@@ -247,7 +247,7 @@ func EncKey(dir, passphrase string) ([]byte, error) {
 // refuse and keep the sidecar, because the alternative overwrites key material
 // on a guess about a directory we could not see.
 func storeHasContent(dir string) bool {
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(dir) //nolint:gosec // G703: dir is the server-configured store path, never request-derived
 	if err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
 	}

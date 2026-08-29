@@ -82,7 +82,7 @@ func garbleTables(t *testing.T, dir string) int {
 		for i := range b {
 			b[i] ^= 0xFF
 		}
-		if werr := os.WriteFile(p, b, 0o600); werr != nil {
+		if werr := os.WriteFile(p, b, 0o600); werr != nil { //nolint:gosec // G703: test fixture under t.TempDir()
 			t.Fatalf("write %s: %v", p, werr)
 		}
 		n++

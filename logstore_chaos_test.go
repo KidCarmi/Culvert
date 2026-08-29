@@ -71,8 +71,8 @@ func TestChaos57_EnableRecoversDamagedStoreAndSurfacesIt(t *testing.T) {
 	}
 
 	h := logStoreHealthState()
-	if !h.Enabled || !h.Available || !h.Recovered {
-		t.Fatalf("health record after a recovery = %+v, want enabled+available+recovered", h)
+	if !h.SaveRequested || !h.Available || !h.Recovered {
+		t.Fatalf("health record after a recovery = %+v, want requested+available+recovered", h)
 	}
 	if h.ResidualCopies != 1 {
 		t.Errorf("residual copies = %d, want 1", h.ResidualCopies)
@@ -117,8 +117,8 @@ func TestChaos57_UnopenableStoreDegradesAndStaysVisible(t *testing.T) {
 	}
 
 	h := logStoreHealthState()
-	if !h.Enabled || h.Available {
-		t.Fatalf("health record = %+v, want enabled but unavailable", h)
+	if !h.SaveRequested || h.Available {
+		t.Fatalf("health record = %+v, want requested but unavailable", h)
 	}
 	if h.Detail == "" {
 		t.Error("no detail recorded for an unavailable store")

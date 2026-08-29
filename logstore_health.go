@@ -46,9 +46,18 @@ import (
 // metrics surfaces, so it is mutex-guarded rather than atomic-per-field: the
 // readers need a consistent view across all of it.
 type logStoreHealthRecord struct {
-	// Enabled is true when the admin has history saving switched on (whether or
-	// not the store actually opened).
-	Enabled bool
+	// SaveRequested is true when an open was ATTEMPTED for this path — a boot
+	// applying the durable setting, or an admin turning the toggle on.
+	//
+	// It deliberately does NOT claim the persisted configuration is "enabled"
+	// (Codex review, PR #1257). A runtime enable that fails to open returns an
+	// error BEFORE adminSettingsSave runs, so the saved setting stays off; a
+	// record asserting "enabled" would make diagnostics report a configuration
+	// that was never written, and keep reporting it until the next lifecycle
+	// action. What this half of the record actually knows is that an open was
+	// attempted and how it went — which is true on both the boot path and the
+	// admin path, and is what the operator needs either way.
+	SaveRequested bool
 	// Available is true when the store opened and is serving queries.
 	Available bool
 	// Path is the store directory.
@@ -100,7 +109,7 @@ func resetLogStoreHealthForTest() {
 // Alert on evidence or on impact, never on a suspicion that resolved itself.
 func noteLogStoreOpened(path string, rec storeguard.Recovery) {
 	setLogStoreHealth(logStoreHealthRecord{
-		Enabled:        true,
+		SaveRequested:  true,
 		Available:      true,
 		Path:           path,
 		Recovered:      rec.Quarantined,
@@ -129,7 +138,7 @@ func noteLogStoreOpened(path string, rec storeguard.Recovery) {
 // in between) is a FAILURE, not a recovery.
 func noteLogStoreOpenFailed(path string, rec storeguard.Recovery, openErr error) {
 	setLogStoreHealth(logStoreHealthRecord{
-		Enabled:        true,
+		SaveRequested:  true,
 		Available:      false,
 		Path:           path,
 		Detail:         openErr.Error(),
@@ -171,7 +180,7 @@ func noteLogStoreDisabled(path string) {
 //     fail row here would report a healthy gateway as broken.
 func checkRequestHistory() OperatorContractCheck {
 	h := logStoreHealthState()
-	if !h.Enabled {
+	if !h.SaveRequested {
 		if h.ResidualCopies > 0 {
 			return OperatorContractCheck{
 				Code:   "request_history",
@@ -191,7 +200,7 @@ func checkRequestHistory() OperatorContractCheck {
 		return OperatorContractCheck{
 			Code:           "request_history",
 			Status:         diagWarn,
-			Message:        "request history is enabled but its store could not be opened — searchable history is not being saved",
+			Message:        "request-history saving was requested but its store could not be opened — searchable history is not being saved",
 			OperatorAction: "Check the data volume for the history store (space, permissions, mount) and re-enable; see server logs for the cause. If the store is encrypted, confirm the .salt sidecar next to it is intact before purging.",
 		}
 	}

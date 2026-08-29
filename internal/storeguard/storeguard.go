@@ -99,7 +99,7 @@ const QuarantineSuffix = ".corrupt."
 
 // MarkerSuffix / MarkerTempSuffix name the per-attempt open markers. The temp
 // form is deliberately NOT a prefix match of the final form (no dot after
-// "opening"), so the sweep's glob cannot pick up a marker still being armed.
+// "opening"), so the sweep cannot pick up a marker still being armed.
 const (
 	MarkerSuffix     = ".opening."
 	MarkerTempSuffix = ".openingtmp."
@@ -445,12 +445,12 @@ func AbandonedMarkers(dir string) []string {
 		return nil
 	}
 	var dead []string
-	for _, m := range globAll(base + MarkerSuffix + "*") {
+	for _, m := range siblings(base, MarkerSuffix) {
 		if lockableRegularFile(m) {
 			dead = append(dead, m)
 		}
 	}
-	for _, tmp := range globAll(base + MarkerTempSuffix + "*") {
+	for _, tmp := range siblings(base, MarkerTempSuffix) {
 		if lockableRegularFile(tmp) {
 			_ = os.Remove(tmp)
 		}
@@ -482,12 +482,39 @@ func lockableRegularFile(path string) bool {
 	return true
 }
 
-func globAll(pattern string) []string {
-	matches, err := filepath.Glob(pattern)
+// siblings returns every entry beside base whose name starts with
+// filepath.Base(base)+suffix, newest-last by name.
+//
+// This deliberately does NOT use filepath.Glob. A store path is operator-
+// configurable, and a glob metacharacter in it silently breaks the mechanism in
+// BOTH directions — measured, not theorised:
+//
+//   - `/data/hist[1]` — `Glob("/data/hist[1].opening.*")` reads `[1]` as a
+//     character class and looks for `/data/hist1.opening.*`, so the store's OWN
+//     abandoned marker is never found. The poison signal is missed, badger is
+//     handed the corrupt directory again, and the crash loop persists through
+//     the very mechanism meant to break it.
+//   - `/data/hist?` — matches a NEIGHBOURING store's marker, so a healthy store
+//     is quarantined on someone else's evidence.
+//
+// Escaping the metacharacters would fix the first case but is platform-specific
+// (backslash escaping does not work in Go's glob on Windows). A prefix match
+// over the parent directory has no pattern semantics at all, so the class is
+// gone rather than patched.
+func siblings(base, suffix string) []string {
+	dir := filepath.Dir(base)
+	prefix := filepath.Base(base) + suffix
+	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
-	return matches
+	var out []string
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), prefix) {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
 }
 
 func trimSep(p string) string { return strings.TrimSuffix(p, string(os.PathSeparator)) }
@@ -533,7 +560,7 @@ func QuarantinedCopies(dir string) []string {
 	if base == "" {
 		return nil
 	}
-	matches := globAll(base + QuarantineSuffix + "*")
+	matches := siblings(base, QuarantineSuffix)
 	if len(matches) == 0 {
 		return nil
 	}

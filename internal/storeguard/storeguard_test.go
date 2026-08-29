@@ -442,3 +442,82 @@ func TestEmptyPathIsInert(t *testing.T) {
 		t.Errorf("BeginAttempt(\"\") armed a marker at %q", a.Path)
 	}
 }
+
+// ── glob metacharacters in the store path ────────────────────────────────────
+
+// A store path is operator-configurable, and discovery must not interpret it as
+// a pattern. Raised by Codex review on PR #1257 and verified in both directions
+// before the fix: with filepath.Glob, `hist[1]` found NOTHING (its own poison
+// marker undiscoverable — the crash loop survives its own remedy) and `hist?`
+// matched a NEIGHBOUR's marker (a healthy store quarantined on someone else's
+// evidence).
+func TestDiscovery_IsNotFooledByGlobMetacharactersInThePath(t *testing.T) {
+	for _, name := range []string{"hist[1]", "hist?", "hist*", `hist\x`} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			base := filepath.Join(root, name)
+			seedDir(t, base)
+
+			// This store's own abandoned marker must be found.
+			marker := base + MarkerSuffix + "1234-5678"
+			if err := os.WriteFile(marker, []byte("pid=1234\n"), 0o600); err != nil {
+				t.Fatalf("plant marker: %v", err)
+			}
+			got := AbandonedMarkers(base)
+			if len(got) != 1 || got[0] != marker {
+				t.Fatalf("AbandonedMarkers = %v, want exactly [%s] — a missed poison marker means the next start panics again", got, marker)
+			}
+
+			// And its own quarantined copy must be found.
+			q := base + QuarantineSuffix + "1700000000000000000"
+			if err := os.MkdirAll(q, 0o700); err != nil {
+				t.Fatalf("plant quarantine: %v", err)
+			}
+			if c := QuarantinedCopies(base); len(c) != 1 || c[0] != q {
+				t.Fatalf("QuarantinedCopies = %v, want exactly [%s]", c, q)
+			}
+		})
+	}
+}
+
+// The other direction: a neighbouring store's marker must never be attributed to
+// this one, or a healthy store gets quarantined on someone else's evidence.
+func TestDiscovery_DoesNotClaimANeighboursMarker(t *testing.T) {
+	root := t.TempDir()
+	mine := filepath.Join(root, "hist?")
+	seedDir(t, mine)
+
+	neighbour := filepath.Join(root, "histX")
+	seedDir(t, neighbour)
+	if err := os.WriteFile(neighbour+MarkerSuffix+"999-1", []byte("pid=999\n"), 0o600); err != nil {
+		t.Fatalf("plant neighbour marker: %v", err)
+	}
+	if err := os.MkdirAll(neighbour+QuarantineSuffix+"1700000000000000000", 0o700); err != nil {
+		t.Fatalf("plant neighbour quarantine: %v", err)
+	}
+
+	if got := AbandonedMarkers(mine); len(got) != 0 {
+		t.Errorf("AbandonedMarkers(%q) claimed a neighbour's marker: %v", mine, got)
+	}
+	if got := QuarantinedCopies(mine); len(got) != 0 {
+		t.Errorf("QuarantinedCopies(%q) claimed a neighbour's copy: %v", mine, got)
+	}
+}
+
+// The temp-marker form must stay outside the final form's prefix, or arming a
+// marker would read as an abandoned one.
+func TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker(t *testing.T) {
+	if strings.HasPrefix(MarkerTempSuffix, MarkerSuffix) {
+		t.Fatalf("MarkerTempSuffix %q starts with MarkerSuffix %q — a marker being armed reads as abandoned", MarkerTempSuffix, MarkerSuffix)
+	}
+	root := t.TempDir()
+	base := filepath.Join(root, "store")
+	seedDir(t, base)
+	if err := os.WriteFile(base+MarkerTempSuffix+"1-2", []byte("x"), 0o600); err != nil {
+		t.Fatalf("plant temp marker: %v", err)
+	}
+	// AbandonedMarkers reaps the temp marker as litter but must not report it.
+	if got := AbandonedMarkers(base); len(got) != 0 {
+		t.Errorf("a temp marker was reported as a poison signal: %v", got)
+	}
+}

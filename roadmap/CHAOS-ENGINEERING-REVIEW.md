@@ -2935,6 +2935,37 @@ and textually), the `EncKey` fix, the `request_history` contract row, three
 distinct 409 for the salt case naming its own reversible remedy. **Not** wired
 into `/readyz` — a node with history degraded is fully able to serve.
 
+### 25.6b Review follow-up — a defect in the mechanism itself (LS-5)
+
+Raised by Codex against the extraction and **verified in both directions before
+fixing**. Discovery used `filepath.Glob(base + suffix + "*")`, so a glob
+metacharacter in the operator-configurable store path silently broke the
+mechanism:
+
+| Store path | `filepath.Glob` result | Consequence |
+|---|---|---|
+| `/data/hist[1]` | `[]` — reads `[1]` as a character class and looks for `hist1.opening.*` | the store's OWN poison marker is undiscoverable, so the next start hands badger the corrupt directory again — **the crash loop survives its own remedy** |
+| `/data/hist?` | matches `histX.opening.999` | a **healthy** store is quarantined on a NEIGHBOUR's evidence |
+
+The first row is the exact failure this package exists to prevent, reached
+through the package itself. It is inherited from CHAOS-50 — the shipped catdb
+code has it today — and is fixed here for both stores.
+
+Escaping the metacharacters would close only the first row and is
+platform-specific (Go's glob does not honour backslash escapes on Windows).
+Discovery is now a prefix match over the parent directory (`siblings`), which
+has no pattern semantics at all, so the class is gone rather than patched.
+Gates: `TestDiscovery_IsNotFooledByGlobMetacharactersInThePath` (4 paths),
+`TestDiscovery_DoesNotClaimANeighboursMarker`, both verified failing against the
+glob implementation.
+
+A second Codex finding (P2) corrected the health record: a runtime enable that
+fails to open returns BEFORE `adminSettingsSave`, so the persisted setting stays
+off — a record asserting `Enabled: true` reported a configuration that was never
+written. The field is now `SaveRequested` ("an open was attempted"), which is
+true on both the boot and admin paths, and the contract row no longer claims the
+feature is enabled.
+
 ### 25.7 What is deliberately left
 
 - **Real KEYREGISTRY damage does not self-heal.** It is indistinguishable from

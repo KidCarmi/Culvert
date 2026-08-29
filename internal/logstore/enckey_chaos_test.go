@@ -58,7 +58,7 @@ func TestChaos57_TornSaltNeverMintsOverAnExistingStore(t *testing.T) {
 
 	// The recovery the refusal preserves: restore the sidecar, open the store,
 	// read the history back.
-	if err := os.WriteFile(dir+".salt", good, 0o600); err != nil {
+	if err := os.WriteFile(dir+".salt", good, 0o600); err != nil { //nolint:gosec // G703: test fixture under t.TempDir()
 		t.Fatalf("restore salt: %v", err)
 	}
 	restored, err := EncKey(dir, chaosPass)
