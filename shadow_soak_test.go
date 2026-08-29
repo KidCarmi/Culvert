@@ -29,6 +29,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
@@ -1161,7 +1162,76 @@ func TestShadowSoakEvidenceStress(t *testing.T) {
 	tampered.Shadow = &evmodel.ShadowEvidence{Outcome: "would_block", Override: true, CredentialPlan: "no_credential_profile", MaterializationReadiness: "not_evaluated", RequestInspection: "not_evaluated", ResponseInspection: "not_evaluated"}
 	req(t, !tampered.VerifyDigest(), "a tampered event must FAIL digest verification (corruption detected, never repaired)")
 	req(t, evs[0].VerifyDigest(), "the original untampered event still verifies")
-	ev("no-hidden-repair: schema v3 fails closed; tampered event fails VerifyDigest (detected, not repaired); original still verifies")
+	ev("no-hidden-repair (in-memory digest primitive): schema v3 fails closed; tampered event fails VerifyDigest; original still verifies. The DURABLE recovery path is proven separately by TestShadowSoakEvidencePersistedCorruptionFailsClosed")
+}
+
+// TestShadowSoakEvidencePersistedCorruptionFailsClosed proves the no-hidden-auto-repair
+// invariant at the REAL durable seam (§20): a byte flipped INSIDE a committed, persisted
+// P-CRIT segment on disk is detected by Spool.Recover as corruption (Corrupt=true), never
+// silently repaired, discarded, or accepted. The in-memory VerifyDigest check in
+// TestShadowSoakEvidenceStress proves the detection primitive; this proves the recovery path
+// actually invokes it against on-disk corruption. A CLEAN reopen of the same directory is the
+// control (Corrupt=false, exact record count) so the gate cannot pass vacuously.
+func TestShadowSoakEvidencePersistedCorruptionFailsClosed(t *testing.T) {
+	ev := func(f string, a ...any) { t.Logf("SOAK-EVIDENCE-CORRUPT | "+f, a...) }
+	dir := t.TempDir()
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = byte(i + 11)
+	}
+	var clk atomic.Int64
+	clock := func() time.Time { return time.Unix(0, clk.Add(1)) }
+	const n = 64
+	mk := func() *events.Manager {
+		m, err := events.NewManager(events.ManagerConfig{
+			NodeID: "qual-node-1", DataDir: dir, KEK: secret.MemoryProvider(k),
+			GatewayLimits: soakSmallEvents(t, n), ManagementLimits: limits.DefaultManagementEvent(), Clock: clock,
+		})
+		req(t, err == nil, "NewManager: %v", err)
+		return m
+	}
+
+	// Commit enough critical shadow events to fill and seal at least one P-CRIT segment.
+	m1 := mk()
+	for i := 0; i < n; i++ {
+		_, err := m1.CommitDecision(soakShadowFacts())
+		req(t, err == nil, "commit %d: %v", i, err)
+	}
+	req(t, m1.Close() == nil, "close m1")
+
+	// CONTROL: a clean reopen recovers exactly n P-CRIT records with NO corruption.
+	mc := mk()
+	repClean, err := mc.Spool(evmodel.CapGateway).Recover()
+	req(t, err == nil && !repClean.Corrupt && repClean.Records[evmodel.PartCrit] == n,
+		"control: a clean reopen must recover %d P-CRIT records with Corrupt=false, got %+v err=%v", n, repClean, err)
+	req(t, mc.Close() == nil, "close mc")
+	ev("control: clean reopen recovered %d P-CRIT records, Corrupt=false", n)
+
+	// Corrupt an INTERIOR run of the FIRST persisted P-CRIT segment — past the segment header
+	// and well before the (uncommitted) tail, so recovery must classify it as genuine
+	// corruption rather than a truncatable torn tail. A run (not one byte) guarantees a
+	// record ciphertext is hit, forcing an AEAD/chain failure regardless of frame alignment.
+	segs, gerr := filepath.Glob(filepath.Join(dir, "gateway", evmodel.PartCrit.String(), "seg-*.dat"))
+	req(t, gerr == nil && len(segs) > 0, "must find a persisted P-CRIT segment, got %v (err=%v)", segs, gerr)
+	sort.Strings(segs)
+	seg := segs[0]
+	b, rerr := os.ReadFile(seg)
+	req(t, rerr == nil && len(b) > 512, "read segment %s: err=%v len=%d", seg, rerr, len(b))
+	start := len(b) / 4
+	for i := start; i < start+128 && i < len(b); i++ {
+		b[i] ^= 0xFF
+	}
+	req(t, os.WriteFile(seg, b, 0o600) == nil, "write corrupted segment")
+
+	// Recovery MUST detect the persisted corruption and fail closed.
+	m2 := mk()
+	rep, rerr2 := m2.Spool(evmodel.CapGateway).Recover()
+	req(t, rerr2 == nil, "Recover must surface corruption via the report, not a hard error: %v", rerr2)
+	req(t, rep.Corrupt && rep.CorruptPartition == evmodel.PartCrit,
+		"GATE no-hidden-repair: persisted P-CRIT corruption must be detected on recovery (Corrupt, never silently repaired/accepted), got %+v", rep)
+	req(t, m2.Close() == nil, "close m2")
+	ev("persisted corruption: flipped a 128-byte interior run in %s -> Recover reported Corrupt=true partition=%s reason=%q (no silent repair/discard/accept)",
+		filepath.Base(seg), rep.CorruptPartition, rep.CorruptReason)
 }
 
 // failAppendBackend wraps the real OS backend but fails every durable segment append (the
