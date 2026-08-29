@@ -20,7 +20,7 @@
 //   - A confirmed 2xx is restart-durable (settings-owner persistence for
 //     rewrite; durable-or-nothing store for profiles); a hard persist
 //     failure is a non-2xx with the runtime unchanged.
-import { apiRequest } from "./client";
+import { ApiError, apiRequest } from "./client";
 import {
   field,
   readArray,
@@ -249,6 +249,40 @@ export const decodeRewriteState: Decoder<RewriteState> = (v, path = "$") => {
     revision: field(o, "revision", readString, path),
   };
 };
+
+/** The structured 503 the appliance answers while rewrite MANAGEMENT
+ * identity is not durable (a refused corrupt settings slice or a failed
+ * identity migration): ephemeral StableIDs are never presented as durable
+ * management identities, and StableID-addressed mutations refuse. */
+export interface RewriteIdentityDegraded {
+  error: string;
+  reason: string;
+}
+
+export function asRewriteIdentityDegraded(
+  err: unknown,
+): RewriteIdentityDegraded | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status !== 503 || err.bodyText === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(err.bodyText);
+  } catch {
+    return null;
+  }
+  try {
+    const o = readRecord(parsed, "$");
+    if (field(o, "degraded", readString, "$") !== "rewrite-identity") {
+      return null;
+    }
+    return {
+      error: field(o, "error", readString, "$"),
+      reason: field(o, "reason", readString, "$"),
+    };
+  } catch {
+    return null;
+  }
+}
 
 export function getRewriteState(signal?: AbortSignal): Promise<RewriteState> {
   return apiRequest(

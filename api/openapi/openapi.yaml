@@ -3569,6 +3569,8 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+        '503':
+          description: Rewrite MANAGEMENT identity is not durable on this node — structured `{error, degraded:"rewrite-identity", reason}`; mutations refuse until durable identity is established (fix persistence, restart).
     delete:
       operationId: deleteRewriteRule
       tags: [policy]
@@ -3615,6 +3617,8 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+        '503':
+          description: Rewrite MANAGEMENT identity is not durable on this node — structured `{error, degraded:"rewrite-identity", reason}`; mutations refuse until durable identity is established (fix persistence, restart).
 
   /api/rewrite/state:
     get:
@@ -3638,6 +3642,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/RewriteState' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Rewrite MANAGEMENT identity is not durable on this node (a refused corrupt settings-owned rewrite slice, or a failed stable-identity migration/ledger write) — structured `{error, degraded:"rewrite-identity", reason}`. Ephemeral StableIDs are never presented as durable management identities; traffic rewrite enforcement continues. Recovery is fixing the settings persistence issue and restarting.
 
   /api/category-groups:
     get:

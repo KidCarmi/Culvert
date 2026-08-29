@@ -17373,6 +17373,9 @@
               }
             },
             "description": "Stale revision assertion; carries the current revision."
+          },
+          "503": {
+            "description": "Rewrite MANAGEMENT identity is not durable on this node — structured `{error, degraded:\"rewrite-identity\", reason}`; mutations refuse until durable identity is established (fix persistence, restart)."
           }
         },
         "security": [
@@ -17484,6 +17487,9 @@
               }
             },
             "description": "Stale revision assertion; carries the current revision."
+          },
+          "503": {
+            "description": "Rewrite MANAGEMENT identity is not durable on this node — structured `{error, degraded:\"rewrite-identity\", reason}`; mutations refuse until durable identity is established (fix persistence, restart)."
           }
         },
         "security": [
@@ -17525,6 +17531,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "description": "Rewrite MANAGEMENT identity is not durable on this node (a refused corrupt settings-owned rewrite slice, or a failed stable-identity migration/ledger write) — structured `{error, degraded:\"rewrite-identity\", reason}`. Ephemeral StableIDs are never presented as durable management identities; traffic rewrite enforcement continues. Recovery is fixing the settings persistence issue and restarting."
           }
         },
         "security": [
