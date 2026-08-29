@@ -63,9 +63,30 @@ func publishRewriteRules(rules []RewriteRule) int {
 // to the Rewriter only after the write landed. Used by config import and
 // config-version rollback (authoritative local nodes). Never call while
 // holding adminSettingsMu.
+//
+// Legacy identity is CANONICALIZED here, BEFORE the durable write: an empty
+// StableID (the one legacy migration input the validated doors admit)
+// receives its server-owned UUID on a copy of the target, and that EXACT
+// canonical slice is both persisted and published. Without this, the save
+// wrote the ID-less target to disk and SetRules then backfilled UUIDs only
+// into its internal published copy — disk="" vs runtime=UUID, so the settings
+// load re-minted a fresh identity on EVERY restart instead of the promised
+// one-time migration. Identity is generated exactly once (SetRules sees no
+// empty IDs and preserves the slice verbatim); modern non-empty IDs pass
+// through untouched; a persist failure publishes nothing, so a generated
+// identity never becomes externally usable as a successful durable install.
+// The CP follower path (publishRewriteRules) is untouched — deliberately
+// runtime-only, never persisting follower snapshots.
 func installRewriteRulesDurable(target []RewriteRule) error {
+	canonical := make([]RewriteRule, len(target))
+	copy(canonical, target)
+	for i := range canonical {
+		if canonical[i].StableID == "" {
+			canonical[i].StableID = rewrite.NewStableID()
+		}
+	}
 	return saveAdminSettingsWithOverrides(adminSaveOverrides{
-		rewriteMutate: func([]RewriteRule) ([]RewriteRule, error) { return target, nil },
+		rewriteMutate: func([]RewriteRule) ([]RewriteRule, error) { return canonical, nil },
 	})
 }
 

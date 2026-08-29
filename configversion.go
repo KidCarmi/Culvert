@@ -263,6 +263,21 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	warnings := validateConfigBackup(&target)
 
 	if req.DryRun {
+		// While the rewrite management-identity degradation is latched, the
+		// preview would diff the target against captureConfigBackup()'s live
+		// rewriter.List() — and diffRewriteRules is identity-aware, so the
+		// KNOWN-ephemeral StableIDs would ride out in its added/removed/
+		// changed arrays through a healthy 200. Answer the ONE structured
+		// rewrite-identity 503 instead (authorization already happened in
+		// apiConfigVersions); never blank IDs, substitute process-local
+		// values, or emit a misleading partial diff. The REAL rollback below
+		// stays available: it applies a durable historical artifact (a
+		// legitimate recovery door) and its response carries no live-identity
+		// diff.
+		if d := rewriteIdentityDegraded(); d != nil {
+			writeRewriteIdentityDegraded(w, d)
+			return
+		}
 		// Compare against current config for a preview diff.
 		current := captureConfigBackup()
 		changes := diffConfigs(current, &target)
