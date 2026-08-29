@@ -424,6 +424,77 @@ func TestIngestOmissionIsPerServer(t *testing.T) {
 	}
 }
 
+// TestIngestPaginatedPageDoesNotWithdraw pins the pagination guard: a tools/list result carrying
+// a non-empty nextCursor is only ONE page of a larger set (execution.Discovery fetches the first
+// page), so a previously-known tool absent from it has NOT been proven withdrawn and must remain.
+// Only a complete (cursor-less or empty-cursor) result withdraws omitted tools.
+func TestIngestPaginatedPageDoesNotWithdraw(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	// A complete first discovery establishes a and b.
+	ingest(t, c, reg, testServer, testIdentity, result(
+		`{"name":"a","inputSchema":{"type":"object"}}`,
+		`{"name":"b","inputSchema":{"type":"object"}}`))
+	// A PARTIAL page (nextCursor set) listing only b must NOT withdraw a.
+	paged := []byte(`{"tools":[{"name":"b","inputSchema":{"type":"object"}}],"nextCursor":"page-2"}`)
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: paged}); err != nil {
+		t.Fatalf("ingest paginated page: %v", err)
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); !ok {
+		t.Fatal("a tool absent from a PARTIAL (nextCursor) page must NOT be withdrawn")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "b"}); !ok {
+		t.Fatal("tool b, present on the page, must remain")
+	}
+	// An explicitly empty cursor is a complete result and DOES withdraw the omitted a.
+	done := []byte(`{"tools":[{"name":"b","inputSchema":{"type":"object"}}],"nextCursor":""}`)
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: done}); err != nil {
+		t.Fatalf("ingest complete (empty-cursor) result: %v", err)
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); ok {
+		t.Fatal("a complete (empty-cursor) result must withdraw the omitted tool a")
+	}
+}
+
+// TestIngestReplacementAtCapacity pins that a complete discovery replacing a tool at exactly
+// MaxCatalogEntries publishes: the omitted tool is withdrawn to free its slot BEFORE the new
+// tool's capacity check, so a tool-for-tool swap at the cap does not fail capacity_exceeded.
+func TestIngestReplacementAtCapacity(t *testing.T) {
+	cfg := smallCatalog(t) // MaxCatalogEntries:8, MaxToolsPerServer:4
+	c := New(cfg)
+	reg := regWith(t, cfg, [2]string{"srv-A", "id-A"}, [2]string{"srv-B", "id-B"})
+	fill := func(id registry.ServerID, identity registry.Identity, names ...string) {
+		tools := make([]string, 0, len(names))
+		for _, n := range names {
+			tools = append(tools, `{"name":"`+n+`","inputSchema":{}}`)
+		}
+		if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: id, Identity: identity, Raw: result(tools...)}); err != nil {
+			t.Fatalf("fill %s: %v", id, err)
+		}
+	}
+	// Fill to exactly MaxCatalogEntries: 4 tools on each of two servers.
+	fill("srv-A", "id-A", "a0", "a1", "a2", "a3")
+	fill("srv-B", "id-B", "b0", "b1", "b2", "b3")
+	if c.Current().Len() != 8 {
+		t.Fatalf("precondition: catalog must be at capacity 8, got %d", c.Current().Len())
+	}
+	// Complete re-discovery of srv-A swaps a3 → aNew (still 4 tools on A, 8 total after withdrawal).
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: "srv-A", Identity: "id-A", Raw: result(
+		`{"name":"a0","inputSchema":{}}`, `{"name":"a1","inputSchema":{}}`,
+		`{"name":"a2","inputSchema":{}}`, `{"name":"aNew","inputSchema":{}}`)}); err != nil {
+		t.Fatalf("tool-for-tool replacement at capacity must publish, got %v", err)
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "a3"}); ok {
+		t.Fatal("the replaced tool a3 must be withdrawn")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "aNew"}); !ok {
+		t.Fatal("the new tool aNew must be present after a replacement at capacity")
+	}
+	if c.Current().Len() != 8 {
+		t.Fatalf("catalog must stay at 8 after a tool-for-tool swap, got %d", c.Current().Len())
+	}
+}
+
 func TestQuarantineCannotAutoClear(t *testing.T) {
 	l := lim(t)
 	c, reg := New(l), oneServerReg(t, l)
