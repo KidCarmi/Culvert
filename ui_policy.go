@@ -1539,6 +1539,14 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
 
 	case http.MethodPost:
+		// Recovery correction §5: while management identity is not durable a
+		// v2 mutation could create/address identity that re-mints on restart
+		// (and a save could clobber a refused/corrupt settings file) — refuse.
+		if d := rewriteIdentityDegraded(); d != nil {
+			writeRewriteIdentityDegraded(w, d)
+			return
+		}
+
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
@@ -1589,6 +1597,11 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, added)
 
 	case http.MethodDelete:
+		if d := rewriteIdentityDegraded(); d != nil {
+			writeRewriteIdentityDegraded(w, d)
+			return
+		}
+
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}

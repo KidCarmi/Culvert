@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 
@@ -95,6 +96,47 @@ func validateRewriteStableIDs(rules []RewriteRule) error {
 	return nil
 }
 
+// ─── Rewrite management-identity durability latch (recovery correction) ────
+
+// rewriteIdentityDegradation records why the v2 rewrite MANAGEMENT identity
+// is not trustworthy this boot: a refused settings-owned slice (corrupt
+// identity in admin_settings.json) or a failed identity migration/ledger
+// write (the generated StableIDs would re-mint on restart). While latched,
+// traffic rewrite enforcement and legacy runtime semantics continue
+// unchanged, but the v2 management surface fails closed: /api/rewrite/state
+// returns the structured 503 (unstable IDs are never presented as durable
+// management identities) and StableID-addressed mutations refuse. The latch
+// is re-evaluated by every LoadAdminSettings (cleared at entry, set on this
+// boot's failures); recovery is fixing the file/volume and restarting — no
+// in-process retry loop, and mutations cannot clear it because they are
+// refused while it holds.
+type rewriteIdentityDegradation struct{ reason string }
+
+var rewriteIdentityDegradedState atomic.Pointer[rewriteIdentityDegradation]
+
+func rewriteIdentityDegraded() *rewriteIdentityDegradation {
+	return rewriteIdentityDegradedState.Load()
+}
+
+func setRewriteIdentityDegraded(reason string) {
+	rewriteIdentityDegradedState.Store(&rewriteIdentityDegradation{reason: reason})
+	logger.Printf("WARN Rewrite: management identity DEGRADED — %s. Traffic rewrite enforcement continues; v2 rewrite management (state + StableID mutations) refuses until durable identity is established (fix the settings file/volume and restart).", reason)
+}
+
+func clearRewriteIdentityDegraded() { rewriteIdentityDegradedState.Store(nil) }
+
+// writeRewriteIdentityDegraded renders the structured 503 for a management
+// call made while rewrite identity is not durable.
+func writeRewriteIdentityDegraded(w http.ResponseWriter, d *rewriteIdentityDegradation) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+		"error":    "rewrite management identity is not durable on this node — stable rule identities cannot be trusted until the settings persistence issue is fixed and the node restarts",
+		"degraded": "rewrite-identity",
+		"reason":   d.reason,
+	})
+}
+
 // ─── YAML-seed identity durability (2D-C final §7–§9) ──────────────────────
 
 // rewriteRuleContentEqual reports whether two rules carry the same SEMANTIC
@@ -131,19 +173,32 @@ func rewriteRuleContentEqual(a, b RewriteRule) bool {
 //     none exists, claiming ownership of nothing but the ledger itself.
 func finalizeRewriteSeedIdentities() {
 	owned := rewriteSettingsOwnedAtLoad
+	refused := rewriteSettingsSliceRefusedAtLoad
 	ledger := rewriteSeedLedgerAtLoad
 	backfilled := rewriteIDsBackfilledAtLoad
 	rewriteSettingsOwnedAtLoad = false
+	rewriteSettingsSliceRefusedAtLoad = nil
 	rewriteSeedLedgerAtLoad = nil
 	rewriteIDsBackfilledAtLoad = 0
 
 	if owned {
+		if refused != nil {
+			// The settings-owned slice carried malformed/ambiguous modern
+			// identity and was NOT published (recovery correction §2). The
+			// management surface must not present the surviving runtime
+			// state (the pre-restore seed) as healthy owned identity.
+			setRewriteIdentityDegraded(fmt.Sprintf("settings-owned rewrite rules refused: %v", refused))
+			return
+		}
 		if backfilled > 0 {
 			migrated := rewriter.List()
 			if err := persistRewriteIdentityMutation(func(s *AdminSettings) {
 				s.RewriteRules = migrated
 			}); err != nil {
-				logger.Printf("AdminSettings: rewrite stable-ID migration (%d rule(s)) not yet durable: %v", backfilled, err)
+				// The backfilled identities exist only in memory — a restart
+				// re-mints them, so they must not be presented as durable
+				// management identity (recovery correction §4).
+				setRewriteIdentityDegraded(fmt.Sprintf("legacy stable-ID backfill (%d rule(s)) could not persist: %v", backfilled, err))
 			} else {
 				logger.Printf("AdminSettings: migrated %d rewrite rule(s) to durable stable identities", backfilled)
 			}
@@ -180,7 +235,11 @@ func finalizeRewriteSeedIdentities() {
 	if err := persistRewriteIdentityMutation(func(s *AdminSettings) {
 		s.RewriteSeedIdentities = attached
 	}); err != nil {
-		logger.Printf("AdminSettings: rewrite seed identities not yet durable (%v) — identities will re-mint if the node restarts before a successful save", err)
+		// The seeded identities are ephemeral — a restart re-mints them.
+		// KNOWN-non-durable identity must never be presented as normal
+		// management identity (recovery correction §4): latch instead of
+		// log-and-continue.
+		setRewriteIdentityDegraded(fmt.Sprintf("YAML seed identity ledger could not persist: %v", err))
 	} else {
 		logger.Printf("AdminSettings: recorded %d YAML-seeded rewrite identit%s in the durable ledger", len(attached), pluralYIes(len(attached)))
 	}
@@ -232,8 +291,15 @@ func persistRewriteIdentityMutation(mut func(*AdminSettings)) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(path, out, 0o600)
+	return rewriteIdentityAtomicWrite(path, out, 0o600)
 }
+
+// rewriteIdentityAtomicWrite is the targeted migration writer's write seam —
+// production is fileutil.AtomicWrite; the recovery-correction tests inject a
+// hard persistence failure through it for the settings-owned backfill variant
+// (the file-absent variant injects via a nonexistent parent directory, no
+// seam needed).
+var rewriteIdentityAtomicWrite = fileutil.AtomicWrite
 
 // validateIncomingRewriteRule enforces structural sanity on an interactive
 // create (§28): a rule must carry at least one header operation — an empty
@@ -290,6 +356,13 @@ func apiRewriteState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	// Recovery correction §5: while management identity is not durable, the
+	// v2 state surface must not expose the ephemeral StableIDs at all — a
+	// structured 503 names the degradation instead.
+	if d := rewriteIdentityDegraded(); d != nil {
+		writeRewriteIdentityDegraded(w, d)
 		return
 	}
 	rules, revision := rewriter.StateSnapshot()

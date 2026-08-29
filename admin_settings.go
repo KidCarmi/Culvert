@@ -277,6 +277,11 @@ func LoadAdminSettings(path string) {
 	adminSettingsPath = path
 	adminSettingsMu.Unlock()
 
+	// Rewrite management-identity durability is re-evaluated by THIS load
+	// (2D-C recovery correction §5): the latch reflects the current boot's
+	// outcome, set again below on any refused slice / failed migration.
+	clearRewriteIdentityDegraded()
+
 	// Re-surface an unreconciled quarantine from a prior boot (CHAOS-05 pattern): after
 	// a corrupt load we default and the next save writes a clean file, so the /readyz
 	// row + alert would otherwise vanish while every GUI-saved admin setting stays lost.
@@ -299,6 +304,11 @@ func LoadAdminSettings(path string) {
 		// loudly — every durable admin setting silently reverts to its default until
 		// this is fixed — but keep booting.
 		logger.Printf("AdminSettings: cannot read %q (%v) — every GUI-saved admin setting is using its default until the file is readable and the node is restarted", sanitizeLog(path), err)
+		// The YAML-seeded rewrite identities still need durability judgment:
+		// the finalize pass will attempt the ledger write (its targeted
+		// writer re-reads the file, fails the same way, and refuses to
+		// overwrite) and latch the management-identity degradation.
+		finalizeRewriteSeedIdentities()
 		return
 	}
 	var s AdminSettings
@@ -311,6 +321,9 @@ func LoadAdminSettings(path string) {
 		// ui_users.json / cluster.json): rename the corrupt file aside so no save can
 		// clobber it, fire the state_file_corrupt alert, and record a /readyz fail row.
 		quarantineCorruptStateFile("admin_settings", path, err)
+		// The corrupt file was moved aside, so the targeted ledger writer can
+		// safely create a fresh minimal file for the YAML-seeded identities.
+		finalizeRewriteSeedIdentities()
 		return
 	}
 
@@ -396,7 +409,22 @@ func applyAdminSecurity(s *AdminSettings) {
 	// re-identify them — 2D-C §21).
 	if s.RewriteRulesSaved || len(s.RewriteRules) > 0 {
 		rewriteSettingsOwnedAtLoad = true
-		rewriteIDsBackfilledAtLoad = rewriter.SetRules(s.RewriteRules)
+		// The settings restore is a TRUST BOUNDARY like every other door
+		// (2D-C recovery correction §1–§2): a hand-edited/corrupt file must
+		// not publish identity the import/rollback/snapshot validators
+		// reject. The same seam draws the same line — EMPTY StableIDs are
+		// the one legacy migration input (backfilled just below), a
+		// MALFORMED non-empty or DUPLICATE identity refuses the whole
+		// rewrite slice: nothing from it is published (the previously
+		// seeded runtime source stays live per startup ownership), and
+		// finalizeRewriteSeedIdentities latches the named management-
+		// identity degradation. Silently minting a replacement for a
+		// malformed NON-EMPTY identity would not be identity preservation.
+		if err := validateRewriteStableIDs(s.RewriteRules); err != nil {
+			rewriteSettingsSliceRefusedAtLoad = err
+		} else {
+			rewriteIDsBackfilledAtLoad = rewriter.SetRules(s.RewriteRules)
+		}
 	}
 	// Identity ledger for YAML-seeded rules (2D-C final §7): captured here,
 	// consumed by finalizeRewriteSeedIdentities at the end of the load.
@@ -411,9 +439,10 @@ func applyAdminSecurity(s *AdminSettings) {
 // All three are consumed once by finalizeRewriteSeedIdentities at the end of
 // LoadAdminSettings; boot-time only (single-threaded startup).
 var (
-	rewriteIDsBackfilledAtLoad int
-	rewriteSettingsOwnedAtLoad bool
-	rewriteSeedLedgerAtLoad    []RewriteRule
+	rewriteIDsBackfilledAtLoad        int
+	rewriteSettingsOwnedAtLoad        bool
+	rewriteSettingsSliceRefusedAtLoad error
+	rewriteSeedLedgerAtLoad           []RewriteRule
 )
 
 // applyAdminServices applies logging, monitoring, and session settings.
