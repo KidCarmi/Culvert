@@ -36,6 +36,13 @@ var (
 // security-scan stats map (the counter is package-internal to internal/yara).
 func yaraInflightLoad() int64 { return yara.Inflight() }
 
+// yaraMatchPanicsLoad reports how many regex-match rounds were contained by
+// the CHAOS-25 per-match panic guard (see yara.MatchPanics's doc comment):
+// non-zero means some scan verdicts were decided by the on-timeout posture
+// rather than by the rule itself, so it belongs in the same admin-visible
+// stats map as the other YARA runtime-health counters.
+func yaraMatchPanicsLoad() int64 { return yara.MatchPanics() }
+
 // Posture strings for on_timeout / on_saturation, re-exposed unqualified for
 // diagnostics.go and ui_security.go.
 const (

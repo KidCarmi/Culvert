@@ -329,6 +329,7 @@ func secScanStatusMap() map[string]interface{} {
 		"yara_warnings":            len(globalYARA.Warnings()), // Tier 2.1
 		"yara_inflight":            yaraInflightLoad(),         // Tier 1.3
 		"yara_inflight_max":        yaraGetMaxInflight(),       // Tier 1.3
+		"yara_match_panics":        yaraMatchPanicsLoad(),      // CHAOS-25: verdicts decided by on-timeout posture, not the rule
 		"yara_enabled":             yaraGetEnabled(),
 		"yara_timeout_secs":        yaraGetTimeoutSecs(),
 		"yara_on_timeout":          yaraGetOnTimeout(),
