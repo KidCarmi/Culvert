@@ -257,7 +257,7 @@ func TestDC_RollbackPreservesRewriteStableIDs(t *testing.T) {
 func TestDC_SnapshotPreservesRewriteStableIDs(t *testing.T) {
 	dcRewriteSetup(t)
 	cpRule := dcRewriteRule("cp.example", "X-CP", "1")
-	cpRule.StableID = "cp-stable-1"
+	cpRule.StableID = "5c9e1a00-0000-4000-8000-0000000000c1"
 	snap := ConfigSnapshot{Version: 3, RewriteRules: []RewriteRule{cpRule}}
 	if err := validateConfigSnapshot(snap); err != nil {
 		t.Fatalf("valid snapshot refused: %v", err)
@@ -266,14 +266,14 @@ func TestDC_SnapshotPreservesRewriteStableIDs(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	got := rewriter.List()
-	if len(got) != 1 || got[0].StableID != "cp-stable-1" {
+	if len(got) != 1 || got[0].StableID != "5c9e1a00-0000-4000-8000-0000000000c1" {
 		t.Fatalf("DP must preserve the CP's stable identity verbatim; got %+v", got)
 	}
 
 	dup := dcRewriteRule("d.example", "X-D", "1")
-	dup.StableID = "cp-dup"
+	dup.StableID = "5c9e1a00-0000-4000-8000-0000000000d0"
 	dup2 := dcRewriteRule("d2.example", "X-D", "2")
-	dup2.StableID = "cp-dup"
+	dup2.StableID = "5c9e1a00-0000-4000-8000-0000000000d0"
 	if err := validateConfigSnapshot(ConfigSnapshot{Version: 4, RewriteRules: []RewriteRule{dup, dup2}}); err == nil {
 		t.Fatal("duplicate stable identities must reject the ENTIRE snapshot")
 	}
