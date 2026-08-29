@@ -490,6 +490,12 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
+		// Blocker B delete-first order: every member category must currently
+		// resolve in some category authority — validated under the shared
+		// gate, before the commit.
+		if refuseDanglingGroupMembers(w, body.Categories) {
+			return
+		}
 		// Durable-or-nothing (2D-A.0): the fence check (optional ?ifVersion=),
 		// the mutation, and the persist run in one serialized critical section;
 		// a persist failure rolls the store back and maps to 500 — a confirmed
@@ -524,6 +530,11 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Blocker B delete-first order: membership edits must reference
+		// currently-resolvable categories (validated under the shared gate).
+		if refuseDanglingGroupMembers(w, body.Categories) {
 			return
 		}
 		// Prefer stable-ID addressing (rename-safe) when ?id= is supplied; fall
@@ -1756,6 +1767,12 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Blocker B delete-first order: validate every referenced object UNDER the
+	// shared gate, before the commit — a delete that already won makes this
+	// fail 400 instead of committing a dangling reference.
+	if refuseDanglingRuleRefs(w, &rule) {
+		return
+	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
@@ -1828,6 +1845,11 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validatePolicyRule(rule, effectivePolicyList(), priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Blocker B delete-first order: validate referenced objects under the
+	// shared gate before committing the edit.
+	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
@@ -1955,6 +1977,11 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	// priority path passes the URL priority).
 	if err := validatePolicyRule(rule, effectivePolicyList(), beforeRule.Priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Blocker B delete-first order: validate referenced objects under the
+	// shared gate (held by the apiPolicyUpdate caller) before committing.
+	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))

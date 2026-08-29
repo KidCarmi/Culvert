@@ -171,6 +171,28 @@ func newEffectiveViewWithMembership(entries map[string]string, members map[strin
 	return &meta
 }
 
+// HasCategoryName reports whether the view carries any host classified (or
+// membership-listed) under the named category, case-insensitively. Used by the
+// reference-validity predicate (referencedCategoryResolvable): a rule or group
+// member may legitimately reference a signed-feed class that is not a writable
+// catStore object. Admin-rate write-door read — O(view) is acceptable there
+// and this deliberately adds NO index the hot path would have to maintain.
+func (v *effectiveCategoryView) HasCategoryName(name string) bool {
+	for _, c := range v.entries {
+		if strings.EqualFold(c, name) {
+			return true
+		}
+	}
+	for _, cats := range v.members {
+		for _, c := range cats {
+			if strings.EqualFold(c, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // HostCount / CategoryCount report the composed view's size.
 func (v *effectiveCategoryView) HostCount() int { return len(v.entries) }
 

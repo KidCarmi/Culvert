@@ -248,6 +248,12 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Blocker B delete-first order: validate destination object references
+	// under the shared gate before committing (auth rules may carry
+	// destination category/group/profile scopes).
+	if refuseDanglingRuleRefs(w, &rule) {
+		return
+	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Serialize with commit/revert exactly like the Stage-2 handlers.
 	beginPolicyWrite()
@@ -307,6 +313,11 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+	// Blocker B delete-first order: validate destination object references
+	// under the shared gate before committing the edit.
+	if refuseDanglingRuleRefs(w, &rule) {
+		return
 	}
 	stampRuleMetadataForWrite(&rule, target.before, sessionAdmin(r))
 	beginPolicyWrite()

@@ -44,6 +44,10 @@ var (
 	errAcceptRequiresDraftMode = errors.New("accept requires Draft Mode (RequireCommit): acceptance creates a disabled rule in the Policy Draft only — arm Require Commit in Policy settings first")
 	errAcceptVersionConflict   = errors.New("policy/draft changed since the fence was read — reload and retry with the current version")
 	errAcceptIntegrityConflict = errors.New("a rule with this recommendation's target ID exists with DIFFERENT content — refusing to overwrite; resolve the draft rule manually")
+	// errAcceptDanglingReference: the recommendation's referenced category no
+	// longer resolves in any current category authority (deleted since
+	// generation) — accepting would stage a dangling candidate rule.
+	errAcceptDanglingReference = errors.New("the recommendation's referenced object no longer exists — refusing to stage a dangling draft rule")
 )
 
 // plAcceptOutcome carries the result of one accept attempt for the API layer.
@@ -249,6 +253,15 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 		// The intent stays pending; a retry after the operator resolves the
 		// collision converges on the same target.
 		return plAcceptOutcome{}, fmt.Errorf("translated rule failed validation: %w", err)
+	}
+	// Blocker B delete-first order: the recommendation's category was live at
+	// generation time but may have been deleted since. Validated here — under
+	// the shared objectReferenceMutationGate acquired above, before the staged
+	// append — so a delete that already won refuses the accept instead of
+	// staging a dangling candidate rule. The intent stays pending (a retry
+	// after the operator restores the category converges on the same target).
+	if e := validateRuleObjectRefs(&rule); e != nil {
+		return plAcceptOutcome{}, fmt.Errorf("%v: %w", e, errAcceptDanglingReference)
 	}
 	stampRuleMetadataForWrite(&rule, nil, actor)
 

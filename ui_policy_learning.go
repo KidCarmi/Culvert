@@ -604,6 +604,7 @@ func plDecisionError(w http.ResponseWriter, err error) {
 		errors.Is(err, errAcceptRequiresDraftMode),
 		errors.Is(err, errAcceptVersionConflict),
 		errors.Is(err, errAcceptIntegrityConflict),
+		errors.Is(err, errAcceptDanglingReference),
 		errors.Is(err, errStaleRecommendation):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
