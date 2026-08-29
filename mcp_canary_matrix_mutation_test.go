@@ -38,6 +38,20 @@ func TestCanaryMatrix_ShippedBuildNeverReady(t *testing.T) {
 // reasons are NOT reported by the node dry-run; capability_not_gateway is met for Gateway. If a
 // prerequisite is silently dropped or an extra one appears, this fails.
 func TestCanaryMatrix_DormantNodeRejections(t *testing.T) {
+	// This exact-set assertion depends on ambient global state (dataDir for the attestation +
+	// rehearsal files, and the rollout singleton's persist status). Isolate both so the set is
+	// deterministic under -shuffle/-count regardless of any prior test's leftovers: a fresh temp
+	// dataDir (no attestation/rehearsal files ⇒ shadow_exit + rollback stay unmet) and a fresh
+	// rollout singleton (fresh persist status, kill clear).
+	withTempDataDir(t)
+	_ = getMCPRollout()
+	prevRollout := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	t.Cleanup(func() { globalMCPRollout = prevRollout })
+
 	rd := evaluateCanaryNodeReadiness(rollout.CapabilityGateway)
 	want := []canary.Reason{
 		canary.ReasonShadowExitNotPassed,

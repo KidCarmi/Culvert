@@ -578,14 +578,13 @@ func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	// evidence preserved.
 	now2 := time.Unix(2000, 0)
 	vin := validCanaryActivationInput(now2)
-	prevProbe := canaryActivationInputsProbe
-	canaryActivationInputsProbe = func(_ rollout.Capability, _ rollout.ScopeSpec, _ uint64) canaryActivationInputs {
-		return canaryActivationInputs{ToolApprovals: vin.ToolApprovals, Budget: vin.Budget, ServerUsable: true, FingerprintCurrent: true}
-	}
+	// Arm the authoritative activation-inputs seam via t.Cleanup (leak-safe under -shuffle/-count).
+	// The Shadow legs never consult it (Shadow does not require live execution), so arming it for
+	// the whole test is inert for them and only satisfies the Canary leg's full preflight.
+	armCanaryActivationInputs(t, vin)
 	globalExecDeps.gateway.Store(true)
 	err := r.commitRolloutTransition(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now2)
 	globalExecDeps.gateway.Store(false) // disarm live so the demotion-to-Shadow preflight passes
-	canaryActivationInputsProbe = prevProbe
 	if err != nil {
 		t.Fatal(err)
 	}

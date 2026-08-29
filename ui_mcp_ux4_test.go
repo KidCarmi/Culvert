@@ -99,6 +99,10 @@ func TestMCPUX4_EmergencyInvalidCapability(t *testing.T) {
 }
 
 func TestMCPUX4_RehearseCapabilityFromBody(t *testing.T) {
+	// The rehearse endpoint now runs the real executable drill (§5), which writes durable
+	// rehearsal evidence + rollout state under dataDir; confine those to a temp dir so they never
+	// leak to the shared default and pollute another test's dormant-default assertions.
+	withTempDataDir(t)
 	// The rehearsal must record evidence for the capability named in the body
 	// (parity with emergency), so a rehearsal chosen for management can never land
 	// on gateway. This pins the PR-UX-4 capability-binding fix.
@@ -120,6 +124,7 @@ func TestMCPUX4_RehearseCapabilityFromBody(t *testing.T) {
 }
 
 func TestMCPUX4_RehearseRBACAndValidation(t *testing.T) {
+	withTempDataDir(t) // the admin rehearse below runs the real drill, which writes under dataDir
 	// Viewer/operator may not record a rehearsal (admin only).
 	for _, role := range []UIRole{RoleViewer, RoleOperator} {
 		if got := mcpReq(http.MethodPost, "/api/mcp/rollout/rehearse-rollback", role, `{"capability":"gateway"}`).Code; got != http.StatusForbidden {
@@ -141,6 +146,7 @@ func TestMCPUX4_RehearseRBACAndValidation(t *testing.T) {
 // misread as a malformed body. The empty body decodes to io.EOF and falls back to
 // the query-string capability (here: management), returning 200 — not a 400.
 func TestMCPUX4_RehearseChunkedBodylessPOST(t *testing.T) {
+	withTempDataDir(t) // the rehearse below runs the real drill, which writes under dataDir
 	r := httptest.NewRequest(http.MethodPost, "/api/mcp/rollout/rehearse-rollback?capability=management", http.NoBody)
 	r.ContentLength = -1 // simulate chunked transfer encoding (no Content-Length)
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
