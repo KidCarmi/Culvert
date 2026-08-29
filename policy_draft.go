@@ -610,17 +610,33 @@ func (c *policyDraftCoordinator) cascadeDestCategoryGroupRename(id, oldName, new
 	return c.persistLocked()
 }
 
+// cascadeFileProfileRename mirrors PolicyStore.CascadeFileProfileRename onto
+// the open candidate (2D-C references-by-id), so a file-profile rename keeps
+// the DRAFT's denormalized names honest too. Same durable contract as
+// cascadeDecryptionProfileRename above. Lock order c.mu → PolicyStore.mu.
+func (c *policyDraftCoordinator) cascadeFileProfileRename(id, oldName, newName string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.state.Active {
+		return nil
+	}
+	if n := c.cand.CascadeFileProfileRename(id, oldName, newName); n == 0 {
+		return nil
+	}
+	return c.persistLocked()
+}
+
 // refreshObjectRefNames mirrors PolicyStore.RefreshObjectRefNames onto the open
 // candidate (boot reconciliation for the 2D-A rename model). Returns the number
 // of candidate rules touched plus the persist outcome; (0, nil) when no draft
 // is open or nothing was stale. Lock order c.mu → PolicyStore.mu.
-func (c *policyDraftCoordinator) refreshObjectRefNames(groupNames, profileNames map[string]string) (int, error) {
+func (c *policyDraftCoordinator) refreshObjectRefNames(groupNames, profileNames, fileProfileNames map[string]string) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.state.Active {
 		return 0, nil
 	}
-	n := c.cand.RefreshObjectRefNames(groupNames, profileNames)
+	n := c.cand.RefreshObjectRefNames(groupNames, profileNames, fileProfileNames)
 	if n == 0 {
 		return 0, nil
 	}

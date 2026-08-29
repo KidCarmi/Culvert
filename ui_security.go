@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/fileblock"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
@@ -493,10 +496,54 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 
 // ── File Extension Profiles API ───────────────────────────────────────────────
 //
-// GET    /api/fileblock/profiles          → list all profiles
+// GET    /api/fileblock/profiles          → list all profiles (legacy shape)
+// GET    /api/fileblock/profiles/state    → {profiles, revision} — ONE coherent
+//	committed snapshot (v2 fenced-read contract)
 // POST   /api/fileblock/profiles          → create profile {name, extensions[]}
-// PUT    /api/fileblock/profiles?id=X     → update profile
-// DELETE /api/fileblock/profiles?id=X     → delete profile
+// PUT    /api/fileblock/profiles?id=X     → update profile (rename cascades by ID)
+// DELETE /api/fileblock/profiles?id=X     → delete profile (reference-gated)
+//
+// Mutations accept an optional ?ifRevision= (the content-derived revision from
+// /state): the comparison, the mutation, and the durable publish share the
+// store's single critical section — never a detached handler check. A conflict
+// is the structured 409 the v2 editor refreshes from.
+
+// apiFileblockProfilesState — GET the v2 coherent management snapshot.
+func apiFileblockProfilesState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	profiles, revision := globalProfileStore.SnapshotWithRevision()
+	jsonOK(w, map[string]any{"profiles": profiles, "revision": revision, "count": len(profiles)})
+}
+
+// writeFileProfileMutationError maps store errors to truthful HTTP outcomes:
+// revision conflict → structured 409 with the current revision; landed-content
+// degraded durability → treated as success by the caller (returns false);
+// not-found/name-taken → 4xx. Returns true when the response has been written.
+func writeFileProfileMutationError(w http.ResponseWriter, err error, notFoundStatus int) bool {
+	if err == nil || errors.Is(err, fileutil.ErrReplacedNotSynced) {
+		return false // success (possibly with the landed-content degradation, logged by storage health)
+	}
+	var conflict *fileblock.ErrRevisionConflict
+	if errors.As(err, &conflict) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+			"error":    conflict.Error(),
+			"conflict": "revision",
+			"revision": conflict.Current,
+		})
+		return true
+	}
+	http.Error(w, err.Error(), notFoundStatus)
+	return true
+}
+
 func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -517,9 +564,9 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		prof, err := globalProfileStore.Create(body.Name, body.Extensions)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+		prof, err := globalProfileStore.CreateFenced(
+			strings.TrimSpace(r.URL.Query().Get("ifRevision")), body.Name, body.Extensions)
+		if writeFileProfileMutationError(w, err, http.StatusConflict) {
 			return
 		}
 		auditEvent(r, "fileprofile.create", prof.Name, fmt.Sprintf("%d extensions", len(prof.Extensions)))
@@ -542,12 +589,49 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := globalProfileStore.Update(id, body.Name, body.Extensions); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		// Rename detection BEFORE the durable update, by stable ID (2D-C §8): a
+		// true rename keeps the object ID and every referencing rule's identity;
+		// only the display name changes and cascades.
+		beforeName, existed := globalProfileStore.NameByID(id)
+		newName := strings.TrimSpace(body.Name)
+		renamed := existed && newName != "" && !strings.EqualFold(beforeName, newName)
+		if err := globalProfileStore.UpdateFenced(
+			strings.TrimSpace(r.URL.Query().Get("ifRevision")), id, body.Name, body.Extensions); writeFileProfileMutationError(w, err, http.StatusNotFound) {
 			return
 		}
-		auditEvent(r, "fileprofile.update", body.Name, fmt.Sprintf("%d extensions", len(body.Extensions)))
-		jsonOK(w, map[string]any{"ok": true})
+		detail := fmt.Sprintf("%d extensions", len(body.Extensions))
+		// Rename cascade onto RUNNING policy and the open draft candidate —
+		// same composed cross-store operation as the category-group /
+		// decryption-profile renames (2D-A §6/§7): each is a real policy
+		// mutation that must survive a restart, so both persists are
+		// error-aware; a failure after the durable object rename keeps the
+		// (correct) in-memory cascade, is surfaced as a truthful 500 — never a
+		// 2xx over a known-failed durable domain — and converges at the next
+		// restart via reconcileObjectRefNames.
+		var cascadeErr error
+		if renamed {
+			if n := policyStore.CascadeFileProfileRename(id, beforeName, newName); n > 0 {
+				if perr := policyStore.SaveErr(); perr != nil && !errors.Is(perr, fileutil.ErrReplacedNotSynced) {
+					cascadeErr = fmt.Errorf("running policy: %w", perr)
+				}
+			}
+			if derr := policyDraft.cascadeFileProfileRename(id, beforeName, newName); derr != nil {
+				if cascadeErr != nil {
+					cascadeErr = fmt.Errorf("%w; draft candidate: %w", cascadeErr, derr)
+				} else {
+					cascadeErr = fmt.Errorf("draft candidate: %w", derr)
+				}
+			}
+			detail += ", renamed from " + sanitizeLog(beforeName)
+		}
+		if cascadeErr != nil {
+			auditEvent(r, "fileprofile.update", newName,
+				detail+" — rename durable but display-name cascade not persisted: "+cascadeErr.Error())
+			writeRenameCascadePersistFailure(w, "file profile", cascadeErr)
+			return
+		}
+		auditEvent(r, "fileprofile.update", body.Name, detail)
+		jsonOK(w, map[string]any{"ok": true, "revision": globalProfileStore.Revision()})
 
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleOperator) {
@@ -578,8 +662,8 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err := globalProfileStore.Delete(id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		if err := globalProfileStore.DeleteFenced(
+			strings.TrimSpace(r.URL.Query().Get("ifRevision")), id); writeFileProfileMutationError(w, err, http.StatusNotFound) {
 			return
 		}
 		auditEvent(r, "fileprofile.delete", id, "")

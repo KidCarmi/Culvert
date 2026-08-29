@@ -106,13 +106,17 @@ func reconcileObjectRefNames() {
 	for _, p := range globalDecryptionProfiles.List() {
 		profileNames[p.ID] = p.Name
 	}
-	if n := policyStore.RefreshObjectRefNames(groupNames, profileNames); n > 0 {
+	fileProfileNames := make(map[string]string)
+	for _, p := range globalProfileStore.List() {
+		fileProfileNames[p.ID] = p.Name
+	}
+	if n := policyStore.RefreshObjectRefNames(groupNames, profileNames, fileProfileNames); n > 0 {
 		logger.Printf("Policy: reconciled %d stale denormalized object name(s) on running rules (ID-authoritative)", n)
 		if err := policyStore.SaveErr(); err != nil {
 			logger.Printf("Policy: reconciled names not persisted (%v) — in-memory truth is correct; will reconcile again next restart", err)
 		}
 	}
-	if n, err := policyDraft.refreshObjectRefNames(groupNames, profileNames); n > 0 {
+	if n, err := policyDraft.refreshObjectRefNames(groupNames, profileNames, fileProfileNames); n > 0 {
 		logger.Printf("PolicyDraft: reconciled %d stale denormalized object name(s) on the candidate", n)
 		if err != nil {
 			logger.Printf("PolicyDraft: reconciled candidate names not persisted (%v) — in-memory truth is correct; will reconcile again next restart", err)

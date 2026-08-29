@@ -138,6 +138,11 @@ func resolveObjectID(objType, name string) string {
 			return g.ID
 		}
 	}
+	if objType == "file-profile" {
+		if p := globalProfileStore.GetByName(name); p != nil {
+			return p.ID
+		}
+	}
 	return ""
 }
 
@@ -176,6 +181,19 @@ func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 			return "destCategoryGroup"
 		}
 	case "file-profile":
+		// ID is AUTHORITATIVE (2D-C references-by-id): an ID-bearing rule
+		// references this profile IFF its ID matches objID. Unlike the group /
+		// decryption-profile cases there is NO dangling-ID name fallback,
+		// because the ENFORCEMENT path has none either (FileProfileBlocked
+		// fails safe on a dangling ID and never retargets by name — the walk
+		// must agree with the match path, OBJECT-REFERENCES-BY-ID.md §8).
+		// Un-migrated rules (no ID) match by name, exactly as enforcement does.
+		if r.FileProfileID != "" {
+			if r.FileProfileID == objID {
+				return "fileProfile"
+			}
+			return ""
+		}
 		if strings.EqualFold(string(r.FileProfile), name) {
 			return "fileProfile"
 		}

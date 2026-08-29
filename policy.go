@@ -104,16 +104,29 @@ type PolicyRule struct {
 	// above is a denormalized display cache kept honest by the rename cascade.
 	// Stamped name→id on write; omitempty so pre-migration rules are byte-unchanged.
 	DestCategoryGroupID string          `json:"destCategoryGroupId,omitempty"`
-	DestCountry         []string        `json:"destCountry"`                 // ISO 3166-1 alpha-2 country codes; empty = any
-	Schedule            *PolicySchedule `json:"schedule,omitempty"`          // nil = always active
-	SSLAction           SSLAction       `json:"sslAction"`                   // Inspect | Bypass
-	FileFiltering       bool            `json:"fileFiltering"`               // enable file-type scanning
-	FileProfile         FileProfileName `json:"fileProfile"`                 // named file-extension block profile
-	LogFullURI          bool            `json:"logFullUri"`                  // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
-	LogTraffic          *bool           `json:"logTraffic,omitempty"`        // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
-	TLSSkipVerify       bool            `json:"tlsSkipVerify"`               // skip upstream cert verification (use with caution)
-	StripALPN           *bool           `json:"stripAlpn,omitempty"`         // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN). Superseded by DecryptionProfile.InspectHTTP2 when a profile is bound.
-	DecryptionProfile   string          `json:"decryptionProfile,omitempty"` // SSL-inspect only: name of a DecryptionProfile that governs HOW this tunnel is decrypted (InspectHTTP2, cert-verification, TLS floor/cap, stall). Empty = none. A dangling ref falls back to the inline StripALPN/TLSSkipVerify (fail-safe at eval).
+	DestCountry         []string        `json:"destCountry"`        // ISO 3166-1 alpha-2 country codes; empty = any
+	Schedule            *PolicySchedule `json:"schedule,omitempty"` // nil = always active
+	SSLAction           SSLAction       `json:"sslAction"`          // Inspect | Bypass
+	FileFiltering       bool            `json:"fileFiltering"`      // enable file-type scanning
+	FileProfile         FileProfileName `json:"fileProfile"`        // named file-extension block profile (denormalized display cache once FileProfileID is stamped; legacy-fallback input for un-migrated rules)
+	// FileProfileID is the AUTHORITATIVE, rename-safe link to the file profile
+	// (references-by-id, 2D-C promotion — same doctrine as DecryptionProfileID).
+	// Resolution is ID-FIRST; a rule with NO ID (legacy/un-migrated) resolves by
+	// name through the store and then the compiled legacy fileProfileExts map,
+	// byte-identical to the pre-promotion behavior. A NON-EMPTY ID that no longer
+	// resolves is fail-SAFE for the file-control dimension (no extensions block)
+	// and deliberately does NOT retarget by name — an authoritative identity must
+	// never silently rebind to a different object that happens to carry the same
+	// name (2D-C anti-rebinding doctrine, stricter here than the group shape
+	// because the legacy built-in name space is compiled-in and collision-prone).
+	// Stamped name→id server-side on every interactive/import write; omitempty so
+	// pre-promotion rules are byte-unchanged.
+	FileProfileID     string `json:"fileProfileId,omitempty"`
+	LogFullURI        bool   `json:"logFullUri"`                  // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
+	LogTraffic        *bool  `json:"logTraffic,omitempty"`        // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
+	TLSSkipVerify     bool   `json:"tlsSkipVerify"`               // skip upstream cert verification (use with caution)
+	StripALPN         *bool  `json:"stripAlpn,omitempty"`         // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN). Superseded by DecryptionProfile.InspectHTTP2 when a profile is bound.
+	DecryptionProfile string `json:"decryptionProfile,omitempty"` // SSL-inspect only: name of a DecryptionProfile that governs HOW this tunnel is decrypted (InspectHTTP2, cert-verification, TLS floor/cap, stall). Empty = none. A dangling ref falls back to the inline StripALPN/TLSSkipVerify (fail-safe at eval).
 	// DecryptionProfileID is the AUTHORITATIVE, rename-safe link to the profile
 	// (references-by-id, OBJECT-REFERENCES-BY-ID.md). Resolution prefers the ID
 	// and falls back to the name for un-migrated/dangling rules; the name above is
@@ -787,6 +800,43 @@ func (ps *PolicyStore) CascadeDestCategoryGroupRename(id, oldName, newName strin
 	return n
 }
 
+// CascadeFileProfileRename refreshes the denormalized FileProfile name on
+// every rule that references the renamed file profile — by its stable ID
+// (migrated rules) or, for un-migrated name-only rules, by its OLD name
+// (which also stamps the ID, migrating them so the reference is ID-stable
+// henceforth). References-by-id (2D-C): the enforcement path resolves by ID,
+// so file blocking survives the rename regardless; this keeps the
+// human-readable denormalized copy honest for display/export/DP-sync.
+// Returns the number of rules touched; the caller persists via SaveErr.
+// Race-safe by pointer swap, like the other Cascade*Rename methods.
+func (ps *PolicyStore) CascadeFileProfileRename(id, oldName, newName string) int {
+	if id == "" {
+		return 0
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	next := append([]*PolicyRule(nil), ps.rules...)
+	n := 0
+	for i, rule := range next {
+		byID := rule.FileProfileID == id && string(rule.FileProfile) != newName
+		byName := rule.FileProfileID == "" && strings.EqualFold(string(rule.FileProfile), oldName)
+		if !byID && !byName {
+			continue
+		}
+		nr := *rule
+		nr.FileProfile = FileProfileName(newName)
+		nr.FileProfileID = id // stamp/keep the authoritative link
+		next[i] = &nr
+		n++
+	}
+	if n > 0 {
+		ps.rules = next
+		ps.sortLocked()
+		ps.bumpVersion()
+	}
+	return n
+}
+
 // RefreshObjectRefNames re-derives every rule's denormalized object display
 // names from the ID-authoritative object stores (boot reconciliation — the
 // deterministic recovery half of the 2D-A rename model; see
@@ -796,7 +846,7 @@ func (ps *PolicyStore) CascadeDestCategoryGroupRename(id, oldName, newName strin
 // rewriting it would change match semantics). Returns the number of rules
 // touched; the caller persists via SaveErr. Race-safe by pointer swap, like
 // the Cascade*Rename methods.
-func (ps *PolicyStore) RefreshObjectRefNames(groupNames, profileNames map[string]string) int {
+func (ps *PolicyStore) RefreshObjectRefNames(groupNames, profileNames, fileProfileNames map[string]string) int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	next := append([]*PolicyRule(nil), ps.rules...)
@@ -814,7 +864,13 @@ func (ps *PolicyStore) RefreshObjectRefNames(groupNames, profileNames map[string
 				newProfile, hasProfile = cur, true
 			}
 		}
-		if !hasGroup && !hasProfile {
+		newFileProfile, hasFileProfile := "", false
+		if rule.FileProfileID != "" {
+			if cur, ok := fileProfileNames[rule.FileProfileID]; ok && string(rule.FileProfile) != cur {
+				newFileProfile, hasFileProfile = cur, true
+			}
+		}
+		if !hasGroup && !hasProfile && !hasFileProfile {
 			continue
 		}
 		nr := *rule
@@ -823,6 +879,9 @@ func (ps *PolicyStore) RefreshObjectRefNames(groupNames, profileNames map[string
 		}
 		if hasProfile {
 			nr.DecryptionProfile = newProfile
+		}
+		if hasFileProfile {
+			nr.FileProfile = FileProfileName(newFileProfile)
 		}
 		next[i] = &nr
 		n++
@@ -1739,16 +1798,29 @@ func matchCountry(countries []string, code string) bool {
 }
 
 // FileProfileBlocked returns true if the file extension of urlPath is blocked
-// by the rule's FileProfile, and FileFiltering is enabled.
-// Dynamic profiles from globalProfileStore take precedence over the legacy
-// hardcoded fileProfileExts map (backward-compatible fallback).
+// by the rule's file profile, and FileFiltering is enabled.
+//
+// Resolution (2D-C references-by-id): the STABLE ID is authoritative when
+// present — a stamped rule resolves via GetByID, so a profile rename never
+// changes which extensions this rule enforces. A non-empty ID that no longer
+// resolves is fail-SAFE (no block) and deliberately does NOT fall back to the
+// name: retargeting an authoritative identity to a different profile that
+// happens to carry the same name is the rebinding hazard the promotion
+// closes (the delete gate + bulk graph make this branch defense-in-depth).
+// Legacy rules with NO ID keep the exact pre-promotion resolution: dynamic
+// store by name first, then the compiled fileProfileExts map.
 func (r *PolicyRule) FileProfileBlocked(urlPath string) bool {
 	if !r.FileFiltering || r.FileProfile == FileProfileNone {
 		return false
 	}
-	// Resolve extension list: check dynamic store first, then legacy map.
 	var exts []string
-	if p := globalProfileStore.GetByName(string(r.FileProfile)); p != nil {
+	if r.FileProfileID != "" {
+		p := globalProfileStore.GetByID(r.FileProfileID)
+		if p == nil {
+			return false // dangling authoritative ID — never retarget by name
+		}
+		exts = p.Extensions
+	} else if p := globalProfileStore.GetByName(string(r.FileProfile)); p != nil {
 		exts = p.Extensions
 	} else if legacyExts, ok := fileProfileExts[r.FileProfile]; ok {
 		exts = legacyExts

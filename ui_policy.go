@@ -1622,6 +1622,16 @@ func stampObjectRefIDs(rule *PolicyRule) {
 			rule.DestCategoryGroupID = g.ID
 		}
 	}
+	// File profile (2D-C promotion): same trust boundary — the NAME is client
+	// intent, the ID is server-derived. A legacy built-in name with no store
+	// object (compiled fileProfileExts fallback) legitimately stamps no ID and
+	// keeps resolving by name.
+	rule.FileProfileID = ""
+	if rule.FileProfile != "" && rule.FileProfile != FileProfileNone {
+		if p := globalProfileStore.GetByName(string(rule.FileProfile)); p != nil {
+			rule.FileProfileID = p.ID
+		}
+	}
 }
 
 // policyVersionConflict enforces the OPTIONAL optimistic-concurrency
