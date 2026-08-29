@@ -346,37 +346,60 @@ critical-commit-before-response ordering.
 
 ---
 
-## 10. Kill switch at the boundary — HARD CANARY PREREQUISITE (task 12, PREREQ-MCP-KILL-1)
+## 10. Kill switch at the boundary — HARD CANARY PREREQUISITE · CLOSED (task 12, PREREQ-MCP-KILL-1)
 
-The kill switch is checked once at the top of `Executor.Execute` but **not re-checked at
-the irreversible boundary** (`run.go` `callUpstream`). Between admission and the boundary
-the executor performs a durable decision commit, credential planning and credential
-materialization — all of which can block — so a kill engaged during that window does NOT
-stop an in-flight live call today. The existing OVN-09 tool-drift re-check sits exactly at
-the boundary (`callUpstream` re-invokes `ToolStillCurrent`); the kill re-check does not yet
-join it.
+> **CLOSED 2026-08-29.** The authoritative emergency-kill state is now revalidated at the ONE
+> irreversible boundary (`run.go` `callUpstream`), immediately before `Upstream.Call`, on both
+> the credential and no-credential paths, with NOTHING between the final check and the call. A
+> kill engaged anywhere in the admission→boundary window (durable commit, credential planning,
+> materialization, or the final tool-freshness check) aborts the call: `up.calls == 0`, block
+> reason `rollout_emergency_active`, `Executed == false`.
 
-> **Prerequisite (blocking).** **Canary/Production activation is PROHIBITED until the
-> authoritative kill state is revalidated immediately before the irreversible side-effect
-> boundary.** A kill engaged during credential planning or materialization MUST abort the
-> upstream call (`up.calls == 0`), landing as `WOULD_BLOCK` / block reason
-> `rollout_emergency_active`. This is a HARD gate, not a nicety: the kill switch is the
-> operator's only immediate stop, and a stop that a slow commit window can outrun is not a
-> stop.
+**Original gap (for the record).** The kill switch was checked once at the top of
+`Executor.Execute` but not re-checked at the irreversible boundary. Between admission and the
+boundary the executor performs a durable decision commit, credential planning and credential
+materialization — all of which can block — so a kill engaged during that window did not stop
+an in-flight live call. The existing OVN-09 tool-drift re-check already sat exactly at the
+boundary; the kill re-check now joins it.
 
-Scope of the change (deferred; NOT implemented in the Shadow-readiness/Layer-B increment):
-add a `killEpoch` to the boundary re-check alongside the existing tool-drift re-check, so
-the final `callUpstream` re-reads the authoritative execution state before the side effect.
-For Shadow the kill switch already affects the verdict consistently with live at admission
-(a killed capability yields `WOULD_BLOCK` reason `rollout_emergency_active`); the boundary
-re-check matters only for a live-capable mode, which is why it is a Canary prerequisite
-rather than a Shadow one.
+**Design — Model B (monotonic kill generation).** `rollout.State` carries a `killGen`
+`atomic.Uint64`, incremented exactly once per false→true engage transition (never decremented
+on clear) and read lock-free via `State.KillGeneration()`. `Executor.Execute` captures
+`admKillGen` at admission; `callUpstream` re-reads the generation and, when
+`KillGeneration() != admKillGen`, aborts with the package-private `errKilledAtBoundary` before
+`Upstream.Call`. Model B was chosen over a current-state boolean deliberately: it also refuses
+the **engage→clear (ABA)** window that a boolean re-read at the boundary would miss, because
+any kill that straddled the request advanced the generation. The re-read is an emergency
+monotonic restriction ONLY — it reads solely the kill generation and never re-resolves
+mode/scope/policy/approval, so it preserves F7 single-resolution and can only make the outcome
+more restrictive.
 
-Tracking: `PREREQ-MCP-KILL-1` in `docs/engineering/TECHNICAL-DEBT-REGISTER.md`. The gap is
-pinned non-vacuously by `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`
-(`internal/mcp/execution`), which drives the admission→boundary window and asserts the
-current (gap-present) behaviour; closing the prerequisite means inverting that assertion to
-`up.calls == 0` and checking off the §12 exit criterion below.
+**Reason mapping.** `errKilledAtBoundary` is package-private (`ReasonOf == ReasonNone`), so
+each path reclassifies it to `ReasonRolloutEmergencyActive`: the no-credential path when the
+sentinel escapes `CommitThenAct`, the credential path when `materializeAndCall` absorbs it into
+a blocked output (reclassified ahead of the drift reason — an emergency stop is paramount). No
+branch returns `ReasonNone` or a transport/durability fault for a kill refusal, and the block
+is metered as an emergency block with `Executed=false` so evidence never claims an execution.
+
+**Honest scope (§8 of the closure brief).** A kill after admission does NOT unwind credential
+Plan/Materialize work already in flight — provider `Fetch`/materialization can complete — but
+the boundary still guarantees `Upstream.Call == 0`. The invariant is "no irreversible upstream
+side effect", not "no pre-boundary work occurred".
+
+For Shadow the kill switch already affected the verdict consistently with live at admission (a
+killed capability yields `rollout_emergency_active` and never reaches the boundary); the
+boundary re-check matters only for a live-capable mode, which is why this was a Canary
+prerequisite rather than a Shadow one. Its closure does not authorize activation: execution
+posture stays CLOSED (no LiveExecutor composed; AST posture walls green).
+
+Tracking: `PREREQ-MCP-KILL-1` in `docs/engineering/TECHNICAL-DEBT-REGISTER.md` (CLOSED). The
+invariant is pinned non-vacuously by
+`TestCanaryPrerequisite_KillStateRevalidatedAtSideEffectBoundary` (inverted from the former
+`*_KillStateNotRevalidated*`; reaches the real production boundary), the deterministic
+`TestKillBoundary_RaceMatrix` (10 windows incl. ABA + concurrency, channel/barrier ordering,
+no sleeps), `TestKillBoundary_KillBetweenResolveAndExecute`,
+`TestKillBoundary_NoCredentialReasonMapping`, and a 10-defect mutation campaign whose
+mapping is recorded at the head of `internal/mcp/execution/kill_boundary_race_test.go`.
 
 ---
 
@@ -443,10 +466,13 @@ Measurable gates before Canary may even be *reviewed* (rationale, not arbitrary)
   event after admission has already rejected the request would misrepresent what the node did
   (it did not evaluate). The criterion now measures the real invariant (Option A of the
   Phase-A brief).
-- **`PREREQ-MCP-KILL-1` CLOSED** — the authoritative kill state is revalidated immediately
-  before the irreversible side-effect boundary (`run.go` `callUpstream`), so a kill engaged
-  during credential planning/materialization aborts the call (`up.calls == 0`). This is a
-  HARD blocker: Canary/Production activation is prohibited while this is open (§10).
+- **`PREREQ-MCP-KILL-1` CLOSED (2026-08-29)** — the authoritative kill state is revalidated
+  immediately before the irreversible side-effect boundary (`run.go` `callUpstream`), so a
+  kill engaged during credential planning/materialization aborts the call (`up.calls == 0`,
+  reason `rollout_emergency_active`, `Executed=false`) on both the credential and no-credential
+  paths (Model B / monotonic kill generation — see §10). This was a HARD blocker; its closure
+  is required for the Shadow→Canary review to pass but does NOT itself authorize
+  Canary/Production activation (execution posture stays CLOSED — no LiveExecutor composed).
 - restart drills pass (durable evidence survives; no execution replay).
 - observability verified (all series emit; health three-state correct).
 - operator procedure tested (runbook dry-run).

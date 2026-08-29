@@ -298,32 +298,55 @@
 - **Interest:** (a) bounded information disclosure; (b) a TLS handshake per upstream tool call
   once execution is armed.
 
-## PREREQ-MCP-KILL-1 — MCP kill switch not revalidated at the side-effect boundary · HARD CANARY PREREQUISITE (2026-08-25)
-- **Principal:** `Executor.Execute` checks `State.Killed()` once at admission, but the
-  irreversible boundary (`run.go` `callUpstream`) does NOT re-read the authoritative kill
+## PREREQ-MCP-KILL-1 — MCP kill switch not revalidated at the side-effect boundary · HARD CANARY PREREQUISITE · CLOSED (2026-08-25, closed 2026-08-29)
+- **Principal (as filed):** `Executor.Execute` checked `State.Killed()` once at admission, but
+  the irreversible boundary (`run.go` `callUpstream`) did NOT re-read the authoritative kill
   state before the upstream side effect. Between admission and the boundary the executor
   performs a durable decision commit, credential planning and credential materialization —
-  all of which can block — so an emergency kill engaged during that window does not abort an
-  in-flight live call. The OVN-09 tool-drift re-check already sits at that boundary; the kill
-  re-check does not yet join it.
-- **Status:** OPEN. This is a **blocking prerequisite**, not an ordinary debt item.
-  **Canary/Production activation is PROHIBITED until the authoritative kill state is
-  revalidated immediately before the irreversible side-effect boundary** (a kill during
-  planning/materialization must yield `up.calls == 0`, block reason
-  `rollout_emergency_active`). Compensating control today: no production executor is composed
-  (arming hooks uncalled; AST posture wall), so the window is unreachable in production — but
-  the prerequisite must be CLOSED before any live-capable mode is armed.
+  all of which can block — so an emergency kill engaged during that window did not abort an
+  in-flight live call. The OVN-09 tool-drift re-check already sat at that boundary; the kill
+  re-check did not yet join it.
+- **Status:** **CLOSED (2026-08-29).** The authoritative emergency-kill state is now
+  revalidated at the ONE irreversible boundary (`run.go` `callUpstream`, shared by the
+  credential and no-credential paths) immediately before `Upstream.Call`, with NOTHING between
+  the final check and the call.
+- **Resolution — Model B (monotonic epoch):** `rollout.State` carries a `killGen`
+  `atomic.Uint64`, incremented exactly once per false→true engage transition (never on clear),
+  read lock-free via `State.KillGeneration()`. `Executor.Execute` captures `admKillGen` at
+  admission; `callUpstream` re-reads the generation and aborts with the package-private
+  `errKilledAtBoundary` when `KillGeneration() != admKillGen`. Model B was chosen over a
+  current-state boolean specifically to also refuse the engage→clear (ABA) window that a
+  boolean re-read would miss: any kill that straddled the request advanced the generation and
+  is therefore caught even if already cleared by the time the boundary is reached. The re-read
+  is an emergency monotonic restriction only — it reads solely the kill generation and never
+  re-resolves mode/scope/policy/approval, so it cannot reopen the F7 single-resolution TOCTOU.
+- **Reason mapping (both branches):** a boundary kill maps to `ReasonRolloutEmergencyActive`
+  on the no-credential path (the sentinel escapes `CommitThenAct` and is reclassified) and on
+  the credential path (the sentinel is absorbed by `materializeAndCall` into a blocked output
+  and reclassified in the `didBlock` branch, ahead of the drift reclassification — an
+  emergency stop is the paramount reason). No branch returns `ReasonNone` or a
+  transport/durability fault for a kill refusal. `Executed` stays false and the block is
+  metered as an emergency block, so operator evidence never claims an upstream execution
+  occurred.
+- **Honest credential-path note (§8):** a kill engaged after admission does NOT unwind
+  credential Plan/Materialize work already in flight — provider `Fetch`/materialization can
+  complete — but the boundary refusal still guarantees `Upstream.Call == 0`. The invariant is
+  "no irreversible upstream side effect", not "no pre-boundary work occurred".
 - **Interest:** the kill switch is the operator's only immediate stop; a stop that a slow
-  commit/materialize window can outrun is not a stop. Purely a live-mode concern — Shadow
-  already reflects the kill at admission (`WOULD_BLOCK` / `rollout_emergency_active`) and never
-  reaches the boundary.
-- **Fix:** add a `killEpoch` re-read to `callUpstream` alongside the tool-drift re-check; on a
-  kill, abort before `Upstream.Call` and return the emergency block. Then invert
-  `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`
-  (`internal/mcp/execution`) to assert `up.calls == 0` and check off the §12 exit criterion in
-  `docs/design/mcp/SHADOW-ARCHITECTURE.md`.
+  commit/materialize window can outrun is not a stop.
+- **Compensating control unchanged:** execution posture stays CLOSED — no production
+  LiveExecutor is composed, arming hooks remain uncalled, and the AST posture walls stay
+  green. This closes the prerequisite; it does NOT authorize Canary/Production activation.
 - **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §10 (PREREQ-MCP-KILL-1) + §12 exit
-  criteria; non-vacuous gate `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`.
+  criterion 13. Permanent non-vacuous gate
+  `TestCanaryPrerequisite_KillStateRevalidatedAtSideEffectBoundary` (inverted from the former
+  `*_KillStateNotRevalidated*`; reaches the real production boundary). Deterministic race
+  matrix `TestKillBoundary_RaceMatrix` (10 windows incl. ABA + concurrency, channel/barrier
+  ordering, no sleeps), `TestKillBoundary_KillBetweenResolveAndExecute`,
+  `TestKillBoundary_NoCredentialReasonMapping`, `TestKillBoundary_CleanRequestStillExecutes`
+  (control), all under `-race`. Mutation campaign of 10 defects, each mechanically
+  re-introduced and confirmed to fail its named guard (mapping recorded at the head of
+  `internal/mcp/execution/kill_boundary_race_test.go`).
 
 ## SHADOW-EVIDENCE-ROUTING-1 — Pre-dispatch fail-closed signals not routed into Shadow evidence · LOW (2026-08-25)
 - **Principal:** Two failure classes are terminally handled by the runtime BEFORE the

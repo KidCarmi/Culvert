@@ -30,6 +30,17 @@ type State struct {
 
 	cur atomic.Pointer[activeState] // hot-path lock-free reads
 
+	// killGen is a MONOTONIC emergency-kill generation counter, incremented once per
+	// distinct kill ENGAGEMENT (a false→true transition) and NEVER decremented — clearing
+	// the kill does not roll it back. It is the authoritative signal the executor's
+	// side-effect boundary re-reads to close PREREQ-MCP-KILL-1: a request captures the
+	// generation at admission and refuses to cross the irreversible upstream call if the
+	// generation has advanced since, so an emergency engaged AFTER admission aborts the
+	// in-flight call EVEN IF it was subsequently cleared (the engage→clear ABA case that a
+	// current-state `Killed()` boolean would miss — Model B / monotonic-epoch semantics).
+	// Separate from the activeState pointer and read lock-free; see KillGeneration.
+	killGen atomic.Uint64
+
 	// swapMu serializes the read-modify-write of cur across ALL writers (config
 	// apply + kill-switch engage/clear) so two concurrent mutators can never both
 	// load the same prior pointer and lose one update (e.g. a config apply silently
@@ -85,6 +96,18 @@ func (s *State) CurrentConfig() SignedConfig { return s.cur.Load().config }
 // Killed reports whether the emergency kill switch is engaged (lock-free). A
 // killed capability refuses new admission (ReasonRolloutEmergencyActive).
 func (s *State) Killed() bool { return s.cur.Load().killed }
+
+// KillGeneration returns the MONOTONIC emergency-kill generation (lock-free). It
+// increments once per distinct kill engagement and is never rolled back by a clear.
+// The executor captures it at admission and re-reads it immediately before the
+// irreversible upstream side effect: a differing value means an emergency kill was
+// engaged while the request was in flight (even if since cleared), and the request
+// MUST NOT cross the boundary (PREREQ-MCP-KILL-1, docs/design/mcp/SHADOW-ARCHITECTURE.md
+// §10). Because admission already refuses an already-killed capability, a boundary value
+// that differs from the admission value uniquely identifies an in-flight emergency —
+// which also subsumes the "currently killed" case (an engagement that is still active
+// necessarily advanced the generation).
+func (s *State) KillGeneration() uint64 { return s.killGen.Load() }
 
 // ScopeHash returns the active scope's content hash (lock-free).
 func (s *State) ScopeHash() string { return s.cur.Load().scope.Hash() }
@@ -162,6 +185,13 @@ func (s *State) EngageKillSwitch(actor string, atUnixNano int64) {
 	next := *prev
 	next.killed = true
 	s.cur.Store(&next)
+	// Advance the monotonic kill generation on the ENGAGE transition ONLY (this branch is
+	// reached iff prev.killed was false). Incremented while holding swapMu so it is ordered
+	// with the killed store and with any concurrent engage/clear; the boundary reads it
+	// lock-free. A subsequent ClearKillSwitch deliberately does NOT decrement it — that is
+	// what lets the side-effect boundary detect an engage→clear that straddled an in-flight
+	// request (PREREQ-MCP-KILL-1, Model B).
+	s.killGen.Add(1)
 	s.swapMu.Unlock()
 	s.appendHistory(TransitionRecord{From: prev.mode, To: prev.mode, Kind: TransitionDemotion, ScopeHash: prev.scope.Hash(), Actor: sanitize(actor), AtUnixNano: atUnixNano, Emergency: true, Note: "kill-switch engaged"})
 }

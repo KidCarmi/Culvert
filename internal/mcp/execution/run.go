@@ -25,6 +25,13 @@ import (
 // mcperr.ReasonDecisionSnapshotStale before returning.
 var errToolDriftedBeforeCall = errors.New("mcp: tool drifted between decision and upstream call")
 
+// errKilledAtBoundary aborts the commit-then-act callback when the authoritative
+// emergency-kill generation advanced between admission and the irreversible upstream
+// side effect (PREREQ-MCP-KILL-1). Like errToolDriftedBeforeCall it never escapes this
+// package: the caller maps it to mcperr.ReasonRolloutEmergencyActive before returning,
+// on BOTH the credential and no-credential paths.
+var errKilledAtBoundary = errors.New("mcp: emergency kill engaged before upstream call")
+
 // runExecute performs the real guarded upstream execution for an in-scope
 // executing mode. The mandatory order is preserved: policy already ran, then
 // credential planning, then a DURABLE P-CRIT commit BEFORE any cache decrypt /
@@ -32,7 +39,7 @@ var errToolDriftedBeforeCall = errors.New("mcp: tool drifted between decision an
 // gate or CommitThenAct), then the upstream call inside the materialization
 // callback, then response inspection + DLP, then the result. A failure at any step
 // leaves NO downstream side effect.
-func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollout.Subject, res rollout.Resolution) runtime.ExecOutput {
+func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollout.Subject, res rollout.Resolution, admKillGen uint64) runtime.ExecOutput {
 	if e.cfg.Events == nil {
 		// No durability seam ⇒ fail closed (commit-before-side-effect is mandatory).
 		return e.blocked(in, mcperr.ReasonEventDurabilityDegraded, false)
@@ -63,10 +70,15 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// call run under a decision made about a tool that no longer exists or has been
 	// redefined. Re-checking here makes the refusal precede the side effect.
 	staleAtCall := false
+	killedAtCall := false
 	callUpstream := func(authHeader string) error {
-		if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
-			staleAtCall = true
-			return errToolDriftedBeforeCall
+		// Last-moment boundary re-checks (tool drift, then the emergency kill) run inside
+		// preCallGuard so nothing sits between them and Upstream.Call. Setting the flags from
+		// the returned sentinel (rather than a branch) keeps this closure to a single decision.
+		if gerr := e.preCallGuard(in, admKillGen); gerr != nil {
+			staleAtCall = errors.Is(gerr, errToolDriftedBeforeCall)
+			killedAtCall = errors.Is(gerr, errKilledAtBoundary)
+			return gerr
 		}
 		r, err := e.cfg.Upstream.Call(ctx, target, in.Method, json.RawMessage(in.RawParams), upstreamclient.CallOptions{
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
@@ -96,27 +108,24 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
 		return nil
 	}); err != nil {
-		// A drift refusal is not a transport or durability fault, and must not be
-		// classified as one: it is the decision-staleness reason the runtime's own
-		// entry check uses, so both refusals read identically to an operator. This
-		// branch carries the NO-credential path, whose callUpstream error escapes
-		// CommitThenAct verbatim.
-		if staleAtCall {
-			return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false)
+		// A boundary drift/kill refusal outranks the generic error mapping and must read as its
+		// own reason, never as a transport/durability fault. This branch carries the
+		// NO-credential path, whose callUpstream error escapes CommitThenAct verbatim.
+		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall); ok {
+			return out
 		}
 		return e.blocked(in, mcperr.ReasonOf(err), false)
 	}
 	if didBlock {
 		// The CREDENTIAL path never lets callUpstream's error escape CommitThenAct:
 		// materializeAndCall swallows it into a blocked ExecOutput whose reason is
-		// ReasonOf(errToolDriftedBeforeCall) == ReasonNone (the sentinel is
-		// package-private and unregistered). A drift detected inside the broker
-		// callback must therefore be reclassified HERE too, or clients and block
-		// telemetry would read `none` where the no-credential path reads
-		// `decision_snapshot_stale`. staleAtCall is set only by callUpstream, so on
-		// this branch it is true iff the block was the drift refusal.
-		if staleAtCall {
-			return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false)
+		// ReasonOf(errToolDriftedBeforeCall)/ReasonOf(errKilledAtBoundary) == ReasonNone (both
+		// sentinels are package-private and unregistered). A drift or emergency-kill refusal
+		// detected inside the broker callback must therefore be reclassified HERE too, or
+		// clients and block telemetry would read `none` where the no-credential path reads the
+		// correct reason.
+		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall); ok {
+			return out
 		}
 		return blockedOut
 	}
@@ -130,6 +139,49 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	}
 	e.cfg.Metrics.ObserveUpstream(in.Capability.String(), "success")
 	return e.finishUpstream(ctx, in, upResp, res)
+}
+
+// preCallGuard runs the last-moment boundary re-validations immediately before the
+// irreversible upstream side effect, in refusal-precedence order: first the OVN-09 tool-drift
+// re-check, then the PREREQ-MCP-KILL-1 emergency-kill re-check. It returns the sentinel to
+// abort with (mapped to a reason by the caller), or nil to proceed.
+//
+// The kill re-read is the FINAL authoritative revalidation — the last executable instruction
+// before Culvert crosses into the irreversible MCP upstream side effect. A security decision
+// made at admission is not permission to ignore an emergency stop issued since: if the
+// monotonic kill generation has advanced past the value captured at admission, an emergency
+// kill was engaged while this request was in flight (even one already cleared — the ABA case)
+// and the call MUST NOT proceed. It re-reads SOLELY the monotonic kill generation, so it does
+// not re-resolve mode/scope/policy/approval and cannot reopen the F7 single-resolution TOCTOU;
+// it only ever makes the outcome MORE restrictive. This is the ONE side-effect boundary shared
+// by both the credential and no-credential paths, so the check lives here and nowhere else, and
+// callUpstream places NOTHING between this guard and Upstream.Call.
+func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64) error {
+	if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
+		return errToolDriftedBeforeCall
+	}
+	if e.cfg.State.KillGeneration() != admKillGen {
+		return errKilledAtBoundary
+	}
+	return nil
+}
+
+// classifyBoundaryRefusal maps a boundary drift/kill refusal detected by callUpstream to its
+// terminal block, or reports ok=false when neither fired. Kill is classified FIRST — an
+// emergency stop is the paramount reason. killedAtCall and staleAtCall are mutually exclusive
+// (preCallGuard returns on drift before the kill re-check), so the order only fixes which named
+// reason each refusal carries; both read as a fail-closed refusal, never a transport/durability
+// fault or ReasonNone. Shared by the no-credential (CommitThenAct-error) and credential
+// (materializeAndCall-absorbed) branches so both reclassify identically.
+func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, staleAtCall bool) (runtime.ExecOutput, bool) {
+	switch {
+	case killedAtCall:
+		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false), true
+	case staleAtCall:
+		return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false), true
+	default:
+		return runtime.ExecOutput{}, false
+	}
 }
 
 // finishUpstream processes a successful upstream response: it forwards a sanitized
