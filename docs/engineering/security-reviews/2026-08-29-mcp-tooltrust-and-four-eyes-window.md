@@ -102,6 +102,18 @@ section does not record self-approval as an accepted residual. The sibling plane
 same subsystem enforces it, with a reason code (`ReasonApprovalSelfApproval`) already
 defined, named and HTTP-mapped. The gap is an omission, not a decision.
 
+**Corroborated by the Canary design merged in the same window.**
+`canary.SatisfiesLiveExecution` (ADR-0035, §3 clause 5) refuses a `ToolApproval` whose
+`RequestedBy == ApprovedBy` with `approval_not_four_eyes` — the *consumer* of a
+`ToolApproval` already assumes a distinct requester and approver, while the *producer* of
+one never enforced it. The store-side check closes that asymmetry at issuance, so the
+invariant now holds at both ends rather than resting on a dormant downstream predicate.
+Note that the Canary predicate compares raw strings: under the pre-change IP-bearing
+principals, a one-human approval issued from two addresses would have satisfied it too.
+That path is unreachable today (a `shadow_evaluation` record fails
+`PermitsLiveExecution` first, and `live_execution` is refused at issue), so the dormant
+predicate is left as-is rather than changed speculatively.
+
 **Fix.** `tooltrust.Store.Approve` refuses `samePrincipal(approver, RequestedBy)` with
 `ReasonApprovalSelfApproval`, on the pending→active transition only (the idempotent
 re-approve of an already-active grant re-verifies the target and changes nothing, so
