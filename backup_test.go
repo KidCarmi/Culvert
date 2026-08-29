@@ -587,3 +587,40 @@ func TestBackup_SaaSFeedOverrides_IncludedWithContent(t *testing.T) {
 		t.Errorf("saas_feed/overrides.json content mismatch in backup")
 	}
 }
+
+// TestBackup_FileProfiles_IncludedWithContent guards against the same drift
+// class as the four tests above, for a store the earlier pass still missed:
+// globalProfileStore (internal/fileblock.FileProfileStore) is the named
+// file-type profile set (e.g. a custom "Executables" profile) that policy
+// rules reference by name via FileProfile (policy.go's
+// globalProfileStore.GetByName). It is admin-configurable via its own API
+// (ui_security.go Create/Update/Delete), is a first-class config_surfaces.go
+// entry ("file_profiles"), and is CP->DP synced — exactly the bar the other
+// four stores were added at — but is persisted to a SEPARATE file from
+// fileblock.json (the plain extension-list store, which IS backed up):
+// fileprofiles.json, the default path resolveFileBlockStartupConfig falls
+// back to when neither the --fileprofiles-file CLI flag nor
+// proxy.fileprofiles_file in config.yaml is set, and the exact path the
+// shipped docker-compose.yml wires via "-fileprofiles-file"
+// "/data/fileprofiles.json". A backup taken today silently drops any custom
+// file-type profile, so restoring onto a fresh volume/host leaves policy
+// rules referencing it unable to resolve the named profile.
+func TestBackup_FileProfiles_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"profiles":[{"id":"p1","name":"Executables","extensions":[".exe",".bat"]}]}`)
+	seedFile(t, dataDir, "fileprofiles.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/fileprofiles.json"]
+	if !ok {
+		t.Fatalf("data/fileprofiles.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("fileprofiles.json content mismatch in backup")
+	}
+}

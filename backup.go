@@ -97,6 +97,16 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		{SrcPath: p("decryption_profiles.json"), TarPath: "data/decryption_profiles.json"},
 		{SrcPath: p("alert_webhooks.json"), TarPath: "data/alert_webhooks.json"},
 		{SrcPath: p("fileblock.json"), TarPath: "data/fileblock.json"},
+		// Named file-type profiles (globalProfileStore, internal/fileblock.
+		// FileProfileStore) — distinct from fileblock.json above (the plain
+		// blocked-extension list). Admin-configurable via its own API
+		// (ui_security.go Create/Update/Delete) and referenced by policy
+		// rules by name (policy.go's FileProfile matching), but persisted to
+		// its OWN file: "fileprofiles.json" is the default
+		// resolveFileBlockStartupConfig falls back to, and the exact path
+		// the shipped docker-compose.yml wires via -fileprofiles-file. Was
+		// missing from every prior nightly QA backup-completeness pass.
+		{SrcPath: p("fileprofiles.json"), TarPath: "data/fileprofiles.json"},
 		{SrcPath: p(filepath.Join("saas_feed", "overrides.json")), TarPath: "data/saas_feed/overrides.json"},
 	}
 }
