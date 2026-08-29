@@ -788,14 +788,20 @@ func TestToolTrust_Annotator_SharedSnapshotAnnotatesEachTool(t *testing.T) {
 	resetInventory(t)
 	inv := seedToolTrustInventory2(t)
 	composeToolTrust(t, nil)
-	// toolA → active (approved); toolB → pending.
+	// toolA → active (approved); toolB → pending. Use each tool's PER-RECORD revision (not the
+	// global snapshot revision, which the toolA promote bumps) — the exact-target contract keys
+	// on ToolView.Revision.
+	recB, ok := inv.cat.Current().Get(catalog.ToolKey{Server: registry.ServerID(inv.serverID), Name: inv.toolB})
+	if !ok {
+		t.Fatal("seeded tool B must exist")
+	}
 	requestAndApprove(t, inv.serverID, inv.toolA, inv.fpA, inv.cat.Current().Revision(), 0)
 	if _, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
 		Tenant:              ttTenant,
 		ServerID:            inv.serverID,
 		ToolName:            inv.toolB,
 		ExpectedFingerprint: inv.fpB,
-		ExpectedCatalogRev:  0, // not asserted
+		ExpectedCatalogRev:  recB.Revision,
 		Purpose:             tooltrust.PurposeShadowEvaluation,
 		RequestedBy:         "operator@corp",
 		Reason:              "b pending",
@@ -818,6 +824,42 @@ func TestToolTrust_Annotator_SharedSnapshotAnnotatesEachTool(t *testing.T) {
 	// Parity with the single-tool path.
 	if a, ok := mcpToolTrust.annotateTool(ttTenant, inv.serverID, inv.toolA, inv.fpA); !ok || a.Status != "active" {
 		t.Fatalf("annotateTool parity = %+v ok=%v, want active", a, ok)
+	}
+}
+
+// TestToolTrust_Request_RequiresCatalogRevision proves the round-20 fix: the reviewed catalog
+// revision is a MANDATORY part of the exact-target contract. A request omitting it (0) is rejected
+// fail-closed, so an identical rediscovery cannot bind a revision the operator never reviewed by
+// simply not asserting one; the correct current revision is accepted.
+func TestToolTrust_Request_RequiresCatalogRevision(t *testing.T) {
+	resetInventory(t)
+	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+
+	if _, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+		Tenant:              ttTenant,
+		ServerID:            sid,
+		ToolName:            tool,
+		ExpectedFingerprint: fpHex,
+		// ExpectedCatalogRev omitted (0) — must be rejected.
+		Purpose:     tooltrust.PurposeShadowEvaluation,
+		RequestedBy: "operator@corp",
+		Reason:      "no revision asserted",
+	}); err == nil {
+		t.Fatal("a request omitting the reviewed catalog revision must fail closed")
+	}
+
+	if _, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+		Tenant:              ttTenant,
+		ServerID:            sid,
+		ToolName:            tool,
+		ExpectedFingerprint: fpHex,
+		ExpectedCatalogRev:  cat.Current().Revision(),
+		Purpose:             tooltrust.PurposeShadowEvaluation,
+		RequestedBy:         "operator@corp",
+		Reason:              "revision asserted",
+	}); err != nil {
+		t.Fatalf("a request asserting the current revision must succeed: %v", err)
 	}
 }
 
@@ -945,7 +987,7 @@ func TestToolTrust_IngestSerializedUnderDeriveMu(t *testing.T) {
 // released.
 func TestToolTrust_RequestApprovalHoldsDeriveMuAcrossTargetLoad(t *testing.T) {
 	resetInventory(t)
-	_, _, sid, tool, fpHex := seedToolTrustInventory(t)
+	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
 	composeToolTrust(t, nil)
 
 	mcpToolTrust.deriveMu.Lock()
@@ -959,6 +1001,7 @@ func TestToolTrust_RequestApprovalHoldsDeriveMuAcrossTargetLoad(t *testing.T) {
 			ServerID:            sid,
 			ToolName:            tool,
 			ExpectedFingerprint: fpHex,
+			ExpectedCatalogRev:  cat.Current().Revision(),
 			Purpose:             tooltrust.PurposeShadowEvaluation,
 			RequestedBy:         "operator@corp",
 			Reason:              "reviewed for shadow eval",

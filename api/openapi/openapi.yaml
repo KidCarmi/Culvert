@@ -10832,7 +10832,7 @@ paths:
       operationId: requestMCPToolApproval
       tags: [mcp]
       summary: Request an MCP tool-trust approval
-      description: Create a pending tool-trust request bound to an exact reviewed fingerprint digest for a declared purpose (only shadow_evaluation is issuable). This is NOT a grant — it never changes catalog eligibility. The tenant comes from the query scope, validated against the server's ownership; the client never submits server facts. Fails closed on a stale target (fingerprint or catalog revision advanced).
+      description: Create a pending tool-trust request bound to an exact reviewed fingerprint digest for a declared purpose (only shadow_evaluation is issuable). The reviewed per-record catalog revision (catalog_revision, the tool's Revision from the inventory view) is REQUIRED — a zero/omitted value is rejected — so the exact-target contract cannot be bypassed by not asserting a revision. This is NOT a grant — it never changes catalog eligibility. The tenant comes from the query scope, validated against the server's ownership; the client never submits server facts. Fails closed on a stale target (fingerprint or catalog revision omitted or advanced).
       security: [ { sessionCookie: [] }, { basicAuth: [] } ]
       x-culvert-visibility: admin-supported
       x-culvert-permission: operator

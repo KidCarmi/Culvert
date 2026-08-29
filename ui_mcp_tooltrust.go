@@ -147,7 +147,7 @@ type mcpToolApprovalRequestBody struct {
 	ServerID         string `json:"server_id"`
 	ToolName         string `json:"tool_name"`
 	Fingerprint      string `json:"fingerprint"`      // 64-char hex of the reviewed digest
-	CatalogRevision  uint64 `json:"catalog_revision"` // 0 ⇒ not asserted
+	CatalogRevision  uint64 `json:"catalog_revision"` // REQUIRED: the reviewed per-record revision (ToolView.Revision); 0/omitted is rejected
 	Purpose          string `json:"purpose"`          // shadow_evaluation (default; only issuable)
 	Reason           string `json:"reason"`
 	TicketRef        string `json:"ticket_ref"`

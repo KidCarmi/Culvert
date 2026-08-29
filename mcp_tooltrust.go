@@ -369,11 +369,18 @@ func (c *mcpToolTrustCoordinator) RequestApproval(in toolTrustRequestInput) (*to
 	if expected != ti.target.Fingerprint {
 		return nil, mcperr.New(mcperr.ReasonToolFingerprintMismatch, "tooltrust.request", "expected fingerprint does not match the current tool")
 	}
-	if in.ExpectedCatalogRev != 0 && in.ExpectedCatalogRev != ti.target.CatalogRevision {
-		// The reviewer's catalog view is stale even though the fingerprint still
-		// matches (a benign flap can cause this). Fail closed and let the reviewer
-		// re-fetch — the exact-target contract is optimistic-concurrency, not just a
-		// fingerprint compare.
+	// The reviewed catalog revision is a REQUIRED part of the exact-target contract, not an
+	// optional hint. Treating a zero/omitted value as "not asserted" let a caller skip the
+	// freshness check entirely: an identical rediscovery (same fingerprint, bumped revision)
+	// between review and request would then bind the NEW current revision, and approval could no
+	// longer detect that the operator never reviewed that revision. Require the caller to assert
+	// the per-record revision they reviewed (ToolView.Revision), and reject an omission or a
+	// mismatch fail-closed — the fingerprint is the capability half, the revision the
+	// optimistic-concurrency half.
+	if in.ExpectedCatalogRev == 0 {
+		return nil, mcperr.New(mcperr.ReasonToolApprovalStale, "tooltrust.request", "reviewed catalog revision is required (exact-target contract)")
+	}
+	if in.ExpectedCatalogRev != ti.target.CatalogRevision {
 		return nil, mcperr.New(mcperr.ReasonToolApprovalStale, "tooltrust.request", "catalog revision advanced since review")
 	}
 	return store.CreateRequest(tooltrust.RequestInput{
