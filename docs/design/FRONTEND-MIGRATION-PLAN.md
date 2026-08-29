@@ -725,6 +725,44 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2D-C FINAL identity egress & persistence closure (this branch,
+> 2026-08-29 — external-review follow-up on the eec0ca44 candidate).** The
+> accepted state/legacy-GET closures left the KNOWN-ephemeral StableIDs
+> flowing out through egress and durability paths while the rewrite
+> management-identity degradation was latched; the governing invariant is
+> now enforced at every sink the §3 inventory found: WHILE LATCHED, NO NEW
+> DURABLE ARTIFACT MAY RECORD THE LIVE EPHEMERAL StableIDs AS
+> AUTHORITATIVE. Each fix red-before against eec0ca44
+> (`dc_final4_red_test.go`):
+> **(1) Config export.** `apiConfigExport` (admin-authorized FIRST, then
+> the disclosure) answers the ONE structured `{error,
+> degraded:"rewrite-identity", reason}` 503 for the `rewrite` section AND
+> for any request the default arm serves as the full export
+> (empty/`all`/unrecognized sections) — never a 200 backup carrying
+> ephemeral identity, never a silently partial "full" backup. Sections
+> with no rewrite identity export unchanged. OpenAPI documents the 503.
+> **(2) Config-version capture.** `saveConfigVersionNote` refuses while
+> latched with a named operator log line — an unrelated admin mutation's
+> best-effort versioning no longer persists an artifact whose valid-UUID
+> ephemeral IDs a later rollback would promote through
+> `installRewriteRulesDurable`. The triggering mutation stays complete.
+> **(3) Omnibus settings save.** `saveAdminSettingsWithOverrides` carries
+> the existing file's rewrite fields (rules + sentinel + seed ledger)
+> VERBATIM while latched instead of snapshotting the live set +
+> `RewriteRulesSaved=true` — preserving the refused-but-recoverable
+> operator slice; no readable file ⇒ no rewrite claim; unreadable ⇒ the
+> save refuses rather than overwrite what it cannot carry
+> (`carryFileRewriteFields`). Rewrite-mutating saves stay exempt (their
+> targets carry durable-artifact identities; interactive mutations are
+> already refused upstream).
+> **(4) CP→DP publication.** `ConfigStore.Update` gains Gate 0: while
+> latched the publish is REJECTED through the existing commit-time
+> rejection contract (`rejectPublish` → log/alert/LastPublishError; the
+> fleet keeps the last valid snapshot) — the rewrite slice is never
+> silently omitted or re-minted. HA carries only leader-publish-gated
+> bundles (`seedReplicatedSnapshot` seeds from the leader's replicated
+> snapshot), so the gate covers that path by construction.
+>
 > **2D-C FINAL recovery trust-boundary correction (this branch, 2026-08-29 —
 > external-review follow-up on the 161eb79e candidate).** Three gaps, each
 > red-before against 161eb79e (`dc_final2_red_test.go`):
