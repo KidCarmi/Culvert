@@ -277,6 +277,18 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bulk candidate reference integrity (§17): construct the candidate this
+	// rollback would restore — per-field nil-skip semantics, a nil section
+	// keeps the live objects — and validate its whole object graph BEFORE any
+	// apply. A dangling reference refuses the ENTIRE rollback (truthful 400,
+	// nothing applied): a historical snapshot capturing rules whose referenced
+	// group/profile/category section is absent from that version would
+	// otherwise restore DENY/DROP rules that silently stop matching.
+	if err := validateRestoredCandidateRefs(&target); err != nil {
+		http.Error(w, "rollback refused, dangling object reference: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	// CHAOS-27 / F-12: the apply is unconditional, but a persistence failure
 	// during it is no longer swallowed. The running config IS rolled back
 	// either way; what changes is that the operator is told when the result

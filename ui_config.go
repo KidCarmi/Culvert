@@ -1061,6 +1061,21 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	refScanDeleteLock()
 	defer refScanDeleteUnlock()
 
+	// Bulk candidate reference integrity (§16, before ANY store mutation):
+	// construct the EFFECTIVE imported candidate under this request's
+	// merge/replace semantics — never-wipe preserved, absent sections keep
+	// their live objects — and validate its whole object graph. A dangling
+	// PolicyRule→CategoryGroup / PolicyRule→DecryptionProfile / category-name
+	// reference refuses the ENTIRE import (400): the leaf-first apply order
+	// below guarantees ordering, not resolvability, and a partially-imported
+	// graph leaves DENY/DROP rules that silently stop matching. Judged INSIDE
+	// the exclusive gate so the live halves cannot shift between verdict and
+	// apply.
+	if err := validateImportCandidateRefs(&b, replaceMode); err != nil {
+		http.Error(w, "import refused, dangling object reference: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	// Blocklist. Feed attribution is carried across a replace-mode
 	// rebuild — ClearAll+Add would otherwise strand every feed entry as
 	// unattributed (Codex P1, PR #447).

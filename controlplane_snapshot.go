@@ -15,6 +15,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/session"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // categoryOverrideHostCount returns the aggregate number of host-keys in an
@@ -385,6 +386,26 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		urlCatHosts
 	if agg > maxSnapAggregateEntries {
 		return fmt.Errorf("config snapshot aggregate host-scale entries=%d exceeds cap %d (too large to sync in one CP↔DP frame)", agg, maxSnapAggregateEntries)
+	}
+	// Per-category host cap (§19, whole-snapshot 10k gate): the DP apply used
+	// to reject only the URL-category SLICE (ReplaceAllChecked), so a snapshot
+	// carrying one over-cap category applied MIXED — new rulebase against the
+	// old taxonomy, the exact torn state a whole-snapshot contract exists to
+	// prevent. Judged here so callers reject the ENTIRE snapshot before any
+	// slice applies; ReplaceAllChecked stays in applySnapshotURLCategories as
+	// defense in depth.
+	if err := urlcat.ValidateEntries(snap.URLCategories); err != nil {
+		return fmt.Errorf("config snapshot url_categories invalid: %w", err)
+	}
+	// Object-reference graph (§18): deterministic both-sides-carried checks —
+	// PolicyRules↔CategoryGroups, PolicyRules↔DecryptionProfiles, and the
+	// category-name edges (group members + direct DestCategory) against the
+	// carried taxonomy plus the applying node's live view/UT1 layers. A
+	// dangling reference rejects the WHOLE snapshot: the fleet keeps its last
+	// valid config instead of installing a rulebase whose DENY/DROP rules
+	// silently stop matching.
+	if err := validateSnapshotRefGraph(snap); err != nil {
+		return fmt.Errorf("config snapshot reference graph invalid: %w", err)
 	}
 	return nil
 }
