@@ -1600,7 +1600,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div id="sec-remote-inflight" style="font-weight:600;font-size:.85rem">0</div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:10px">
-              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="A YARA regex match blew its per-match timeout and was contained instead of crashing the scan. Non-zero means some verdicts were decided by the configured on-timeout posture (block/allow), not by the rule itself — check for a slow rule or raise the timeout.">YARA match timeouts</div>
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="A YARA regex match panicked (an internal crash, not a slow match) and was contained instead of taking down the scan. The verdict was decided by the configured on-timeout posture (block/allow), not by the rule itself. Non-zero points at a bug in a specific rule's regex, not a timeout — raising the timeout will not help.">YARA match panics</div>
               <div id="sec-yara-match-panics" style="font-weight:600;font-size:.85rem">0</div>
             </div>
           </div>
