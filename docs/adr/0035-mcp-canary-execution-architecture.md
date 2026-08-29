@@ -167,6 +167,7 @@ Twelve defects, each caught by a named gate:
 | 15 | future/zero-dated approval passes the TTL ceiling | `TestSatisfiesLiveExecution_Rejections` (approved_in_future/approved_zero) |
 | 16 | group-only / identity-less scope enters Canary | `TestValidateScope_Rejections` (no_identity/group_only_identity/uses_groups) |
 | 17 | degraded durable-event plane still Canary-ready | `durableEventsHealthy` (domain CriticalState=="normal"; `mcp_canary_preflight_test.go`) |
+| 18 | node dry-run conflates missing activation inputs with node deficiencies | `TestEvaluateNode_ExcludesActivationInputs` (node dry-run evaluates node-level facts only) |
 
 Mutations 1–4 and 13–17 (plus four-eyes, TTL ceiling, read-first, bound-cap, fingerprint,
 per-tool coverage, exact identity) are mechanically re-introduced and confirmed to fail their

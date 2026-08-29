@@ -150,6 +150,62 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 	}
 }
 
+// TestEvaluateNode_ExcludesActivationInputs is the Codex P2 regression: the scope-independent
+// node dry run must never report an activation-input fact (scope/approval/budget/server/
+// fingerprint) as unmet, so node_ready reflects NODE deficiencies alone. With every node fact
+// satisfied but every activation fact false, EvaluateNode must be Ready with an empty Unmet
+// set, while the full Evaluate reports exactly the six activation reasons.
+func TestEvaluateNode_ExcludesActivationInputs(t *testing.T) {
+	activationReasons := map[Reason]bool{
+		ReasonScopeNotBounded: true, ReasonScopeNotReadFirst: true, ReasonLiveApprovalInvalid: true,
+		ReasonServerNotUsable: true, ReasonToolFingerprintStale: true, ReasonBudgetNotConfigured: true,
+	}
+	// Node facts all true; the six activation facts all false.
+	f := allTrueFacts()
+	f.ScopeBounded, f.ScopeReadFirst, f.LiveApprovalValid = false, false, false
+	f.ServerUsable, f.ToolFingerprintCurrent, f.BudgetConfigured = false, false, false
+
+	node := EvaluateNode(f)
+	if !node.Ready || len(node.Unmet) != 0 {
+		t.Fatalf("node readiness must be Ready when every NODE fact holds regardless of activation inputs, got ready=%v unmet=%v", node.Ready, node.Unmet)
+	}
+	// The full verdict must surface exactly the six activation reasons (nothing node-level).
+	full := Evaluate(f)
+	if full.Ready {
+		t.Fatal("full readiness must not be ready with activation inputs unmet")
+	}
+	if len(full.Unmet) != len(activationReasons) {
+		t.Fatalf("full Evaluate must report exactly the %d activation reasons, got %v", len(activationReasons), full.Unmet)
+	}
+	for _, r := range full.Unmet {
+		if !activationReasons[r] {
+			t.Errorf("full Evaluate reported %q, which is not an activation-input reason", r)
+		}
+	}
+}
+
+// TestEvaluateNode_StillReportsNodeDeficiencies proves EvaluateNode is not vacuous: a false
+// NODE fact (the dormant-default live tier) is still reported, and the capability short-circuit
+// is preserved.
+func TestEvaluateNode_StillReportsNodeDeficiencies(t *testing.T) {
+	if r := EvaluateNode(Facts{}); r.Ready || len(r.Unmet) != 1 || r.Unmet[0] != ReasonCapabilityNotGateway {
+		t.Fatalf("EvaluateNode must keep the capability short-circuit, got %v", r.Unmet)
+	}
+	node := EvaluateNode(Facts{CapabilityGateway: true})
+	if node.Ready {
+		t.Fatal("a gateway node with nothing composed must not be node-ready")
+	}
+	if !containsReason(node.Unmet, ReasonLiveExecutorAbsent) {
+		t.Fatalf("node readiness must still report live_executor_absent, got %v", node.Unmet)
+	}
+	// It must NOT report any activation-input reason even though those facts are false.
+	for _, r := range []Reason{ReasonScopeNotBounded, ReasonLiveApprovalInvalid, ReasonBudgetNotConfigured} {
+		if containsReason(node.Unmet, r) {
+			t.Errorf("node readiness must not report activation reason %q", r)
+		}
+	}
+}
+
 // --- reflection helpers ---
 
 func countBoolFields(t reflect.Type) int {

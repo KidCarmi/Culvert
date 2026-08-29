@@ -113,43 +113,86 @@ type Readiness struct {
 	Unmet []Reason `json:"unmet"`
 }
 
-// Evaluate returns the Canary readiness verdict for the supplied facts. It is a pure
-// function: same facts ⇒ identical verdict, no side effects, no I/O. A false fact adds its
-// named Reason in canonical order; Ready is true only when every prerequisite holds.
+// factScope distinguishes a NODE-level prerequisite — a property of the node/build that holds
+// independently of any specific requested Canary — from an ACTIVATION-level one, which is only
+// meaningful once an operator supplies a concrete scope, live approval, and budget. The
+// scope-independent node-readiness dry run (EvaluateNode) evaluates only the node-level facts;
+// the full activation preflight (Evaluate) checks both (Codex P2, PR #1249).
+type factScope uint8
+
+const (
+	factNode       factScope = iota // holds/observed from node+build state alone
+	factActivation                  // depends on the operator-supplied scope/approval/budget
+)
+
+// readinessCheck is one ordered prerequisite: its positive-assertion accessor, the Reason it
+// emits when unmet, and whether it is a node- or activation-level fact.
+type readinessCheck struct {
+	ok     func(Facts) bool
+	reason Reason
+	scope  factScope
+}
+
+// readinessChecks is the canonical-ordered prerequisite table (matches the Reason declaration
+// order) and the SINGLE source of truth for both Evaluate and EvaluateNode. The six
+// activation-level rows are exactly the facts a caller resolves from a requested scope/
+// approval/budget/target; every other row is node-level.
+var readinessChecks = []readinessCheck{
+	{func(f Facts) bool { return f.ShadowExitReviewPassed }, ReasonShadowExitNotPassed, factNode},
+	{func(f Facts) bool { return f.ScopeBounded }, ReasonScopeNotBounded, factActivation},
+	{func(f Facts) bool { return f.ScopeReadFirst }, ReasonScopeNotReadFirst, factActivation},
+	{func(f Facts) bool { return f.LiveExecutorComposed }, ReasonLiveExecutorAbsent, factNode},
+	{func(f Facts) bool { return f.UpstreamCallerPresent }, ReasonUpstreamCallerAbsent, factNode},
+	{func(f Facts) bool { return f.CredentialPathReady }, ReasonCredentialPathNotReady, factNode},
+	{func(f Facts) bool { return f.DurableEventsHealthy }, ReasonDurableEventsDegraded, factNode},
+	{func(f Facts) bool { return f.ResponseInspectionReady }, ReasonResponseInspectionNotReady, factNode},
+	{func(f Facts) bool { return f.RegistryHealthy }, ReasonRegistryUnhealthy, factNode},
+	{func(f Facts) bool { return f.CatalogHealthy }, ReasonCatalogUnhealthy, factNode},
+	{func(f Facts) bool { return f.PolicyHealthy }, ReasonPolicyUnhealthy, factNode},
+	{func(f Facts) bool { return f.EmergencyKillClear }, ReasonEmergencyKillActive, factNode},
+	{func(f Facts) bool { return f.KillBoundaryGuardPresent }, ReasonKillBoundaryGuardAbsent, factNode},
+	{func(f Facts) bool { return f.ToolFreshnessGuardPresent }, ReasonToolFreshnessGuardAbsent, factNode},
+	{func(f Facts) bool { return f.LiveApprovalValid }, ReasonLiveApprovalInvalid, factActivation},
+	{func(f Facts) bool { return f.ServerUsable }, ReasonServerNotUsable, factActivation},
+	{func(f Facts) bool { return f.ToolFingerprintCurrent }, ReasonToolFingerprintStale, factActivation},
+	{func(f Facts) bool { return f.RollbackPathHealthy }, ReasonRollbackPathUnhealthy, factNode},
+	{func(f Facts) bool { return f.BudgetConfigured }, ReasonBudgetNotConfigured, factActivation},
+}
+
+// Evaluate returns the FULL Canary readiness verdict for the supplied facts — every
+// prerequisite, node- and activation-level alike. It is a pure function: same facts ⇒
+// identical verdict, no side effects, no I/O. A false fact adds its named Reason in canonical
+// order; Ready is true only when every prerequisite holds.
 //
 // The capability gate is evaluated first and, when the capability is not Gateway, is the
 // SOLE reason (a Management "Canary" is a category error — it never executes upstream — so
 // enumerating the other unmet live facts for it would be misleading).
-func Evaluate(f Facts) Readiness {
+func Evaluate(f Facts) Readiness { return evaluate(f, false) }
+
+// EvaluateNode returns the SCOPE-INDEPENDENT node readiness verdict: it evaluates only the
+// node-level prerequisites and NEVER reports an activation-input fact (scope, read-first,
+// live approval, server usability, tool fingerprint, budget) as unmet. This is the operator
+// dry-run surface consumed before any scope is chosen — a node that has satisfied every
+// node-level prerequisite reports node_ready true even though no activation input has been
+// supplied yet, instead of being permanently not-ready because the six activation facts
+// default false (Codex P2, PR #1249). The complete verdict is Evaluate, driven by the
+// activation preflight once a scope/approval/budget exist.
+func EvaluateNode(f Facts) Readiness { return evaluate(f, true) }
+
+func evaluate(f Facts, nodeOnly bool) Readiness {
 	if !f.CapabilityGateway {
 		return Readiness{Ready: false, Unmet: []Reason{ReasonCapabilityNotGateway}}
 	}
 	var unmet []Reason
-	add := func(ok bool, r Reason) {
-		if !ok {
-			unmet = append(unmet, r)
+	for i := range readinessChecks {
+		c := readinessChecks[i]
+		if nodeOnly && c.scope == factActivation {
+			continue
+		}
+		if !c.ok(f) {
+			unmet = append(unmet, c.reason)
 		}
 	}
-	// Canonical evaluation order (matches the Reason declaration order).
-	add(f.ShadowExitReviewPassed, ReasonShadowExitNotPassed)
-	add(f.ScopeBounded, ReasonScopeNotBounded)
-	add(f.ScopeReadFirst, ReasonScopeNotReadFirst)
-	add(f.LiveExecutorComposed, ReasonLiveExecutorAbsent)
-	add(f.UpstreamCallerPresent, ReasonUpstreamCallerAbsent)
-	add(f.CredentialPathReady, ReasonCredentialPathNotReady)
-	add(f.DurableEventsHealthy, ReasonDurableEventsDegraded)
-	add(f.ResponseInspectionReady, ReasonResponseInspectionNotReady)
-	add(f.RegistryHealthy, ReasonRegistryUnhealthy)
-	add(f.CatalogHealthy, ReasonCatalogUnhealthy)
-	add(f.PolicyHealthy, ReasonPolicyUnhealthy)
-	add(f.EmergencyKillClear, ReasonEmergencyKillActive)
-	add(f.KillBoundaryGuardPresent, ReasonKillBoundaryGuardAbsent)
-	add(f.ToolFreshnessGuardPresent, ReasonToolFreshnessGuardAbsent)
-	add(f.LiveApprovalValid, ReasonLiveApprovalInvalid)
-	add(f.ServerUsable, ReasonServerNotUsable)
-	add(f.ToolFingerprintCurrent, ReasonToolFingerprintStale)
-	add(f.RollbackPathHealthy, ReasonRollbackPathUnhealthy)
-	add(f.BudgetConfigured, ReasonBudgetNotConfigured)
 	return Readiness{Ready: len(unmet) == 0, Unmet: unmet}
 }
 

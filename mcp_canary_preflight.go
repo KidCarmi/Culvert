@@ -67,7 +67,10 @@ func canaryNodeFacts(capb rollout.Capability) canary.Facts {
 		// emergency disable is unconditional); reflect that the coordinator exists.
 		RollbackPathHealthy: getMCPRollout() != nil,
 
-		// Scope/approval/budget facts default false here; the activation preflight sets them.
+		// Scope/approval/budget facts default false here. They are ACTIVATION-level, so the node
+		// dry-run (EvaluateNode) skips them entirely — they are set and evaluated only by
+		// evaluateCanaryActivationPreflight once an operator supplies a scope, approval, and
+		// budget (Codex P2, PR #1249).
 		ScopeBounded:           false,
 		ScopeReadFirst:         false,
 		LiveApprovalValid:      false,
@@ -129,9 +132,13 @@ type CanaryActivationInput struct {
 
 // evaluateCanaryNodeReadiness returns the scope-independent Canary node readiness verdict.
 // It is the operator dry-run surface: before any Canary scope is chosen, it reports which
-// node-level prerequisites hold. In this build it always carries live_executor_absent.
+// NODE-level prerequisites hold, and never reports an activation-input fact (scope/approval/
+// budget/server/fingerprint) as unmet — those are decided only once a scope is supplied, by
+// evaluateCanaryActivationPreflight (Codex P2, PR #1249). It uses canary.EvaluateNode so
+// node_ready reflects node deficiencies alone. In this build it always carries
+// live_executor_absent.
 func evaluateCanaryNodeReadiness(capb rollout.Capability) canary.Readiness {
-	return canary.Evaluate(canaryNodeFacts(capb))
+	return canary.EvaluateNode(canaryNodeFacts(capb))
 }
 
 // evaluateCanaryActivationPreflight returns the FULL Canary readiness verdict for a capability
@@ -151,11 +158,13 @@ func evaluateCanaryActivationPreflight(in CanaryActivationInput) canary.Readines
 	return canary.Evaluate(f)
 }
 
-// canaryActivationReady is the single boolean gate a future arming activation would consult
-// for a RequiresLiveExecution mode. It is intentionally redundant with modeExecReady (which
-// already fails such a transition closed on the unarmed live tier): defense-in-depth, and the
-// reason list it can surface names EVERY missing prerequisite, not just the exec-deps one.
-// Always false in this build.
+// canaryActivationReady is the boolean NODE gate a future arming activation would consult for
+// a RequiresLiveExecution mode. It takes only a capability (no scope/approval/budget), so it
+// reports node-level readiness (canary.EvaluateNode): whether the NODE is prepared for a
+// Canary, independent of any specific scope. It is intentionally redundant with modeExecReady
+// (which already fails such a transition closed on the unarmed live tier): defense-in-depth,
+// and the reason list it can surface names every missing NODE prerequisite. The per-scope
+// activation decision is evaluateCanaryActivationPreflight. Always false in this build.
 func canaryActivationReady(capb rollout.Capability) bool {
 	return evaluateCanaryNodeReadiness(capb).Ready
 }

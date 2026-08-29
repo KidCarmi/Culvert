@@ -58,6 +58,16 @@ Live-tier facts (5, 6, 7, 14, 15) are all false together in this build (the guar
 executor — whose boundary guards are pinned by `internal/mcp/execution`'s PREREQ-MCP-KILL-1
 tests — composes as one unit and is never composed).
 
+**Node vs activation readiness (two evaluators).** Rows 3, 4, 16, 17, 18, 20 (scope bounded,
+scope read-first, live approval, server usable, tool fingerprint, budget) are **activation-
+level**: they are meaningful only once an operator supplies a concrete scope, approval, and
+budget. Every other row is **node-level**. `canary.EvaluateNode` (the `node_ready` dry run at
+`GET /api/mcp/rollout` → `canary`) evaluates ONLY node-level rows, so a node that has satisfied
+every node prerequisite reports `node_ready` true even before a scope is chosen, instead of
+being permanently not-ready because the six activation facts default false. `canary.Evaluate`
+(the full verdict, driven by `evaluateCanaryActivationPreflight` once a scope/approval/budget
+exist) checks both. Pinned by `TestEvaluateNode_ExcludesActivationInputs` (Codex P2, PR #1249).
+
 ## Live-execution trust firewall (`tooltrust` + `canary.SatisfiesLiveExecution`)
 
 | Property | Requirement | Gate |
