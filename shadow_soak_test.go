@@ -268,7 +268,7 @@ func (r *soakRun) session(principal, server string) (token, sid string) {
 }
 
 // callOn posts a tools/call to an arbitrary server and returns status + result object.
-func (r *soakRun) callOn(server, token, sid, id, tool, arg string) (int, map[string]any) {
+func (r *soakRun) callOn(server, token, sid, id, tool, arg string) (status int, result map[string]any) {
 	t := r.t
 	st, _, body := gwPost(t, r.cli, r.base, server, token, sid, `{"jsonrpc":"2.0","id":`+id+`,"method":"tools/call","params":{"name":"`+tool+`","arguments":`+arg+`}}`)
 	return st, resultOf(t, body)
@@ -391,8 +391,7 @@ type soakSpec struct {
 
 // soakStableSpecs builds the in-scope (principal x tool) worker set plus two out-of-scope
 // workers, and the expected metric distribution over the in-scope set.
-func soakStableSpecs(perPair int) ([]soakSpec, shadowMetricsView) {
-	var specs []soakSpec
+func soakStableSpecs(perPair int) (specs []soakSpec, expected shadowMetricsView) {
 	for _, p := range soakPrincipals {
 		specs = append(specs,
 			soakSpec{p, ctrlServer, toolEcho, `{"text":"x"}`, false},
@@ -406,15 +405,14 @@ func soakStableSpecs(perPair int) ([]soakSpec, shadowMetricsView) {
 		soakSpec{outsiderSub, ctrlServer, toolEcho, `{"text":"x"}`, true},
 		soakSpec{outsiderSub, ctrlServer, toolDanger, `{"x":"y"}`, true},
 	)
-	var exp shadowMetricsView
 	for _, s := range specs {
 		if s.outScope {
 			continue
 		}
-		exp.Evaluations += int64(perPair)
-		bumpOutcome(&exp, soakOutcomeForTool(s.tool), int64(perPair))
+		expected.Evaluations += int64(perPair)
+		bumpOutcome(&expected, soakOutcomeForTool(s.tool), int64(perPair))
 	}
-	return specs, exp
+	return specs, expected
 }
 
 // bumpOutcome adds n to the metric bucket for the given outcome string.
