@@ -330,6 +330,40 @@ func TestBudgetEnforcer_IdentityCapsEnforced(t *testing.T) {
 	}
 }
 
+// TestBudgetEnforcer_IncompleteIdentityFailsClosed is the Codex P1 (round-4) proof: a reservation
+// whose ExecutionIdentity is missing any dimension (empty Principal/Tool/Server) must fail CLOSED —
+// never admitted as the empty-string key. Without the guard, two distinct real tools that both
+// resolve to an empty Tool would both execute under MaxTools:1, silently defeating the ceiling.
+func TestBudgetEnforcer_IncompleteIdentityFailsClosed(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := testBudget(100)
+	b.MaxPrincipals = 1
+	b.MaxTools = 1
+	b.MaxServers = 1
+	e := NewBudgetEnforcer(b, 1, now)
+
+	// Each missing dimension is denied with the incomplete-identity outcome, and consumes no slot.
+	for _, id := range []ExecutionIdentity{
+		{Principal: "", Tool: "t1", Server: "s1"},
+		{Principal: "p1", Tool: "", Server: "s1"},
+		{Principal: "p1", Tool: "t1", Server: ""},
+		{}, // all empty
+	} {
+		if o := e.Reserve(1, now, id); o != BudgetDeniedIdentityIncomplete {
+			t.Fatalf("an incomplete identity %+v must be denied identity-incomplete, got %s", id, o)
+		}
+	}
+	// No slot was consumed by any of the denials — a full valid identity still gets the first grant.
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p1", Tool: "t1", Server: "s1"}); o != BudgetGranted {
+		t.Fatalf("a complete identity must still be granted after incomplete denials, got %s", o)
+	}
+	// SECURITY: a SECOND execution with an empty Tool must NOT be admitted as the same "" key under
+	// MaxTools:1 — it fails closed rather than collapsing onto an already-admitted slot.
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p1", Tool: "", Server: "s1"}); o != BudgetDeniedIdentityIncomplete {
+		t.Fatalf("SECURITY: an empty Tool must never bypass MaxTools via the empty key, got %s", o)
+	}
+}
+
 // TestBudgetEnforcer_ConcurrentReserveNeverExceedsTotal is the atomicity gate: many goroutines
 // reserving at once must grant EXACTLY MaxTotalExecutions in total — never more (a race in the
 // check-then-reserve would over-grant and breach the blast radius).

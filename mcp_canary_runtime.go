@@ -110,6 +110,11 @@ func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollou
 // the real persistLocked.
 var canaryRuntimePersist = (*canaryRuntime).persistLocked
 
+// canaryAtomicWrite is the durable-write seam for the canary runtime state. Production is
+// fileutil.AtomicWrite; tests inject failures (including fileutil.ErrReplacedNotSynced) to prove the
+// persist fails closed.
+var canaryAtomicWrite = fileutil.AtomicWrite
+
 // beginCanaryActivation bumps the activation generation and arms a fresh budget enforcer + abort
 // controller for it, then persists. It is the FUTURE-arming seam (never invoked in this build). It
 // composes no executor and reaches no upstream — it only initialises the accounting a live Canary
@@ -300,10 +305,12 @@ func (rt *canaryRuntime) persistLocked(capb rollout.Capability, cr *canaryCapRun
 	if err != nil {
 		return err
 	}
-	if werr := fileutil.AtomicWrite(canaryRuntimeStatePath(capb), raw, 0o600); werr != nil {
-		if errors.Is(werr, fileutil.ErrReplacedNotSynced) {
-			return nil
-		}
+	if werr := canaryAtomicWrite(canaryRuntimeStatePath(capb), raw, 0o600); werr != nil {
+		// Any write error — INCLUDING fileutil.ErrReplacedNotSynced, where the replacement is visible
+		// but not durably synced and an immediate crash can lose it — is a persist FAILURE here. The
+		// reserve path grants a budget slot only AFTER a durable persist, so a lost write would replay
+		// the slot on restart and break the monotonic, non-replayable total (Codex P1). Unlike a
+		// best-effort cache, the canary budget MUST fail closed on a not-synced replacement.
 		return werr
 	}
 	return nil

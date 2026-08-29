@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
@@ -445,6 +446,45 @@ func TestCanaryRuntime_ReserveAbortPersistFailureRemovesState(t *testing.T) {
 	fresh.restore()
 	if fresh.executionEligible(capb) {
 		t.Fatal("SECURITY: a restart after a failed reserve-abort persist must not revive an eligible Canary")
+	}
+}
+
+// TestCanaryRuntime_ReserveNotSyncedPersistDeniesGrant is the Codex P1 (round-4) durability proof:
+// when the runtime-state AtomicWrite returns fileutil.ErrReplacedNotSynced (the replacement is
+// visible but not durably synced, so an immediate crash can lose it), the persist must be treated as
+// a FAILURE — a granted reserve must be denied rather than authorizing a side effect, because a lost
+// budget write would replay the slot on restart and break the monotonic non-replayable total. This
+// exercises the REAL persistLocked path through the canaryAtomicWrite seam.
+func TestCanaryRuntime_ReserveNotSyncedPersistDeniesGrant(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(5), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// Inject a not-synced replacement for the next persist (the real persistLocked runs).
+	prevWrite := canaryAtomicWrite
+	canaryAtomicWrite = func(_ string, _ []byte, _ os.FileMode) error {
+		return fileutil.ErrReplacedNotSynced
+	}
+	t.Cleanup(func() { canaryAtomicWrite = prevWrite })
+
+	// The enforcer grants in memory, but the not-synced persist must turn the grant into a denial so
+	// no side effect is authorized against a budget slot that may not survive a crash.
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedInvalid {
+		t.Fatalf("SECURITY: a reserve whose persist is not durably synced must be denied, got %s", o)
+	}
+	// Restore durable writes: a restart-equivalent restore must not have been handed a granted slot
+	// via a lost write — the budget still grants its full N (the denied reserve authorized nothing).
+	canaryAtomicWrite = prevWrite
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+	for i := 0; i < 5; i++ {
+		if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetGranted {
+			t.Fatalf("restored budget grant %d must succeed (denied reserve consumed no durable slot), got %s", i+1, o)
+		}
+		fresh.releaseCanaryExecution(capb, fresh.currentGeneration(capb))
 	}
 }
 

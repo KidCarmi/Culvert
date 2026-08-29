@@ -51,6 +51,11 @@ const (
 	// BudgetDeniedServerCap — this execution's server is a NEW distinct server that would exceed
 	// MaxServers.
 	BudgetDeniedServerCap
+	// BudgetDeniedIdentityIncomplete — the execution's ExecutionIdentity is missing a dimension
+	// (empty Principal, Tool, or Server). Fail-closed: an unresolved authoritative identity must
+	// never be admitted as the empty-string key, which would collapse every distinct unresolved
+	// identity onto one already-admitted slot and silently defeat the distinct-identity ceilings.
+	BudgetDeniedIdentityIncomplete
 )
 
 // ExecutionIdentity carries the authoritative identity of one execution so the runtime budget can
@@ -86,6 +91,8 @@ func (o BudgetOutcome) String() string {
 		return "denied_tool_cap"
 	case BudgetDeniedServerCap:
 		return "denied_server_cap"
+	case BudgetDeniedIdentityIncomplete:
+		return "denied_identity_incomplete"
 	default:
 		return "unknown"
 	}
@@ -187,6 +194,14 @@ func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time, ident ExecutionIdent
 	// grants happen while total ∈ [0, N-1]; the Nth leaves total==N and every later Reserve denies.
 	if e.total >= e.budget.MaxTotalExecutions {
 		return BudgetDeniedTotal
+	}
+	// A missing authoritative identity dimension fails CLOSED before the ceilings are consulted. The
+	// live executor resolves Principal/Tool/Server from policy; an empty field means resolution failed,
+	// and admitting "" as an ordinary key would collapse every distinct unresolved identity onto one
+	// already-admitted slot — two real tools could both execute under MaxTools:1 via an empty Tool
+	// (Codex P1). No slot is consumed.
+	if ident.Principal == "" || ident.Tool == "" || ident.Server == "" {
+		return BudgetDeniedIdentityIncomplete
 	}
 	// Distinct-identity blast-radius ceilings: a NEW principal/tool/server beyond its cap is denied
 	// (a scope/identity breach), and no slot is consumed. An already-admitted identity is fine.
