@@ -85,7 +85,8 @@ aborted by emergency kill" from "upstream execution occurred".
 channels/barriers (no sleeps for security ordering): kill before Execute; after admission; during
 commit (concurrent); during Plan (concurrent, credential); during materialization (genuine
 provider `Fetch` hook); from inside `ToolStillCurrent` (credential); tool drift without kill (stale
-preserved); drift + kill (fail-closed); engage→clear ABA (Model B proof); 24 concurrent + one kill
+preserved); drift + kill (fail-closed, emergency reason paramount over stale); engage→clear ABA
+(Model B proof); 24 concurrent + one kill
 (all refuse, upstream 0, no corruption). Plus the Resolve→Execute-window test and the
 no-credential reason-mapping test. Run repeatedly under `-race`.
 
@@ -142,7 +143,7 @@ Full package suites (`go test ./internal/mcp/...`) pass, including `-shuffle=on 
 |---|---|
 | TOCTOU: final check vs. call | No blocking/business logic between the kill check and `Upstream.Call`; both read the same lock-free generation. No gap. |
 | engage→clear ABA | Caught by Model B (generation advanced); `9_engage_clear_aba` proves `Killed()==false` at the boundary yet the call is refused. |
-| stale vs. kill precedence | Drift is checked first (its reason wins when both fire); kill is checked before `Upstream.Call`. Both are fail-closed refusals; neither executes. `8_drift_and_kill` pins it. |
+| stale vs. kill precedence | Tool freshness is *evaluated* first (its callback may itself engage the kill), but the emergency kill is *paramount* in the refusal precedence: when both drift and kill hold, `preCallGuard` returns the kill sentinel, so the refusal is metered `rollout_emergency_active`, not staleness — consistent with the broker-callback row above. Drift-only (no kill) still reports `decision_snapshot_stale`. Both are fail-closed refusals; neither executes. `8_drift_and_kill` pins the emergency reason deterministically. |
 | broker callback error swallowing | The credential branch reclassifies the absorbed sentinel to `rollout_emergency_active` (ahead of drift), so a kill never reads as `ReasonNone`/transport/durability. `TestKillBoundary_*` credential subtests. |
 | kill during materialization | Genuine provider `Fetch` hook engages the kill mid-materialization; boundary refuses, upstream 0. `5_kill_during_materialization_credential`. |
 | kill concurrent with many requests | 24 goroutines rendezvous on the kill; all refuse, no corruption/duplicate/deadlock. `10_many_concurrent_with_kill`, `-race`. |
