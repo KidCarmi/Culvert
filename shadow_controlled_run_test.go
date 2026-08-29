@@ -353,8 +353,14 @@ func (r *shadowRun) matrixWouldBlock() {
 		"B: expected shadow_evaluated/would_block, got %v", rb)
 	req(t, rb["shadow_override"] == true, "B: a policy DENY must set shadow_override=true, got %v", rb)
 	after := shadowSnap()
-	r.ev("B danger request: execution_state=shadow_evaluated executed=false shadow_outcome=would_block shadow_override=true would_block %d->%d",
-		before.WouldBlock, after.WouldBlock)
+	req(t, after.Evaluations > before.Evaluations && after.WouldBlock > before.WouldBlock,
+		"B: the would_block metric must increment (before=%+v after=%+v)", before, after)
+	// A durable schema-v2 event must exist for THIS would_block evaluation (no evidence gap).
+	de, ok := latestShadowEvidence(t)
+	req(t, ok && de.Shadow.Outcome == "would_block" && de.VerifyDigest() && de.Validate() == nil,
+		"B: a durable schema-v2 would_block event must be committed, got ok=%v %+v", ok, de.Shadow)
+	r.ev("B danger request: execution_state=shadow_evaluated executed=false shadow_outcome=would_block shadow_override=true would_block %d->%d durable_outcome=%s",
+		before.WouldBlock, after.WouldBlock, de.Shadow.Outcome)
 }
 
 // outOfScopeContainment — an out-of-scope principal must NOT be shadow-evaluated; it
@@ -366,7 +372,9 @@ func (r *shadowRun) outOfScopeContainment() {
 	oSid := handshake(t, r.cli, r.base, ctrlServer, outToken)
 	st, ro := toolsCall(t, r.cli, r.base, outToken, oSid, "5", toolEcho, `{"text":"x"}`)
 	req(t, st == 200, "out-of-scope call: status=%d", st)
-	req(t, ro["execution_state"] != "shadow_evaluated", "SECURITY: out-of-scope subject must NOT be shadow-evaluated, got %v", ro)
+	// Assert the EXACT Observe outcome: an out-of-scope allow-class call is a non-executing
+	// Observe decision (execution_state=not_implemented), never a Shadow evaluation.
+	req(t, ro["execution_state"] == "not_implemented", "SECURITY: out-of-scope subject must be Observe (not_implemented), never shadow-evaluated, got %v", ro)
 	after := shadowSnap()
 	req(t, after.Evaluations == before.Evaluations,
 		"SECURITY: out-of-scope traffic must not increment shadow evaluations (%d->%d)", before.Evaluations, after.Evaluations)
@@ -404,7 +412,11 @@ func (r *shadowRun) revokeDrill() {
 	req(t, st == 200, "post-revoke call: status=%d", st)
 	req(t, rr["shadow_outcome"] == "would_fail_hard_control",
 		"revoked/quarantined tool must predict would_fail_hard_control, got %v", rr)
-	r.ev("revocation drill: approval revoked -> eligibility!=Usable -> echo shadow_outcome=would_fail_hard_control (no longer would_execute)")
+	// A durable schema-v2 event must exist for THIS would_fail_hard_control evaluation.
+	de, ok := latestShadowEvidence(t)
+	req(t, ok && de.Shadow.Outcome == "would_fail_hard_control" && de.VerifyDigest() && de.Validate() == nil,
+		"revoke: a durable schema-v2 would_fail_hard_control event must be committed, got ok=%v %+v", ok, de.Shadow)
+	r.ev("revocation drill: approval revoked -> eligibility!=Usable -> echo shadow_outcome=would_fail_hard_control durable_outcome=%s (no longer would_execute)", de.Shadow.Outcome)
 }
 
 // rollbackToObserve — a signed mode=Observe envelope returns the node to Observe; a
