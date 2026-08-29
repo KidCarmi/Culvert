@@ -46,7 +46,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/KidCarmi/Culvert/internal/catoverride"
 	"github.com/KidCarmi/Culvert/internal/feedsync"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
 
 // bulkRefViolation names the first unresolvable reference in a bulk candidate.
@@ -77,24 +79,75 @@ type bulkCandidate struct {
 	CategoryOK func(name string) bool
 }
 
-// bulkCategoryClosure builds the case-insensitive category-name predicate for
-// a candidate category set: candidate entries ∪ current signed-view classes ∪
-// UT1 community categories. The view pointer is read ONCE so every judgement
-// in one validation run is against one authority state.
-func bulkCategoryClosure(cands []CategoryEntry) func(string) bool {
-	set := make(map[string]struct{}, len(cands))
-	for i := range cands {
-		set[strings.ToLower(cands[i].Name)] = struct{}{}
-	}
+// postApplyCategoryClosure builds the case-insensitive category-name predicate
+// over the POST-APPLY effective authority of a bulk candidate (final
+// bulk-integrity correction §§4–8): the authority that will exist AFTER the
+// candidate taxonomy AND the candidate override set apply, mirroring the
+// runtime source model (resolveFusion / referencedCategoryResolvable) exactly:
+//
+//   - NO effective view armed: the full candidate taxonomy + UT1 (the
+//     lifecycle is unarmed, so overrides never reach the policy path).
+//   - Source == embedded: the view is recomposed FROM catStore's BuiltIn
+//     taxonomy, so the candidate's BuiltIn entries form the raw base and the
+//     candidate override set composes over it; authority = candidate
+//     BuiltIn=false admin names ∪ composed embedded classes ∪ UT1.
+//   - Source == downloaded/cached/resumed: the classes come from the SIGNED
+//     generation — a candidate BuiltIn=true catStore row is NOT authority
+//     merely for being present (§4/§5). The raw base is the live view's
+//     retained pre-override signed classes (baseClasses — the same input the
+//     production recompose uses; the bulk paths never replace the generation
+//     itself), the candidate override set composes over it; authority =
+//     candidate BuiltIn=false admin names ∪ composed signed classes ∪ UT1.
+//
+// Composition reuses the runtime's own PURE seams (catoverride.ComposeView /
+// ComposeMembership) over the RAW base — never over the already-composed live
+// entries, which would double-apply the current overrides (§7). The view
+// pointer is read ONCE so every judgement in one run is against one authority
+// state. The authority set is built lazily on first use so callers that judge
+// no category edge pay nothing.
+func postApplyCategoryClosure(cands []CategoryEntry, ov CategoryOverrides) func(string) bool {
 	view := saasEffectiveView.Current()
+	var names map[string]struct{}
+	build := func() map[string]struct{} {
+		out := make(map[string]struct{}, len(cands))
+		if view == nil {
+			for i := range cands {
+				out[strings.ToLower(cands[i].Name)] = struct{}{}
+			}
+			return out
+		}
+		// Admin tier: candidate BuiltIn=false names only.
+		for i := range cands {
+			if !cands[i].BuiltIn {
+				out[strings.ToLower(cands[i].Name)] = struct{}{}
+			}
+		}
+		// View tier: candidate overrides composed over the RAW base.
+		var baseMembers map[string][]string
+		if view.Source == sourceEmbedded {
+			baseMembers = candidateBuiltInMemberships(cands)
+		} else {
+			base := view.baseClasses()
+			baseMembers = make(map[string][]string, len(base))
+			for h, c := range base {
+				baseMembers[h] = []string{c}
+			}
+		}
+		for _, cats := range catoverride.ComposeMembership(baseMembers, ov) {
+			for _, c := range cats {
+				out[strings.ToLower(c)] = struct{}{}
+			}
+		}
+		return out
+	}
 	return func(name string) bool {
 		if name == "" {
 			return true
 		}
-		if _, ok := set[strings.ToLower(name)]; ok {
-			return true
+		if names == nil {
+			names = build()
 		}
-		if view != nil && view.HasCategoryName(name) {
+		if _, ok := names[strings.ToLower(name)]; ok {
 			return true
 		}
 		if communityDB != nil {
@@ -105,6 +158,66 @@ func bulkCategoryClosure(cands []CategoryEntry) func(string) bool {
 			}
 		}
 		return false
+	}
+}
+
+// candidateBuiltInMemberships derives the embedded-baseline membership map
+// from a CANDIDATE taxonomy slice — the pure analogue of
+// catStore.BuiltInHostMemberships over the entries the bulk apply will
+// install (same normalization, same case-insensitive dedupe).
+func candidateBuiltInMemberships(cands []CategoryEntry) map[string][]string {
+	out := make(map[string][]string)
+	for i := range cands {
+		if !cands[i].BuiltIn {
+			continue
+		}
+		for _, h := range cands[i].Hosts {
+			nh := hostutil.NormalizeHost(strings.TrimSpace(h))
+			if nh == "" {
+				continue
+			}
+			dup := false
+			for _, c := range out[nh] {
+				if strings.EqualFold(c, cands[i].Name) {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				out[nh] = append(out[nh], cands[i].Name)
+			}
+		}
+	}
+	return out
+}
+
+// canonicalizeCandidateRuleRefs is the PURE candidate analogue of
+// stampObjectRefIDs (final bulk-integrity correction §§1–2): an INCOMING
+// import rule's NAME is the intent and its object-link IDs are untrusted, so
+// the IDs are discarded and re-derived from the names against the CANDIDATE
+// object sets — which may themselves be supplied by the same backup and are
+// not live yet, so the live-global stamp cannot be used. An unknown name
+// yields an empty ID, exactly what importPolicyRules will install; a valid
+// unrelated client ID can therefore never make an invalid name pass
+// validation, and a mismatched name/ID pair binds to the NAME's object.
+func canonicalizeCandidateRuleRefs(r *PolicyRule, groups []CategoryGroup, profiles []DecryptionProfile) {
+	r.DestCategoryGroupID = ""
+	if r.DestCategoryGroup != "" {
+		for i := range groups {
+			if strings.EqualFold(groups[i].Name, r.DestCategoryGroup) {
+				r.DestCategoryGroupID = groups[i].ID
+				break
+			}
+		}
+	}
+	r.DecryptionProfileID = ""
+	if r.DecryptionProfile != "" {
+		for i := range profiles {
+			if strings.EqualFold(profiles[i].Name, r.DecryptionProfile) {
+				r.DecryptionProfileID = profiles[i].ID
+				break
+			}
+		}
 	}
 }
 
@@ -182,15 +295,34 @@ func effectiveImportSlice[T any](live, incoming []T, replaceMode bool, key func(
 }
 
 // effectiveImportRules reproduces importPolicyRules' semantics: replace swaps
-// the whole set (when carried); merge upserts by identity — stable ID first,
-// then a case-insensitive name fallback, else append.
-func effectiveImportRules(b *configBackup, replaceMode bool) []PolicyRule {
+// the whole set (when carried); merge upserts by identity — stable rule ID
+// first, then a case-insensitive name fallback, else append.
+//
+// TRUST BOUNDARY (§2, mirrors the interactive doctrine): every INCOMING rule
+// is CANONICALIZED against the candidate object sets before it joins the
+// effective candidate — its object-link IDs are discarded and re-derived from
+// its NAMES (canonicalizeCandidateRuleRefs), exactly as importPolicyRules'
+// stampObjectRefIDs will do at apply time (by then the candidate objects are
+// installed, so the two derivations agree). The validator therefore judges
+// the rule the import will ACTUALLY install, and a smuggled unrelated ID can
+// never satisfy validation for an unresolvable name. UNTOUCHED live rules in
+// merge/never-wipe candidates are carried verbatim and retain their existing
+// ID-authoritative semantics — the import does not restamp them.
+func effectiveImportRules(b *configBackup, replaceMode bool, groups []CategoryGroup, profiles []DecryptionProfile) []PolicyRule {
+	canon := func(r PolicyRule) PolicyRule {
+		canonicalizeCandidateRuleRefs(&r, groups, profiles)
+		return r
+	}
 	if replaceMode && len(b.PolicyRules) > 0 {
-		return append([]PolicyRule(nil), b.PolicyRules...)
+		out := make([]PolicyRule, len(b.PolicyRules))
+		for i := range b.PolicyRules {
+			out[i] = canon(b.PolicyRules[i])
+		}
+		return out
 	}
 	out := policyStore.List()
 	for i := range b.PolicyRules {
-		in := b.PolicyRules[i]
+		in := canon(b.PolicyRules[i])
 		idx := -1
 		if in.ID != "" {
 			for j := range out {
@@ -217,6 +349,19 @@ func effectiveImportRules(b *configBackup, replaceMode bool) []PolicyRule {
 	return out
 }
 
+// effectiveImportOverrides reproduces importCategoryOverrides' semantics for
+// the post-apply preview: absent/empty incoming ⇒ the live set is retained;
+// replace ⇒ incoming; merge ⇒ mergeCategoryOverrides(live, incoming).
+func effectiveImportOverrides(b *configBackup, replaceMode bool) CategoryOverrides {
+	if b.CategoryOverrides == nil || categoryOverridesEmpty(*b.CategoryOverrides) {
+		return globalCategoryOverrides.Get()
+	}
+	if replaceMode {
+		return *b.CategoryOverrides
+	}
+	return mergeCategoryOverrides(globalCategoryOverrides.Get(), *b.CategoryOverrides)
+}
+
 // validateImportCandidateRefs constructs the EFFECTIVE imported candidate per
 // the request's merge/replace mode and validates its whole graph BEFORE any
 // store mutation — a dangling reference refuses the ENTIRE import with a 400
@@ -234,13 +379,13 @@ func validateImportCandidateRefs(b *configBackup, replaceMode bool) error {
 	profiles := effectiveImportSlice(globalDecryptionProfiles.List(), b.DecryptionProfiles, replaceMode,
 		func(p DecryptionProfile) string { return p.Name })
 	return validateBulkCandidateRefs(bulkCandidate{
-		Rules:             effectiveImportRules(b, replaceMode),
+		Rules:             effectiveImportRules(b, replaceMode, groups, profiles),
 		Groups:            groups,
 		Profiles:          profiles,
 		CheckRuleGroups:   true,
 		CheckRuleProfiles: true,
 		CheckCategories:   true,
-		CategoryOK:        bulkCategoryClosure(cats),
+		CategoryOK:        postApplyCategoryClosure(cats, effectiveImportOverrides(b, replaceMode)),
 	})
 }
 
@@ -267,6 +412,19 @@ func validateRestoredCandidateRefs(b *configBackup) error {
 	if b.PolicyRules != nil {
 		rules = b.PolicyRules
 	}
+	// Rollback candidate overrides: nil section keeps the live set; a non-nil
+	// section (including empty) is a wholesale replacement — exactly
+	// applyConfigBackup's semantics.
+	ov := globalCategoryOverrides.Get()
+	if b.CategoryOverrides != nil {
+		ov = *b.CategoryOverrides
+	}
+	// §10 ID/name semantics: unlike the import, a restored rulebase is applied
+	// VERBATIM (policyStore.ReplaceAll — no restamp), and its historical
+	// object-link IDs are legitimately ID-authoritative at runtime (ID-first
+	// resolution with name fallback). The validator therefore judges the
+	// restored rules exactly as captured — ID-or-name — and never converts
+	// them to the interactive name-intent doctrine.
 	return validateBulkCandidateRefs(bulkCandidate{
 		Rules:             rules,
 		Groups:            groups,
@@ -274,7 +432,7 @@ func validateRestoredCandidateRefs(b *configBackup) error {
 		CheckRuleGroups:   true,
 		CheckRuleProfiles: true,
 		CheckCategories:   true,
-		CategoryOK:        bulkCategoryClosure(cats),
+		CategoryOK:        postApplyCategoryClosure(cats, ov),
 	})
 }
 
@@ -301,7 +459,19 @@ func validateSnapshotRefGraph(snap ConfigSnapshot) error {
 	if c.CheckCategories {
 		// A nil Rules/Groups slice simply contributes no edges to the walk, so
 		// the both-sides-carried scoping needs no further special-casing here.
-		c.CategoryOK = bulkCategoryClosure(snap.URLCategories)
+		//
+		// Snapshot candidate overrides (§7): non-nil ⇒ the CP's authoritative
+		// replacement (exactly applySnapshotSaaSFeed's semantics), nil ⇒ the
+		// applying node keeps its current set — which is then the post-apply
+		// set the preview must compose. §10 ID/name semantics: snapshot rules
+		// are CP-stamped and applied verbatim (ReplaceAll — no DP restamp), so
+		// their IDs are legitimately authoritative and the validator judges
+		// them ID-or-name as captured, never re-canonicalized.
+		ov := globalCategoryOverrides.Get()
+		if snap.CategoryOverrides != nil {
+			ov = *snap.CategoryOverrides
+		}
+		c.CategoryOK = postApplyCategoryClosure(snap.URLCategories, ov)
 	}
 	return validateBulkCandidateRefs(c)
 }

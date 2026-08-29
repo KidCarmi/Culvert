@@ -220,23 +220,41 @@ func TestBulkRef_SnapshotOverCapCategoryRejectsWholeSnapshot(t *testing.T) {
 	}
 }
 
-// TestBulkRef_ValidatorAdmitsAuthorityLayers pins the category closure's
-// non-goals: a candidate-carried BuiltIn name, a signed-view class, and a
-// UT1-mapped name are all legitimate reference targets — the bulk gate judges
-// dangling-ness, and a name any current authority serves is not dangling.
+// TestBulkRef_ValidatorAdmitsAuthorityLayers pins the POST-APPLY closure's
+// source rules (final bulk canonicalization correction §8): under a signed
+// (downloaded) view, a candidate BuiltIn=false admin name and a signed-view
+// class resolve; a candidate BuiltIn=true name the signed authority does not
+// serve is NOT authority merely for being present; and under NO view the full
+// candidate taxonomy resolves.
 func TestBulkRef_ValidatorAdmitsAuthorityLayers(t *testing.T) {
+	cands := []CategoryEntry{
+		{Name: "Candidate-Admin", Hosts: []string{"ca.example.com"}},
+		{Name: "Candidate-BuiltIn", Hosts: []string{"cb.example.com"}, BuiltIn: true},
+	}
+
+	// Signed (downloaded) authority: base {svc.example.com → AI}, no overrides.
 	prev := saasEffectiveView.Swap(newEffectiveView(map[string]string{"svc.example.com": "AI"},
 		effectiveCategoryView{Source: sourceDownloaded, FeedVersion: 4}))
 	t.Cleanup(func() { saasEffectiveView.Swap(prev) })
 
-	ok := bulkCategoryClosure([]CategoryEntry{{Name: "Candidate-Cat", BuiltIn: true}})
-	if !ok("candidate-cat") {
-		t.Fatal("candidate-carried name (case-insensitive) must resolve")
+	ok := postApplyCategoryClosure(cands, CategoryOverrides{})
+	if !ok("candidate-admin") {
+		t.Fatal("candidate BuiltIn=false admin name (case-insensitive) must resolve")
 	}
 	if !ok("AI") {
-		t.Fatal("a class served by the live signed view must resolve")
+		t.Fatal("a class served by the signed view must resolve")
+	}
+	if ok("Candidate-BuiltIn") {
+		t.Fatal("a candidate BuiltIn=true name the signed authority does not serve must NOT resolve (§4/§5)")
 	}
 	if ok("definitely-not-anywhere") {
 		t.Fatal("a name no authority serves must not resolve")
+	}
+
+	// No view: the full candidate taxonomy is the authority.
+	saasEffectiveView.Swap(nil)
+	ok = postApplyCategoryClosure(cands, CategoryOverrides{})
+	if !ok("Candidate-BuiltIn") || !ok("Candidate-Admin") {
+		t.Fatal("with no view the full candidate taxonomy must resolve")
 	}
 }
