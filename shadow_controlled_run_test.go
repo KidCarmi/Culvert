@@ -279,16 +279,34 @@ func latestShadowEvidence(t *testing.T) (event evmodel.Event, found bool) {
 	if er == nil {
 		return event, false
 	}
+	// Return the genuinely most-recently-committed schema-v2 shadow event. The reader is a
+	// paginated cursor (afterSeq -> next), and a shadow decision lands in EITHER partition
+	// depending on its criticality, so a single bounded read of the FIRST page of one
+	// partition-then-the-other does not reach the latest event once either partition holds
+	// more than one page (the soak's high-volume mode). Fully paginate BOTH partitions and
+	// pick the match with the maximum TimeUnixNano — the event's own recorded commit time,
+	// which is globally comparable across partitions and strictly monotonic under both the
+	// real clock and the injected monotonic test clocks.
+	const batch = 512
 	for _, part := range []string{"P-CRIT", "P-ORD"} {
-		evs, _, _, err := er.CommittedEvents("gateway", part, 0, 256)
-		if err != nil {
-			continue
-		}
-		for i := range evs {
-			e := evs[i]
-			if e.SchemaVersion == evmodel.SchemaVersionV2 && e.Decision.ExecutionState == "shadow_evaluated" && e.Shadow != nil {
-				event, found = e, true
+		afterSeq := uint64(0)
+		for {
+			evs, _, next, err := er.CommittedEvents("gateway", part, afterSeq, batch)
+			if err != nil {
+				break
 			}
+			for i := range evs {
+				e := evs[i]
+				if e.SchemaVersion == evmodel.SchemaVersionV2 && e.Decision.ExecutionState == "shadow_evaluated" && e.Shadow != nil {
+					if !found || e.TimeUnixNano >= event.TimeUnixNano {
+						event, found = e, true
+					}
+				}
+			}
+			if len(evs) < batch {
+				break
+			}
+			afterSeq = next
 		}
 	}
 	return event, found
@@ -302,15 +320,23 @@ func shadowEventByIDPresent(t *testing.T, id string) bool {
 	if er == nil {
 		return false
 	}
+	const batch = 512
 	for _, part := range []string{"P-CRIT", "P-ORD"} {
-		evs, _, _, err := er.CommittedEvents("gateway", part, 0, 256)
-		if err != nil {
-			continue
-		}
-		for i := range evs {
-			if evs[i].EventID == id && evs[i].SchemaVersion == evmodel.SchemaVersionV2 {
-				return true
+		afterSeq := uint64(0)
+		for {
+			evs, _, next, err := er.CommittedEvents("gateway", part, afterSeq, batch)
+			if err != nil {
+				break
 			}
+			for i := range evs {
+				if evs[i].EventID == id && evs[i].SchemaVersion == evmodel.SchemaVersionV2 {
+					return true
+				}
+			}
+			if len(evs) < batch {
+				break
+			}
+			afterSeq = next
 		}
 	}
 	return false
