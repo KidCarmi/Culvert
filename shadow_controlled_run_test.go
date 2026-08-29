@@ -40,6 +40,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
+	"github.com/KidCarmi/Culvert/internal/mcp/execution"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
@@ -612,7 +613,15 @@ func composeShadowNode(t *testing.T, pki *mcpTestPKI, invPath, polPath string, t
 	var cfg mcpruntime.Config
 	cfg, act = loadMCPObserveRuntime(sc)
 	req(t, act.State == mcpObserveConfigured, "compose: state=%q reason=%q", act.State, act.Reason)
-	req(t, cfg.Deps.Executor != nil, "compose: shadow evaluator must be composed")
+	// STRUCTURAL zero-side-effect proof (the primary guarantee; the upstream witness is only
+	// auxiliary): the composed executor MUST be the non-executing *execution.ShadowEvaluator,
+	// which structurally holds no UpstreamCaller and no materialize-capable broker (Layer B),
+	// and MUST NOT be the live *execution.Executor. So Shadow cannot dial an upstream or
+	// materialize a credential regardless of any endpoint/transport wiring.
+	_, isShadow := cfg.Deps.Executor.(*execution.ShadowEvaluator)
+	req(t, isShadow, "compose: executor must be the non-executing *execution.ShadowEvaluator, got %T", cfg.Deps.Executor)
+	_, isLive := cfg.Deps.Executor.(*execution.Executor)
+	req(t, !isLive, "SECURITY: the live *execution.Executor must never be composed for Shadow")
 	setMCPObserveStatus(act)
 	var err error
 	rt, err = mcpruntime.NewRuntime(cfg)
