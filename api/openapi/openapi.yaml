@@ -10858,8 +10858,8 @@ paths:
                 fingerprint: { type: string, minLength: 64, maxLength: 64, pattern: '^[0-9a-fA-F]{64}$', description: 64-char hex of the reviewed 32-byte tool fingerprint digest }
                 catalog_revision: { type: integer, format: int64, minimum: 1, description: The reviewed per-record catalog revision (the tool's Revision from the inventory view). REQUIRED — a zero/omitted value is rejected so the exact-target contract cannot be bypassed. }
                 purpose: { type: string, enum: [shadow_evaluation], description: 'Declared purpose. Only shadow_evaluation is issuable by this endpoint; omit to default to it. (live_execution exists in the trust model but is never issuable here.)' }
-                reason: { type: string }
-                ticket_ref: { type: string }
+                reason: { type: string, maxLength: 512, description: 'Optional free-text reason. The backend limit is 512 UTF-8 BYTES (maxLength counts characters, so multi-byte input may be rejected below this).' }
+                ticket_ref: { type: string, maxLength: 128, description: 'Optional external ticket reference. The backend limit is 128 UTF-8 BYTES (maxLength counts characters, so multi-byte input may be rejected below this).' }
                 expires_in_seconds: { type: integer, format: int64, minimum: 0, maximum: 315360000, description: 'TTL in seconds; 0 means no expiry. Range is 0..315360000 (~10 years); a negative or larger value is rejected.' }
       responses:
         '200': { description: Pending approval created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }

@@ -13799,12 +13799,16 @@
                     "type": "string"
                   },
                   "reason": {
+                    "description": "Optional free-text reason. The backend limit is 512 UTF-8 BYTES (maxLength counts characters, so multi-byte input may be rejected below this).",
+                    "maxLength": 512,
                     "type": "string"
                   },
                   "server_id": {
                     "type": "string"
                   },
                   "ticket_ref": {
+                    "description": "Optional external ticket reference. The backend limit is 128 UTF-8 BYTES (maxLength counts characters, so multi-byte input may be rejected below this).",
+                    "maxLength": 128,
                     "type": "string"
                   },
                   "tool_name": {
