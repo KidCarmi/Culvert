@@ -108,9 +108,11 @@ func controlledScope() rollout.ScopeSpec {
 	}
 }
 
-// witnessEndpoint starts a REAL controlled upstream server and returns it plus the
-// inventory endpoint token that registers it as the controlled server. A regressed
-// upstream dial to the registered endpoint would land on hits.
+// witnessEndpoint starts a REAL controlled upstream TLS server and returns it plus its
+// dialable HTTPS URL, registered as the controlled server's inventory endpoint. The URL
+// is a plain https:// loopback address the real upstream transport can actually dial
+// (it rejects non-allowlisted schemes before dialing), so a regressed upstream call would
+// reach this handler and increment hits — making the zero-invocation assertion meaningful.
 func witnessEndpoint(t *testing.T, hits *int64) (srv *httptest.Server, endpoint string) {
 	t.Helper()
 	w := httptest.NewTLSServer(http.HandlerFunc(func(wr http.ResponseWriter, _ *http.Request) {
@@ -118,7 +120,7 @@ func witnessEndpoint(t *testing.T, hits *int64) (srv *httptest.Server, endpoint 
 		wr.WriteHeader(200)
 	}))
 	t.Cleanup(w.Close)
-	return w, "mcp+https://" + w.Listener.Addr().String()
+	return w, w.URL // https://127.0.0.1:<port>
 }
 
 // mintBearerSub mints a valid ES256 gateway bearer with a caller-chosen subject
@@ -194,7 +196,7 @@ func resultOf(t *testing.T, body []byte) map[string]any {
 }
 
 // catRec returns a tool's current fingerprint-hex, per-record revision, and eligibility.
-func catRec(t *testing.T, cat *catalog.Catalog, serverID, tool string) (string, uint64, catalog.Eligibility) {
+func catRec(t *testing.T, cat *catalog.Catalog, serverID, tool string) (fingerprintHex string, revision uint64, eligibility catalog.Eligibility) {
 	t.Helper()
 	rec, ok := cat.Current().Get(catalog.ToolKey{Server: registry.ServerID(serverID), Name: tool})
 	req(t, ok, "tool %s/%s not in catalog", serverID, tool)
@@ -233,14 +235,12 @@ func shadowSnap() shadowMetricsView {
 
 // latestShadowEvidence scans the Gateway partitions for the most recent committed
 // schema-v2 shadow decision event.
-func latestShadowEvidence(t *testing.T) (evmodel.Event, bool) {
+func latestShadowEvidence(t *testing.T) (event evmodel.Event, found bool) {
 	t.Helper()
 	er := mcpAdminEventReader()
 	if er == nil {
-		return evmodel.Event{}, false
+		return event, false
 	}
-	var last evmodel.Event
-	var found bool
 	for _, part := range []string{"P-CRIT", "P-ORD"} {
 		evs, _, _, err := er.CommittedEvents("gateway", part, 0, 256)
 		if err != nil {
@@ -249,11 +249,11 @@ func latestShadowEvidence(t *testing.T) (evmodel.Event, bool) {
 		for i := range evs {
 			e := evs[i]
 			if e.SchemaVersion == evmodel.SchemaVersionV2 && e.Decision.ExecutionState == "shadow_evaluated" && e.Shadow != nil {
-				last, found = e, true
+				event, found = e, true
 			}
 		}
 	}
-	return last, found
+	return event, found
 }
 
 // shadowEventByIDPresent reports whether a specific committed schema-v2 shadow event id
@@ -417,7 +417,9 @@ func (r *shadowRun) rollbackToObserve() {
 	before := shadowSnap()
 	st, rrb := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "8", toolEcho, `{"text":"post-rollback"}`)
 	req(t, st == 200, "post-rollback call: status=%d", st)
-	req(t, rrb["execution_state"] != "shadow_evaluated", "post-rollback in-scope call must be Observe, not shadow: %v", rrb)
+	// Assert the EXACT Observe outcome (not merely "not shadow"): an allow-class Observe
+	// decision is non-executing and reports execution_state=not_implemented.
+	req(t, rrb["execution_state"] == "not_implemented", "post-rollback in-scope call must be Observe (not_implemented), got %v", rrb)
 	after := shadowSnap()
 	req(t, after.Evaluations == before.Evaluations, "post-rollback: shadow evaluations must not increment (%d->%d)", before.Evaluations, after.Evaluations)
 	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must remain unarmed through rollback")
@@ -574,23 +576,25 @@ func stableTelemetry(dir string) mcpTelemetryStartupConfig {
 // composeShadowNode runs the REAL observe+shadow startup composition against the given
 // files/telemetry, starts the listener, and wires the global runtime + observe status so
 // the live readiness probe is genuine. Returns the runtime, published catalog, activation.
-func composeShadowNode(t *testing.T, pki *mcpTestPKI, invPath, polPath string, telCfg mcpTelemetryStartupConfig) (*mcpruntime.Runtime, *catalog.Catalog, mcpObserveActivation) {
+func composeShadowNode(t *testing.T, pki *mcpTestPKI, invPath, polPath string, telCfg mcpTelemetryStartupConfig) (rt *mcpruntime.Runtime, cat *catalog.Catalog, act mcpObserveActivation) {
 	t.Helper()
 	sc := scWithInventory(t, pki, invPath)
 	sc.SenderConstraint = "bearer"
 	sc.ClientCertMode = "none"
 	sc.Telemetry = telCfg
 	sc.QualificationPolicyFile = polPath
-	cfg, act := loadMCPObserveRuntime(sc)
+	var cfg mcpruntime.Config
+	cfg, act = loadMCPObserveRuntime(sc)
 	req(t, act.State == mcpObserveConfigured, "compose: state=%q reason=%q", act.State, act.Reason)
 	req(t, cfg.Deps.Executor != nil, "compose: shadow evaluator must be composed")
 	setMCPObserveStatus(act)
-	rt, err := mcpruntime.NewRuntime(cfg)
+	var err error
+	rt, err = mcpruntime.NewRuntime(cfg)
 	req(t, err == nil, "NewRuntime: %v", err)
 	req(t, rt.Start() == nil, "Start failed")
 	mcpRuntime = rt
 	req(t, liveGatewayListenerReady(), "compose: gateway listener must be live")
-	_, cat := mcpInventory.sharedInventory()
+	_, cat = mcpInventory.sharedInventory()
 	return rt, cat, act
 }
 

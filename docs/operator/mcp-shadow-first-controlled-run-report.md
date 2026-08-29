@@ -2,7 +2,7 @@
 
 > Sanitized. No credentials, tokens, or secrets. Runtime evidence produced by an
 > in-process controlled harness that drives the REAL Culvert MCP production code
-> paths (real listener socket + TLS/mTLS + OAuth JWT + real ShadowEvaluator +
+> paths (real listener socket + TLS + OAuth JWT + real ShadowEvaluator +
 > real durable schema-v2 evidence spool). See "Nature of the environment" below.
 
 ## 1. Baseline (established before activation)
@@ -25,9 +25,13 @@ external OAuth IdP), not less. The genuine, controlled, reproducible way to driv
 the REAL production pipeline here is an in-process Go harness that exercises the
 actual production code paths with real cryptography and a real listener socket:
 
-- real Gateway listener binding a real TCP socket on 127.0.0.1 with real TLS,
-  real mTLS client-auth, and real RFC-9728/OAuth JWT (ES256) validation
-  (`mcpTestPKI` builds a real CA, server/client certs, and a JWKS signer);
+- real Gateway listener binding a real TCP socket on 127.0.0.1 with real
+  server TLS and real RFC-9728/OAuth JWT (ES256) bearer-token validation
+  (`mcpTestPKI` builds a real CA, server cert, and a JWKS signer). The run uses
+  the `bearer` sender-constraint posture (`ClientCertMode="none"`), which
+  isolates the policy/rollout behavior from sender binding; the mTLS
+  client-auth and DPoP sender-binding postures are exercised by the QUAL-1
+  auth tests, not re-run here;
 - the REAL non-executing `*execution.ShadowEvaluator` composed via the production
   `composeGatewayShadowIntoConfig` path (`CULVERT_MCP_SHADOW_READY=1`);
 - the REAL tool-trust approval → `catalog.Usable` projection (PR #1236);
