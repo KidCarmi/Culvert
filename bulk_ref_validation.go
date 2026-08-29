@@ -320,6 +320,7 @@ func validateBulkCandidateRefs(c bulkCandidate) error {
 //     compiled map (their enforcement uses that same fallback, so rejecting
 //     them would refuse legitimate restores);
 //   - rollback / CP snapshots are applied verbatim as captured.
+//
 // The invariant that matters is upheld at the other end: the INTERACTIVE
 // modern write door can never manufacture a NEW ID-less reference, so the
 // legacy shape only ever enters through evidence-bearing historical inputs.
