@@ -333,6 +333,13 @@
   credential Plan/Materialize work already in flight — provider `Fetch`/materialization can
   complete — but the boundary refusal still guarantees `Upstream.Call == 0`. The invariant is
   "no irreversible upstream side effect", not "no pre-boundary work occurred".
+- **Accepted residual — irreducible check-then-act window:** the boundary is lock-free, so a
+  kill engaged strictly between the final `KillGeneration()` read and `Upstream.Call` (a
+  handful of instructions) is not observed by that request. Closing it fully would require a
+  lock held across `Upstream.Call` — placing a mutex across network I/O so a hung upstream
+  blocks the operator's emergency kill (inverting the stop), and violating §2's "nothing
+  between the final check and the call". Recorded as an accepted owner-decision residual; the
+  fix shrank the exposure from the whole commit + materialization span to instruction-level.
 - **Interest:** the kill switch is the operator's only immediate stop; a stop that a slow
   commit/materialize window can outrun is not a stop.
 - **Compensating control unchanged:** execution posture stays CLOSED — no production

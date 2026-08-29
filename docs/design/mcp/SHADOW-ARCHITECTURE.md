@@ -388,6 +388,21 @@ Plan/Materialize work already in flight — provider `Fetch`/materialization can
 the boundary still guarantees `Upstream.Call == 0`. The invariant is "no irreversible upstream
 side effect", not "no pre-boundary work occurred".
 
+**Accepted residual — the irreducible check-then-act window.** The boundary is lock-free: it
+reads the kill generation and then, a few instructions later, calls `Upstream.Call`. A kill
+engaged strictly *after* that read but before the call is not observed by that request. This
+window is NOT closeable without holding a lock across `Upstream.Call` that `EngageKillSwitch`
+also takes — which is rejected on two grounds: (1) it would place a mutex across a network I/O
+side effect, so a slow or hung upstream would make the operator's emergency kill itself block
+for the duration of an in-flight call, inverting the stop's purpose; and (2) §2 of the closure
+brief forbids inserting any blocking/business logic between the final kill check and the call.
+The stated invariant — the last executable instruction before the side effect honors the
+authoritative kill state *at that instant* — holds; a kill arriving after that instant was not
+yet authoritative when the request committed. The fix shrank the exposure from the entire
+durable-commit + credential-materialization span (blockable, milliseconds to seconds) to this
+handful of instructions, and it is recorded here as an accepted owner-decision residual (the
+same class as the in-flight-materialization note above), not an open defect.
+
 For Shadow the kill switch already affected the verdict consistently with live at admission (a
 killed capability yields `rollout_emergency_active` and never reaches the boundary); the
 boundary re-check matters only for a live-capable mode, which is why this was a Canary
