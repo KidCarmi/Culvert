@@ -1568,7 +1568,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var conflict *errRewriteRevisionConflict
 			if errors.As(err, &conflict) {
-				writeRewriteRevisionConflict(w, conflict.current)
+				writeRewriteRevisionConflict(w, conflict.current, ifRev)
 				return
 			}
 			http.Error(w, "rewrite rule not persisted: "+err.Error(), http.StatusInternalServerError)
@@ -1635,7 +1635,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var conflict *errRewriteRevisionConflict
 			if errors.As(err, &conflict) {
-				writeRewriteRevisionConflict(w, conflict.current)
+				writeRewriteRevisionConflict(w, conflict.current, ifRev)
 				return
 			}
 			if errors.Is(err, errRewriteRuleNotFound) {

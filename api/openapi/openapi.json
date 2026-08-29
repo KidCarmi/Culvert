@@ -11476,7 +11476,7 @@
         "operationId": "createFileblockProfile",
         "parameters": [
           {
-            "description": "Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.",
+            "description": "Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the shared structured 409 ({error, currentRevision, yourRevision}) without mutating.",
             "in": "query",
             "name": "ifRevision",
             "required": false,
@@ -11559,7 +11559,7 @@
             }
           },
           {
-            "description": "Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.",
+            "description": "Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the shared structured 409 ({error, currentRevision, yourRevision}) without mutating.",
             "in": "query",
             "name": "ifRevision",
             "required": false,

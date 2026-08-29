@@ -152,7 +152,7 @@ func TestDC_RewriteStateCoherentRead(t *testing.T) {
 	if w.Code != 409 {
 		t.Fatalf("the superseded revision must 409, got %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"revision"`) {
+	if !strings.Contains(w.Body.String(), `"currentRevision"`) {
 		t.Fatalf("conflict must carry the current revision: %s", w.Body.String())
 	}
 }

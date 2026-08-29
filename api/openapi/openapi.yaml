@@ -4441,7 +4441,7 @@ paths:
         - name: ifRevision
           in: query
           required: false
-          description: Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.
+          description: Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the shared structured 409 ({error, currentRevision, yourRevision}) without mutating.
           schema: { type: string }
       requestBody:
         required: true
@@ -4485,7 +4485,7 @@ paths:
         - name: ifRevision
           in: query
           required: false
-          description: Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.
+          description: Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the shared structured 409 ({error, currentRevision, yourRevision}) without mutating.
           schema: { type: string }
       requestBody:
         required: true

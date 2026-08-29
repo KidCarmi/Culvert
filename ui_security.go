@@ -522,10 +522,12 @@ func apiFileblockProfilesState(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeFileProfileMutationError maps store errors to truthful HTTP outcomes:
-// revision conflict → structured 409 with the current revision; landed-content
-// degraded durability → treated as success by the caller (returns false);
-// not-found/name-taken → 4xx. Returns true when the response has been written.
-func writeFileProfileMutationError(w http.ResponseWriter, err error, notFoundStatus int) bool {
+// revision conflict → the SHARED 2D-B structured revision 409 ({error,
+// currentRevision, yourRevision} — one dialect across every fenced surface);
+// landed-content degraded durability → treated as success by the caller
+// (returns false); not-found/name-taken → 4xx. Returns true when the response
+// has been written.
+func writeFileProfileMutationError(w http.ResponseWriter, r *http.Request, err error, notFoundStatus int) bool {
 	if err == nil || errors.Is(err, fileutil.ErrReplacedNotSynced) {
 		return false // success (possibly with the landed-content degradation, logged by storage health)
 	}
@@ -534,9 +536,9 @@ func writeFileProfileMutationError(w http.ResponseWriter, err error, notFoundSta
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
-			"error":    conflict.Error(),
-			"conflict": "revision",
-			"revision": conflict.Current,
+			"error":           conflict.Error(),
+			"currentRevision": conflict.Current,
+			"yourRevision":    strings.TrimSpace(r.URL.Query().Get("ifRevision")),
 		})
 		return true
 	}
@@ -566,7 +568,7 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 		prof, err := globalProfileStore.CreateFenced(
 			strings.TrimSpace(r.URL.Query().Get("ifRevision")), body.Name, body.Extensions)
-		if writeFileProfileMutationError(w, err, http.StatusConflict) {
+		if writeFileProfileMutationError(w, r, err, http.StatusConflict) {
 			return
 		}
 		auditEvent(r, "fileprofile.create", prof.Name, fmt.Sprintf("%d extensions", len(prof.Extensions)))
@@ -596,7 +598,7 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 		newName := strings.TrimSpace(body.Name)
 		renamed := existed && newName != "" && !strings.EqualFold(beforeName, newName)
 		if err := globalProfileStore.UpdateFenced(
-			strings.TrimSpace(r.URL.Query().Get("ifRevision")), id, body.Name, body.Extensions); writeFileProfileMutationError(w, err, http.StatusNotFound) {
+			strings.TrimSpace(r.URL.Query().Get("ifRevision")), id, body.Name, body.Extensions); writeFileProfileMutationError(w, r, err, http.StatusNotFound) {
 			return
 		}
 		detail := fmt.Sprintf("%d extensions", len(body.Extensions))
@@ -663,7 +665,7 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := globalProfileStore.DeleteFenced(
-			strings.TrimSpace(r.URL.Query().Get("ifRevision")), id); writeFileProfileMutationError(w, err, http.StatusNotFound) {
+			strings.TrimSpace(r.URL.Query().Get("ifRevision")), id); writeFileProfileMutationError(w, r, err, http.StatusNotFound) {
 			return
 		}
 		auditEvent(r, "fileprofile.delete", id, "")

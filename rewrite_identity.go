@@ -94,16 +94,16 @@ func validateIncomingRewriteRule(r RewriteRule) error {
 	return nil
 }
 
-// writeRewriteRevisionConflict renders the structured 409 for a stale
-// ?ifRevision= assertion, carrying the CURRENT revision so the client
-// refreshes instead of blind-retrying.
-func writeRewriteRevisionConflict(w http.ResponseWriter, current string) {
+// writeRewriteRevisionConflict renders the SHARED 2D-B structured revision
+// 409 ({error, currentRevision, yourRevision} — one dialect across every
+// fenced surface) so the client refreshes instead of blind-retrying.
+func writeRewriteRevisionConflict(w http.ResponseWriter, current, asserted string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusConflict)
 	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
-		"error":    "rewrite rules changed since you loaded them — refresh and retry",
-		"conflict": "revision",
-		"revision": current,
+		"error":           "rewrite rules changed since you loaded them — refresh and retry",
+		"currentRevision": current,
+		"yourRevision":    asserted,
 	})
 }
 
