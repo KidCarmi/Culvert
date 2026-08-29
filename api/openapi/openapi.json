@@ -964,7 +964,7 @@
             "type": "array"
           },
           "revision": {
-            "description": "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "description": "Server-owned content-derived revision, derived from the SAME committed snapshot as `hosts` (coherent pair). Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
             "type": "string"
           }
         },
@@ -982,6 +982,10 @@
           },
           "count": {
             "type": "integer"
+          },
+          "editable": {
+            "description": "Ownership signal (2E-A-2): false on a managed Data Plane node, where DPI patterns are control-plane managed (cluster-synced) and local writes are refused with 409.",
+            "type": "boolean"
           },
           "patterns": {
             "items": {
@@ -1339,8 +1343,12 @@
             "nullable": true,
             "type": "array"
           },
+          "editable": {
+            "description": "Ownership signal (2E-A-2): false on a managed Data Plane node, where the allowlist is control-plane managed (cluster-synced) and local writes are refused with 409.",
+            "type": "boolean"
+          },
           "revision": {
-            "description": "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "description": "Server-owned content-derived revision, derived from the SAME committed snapshot as `domains` (coherent pair). Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
             "type": "string"
           }
         },
@@ -9430,25 +9438,10 @@
         "operationId": "deleteContentScan",
         "parameters": [
           {
+            "description": "The exact pattern string to remove.",
             "in": "query",
-            "name": "id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "name",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "host",
-            "required": false,
+            "name": "pattern",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -9464,13 +9457,36 @@
                 }
               }
             },
-            "description": "Delete DPI pattern (legacy alias)."
+            "description": "Pattern removed and persisted, but the fleet publish was REJECTED at commit — the body carries the rejection reason in cluster_publish_rejected (2E-A-2)."
+          },
+          "204": {
+            "description": "Pattern removed, persisted, and a fresh config snapshot published to the fleet (2E-A-2; same handler as DELETE /api/dpi)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "DPI patterns are control-plane managed on this data-plane node (2E-A-2 ownership refusal). Body is plain text."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Removed in memory but failed to persist (audited as dpi.remove.unpersisted). Body is plain text."
           }
         },
         "security": [
@@ -9554,13 +9570,33 @@
                 }
               }
             },
-            "description": "Add DPI pattern (legacy alias)."
+            "description": "Add DPI pattern (legacy alias — same handler and 2E-A-2 semantics as POST /api/dpi: publish-on-success, cluster_publish_rejected fact)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "DPI patterns are control-plane managed on this data-plane node (2E-A-2 ownership refusal). Body is plain text."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Applied in memory but failed to persist (audited as dpi.add.unpersisted). Body is plain text."
           }
         },
         "security": [
@@ -10970,17 +11006,10 @@
         "operationId": "deleteDPIPattern",
         "parameters": [
           {
+            "description": "The exact pattern string to remove.",
             "in": "query",
-            "name": "id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "name",
-            "required": false,
+            "name": "pattern",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -10996,13 +11025,36 @@
                 }
               }
             },
-            "description": "Delete DPI pattern."
+            "description": "Pattern removed and persisted, but the fleet publish was REJECTED at commit — the body carries the rejection reason in cluster_publish_rejected (2E-A-2; the local durable mutation is kept)."
+          },
+          "204": {
+            "description": "Pattern removed, persisted, and a fresh config snapshot published to the fleet (2E-A-2)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "DPI patterns are control-plane managed on this data-plane node (2E-A-2 ownership refusal, before any mutation). Body is plain text."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Removed in memory but failed to persist (audited as dpi.remove.unpersisted). Body is plain text."
           }
         },
         "security": [
@@ -11086,13 +11138,23 @@
                 }
               }
             },
-            "description": "Add DPI pattern."
+            "description": "Pattern(s) added and persisted; a fresh config snapshot was published to the fleet (2E-A-2). When the publish was rejected at commit, the local durable mutation is kept and the body carries the rejection reason in cluster_publish_rejected."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "DPI patterns are control-plane managed on this data-plane node (2E-A-2 ownership refusal, before any mutation). Body is plain text."
           },
           "500": {
             "content": {
@@ -18300,7 +18362,7 @@
                 }
               }
             },
-            "description": "Updated ({ok, count, revision})."
+            "description": "Updated ({ok, count, revision}); count and revision come from the ONE committed snapshot that was stored (2E-A-2 coherency). A fresh config snapshot is published to the fleet; when that publish is rejected at commit, the local durable mutation is kept and the body additionally carries the rejection reason in cluster_publish_rejected."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -18309,7 +18371,7 @@
             "$ref": "#/components/responses/PlainForbidden"
           },
           "409": {
-            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated. Also returned (plain text) when the allowlist is control-plane managed on this data-plane node (2E-A-2 ownership refusal, before any mutation)."
           },
           "500": {
             "content": {
@@ -18512,16 +18574,18 @@
         "operationId": "deleteYARARule",
         "parameters": [
           {
+            "description": "The rule file stem to delete (this collection-path form exists for clients that cannot DELETE with a path segment).",
             "in": "query",
-            "name": "id",
-            "required": false,
+            "name": "name",
+            "required": true,
             "schema": {
               "type": "string"
             }
           },
           {
+            "description": "OPTIONAL stale-delete fence (2E-A-2): the content-derived revision of the rule source the caller reviewed (from the item GET). A mismatch is the structured 409 with no deletion; absent keeps the legacy replacement semantics. The v2 client always asserts it.",
             "in": "query",
-            "name": "name",
+            "name": "ifRevision",
             "required": false,
             "schema": {
               "type": "string"
@@ -18538,13 +18602,36 @@
                 }
               }
             },
-            "description": "Delete YARA rule."
+            "description": "Delete YARA rule ({deleted, yara_rules, cache_cleared})."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The rule file does not exist. Body is plain text."
+          },
+          "409": {
+            "description": "Stale-delete fence conflict ({error, currentRevision, yourRevision}) — the rule changed since the asserted revision; nothing deleted."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The rule exists but removal failed (I/O fault). Body is plain text."
           }
         },
         "security": [
@@ -18720,18 +18807,30 @@
     },
     "/api/security-scan/yara/rules/{name}": {
       "delete": {
-        "description": "Deletes a YARA rule file.",
+        "description": "Deletes a YARA rule file. Destructive — joins the same optimistic-concurrency contract as the writes (2E-A-2).",
         "operationId": "deleteYARARuleItem",
+        "parameters": [
+          {
+            "description": "OPTIONAL stale-delete fence (2E-A-2): the content-derived revision of the rule source the caller reviewed (from the item GET). A mismatch is the structured 409 with no deletion; absent keeps the legacy replacement semantics. The v2 client always asserts it.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/YARARuleItem"
+                  "additionalProperties": true,
+                  "type": "object"
                 }
               }
             },
-            "description": "Delete YARA rule."
+            "description": "Delete YARA rule ({deleted, yara_rules, cache_cleared})."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -18747,7 +18846,20 @@
                 }
               }
             },
-            "description": "Not found. Body is plain text."
+            "description": "The rule file does not exist. Body is plain text."
+          },
+          "409": {
+            "description": "Stale-delete fence conflict ({error, currentRevision, yourRevision}) — the rule changed since the asserted revision; nothing deleted."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The rule exists but removal failed (I/O fault). Body is plain text."
           }
         },
         "security": [
@@ -18899,7 +19011,7 @@
     },
     "/api/security-scan/yara/settings": {
       "get": {
-        "description": "Returns the YARA engine runtime settings.",
+        "description": "Returns the YARA engine runtime settings as ONE coherent posture snapshot taken under the settings writer domain; `revision` fingerprints exactly the returned values (2E-A-2 coherency).",
         "operationId": "getYARASettings",
         "responses": {
           "200": {

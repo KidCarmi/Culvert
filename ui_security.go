@@ -381,10 +381,23 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 			"patterns":      patterns,
 			"count":         len(patterns),
 			"blocked_total": statDPIBlocked,
+			// 2E-A-2 §4: DPI patterns are CLUSTER-SYNCED (config_surfaces
+			// content_scan_patterns — CurrentConfigSnapshot captures
+			// dpiScanner.List(), the DP apply path installs it), so on a
+			// managed DP the CP is the single writer. The established
+			// ownership signal (F3a-2, same as the SaaS feed surfaces).
+			"editable": !isManagedDataPlane(),
 		})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		// 2E-A-2 §4: refused BEFORE mutation on a managed DP — a local edit
+		// would be silently overwritten by the next config sync or diverge
+		// the node from the fleet (the established F3a-2 posture).
+		if isManagedDataPlane() {
+			http.Error(w, "DPI patterns are control-plane managed on this data-plane node", http.StatusConflict)
 			return
 		}
 		var body struct {
@@ -424,10 +437,26 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 		auditEvent(r, "dpi.add", fmt.Sprintf("%d pattern(s)", added),
 			strings.Join(body.Patterns, ", "))
 		saveConfigVersion(sessionAdmin(r), "dpi.add")
-		jsonOK(w, map[string]any{"added": added})
+		// 2E-A-2 §4: DPI patterns are cluster-synced, so a successful
+		// mutation publishes a fresh snapshot NOW — without the version bump
+		// DPs keep enforcing the OLD pattern set until an unrelated admin
+		// action publishes one. A rejected publish is reported inline as the
+		// established cluster_publish_rejected fact (the local durable
+		// mutation is kept — the fleet stays on the last valid snapshot).
+		pubErr := publishCurrentConfigSnapshot()
+		resp := map[string]any{"added": added}
+		if pubErr != nil {
+			resp["cluster_publish_rejected"] = pubErr.Error()
+		}
+		jsonOK(w, resp)
 
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		// 2E-A-2 §4: same managed-DP ownership refusal as the add path.
+		if isManagedDataPlane() {
+			http.Error(w, "DPI patterns are control-plane managed on this data-plane node", http.StatusConflict)
 			return
 		}
 		pattern := strings.TrimSpace(r.URL.Query().Get("pattern"))
@@ -447,6 +476,17 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("UI: DPI pattern removed %q", pattern)
 		auditEvent(r, "dpi.remove", pattern, "")
 		saveConfigVersion(sessionAdmin(r), "dpi.remove")
+		// 2E-A-2 §4: publish so DPs converge on the removal now. The accepted
+		// 204 stays the full-success response; a rejected publish must be
+		// visible to the caller, so that case alone returns 200 with the
+		// established cluster_publish_rejected fact (a 204 cannot carry it).
+		if pubErr := publishCurrentConfigSnapshot(); pubErr != nil {
+			jsonOK(w, map[string]any{
+				"removed":                  pattern,
+				"cluster_publish_rejected": pubErr.Error(),
+			})
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -748,9 +788,25 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// Revision derived from the SAME snapshot returned (2E-A-2 §1) — a
 		// second store read could interleave with a writer and mint a token
 		// for a state this response does not show.
-		jsonOK(w, map[string]any{"domains": list, "revision": domainAllowlistRevisionOf(list)})
+		jsonOK(w, map[string]any{
+			"domains":  list,
+			"revision": domainAllowlistRevisionOf(list),
+			// 2E-A-2 §4: the allowlist is CLUSTER-SYNCED (config_surfaces
+			// threat_domain_allowlist — captured by CurrentConfigSnapshot,
+			// applied by the DP snapshot path), so on a managed DP the CP is
+			// the single writer. The established ownership signal (F3a-2).
+			"editable": !isManagedDataPlane(),
+		})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		// 2E-A-2 §4: refused BEFORE mutation on a managed DP (established
+		// F3a-2 posture) — the DP snapshot apply path is this surface's only
+		// writer there, and a local edit would be silently overwritten on the
+		// next sync or diverge the node from the fleet.
+		if isManagedDataPlane() {
+			http.Error(w, "threat-feed domain allowlist is control-plane managed on this data-plane node", http.StatusConflict)
 			return
 		}
 		var body struct {
@@ -789,8 +845,15 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// ui_auth.go). Without a version bump DPs keep enforcing the OLD
 		// allowlist until some unrelated admin action publishes a
 		// snapshot — the exact "unblock this false positive NOW" latency
-		// this control exists to remove. No-op when not running as CP.
-		_ = publishCurrentConfigSnapshot()
+		// this control exists to remove.
+		//
+		// 2E-A-2 §4: the publish outcome is a FACT the caller must see — a
+		// rejected publish means the fleet stays on the old allowlist while
+		// this node enforces the new one. Reported inline as the established
+		// cluster_publish_rejected response fact (saas_feed_api.go /
+		// ui_config.go import); the valid local mutation is kept per the
+		// same doctrine (the fleet keeps the last valid snapshot).
+		pubErr := publishCurrentConfigSnapshot()
 		// Closes the audit gap flagged by
 		// roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md §3.5 and
 		// ui_routes_meta.go:291 ("no direct auditEvent observed"). The
@@ -811,7 +874,11 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		count := len(stored)
 		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", count), "")
 		// Count and revision from ONE committed snapshot (2E-A-2 §1).
-		jsonOK(w, map[string]any{"ok": true, "count": count, "revision": domainAllowlistRevisionOf(stored)})
+		resp := map[string]any{"ok": true, "count": count, "revision": domainAllowlistRevisionOf(stored)}
+		if pubErr != nil {
+			resp["cluster_publish_rejected"] = pubErr.Error()
+		}
+		jsonOK(w, resp)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
