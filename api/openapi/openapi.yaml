@@ -643,6 +643,9 @@ components:
       additionalProperties: false
       properties:
         hosts: { type: array, items: { type: string }, nullable: true }
+        revision:
+          type: string
+          description: "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision})."
     SecurityScanStatus:
       type: object
       description: Security-scan service status (fields vary by scan-service mode).
@@ -714,6 +717,9 @@ components:
       additionalProperties: false
       properties:
         domains: { type: array, items: { type: string }, nullable: true }
+        revision:
+          type: string
+          description: "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision})."
     YARASettings:
       type: object
       description: YARA engine runtime settings (fields vary by build/config).
@@ -1124,6 +1130,9 @@ components:
       properties:
         hashes: { type: array, items: { type: string }, nullable: true }
         hosts: { type: array, items: { type: string }, nullable: true }
+        revision:
+          type: string
+          description: "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision})."
     YARARules:
       type: object
       description: YARA rule inventory — directory, files, per-file rule names, compiled names.
@@ -1204,6 +1213,9 @@ components:
       additionalProperties: false
       properties:
         hosts: { type: array, items: { type: string } }
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies."
     SetMetricsToken:
       type: object
       required: [token]
@@ -1244,12 +1256,18 @@ components:
       properties:
         hashes: { type: array, items: { type: string } }
         hosts: { type: array, items: { type: string } }
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies."
     SetDomainAllowlist:
       type: object
       required: [domains]
       additionalProperties: false
       properties:
         domains: { type: array, items: { type: string } }
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies."
     SetYARASettings:
       type: object
       additionalProperties: false
@@ -1260,6 +1278,9 @@ components:
         on_timeout: { type: string }
         on_saturation: { type: string }
         alert_degraded: { type: boolean }
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies."
     SetLogsRetention:
       type: object
       additionalProperties: false
@@ -1983,6 +2004,9 @@ components:
       properties:
         name: { type: string }
         source: { type: string }
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies A fenced CREATE asserts the literal sentinel `new` and refuses (409) when the rule file already exists; a fenced UPDATE asserts the content revision of the source it edited."
     SupportRecipient:
       type: object
       description: A support-bundle recipient (create/update response — includes derived + rotation metadata).
@@ -4868,6 +4892,10 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: Applied in memory but failed to persist (audited as dpi.add.unpersisted). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
     delete:
       operationId: deleteDPIPattern
       tags: [security]
@@ -4947,12 +4975,17 @@ paths:
             schema: { $ref: '#/components/schemas/SetDPIBypass' }
       responses:
         '200':
-          description: Updated.
+          description: Updated ({hosts, revision}).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
+        '500':
+          description: Applied in memory but failed to persist (fail-safe; audited as security.dpi_bypass.update_unpersisted). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
 
   /api/security-scan/status:
     get:
@@ -5100,12 +5133,17 @@ paths:
             schema: { $ref: '#/components/schemas/SetDomainAllowlist' }
       responses:
         '200':
-          description: Updated.
+          description: Updated ({ok, count, revision}).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
+        '500':
+          description: Applied in memory but failed to persist (fail-safe; audited as threatfeed.allowlist.update_unpersisted). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
 
   /api/security-scan/yara/settings:
     get:
@@ -5152,12 +5190,17 @@ paths:
             schema: { $ref: '#/components/schemas/SetYARASettings' }
       responses:
         '200':
-          description: Updated.
+          description: Updated (persist-before-apply — a 200 means the posture is durable AND live; carries the new revision).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
+        '500':
+          description: The settings could not be persisted; the live engine posture is UNCHANGED (persist-before-apply). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
 
   /api/decryption/redaction:
     get:
@@ -6845,12 +6888,17 @@ paths:
             schema: { $ref: '#/components/schemas/SetScanExclusions' }
       responses:
         '200':
-          description: Updated.
+          description: Updated ({hashes, hosts, revision}).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
+        '500':
+          description: Applied in memory but failed to persist (fail-safe; audited as security.scan_exclusions.update_unpersisted). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
 
   /api/security-scan/yara/rules:
     get:
@@ -6903,6 +6951,7 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
     put:
       operationId: updateYARARulesCollection
       tags: [security]
@@ -6932,6 +6981,7 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
     delete:
       operationId: deleteYARARule
       tags: [security]
@@ -7858,7 +7908,7 @@ paths:
       operationId: getYARARuleItem
       tags: [security]
       summary: Get YARA rule
-      description: Returns a single YARA rule file.
+      description: Returns a single YARA rule file ({name, source, revision} — the content-derived revision is the ifRevision a fenced update asserts).
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -7909,6 +7959,7 @@ paths:
               schema: { $ref: '#/components/schemas/YARARuleItem' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
         '404':
           description: Not found. Body is plain text.
           content:

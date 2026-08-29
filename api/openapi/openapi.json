@@ -962,6 +962,10 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "revision": {
+            "description": "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
           }
         },
         "required": [
@@ -1334,6 +1338,10 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "revision": {
+            "description": "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
           }
         },
         "required": [
@@ -3081,6 +3089,10 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "revision": {
+            "description": "Server-owned content-derived revision. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
           }
         },
         "required": [
@@ -3330,6 +3342,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies.",
+            "type": "string"
           }
         },
         "required": [
@@ -3377,6 +3393,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies.",
+            "type": "string"
           }
         },
         "required": [
@@ -3572,6 +3592,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -3687,6 +3711,10 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies.",
+            "type": "string"
           },
           "max_inflight": {
             "format": "int64",
@@ -4550,6 +4578,10 @@
       "YARARuleInput2": {
         "additionalProperties": false,
         "properties": {
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies A fenced CREATE asserts the literal sentinel `new` and refuses (409) when the rule file already exists; a fenced UPDATE asserts the content revision of the source it edited.",
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -11061,6 +11093,16 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Applied in memory but failed to persist (audited as dpi.add.unpersisted). Body is plain text."
           }
         },
         "security": [
@@ -11146,13 +11188,26 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated ({hosts, revision})."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Applied in memory but failed to persist (fail-safe; audited as security.dpi_bypass.update_unpersisted). Body is plain text."
           }
         },
         "security": [
@@ -18140,13 +18195,26 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated ({hashes, hosts, revision})."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Applied in memory but failed to persist (fail-safe; audited as security.scan_exclusions.update_unpersisted). Body is plain text."
           }
         },
         "security": [
@@ -18232,13 +18300,26 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated ({ok, count, revision})."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Applied in memory but failed to persist (fail-safe; audited as threatfeed.allowlist.update_unpersisted). Body is plain text."
           }
         },
         "security": [
@@ -18554,6 +18635,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
           }
         },
         "security": [
@@ -18607,6 +18691,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
           }
         },
         "security": [
@@ -18685,7 +18772,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "get": {
-        "description": "Returns a single YARA rule file.",
+        "description": "Returns a single YARA rule file ({name, source, revision} — the content-derived revision is the ifRevision a fenced update asserts).",
         "operationId": "getYARARuleItem",
         "responses": {
           "200": {
@@ -18783,6 +18870,9 @@
               }
             },
             "description": "Not found. Body is plain text."
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
           }
         },
         "security": [
@@ -18868,13 +18958,26 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated (persist-before-apply — a 200 means the posture is durable AND live; carries the new revision)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The settings could not be persisted; the live engine posture is UNCHANGED (persist-before-apply). Body is plain text."
           }
         },
         "security": [
