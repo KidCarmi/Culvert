@@ -1535,19 +1535,29 @@ type configBackup struct {
 func apiRewrite(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rules := rewriter.List()
-		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
-
-	case http.MethodPost:
-		// Recovery correction §5: while management identity is not durable a
-		// v2 mutation could create/address identity that re-mints on restart
-		// (and a save could clobber a refused/corrupt settings file) — refuse.
+		// Management-surface closure: RewriteRule serializes stableId, so the
+		// LEGACY list is a management-identity read too — while identity is
+		// not durable it answers the SAME structured 503 as the v2 state
+		// surface (one dialect; ephemeral StableIDs are never exposed as a
+		// healthy management list). Healthy behavior is unchanged.
 		if d := rewriteIdentityDegraded(); d != nil {
 			writeRewriteIdentityDegraded(w, d)
 			return
 		}
+		rules := rewriter.List()
+		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
 
+	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		// AFTER the RBAC boundary (authorization precedes degradation
+		// disclosure): while management identity is not durable a v2
+		// mutation could create/address identity that re-mints on restart
+		// (and a save could clobber a refused/corrupt settings file) — refuse
+		// with the structured 503, visible to authorized Operators only.
+		if d := rewriteIdentityDegraded(); d != nil {
+			writeRewriteIdentityDegraded(w, d)
 			return
 		}
 		var rule RewriteRule
@@ -1597,12 +1607,12 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, added)
 
 	case http.MethodDelete:
-		if d := rewriteIdentityDegraded(); d != nil {
-			writeRewriteIdentityDegraded(w, d)
+		if !requireRole(w, r, RoleOperator) {
 			return
 		}
-
-		if !requireRole(w, r, RoleOperator) {
+		// AFTER the RBAC boundary — same ordering contract as POST.
+		if d := rewriteIdentityDegraded(); d != nil {
+			writeRewriteIdentityDegraded(w, d)
 			return
 		}
 		// v2 addressing: ?stableId= (durable identity). Legacy ?id= (process-

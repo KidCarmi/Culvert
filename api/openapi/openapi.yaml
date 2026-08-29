@@ -3529,6 +3529,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/RewriteList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Rewrite MANAGEMENT identity is not durable on this node — the legacy list serializes stableId, so it answers the SAME structured `{error, degraded:"rewrite-identity", reason}` as GET /api/rewrite/state instead of exposing ephemeral identities. Healthy behavior is unchanged; traffic rewrite enforcement continues.
     post:
       operationId: addRewriteRule
       tags: [policy]
