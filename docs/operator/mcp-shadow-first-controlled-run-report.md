@@ -40,8 +40,9 @@ actual production code paths with real cryptography and a real listener socket:
 - the REAL durable schema-v2 evidence spool and the REAL `culvert_mcp_shadow_*`
   metric singleton;
 - a REAL controlled upstream HTTP server (owned by the harness) with an
-  invocation counter, so the central differential — Culvert shadow evaluations > 0
-  while the protected upstream observes 0 invocations — is independently measured.
+  invocation counter, providing an AUXILIARY observation — Culvert shadow evaluations > 0
+  while the protected upstream observes 0 invocations. (This counter is defense-in-depth,
+  not the proof: the primary zero-side-effect guarantee is structural — see §5 and §8.)
 
 This is real-runtime, in-process, single-node evidence over the production code —
 NOT evidence from a production-like fleet with a real Control Plane and external
@@ -81,8 +82,15 @@ functional gap — noted, not patched, per the no-code-change rule.)
 - Controlled MCP server: `controlled-test-server`, owned by the harness, exposing two
   harmless deterministic tools — `echo` (policy ALLOW) and `danger` (policy DENY). It is
   backed by a REAL controlled upstream TLS server (httptest) **registered as the server's
-  inventory endpoint**, so a regressed upstream dial would land on its handler; its
-  invocation counter is the independent zero-side-effect witness.
+  inventory endpoint**. Its invocation counter is an **AUXILIARY / defense-in-depth** check,
+  NOT an independent proof: the production upstream transport can reject an attempted dial
+  during endpoint resolution or peer-identity verification *before* any request handler is
+  reached, so zero hits do not by themselves prove no regressed dial was attempted. The
+  PRIMARY zero-side-effect proof is **structural** — the composed executor is the
+  non-executing `*execution.ShadowEvaluator`, which holds no upstream client and no
+  materialize-capable broker (Layer B), asserted in the harness and enforced by the
+  execution-posture wall — so Shadow cannot dial an upstream at all, regardless of the
+  witness's reachability.
 - Synthetic identity: tenant `qualification`, principal/sub `synthetic-shadow-principal`,
   client_id `client-gw`, auth = ES256 bearer (RFC-9728 audience), scope `gateway.tools.call`.
 - Tool fingerprint (deterministic from the tool definition): `8f7e32e0c4fa380a9ae085a0a306ca3a8552252ffdbb6e7795973e7fd011043c`
@@ -239,5 +247,8 @@ status map, both asserted equal to the live evaluation counters (not merely the 
 metrics singleton) — contained scope, performed ZERO upstream side effects and ZERO credential
 materializations, never armed live execution, and rolled back Shadow→Observe deterministically
 (and survived a restart). The protected upstream observed 0 invocations while Culvert recorded
-3 Shadow evaluations — the central differential.
+3 Shadow evaluations — an auxiliary observation consistent with the structural guarantee that
+the non-executing `*execution.ShadowEvaluator` (no upstream client, no materialize broker) is
+the composed executor; that structural fact, asserted in the harness and enforced by the
+execution-posture wall, is what proves zero upstream side effects.
 
