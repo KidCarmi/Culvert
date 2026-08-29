@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -224,6 +225,30 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	if cfg == nil {
 		return nil
 	}
+	// Pre-compute the Canary/Production activation verdict BEFORE taking durableMu. The full
+	// preflight reads rollback health (canaryNodeFacts → rollbackPathHealthy → rollbackPathReady),
+	// which itself takes r.durableMu; computing it inside the commit's own durableMu critical section
+	// would self-deadlock (the mutex is non-reentrant), which in production is the same singleton the
+	// commit holds (Codex P1). It is a read-only, fail-closed gate, so evaluating it just before the
+	// lock is safe: a benign state change in the tiny window only ever fails the transition closed,
+	// and the verdict is consumed inside the lock so modeExecReady still owns the first rejection.
+	canaryPreflightReady := true
+	var canaryPreflightUnmet []canary.Reason
+	if cfg.Mode.RequiresLiveExecution() {
+		ai := canaryActivationInputsProbe(cfg.Capability, cfg.Scope, cfg.ScopeRevision)
+		rd := evaluateCanaryActivationPreflight(CanaryActivationInput{
+			Capability:         cfg.Capability,
+			Scope:              cfg.Scope,
+			ScopeRev:           cfg.ScopeRevision,
+			ToolApprovals:      ai.ToolApprovals,
+			Budget:             ai.Budget,
+			ServerUsable:       ai.ServerUsable,
+			FingerprintCurrent: ai.FingerprintCurrent,
+			Now:                now,
+		})
+		canaryPreflightReady = rd.Ready
+		canaryPreflightUnmet = rd.Unmet
+	}
 	// Serialize the whole read-modify-write-persist sequence against other durable
 	// mutations (kill switch, rehearsal, another commit).
 	r.durableMu.Lock()
@@ -266,23 +291,10 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	// envelope cannot smuggle an approval or budget past the gate (Codex P1). In this build the
 	// authoritative approval/budget store does not exist (the probe returns empties) and the live
 	// tier is never armed, so a Canary/Production transition ALWAYS fails here.
-	if cfg.Mode.RequiresLiveExecution() {
-		ai := canaryActivationInputsProbe(cfg.Capability, cfg.Scope, cfg.ScopeRevision)
-		in := CanaryActivationInput{
-			Capability:         cfg.Capability,
-			Scope:              cfg.Scope,
-			ScopeRev:           cfg.ScopeRevision,
-			ToolApprovals:      ai.ToolApprovals,
-			Budget:             ai.Budget,
-			ServerUsable:       ai.ServerUsable,
-			FingerprintCurrent: ai.FingerprintCurrent,
-			Now:                now,
-		}
-		if rd := evaluateCanaryActivationPreflight(in); !rd.Ready {
-			logger.Printf("MCP rollout: %s transition to %s refused by Canary activation preflight %v (fail-closed)",
-				cfg.Capability.String(), cfg.Mode.String(), rd.Unmet)
-			return errCanaryActivationPreflightFailed
-		}
+	if cfg.Mode.RequiresLiveExecution() && !canaryPreflightReady {
+		logger.Printf("MCP rollout: %s transition to %s refused by Canary activation preflight %v (fail-closed)",
+			cfg.Capability.String(), cfg.Mode.String(), canaryPreflightUnmet)
+		return errCanaryActivationPreflightFailed
 	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
 	// for the scope-change continuity check below.

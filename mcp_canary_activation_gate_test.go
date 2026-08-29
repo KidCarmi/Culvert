@@ -143,6 +143,55 @@ func TestCanaryCommitGate_AllowsWhenFullyReady(t *testing.T) {
 	}
 }
 
+// TestCanaryCommitGate_SingletonCommitDoesNotDeadlock is the Codex P1 (round-3) regression proof:
+// the commit path takes r.durableMu, and the Canary activation preflight it must consult reads
+// rollback health (canaryNodeFacts → rollbackPathHealthy → getMCPRollout().rollbackPathReady),
+// which ALSO takes durableMu — on the process SINGLETON, the SAME non-reentrant mutex the commit
+// holds. Earlier tests missed this because they commit on newTestRollout() (a non-singleton) while
+// rollbackPathReady reads the singleton, so the two locks were different objects. This test commits
+// a fully-ready Canary on the SINGLETON itself, so a self-deadlock would hang forever. The fix
+// pre-computes the preflight verdict BEFORE taking durableMu; with it, the commit returns.
+func TestCanaryCommitGate_SingletonCommitDoesNotDeadlock(t *testing.T) {
+	withTempDataDir(t)
+	withCanaryReadyNode(t) // node facts + live tier + attestation + rehearsal at the temp dataDir
+	now := time.Unix(1000, 0)
+	vin := validCanaryActivationInput(now)
+	armCanaryActivationInputs(t, vin)
+
+	// Swap the process-wide rollout singleton for a fresh instance so the commit and
+	// rollbackPathReady (which reads getMCPRollout()) share the SAME durableMu — the production
+	// shape that self-deadlocks without the fix.
+	_ = getMCPRollout() // ensure the sync.Once has fired before we swap the pointer
+	prev := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	t.Cleanup(func() { globalMCPRollout = prev })
+
+	// Precondition: the FULL preflight is Ready, so the commit reaches the transition (not an early
+	// refusal that would never touch the re-entrant path).
+	if rd := evaluateCanaryActivationPreflight(vin); !rd.Ready {
+		t.Fatalf("fixture must make the FULL preflight ready, unmet=%v", rd.Unmet)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- getMCPRollout().commitRolloutTransitionAt(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now, rollout.OriginSynthetic)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a fully-ready Canary commit on the singleton must succeed, got %v", err)
+		}
+		if getMCPRollout().gateway.CurrentMode() != rollout.ModeCanary {
+			t.Fatalf("mode must be Canary after an admitted transition, got %s", getMCPRollout().gateway.CurrentMode())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SECURITY/LIVENESS: commitRolloutTransitionAt deadlocked on the singleton durableMu (preflight re-entered the held lock)")
+	}
+}
+
 // TestCanaryCommitGate_RefusesWhenActivationInputsMissing proves the ACTIVATION-level half: a node
 // that is fully canary-READY but whose authoritative activation inputs are absent (the shipped
 // production posture — no approval/budget store) still refuses the Canary transition. This is the

@@ -89,6 +89,20 @@ func canaryRuntimeStatePath(capb rollout.Capability) string {
 // errCanaryBudgetInvalid marks an activation refused because its budget is not first-Canary valid.
 var errCanaryBudgetInvalid = errors.New("canary_budget_invalid")
 
+// removeRuntimeStateAfterSafetyPersistFailure best-effort removes the durable runtime file after a
+// FAIL-CLOSED safety mutation (a whole-Canary abort or a demotion) could not be persisted, so a
+// restart cannot restore the pre-mutation record and revive an execution-eligible activation the
+// mutation was meant to stop. A missing file restores to the dormant default (the safe direction);
+// if the removal also fails the stale record remains and that is logged. Caller holds cr.mu.
+func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollout.Capability, what string, persistErr error) {
+	if rerr := os.Remove(canaryRuntimeStatePath(capb)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		logger.Printf("MCP canary runtime: %s persist AND remove for %s failed; a restart may revive the activation: persist=%q remove=%q",
+			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(rerr.Error()))
+		return
+	}
+	logger.Printf("MCP canary runtime: %s persist for %s failed; removed durable state to fail closed to dormant: %q", what, capb.String(), sanitizeLog(persistErr.Error()))
+}
+
 // canaryRuntimePersist is the durable persist step for every canary-runtime mutation (begin,
 // reserve, abort trip, demote), isolated as a seam so a test can inject a durable-write failure and
 // exercise the fail-closed paths (disarm on begin failure; remove-durable-record on demote/abort
@@ -149,15 +163,10 @@ func (rt *canaryRuntime) demoteCanary(capb rollout.Capability) error {
 	cr.aborter = nil
 	cr.budget = canary.Budget{}
 	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
-		// Persisting the disarmed record failed — remove the durable file so a restart cannot
-		// restore the prior Active:true record. A removal that succeeds fails the runtime closed to
-		// dormant; a removal that also fails leaves the stale record, so surface the original error.
-		if rerr := os.Remove(canaryRuntimeStatePath(capb)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-			logger.Printf("MCP canary runtime: demote persist AND remove for %s failed; a restart may revive the activation: persist=%q remove=%q",
-				capb.String(), sanitizeLog(err.Error()), sanitizeLog(rerr.Error()))
-			return err
-		}
-		logger.Printf("MCP canary runtime: demote persist for %s failed; removed durable state to fail closed to dormant: %q", capb.String(), sanitizeLog(err.Error()))
+		// Persisting the disarmed record failed — remove the durable file so a restart cannot restore
+		// the prior Active:true record and undo the rollback. The error is RETURNED so the caller
+		// never reports a durable rollback that a restart could reverse.
+		rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "demote", err)
 		return err
 	}
 	return nil
@@ -204,6 +213,13 @@ func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now tim
 	// failure the in-memory spend is already consumed (monotonic — never replayed), and we deny.
 	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
 		logger.Printf("MCP canary runtime: persist after reserve for %s failed (fail-closed): %q", capb.String(), sanitizeLog(err.Error()))
+		// If this reserve latched a WHOLE-CANARY abort (budget exhaustion or an identity/blast-radius
+		// breach) that did not durably persist, remove the durable record so a restart cannot revive
+		// the (pre-abort) Active/not-aborted activation and let previously-admitted work run again —
+		// the same fail-closed handling as tripCanaryAbort/demoteCanary (Codex P1).
+		if outcome.WholeCanaryExhaustion() || outcome.IdentityCapExceeded() {
+			rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "reserve-abort", err)
+		}
 		if outcome.Granted() {
 			return canary.BudgetDeniedInvalid, generation
 		}
@@ -246,12 +262,7 @@ func (rt *canaryRuntime) tripCanaryAbort(capb rollout.Capability, code string, n
 	res := cr.aborter.Trip(code, cr.generation, now)
 	if res == canary.TripCanaryLatched {
 		if err := canaryRuntimePersist(rt, capb, cr); err != nil {
-			if rerr := os.Remove(canaryRuntimeStatePath(capb)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-				logger.Printf("MCP canary runtime: abort persist AND remove for %s failed; a restart may revive the activation: persist=%q remove=%q",
-					capb.String(), sanitizeLog(err.Error()), sanitizeLog(rerr.Error()))
-			} else {
-				logger.Printf("MCP canary runtime: abort persist for %s failed; removed durable state to fail closed to dormant: %q", capb.String(), sanitizeLog(err.Error()))
-			}
+			rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "abort", err)
 		}
 	}
 	return res

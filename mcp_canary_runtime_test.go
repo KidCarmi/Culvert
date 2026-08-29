@@ -400,6 +400,54 @@ func TestCanaryRuntime_AbortPersistFailureRemovesState(t *testing.T) {
 	}
 }
 
+// TestCanaryRuntime_ReserveAbortPersistFailureRemovesState proves the §4 fail-closed handling when a
+// RESERVE (not an explicit trip/demote) latches a whole-Canary abort whose persist fails (Codex P1):
+// the durable record is removed so a restart cannot revive the pre-abort Active/not-aborted
+// activation and re-admit previously-granted work. This is the reserve-triggered sibling of
+// TestCanaryRuntime_AbortPersistFailureRemovesState.
+func TestCanaryRuntime_ReserveAbortPersistFailureRemovesState(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	// A total budget of exactly 1: the 2nd reserve exhausts the blast radius → whole-Canary abort.
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(1), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetGranted {
+		t.Fatalf("the first reserve must be granted, got %s", o)
+	}
+	rt.releaseCanaryExecution(capb, rt.currentGeneration(capb))
+	// Sanity: a durable active record exists that a naive restart would revive.
+	if _, err := os.Stat(canaryRuntimeStatePath(capb)); err != nil {
+		t.Fatalf("begin/reserve must have written a durable active record: %v", err)
+	}
+	// Inject a persist failure for the abort-latching reserve only.
+	prev := canaryRuntimePersist
+	canaryRuntimePersist = func(_ *canaryRuntime, _ rollout.Capability, _ *canaryCapRuntime) error {
+		return errors.New("injected reserve-abort persist failure")
+	}
+	t.Cleanup(func() { canaryRuntimePersist = prev })
+
+	// The 2nd reserve exhausts the total → latches a whole-Canary abort → persist fails.
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedTotal {
+		t.Fatalf("the exhausting reserve must be denied on total, got %s", o)
+	}
+	if rt.executionEligible(capb) {
+		t.Fatal("the exhausting reserve must have latched the whole-Canary abort (no longer eligible)")
+	}
+	// The fix removes the durable record so a restart cannot revive the un-aborted activation.
+	if _, err := os.Stat(canaryRuntimeStatePath(capb)); !os.IsNotExist(err) {
+		t.Fatal("a failed reserve-triggered abort persist must remove the durable record to fail closed to dormant")
+	}
+	canaryRuntimePersist = prev
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+	if fresh.executionEligible(capb) {
+		t.Fatal("SECURITY: a restart after a failed reserve-abort persist must not revive an eligible Canary")
+	}
+}
+
 // TestCanaryRuntime_StaleReleaseDoesNotFreeNewGeneration proves the §3 generation-bound release
 // (Codex P1): a release carrying a superseded generation is a no-op and cannot free a concurrency
 // slot on the current activation (which would admit an extra in-flight execution beyond the cap).
