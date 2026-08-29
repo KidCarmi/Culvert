@@ -865,6 +865,55 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > (transition-waits, mutation-waits→truthful 409, §13/§14 pins, GET
 > tear-proof). API shape unchanged — no frontend source change.
 >
+> **2D-B trust-boundary / policy-read / bulk-integrity correction (this
+> branch, 2026-08-29 — external-review follow-up on the 244a846e
+> candidate).** Five defect families, each red-before against 244a846e:
+> **(1) Interactive reference trust boundary.** `validateRuleObjectRefs`
+> used to run BEFORE server canonicalization and accepted "supplied ID
+> exists OR name exists" — a payload naming a MISSING object while
+> smuggling a valid unrelated object's ID passed validation, the stamp then
+> discarded the ID, and a dangling rule landed. The pipeline is now decode
+> → structural validation → SERVER canonicalization
+> (`stampRuleMetadataForWrite`/`stampObjectRefIDs`, client IDs discarded) →
+> reference validation of the FINAL canonical rule → persistence, at all
+> five interactive rule sites + PL Accept; validation keys on NAMES only.
+> A mismatched name/ID pair binds to the NAME's object (doctrine pin, not
+> an error). Proofs: `reference_trust_boundary_test.go`.
+> **(2) Runtime-faithful category resolvability.**
+> `referencedCategoryResolvable` now mirrors `resolveFusion` exactly: view
+> installed ⇒ catStore BuiltIn=false admin tier + the CURRENT view's
+> classes + UT1; a BuiltIn=true catStore-only name the view does not serve
+> is NOT referenceable; no view ⇒ full catStore + UT1.
+> **(3) Policy fenced reads.** `PolicyStore.SnapshotWithVersion()` (rules +
+> version + updatedAt under ONE read lock) + the coordinator-locked
+> `effectiveManagementSnapshot()`: GET /api/policy and GET /api/authpolicy
+> no longer pair a rule list with a version read from a second call — the
+> stale-rows/successor-token pair that let an edit pass the ifVersion fence
+> against content the client never saw. `CurrentConfigSnapshot`'s
+> PolicyRules/PolicyVersion capture fixed the same way (§13 audit).
+> **(4) Draft review snapshot.** GET /api/policy/draft assembles
+> state/diff/pendingCount/version/shadows/baseStale from ONE
+> `reviewSnapshot()` capture; diff/shadows derived from the captured
+> slices by pure functions (`diffRuleSets`), so the returned commit token
+> identifies exactly the reviewed candidate — a commit with it can never
+> activate a rule the review never showed (deterministic §12 proof kept as
+> the load-bearing 2B regression gate). Proofs:
+> `policy_fenced_read_test.go`.
+> **(5) Bulk candidate reference integrity + whole-snapshot 10k.**
+> `bulk_ref_validation.go`: a PURE candidate-graph validator
+> (rule→group/profile ID-or-name within the candidate; category names via
+> candidate entries ∪ live view/UT1 closure; FileProfile deferred to
+> 2D-C) applied at the three bulk doors — config import constructs the
+> EFFECTIVE merged/replaced candidate and 400s the whole import inside the
+> exclusive gate before any mutation; rollback validates the restored
+> candidate (nil-section = live) beside the 10k gate; CP→DP
+> `validateConfigSnapshot` gains the deterministic both-sides-carried
+> graph checks AND `urlcat.ValidateEntries` so one over-cap category now
+> rejects the ENTIRE snapshot (no more mixed new-rulebase/old-taxonomy
+> apply; `ReplaceAllChecked` stays as defense in depth). Proofs:
+> `bulk_ref_integrity_test.go`. API shapes unchanged — no frontend source
+> change.
+>
 > **Slice 2D-A implementation record (this branch, 2026-08-28).**
 >
 > **2D-A.0 backend hardening** — the shared-object stores
