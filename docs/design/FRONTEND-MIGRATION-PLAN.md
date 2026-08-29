@@ -914,6 +914,47 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > `bulk_ref_integrity_test.go`. API shapes unchanged — no frontend source
 > change.
 >
+> **2D-B final bulk canonicalization + effective-authority correction (this
+> branch, 2026-08-29 — external-review follow-up on the f29f652d candidate).**
+> Two remaining bulk-validation defects, each red-before against f29f652d:
+> **(A) Import validated a different rule than it installs.** The candidate
+> validator judged incoming rules AS SUBMITTED (name-or-ID), while
+> importPolicyRules later discards client IDs and re-derives from names — a
+> backup naming a MISSING group/profile while smuggling a valid unrelated
+> object's ID passed pre-validation and landed a dangling rule.
+> `canonicalizeCandidateRuleRefs` is the PURE candidate analogue of
+> stampObjectRefIDs: incoming/updated import rules are canonicalized against
+> the CANDIDATE object sets (which may be supplied by the same backup and
+> are not live yet) before validation, so the validator judges the rule the
+> import will actually install; untouched live rules in merge/never-wipe
+> candidates retain their ID-authoritative semantics. §10 distinction
+> recorded in-code: rollback/CP-snapshot rules are applied VERBATIM (no
+> restamp) and legitimately keep authoritative IDs — judged ID-or-name as
+> captured, never re-canonicalized.
+> **(B) Post-apply category authority.** The bulk closure treated every
+> candidate URLCategories row as authority regardless of BuiltIn and
+> unioned the CURRENT effective view. `postApplyCategoryClosure` now
+> previews the POST-APPLY authority per the runtime source model (§8): no
+> view ⇒ full candidate + UT1; embedded ⇒ candidate BuiltIn baseline
+> recomposed; downloaded/cached/resumed ⇒ candidate BuiltIn=false admin
+> names + the candidate override set composed over the RAW pre-override
+> signed base + UT1 — a candidate BuiltIn=true row is NOT authority merely
+> for being present. The raw base is retained on the effective view at
+> composition time (`effectiveCategoryView.base`, set by buildEffectiveView
+> from rg.SnapshotEntries and by composeEmbeddedForOverrides — the
+> production recompose's own input), and the preview composes candidate
+> overrides via the runtime's own pure seams
+> (catoverride.ComposeMembership), never over the already-composed entries
+> (no double-apply, §7). Per-path candidate override semantics mirrored
+> exactly: import merge/replace/absent-skips, rollback nil-keeps/non-nil-
+> replaces, snapshot nil-keeps/non-nil-authoritative-replacement. Signed-
+> feed protocol untouched (§9). Proofs: `bulk_canonical_authority_test.go`
+> (ID-smuggling both kinds, BuiltIn-only false acceptance on import +
+> snapshot, override-introduced category false refusal, tombstone-removed
+> last-instance false acceptance on import + snapshot — all red at
+> f29f652d; mismatched-pair name binding, same-import object resolution,
+> and the §7 raw-base/no-double-apply controls).
+>
 > **Slice 2D-A implementation record (this branch, 2026-08-28).**
 >
 > **2D-A.0 backend hardening** — the shared-object stores
