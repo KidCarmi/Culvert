@@ -80,7 +80,7 @@ All 5 reachable outcomes are asserted with the **full contract**: `shadow_evalua
 The harness is **request‑count** driven, never wall‑clock, and has two modes:
 
 - **CI default:** small deterministic counts (176 stable requests → 248 total evaluations). Runs in seconds. There is **no permanently‑30‑minute default test.**
-- **Heavy soak:** `CULVERT_MCP_SOAK=<n>` scales every phase deterministically. The user‑facing target band is **5,000–20,000**; verified at 6,000 (7,516 evaluations) and 8,000, plus the evidence‑stress spool at 19,999 records.
+- **Heavy soak:** `CULVERT_MCP_SOAK=<n>` scales every phase deterministically. The user‑facing target band is **5,000–20,000**; verified at 6,000 (7,516 evaluations) and 8,000, plus the evidence‑stress spool at the **20,000** upper endpoint (honored inclusively; values above the band clamp to 20,000 — `n = min(h, 20000)`, never a silent fall‑back to the CI size).
 
 The count is sized by a coverage argument (every tool × every policy branch, plus churn/rug/kill/restart), not a round number.
 
@@ -109,7 +109,7 @@ Heavy (6000) — total 7,516: `would_execute` 3,159 (42%), `would_block` 1,950 (
 | 11 | **Tool‑trust churn** — approve/revoke/reapprove/expire under traffic | ✅ PASS (short‑lived approval → Usable → clock+1h + reconcile → Expired+demoted → `would_fail_hard_control` → reapprove is a NEW durable decision → `would_require_confirmation`) |
 | 12 | **Kill switch under load** — engaged kill emergency‑blocks every concurrent request; none `would_execute`; upstream 0; one `evaluation_error` per blocked request; clearing restores `would_execute` | ✅ PASS (608 concurrent requests during kill, ALL `rollout_emergency_active`, +608 `evaluation_errors`, upstream 0, deterministic recovery) |
 | 13 | **Restart during soak** against the same durable data directory | ✅ PASS (mode, active Shadow scope, tool‑trust, catalog Usable, and the durable spool — exact count + a specific event id + valid digest chain — all recover; LiveExecutor stays absent; upstream 0; resumed traffic still `shadow_evaluated`) |
-| 14 | **Durable evidence stress** — write/read/recover/re‑read; `events_written == events_recovered == events_reread`; no loss/dup/corruption; crosses segment rotation | ✅ PASS (150 default, up to 19,999 heavy, crossing ~hundreds of rotations; recover reports `Corrupt=false`, exact record count) |
+| 14 | **Durable evidence stress** — write/read/recover/re‑read; `events_written == events_recovered == events_reread`; no loss/dup/corruption; crosses segment rotation | ✅ PASS (150 default, up to **20,000** heavy — the band's upper endpoint honored inclusively, above‑band clamped — crossing ~hundreds of rotations; recover reports `Corrupt=false`, exact record count) |
 | 15 | **Metrics correctness** — exact expected bucket deltas for deterministic cases, not "> 0" | ✅ PASS (every `assertOutcome` asserts a full `shadowMetricsView` delta; the metric singleton is a process‑global accumulator, so the harness compares **deltas** captured per run against the per‑run durable spool) |
 | 18 | **Scope containment** — 0 out‑of‑scope evaluations | ✅ PASS (out‑of‑scope principal is never `shadow_evaluated`; `shadow_outcome` absent) |
 | 19 | **Failure injection (fail‑closed)** — real durable‑write fault at the real seam | ✅ PASS (`Manager.CommitThenAct` with an injected `AppendSync` fault returns an error, the "act" continuation NEVER runs, 0 events committed — the exact chokepoint the evaluator sits on) |
@@ -175,7 +175,8 @@ Toolchain: Go 1.26.6. Commands run from the repo root on the branch head.
 | `go test -race -shuffle=on -count=2 -run '…Shadow…ToolTrust…Preflight…MCPPolicy…ExecPosture' .` | ok (104.8 s) | **0** |
 | `CULVERT_MCP_SOAK=8000 go test -run 'TestShadowSoak' .` | ok (59 s) | **0** |
 | `CULVERT_MCP_SOAK=3000 go test -race -run '^TestShadowSoak$' .` | ok (93.7 s) | **0** |
-| `CULVERT_MCP_SOAK=19999 go test -run 'TestShadowSoakEvidenceStress' .` | ok (39.9 s) | **0** |
+| `CULVERT_MCP_SOAK=20000 go test -run 'TestShadowSoakEvidenceStress' .` | ok (38.6 s; runs 20,000 records) | **0** |
+| `CULVERT_MCP_SOAK=25000 go test -run 'TestShadowSoakEvidenceStress' .` | ok (38.6 s; clamps to 20,000, no fall‑back to 150) | **0** |
 | `staticcheck .` (installed `@2025.1`) | no findings on either changed file | **0** |
 | `gocognit -over 30 <changed files>` | no functions over 30 (max = 21, `killUnderLoad`) | **0** |
 
