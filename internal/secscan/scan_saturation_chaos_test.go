@@ -264,6 +264,16 @@ func TestChaos_AbandonedScansAreCountedAndUnwind(t *testing.T) {
 	withScanBudget(t, 50*time.Millisecond)
 	withCooldown(t, 10*time.Second)
 
+	// scanInflight is a PROCESS-GLOBAL gauge shared by every test in this package. A prior
+	// test's abandoned worker goroutine may not have run its deferred scanInflight.Add(-1)
+	// yet — that decrement lags result delivery on the timeout/abandon path — so reading it
+	// once here is order-dependent under -shuffle/-count (the source of the flaky
+	// "precondition: inflight = 1, want 0"). Drain first, mirroring the post-unwind loop
+	// below; the assertion is unchanged, so it still fails if inflight never returns to zero.
+	pre := time.Now().Add(5 * time.Second)
+	for ScanInflight() != 0 && time.Now().Before(pre) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := ScanInflight(); got != 0 {
 		t.Fatalf("precondition: inflight = %d, want 0", got)
 	}
