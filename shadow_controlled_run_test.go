@@ -452,6 +452,60 @@ func resetShadowGlobalsForRun(t *testing.T) {
 	t.Setenv(mcpShadowReadyEnvVar, "true")
 }
 
+// composeAndStartShadow builds the controlled files, runs the real observe+shadow
+// startup, starts the listener, and asserts the pre-activation posture. Returns the
+// runtime, activation, published catalog, and base URL.
+func composeAndStartShadow(t *testing.T, pki *mcpTestPKI, hits *int64, ev func(string, ...any)) (act mcpObserveActivation, cat *catalog.Catalog, base string) {
+	t.Helper()
+	_, endpoint := witnessEndpoint(t, hits)
+	invPath := writeInv(t, controlledInventoryJSON(endpoint))
+	polPath := writeMCPPolicyFile(t, gwPolicyDoc(1, allowDiscoveryRule+","+allowEchoRule))
+	rt, cat, act := composeShadowNode(t, pki, invPath, polPath, telemetryConfigAt(t))
+	tel := sharedTelemetry()
+	req(t, tel != nil, "durable telemetry must be composed for Shadow")
+	t.Cleanup(func() {
+		_ = rt.Shutdown(ctxWithTimeout(t))
+		_ = tel.Close(context.Background())
+		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
+	})
+	req(t, globalMCPShadow.composed.Load() && shadowDepsConfigured(false), "ShadowEvaluator must be composed and shadow tier armed")
+	req(t, !liveExecDepsConfigured(false), "SECURITY: live-execution tier must remain UNarmed after Shadow composition")
+	base = "https://" + rt.Addr(false)
+	ev("pre-activation: shadow_mode=NO shadow_evaluator_composed=YES live_executor_composed=NO shadow_deps_ready=%v live_execution_ready=%v reason=%q",
+		shadowDepsConfigured(false), liveExecDepsConfigured(false), globalMCPShadow.Reason())
+	ev("gateway listener LIVE and serving at %s (real TLS+OAuth)", base)
+	return act, cat, base
+}
+
+// promoteControlledTools composes tool-trust and drives the REAL approval path to promote
+// both controlled tools to catalog.Usable. Returns the echo approval id + fingerprint.
+func promoteControlledTools(t *testing.T, cat *catalog.Catalog, ev func(string, ...any)) (echoApproval string) {
+	t.Helper()
+	initMCPToolTrust(nil)
+	echoFP, _, elig := catRec(t, cat, ctrlServer, toolEcho)
+	req(t, elig == catalog.Quarantined, "precondition: %s must ingest Quarantined, got %v", toolEcho, elig)
+	echoApproval = approveToUsable(t, cat, ctrlServer, toolEcho)
+	_ = approveToUsable(t, cat, ctrlServer, toolDanger)
+	_, _, elig = catRec(t, cat, ctrlServer, toolEcho)
+	req(t, elig == catalog.Usable, "%s must be Usable after approval, got %v", toolEcho, elig)
+	ev("tool trust: approval=%s purpose=shadow_evaluation tool=%s/%s fingerprint=%s eligibility=Usable", echoApproval, ctrlServer, toolEcho, echoFP)
+	return echoApproval
+}
+
+// activate performs the signed Observe->Shadow transition for the controlled scope and
+// asserts the node is genuinely in Shadow with distribution active.
+func (r *shadowRun) activate(scope rollout.ScopeSpec) {
+	r.inToken = mintBearerSub(r.t, r.pki, r.audience, ctrlTenant, ctrlPrincip)
+	r.applyGateway(&rollout.SignedConfig{
+		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeShadow,
+		ScopeRevision: 1, ConnectorMode: rollout.ConnectorLocalClient, Scope: scope,
+	})
+	req(r.t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "activation failed: mode=%s (want shadow)", getMCPRollout().gateway.CurrentMode())
+	req(r.t, getMCPRollout().gateway.Evidence().ShadowStartUnix != 0, "Shadow window must be stamped on activation")
+	req(r.t, globalMCPDistribution.dpApplierFor(cpdp.CapabilityGateway).Active() != nil, "distribution must be active after a committed Shadow activation")
+	r.ev("ACTIVATED Observe->Shadow: mode=shadow shadow_window_stamped=true distribution_active=true canary=off production=off live_exec_ready=%v", liveExecDepsConfigured(false))
+}
+
 // newControlledShadowRun performs the whole setup: distribution + rollout composition,
 // the real observe+shadow startup, tool-trust promotion, the genuine activation preflight,
 // and the signed Observe->Shadow activation. It returns the ready run context.
@@ -466,46 +520,8 @@ func newControlledShadowRun(t *testing.T, hits *int64) *shadowRun {
 	ev("baseline: gateway_mode=disabled canary=off production=off live_exec_ready=false")
 
 	pki := newMCPTestPKI(t)
-	_, endpoint := witnessEndpoint(t, hits)
-	invPath := writeInv(t, controlledInventoryJSON(endpoint))
-	sc := scWithInventory(t, pki, invPath)
-	sc.SenderConstraint = "bearer"
-	sc.ClientCertMode = "none"
-	sc.Telemetry = telemetryConfigAt(t)
-	sc.QualificationPolicyFile = writeMCPPolicyFile(t, gwPolicyDoc(1, allowDiscoveryRule+","+allowEchoRule))
-
-	cfg, act := loadMCPObserveRuntime(sc)
-	req(t, act.State == mcpObserveConfigured, "observe activation failed: state=%q reason=%q", act.State, act.Reason)
-	setMCPObserveStatus(act)
-	req(t, cfg.Deps.Executor != nil, "Shadow evaluator must be composed (CULVERT_MCP_SHADOW_READY=1)")
-	tel := sharedTelemetry()
-	req(t, tel != nil, "durable telemetry must be composed for Shadow")
-	t.Cleanup(func() { publishMCPTelemetry(mcpTelemNotConfigured, "", nil) })
-	req(t, globalMCPShadow.composed.Load() && shadowDepsConfigured(false), "ShadowEvaluator must be composed and shadow tier armed")
-	req(t, !liveExecDepsConfigured(false), "SECURITY: live-execution tier must remain UNarmed after Shadow composition")
-	ev("pre-activation: shadow_mode=NO shadow_evaluator_composed=YES live_executor_composed=NO shadow_deps_ready=%v live_execution_ready=%v reason=%q",
-		shadowDepsConfigured(false), liveExecDepsConfigured(false), globalMCPShadow.Reason())
-
-	rt, err := mcpruntime.NewRuntime(cfg)
-	req(t, err == nil, "NewRuntime: %v", err)
-	req(t, rt.Start() == nil, "Start failed")
-	mcpRuntime = rt
-	t.Cleanup(func() { _ = rt.Shutdown(ctxWithTimeout(t)); _ = tel.Close(context.Background()) })
-	base := "https://" + rt.Addr(false)
-	req(t, liveGatewayListenerReady(), "gateway listener must be live and serving (genuine probe, no seam)")
-	ev("gateway listener LIVE and serving at %s (real TLS+OAuth)", base)
-
-	initMCPToolTrust(nil)
-	_, cat := mcpInventory.sharedInventory()
-	req(t, cat != nil, "published catalog must be present")
-	_, _, elig := catRec(t, cat, ctrlServer, toolEcho)
-	req(t, elig == catalog.Quarantined, "precondition: %s must ingest Quarantined, got %v", toolEcho, elig)
-	echoFP, _, _ := catRec(t, cat, ctrlServer, toolEcho)
-	echoApproval := approveToUsable(t, cat, ctrlServer, toolEcho)
-	_ = approveToUsable(t, cat, ctrlServer, toolDanger)
-	_, _, elig = catRec(t, cat, ctrlServer, toolEcho)
-	req(t, elig == catalog.Usable, "%s must be Usable after approval, got %v", toolEcho, elig)
-	ev("tool trust: approval=%s purpose=shadow_evaluation tool=%s/%s fingerprint=%s eligibility=Usable", echoApproval, ctrlServer, toolEcho, echoFP)
+	act, cat, base := composeAndStartShadow(t, pki, hits, ev)
+	echoApproval := promoteControlledTools(t, cat, ev)
 
 	scope := controlledScope()
 	sc1, cerr := rollout.Compile(scope, 1, rollout.DefaultLimits())
@@ -521,15 +537,7 @@ func newControlledShadowRun(t *testing.T, hits *int64) *shadowRun {
 		t: t, pki: pki, cli: pki.mtlsClient(t, false), base: base, audience: act.CanonicalURL,
 		cat: cat, signer: signer, echoApproval: echoApproval, upstreamHits: hits, cfgRev: 1, ev: ev,
 	}
-	r.inToken = mintBearerSub(t, pki, r.audience, ctrlTenant, ctrlPrincip)
-	r.applyGateway(&rollout.SignedConfig{
-		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeShadow,
-		ScopeRevision: 1, ConnectorMode: rollout.ConnectorLocalClient, Scope: scope,
-	})
-	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "activation failed: mode=%s (want shadow)", getMCPRollout().gateway.CurrentMode())
-	req(t, getMCPRollout().gateway.Evidence().ShadowStartUnix != 0, "Shadow window must be stamped on activation")
-	req(t, globalMCPDistribution.dpApplierFor(cpdp.CapabilityGateway).Active() != nil, "distribution must be active after a committed Shadow activation")
-	ev("ACTIVATED Observe->Shadow: mode=shadow shadow_window_stamped=true distribution_active=true canary=off production=off live_exec_ready=%v", liveExecDepsConfigured(false))
+	r.activate(scope)
 	return r
 }
 
@@ -597,39 +605,93 @@ func TestControlledShadowRestartDrill(t *testing.T) {
 	resetShadowGlobalsForRun(t)
 
 	signer, dir := mcpProdSetup(t)
-	pki := newMCPTestPKI(t)
-	_, endpoint := witnessEndpoint(t, &upstreamHits)
-	invPath := writeInv(t, controlledInventoryJSON(endpoint))
-	polPath := writeMCPPolicyFile(t, gwPolicyDoc(1, allowDiscoveryRule+","+allowEchoRule))
-	telCfg := stableTelemetry(dir)
-	scope := controlledScope()
-	rc := &rollout.SignedConfig{
-		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeShadow,
-		ScopeRevision: 1, ConnectorMode: rollout.ConnectorLocalClient, Scope: scope,
+	env := &restartEnv{
+		t: t, signer: signer, pki: newMCPTestPKI(t), telCfg: stableTelemetry(dir),
+		hits: &upstreamHits, ev: ev,
 	}
+	env.cli = env.pki.mtlsClient(t, false)
+	_, endpoint := witnessEndpoint(t, &upstreamHits)
+	env.invPath = writeInv(t, controlledInventoryJSON(endpoint))
+	env.polPath = writeMCPPolicyFile(t, gwPolicyDoc(1, allowDiscoveryRule+","+allowEchoRule))
 
-	// ---- boot #1: compose, approve, activate Shadow, and COMMIT one identifiable event ----
-	rt1, cat1, act1 := composeShadowNode(t, pki, invPath, polPath, telCfg)
+	preRestartID := env.boot1CommitEvent()
+	simulateProcessRestart(t)
+	env.boot2VerifyRecovery(preRestartID)
+}
+
+// restartEnv bundles the handles the two boots of the restart drill share.
+type restartEnv struct {
+	t                *testing.T
+	signer           cpdp.Signer
+	pki              *mcpTestPKI
+	cli              *http.Client
+	invPath, polPath string
+	telCfg           mcpTelemetryStartupConfig
+	hits             *int64
+	ev               func(string, ...any)
+}
+
+// boot1CommitEvent composes+activates Shadow, commits one identifiable schema-v2 event,
+// then cleanly shuts the node down. Returns the committed event id.
+func (e *restartEnv) boot1CommitEvent() string {
+	t := e.t
+	rt1, cat1, act1 := composeShadowNode(t, e.pki, e.invPath, e.polPath, e.telCfg)
 	tel1 := sharedTelemetry()
 	initMCPToolTrust(nil)
 	_ = approveToUsable(t, cat1, ctrlServer, toolEcho)
 	_, _, elig := catRec(t, cat1, ctrlServer, toolEcho)
 	req(t, elig == catalog.Usable, "boot#1: echo must be Usable, got %v", elig)
-	applySnapshotMCP(ConfigSnapshot{MCPGatewaySnapshot: mcpSignedGWEnv(t, signer, 2, rc)})
+	rc := &rollout.SignedConfig{
+		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeShadow,
+		ScopeRevision: 1, ConnectorMode: rollout.ConnectorLocalClient, Scope: controlledScope(),
+	}
+	applySnapshotMCP(ConfigSnapshot{MCPGatewaySnapshot: mcpSignedGWEnv(t, e.signer, 2, rc)})
 	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "boot#1: activation failed, mode=%s", getMCPRollout().gateway.CurrentMode())
-	cli := pki.mtlsClient(t, false)
-	tok1 := mintBearerSub(t, pki, act1.CanonicalURL, ctrlTenant, ctrlPrincip)
-	sid1 := handshake(t, cli, "https://"+rt1.Addr(false), ctrlServer, tok1)
-	st1, r1 := toolsCall(t, cli, "https://"+rt1.Addr(false), tok1, sid1, "10", toolEcho, `{"text":"pre-restart"}`)
-	req(t, st1 == 200 && r1["shadow_outcome"] == "would_execute", "boot#1: pre-restart shadow call must be would_execute, got %v", r1)
+	tok := mintBearerSub(t, e.pki, act1.CanonicalURL, ctrlTenant, ctrlPrincip)
+	sid := handshake(t, e.cli, "https://"+rt1.Addr(false), ctrlServer, tok)
+	st, r := toolsCall(t, e.cli, "https://"+rt1.Addr(false), tok, sid, "10", toolEcho, `{"text":"pre-restart"}`)
+	req(t, st == 200 && r["shadow_outcome"] == "would_execute", "boot#1: pre-restart shadow call must be would_execute, got %v", r)
 	de1, ok := latestShadowEvidence(t)
 	req(t, ok && de1.EventID != "", "boot#1: an identifiable schema-v2 event must be committed before restart")
-	preRestartID := de1.EventID
-	ev("restart boot#1: Shadow ACTIVE, echo Usable, committed schema-v2 event id=%s under durable dataDir", preRestartID)
-
-	// ---- simulate a clean restart: stop the node, drop in-memory singletons ----
+	e.ev("restart boot#1: Shadow ACTIVE, echo Usable, committed schema-v2 event id=%s under durable dataDir", de1.EventID)
 	req(t, rt1.Shutdown(ctxWithTimeout(t)) == nil, "shutdown boot#1 failed")
 	_ = tel1.Close(context.Background())
+	return de1.EventID
+}
+
+// boot2VerifyRecovery re-composes the node against the SAME dataDir and proves Shadow
+// state, the approval store, the exact evidence record, and zero side effects recover.
+func (e *restartEnv) boot2VerifyRecovery(preRestartID string) {
+	t := e.t
+	rt2, cat2, act2 := composeShadowNode(t, e.pki, e.invPath, e.polPath, e.telCfg)
+	tel2 := sharedTelemetry()
+	req(t, tel2 != nil, "boot#2: telemetry (evidence spool) must recover")
+	t.Cleanup(func() { _ = rt2.Shutdown(ctxWithTimeout(t)); _ = tel2.Close(context.Background()) })
+	initMCPToolTrust(nil)
+	_, _, elig := catRec(t, cat2, ctrlServer, toolEcho)
+	req(t, elig == catalog.Usable, "boot#2: approval store must recover and re-derive echo Usable, got %v", elig)
+	initMCPDistribution(nil)
+	getMCPRollout().restore()
+	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "SECURITY/CONTRACT: Shadow must survive restart, mode=%s", getMCPRollout().gateway.CurrentMode())
+	req(t, shadowEventByIDPresent(t, preRestartID), "boot#2: the SAME schema-v2 evidence record (id=%s) must recover from the spool", preRestartID)
+	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must remain absent across restart")
+	req(t, atomic.LoadInt64(e.hits) == 0, "SECURITY: upstream invoked during restart/reconciliation: %d", atomic.LoadInt64(e.hits))
+	e.ev("restart boot#2: Shadow RESTORED (mode=shadow) approval_store_recovered=true echo_reDerived=Usable evidence_record_recovered(id=%s)=true live_executor=absent upstream=0", preRestartID)
+
+	tok := mintBearerSub(t, e.pki, act2.CanonicalURL, ctrlTenant, ctrlPrincip)
+	sid := handshake(t, e.cli, "https://"+rt2.Addr(false), ctrlServer, tok)
+	st, r := toolsCall(t, e.cli, "https://"+rt2.Addr(false), tok, sid, "11", toolEcho, `{"text":"post-restart"}`)
+	req(t, st == 200, "post-restart call: status=%d", st)
+	req(t, r["execution_state"] == "shadow_evaluated" && r["executed"] == false && r["shadow_outcome"] == "would_execute",
+		"post-restart request must be shadow_evaluated/would_execute, got %v", r)
+	req(t, atomic.LoadInt64(e.hits) == 0, "SECURITY: upstream invoked by post-restart shadow request: %d", atomic.LoadInt64(e.hits))
+	e.ev("restart post-request: execution_state=shadow_evaluated executed=false shadow_outcome=would_execute upstream_invocations=0")
+	e.ev("VERDICT-INPUT: restart survival + durable evidence recovery observed at runtime")
+}
+
+// simulateProcessRestart drops the in-memory singletons a fresh process would start
+// without, leaving only the durable on-disk state under the same dataDir.
+func simulateProcessRestart(t *testing.T) {
 	publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
 	mcpPolicy.resetForTest() // a fresh process re-composes policy from file (avoids non-advancing-revision reject)
 	resetMCPToolTrustForTest()
@@ -638,31 +700,4 @@ func TestControlledShadowRestartDrill(t *testing.T) {
 	globalExecDeps.shadowGateway.Store(false)
 	mcpResetGlobals(t)
 	mcpRuntime = nil
-
-	// ---- boot #2: re-compose against the SAME dataDir/files, recover, restore ----
-	rt2, cat2, act2 := composeShadowNode(t, pki, invPath, polPath, telCfg)
-	tel2 := sharedTelemetry()
-	req(t, tel2 != nil, "boot#2: telemetry (evidence spool) must recover")
-	t.Cleanup(func() { _ = rt2.Shutdown(ctxWithTimeout(t)); _ = tel2.Close(context.Background()) })
-	initMCPToolTrust(nil)
-	_, _, elig = catRec(t, cat2, ctrlServer, toolEcho)
-	req(t, elig == catalog.Usable, "boot#2: approval store must recover and re-derive echo Usable, got %v", elig)
-	initMCPDistribution(nil)
-	getMCPRollout().restore()
-	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "SECURITY/CONTRACT: Shadow must survive restart, mode=%s", getMCPRollout().gateway.CurrentMode())
-	req(t, shadowEventByIDPresent(t, preRestartID), "boot#2: the SAME schema-v2 evidence record (id=%s) must recover from the spool", preRestartID)
-	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must remain absent across restart")
-	req(t, atomic.LoadInt64(&upstreamHits) == 0, "SECURITY: upstream invoked during restart/reconciliation: %d", atomic.LoadInt64(&upstreamHits))
-	ev("restart boot#2: Shadow RESTORED (mode=shadow) approval_store_recovered=true echo_reDerived=Usable evidence_record_recovered(id=%s)=true live_executor=absent upstream=0", preRestartID)
-
-	// ---- one more in-scope request after restart ----
-	tok2 := mintBearerSub(t, pki, act2.CanonicalURL, ctrlTenant, ctrlPrincip)
-	sid2 := handshake(t, cli, "https://"+rt2.Addr(false), ctrlServer, tok2)
-	st2, r2 := toolsCall(t, cli, "https://"+rt2.Addr(false), tok2, sid2, "11", toolEcho, `{"text":"post-restart"}`)
-	req(t, st2 == 200, "post-restart call: status=%d", st2)
-	req(t, r2["execution_state"] == "shadow_evaluated" && r2["executed"] == false && r2["shadow_outcome"] == "would_execute",
-		"post-restart request must be shadow_evaluated/would_execute, got %v", r2)
-	req(t, atomic.LoadInt64(&upstreamHits) == 0, "SECURITY: upstream invoked by post-restart shadow request: %d", atomic.LoadInt64(&upstreamHits))
-	ev("restart post-request: execution_state=shadow_evaluated executed=false shadow_outcome=would_execute upstream_invocations=0")
-	ev("VERDICT-INPUT: restart survival + durable evidence recovery observed at runtime")
 }
