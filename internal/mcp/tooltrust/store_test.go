@@ -643,6 +643,78 @@ func TestLoad_InvalidUTF8InStringFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLoad_LoneSurrogateEscapeFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+
+	// A genuinely valid active record, so the injected surrogate escape is the sole defect.
+	s, err := NewStore(Config{Path: path, Clock: clk.now})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	in := goodRequest()
+	req, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	if _, err := s.Approve(req.ApprovalID, "admin@corp", matchingTarget(in)); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace the Reason string content with a lone HIGH-surrogate escape. The file stays pure
+	// ASCII, so utf8.Valid remains true; encoding/json would decode \ud800 to U+FFFD, and the
+	// per-field utf8.ValidString checks would then accept it — exactly the gap this guards.
+	tampered := bytes.Replace(raw, []byte(in.Reason), []byte(`\ud800`), 1)
+	if bytes.Equal(tampered, raw) {
+		t.Fatal("test setup: could not locate the Reason string to tamper")
+	}
+	if !utf8.Valid(tampered) {
+		t.Fatal("test setup: tampered bytes must still be valid UTF-8 (the escape is ASCII)")
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, _ := NewStore(Config{Path: path, Clock: clk.now})
+	err = s2.Load()
+	if err == nil {
+		t.Fatal("a lone surrogate escape must fail closed, not decode via U+FFFD replacement")
+	}
+	if !strings.Contains(err.Error(), "surrogate") {
+		t.Fatalf("expected the fail-closed reason to name the surrogate escape, got: %v", err)
+	}
+}
+
+func TestHasUnpairedSurrogateEscape(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plain ascii", `{"reason":"hello"}`, false},
+		{"valid pair (emoji)", `{"reason":"😀"}`, false},
+		{"lone high", `{"reason":"\ud800"}`, true},
+		{"lone low", `{"reason":"\udc00"}`, true},
+		{"high then non-low", `{"reason":"\ud800A"}`, true},
+		{"escaped backslash then literal uD800", `{"reason":"\\uD800"}`, false},
+		{"bmp escape (letter A)", `{"reason":"A"}`, false},
+		{"truncated escape", `{"reason":"\ud80`, false}, // malformed; left for the JSON decoder
+	}
+	for _, c := range cases {
+		if got := hasUnpairedSurrogateEscape([]byte(c.in)); got != c.want {
+			t.Errorf("%s: hasUnpairedSurrogateEscape(%q) = %v, want %v", c.name, c.in, got, c.want)
+		}
+	}
+}
+
 func TestCreate_ExpiredPendingRequestsFreeCapacity(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	dir := t.TempDir()

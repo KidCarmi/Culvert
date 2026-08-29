@@ -160,6 +160,14 @@ func (s *Store) Load() error {
 	if !utf8.Valid(raw) {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file is not valid UTF-8")
 	}
+	// utf8.Valid catches invalid UTF-8 BYTES, but a JSON \uXXXX escape for an unpaired UTF-16
+	// surrogate is pure ASCII (so it passes above), and encoding/json decodes it to U+FFFD rather
+	// than erroring — the same silent-replacement gap one level up. json.Marshal never emits a
+	// surrogate escape (it escapes only control chars and U+2028/U+2029), so a lone surrogate is
+	// always tampering. Reject it before decoding.
+	if hasUnpairedSurrogateEscape(raw) {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file has an unpaired surrogate escape")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var env persistedStore
@@ -190,6 +198,70 @@ func (s *Store) Load() error {
 	}
 	s.byID = byID
 	return nil
+}
+
+// hasUnpairedSurrogateEscape reports whether raw contains a JSON \uXXXX escape for an unpaired
+// UTF-16 surrogate: a high surrogate (D800–DBFF) not immediately followed by a low-surrogate
+// escape (DC00–DFFF), or a low surrogate appearing on its own. encoding/json decodes such an
+// escape to U+FFFD instead of erroring, so a tampered record whose bytes are otherwise valid
+// UTF-8 (the escape itself is ASCII) would slip past utf8.Valid and the per-field checks. A
+// store written by json.Marshal never emits a surrogate escape, so this only ever rejects
+// tampering. An escaped backslash (\\) is consumed as a pair, so literal "\\uD800" text is not
+// misread as an escape; a malformed \u is left for the JSON decoder to reject.
+func hasUnpairedSurrogateEscape(raw []byte) bool {
+	for i := 0; i+1 < len(raw); {
+		if raw[i] != '\\' {
+			i++
+			continue
+		}
+		if raw[i+1] != 'u' {
+			i += 2 // any other escape (including \\) consumes two bytes
+			continue
+		}
+		hi, ok := parseHex4(raw, i+2)
+		if !ok {
+			i += 2 // malformed \u — the JSON decoder will report it
+			continue
+		}
+		if hi < 0xD800 || hi > 0xDFFF {
+			i += 6 // an ordinary BMP escape
+			continue
+		}
+		if hi >= 0xDC00 {
+			return true // a low surrogate with no preceding high — unpaired
+		}
+		// hi is a high surrogate; a valid pair needs a low-surrogate escape immediately after.
+		if i+7 < len(raw) && raw[i+6] == '\\' && raw[i+7] == 'u' {
+			if lo, lok := parseHex4(raw, i+8); lok && lo >= 0xDC00 && lo <= 0xDFFF {
+				i += 12 // consumed a valid surrogate pair
+				continue
+			}
+		}
+		return true // high surrogate not followed by a low surrogate — unpaired
+	}
+	return false
+}
+
+// parseHex4 reads the 4 hex digits at off and returns their value. ok is false if fewer than
+// four bytes remain or any is not a hex digit.
+func parseHex4(b []byte, off int) (value uint32, ok bool) {
+	if off+4 > len(b) {
+		return 0, false
+	}
+	for j := 0; j < 4; j++ {
+		c := b[off+j]
+		switch {
+		case c >= '0' && c <= '9':
+			value = value<<4 | uint32(c-'0')
+		case c >= 'a' && c <= 'f':
+			value = value<<4 | uint32(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			value = value<<4 | uint32(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 // buildLoadedIndexLocked validates every recovered record and enforces the per-tenant
