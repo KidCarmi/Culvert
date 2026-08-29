@@ -31,6 +31,7 @@ func dcFinYAMLBootEnv(t *testing.T) (settingsPath string) {
 	})
 	restoreRewriter := rewriter.Snapshot()
 	t.Cleanup(restoreRewriter)
+	rewriter.SetRules(nil) // isolate from rules other tests left live
 	swapAdminSettingsPath(t, settingsPath)
 	return settingsPath
 }
