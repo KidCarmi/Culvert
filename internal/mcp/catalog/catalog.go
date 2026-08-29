@@ -230,6 +230,7 @@ func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observ
 	rev := base.revision + 1
 	next := base.clone(rev)
 	report := &Report{ServerID: serverID, Revision: rev, Observations: make([]Observation, 0, len(observed))}
+	observedKeys := make(map[ToolKey]struct{}, len(observed))
 	for _, obs := range observed {
 		prior := base.byKey[obs.Key] // nil ⇒ unknown tool
 		class, diffs := Classify(prior, obs)
@@ -244,7 +245,26 @@ func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observ
 			}
 		}
 		next.byKey[obs.Key] = &rec
+		observedKeys[obs.Key] = struct{}{}
 		report.Observations = append(report.Observations, Observation{Key: obs.Key, Class: class, Diffs: diffs, Eligibility: elig})
+	}
+	// Withdraw records of THIS server that the discovery did not observe. Every Ingest carries a
+	// server's COMPLETE tools/list (execution.Discovery fetches a full tools/list; seedTools
+	// ingests the full declared set), so a previously-known tool absent here means the server no
+	// longer offers it. Left in place, the stale record would keep conferring eligibility — and,
+	// once tool-trust derives from the catalog (ADR-0034), a withdrawn tool would stay Usable and
+	// its active approval would keep matching the unchanged fingerprint indefinitely. Dropping it
+	// is fail-safe: a re-added tool re-ingests against an empty prior (unknown ⇒ re-quarantined,
+	// never silently re-Usable), and only serverID's records are touched — other servers' tools
+	// (and this server's observed tools) are untouched. `Classify` above already ran against the
+	// pre-drop base, so drift/quarantine of OBSERVED tools is unaffected.
+	for k := range next.byKey {
+		if k.Server != serverID {
+			continue
+		}
+		if _, seen := observedKeys[k]; !seen {
+			delete(next.byKey, k)
+		}
 	}
 	sort.Slice(report.Observations, func(i, j int) bool {
 		return report.Observations[i].Key.Name < report.Observations[j].Key.Name
