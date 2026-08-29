@@ -14,7 +14,10 @@ package main
 // otherwise to "deny" (zero-trust).
 func loadRewriteAndDefaultAction(cfg rewriteDefaultActionStartupConfig, rulesLoaded int) {
 	if len(cfg.Rules) > 0 {
-		rewriter.SetRules(cfg.Rules)
+		// Published under the settings writer domain (uncontended at boot);
+		// YAML-seeded rules receive stable identities at publication, made
+		// durable by the first ordinary settings save (2D-C §21 YAML posture).
+		publishRewriteRules(cfg.Rules)
 		logger.Printf("Rewrite: %d rule(s) loaded", len(cfg.Rules))
 	}
 

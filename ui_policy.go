@@ -15,6 +15,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/feedsync"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/pac"
+	"github.com/KidCarmi/Culvert/internal/rewrite"
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
@@ -1546,11 +1547,44 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		added := rewriter.Add(rule)
-		logID := strings.ReplaceAll(fmt.Sprintf("%d", added.ID), "\n", "_")
-		logger.Printf("UI: rewrite rule added id=%s host=%q", logID, sanitizeLog(added.Host))
-		auditEvent(r, "rewrite.add", fmt.Sprintf("id=%d host=%s", added.ID, added.Host), "")
-		adminSettingsSave()
+		if err := validateIncomingRewriteRule(rule); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Server-owned identity (§22): a client-supplied stableId is ignored.
+		rule.StableID = rewrite.NewStableID()
+		ifRev := strings.TrimSpace(r.URL.Query().Get("ifRevision"))
+		// Durable-or-nothing (§24): fence + target build + settings persist +
+		// runtime publication in ONE adminSettingsMu critical section. A hard
+		// persist failure means the rule was never active anywhere.
+		err := saveAdminSettingsWithOverrides(adminSaveOverrides{
+			rewriteMutate: func(current []RewriteRule) ([]RewriteRule, error) {
+				if ferr := rewriteFence(ifRev, current); ferr != nil {
+					return nil, ferr
+				}
+				return append(append([]RewriteRule(nil), current...), rule), nil
+			},
+		})
+		if err != nil {
+			var conflict *errRewriteRevisionConflict
+			if errors.As(err, &conflict) {
+				writeRewriteRevisionConflict(w, conflict.current)
+				return
+			}
+			http.Error(w, "rewrite rule not persisted: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// The published copy carries the process-local integer id assigned at
+		// publication — return it for legacy-client compatibility.
+		added := rule
+		for _, lr := range rewriter.List() {
+			if lr.StableID == rule.StableID {
+				added = lr
+				break
+			}
+		}
+		logger.Printf("UI: rewrite rule added stableId=%s host=%q", sanitizeLog(added.StableID), sanitizeLog(added.Host))
+		auditEvent(r, "rewrite.add", fmt.Sprintf("stableId=%s host=%s", added.StableID, added.Host), "")
 		saveConfigVersion(sessionAdmin(r), "rewrite.add")
 		jsonOK(w, added)
 
@@ -1558,20 +1592,61 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
+		// v2 addressing: ?stableId= (durable identity). Legacy ?id= (process-
+		// local integer) stays supported for existing clients; it is resolved
+		// to the durable identity INSIDE the critical section so a concurrent
+		// reload cannot retarget it.
+		stableID := strings.TrimSpace(r.URL.Query().Get("stableId"))
 		idStr := strings.TrimSpace(r.URL.Query().Get("id"))
-		var id int
-		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
-			http.Error(w, "missing or invalid id param", http.StatusBadRequest)
+		var legacyID int
+		hasLegacy := false
+		if stableID == "" {
+			if _, err := fmt.Sscanf(idStr, "%d", &legacyID); err != nil {
+				http.Error(w, "missing or invalid id/stableId param", http.StatusBadRequest)
+				return
+			}
+			hasLegacy = true
+		}
+		ifRev := strings.TrimSpace(r.URL.Query().Get("ifRevision"))
+		removedStable := stableID
+		err := saveAdminSettingsWithOverrides(adminSaveOverrides{
+			rewriteMutate: func(current []RewriteRule) ([]RewriteRule, error) {
+				if ferr := rewriteFence(ifRev, current); ferr != nil {
+					return nil, ferr
+				}
+				target := make([]RewriteRule, 0, len(current))
+				found := false
+				for _, cr := range current {
+					match := (stableID != "" && cr.StableID == stableID) ||
+						(hasLegacy && cr.ID == legacyID)
+					if match && !found {
+						found = true
+						removedStable = cr.StableID
+						continue
+					}
+					target = append(target, cr)
+				}
+				if !found {
+					return nil, errRewriteRuleNotFound
+				}
+				return target, nil
+			},
+		})
+		if err != nil {
+			var conflict *errRewriteRevisionConflict
+			if errors.As(err, &conflict) {
+				writeRewriteRevisionConflict(w, conflict.current)
+				return
+			}
+			if errors.Is(err, errRewriteRuleNotFound) {
+				http.Error(w, "rule not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "rewrite rule removal not persisted: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if !rewriter.RemoveByID(id) {
-			http.Error(w, "rule not found", http.StatusNotFound)
-			return
-		}
-		logID := strings.ReplaceAll(fmt.Sprintf("%d", id), "\n", "_")
-		logger.Printf("UI: rewrite rule removed id=%s", logID)
-		auditEvent(r, "rewrite.remove", fmt.Sprintf("id=%d", id), "")
-		adminSettingsSave()
+		logger.Printf("UI: rewrite rule removed stableId=%s", sanitizeLog(removedStable))
+		auditEvent(r, "rewrite.remove", "stableId="+removedStable, "")
 		saveConfigVersion(sessionAdmin(r), "rewrite.remove")
 		w.WriteHeader(http.StatusNoContent)
 

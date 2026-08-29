@@ -35,8 +35,15 @@ type AdminSettings struct {
 	ConnLimitMaxPerIP   int      `json:"conn_limit_max_per_ip"`
 	ConnLimitEnabled    bool     `json:"conn_limit_enabled"`
 
-	// Rewrite
-	RewriteRules []RewriteRule `json:"rewrite_rules,omitempty"`
+	// Rewrite. RewriteRulesSaved is a sentinel (mirroring UpstreamProxiesSaved /
+	// BlocklistFeedsSaved): when true the persisted list is authoritative —
+	// INCLUDING an explicit empty list, so an admin who deleted the last rewrite
+	// rule does not have YAML-seeded rules resurrect on restart. Sentinel-less
+	// legacy files keep the historical len>0 restore gate. The persisted rules
+	// carry their durable StableIDs (2D-C §21), making AdminSettings the
+	// persistence owner of rewrite identity.
+	RewriteRules      []RewriteRule `json:"rewrite_rules,omitempty"`
+	RewriteRulesSaved bool          `json:"rewrite_rules_saved"`
 
 	// Block page
 	BlockPageHTML string `json:"block_page_html,omitempty"`
@@ -321,6 +328,22 @@ func LoadAdminSettings(path string) {
 
 	snapshotOverriddenSurfaces(s)
 
+	// One-time rewrite stable-identity migration (2D-C §21): legacy persisted
+	// rules were just backfilled with durable StableIDs in memory; persist them
+	// NOW through the real owner so a restart before the next ordinary save
+	// cannot re-identify them. Boot-time, so a failure only logs — the disk
+	// that failed this save would fail every later one too, and the next
+	// successful save completes the migration.
+	if rewriteIDsBackfilledAtLoad > 0 {
+		n := rewriteIDsBackfilledAtLoad
+		rewriteIDsBackfilledAtLoad = 0
+		if err := SaveAdminSettings(); err != nil {
+			logger.Printf("AdminSettings: rewrite stable-ID migration (%d rule(s)) not yet durable: %v", n, err)
+		} else {
+			logger.Printf("AdminSettings: migrated %d rewrite rule(s) to durable stable identities", n)
+		}
+	}
+
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
 
@@ -352,10 +375,24 @@ func applyAdminSecurity(s *AdminSettings) {
 	if s.BlockPageHTML != "" {
 		_ = setBlockPageHTML(s.BlockPageHTML)
 	}
-	if len(s.RewriteRules) > 0 {
-		rewriter.SetRules(s.RewriteRules)
+	// Rewrite rules. Sentinel-aware (2D-C): once saved-authoritative, the
+	// persisted list — INCLUDING an explicit empty one — replaces whatever the
+	// YAML seed installed, so deleting the last rule survives a restart.
+	// Sentinel-less legacy files keep the historical len>0 gate. SetRules
+	// backfills durable StableIDs onto legacy persisted rules exactly once;
+	// the count is recorded so LoadAdminSettings can persist the migrated
+	// identities immediately (a restart before the next save must not
+	// re-identify them — 2D-C §21).
+	if s.RewriteRulesSaved || len(s.RewriteRules) > 0 {
+		rewriteIDsBackfilledAtLoad = rewriter.SetRules(s.RewriteRules)
 	}
 }
+
+// rewriteIDsBackfilledAtLoad counts the stable rewrite identities minted while
+// restoring admin_settings.json this boot (legacy file without stableIds).
+// Consumed once at the end of LoadAdminSettings to trigger the one-time
+// migration save; boot-time only (single-threaded startup).
+var rewriteIDsBackfilledAtLoad int
 
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {
@@ -693,6 +730,15 @@ type adminSaveOverrides struct {
 	// values while the live holder still carries the old ones; applyOnSuccess
 	// then publishes them to the holder only after the write landed.
 	saasFeed *saasFeedDurable
+	// rewriteMutate, when set, builds the TARGET rewrite rule set INSIDE
+	// adminSettingsMu from the CURRENT committed set (2D-C §24/§27): the
+	// optimistic-revision comparison, the target construction, the durable
+	// write, and the runtime publication all share this one serialized save
+	// domain. A returned error aborts the save untouched (fence conflict /
+	// validation). On a successful write the target is published to the live
+	// Rewriter; on a persist failure it is never published — durable-or-nothing,
+	// so an unacknowledged rewrite rule can never stay active in memory.
+	rewriteMutate func(current []RewriteRule) ([]RewriteRule, error)
 	// precondition, when set, runs INSIDE adminSettingsMu before anything is
 	// snapshotted or written; a non-nil error aborts the save untouched and is
 	// returned to the caller. This is what makes an optimistic-revision fence
@@ -735,11 +781,26 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 			return err
 		}
 	}
+	// Rewrite target construction (2D-C §24/§27): read-current + fence + build
+	// INSIDE the lock, so no other save (or bulk publish, which also enters
+	// adminSettingsMu) can land between the read and this save's publication.
+	var rewriteTarget []RewriteRule
+	rewriteApply := false
+	if ov.rewriteMutate != nil {
+		target, err := ov.rewriteMutate(rewriter.List())
+		if err != nil {
+			return err
+		}
+		rewriteTarget, rewriteApply = target, true
+	}
 	path := adminSettingsPath
 	if path == "" {
 		// No persistence configured: the (empty) write trivially succeeds, so a
 		// persist-before-apply target still applies — the caller was promised
 		// "returns nil ⇒ the target is live".
+		if rewriteApply {
+			rewriter.SetRules(rewriteTarget)
+		}
 		if ov.applyOnSuccess != nil {
 			ov.applyOnSuccess()
 		}
@@ -768,8 +829,15 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	snapshotAdminEndpoints(&s)
 
-	// Rewrite rules
-	s.RewriteRules = rewriter.List()
+	// Rewrite rules: the TARGET set for a rewrite-mutating save (persist-before-
+	// apply), else the live set. Always stamped saved-authoritative so an
+	// explicit empty set survives restart (see RewriteRulesSaved).
+	if rewriteApply {
+		s.RewriteRules = rewriteTarget
+	} else {
+		s.RewriteRules = rewriter.List()
+	}
+	s.RewriteRulesSaved = true
 
 	snapshotBlocklistFeeds(&s)
 
@@ -829,6 +897,9 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// Persist-before-apply: the durable write succeeded, so apply the target to the
 	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
 	// moves atomically w.r.t. every other save.
+	if rewriteApply {
+		rewriter.SetRules(rewriteTarget)
+	}
 	if ov.applyOnSuccess != nil {
 		ov.applyOnSuccess()
 	}

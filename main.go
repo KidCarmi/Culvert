@@ -1346,9 +1346,13 @@ func applyHotReload(fc *FileConfig) {
 		logger.Printf("Reload: IP filter mode %s", fc.Security.IPFilterMode)
 	}
 
-	// Rewrite rules
+	// Rewrite rules — published under the settings writer domain (2D-C §25)
+	// so a reload cannot interleave with an interactive rewrite mutation's
+	// read→persist→publish critical section. YAML rules have no stable IDs;
+	// identities are minted at publication and become durable at the next
+	// ordinary settings save (the documented YAML-seed posture).
 	if len(fc.Rewrite) > 0 {
-		rewriter.SetRules(fc.Rewrite)
+		publishRewriteRules(fc.Rewrite)
 		logger.Printf("Reload: rewrite %d rules", len(fc.Rewrite))
 	}
 
