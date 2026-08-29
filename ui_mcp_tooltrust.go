@@ -240,10 +240,15 @@ func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		ExpectedFingerprint: body.Fingerprint,
 		ExpectedCatalogRev:  body.CatalogRevision,
 		Purpose:             purpose,
-		RequestedBy:         auditActor(r),
-		Reason:              body.Reason,
-		TicketRef:           body.TicketRef,
-		ExpiresAt:           expiresAt,
+		// The recorded requester is the four-eyes PRINCIPAL (the authenticated identity),
+		// not the IP-bearing audit-attribution string: tooltrust.Store.Approve compares it
+		// against the approver, and a principal that embeds the client address lets one
+		// human satisfy the check from two addresses (SEC-MCP-4E-1). Audit attribution is
+		// unaffected — auditEvent below still records auditActor(r), address included.
+		RequestedBy: mcpApprovalPrincipal(r),
+		Reason:      body.Reason,
+		TicketRef:   body.TicketRef,
+		ExpiresAt:   expiresAt,
 	}
 	a, err := mcpToolTrust.RequestApproval(in)
 	if err != nil {
@@ -275,7 +280,10 @@ func apiMCPToolApprovalDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	actor := auditActor(r)
+	// The decision actor is the four-eyes PRINCIPAL, matching what RequestApproval
+	// recorded, so tooltrust.Store.Approve compares two identities rather than two network
+	// locations (SEC-MCP-4E-1). Audit still attributes each verb via auditActor(r).
+	actor := mcpApprovalPrincipal(r)
 	switch body.Action {
 	case "approve":
 		a, err := mcpToolTrust.ApproveShadow(body.ApprovalID, actor, tenant)

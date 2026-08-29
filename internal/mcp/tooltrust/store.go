@@ -8,9 +8,11 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -436,6 +438,18 @@ func (s *Store) Approve(id, approver string, target CurrentTarget) (*ToolApprova
 	}
 	if !a.Purpose.Issuable() {
 		return nil, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "tooltrust.approve", "purpose not issuable")
+	}
+	// SEPARATION OF DUTIES (SEC-MCP-4E-2). A tool-trust grant is a supply-chain trust
+	// decision that promotes an exact tool fingerprint to catalog.Usable, so the human who
+	// asked for it may not be the human who grants it — the same rule internal/mcp/approval
+	// applies to an operational approval, using the same reason code. Enforced ONLY on the
+	// pending→active transition: the idempotent re-approve of an ALREADY-active grant above
+	// re-verifies the target and changes nothing, so refusing it would break idempotency
+	// without withholding any trust. Checked BEFORE verifyTarget so a self-approval is
+	// refused on its own terms rather than being masked by an unrelated target conflict, and
+	// before any mutation, so a refusal leaves the record byte-unchanged and undecided.
+	if samePrincipal(approver, a.RequestedBy) {
+		return nil, mcperr.New(mcperr.ReasonApprovalSelfApproval, "tooltrust.approve", "requester may not approve own request")
 	}
 	if err := a.verifyTarget(target); err != nil {
 		return nil, err
@@ -1013,6 +1027,43 @@ func (a *ToolApproval) freeTextOverBound() bool {
 		len(a.RevocationReason) > maxReasonBytes || len(a.RejectedReason) > maxReasonBytes ||
 		len(a.RequestedBy) > maxActorBytes || len(a.ApprovedBy) > maxActorBytes ||
 		len(a.RevokedBy) > maxActorBytes || len(a.RejectedBy) > maxActorBytes
+}
+
+// --- four-eyes principal comparison ---------------------------------------
+
+// samePrincipal reports whether two recorded principals denote the SAME human, for the
+// separation-of-duties check in Approve. It compares normalized principals so an
+// address-bearing legacy value can never be read as a second person (SEC-MCP-4E-1/2).
+func samePrincipal(a, b string) bool {
+	return normalizePrincipal(a) == normalizePrincipal(b)
+}
+
+// normalizePrincipal strips a trailing `"@" + <IP literal>` from a principal.
+//
+// The store is DURABLE, so a record written by a build that recorded the IP-bearing audit
+// string (`"<sub>@<clientIP>"`) can outlive the change to identity-only principals. Without
+// this, such a record's requester would never equal the identity-only approver and the same
+// human could approve their own pre-existing request — the exact bypass the change closes,
+// re-opened for one upgrade window. Normalizing BOTH sides makes the comparison identity-
+// based regardless of which format each side was written in.
+//
+// It only ever strips a suffix that PARSES AS AN IP ADDRESS, so an ordinary email principal
+// (`alice@example.com`) is untouched — "example.com" is not an address. The residual is a
+// deliberate fail-CLOSED one: an identity of the literal form `alice@10.0.0.1` would collapse
+// to `alice` and could be refused as a self-approval it is not. Refusing a legitimate
+// approval is the safe direction; admitting a self-approval is not.
+func normalizePrincipal(s string) string {
+	i := strings.LastIndexByte(s, '@')
+	if i <= 0 || i == len(s)-1 {
+		// No separator, an empty identity half, or an empty suffix: nothing to strip. A
+		// principal that is a BARE address (the pre-setup bootstrap fallback, which carries no
+		// identity at all) is likewise left as-is — it is all the caller ever knew.
+		return s
+	}
+	if _, err := netip.ParseAddr(s[i+1:]); err != nil {
+		return s
+	}
+	return s[:i]
 }
 
 // --- small helpers --------------------------------------------------------

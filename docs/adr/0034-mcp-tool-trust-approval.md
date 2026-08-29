@@ -161,3 +161,28 @@ because it is shadow-only and byte-identical to the reviewed capability (documen
 D8). The AtomicWrite store and the best-effort event evidence can momentarily disagree on
 an abrupt crash between the two writes; the AtomicWrite store is the recovery authority
 and the event is tamper-evidence only.
+
+## Amendment 2026-08-29 — D10: separation of duties on a trust grant
+
+The slice as shipped had no separation-of-duties check: one principal could create a
+tool-trust request and approve it, self-granting `Usable` for a fingerprint of its choosing.
+That was an omission, not a decision — D9 does not list it among the deliberate exclusions,
+and the sibling operational-approval plane in the same subsystem has always enforced
+four-eyes with the same reason code.
+
+**D10.** The requester of a `ToolApproval` MAY NOT approve it. `Store.Approve` refuses
+`ReasonApprovalSelfApproval` (HTTP 403) on the pending→active transition, before any
+mutation, so a refusal leaves the record undecided. The idempotent re-approve of an
+ALREADY-active grant is deliberately out of scope — it re-verifies the target and changes
+nothing.
+
+The comparison is over an **authenticated identity**, never the client address: the admin
+call sites build the principal with `mcpApprovalPrincipal` (session subject, else a
+verified HTTP Basic username), because a principal that embeds the client IP lets one human
+satisfy four-eyes from two addresses. `normalizePrincipal` additionally strips a trailing
+`"@" + <IP literal>` from both sides so a durable record written by the pre-amendment build
+is still compared identity-to-identity. Audit attribution is unchanged and still records
+the address.
+
+See `docs/engineering/security-reviews/2026-08-29-mcp-tooltrust-and-four-eyes-window.md`
+(SEC-4E-1 / SEC-4E-2).
