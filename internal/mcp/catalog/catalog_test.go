@@ -380,6 +380,50 @@ func TestSameNameDifferentServersDistinct(t *testing.T) {
 	}
 }
 
+// TestIngestWithdrawsOmittedTool proves a complete per-server discovery that omits a
+// previously-known tool drops that tool from the snapshot, so a stale record can never keep
+// conferring eligibility (and, once tool-trust derives from the catalog, keep a withdrawn tool
+// Usable). A re-added tool re-ingests as unknown, never silently re-Usable.
+func TestIngestWithdrawsOmittedTool(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(
+		`{"name":"a","inputSchema":{"type":"object"}}`,
+		`{"name":"b","inputSchema":{"type":"object"}}`))
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); !ok {
+		t.Fatal("tool a must be present after the first discovery")
+	}
+	// A complete re-discovery that returns only b — a is gone from the server.
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"b","inputSchema":{"type":"object"}}`))
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); ok {
+		t.Fatal("tool a omitted by a complete discovery must be withdrawn from the catalog")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "b"}); !ok {
+		t.Fatal("tool b, still observed, must remain")
+	}
+}
+
+// TestIngestOmissionIsPerServer proves the withdrawal touches ONLY the discovered server: a
+// discovery for one server never drops another server's tools.
+func TestIngestOmissionIsPerServer(t *testing.T) {
+	l := lim(t)
+	c := New(l)
+	reg := regWith(t, l, [2]string{"srv-A", "spiffe://culvert/A"}, [2]string{"srv-B", "spiffe://culvert/B"})
+	ingest(t, c, reg, "srv-A", "spiffe://culvert/A", result(`{"name":"a","inputSchema":{"type":"object"}}`))
+	ingest(t, c, reg, "srv-B", "spiffe://culvert/B", result(`{"name":"b","inputSchema":{"type":"object"}}`))
+	// Re-discover srv-A with a different tool set (omitting "a"): only srv-A's "a" is withdrawn.
+	ingest(t, c, reg, "srv-A", "spiffe://culvert/A", result(`{"name":"c","inputSchema":{"type":"object"}}`))
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "a"}); ok {
+		t.Fatal("srv-A tool a omitted by its own discovery must be withdrawn")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "c"}); !ok {
+		t.Fatal("srv-A tool c, newly observed, must be present")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-B", Name: "b"}); !ok {
+		t.Fatal("srv-B tool b must NOT be dropped by a srv-A discovery")
+	}
+}
+
 func TestQuarantineCannotAutoClear(t *testing.T) {
 	l := lim(t)
 	c, reg := New(l), oneServerReg(t, l)
