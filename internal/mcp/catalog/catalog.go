@@ -275,6 +275,25 @@ func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observ
 		next.byKey[obs.Key] = &rec
 		report.Observations = append(report.Observations, Observation{Key: obs.Key, Class: class, Diffs: diffs, Eligibility: elig})
 	}
+	// Enforce the per-server tool cap on the FINAL merged set, not just the current page's array
+	// length. On the incomplete (partial-page) path above the insertion loop is additive and does
+	// not withdraw, so successive first pages carrying DIFFERENT tool names would otherwise
+	// accumulate unboundedly for one server (up to MaxCatalogEntries), monopolizing the global
+	// catalog and starving other servers with capacity_exceeded. Counting serverID's keys here
+	// bounds that on both paths — on the complete path withdrawal already holds the set to the
+	// observed page (itself array-length-bounded), so this is a no-op there. Fail-closed: an
+	// overrun rejects the whole ingest, leaving the prior snapshot unchanged.
+	if maxPerServer := c.lim.MaxToolsPerServer(); maxPerServer > 0 {
+		count := 0
+		for k := range next.byKey {
+			if k.Server == serverID {
+				count++
+			}
+		}
+		if count > maxPerServer {
+			return nil, nil, mcperr.New(mcperr.ReasonCapacityExceeded, "catalog.ingest", "tools per server capacity reached")
+		}
+	}
 	sort.Slice(report.Observations, func(i, j int) bool {
 		return report.Observations[i].Key.Name < report.Observations[j].Key.Name
 	})

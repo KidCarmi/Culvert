@@ -495,6 +495,38 @@ func TestIngestReplacementAtCapacity(t *testing.T) {
 	}
 }
 
+// TestIngestPartialPagesRespectPerServerCap proves the per-server cap is enforced on the merged
+// set, not just each page's array length: a changing upstream that returns successive partial
+// (nextCursor) first pages with DIFFERENT tool names cannot accumulate past MaxToolsPerServer for
+// one server. An overrun fails closed (capacity_exceeded) and leaves the prior snapshot unchanged.
+func TestIngestPartialPagesRespectPerServerCap(t *testing.T) {
+	cfg := smallCatalog(t) // MaxToolsPerServer:4
+	c := New(cfg)
+	reg := regWith(t, cfg, [2]string{"srv-A", "id-A"})
+	paged := func(names ...string) []byte {
+		out := `{"tools":[`
+		for i, n := range names {
+			if i > 0 {
+				out += ","
+			}
+			out += `{"name":"` + n + `","inputSchema":{}}`
+		}
+		return []byte(out + `],"nextCursor":"more"}`)
+	}
+	// First partial page: 3 distinct tools — accepted, additive, not withdrawn (partial page).
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: "srv-A", Identity: "id-A", Raw: paged("a", "b", "c")}); err != nil {
+		t.Fatalf("first partial page: %v", err)
+	}
+	// Second partial page with 2 more distinct names would make 5 > MaxToolsPerServer(4): rejected.
+	before := c.Current()
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: "srv-A", Identity: "id-A", Raw: paged("d", "e")}); mcperr.ReasonOf(err) != mcperr.ReasonCapacityExceeded {
+		t.Fatalf("per-server accumulation past the cap must be capacity_exceeded, got %v", err)
+	}
+	if c.Current() != before {
+		t.Fatal("a rejected over-cap ingest must leave the prior snapshot unchanged")
+	}
+}
+
 func TestQuarantineCannotAutoClear(t *testing.T) {
 	l := lim(t)
 	c, reg := New(l), oneServerReg(t, l)
