@@ -51,7 +51,7 @@ live tier; Canary *requires* it).
 | 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`) | **unissuable** |
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |
-| 19 | Rollback path healthy | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND rollback rehearsed | **NO (unrehearsed)** |
+| 19 | Rollback path healthy | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND rollback rehearsed (marker is self-attested today; real drill attestation is a live-activation prerequisite) | **NO (unrehearsed)** |
 | 20 | Budget configured | `canary_budget_not_configured` | `canary.ValidateBudget` | activation input |
 
 Live-tier facts (5, 6, 7, 14, 15) are all false together in this build (the guarded live

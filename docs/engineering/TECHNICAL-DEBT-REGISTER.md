@@ -392,6 +392,14 @@
   5. **Shadow-Exit attestation surface** (`shadowExitReviewAttested` returns false today).
   6. **Wire the preflight as the primary activation gate** and the abort taxonomy
      (`canary.AbortConditions`) into runtime detectors.
+  7. **Real rollback-rehearsal attestation** (Codex P2, PR #1249): `RollbackPathHealthy` today
+     reads the `RollbackRehearsed` marker, which the admin `POST /api/mcp/rollout/rehearse`
+     (`recordRehearsal`) sets WITHOUT executing an actual Canary→Shadow/Observe demotion — a
+     self-attested marker, harmless while Canary never activates. Before the first Canary, bind
+     readiness to evidence produced by a SUCCESSFULLY EXECUTED rollback drill (a real demotion
+     with recorded evidence/attestation), not the manual marker. This is a live-activation
+     concern — the dormant build has no live Canary to roll back — so the readiness FACT stays as
+     the contract and the attestation strengthening lands with the live tier.
 - **Red-team → defense mapping (§18; all real attacks have a standing gate):** shadow approval
   reused as live → `TestSatisfiesLiveExecution_ShadowApprovalNeverQualifies`; stale/long-TTL/
   no-four-eyes approval → `TestSatisfiesLiveExecution_Rejections`; F1→F2 rug-pull → exact
