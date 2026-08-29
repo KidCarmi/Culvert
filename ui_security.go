@@ -744,6 +744,7 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		if list == nil {
 			list = []string{}
 		}
+		contentSecGETPause("allowlist")
 		jsonOK(w, map[string]any{"domains": list, "revision": domainAllowlistRevision()})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
@@ -909,6 +910,7 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		m := yaraSettingsMap()
+		contentSecGETPause("yara-settings")
 		m["revision"] = yaraSettingsRevision()
 		jsonOK(w, m)
 
@@ -1178,6 +1180,7 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		hashes, hosts := globalScanExclusions.Lists()
+		contentSecGETPause("exclusions")
 		jsonOK(w, map[string]any{
 			"hashes":   hashes,
 			"hosts":    hosts,
@@ -1249,7 +1252,9 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts(), "revision": dpiBypassRevision()})
+		hosts := dpiScanner.BypassHosts()
+		contentSecGETPause("dpi-bypass")
+		jsonOK(w, map[string]any{"hosts": hosts, "revision": dpiBypassRevision()})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return

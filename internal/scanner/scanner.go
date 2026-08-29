@@ -42,6 +42,12 @@ type ContentScanner struct {
 	path     string // optional JSON file path for persistence
 	maxBytes int64  // max bytes buffered per response (default 1 MiB)
 
+	// writeFile overrides Save's durable-publication step (nil ⇒
+	// fileutil.AtomicWrite). Test-only seam so the publication boundary can be
+	// paused/observed deterministically; production never sets it. Read under
+	// mu alongside the snapshot so the race detector sees the handoff.
+	writeFile func(path string, data []byte) error
+
 	// Tier 3.4: per-host DPI bypass list. Hosts in this map skip DPI regex
 	// scanning entirely even when the scanner has patterns loaded. Used for
 	// internal content mirrors, CI artifact servers, etc. where DPI false
@@ -208,14 +214,28 @@ func (s *ContentScanner) Save() error {
 	} else {
 		data, _ = json.MarshalIndent(raw, "", "  ")
 	}
+	write := s.writeFile
 	s.mu.RUnlock()
 
 	if path == "" || data == nil {
 		return nil
 	}
+	if write != nil {
+		return write(path, data)
+	}
 	// Bucket-4 durability hardening: AtomicWrite gives unique tmp + chmod +
 	// fsync(file) + rename + best-effort fsync(parent dir).
 	return fileutil.AtomicWrite(path, data, 0o600)
+}
+
+// SetWriteFileForTest installs a durable-publication seam (nil restores the
+// default fileutil.AtomicWrite). Test-only: lets a test pause Save at the
+// exact write boundary so writer interleavings are deterministic, never
+// sleep-based.
+func (s *ContentScanner) SetWriteFileForTest(fn func(path string, data []byte) error) {
+	s.mu.Lock()
+	s.writeFile = fn
+	s.mu.Unlock()
 }
 
 // SetBypassHosts atomically replaces the DPI bypass host list. Hosts are

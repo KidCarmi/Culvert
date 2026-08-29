@@ -37,6 +37,20 @@ import (
 // surfaces (admin-rate; never taken on a request-path read).
 var contentSecMu sync.Mutex
 
+// contentSecGETPauseHook, when non-nil, is invoked by the content-security GET
+// handlers after assembling the response state and before writing it — a
+// deterministic interleaving seam so tests can land a concurrent writer at the
+// exact read boundary without sleeps. nil in production (the call is a nil
+// check and nothing else); never set outside tests.
+var contentSecGETPauseHook func(surface string)
+
+// contentSecGETPause fires the test-only GET interleaving seam.
+func contentSecGETPause(surface string) {
+	if h := contentSecGETPauseHook; h != nil {
+		h(surface)
+	}
+}
+
 // contentSecRevision derives a deterministic revision string from canonical
 // content parts. Length-framed so ("ab","c") never collides with ("a","bc").
 func contentSecRevision(parts ...string) string {
