@@ -825,6 +825,46 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > transaction blocks import/rollback; three-surface agreement on the
 > serialized winner; the reverse-direction fenced-PUT 409).
 >
+> **2D-B transactional-read / referential-integrity / ownership-linearization
+> correction (this branch, 2026-08-29 — external-review follow-up on the
+> five-blocker candidate).** Three transaction-boundary defect families,
+> each red-before against e221106d:
+> **(A) Committed fenced reads.** MutateDurable's fn mutates under the inner
+> lock and releases it before the version bump/publication, and a persist
+> failure rolls back at the SAME version — so a management GET inside that
+> window captured phantom rows at the unbumped version, and an edit derived
+> from them PASSED the ifVersion fence against the rolled-back tree. The
+> three snapshot readers (`SnapshotWithRevision`, both `SnapshotView`s) now
+> acquire the store's mutation serializer first (urlcat: mutMu → fpMu → mu;
+> catgroup/decryptprofile: mutMu → mu): a fenced management read waits for
+> the open transaction to reach success or rollback and describes committed
+> truth only; no hot-path lookup takes mutMu. Proofs:
+> `committed_snapshot_2db_test.go` (real GETs, fn-seam pause + ENOTDIR
+> publication fault — the red runs demonstrated the ifVersion=N false-pass
+> err=nil) + `urlcat_committed_snapshot_test.go`.
+> **(B) Delete-first referential integrity.** Reference writers validate
+> their targets UNDER the shared gate before committing
+> (`policy_ref_validation.go`): access/auth-rule create+edit, group
+> create/membership edit, PL Accept-to-Draft (new 409 sentinel). Predicates
+> match runtime resolution (§9): a category name resolves via ANY current
+> authority (catStore object, live signed view class — new
+> `HasCategoryName`, UT1 mapped name); groups/profiles ID-first with name
+> fallback; file profiles via store-then-legacy-map exactly as
+> `FileProfileBlocked`. Bulk installs stay exclusive, validated by their
+> leaf-first whole-candidate application. Both serial orders proven
+> (`reference_delete_first_test.go`: A–E + the raced queued-writer shape +
+> the feed-authority vocabulary pin); writer-first 409 proofs retained.
+> **(C) Ownership linearization.** `taxonomyAuthorityGate`:
+> `feedLiveStore.Swap` (the one production transition point) is exclusive;
+> `beginV2CategoryMutation` holds the shared side across [ownership read →
+> durable catStore mutation], released before the recompose (a later
+> transition is a legitimately ordered supersession — §14; admin-created
+> rows never take the gate — §13; `Current()` stays lock-free). The state
+> GET captures the ownership fact ONCE and derives `builtInAuthority` and
+> every `row.writable` from it (§15). Proofs: `taxonomy_authority_test.go`
+> (transition-waits, mutation-waits→truthful 409, §13/§14 pins, GET
+> tear-proof). API shape unchanged — no frontend source change.
+>
 > **Slice 2D-A implementation record (this branch, 2026-08-28).**
 >
 > **2D-A.0 backend hardening** — the shared-object stores

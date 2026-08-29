@@ -15,7 +15,12 @@ import "sync"
 // prevent.
 //
 // THE GATE: one process-wide RWMutex, deliberately narrow — NOT a generic
-// config transaction framework.
+// config transaction framework. The gate serializes the two sides; the
+// DELETE-FIRST serial order is closed by the writer-side target validation
+// (policy_ref_validation.go): a shared-side writer validates its reference
+// targets under the gate before committing, so a writer waking after a
+// successful delete refuses (structured 400) instead of committing a
+// dangling reference.
 //
 //   - EXCLUSIVE side (Lock): an object DELETE holds it across the
 //     authoritative reference scan AND the durable deletion, so the scan's
