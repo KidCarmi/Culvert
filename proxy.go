@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -664,11 +663,32 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		if match.Rule.LogFullURI {
 			ruleURI = policyLogURI(r.Host, r.URL.Path)
 		}
+		// Sanitize the rule name ONCE. Every branch below names the rule twice
+		// on its decision line (the leading rule=%q and the trailing rule=%s in
+		// the brace block), and sanitizeLog scans the whole string on each call
+		// — so the un-hoisted form paid the scan twice per proxied request for
+		// one value. Hoisted here beside ruleURI, which is already computed once
+		// per decision for the same reason.
+		safeRule := sanitizeLog(match.Rule.Name)
+		// The rule priority is rendered with %d directly on the lines below.
+		// It was previously spelled strings.ReplaceAll(fmt.Sprintf("%d", …),
+		// "\n", ""), which formatted an int to a string and then scanned that
+		// string for newlines a decimal integer cannot contain — two heap
+		// allocations per proxied request (the Sprintf result, then boxing that
+		// result back into the Printf argument list) for a no-op.
+		//
+		// This is NOT the CWE-117 idiom the code conventions require. That rule
+		// covers STRING values reaching a log sink; Priority is an int field of
+		// the admin-configured rulebase, carries no client-controlled data, and
+		// %d on an int can only ever emit [-0-9]. There is nothing to sanitize,
+		// and the rendered digits are identical either way — the log line is
+		// byte-for-byte what it was. Every genuinely string-typed argument on
+		// these lines still goes through sanitizeLog.
 		switch match.Action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", ruleURI, authLog)
-			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", safeRule, match.Rule.Priority, clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), safeRule)
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
 				if conn, _, err := hj.Hijack(); err == nil && conn != nil {
@@ -686,7 +706,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
-			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", safeRule, match.Rule.Priority, clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), safeRule)
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return "POLICY_BLOCK", true
 
@@ -694,11 +714,11 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, "", ruleURI, authLog)
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
-				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
+				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", safeRule, sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return "POLICY_REDIRECT", true
 			}
-			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", safeRule, match.Rule.Priority, clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), safeRule)
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound) // #nosec G710 -- admin-configured rule action target; the isSafeRedirectURL guard above blocks unsafe values
 			return "POLICY_REDIRECT", true
 
@@ -713,7 +733,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
 					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
-					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
+					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), safeRule)
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
 					return "FILE_BLOCKED", true
 				}
@@ -725,7 +745,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 				// write no feed/history entry (volume control).
 				recordStats(clientIP, r.Host, "OK", match.Rule.Name, string(ActionAllow))
 			}
-			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", safeRule, match.Rule.Priority, clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), safeRule)
 			// Fall through to normal handling below.
 		}
 	} else {
