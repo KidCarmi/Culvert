@@ -423,15 +423,20 @@ func (r *shadowRun) revokeDrill() {
 	mcpToolTrustReconcile()
 	_, _, elig := catRec(t, r.cat, ctrlServer, toolEcho)
 	req(t, elig != catalog.Usable, "revoked tool must lose Usable projection, got %v", elig)
+	before := shadowSnap()
 	st, rr := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "7", toolEcho, `{"text":"after-revoke"}`)
 	req(t, st == 200, "post-revoke call: status=%d", st)
 	req(t, rr["shadow_outcome"] == "would_fail_hard_control",
 		"revoked/quarantined tool must predict would_fail_hard_control, got %v", rr)
+	after := shadowSnap()
+	req(t, after.Evaluations == before.Evaluations+1 && after.WouldFailHardControl == before.WouldFailHardControl+1,
+		"revoke: exactly one shadow evaluation + one would_fail_hard_control must be counted (before=%+v after=%+v)", before, after)
 	// A durable schema-v2 event must exist for THIS would_fail_hard_control evaluation.
 	de, ok := latestShadowEvidence(t)
 	req(t, ok && de.Shadow.Outcome == "would_fail_hard_control" && de.VerifyDigest() && de.Validate() == nil,
 		"revoke: a durable schema-v2 would_fail_hard_control event must be committed, got ok=%v %+v", ok, de.Shadow)
-	r.ev("revocation drill: approval revoked -> eligibility!=Usable -> echo shadow_outcome=would_fail_hard_control durable_outcome=%s (no longer would_execute)", de.Shadow.Outcome)
+	r.ev("revocation drill: approval revoked -> eligibility!=Usable -> echo shadow_outcome=would_fail_hard_control would_fail_hard_control %d->%d durable_outcome=%s",
+		before.WouldFailHardControl, after.WouldFailHardControl, de.Shadow.Outcome)
 }
 
 // rollbackToObserve — a signed mode=Observe envelope returns the node to Observe; a
@@ -709,8 +714,13 @@ func (e *restartEnv) boot2VerifyRecovery(preRestartID string) {
 	initMCPToolTrust(nil)
 	_, _, elig := catRec(t, cat2, ctrlServer, toolEcho)
 	req(t, elig == catalog.Usable, "boot#2: approval store must recover and re-derive echo Usable, got %v", elig)
-	initMCPDistribution(nil)
+	// Mirror the PRODUCTION startup order (main.go: initMCPToolTrust -> initMCPRollout
+	// [restore] -> initMCPDistribution). restore() runs the Shadow activation preflight
+	// (incl. the restore-clamp) against the ORIGINAL persisted rollout file BEFORE
+	// distribution composition re-commits any state, so a genuine restore/clamp failure
+	// cannot be masked by a distribution-driven re-commit.
 	getMCPRollout().restore()
+	initMCPDistribution(nil)
 	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "SECURITY/CONTRACT: Shadow must survive restart, mode=%s", getMCPRollout().gateway.CurrentMode())
 	req(t, shadowEventByIDPresent(t, preRestartID), "boot#2: the SAME schema-v2 evidence record (id=%s) must recover from the spool", preRestartID)
 	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must remain absent across restart")
