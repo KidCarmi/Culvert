@@ -700,12 +700,27 @@ func (s *Store) All() []Entry {
 // revision, and a client editing from that pair passes the fence against
 // content it never saw. This is the ONLY read the v2 state contract may use.
 //
-// Lock order is the fingerprint reader's own: fpMu → mu (read). fpMu is held
-// so the memo single-flight stays intact (a valid memo is reused; a computed
-// pair is published for the next reader), and the entries copy happens under
-// the SAME mu.RLock as the rev/fingerprint capture, so no writer's critical
-// section can land between the rows and the revision that names them.
+// COMMITTED-SNAPSHOT rule (transactional-read correction): the snapshot also
+// acquires mutMu FIRST, so a management read can never observe an IN-FLIGHT
+// durable transaction — mutateDurable mutates memory inside fn (releasing mu)
+// before the durable publication, and a persist failure rolls the memory
+// back, so a snapshot taken in that window would describe taxonomy that was
+// never durably acknowledged, never recomposed into the effective view, and
+// may vanish on rollback. A management GET describes committed/current
+// management truth, not intermediate mutation memory; it waits for the open
+// transaction to reach success or rollback. This is a COLD admin read — the
+// hot-path lookups (LookupHost/MatchesHost/ContentFingerprint) never touch
+// mutMu.
+//
+// Lock order is the store's established order: mutMu → fpMu → mu. fpMu is
+// held so the memo single-flight stays intact (a valid memo is reused; a
+// computed pair is published for the next reader), and the entries copy
+// happens under the SAME mu.RLock as the rev/fingerprint capture, so no
+// writer's critical section can land between the rows and the revision that
+// names them.
 func (s *Store) SnapshotWithRevision() ([]Entry, string) {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
 	s.fpMu.Lock()
 	defer s.fpMu.Unlock()
 	s.mu.RLock()

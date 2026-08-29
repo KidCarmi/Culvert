@@ -511,7 +511,21 @@ type Snapshot struct {
 // state paired with the fence version of another, and an edit from that pair
 // passes the ifVersion fence against content the client never saw. Handlers
 // serving the fenced list contract must use this, never the trio.
+//
+// COMMITTED-SNAPSHOT rule (transactional-read correction): SnapshotView also
+// acquires mutMu FIRST. MutateDurable's fn mutates the store under mu and
+// RELEASES mu before the version bump and the durable publication, and a
+// persist failure rolls everything back to the pre-mutation state at the
+// SAME version — so a snapshot taken inside that window returns mutated rows
+// paired with the UNBUMPED version, and after the rollback a client edit
+// derived from those phantom rows PASSES the ifVersion fence against the
+// restored tree. Holding mutMu makes the snapshot wait until the open
+// transaction reaches success or rollback; it then describes committed truth
+// only. Cold admin read — hot-path accessors never touch mutMu. Lock order:
+// mutMu → mu (the store's established order).
 func (s *Store) SnapshotView() Snapshot {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	snap := Snapshot{
