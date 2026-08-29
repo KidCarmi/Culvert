@@ -690,6 +690,46 @@ func (c *policyDraftCoordinator) baseGenerationStale() bool {
 	return cur != base
 }
 
+// draftReviewSnapshot is ONE coherent capture of everything GET
+// /api/policy/draft renders (§§10–12 draft-review correction): draft
+// metadata, the candidate rules WITH the version that identifies exactly
+// them, the running baseline, and the baseStale verdict — all under one
+// coordinator lock. The previous handler assembled state, diff, candidate
+// version, shadows, and baseStale from independent reads, so a staged edit
+// landing mid-assembly let an operator review the diff of candidate
+// generation C(N) while receiving commit token N+1 — the token then
+// committed a candidate containing a rule the operator never saw, and the
+// ?ifVersion= fence (whose whole job is "commit exactly what was reviewed")
+// was structurally bypassed. Diff, pendingCount, and shadows are derived
+// FROM the captured slices by pure functions, never from a second live read.
+// Lock order c.mu → PolicyStore.mu (the stageTarget convention); each store
+// pair is itself one SnapshotWithVersion read.
+type draftReviewSnapshot struct {
+	RequireCommit bool
+	State         draftState
+	Candidate     PolicyStoreSnapshot // valid only when State.Active
+	Running       PolicyStoreSnapshot
+	BaseStale     bool // Running.Version != State.BaseGeneration; only while active
+}
+
+// reviewSnapshot captures the coherent draft-review state. The diff/shadow
+// derivations are left to the caller (pure functions over the captured
+// slices) so the lock hold stays a capture, not a computation.
+func (c *policyDraftCoordinator) reviewSnapshot() draftReviewSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := draftReviewSnapshot{
+		RequireCommit: requireCommitEnabled(),
+		State:         c.state,
+		Running:       policyStore.SnapshotWithVersion(),
+	}
+	if c.state.Active {
+		s.Candidate = c.cand.SnapshotWithVersion()
+		s.BaseStale = s.Running.Version != c.state.BaseGeneration
+	}
+	return s
+}
+
 // policyDraftDiff summarizes the candidate against running (by stable ID).
 type policyDraftDiff struct {
 	Added    []string `json:"added"`    // rule names present in candidate, not running
@@ -703,8 +743,14 @@ func (d policyDraftDiff) total() int { return len(d.Added) + len(d.Removed) + le
 // (backfilled on load, so always present); content equality via JSON so every
 // field participates without a hand-maintained comparator.
 func (c *policyDraftCoordinator) diffVsRunning() policyDraftDiff {
-	run := policyStore.List()
-	cand := c.candidateList()
+	return diffRuleSets(policyStore.List(), c.candidateList())
+}
+
+// diffRuleSets is the PURE candidate-vs-running comparator over two
+// already-captured rule lists, so a coherent reader (reviewSnapshot) can
+// derive the diff from exactly the slices its version fence identifies
+// instead of re-reading live stores (§§10–11).
+func diffRuleSets(run, cand []PolicyRule) policyDraftDiff {
 	runByID := make(map[string]PolicyRule, len(run))
 	for i := range run {
 		runByID[run[i].ID] = run[i]
@@ -837,6 +883,26 @@ func effectivePolicyVersion() (version int64, updatedAt string) {
 	return policyStore.policyVersion()
 }
 
+// effectiveManagementSnapshot is the FENCED read behind GET /api/policy
+// (§§6–8 fenced-read correction): the candidate-vs-running choice, the rule
+// list, the version fence, and the draft fact all come from ONE coordinator-
+// locked capture. The previous shape — effectivePolicyList() then
+// effectivePolicyVersion() as independent calls — let a staged edit land
+// between them, so a client rendered generation-P rules yet held a
+// generation-P+1 token and its stale later edit passed the optimistic fence.
+// Same engaged predicate + lock order as effectivePolicySnapshot
+// (c.mu → PolicyStore.mu, the stageTarget convention); the per-store pair is
+// itself one PolicyStore.SnapshotWithVersion read so rules/version cannot
+// tear inside the selected store either.
+func effectiveManagementSnapshot() (snap PolicyStoreSnapshot, draft bool) {
+	policyDraft.mu.Lock()
+	defer policyDraft.mu.Unlock()
+	if requireCommitEnabled() && policyDraft.state.Active {
+		return policyDraft.cand.SnapshotWithVersion(), true
+	}
+	return policyStore.SnapshotWithVersion(), false
+}
+
 // afterPolicyWrite is RETIRED (2B.0b): ordinary policy mutations run their
 // persist durable-or-nothing INSIDE fencedMutate's critical section (see
 // policy_mutation.go), and the handler-side finalize —
@@ -951,30 +1017,35 @@ func apiPolicyDraft(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		st := policyDraft.snapshotState()
+		// ONE coordinator-locked review snapshot (§§10–12): diff, version,
+		// shadows, and baseStale are all derived from the SAME captured
+		// candidate/running pair, so the version returned identifies exactly
+		// the candidate whose diff the operator is reviewing — a commit with
+		// this token can never activate a rule the review response did not
+		// show (the ?ifVersion= fence 409s any later staged edit).
+		snap := policyDraft.reviewSnapshot()
 		resp := map[string]any{
-			"requireCommit": requireCommitEnabled(),
-			"active":        st.Active,
-			"actor":         st.Actor,
-			"startedAt":     st.StartedAt,
+			"requireCommit": snap.RequireCommit,
+			"active":        snap.State.Active,
+			"actor":         snap.State.Actor,
+			"startedAt":     snap.State.StartedAt,
 		}
-		if st.Active {
-			d := policyDraft.diffVsRunning()
-			ver, _ := policyDraft.candidateVersion()
+		if snap.State.Active {
+			d := diffRuleSets(snap.Running.Rules, snap.Candidate.Rules)
 			resp["diff"] = d
 			resp["pendingCount"] = d.total()
-			resp["version"] = ver
+			resp["version"] = snap.Candidate.Version
 			// Advisory shadow warnings over the CANDIDATE (what will go live),
-			// so the operator sees them before committing (G4).
-			resp["shadows"] = detectShadowedRules(policyDraft.candidateList())
+			// so the operator sees them before committing (G4) — derived from
+			// the same captured candidate the diff and version describe.
+			resp["shadows"] = detectShadowedRules(snap.Candidate.Rules)
 			// baseStale: running advanced past the generation this draft forked
 			// from (an import, rollback, or a Stage-1 auth-policy mutation — auth
-			// rules write the running domain immediately). The SAME backend truth
-			// the commit's fail-closed guard reads (baseGenerationStale), surfaced
-			// so the UI can say the draft cannot be safely committed as-is
-			// (2C §8). Only meaningful — and only present — while a draft is
-			// active.
-			resp["baseStale"] = policyDraft.baseGenerationStale()
+			// rules write the running domain immediately). The SAME truth the
+			// commit's fail-closed guard reads (baseGenerationStale), computed
+			// from the captured running version (2C §8). Only meaningful — and
+			// only present — while a draft is active.
+			resp["baseStale"] = snap.BaseStale
 		}
 		jsonOK(w, resp)
 

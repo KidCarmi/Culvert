@@ -1698,17 +1698,22 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// Effective view: the candidate while the draft is engaged (so the editor
-		// shows what will be committed), else running (policy-draft G2). The
-		// draft flag mirrors the same predicate so the SPA banner never claims
-		// draft editing while the rules shown (and written) are the live ones.
-		rules := effectivePolicyList()
-		ver, updatedAt := effectivePolicyVersion()
+		// shows what will be committed), else running (policy-draft G2). ONE
+		// coordinator-locked capture supplies the store choice, the rules, the
+		// version fence, AND the draft fact (§§6–8 fenced-read correction):
+		// independent effectivePolicyList/effectivePolicyVersion calls let a
+		// staged edit land in between, tearing rules from version — a client
+		// holding generation-P rules with a generation-P+1 token would pass the
+		// optimistic fence with a stale edit. The draft flag comes from the same
+		// selected state so the SPA banner never claims draft editing while the
+		// rules shown (and written) are the live ones.
+		snap, draft := effectiveManagementSnapshot()
 		jsonOK(w, map[string]any{
-			"rules":     rules,
-			"count":     len(rules),
-			"version":   ver,
-			"updatedAt": updatedAt,
-			"draft":     policyDraftEngaged(),
+			"rules":     snap.Rules,
+			"count":     len(snap.Rules),
+			"version":   snap.Version,
+			"updatedAt": snap.UpdatedAt,
+			"draft":     draft,
 		})
 	case http.MethodPost:
 		apiPolicyCreate(w, r)

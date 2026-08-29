@@ -1288,11 +1288,14 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 		snap.CAFingerprint = fp
 	}
 
-	// Full policy sync.
+	// Full policy sync. Rules + version come from ONE running-store snapshot
+	// (§13 fenced-read audit): List() then policyVersion() as two reads let a
+	// concurrent mutation pair generation-P rules with a generation-P+1
+	// version in the published snapshot.
 	snap.DefaultAction = defaultPolicyAction()
-	snap.PolicyRules = policyStore.List()
-	pv, _ := policyStore.policyVersion()
-	snap.PolicyVersion = pv
+	ps := policyStore.SnapshotWithVersion()
+	snap.PolicyRules = ps.Rules
+	snap.PolicyVersion = ps.Version
 	snap.SSLBypassPatterns = sslBypass.List()
 	cats := catStore.All()
 	snap.URLCategories = cats

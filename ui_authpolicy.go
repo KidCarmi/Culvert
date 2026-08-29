@@ -49,7 +49,13 @@ type authRuleView struct {
 // listAuthRules returns the auth (Stage-1) subset of the policy store, each
 // enriched with validateAuthRule warnings. Read-only.
 func listAuthRules() []authRuleView {
-	rules := policyStore.List()
+	return authRuleViews(policyStore.List())
+}
+
+// authRuleViews filters the auth (Stage-1) subset out of an already-captured
+// rule list — a PURE projection, so a fenced reader can derive the views from
+// the same snapshot its version fence came from (§7).
+func authRuleViews(rules []PolicyRule) []authRuleView {
 	out := make([]authRuleView, 0, 4)
 	for i := range rules {
 		if ruleTypeOf(&rules[i]) != ruleTypeAuth {
@@ -92,19 +98,24 @@ func apiAuthPolicy(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		rules := listAuthRules()
-		// version/updatedAt are the RUNNING PolicyStore generation — the fence
-		// clients echo via ?ifVersion=. Deliberately NOT effectivePolicyVersion:
-		// auth rules live in the running domain even while a Stage-2 draft is
-		// engaged, so the candidate's generation must never leak here (2C.0a).
-		ver, updatedAt := policyStore.policyVersion()
+		// ONE running-store snapshot supplies both the rules and the version
+		// fence (§7 fenced-read correction): listAuthRules() then
+		// policyVersion() as two reads let a concurrent auth mutation land in
+		// between, handing a client generation-P rules with a generation-P+1
+		// token — its stale later edit would pass the ?ifVersion= fence. The
+		// fence stays the RUNNING PolicyStore generation — deliberately NOT
+		// effectivePolicyVersion: auth rules live in the running domain even
+		// while a Stage-2 draft is engaged, so the candidate's generation must
+		// never leak here (2C.0a).
+		snap := policyStore.SnapshotWithVersion()
+		rules := authRuleViews(snap.Rules)
 		jsonOK(w, map[string]any{
 			"rules":         rules,
 			"count":         len(rules),
 			"defaultAction": defaultPolicyAction(),
 			"note":          authExemptNote,
-			"version":       ver,
-			"updatedAt":     updatedAt,
+			"version":       snap.Version,
+			"updatedAt":     snap.UpdatedAt,
 		})
 
 	case http.MethodPost:

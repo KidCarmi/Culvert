@@ -469,6 +469,38 @@ func (ps *PolicyStore) SaveErr() error {
 func (ps *PolicyStore) List() []PolicyRule {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
+	return ps.listLocked()
+}
+
+// PolicyStoreSnapshot is one coherent read of a policy store: the published
+// rule copies plus the version fence that identifies EXACTLY that rulebase.
+// Captured under a single read lock so a concurrent staged/committed mutation
+// can never tear rules from version (fenced-read correction §§6–8: List() then
+// policyVersion() as two calls let an edit land in between, handing a client
+// generation-P rules with a generation-P+1 token — a stale later edit would
+// pass the optimistic fence).
+type PolicyStoreSnapshot struct {
+	Rules     []PolicyRule
+	Version   int64
+	UpdatedAt string
+}
+
+// SnapshotWithVersion captures rules + version + updatedAt under ONE
+// PolicyStore read lock. This is the only sanctioned way to pair a rule list
+// with its version fence; do not call List() and policyVersion() separately
+// for any surface that returns both.
+func (ps *PolicyStore) SnapshotWithVersion() PolicyStoreSnapshot {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return PolicyStoreSnapshot{
+		Rules:     ps.listLocked(),
+		Version:   ps.version,
+		UpdatedAt: ps.updatedAt,
+	}
+}
+
+// listLocked is List's body; the caller must hold ps.mu (read or write).
+func (ps *PolicyStore) listLocked() []PolicyRule {
 	out := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
 		out[i] = *clonePolicyRuleForPublication(r)
