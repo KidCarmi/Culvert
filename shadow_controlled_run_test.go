@@ -246,6 +246,31 @@ func shadowSnap() shadowMetricsView {
 	return shadowMetricsView{}
 }
 
+// assertShadowDelta asserts that EXACTLY the named deltas were applied to the shadow metrics
+// singleton between before and after and that NOTHING ELSE changed — a FULL-snapshot
+// comparison. A per-field "+1" check on only the intended bucket would miss an accounting
+// regression that also bumped an unrelated bucket, and the next phase would then inherit the
+// inflated value as its baseline and also pass; comparing the whole snapshot closes that
+// (Codex P2 on 7dfe358). Every field is compared, so an unexercised bucket moving from 0 is
+// caught here rather than only at the report's "all-zero" claim.
+func assertShadowDelta(t *testing.T, before, after, deltas shadowMetricsView) {
+	t.Helper()
+	want := shadowMetricsView{
+		Evaluations:              before.Evaluations + deltas.Evaluations,
+		WouldExecute:             before.WouldExecute + deltas.WouldExecute,
+		WouldBlock:               before.WouldBlock + deltas.WouldBlock,
+		WouldRequireApproval:     before.WouldRequireApproval + deltas.WouldRequireApproval,
+		WouldRequireConfirmation: before.WouldRequireConfirmation + deltas.WouldRequireConfirmation,
+		WouldFailCredential:      before.WouldFailCredential + deltas.WouldFailCredential,
+		WouldFailInspection:      before.WouldFailInspection + deltas.WouldFailInspection,
+		WouldFailStale:           before.WouldFailStale + deltas.WouldFailStale,
+		WouldFailHardControl:     before.WouldFailHardControl + deltas.WouldFailHardControl,
+		WouldOther:               before.WouldOther + deltas.WouldOther,
+		EvaluationErrors:         before.EvaluationErrors + deltas.EvaluationErrors,
+	}
+	req(t, after == want, "shadow metric delta: only the intended buckets may change. before=%+v after=%+v want=%+v (deltas=%+v)", before, after, want, deltas)
+}
+
 // latestShadowEvidence scans the Gateway partitions for the most recent committed
 // schema-v2 shadow decision event.
 func latestShadowEvidence(t *testing.T) (event evmodel.Event, found bool) {
@@ -329,8 +354,7 @@ func (r *shadowRun) firstRequestWouldExecute() {
 	req(t, ra["materialization_ready"] == "not_evaluated" && ra["response_inspection"] == "not_evaluated",
 		"A: materialization_ready and response_inspection must be not_evaluated, got %v", ra)
 	after := shadowSnap()
-	req(t, after.Evaluations == before.Evaluations+1 && after.WouldExecute == before.WouldExecute+1,
-		"A: exactly one shadow evaluation + one would_execute must be counted (before=%+v after=%+v)", before, after)
+	assertShadowDelta(t, before, after, shadowMetricsView{Evaluations: 1, WouldExecute: 1})
 	r.ev("A first request echo: execution_state=shadow_evaluated executed=false shadow_outcome=would_execute mode=shadow mat_ready=not_evaluated resp_insp=not_evaluated")
 	r.ev("A metrics: evaluations %d->%d would_execute %d->%d evaluation_errors=%d",
 		before.Evaluations, after.Evaluations, before.WouldExecute, after.WouldExecute, after.EvaluationErrors)
@@ -366,8 +390,7 @@ func (r *shadowRun) matrixWouldBlock() {
 		"B: expected shadow_evaluated/would_block, got %v", rb)
 	req(t, rb["shadow_override"] == true, "B: a policy DENY must set shadow_override=true, got %v", rb)
 	after := shadowSnap()
-	req(t, after.Evaluations == before.Evaluations+1 && after.WouldBlock == before.WouldBlock+1,
-		"B: exactly one shadow evaluation + one would_block must be counted (before=%+v after=%+v)", before, after)
+	assertShadowDelta(t, before, after, shadowMetricsView{Evaluations: 1, WouldBlock: 1})
 	// A durable schema-v2 event must exist for THIS would_block evaluation (no evidence gap).
 	de, ok := latestShadowEvidence(t)
 	req(t, ok && de.Shadow.Outcome == "would_block" && de.VerifyDigest() && de.Validate() == nil,
@@ -389,8 +412,9 @@ func (r *shadowRun) outOfScopeContainment() {
 	// Observe decision (execution_state=not_implemented), never a Shadow evaluation.
 	req(t, ro["execution_state"] == "not_implemented", "SECURITY: out-of-scope subject must be Observe (not_implemented), never shadow-evaluated, got %v", ro)
 	after := shadowSnap()
-	req(t, after.Evaluations == before.Evaluations,
-		"SECURITY: out-of-scope traffic must not increment shadow evaluations (%d->%d)", before.Evaluations, after.Evaluations)
+	// Out-of-scope traffic must move NO shadow counter — the full-snapshot delta of zero
+	// proves it neither shadow-evaluated nor touched any other bucket.
+	assertShadowDelta(t, before, after, shadowMetricsView{})
 	r.ev("out-of-scope containment: principal=%s execution_state=%v shadow_evaluations UNCHANGED %d (behaves as Observe)",
 		outsiderSub, ro["execution_state"], after.Evaluations)
 }
@@ -414,8 +438,8 @@ func (r *shadowRun) killDrill() {
 	req(t, errObj != nil && errObj["message"] == "rollout_emergency_active",
 		"kill: expected emergency-block error rollout_emergency_active, got %v", rk)
 	after := shadowSnap()
-	req(t, after.EvaluationErrors == before.EvaluationErrors+1,
-		"kill: exactly one fail-closed evaluation error must be counted (%d->%d)", before.EvaluationErrors, after.EvaluationErrors)
+	// Exactly one fail-closed evaluation error and NO shadow evaluation (or any other bucket).
+	assertShadowDelta(t, before, after, shadowMetricsView{EvaluationErrors: 1})
 	req(t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: upstream invoked during kill drill: %d", atomic.LoadInt64(r.upstreamHits))
 	req(t, getMCPRollout().clearEmergency(rollout.CapabilityGateway) == nil, "clearEmergency failed")
 	r.ev("kill drill: emergency engaged -> error=rollout_emergency_active evaluation_errors %d->%d not_would_execute no_shadow_eval upstream=0 -> kill cleared",
@@ -437,8 +461,7 @@ func (r *shadowRun) revokeDrill() {
 	req(t, rr["shadow_outcome"] == "would_fail_hard_control",
 		"revoked/quarantined tool must predict would_fail_hard_control, got %v", rr)
 	after := shadowSnap()
-	req(t, after.Evaluations == before.Evaluations+1 && after.WouldFailHardControl == before.WouldFailHardControl+1,
-		"revoke: exactly one shadow evaluation + one would_fail_hard_control must be counted (before=%+v after=%+v)", before, after)
+	assertShadowDelta(t, before, after, shadowMetricsView{Evaluations: 1, WouldFailHardControl: 1})
 	// A durable schema-v2 event must exist for THIS would_fail_hard_control evaluation.
 	de, ok := latestShadowEvidence(t)
 	req(t, ok && de.Shadow.Outcome == "would_fail_hard_control" && de.VerifyDigest() && de.Validate() == nil,
@@ -461,7 +484,8 @@ func (r *shadowRun) rollbackToObserve() {
 	// decision is non-executing and reports execution_state=not_implemented.
 	req(t, rrb["execution_state"] == "not_implemented", "post-rollback in-scope call must be Observe (not_implemented), got %v", rrb)
 	after := shadowSnap()
-	req(t, after.Evaluations == before.Evaluations, "post-rollback: shadow evaluations must not increment (%d->%d)", before.Evaluations, after.Evaluations)
+	// Post-rollback Observe traffic must move NO shadow counter (full-snapshot zero delta).
+	assertShadowDelta(t, before, after, shadowMetricsView{})
 	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must remain unarmed through rollback")
 	r.ev("rollback Shadow->Observe: mode=observe post_rollback_execution_state=%v shadow_evaluations UNCHANGED live_executor=absent canary=off production=off",
 		rrb["execution_state"])
