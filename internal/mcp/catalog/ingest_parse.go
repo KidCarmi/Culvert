@@ -34,45 +34,64 @@ var toolMembers = map[string]struct{}{
 
 // parseDiscovery decodes and strictly validates a discovery result against the
 // supported V1 contract, returning the freshly-built (eligibility-unset) tool
-// records in tools-array order. It performs exactly one hostile-input decode
-// (canonical.Decode) and schema-canonicalizes each schema from the resulting
+// records in tools-array order plus whether the result represents the server's
+// COMPLETE tool set (see discoveryComplete). It performs exactly one hostile-input
+// decode (canonical.Decode) and schema-canonicalizes each schema from the resulting
 // trusted tree. server supplies the per-tool credential profile and identity pin.
-func parseDiscovery(server registry.ServerRecord, in DiscoveryInput, lim limits.CatalogLimits) ([]*ToolRecord, error) {
+func parseDiscovery(server registry.ServerRecord, in DiscoveryInput, lim limits.CatalogLimits) ([]*ToolRecord, bool, error) {
 	if len(in.Raw) > lim.MaxDiscoveryBytes() {
-		return nil, mcperr.New(mcperr.ReasonResourceLimit, "catalog.ingest", "discovery result bytes")
+		return nil, false, mcperr.New(mcperr.ReasonResourceLimit, "catalog.ingest", "discovery result bytes")
 	}
 	root, err := canonical.Decode(in.Raw, discoveryBounds(lim))
 	if err != nil {
-		return nil, err // malformed_json / resource_limit / canonicalization_failed
+		return nil, false, err // malformed_json / resource_limit / canonicalization_failed
 	}
 	if root.Kind != canonical.KindObject {
-		return nil, malformedDiscovery("discovery result is not a JSON object")
+		return nil, false, malformedDiscovery("discovery result is not a JSON object")
 	}
 	for _, k := range root.Keys {
 		if _, ok := resultMembers[k]; !ok {
-			return nil, malformedDiscovery("unknown discovery result member")
+			return nil, false, malformedDiscovery("unknown discovery result member")
 		}
 	}
 	toolsNode, ok := root.Get("tools")
 	if !ok {
-		return nil, malformedDiscovery("discovery result missing tools array")
+		return nil, false, malformedDiscovery("discovery result missing tools array")
 	}
 	if toolsNode.Kind != canonical.KindArray {
-		return nil, malformedDiscovery("tools is not an array")
+		return nil, false, malformedDiscovery("tools is not an array")
 	}
 	if len(toolsNode.Arr) > lim.MaxToolsPerServer() {
-		return nil, mcperr.New(mcperr.ReasonCapacityExceeded, "catalog.ingest", "tools per server capacity reached")
+		return nil, false, mcperr.New(mcperr.ReasonCapacityExceeded, "catalog.ingest", "tools per server capacity reached")
 	}
 	records := make([]*ToolRecord, 0, len(toolsNode.Arr))
 	seen := make(map[string]struct{}, len(toolsNode.Arr))
 	for _, tn := range toolsNode.Arr {
 		rec, err := parseTool(server, in, tn, lim, seen)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		records = append(records, rec)
 	}
-	return records, nil
+	return records, discoveryComplete(root), nil
+}
+
+// discoveryComplete reports whether a tools/list result represents the server's
+// COMPLETE tool set — i.e. there is no continuation cursor to a further page. A
+// tools/list result MAY paginate (the MCP `nextCursor` member), and
+// execution.Discovery fetches only the FIRST page, so only a result carrying no
+// continuation token can be trusted as the whole list. An absent cursor, or an
+// explicitly empty-string cursor, means this is the complete set; a present,
+// non-empty string cursor means more pages exist. Any other shape (a non-string
+// cursor) is treated conservatively as NOT known-complete, so an omission-based
+// withdrawal never fires against a page that might be partial. This is the sole
+// consumer of `nextCursor`, which resultMembers has always permitted.
+func discoveryComplete(root *canonical.Node) bool {
+	nc, ok := root.Get("nextCursor")
+	if !ok {
+		return true
+	}
+	return nc.Kind == canonical.KindString && nc.Str == ""
 }
 
 // parseTool validates one tool object and builds its record + fingerprint.

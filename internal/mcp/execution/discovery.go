@@ -19,14 +19,73 @@ type Discovery struct {
 	Registry *registry.Registry
 	Catalog  *catalog.Catalog
 	Upstream UpstreamCaller
+	// OnIngest, when set, is invoked after a SUCCESSFUL catalog ingest (a new snapshot was
+	// published). Ingestion can only ever land a tool Quarantined/ReviewRequired — it never
+	// produces catalog.Usable — so a re-discovered tool that exactly matches an active trust
+	// approval would otherwise stay non-Usable until the next inventory read, Shadow
+	// preflight, or the periodic 30s reconcile tick, contaminating an in-flight Shadow
+	// experiment. The composition root wires this to the tool-trust reconcile hook so the
+	// approval's projection is re-materialized immediately. Optional and nil-safe; it must
+	// only WITHDRAW-or-re-affirm trust (it can never widen usability), so calling it here is
+	// safe even though this package holds no trust authority.
+	OnIngest func()
+	// IngestGuard, when set, runs the catalog ingest (its snapshot PUBLISH) inside the
+	// tool-trust reconcile critical section so a catalog revision advance is MUTUALLY
+	// EXCLUSIVE with an in-flight trust approval. Without it, ingestion advances the live
+	// catalog revision without holding the coordinator's derive lock, so an approval that
+	// captured the pre-advance revision between its target load and its durable commit would
+	// validate a stale copy — an identical rediscovery (same fingerprint, bumped revision) or
+	// an F1→F2→F1 flap in that window would be approved instead of returning the required
+	// stale-target conflict (ADR-0034 optimistic concurrency, PR round-15). Optional and
+	// nil-safe; when nil the ingest runs directly. Like OnIngest it only ever gates WHEN a
+	// publish lands, never what a publish produces, so carrying it grants this package no
+	// trust authority.
+	IngestGuard func(ingest func() error) error
 }
 
-// NewDiscovery constructs a Discovery. It fails closed on missing collaborators.
+// discoveryReconcileHook is the default OnIngest callback installed on every Discovery built
+// by NewDiscovery. The composition root sets it (SetReconcileHook) to the tool-trust reconcile
+// hook so a successful discovery ingest re-materializes matching approvals immediately, rather
+// than requiring each caller to remember to wire it. Nil (tests, or tool trust not composed) ⇒
+// no default (a no-op ingest). It is set once at startup before any Discovery is constructed,
+// so no synchronization is required — the same convention as the other startup-wired MCP seams.
+var discoveryReconcileHook func()
+
+// SetReconcileHook installs the default post-ingest reconcile callback used by NewDiscovery.
+// The composition root calls it once at startup; nil clears it (tests). It keeps this package
+// decoupled from tool trust — it only ever invokes the func it is handed, and that func can
+// only withdraw-or-re-affirm trust, never widen usability.
+func SetReconcileHook(fn func()) { discoveryReconcileHook = fn }
+
+// discoveryIngestGuard is the default IngestGuard installed on every Discovery built by
+// NewDiscovery. The composition root sets it (SetIngestGuard) to run the ingest publish under
+// the tool-trust derive lock, so a catalog revision advance cannot slip under an in-flight
+// approval's target-load→commit window. Nil (tests, or tool trust not composed) ⇒ no guard
+// (the ingest runs directly). Set once at startup before any Discovery is constructed, so no
+// synchronization is required — the same convention as the other startup-wired MCP seams.
+var discoveryIngestGuard func(ingest func() error) error
+
+// SetIngestGuard installs the default ingest-serialization guard used by NewDiscovery. The
+// composition root calls it once at startup; nil clears it (tests). It keeps this package
+// decoupled from tool trust — it only ever runs the ingest it is handed inside whatever
+// critical section the composition root wraps it in, and that gating can never widen usability.
+func SetIngestGuard(fn func(ingest func() error) error) { discoveryIngestGuard = fn }
+
+// NewDiscovery constructs a Discovery. It fails closed on missing collaborators and installs
+// the default post-ingest reconcile hook (SetReconcileHook) plus the ingest-serialization
+// guard (SetIngestGuard) so the ingest path reconciles trust and serializes its publish with
+// in-flight approvals without the caller having to wire OnIngest / IngestGuard itself.
 func NewDiscovery(reg *registry.Registry, cat *catalog.Catalog, up UpstreamCaller) (*Discovery, error) {
 	if reg == nil || cat == nil || up == nil {
 		return nil, mcperr.New(mcperr.ReasonListenerConfigInvalid, "execution.discovery", "incomplete discovery config")
 	}
-	return &Discovery{Registry: reg, Catalog: cat, Upstream: up}, nil
+	return &Discovery{
+		Registry:    reg,
+		Catalog:     cat,
+		Upstream:    up,
+		OnIngest:    discoveryReconcileHook,
+		IngestGuard: discoveryIngestGuard,
+	}, nil
 }
 
 // Discover runs the ordered discovery sequence for one registered server:
@@ -65,13 +124,29 @@ func (d *Discovery) Discover(ctx context.Context, serverID string) (*catalog.Rep
 	// strict decode with a member allowlist, per-tool fingerprinting, drift
 	// classification, sticky quarantine, all-or-nothing publish). The previous
 	// snapshot is retained on any ingestion error.
-	_, report, err := d.Catalog.Ingest(d.Registry, catalog.DiscoveryInput{
-		ServerID: rec.ID,
-		Identity: rec.PinnedIdentity,
-		Raw:      []byte(resp.Result),
-	})
-	if err != nil {
-		return nil, mcperr.Wrap(mcperr.ReasonUpstreamDiscoveryFailed, "execution.discovery", "catalog ingest", err)
+	var report *catalog.Report
+	ingest := func() error {
+		_, r, ierr := d.Catalog.Ingest(d.Registry, catalog.DiscoveryInput{
+			ServerID: rec.ID,
+			Identity: rec.PinnedIdentity,
+			Raw:      []byte(resp.Result),
+		})
+		report = r
+		return ierr
+	}
+	// Serialize the publish with in-flight approvals when a guard is installed, so the catalog
+	// revision an approval verifies for its durable decision cannot advance underneath it.
+	run := ingest
+	if d.IngestGuard != nil {
+		run = func() error { return d.IngestGuard(ingest) }
+	}
+	if ierr := run(); ierr != nil {
+		return nil, mcperr.Wrap(mcperr.ReasonUpstreamDiscoveryFailed, "execution.discovery", "catalog ingest", ierr)
+	}
+	// A new snapshot was published. Reconcile trust NOW so a re-discovered tool that matches
+	// an active approval is re-promoted immediately rather than after the next reconcile tick.
+	if d.OnIngest != nil {
+		d.OnIngest()
 	}
 	return report, nil
 }

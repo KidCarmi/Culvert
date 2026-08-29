@@ -224,6 +224,7 @@ func main() {
 	initPersistentAdminState(s)
 	initPolicyLearning(s)  // ADR-0025: disabled-by-default advisory learning engine (governed via AdminSettings; no SWG effect when off)
 	initMCPRuntime(s)      // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
+	initMCPToolTrust(s)    // ADR-0034: disabled-by-default tool-trust store + catalog Usable projection. MUST run after initMCPRuntime (needs the published inventory) and BEFORE initMCPRollout, whose restore() runs the Shadow preflight that reads catalog.Usable — otherwise a valid persisted Shadow rollout is clamped to Disabled every restart before approved tools are re-promoted.
 	initMCPRollout(s)      // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
 	initMCPDistribution(s) // PR-12: disabled-by-default DP applier composition (after rollout state is restored)
 	loadReleaseManagement(resolveReleaseStartupConfig())

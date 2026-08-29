@@ -98,7 +98,7 @@ import (
 //   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
 //     feed freshness/failure counts, previously Prometheus-only).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 233 // 222 (incl. the 3 ADR-0027 LDAP IdP routes) + 6 /api/policy-learning/* (ADR-0025 M5A) + 1 /api/backups (backup-archive visibility) + 3 FrontendV2 preview routes (FE-1B: /app, /app/, /assets/) + 1 /api/urlcat/state (2D-B v2 read: categories + semantic revision)
+	const want = 235 // 222 (incl. the 3 ADR-0027 LDAP IdP routes) + 6 /api/policy-learning/* (ADR-0025 M5A) + 1 /api/backups (backup-archive visibility) + 3 FrontendV2 preview routes (FE-1B: /app, /app/, /assets/) + 1 /api/urlcat/state (2D-B v2 read: categories + semantic revision) + 2 ADR-0034 tool-trust routes (/api/mcp/tool-approvals, /api/mcp/tool-approval-decision)
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

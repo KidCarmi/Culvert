@@ -3407,6 +3407,36 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/mcp/tool-approvals"
+    method: "GET"
+    handler: "apiMCPToolApprovals"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/tool-approvals"
+    method: "POST"
+    handler: "apiMCPToolApprovals"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "operator"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/mcp/tool-approval-decision"
+    method: "POST"
+    handler: "apiMCPToolApprovalDecision"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
   - route: "/api/mcp/config"
     method: "GET"
     handler: "apiMCPConfig"

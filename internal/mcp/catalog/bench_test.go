@@ -47,9 +47,9 @@ func BenchmarkCanonicalizeMaxSchema(b *testing.B) {
 func BenchmarkClassifyTypicalCycle(b *testing.B) {
 	l := limitsForFuzz()
 	srv := serverRecord(testServer, testIdentity)
-	prior, _ := parseDiscovery(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: wrapTool([]byte(typicalSchema))}, l)
+	prior, _, _ := parseDiscovery(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: wrapTool([]byte(typicalSchema))}, l)
 	changed := `{"type":"object","required":["path"],"properties":{"path":{"type":"string","maxLength":4096},"mode":{"enum":["read","write","admin"]},"count":{"type":"number","minimum":0,"maximum":100}},"additionalProperties":false}`
-	obs, _ := parseDiscovery(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: wrapTool([]byte(changed))}, l)
+	obs, _, _ := parseDiscovery(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: wrapTool([]byte(changed))}, l)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if class, _ := Classify(prior[0], obs[0]); class != PrivilegeExpansion {

@@ -380,6 +380,153 @@ func TestSameNameDifferentServersDistinct(t *testing.T) {
 	}
 }
 
+// TestIngestWithdrawsOmittedTool proves a complete per-server discovery that omits a
+// previously-known tool drops that tool from the snapshot, so a stale record can never keep
+// conferring eligibility (and, once tool-trust derives from the catalog, keep a withdrawn tool
+// Usable). A re-added tool re-ingests as unknown, never silently re-Usable.
+func TestIngestWithdrawsOmittedTool(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(
+		`{"name":"a","inputSchema":{"type":"object"}}`,
+		`{"name":"b","inputSchema":{"type":"object"}}`))
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); !ok {
+		t.Fatal("tool a must be present after the first discovery")
+	}
+	// A complete re-discovery that returns only b — a is gone from the server.
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"b","inputSchema":{"type":"object"}}`))
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); ok {
+		t.Fatal("tool a omitted by a complete discovery must be withdrawn from the catalog")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "b"}); !ok {
+		t.Fatal("tool b, still observed, must remain")
+	}
+}
+
+// TestIngestOmissionIsPerServer proves the withdrawal touches ONLY the discovered server: a
+// discovery for one server never drops another server's tools.
+func TestIngestOmissionIsPerServer(t *testing.T) {
+	l := lim(t)
+	c := New(l)
+	reg := regWith(t, l, [2]string{"srv-A", "spiffe://culvert/A"}, [2]string{"srv-B", "spiffe://culvert/B"})
+	ingest(t, c, reg, "srv-A", "spiffe://culvert/A", result(`{"name":"a","inputSchema":{"type":"object"}}`))
+	ingest(t, c, reg, "srv-B", "spiffe://culvert/B", result(`{"name":"b","inputSchema":{"type":"object"}}`))
+	// Re-discover srv-A with a different tool set (omitting "a"): only srv-A's "a" is withdrawn.
+	ingest(t, c, reg, "srv-A", "spiffe://culvert/A", result(`{"name":"c","inputSchema":{"type":"object"}}`))
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "a"}); ok {
+		t.Fatal("srv-A tool a omitted by its own discovery must be withdrawn")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "c"}); !ok {
+		t.Fatal("srv-A tool c, newly observed, must be present")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-B", Name: "b"}); !ok {
+		t.Fatal("srv-B tool b must NOT be dropped by a srv-A discovery")
+	}
+}
+
+// TestIngestPaginatedPageDoesNotWithdraw pins the pagination guard: a tools/list result carrying
+// a non-empty nextCursor is only ONE page of a larger set (execution.Discovery fetches the first
+// page), so a previously-known tool absent from it has NOT been proven withdrawn and must remain.
+// Only a complete (cursor-less or empty-cursor) result withdraws omitted tools.
+func TestIngestPaginatedPageDoesNotWithdraw(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	// A complete first discovery establishes a and b.
+	ingest(t, c, reg, testServer, testIdentity, result(
+		`{"name":"a","inputSchema":{"type":"object"}}`,
+		`{"name":"b","inputSchema":{"type":"object"}}`))
+	// A PARTIAL page (nextCursor set) listing only b must NOT withdraw a.
+	paged := []byte(`{"tools":[{"name":"b","inputSchema":{"type":"object"}}],"nextCursor":"page-2"}`)
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: paged}); err != nil {
+		t.Fatalf("ingest paginated page: %v", err)
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); !ok {
+		t.Fatal("a tool absent from a PARTIAL (nextCursor) page must NOT be withdrawn")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "b"}); !ok {
+		t.Fatal("tool b, present on the page, must remain")
+	}
+	// An explicitly empty cursor is a complete result and DOES withdraw the omitted a.
+	done := []byte(`{"tools":[{"name":"b","inputSchema":{"type":"object"}}],"nextCursor":""}`)
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: done}); err != nil {
+		t.Fatalf("ingest complete (empty-cursor) result: %v", err)
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: testServer, Name: "a"}); ok {
+		t.Fatal("a complete (empty-cursor) result must withdraw the omitted tool a")
+	}
+}
+
+// TestIngestReplacementAtCapacity pins that a complete discovery replacing a tool at exactly
+// MaxCatalogEntries publishes: the omitted tool is withdrawn to free its slot BEFORE the new
+// tool's capacity check, so a tool-for-tool swap at the cap does not fail capacity_exceeded.
+func TestIngestReplacementAtCapacity(t *testing.T) {
+	cfg := smallCatalog(t) // MaxCatalogEntries:8, MaxToolsPerServer:4
+	c := New(cfg)
+	reg := regWith(t, cfg, [2]string{"srv-A", "id-A"}, [2]string{"srv-B", "id-B"})
+	fill := func(id registry.ServerID, identity registry.Identity, names ...string) {
+		tools := make([]string, 0, len(names))
+		for _, n := range names {
+			tools = append(tools, `{"name":"`+n+`","inputSchema":{}}`)
+		}
+		if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: id, Identity: identity, Raw: result(tools...)}); err != nil {
+			t.Fatalf("fill %s: %v", id, err)
+		}
+	}
+	// Fill to exactly MaxCatalogEntries: 4 tools on each of two servers.
+	fill("srv-A", "id-A", "a0", "a1", "a2", "a3")
+	fill("srv-B", "id-B", "b0", "b1", "b2", "b3")
+	if c.Current().Len() != 8 {
+		t.Fatalf("precondition: catalog must be at capacity 8, got %d", c.Current().Len())
+	}
+	// Complete re-discovery of srv-A swaps a3 → aNew (still 4 tools on A, 8 total after withdrawal).
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: "srv-A", Identity: "id-A", Raw: result(
+		`{"name":"a0","inputSchema":{}}`, `{"name":"a1","inputSchema":{}}`,
+		`{"name":"a2","inputSchema":{}}`, `{"name":"aNew","inputSchema":{}}`)}); err != nil {
+		t.Fatalf("tool-for-tool replacement at capacity must publish, got %v", err)
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "a3"}); ok {
+		t.Fatal("the replaced tool a3 must be withdrawn")
+	}
+	if _, ok := c.Current().Get(ToolKey{Server: "srv-A", Name: "aNew"}); !ok {
+		t.Fatal("the new tool aNew must be present after a replacement at capacity")
+	}
+	if c.Current().Len() != 8 {
+		t.Fatalf("catalog must stay at 8 after a tool-for-tool swap, got %d", c.Current().Len())
+	}
+}
+
+// TestIngestPartialPagesRespectPerServerCap proves the per-server cap is enforced on the merged
+// set, not just each page's array length: a changing upstream that returns successive partial
+// (nextCursor) first pages with DIFFERENT tool names cannot accumulate past MaxToolsPerServer for
+// one server. An overrun fails closed (capacity_exceeded) and leaves the prior snapshot unchanged.
+func TestIngestPartialPagesRespectPerServerCap(t *testing.T) {
+	cfg := smallCatalog(t) // MaxToolsPerServer:4
+	c := New(cfg)
+	reg := regWith(t, cfg, [2]string{"srv-A", "id-A"})
+	paged := func(names ...string) []byte {
+		out := `{"tools":[`
+		for i, n := range names {
+			if i > 0 {
+				out += ","
+			}
+			out += `{"name":"` + n + `","inputSchema":{}}`
+		}
+		return []byte(out + `],"nextCursor":"more"}`)
+	}
+	// First partial page: 3 distinct tools — accepted, additive, not withdrawn (partial page).
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: "srv-A", Identity: "id-A", Raw: paged("a", "b", "c")}); err != nil {
+		t.Fatalf("first partial page: %v", err)
+	}
+	// Second partial page with 2 more distinct names would make 5 > MaxToolsPerServer(4): rejected.
+	before := c.Current()
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: "srv-A", Identity: "id-A", Raw: paged("d", "e")}); mcperr.ReasonOf(err) != mcperr.ReasonCapacityExceeded {
+		t.Fatalf("per-server accumulation past the cap must be capacity_exceeded, got %v", err)
+	}
+	if c.Current() != before {
+		t.Fatal("a rejected over-cap ingest must leave the prior snapshot unchanged")
+	}
+}
+
 func TestQuarantineCannotAutoClear(t *testing.T) {
 	l := lim(t)
 	c, reg := New(l), oneServerReg(t, l)
