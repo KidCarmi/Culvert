@@ -13599,7 +13599,8 @@
                     "type": "string"
                   },
                   "reason": {
-                    "description": "Optional free-text reason (used for reject/revoke).",
+                    "description": "Optional free-text reason (used for reject/revoke). The backend limit is 512 UTF-8 BYTES (maxLength counts characters, so multi-byte input may be rejected below this).",
+                    "maxLength": 512,
                     "type": "string"
                   }
                 },

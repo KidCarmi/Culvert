@@ -10899,7 +10899,7 @@ paths:
               properties:
                 approval_id: { type: string }
                 action: { type: string, enum: [approve, reject, revoke], description: 'approve materializes catalog.Usable for the exact reviewed fingerprint; reject decides a pending request; revoke withdraws an active grant.' }
-                reason: { type: string, description: 'Optional free-text reason (used for reject/revoke).' }
+                reason: { type: string, maxLength: 512, description: 'Optional free-text reason (used for reject/revoke). The backend limit is 512 UTF-8 BYTES (maxLength counts characters, so multi-byte input may be rejected below this).' }
       responses:
         '200': { description: Decision applied, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
