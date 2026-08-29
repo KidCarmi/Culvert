@@ -3,7 +3,7 @@
 - **Status:** Proposed (design recorded 2026-07-13; no code moved)
 - **Date:** 2026-07-13
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
-- **Relates to:** ADR-0012 (cloud-first), ADR-0034 (AI input), ADR-0029 (redaction). Basis: `docs/support/TAC-CLOUD-ARCHITECTURE.md §3-4`.
+- **Relates to:** ADR-0012 (cloud-first), ADR-0036 (AI input), ADR-0029 (redaction). Basis: `docs/support/TAC-CLOUD-ARCHITECTURE.md §3-4`.
 
 ## Context
 An uploaded bundle is redacted + E2E-encrypted, but it is still the most sensitive artifact the platform holds: customer configuration, hostnames, masked identities, logs. TAC engineers and AI need *diagnosis*, not the raw bundle. Mixing raw bundles with derived findings in one store, or granting standing access to raw, maximizes exposure.

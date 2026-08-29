@@ -43,6 +43,7 @@ is listed under "replaces".
 | **Administrator** | A console account (admin/operator/viewer role) | "Users & Roles" → "Administrators" (avoids collision with proxy users/identities) |
 | **Identity** | An authenticated proxy user (from IdP/local auth; `identity.go`) | never "user" alone when it could mean console account |
 | **Inspection** | TLS MITM (SSL inspect) | "SSL inspection" acceptable; be consistent per screen |
+| **Kill switch** | *Not a single concept — three distinct, unrelated safety mechanisms share this bare name and MUST always carry a qualifier in UI/docs:* **Authentication kill switch** (Stage-1 Exempt-outcome fail-safe when no credential-capable backend is configured, `authExemptKillSwitchEngaged`/`CULVERT_AUTHBYPASS_DISABLE`, Auth Policy Simulator); **C2 enforcement override** (`CULVERT_C2_ENFORCE` revert-to-shadow, Governance panel — already self-qualifies by showing the env var name); **MCP emergency kill switch** (per-capability admission stop, `EngageKillSwitch`/`ClearKillSwitch`, MCP Command Center — already self-qualifies as "Emergency kill switch ... on gateway/management") | none of the three should ever be renamed away from "kill switch" (each is an established, tested, domain-specific fail-safe name) — the fix is always a qualifier, never a rename |
 
 ## Casing & style
 

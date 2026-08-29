@@ -4001,8 +4001,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Appliance settings summary
-         * @description Returns core appliance settings — auth state, admin user, ports, and default auth outcome (password never returned).
+         * Node settings summary
+         * @description Returns core node settings — auth state, admin user, ports, and default auth outcome (password never returned).
          */
         get: operations["getSettings"];
         put?: never;
@@ -13905,7 +13905,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Appliance settings summary. */
+            /** @description Node settings summary. */
             200: {
                 headers: {
                     [name: string]: unknown;
