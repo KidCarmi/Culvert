@@ -413,6 +413,13 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 	if err := validateRewriteStableIDs(snap.RewriteRules); err != nil {
 		return fmt.Errorf("config snapshot rewrite_rules invalid: %w", err)
 	}
+	// File-profile identity invariants (2D-C final §13–§15): FileProfile IDs
+	// are enforcement-authoritative, so a snapshot carrying a duplicate or
+	// missing ID (or duplicate names) is ambiguous identity — reject the
+	// ENTIRE snapshot before ANY slice applies.
+	if err := validateFileProfiles(snap.FileProfiles); err != nil {
+		return fmt.Errorf("config snapshot file_profiles invalid: %w", err)
+	}
 	return nil
 }
 
@@ -918,9 +925,14 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 		}
 	}
 
-	// File profiles.
+	// File profiles. The preflight (validateConfigSnapshot) already rejected
+	// ambiguous identity with the whole snapshot; the store-boundary refusal
+	// is defense-in-depth and must never install a set the preflight would
+	// have refused.
 	if snap.FileProfiles != nil {
-		globalProfileStore.ReplaceAll(snap.FileProfiles)
+		if err := globalProfileStore.ReplaceAll(snap.FileProfiles); err != nil {
+			logger.Printf("ConfigSnapshot: file profiles NOT applied: %v", err)
+		}
 	}
 
 	// Rewrite rules. FOLLOWER semantics (2D-C §39): the CP is authoritative —

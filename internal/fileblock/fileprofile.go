@@ -107,8 +107,58 @@ var builtInProfiles = []*FileExtProfile{
 	},
 }
 
+// ValidateProfiles is the canonical FileProfile SET validation seam (2D-C
+// final §13–§14), applied at every trust/load boundary (disk Load, CP→DP
+// ConfigSnapshot preflight, ReplaceAll): IDs are enforcement-authoritative,
+// so a set with a missing or duplicate ID is ambiguous identity and must be
+// refused — never repaired by minting fresh identity nondeterministically
+// per load. Names are the interactive intent namespace and must be non-empty
+// and case-insensitively unique. IDs are deliberately NOT required to be
+// UUIDs: the seeded built-ins carry deterministic `builtin-*` IDs by design.
+// Missing IDs are corruption, not legacy: FileExtProfile was born with the ID
+// field, the built-in IDs, and a uuid-minting Create (§14 audit) — every
+// version that ever persisted profiles wrote IDs.
+func ValidateProfiles(profiles []FileExtProfile) error {
+	ids := make(map[string]bool, len(profiles))
+	names := make(map[string]bool, len(profiles))
+	for i := range profiles {
+		p := &profiles[i]
+		if strings.TrimSpace(p.ID) == "" {
+			return fmt.Errorf("file profile %q has no id (corrupt set — every persisted profile carries one)", p.Name)
+		}
+		if ids[p.ID] {
+			return fmt.Errorf("duplicate file profile id %q (ambiguous identity)", p.ID)
+		}
+		ids[p.ID] = true
+		if strings.TrimSpace(p.Name) == "" {
+			return fmt.Errorf("file profile %q has an empty name", p.ID)
+		}
+		ln := strings.ToLower(strings.TrimSpace(p.Name))
+		if names[ln] {
+			return fmt.Errorf("duplicate file profile name %q (case-insensitive)", p.Name)
+		}
+		names[ln] = true
+	}
+	return nil
+}
+
+func validateProfilePtrs(profiles []*FileExtProfile) error {
+	vals := make([]FileExtProfile, 0, len(profiles))
+	for _, p := range profiles {
+		if p == nil {
+			return errors.New("nil file profile entry")
+		}
+		vals = append(vals, *p)
+	}
+	return ValidateProfiles(vals)
+}
+
 // Load reads profiles from disk. If the file does not exist the built-in
-// profiles are seeded and persisted so policy rules continue to work.
+// profiles are seeded and persisted so policy rules continue to work. A
+// persisted set that fails ValidateProfiles is REFUSED — the store keeps its
+// prior (empty at boot) contents rather than publishing ambiguous identity,
+// and the ID-authoritative enforcement path fails closed on the rules that
+// referenced it.
 func (s *FileProfileStore) Load(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,7 +174,15 @@ func (s *FileProfileStore) Load(path string) error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &s.profiles)
+	var loaded []*FileExtProfile
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return err
+	}
+	if err := validateProfilePtrs(loaded); err != nil {
+		return fmt.Errorf("refusing persisted profile set: %w", err)
+	}
+	s.profiles = loaded
+	return nil
 }
 
 // SetPath sets the persistence file path without reading from disk (use Load to
@@ -170,10 +228,17 @@ func (s *FileProfileStore) List() []*FileExtProfile {
 // source of truth — the in-memory swap is authoritative so the DP enforces the
 // CP's profiles even on a wedged local disk, the persist failure is logged
 // (and observed by the CHAOS-45 durable-write chokepoint), and the next CP
-// sync re-converges. Local confirmed administrative mutations must NEVER use
-// this path — they go through Create/Update/Delete, which are
-// durable-or-nothing. Tests are the other callers (state seeding).
-func (s *FileProfileStore) ReplaceAll(profiles []FileExtProfile) {
+// sync re-converges. CANDIDATE VALIDITY is separate from that follower
+// durability posture (2D-C final §15): a set failing ValidateProfiles is
+// refused up front — ReplaceAll must never make ambiguous identity
+// authoritative (the snapshot preflight rejects it earlier; this is the
+// defense-in-depth at the store boundary). Local confirmed administrative
+// mutations must NEVER use this path — they go through Create/Update/Delete,
+// which are durable-or-nothing. Tests are the other callers (state seeding).
+func (s *FileProfileStore) ReplaceAll(profiles []FileExtProfile) error {
+	if err := ValidateProfiles(profiles); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	s.profiles = make([]*FileExtProfile, len(profiles))
 	for i := range profiles {
@@ -184,6 +249,7 @@ func (s *FileProfileStore) ReplaceAll(profiles []FileExtProfile) {
 		obs.Printf("FileProfileStore: ReplaceAll persist: %v", err)
 	}
 	s.mu.Unlock()
+	return nil
 }
 
 // GetByName returns the profile with the given name (case-insensitive), or nil.
@@ -246,19 +312,35 @@ func (s *FileProfileStore) SnapshotWithRevision() ([]*FileExtProfile, string) {
 	return out, fingerprintProfiles(s.profiles)
 }
 
-// fingerprintProfiles hashes the sorted (id, name, extensions) tuples.
-// Length-framed fields under a version tag; extensions are already normalized
-// (normExts) so the fingerprint is canonical.
+// fingerprintProfiles hashes the profile set under the fpv2 domain tag.
+//
+// COLLISION-SAFE ENCODING (2D-C final §10–§11): every user-controlled string
+// (ID, name, each extension) is length-framed ("<len>:<bytes>") and the
+// extension COUNT is framed explicitly, so no reserved delimiter can be
+// smuggled inside a value — the fpv1 shape joined extensions with ",", and
+// normExts permits a comma inside an extension, so [".a",".b"] and [".a,.b"]
+// (different filter behavior) collided into one revision, letting a stale
+// editor false-pass the fence. Profile ordering is canonicalized by sorting
+// the per-profile encodings (as fpv1 sorted its rows) — the set, not the
+// slice order, is the content. Extension ordering is PRESERVED as stored:
+// matching is set-based, but the stored order is what the editor displays,
+// and the fence must distinguish every observable difference (documented
+// choice per §11).
 func fingerprintProfiles(profiles []*FileExtProfile) string {
 	rows := make([]string, 0, len(profiles))
 	for _, p := range profiles {
-		rows = append(rows, p.ID+"\x00"+p.Name+"\x00"+strings.Join(p.Extensions, ","))
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d:%s%d:%s%d:", len(p.ID), p.ID, len(p.Name), p.Name, len(p.Extensions))
+		for _, e := range p.Extensions {
+			fmt.Fprintf(&b, "%d:%s", len(e), e)
+		}
+		rows = append(rows, b.String())
 	}
 	sort.Strings(rows)
 	h := sha256.New()
-	h.Write([]byte("fpv1\x00"))
+	fmt.Fprintf(h, "fpv2\x00%d:", len(rows))
 	for _, r := range rows {
-		fmt.Fprintf(h, "%d\x00%s\x00", len(r), r)
+		fmt.Fprintf(h, "%d:%s", len(r), r)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

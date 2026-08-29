@@ -19,4 +19,8 @@ type (
 var (
 	fileBlocker        = fileblock.NewBlocker()
 	globalProfileStore = &fileblock.FileProfileStore{}
+
+	// validateFileProfiles is the canonical profile-set validation seam
+	// (2D-C final §14), aliased for the ConfigSnapshot preflight.
+	validateFileProfiles = fileblock.ValidateProfiles
 )
