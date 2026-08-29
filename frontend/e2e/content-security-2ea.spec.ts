@@ -281,9 +281,20 @@ test("admin: YARA validate is validation-only; rule create + ceremonial delete r
       .click();
     await expect(page.getByText(`Delete YARA rule file ${RULE}`)).toBeVisible();
     await expect(page.getByText("no longer be blocked by YARA")).toBeVisible();
+    // 2E-A-2 §3: the ceremony is bound to the authoritative reviewed revision
+    // (the confirm control only takes its final name once the review loaded)
+    // and the DELETE must assert it on the wire.
+    await expect(page.getByText("bound to the current version")).toBeVisible();
+    const deleteReq = page.waitForRequest(
+      (req) =>
+        req.method() === "DELETE" &&
+        req.url().includes("/api/security-scan/yara/rules/") &&
+        req.url().includes("ifRevision="),
+    );
     await page
       .getByRole("button", { name: "Delete rule file", exact: true })
       .click();
+    await deleteReq;
 
     // Authoritative result after refresh: the file is gone.
     await expect
