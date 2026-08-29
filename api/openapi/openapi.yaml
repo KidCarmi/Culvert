@@ -62,7 +62,7 @@ tags:
   - name: pac
     description: Proxy auto-config (PAC) settings.
   - name: settings
-    description: Appliance settings — logging, session, connection limits.
+    description: Node settings — logging, session, connection limits.
   - name: cluster
     description: Control-plane / data-plane cluster status and upstream pool.
   - name: support
@@ -3257,8 +3257,8 @@ paths:
     get:
       operationId: getSettings
       tags: [settings]
-      summary: Appliance settings summary
-      description: Returns core appliance settings — auth state, admin user, ports, and default auth outcome (password never returned).
+      summary: Node settings summary
+      description: Returns core node settings — auth state, admin user, ports, and default auth outcome (password never returned).
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -3270,7 +3270,7 @@ paths:
       x-culvert-introduced-version: 1.0.0
       responses:
         '200':
-          description: Appliance settings summary.
+          description: Node settings summary.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SettingsSummary' }

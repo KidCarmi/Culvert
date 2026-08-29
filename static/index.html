@@ -2305,7 +2305,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title">Steering Profiles</span>
-            <button class="btn primary sm" data-click="newPACProfile" data-min-role="admin">+ New Profile</button>
+            <button class="btn primary sm" data-click="newPACProfile" data-min-role="admin">+ New Steering Profile</button>
           </div>
           <div class="panel-body">
             <p style="font-size:.8rem;color:var(--muted);margin-bottom:10px;line-height:1.6">
@@ -2316,7 +2316,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             <div id="pac-profiles-list" style="font-size:.82rem">Loading…</div>
             <div id="pac-profile-editor" style="display:none;margin-top:14px;border-top:1px solid var(--surface2);padding-top:12px">
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-                <div><label class="form-label">Profile ID (URL-safe)</label><input id="pacp-id" class="input" placeholder="hq-israel"></div>
+                <div><label class="form-label">Steering Profile ID (URL-safe)</label><input id="pacp-id" class="input" placeholder="hq-israel"></div>
                 <div><label class="form-label">Name</label><input id="pacp-name" class="input" placeholder="HQ Israel"></div>
                 <div><label class="form-label">Proxy Pool</label><select id="pacp-pool" class="input"></select></div>
                 <div><label class="form-label">Availability Mode</label>
@@ -2340,7 +2340,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <button class="btn ghost sm" data-click="addPACRuleRow" style="margin-top:6px">+ Add Rule</button>
               <div id="pac-profile-errors" style="display:none;margin-top:10px;padding:10px 12px;border:1px solid var(--red,#e5484d);border-radius:8px;font-size:.8rem;line-height:1.5"></div>
               <div style="display:flex;gap:8px;margin-top:12px">
-                <button class="btn primary" data-click="savePACProfile">Save Profile</button>
+                <button class="btn primary" data-click="savePACProfile">Save Steering Profile</button>
                 <button class="btn ghost" data-click="cancelPACProfileEdit">Cancel</button>
               </div>
             </div>
@@ -2382,12 +2382,12 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div class="panel-header"><span class="panel-title">Steering Simulator</span></div>
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:10px;line-height:1.6">
-            Explain what a profile would return for a destination - the same rule
+            Explain what a steering profile would return for a destination - the same rule
             evaluation the compiler emits. No live DNS: supply a resolved IP to
             evaluate CIDR/private-network rules definitively.
           </p>
           <div class="pac-sim-grid" style="display:grid;grid-template-columns:1fr 2fr 1fr 90px 120px auto;gap:8px;align-items:end">
-            <div><label class="form-label">Profile</label><select id="pacsim-profile" class="input"></select></div>
+            <div><label class="form-label">Steering Profile</label><select id="pacsim-profile" class="input"></select></div>
             <div><label class="form-label">URL or Host</label><input id="pacsim-host" class="input" placeholder="https://intranet.corp.example/"></div>
             <div><label class="form-label">Resolved IP (optional)</label><input id="pacsim-ip" class="input" placeholder="10.1.2.3"></div>
             <div><label class="form-label">Port</label><input id="pacsim-port" class="input" placeholder="443"></div>
@@ -15140,7 +15140,7 @@ async function runPolicyTest() {
       ${credReq ? '<div class="pt-sub" style="color:#60a5fa;margin-top:4px">CredentialRequired returns a deterministic 407 credential challenge - the client must authenticate first. This is NOT Allow. At runtime Stage-2 is NOT evaluated until the client authenticates; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-authentication decision (with the authenticated identity) may differ.</div>' : ''}
       ${sso ? '<div class="pt-sub" style="color:#34d399;margin-top:4px">SSORequired requires an interactive browser SSO login first. A browser client is redirected (302) to the IdP; a non-browser or CONNECT client is failed closed (403). This is NOT Allow. Stage-2 is NOT evaluated until SSO completes and a session exists; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-SSO decision (with the authenticated identity) may differ.</div>' : ''}
       ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented - at runtime, credentials always win and the Stage-1 outcome is not evaluated.</div>' : ''}
-      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged - exemptions (scoped Exempt and the Open default) are forced to Require authentication. CredentialRequired and SSORequired are unaffected.</div>' : ''}
+      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Authentication kill switch engaged - exemptions (scoped Exempt and the Open default) are forced to Require authentication. CredentialRequired and SSORequired are unaffected.</div>' : ''}
       <div class="pt-sub" style="margin-top:6px;color:${a.stage2Reached ? '#34d399' : 'var(--muted)'}">Stage-2: <strong>${a.stage2Reached ? 'reached at runtime' : 'NOT reached at runtime'}</strong>.${a.stage2Note ? ' ' + escHtml(a.stage2Note) : ''}</div>
     </div>`;
   }

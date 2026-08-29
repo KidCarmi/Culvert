@@ -69,7 +69,7 @@ export function AuthScreen({
           <div className={styles.railHeading}>Management plane</div>
           <dl className={styles.railList}>
             <div className={styles.railItem}>
-              <dt>Appliance</dt>
+              <dt>Node</dt>
               <dd>{window.location.host}</dd>
             </div>
             <div className={styles.railItem}>

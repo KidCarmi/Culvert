@@ -18485,7 +18485,7 @@
     },
     "/api/settings": {
       "get": {
-        "description": "Returns core appliance settings — auth state, admin user, ports, and default auth outcome (password never returned).",
+        "description": "Returns core node settings — auth state, admin user, ports, and default auth outcome (password never returned).",
         "operationId": "getSettings",
         "responses": {
           "200": {
@@ -18496,7 +18496,7 @@
                 }
               }
             },
-            "description": "Appliance settings summary."
+            "description": "Node settings summary."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
@@ -18510,7 +18510,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Appliance settings summary",
+        "summary": "Node settings summary",
         "tags": [
           "settings"
         ],
@@ -21856,7 +21856,7 @@
       "name": "pac"
     },
     {
-      "description": "Appliance settings — logging, session, connection limits.",
+      "description": "Node settings — logging, session, connection limits.",
       "name": "settings"
     },
     {
