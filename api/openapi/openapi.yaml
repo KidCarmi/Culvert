@@ -10892,7 +10892,14 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, additionalProperties: true }
+            schema:
+              type: object
+              additionalProperties: false
+              required: [approval_id, action]
+              properties:
+                approval_id: { type: string }
+                action: { type: string, enum: [approve, reject, revoke], description: 'approve materializes catalog.Usable for the exact reviewed fingerprint; reject decides a pending request; revoke withdraws an active grant.' }
+                reason: { type: string, description: 'Optional free-text reason (used for reject/revoke).' }
       responses:
         '200': { description: Decision applied, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }

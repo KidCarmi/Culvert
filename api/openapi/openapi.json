@@ -13584,7 +13584,29 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "description": "approve materializes catalog.Usable for the exact reviewed fingerprint; reject decides a pending request; revoke withdraws an active grant.",
+                    "enum": [
+                      "approve",
+                      "reject",
+                      "revoke"
+                    ],
+                    "type": "string"
+                  },
+                  "approval_id": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "description": "Optional free-text reason (used for reject/revoke).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "approval_id",
+                  "action"
+                ],
                 "type": "object"
               }
             }
