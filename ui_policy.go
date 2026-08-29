@@ -1114,17 +1114,21 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
-			// Blocker D: a BuiltIn category owned by an active signed feed
-			// generation is read-only on the v2 surface — a durable 2xx the
-			// enforced view ignores would be a lie. Structured 409 points at
-			// SaaS Overrides.
-			if refuseFeedOwnedBuiltIn(w, name) {
+			// Blocker D + C: a BuiltIn category owned by an active signed
+			// generation is read-only on the v2 surface (structured 409 →
+			// SaaS Overrides), and the ownership decision is linearized with
+			// the durable mutation against signed cutover (§14) — released
+			// before the recompose.
+			release, refused := beginV2CategoryMutation(w, name)
+			if refused {
 				return
 			}
 			// v2 fenced host replacement: the store preserves BuiltIn INSIDE
 			// the transaction (no read-then-write window) and enforces the
 			// MaxHostsPerCategory bound; recompose only after durable success.
-			if err := catStore.ReplaceHostsDurable(ifRev, name, body.Hosts); err != nil {
+			err := catStore.ReplaceHostsDurable(ifRev, name, body.Hosts)
+			release()
+			if err != nil {
 				writeTaxonomyMutationError(w, err)
 				return
 			}
@@ -1180,14 +1184,18 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
-			// Blocker D: deleting a feed-owned BuiltIn category cannot remove
-			// it from enforcement (the signed generation serves it) — refuse
-			// on the v2 surface and point at SaaS Overrides (tombstones).
-			if refuseFeedOwnedBuiltIn(w, name) {
+			// Blocker D + C: deleting a feed-owned BuiltIn category cannot
+			// remove it from enforcement — refuse (409 → SaaS Overrides
+			// tombstones); ownership decision linearized with the durable
+			// delete (§14), released before the recompose.
+			release, refused := beginV2CategoryMutation(w, name)
+			if refused {
 				return
 			}
 			// v2 fenced durable delete; recompose only after durable success.
-			if err := catStore.DeleteDurable(ifRev, name); err != nil {
+			err := catStore.DeleteDurable(ifRev, name)
+			release()
+			if err != nil {
 				writeTaxonomyMutationError(w, err)
 				return
 			}
@@ -1233,13 +1241,17 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
-			// Blocker D: no v2 host mutation on a feed-owned BuiltIn category.
-			if refuseFeedOwnedBuiltIn(w, body.Category) {
+			// Blocker D + C: no v2 host mutation on a feed-owned BuiltIn
+			// category; ownership decision linearized with the mutation.
+			release, refused := beginV2CategoryMutation(w, body.Category)
+			if refused {
 				return
 			}
 			// v2 fenced durable single-host add (post-mutation cap enforced
 			// at the store boundary); recompose only after durable success.
-			if err := catStore.AddHostDurable(ifRev, body.Category, body.Host); err != nil {
+			err := catStore.AddHostDurable(ifRev, body.Category, body.Host)
+			release()
+			if err != nil {
 				writeTaxonomyMutationError(w, err)
 				return
 			}
@@ -1271,12 +1283,16 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
-			// Blocker D: no v2 host mutation on a feed-owned BuiltIn category.
-			if refuseFeedOwnedBuiltIn(w, category) {
+			// Blocker D + C: no v2 host mutation on a feed-owned BuiltIn
+			// category; ownership decision linearized with the mutation.
+			release, refused := beginV2CategoryMutation(w, category)
+			if refused {
 				return
 			}
 			// v2 fenced durable single-host remove.
-			if err := catStore.RemoveHostDurable(ifRev, category, host); err != nil {
+			err := catStore.RemoveHostDurable(ifRev, category, host)
+			release()
+			if err != nil {
 				writeTaxonomyMutationError(w, err)
 				return
 			}

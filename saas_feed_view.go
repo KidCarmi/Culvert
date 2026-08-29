@@ -22,6 +22,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -338,6 +339,37 @@ type liveCategorySwapper interface {
 	Current() *effectiveCategoryView
 }
 
+// taxonomyAuthorityGate is the NARROW built-in-taxonomy ownership-transition
+// gate (transactional-integrity correction, Blocker C §§12–14). The signed
+// effective view can atomically transition embedded/local →
+// downloaded/cached/resumed between a v2 BuiltIn mutation's ownership check
+// and its durable catStore mutation — leaving a normal 2xx for a local edit
+// the now-serving signed view ignores. The ownership truth therefore
+// participates in the mutation's linearization:
+//
+//   - SHARED side (RLock): a v2 BuiltIn-category mutation holds it across
+//     [ownership read → durable catStore mutation] (beginV2CategoryMutation,
+//     ui_policy.go). The recompose runs AFTER release: a transition landing
+//     there is a legitimate LATER ordered supersession (§14 outcome B — the
+//     local mutation linearized first, durably), and the recompose always
+//     rebuilds from whatever authority is then live. Admin-created
+//     (BuiltIn=false) mutations never take the gate (§13 — they are never
+//     feed-owned, so serializing them against activation buys nothing).
+//   - EXCLUSIVE side (Lock): every PRODUCTION live-view transition — the
+//     activation coordinator's cutovers, recovery installs, and the
+//     override recomposes all publish through feedLiveStore.Swap below.
+//
+// LOCK ORDER (acyclic): {objectReferenceMutationGate | scheduler runMu |
+// coordinator internals} → taxonomyAuthorityGate → catStore locks. The
+// exclusive side wraps ONLY the pointer swap (no store lock is ever taken
+// while holding it); the shared side acquires catStore.mutMu underneath; and
+// a handler that later recomposes does so only AFTER releasing the shared
+// side (recompose reaches Swap → the exclusive side — holding the shared
+// side across it would self-deadlock, pinned in review). Current() stays a
+// bare atomic load — the policy hot path never touches the gate. This is
+// deliberately NOT a generic feed transaction manager.
+var taxonomyAuthorityGate sync.RWMutex
+
 // feedLiveStore is the production live holder: a single atomic.Pointer so the cutover is
 // a lock-free, all-or-nothing swap and concurrent readers never observe a torn view.
 type feedLiveStore struct {
@@ -346,7 +378,13 @@ type feedLiveStore struct {
 
 func newFeedLiveStore() *feedLiveStore { return &feedLiveStore{} }
 
+// Swap installs v as the live view. It is the ONE production transition seam,
+// so it enters the exclusive side of taxonomyAuthorityGate: a transition that
+// can change built-in ownership linearizes against every in-flight v2
+// BuiltIn mutation (Blocker C). The gate wraps only the pointer swap.
 func (s *feedLiveStore) Swap(v *effectiveCategoryView) *effectiveCategoryView {
+	taxonomyAuthorityGate.Lock()
+	defer taxonomyAuthorityGate.Unlock()
 	return s.ptr.Swap(v)
 }
 
