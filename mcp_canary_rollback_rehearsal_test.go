@@ -65,7 +65,7 @@ func TestRollbackRehearsal_PersistFailureRemovesRecord(t *testing.T) {
 	capb := rollout.CapabilityGateway
 	// Force ONLY the final rollout-state persist to fail: a rename onto a directory fails, while the
 	// drill's scratch writes and the rehearsal-record write (different paths under dataDir) succeed.
-	if err := os.Mkdir(rolloutStateFileName(capb), 0o755); err != nil {
+	if err := os.Mkdir(rolloutStateFileName(capb), 0o750); err != nil {
 		t.Fatalf("pre-create state-file directory: %v", err)
 	}
 	if err := globalMCPRollout.recordRehearsal(capb); err == nil {
