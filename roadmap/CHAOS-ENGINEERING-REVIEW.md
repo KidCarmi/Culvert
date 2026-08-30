@@ -3028,6 +3028,19 @@ permanently if the first fetch died before recording an error. Fixed to require
 a completed clean round. Same rule as the absent-when-not-running gauges, which
 this change had already applied one function away.
 
+**FD-9 — the floor's own jitter breached the floor.** Found by the FD-7 gate
+flaking, not by reading the code: `firstDelay` jittered the floor remainder by
+the same symmetric ±10% used for the ordinary cadence, so roughly HALF of
+floored boots were scheduled BEFORE the floor expired — quietly defeating the
+crash-loop protection the floor exists to provide. Symmetric jitter is right
+for a cadence and wrong for a bound. `jitterUp` keeps the fleet spread and
+constrains it to add only. The gate now pins the floor from BOTH sides across
+200 draws, because a single draw passes a symmetric-jitter build about half the
+time — the same many-trial reasoning as CHAOS-54's
+`TestChaos54_StopIsPromptDuringAcceptBackoff`. Worth recording: **a flaky gate
+is evidence, not noise.** The first instinct was to loosen the assertion by the
+jitter margin, which would have hidden a real defect behind a wider bound.
+
 ### 25.9 Tests
 
 `internal/threatfeed/sync_freshness_test.go` (17) and

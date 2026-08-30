@@ -365,7 +365,13 @@ func (tf *Feed) runSyncLoop(ctx context.Context, now time.Time) {
 func (tf *Feed) firstDelay(decision bootDecision, floorLeft time.Duration) time.Duration {
 	d := tf.nextSyncDelay()
 	if decision == bootFloored && floorLeft > 0 && floorLeft < d {
-		return jitterDuration(floorLeft, syncJitterFrac)
+		// Jitter UPWARD only. The floor is a lower bound — it exists so a
+		// crash-looping process cannot fetch on every restart — and the
+		// symmetric ±10% jitter used everywhere else would push roughly half
+		// of these attempts BEFORE the floor expires, quietly defeating it.
+		// Spreading a fleet is still worth doing, so the jitter is kept and
+		// only its direction is constrained.
+		return jitterUp(floorLeft, syncJitterFrac)
 	}
 	return d
 }
@@ -454,6 +460,15 @@ func jitterDuration(d time.Duration, frac float64) time.Duration {
 		out = time.Millisecond
 	}
 	return out
+}
+
+// jitterUp spreads d by up to +frac, never below d. Used where the delay is a
+// floor that must not be breached; see firstDelay.
+func jitterUp(d time.Duration, frac float64) time.Duration {
+	if d <= 0 || frac <= 0 {
+		return d
+	}
+	return d + time.Duration(rand.Float64()*frac*float64(d)) // #nosec G404 -- fleet spread, not crypto
 }
 
 // SetSyncObserver installs the callback invoked after every completed sync
