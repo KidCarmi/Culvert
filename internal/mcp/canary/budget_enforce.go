@@ -201,24 +201,10 @@ func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time, ident ExecutionIdent
 	if e.total >= e.budget.MaxTotalExecutions {
 		return BudgetDeniedTotal
 	}
-	// A missing authoritative identity dimension fails CLOSED before the ceilings are consulted. The
-	// live executor resolves Principal/Tool/Server from policy; an empty field means resolution failed,
-	// and admitting "" as an ordinary key would collapse every distinct unresolved identity onto one
-	// already-admitted slot — two real tools could both execute under MaxTools:1 via an empty Tool
-	// (Codex P1). No slot is consumed.
-	if ident.Principal == "" || ident.Tool == "" || ident.Server == "" {
-		return BudgetDeniedIdentityIncomplete
-	}
-	// Distinct-identity blast-radius ceilings: a NEW principal/tool/server beyond its cap is denied
-	// (a scope/identity breach), and no slot is consumed. An already-admitted identity is fine.
-	if isNewBeyondCap(e.principals, ident.Principal, e.budget.MaxPrincipals) {
-		return BudgetDeniedPrincipalCap
-	}
-	if isNewBeyondCap(e.tools, ident.Tool, e.budget.MaxTools) {
-		return BudgetDeniedToolCap
-	}
-	if isNewBeyondCap(e.servers, ident.Server, e.budget.MaxServers) {
-		return BudgetDeniedServerCap
+	// Identity fail-closed + distinct-identity blast-radius ceilings (extracted to keep Reserve under
+	// the cyclomatic-complexity budget). No slot is consumed on any identity denial.
+	if d := e.identityDenial(ident); d != BudgetGranted {
+		return d
 	}
 	// Concurrency — simultaneous in-flight cap (per-request throttle; Release frees a slot).
 	if e.inflight >= e.budget.MaxConcurrentExecutions {
@@ -240,6 +226,28 @@ func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time, ident ExecutionIdent
 	e.principals[ident.Principal] = struct{}{}
 	e.tools[ident.Tool] = struct{}{}
 	e.servers[ident.Server] = struct{}{}
+	return BudgetGranted
+}
+
+// identityDenial fails an execution CLOSED on any identity problem, returning the specific denial
+// outcome, or BudgetGranted when the identity is complete and within every distinct-identity ceiling.
+// It first rejects a missing dimension (an empty Principal/Tool/Server must never be admitted as the
+// empty-string key — Codex P1), then the blast-radius ceilings (a NEW principal/tool/server beyond
+// its cap is a scope breach). No slot is consumed by any denial. Extracted from Reserve to keep that
+// method under the cyclomatic-complexity budget. Caller holds e.mu.
+func (e *BudgetEnforcer) identityDenial(ident ExecutionIdentity) BudgetOutcome {
+	if ident.Principal == "" || ident.Tool == "" || ident.Server == "" {
+		return BudgetDeniedIdentityIncomplete
+	}
+	if isNewBeyondCap(e.principals, ident.Principal, e.budget.MaxPrincipals) {
+		return BudgetDeniedPrincipalCap
+	}
+	if isNewBeyondCap(e.tools, ident.Tool, e.budget.MaxTools) {
+		return BudgetDeniedToolCap
+	}
+	if isNewBeyondCap(e.servers, ident.Server, e.budget.MaxServers) {
+		return BudgetDeniedServerCap
+	}
 	return BudgetGranted
 }
 
