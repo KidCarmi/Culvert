@@ -1240,8 +1240,12 @@
       },
       "DecryptionRedaction": {
         "additionalProperties": false,
-        "description": "Global destination-privacy posture (traffic-log host pseudonymization).",
+        "description": "Global destination-privacy posture (traffic-log destination pseudonymization). Node-local — outside export/import, config-version rollback, and CP→DP sync. Controls what destination information is retained in logs/observability; it does NOT control whether traffic is decrypted.",
         "properties": {
+          "key_id": {
+            "description": "NON-SECRET pseudonym-generation identifier (2E-B): random, never derived from key material; empty when no key is installed. Changes iff a key rotation lands, so a client can resolve a lost rotation response by comparing ids instead of blindly retrying.",
+            "type": "string"
+          },
           "key_provisioned": {
             "description": "Whether this node holds a pseudonym key (the key value is never exposed).",
             "type": "boolean"
@@ -1252,6 +1256,10 @@
           },
           "redact_hosts": {
             "description": "Boolean posture flag (false = off), or an array of redacted hosts on legacy builds."
+          },
+          "revision": {
+            "description": "Server-owned content-derived revision over (redact_hosts, key_id), from the SAME committed snapshot (coherent pair). Echo back as ifRevision on the PUT for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
           },
           "scope": {
             "description": "The privacy scope this posture governs (traffic_destination).",
@@ -3544,6 +3552,10 @@
         "additionalProperties": false,
         "description": "Toggle the destination-privacy posture and/or rotate the pseudonym key. A rotate-only call sends {\"rotate_key\":true} and omits redact_hosts (the posture is preserved across a rotation); neither field is individually required.",
         "properties": {
+          "ifRevision": {
+            "description": "OPTIONAL stale-writer fence (2E-B): the revision from the GET. A mismatch is the structured 409 with no mutation; because the revision covers key_id, a fenced rotation retried after a lost response is refused instead of silently rotating twice. Absent keeps the legacy replacement contract; the v2 client always asserts it.",
+            "type": "string"
+          },
           "redact_hosts": {
             "description": "Enable (true) or disable (false) the posture. Omitted on a rotate-only call.",
             "type": "boolean"
@@ -9903,7 +9915,7 @@
                 }
               }
             },
-            "description": "Eviction applied."
+            "description": "Truthful volatile-cache outcome: an evict returns {ok, removed} (removed=false when the entry was not present); a clear-all returns {ok, cleared}. Affected destinations may be attempted for decryption again and can be re-learned; no policy or Decryption Profile is deleted."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
@@ -9931,8 +9943,20 @@
         "x-culvert-visibility": "admin-supported"
       },
       "get": {
-        "description": "Returns the adaptive decryption-exclusion cache listing plus stats and per-scope blast radius.",
+        "description": "Returns the VOLATILE runtime auto-exclusion cache listing plus stats, per-scope blast radius, and tunables_revision (2E-B: derived from the SAME stats snapshot — the fence the tunables PUT asserts). Entries are runtime-generated from decryption failures, never persisted or synced, and may be learned again after eviction.",
         "operationId": "listDecryptionExclusions",
+        "parameters": [
+          {
+            "description": "OPTIONAL bounded management read (2E-B): cap the returned entry list. When the cap truncates, the response carries truncated=true; stats.active keeps the full population. Absent keeps the legacy full listing.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -10007,8 +10031,19 @@
         "x-culvert-visibility": "admin-supported"
       },
       "put": {
-        "description": "Updates adaptive decryption auto-exclude tunables.",
+        "description": "Full-replacement update of the adaptive decryption auto-exclude tunables (validate → persist → apply; a persist failure is a 500 with the running configuration untouched). Node-local AdminSettings-durable, deliberately outside config-version rollback.",
         "operationId": "setAutoExcludeTunables",
+        "parameters": [
+          {
+            "description": "OPTIONAL stale-writer fence (2E-B): the tunables_revision from GET /api/decryption-exclusions. A mismatch is the structured 409 with no mutation; absent keeps the legacy replacement contract. The v2 client always asserts it.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10029,13 +10064,26 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated — the RESOLVED set this PUT installed plus its revision (durable AND applied; coherent by construction)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the tunables changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The durable write failed — the running tunables (and every learned exclusion) are unchanged. Body is plain text."
           }
         },
         "security": [
@@ -10374,7 +10422,7 @@
     },
     "/api/decryption/redaction": {
       "get": {
-        "description": "Returns hosts whose decrypted content is redacted from logs.",
+        "description": "Returns the node-local destination-privacy posture (traffic-log destination pseudonymization) as ONE coherent snapshot: posture, non-secret pseudonym generation (key_id), and the revision that fingerprints exactly the returned state.",
         "operationId": "getDecryptionRedaction",
         "responses": {
           "200": {
@@ -10399,7 +10447,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Decryption redaction hosts",
+        "summary": "Destination-privacy posture",
         "tags": [
           "policy"
         ],
@@ -10411,7 +10459,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "put": {
-        "description": "Enables or disables redaction of decrypted content from logs.",
+        "description": "Sets the destination-privacy posture and/or rotates the node-local pseudonym key (persist-before-apply: the durable write lands first; a persist failure leaves the running posture untouched). This governs destination information in logs/observability — NOT whether traffic is decrypted, and the pseudonym key is NOT the TLS inspection Root CA.",
         "operationId": "setDecryptionRedaction",
         "requestBody": {
           "content": {
@@ -10433,13 +10481,26 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated ({redact_hosts, key_rotated, key_id, revision} — the state THIS PUT installed; a rotation is durable before this response)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the posture or pseudonym generation changed since the asserted revision; nothing mutated and no key was minted."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Key provisioning/rotation failed, or the durable write failed — the running posture and key are unchanged. Body is plain text."
           }
         },
         "security": [
@@ -10450,7 +10511,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Set decryption redaction",
+        "summary": "Set destination privacy / rotate pseudonym key",
         "tags": [
           "policy"
         ],

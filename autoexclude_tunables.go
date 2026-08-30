@@ -13,6 +13,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
@@ -128,11 +129,21 @@ func (t autoExcludeTunables) engineConfig() autoexclude.Config {
 	}
 }
 
-// currentAutoExcludeTunables snapshots the live engine tunables (from Stats, the
-// existing read-only source of truth) into the persisted shape. Used by
-// SaveAdminSettings so the durable file always reflects the applied values.
-func currentAutoExcludeTunables() autoExcludeTunables {
-	s := autoExclude().Stats()
+// autoExcludeTunablesRevisionOf derives the tunables revision from one
+// committed set (2E-B §D) — a pure function of the five values, so the
+// exclusions GET can serve a revision that fingerprints exactly the stats
+// snapshot it returns, and the fenced PUT compares against the same
+// derivation inside the AdminSettings writer domain.
+func autoExcludeTunablesRevisionOf(t autoExcludeTunables) string {
+	return contentSecRevision("autoexclude-tunables",
+		strconv.Itoa(t.ConfirmN), strconv.Itoa(t.TTLSecs), strconv.Itoa(t.PinnedTTLSecs),
+		strconv.Itoa(t.WindowSecs), strconv.Itoa(t.MaxEntries))
+}
+
+// autoExcludeTunablesFromStats converts one coherent Stats snapshot into the
+// tunables shape (shared by the GET's revision derivation and
+// currentAutoExcludeTunables, so the two can never disagree).
+func autoExcludeTunablesFromStats(s autoexclude.Stats) autoExcludeTunables {
 	return autoExcludeTunables{
 		ConfirmN:      s.ConfirmN,
 		TTLSecs:       s.TTLSecs,
@@ -140,4 +151,11 @@ func currentAutoExcludeTunables() autoExcludeTunables {
 		WindowSecs:    s.WindowSecs,
 		MaxEntries:    s.MaxEntries,
 	}
+}
+
+// currentAutoExcludeTunables snapshots the live engine tunables (from Stats, the
+// existing read-only source of truth) into the persisted shape. Used by
+// SaveAdminSettings so the durable file always reflects the applied values.
+func currentAutoExcludeTunables() autoExcludeTunables {
+	return autoExcludeTunablesFromStats(autoExclude().Stats())
 }

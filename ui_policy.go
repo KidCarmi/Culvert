@@ -899,7 +899,27 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		// into fail-open and how many rules reference them. 0/0 ⇒ nothing can ever
 		// auto-disable inspection (an empty cache alone does not prove this).
 		foProfiles, foRules := failOpenFootprint()
+		// ONE Stats snapshot: the stats block AND the tunables revision derive
+		// from it, so the served {current values, revision} pair is coherent
+		// (2E-B §D — the revision must fingerprint exactly the returned state).
+		stats := autoExclude().Stats()
 		exclusions := autoExclude().List()
+		// Bounded management read (2E-B §E): ?limit= caps the entry corpus a
+		// browser is handed (the cache itself is bounded by max_entries, which an
+		// admin may raise to 262144 — far past a sane management payload). Absent
+		// ⇒ the legacy full listing. stats.active keeps the full population.
+		truncated := false
+		if limStr := strings.TrimSpace(r.URL.Query().Get("limit")); limStr != "" {
+			lim, err := strconv.Atoi(limStr)
+			if err != nil || lim < 1 {
+				http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+				return
+			}
+			if len(exclusions) > lim {
+				exclusions = exclusions[:lim]
+				truncated = true
+			}
+		}
 		// Resolve each scope's CURRENT profile name + rule-count blast radius by ID
 		// (a rename keeps the profile ID; the entry's cached ScopeName may be stale).
 		// Both maps are keyed by scope ID; the UI prefers the current name.
@@ -929,7 +949,9 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, map[string]any{
 			"exclusions":         exclusions,
-			"stats":              autoExclude().Stats(),
+			"truncated":          truncated,
+			"stats":              stats,
+			"tunables_revision":  autoExcludeTunablesRevisionOf(autoExcludeTunablesFromStats(stats)),
 			"fail_open_profiles": foProfiles,
 			"fail_open_rules":    foRules,
 			"scope_rule_counts":  scopeRules, // keyed by scope_id
@@ -945,7 +967,13 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		if host != "" {
 			// Evict one (scope, host). scope is the owning decryption-profile ID.
 			removed := autoExclude().Remove(scope, host)
-			auditEvent(r, "decryption.autoexclude.evict", scope+"/"+host, "manual eviction of a learned exclusion")
+			// Audit truth (2E-B §I): the record reflects what actually happened —
+			// a request for an absent entry is not an eviction.
+			detail := "manual eviction of a learned exclusion"
+			if !removed {
+				detail = "eviction requested; entry was not present"
+			}
+			auditEvent(r, "decryption.autoexclude.evict", scope+"/"+host, detail)
 			jsonOK(w, map[string]any{"ok": true, "removed": removed})
 			return
 		}
@@ -1016,22 +1044,52 @@ func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// VALIDATE (done) → PERSIST target → APPLY runtime. Persist first: a write
-		// failure must not have already evicted learned entries (persist-before-apply).
-		// The apply runs via applyOnSuccess INSIDE the save's lock so a concurrent
-		// omnibus save can't revert the just-persisted tunables on disk.
-		old := currentAutoExcludeTunables()
-		if err := saveAdminSettingsWithOverrides(adminSaveOverrides{
-			autoExclude:    &resolved,
+		// VALIDATE (done) → FENCE → PERSIST target → APPLY runtime. Persist first: a
+		// write failure must not have already evicted learned entries
+		// (persist-before-apply). The OPTIONAL ?ifRevision= stale-writer fence
+		// (2E-B §D) is compared inside the save's precondition — the comparison and
+		// the durable target write share ONE serialized AdminSettings save domain,
+		// so two racing fenced admins cannot both pass; absent keeps the legacy
+		// replacement contract (the v2 client always asserts). The apply runs via
+		// applyOnSuccess INSIDE the save's lock so a concurrent omnibus save can't
+		// revert the just-persisted tunables on disk.
+		ifRev := parseIfRevision(r)
+		var old autoExcludeTunables
+		err := saveAdminSettingsWithOverrides(adminSaveOverrides{
+			autoExclude: &resolved,
+			precondition: func() error {
+				old = currentAutoExcludeTunables()
+				if ifRev != nil {
+					if cur := autoExcludeTunablesRevisionOf(old); cur != *ifRev {
+						return errContentSecRevisionConflict{current: cur, asserted: *ifRev}
+					}
+				}
+				return nil
+			},
 			applyOnSuccess: func() { autoExclude().Reconfigure(resolved.engineConfig()) },
-		}); err != nil {
+		})
+		var conflict errContentSecRevisionConflict
+		if errors.As(err, &conflict) {
+			writeContentSecRevisionConflict(w, "auto-exclusion tunables", conflict.current, conflict.asserted)
+			return
+		}
+		if err != nil {
 			logger.Printf("decryption tunables: persist failed, runtime unchanged: %v", err)
 			http.Error(w, "failed to persist tunables", http.StatusInternalServerError)
 			return
 		}
 		auditEventDiff(r, "decryption.autoexclude.tunables", "tunables",
 			"updated adaptive decryption-exclusion tunables", old, resolved)
-		jsonOK(w, resolved)
+		// The response is the set THIS PUT installed plus its revision (coherent
+		// by construction — never a re-read).
+		jsonOK(w, map[string]any{
+			"confirm_n":       resolved.ConfirmN,
+			"ttl_secs":        resolved.TTLSecs,
+			"pinned_ttl_secs": resolved.PinnedTTLSecs,
+			"window_secs":     resolved.WindowSecs,
+			"max_entries":     resolved.MaxEntries,
+			"revision":        autoExcludeTunablesRevisionOf(resolved),
+		})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

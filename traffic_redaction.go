@@ -22,8 +22,10 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"hash"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +48,15 @@ const (
 type trafficKeyState struct {
 	key []byte
 	gen uint64
+	// id is the NON-SECRET pseudonym-generation identifier (2E-B §B): a random
+	// 16-hex string minted WITH each key (never derived from it), persisted in
+	// admin_settings.json beside the key, and exposed on the admin API as
+	// key_id. It is what makes rotation exactly-once observable: a rotation
+	// mints a new id, the id survives restart, and a client resolving an
+	// unknown-outcome rotation compares ids instead of blindly retrying.
+	// Unlike gen (process-local pool-invalidation counter), id is durable
+	// identity; the two are deliberately separate.
+	id string
 }
 
 // trafficPseudonymKey holds the node-local 32-byte HMAC key. atomic.Pointer so the
@@ -61,6 +72,15 @@ var trafficKeyGen atomic.Uint64
 // setTrafficPseudonymKey publishes the key (copying the input so the caller's slice is
 // not aliased). An empty key clears it (⇒ fail-closed while the posture is on).
 func setTrafficPseudonymKey(k []byte) {
+	setTrafficPseudonymKeyPair(k, mintTrafficKeyID())
+}
+
+// setTrafficPseudonymKeyPair publishes a (key, key-id) pair atomically — one
+// pointer store, so a reader can never pair a new key with an old id. The
+// settings LOAD path uses this to restore the PERSISTED id (restart must not
+// change the observable pseudonym generation); every other install mints a
+// fresh id via setTrafficPseudonymKey.
+func setTrafficPseudonymKeyPair(k []byte, id string) {
 	if len(k) == 0 {
 		trafficKeyGen.Add(1) // burn a generation so pooled hashers for the old key are stale
 		trafficPseudonymKey.Store(nil)
@@ -68,7 +88,28 @@ func setTrafficPseudonymKey(k []byte) {
 	}
 	c := make([]byte, len(k))
 	copy(c, k)
-	trafficPseudonymKey.Store(&trafficKeyState{key: c, gen: trafficKeyGen.Add(1)})
+	trafficPseudonymKey.Store(&trafficKeyState{key: c, gen: trafficKeyGen.Add(1), id: id})
+}
+
+// getTrafficPseudonymKeyID returns the non-secret pseudonym-generation id
+// ("" when no key is installed).
+func getTrafficPseudonymKeyID() string {
+	if s := trafficPseudonymKey.Load(); s != nil {
+		return s.id
+	}
+	return ""
+}
+
+// mintTrafficKeyID mints a random 16-hex generation id, independent of any key
+// material (deliberately NOT a key fingerprint — nothing derivable ever leaves
+// the node). Falls back to a monotonic counter-based id if the entropy source
+// fails, so a key install never silently loses its observable generation.
+func mintTrafficKeyID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "gen-" + strconv.FormatUint(trafficKeyGen.Add(1), 10)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // getTrafficPseudonymKey returns the active key (nil if unset). Callers must treat the
@@ -91,6 +132,17 @@ func rotateTrafficPseudonymKey() error {
 	}
 	setTrafficPseudonymKey(k)
 	return nil
+}
+
+// mintTrafficPseudonymKeyPair mints a fresh (key, generation-id) pair WITHOUT
+// publishing it — the persist-before-apply redaction PUT builds its durable
+// target from this and publishes only after the write lands (2E-B §B/§C).
+func mintTrafficPseudonymKeyPair() ([]byte, string, error) {
+	k := make([]byte, trafficKeyLen)
+	if _, err := rand.Read(k); err != nil {
+		return nil, "", err
+	}
+	return k, mintTrafficKeyID(), nil
 }
 
 // ensureTrafficPseudonymKey publishes a fresh 32-byte key iff none exists. Called on the

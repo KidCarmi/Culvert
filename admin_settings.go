@@ -76,6 +76,15 @@ type AdminSettings struct {
 	// (fleet correlation) is the deferred B3 follow-up. Generated on first enable.
 	TrafficPseudonymKey []byte `json:"traffic_pseudonym_key,omitempty"`
 
+	// TrafficPseudonymKeyID is the NON-SECRET pseudonym-generation identifier
+	// (2E-B §B): a random id minted with each key, never derived from it. It is
+	// what the admin API exposes as key_id so a client can resolve an
+	// unknown-outcome rotation (the id changes iff a rotation landed) without
+	// any key material leaving the node. Persisted beside the key so the
+	// observable generation is restart-stable; a legacy file carrying a key but
+	// no id gets one minted on load (persists on the next save).
+	TrafficPseudonymKeyID string `json:"traffic_pseudonym_key_id,omitempty"`
+
 	// History-store retention. LogRetentionSaved is a sentinel (like
 	// YARASettingsSaved): when false the values below are not applied on load,
 	// so a zero value can't override the YAML/CLI-seeded retention on settings
@@ -466,7 +475,15 @@ func applyAdminServices(s *AdminSettings) {
 	// a truncated/corrupt/hand-edited value is ignored so the posture fails closed to a
 	// sentinel rather than HMACing with a weak key.
 	if len(s.TrafficPseudonymKey) == trafficKeyLen {
-		setTrafficPseudonymKey(s.TrafficPseudonymKey)
+		// Restore the PERSISTED generation id so a restart never changes the
+		// observable pseudonym generation (2E-B §B exact-once truth). A legacy
+		// file carrying a key but no id gets one minted here; it persists on
+		// the next settings save (same precedent as the key mint below).
+		id := s.TrafficPseudonymKeyID
+		if id == "" {
+			id = mintTrafficKeyID()
+		}
+		setTrafficPseudonymKeyPair(s.TrafficPseudonymKey, id)
 	}
 	// If the destination-privacy posture is ON but no valid key was restored (a node
 	// upgrading from the legacy/B0 host/SNI toggle, which had no key), mint one now so
@@ -783,6 +800,13 @@ type adminSaveOverrides struct {
 	// failure leaves the running posture untouched (never a 200 over a
 	// change that silently reverts on restart).
 	yaraSettings *yaraSettingsTarget
+	// decRedaction carries the TARGET destination-privacy state (posture + key
+	// + non-secret generation id) for the persist-before-apply redaction PUT
+	// (2E-B §A/§B/§C): the durable file records the target while the live
+	// posture/key still run the old values; applyOnSuccess publishes them only
+	// after the write landed, so a persist failure leaves the running privacy
+	// posture untouched and a rotation is durable BEFORE its success response.
+	decRedaction *decRedactionTarget
 	// saasFeed carries the TARGET signed-feed configuration for the 2D-B.0c
 	// persist-before-apply settings PUT: the durable file records these target
 	// values while the live holder still carries the old ones; applyOnSuccess
@@ -963,8 +987,19 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
 	snapshotPolicyLearning(&s, ov.policyLearning)     // ADR-0025 M5A: governed enablement + recommendable guardrail
-	s.DecryptionRedactHosts = decRedactHosts()        // ADR-0011 §4 / PR3 Option B destination-privacy posture
-	s.TrafficPseudonymKey = getTrafficPseudonymKey()  // PR3 Option B node-local pseudonym key (nil when unset)
+	// Destination privacy (ADR-0011 §4 / PR3 Option B / 2E-B): the TARGET
+	// posture+key+id for a persist-before-apply redaction PUT, else the live
+	// values. The target path is what makes the redaction write durable-
+	// before-live and serialized under this save's adminSettingsMu.
+	if ov.decRedaction != nil {
+		s.DecryptionRedactHosts = ov.decRedaction.RedactHosts
+		s.TrafficPseudonymKey = ov.decRedaction.Key
+		s.TrafficPseudonymKeyID = ov.decRedaction.KeyID
+	} else {
+		s.DecryptionRedactHosts = decRedactHosts()
+		s.TrafficPseudonymKey = getTrafficPseudonymKey() // node-local pseudonym key (nil when unset)
+		s.TrafficPseudonymKeyID = getTrafficPseudonymKeyID()
+	}
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

@@ -476,6 +476,13 @@ var configSurfaces = []configSurfaceRow{
 	// per-appliance privacy secret; fleet-wide key sync is the deferred B3 follow-up.
 	{ID: "traffic_pseudonym_key", Kind: kindConfig, Owner: "trafficRedact", AdminDurable: true, Sensitive: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrafficPseudonymKey"}}},
+	// 2E-B §B: the NON-SECRET pseudonym-generation id persisted beside the key
+	// (random, never derived from key material) — what the admin API exposes as
+	// key_id so a lost rotation response is resolvable without a blind retry.
+	// AdminDurable-only like the key itself; deliberately NOT Sensitive (it is
+	// designed to be shown), but it travels nowhere the key doesn't.
+	{ID: "traffic_pseudonym_key_id", Kind: kindConfig, Owner: "trafficRedact", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrafficPseudonymKeyID"}}},
 
 	// Support-bundle retention caps (Slice B). AdminDurable-only — node-local
 	// OPERATIONAL tuning over DURABLE forensic evidence: OFF export/import,

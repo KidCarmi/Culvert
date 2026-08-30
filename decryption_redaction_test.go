@@ -205,10 +205,16 @@ func TestDecRedaction_APISurfacesScope(t *testing.T) {
 	if resp["key_provisioned"] != true {
 		t.Fatalf("key_provisioned = %v, want true", resp["key_provisioned"])
 	}
-	// The response must NEVER carry the key material itself.
+	// The response must NEVER carry the key material itself. key_id is the
+	// 2E-B §B NON-SECRET generation identifier (random, never derived from the
+	// key); its non-secrecy is separately pinned by
+	// TestDec2EB_RedactionResponsesNeverCarryKeyMaterial.
 	for k := range resp {
-		if strings.Contains(strings.ToLower(k), "key") && k != "key_provisioned" {
+		if strings.Contains(strings.ToLower(k), "key") && k != "key_provisioned" && k != "key_id" {
 			t.Fatalf("GET response exposes a key-ish field %q", k)
 		}
+	}
+	if id, _ := resp["key_id"].(string); id == "" || strings.Contains(id, "0123456789abcdef0123456789abcdef") {
+		t.Fatalf("key_id must be a non-empty identifier independent of the key bytes, got %q", id)
 	}
 }
