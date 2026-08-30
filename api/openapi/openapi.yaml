@@ -743,7 +743,22 @@ components:
         key_provisioned: { type: boolean, description: Whether this node holds a pseudonym key (the key value is never exposed). }
         key_id:
           type: string
-          description: "NON-SECRET pseudonym-generation identifier (2E-B): random, never derived from key material; empty when no key is installed. Changes iff a key rotation lands, so a client can resolve a lost rotation response by comparing ids instead of blindly retrying."
+          description: "NON-SECRET pseudonym-generation identifier (2E-B): random, never derived from key material; empty when no key is installed. Changes iff a new key is installed. A changed key_id alone does NOT identify WHOSE rotation landed — operation attribution comes from rotation_receipts."
+        rotation_seq:
+          type: integer
+          description: "Durable monotonic key-generation sequence, node-local, advanced by every new-key install (rotation or enable-path mint) atomically with the key. An unchanged sequence proves no rotation landed in between — the NOT-LANDED half of unknown-outcome resolution."
+        rotation_receipts:
+          type: array
+          description: "Bounded (newest-last, FIFO window) NON-SECRET receipts of client-identified rotations. A caller resolving a lost rotation response checks for ITS operation_id here: receipt present = that operation landed exactly once; absent with rotation_seq unchanged = it did not land; absent with the sequence advanced = ambiguous (another admin may have rotated; the receipt may also have aged out of the window) — never claim landed/not-landed, never blindly rotate again."
+          items:
+            type: object
+            additionalProperties: false
+            required: [operation_id, key_id, seq]
+            properties:
+              operation_id: { type: string, description: "The caller-generated opaque id of the rotation operation." }
+              key_id: { type: string, description: "The NON-SECRET pseudonym generation that rotation produced." }
+              seq: { type: integer, description: "The rotation sequence that operation advanced to." }
+              ts: { type: string, description: "Informational RFC3339 timestamp of the rotation." }
         revision:
           type: string
           description: "Server-owned content-derived revision over (redact_hosts, key_id), from the SAME committed snapshot (coherent pair). Echo back as ifRevision on the PUT for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision})."
@@ -1200,16 +1215,24 @@ components:
     SetRedaction:
       type: object
       description: >-
-        Toggle the destination-privacy posture and/or rotate the pseudonym key. A
-        rotate-only call sends {"rotate_key":true} and omits redact_hosts (the
-        posture is preserved across a rotation); neither field is individually required.
+        EXACTLY ONE ACTION per request (2E-B correction). Either a POSTURE
+        write ({"redact_hosts": true|false} — field PRESENCE is the command;
+        an absent field is never read as false) or a ROTATION
+        ({"rotate_key": true, "operation_id": "...", "ifRevision": "..."} —
+        posture preserved). Refused with 400 and no mutation: an empty body,
+        rotate_key:false alone, a rotation without operation_id or
+        ifRevision, and any body carrying both redact_hosts and
+        rotate_key:true (ambiguous — never silently resolved).
       additionalProperties: false
       properties:
-        redact_hosts: { type: boolean, description: "Enable (true) or disable (false) the posture. Omitted on a rotate-only call." }
-        rotate_key: { type: boolean, description: "When true, mint a new node-local pseudonym key (breaks correlation with older records)." }
+        redact_hosts: { type: boolean, description: "Posture action: enable (true) or disable (false). Its PRESENCE selects the posture action; it must be absent on a rotation." }
+        rotate_key: { type: boolean, description: "Rotation action (true only): mint a new node-local pseudonym key (breaks correlation with older records). Requires operation_id and ifRevision; must not be combined with redact_hosts. rotate_key:false selects no action." }
+        operation_id:
+          type: string
+          description: "REQUIRED for a rotation: caller-generated opaque operation id (1-64 chars of [A-Za-z0-9._-]), fresh per operation, never reused. The appliance records a durable non-secret receipt for it atomically with the rotation; a replay of the same id is answered from the receipt (already_applied:true) and NEVER mints another key. The idempotency lookup runs BEFORE the stale fence, so a lost-response retry cannot become a second rotation."
         ifRevision:
           type: string
-          description: "OPTIONAL stale-writer fence (2E-B): the revision from the GET. A mismatch is the structured 409 with no mutation; because the revision covers key_id, a fenced rotation retried after a lost response is refused instead of silently rotating twice. Absent keeps the legacy replacement contract; the v2 client always asserts it."
+          description: "Stale-writer fence (2E-B): the revision from the GET. A mismatch is the structured 409 with no mutation. OPTIONAL for a posture write (absent keeps the legacy replacement contract; the v2 client always asserts it); REQUIRED for a rotation."
     SetOCSP:
       type: object
       required: [enabled]
@@ -5239,7 +5262,7 @@ paths:
       operationId: getDecryptionRedaction
       tags: [policy]
       summary: Destination-privacy posture
-      description: "Returns the node-local destination-privacy posture (traffic-log destination pseudonymization) as ONE coherent snapshot: posture, non-secret pseudonym generation (key_id), and the revision that fingerprints exactly the returned state."
+      description: "Returns the node-local destination-privacy posture (traffic-log destination pseudonymization) as ONE coherent snapshot: posture, non-secret pseudonym generation (key_id), the durable rotation sequence + bounded non-secret rotation receipts (operation-identity truth for resolving a lost rotation response), and the revision that fingerprints exactly the returned state."
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -5260,7 +5283,7 @@ paths:
       operationId: setDecryptionRedaction
       tags: [policy]
       summary: Set destination privacy / rotate pseudonym key
-      description: "Sets the destination-privacy posture and/or rotates the node-local pseudonym key (persist-before-apply: the durable write lands first; a persist failure leaves the running posture untouched). This governs destination information in logs/observability — NOT whether traffic is decrypted, and the pseudonym key is NOT the TLS inspection Root CA."
+      description: "EXACTLY ONE ACTION per request: sets the destination-privacy posture (redact_hosts present) OR rotates the node-local pseudonym key (rotate_key:true + operation_id + ifRevision) — never both (persist-before-apply: the durable write, including the rotation receipt, lands first; a persist failure leaves the running posture untouched). This governs destination information in logs/observability — NOT whether traffic is decrypted, and the pseudonym key is NOT the TLS inspection Root CA."
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -5279,7 +5302,7 @@ paths:
             schema: { $ref: '#/components/schemas/SetRedaction' }
       responses:
         '200':
-          description: "Updated ({redact_hosts, key_rotated, key_id, revision} — the state THIS PUT installed; a rotation is durable before this response)."
+          description: "Updated ({redact_hosts, key_rotated, key_id, rotation_seq, revision} plus, for a rotation, {operation_id, already_applied} — the state THIS PUT installed; a rotation and its receipt are durable before this response. An idempotent replay of an already-landed operation_id returns already_applied:true with that operation's receipt facts and mutates nothing)."
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

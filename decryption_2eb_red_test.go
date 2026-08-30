@@ -163,14 +163,16 @@ func TestDec2EB_RotationChangesObservableGeneration(t *testing.T) {
 		map[string]any{"redact_hosts": true}); w.Code != 200 {
 		t.Fatalf("enable = %d: %s", w.Code, w.Body.String())
 	}
-	before := dec2ebStr(t, dec2ebBody(t,
-		dec2ebDo(t, RoleViewer, http.MethodGet, "/api/decryption/redaction", nil)), "key_id")
+	g := dec2ebBody(t, dec2ebDo(t, RoleViewer, http.MethodGet, "/api/decryption/redaction", nil))
+	before := dec2ebStr(t, g, "key_id")
 	if before == "" {
 		t.Fatal("an enabled posture must report a non-empty key_id (the non-secret pseudonym generation)")
 	}
 
+	// 2E-B correction: a rotation is a fenced, operation-identified command.
 	w := dec2ebDo(t, RoleAdmin, http.MethodPut, "/api/decryption/redaction",
-		map[string]any{"rotate_key": true})
+		map[string]any{"rotate_key": true, "operation_id": "op-2eb-gen",
+			"ifRevision": dec2ebStr(t, g, "revision")})
 	if w.Code != 200 {
 		t.Fatalf("rotate = %d: %s", w.Code, w.Body.String())
 	}
@@ -200,18 +202,20 @@ func TestDec2EB_RotationStaleFenceCannotDoubleRotate(t *testing.T) {
 
 	// The v2 client always rotates FENCED against the reviewed truth.
 	w := dec2ebDo(t, RoleAdmin, http.MethodPut, "/api/decryption/redaction",
-		map[string]any{"rotate_key": true, "ifRevision": preRev})
+		map[string]any{"rotate_key": true, "operation_id": "op-2eb-fence-a", "ifRevision": preRev})
 	if w.Code != 200 {
 		t.Fatalf("fenced rotate = %d, want 200: %s", w.Code, w.Body.String())
 	}
 	rotatedID := dec2ebStr(t, dec2ebBody(t,
 		dec2ebDo(t, RoleViewer, http.MethodGet, "/api/decryption/redaction", nil)), "key_id")
 
-	// A blind RETRY of the same fenced request (the transport-lost recovery
-	// hazard) must be refused — the asserted revision no longer names the
-	// committed state — and must NOT mint yet another generation.
+	// A DIFFERENT rotation operation asserting the superseded revision (a
+	// stale writer, not a retry) must be refused — and must NOT mint yet
+	// another generation. (The byte-identical retry of the SAME operation is
+	// the idempotent-replay case, pinned by
+	// TestDec2EB2_ReplaySameOperationNeverRotatesTwice.)
 	w2 := dec2ebDo(t, RoleAdmin, http.MethodPut, "/api/decryption/redaction",
-		map[string]any{"rotate_key": true, "ifRevision": preRev})
+		map[string]any{"rotate_key": true, "operation_id": "op-2eb-fence-b", "ifRevision": preRev})
 	if w2.Code != 409 {
 		t.Fatalf("retried fenced rotate = %d, want 409 (a retry must never silently rotate twice): %s", w2.Code, w2.Body.String())
 	}
@@ -228,8 +232,11 @@ func TestDec2EB_RotationDurableAcrossRestart(t *testing.T) {
 		map[string]any{"redact_hosts": true}); w.Code != 200 {
 		t.Fatalf("enable = %d: %s", w.Code, w.Body.String())
 	}
+	preRev := dec2ebStr(t, dec2ebBody(t,
+		dec2ebDo(t, RoleViewer, http.MethodGet, "/api/decryption/redaction", nil)), "revision")
 	if w := dec2ebDo(t, RoleAdmin, http.MethodPut, "/api/decryption/redaction",
-		map[string]any{"rotate_key": true}); w.Code != 200 {
+		map[string]any{"rotate_key": true, "operation_id": "op-2eb-durable",
+			"ifRevision": preRev}); w.Code != 200 {
 		t.Fatalf("rotate = %d: %s", w.Code, w.Body.String())
 	}
 	keyID := dec2ebStr(t, dec2ebBody(t,

@@ -85,6 +85,18 @@ type AdminSettings struct {
 	// no id gets one minted on load (persists on the next save).
 	TrafficPseudonymKeyID string `json:"traffic_pseudonym_key_id,omitempty"`
 
+	// TrafficKeyRotationSeq / TrafficKeyRotationReceipts are the durable
+	// rotation operation-identity record (2E-B correction, Blocker A): the
+	// monotonic key-generation sequence (advanced by every new-key install)
+	// and the bounded NON-SECRET receipts of client-identified rotations
+	// ({op_id, key_id, seq, ts} — nothing derivable from key material).
+	// Persisted atomically WITH the key they describe, so "durable before
+	// success" covers the operation identity too; restored on load so a
+	// caller can resolve a lost-response rotation across a restart.
+	// AdminDurable-only, node-local like the key itself.
+	TrafficKeyRotationSeq      int64                    `json:"traffic_key_rotation_seq,omitempty"`
+	TrafficKeyRotationReceipts []trafficRotationReceipt `json:"traffic_key_rotation_receipts,omitempty"`
+
 	// History-store retention. LogRetentionSaved is a sentinel (like
 	// YARASettingsSaved): when false the values below are not applied on load,
 	// so a zero value can't override the YAML/CLI-seeded retention on settings
@@ -485,6 +497,14 @@ func applyAdminServices(s *AdminSettings) {
 		}
 		setTrafficPseudonymKeyPair(s.TrafficPseudonymKey, id)
 	}
+	// Restore the durable rotation operation-identity record (2E-B correction,
+	// Blocker A) — unconditionally, so the FILE's truth replaces any live
+	// residue: a legacy file without the fields restores seq 0 / no receipts.
+	// The guarded vars live under adminSettingsMu; load runs outside it.
+	adminSettingsMu.Lock()
+	trafficRotationSeq = s.TrafficKeyRotationSeq
+	trafficRotationReceipts = append([]trafficRotationReceipt(nil), s.TrafficKeyRotationReceipts...)
+	adminSettingsMu.Unlock()
 	// If the destination-privacy posture is ON but no valid key was restored (a node
 	// upgrading from the legacy/B0 host/SNI toggle, which had no key), mint one now so
 	// redaction produces real tokens instead of the fail-closed sentinel. Generated
@@ -995,10 +1015,14 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		s.DecryptionRedactHosts = ov.decRedaction.RedactHosts
 		s.TrafficPseudonymKey = ov.decRedaction.Key
 		s.TrafficPseudonymKeyID = ov.decRedaction.KeyID
+		s.TrafficKeyRotationSeq = ov.decRedaction.Seq
+		s.TrafficKeyRotationReceipts = ov.decRedaction.Receipts
 	} else {
 		s.DecryptionRedactHosts = decRedactHosts()
 		s.TrafficPseudonymKey = getTrafficPseudonymKey() // node-local pseudonym key (nil when unset)
 		s.TrafficPseudonymKeyID = getTrafficPseudonymKeyID()
+		s.TrafficKeyRotationSeq = trafficRotationSeq // guarded by this save's adminSettingsMu
+		s.TrafficKeyRotationReceipts = trafficRotationReceipts
 	}
 
 	data, err := json.MarshalIndent(s, "", "  ")

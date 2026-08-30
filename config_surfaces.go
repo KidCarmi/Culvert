@@ -484,6 +484,16 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "traffic_pseudonym_key_id", Kind: kindConfig, Owner: "trafficRedact", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrafficPseudonymKeyID"}}},
 
+	// Rotation operation-identity record (2E-B correction, Blocker A): the
+	// durable monotonic key-generation sequence + the bounded NON-SECRET
+	// rotation receipts ({op_id, key_id, seq, ts} — never key material, pinned
+	// by TestDec2EB2_RotationSurfacesCarryNoKeyMaterial). AdminDurable-only,
+	// node-local like the key they describe; deliberately NOT Sensitive.
+	{ID: "traffic_key_rotation_seq", Kind: kindConfig, Owner: "trafficRedact", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrafficKeyRotationSeq"}}},
+	{ID: "traffic_key_rotation_receipts", Kind: kindConfig, Owner: "trafficRedact", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrafficKeyRotationReceipts"}}},
+
 	// Support-bundle retention caps (Slice B). AdminDurable-only — node-local
 	// OPERATIONAL tuning over DURABLE forensic evidence: OFF export/import,
 	// version-rollback (a rollback must never mass-evict bundles), and CP→DP.

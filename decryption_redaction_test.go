@@ -132,10 +132,12 @@ func TestApiDecryptionRedaction_GetPutAndRBAC(t *testing.T) {
 	}
 }
 
-// TestApiDecryptionRedaction_RotatePreservesPosture — PUT {"rotate_key":true} omits
-// redact_hosts (decodes false), so it must NOT silently disable an enabled posture: the
-// posture is preserved across a rotation, only the key changes. Regression for the Codex
-// P1 "rotation turns plaintext logging back on" finding.
+// TestApiDecryptionRedaction_RotatePreservesPosture — a rotation is its own
+// action (2E-B correction, exactly-one-action contract: rotate_key:true +
+// operation_id + ifRevision, no posture field), so it must NOT disable an
+// enabled posture: the posture is preserved across a rotation, only the key
+// changes. Regression for the Codex P1 "rotation turns plaintext logging
+// back on" finding.
 func TestApiDecryptionRedaction_RotatePreservesPosture(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin_settings.json")
 	swapAdminSettingsPath(t, path)
@@ -150,9 +152,16 @@ func TestApiDecryptionRedaction_RotatePreservesPosture(t *testing.T) {
 	if !strings.HasPrefix(before, "h_") {
 		t.Fatalf("posture-on token wrong: %q", before)
 	}
+	var g struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(decRedactReq(t, RoleViewer, http.MethodGet, "").Body.Bytes(), &g); err != nil || g.Revision == "" {
+		t.Fatalf("cannot read the reviewed revision: %v", err)
+	}
 
 	// Rotate the key; the posture MUST stay enabled.
-	w := decRedactReq(t, RoleAdmin, http.MethodPut, `{"rotate_key":true}`)
+	w := decRedactReq(t, RoleAdmin, http.MethodPut,
+		`{"rotate_key":true,"operation_id":"op-preserve-posture","ifRevision":"`+g.Revision+`"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate: code=%d body=%s", w.Code, w.Body.String())
 	}
