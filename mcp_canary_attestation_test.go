@@ -94,6 +94,38 @@ func TestShadowExitAttestation_NotSyncedWriteRemovesVisibleRecord(t *testing.T) 
 	}
 }
 
+// TestShadowExitAttestation_SweepSerializedWithDurableMu is the Codex P2 (round-10) proof: the
+// corrupt-attestation quarantine (sweep) holds mcpRollout.durableMu across its read + rename, so it
+// is atomic against a concurrent admin POST/DELETE and can never move aside a valid replacement
+// installed after a stale read. Structural gate: while durableMu is held the sweep must BLOCK.
+func TestShadowExitAttestation_SweepSerializedWithDurableMu(t *testing.T) {
+	withAttestationTestEnv(t, "v9.9.9")
+	if err := os.WriteFile(shadowExitAttestationPath(), []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	rr := getMCPRollout()
+	rr.durableMu.Lock()
+	done := make(chan struct{}, 1)
+	go func() { sweepCorruptShadowExitAttestation(); done <- struct{}{} }()
+	select {
+	case <-done:
+		rr.durableMu.Unlock()
+		t.Fatal("sweepCorruptShadowExitAttestation must block while durableMu is held (quarantine is not serialized)")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: the sweep is blocked on durableMu.
+	}
+	rr.durableMu.Unlock()
+	select {
+	case <-done:
+		// Completed once the lock was released.
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweepCorruptShadowExitAttestation must complete once durableMu is released")
+	}
+	if _, err := os.Stat(shadowExitAttestationPath()); !os.IsNotExist(err) {
+		t.Fatal("the sweep must have quarantined the corrupt file once it acquired the lock")
+	}
+}
+
 // TestShadowExitAttestation_RevokeIsDurable proves revocation removes the record and syncs the parent
 // directory (Codex P1, round-6): removeAttestationDurable deletes the file and returns nil on success,
 // so a subsequent readiness read fails closed to not-attested.
@@ -198,12 +230,18 @@ func TestShadowExitAttestation_CorruptIsQuarantinedAndFailsClosed(t *testing.T) 
 	if err := os.WriteFile(path, []byte(`{"schema_version":1,"status":"shadow_exit_review_passed","review_id":"x","evidence_digest":"y","identity":{"build_version":"v9.9.9"},"attested_by":"a","injected":true}`), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	// The pure read fails closed to not-attested WITHOUT quarantining (quarantine is the sweep's job,
+	// serialized under durableMu — Codex P2).
 	if shadowExitReviewAttested() {
 		t.Fatal("SECURITY: a tampered (unknown-field) attestation must not attest")
 	}
-	// The corrupt file must have been quarantined (moved aside), not left in place.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("the pure read must NOT move the corrupt file aside; the serialized sweep does that")
+	}
+	// The serialized sweep (invoked by the admin GET surface) quarantines it.
+	sweepCorruptShadowExitAttestation()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("a corrupt attestation must be quarantined (moved aside)")
+		t.Fatal("the sweep must quarantine a corrupt attestation (moved aside)")
 	}
 	matches, _ := filepath.Glob(path + ".corrupt.*")
 	if len(matches) == 0 {

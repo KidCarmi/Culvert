@@ -40,11 +40,16 @@ func currentRuntimeIdentity() canary.RuntimeIdentity {
 	return canary.RuntimeIdentity{BuildVersion: version}
 }
 
-// loadShadowExitAttestation reads the durable attestation. A missing file returns (nil, nil)
-// (no attestation — the fail-closed default). A corrupt/undecodable file is QUARANTINED (moved
-// aside) and returns (nil, nil) so the node fails closed to "not attested" rather than trusting
-// garbage; the quarantine is surfaced via the existing state-corruption alerting. A read error
-// on an existing file (transient) is returned so the caller does not misread it as "absent".
+// loadShadowExitAttestation is a PURE read of the durable attestation. A missing file returns
+// (nil, nil) (no attestation — the fail-closed default). A corrupt/undecodable file also returns
+// (nil, nil) so the node fails closed to "not attested" rather than trusting garbage — but it does
+// NOT quarantine (rename) the file: this predicate is read on the activation-commit path while it
+// already holds mcpRollout.durableMu, so a side-effecting rename here could neither take that lock
+// (to be serialized against a concurrent POST/DELETE) without self-deadlocking, nor safely rename
+// without it — the TOCTOU that would let a viewer read move aside a valid replacement (Codex P2).
+// Moving a corrupt file aside (repair + visibility) is done by sweepCorruptShadowExitAttestation,
+// which holds durableMu for the whole read+quarantine so it is atomic against the writers. A
+// transient read error on an existing file is returned so the caller does not misread it as absent.
 func loadShadowExitAttestation() (*canary.ShadowExitAttestation, error) {
 	path := shadowExitAttestationPath()
 	raw, err := os.ReadFile(path) // #nosec G304 -- fixed operator-owned path under dataDir
@@ -56,24 +61,31 @@ func loadShadowExitAttestation() (*canary.ShadowExitAttestation, error) {
 	}
 	var a canary.ShadowExitAttestation
 	if derr := strictDecodeAttestationJSON(raw, &a); derr != nil {
-		// Corruption (bad JSON, unknown fields, trailing data). Before quarantining, RE-READ: an admin
-		// POST may have atomically replaced the file with a VALID attestation between our read and now,
-		// and quarantining here would move that valid replacement aside — a just-acknowledged
-		// attestation would vanish and readiness would fail (Codex P2). Quarantine only if the current
-		// content is STILL the same corrupt bytes we parsed; if a valid replacement landed, return it.
-		raw2, err2 := os.ReadFile(path) // #nosec G304 -- fixed operator-owned path under dataDir
-		if err2 != nil {
-			return nil, nil // gone/unreadable now — nothing to quarantine, fail closed to not-attested
-		}
-		var a2 canary.ShadowExitAttestation
-		if d2 := strictDecodeAttestationJSON(raw2, &a2); d2 == nil {
-			return &a2, nil // a valid replacement landed after the first read — never quarantine it
-		} else if bytes.Equal(raw2, raw) {
-			quarantineCorruptStateFile("mcp_shadow_exit_review", path, derr)
-		}
-		return nil, nil
+		return nil, nil // corrupt ⇒ fail closed to not-attested (quarantine is the sweep's job)
 	}
 	return &a, nil
+}
+
+// sweepCorruptShadowExitAttestation quarantines a corrupt attestation (moves it aside so the
+// state-corruption alerting fires and the operator sees it), holding mcpRollout.durableMu across the
+// READ and the quarantine so the compare-and-rename is ATOMIC against a concurrent admin POST/DELETE
+// (which hold the same lock). This closes the TOCTOU where a stale read could rename a valid
+// replacement installed after the read (Codex P2). It must NOT be called from a path already holding
+// durableMu (the activation commit) — only from admin read surfaces that hold no lock. A missing,
+// unreadable, or now-valid file is left untouched.
+func sweepCorruptShadowExitAttestation() {
+	rr := getMCPRollout()
+	rr.durableMu.Lock()
+	defer rr.durableMu.Unlock()
+	path := shadowExitAttestationPath()
+	raw, err := os.ReadFile(path) // #nosec G304 -- fixed operator-owned path under dataDir
+	if err != nil {
+		return // absent/unreadable — nothing to quarantine
+	}
+	var a canary.ShadowExitAttestation
+	if derr := strictDecodeAttestationJSON(raw, &a); derr != nil {
+		quarantineCorruptStateFile("mcp_shadow_exit_review", path, derr)
+	}
 }
 
 // strictDecodeAttestationJSON decodes exactly one JSON value into v, rejecting unknown fields and any
@@ -162,6 +174,10 @@ func apiMCPShadowExitReviewGet(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
+	// Quarantine a corrupt attestation here (serialized under durableMu), not on the pure read path,
+	// so the compare-and-quarantine cannot race a concurrent POST/DELETE (Codex P2). This handler
+	// holds no lock, so the sweep is free to take durableMu.
+	sweepCorruptShadowExitAttestation()
 	a, _ := loadShadowExitAttestation()
 	reason := canary.ValidateAttestation(a, currentRuntimeIdentity())
 	resp := map[string]any{
