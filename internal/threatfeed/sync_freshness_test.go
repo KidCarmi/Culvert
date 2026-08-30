@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 )
@@ -39,6 +40,7 @@ func newTestFeed(t *testing.T, entries int64, lastSuccess, lastAttempt time.Time
 	tf.enabled = true
 	tf.syncInterval = interval
 	tf.lastSuccess = lastSuccess
+	tf.lastRefresh = lastSuccess
 	tf.lastSync = lastAttempt
 	tf.publishLocked()
 	tf.mu.Unlock()
@@ -361,4 +363,132 @@ func TestChaos57_FreshnessIsOneConsistentRead(t *testing.T) {
 	if f.Entries != 1 {
 		t.Fatalf("Entries = %d, want 1", f.Entries)
 	}
+}
+
+// ── Codex review follow-ups (PR #1264) ───────────────────────────────────────
+
+// TestChaos57_PartialRefreshIsNotTreatedAsNeverRefreshed is the DEFECT gate for
+// the contradiction Codex found INSIDE this change. consecutiveFailures is
+// deliberately narrow — a round that refreshed one of two sources did its job,
+// because one free public feed 403ing indefinitely is an ordinary steady state
+// — but freshness was originally keyed on lastSuccess, which requires EVERY
+// source clean. The two halves disagreed: a feed whose surviving source
+// refreshed on every single window had a lastSuccess that never advanced, so
+// the boot check saw "never succeeded" and fetched on EVERY restart with no
+// crash-loop floor at all.
+func TestChaos57_PartialRefreshIsNotTreatedAsNeverRefreshed(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	tf := New()
+	// Ten minutes ago: URLhaus refreshed, OpenPhish failed. Never a fully
+	// clean round, so lastSuccess stays zero — forever.
+	tf.mu.Lock()
+	tf.enabled, tf.syncInterval = true, 6*time.Hour
+	tf.mu.Unlock()
+	tf.applySync(map[string]entry{"http://a.test": {Source: sourceURLhaus}}, map[string]entry{},
+		[]string{"OpenPhish: HTTP 403"}, map[string]bool{sourceURLhaus: true}, now.Add(-10*time.Minute))
+
+	f := tf.Freshness()
+	if !f.LastSuccess.IsZero() {
+		t.Fatal("precondition: a partial round must NOT advance lastSuccess")
+	}
+	if f.LastRefresh.IsZero() {
+		t.Fatal("a round that refreshed one of two sources must advance lastRefresh")
+	}
+	if tf.needBootSync(now) {
+		t.Fatal("a feed refreshed 10 minutes ago by its surviving source must not refetch at boot — " +
+			"keying freshness on lastSuccess made this fetch on every restart, with no crash-loop floor")
+	}
+}
+
+// TestChaos57_FlooredBootRetriesWhenTheFloorExpires is the DEFECT gate for the
+// second Codex finding. When the boot fetch is skipped by the crash-loop floor,
+// the first scheduled attempt used the ordinary cadence — and because
+// consecutiveFailures is process-local and resets to zero on restart, the retry
+// path that would have shortened it was not armed. A floor meant to defer a
+// fetch by at most 15 minutes deferred it by a full interval instead, leaving
+// stale intelligence frozen for another whole window.
+func TestChaos57_FlooredBootRetriesWhenTheFloorExpires(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	// Stale data, attempted one minute ago: the floored shape.
+	tf := newTestFeed(t, 200_000, now.Add(-21*24*time.Hour), now.Add(-time.Minute), 6*time.Hour)
+
+	decision, floorLeft := tf.bootSyncDecision(now)
+	if decision != bootFloored {
+		t.Fatalf("decision = %v, want bootFloored", decision)
+	}
+	want := bootResyncFloor - time.Minute
+	if floorLeft != want {
+		t.Fatalf("floorLeft = %s, want %s", floorLeft, want)
+	}
+
+	got := tf.firstDelay(decision, floorLeft)
+	if got > bootResyncFloor {
+		t.Fatalf("first scheduled attempt after a floored boot = %s, want <= the %s floor "+
+			"(pre-fix it waited the full 6h interval)", got, bootResyncFloor)
+	}
+}
+
+// TestChaos57_FreshBootStillUsesTheFullCadence is the CONTROL for the above: the
+// floor shortcut must apply ONLY to a floored boot. Shortening the first delay
+// on a node whose data is simply fresh would refetch every healthy restart —
+// the thundering-herd direction this change exists to avoid.
+func TestChaos57_FreshBootStillUsesTheFullCadence(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	tf := newTestFeed(t, 200_000, now.Add(-10*time.Minute), now.Add(-10*time.Minute), 6*time.Hour)
+
+	decision, floorLeft := tf.bootSyncDecision(now)
+	if decision != bootDataFresh {
+		t.Fatalf("decision = %v, want bootDataFresh", decision)
+	}
+	if got := tf.firstDelay(decision, floorLeft); got < 5*time.Hour {
+		t.Fatalf("first delay on a fresh boot = %s, want roughly the full 6h interval", got)
+	}
+}
+
+// TestChaos57_LastRefreshSurvivesRestart pins the persistence half: the field
+// freshness is computed from must round-trip, and a legacy DB written before it
+// existed must back-fill from lastSuccess rather than loading as "never
+// refreshed" (which would force a fetch on the first boot after upgrade for
+// every appliance in a fleet at once).
+func TestChaos57_LastRefreshSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/feed.json"
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	t.Run("round-trips", func(t *testing.T) {
+		tf := New()
+		tf.mu.Lock()
+		tf.dbPath, tf.enabled = path, true
+		tf.mu.Unlock()
+		tf.applySync(map[string]entry{"http://a.test": {Source: sourceURLhaus}}, map[string]entry{},
+			[]string{"OpenPhish: HTTP 403"}, map[string]bool{sourceURLhaus: true}, now)
+		if err := tf.saveToDisk(); err != nil {
+			t.Fatalf("saveToDisk: %v", err)
+		}
+
+		reloaded := New()
+		if err := reloaded.loadFromDisk(path); err != nil {
+			t.Fatalf("loadFromDisk: %v", err)
+		}
+		if got := reloaded.Freshness().LastRefresh; !got.Equal(now) {
+			t.Fatalf("LastRefresh after restart = %s, want %s", got, now)
+		}
+	})
+
+	t.Run("legacy DB back-fills from last_success", func(t *testing.T) {
+		legacy := dir + "/legacy.json"
+		body := `{"last_sync":"2026-08-29T12:00:00Z","last_success":"2026-08-29T12:00:00Z",` +
+			`"urls":{},"domains":{},"domain_allowlist":[]}`
+		if err := os.WriteFile(legacy, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tf := New()
+		if err := tf.loadFromDisk(legacy); err != nil {
+			t.Fatalf("loadFromDisk: %v", err)
+		}
+		want := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+		if got := tf.Freshness().LastRefresh; !got.Equal(want) {
+			t.Fatalf("legacy LastRefresh = %s, want back-fill from last_success (%s)", got, want)
+		}
+	})
 }

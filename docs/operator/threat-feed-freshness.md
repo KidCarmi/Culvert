@@ -42,9 +42,9 @@ exactly what the surfaces below exist to fix.
 |---|---|
 | `culvert_threat_feed_stale` | `1` when the served intelligence is older than the staleness threshold. **This is the alerting rule: `== 1`.** |
 | `culvert_threat_feed_staleness_seconds` | Age of the data currently being served. |
-| `culvert_threat_feed_last_success_timestamp_seconds` | Unix time of the last sync in which every source fetched cleanly (`0` = never). |
+| `culvert_threat_feed_last_refresh_timestamp_seconds` | Unix time of the last sync that brought in entries from **any** source — the age of what is being served (`0` = never). |
 | `culvert_threat_feed_sync_failures` | Consecutive rounds that fetched nothing from any source. |
-| `culvert_threat_feed_sync_ok` | `1` when the most recent round fetched every source cleanly. |
+| `culvert_threat_feed_sync_ok` | `1` when the most recent round fetched **every** source cleanly *and* at least one round has ever done so. A feed with one permanently-failing source sits at `0` here while still refreshing — see §3.1. |
 
 **All five series are absent on a node with no threat feed configured.** That is
 deliberate: a `culvert_threat_feed_stale 0` on an appliance that never had the
@@ -84,6 +84,25 @@ The `threat_feed` row is deliberately **warn, never fail**, and is deliberately
 enforcing policy, still scanning bodies, and still blocking every entry it
 holds. Failing readiness would pull a working gateway out of a load-balancer
 rotation and leave the traffic to egress with no gateway at all.
+
+---
+
+### 3.1 One source failing is not staleness
+
+Staleness is measured from the last round that refreshed **any** source, not
+from the last round in which **every** source fetched cleanly. The two differ
+in a case that is ordinary rather than exceptional: one of two free public
+feeds returning 403 or 429 indefinitely for your egress IP.
+
+In that state the appliance is still getting fresh intelligence on every window
+from the surviving source, so it is **not** stale and will not page you. What
+you will see instead is `culvert_threat_feed_sync_ok 0` and the failing
+source's error in `threat_feed_sync_error` — visible, worth fixing, not an
+outage of the control.
+
+`threat_feed_sync_failing` counts only rounds that fetched **nothing at all**,
+for the same reason: holding a whole fleet at the retry floor against a service
+that is already refusing it would make the problem worse, not better.
 
 ---
 

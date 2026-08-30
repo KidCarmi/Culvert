@@ -21,7 +21,7 @@ package main
 //     Prometheus rule can read.
 //   - `/healthz`, `/readyz` and `/api/diagnostics` carried nothing at all.
 //   - The only report of sync health was `threat_feed_sync_ok` inside the
-//     admin JSON blob at `/api/security/scan-status` — a human-polled surface
+//     admin JSON blob at `/api/security-scan/status` — a human-polled surface
 //     that no alerting rule consumes.
 //
 // The comparison that settles the severity is in-repo: the LESS security-
@@ -35,7 +35,7 @@ package main
 // Surfaces added here, all reusing existing operator vocabulary:
 //
 //   - `/api/diagnostics` — the `threat_feed` operator-contract row.
-//   - `/metrics` — culvert_threat_feed_{last_success_timestamp_seconds,
+//   - `/metrics` — culvert_threat_feed_{last_refresh_timestamp_seconds,
 //     staleness_seconds,stale,sync_failures,sync_ok}.
 //   - alerts — threat_feed_stale / threat_feed_sync_failing /
 //     threat_feed_recovered, each fire-once-per-threshold-crossing.
@@ -113,14 +113,14 @@ type threatFeedStatus struct {
 	// claim a verdict. The CHAOS-54 rule: a "stale" reading on a node that
 	// never had the feature is indistinguishable from a broken one.
 	Reportable bool
-	// NeverSynced is true when no round has ever fetched cleanly. This is
-	// NOT the same as stale: staleness is not computable from a zero
-	// timestamp, and an appliance that has been up for two minutes on a slow
-	// link has simply not finished yet.
+	// NeverSynced is true when no round has ever brought in entries from any
+	// source. This is NOT the same as stale: staleness is not computable from
+	// a zero timestamp, and an appliance that has been up for two minutes on a
+	// slow link has simply not finished yet.
 	NeverSynced bool
 	Stale       bool
 	Failing     bool
-	Age         time.Duration // since the last fully-successful sync; 0 when NeverSynced
+	Age         time.Duration // since the last round that refreshed any source; 0 when NeverSynced
 	StaleAfter  time.Duration
 	Snapshot    threatFeedSnapshot
 }
@@ -132,6 +132,7 @@ type threatFeedSnapshot struct {
 	Entries             int64
 	LastAttempt         time.Time
 	LastSuccess         time.Time
+	LastRefresh         time.Time
 	LastErr             string
 	ConsecutiveFailures int
 	SyncInterval        time.Duration
@@ -146,7 +147,15 @@ func evaluateThreatFeedStatus(s threatFeedSnapshot, now time.Time) threatFeedSta
 	}
 	st.Reportable = true
 	st.Failing = s.ConsecutiveFailures >= threatFeedFailingThreshold
-	if s.LastSuccess.IsZero() {
+	// Age is measured from LastRefresh — the last round that brought in
+	// entries from ANY source — not LastSuccess, which requires EVERY source
+	// clean. One of two free public feeds 403ing indefinitely is an ordinary
+	// steady state (it is exactly why ConsecutiveFailures is deliberately
+	// narrow), and keying staleness on LastSuccess would report a feed whose
+	// surviving source refreshes on every window as permanently stale, and
+	// page about it. Codex review, PR #1264 — the two halves of this change
+	// disagreed with each other until this was fixed.
+	if s.LastRefresh.IsZero() {
 		st.NeverSynced = true
 		return st
 	}
@@ -155,7 +164,7 @@ func evaluateThreatFeedStatus(s threatFeedSnapshot, now time.Time) threatFeedSta
 	// the size of the jump in one direction and stale in the other: the only
 	// honest reading of "the last success is in the future" is "we have no
 	// usable age", and the failing/never-synced signals still work.
-	if age := now.Sub(s.LastSuccess); age > 0 {
+	if age := now.Sub(s.LastRefresh); age > 0 {
 		st.Age = age
 		st.Stale = age >= st.StaleAfter
 	}
@@ -174,6 +183,7 @@ func threatFeedSnapshotNow() threatFeedSnapshot {
 		Entries:             f.Entries,
 		LastAttempt:         f.LastAttempt,
 		LastSuccess:         f.LastSuccess,
+		LastRefresh:         f.LastRefresh,
 		LastErr:             f.LastErr,
 		ConsecutiveFailures: f.ConsecutiveFailures,
 		SyncInterval:        f.SyncInterval,
@@ -357,20 +367,28 @@ func writeThreatFeedMetricsAt(w *strings.Builder, snap threatFeedSnapshot, now t
 	if st.Stale {
 		stale = 1
 	}
-	if st.Snapshot.LastErr == "" {
+	// sync_ok requires a round to have ACTUALLY completed cleanly, not merely
+	// the absence of a recorded error. On an enabled feed that has never
+	// synced, LastErr starts empty, so keying on it alone published
+	// `sync_ok 1` beside a zero last-refresh timestamp and a diagnostics row
+	// reading "never synced" — a false healthy signal during every boot, and a
+	// permanent one if the first fetch died before recording an error (Codex
+	// review, PR #1264). Same rule as the absent-when-not-running gauges: an
+	// unknown state must never render as the healthy value.
+	if st.Snapshot.LastErr == "" && !st.Snapshot.LastSuccess.IsZero() {
 		syncOK = 1
 	}
 	// staleness_seconds is the age of the DATA, which is what an alerting rule
 	// wants; it is deliberately not derived from lastAttempt, because
 	// lastAttempt advances on failures too and would report a permanently
 	// broken feed as perpetually fresh (the trap SyncStatus's own comment
-	// already warns about).
+	// already warns about). Nor from lastSuccess — see evaluateThreatFeedStatus.
 	fmt.Fprintf(w, `
-# HELP culvert_threat_feed_last_success_timestamp_seconds Unix time of the last threat-feed sync in which every source fetched cleanly (0 = never)
-# TYPE culvert_threat_feed_last_success_timestamp_seconds gauge
-culvert_threat_feed_last_success_timestamp_seconds %d
+# HELP culvert_threat_feed_last_refresh_timestamp_seconds Unix time of the last threat-feed sync that brought in entries from any source — the age of the served intelligence (0 = never)
+# TYPE culvert_threat_feed_last_refresh_timestamp_seconds gauge
+culvert_threat_feed_last_refresh_timestamp_seconds %d
 
-# HELP culvert_threat_feed_staleness_seconds Age of the threat intelligence currently being served (seconds since the last fully-successful sync)
+# HELP culvert_threat_feed_staleness_seconds Age of the threat intelligence currently being served (seconds since the last sync that refreshed any source)
 # TYPE culvert_threat_feed_staleness_seconds gauge
 culvert_threat_feed_staleness_seconds %d
 
@@ -386,7 +404,7 @@ culvert_threat_feed_sync_failures %d
 # TYPE culvert_threat_feed_sync_ok gauge
 culvert_threat_feed_sync_ok %d
 `,
-		unixOrZero(st.Snapshot.LastSuccess),
+		unixOrZero(st.Snapshot.LastRefresh),
 		int64(st.Age.Seconds()),
 		stale,
 		st.Snapshot.ConsecutiveFailures,

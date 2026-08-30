@@ -57,7 +57,21 @@ type feedDB struct {
 	// existed loads as zero/"" — loadFromDisk treats that legacy shape as
 	// "LastSync was itself a success" (matching the pre-SyncStatus
 	// behavior, where a successful sync was the only thing ever recorded).
-	LastSuccess time.Time        `json:"last_success,omitempty"`
+	LastSuccess time.Time `json:"last_success,omitempty"`
+	// LastRefresh is the last round in which AT LEAST ONE source replaced its
+	// entries — i.e. the age of the intelligence actually being served. It is
+	// deliberately distinct from LastSuccess, which requires EVERY source to
+	// have fetched cleanly. One of two free public feeds 403ing indefinitely
+	// is an ordinary steady state, not an incident, and keying freshness on
+	// LastSuccess would report a feed whose other source refreshes on every
+	// window as permanently stale (Codex review, PR #1264). LastSuccess keeps
+	// its original meaning because SyncStatus() and the admin surfaces
+	// document and consume it.
+	//
+	// omitempty + the loadFromDisk back-fill keep legacy DBs (written before
+	// this field existed) loading as "LastSuccess was the last refresh",
+	// which is exactly true for them.
+	LastRefresh time.Time        `json:"last_refresh,omitempty"`
 	LastSyncErr string           `json:"last_sync_err,omitempty"`
 	URLs        map[string]entry `json:"urls"`
 	Domains     map[string]entry `json:"domains"`
@@ -82,6 +96,7 @@ type Feed struct {
 	syncInterval    time.Duration
 	lastSync        time.Time // time of the most recent sync attempt, success or failure
 	lastSuccess     time.Time // time of the most recent sync where every feed fetched cleanly
+	lastRefresh     time.Time // time of the most recent sync where AT LEAST ONE feed replaced its entries — the age of the served intelligence
 	lastSyncErr     string    // summary of the most recent failure(s); empty when the last sync fully succeeded
 	totalEntries    atomic.Int64
 	maskedHits      atomic.Int64 // domain hits suppressed by the allowlist (security-bypass observability)
@@ -295,6 +310,20 @@ func (tf *Feed) Start(ctx context.Context) {
 	go tf.runSyncLoop(ctx, time.Now())
 }
 
+// bootDecision is why runSyncLoop did or did not fetch at startup. The reason
+// matters, not just the verdict: a fetch skipped because the data is FRESH
+// should wait a full interval, but a fetch skipped because of the crash-loop
+// floor should be retried the moment that floor expires — otherwise the floor,
+// which is meant to defer a fetch by at most bootResyncFloor, silently defers
+// it by a whole syncInterval instead (Codex review, PR #1264).
+type bootDecision int
+
+const (
+	bootFetchNow  bootDecision = iota // stale or empty: fetch immediately
+	bootDataFresh                     // within one interval of a refresh: normal cadence
+	bootFloored                       // stale, but we attempted too recently
+)
+
 // runSyncLoop is Start's body, split out so tests can drive it directly with a
 // controlled "now" and a cancellable context.
 func (tf *Feed) runSyncLoop(ctx context.Context, now time.Time) {
@@ -303,7 +332,8 @@ func (tf *Feed) runSyncLoop(ctx context.Context, now time.Time) {
 	// control. Guard the ROUND, not the goroutine: a bad feed pass costs
 	// one sync, not the whole gateway, and the loop keeps running so the
 	// next window can recover on its own.
-	if tf.needBootSync(now) {
+	decision, floorLeft := tf.bootSyncDecision(now)
+	if decision == bootFetchNow {
 		obs.SafeCall("threatfeed", tf.Sync)
 	} else {
 		// No boot fetch, but the freshness plane must still be evaluated
@@ -314,7 +344,7 @@ func (tf *Feed) runSyncLoop(ctx context.Context, now time.Time) {
 		tf.notifySyncObserver()
 	}
 
-	timer := time.NewTimer(tf.nextSyncDelay())
+	timer := time.NewTimer(tf.firstDelay(decision, floorLeft))
 	defer timer.Stop()
 	for {
 		select {
@@ -327,24 +357,57 @@ func (tf *Feed) runSyncLoop(ctx context.Context, now time.Time) {
 	}
 }
 
-// needBootSync decides whether to fetch immediately at startup. See Start.
+// firstDelay is the wait before the FIRST scheduled attempt. It is the normal
+// jittered cadence except after a floored boot, where waiting a full interval
+// would leave stale intelligence frozen for a whole window because
+// consecutiveFailures is process-local and resets to zero on restart — so the
+// retry path that would otherwise shorten this wait is not yet armed.
+func (tf *Feed) firstDelay(decision bootDecision, floorLeft time.Duration) time.Duration {
+	d := tf.nextSyncDelay()
+	if decision == bootFloored && floorLeft > 0 && floorLeft < d {
+		return jitterDuration(floorLeft, syncJitterFrac)
+	}
+	return d
+}
+
+// needBootSync reports whether to fetch immediately at startup. Retained as the
+// boolean form for readability at the call sites that do not care WHY.
 func (tf *Feed) needBootSync(now time.Time) bool {
+	d, _ := tf.bootSyncDecision(now)
+	return d == bootFetchNow
+}
+
+// bootSyncDecision decides whether to fetch immediately at startup, and when
+// the decision is bootFloored also returns how long is left on the floor.
+//
+// Freshness is measured against lastRefresh — the last round that brought in
+// entries from ANY source — not lastSuccess, which requires EVERY source to
+// have fetched cleanly. With one of two free public feeds 403ing indefinitely
+// (an ordinary steady state, and the exact case consecutiveFailures is
+// deliberately narrow about) lastSuccess never advances at all, so keying on
+// it would force a fetch on every single restart while the node in fact holds
+// intelligence refreshed on the last window — the crash-loop hammering this
+// floor exists to prevent (Codex review, PR #1264).
+func (tf *Feed) bootSyncDecision(now time.Time) (bootDecision, time.Duration) {
 	tf.mu.RLock()
-	lastSuccess, lastAttempt, interval := tf.lastSuccess, tf.lastSync, tf.syncInterval
+	lastRefresh, lastAttempt, interval := tf.lastRefresh, tf.lastSync, tf.syncInterval
 	tf.mu.RUnlock()
 
 	// Nothing usable on disk: fetch, exactly as before this change.
-	if tf.totalEntries.Load() == 0 || lastSuccess.IsZero() {
-		return true
+	if tf.totalEntries.Load() == 0 || lastRefresh.IsZero() {
+		return bootFetchNow, 0
 	}
 	// Fresh enough to serve: the scheduled cadence is sufficient. A node
-	// restarted ten minutes after a clean sync must NOT refetch — that is
-	// the direction that builds a thundering herd out of a rolling upgrade.
-	if now.Sub(lastSuccess) < interval {
-		return false
+	// restarted ten minutes after a refresh must NOT refetch — that is the
+	// direction that builds a thundering herd out of a rolling upgrade.
+	if now.Sub(lastRefresh) < interval {
+		return bootDataFresh, 0
 	}
 	// Stale. Fetch, unless we already attempted recently (crash-loop floor).
-	return now.Sub(lastAttempt) >= bootResyncFloor
+	if since := now.Sub(lastAttempt); since < bootResyncFloor {
+		return bootFloored, bootResyncFloor - since
+	}
+	return bootFetchNow, 0
 }
 
 // nextSyncDelay returns the jittered wait before the next scheduled sync: the
@@ -484,10 +547,16 @@ func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []strin
 	// condition the retry cadence and the sync-failing alert key on. A round
 	// where one of two feeds succeeded refreshed real intelligence and is not
 	// charged as a failure (see the consecutiveFailures field comment).
+	//
+	// lastRefresh moves on exactly that same condition, and that pairing is
+	// load-bearing: keying freshness on lastSuccess instead would contradict
+	// this very rule, reporting a feed whose surviving source refreshes every
+	// window as permanently stale for as long as the other one 403s.
 	if len(replacedSources) == 0 {
 		tf.consecutiveFailures++
 	} else {
 		tf.consecutiveFailures = 0
+		tf.lastRefresh = now
 	}
 	tf.publishLocked()
 	tf.mu.Unlock()
@@ -652,6 +721,7 @@ func (tf *Feed) Freshness() FreshnessSnapshot {
 		Entries:             tf.totalEntries.Load(),
 		LastAttempt:         tf.lastSync,
 		LastSuccess:         tf.lastSuccess,
+		LastRefresh:         tf.lastRefresh,
 		LastErr:             tf.lastSyncErr,
 		ConsecutiveFailures: tf.consecutiveFailures,
 		SyncInterval:        tf.syncInterval,
@@ -660,11 +730,16 @@ func (tf *Feed) Freshness() FreshnessSnapshot {
 
 // FreshnessSnapshot is one consistent view of the feed's sync health.
 type FreshnessSnapshot struct {
-	Enabled             bool
-	Entries             int64
-	LastAttempt         time.Time // most recent attempt, success or failure
-	LastSuccess         time.Time // most recent round where every feed fetched cleanly; zero = never
-	LastErr             string    // summary of the most recent failure(s)
+	Enabled     bool
+	Entries     int64
+	LastAttempt time.Time // most recent attempt, success or failure
+	LastSuccess time.Time // most recent round where EVERY feed fetched cleanly; zero = never
+	// LastRefresh is the most recent round where AT LEAST ONE feed replaced
+	// its entries — the age of the intelligence actually being served, and
+	// therefore the field staleness must be computed from. See the feedDB
+	// field comment for why this is not LastSuccess.
+	LastRefresh         time.Time
+	LastErr             string // summary of the most recent failure(s)
 	ConsecutiveFailures int
 	SyncInterval        time.Duration
 }
@@ -947,6 +1022,15 @@ func (tf *Feed) loadFromDisk(path string) error {
 		// success, so back-fill it rather than reporting "never synced".
 		tf.lastSuccess = db.LastSync
 	}
+	// LastRefresh back-fill: a DB written before the field existed recorded
+	// only fully-clean rounds, so its LastSuccess IS its last refresh. Never
+	// weaker than the value it replaces — a legacy DB can only be reported as
+	// exactly as fresh as it already claimed to be.
+	if !db.LastRefresh.IsZero() {
+		tf.lastRefresh = db.LastRefresh
+	} else {
+		tf.lastRefresh = tf.lastSuccess
+	}
 	// Restore the persisted allowlist. The guard keys on nil, not
 	// len()==0, so an admin-cleared explicit-empty `[]` (saved as
 	// `"domain_allowlist": []` per the no-omitempty tag) replaces the
@@ -999,6 +1083,7 @@ func (tf *Feed) saveToDisk() error {
 	db := feedDB{
 		LastSync:        tf.lastSync,
 		LastSuccess:     tf.lastSuccess,
+		LastRefresh:     tf.lastRefresh,
 		LastSyncErr:     tf.lastSyncErr,
 		URLs:            tf.urls,
 		Domains:         domains,

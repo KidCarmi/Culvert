@@ -2986,10 +2986,53 @@ must not page on twenty minutes of a public feed being slow.
   remain bare tickers. Both are short-interval and neither targets a free public
   service, so the herd cost is lower; recorded rather than swept.
 
-### 25.8 Tests
+### 25.8 Review follow-ups — three defects in the fix itself
 
-`internal/threatfeed/sync_freshness_test.go` (13) and
-`threatfeed_health_test.go` (10). Provenance is stated per gate in each file's
+Codex review of PR #1264 raised three P2s against the change. All three were
+verified against the code and fixed in the same PR; each carries a gate that
+was confirmed failing against its pre-fix shape.
+
+**FD-6 — the fix contradicted itself.** §25.5 rule 3 defines a failure as a
+round that replaced NO source, on the explicit reasoning that one of two free
+public feeds 403ing indefinitely is an ordinary steady state. Freshness was
+then keyed on `lastSuccess`, which requires EVERY source clean. The two halves
+disagree, and the consequence is not cosmetic: with OpenPhish permanently
+refusing this egress IP, `lastSuccess` never advances at all, so a node whose
+URLhaus feed refreshed on every single window was seen by `needBootSync` as
+"never succeeded" — the branch that returns true UNCONDITIONALLY, bypassing the
+crash-loop floor. **The floor added to stop a crash loop from hammering the
+feeds did not apply in the one steady state that most needs it.** The same
+snapshot would have reported the feed permanently stale and paged about it.
+Fixed by a persisted `lastRefresh` (last round that refreshed ANY source);
+`lastSuccess` keeps its documented all-clean meaning for `SyncStatus()` and
+`sync_ok`. This is worth recording as a pattern: **when a change defines a
+narrow notion of "failure" for one purpose, every other surface in the same
+change has to be checked against that same definition** — the contradiction
+lived in two files that were written minutes apart.
+
+**FD-7 — the floor deferred by a window, not by the floor.** When
+`needBootSync` skipped the boot fetch because of the crash-loop floor, the
+first scheduled attempt used the ordinary cadence, because
+`consecutiveFailures` is process-local and resets to zero on restart — so the
+retry path that would have shortened it was not armed. A floor meant to defer a
+fetch by at most 15 minutes deferred it by a full 6-hour interval, partially
+undoing FD-2. Fixed by `firstDelay`, which uses the floor remainder after a
+`bootFloored` decision; the CONTROL gate pins that a merely-fresh boot still
+waits the full cadence.
+
+**FD-8 — an unknown state rendered as the healthy value.** `sync_ok` was
+`LastErr == ""`, and on a feed that has never synced `LastErr` starts empty —
+so `culvert_threat_feed_sync_ok 1` was published beside a zero last-refresh
+timestamp and a diagnostics row reading "never synced", on every boot, and
+permanently if the first fetch died before recording an error. Fixed to require
+a completed clean round. Same rule as the absent-when-not-running gauges, which
+this change had already applied one function away.
+
+### 25.9 Tests
+
+`internal/threatfeed/sync_freshness_test.go` (17) and
+`threatfeed_health_test.go` (13) — including four gates for the FD-6/FD-7/FD-8
+review follow-ups, each verified failing against its pre-fix shape. Provenance is stated per gate in each file's
 header, because "verified failing against the pre-fix tree" is a claim that has
 to be earned: the boot-sync gates WERE run against the reintroduced pre-fix
 condition and fail; the retry and jitter gates pin arming conditions that had

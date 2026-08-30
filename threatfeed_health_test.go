@@ -48,6 +48,7 @@ func running(lastSuccess time.Time, fails int) threatFeedSnapshot {
 		Entries:      200_000,
 		LastAttempt:  lastSuccess,
 		LastSuccess:  lastSuccess,
+		LastRefresh:  lastSuccess,
 		SyncInterval: 6 * time.Hour,
 
 		ConsecutiveFailures: fails,
@@ -261,5 +262,69 @@ func TestChaos57_ContractRowIsRegistered(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("threat_feed row missing from the operator contract — the freshness plane is unreachable")
+	}
+}
+
+// ── Codex review follow-ups (PR #1264) ───────────────────────────────────────
+
+// TestChaos57_SyncOkIsFalseUntilARoundHasSucceeded is the DEFECT gate for the
+// false healthy signal. On an enabled feed that has never synced, LastErr
+// starts empty, so keying sync_ok on it alone published `sync_ok 1` beside a
+// zero last-refresh timestamp and a diagnostics row reading "never synced" —
+// visible on every boot, and permanent if the first fetch died before
+// recording an error. An unknown state must never render as the healthy value.
+func TestChaos57_SyncOkIsFalseUntilARoundHasSucceeded(t *testing.T) {
+	var b strings.Builder
+	writeThreatFeedMetricsAt(&b, threatFeedSnapshot{
+		Enabled: true, SyncInterval: 6 * time.Hour, // never synced: LastErr == "", LastSuccess zero
+	}, time.Now())
+
+	if !strings.Contains(b.String(), "culvert_threat_feed_sync_ok 0") {
+		t.Fatalf("a feed that has never synced must publish sync_ok 0, got:\n%s", b.String())
+	}
+}
+
+// TestChaos57_SyncOkTrueOnlyAfterACleanRound is its CONTROL: the fix must not
+// pin sync_ok to 0 forever.
+func TestChaos57_SyncOkTrueOnlyAfterACleanRound(t *testing.T) {
+	var b strings.Builder
+	writeThreatFeedMetricsAt(&b, running(time.Now().Add(-time.Minute), 0), time.Now())
+	if !strings.Contains(b.String(), "culvert_threat_feed_sync_ok 1") {
+		t.Fatalf("a feed that just synced cleanly must publish sync_ok 1, got:\n%s", b.String())
+	}
+}
+
+// TestChaos57_PartialRefreshIsNotStale is the root-side half of the engine gate
+// with the same name. A feed whose surviving source refreshes on every window
+// must not be reported stale — nor paged about — just because the other source
+// is permanently 403ing and lastSuccess therefore never advances.
+func TestChaos57_PartialRefreshIsNotStale(t *testing.T) {
+	got := captureThreatFeedAlerts(t)
+	now := time.Now()
+	partial := threatFeedSnapshot{
+		Enabled: true, Entries: 200_000,
+		LastAttempt:  now.Add(-time.Minute),
+		LastRefresh:  now.Add(-time.Minute), // surviving source refreshed just now
+		LastSuccess:  time.Time{},           // never a fully-clean round
+		LastErr:      "OpenPhish: HTTP 403",
+		SyncInterval: 6 * time.Hour,
+	}
+
+	st := evaluateThreatFeedStatus(partial, now)
+	if st.Stale {
+		t.Fatal("a feed refreshed a minute ago by its surviving source must not be stale")
+	}
+	if st.NeverSynced {
+		t.Fatal("a feed holding freshly-refreshed entries must not report NeverSynced")
+	}
+	evaluateThreatFeedAlertsAt(partial, now)
+	if len(*got) != 0 {
+		t.Fatalf("a partially-refreshing feed was alerted on: %v", threatFeedEventNames(*got))
+	}
+	// But the operator must still be able to SEE that one source is failing.
+	var b strings.Builder
+	writeThreatFeedMetricsAt(&b, partial, now)
+	if !strings.Contains(b.String(), "culvert_threat_feed_sync_ok 0") {
+		t.Fatalf("a feed with a permanently failing source must publish sync_ok 0, got:\n%s", b.String())
 	}
 }
