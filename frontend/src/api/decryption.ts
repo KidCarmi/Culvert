@@ -10,11 +10,17 @@
 //   - FENCES: the privacy PUT and the tunables PUT assert the server's
 //     content-derived revision (body ifRevision / query ?ifRevision=); a
 //     mismatch is the shared structured 409. This client ALWAYS asserts.
-//   - ROTATION EXACT-ONCE: key_id is the NON-SECRET pseudonym generation — it
-//     changes iff a rotation lands and survives restart. An unknown-outcome
-//     rotation is resolved by comparing key_id via GET, NEVER by retrying;
-//     because the revision covers key_id, a stale-fenced retry is a 409 that
-//     cannot rotate twice. No key material ever reaches this client.
+//   - ROTATION OPERATION IDENTITY (2E-B correction): every rotation carries a
+//     client-minted opaque operation_id; the appliance records a bounded
+//     durable NON-SECRET receipt {operation_id, key_id, seq} atomically with
+//     the rotation plus a monotonic rotation_seq. An unknown-outcome rotation
+//     is resolved against fresh GET truth PER OPERATION: our receipt present
+//     = landed exactly once; sequence unchanged = did not land; sequence
+//     advanced without our receipt = AMBIGUOUS (another admin may have
+//     rotated) — never "landed because key_id changed", never a blind retry.
+//     A replay of the same operation_id is answered idempotently
+//     (already_applied) and cannot rotate twice. No key material ever
+//     reaches this client.
 //   - AUTO-EXCLUSIONS are VOLATILE runtime state (drop-and-relearn): eviction
 //     and clear-all carry no fence and no durability claim; the response
 //     truthfully reports removed/cleared. Reads are bounded via ?limit=.
@@ -194,14 +200,27 @@ export function getDecryptionHealth(
 
 // ── Destination privacy (GET/PUT /api/decryption/redaction) ─────────────────
 
+/** NON-SECRET durable record of ONE landed rotation operation. */
+export interface RotationReceipt {
+  operationId: string;
+  keyId: string;
+  seq: number;
+}
+
 export interface DestinationPrivacy {
   redactHosts: boolean;
   scope: string;
   scopeFields: readonly string[];
   keyProvisioned: boolean;
   /** NON-SECRET pseudonym generation; "" when no key is installed. Changes
-   * iff a rotation lands — the unknown-outcome resolution fact. */
+   * iff a new key installs — display truth, NOT operation attribution. */
   keyId: string;
+  /** Durable monotonic key-generation sequence: unchanged ⇒ no rotation
+   * landed in between (the NOT-LANDED half of unknown-outcome truth). */
+  rotationSeq: number;
+  /** Bounded receipts of client-identified rotations — a lost-response
+   * rotation is LANDED iff OUR operation id appears here. */
+  receipts: readonly RotationReceipt[];
   revision: string;
 }
 
@@ -211,6 +230,21 @@ export const decodeDestinationPrivacy: Decoder<DestinationPrivacy> = (
 ) => {
   const o = readRecord(v, path);
   const sf = o["scope_fields"];
+  const receiptsRaw = field(
+    o,
+    "rotation_receipts",
+    readArray((x, p) => readRecord(x, p)),
+    path,
+  );
+  const receipts: RotationReceipt[] = [];
+  for (const [i, r] of receiptsRaw.entries()) {
+    const p = `${path}.rotation_receipts[${i}]`;
+    receipts.push({
+      operationId: field(r, "operation_id", readString, p),
+      keyId: field(r, "key_id", readString, p),
+      seq: field(r, "seq", readNumber, p),
+    });
+  }
   return {
     redactHosts: field(o, "redact_hosts", readBoolean, path),
     scope: opt(o, "scope", readString, path) ?? "",
@@ -220,6 +254,8 @@ export const decodeDestinationPrivacy: Decoder<DestinationPrivacy> = (
         : field(o, "scope_fields", readArray(readString), path),
     keyProvisioned: field(o, "key_provisioned", readBoolean, path),
     keyId: field(o, "key_id", readString, path),
+    rotationSeq: field(o, "rotation_seq", readNumber, path),
+    receipts,
     revision: field(o, "revision", readString, path),
   };
 };
@@ -228,6 +264,12 @@ export interface PrivacyWriteResult {
   redactHosts: boolean;
   keyRotated: boolean;
   keyId: string;
+  rotationSeq: number;
+  /** Rotation responses only: true when this operation had already landed
+   * and the appliance answered from its receipt (nothing was mutated). */
+  alreadyApplied: boolean;
+  /** Rotation responses only: echo of the operation identity. */
+  operationId: string;
   revision: string;
 }
 
@@ -240,9 +282,21 @@ const decodePrivacyWriteResult: Decoder<PrivacyWriteResult> = (
     redactHosts: field(o, "redact_hosts", readBoolean, path),
     keyRotated: field(o, "key_rotated", readBoolean, path),
     keyId: field(o, "key_id", readString, path),
+    rotationSeq: field(o, "rotation_seq", readNumber, path),
+    alreadyApplied: opt(o, "already_applied", readBoolean, path) ?? false,
+    operationId: opt(o, "operation_id", readString, path) ?? "",
     revision: field(o, "revision", readString, path),
   };
 };
+
+/** Mints a fresh opaque rotation operation id (16 hex chars, browser
+ * entropy). One id names ONE operation: minted when a rotation ceremony
+ * opens, retired with it — never reused for a later rotation. */
+export function mintRotationOperationId(): string {
+  const b = new Uint8Array(8);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
 
 export function getDestinationPrivacy(
   signal?: AbortSignal,
@@ -267,17 +321,20 @@ export function putDestinationPrivacy(
   });
 }
 
-/** Fenced pseudonym-key rotation (T3). The fence is the exactly-once
- * mechanism: the asserted revision covers the current key_id, so a retry
- * after a lost response is a structured 409 that cannot rotate twice. NEVER
- * dispatch this from a generic retry path. */
+/** Fenced, operation-identified pseudonym-key rotation (T3). The appliance
+ * records a durable receipt for operationId atomically with the rotation, so
+ * a lost response is resolved from fresh GET truth per operation; a replay of
+ * the same id is idempotent (already_applied) and cannot rotate twice, and a
+ * DIFFERENT operation on stale truth is a structured 409. NEVER dispatch
+ * this from a generic retry path. */
 export function rotatePseudonymKey(
+  operationId: string,
   ifRevision: string,
   signal?: AbortSignal,
 ): Promise<PrivacyWriteResult> {
   return apiRequest("/api/decryption/redaction", decodePrivacyWriteResult, {
     method: "PUT",
-    body: { rotate_key: true, ifRevision },
+    body: { rotate_key: true, operation_id: operationId, ifRevision },
     ...(signal !== undefined ? { signal } : {}),
   });
 }

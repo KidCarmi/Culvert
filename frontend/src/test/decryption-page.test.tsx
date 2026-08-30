@@ -31,9 +31,17 @@ let root: Root;
 let requested: string[];
 let mutations: Array<{ method: string; url: string; body: unknown }>;
 let onMutate: (method: string, url: string) => Promise<Response>;
-// Mutable privacy fixture (the rotation-resolution tests move key_id).
+// Mutable privacy fixture (the rotation-resolution tests move key_id and the
+// operation-identity truth: rotation_seq + rotation_receipts).
 let privacyKeyId: string;
 let privacyRedact: boolean;
+let privacySeq: number;
+let privacyReceipts: Array<{
+  operation_id: string;
+  key_id: string;
+  seq: number;
+  ts: string;
+}>;
 
 const HEALTH = {
   sessions: {
@@ -129,6 +137,8 @@ beforeEach(() => {
   onMutate = () => okJSON({ ok: true });
   privacyKeyId = "gen-aaaa";
   privacyRedact = true;
+  privacySeq = 2;
+  privacyReceipts = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: unknown, init?: RequestInit) => {
@@ -149,6 +159,8 @@ beforeEach(() => {
           scope_fields: ["host", "uri", "dec.host", "dec.sni", "top_hosts"],
           key_provisioned: true,
           key_id: privacyKeyId,
+          rotation_seq: privacySeq,
+          rotation_receipts: privacyReceipts,
           revision: `sha256:rev-${privacyKeyId}-${String(privacyRedact)}`,
         });
       if (url.includes("/api/decryption-exclusions/tunables"))
@@ -307,6 +319,7 @@ it("privacy OFF is a T2 ceremony; the PUT asserts the reviewed revision", async 
       redact_hosts: false,
       key_rotated: false,
       key_id: privacyKeyId,
+      rotation_seq: privacySeq,
       revision: "sha256:next",
     });
   clickButton((t) => t === "Disable destination privacy");
@@ -338,10 +351,14 @@ it("rotation is a T3 typed ceremony bound to fresh truth, with no CA confusion",
   if (input === undefined) throw new Error("typed-ceremony input not found");
   onMutate = () => {
     privacyKeyId = "gen-bbbb";
+    privacySeq += 1;
     return okJSON({
       redact_hosts: true,
       key_rotated: true,
+      already_applied: false,
+      operation_id: "echoed-by-server",
       key_id: "gen-bbbb",
+      rotation_seq: privacySeq,
       revision: "sha256:rot",
     });
   };
@@ -362,7 +379,9 @@ it("rotation is a T3 typed ceremony bound to fresh truth, with no CA confusion",
   const put = mutations[0];
   if (put === undefined || !isRecord(put.body)) throw new Error("no body");
   expect(put.body["rotate_key"]).toBe(true);
+  expect(put.body["operation_id"]).toMatch(/^[0-9a-f]{16}$/); // fresh identity
   expect(put.body["ifRevision"]).toBe("sha256:rev-gen-aaaa-true");
+  expect("redact_hosts" in put.body).toBe(false); // exactly one action
   await flushUntil(() => {
     expect(container.textContent).toContain(
       "New pseudonym generation: gen-bbbb",
@@ -370,7 +389,7 @@ it("rotation is a T3 typed ceremony bound to fresh truth, with no CA confusion",
   });
 });
 
-it("rotation unknown outcome latches and resolves LANDED from fresh key_id truth", async () => {
+it("rotation unknown outcome latches and resolves LANDED from OUR receipt in fresh truth", async () => {
   await mountPage("admin");
   await openTab("Destination Privacy", "Destination privacy");
   clickButton((t) => t.includes("Rotate pseudonym"));
@@ -389,16 +408,31 @@ it("rotation unknown outcome latches and resolves LANDED from fresh key_id truth
     proto?.set?.call(input, "ROTATE");
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  // The rotation LANDED on the appliance but the response was lost.
+  // The rotation LANDED on the appliance (which recorded OUR operation's
+  // receipt) but the response was lost.
   onMutate = () => {
+    const body = mutations[mutations.length - 1]?.body;
+    const op =
+      isRecord(body) && typeof body["operation_id"] === "string"
+        ? body["operation_id"]
+        : "";
     privacyKeyId = "gen-cccc";
+    privacySeq += 1;
+    privacyReceipts = [
+      {
+        operation_id: op,
+        key_id: "gen-cccc",
+        seq: privacySeq,
+        ts: "2026-08-30T10:00:00Z",
+      },
+    ];
     return Promise.reject(new TypeError("network down"));
   };
   clickButton((t) => t === "Rotate pseudonym key");
   await flushUntil(() => {
     expect(container.textContent).toContain("Outcome unconfirmed");
   });
-  // Resolution comes from fresh GET truth — never a blind repeat.
+  // Resolution comes from OUR receipt in fresh GET truth — never a repeat.
   clickButton((t) => t === "Refresh state");
   await flushUntil(() => {
     expect(container.textContent).toContain("Rotation landed");

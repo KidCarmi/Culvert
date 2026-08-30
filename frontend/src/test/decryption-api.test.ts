@@ -13,6 +13,7 @@ import {
   decodeTunablesMeta,
   evictAutoExclusion,
   getAutoExclusions,
+  mintRotationOperationId,
   putDestinationPrivacy,
   putTunables,
   rotatePseudonymKey,
@@ -76,24 +77,40 @@ describe("destination privacy decoding", () => {
     scope_fields: ["host", "uri"],
     key_provisioned: true,
     key_id: "a1b2c3d4e5f60708",
+    rotation_seq: 3,
+    rotation_receipts: [
+      {
+        operation_id: "op-1",
+        key_id: "a1b2c3d4e5f60708",
+        seq: 3,
+        ts: "2026-08-30T10:00:00Z",
+      },
+    ],
     revision: "sha256:r",
     note: "…",
   };
 
-  it("decodes the coherent snapshot", () => {
+  it("decodes the coherent snapshot including the rotation identity truth", () => {
     const p = decodeDestinationPrivacy(PRIVACY);
     expect(p.redactHosts).toBe(true);
     expect(p.keyId).toBe("a1b2c3d4e5f60708");
+    expect(p.rotationSeq).toBe(3);
+    expect(p.receipts[0]?.operationId).toBe("op-1");
+    expect(p.receipts[0]?.seq).toBe(3);
     expect(p.revision).toBe("sha256:r");
   });
 
-  it("fails closed when key_id or revision is missing (pre-2E-B appliance)", () => {
-    const noId: Record<string, unknown> = { ...PRIVACY };
-    delete noId["key_id"];
-    expect(() => decodeDestinationPrivacy(noId)).toThrow(DecodeError);
-    const noRev: Record<string, unknown> = { ...PRIVACY };
-    delete noRev["revision"];
-    expect(() => decodeDestinationPrivacy(noRev)).toThrow(DecodeError);
+  it("fails closed when key_id, revision, or the rotation identity is missing (pre-correction appliance)", () => {
+    for (const missing of [
+      "key_id",
+      "revision",
+      "rotation_seq",
+      "rotation_receipts",
+    ]) {
+      const copy: Record<string, unknown> = { ...PRIVACY };
+      delete copy[missing];
+      expect(() => decodeDestinationPrivacy(copy)).toThrow(DecodeError);
+    }
   });
 });
 
@@ -132,6 +149,7 @@ const WRITE_RESULT = {
   redact_hosts: true,
   key_rotated: false,
   key_id: "gen1",
+  rotation_seq: 3,
   revision: "sha256:new",
 };
 
@@ -147,16 +165,34 @@ it("privacy PUT asserts the fence and never carries a rotation", async () => {
   expect(put.body["rotate_key"]).toBeUndefined();
 });
 
-it("rotation sends rotate_key + the fence and NO posture field (server preserves it)", async () => {
-  const sent = stubFetch(() => ({ ...WRITE_RESULT, key_rotated: true }));
-  const res = await rotatePseudonymKey("revA");
+it("rotation sends rotate_key + operation identity + the fence and NO posture field", async () => {
+  const sent = stubFetch(() => ({
+    ...WRITE_RESULT,
+    key_rotated: true,
+    already_applied: false,
+    operation_id: "op-a1",
+    rotation_seq: 4,
+  }));
+  const res = await rotatePseudonymKey("op-a1", "revA");
   const put = sent[0];
   if (put === undefined || !isRecord(put.body)) throw new Error("no PUT body");
   expect(put.body["rotate_key"]).toBe(true);
+  expect(put.body["operation_id"]).toBe("op-a1");
   expect(put.body["ifRevision"]).toBe("revA");
   expect("redact_hosts" in put.body).toBe(false);
   expect(res.keyRotated).toBe(true);
+  expect(res.alreadyApplied).toBe(false);
+  expect(res.operationId).toBe("op-a1");
+  expect(res.rotationSeq).toBe(4);
   expect(res.keyId).toBe("gen1");
+});
+
+it("mintRotationOperationId mints fresh 16-hex identities (never reused)", () => {
+  const a = mintRotationOperationId();
+  const b = mintRotationOperationId();
+  expect(a).toMatch(/^[0-9a-f]{16}$/);
+  expect(b).toMatch(/^[0-9a-f]{16}$/);
+  expect(a).not.toBe(b);
 });
 
 // ── auto-exclusions ─────────────────────────────────────────────────────────

@@ -4,10 +4,16 @@
 // pseudonym key is NOT the TLS inspection Root CA and rotating it is NOT a
 // certificate rotation. Enable is a light T1 confirm (protective direction),
 // disable is a T2 ceremony, key rotation is a T3 typed ceremony bound to
-// fresh server truth. Rotation is NEVER blindly retried: an unknown outcome
-// latches and is resolved by comparing the non-secret pseudonym generation
-// (key_id) against fresh GET truth.
-import { useState, type JSX } from "react";
+// fresh server truth. Rotation is NEVER blindly retried: each rotation
+// carries a fresh client-minted operation id; an unknown outcome latches and
+// is resolved against fresh GET truth PER OPERATION (2E-B correction) — our
+// receipt present = landed exactly once; rotation sequence unchanged = did
+// not land; sequence advanced without our receipt = AMBIGUOUS (stay
+// latched; another admin may have rotated). A proven landed/not-landed
+// resolution converts into a durable local notice and CLEARS the latch, so
+// a deliberate NEW rotation (with a NEW operation id) becomes possible;
+// nothing is ever re-dispatched automatically.
+import { useEffect, useState, type JSX } from "react";
 import {
   Callout,
   Card,
@@ -26,6 +32,7 @@ import { asRevisionConflict } from "../../api/urlcat";
 import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import {
   getDestinationPrivacy,
+  mintRotationOperationId,
   putDestinationPrivacy,
   rotatePseudonymKey,
 } from "../../api/decryption";
@@ -34,7 +41,26 @@ import styles from "../policy/policy.module.css";
 type Ceremony =
   | { kind: "enable"; revision: string }
   | { kind: "disable"; revision: string }
-  | { kind: "rotate"; revision: string; preKeyId: string };
+  | {
+      kind: "rotate";
+      revision: string;
+      preKeyId: string;
+      /** rotation_seq at review time — the NOT-LANDED proof anchor. */
+      preSeq: number;
+      /** Fresh opaque identity for THIS operation (never reused). */
+      operationId: string;
+    };
+
+/** A transport-lost rotation awaiting per-operation proof from fresh truth. */
+interface UnresolvedRotation {
+  operationId: string;
+  preSeq: number;
+}
+
+/** An authoritative per-operation resolution, kept as a durable local notice
+ * after the latch clears. */
+type RotationResolution =
+  { kind: "landed"; keyId: string } | { kind: "not-landed" };
 
 export function DestinationPrivacyTab({
   isAdmin,
@@ -52,10 +78,12 @@ export function DestinationPrivacyTab({
   const [errorText, setErrorText] = useState("");
   const [notice, setNotice] = useState("");
   // Pending rotation whose response was LOST: resolved against fresh GET
-  // truth by comparing key_id — never by repeating the rotation.
-  const [unresolvedRotation, setUnresolvedRotation] = useState<string | null>(
-    null,
-  );
+  // truth PER OPERATION (receipt / sequence) — never by repeating it.
+  const [unresolvedRotation, setUnresolvedRotation] =
+    useState<UnresolvedRotation | null>(null);
+  // Durable local record of the last authoritative resolution (survives the
+  // latch clearing; replaced only by a new ceremony or the auth boundary).
+  const [resolution, setResolution] = useState<RotationResolution | null>(null);
 
   page.setBoundaryCleanup(() => {
     setCeremony(null);
@@ -64,7 +92,43 @@ export function DestinationPrivacyTab({
     setErrorText("");
     setNotice("");
     setUnresolvedRotation(null);
+    setResolution(null);
   });
+
+  // Classify the unresolved operation against the CURRENT fresh truth. This
+  // is the directive's matrix, exactly: (1) our receipt exists ⇒ LANDED;
+  // (2) the sequence still equals our pre-operation anchor and no receipt ⇒
+  // NOT LANDED; (3) anything else ⇒ AMBIGUOUS (another admin may have
+  // rotated, or our receipt aged out of the bounded window) — no claim.
+  const pendingClass =
+    unresolvedRotation !== null && p !== undefined && page.unknown === null
+      ? ((): "landed" | "not-landed" | "ambiguous" => {
+          const rcpt = p.receipts.find(
+            (r) => r.operationId === unresolvedRotation.operationId,
+          );
+          if (rcpt !== undefined) return "landed";
+          if (p.rotationSeq === unresolvedRotation.preSeq) return "not-landed";
+          return "ambiguous";
+        })()
+      : null;
+
+  // A PROVEN outcome converts into the durable notice and clears the latch
+  // (2E-B correction, Minor C) — a fresh deliberate rotation becomes possible
+  // again. AMBIGUOUS deliberately stays latched. Never dispatches anything.
+  useEffect(() => {
+    if (unresolvedRotation === null || p === undefined || page.unknown !== null)
+      return;
+    const rcpt = p.receipts.find(
+      (r) => r.operationId === unresolvedRotation.operationId,
+    );
+    if (rcpt !== undefined) {
+      setResolution({ kind: "landed", keyId: rcpt.keyId });
+      setUnresolvedRotation(null);
+    } else if (p.rotationSeq === unresolvedRotation.preSeq) {
+      setResolution({ kind: "not-landed" });
+      setUnresolvedRotation(null);
+    }
+  }, [unresolvedRotation, p, page.unknown]);
 
   const closeCeremony = (): void => {
     setCeremony(null);
@@ -76,7 +140,10 @@ export function DestinationPrivacyTab({
   const handleFailure = (err: unknown, action: string): void => {
     if (unknownOutcome(err)) {
       if (ceremony?.kind === "rotate") {
-        setUnresolvedRotation(ceremony.preKeyId);
+        setUnresolvedRotation({
+          operationId: ceremony.operationId,
+          preSeq: ceremony.preSeq,
+        });
       }
       page.latchUnknown("edit");
       closeCeremony();
@@ -113,11 +180,13 @@ export function DestinationPrivacyTab({
   const runRotation = (c: Ceremony & { kind: "rotate" }): void => {
     const signal = page.owner.begin();
     setResult("pending");
-    rotatePseudonymKey(c.revision, signal)
+    rotatePseudonymKey(c.operationId, c.revision, signal)
       .then((res) => {
         closeCeremony();
         setNotice(
-          `Pseudonym key rotated. New pseudonym generation: ${res.keyId}. Records written before this rotation no longer correlate with new ones.`,
+          res.alreadyApplied
+            ? `This rotation had already landed exactly once (generation ${res.keyId}); nothing was rotated again.`
+            : `Pseudonym key rotated. New pseudonym generation: ${res.keyId}. Records written before this rotation no longer correlate with new ones.`,
         );
         page.refreshToResolve();
       })
@@ -128,14 +197,6 @@ export function DestinationPrivacyTab({
         page.owner.settle(signal);
       });
   };
-
-  // Resolve a lost-response rotation from FRESH truth once it arrives.
-  const rotationResolution =
-    unresolvedRotation !== null && p !== undefined && page.unknown === null
-      ? p.keyId !== unresolvedRotation
-        ? "landed"
-        : "not-landed"
-      : null;
 
   return (
     <div>
@@ -164,21 +225,46 @@ export function DestinationPrivacyTab({
         </div>
       )}
 
-      {rotationResolution === "landed" && (
+      {pendingClass === "ambiguous" && (
         <div className={styles.calloutSpace}>
-          <Callout variant="warning" title="Rotation landed" role="alert">
-            The rotation&apos;s response was lost, but fresh server truth shows
-            the pseudonym generation CHANGED — the rotation landed exactly once.
-            Do not run it again unless you intend a second rotation.
+          <Callout
+            variant="unknown"
+            title="Rotation outcome unproven"
+            role="alert"
+          >
+            The rotation&apos;s response was lost, and the appliance&apos;s
+            state has changed since — but it holds no receipt for the specific
+            rotation you started, so its outcome cannot yet be proven (another
+            admin may have rotated meanwhile). No landed or not-landed claim can
+            be made; do not start another rotation from here. Refresh to
+            re-check.
           </Callout>
         </div>
       )}
-      {rotationResolution === "not-landed" && (
+      {(resolution?.kind === "landed" || pendingClass === "landed") && (
+        <div className={styles.calloutSpace}>
+          <Callout variant="warning" title="Rotation landed" role="alert">
+            The rotation&apos;s response was lost, but the appliance holds the
+            receipt for the specific rotation you started — it landed exactly
+            once
+            {resolution?.kind === "landed" && resolution.keyId !== "" ? (
+              <>
+                {" "}
+                (generation <Mono>{resolution.keyId}</Mono>)
+              </>
+            ) : null}
+            . It will not run again on its own; a further rotation is a new,
+            deliberate operation.
+          </Callout>
+        </div>
+      )}
+      {(resolution?.kind === "not-landed" || pendingClass === "not-landed") && (
         <div className={styles.calloutSpace}>
           <Callout variant="warning" title="Rotation did not land" role="alert">
-            The rotation&apos;s response was lost and fresh server truth shows
-            the pseudonym generation is UNCHANGED — the rotation did not happen.
-            You may start it again from the current state.
+            The rotation&apos;s response was lost and the appliance&apos;s
+            rotation sequence is unchanged — the rotation you started did not
+            occur. You may deliberately start a new rotation from the current
+            state.
           </Callout>
         </div>
       )}
@@ -281,12 +367,18 @@ export function DestinationPrivacyTab({
                 variant="ghost"
                 disabled={page.unknown !== null || unresolvedRotation !== null}
                 onClick={() => {
+                  // A NEW deliberate operation: fresh identity, fresh anchors,
+                  // and the previous resolution notice retires. An old
+                  // operation id is never reused.
                   setCeremony({
                     kind: "rotate",
                     revision: p.revision,
                     preKeyId: p.keyId,
+                    preSeq: p.rotationSeq,
+                    operationId: mintRotationOperationId(),
                   });
                   setNotice("");
+                  setResolution(null);
                 }}
               >
                 Rotate pseudonym key…
