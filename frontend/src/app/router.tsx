@@ -27,6 +27,7 @@ import { UrlCategoriesPage } from "../features/objects/UrlCategoriesPage";
 import { DecryptionProfilesPage } from "../features/objects/DecryptionProfilesPage";
 import { FileProfilesPage } from "../features/objects/FileProfilesPage";
 import { ContentSecurityPage } from "../features/security/ContentSecurityPage";
+import { DecryptionPage } from "../features/security/DecryptionPage";
 
 function NotFoundPage(): JSX.Element {
   return (
@@ -81,6 +82,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           {
             path: "security/content-security",
             element: <ContentSecurityPage />,
+          },
+          {
+            path: "security/decryption",
+            element: <DecryptionPage />,
           },
           { path: "diagnostics", element: <DiagnosticsPage /> },
           { path: "governance", element: <GovernancePage /> },

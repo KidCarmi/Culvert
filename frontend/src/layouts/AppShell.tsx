@@ -125,6 +125,11 @@ const NAV: readonly NavSection[] = [
         to: "/security/content-security",
         minRole: "viewer",
       },
+      {
+        label: "Decryption",
+        to: "/security/decryption",
+        minRole: "viewer",
+      },
       { label: "Certificates", minRole: "viewer" },
     ],
   },
