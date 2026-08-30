@@ -56,8 +56,21 @@ func loadShadowExitAttestation() (*canary.ShadowExitAttestation, error) {
 	}
 	var a canary.ShadowExitAttestation
 	if derr := strictDecodeAttestationJSON(raw, &a); derr != nil {
-		// Corruption (bad JSON, unknown fields, trailing data): quarantine and fail closed.
-		quarantineCorruptStateFile("mcp_shadow_exit_review", path, derr)
+		// Corruption (bad JSON, unknown fields, trailing data). Before quarantining, RE-READ: an admin
+		// POST may have atomically replaced the file with a VALID attestation between our read and now,
+		// and quarantining here would move that valid replacement aside — a just-acknowledged
+		// attestation would vanish and readiness would fail (Codex P2). Quarantine only if the current
+		// content is STILL the same corrupt bytes we parsed; if a valid replacement landed, return it.
+		raw2, err2 := os.ReadFile(path) // #nosec G304 -- fixed operator-owned path under dataDir
+		if err2 != nil {
+			return nil, nil // gone/unreadable now — nothing to quarantine, fail closed to not-attested
+		}
+		var a2 canary.ShadowExitAttestation
+		if d2 := strictDecodeAttestationJSON(raw2, &a2); d2 == nil {
+			return &a2, nil // a valid replacement landed after the first read — never quarantine it
+		} else if bytes.Equal(raw2, raw) {
+			quarantineCorruptStateFile("mcp_shadow_exit_review", path, derr)
+		}
 		return nil, nil
 	}
 	return &a, nil

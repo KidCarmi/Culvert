@@ -188,7 +188,20 @@ func loadRollbackRehearsal(capb rollout.Capability) (*canary.RollbackRehearsalRe
 	}
 	var rec canary.RollbackRehearsalRecord
 	if derr := strictDecodeRehearsalJSON(raw, &rec); derr != nil {
-		quarantineCorruptStateFile("mcp_rollback_rehearsal", path, derr)
+		// Re-read before quarantining: recordRehearsal may have atomically replaced the file with a
+		// VALID record between our read and now, and quarantining here would move that valid replacement
+		// aside (Codex P2). Quarantine only if the current content is STILL the same corrupt bytes we
+		// parsed; if a valid replacement landed, return it.
+		raw2, err2 := os.ReadFile(path) // #nosec G304 -- fixed operator-owned path under dataDir
+		if err2 != nil {
+			return nil, nil
+		}
+		var rec2 canary.RollbackRehearsalRecord
+		if d2 := strictDecodeRehearsalJSON(raw2, &rec2); d2 == nil {
+			return &rec2, nil // a valid replacement landed after the first read — never quarantine it
+		} else if bytes.Equal(raw2, raw) {
+			quarantineCorruptStateFile("mcp_rollback_rehearsal", path, derr)
+		}
 		return nil, nil
 	}
 	return &rec, nil

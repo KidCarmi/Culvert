@@ -563,6 +563,33 @@ func TestSyncParentDir_ReportsFailure(t *testing.T) {
 	}
 }
 
+// TestInvalidateFileContentDurably_EmptiesFile is the Codex P1 (round-9) durability-anchor proof:
+// invalidateFileContentDurably truncates a record to empty and fsyncs the FILE inode (independent of
+// the parent-directory fsync), so a not-synced write whose directory cleanup cannot be synced is
+// still failed closed — a crash-restored directory entry then points to an EMPTY file that decodes as
+// corrupt (quarantined → not attested). A missing file is a no-op success.
+func TestInvalidateFileContentDurably_EmptiesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rec.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"status":"passed"}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := invalidateFileContentDurably(path); err != nil {
+		t.Fatalf("invalidate: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after invalidate: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("invalidate must truncate the file to empty, size=%d", info.Size())
+	}
+	// A missing file is a no-op success (nothing to invalidate).
+	if err := invalidateFileContentDurably(filepath.Join(dir, "absent.json")); err != nil {
+		t.Fatalf("invalidating a missing file must succeed, got %v", err)
+	}
+}
+
 // TestCanaryRuntime_StaleReleaseDoesNotFreeNewGeneration proves the §3 generation-bound release
 // (Codex P1): a release carrying a superseded generation is a no-op and cannot free a concurrency
 // slot on the current activation (which would admit an extra in-flight execution beyond the cap).

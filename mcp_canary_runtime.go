@@ -124,21 +124,50 @@ func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollou
 // touching it — never destroying a valid prior record on a transient failure (Codex P1).
 func removeVisibleFileAfterNotSyncedWrite(path string, writeErr error) error {
 	if errors.Is(writeErr, fileutil.ErrReplacedNotSynced) {
+		// DURABLY INVALIDATE THE CONTENT FIRST. ErrReplacedNotSynced means the replacement's DATA is
+		// fsynced (AtomicWrite fsyncs the temp file before the rename) but the directory entry may not
+		// be crash-durable. Truncating the target to empty and fsyncing the FILE inode makes the record
+		// fail-closed against a crash WITHOUT relying on another directory fsync — the one that just
+		// failed: a crash-restored directory entry then points to an EMPTY file that strictDecode
+		// rejects (quarantined → not attested), so a record the API reported as not persisted can never
+		// satisfy the gate. Only a total filesystem failure (even the file-inode fsync fails) defeats
+		// this, and then the runtime fail-closed (the returned error) is the sole remaining guarantee
+		// (Codex P1).
+		if ierr := invalidateFileContentDurably(path); ierr != nil {
+			logger.Printf("MCP canary: not-synced write for %s could not be durably invalidated; a crash could expose a record reported as not persisted: write=%q invalidate=%q",
+				filepath.Base(path), sanitizeLog(writeErr.Error()), sanitizeLog(ierr.Error()))
+		}
+		// Then best-effort remove the (now empty) file + dir sync for cleanliness. A failure here no
+		// longer risks exposing a VALID record — the content was already durably invalidated above.
 		if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-			logger.Printf("MCP canary: not-synced write left %s visible and its removal failed; a crash could expose a record reported as not persisted: write=%q remove=%q",
+			logger.Printf("MCP canary: not-synced write left %s and its removal failed (content already invalidated): write=%q remove=%q",
 				filepath.Base(path), sanitizeLog(writeErr.Error()), sanitizeLog(rerr.Error()))
 			return writeErr
 		}
-		// The unlink is not crash-durable until the parent directory is synced; a dir-sync failure
-		// means the removal could be undone by an immediate crash and the record the API reported as
-		// not persisted could reappear and satisfy the gate. It does not change the returned failure
-		// (the write already failed), but it must NOT be silently ignored (Codex P1).
-		if derr := syncParentDir(path); derr != nil {
-			logger.Printf("MCP canary: not-synced write cleanup for %s is not durably synced; a crash could restore a record reported as not persisted: write=%q dirsync=%q",
-				filepath.Base(path), sanitizeLog(writeErr.Error()), sanitizeLog(derr.Error()))
-		}
+		_ = syncParentDir(path)
 	}
 	return writeErr
+}
+
+// invalidateFileContentDurably truncates the file at path to empty and fsyncs the FILE inode, making
+// its content durably invalid (an empty file fails every strict JSON decode → quarantined → treated
+// as absent). The file-content fsync is independent of the parent-directory fsync, so this fails a
+// not-durably-linked record closed even when the directory cannot be synced. A missing file is
+// success (nothing to invalidate).
+func invalidateFileContentDurably(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- fixed operator-owned path under dataDir
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	serr := f.Sync()
+	cerr := f.Close()
+	if serr != nil {
+		return serr
+	}
+	return cerr
 }
 
 // syncParentDir fsyncs the directory containing path so a preceding unlink (or rename) is
