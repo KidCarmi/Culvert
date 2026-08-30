@@ -41,6 +41,49 @@ func withRehearsalTestEnv(t *testing.T, buildVer string) {
 	t.Cleanup(func() { dataDir = prevDir; version = prevVer })
 }
 
+// TestRollbackRehearsal_PersistFailureRemovesRecord is the Codex P1 (round-15) proof: when the drill
+// succeeds and writes the durable build-bound record but the SUBSEQUENT rollout-state persist fails,
+// recordRehearsal must durably REMOVE the record and revert the marker. Otherwise a restart that
+// restores the pre-rehearsal rollout snapshot clears the in-memory write_failed blocker while the
+// valid record survives, letting rollbackPathReadyLocked accept a rehearsal the operator was told
+// failed. The final persist is forced to fail by pre-creating a directory at the rollout-state path
+// (rename-onto-dir fails) while the drill's scratch writes and the record write still succeed.
+func TestRollbackRehearsal_PersistFailureRemovesRecord(t *testing.T) {
+	withRehearsalTestEnv(t, "v9.9.9")
+	// The forced persist failure trips the process-global storage-health write observer; isolate it.
+	fileutil.SetWriteFailureObserver(func(string, error) {})
+	t.Cleanup(func() { fileutil.SetWriteFailureObserver(noteStorageWriteFailure) })
+	// Fresh rollout singleton so evidence + persist status start clean.
+	_ = getMCPRollout()
+	prevR := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	t.Cleanup(func() { globalMCPRollout = prevR })
+
+	capb := rollout.CapabilityGateway
+	// Force ONLY the final rollout-state persist to fail: a rename onto a directory fails, while the
+	// drill's scratch writes and the rehearsal-record write (different paths under dataDir) succeed.
+	if err := os.Mkdir(rolloutStateFileName(capb), 0o755); err != nil {
+		t.Fatalf("pre-create state-file directory: %v", err)
+	}
+	if err := globalMCPRollout.recordRehearsal(capb); err == nil {
+		t.Fatal("recordRehearsal must return an error when the rollout-state persist fails")
+	}
+	// The drill DID write a build-bound record; the fix must have durably removed it (fail-closed).
+	if _, statErr := os.Stat(rollbackRehearsalPath(capb)); !os.IsNotExist(statErr) {
+		t.Fatal("SECURITY: a rehearsal whose rollout-state persist failed must not leave a valid record on disk")
+	}
+	if rollbackRehearsalAttested(capb) {
+		t.Fatal("SECURITY: no rehearsal may be attested after a failed persist")
+	}
+	// The gate must read unhealthy — both because the record is gone and because write_failed is set.
+	if rollbackPathHealthy(capb) {
+		t.Fatal("SECURITY: the rollback path must be unhealthy after a failed rehearsal persist")
+	}
+}
+
 // TestRollbackRehearsal_NotSyncedWriteRemovesVisibleRecord is the Codex P1 (round-7) proof: a
 // not-durably-synced rehearsal write leaves the record visible (ErrReplacedNotSynced is post-rename),
 // so the write must remove the possibly-installed evidence before returning the failure — the

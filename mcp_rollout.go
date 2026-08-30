@@ -491,6 +491,16 @@ func (r *mcpRollout) recordRehearsal(capb rollout.Capability) error {
 	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
 	if err := persistRolloutState(st); err != nil {
 		r.setPersistStatus(capb, "write_failed")
+		// The build-bound rehearsal record from (1) is ALREADY durable on disk, but persistStatus is
+		// in-memory only. A restart that restores the pre-rehearsal rollout snapshot (whose persist just
+		// failed) clears the write_failed blocker while the valid record survives — rollbackPathReadyLocked
+		// would then accept a rehearsal the operator was told failed (Codex P1). Durably remove the record
+		// and revert the in-memory marker so the gate fails CLOSED to "not rehearsed" until a
+		// fully-successful drill+persist runs.
+		st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = false })
+		if rerr := removeRollbackRehearsalDurable(capb); rerr != nil {
+			logger.Printf("MCP rollout rehearsal cleanup for %s failed after a persist error (record may survive; gate stays blocked by write_failed until re-run): %q", capb.String(), sanitizeLog(rerr.Error()))
+		}
 		logger.Printf("MCP rollout rehearsal persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}

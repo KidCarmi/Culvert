@@ -173,6 +173,20 @@ func saveRollbackRehearsal(capb rollout.Capability, rec *canary.RollbackRehearsa
 // including fileutil.ErrReplacedNotSynced, to prove the write fails closed).
 var rehearsalAtomicWrite = fileutil.AtomicWrite
 
+// removeRollbackRehearsalDurable unlinks the rehearsal record and fsyncs the parent directory so the
+// removal is crash-durable. A missing file is success; a non-ENOENT unlink error or a parent-dir sync
+// failure is returned. Used to fail CLOSED when the record was written but a later step failed: the
+// record is durable while its in-memory "unhealthy" blocker is not, so a restart that restores the
+// pre-rehearsal state would otherwise let the still-present valid record satisfy the activation gate —
+// accepting a rehearsal the operator was told failed (Codex P1). Mirrors removeAttestationDurable.
+func removeRollbackRehearsalDurable(capb rollout.Capability) error {
+	path := rollbackRehearsalPath(capb)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncParentDir(path)
+}
+
 // loadRollbackRehearsal reads the durable rehearsal record. A missing file returns (nil, nil) (no
 // evidence — the fail-closed default). A corrupt/undecodable file is QUARANTINED (moved aside) and
 // returns (nil, nil) so a tampered record never satisfies readiness. A transient read error on an
