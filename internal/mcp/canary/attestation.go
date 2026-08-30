@@ -1,5 +1,7 @@
 package canary
 
+import "strings"
+
 // Shadow Exit Review attestation (§1). Canary readiness requires the full 13-criterion Shadow
 // Exit Review to have PASSED. That fact must be a durable, explicit, privileged attestation —
 // never a hard-coded boolean, never synthesized on startup or because tests passed. This file
@@ -31,30 +33,62 @@ type RuntimeIdentity struct {
 	BuildVersion string `json:"build_version"`
 }
 
-// nonUniqueBuildStamps are build-version values that are NOT a unique runtime identity: the default
-// local stamp and common CI/placeholder fillers. An attestation or rollback rehearsal bound to one of
-// these does not prove WHICH code was reviewed/rehearsed — the same stamp can cover materially
-// different commits (a "dev" local build, or a floating tag) — so it must not satisfy the identity
-// binding. Fail closed (Codex P1). A production Canary is only ever attestable on a build carrying a
-// concrete, non-placeholder version stamp. The BuildVersion passed here is composed as
-// "<version>+<commit>" (currentRuntimeIdentity → composeBuildStamp) with the immutable commit digest
-// stamped at build time (Dockerfile `-X main.buildCommit`), so two commits released under the same
-// release tag get DISTINCT identities — closing the reused-real-tag residual the placeholder set alone
-// could not detect (Codex P1). A tag-only stamp with no commit still fails closed via this set.
-var nonUniqueBuildStamps = map[string]struct{}{
-	"":        {},
-	"dev":     {},
-	"unknown": {},
-	"none":    {},
-	"latest":  {},
+// buildStampCommitSep is the separator currentRuntimeIdentity (package main) uses to compose the
+// runtime identity as "<version>+<commit>" (composeBuildStamp). '+' is RESERVED for the commit: the
+// commit is appended last, so the component after the LAST '+' is always the commit digest.
+const buildStampCommitSep = '+'
+
+// Commit-stamp length bounds: a git short SHA (>= 7; our builds stamp `git rev-parse --short=12`)
+// up to a full SHA-256 (64). A value outside this range is not a real commit digest.
+const (
+	minCommitStampLen = 7
+	maxCommitStampLen = 64
+)
+
+// splitBuildStamp separates a composed "<version>+<commit>" stamp at the LAST '+'. ok is false when
+// the stamp carries no '+' at all — a BARE version with no commit component (a `.git`-less build
+// stamps an empty commit, so composeBuildStamp emits the bare version). Splitting on the last '+'
+// tolerates a version that itself carries "+<metadata>": the commit is always the final segment.
+func splitBuildStamp(s string) (version, commit string, ok bool) {
+	idx := strings.LastIndexByte(s, buildStampCommitSep)
+	if idx < 0 {
+		return s, "", false
+	}
+	return s[:idx], s[idx+1:], true
 }
 
-// Valid reports whether an identity carries a concrete, UNIQUE build stamp — never the empty default
-// and never a known non-unique placeholder (see nonUniqueBuildStamps). A placeholder stamp fails the
-// identity binding so an old review can never cover materially changed code on an unversioned build.
+// validCommitStamp reports whether c is a concrete commit digest: minCommitStampLen..maxCommitStampLen
+// LOWERCASE-HEX characters. Requiring hex both proves a real commit is present AND stops a version's
+// own "+<metadata>" segment (e.g. semver "+build.7") from being mistaken for a commit — closing the
+// bare-version fail-open unambiguously (Codex P1, round-22).
+func validCommitStamp(c string) bool {
+	if len(c) < minCommitStampLen || len(c) > maxCommitStampLen {
+		return false
+	}
+	for i := 0; i < len(c); i++ {
+		ch := c[i]
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// Valid reports whether an identity carries a UNIQUE, immutable build stamp: the composed
+// "<version>+<commit>" form (currentRuntimeIdentity → composeBuildStamp) with a concrete lowercase-hex
+// commit digest. A BARE version with no commit component is NOT unique — the same version tag can
+// cover materially different commits, and a `.git`-less source archive built with the same VERSION arg
+// stamps an EMPTY commit that collapses to that bare version — so it must not satisfy the identity
+// binding and fails closed (Codex P1, round-22): merely rejecting a small placeholder list let every
+// bare non-placeholder tag (e.g. "v1.2.3") through, allowing one build to reuse another's
+// attestation/rehearsal/runtime record. The COMMIT digest is the uniqueness anchor; the version part
+// is informational, so even a "dev" version is a valid identity when it carries a real commit.
 func (i RuntimeIdentity) Valid() bool {
-	_, placeholder := nonUniqueBuildStamps[i.BuildVersion]
-	return !placeholder
+	_, commit, ok := splitBuildStamp(i.BuildVersion)
+	if !ok {
+		return false
+	}
+	return validCommitStamp(commit)
 }
 
 // ShadowExitAttestation is the durable, schema-versioned record that the Shadow Exit Review

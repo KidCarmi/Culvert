@@ -52,15 +52,21 @@ func writeValidRollbackRehearsal(t *testing.T, capb rollout.Capability) {
 // the gate refuses. NOTE: this arms the live tier permanently, so a test using it must NOT also
 // commit a Shadow config (the Shadow preflight forbids a live-armed node) — use the surgical
 // helpers above for a test that toggles the live tier around a single Canary commit.
-// pinTestBuildVersion sets the process build stamp to a concrete, non-placeholder value for the
-// duration of a test, restoring it on cleanup. The attestation/rehearsal identity binding now rejects
-// placeholder stamps ("dev", the process default — Codex P1), so any test that must produce a VALID
-// attestation or rehearsal record must run under a real version.
+// testBuildCommit is a valid lowercase-hex commit stamp (12 hex = the `git rev-parse --short=12`
+// width our builds use) for test build identities. The attestation/rehearsal/runtime identity
+// binding now REQUIRES the immutable commit component (a bare version is not unique — Codex P1,
+// round-22), so a test that must produce a VALID record composes "<version>+<testBuildCommit>".
+const testBuildCommit = "abc123def456"
+
+// pinTestBuildVersion sets the process build stamp to a concrete, unique value for the duration of a
+// test, restoring it on cleanup. The identity binding requires BOTH a non-placeholder version AND an
+// immutable commit digest (Codex P1, round-22), so any test that must produce a VALID attestation or
+// rehearsal record must run under a composed "<version>+<commit>" stamp — which is what this pins.
 func pinTestBuildVersion(t *testing.T) {
 	t.Helper()
 	prev, prevCommit := version, buildCommit
 	version = "v-canary-test-1"
-	buildCommit = "" // deterministic identity = bare version (composeBuildStamp)
+	buildCommit = testBuildCommit // composed identity = "v-canary-test-1+abc123def456" (Valid)
 	t.Cleanup(func() { version = prev; buildCommit = prevCommit })
 }
 

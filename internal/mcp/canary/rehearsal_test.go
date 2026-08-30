@@ -6,7 +6,7 @@ func validRehearsal() *RollbackRehearsalRecord {
 	return &RollbackRehearsalRecord{
 		SchemaVersion:       RollbackRehearsalSchemaVersion,
 		Capability:          "gateway",
-		Identity:            RuntimeIdentity{BuildVersion: "v1.2.3"},
+		Identity:            RuntimeIdentity{BuildVersion: validTestBuild},
 		Executed:            true,
 		Steps:               RequiredRollbackPath(),
 		RehearsedAtUnixNano: 1_700_000_000_000_000_000,
@@ -14,10 +14,10 @@ func validRehearsal() *RollbackRehearsalRecord {
 }
 
 func TestValidateRehearsal_ValidPasses(t *testing.T) {
-	if r := ValidateRehearsal(validRehearsal(), "gateway", RuntimeIdentity{BuildVersion: "v1.2.3"}); r != RehearsalOK {
+	if r := ValidateRehearsal(validRehearsal(), "gateway", RuntimeIdentity{BuildVersion: validTestBuild}); r != RehearsalOK {
 		t.Fatalf("a fully-executed, current-build rehearsal must validate, got %q", r)
 	}
-	if !RehearsalValid(validRehearsal(), "gateway", RuntimeIdentity{BuildVersion: "v1.2.3"}) {
+	if !RehearsalValid(validRehearsal(), "gateway", RuntimeIdentity{BuildVersion: validTestBuild}) {
 		t.Fatal("RehearsalValid must be true for a valid record")
 	}
 }
@@ -25,7 +25,7 @@ func TestValidateRehearsal_ValidPasses(t *testing.T) {
 // TestValidateRehearsal_Rejections is the §5 mutation proof: a missing, wrong-schema, wrong-
 // capability, not-executed, incomplete-path, or stale-build record must NOT satisfy readiness.
 func TestValidateRehearsal_Rejections(t *testing.T) {
-	cur := RuntimeIdentity{BuildVersion: "v1.2.3"}
+	cur := RuntimeIdentity{BuildVersion: validTestBuild}
 	cases := []struct {
 		name   string
 		cap    string

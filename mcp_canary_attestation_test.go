@@ -166,7 +166,7 @@ func withAttestationTestEnv(t *testing.T, buildVer string) {
 	prevDir, prevVer, prevCommit := dataDir, version, buildCommit
 	dataDir = t.TempDir()
 	version = buildVer
-	buildCommit = "" // deterministic identity = bare version (composeBuildStamp), matching hardcoded BuildVersion fixtures
+	buildCommit = testBuildCommit // composed identity = "<buildVer>+<commit>" so currentRuntimeIdentity().Valid() (Codex P1, round-22)
 	t.Cleanup(func() { dataDir = prevDir; version = prevVer; buildCommit = prevCommit })
 }
 
@@ -264,13 +264,13 @@ func TestBuildStamp_CommitMakesIdentityUniquePerCommit(t *testing.T) {
 // the same version tag (Codex round-19 P1).
 func TestShadowExitAttestation_CommitMismatchDoesNotAttest(t *testing.T) {
 	withAttestationTestEnv(t, "v1.0.0")
-	buildCommit = "commit-A-aaaa" // the runtime that CREATES the attestation
+	buildCommit = "aaaa1111aaaa" // the runtime that CREATES the attestation (hex commit)
 	a := &canary.ShadowExitAttestation{
 		SchemaVersion:  canary.ShadowExitAttestationSchemaVersion,
 		Status:         canary.ShadowExitStatusPassed,
 		ReviewID:       "SXR-commit",
 		EvidenceDigest: testEvidenceDigest,
-		Identity:       currentRuntimeIdentity(), // v1.0.0+commit-A-aaaa
+		Identity:       currentRuntimeIdentity(), // v1.0.0+aaaa1111aaaa
 		AttestedBy:     "admin",
 	}
 	if err := saveShadowExitAttestation(a); err != nil {
@@ -280,7 +280,7 @@ func TestShadowExitAttestation_CommitMismatchDoesNotAttest(t *testing.T) {
 		t.Fatal("precondition: the attestation must cover its own commit")
 	}
 	// A redeploy of a DIFFERENT commit under the SAME tag must NOT inherit the attestation.
-	buildCommit = "commit-B-bbbb"
+	buildCommit = "bbbb2222bbbb"
 	if shadowExitReviewAttested() {
 		t.Fatal("SECURITY: an attestation bound to commit A must not attest a runtime built from commit B under the same tag")
 	}

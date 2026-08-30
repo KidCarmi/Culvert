@@ -38,7 +38,8 @@ func shadowExitAttestationPath() string {
 // the identity is UNIQUE PER COMMIT — two commits released under the same tag get distinct identities
 // and cannot share an attestation/rehearsal/runtime record (Codex P1). A redeploy to a different build
 // changes it, so a prior attestation no longer covers the current runtime. Local builds have no commit
-// stamp and version "dev", so they remain non-attestable via RuntimeIdentity.Valid()'s placeholder set.
+// stamp (buildCommit == ""), so composeBuildStamp emits the BARE version and RuntimeIdentity.Valid()
+// rejects it for lacking the required immutable commit component — they remain non-attestable (round-22).
 func currentRuntimeIdentity() canary.RuntimeIdentity {
 	return canary.RuntimeIdentity{BuildVersion: composeBuildStamp(version, buildCommit)}
 }
@@ -194,9 +195,12 @@ func apiMCPShadowExitReviewGet(w http.ResponseWriter, r *http.Request) {
 	a, _ := loadShadowExitAttestation()
 	reason := canary.ValidateAttestation(a, currentRuntimeIdentity())
 	resp := map[string]any{
-		"attested":        reason == canary.AttestationOK,
-		"reason":          string(reason),
-		"current_build":   version,
+		"attested": reason == canary.AttestationOK,
+		"reason":   string(reason),
+		// Report the COMPOSED runtime identity ("<version>+<commit>"), the same value the record
+		// stores in attested_build, so a client can compare current vs attested without a spurious
+		// mismatch on an official (commit-stamped) build (Codex P2, round-22).
+		"current_build":   currentRuntimeIdentity().BuildVersion,
 		"schema_expected": canary.ShadowExitAttestationSchemaVersion,
 	}
 	if a != nil {
@@ -257,7 +261,10 @@ func apiMCPShadowExitReviewPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auditEvent(r, "mcp.canary.shadow-exit-review.attest", req.ReviewID, "shadow_exit_review_passed")
-	jsonOK(w, map[string]any{"attested": true, "persisted": true, "review_id": req.ReviewID, "attested_build": version})
+	// Report the COMPOSED identity that was actually persisted (a.Identity.BuildVersion =
+	// "<version>+<commit>"), not the bare version tag, so this POST and the subsequent GET agree on
+	// attested_build/current_build on a commit-stamped build (Codex P2, round-22).
+	jsonOK(w, map[string]any{"attested": true, "persisted": true, "review_id": req.ReviewID, "attested_build": a.Identity.BuildVersion})
 }
 
 // apiMCPShadowExitReviewDelete revokes the attestation (admin-only, audited). Revocation is

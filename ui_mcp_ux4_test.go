@@ -173,8 +173,9 @@ func TestMCPUX4_RehearseChunkedBodylessPOST(t *testing.T) {
 // uniquely-versioned-build guard.
 func TestMCPUX4_RehearseRefusesUnversionedBuild(t *testing.T) {
 	withTempDataDir(t)
-	prevVer := version
-	version = "dev" // a placeholder stamp ⇒ currentRuntimeIdentity().Valid() is false
+	prevVer, prevCommit := version, buildCommit
+	version = "dev"  // placeholder version
+	buildCommit = "" // AND no commit ⇒ bare "dev" ⇒ currentRuntimeIdentity().Valid() is false (round-22)
 	// The rollback-rehearsed evidence flag is process-global and other tests leave it set
 	// (documented as node-local + harmless), so swap in a fresh singleton to assert the flag
 	// stays false here rather than reading leaked state.
@@ -184,7 +185,7 @@ func TestMCPUX4_RehearseRefusesUnversionedBuild(t *testing.T) {
 		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
 		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
 	}
-	t.Cleanup(func() { version = prevVer; globalMCPRollout = prevR })
+	t.Cleanup(func() { version = prevVer; buildCommit = prevCommit; globalMCPRollout = prevR })
 
 	rec := mcpReq(http.MethodPost, "/api/mcp/rollout/rehearse-rollback", RoleAdmin, `{"capability":"gateway"}`)
 	if rec.Code != http.StatusConflict {

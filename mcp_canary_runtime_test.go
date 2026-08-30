@@ -24,7 +24,7 @@ func withCanaryRuntimeTestEnv(t *testing.T, buildVer string) *canaryRuntime {
 	prevDir, prevVer, prevCommit, prevRt := dataDir, version, buildCommit, globalCanaryRuntime
 	dataDir = t.TempDir()
 	version = buildVer
-	buildCommit = "" // deterministic identity = bare version (composeBuildStamp)
+	buildCommit = testBuildCommit // composed identity = "<buildVer>+<commit>" so currentRuntimeIdentity().Valid() (Codex P1, round-22)
 	globalCanaryRuntime = &canaryRuntime{}
 	t.Cleanup(func() { dataDir = prevDir; version = prevVer; buildCommit = prevCommit; globalCanaryRuntime = prevRt })
 	return globalCanaryRuntime
@@ -260,14 +260,14 @@ func TestCanaryRuntime_BuildMismatchDisarms(t *testing.T) {
 // commit-bound attestation and rehearsal records.
 func TestCanaryRuntime_CommitMismatchDisarms(t *testing.T) {
 	rt := withCanaryRuntimeTestEnv(t, "v1.0.0")
-	buildCommit = "commit-A-aaaa" // the build that ARMS the activation (helper set it to ""; override)
+	buildCommit = "aaaa1111aaaa" // the build that ARMS the activation (hex commit; overrides the helper)
 	capb := rollout.CapabilityGateway
 	now := time.Unix(1_700_000_000, 0)
 	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(5), now); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	// Restart under the SAME version tag but a DIFFERENT commit.
-	buildCommit = "commit-B-bbbb"
+	buildCommit = "bbbb2222bbbb"
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
@@ -728,7 +728,7 @@ func TestCanaryRuntime_RestoreForeignAbortSnapshotDisarms(t *testing.T) {
 	st := canaryRuntimeState{
 		SchemaVersion: canaryRuntimeSchemaVersion,
 		Capability:    capb.String(),
-		BuildVersion:  version,
+		BuildVersion:  currentRuntimeIdentity().BuildVersion, // THIS build's composed identity, so the disarm is attributable to the foreign abort snapshot, not a build mismatch
 		Generation:    1,
 		Active:        true,
 		Budget:        runtimeTestBudget(5),
@@ -764,7 +764,7 @@ func TestCanaryRuntime_RestoreReconcileDisarmsWithoutLiveMode(t *testing.T) {
 	st := canaryRuntimeState{
 		SchemaVersion:  canaryRuntimeSchemaVersion,
 		Capability:     capb.String(),
-		BuildVersion:   version,
+		BuildVersion:   currentRuntimeIdentity().BuildVersion, // THIS build's composed identity, so the disarm is attributable to the mode reconcile, not a build mismatch
 		Generation:     1,
 		Active:         true,
 		Budget:         runtimeTestBudget(5),

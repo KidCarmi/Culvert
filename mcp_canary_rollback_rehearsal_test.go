@@ -38,7 +38,7 @@ func withRehearsalTestEnv(t *testing.T, buildVer string) {
 	prevDir, prevVer, prevCommit := dataDir, version, buildCommit
 	dataDir = t.TempDir()
 	version = buildVer
-	buildCommit = "" // deterministic identity = bare version (composeBuildStamp), matching hardcoded BuildVersion fixtures
+	buildCommit = testBuildCommit // composed identity = "<buildVer>+<commit>" so currentRuntimeIdentity().Valid() (Codex P1, round-22)
 	t.Cleanup(func() { dataDir = prevDir; version = prevVer; buildCommit = prevCommit })
 }
 
