@@ -12157,6 +12157,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
           }
         },
         "security": [
@@ -13364,6 +13367,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
           }
         },
         "security": [

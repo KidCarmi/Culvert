@@ -11247,6 +11247,7 @@ paths:
         '200': { description: Rehearsal recorded, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
   /api/mcp/canary/shadow-exit-review:
     get:
       operationId: getMCPShadowExitReview
@@ -11292,6 +11293,7 @@ paths:
         '200': { description: Attestation created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
     delete:
       operationId: deleteMCPShadowExitReview
       tags: [mcp]
