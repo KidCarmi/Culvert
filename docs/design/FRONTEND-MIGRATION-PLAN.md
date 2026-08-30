@@ -725,6 +725,75 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-C — CDR / Sluice Integration (this branch, 2026-08-30).** Final
+> sub-slice of the 2E decomposition: `/app/security/cdr` (Overview &
+> Health / Instances / Policies / Test — four sections because the actual
+> contract is that simple: the only runtime-mutable configuration is the
+> `enabled` boolean, so it lives on Overview instead of a forced
+> Configuration tab). Every CDR surface is NODE-LOCAL by recorded backend
+> design (no export/import, no rollback, no CP→DP sync; mutations are
+> audited but deliberately never create config versions — the revoke path
+> pins that as a security invariant: a rollback must never un-revoke).
+>
+> **Backend corrections (RED-first at the 2E-B frozen predecessor
+> 42296756; matrix `cdr_2ec_red_test.go`, R1–R5 each verified failing
+> there, R3 under `-race`):** (R1) PUT /api/cdr/config metadata hid the
+> audit event the handler emits (`AuditExpected` now true); (R2) DELETE
+> shredded the client cert without recording its SHA-256 fingerprint —
+> the ONLY key Sluice accepts for revocation — anywhere durable, leaving
+> an untraceable trust orphan; the fingerprint is now recorded at enroll
+> (fail-closed: an unfingerprintable issued cert refuses the enrollment),
+> refreshed on renewal, surfaced on GET, preferred by revoke, and carried
+> in the DELETE audit + response; (R3) the health poller mutated registry
+> entries through shared pointers with no lock while the instances GET
+> rendered them (data race) — locked mutators + value-snapshot reads;
+> (R4) registry/policy Save ran outside the mutation lock, so a
+> concurrent poller Save could resurrect a deleted/revoked instance in
+> the durable file — mutate+persist is now one critical section with
+> durable-or-nothing rollback; (R5) policy names (the sole DELETE key)
+> accepted duplicates — now a 409 identity conflict. OpenAPI corrected to
+> the implemented surface (real audit-event names, enroll documented
+> NON-idempotent — the Sluice token is consume-and-delete single-use,
+> proven from the engine source — revoke documented idempotent-at-Sluice
+> with the second-instance 503, response codes and request shapes fixed).
+>
+> **Trust semantics the UI states exactly:** DELETE is local-only (Sluice
+> keeps trusting the fingerprint until expiry or a Sluice-side
+> revocation; the T3 typed ceremony and the completion notice both carry
+> it, and steer compromise cases to Revoke BEFORE delete forecloses it);
+> REVOKE is irreversible, requires a second enrolled instance, and is
+> safe to retry after an unknown outcome (idempotent at Sluice);
+> enrollment consumes its token even when the response is lost, so the
+> unknown-outcome path clears the token, forbids blind retry, and gives
+> the exact recovery (fresh list = landed; otherwise new token + possible
+> orphaned cert in the engine ledger). Fail-mode is rendered verbatim
+> with the server-derived `failOpen` and a fail-open warning; "engine
+> answered its last probe" is never widened into a production-traffic
+> claim, and the cached health snapshot is flagged stale via the live
+> poller's consecutiveFailures.
+>
+> **Secret hygiene finding from the e2e journey:** a controlled password
+> input's value is serialized into the DOM, so a dispatched single-use
+> enrollment token was reconstructable from `document.body.innerHTML`
+> after a failed dispatch. The token field is now cleared on EVERY
+> dispatch outcome; the e2e proof sweeps both storages and the serialized
+> DOM. Proofs: Go red/green matrix + full CDR suites, frontend unit
+> suites (cdr-api 9, cdr-page 6), real-binary Playwright journey
+> (5 tests: viewer GET-only posture, T2 toggle round-trip restored,
+> truthful 502 enrollment with residue sweep, policy
+> add/409/transport-lost-latch/delete with /data hygiene in finally,
+> bounded no-active-client test) + cross-surface sweep pinned to
+> /api/cdr/*.
+>
+> **Deferrals (recorded):** 2F and everything beyond stay OUT of this
+> slice — no FE-6/FE-7/FE-8 work, no Batch-2 PR mechanics, and the
+> legacy `static/index.html` CDR panels are untouched. A live-Sluice e2e
+> (real enroll/renew/revoke through the browser) is deferred with the
+> harness note that the Go suites cover those RPC flows against an
+> in-process fake engine. Instance disable/enable (the registry's soft
+> `enabled` flag) has no admin API endpoint — surfaced read-only,
+> recorded as a backend gap for a future slice, not invented client-side.
+>
 > **2E-B FINAL STORAGE-READ FAIL-CLOSED CLOSURE (this branch, 2026-08-30).**
 > External review of the freeze candidate (465316df) found the last
 > lifecycle defect: the recovery read collapsed "cannot read / cannot
