@@ -1445,10 +1445,25 @@ components:
     # ── Slice 3 tranche 15: cdr/release read schemas ──────────────────────────────
     CDRConfig:
       type: object
-      required: [enabled]
+      required: [enabled, failMode, clientActive, failOpen]
       additionalProperties: true
       properties:
         enabled: { type: boolean }
+        endpoint: { type: string }
+        failMode:
+          type: string
+          description: "\"open\" or \"closed\" (YAML-validated); NOT runtime-mutable — render any other value verbatim as unknown."
+        defaultProfile: { type: string }
+        defaultMode: { type: string }
+        timeoutSec: { type: integer }
+        maxFileSizeMB: { type: integer }
+        chunkSizeKB: { type: integer }
+        serverFingerprint: { type: string }
+        certsDir: { type: string }
+        clientActive: { type: boolean }
+        failOpen:
+          type: boolean
+          description: Server-derived; true unless failMode is exactly "closed".
     CDRHealth:
       type: object
       description: CDR sidecar health (shape varies).
@@ -8111,8 +8126,16 @@ paths:
     put:
       operationId: setCDRConfig
       tags: [cluster]
-      summary: Set CDR config
-      description: Set CDR config.
+      summary: Toggle CDR runtime enable
+      description: >-
+        Toggle the CDR runtime-enable sentinel. This is the ONLY
+        runtime-mutable CDR configuration field — every other setting
+        (fail_mode, default_profile, timeouts, sizes) comes from YAML/CLI
+        and requires a restart. The toggle is an absolute-state boolean
+        (idempotent; last writer wins by design), persisted to the
+        /data/cdr_enabled sentinel so it survives restarts, and it
+        drives the client pool (enable dials enrolled instances,
+        disable drains them).
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -8123,20 +8146,35 @@ paths:
       x-culvert-idempotency: idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
-      x-culvert-audit-event: cdr.config.set
+      x-culvert-audit-event: cdr.config.toggle
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled: { type: boolean, description: "Desired absolute runtime-enable state." }
       responses:
         '200':
-          description: Set CDR config.
+          description: Toggle applied and persisted.
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema:
+                type: object
+                additionalProperties: true
+                required: [enabled, clientActive]
+                properties:
+                  enabled: { type: boolean }
+                  clientActive: { type: boolean }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: Sentinel persist failed — neither the durable nor the runtime state changed. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
 
   /api/cdr/health:
     get:
@@ -8160,6 +8198,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CDRHealth' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '502':
+          description: On-demand health probe failed (no cached snapshot was available). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
         '503':
           description: No active CDR client. Body is plain text.
           content:
@@ -8189,8 +8231,15 @@ paths:
     delete:
       operationId: deleteCDRInstance
       tags: [cluster]
-      summary: Delete CDR instance
-      description: Delete CDR instance.
+      summary: Delete CDR instance (local only)
+      description: >-
+        Remove an enrolled instance from THIS appliance's registry and
+        shred its local mTLS material. LOCAL ONLY — Sluice keeps
+        trusting the issued client certificate until it expires or is
+        revoked on the Sluice side; the response and the audit record
+        carry the client-cert fingerprint (the Sluice-side revocation
+        key) so that remains possible after the local shred. Use
+        /api/cdr/instances/revoke to actually revoke the credential.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -8200,8 +8249,8 @@ paths:
       x-culvert-stability: stable
       x-culvert-idempotency: idempotent
       x-culvert-introduced-version: 1.0.0
-      x-culvert-danger-level: medium
-      x-culvert-audit-event: cdr.instance.delete
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cdr.instance.remove
       parameters:
         - name: name
           in: query
@@ -8209,12 +8258,24 @@ paths:
           schema: { type: string }
       responses:
         '200':
-          description: Delete CDR instance.
+          description: Instance removed locally.
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema:
+                type: object
+                additionalProperties: true
+                required: [removed, clientCertFingerprint]
+                properties:
+                  removed: { type: string }
+                  clientCertFingerprint:
+                    type: string
+                    description: "SHA-256 fingerprint of the orphaned client cert (sha256:<hex>); empty when unknown (legacy entry with an unreadable cert)."
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Instance not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
 
   /api/cdr/policies:
     get:
@@ -8242,7 +8303,10 @@ paths:
       operationId: createCDRPolicy
       tags: [cluster]
       summary: Create CDR policy
-      description: Create CDR policy.
+      description: >-
+        Add a CDR policy rule. The rule name is the rule's identity (the
+        only key DELETE accepts) and must be unique — a duplicate name is
+        refused with 409.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -8250,10 +8314,10 @@ paths:
       x-culvert-permission: admin
       x-culvert-tenant-scope: appliance
       x-culvert-stability: stable
-      x-culvert-idempotency: idempotent
+      x-culvert-idempotency: non-idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
-      x-culvert-audit-event: cdr.policy.create
+      x-culvert-audit-event: cdr.policy.add
       requestBody:
         required: true
         content:
@@ -8267,11 +8331,15 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: A rule with that name already exists. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
     delete:
       operationId: deleteCDRPolicy
       tags: [cluster]
       summary: Delete CDR policy
-      description: Delete CDR policy.
+      description: Delete the CDR policy rule with the given (unique) name.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -8282,15 +8350,11 @@ paths:
       x-culvert-idempotency: idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
-      x-culvert-audit-event: cdr.policy.delete
+      x-culvert-audit-event: cdr.policy.remove
       parameters:
-        - name: id
-          in: query
-          required: false
-          schema: { type: string }
         - name: name
           in: query
-          required: false
+          required: true
           schema: { type: string }
       responses:
         '200':
@@ -8298,6 +8362,10 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+        '404':
+          description: Rule not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
@@ -10871,7 +10939,16 @@ paths:
       operationId: enrollCDRInstance
       tags: [cluster]
       summary: Enroll CDR instance
-      description: Enroll CDR instance.
+      description: >-
+        Exchange a Sluice enrollment token for an mTLS client credential
+        and register the instance. NON-idempotent — the token is
+        single-use (consume-and-delete on the Sluice side), so a retry
+        after an unknown outcome fails with 502 rather than minting a
+        duplicate credential; if the original attempt did land on the
+        Sluice side, the issued certificate remains in Sluice's ledger
+        (revocable there) and a fresh token is needed to enroll again.
+        First successful enrollment auto-enables CDR (persisted
+        sentinel).
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -10879,7 +10956,7 @@ paths:
       x-culvert-permission: admin
       x-culvert-tenant-scope: appliance
       x-culvert-stability: stable
-      x-culvert-idempotency: idempotent
+      x-culvert-idempotency: non-idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: high
       x-culvert-audit-event: cdr.instance.enroll
@@ -10898,21 +10975,34 @@ paths:
                 serverFingerprint: { type: string, description: "TOFU pin of the server certificate." }
       responses:
         '200':
-          description: OK.
+          description: Enrolled and registered.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GenericRead' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
-        '404':
-          description: Not found. Body is plain text.
+        '409':
+          description: An instance with that name is already enrolled. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+        '502':
+          description: The Sluice Enroll RPC failed (bad/consumed/expired token, fingerprint mismatch, unreachable). Body is plain text.
           content:
             text/plain: { schema: { type: string } }
   /api/cdr/instances/revoke:
     post:
       operationId: revokeCDRInstance
       tags: [cluster]
-      summary: Revoke CDR instance
-      description: Revoke CDR instance.
+      summary: Revoke CDR instance credential
+      description: >-
+        Tell Sluice to refuse the named instance's client certificate
+        (RevokeClient by SHA-256 fingerprint), then prune the local
+        registry entry and shred the local PEMs. The Sluice-side revoke
+        is idempotent (already-revoked/unknown fingerprints succeed with
+        revoked=false), so a retry after an unknown outcome is safe.
+        Sluice refuses self-revocation, so at least one OTHER enrolled,
+        reachable instance is required to issue the call — a
+        single-instance deployment gets 503.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -10923,21 +11013,42 @@ paths:
       x-culvert-idempotency: idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: high
-      x-culvert-audit-event: cdr.instance.revoke
+      x-culvert-audit-event: cdr.instance.revoke_rpc
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string, description: "Enrolled instance whose credential to revoke." }
+                reason: { type: string, description: "Free-text revocation reason (recorded in the Sluice ledger + audit trail)." }
       responses:
         '200':
-          description: OK.
+          description: Credential revoked on Sluice; local registry pruned.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema:
+                type: object
+                additionalProperties: true
+                required: [revoked, fingerprint]
+                properties:
+                  revoked: { type: string, description: "The instance name." }
+                  fingerprint: { type: string, description: "The revoked client cert's SHA-256 fingerprint." }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
-          description: Not found. Body is plain text.
+          description: Instance not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+        '502':
+          description: The Sluice RevokeClient RPC failed — the credential may or may not be revoked; retry is safe (idempotent on the Sluice side). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+        '503':
+          description: No other enrolled, reachable instance to issue the revoke (Sluice refuses self-revocation). Body is plain text.
           content:
             text/plain: { schema: { type: string } }
 
