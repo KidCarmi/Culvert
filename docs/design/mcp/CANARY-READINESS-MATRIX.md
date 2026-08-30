@@ -52,7 +52,7 @@ live tier; Canary *requires* it).
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |
 | 19 | Rollback path healthy (**mechanics**) | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND a build-bound EXECUTABLE rollback-rehearsal record (a real Canary→Shadow→Observe drill through the actual persist/restore path, §5) validates for the current build. **Rollback MECHANICS evidence only** — it does NOT traverse the authoritative coordinator (see row 20). | **NO (undrilled)** |
-| 20 | Authoritative rollback rehearsed (coordinator) | `rollback_coordinator_rehearsal_pending` | `coordinatorRollbackRehearsedFn` — a rehearsal routed through the real `commitRolloutTransitionAt` coordinator, proving parity with its Shadow preflight, emergency-kill, revision, durability, and rollback guards. **OPEN hard prerequisite `CANARY-ROLLBACK-COORDINATOR-REHEARSAL`**: `productionCoordinatorRollbackRehearsed` returns false by construction, so a node whose row-19 mechanics rehearsal passed is STILL not ready. Deferred to a dedicated follow-up (owner decision). | **NO (open)** |
+| 20 | Authoritative rollback rehearsed (coordinator) | `rollback_coordinator_rehearsal_pending` | `productionCoordinatorRollbackRehearsed` — reads DURABLE, build-bound evidence that the Canary→Shadow→Observe demotion was driven through the REAL coordinator core (`commitRolloutTransitionCore`, the same body every production transition runs) and recovered to Observe, so the rehearsal fails for every security reason a real rollback would (Shadow preflight, emergency kill, config validity, durability). Run via `POST /api/mcp/rollout/rehearse-rollback-authoritative`. Distinct from row 19 (mechanics). **CLOSABLE** by a successful coordinator-routed drill; the shipped default stays open (no drill has run — and it requires the full shadow tier, which the unshipped tool-approval slice gates). | **NO (until drilled)** |
 | 21 | Budget configured | `canary_budget_not_configured` | `canary.ValidateBudget` | activation input |
 
 Live-tier facts (5, 6, 7, 14, 15) are all false together in this build (the guarded live
@@ -163,11 +163,19 @@ composed are now implemented and dormant-by-construction (Execution posture stay
   This is rollback **mechanics** evidence: it drives the scratch ladder directly (`SetConfig` +
   `persistRolloutStateTo`), NOT through the authoritative `commitRolloutTransitionAt` coordinator, so
   it does not prove parity with that coordinator's Shadow preflight, emergency-kill, revision,
-  durability, and rollback guards. The authoritative rehearsal is a SEPARATE, OPEN hard prerequisite
+  durability, and rollback guards. The authoritative rehearsal is a SEPARATE hard prerequisite
   (row 20, `rollback_coordinator_rehearsal_pending`, `CANARY-ROLLBACK-COORDINATOR-REHEARSAL`) that
   keeps Canary readiness FALSE regardless of the mechanics rehearsal — no transition can become READY
-  on the mechanics rehearsal alone. Deferred to a dedicated follow-up (owner decision; the coordinator
-  is not refactored here and the readiness criterion is not weakened).
+  on the mechanics rehearsal alone.
+- **Authoritative rollback rehearsal (coordinator parity, row 20)** — the follow-up landed: the rollout
+  coordinator is extracted into a single locked core (`commitRolloutTransitionCore`) that every
+  production transition AND the rehearsal share, and the rehearsal drives the Canary→Shadow→Observe
+  ladder through that core on a SCRATCH state/file (never live state), recovers to Observe, and records
+  DISTINCT durable build-bound evidence (`mcp_canary_coordinator_rehearsal.go`). So the rehearsal fails
+  for every security reason a real rollback would (Shadow preflight, emergency kill, config validity,
+  durability), proven by the parity wall and the rejection/mutation campaign. `productionCoordinatorRollbackRehearsed`
+  reads that evidence, so row 20 CLOSES for a build only after a successful coordinator-routed drill.
+  The mechanics fact (row 19) and this fact stay DISTINCT.
 - **Runtime lifecycle** — `mcp_canary_runtime.go` owns the monotonic activation generation and the
   durable budget/abort state; `beginCanaryActivation` (the future-arming seam) is UNINVOKED in this
   build, so no generation is ever bumped and no execution is ever reserved in production.
@@ -182,12 +190,12 @@ Every one is a **separately-reviewed activation**, not a config change:
    `tooltrust.Purpose.Issuable()` and the issue path.
 3. Call `beginCanaryActivation` from the (future) armed live path so the runtime budget/abort
    generation is armed, and drive `reserveCanaryExecution` at the pre-side-effect boundary.
-4. Close **`CANARY-ROLLBACK-COORDINATOR-REHEARSAL`** (row 20): refactor the coordinator into a
-   locked, side-effect-injectable core; route a scratch rehearsal through the same authoritative
-   `commitRolloutTransitionAt` gates with an injected persistence destination; make it FAIL whenever
-   the real rollback would fail; avoid live rollout-state mutation; add parity + mutation proofs.
-   Until this lands, the Canary Activation Gate is **INCOMPLETE — AUTHORITATIVE ROLLBACK REHEARSAL
-   REMAINS**.
+4. Close **`CANARY-ROLLBACK-COORDINATOR-REHEARSAL`** (row 20) by running the authoritative rehearsal
+   on a genuinely rollback-capable node (`POST /api/mcp/rollout/rehearse-rollback-authoritative`). The
+   machinery landed (coordinator core extracted; the rehearsal routes the scratch demotion through it,
+   fails for every real rollback gate, and records durable build-bound evidence), so row 20 CLOSES for a
+   build once a coordinator-routed drill succeeds. In the shipped build this still requires the full
+   shadow tier (gated by the unshipped tool-approval slice), so it stays open by default.
 5. Execute the first Canary per `CANARY-FIRST-RUNBOOK.md` (synthetic identity, recording
    upstream, never customer traffic).
 </content>
