@@ -66,6 +66,7 @@ func ringAdmit(b *clientBucket, now time.Time, window time.Duration, limit int) 
 // arrivals (the bucket stays at one), and some sit in between (a partial prefix
 // expires each time), which is the case the prefix-only expiry has to get right.
 func TestRateLimitWindow_DifferentialAgainstLegacy(t *testing.T) {
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
 	rnd := rand.New(rand.NewSource(20260830))
 	base := time.Now()
 
