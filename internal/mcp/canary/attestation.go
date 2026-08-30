@@ -62,13 +62,14 @@ type AttestationReason string
 // Attestation rejection sub-reasons (fixed vocabulary; AttestationOK is the admissible value).
 const (
 	AttestationOK               AttestationReason = ""
-	AttestationMissing          AttestationReason = "attestation_missing"            // no attestation present
-	AttestationSchemaUnknown    AttestationReason = "attestation_schema_unknown"     // schema != current (fail closed)
-	AttestationNotPassed        AttestationReason = "attestation_not_passed"         // status is not PASSED
-	AttestationNoReviewID       AttestationReason = "attestation_no_review_id"       // missing review identity
-	AttestationNoEvidence       AttestationReason = "attestation_no_evidence_digest" // missing evidence digest
-	AttestationNoAttestor       AttestationReason = "attestation_no_attestor"        // missing privileged actor
-	AttestationIdentityMismatch AttestationReason = "attestation_identity_mismatch"  // build changed since attested
+	AttestationMissing          AttestationReason = "attestation_missing"             // no attestation present
+	AttestationSchemaUnknown    AttestationReason = "attestation_schema_unknown"      // schema != current (fail closed)
+	AttestationNotPassed        AttestationReason = "attestation_not_passed"          // status is not PASSED
+	AttestationNoReviewID       AttestationReason = "attestation_no_review_id"        // missing review identity
+	AttestationNoEvidence       AttestationReason = "attestation_no_evidence_digest"  // missing evidence digest
+	AttestationBadEvidence      AttestationReason = "attestation_bad_evidence_digest" // evidence digest not a canonical hex digest
+	AttestationNoAttestor       AttestationReason = "attestation_no_attestor"         // missing privileged actor
+	AttestationIdentityMismatch AttestationReason = "attestation_identity_mismatch"   // build changed since attested
 )
 
 // ValidateAttestation returns AttestationOK ONLY when a is a well-formed, PASSED attestation
@@ -94,6 +95,9 @@ func ValidateAttestation(a *ShadowExitAttestation, current RuntimeIdentity) Atte
 	if a.EvidenceDigest == "" {
 		return AttestationNoEvidence
 	}
+	if !ValidEvidenceDigest(a.EvidenceDigest) {
+		return AttestationBadEvidence
+	}
 	if a.AttestedBy == "" {
 		return AttestationNoAttestor
 	}
@@ -109,4 +113,25 @@ func ValidateAttestation(a *ShadowExitAttestation, current RuntimeIdentity) Atte
 // AttestationValid is the boolean form used by the readiness fact.
 func AttestationValid(a *ShadowExitAttestation, current RuntimeIdentity) bool {
 	return ValidateAttestation(a, current) == AttestationOK
+}
+
+// evidenceDigestLen is the canonical length of a hex-encoded SHA-256 evidence digest (32 bytes).
+const evidenceDigestLen = 64
+
+// ValidEvidenceDigest reports whether s is a canonical lowercase-hex SHA-256 digest (exactly 64
+// lowercase hex characters) — the documented encoding that identifies the reviewed Shadow Exit
+// evidence bundle. A nonempty-but-malformed value (e.g. "x", "not-a-digest") is rejected so a review
+// can never be attested against an unidentifiable evidence reference (Codex P2). It is enforced both
+// at the admin POST (trust boundary) and in ValidateAttestation (durable defense-in-depth).
+func ValidEvidenceDigest(s string) bool {
+	if len(s) != evidenceDigestLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

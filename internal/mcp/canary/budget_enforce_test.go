@@ -394,6 +394,26 @@ func TestBudgetEnforcer_IncompleteIdentityFailsClosed(t *testing.T) {
 	}
 }
 
+// TestBudgetEnforcer_ClockRollbackFailsClosedOnWindow is the Codex P2 (round-11) proof: the stored
+// activation instant is a wall-clock UnixNano, so a backward clock step after activation would make
+// the elapsed delta shrink/negative and keep the window check passing — silently extending the
+// Canary past its safety window. A `now` earlier than the recorded activation instant must fail
+// closed on the window.
+func TestBudgetEnforcer_ClockRollbackFailsClosedOnWindow(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	b := testBudget(100)
+	b.Window = time.Hour
+	e := NewBudgetEnforcer(b, 1, start)
+	// A reserve BEFORE the activation instant (clock rolled back) must fail closed on the window.
+	if o := e.Reserve(1, start.Add(-time.Second), idOne); o != BudgetDeniedWindow {
+		t.Fatalf("a backward clock step must fail closed on the window, got %s", o)
+	}
+	// Sanity: a normal in-window reserve still grants.
+	if o := e.Reserve(1, start.Add(time.Minute), idOne); o != BudgetGranted {
+		t.Fatalf("an in-window reserve must still grant, got %s", o)
+	}
+}
+
 // TestBudgetEnforcer_ConcurrentReserveNeverExceedsTotal is the atomicity gate: many goroutines
 // reserving at once must grant EXACTLY MaxTotalExecutions in total — never more (a race in the
 // check-then-reserve would over-grant and breach the blast radius).

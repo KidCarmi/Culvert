@@ -186,8 +186,14 @@ func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time, ident ExecutionIdent
 	if gen != e.generation {
 		return BudgetDeniedGeneration
 	}
-	// Window (TTL) — the experiment is time-boxed; once elapsed nothing more executes.
-	if now.UnixNano()-e.startNanos >= int64(e.budget.Window) {
+	// Window (TTL) — the experiment is time-boxed; once elapsed nothing more executes. The stored
+	// activation instant is a wall-clock UnixNano (Go's monotonic reading is dropped on the struct and
+	// cannot survive the durable snapshot), so a backward clock step (NTP correction, manual set) would
+	// make the elapsed delta shrink or go NEGATIVE and keep this check passing until wall time catches
+	// back up — silently extending the Canary past its safety window. A `now` earlier than the recorded
+	// activation instant is therefore treated as window-expired and fails CLOSED (Codex P2).
+	elapsed := now.UnixNano() - e.startNanos
+	if elapsed < 0 || elapsed >= int64(e.budget.Window) {
 		return BudgetDeniedWindow
 	}
 	// Total — the absolute execution ceiling. Exactly MaxTotalExecutions grants (no off-by-one):

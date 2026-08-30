@@ -213,6 +213,13 @@ func apiMCPShadowExitReviewPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "shadow_exit_review_id_and_evidence_required", http.StatusBadRequest)
 		return
 	}
+	// The evidence digest must be a canonical hex SHA-256 digest that identifies the exact reviewed
+	// evidence bundle — a nonempty-but-arbitrary value ("x", "not-a-digest") must not be attestable
+	// (Codex P2). Enforced here at the trust boundary; ValidateAttestation enforces it again on read.
+	if !canary.ValidEvidenceDigest(req.EvidenceDigest) {
+		http.Error(w, "shadow_exit_evidence_digest_must_be_hex_sha256", http.StatusBadRequest)
+		return
+	}
 	a := &canary.ShadowExitAttestation{
 		SchemaVersion:      canary.ShadowExitAttestationSchemaVersion,
 		Status:             canary.ShadowExitStatusPassed,

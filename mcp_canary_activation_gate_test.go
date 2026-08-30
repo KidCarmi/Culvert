@@ -17,7 +17,7 @@ func writeValidShadowExitAttestation(t *testing.T) {
 		SchemaVersion:      canary.ShadowExitAttestationSchemaVersion,
 		Status:             canary.ShadowExitStatusPassed,
 		ReviewID:           "SXR-test",
-		EvidenceDigest:     "digest",
+		EvidenceDigest:     testEvidenceDigest,
 		Identity:           currentRuntimeIdentity(),
 		AttestedBy:         "admin",
 		AttestedAtUnixNano: 1,

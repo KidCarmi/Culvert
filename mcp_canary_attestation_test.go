@@ -10,6 +10,10 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 )
 
+// testEvidenceDigest is a canonical 64-char lowercase-hex SHA-256 digest used by attestation test
+// fixtures so they satisfy canary.ValidEvidenceDigest (Codex P2, round-11).
+const testEvidenceDigest = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+
 // TestShadowExitAttestation_WriteSerializedWithDurableMu is the Codex P1 (round-8) proof: the
 // attestation write + compensating cleanup runs under mcpRollout.durableMu — the same lock the
 // activation commit holds while it reads the attestation — so a commit can never observe the
@@ -187,7 +191,7 @@ func TestShadowExitAttestation_DurableRoundTrip(t *testing.T) {
 		SchemaVersion:      canary.ShadowExitAttestationSchemaVersion,
 		Status:             canary.ShadowExitStatusPassed,
 		ReviewID:           "SXR-1",
-		EvidenceDigest:     "deadbeef",
+		EvidenceDigest:     testEvidenceDigest,
 		Identity:           currentRuntimeIdentity(),
 		AttestedBy:         "admin",
 		AttestedAtUnixNano: 1,
@@ -208,7 +212,7 @@ func TestShadowExitAttestation_BuildMismatchDoesNotAttest(t *testing.T) {
 		SchemaVersion:  canary.ShadowExitAttestationSchemaVersion,
 		Status:         canary.ShadowExitStatusPassed,
 		ReviewID:       "SXR-1",
-		EvidenceDigest: "deadbeef",
+		EvidenceDigest: testEvidenceDigest,
 		Identity:       canary.RuntimeIdentity{BuildVersion: "v1.0.0"}, // an OLD build
 		AttestedBy:     "admin",
 	}
