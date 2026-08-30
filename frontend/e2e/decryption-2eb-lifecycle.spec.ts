@@ -232,3 +232,84 @@ test("ambiguous recovery ceremony resolves the latch without any mutation of the
     await api.dispose();
   }
 });
+
+test("SPA navigation (no reload): the stale cache never classifies; a post-return GET resolves LANDED, one rotation total", async ({
+  page,
+}) => {
+  const api = await newAdminClient("198.51.100.78");
+  try {
+    const before = await getPrivacyFull(api);
+
+    // Establish cached pre-operation truth in the LIVE app instance.
+    await page.goto(ROUTE);
+    await page.getByRole("tab", { name: "Destination Privacy" }).click();
+    await expect(page.getByText("Node-local").first()).toBeVisible();
+
+    // Deterministic transport-loss seam (executes on the appliance, drops
+    // the response before the browser sees it).
+    let intercepted = 0;
+    await page.route("**/api/decryption/redaction", async (route) => {
+      if (route.request().method() === "PUT" && intercepted === 0) {
+        intercepted += 1;
+        await route.fetch();
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    await page.getByRole("button", { name: /Rotate pseudonym key/ }).click();
+    await page.getByLabel("Type ROTATE to confirm").fill("ROTATE");
+    await page
+      .getByRole("button", { name: "Rotate pseudonym key", exact: true })
+      .click();
+    await expect(page.getByText("Outcome unconfirmed")).toBeVisible();
+    const rawMarker = await page.evaluate(
+      (k) => sessionStorage.getItem(k),
+      MARKER_KEY,
+    );
+    const parsed: unknown = JSON.parse(rawMarker ?? "null");
+    if (!isRecord(parsed)) throw new Error("marker is not an object");
+    const opX = str(parsed["operationId"]);
+    expect(opX).toMatch(/^[0-9a-f]{32}$/);
+    await page.unroute("**/api/decryption/redaction");
+
+    // Count every further rotation PUT and every privacy GET from here on.
+    let puts = 0;
+    let gets = 0;
+    page.on("request", (r) => {
+      if (!r.url().includes("/api/decryption/redaction")) return;
+      if (r.method() === "PUT") puts += 1;
+      if (r.method() === "GET") gets += 1;
+    });
+
+    // SPA navigation: SAME browser context, SAME app instance and
+    // QueryClient — no reload. The pre-operation snapshot stays cached.
+    await page.getByRole("link", { name: "Dashboard" }).click();
+    await expect(
+      page.getByRole("tab", { name: "Destination Privacy" }),
+    ).toHaveCount(0);
+    await page.getByRole("link", { name: "Decryption" }).click();
+    await page.getByRole("tab", { name: "Destination Privacy" }).click();
+
+    // The stale cache must not classify; an actual post-return GET is
+    // forced and ITS truth (the appliance's receipt for X) proves LANDED.
+    await expect(page.getByText("landed exactly once")).toBeVisible();
+    expect(gets).toBeGreaterThan(0); // a real post-return GET occurred
+    const cleared = await page.evaluate(
+      (k) => sessionStorage.getItem(k),
+      MARKER_KEY,
+    );
+    expect(cleared).toBeNull(); // cleared only by that fresh truth
+    await expect(
+      page.getByRole("button", { name: /Rotate pseudonym key/ }),
+    ).toBeEnabled();
+
+    // Exactly ONE rotation happened in total — the intercepted one.
+    const after = await getPrivacyFull(api);
+    expect(after.seq).toBe(before.seq + 1);
+    expect(after.receiptOps).toContain(opX);
+    expect(puts).toBe(0);
+  } finally {
+    await api.dispose();
+  }
+});
