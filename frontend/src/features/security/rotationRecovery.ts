@@ -40,6 +40,20 @@ export interface RotationRecoveryMarker {
   preSeq: number;
 }
 
+/** The result of inspecting the recovery store (storage-read fail-closed
+ * closure). "none" is the ONLY state meaning "no pending marker" — storage
+ * was readable and the key was absent. Everything else keeps the T3
+ * rotation blocked: "unavailable" = storage access threw (the record — if
+ * any — cannot currently be inspected; nothing is deleted); "unreadable" =
+ * the key EXISTS but its recovery meaning cannot be safely interpreted
+ * (malformed JSON, schema-invalid, or an unsupported version — nothing is
+ * silently deleted; only the explicit typed DISCARD ceremony may retire it). */
+export type RotationRecoveryRead =
+  | { kind: "none" }
+  | { kind: "valid"; marker: RotationRecoveryMarker }
+  | { kind: "unavailable" }
+  | { kind: "unreadable" };
+
 /** Persist the recovery identity for one dispatched-but-unconfirmed
  * rotation, VERIFIED: the marker is written and then read back through the
  * strict reader; only an exactly-recoverable marker returns true. Called
@@ -63,49 +77,83 @@ export function writeRotationRecovery(
         subject,
       }),
     );
-    // Read-back through the strict subject-bound reader: a silently-failing
-    // or lying storage (quota, privacy mode, extension interference) must
-    // fail the write, not the recovery that would later depend on it.
+    // Read-back through the strict subject-bound TYPED reader: a
+    // silently-failing or lying storage (quota, privacy mode, extension
+    // interference) must fail the write, not the recovery that would later
+    // depend on it. Success requires the exact marker to read back VALID.
     const back = readRotationRecovery(subject);
     return (
-      back !== null &&
-      back.operationId === m.operationId &&
-      back.preSeq === m.preSeq
+      back.kind === "valid" &&
+      back.marker.operationId === m.operationId &&
+      back.marker.preSeq === m.preSeq
     );
   } catch {
     return false;
   }
 }
 
-/** Load the pending recovery identity for the CURRENT authenticated
- * subject. A malformed, foreign-version, or foreign-subject marker is
- * discarded (removed) — a pending operation is never inherited across
- * authenticated identities. */
-export function readRotationRecovery(
-  subject: string,
-): RotationRecoveryMarker | null {
+/** VERIFIED removal for the explicit DISCARD ceremony: the record is
+ * removed and then proven absent by a read-back. False (marker may remain)
+ * keeps the rotation surface blocked. */
+export function clearRotationRecoveryVerified(): boolean {
   try {
     // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2E-B lifecycle closure): the single NON-SECRET T3 rotation-recovery marker; field allowlist pinned by decryption-rotation-lifecycle.test.tsx.
-    const raw = sessionStorage.getItem(ROTATION_RECOVERY_KEY);
-    if (raw === null) return null;
-    const v: unknown = JSON.parse(raw);
-    if (
-      !isRecord(v) ||
-      v["version"] !== 1 ||
-      typeof v["operationId"] !== "string" ||
-      v["operationId"] === "" ||
-      typeof v["preSeq"] !== "number" ||
-      !Number.isFinite(v["preSeq"]) ||
-      v["subject"] !== subject
-    ) {
+    sessionStorage.removeItem(ROTATION_RECOVERY_KEY);
+    // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2E-B lifecycle closure): the single NON-SECRET T3 rotation-recovery marker; field allowlist pinned by decryption-rotation-lifecycle.test.tsx.
+    return sessionStorage.getItem(ROTATION_RECOVERY_KEY) === null;
+  } catch {
+    return false;
+  }
+}
+
+/** Inspect the recovery store for the CURRENT authenticated subject —
+ * TYPED, never `Marker | null`: "cannot read" and "cannot interpret" are
+ * NOT "absent" (an irreversible T3 action must stay blocked until recovery
+ * state is provably absent, valid, or explicitly discarded). The ONE
+ * deliberate deletion here is the established subject-isolation contract:
+ * a clearly WELL-FORMED v1 marker bound to a DIFFERENT authenticated
+ * subject is discarded (never inherited) and reads as "none". */
+export function readRotationRecovery(subject: string): RotationRecoveryRead {
+  let raw: string | null;
+  try {
+    // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2E-B lifecycle closure): the single NON-SECRET T3 rotation-recovery marker; field allowlist pinned by decryption-rotation-lifecycle.test.tsx.
+    raw = sessionStorage.getItem(ROTATION_RECOVERY_KEY);
+  } catch {
+    return { kind: "unavailable" }; // storage cannot be inspected — NOT absent
+  }
+  if (raw === null) return { kind: "none" }; // proven absent
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return { kind: "unreadable" }; // exists but uninterpretable — keep it
+  }
+  if (
+    !isRecord(v) ||
+    v["version"] !== 1 ||
+    typeof v["operationId"] !== "string" ||
+    v["operationId"] === "" ||
+    typeof v["preSeq"] !== "number" ||
+    !Number.isFinite(v["preSeq"]) ||
+    typeof v["subject"] !== "string"
+  ) {
+    // Schema-invalid or unsupported version: never silently discarded (no
+    // migration logic here) — the explicit DISCARD ceremony owns retirement.
+    return { kind: "unreadable" };
+  }
+  if (v["subject"] !== subject) {
+    try {
       // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2E-B lifecycle closure): the single NON-SECRET T3 rotation-recovery marker; field allowlist pinned by decryption-rotation-lifecycle.test.tsx.
       sessionStorage.removeItem(ROTATION_RECOVERY_KEY);
-      return null;
+    } catch {
+      // the foreign marker cannot be ours either way
     }
-    return { operationId: v["operationId"], preSeq: v["preSeq"] };
-  } catch {
-    return null;
+    return { kind: "none" };
   }
+  return {
+    kind: "valid",
+    marker: { operationId: v["operationId"], preSeq: v["preSeq"] },
+  };
 }
 
 /** Terminal clear — confirmed outcome, proven resolution, or the explicit

@@ -39,6 +39,7 @@ import {
 } from "../../api/decryption";
 import {
   clearRotationRecovery,
+  clearRotationRecoveryVerified,
   readRotationRecovery,
   writeRotationRecovery,
 } from "./rotationRecovery";
@@ -59,7 +60,12 @@ type Ceremony =
   // The explicit AMBIGUOUS recovery: consciously give up proof of one
   // irreversible operation. Never a mutation — it only retires the durable
   // recovery marker so a NEW deliberate T3 rotation becomes possible.
-  | { kind: "abandon"; operationId: string };
+  | { kind: "abandon"; operationId: string }
+  // The explicit UNREADABLE-record recovery (storage-read fail-closed
+  // closure): the recovery key exists but cannot be safely interpreted;
+  // discarding it (typed DISCARD, verified removal, NO appliance mutation)
+  // is the only way it is ever retired.
+  | { kind: "discard" };
 
 /** A transport-lost rotation awaiting per-operation proof from fresh truth. */
 interface UnresolvedRotation {
@@ -110,10 +116,24 @@ export function DestinationPrivacyTab({
   //                   clear the marker, or enable Rotate.
   //   "fetch-failed"— that recovery GET failed: marker + latch retained,
   //                   Rotate stays blocked, explicit retry offered.
-  //   "fresh"       — no marker existed, or the post-restore GET succeeded;
+  //   "fresh"       — the marker is PROVEN ABSENT (storage readable, key
+  //                   null), or the post-restore GET succeeded;
   //                   classification and Rotate follow the normal rules.
+  //   "storage-unavailable" — the recovery store itself cannot currently be
+  //                   inspected (storage access threw): NOT "absent". A
+  //                   pending operation may exist; Rotate stays blocked and
+  //                   an explicit storage re-check is offered.
+  //   "unreadable"  — the recovery key EXISTS but its meaning cannot be
+  //                   safely interpreted (malformed / unsupported version):
+  //                   never silently deleted; only the typed DISCARD
+  //                   ceremony retires it. Rotate stays blocked.
   const [recoveryGate, setRecoveryGate] = useState<
-    "inspecting" | "stale" | "fetch-failed" | "fresh"
+    | "inspecting"
+    | "stale"
+    | "fetch-failed"
+    | "fresh"
+    | "storage-unavailable"
+    | "unreadable"
   >("inspecting");
 
   // The pre-recovery dataUpdatedAt stamp: only a successful fetch that
@@ -159,22 +179,44 @@ export function DestinationPrivacyTab({
   // re-reads after every (re)mount pass. A foreign-subject marker is
   // discarded by the read itself, never inherited. A restored marker
   // immediately forces the fresh recovery GET.
-  useEffect(() => {
-    const m = readRotationRecovery(subject);
-    if (m === null) {
-      setRecoveryGate("fresh");
-      return;
+  // inspectRecovery is the ONE entry to the recovery store (mount, the
+  // storage-unavailable retry, and post-discard re-inspection). Its TYPED
+  // result is fail-closed: only a PROVEN-ABSENT marker ("none") reaches the
+  // ordinary no-recovery state; "unavailable"/"unreadable" keep Rotate
+  // blocked with their explicit human recovery paths.
+  // The stamp of whatever the query held at MOUNT — captured once, never
+  // advanced by later refreshes: it must mark PRE-recovery data only.
+  const mountStampRef = useRef<number | null>(null);
+  if (mountStampRef.current === null) {
+    mountStampRef.current = page.q.dataUpdatedAt;
+  }
+  const inspectRecovery = useCallback((): void => {
+    const read = readRotationRecovery(subject);
+    switch (read.kind) {
+      case "none":
+        setRecoveryGate("fresh");
+        return;
+      case "unavailable":
+        setRecoveryGate("storage-unavailable");
+        return;
+      case "unreadable":
+        setRecoveryGate("unreadable");
+        return;
+      case "valid":
+        setUnresolvedRotation(read.marker);
+        // Everything the query held at recovery entry is pre-recovery:
+        // stamp it stale (monotonic — the stamp never lowers).
+        recoveryStaleStampRef.current = Math.max(
+          recoveryStaleStampRef.current,
+          mountStampRef.current ?? 0,
+        );
+        runRecoveryFetch();
     }
-    setUnresolvedRotation(m);
-    // Everything the query holds RIGHT NOW is pre-recovery: stamp it stale.
-    recoveryStaleStampRef.current = Math.max(
-      recoveryStaleStampRef.current,
-      page.q.dataUpdatedAt,
-    );
-    runRecoveryFetch();
-    // The restore re-runs per (re)mount pass and identity change only —
-    // page.q.dataUpdatedAt is read at restore time, deliberately not a dep.
   }, [subject, runRecoveryFetch]);
+
+  useEffect(() => {
+    inspectRecovery();
+  }, [inspectRecovery]);
   // Durable local record of the last authoritative resolution (survives the
   // latch clearing; replaced only by a new ceremony or the auth boundary).
   const [resolution, setResolution] = useState<RotationResolution | null>(null);
@@ -347,6 +389,54 @@ export function DestinationPrivacyTab({
                 Refresh state
               </Button>
             </div>
+          </Callout>
+        </div>
+      )}
+
+      {recoveryGate === "storage-unavailable" && (
+        <div className={styles.calloutSpace}>
+          <Callout
+            variant="critical"
+            title="Recovery store unavailable"
+            role="alert"
+          >
+            The browser recovery store cannot be inspected. Safe key rotation is
+            unavailable until recovery state can be verified — a rotation you
+            started earlier may still be pending, and nothing is deleted while
+            the store is unreadable.
+            <div className={styles.fallbackAction}>
+              <Button size="sm" onClick={inspectRecovery}>
+                Retry storage check
+              </Button>
+            </div>
+          </Callout>
+        </div>
+      )}
+      {recoveryGate === "unreadable" && (
+        <div className={styles.calloutSpace}>
+          <Callout
+            variant="critical"
+            title="Unreadable recovery record"
+            role="alert"
+          >
+            The browser contains a recovery record for a prior rotation, but its
+            operation identity and outcome cannot be safely interpreted (it may
+            be malformed or written by an unsupported version). Safe key
+            rotation stays unavailable, and the record is never silently
+            discarded.
+            {isAdmin && (
+              <div className={styles.fallbackAction}>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setCeremony({ kind: "discard" });
+                    setNotice("");
+                  }}
+                >
+                  Discard unreadable recovery record…
+                </Button>
+              </div>
+            )}
           </Callout>
         </div>
       )}
@@ -566,6 +656,55 @@ export function DestinationPrivacyTab({
             </div>
           )}
         </Card>
+      )}
+
+      {ceremony?.kind === "discard" && (
+        <ConfirmationDialog
+          open
+          tier={3}
+          title="Discard unreadable recovery record"
+          body={
+            <>
+              The browser contains a recovery record for a prior rotation whose
+              operation identity and outcome cannot be safely interpreted.
+              Discarding it permanently gives up automatic recovery attribution
+              for that operation — and if it actually landed, a later new
+              rotation will break destination-pseudonym continuity again. This
+              ceremony performs NO appliance mutation: nothing is rotated or
+              changed on the appliance, only the browser record is removed (and
+              its removal is verified before rotation becomes available again).
+            </>
+          }
+          impact="Automatic attribution for the prior rotation is given up permanently on this browser."
+          rollback="None — a discarded recovery record cannot be reconstructed."
+          confirmLabel="Discard recovery record"
+          confirmWord="DISCARD"
+          typedValue={typed}
+          onTypedChange={setTyped}
+          destructive
+          result={result}
+          {...(errorText !== "" ? { errorText } : {})}
+          onConfirm={() => {
+            // Verified removal only: if the record may remain, everything
+            // stays blocked. Never a mutation, never an unverified clear.
+            if (!clearRotationRecoveryVerified()) {
+              setResult("failed");
+              setErrorText(
+                "The browser recovery record could not be removed and verified absent. Safe key rotation stays unavailable.",
+              );
+              return;
+            }
+            closeCeremony();
+            setNotice(
+              "The unreadable recovery record was discarded — nothing was changed on the appliance. Any future rotation is a new deliberate action.",
+            );
+            inspectRecovery(); // re-inspect: a verified-absent record reads "none"
+            page.refreshToResolve(); // refresh authoritative truth
+          }}
+          onCancel={() => {
+            closeCeremony();
+          }}
+        />
       )}
 
       {ceremony?.kind === "abandon" && (
