@@ -182,19 +182,30 @@ func (s *CDRPolicyStore) Load(path string) error {
 
 // Save atomically writes the current ruleset to s.path (if set).  Returns
 // nil without writing when path is empty (in-memory-only mode).
+//
+// 2E-C commit boundary: Save takes the WRITE lock and persists while
+// holding it, and Add/RemoveByName persist inside their own critical
+// sections (saveLocked) — the pre-2E-C snapshot-under-RLock/write-unlocked
+// shape let two concurrent mutations land their file writes out of order,
+// so the durable file could lose the later mutation (same class as the
+// instance registry; see cdrstore.go Save).
 func (s *CDRPolicyStore) Save() error {
-	s.mu.RLock()
-	path := s.path
-	rules := append([]*CDRPolicyRule(nil), s.rules...) // shallow copy
-	s.mu.RUnlock()
-	if path == "" {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLocked()
+}
+
+// saveLocked persists the current ruleset.  MUST be called with s.mu
+// held (write mode).  No-op when path is empty.
+func (s *CDRPolicyStore) saveLocked() error {
+	if s.path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(rules, "", "  ")
+	data, err := json.MarshalIndent(s.rules, "", "  ")
 	if err != nil {
 		return fmt.Errorf("cdr policies: marshal: %w", err)
 	}
-	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(s.path, data, 0o600); err != nil {
 		return fmt.Errorf("cdr policies: %w", err)
 	}
 	return nil
@@ -232,28 +243,47 @@ func (s *CDRPolicyStore) Replace(rules []*CDRPolicyRule) error {
 	return nil
 }
 
+// errCDRPolicyDuplicateName rejects a second rule under an existing
+// name (2E-C): the name is the only key RemoveByName / the admin DELETE
+// accepts, so duplicates would make the deletion target ambiguous.
+var errCDRPolicyDuplicateName = fmt.Errorf("a CDR policy rule with that name already exists")
+
 // Add appends a rule, keeps the list priority-sorted, and persists.
+// The name must be unique (it is the rule's identity — see
+// errCDRPolicyDuplicateName). Durable-or-nothing: a failed persist
+// reverts the in-memory append.
 func (s *CDRPolicyStore) Add(r CDRPolicyRule) (CDRPolicyRule, error) {
 	if !validateMode(r.Mode) {
 		safe := strings.ReplaceAll(strings.ReplaceAll(r.Mode, "\n", "_"), "\r", "_")
 		return CDRPolicyRule{}, fmt.Errorf("invalid mode %q", safe)
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.rules {
+		if s.rules[i].Name == r.Name {
+			return CDRPolicyRule{}, fmt.Errorf("%w: %q", errCDRPolicyDuplicateName,
+				strings.ReplaceAll(strings.ReplaceAll(r.Name, "\n", "_"), "\r", "_"))
+		}
+	}
+	prev := s.rules
 	rule := r
-	s.rules = append(s.rules, &rule)
-	sortCDRRulesByPriority(s.rules)
-	s.bumpVersion()
-	s.mu.Unlock()
-	if err := s.Save(); err != nil {
+	next := append(append([]*CDRPolicyRule(nil), prev...), &rule)
+	sortCDRRulesByPriority(next)
+	s.rules = next
+	if err := s.saveLocked(); err != nil {
+		s.rules = prev
 		return CDRPolicyRule{}, err
 	}
+	s.bumpVersion()
 	return rule, nil
 }
 
-// RemoveByName removes the first rule with the matching name; returns
-// false if no such rule exists.
+// RemoveByName removes the rule with the matching name; returns false
+// if no such rule exists. Durable-or-nothing: a failed persist restores
+// the rule and reports (false, err).
 func (s *CDRPolicyStore) RemoveByName(name string) (bool, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	found := -1
 	for i := range s.rules {
 		if s.rules[i].Name == name {
@@ -262,15 +292,18 @@ func (s *CDRPolicyStore) RemoveByName(name string) (bool, error) {
 		}
 	}
 	if found < 0 {
-		s.mu.Unlock()
 		return false, nil
 	}
-	s.rules = append(s.rules[:found], s.rules[found+1:]...)
-	s.bumpVersion()
-	s.mu.Unlock()
-	if err := s.Save(); err != nil {
-		return true, err
+	prev := s.rules
+	next := make([]*CDRPolicyRule, 0, len(prev)-1)
+	next = append(next, prev[:found]...)
+	next = append(next, prev[found+1:]...)
+	s.rules = next
+	if err := s.saveLocked(); err != nil {
+		s.rules = prev
+		return false, err
 	}
+	s.bumpVersion()
 	return true, nil
 }
 

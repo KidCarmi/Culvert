@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Sluice/pkg/sluiceauth"
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
@@ -229,11 +230,13 @@ func TestShredCDRCerts_RefusesPathOutsideRoot(t *testing.T) {
 
 func TestPersistCDREnrollment_WritesBundleAndRegisters(t *testing.T) {
 	resetCDRState(t)
-	// Build a fake EnrollResponse with minimal PEM content — we only
-	// exercise the file write path here, not cert parsing.
+	// 2E-C: the issued client cert must be a real, fingerprintable PEM —
+	// persistCDREnrollment records its SHA-256 fingerprint durably (the
+	// Sluice-side revocation key) and fails closed otherwise.
+	clientPEM := mustGenerateTestCertPEM(t)
 	fakeResp := &pb.EnrollResponse{
 		CaCert:     []byte("CA-PEM"),
-		ClientCert: []byte("CLIENT-PEM"),
+		ClientCert: clientPEM,
 		ClientKey:  []byte("KEY-PEM"),
 	}
 	// cdrInstanceCertsDir returns /data/integrations/sluice/<name>/
@@ -256,11 +259,53 @@ func TestPersistCDREnrollment_WritesBundleAndRegisters(t *testing.T) {
 	if stored.Name != "cov-test" {
 		t.Fatalf("stored.Name = %q", stored.Name)
 	}
+	wantFP, ferr := sluiceauth.Fingerprint(clientPEM)
+	if ferr != nil {
+		t.Fatalf("sluiceauth.Fingerprint: %v", ferr)
+	}
+	if stored.ClientCertFingerprint != wantFP {
+		t.Fatalf("stored.ClientCertFingerprint = %q, want %q", stored.ClientCertFingerprint, wantFP)
+	}
 	// Files must exist at the expected paths.
 	for _, f := range []string{"ca.pem", "client.pem", "client.key"} {
 		p := filepath.Join(tryPath, f)
 		if _, statErr := os.Stat(p); statErr != nil {
 			t.Errorf("expected file %s: %v", p, statErr)
+		}
+	}
+}
+
+// TestPersistCDREnrollment_UnfingerprintableCertFailsClosed pins the
+// 2E-C contract: an issued client cert whose fingerprint cannot be
+// derived is refused (the registry must never hold a credential it
+// cannot later identify for revocation), and the partially written
+// bundle is rolled back.
+func TestPersistCDREnrollment_UnfingerprintableCertFailsClosed(t *testing.T) {
+	resetCDRState(t)
+	tryPath, err := cdrInstanceCertsDir("cov-badcert")
+	if err != nil || os.MkdirAll(tryPath, 0o700) != nil {
+		t.Skipf("cannot write %s (test env restricted)", tryPath)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tryPath) })
+
+	_, perr := persistCDREnrollment(cdrEnrollRequest{
+		Name:              "cov-badcert",
+		Endpoint:          "sluice:8443",
+		ServerFingerprint: strings.Repeat("ab", 32),
+	}, &pb.EnrollResponse{
+		CaCert:     []byte("CA-PEM"),
+		ClientCert: []byte("NOT-A-PEM-CERT"),
+		ClientKey:  []byte("KEY-PEM"),
+	})
+	if perr == nil {
+		t.Fatal("persistCDREnrollment accepted an unfingerprintable client cert")
+	}
+	if cdrInstances.Get("cov-badcert") != nil {
+		t.Fatal("registry holds an instance whose credential cannot be identified for revocation")
+	}
+	for _, f := range []string{"ca.pem", "client.pem", "client.key"} {
+		if _, statErr := os.Stat(filepath.Join(tryPath, f)); !os.IsNotExist(statErr) {
+			t.Errorf("rollback left %s behind (stat err=%v)", f, statErr)
 		}
 	}
 }

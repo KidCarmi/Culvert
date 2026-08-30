@@ -298,11 +298,15 @@ func cdrMarkOutcome(instanceName string, isFailure bool) {
 // still works while admins investigate broken instances through
 // /api/cdr/instances.
 func buildCDRPoolFromRegistry(cfg CDRConfig, oldPool []*cdrPooledClient) (pool []*cdrPooledClient, firstErr error) {
-	instances := cdrInstances.List()
+	// 2E-C: dial from VALUE snapshots — the fingerprint/rotation fields
+	// are mutated by the health poller under the registry lock, so
+	// reading them through List()'s live pointers here would race.
+	instances := cdrInstances.SnapshotView()
 	if len(instances) == 0 {
 		return bootstrapPoolFromConfig(cfg)
 	}
-	for _, inst := range instances {
+	for i := range instances {
+		inst := instances[i]
 		if !inst.IsEnabled() {
 			continue
 		}
@@ -340,7 +344,7 @@ func bootstrapPoolFromConfig(cfg CDRConfig) ([]*cdrPooledClient, error) {
 // dialEnrolledInstance builds one pooled client from a registry entry,
 // carrying the circuit-breaker state forward if the instance was
 // already in the old pool.
-func dialEnrolledInstance(inst *CDREnrolledInstance, cfg CDRConfig, oldPool []*cdrPooledClient) (*cdrPooledClient, error) {
+func dialEnrolledInstance(inst CDREnrolledInstance, cfg CDRConfig, oldPool []*cdrPooledClient) (*cdrPooledClient, error) {
 	var carriedBreaker *cdrCircuitBreaker
 	for _, oc := range oldPool {
 		if oc.Name == inst.Name {

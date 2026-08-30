@@ -153,7 +153,11 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		list := cdrInstances.List()
+		// 2E-C: render from VALUE copies — the health poller mutates the
+		// registry entries through locked mutators, so reading List()'s
+		// live pointers here was a data race (pinned by
+		// TestCDR2EC_InstanceListDoesNotRaceHealthPoller).
+		list := cdrInstances.SnapshotView()
 		ver, updatedAt := cdrInstances.Version()
 		// Snapshot the live pool once and index by name so enrichment
 		// below is O(1) per instance instead of re-scanning the pool
@@ -168,7 +172,8 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 		// fields for instances whose cert we can't read (admin will
 		// see "—" in the GUI and we log server-side).
 		enriched := make([]map[string]any, 0, len(list))
-		for _, inst := range list {
+		for i := range list {
+			inst := &list[i]
 			entry := cdrInstanceToMap(inst)
 			if expiry, err := loadCertExpiry(inst.ClientCertPath); err == nil {
 				entry["clientCertNotAfter"] = expiry.UTC().Format(time.RFC3339)
@@ -203,10 +208,30 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		inst := cdrInstances.Get(name)
-		if inst == nil {
+		inst, found := cdrInstances.GetCopy(name)
+		if !found {
 			http.Error(w, "instance not found", http.StatusNotFound)
 			return
+		}
+
+		// 2E-C trust-orphan remediation: a local delete only prunes OUR
+		// registry and shreds OUR copy of the credential — Sluice keeps
+		// trusting the client cert until it expires or is revoked THERE,
+		// and the shred destroys the only local source of its
+		// fingerprint (the sole key Sluice accepts for revocation).
+		// Resolve the fingerprint BEFORE the shred — from the durable
+		// registry field (2E-C enrollments) or from the on-disk cert
+		// (pre-2E-C entries) — and record it in the audit trail and the
+		// response. Empty = genuinely unknown (legacy entry with an
+		// unreadable cert); never invented.
+		fp := inst.ClientCertFingerprint
+		if fp == "" {
+			if diskFP, ferr := loadCertFingerprint(inst.ClientCertPath); ferr == nil {
+				fp = diskFP
+			} else {
+				logger.Printf("CDR: delete %q: client cert fingerprint unknown (cert unreadable: %v)",
+					sanitizeLog(name), ferr)
+			}
 		}
 
 		// Remove registry entry first so no new calls route here, then
@@ -221,7 +246,7 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "instance not found", http.StatusNotFound)
 			return
 		}
-		shredCDRCerts(inst)
+		shredCDRCerts(&inst)
 
 		// If this was the active-client instance, drop the client so we
 		// stop trying to dial it.  The next safeCDRSanitize call gets the
@@ -231,9 +256,15 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 			logger.Printf("CDR: instance %q removed — client shut down; re-enroll to re-enable", sanitizeLog(name))
 		}
 
-		auditEventDiff(r, "cdr.instance.remove", name, "removed enrolled Sluice instance", inst, nil)
+		fpDetail := fp
+		if fpDetail == "" {
+			fpDetail = "unknown (cert unreadable before shred)"
+		}
+		auditEventDiff(r, "cdr.instance.remove", name,
+			fmt.Sprintf("removed enrolled Sluice instance; client cert fingerprint %s remains trusted by Sluice until revoked there or expired", fpDetail),
+			inst, nil)
 		// No saveConfigVersion — see file header.
-		jsonOK(w, map[string]any{"removed": name})
+		jsonOK(w, map[string]any{"removed": name, "clientCertFingerprint": fp})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -405,14 +436,25 @@ func persistCDREnrollment(req cdrEnrollRequest, resp *pb.EnrollResponse) (CDREnr
 		paths.cleanup()
 		return CDREnrolledInstance{}, werr
 	}
+	// 2E-C: record the issued client cert's fingerprint durably — it is
+	// the only key Sluice accepts for revocation, and the PEMs it can be
+	// derived from are shredded on delete. An unfingerprintable cert
+	// means Sluice returned garbage: fail the enrollment (fail closed)
+	// rather than registering a credential we cannot later identify.
+	clientFP, fperr := sluiceauth.Fingerprint(resp.ClientCert)
+	if fperr != nil {
+		paths.cleanup()
+		return CDREnrolledInstance{}, fmt.Errorf("fingerprint issued client cert: %w", fperr)
+	}
 	inst := CDREnrolledInstance{
-		Name:              req.Name,
-		Endpoint:          req.Endpoint,
-		ServerFingerprint: req.ServerFingerprint,
-		CACertPath:        caPath,
-		ClientCertPath:    certPath,
-		ClientKeyPath:     keyPath,
-		EnrolledAt:        time.Now().UTC(),
+		Name:                  req.Name,
+		Endpoint:              req.Endpoint,
+		ServerFingerprint:     req.ServerFingerprint,
+		ClientCertFingerprint: clientFP,
+		CACertPath:            caPath,
+		ClientCertPath:        certPath,
+		ClientKeyPath:         keyPath,
+		EnrolledAt:            time.Now().UTC(),
 	}
 	stored, aerr := cdrInstances.Add(inst)
 	if aerr != nil {
@@ -547,6 +589,13 @@ func apiCDRPolicies(w http.ResponseWriter, r *http.Request) {
 		}
 		added, err := cdrPolicyStore.Add(rule)
 		if err != nil {
+			// 2E-C: the name is the only key DELETE accepts, so a
+			// duplicate makes the deletion target ambiguous — refused
+			// as a conflict, distinct from a malformed rule.
+			if errors.Is(err, errCDRPolicyDuplicateName) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -623,17 +672,25 @@ func apiCDRRevokeRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := cdrInstances.Get(name)
-	if target == nil {
+	target, found := cdrInstances.GetCopy(name)
+	if !found {
 		http.Error(w, "instance not found", http.StatusNotFound)
 		return
 	}
 
-	// Derive the target's fingerprint from its client cert on disk.
-	fp, err := loadCertFingerprint(target.ClientCertPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("load target cert: %v", err), http.StatusInternalServerError)
-		return
+	// Target fingerprint: prefer the durable registry record (2E-C —
+	// kept current by enroll + renewal), falling back to deriving it
+	// from the client cert on disk for pre-2E-C entries. The stored
+	// value also keeps revocation possible when the on-disk PEM has
+	// been damaged — exactly the situation where revoking matters.
+	fp := target.ClientCertFingerprint
+	if fp == "" {
+		diskFP, err := loadCertFingerprint(target.ClientCertPath)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("load target cert: %v", err), http.StatusInternalServerError)
+			return
+		}
+		fp = diskFP
 	}
 
 	// Pick ANY other active pool member to make the call — Sluice
@@ -658,8 +715,14 @@ func apiCDRRevokeRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Prune the local registry entry now that its cert is dead on
 	// the Sluice side.  shredCDRCerts removes the PEMs from disk.
-	_, _ = cdrInstances.RemoveByName(name)
-	shredCDRCerts(target)
+	// A failed prune-persist is loud, not fatal: the revocation itself
+	// is durable on the Sluice side (its ledger), so a resurrected
+	// registry entry can only fail to dial — but the operator should
+	// know the local registry disagrees with what they just did.
+	if _, rerr := cdrInstances.RemoveByName(name); rerr != nil {
+		logger.Printf("CDR: revoke %q: prune registry entry: %v", sanitizeLog(name), rerr)
+	}
+	shredCDRCerts(&target)
 	if cdrActiveClient() != nil {
 		// Drop the pool entry by re-init so we stop trying to dial
 		// the revoked instance.
@@ -918,16 +981,17 @@ var cdrHealthSnapshot = func() *pb.HealthResponse { return nil }
 // (e.g. cert expiry) without polluting the persisted shape.
 func cdrInstanceToMap(inst *CDREnrolledInstance) map[string]any {
 	return map[string]any{
-		"name":              inst.Name,
-		"endpoint":          inst.Endpoint,
-		"serverFingerprint": inst.ServerFingerprint,
-		"caCertPath":        inst.CACertPath,
-		"clientCertPath":    inst.ClientCertPath,
-		"clientKeyPath":     inst.ClientKeyPath,
-		"enrolledAt":        inst.EnrolledAt.UTC().Format(time.RFC3339),
-		"version":           inst.Version,
-		"lastHealth":        formatOptionalTime(inst.LastHealth),
-		"enabled":           inst.IsEnabled(),
+		"name":                  inst.Name,
+		"endpoint":              inst.Endpoint,
+		"serverFingerprint":     inst.ServerFingerprint,
+		"clientCertFingerprint": inst.ClientCertFingerprint,
+		"caCertPath":            inst.CACertPath,
+		"clientCertPath":        inst.ClientCertPath,
+		"clientKeyPath":         inst.ClientKeyPath,
+		"enrolledAt":            inst.EnrolledAt.UTC().Format(time.RFC3339),
+		"version":               inst.Version,
+		"lastHealth":            formatOptionalTime(inst.LastHealth),
+		"enabled":               inst.IsEnabled(),
 	}
 }
 

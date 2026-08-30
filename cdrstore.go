@@ -53,6 +53,15 @@ type CDREnrolledInstance struct {
 	ClientCertPath string `json:"clientCertPath"`
 	ClientKeyPath  string `json:"clientKeyPath"`
 
+	// ClientCertFingerprint is the SHA-256 fingerprint of OUR client cert
+	// as issued by Sluice ("sha256:<hex>", sluiceauth.Fingerprint form).
+	// This is the ONLY key Sluice accepts for revocation, so it is
+	// recorded durably at enroll time and refreshed on renewal — a local
+	// delete shreds the PEMs, and without this field the still-trusted
+	// credential on the Sluice side would become unidentifiable (2E-C).
+	// Non-secret (a public-cert digest). Empty on pre-2E-C entries.
+	ClientCertFingerprint string `json:"clientCertFingerprint,omitempty"`
+
 	// Metadata for the admin GUI (Phase 3); populated from Enroll + Health.
 	EnrolledAt time.Time `json:"enrolledAt"`
 	Version    string    `json:"version,omitempty"`    // from last Health
@@ -128,19 +137,33 @@ func (r *CDRInstanceRegistry) Load(path string) error {
 
 // Save atomically persists the registry.  No-op when path is empty
 // (in-memory mode for tests).
+//
+// 2E-C commit boundary: Save takes the WRITE lock and persists while
+// holding it, and every mutator persists inside its own critical
+// section (saveLocked). The pre-2E-C shape — snapshot under RLock,
+// write unlocked — let a concurrent bare Save (the health poller's
+// server-cert-rotation path) land a PRE-removal snapshot AFTER
+// RemoveByName's own write, resurrecting a deleted (or revoked)
+// instance in the durable file for the next boot. Pinned by
+// TestCDR2EC_RemovalIsNotResurrectedByConcurrentSave. Do not move the
+// write back outside the lock.
 func (r *CDRInstanceRegistry) Save() error {
-	r.mu.RLock()
-	path := r.path
-	list := append([]*CDREnrolledInstance(nil), r.instances...)
-	r.mu.RUnlock()
-	if path == "" {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.saveLocked()
+}
+
+// saveLocked persists the current in-memory list.  MUST be called with
+// r.mu held (write mode).  No-op when path is empty.
+func (r *CDRInstanceRegistry) saveLocked() error {
+	if r.path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
+	data, err := json.MarshalIndent(r.instances, "", "  ")
 	if err != nil {
 		return fmt.Errorf("cdr instances: marshal: %w", err)
 	}
-	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(r.path, data, 0o600); err != nil {
 		return fmt.Errorf("cdr instances: %w", err)
 	}
 	return nil
@@ -170,29 +193,37 @@ func (r *CDRInstanceRegistry) Add(inst CDREnrolledInstance) (CDREnrolledInstance
 	}
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, existing := range r.instances {
 		if existing.Name == inst.Name {
-			r.mu.Unlock()
 			safe := strings.ReplaceAll(strings.ReplaceAll(inst.Name, "\n", "_"), "\r", "_")
 			return CDREnrolledInstance{}, fmt.Errorf("cdr instances: %q already enrolled", safe)
 		}
 	}
+	// Durable-or-nothing: persist inside the critical section; a failed
+	// write reverts the in-memory append so memory never claims an
+	// instance the next boot will not load (2E-C commit boundary).
+	prev := r.instances
 	copy := inst
-	r.instances = append(r.instances, &copy)
-	r.bumpVersion()
-	r.mu.Unlock()
-
-	if err := r.Save(); err != nil {
+	r.instances = append(append([]*CDREnrolledInstance(nil), prev...), &copy)
+	if err := r.saveLocked(); err != nil {
+		r.instances = prev
 		return CDREnrolledInstance{}, err
 	}
+	r.bumpVersion()
 	return copy, nil
 }
 
 // RemoveByName removes an instance; returns false if no match.
 // Callers are responsible for shredding the cert files on disk — this
 // store doesn't know the retention policy.
+//
+// Durable-or-nothing: the removal persists inside the critical section;
+// a failed write restores the entry and reports (false, err), so a
+// "removed" answer is always durable (never resurrected at next boot).
 func (r *CDRInstanceRegistry) RemoveByName(name string) (bool, error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	found := -1
 	for i := range r.instances {
 		if r.instances[i].Name == name {
@@ -201,16 +232,134 @@ func (r *CDRInstanceRegistry) RemoveByName(name string) (bool, error) {
 		}
 	}
 	if found < 0 {
-		r.mu.Unlock()
 		return false, nil
 	}
-	r.instances = append(r.instances[:found], r.instances[found+1:]...)
-	r.bumpVersion()
-	r.mu.Unlock()
-	if err := r.Save(); err != nil {
-		return true, err
+	prev := r.instances
+	next := make([]*CDREnrolledInstance, 0, len(prev)-1)
+	next = append(next, prev[:found]...)
+	next = append(next, prev[found+1:]...)
+	r.instances = next
+	if err := r.saveLocked(); err != nil {
+		r.instances = prev
+		return false, err
 	}
+	r.bumpVersion()
 	return true, nil
+}
+
+// SnapshotView returns VALUE copies of every instance, in registration
+// order. This is the render/read path for the admin API and the pool
+// builder — the pointers returned by List/Get alias live registry state
+// that the health poller mutates through locked mutators, so reading
+// their mutable fields without r.mu is a data race (pinned by
+// TestCDR2EC_InstanceListDoesNotRaceHealthPoller).
+func (r *CDRInstanceRegistry) SnapshotView() []CDREnrolledInstance {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]CDREnrolledInstance, len(r.instances))
+	for i := range r.instances {
+		out[i] = *r.instances[i]
+	}
+	return out
+}
+
+// GetCopy returns a value copy of the named instance.
+func (r *CDRInstanceRegistry) GetCopy(name string) (CDREnrolledInstance, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for i := range r.instances {
+		if r.instances[i].Name == name {
+			return *r.instances[i], true
+		}
+	}
+	return CDREnrolledInstance{}, false
+}
+
+// SetHealthMeta records runtime telemetry (Sluice version + last-health
+// time) under the lock. Deliberately NOT persisted — purely for the
+// admin GUI, matching the pre-2E-C behavior.
+func (r *CDRInstanceRegistry) SetHealthMeta(name, version string, at time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.instances {
+		if r.instances[i].Name == name {
+			r.instances[i].Version = version
+			r.instances[i].LastHealth = at
+			return true
+		}
+	}
+	return false
+}
+
+// StageRotation records an active Sluice server-cert rotation window
+// (dual-pin) and persists. Returns whether anything changed. On a
+// persist failure the staged window is KEPT in memory (the poller
+// retries the save on its next tick; staging is availability-positive,
+// not a trust widening — the new pin came from an authenticated Health
+// response).
+func (r *CDRInstanceRegistry) StageRotation(name, rotatedFP string, untilUnix int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.instances {
+		if r.instances[i].Name != name {
+			continue
+		}
+		if r.instances[i].RotatedFingerprint == rotatedFP &&
+			r.instances[i].RotatedFingerprintUntilUnix == untilUnix {
+			return false, nil
+		}
+		r.instances[i].RotatedFingerprint = rotatedFP
+		r.instances[i].RotatedFingerprintUntilUnix = untilUnix
+		r.bumpVersion()
+		return true, r.saveLocked()
+	}
+	return false, nil
+}
+
+// PromoteRotation adopts newPrimary as the canonical server pin (when
+// non-empty), clears the rotation window, and persists. Returns whether
+// anything changed.
+func (r *CDRInstanceRegistry) PromoteRotation(name, newPrimary string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.instances {
+		if r.instances[i].Name != name {
+			continue
+		}
+		if r.instances[i].RotatedFingerprint == "" &&
+			r.instances[i].RotatedFingerprintUntilUnix == 0 {
+			return false, nil
+		}
+		if newPrimary != "" {
+			r.instances[i].ServerFingerprint = newPrimary
+		}
+		r.instances[i].RotatedFingerprint = ""
+		r.instances[i].RotatedFingerprintUntilUnix = 0
+		r.bumpVersion()
+		return true, r.saveLocked()
+	}
+	return false, nil
+}
+
+// SetClientCertFingerprint updates the recorded client-cert fingerprint
+// (renewal path — the live credential changed) and persists. The
+// in-memory value is kept even when the persist fails: it is the truth
+// about the live cert; the error is returned for the caller to log.
+func (r *CDRInstanceRegistry) SetClientCertFingerprint(name, fp string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.instances {
+		if r.instances[i].Name != name {
+			continue
+		}
+		if r.instances[i].ClientCertFingerprint == fp {
+			return nil
+		}
+		r.instances[i].ClientCertFingerprint = fp
+		r.bumpVersion()
+		return r.saveLocked()
+	}
+	return fmt.Errorf("cdr instances: %q not found", strings.ReplaceAll(strings.ReplaceAll(name, "\n", "_"), "\r", "_"))
 }
 
 // Get returns a pointer to the stored instance by name, or nil.

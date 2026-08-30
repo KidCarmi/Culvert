@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Sluice/pkg/sluiceauth"
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
@@ -116,6 +117,11 @@ func probeCDRHealth(ctx context.Context) {
 // passed, promotes RotatedFingerprint to ServerFingerprint and clears
 // the rotation fields, then triggers a reinit so the dialled client
 // drops the old pin.
+// 2E-C: all registry mutations go through locked registry mutators that
+// persist inside their own critical section — the earlier shape wrote
+// through Get()'s shared pointer with no lock and then called the bare
+// Save(), which raced admin mutations in both memory and the durable
+// file (see cdrstore.go Save + TestCDR2EC_RemovalIsNotResurrectedByConcurrentSave).
 func propagateServerRotation(members []*cdrPooledClient) {
 	var needReinit bool
 	for _, pc := range members {
@@ -123,41 +129,39 @@ func propagateServerRotation(members []*cdrPooledClient) {
 		if h == nil {
 			continue
 		}
-		inst := cdrInstances.Get(pc.Name)
-		if inst == nil {
+		inst, ok := cdrInstances.GetCopy(pc.Name)
+		if !ok {
 			continue
 		}
 		newRotated := normalisePinHex(h.RotatedFingerprint)
-		// Case 1: grace window expired — promote + clear.
+		// Case 1: grace window expired — promote + clear.  The
+		// fingerprint advertised as "primary" in Health is the new one.
 		if inst.RotatedFingerprint != "" &&
 			inst.RotatedFingerprintUntilUnix > 0 &&
 			time.Now().Unix() >= inst.RotatedFingerprintUntilUnix {
-			// The fingerprint advertised as "primary" in Health is the
-			// new one.  Adopt it.
-			if newPrimary := normalisePinHex(h.ServerFingerprint); newPrimary != "" {
-				inst.ServerFingerprint = newPrimary
-			}
-			inst.RotatedFingerprint = ""
-			inst.RotatedFingerprintUntilUnix = 0
-			needReinit = true
-			if err := cdrInstances.Save(); err != nil {
+			changed, err := cdrInstances.PromoteRotation(pc.Name, normalisePinHex(h.ServerFingerprint))
+			if err != nil {
 				logger.Printf("CDR: rotation promote: save registry: %v", err)
 			}
-			logger.Printf("CDR: server-cert rotation complete for %q — promoted new fingerprint", sanitizeLog(pc.Name))
+			if changed {
+				needReinit = true
+				logger.Printf("CDR: server-cert rotation complete for %q — promoted new fingerprint", sanitizeLog(pc.Name))
+			}
 			continue
 		}
 		// Case 2: new rotation signalled.
 		if newRotated != "" &&
 			h.RotatedFingerprintUntilUnix > 0 &&
 			inst.RotatedFingerprint != newRotated {
-			inst.RotatedFingerprint = newRotated
-			inst.RotatedFingerprintUntilUnix = h.RotatedFingerprintUntilUnix
-			needReinit = true
-			if err := cdrInstances.Save(); err != nil {
+			changed, err := cdrInstances.StageRotation(pc.Name, newRotated, h.RotatedFingerprintUntilUnix)
+			if err != nil {
 				logger.Printf("CDR: rotation stage: save registry: %v", err)
 			}
-			logger.Printf("CDR: server-cert rotation signalled by %q — dual-pin active until %s",
-				sanitizeLog(pc.Name), time.Unix(h.RotatedFingerprintUntilUnix, 0).UTC().Format(time.RFC3339))
+			if changed {
+				needReinit = true
+				logger.Printf("CDR: server-cert rotation signalled by %q — dual-pin active until %s",
+					sanitizeLog(pc.Name), time.Unix(h.RotatedFingerprintUntilUnix, 0).UTC().Format(time.RFC3339))
+			}
 		}
 	}
 	if needReinit {
@@ -179,8 +183,8 @@ const cdrRenewWindow = 30
 // doesn't stall the poller.
 func maybeRenewExpiringClients(members []*cdrPooledClient) {
 	for _, pc := range members {
-		inst := cdrInstances.Get(pc.Name)
-		if inst == nil || inst.ClientCertPath == "" {
+		inst, ok := cdrInstances.GetCopy(pc.Name)
+		if !ok || inst.ClientCertPath == "" {
 			continue
 		}
 		exp, err := loadCertExpiry(inst.ClientCertPath)
@@ -202,7 +206,7 @@ func maybeRenewExpiringClients(members []*cdrPooledClient) {
 // credentials take effect for subsequent RPCs.  Errors are logged
 // but non-fatal — the old cert still works until its own NotAfter,
 // giving us up to cdrRenewWindow days of retries.
-func runRenewFor(pc *cdrPooledClient, inst *CDREnrolledInstance) {
+func runRenewFor(pc *cdrPooledClient, inst CDREnrolledInstance) {
 	defer pc.renewInFlight.Store(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -249,6 +253,18 @@ func runRenewFor(pc *cdrPooledClient, inst *CDREnrolledInstance) {
 
 	logger.Printf("CDR: RenewCert %q succeeded — days_until_expiry=%d",
 		sanitizeLog(pc.Name), resp.DaysUntilExpiry)
+
+	// 2E-C: the live credential changed, so refresh the durably recorded
+	// client-cert fingerprint (the Sluice-side revocation key — see
+	// CDREnrolledInstance.ClientCertFingerprint). Failure is logged, not
+	// fatal: the in-memory value is updated either way.
+	if fp, ferr := sluiceauth.Fingerprint(resp.ClientCert); ferr == nil {
+		if serr := cdrInstances.SetClientCertFingerprint(pc.Name, fp); serr != nil {
+			logger.Printf("CDR: RenewCert %q: record fingerprint: %v", sanitizeLog(pc.Name), serr)
+		}
+	} else {
+		logger.Printf("CDR: RenewCert %q: fingerprint renewed cert: %v", sanitizeLog(pc.Name), ferr)
+	}
 
 	// Re-init the client so the next RPC uses the new cert.  The old
 	// *CDRClient (and its grpc.ClientConn) gets closed inside
@@ -335,19 +351,17 @@ func applyAggregateHealth(agg probeAggregate) {
 
 // updateRegistryMetadataFromPool copies runtime telemetry (version,
 // last-health) from each pool member back onto its registry entry.
-// Not persisted — purely for the admin GUI.
+// Not persisted — purely for the admin GUI. 2E-C: writes go through the
+// locked SetHealthMeta — the earlier unlocked pointer write raced the
+// GET /api/cdr/instances render (pinned by
+// TestCDR2EC_InstanceListDoesNotRaceHealthPoller).
 func updateRegistryMetadataFromPool(members []*cdrPooledClient) {
 	for _, pc := range members {
 		h, _ := pc.HealthSnapshot()
 		if h == nil {
 			continue
 		}
-		inst := cdrInstances.Get(pc.Name)
-		if inst == nil {
-			continue
-		}
-		inst.Version = h.Version
-		inst.LastHealth = time.Now().UTC()
+		cdrInstances.SetHealthMeta(pc.Name, h.Version, time.Now().UTC())
 	}
 }
 
