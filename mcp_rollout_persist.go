@@ -61,11 +61,17 @@ func persistRolloutStateTo(st *rollout.State, path string) error {
 	if err != nil {
 		return fmt.Errorf("rollout persist: marshal: %w", err)
 	}
-	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+	if err := rolloutStateAtomicWrite(path, data, 0o600); err != nil {
 		return fmt.Errorf("rollout persist: write %s: %w", filepath.Base(path), err)
 	}
 	return nil
 }
+
+// rolloutStateAtomicWrite is the durable-write seam for the rollout state file. Production is
+// fileutil.AtomicWrite; tests inject a failure to exercise the coordinator's fail-closed durability
+// gate (a rollback that cannot be durably persisted must be rejected — for a real transition and for
+// the authoritative rehearsal alike, since both run through the same core).
+var rolloutStateAtomicWrite = fileutil.AtomicWrite
 
 // restoreRolloutState reads and restores a capability's durable rollout state into
 // st. A MISSING file is a genuinely-new state and is NOT an error (returns false,

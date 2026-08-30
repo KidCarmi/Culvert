@@ -89,7 +89,7 @@ func withCanaryReadyNode(t *testing.T) {
 func armCoordinatorRollbackRehearsed(t *testing.T) {
 	t.Helper()
 	prev := coordinatorRollbackRehearsedFn
-	coordinatorRollbackRehearsedFn = func(_ rollout.Capability) bool { return true }
+	coordinatorRollbackRehearsedFn = func(_ *mcpRollout, _ rollout.Capability, _ bool) bool { return true }
 	t.Cleanup(func() { coordinatorRollbackRehearsedFn = prev })
 }
 

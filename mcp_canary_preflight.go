@@ -38,9 +38,12 @@ import (
 // facts (events, policy, inventory, inspection, kill) derive from their own live signals so a
 // future live node with, say, degraded durable events fails on that specific fact.
 func canaryNodeFacts(capb rollout.Capability) canary.Facts {
-	// The two durableMu-dependent facts (kill-clear, rollback health) come from the process singleton
-	// via their own locking reads — this is the dry-run/status path with no lock held.
-	return canaryNodeFactsWith(capb, !getMCPRollout().stateFor(capb).Killed(), rollbackPathHealthy(capb))
+	// The durableMu-dependent facts (kill-clear, rollback-mechanics health, coordinator-rehearsal) come
+	// from the process singleton via their own LOCKING reads — this is the dry-run/status path with no
+	// lock held.
+	r := getMCPRollout()
+	return canaryNodeFactsWith(capb, !r.stateFor(capb).Killed(), rollbackPathHealthy(capb),
+		coordinatorRollbackRehearsedFn(r, capb, false))
 }
 
 // canaryNodeFactsLocked is canaryNodeFacts for a caller that ALREADY holds r.durableMu (the commit's
@@ -49,13 +52,15 @@ func canaryNodeFacts(capb rollout.Capability) canary.Facts {
 // variant (rollbackPathReadyLocked). Every other fact reads a holder unrelated to durableMu, so it
 // is safe to gather while the commit holds the lock.
 func canaryNodeFactsLocked(r *mcpRollout, capb rollout.Capability) canary.Facts {
-	return canaryNodeFactsWith(capb, !r.stateFor(capb).Killed(), r.rollbackPathReadyLocked(capb))
+	return canaryNodeFactsWith(capb, !r.stateFor(capb).Killed(), r.rollbackPathReadyLocked(capb),
+		coordinatorRollbackRehearsedFn(r, capb, true))
 }
 
-// canaryNodeFactsWith fills the scope-independent Canary facts, taking the two durableMu-dependent
-// facts as parameters so both the locking dry-run (canaryNodeFacts) and the in-lock commit
-// revalidation (canaryNodeFactsLocked) share one fact table without either re-entering durableMu.
-func canaryNodeFactsWith(capb rollout.Capability, emergencyKillClear, rollbackHealthy bool) canary.Facts {
+// canaryNodeFactsWith fills the scope-independent Canary facts, taking the durableMu-dependent facts
+// (kill-clear, rollback-mechanics health, coordinator-rehearsal) as parameters so both the locking
+// dry-run (canaryNodeFacts) and the in-lock commit revalidation (canaryNodeFactsLocked) share one fact
+// table without either re-entering the non-reentrant durableMu.
+func canaryNodeFactsWith(capb rollout.Capability, emergencyKillClear, rollbackHealthy, coordinatorRehearsed bool) canary.Facts {
 	live := liveExecDepsConfigured(capb == rollout.CapabilityManagement)
 	reg, cat := mcpInventory.sharedInventory()
 	return canary.Facts{
@@ -81,10 +86,11 @@ func canaryNodeFactsWith(capb rollout.Capability, emergencyKillClear, rollbackHe
 		// required — emergencyDisable that only lands in memory can be silently re-admitted on
 		// restart (Codex P1, PR #1249). See rollbackPathHealthy. This is rollback MECHANICS evidence.
 		RollbackPathHealthy: rollbackHealthy,
-		// The AUTHORITATIVE rollback path (coordinator-routed rehearsal) is a SEPARATE hard
-		// prerequisite (CANARY-ROLLBACK-COORDINATOR-REHEARSAL), FALSE in this build, so a node whose
-		// mechanics rehearsal passed is still not ready (owner decision — follow-up implements it).
-		RollbackCoordinatorRehearsed: coordinatorRollbackRehearsedFn(capb),
+		// The AUTHORITATIVE rollback path (coordinator-routed rehearsal, CANARY-ROLLBACK-COORDINATOR-
+		// REHEARSAL) is a SEPARATE hard prerequisite from the mechanics rehearsal above. It is TRUE only
+		// when a coordinator-routed drill left valid durable build-bound evidence; the caller resolves it
+		// under the correct lock discipline and passes it in.
+		RollbackCoordinatorRehearsed: coordinatorRehearsed,
 
 		// Scope/approval/budget facts default false here. They are ACTIVATION-level, so the node
 		// dry-run (EvaluateNode) skips them entirely — they are set and evaluated only by
@@ -140,10 +146,26 @@ func durableEventsHealthy(capb rollout.Capability) bool {
 // must exercise downstream activation logic arm this seam.
 var coordinatorRollbackRehearsedFn = productionCoordinatorRollbackRehearsed
 
-// productionCoordinatorRollbackRehearsed is fail-closed by construction: no coordinator-routed rollback
-// rehearsal exists in this build, so the authoritative rollback path is never certified and the
-// CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is always unmet.
-func productionCoordinatorRollbackRehearsed(_ rollout.Capability) bool { return false }
+// productionCoordinatorRollbackRehearsed validates the CANARY-ROLLBACK-COORDINATOR-REHEARSAL
+// prerequisite from DURABLE, build-bound evidence: it is TRUE only when a coordinator-routed rollback
+// rehearsal (mcp_canary_coordinator_rehearsal.go — the Canary→Shadow→Observe demotion driven through
+// the authoritative commitRolloutTransitionCore, then recovered to Observe) has succeeded for THIS
+// build and left a valid record. Fail-closed: a missing/corrupt/incomplete/not-routed/stale-build
+// record (and the shipped default, where no such rehearsal has run) returns false, so row 20 stays open
+// until a real coordinator-routed drill succeeds. It NEVER short-circuits on the mechanics rehearsal:
+// the two facts are DISTINCT (rollback_path_healthy vs rollback_coordinator_rehearsal_pending).
+// The `locked` parameter names whether the caller already holds r.durableMu (the 1c gate does; the
+// dry-run does not), so the fact reads the durable evidence via the correct locked/locking accessor and
+// never re-enters the non-reentrant durableMu.
+func productionCoordinatorRollbackRehearsed(r *mcpRollout, capb rollout.Capability, locked bool) bool {
+	if r == nil {
+		return false
+	}
+	if locked {
+		return r.coordinatorRollbackRehearsalAttestedLocked(capb)
+	}
+	return r.coordinatorRollbackRehearsalAttested(capb)
+}
 
 // rollbackPathHealthy reports whether the deterministic Canary→Shadow/Observe rollback path is
 // actually durable and EXECUTABLY rehearsed for the capability — not merely that the rollout
