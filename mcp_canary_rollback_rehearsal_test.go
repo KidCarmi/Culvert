@@ -41,6 +41,36 @@ func withRehearsalTestEnv(t *testing.T, buildVer string) {
 	t.Cleanup(func() { dataDir = prevDir; version = prevVer })
 }
 
+// TestRollbackRehearsal_NotSyncedWriteRemovesVisibleRecord is the Codex P1 (round-7) proof: a
+// not-durably-synced rehearsal write leaves the record visible (ErrReplacedNotSynced is post-rename),
+// so the write must remove the possibly-installed evidence before returning the failure — the
+// activation gate must not consume a rehearsal reported as not recorded.
+func TestRollbackRehearsal_NotSyncedWriteRemovesVisibleRecord(t *testing.T) {
+	withRehearsalTestEnv(t, "v9.9.9")
+	prev := rehearsalAtomicWrite
+	rehearsalAtomicWrite = func(path string, data []byte, perm os.FileMode) error {
+		_ = os.WriteFile(path, data, perm) // the replacement landed and is visible…
+		return fileutil.ErrReplacedNotSynced
+	}
+	t.Cleanup(func() { rehearsalAtomicWrite = prev })
+	rec := &canary.RollbackRehearsalRecord{
+		SchemaVersion: canary.RollbackRehearsalSchemaVersion,
+		Capability:    rollout.CapabilityGateway.String(),
+		Identity:      currentRuntimeIdentity(),
+		Executed:      true,
+		Steps:         canary.RequiredRollbackPath(),
+	}
+	if err := saveRollbackRehearsal(rollout.CapabilityGateway, rec); err == nil {
+		t.Fatal("a not-durably-synced rehearsal write must return an error")
+	}
+	if _, err := os.Stat(rollbackRehearsalPath(rollout.CapabilityGateway)); !os.IsNotExist(err) {
+		t.Fatal("a not-synced rehearsal write must remove the visible record it left")
+	}
+	if rollbackRehearsalAttested(rollout.CapabilityGateway) {
+		t.Fatal("SECURITY: the gate must not read a rehearsal the write reported as not recorded")
+	}
+}
+
 // TestRollbackRehearsal_NotAttestedByDefault is the dormancy proof: with no drill run, the
 // rollback path is NOT attested for either capability — nothing is created merely by asking.
 func TestRollbackRehearsal_NotAttestedByDefault(t *testing.T) {

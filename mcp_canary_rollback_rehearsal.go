@@ -162,7 +162,11 @@ func saveRollbackRehearsal(capb rollout.Capability, rec *canary.RollbackRehearsa
 	if err != nil {
 		return err
 	}
-	return rehearsalAtomicWrite(rollbackRehearsalPath(capb), raw, 0o600)
+	// ErrReplacedNotSynced is POST-rename, so a not-durable rehearsal record is already visible at the
+	// target — remove it before returning the failure so a drill reported as not recorded cannot be
+	// consumed by the activation gate (Codex P1).
+	path := rollbackRehearsalPath(capb)
+	return removeVisibleFileAfterNotSyncedWrite(path, rehearsalAtomicWrite(path, raw, 0o600))
 }
 
 // rehearsalAtomicWrite is the durable-write seam for the rehearsal record (tests inject failures,

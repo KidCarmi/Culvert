@@ -377,6 +377,15 @@ func RestoreBudgetEnforcer(budget Budget, generation uint64, snap BudgetSnapshot
 	if snap.TotalReserved < 0 || snap.TotalReserved > budget.MaxTotalExecutions {
 		return nil // corrupt spend
 	}
+	// Every grant records exactly one principal, tool, and server, so a nonzero spend REQUIRES at
+	// least one entry in each identity set. A syntactically valid snapshot whose spend is nonzero but
+	// whose identity history is missing or cleared would otherwise rebuild EMPTY sets and let a fresh
+	// principal/tool/server slip past a cap of one within the SAME generation after a restart — a
+	// distinct-identity blast-radius escape. Fail closed rather than treat lost identity history as
+	// unused capacity (Codex P1).
+	if snap.TotalReserved > 0 && (len(snap.Principals) == 0 || len(snap.Tools) == 0 || len(snap.Servers) == 0) {
+		return nil
+	}
 	if snap.StartUnixNano == 0 {
 		return nil // no window instant ⇒ cannot bound the TTL, fail closed
 	}

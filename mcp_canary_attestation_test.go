@@ -29,6 +29,35 @@ func TestShadowExitAttestation_NotSyncedWriteFails(t *testing.T) {
 	}
 }
 
+// TestShadowExitAttestation_NotSyncedWriteRemovesVisibleRecord is the Codex P1 (round-7) proof:
+// fileutil.ErrReplacedNotSynced is a POST-rename error, so the not-durable record is visible at the
+// target. A write reported as failed must not leave a readable record the gate could consume, so the
+// possibly-installed record is removed before the error is returned.
+func TestShadowExitAttestation_NotSyncedWriteRemovesVisibleRecord(t *testing.T) {
+	withAttestationTestEnv(t, "v9.9.9")
+	prev := attestationAtomicWrite
+	attestationAtomicWrite = func(path string, data []byte, perm os.FileMode) error {
+		_ = os.WriteFile(path, data, perm) // the replacement landed and is visible…
+		return fileutil.ErrReplacedNotSynced
+	}
+	t.Cleanup(func() { attestationAtomicWrite = prev })
+	a := &canary.ShadowExitAttestation{
+		SchemaVersion: canary.ShadowExitAttestationSchemaVersion,
+		Status:        canary.ShadowExitStatusPassed,
+		ReviewID:      "SXR-notsynced-visible",
+		Identity:      currentRuntimeIdentity(),
+	}
+	if err := saveShadowExitAttestation(a); err == nil {
+		t.Fatal("a not-durably-synced attestation write must return an error")
+	}
+	if _, err := os.Stat(shadowExitAttestationPath()); !os.IsNotExist(err) {
+		t.Fatal("a not-synced attestation write must remove the visible record it left")
+	}
+	if shadowExitReviewAttested() {
+		t.Fatal("SECURITY: the gate must not read an attestation the write reported as not persisted")
+	}
+}
+
 // TestShadowExitAttestation_RevokeIsDurable proves revocation removes the record and syncs the parent
 // directory (Codex P1, round-6): removeAttestationDurable deletes the file and returns nil on success,
 // so a subsequent readiness read fails closed to not-attested.

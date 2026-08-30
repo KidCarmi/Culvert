@@ -114,6 +114,26 @@ func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollou
 	logger.Printf("MCP canary runtime: %s persist for %s failed; durably removed the state to fail closed to dormant: %q", what, capb.String(), sanitizeLog(persistErr.Error()))
 }
 
+// removeVisibleFileAfterNotSyncedWrite eliminates a record that AtomicWrite REPLACED but could not
+// crash-sync (fileutil.ErrReplacedNotSynced is a POST-rename error: the new content is already
+// visible at the target, only the parent-dir fsync failed). For a durable PREREQUISITE that grants
+// capability (the attestation, the rehearsal evidence), a write reported as FAILED must not leave a
+// readable record that a gate could consume, so the possibly-installed record is removed and the
+// parent dir fsynced. The original write error is returned UNCHANGED so the caller still reports the
+// failure. Any other write error left the target unchanged (pre-rename) and is returned as-is without
+// touching it — never destroying a valid prior record on a transient failure (Codex P1).
+func removeVisibleFileAfterNotSyncedWrite(path string, writeErr error) error {
+	if errors.Is(writeErr, fileutil.ErrReplacedNotSynced) {
+		if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			logger.Printf("MCP canary: not-synced write left %s visible and its removal failed; a crash could expose a record reported as not persisted: write=%q remove=%q",
+				filepath.Base(path), sanitizeLog(writeErr.Error()), sanitizeLog(rerr.Error()))
+			return writeErr
+		}
+		_ = syncParentDir(path)
+	}
+	return writeErr
+}
+
 // syncParentDir fsyncs the directory containing path so a preceding unlink (or rename) is
 // crash-durable before the caller reports the fail-closed removal complete.
 func syncParentDir(path string) error {

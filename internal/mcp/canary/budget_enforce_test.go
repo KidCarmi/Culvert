@@ -266,14 +266,44 @@ func TestBudgetEnforcer_LegacySnapshotFailsClosedOnRate(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	b := testBudget(100)
 	b.MaxExecutionsPerMinute = 2
-	// A legacy snapshot: total spend recorded, but no rate-window fields (both zero).
-	legacy := BudgetSnapshot{Generation: 1, TotalReserved: 1, StartUnixNano: now.UnixNano()}
+	// A legacy snapshot: total spend recorded, but no rate-window fields (both zero). The identity
+	// history IS present (a nonzero spend requires it — see the identity-invariant test below), so this
+	// isolates the rate-window fail-closed behavior.
+	legacy := BudgetSnapshot{
+		Generation: 1, TotalReserved: 1, StartUnixNano: now.UnixNano(),
+		Principals: []string{"p1"}, Tools: []string{"t1"}, Servers: []string{"s1"},
+	}
 	restored := RestoreBudgetEnforcer(b, 1, legacy)
 	if restored == nil {
-		t.Fatal("a legacy snapshot must still restore")
+		t.Fatal("a legacy snapshot (with identity history) must still restore")
 	}
 	if o := restored.Reserve(1, now, idOne); o != BudgetDeniedRate {
 		t.Fatalf("a legacy snapshot must fail closed to a spent rate window, got %s", o)
+	}
+}
+
+// TestBudgetEnforcer_SnapshotWithSpendButNoIdentityFailsClosed is the Codex P1 (round-7) proof: a
+// syntactically valid snapshot whose spend is nonzero but whose identity history is missing/cleared
+// must fail CLOSED (nil) rather than rebuild empty sets — otherwise a fresh principal/tool/server
+// could slip past a cap of one within the same generation after a restart.
+func TestBudgetEnforcer_SnapshotWithSpendButNoIdentityFailsClosed(t *testing.T) {
+	b := testBudget(100)
+	b.MaxPrincipals, b.MaxTools, b.MaxServers = 1, 1, 1
+	// Nonzero spend but a missing identity dimension (Principals cleared) — must not restore.
+	for _, snap := range []BudgetSnapshot{
+		{Generation: 1, TotalReserved: 3, StartUnixNano: 1, RateWindowStartNano: 1, Tools: []string{"t1"}, Servers: []string{"s1"}},
+		{Generation: 1, TotalReserved: 3, StartUnixNano: 1, RateWindowStartNano: 1, Principals: []string{"p1"}, Servers: []string{"s1"}},
+		{Generation: 1, TotalReserved: 3, StartUnixNano: 1, RateWindowStartNano: 1, Principals: []string{"p1"}, Tools: []string{"t1"}},
+		{Generation: 1, TotalReserved: 1, StartUnixNano: 1, RateWindowStartNano: 1}, // all missing
+	} {
+		if RestoreBudgetEnforcer(b, 1, snap) != nil {
+			t.Fatalf("SECURITY: a nonzero-spend snapshot missing identity history must fail closed (nil): %+v", snap)
+		}
+	}
+	// A ZERO-spend snapshot with empty identity sets is legitimate (no grants yet) and must restore.
+	zero := BudgetSnapshot{Generation: 1, TotalReserved: 0, StartUnixNano: 1, RateWindowStartNano: 1}
+	if RestoreBudgetEnforcer(b, 1, zero) == nil {
+		t.Fatal("a zero-spend snapshot with no identity history is valid and must restore")
 	}
 }
 

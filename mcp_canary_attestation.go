@@ -101,9 +101,11 @@ func saveShadowExitAttestation(a *canary.ShadowExitAttestation) error {
 	// The attestation is a DURABLE Canary prerequisite that authorizes a live-mode transition, so a
 	// write that is visible but not crash-durable must NOT be reported as persisted:
 	// fileutil.ErrReplacedNotSynced (the replacement landed but the parent-dir fsync failed) is
-	// returned as a failure like any other, so a crash cannot lose a record the API called durable and
-	// let a live-mode commit proceed on an attestation that no longer exists (Codex P1).
-	return attestationAtomicWrite(shadowExitAttestationPath(), raw, 0o600)
+	// returned as a failure. Because that error is POST-rename, the not-durable record is already
+	// visible at the target — removeVisibleFileAfterNotSyncedWrite removes it before returning, so a
+	// write the POST reports as persisted:false is not readable by the gate (Codex P1).
+	path := shadowExitAttestationPath()
+	return removeVisibleFileAfterNotSyncedWrite(path, attestationAtomicWrite(path, raw, 0o600))
 }
 
 // attestationAtomicWrite is the durable-write seam for the attestation (tests inject failures,
