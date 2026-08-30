@@ -725,6 +725,39 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-B TRUE FINAL RECOVERY-FRESHNESS CLOSURE (this branch, 2026-08-30).**
+> External source review of the lifecycle candidate (3669666e) found two
+> remaining frontend defects; red-before at the exact candidate
+> (`decryption-recovery-freshness.test.tsx`, 5/5 red — including the literal
+> false "Rotation did not land" rendered from the warm TanStack cache, and a
+> rotation PUT dispatched under a throwing sessionStorage.setItem).
+> **(1) Stale-cache resolution.** `useSnapshot` caches with
+> staleTime:Infinity and SPA navigation keeps the QueryClient alive, so a
+> restored marker could be classified against the PRE-operation snapshot —
+> a landed operation read as NOT-LANDED, marker cleared, Rotate re-armed.
+> The tab now carries a RECOVERY-HYDRATION GATE
+> (inspecting → stale → fetch-failed | fresh): Rotate is withheld from the
+> first committed render until marker inspection completes; a restored
+> marker forces a fresh GET, and ONLY a successful fetch whose
+> dataUpdatedAt is strictly newer than the pre-recovery stamp opens the
+> gate — deliberately NOT the recovery refetch's own promise, because a
+> refetch cancelled by an unmount (StrictMode's simulated one included)
+> resolves "success" while ECHOING the cached result. Until then cached
+> data renders for context only ("Verifying an unresolved rotation…") and
+> cannot classify, clear the marker, or enable Rotate; a failed recovery
+> GET retains marker + latch with an explicit "Retry verification"; nothing
+> auto-mutates. **(2) Fail-closed marker persistence.**
+> `writeRotationRecovery` now verifies its own write (setItem + strict
+> subject-bound read-back) and returns a result; `runRotation` refuses the
+> irreversible dispatch without a provably recoverable marker ("The browser
+> could not create the recovery record required for a safe key rotation. No
+> rotation was sent.") — no memory-only or localStorage fallback, retry
+> possible once storage works. Real-binary SPA-navigation e2e added (same
+> app instance and QueryClient, no reload): a post-return GET is observed,
+> the receipt resolves LANDED, the marker clears only then, exactly one
+> rotation total. Backend, receipts, command contract, and every other
+> surface untouched.
+>
 > **2E-B FINAL LIFECYCLE CLOSURE — the T3 recovery identity survives the
 > client lifecycle (this branch, 2026-08-30).** External review of the
 > corrected candidate (7f9206b6) accepted the operation-identity design but
