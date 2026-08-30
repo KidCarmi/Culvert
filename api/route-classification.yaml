@@ -514,7 +514,7 @@ routes:
     visibility: admin-supported
     min_role: "admin"
     mutating: true
-    audit_expected: false
+    audit_expected: true
     danger_level: medium
     documented: true
   - route: "/api/cdr/health"
