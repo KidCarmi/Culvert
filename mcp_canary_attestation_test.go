@@ -234,28 +234,34 @@ func TestBuildStamp_CommitMakesIdentityUniquePerCommit(t *testing.T) {
 	if got := composeBuildStamp("v1.2.3", ""); got != "v1.2.3" {
 		t.Fatalf("no commit ⇒ bare version, got %q", got)
 	}
-	if (canary.RuntimeIdentity{BuildVersion: composeBuildStamp("dev", "")}).Valid() {
-		t.Fatal("dev with no commit must remain a non-unique placeholder (not valid)")
-	}
-	// Same tag, DIFFERENT commits ⇒ DISTINCT, valid identities (closes the reused-real-tag residual).
+	// Same tag, DIFFERENT commits ⇒ DISTINCT composed stamps (closes the reused-real-tag residual).
 	a := composeBuildStamp("v1.2.3", "aaaaaaaaaaaa")
 	b := composeBuildStamp("v1.2.3", "bbbbbbbbbbbb")
 	if a == b {
 		t.Fatalf("SECURITY: two commits under one tag must produce distinct stamps, got %q == %q", a, b)
 	}
-	if !(canary.RuntimeIdentity{BuildVersion: a}).Valid() || !(canary.RuntimeIdentity{BuildVersion: b}).Valid() {
-		t.Fatal("a tag+commit stamp must be a valid unique identity")
+	// Validity is decided by the RAW commit (currentRuntimeIdentity's Commit field), never by parsing
+	// the composed BuildVersion — the round-23 fix. Drive it through the live build stamp.
+	prevV, prevC := version, buildCommit
+	t.Cleanup(func() { version, buildCommit = prevV, prevC })
+
+	// A tag + real commit ⇒ composed identity, valid.
+	version, buildCommit = "v9.9.9", "deadbeefcafe"
+	if id := currentRuntimeIdentity(); id.BuildVersion != "v9.9.9+deadbeefcafe" || id.Commit != "deadbeefcafe" || !id.Valid() {
+		t.Fatalf("version+commit must compose and be valid, got build=%q commit=%q valid=%v", id.BuildVersion, id.Commit, id.Valid())
 	}
-	// A dev build WITH a commit is uniquely identifiable, so it is valid (unique, not a placeholder).
-	if !(canary.RuntimeIdentity{BuildVersion: composeBuildStamp("dev", "abc123def456")}).Valid() {
+	// A "dev" version WITH a real commit is uniquely identifiable ⇒ valid (the commit is the anchor).
+	version, buildCommit = "dev", "abc123def456"
+	if !currentRuntimeIdentity().Valid() {
 		t.Fatal("dev+commit is a unique identity and must be valid")
 	}
-	// currentRuntimeIdentity composes the live version+commit.
-	prevV, prevC := version, buildCommit
-	version, buildCommit = "v9.9.9", "deadbeefcafe"
-	t.Cleanup(func() { version, buildCommit = prevV, prevC })
-	if id := currentRuntimeIdentity(); id.BuildVersion != "v9.9.9+deadbeefcafe" || !id.Valid() {
-		t.Fatalf("currentRuntimeIdentity must compose version+commit and be valid, got %q valid=%v", id.BuildVersion, id.Valid())
+	// No commit ⇒ NOT valid, regardless of the version string — INCLUDING a SemVer version whose own
+	// "+<metadata>" is all hex, which must NOT be read as a commit (round-23 reuse hole).
+	for _, ver := range []string{"dev", "v1.2.3", "v1.2.3+deadbeef"} {
+		version, buildCommit = ver, ""
+		if id := currentRuntimeIdentity(); id.Valid() {
+			t.Fatalf("SECURITY: version %q with no commit must not be a valid identity (build=%q)", ver, id.BuildVersion)
+		}
 	}
 }
 

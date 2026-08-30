@@ -6,9 +6,18 @@ import "testing"
 // (satisfies ValidEvidenceDigest — Codex P2, round-11).
 const canonicalTestDigest = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
-// validTestBuild is a composed "<version>+<commit>" identity with a lowercase-hex commit digest,
-// the form Valid() now REQUIRES (a bare version is not a unique identity — Codex P1, round-22).
-const validTestBuild = "v1.2.3+abc123def456"
+// validTestCommit is a lowercase-hex commit digest; validTestBuild is the composed display/equality
+// stamp. Valid() checks the RAW commit (the Commit field), not a parse of BuildVersion — Codex
+// round-23 P1 — so a valid test identity must set BOTH (validTestIdentity).
+const (
+	validTestCommit = "abc123def456"
+	validTestBuild  = "v1.2.3+" + validTestCommit
+)
+
+// validTestIdentity is a valid, unique runtime identity (composed BuildVersion + raw Commit).
+func validTestIdentity() RuntimeIdentity {
+	return RuntimeIdentity{BuildVersion: validTestBuild, Commit: validTestCommit}
+}
 
 func validAttestation() *ShadowExitAttestation {
 	return &ShadowExitAttestation{
@@ -16,13 +25,13 @@ func validAttestation() *ShadowExitAttestation {
 		Status:             ShadowExitStatusPassed,
 		ReviewID:           "SXR-2026-001",
 		EvidenceDigest:     canonicalTestDigest,
-		Identity:           RuntimeIdentity{BuildVersion: validTestBuild},
+		Identity:           validTestIdentity(),
 		AttestedBy:         "admin@culvert",
 		AttestedAtUnixNano: 1_700_000_000_000_000_000,
 	}
 }
 
-func curIdentity() RuntimeIdentity { return RuntimeIdentity{BuildVersion: validTestBuild} }
+func curIdentity() RuntimeIdentity { return validTestIdentity() }
 
 func TestValidateAttestation_ValidPasses(t *testing.T) {
 	if r := ValidateAttestation(validAttestation(), curIdentity()); r != AttestationOK {
@@ -104,46 +113,51 @@ func TestValidEvidenceDigest(t *testing.T) {
 	// ValidateAttestation surfaces a bad digest as AttestationBadEvidence (durable defense-in-depth).
 	a := validAttestation()
 	a.EvidenceDigest = "deadbeef"
-	if r := ValidateAttestation(a, RuntimeIdentity{BuildVersion: a.Identity.BuildVersion}); r != AttestationBadEvidence {
+	if r := ValidateAttestation(a, curIdentity()); r != AttestationBadEvidence {
 		t.Fatalf("a bad digest must yield AttestationBadEvidence, got %q", r)
 	}
 	a.EvidenceDigest = canonicalTestDigest
-	if r := ValidateAttestation(a, RuntimeIdentity{BuildVersion: a.Identity.BuildVersion}); r != AttestationOK {
+	if r := ValidateAttestation(a, curIdentity()); r != AttestationOK {
 		t.Fatalf("a valid digest must validate, got %q", r)
 	}
 }
 
 // TestRuntimeIdentity_RequiresImmutableCommit is the Codex P1 proof (round-12 placeholder set,
-// tightened round-22): a valid identity must carry the immutable COMMIT component, not merely a
-// non-placeholder version. A bare version — placeholder OR concrete — is NOT unique (a `.git`-less
-// build stamps an empty commit that collapses to the bare version, and one tag can cover many
-// commits), so it fails closed and an old attestation can never cover materially changed code.
+// tightened round-22, made unambiguous round-23): a valid identity must carry a concrete lowercase-hex
+// commit digest in the dedicated Commit field. Valid() reads that field DIRECTLY — it never infers the
+// commit from BuildVersion — so a build with no commit is never unique regardless of what its version
+// string looks like, and one build can never cover materially changed code.
 func TestRuntimeIdentity_RequiresImmutableCommit(t *testing.T) {
-	// BARE stamps (no "+<commit>") are never valid — the placeholder fillers AND a concrete tag.
-	for _, s := range []string{"", "dev", "unknown", "none", "latest", "v1.2.3", "v2.0.0-rc1"} {
-		if (RuntimeIdentity{BuildVersion: s}).Valid() {
-			t.Fatalf("a bare build stamp %q (no commit component) must not be a valid unique identity", s)
+	// No commit (Commit == "") is never valid, whatever the version string is — INCLUDING a SemVer
+	// version whose own "+<metadata>" is all hex (the round-23 reuse hole: it must NOT be read as a
+	// commit). This is the load-bearing case.
+	for _, bv := range []string{"", "dev", "v1.2.3", "v2.0.0-rc1", "v1.2.3+deadbeef", "v1.2.3+abc123def456"} {
+		if (RuntimeIdentity{BuildVersion: bv}).Valid() { // Commit deliberately unset
+			t.Fatalf("a build with no Commit (BuildVersion %q) must not be a valid unique identity", bv)
 		}
 	}
-	// A composed "<version>+<hexcommit>" IS valid — the commit is the uniqueness anchor. Even a "dev"
-	// version is valid when it carries a real commit (a genuinely unique build).
-	for _, s := range []string{validTestBuild, "dev+abc123def456", "v9.9.9+deadbeefcafe"} {
-		if !(RuntimeIdentity{BuildVersion: s}).Valid() {
-			t.Fatalf("a composed version+commit stamp %q must be a valid unique identity", s)
+	// A real hex commit in the Commit field IS valid — the commit is the sole uniqueness anchor, so the
+	// version part is irrelevant (even "dev", or empty, is valid when a real commit is present).
+	for _, c := range []string{validTestCommit, "deadbeefcafe", "abcdef1234567890"} {
+		if !(RuntimeIdentity{BuildVersion: "v1.2.3+" + c, Commit: c}).Valid() {
+			t.Fatalf("an identity with a real hex commit %q must be valid", c)
 		}
 	}
-	// A composed stamp whose commit component is NOT a real digest is rejected: empty, too short, a
-	// placeholder, or non-hex (so a version's own "+<metadata>" cannot masquerade as a commit).
-	for _, s := range []string{"v1.2.3+", "v1.2.3+dev", "v1.2.3+abc", "v1.2.3+build.7", "v1.2.3+ABCDEF123456", "v1.2.3+nothexZ12345"} {
-		if (RuntimeIdentity{BuildVersion: s}).Valid() {
-			t.Fatalf("a stamp %q without a real hex commit digest must not be valid", s)
+	if !(RuntimeIdentity{BuildVersion: "dev+abc123def456", Commit: "abc123def456"}).Valid() {
+		t.Fatal("a dev version with a real commit is a unique identity and must be valid")
+	}
+	// A Commit that is not a real digest is rejected: empty, too short, a placeholder, uppercase, or
+	// otherwise non-lowercase-hex.
+	for _, c := range []string{"", "abc", "dev", "none", "ABCDEF123456", "nothexZ12345", "abc 123 def"} {
+		if (RuntimeIdentity{BuildVersion: "v1.2.3+" + c, Commit: c}).Valid() {
+			t.Fatalf("Commit %q is not a real hex digest and must not be valid", c)
 		}
 	}
-	// An attestation bound to a bare/placeholder build fails the identity binding (fail closed), even
-	// when the current build carries the same bare stamp.
+	// An attestation bound to a commitless build fails the identity binding (fail closed), even when
+	// the current build carries the same commitless stamp.
 	a := validAttestation()
 	a.Identity = RuntimeIdentity{BuildVersion: "dev"}
 	if r := ValidateAttestation(a, RuntimeIdentity{BuildVersion: "dev"}); r != AttestationIdentityMismatch {
-		t.Fatalf("a dev-stamped attestation must fail the identity binding, got %q", r)
+		t.Fatalf("a commitless attestation must fail the identity binding, got %q", r)
 	}
 }

@@ -33,15 +33,20 @@ func shadowExitAttestationPath() string {
 	return filepath.Join(dataDir, "mcp_shadow_exit_review.json")
 }
 
-// currentRuntimeIdentity is the software identity an attestation is bound to. The build stamp is the
-// linker-injected version, COMPOSED with the immutable commit digest (`buildCommit`) when present, so
-// the identity is UNIQUE PER COMMIT — two commits released under the same tag get distinct identities
-// and cannot share an attestation/rehearsal/runtime record (Codex P1). A redeploy to a different build
-// changes it, so a prior attestation no longer covers the current runtime. Local builds have no commit
-// stamp (buildCommit == ""), so composeBuildStamp emits the BARE version and RuntimeIdentity.Valid()
-// rejects it for lacking the required immutable commit component — they remain non-attestable (round-22).
+// currentRuntimeIdentity is the software identity an attestation is bound to. BuildVersion is the
+// linker-injected version COMPOSED with the immutable commit digest (`buildCommit`) as "<version>+<commit>"
+// — the durable identity a record persists and equality compares — so two commits released under the
+// same tag get distinct identities and cannot share an attestation/rehearsal/runtime record (Codex P1).
+// Commit carries the RAW buildCommit, which is the value RuntimeIdentity.Valid() checks directly:
+// Valid() never parses the commit out of BuildVersion, so a SemVer version that itself carries an
+// all-hex "+<metadata>" segment cannot masquerade as a commit (Codex round-23 P1). A build with no
+// commit stamp (buildCommit == "" — a local `go build` or `.git`-less archive) has Commit == "", so
+// Valid() rejects it and it remains non-attestable.
 func currentRuntimeIdentity() canary.RuntimeIdentity {
-	return canary.RuntimeIdentity{BuildVersion: composeBuildStamp(version, buildCommit)}
+	return canary.RuntimeIdentity{
+		BuildVersion: composeBuildStamp(version, buildCommit), // composed, durable/display + equality
+		Commit:       buildCommit,                             // RAW commit — the value Valid() checks (never parsed from BuildVersion)
+	}
 }
 
 // composeBuildStamp binds the version tag to the immutable commit digest as "<version>+<commit>" when

@@ -1,7 +1,5 @@
 package canary
 
-import "strings"
-
 // Shadow Exit Review attestation (§1). Canary readiness requires the full 13-criterion Shadow
 // Exit Review to have PASSED. That fact must be a durable, explicit, privileged attestation —
 // never a hard-coded boolean, never synthesized on startup or because tests passed. This file
@@ -25,18 +23,24 @@ const (
 )
 
 // RuntimeIdentity binds an attestation to the software identity it was reviewed against, so a
-// materially changed runtime (a redeploy to a different build) cannot inherit an old
-// attestation. BuildVersion is the linker-injected build stamp (package main `version`). The
-// architecture may extend this with config/policy identity later; build identity is the
-// minimum that makes "materially changed runtime" detectable.
+// materially changed runtime (a redeploy to a different build) cannot inherit an old attestation.
+// The architecture may extend this with config/policy identity later; build identity is the minimum
+// that makes "materially changed runtime" detectable.
 type RuntimeIdentity struct {
+	// BuildVersion is the DURABLE identity: the composed "<version>+<commit>" stamp
+	// (package main currentRuntimeIdentity → composeBuildStamp). It is what is PERSISTED in a record
+	// and compared for equality between a stored record and the current runtime.
 	BuildVersion string `json:"build_version"`
+	// Commit is the RAW immutable commit digest (package main `buildCommit`) — the uniqueness anchor
+	// Valid() checks DIRECTLY. It is runtime-only (json:"-", never persisted): a durable record
+	// identifies its build by the composed BuildVersion string, and only the CURRENT identity's
+	// Valid() is ever consulted (ValidateAttestation/ValidateRehearsal check `current.Valid()`, never
+	// the record's). Keeping the commit as a distinct field means Valid() never has to INFER it from
+	// BuildVersion — a SemVer version can itself carry an all-hex "+<metadata>" segment that a
+	// string-splitting parser would mistake for a commit, letting a `.git`-less build reuse another's
+	// records (Codex round-23 P1).
+	Commit string `json:"-"`
 }
-
-// buildStampCommitSep is the separator currentRuntimeIdentity (package main) uses to compose the
-// runtime identity as "<version>+<commit>" (composeBuildStamp). '+' is RESERVED for the commit: the
-// commit is appended last, so the component after the LAST '+' is always the commit digest.
-const buildStampCommitSep = '+'
 
 // Commit-stamp length bounds: a git short SHA (>= 7; our builds stamp `git rev-parse --short=12`)
 // up to a full SHA-256 (64). A value outside this range is not a real commit digest.
@@ -45,22 +49,9 @@ const (
 	maxCommitStampLen = 64
 )
 
-// splitBuildStamp separates a composed "<version>+<commit>" stamp at the LAST '+'. ok is false when
-// the stamp carries no '+' at all — a BARE version with no commit component (a `.git`-less build
-// stamps an empty commit, so composeBuildStamp emits the bare version). Splitting on the last '+'
-// tolerates a version that itself carries "+<metadata>": the commit is always the final segment.
-func splitBuildStamp(s string) (version, commit string, ok bool) {
-	idx := strings.LastIndexByte(s, buildStampCommitSep)
-	if idx < 0 {
-		return s, "", false
-	}
-	return s[:idx], s[idx+1:], true
-}
-
 // validCommitStamp reports whether c is a concrete commit digest: minCommitStampLen..maxCommitStampLen
-// LOWERCASE-HEX characters. Requiring hex both proves a real commit is present AND stops a version's
-// own "+<metadata>" segment (e.g. semver "+build.7") from being mistaken for a commit — closing the
-// bare-version fail-open unambiguously (Codex P1, round-22).
+// LOWERCASE-HEX characters. Requiring hex proves a real commit digest (the `git rev-parse --short` ..
+// full-SHA form our builds stamp), rejecting the empty default and non-digest placeholders alike.
 func validCommitStamp(c string) bool {
 	if len(c) < minCommitStampLen || len(c) > maxCommitStampLen {
 		return false
@@ -76,21 +67,17 @@ func validCommitStamp(c string) bool {
 	return true
 }
 
-// Valid reports whether an identity carries a UNIQUE, immutable build stamp: the composed
-// "<version>+<commit>" form (currentRuntimeIdentity → composeBuildStamp) with a concrete lowercase-hex
-// commit digest. A BARE version with no commit component is NOT unique — the same version tag can
-// cover materially different commits, and a `.git`-less source archive built with the same VERSION arg
-// stamps an EMPTY commit that collapses to that bare version — so it must not satisfy the identity
-// binding and fails closed (Codex P1, round-22): merely rejecting a small placeholder list let every
-// bare non-placeholder tag (e.g. "v1.2.3") through, allowing one build to reuse another's
-// attestation/rehearsal/runtime record. The COMMIT digest is the uniqueness anchor; the version part
-// is informational, so even a "dev" version is a valid identity when it carries a real commit.
+// Valid reports whether an identity carries a UNIQUE, immutable build stamp: a concrete lowercase-hex
+// commit digest in the dedicated Commit field. A build with no commit (buildCommit == "" — a local
+// `go build`, or a `.git`-less source archive) is NOT unique — the same version tag can cover
+// materially different commits — so it fails closed and one build can never reuse another's
+// attestation/rehearsal/runtime record. Valid() checks the RAW Commit field and never PARSES it out
+// of BuildVersion: a SemVer version can carry an all-hex "+<metadata>" segment (e.g. "v1.2.3+deadbeef")
+// that a string parser would mistake for a commit, reopening the reuse hole (Codex round-23 P1). The
+// commit digest is the sole uniqueness anchor; the version part is informational (a "dev" version with
+// a real commit is a valid, unique identity).
 func (i RuntimeIdentity) Valid() bool {
-	_, commit, ok := splitBuildStamp(i.BuildVersion)
-	if !ok {
-		return false
-	}
-	return validCommitStamp(commit)
+	return validCommitStamp(i.Commit)
 }
 
 // ShadowExitAttestation is the durable, schema-versioned record that the Shadow Exit Review
