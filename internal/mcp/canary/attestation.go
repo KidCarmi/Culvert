@@ -66,8 +66,10 @@ func validCommitStamp(c string) bool {
 		return false
 	}
 	for i := 0; i < len(c); i++ {
-		ch := c[i]
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+		switch ch := c[i]; {
+		case ch >= '0' && ch <= '9', ch >= 'a' && ch <= 'f':
+			// lowercase hex digit (matches ValidEvidenceDigest's canonical-hex check)
+		default:
 			return false
 		}
 	}
