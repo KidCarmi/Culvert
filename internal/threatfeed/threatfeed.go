@@ -981,6 +981,40 @@ func canonicalHost(host string) string {
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
+// restoreTimestampsLocked restores the three sync timestamps from a loaded DB,
+// back-filling the two that post-date the original on-disk format. Callers MUST
+// hold tf.mu for writing.
+//
+// Split out of loadFromDisk to keep that function under the cyclop threshold,
+// but it earns its own name: each back-fill encodes a claim about what an older
+// DB meant, and both are deliberately conservative — an upgraded appliance is
+// never reported as FRESHER than the DB it loaded.
+func (tf *Feed) restoreTimestampsLocked(db feedDB) {
+	tf.lastSync = db.LastSync
+	tf.lastSyncErr = db.LastSyncErr
+
+	switch {
+	case !db.LastSuccess.IsZero():
+		tf.lastSuccess = db.LastSuccess
+	case db.LastSyncErr == "":
+		// Legacy DB (saved before LastSuccess existed) or a DB saved by a
+		// clean sync before this field was ever set: LastSync IS the last
+		// success, so back-fill it rather than reporting "never synced".
+		tf.lastSuccess = db.LastSync
+	}
+
+	// LastRefresh back-fill: a DB written before the field existed recorded
+	// only fully-clean rounds, so its LastSuccess IS its last refresh. Never
+	// weaker than the value it replaces — a legacy DB can only be reported as
+	// exactly as fresh as it already claimed to be, so the first boot after an
+	// upgrade cannot force a fleet-wide fetch.
+	if !db.LastRefresh.IsZero() {
+		tf.lastRefresh = db.LastRefresh
+		return
+	}
+	tf.lastRefresh = tf.lastSuccess
+}
+
 func (tf *Feed) loadFromDisk(path string) error {
 	data, err := os.ReadFile(path) // #nosec G304 -- admin-configured path
 	if os.IsNotExist(err) {
@@ -1026,26 +1060,7 @@ func (tf *Feed) loadFromDisk(path string) error {
 	tf.mu.Lock()
 	tf.urls = urls
 	tf.domains = domains
-	tf.lastSync = db.LastSync
-	tf.lastSyncErr = db.LastSyncErr
-	switch {
-	case !db.LastSuccess.IsZero():
-		tf.lastSuccess = db.LastSuccess
-	case db.LastSyncErr == "":
-		// Legacy DB (saved before LastSuccess existed) or a DB saved by a
-		// clean sync before this field was ever set: LastSync IS the last
-		// success, so back-fill it rather than reporting "never synced".
-		tf.lastSuccess = db.LastSync
-	}
-	// LastRefresh back-fill: a DB written before the field existed recorded
-	// only fully-clean rounds, so its LastSuccess IS its last refresh. Never
-	// weaker than the value it replaces — a legacy DB can only be reported as
-	// exactly as fresh as it already claimed to be.
-	if !db.LastRefresh.IsZero() {
-		tf.lastRefresh = db.LastRefresh
-	} else {
-		tf.lastRefresh = tf.lastSuccess
-	}
+	tf.restoreTimestampsLocked(db)
 	// Restore the persisted allowlist. The guard keys on nil, not
 	// len()==0, so an admin-cleared explicit-empty `[]` (saved as
 	// `"domain_allowlist": []` per the no-omitempty tag) replaces the
