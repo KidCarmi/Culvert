@@ -725,6 +725,42 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-B FINAL LIFECYCLE CLOSURE — the T3 recovery identity survives the
+> client lifecycle (this branch, 2026-08-30).** External review of the
+> corrected candidate (7f9206b6) accepted the operation-identity design but
+> found its CLIENT lifetime wrong: the unresolved-rotation latch lived only
+> in component React state, so navigating away or reloading before
+> authoritative resolution forgot operation X and re-armed Rotate — if X had
+> landed, a "retry" is a NEW operation id backend idempotency cannot stop.
+> Red-before at the exact candidate (`decryption-rotation-lifecycle.test.tsx`,
+> 6/6 red: operation forgotten after remount, Rotate re-enabled, no marker
+> at dispatch). Closure: `rotationRecovery.ts` — ONE narrow sessionStorage
+> marker (`culvert.decryption.rotation-recovery.v1`, a sanctioned per-site
+> exception to the frontend contract's §9.B1 storage ban) holding ONLY
+> non-secret facts `{version, operationId, preSeq, startedAt, subject}`
+> (field allowlist pinned; never key material/key ids/config drafts),
+> WRITTEN BEFORE the network dispatch (load-bearing order, pinned),
+> subject-bound (a foreign-identity marker is discarded, never inherited),
+> cleared at the auth boundary via a module-level `registerAuthCleanup` —
+> deliberately NOT on component unmount. On remount/reload the tab restores
+> the latch (an effect, not a state initializer — StrictMode's simulated
+> unmount runs the boundary cleanup between effect passes), keeps Rotate
+> withheld, and resolves the stored operation with the accepted server
+> matrix: LANDED / NOT-LANDED clear the marker terminally (as do a confirmed
+> response and an authoritative server error); AMBIGUOUS retains it and now
+> has an EXPLICIT admin recovery ceremony ("Resolve ambiguous rotation…",
+> typed ABANDON, T3-strength) that dispatches NO mutation — it abandons
+> attribution for the old operation so a future rotation is a completely new
+> deliberate T3 with a new identity. The v2 operation id widened from 64 to
+> 128 bits (32 hex; server contract and receipt semantics unchanged).
+> Real-binary lifecycle e2e on the throwaway appliance: a deterministic
+> transport-loss seam (route interception executes the PUT, drops the
+> response) + full page reload recovers the SAME operation, resolves it from
+> the appliance's receipt with zero second rotation; the ambiguous ceremony
+> is exercised with key/sequence/posture verified byte-identical. Backend,
+> receipts, sequence, command contract, and every other 2E-B surface are
+> untouched.
+>
 > **2E-B FINAL CORRECTION — rotation operation truth, redaction command
 > presence, recovery unlatch (this branch, 2026-08-30).** External review of
 > the 2E-B candidate (56c23e64) found the rotation unknown-outcome contract
