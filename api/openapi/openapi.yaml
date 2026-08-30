@@ -11291,8 +11291,14 @@ paths:
               type: object
               required: [review_id, evidence_digest]
               properties:
-                review_id: { type: string }
-                evidence_digest: { type: string }
+                # review_id is the only free-text field that reaches the durable attestation
+                # record, so it is byte-bounded at the trust boundary (maxShadowExitReviewIDBytes)
+                # rather than inheriting the admin middleware's 1 MiB body cap. Over-bound input
+                # is rejected 400, never truncated (a truncated identity would name a different
+                # review than the operator attested).
+                review_id: { type: string, minLength: 1, maxLength: 256 }
+                # Canonical lowercase-hex SHA-256 of the reviewed Shadow Exit evidence bundle.
+                evidence_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
         '200': { description: Attestation created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }

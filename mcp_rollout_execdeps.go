@@ -99,16 +99,28 @@ func liveExecDepsConfigured(capbManagement bool) bool {
 //   - Canary/Production require the LIVE tier (liveExecDepsConfigured).
 //   - Shadow requires only the SHADOW tier (shadowDepsConfigured).
 //   - Disabled/Observe require nothing.
+//   - ANY OTHER mode value is refused outright.
 //
-// Fail-closed: an unknown mode falls through to the Shadow/Observe arms and is only
-// admitted if it is Disabled/Observe.
+// The last arm is the fail-closed one and it is enumerated, not defaulted. A bare
+// `default: return true` reads as "everything else needs nothing", which admits an
+// UNKNOWN mode — the opposite of this gate's contract, and precisely the shape the
+// enum-vs-default rule exists to stop. The three callers (the admin transition, the
+// CP→DP apply, and the shared commit path) each reach this gate with a mode drawn from
+// a different source, and one of them — the startup reconcile of a RECOVERED envelope —
+// is documented as deliberately skipping full payload re-validation, so this gate must
+// not lean on someone else having proven the mode well-formed. Downstream
+// SignedConfig.Validate (Mode.Valid) does reject an unknown mode today, which is why
+// this is defense-in-depth rather than a live hole; enumerating the admissible modes
+// makes the gate independently correct instead of correct-by-collaborator.
 func modeExecReady(mode rollout.Mode, capbManagement bool) bool {
 	switch {
 	case mode.RequiresLiveExecution():
 		return liveExecDepsConfigured(capbManagement)
 	case mode == rollout.ModeShadow:
 		return shadowDepsConfigured(capbManagement)
-	default:
+	case mode == rollout.ModeDisabled, mode == rollout.ModeObserve:
 		return true
+	default:
+		return false // unknown/invalid mode — never admit a tier we cannot name
 	}
 }

@@ -182,6 +182,17 @@
 - **Update 2026-07-11:** the updater module was removed (DEBT-008/RISK-ACC-1 CLOSED), so those two
   `docker/docker` masks were retired and `.trivyignore` is now empty. The `exp:`-date mechanism and
   the full-severity non-blocking pass remain the pattern for any future suppression.
+- **Update 2026-08-30 — one suppression is ACTIVE again; recorded here so the register, not just the
+  file, carries it.** `.trivyignore` holds `CVE-2026-14456 exp:2026-09-15` (HIGH; OpenSSL QUIC-server
+  unbounded-memory DoS in Alpine's `libcrypto3`/`libssl3`). The base image `alpine:3.24` ships
+  `3.5.7-r0` and the fix is `3.5.8-r0`; 3.24 is the newest Alpine release, and the runtime stage
+  already runs `apk upgrade --no-cache`, so there is no base bump available — the entry becomes a
+  no-op the moment Alpine publishes the package. Reachability: the culvert binary is a static
+  `CGO_ENABLED=0` Go build that does not link Alpine's libssl, and the appliance runs no OpenSSL
+  QUIC server. **The `exp:` date is the control, and it is close** — after 2026-09-15 trivy stops
+  honoring the entry and the blocking gate goes red, which is the intended forcing function. Do not
+  extend the date by reflex: per this row's original fix, extending requires re-validating the
+  reachability rationale, and the preferred resolution is the `apk upgrade` picking up `3.5.8-r0`.
 - Original finding preserved below for context.
 
 ### (was) RISK-006 — Trivy gate config blind spots · MEDIUM · OPEN

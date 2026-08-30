@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,6 +26,12 @@ import (
 // shadowExitReviewAttested() only READS. A corrupt/unknown-schema file NEVER attests (it is
 // quarantined and treated as absent). A build change invalidates a prior attestation (identity
 // binding) so a materially changed runtime is never covered by an old review.
+
+// maxShadowExitReviewIDBytes bounds the free-text Shadow Exit review identity that reaches the
+// durable attestation record. It is generous for any real review artifact / case id yet keeps the
+// record small enough to re-read cheaply on every readiness evaluation. It matches the tooltrust
+// store's maxIDBytes-class bounds rather than inheriting the middleware's 1 MiB body cap.
+const maxShadowExitReviewIDBytes = 256
 
 // shadowExitAttestationPath is the durable location. Operator-owned, fixed under dataDir.
 func shadowExitAttestationPath() string {
@@ -108,18 +113,11 @@ func sweepCorruptShadowExitAttestation() {
 }
 
 // strictDecodeAttestationJSON decodes exactly one JSON value into v, rejecting unknown fields and any
-// trailing data — the same discipline the tooltrust/policylearn stores use so a malformed or
-// tampered record is treated as corruption, not silently accepted.
+// trailing data — the same discipline the tooltrust store uses so a malformed or tampered record is
+// treated as corruption, not silently accepted. It delegates the end-of-stream proof to
+// strictDecodeSingleJSONValue (see there for why Decoder.More is NOT an EOF check).
 func strictDecodeAttestationJSON(raw []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if dec.More() {
-		return errors.New("trailing data after JSON value")
-	}
-	return nil
+	return strictDecodeSingleJSONValue(raw, v)
 }
 
 // shadowExitReviewAttested reports whether a durable, PASSED Shadow Exit Review attestation
@@ -233,6 +231,16 @@ func apiMCPShadowExitReviewPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ReviewID == "" || req.EvidenceDigest == "" {
 		http.Error(w, "shadow_exit_review_id_and_evidence_required", http.StatusBadRequest)
+		return
+	}
+	// review_id is the ONE free-text field that reaches the durable record. Bound it at the trust
+	// boundary the way every comparable durable free-text field is bounded (internal/mcp/tooltrust
+	// maxIDBytes/maxReasonBytes): unbounded, it is admitted up to the middleware's 1 MiB body cap and
+	// then written verbatim into mcp_shadow_exit_review.json, re-read on EVERY Canary readiness
+	// evaluation and echoed on the viewer-visible GET. Reject over-bound input rather than truncate —
+	// a silently-truncated review identity would name a different review than the operator attested.
+	if len(req.ReviewID) > maxShadowExitReviewIDBytes {
+		http.Error(w, "shadow_exit_review_id_too_long", http.StatusBadRequest)
 		return
 	}
 	// The evidence digest must be a canonical hex SHA-256 digest that identifies the exact reviewed
