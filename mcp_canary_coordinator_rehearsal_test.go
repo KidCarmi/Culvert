@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -255,6 +256,44 @@ func TestCoordinatorRehearsal_InvalidationFailurePoisonsRow20(t *testing.T) {
 	}
 	if !productionCoordinatorRollbackRehearsed(r, capb, false) {
 		t.Fatal("a successful re-run on a recovered volume must clear the poison and re-close row 20")
+	}
+}
+
+// TestCoordinatorRehearsal_LiveArmedRejectsBothPathsIdentically pins the security-decision PARITY
+// against the live-tier posture (Codex P1). The shared Shadow preflight (gate 1b in
+// commitRolloutTransitionCore) forbids a Shadow target while the live-execution tier is armed
+// (shadowPFLiveRequirement), and it is the SAME gate for the production coordinator's real Canary→Shadow
+// demotion AND the rehearsal drill — so BOTH are rejected identically, and the rehearsal can never record
+// a row-20 PASS in a posture where the real demotion would be refused. (This is why the rehearsal legitimately
+// runs with the live tier OFF: a real rollback also cannot demote to Shadow while live is armed — it must
+// quiesce the live tier first, and the drill models that post-quiesce demotion. In the shipped build the
+// live tier is NEVER armed, so this posture is unreachable in production and no real Canary→Shadow rollback
+// occurs; faithfully rehearsing the live-armed quiesce-then-demote sequence requires the live tier itself
+// and is deferred to the live-tier phase — see the posture report's residual.)
+func TestCoordinatorRehearsal_LiveArmedRejectsBothPathsIdentically(t *testing.T) {
+	r := withCoordinatorRehearsalEnv(t)
+	capb := rollout.CapabilityGateway
+
+	// Simulate the live tier being armed WITHOUT composing any live executor: this flips only the readiness
+	// flag liveExecDepsConfigured reads — no LiveExecutor/upstream/broker is composed and
+	// markGatewayExecDepsReady is never called. It is a fail-closed simulation (we assert REJECTION), and it
+	// is restored on cleanup.
+	globalExecDeps.gateway.Store(true)
+	t.Cleanup(func() { globalExecDeps.gateway.Store(false) })
+
+	// (A) The production coordinator's real Shadow demotion is rejected by the shared preflight. It fails at
+	// gate 1b, BEFORE any state mutation, so live rollout state is untouched.
+	_, shadowCfg, _ := rehearsalDrillConfigs(capb)
+	if err := r.commitRolloutTransitionAt(&shadowCfg, "test", time.Now(), rollout.OriginSynthetic); !errors.Is(err, errShadowPreflightFailed) {
+		t.Fatalf("the real coordinator Shadow demotion with the live tier armed must be rejected by the Shadow preflight, got %v", err)
+	}
+	// (B) The authoritative rehearsal drill is rejected IDENTICALLY (its Shadow rung hits the same preflight)
+	// and records NO row-20 PASS.
+	if err := r.recordCoordinatorRehearsal(capb); err == nil {
+		t.Fatal("SECURITY: the rehearsal must FAIL when the live tier is armed (same shared Shadow preflight as the real demotion)")
+	}
+	if r.coordinatorRollbackRehearsalAttested(capb) {
+		t.Fatal("SECURITY: no row-20 PASS may be recorded while the live tier is armed")
 	}
 }
 

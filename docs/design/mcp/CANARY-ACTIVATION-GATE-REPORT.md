@@ -107,6 +107,23 @@ Arming the live tier (compose a live executor + upstream + materialize-broker, c
 `beginCanaryActivation` from that armed path, and executing the first Canary per
 `CANARY-FIRST-RUNBOOK.md` — each a **separately-reviewed activation**, none performed here.
 
+**Deferred to the live-tier phase — `CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL`.** The shared Shadow
+preflight forbids a Shadow target while the live-execution tier is armed
+(`shadowPFLiveRequirement`/`forbidden_live_execution_requirement`, `mcp_shadow_preflight.go`). This is
+the SAME gate for the production coordinator's real `Canary→Shadow` demotion AND the rehearsal drill, so
+both are rejected identically when the live tier is armed — proven by
+`TestCoordinatorRehearsal_LiveArmedRejectsBothPathsIdentically`, which is why the rehearsal can never
+record a row-20 PASS in a posture where the real demotion would be refused. It follows that a real
+`Canary→Shadow` rollback must QUIESCE the live tier before the demotion (demote with live off), and the
+rehearsal legitimately runs with the live tier off, modeling that post-quiesce demotion. In the shipped
+build the live tier is NEVER armed, so no real `Canary→Shadow` rollback occurs and row 20 cannot
+mis-certify one. Faithfully rehearsing the live-armed **quiesce-then-demote** sequence (and coupling row
+20 to that posture) requires the live tier itself to exist and is therefore a HARD prerequisite for the
+live-tier phase, NOT closable here (§9 forbids composing the live tier in this PR). A naive "fail row 20
+when the live tier is armed" read-guard is deliberately NOT added: Canary activation itself requires the
+live tier armed, so such a guard would deadlock every activation — the live-armed rehearsal is the
+correct home for this, not a read-time gate.
+
 ### OPEN hard prerequisite — `CANARY-ROLLBACK-COORDINATOR-REHEARSAL`
 
 The current rollback rehearsal drives the scratch demotion ladder directly through
