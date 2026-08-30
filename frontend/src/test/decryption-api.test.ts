@@ -187,11 +187,11 @@ it("rotation sends rotate_key + operation identity + the fence and NO posture fi
   expect(res.keyId).toBe("gen1");
 });
 
-it("mintRotationOperationId mints fresh 16-hex identities (never reused)", () => {
+it("mintRotationOperationId mints fresh 128-bit (32-hex) identities (never reused)", () => {
   const a = mintRotationOperationId();
   const b = mintRotationOperationId();
-  expect(a).toMatch(/^[0-9a-f]{16}$/);
-  expect(b).toMatch(/^[0-9a-f]{16}$/);
+  expect(a).toMatch(/^[0-9a-f]{32}$/);
+  expect(b).toMatch(/^[0-9a-f]{32}$/);
   expect(a).not.toBe(b);
 });
 

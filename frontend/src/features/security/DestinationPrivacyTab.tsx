@@ -28,6 +28,7 @@ import { ConfirmationDialog } from "../../design-system/dialog";
 import type { ConfirmResult } from "../../design-system/dialog";
 import { SnapshotBar } from "../../shared/snapshot";
 import { useObjectPage } from "../objects/useObjectPage";
+import { useAuth } from "../../auth/AuthProvider";
 import { asRevisionConflict } from "../../api/urlcat";
 import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import {
@@ -36,6 +37,11 @@ import {
   putDestinationPrivacy,
   rotatePseudonymKey,
 } from "../../api/decryption";
+import {
+  clearRotationRecovery,
+  readRotationRecovery,
+  writeRotationRecovery,
+} from "./rotationRecovery";
 import styles from "../policy/policy.module.css";
 
 type Ceremony =
@@ -49,7 +55,11 @@ type Ceremony =
       preSeq: number;
       /** Fresh opaque identity for THIS operation (never reused). */
       operationId: string;
-    };
+    }
+  // The explicit AMBIGUOUS recovery: consciously give up proof of one
+  // irreversible operation. Never a mutation — it only retires the durable
+  // recovery marker so a NEW deliberate T3 rotation becomes possible.
+  | { kind: "abandon"; operationId: string };
 
 /** A transport-lost rotation awaiting per-operation proof from fresh truth. */
 interface UnresolvedRotation {
@@ -72,6 +82,11 @@ export function DestinationPrivacyTab({
     getDestinationPrivacy,
   );
   const p = page.q.data;
+  // Subject binding for the durable recovery marker: the authenticated
+  // username from the auth machine — the strongest session identity the
+  // frontend holds. A marker written under a different subject is discarded
+  // at read time; the auth boundary clears it globally (rotationRecovery.ts).
+  const subject = useAuth().state.user;
   const [ceremony, setCeremony] = useState<Ceremony | null>(null);
   const [typed, setTyped] = useState("");
   const [result, setResult] = useState<ConfirmResult>("idle");
@@ -81,6 +96,19 @@ export function DestinationPrivacyTab({
   // truth PER OPERATION (receipt / sequence) — never by repeating it.
   const [unresolvedRotation, setUnresolvedRotation] =
     useState<UnresolvedRotation | null>(null);
+
+  // Restore the DURABLE recovery marker on mount (lifecycle closure): the
+  // identity of a dispatched-but-unconfirmed T3 operation survives route
+  // navigation and page reload until a terminal/recovery decision. An
+  // EFFECT rather than a state initializer, deliberately: the unmount-path
+  // boundary cleanup clears the transient latch state, and StrictMode's
+  // simulated unmount would otherwise wipe the restored value; the effect
+  // re-reads after every (re)mount pass. A foreign-subject marker is
+  // discarded by the read itself, never inherited.
+  useEffect(() => {
+    const m = readRotationRecovery(subject);
+    if (m !== null) setUnresolvedRotation(m);
+  }, [subject]);
   // Durable local record of the last authoritative resolution (survives the
   // latch clearing; replaced only by a new ceremony or the auth boundary).
   const [resolution, setResolution] = useState<RotationResolution | null>(null);
@@ -124,9 +152,11 @@ export function DestinationPrivacyTab({
     if (rcpt !== undefined) {
       setResolution({ kind: "landed", keyId: rcpt.keyId });
       setUnresolvedRotation(null);
+      clearRotationRecovery(); // terminal: proven landed
     } else if (p.rotationSeq === unresolvedRotation.preSeq) {
       setResolution({ kind: "not-landed" });
       setUnresolvedRotation(null);
+      clearRotationRecovery(); // terminal: proven not landed
     }
   }, [unresolvedRotation, p, page.unknown]);
 
@@ -140,6 +170,8 @@ export function DestinationPrivacyTab({
   const handleFailure = (err: unknown, action: string): void => {
     if (unknownOutcome(err)) {
       if (ceremony?.kind === "rotate") {
+        // The durable marker (written before dispatch) stays: only a
+        // terminal outcome or the explicit abandon ceremony retires it.
         setUnresolvedRotation({
           operationId: ceremony.operationId,
           preSeq: ceremony.preSeq,
@@ -150,6 +182,7 @@ export function DestinationPrivacyTab({
       return;
     }
     if (asRevisionConflict(err) !== null) {
+      if (ceremony?.kind === "rotate") clearRotationRecovery(); // authoritative: refused, nothing landed
       closeCeremony();
       setNotice(
         "The destination-privacy state changed on the appliance since you loaded it. Nothing was changed — review the refreshed state and retry from fresh truth.",
@@ -157,6 +190,7 @@ export function DestinationPrivacyTab({
       page.refreshToResolve();
       return;
     }
+    if (ceremony?.kind === "rotate") clearRotationRecovery(); // the appliance answered: no rotation occurred
     setResult("failed");
     setErrorText(serverErrorText(err, `The ${action} failed.`));
   };
@@ -180,8 +214,16 @@ export function DestinationPrivacyTab({
   const runRotation = (c: Ceremony & { kind: "rotate" }): void => {
     const signal = page.owner.begin();
     setResult("pending");
+    // LOAD-BEARING ORDER: persist the recovery identity BEFORE the network
+    // dispatch — a navigation/crash between dispatch and a later write
+    // would recreate the forgotten-operation defect.
+    writeRotationRecovery(subject, {
+      operationId: c.operationId,
+      preSeq: c.preSeq,
+    });
     rotatePseudonymKey(c.operationId, c.revision, signal)
       .then((res) => {
+        clearRotationRecovery(); // terminal: outcome confirmed by response
         closeCeremony();
         setNotice(
           res.alreadyApplied
@@ -238,6 +280,22 @@ export function DestinationPrivacyTab({
             admin may have rotated meanwhile). No landed or not-landed claim can
             be made; do not start another rotation from here. Refresh to
             re-check.
+            {isAdmin && unresolvedRotation !== null && (
+              <div className={styles.fallbackAction}>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setCeremony({
+                      kind: "abandon",
+                      operationId: unresolvedRotation.operationId,
+                    });
+                    setNotice("");
+                  }}
+                >
+                  Resolve ambiguous rotation…
+                </Button>
+              </div>
+            )}
           </Callout>
         </div>
       )}
@@ -386,6 +444,51 @@ export function DestinationPrivacyTab({
             </div>
           )}
         </Card>
+      )}
+
+      {ceremony?.kind === "abandon" && (
+        <ConfirmationDialog
+          open
+          tier={3}
+          title="Resolve ambiguous rotation"
+          body={
+            <>
+              The appliance cannot prove whether your previous specific rotation
+              (operation <Mono>{ceremony.operationId}</Mono>) landed: it holds
+              no receipt for it while the rotation sequence has advanced.
+              Confirming abandons automatic attribution for that operation
+              permanently — this consciously gives up proof of an irreversible
+              operation. Nothing is rotated or changed on the appliance now.
+              Starting a future rotation is a NEW deliberate action with a new
+              identity — and if the abandoned operation actually landed, a
+              further rotation will break destination-pseudonym continuity
+              again.
+            </>
+          }
+          impact="The pending operation's recovery identity is discarded on this browser; its true outcome will never be automatically attributed."
+          rollback="None — once abandoned, the operation cannot be re-latched for automatic resolution."
+          confirmLabel="Abandon unresolved rotation"
+          confirmWord="ABANDON"
+          typedValue={typed}
+          onTypedChange={setTyped}
+          destructive
+          result={result}
+          onConfirm={() => {
+            // NO mutation is dispatched as part of recovery: this only
+            // retires the durable marker and re-reads authoritative state.
+            clearRotationRecovery();
+            setUnresolvedRotation(null);
+            setResolution(null);
+            closeCeremony();
+            setNotice(
+              "The unresolved rotation was abandoned — nothing was changed on the appliance and its outcome remains unattributed. Any future rotation is a new deliberate action.",
+            );
+            page.refreshToResolve();
+          }}
+          onCancel={() => {
+            closeCeremony();
+          }}
+        />
       )}
 
       {ceremony?.kind === "enable" && (

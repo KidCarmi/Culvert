@@ -133,6 +133,7 @@ beforeEach(() => {
     },
   });
   requested = [];
+  sessionStorage.clear();
   mutations = [];
   onMutate = () => okJSON({ ok: true });
   privacyKeyId = "gen-aaaa";
@@ -379,7 +380,7 @@ it("rotation is a T3 typed ceremony bound to fresh truth, with no CA confusion",
   const put = mutations[0];
   if (put === undefined || !isRecord(put.body)) throw new Error("no body");
   expect(put.body["rotate_key"]).toBe(true);
-  expect(put.body["operation_id"]).toMatch(/^[0-9a-f]{16}$/); // fresh identity
+  expect(put.body["operation_id"]).toMatch(/^[0-9a-f]{32}$/); // fresh identity
   expect(put.body["ifRevision"]).toBe("sha256:rev-gen-aaaa-true");
   expect("redact_hosts" in put.body).toBe(false); // exactly one action
   await flushUntil(() => {

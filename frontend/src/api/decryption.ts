@@ -289,11 +289,13 @@ const decodePrivacyWriteResult: Decoder<PrivacyWriteResult> = (
   };
 };
 
-/** Mints a fresh opaque rotation operation id (16 hex chars, browser
- * entropy). One id names ONE operation: minted when a rotation ceremony
- * opens, retired with it — never reused for a later rotation. */
+/** Mints a fresh opaque rotation operation id (128-bit / 32 hex chars of
+ * browser entropy — accidental idempotency-key collision is negligible over
+ * the product lifetime; within the server's 1-64 safe-character contract).
+ * One id names ONE operation: minted when a rotation ceremony opens,
+ * retired with it — never reused for a later rotation. */
 export function mintRotationOperationId(): string {
-  const b = new Uint8Array(8);
+  const b = new Uint8Array(16);
   crypto.getRandomValues(b);
   return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }

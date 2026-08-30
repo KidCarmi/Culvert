@@ -97,6 +97,7 @@ beforeEach(() => {
       this.open = false;
     },
   });
+  sessionStorage.clear();
   mutations = [];
   onMutate = () => okJSON({ ok: true });
   privacyKeyId = "gen-aaaa";
