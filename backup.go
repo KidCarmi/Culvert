@@ -98,6 +98,18 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		{SrcPath: p("alert_webhooks.json"), TarPath: "data/alert_webhooks.json"},
 		{SrcPath: p("fileblock.json"), TarPath: "data/fileblock.json"},
 		{SrcPath: p(filepath.Join("saas_feed", "overrides.json")), TarPath: "data/saas_feed/overrides.json"},
+		// IdPRegistry (auth_idp.go) — every configured OIDC/SAML/LDAP SSO
+		// provider, including client secrets and bind credentials
+		// (config_surfaces.go's "idp_profiles" row: Sensitive, ClusterSynced —
+		// the same first-class-config bar decryption_profiles.json and
+		// alert_webhooks.json above were added to this list at). Persisted to
+		// "idp_profiles.json" — the exact path the shipped docker-compose.yml
+		// wires via "-idp-profiles-file" "/data/idp_profiles.json", and that
+		// same file's own header comment documents it as "persisted across
+		// restarts". Was missing from every prior nightly QA backup-
+		// completeness pass; a backup taken today silently drops every SSO
+		// integration, so restoring onto a fresh volume/host loses them all.
+		{SrcPath: p("idp_profiles.json"), TarPath: "data/idp_profiles.json"},
 	}
 }
 
