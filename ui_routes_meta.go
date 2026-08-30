@@ -983,6 +983,11 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/mcp/rollout/rehearse-rollback", Handler: "apiMCPRolloutRehearse", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "PR-11 record a rollback rehearsal (local evidence)"}}},
+	{Path: "/api/mcp/canary/shadow-exit-review", Handler: "apiMCPShadowExitReview", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "Canary-gate: Shadow Exit Review attestation status"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "Canary-gate: create durable Shadow Exit Review PASSED attestation"},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "Canary-gate: revoke Shadow Exit Review attestation"}}},
 	{Path: "/api/mcp/executions", Handler: "apiMCPExecutions", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "PR-11 bounded execution history (counts only; no tenant/subject/argument/token)"}}},

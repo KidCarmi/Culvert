@@ -99,6 +99,13 @@ func withReadyShadowNode(t *testing.T) {
 		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
 		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
 		_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
+		// publishMCPInventory(mcpInvLoaded, ...) above eagerly binds the process-wide MCP admin
+		// singleton with the loaded inventory/decision sources wired. Un-publishing the inventory does
+		// NOT un-wire the already-built singleton, so without this reset a later test that expects the
+		// dormant default (e.g. TestMCP_DisabledDefaults) would observe leaked sources under an
+		// unlucky -shuffle order. Reset it so the next getMCPAdmin() rebuilds fresh against the now
+		// un-published (nil) inventory.
+		resetMCPAdminSingleton()
 	})
 }
 
@@ -558,6 +565,7 @@ func gwCanaryCfg(rev uint64, servers ...string) *rollout.SignedConfig {
 // two disjoint Shadow periods are never treated as one continuous window.
 func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	withTempDataDir(t)
+	pinTestBuildVersion(t) // valid attestation/rehearsal require a non-placeholder build stamp
 	withReadyShadowNode(t) // shadow-ready node — for the Shadow legs
 	r := newTestRollout()
 	// Shadow at t=1000. The Gateway Shadow preflight forbids a node that ALSO has the live
@@ -567,9 +575,26 @@ func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	// Promote to Canary at t=2000 (needs the live tier): Shadow evidence preserved.
+	// The §2 Canary activation gate requires the FULL canary verdict at the commit — node
+	// readiness AND the activation-level scope/approval/budget/target facts. Provide the remaining
+	// node facts (Shadow Exit attestation + executable rollback rehearsal) durably; they are inert
+	// for the Shadow legs. The Canary leg below uses a valid canary scope + armed authoritative
+	// activation inputs so the artificial Canary commit passes the authoritative preflight.
+	writeValidShadowExitAttestation(t)
+	writeValidRollbackRehearsal(t, rollout.CapabilityGateway)
+	// Promote to Canary at t=2000 (needs the live tier + full activation readiness): Shadow
+	// evidence preserved.
+	now2 := time.Unix(2000, 0)
+	vin := validCanaryActivationInput(now2)
+	// Arm the authoritative activation-inputs seam via t.Cleanup (leak-safe under -shuffle/-count).
+	// The Shadow legs never consult it (Shadow does not require live execution), so arming it for
+	// the whole test is inert for them and only satisfies the Canary leg's full preflight.
+	armCanaryActivationInputs(t, vin)
+	// The CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is OPEN in production; arm its seam so this
+	// artificial Canary commit is reachable (inert for the Shadow legs, like the other seams).
+	armCoordinatorRollbackRehearsed(t)
 	globalExecDeps.gateway.Store(true)
-	err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0))
+	err := r.commitRolloutTransition(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now2)
 	globalExecDeps.gateway.Store(false) // disarm live so the demotion-to-Shadow preflight passes
 	if err != nil {
 		t.Fatal(err)

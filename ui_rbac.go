@@ -5,6 +5,20 @@ import "net/http"
 // uiRoleKey is the context key used to propagate the authenticated UI role.
 type uiRoleKey struct{}
 
+// uiUserKey is the context key used to propagate the authenticated UI username on auth paths that
+// carry no session cookie (HTTP Basic fallback), so admin-action attribution (sessionAdmin) resolves
+// the real actor instead of "unknown".
+type uiUserKey struct{}
+
+// uiUser extracts the authenticated username injected by uiAuthMiddleware (empty when none is set,
+// e.g. the cookie path, where sessionAdmin reads the cookie directly).
+func uiUser(r *http.Request) string {
+	if u, ok := r.Context().Value(uiUserKey{}).(string); ok {
+		return u
+	}
+	return ""
+}
+
 // uiRole extracts the UI role injected by uiAuthMiddleware.
 // Returns RoleViewer when no role is in context (safe default).
 func uiRole(r *http.Request) UIRole {
@@ -22,14 +36,19 @@ func uiRole(r *http.Request) UIRole {
 // proxy-user identity.
 func sessionAdmin(r *http.Request) string {
 	sess, err := readUISessionCookie(r)
-	if err != nil || sess == nil {
-		return "unknown"
+	if err == nil && sess != nil {
+		if sess.Sub != "" {
+			return sess.Sub
+		}
+		if sess.Email != "" {
+			return sess.Email
+		}
 	}
-	if sess.Sub != "" {
-		return sess.Sub
-	}
-	if sess.Email != "" {
-		return sess.Email
+	// Basic-auth fallback: programmatic/CLI access carries no session cookie, but uiAuthMiddleware
+	// stores the authenticated Basic username in context, so an admin action taken that way is still
+	// attributed to the real actor rather than "unknown" (Codex P2).
+	if u := uiUser(r); u != "" {
+		return u
 	}
 	return "unknown"
 }

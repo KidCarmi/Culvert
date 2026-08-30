@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -99,6 +100,11 @@ func TestMCPUX4_EmergencyInvalidCapability(t *testing.T) {
 }
 
 func TestMCPUX4_RehearseCapabilityFromBody(t *testing.T) {
+	// The rehearse endpoint now runs the real executable drill (§5), which writes durable
+	// rehearsal evidence + rollout state under dataDir; confine those to a temp dir so they never
+	// leak to the shared default and pollute another test's dormant-default assertions.
+	withTempDataDir(t)
+	pinTestBuildVersion(t) // the rehearse POST now refuses a placeholder ("dev") build stamp (Codex P2)
 	// The rehearsal must record evidence for the capability named in the body
 	// (parity with emergency), so a rehearsal chosen for management can never land
 	// on gateway. This pins the PR-UX-4 capability-binding fix.
@@ -120,6 +126,8 @@ func TestMCPUX4_RehearseCapabilityFromBody(t *testing.T) {
 }
 
 func TestMCPUX4_RehearseRBACAndValidation(t *testing.T) {
+	withTempDataDir(t)     // the admin rehearse below runs the real drill, which writes under dataDir
+	pinTestBuildVersion(t) // the admin 200 case requires a non-placeholder build stamp (Codex P2)
 	// Viewer/operator may not record a rehearsal (admin only).
 	for _, role := range []UIRole{RoleViewer, RoleOperator} {
 		if got := mcpReq(http.MethodPost, "/api/mcp/rollout/rehearse-rollback", role, `{"capability":"gateway"}`).Code; got != http.StatusForbidden {
@@ -141,6 +149,8 @@ func TestMCPUX4_RehearseRBACAndValidation(t *testing.T) {
 // misread as a malformed body. The empty body decodes to io.EOF and falls back to
 // the query-string capability (here: management), returning 200 — not a 400.
 func TestMCPUX4_RehearseChunkedBodylessPOST(t *testing.T) {
+	withTempDataDir(t)     // the rehearse below runs the real drill, which writes under dataDir
+	pinTestBuildVersion(t) // the rehearse POST now refuses a placeholder ("dev") build stamp (Codex P2)
 	r := httptest.NewRequest(http.MethodPost, "/api/mcp/rollout/rehearse-rollback?capability=management", http.NoBody)
 	r.ContentLength = -1 // simulate chunked transfer encoding (no Content-Length)
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
@@ -153,6 +163,43 @@ func TestMCPUX4_RehearseChunkedBodylessPOST(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"capability":"management"`) {
 		t.Fatalf("chunked bodyless rehearse must honor the query capability: %s", w.Body.String())
+	}
+}
+
+// TestMCPUX4_RehearseRefusesUnversionedBuild pins the Codex P2 fix: the rehearse POST must refuse a
+// placeholder/non-unique build stamp with 409 and write NO rehearsal record — rather than report
+// rollback_rehearsed:true/persisted:true for a record ValidateRehearsal rejects on read (which would
+// leave the activation gate rollback_path_unhealthy). Analogous to the Shadow Exit review POST's
+// uniquely-versioned-build guard.
+func TestMCPUX4_RehearseRefusesUnversionedBuild(t *testing.T) {
+	withTempDataDir(t)
+	prevVer, prevCommit := version, buildCommit
+	version = "dev"  // placeholder version
+	buildCommit = "" // AND no commit ⇒ bare "dev" ⇒ currentRuntimeIdentity().Valid() is false (round-22)
+	// The rollback-rehearsed evidence flag is process-global and other tests leave it set
+	// (documented as node-local + harmless), so swap in a fresh singleton to assert the flag
+	// stays false here rather than reading leaked state.
+	_ = getMCPRollout()
+	prevR := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	t.Cleanup(func() { version = prevVer; buildCommit = prevCommit; globalMCPRollout = prevR })
+
+	rec := mcpReq(http.MethodPost, "/api/mcp/rollout/rehearse-rollback", RoleAdmin, `{"capability":"gateway"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rehearse on an unversioned build = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rollback_rehearsal_requires_a_uniquely_versioned_build") {
+		t.Fatalf("409 body must name the uniquely-versioned-build requirement: %s", rec.Body.String())
+	}
+	// A refused rehearsal must write NO durable record and leave the evidence flag false.
+	if _, err := os.Stat(rollbackRehearsalPath(rollout.CapabilityGateway)); !os.IsNotExist(err) {
+		t.Fatal("a refused rehearsal must not write a durable record")
+	}
+	if getMCPRollout().stateFor(rollout.CapabilityGateway).Evidence().RollbackRehearsed {
+		t.Fatal("a refused rehearsal must not set the evidence flag")
 	}
 }
 

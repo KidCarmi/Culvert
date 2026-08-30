@@ -36,6 +36,16 @@ var errRolloutCapabilityMismatch = mcperr.New(mcperr.ReasonSnapshotCapabilityMis
 var errShadowPreflightFailed = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
 	"rollout.transition", "shadow_activation_preflight_failed")
 
+// errCanaryActivationPreflightFailed marks a transition into a mode that performs a REAL
+// upstream side effect (Canary/Production) rejected because the Canary activation preflight is
+// not Ready (§2, Canary Activation Gate). It carries the same transition-invalid reason class as
+// the exec-deps and Shadow gates so a DP nack reaches the CP with a truthful, alertable code; the
+// specific unmet prerequisites are logged, never embedded. In this build the live tier is never
+// armed, so this ALWAYS fires for a Canary/Production transition — the Canary preflight, not a
+// syntactically-valid signed config, is the sole authority for a live-execution mode.
+var errCanaryActivationPreflightFailed = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
+	"rollout.transition", "canary_activation_preflight_failed")
+
 // errRolloutPersistFailed wraps a durable-persistence failure so callers can reject a
 // transition rather than acknowledge a RAM-only mode change.
 var errRolloutPersistFailed = errors.New("rollout_persist_failed")
@@ -101,23 +111,34 @@ func (r *mcpRollout) persistStatus(capb rollout.Capability) string {
 // rollbackPathReady reports whether the capability's rollback path is durable AND rehearsed —
 // read as ONE consistent snapshot. It takes durableMu, which recordRehearsal and every other
 // durable read-modify-write-persist holds for its whole sequence, so no rehearsal write can be
-// in flight while this reads: the in-memory RollbackRehearsed evidence and the persistStatus it
-// observes are both post-write (never the pre-persist window where evidence is set but not yet
-// durable). Fail-closed: false unless persistence is not degraded/write_failed AND a rollback
-// rehearsal is durably recorded. Lock order is durableMu → persistMu (persistStatus takes
-// persistMu), the SAME order recordRehearsal uses, so there is no deadlock (Codex P1, PR #1249).
+// in flight while this reads: the durable rehearsal EVIDENCE and the persistStatus it observes are
+// both post-write (never the pre-persist window). Fail-closed: false unless persistence is not
+// degraded/write_failed AND a build-bound executable rollback-rehearsal record validates. Lock
+// order is durableMu → persistMu (persistStatus takes persistMu), the SAME order recordRehearsal
+// uses, so there is no deadlock (Codex P1, PR #1249).
 //
-// SCOPE NOTE (Codex P2, PR #1249): RollbackRehearsed is today a SELF-ATTESTED marker — the
-// pre-existing admin POST /api/mcp/rollout/rehearse sets it via recordRehearsal WITHOUT actually
-// executing a Canary→Shadow/Observe demotion (there is no live Canary to roll back in this
-// dormant build). Binding readiness to a REAL, attested rollback drill — evidence produced by a
-// successfully executed demotion, not a manual marker — is a LIVE-ACTIVATION prerequisite,
-// recorded in the CANARY-ACTIVATION-PREREQS ledger. This fact remains correct as the dormant
-// CONTRACT (readiness requires the marker); strengthening what the marker PROVES is out of scope
-// for the dormant architecture and cannot be exercised while Canary never activates.
+// §5 (Canary Activation Gate): readiness is now driven by EXECUTABLE evidence, not a self-attested
+// marker. rollbackRehearsalAttested loads the durable canary.RollbackRehearsalRecord that a REAL
+// Canary→Shadow→Observe demotion drill produced (through the actual persist/restore path) and
+// requires it to validate against the CURRENT build identity. A missing/corrupt/incomplete record,
+// or one produced under a different build, fails closed — so an ancient drill against a materially
+// changed runtime cannot satisfy the current build's readiness. The pre-existing self-attested
+// EvidenceSummary.RollbackRehearsed marker is still stamped by recordRehearsal for the read model,
+// but it is NO LONGER what this gate consults.
 func (r *mcpRollout) rollbackPathReady(capb rollout.Capability) bool {
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
+	return r.rollbackPathReadyLocked(capb)
+}
+
+// rollbackPathReadyLocked is rollbackPathReady for a caller that ALREADY holds r.durableMu — the
+// commit path re-validates the full Canary activation verdict INSIDE its serialized section (so a
+// concurrent emergencyDisable or attestation revocation cannot make a pre-lock verdict stale before
+// install — Codex P1), and durableMu is non-reentrant, so it must consult this locked variant rather
+// than the locking wrapper above. It reads persistStatus (its own persistMu) and stateFor (a field),
+// neither of which takes durableMu, and the durable rehearsal evidence — consistent against an
+// in-flight rehearsal because that writer holds durableMu too.
+func (r *mcpRollout) rollbackPathReadyLocked(capb rollout.Capability) bool {
 	switch r.persistStatus(capb) {
 	case "degraded", "write_failed":
 		return false
@@ -126,7 +147,7 @@ func (r *mcpRollout) rollbackPathReady(capb rollout.Capability) bool {
 	if st == nil {
 		return false
 	}
-	return st.Evidence().RollbackRehearsed
+	return rollbackRehearsalAttested(capb)
 }
 
 // mcpRolloutMetrics are bounded, low-cardinality counters. No tenant/subject/
@@ -167,8 +188,18 @@ func getMCPRollout() *mcpRollout {
 // isolated capability states and recovers node-local rollout state from durable
 // storage (mode/kill-switch/evidence window), fail-closed to Disabled on corrupt or
 // invalid state. It binds no socket and starts no worker.
+//
+// It also restores the Canary activation runtime (generation + durable budget/abort
+// state, §3/§4/§7). In the shipped build no Canary ever activated, so no durable canary
+// runtime file exists and this is a no-op that leaves the runtime dormant (generation 0,
+// nothing armed) — it composes no executor and reaches no upstream.
 func initMCPRollout(_ *startupState) {
 	getMCPRollout().restore()
+	globalCanaryRuntime.restore()
+	// Reconcile the two independently-restored durable domains: disarm any Canary runtime whose
+	// rollout mode was clamped (or is otherwise not a live-execution mode) so a restart never resumes
+	// an execution-eligible runtime under a mode a fresh commit would reject (Codex P1).
+	reconcileCanaryRuntimeAfterRestore()
 }
 
 // stateFor returns the capability-local rollout state (never shared).
@@ -234,6 +265,47 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 		if pf := evaluateShadowActivationPreflight(cfg.Capability, cfg.Scope, cfg.ScopeRevision); !pf.Ready {
 			logger.Printf("MCP rollout: Gateway Shadow transition rejected by activation preflight %v (fail-closed)", pf.Reasons)
 			return errShadowPreflightFailed
+		}
+	}
+	// (1c) Canary/Production activation gate (§2, Canary Activation Gate). A transition into a
+	// mode that performs a REAL upstream side effect is authorized ONLY by the FULL Canary
+	// activation preflight, enforced HERE in the shared commit path so EVERY caller is covered —
+	// the CP→DP apply (applyMCPCapabilityEnvelope), the startup reconcile
+	// (reconcileRolloutWithAppliers), and any future caller. This makes the preflight — not a
+	// syntactically-valid signed config — the SOLE authority for a live-execution mode: a Canary
+	// config can be perfectly valid and signed yet MUST NOT become active unless the WHOLE
+	// canary.Evaluate verdict (node readiness AND the activation-level scope/read-first/per-tool
+	// live-approval/budget/server/fingerprint facts) is Ready. The scope comes from the SIGNED
+	// config (authoritative); the other activation inputs are resolved from AUTHORITATIVE node
+	// state via canaryActivationInputsProbe — NEVER a request-supplied claim — so a signed Canary
+	// envelope cannot smuggle an approval or budget past the gate (Codex P1). In this build the
+	// authoritative approval/budget store does not exist (the probe returns empties) and the live
+	// tier is never armed, so a Canary/Production transition ALWAYS fails here.
+	if cfg.Mode.RequiresLiveExecution() {
+		// Evaluate the FULL activation verdict INSIDE the serialized section, against THIS rollout's
+		// state, so a mutable fail-closed fact that changed after the caller's checks — an
+		// emergencyDisable kill engaged, an attestation revoked, the rehearsal evidence removed — cannot
+		// leave a stale verdict that installs Canary anyway (Codex P1). It consults the LOCKED readiness
+		// path (evaluateCanaryActivationPreflightLocked → rollbackPathReadyLocked): durableMu is
+		// non-reentrant and we already hold it, so the locking wrapper would self-deadlock — which in
+		// production is the same singleton the commit holds. Activation inputs come from authoritative
+		// state via the probe (never the signed config), keeping a valid signed Canary from smuggling an
+		// approval/budget past the gate.
+		ai := canaryActivationInputsProbe(cfg.Capability, cfg.Scope, cfg.ScopeRevision)
+		rd := evaluateCanaryActivationPreflightLocked(r, CanaryActivationInput{
+			Capability:         cfg.Capability,
+			Scope:              cfg.Scope,
+			ScopeRev:           cfg.ScopeRevision,
+			ToolApprovals:      ai.ToolApprovals,
+			Budget:             ai.Budget,
+			ServerUsable:       ai.ServerUsable,
+			FingerprintCurrent: ai.FingerprintCurrent,
+			Now:                now,
+		})
+		if !rd.Ready {
+			logger.Printf("MCP rollout: %s transition to %s refused by Canary activation preflight %v (fail-closed)",
+				cfg.Capability.String(), cfg.Mode.String(), rd.Unmet)
+			return errCanaryActivationPreflightFailed
 		}
 	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
@@ -327,6 +399,29 @@ func (r *mcpRollout) restore() {
 					continue
 				}
 			}
+			// A restored LIVE-EXECUTION mode (Canary/Production) must ALSO pass the FULL activation
+			// preflight, not just the coarse exec-deps tier: a prerequisite (attestation, rehearsal,
+			// per-tool approval, target, budget) may have been removed while the process was down, and a
+			// restart must never resume a live mode a fresh commit would now reject (Codex P1). The scope
+			// comes from the restored config; the other activation inputs are resolved from AUTHORITATIVE
+			// state via the probe (never trusted from the restored record). In this build the exec-deps
+			// check above already clamps every live mode (the live tier is unarmed), so this is the
+			// future-arming safety net; the paired runtime disarm is reconcileCanaryRuntimeAfterRestore.
+			if st.CurrentMode().RequiresLiveExecution() {
+				restored := st.CurrentConfig()
+				ai := canaryActivationInputsProbe(st.Capability(), restored.Scope, restored.ScopeRevision)
+				rd := evaluateCanaryActivationPreflight(CanaryActivationInput{
+					Capability: st.Capability(), Scope: restored.Scope, ScopeRev: restored.ScopeRevision,
+					ToolApprovals: ai.ToolApprovals, Budget: ai.Budget,
+					ServerUsable: ai.ServerUsable, FingerprintCurrent: ai.FingerprintCurrent, Now: time.Now(),
+				})
+				if !rd.Ready {
+					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
+					r.setPersistStatus(st.Capability(), "degraded")
+					logger.Printf("MCP rollout restore for %s: restored live mode failed activation preflight %v; clamped to Disabled (fail-closed)", st.Capability().String(), rd.Unmet)
+					continue
+				}
+			}
 			r.setPersistStatus(st.Capability(), "recovered")
 			logger.Printf("MCP rollout restore for %s: mode=%s (recovered)", st.Capability().String(), st.CurrentMode().String())
 		} else {
@@ -373,16 +468,43 @@ func (r *mcpRollout) clearEmergency(capb rollout.Capability) error {
 	return nil
 }
 
-// recordRehearsal records a rollback rehearsal (durable evidence) and persists it,
-// serialized against other durable mutations. A persist failure is returned so the
-// caller does not report durable success while a restart could lose the evidence.
+// recordRehearsal EXECUTES a real rollback-rehearsal drill and records durable, build-bound
+// evidence (§5, Canary Activation Gate), serialized against other durable mutations. It replaces
+// the old self-attested marker: rehearseRollback drives a scratch state Canary→Shadow→Observe
+// through the actual persist/restore path and writes evidence ONLY on full success, so a broken
+// rollback path records nothing and the caller learns the drill failed. On success it also stamps
+// the read-model EvidenceSummary.RollbackRehearsed marker (now backed by a real drill) and
+// persists the rollout state. A persist/drill failure is returned so the caller does not report
+// durable success.
 func (r *mcpRollout) recordRehearsal(capb rollout.Capability) error {
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
+	// (1) Execute the drill and write build-bound executable evidence. A drill or evidence-write
+	// failure is fatal to the rehearsal — no marker is stamped and no false success is reported.
+	if _, err := rehearseRollback(capb); err != nil {
+		logger.Printf("MCP rollout rollback rehearsal drill for %s failed (no evidence recorded): %q", capb.String(), sanitizeLog(err.Error()))
+		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
+	}
+	// (2) Stamp the read-model marker (now backed by the real drill above) and persist the
+	// rollout state so the status surface stays truthful across a restart.
 	st := r.stateFor(capb)
 	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
 	if err := persistRolloutState(st); err != nil {
 		r.setPersistStatus(capb, "write_failed")
+		// The build-bound rehearsal record from (1) is ALREADY durable on disk, but persistStatus is
+		// in-memory only. A restart that restores the pre-rehearsal rollout snapshot (whose persist just
+		// failed) clears the write_failed blocker while the valid record survives — rollbackPathReadyLocked
+		// would then accept a rehearsal the operator was told failed (Codex P1). Durably remove the record
+		// and revert the in-memory marker so the gate fails CLOSED to "not rehearsed" until a
+		// fully-successful drill+persist runs.
+		st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = false })
+		// removeRollbackRehearsalDurable invalidates the record content durably FIRST, so it returns an
+		// error ONLY when even that content-invalidation failed (a total filesystem failure). In that
+		// residual case the record may survive a crash and the sole remaining guarantee is the in-memory
+		// write_failed blocker (lost on restart) — logged loudly so the operator re-runs the rehearsal.
+		if rerr := removeRollbackRehearsalDurable(capb); rerr != nil {
+			logger.Printf("MCP rollout rehearsal record for %s could not be durably invalidated after a persist error (a crash could expose a record reported as failed; re-run the rehearsal): %q", capb.String(), sanitizeLog(rerr.Error()))
+		}
 		logger.Printf("MCP rollout rehearsal persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
