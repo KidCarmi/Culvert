@@ -410,10 +410,15 @@ func (rt *canaryRuntime) executionEligible(capb rollout.Capability, now time.Tim
 	if !cr.active || cr.enforcer == nil || cr.aborter == nil {
 		return false
 	}
-	// The window is part of eligibility: an activation that has outlived its Window (or whose clock
-	// rolled back) is NOT execution-eligible even with total slots remaining — every reserve would
-	// return BudgetDeniedWindow — so the status surface must report false rather than true (Codex P2).
-	return cr.aborter.ExecutionEligible(cr.generation) && cr.enforcer.Remaining() > 0 && cr.enforcer.WindowOpen(now)
+	// Eligibility must match what a Reserve would actually do right now, so it consults the full
+	// non-consuming budget gate (Reservable): window open, total slot remaining, a free concurrency
+	// slot, AND rate budget in the current window. An activation that has outlived its Window/clock
+	// rolled back, is out of total budget, has filled MaxConcurrentExecutions, or has spent
+	// MaxExecutionsPerMinute this window would deny every reserve, so the status surface reports false
+	// rather than true (Codex P2). Identity caps are not evaluated here — an eligibility read has no
+	// execution identity — so this can only err permissively on that one dimension, never on window,
+	// total, concurrency, or rate.
+	return cr.aborter.ExecutionEligible(cr.generation) && cr.enforcer.Reservable(now)
 }
 
 // persistLocked writes the capability's durable runtime state. Caller holds cr.mu.

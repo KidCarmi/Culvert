@@ -260,6 +260,12 @@ func isNewBeyondCap(set map[string]struct{}, v string, capLimit int) bool {
 	return len(set) >= capLimit
 }
 
+// windowOpenLocked reports whether the time-boxed window is still open at now. Caller holds e.mu.
+func (e *BudgetEnforcer) windowOpenLocked(now time.Time) bool {
+	elapsed := now.UnixNano() - e.startNanos
+	return elapsed >= 0 && elapsed < int64(e.budget.Window)
+}
+
 // WindowOpen reports whether the time-boxed window is still open at now: false once the configured
 // Window has elapsed, AND false on a backward clock step (now earlier than the activation instant) —
 // mirroring Reserve's window gate exactly, so a status/eligibility read agrees with what a Reserve
@@ -271,8 +277,48 @@ func (e *BudgetEnforcer) WindowOpen(now time.Time) bool {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	elapsed := now.UnixNano() - e.startNanos
-	return elapsed >= 0 && elapsed < int64(e.budget.Window)
+	return e.windowOpenLocked(now)
+}
+
+// reservableLocked reports whether a Reserve — ignoring generation and the specific execution
+// identity — would be GRANTED at now: a valid budget, an open window, a total slot remaining, a free
+// concurrency slot, AND rate budget in the current (or rolled-over) window. It is the non-consuming,
+// identity-independent form of Reserve's window+total+throttle decision. It NEVER mutates state — in
+// particular the rate-window rollover is COMPUTED, not applied (a read must not advance the window) —
+// so it is exact for the identity-independent gates and can only be wrong in the permissive direction
+// for the identity caps, which an eligibility read has no identity to evaluate. Caller holds e.mu.
+func (e *BudgetEnforcer) reservableLocked(now time.Time) bool {
+	if ValidateBudget(e.budget) != BudgetOK {
+		return false
+	}
+	if !e.windowOpenLocked(now) {
+		return false
+	}
+	if e.total >= e.budget.MaxTotalExecutions {
+		return false
+	}
+	if e.inflight >= e.budget.MaxConcurrentExecutions {
+		return false
+	}
+	// Rate: a Reserve rolls the window over (count resets to 0) once budgetRateWindow has elapsed, so
+	// rate is available then; otherwise the current count must be below the per-window cap. Do NOT
+	// mutate rateWindowStart/rateCount here — this is a read.
+	if now.UnixNano()-e.rateWindowStart < int64(budgetRateWindow) && e.rateCount >= e.budget.MaxExecutionsPerMinute {
+		return false
+	}
+	return true
+}
+
+// Reservable is the exported, locked form of reservableLocked: whether an execution could be reserved
+// right now (ignoring generation and the specific execution identity — concurrency, rate, window, and
+// total are all reflected). A nil enforcer is never reservable.
+func (e *BudgetEnforcer) Reservable(now time.Time) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.reservableLocked(now)
 }
 
 // Release returns one in-flight concurrency slot after an execution completes. It NEVER decrements

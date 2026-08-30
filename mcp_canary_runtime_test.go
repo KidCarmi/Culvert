@@ -122,6 +122,36 @@ func TestCanaryRuntime_WindowExpiryEndsEligibility(t *testing.T) {
 	}
 }
 
+// TestCanaryRuntime_ThrottleEndsEligibility is the Codex round-14 P2 proof: an activation whose
+// MaxConcurrentExecutions is filled (or whose per-minute rate is spent) is NOT execution-eligible even
+// with total budget and window remaining, because every reserve would deny on the throttle. The
+// eligibility read must reflect the throttle gates, not just abort/total/window.
+func TestCanaryRuntime_ThrottleEndsEligibility(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	b := runtimeTestBudget(100) // plenty of total/window; concurrency is the binding gate
+	b.MaxConcurrentExecutions = 1
+	if _, err := rt.beginCanaryActivation(capb, b, now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if !rt.executionEligible(capb, now) {
+		t.Fatal("a fresh activation with budget must be execution-eligible")
+	}
+	// Reserve one and do NOT release: the single concurrency slot is now filled.
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetGranted {
+		t.Fatalf("reserve must be granted, got %s", o)
+	}
+	if rt.executionEligible(capb, now) {
+		t.Fatal("SECURITY: with MaxConcurrentExecutions filled, execution must not be eligible (every reserve denies on concurrency)")
+	}
+	// Release the slot: eligible again (concurrency freed; total/rate/window all have room).
+	rt.releaseCanaryExecution(capb, rt.currentGeneration(capb))
+	if !rt.executionEligible(capb, now) {
+		t.Fatal("after releasing the concurrency slot, execution must be eligible again")
+	}
+}
+
 // TestCanaryRuntime_PerRequestTripDoesNotStopCanary proves the taxonomy split at the runtime: a
 // per-request abort code does not stop the Canary, while a whole-Canary code does.
 func TestCanaryRuntime_PerRequestTripDoesNotStopCanary(t *testing.T) {

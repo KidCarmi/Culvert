@@ -167,6 +167,54 @@ func TestBudgetEnforcer_WindowOpenMirrorsReserve(t *testing.T) {
 	}
 }
 
+// TestBudgetEnforcer_ReservableMirrorsReserve proves the non-consuming Reservable read agrees with
+// what a Reserve would actually do across the identity-independent gates — concurrency and rate as
+// well as window and total (Codex P2). It never mutates state.
+func TestBudgetEnforcer_ReservableMirrorsReserve(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := testBudget(100)
+	b.Window = time.Hour
+	b.MaxConcurrentExecutions = 1
+	b.MaxExecutionsPerMinute = 1
+	e := NewBudgetEnforcer(b, 1, now)
+
+	// Fresh: a reserve would be granted, so Reservable is true.
+	if !e.Reservable(now) {
+		t.Fatal("a fresh enforcer with budget must be reservable")
+	}
+	// Consume the single concurrency + rate slot (do NOT release): concurrency is now full.
+	if o := e.Reserve(1, now, idOne); o != BudgetGranted {
+		t.Fatalf("first reserve must be granted, got %s", o)
+	}
+	if e.Reservable(now) {
+		t.Fatal("with MaxConcurrentExecutions filled, Reservable must be false (a reserve denies on concurrency)")
+	}
+	if o := e.Reserve(1, now, idOne); o != BudgetDeniedConcurrency {
+		t.Fatalf("a reserve at concurrency cap must deny on concurrency, got %s", o)
+	}
+	// Free the concurrency slot: now the RATE cap (1/min, already spent) is the binding gate.
+	e.Release()
+	if e.Reservable(now) {
+		t.Fatal("with the per-minute rate spent, Reservable must be false (a reserve denies on rate)")
+	}
+	if o := e.Reserve(1, now, idOne); o != BudgetDeniedRate {
+		t.Fatalf("a reserve at rate cap must deny on rate, got %s", o)
+	}
+	// Advance past the rate window (still inside the hour Window): the rate rolls over ⇒ reservable.
+	later := now.Add(budgetRateWindow)
+	if !e.Reservable(later) {
+		t.Fatal("after the rate window rolls over, Reservable must be true again")
+	}
+	// Reservable must not have mutated the rate window — a real Reserve at `later` still grants.
+	if o := e.Reserve(1, later, idOne); o != BudgetGranted {
+		t.Fatalf("a reserve after the rate window rolls over must be granted, got %s", o)
+	}
+	var nilE *BudgetEnforcer
+	if nilE.Reservable(now) {
+		t.Fatal("a nil enforcer is never reservable")
+	}
+}
+
 // TestBudgetEnforcer_GenerationBinding proves a Reserve carrying a different generation is refused —
 // a stale reservation against a superseded/rolled-back activation can never consume the budget.
 func TestBudgetEnforcer_GenerationBinding(t *testing.T) {
