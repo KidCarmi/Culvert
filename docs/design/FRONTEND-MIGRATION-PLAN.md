@@ -725,6 +725,71 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-B — Decryption Operations (this branch, 2026-08-30).** Second slice of
+> the 2E decomposition: the OPERATIONAL decryption surface at
+> `/app/security/decryption` (Health & Coverage · Destination Privacy ·
+> Auto-Exclusions). 2E-C (CDR/Sluice) stays deferred; Decryption Profiles
+> CRUD (2D-A) and CA/certificate management are linked, never duplicated.
+> **Authoritative endpoint inventory (from source, 2E-B.0):**
+> `GET /api/decryption/health` (viewer, side-effect-free; PROCESS-LIFETIME
+> in-memory counters + a 360×1-minute volatile delta trend);
+> `GET/PUT /api/decryption/redaction` (viewer/admin; the ADR-0011 §4
+> destination-privacy posture + pseudonym key — governs what destination
+> data is RETAINED in logs/observability, never whether traffic is
+> decrypted); `GET/DELETE /api/decryption-exclusions` (viewer/operator; the
+> VOLATILE learned-exclusion cache); `GET/PUT
+> /api/decryption-exclusions/tunables` (viewer/admin; durable engine
+> parameters). **Ownership:** all three write surfaces are NODE-LOCAL
+> AdminDurable-only (config_surfaces rows `decryption_redact_hosts`,
+> `traffic_pseudonym_key`, `traffic_pseudonym_key_id`, `autoexclude_*` — no
+> ClusterSynced row), so the 2E-A managed-DP CP-authority model deliberately
+> does NOT apply; the UI labels the scope "Node-local". **Backend
+> corrections (red-before against 25a80a5e, `decryption_2eb_red_test.go` —
+> 9 deterministic red + 2 green pins):** (§A) the redaction PUT was a
+> fenceless whole-object write mutating live state OUTSIDE adminSettingsMu
+> (apply-then-rollback); it now builds its target INSIDE the save's
+> precondition with an optional body `ifRevision` fence and applies
+> persist-before-apply under one serialized section; the GET is ONE
+> coherent snapshot under the writer domain with a content-derived revision
+> over (posture, key_id). (§B) rotation exposed no non-secret fact, so a
+> lost response was unresolvable and a blind retry rotated twice;
+> `TrafficPseudonymKeyID` — random, never key-derived, persisted beside the
+> key, restart-stable, minted for legacy files on load — is exposed as
+> `key_id` and folded into the revision, making a fenced retry a 409 that
+> cannot rotate twice; rotation is durable BEFORE its success response and
+> the restart observes the rotated generation. (§C) persist-failure truth
+> (500 + running posture unchanged) pinned. (§D) the tunables PUT gains the
+> `?ifRevision=` fence inside the save precondition; the exclusions GET
+> serves `tunables_revision` derived from the SAME Stats snapshot as the
+> current values; the PUT answers with the installed set + revision. (§E/§I)
+> the evict audit records the true outcome (absent entry ⇒ "entry was not
+> present"); the exclusions GET gains a bounded `?limit=` read with an
+> explicit `truncated` fact. **Frontend:** snapshot semantics only; health
+> counters labeled "since process start" (never re-labeled as a window;
+> the prior cumulative-as-window mistake is not repeated), taxonomy keys
+> verbatim, no derived health score; destination privacy separates
+> retention from decryption in copy, enable = T1 confirm, disable = T2
+> ceremony, rotation = T3 typed ROTATE ceremony bound to the reviewed
+> generation with explicit "NOT the TLS inspection Root CA / not a
+> certificate rotation" copy; rotation unknown-outcome LATCHES and resolves
+> LANDED/NOT-LANDED by comparing key_id against fresh GET truth — never a
+> blind repeat (rotation is excluded from every generic retry path);
+> auto-exclusions labeled volatile/runtime-generated with drop-and-relearn
+> copy ("does not delete Decryption Profiles or policy rules"), bounded
+> list (limit 500 + truncated notice), evict/clear ceremonies; tunables are
+> a structured form driven by server defaults/bounds, fenced, conflict
+> preserves the form, and ONLY a guardrail-relaxing change gets a ceremony
+> (`tunablesRelax`). RBAC-exact mounting (viewer zero controls; operator
+> exactly the volatile actions; admin adds privacy/rotation/tunables);
+> fail-closed decoders refuse a pre-2E-B appliance rather than mounting
+> unfenced writes. **Evidence:** 12 API + 11 page unit tests; real-binary
+> e2e journey (`decryption-2eb.spec.ts`) incl. ONE real rotation on the
+> per-run throwaway harness appliance (isolated mktemp WORK dir, workers=1
+> — never shared /data) verified by key_id change, plus the isolated
+> temp-data-dir Go proof (`TestDec2EB_RotationDurableAcrossRestart`) for
+> durable/restart/exactly-once truth. No new ADR needed — every decision
+> fits the accepted appliance/frontend doctrine.
+>
 > **2E-A FINAL transaction & fleet-truth closure (this branch, 2026-08-29 —
 > correction slice against candidate b60d4ed6).** Four blockers, each with a
 > deterministic red-before (`secscan_2ea2_*_test.go` +
