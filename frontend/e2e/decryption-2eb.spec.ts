@@ -46,6 +46,10 @@ async function newAdminClient(xff: string): Promise<APIRequestContext> {
   return ctx;
 }
 
+function str(x: unknown): string {
+  return typeof x === "string" ? x : "";
+}
+
 async function getPrivacy(
   api: APIRequestContext,
 ): Promise<{ redact: boolean; keyId: string; revision: string }> {
@@ -54,8 +58,8 @@ async function getPrivacy(
   if (!isRecord(v)) throw new Error("bad privacy envelope");
   return {
     redact: v["redact_hosts"] === true,
-    keyId: String(v["key_id"] ?? ""),
-    revision: String(v["revision"] ?? ""),
+    keyId: str(v["key_id"]),
+    revision: str(v["revision"]),
   };
 }
 
@@ -70,7 +74,7 @@ async function getExclusions(api: APIRequestContext): Promise<{
   return {
     active: Number(v["stats"]["active"]),
     confirmN: Number(v["stats"]["confirm_n"]),
-    revision: String(v["tunables_revision"] ?? ""),
+    revision: str(v["tunables_revision"]),
   };
 }
 
