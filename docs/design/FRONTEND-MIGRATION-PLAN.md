@@ -725,6 +725,55 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-B FINAL CORRECTION — rotation operation truth, redaction command
+> presence, recovery unlatch (this branch, 2026-08-30).** External review of
+> the 2E-B candidate (56c23e64) found the rotation unknown-outcome contract
+> untruthful under concurrent admins and the redaction PUT's command decode
+> unsafe; three coupled corrections landed with red-before evidence captured
+> against that exact candidate (`decryption_2eb2_red_test.go`: 10 red + 1
+> green control; `decryption-rotation.test.tsx`: 3 red — the candidate
+> literally rendered "landed exactly once" for ANOTHER admin's rotation).
+> **(A) Rotation operation identity.** "key_id changed" cannot attribute a
+> generation transition to the caller's own operation. Every rotation now
+> carries a REQUIRED client-minted opaque `operation_id` (1–64 chars,
+> `[A-Za-z0-9._-]`) plus the fence; the appliance persists — atomically with
+> the key, in the same persist-before-apply AdminSettings transaction — a
+> durable monotonic key-generation sequence (`traffic_key_rotation_seq`,
+> advanced by EVERY new-key install so "sequence unchanged" soundly proves
+> not-landed) and a bounded (32, FIFO) NON-SECRET receipt
+> `{op_id, key_id, seq, ts}` (`traffic_key_rotation_receipts`; allowlist
+> pinned key-material-free; both restored on load, config_surfaces rows
+> added, deliberately not Sensitive). The idempotency lookup runs BEFORE the
+> stale fence, so a replay of an already-landed `operation_id` is answered
+> from its receipt (`200 already_applied:true`, zero additional rotations)
+> while a DIFFERENT operation on stale truth stays the structured 409. GET
+> serves `rotation_seq` + `rotation_receipts`; the client matrix is exactly:
+> our receipt present ⇒ LANDED exactly once; sequence == pre-operation
+> anchor ⇒ NOT LANDED; sequence advanced without our receipt ⇒ AMBIGUOUS
+> (stay latched, no claim, never rotate again blindly — covers both the
+> concurrent-admin case and receipt-window aging; the stronger
+> "window-coverage proves not-landed" inference was deliberately NOT taken).
+> **(B) Command presence.** `redact_hosts` decoded as a bare bool, so
+> `PUT {}` and `{"rotate_key":false}` silently DISABLED an enabled posture,
+> and a combined posture+rotation body silently ignored the explicit posture
+> field while OpenAPI advertised "and/or". The decode is now presence-aware
+> (`*bool`) under an EXACTLY-ONE-ACTION contract: posture = `redact_hosts`
+> alone (ifRevision optional — the legacy GUI, which only ever sends
+> `{redact_hosts: bool}`, keeps its last-writer-wins contract); rotation =
+> `rotate_key:true` + `operation_id` + `ifRevision` alone; empty bodies,
+> `rotate_key:false` alone, identity-less rotations, and combined bodies are
+> 400 with no mutation. OpenAPI/SetRedaction now states the runtime contract
+> exactly. **(C) Recovery unlatch.** A proven LANDED / NOT-LANDED resolution
+> now converts into a durable local notice and CLEARS the unresolved-
+> operation latch (previously the button stayed disabled beside "you may
+> start it again"), so a deliberate NEW rotation — with a NEW operation id,
+> the old one never reused — is possible from fresh truth; AMBIGUOUS renders
+> "cannot yet be proven" and stays latched; nothing is ever re-dispatched
+> automatically, and the auth boundary clears every candidate/latch/notice.
+> Preserved unchanged: node-local ownership, persist-before-apply, coherent
+> revision snapshots, both fences, volatile-cache semantics, health labels,
+> the T1/T2/T3 ceremony model, RBAC exact-mounting, and the secret boundary.
+>
 > **2E-B — Decryption Operations (this branch, 2026-08-30).** Second slice of
 > the 2E decomposition: the OPERATIONAL decryption surface at
 > `/app/security/decryption` (Health & Coverage · Destination Privacy ·
