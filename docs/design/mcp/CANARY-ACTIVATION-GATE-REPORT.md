@@ -130,7 +130,11 @@ routing-is-load-bearing control, a mutation campaign, and durable-evidence + con
 coordinator-routed drill succeeds (`POST /api/mcp/rollout/rehearse-rollback-authoritative`). Fail-closed
 on FRESH negative evidence: a later rehearsal that fails (drill or evidence-write) durably invalidates any
 earlier PASS for the build, so a node whose most recent authoritative rehearsal failed can never activate
-Canary on stale evidence (`TestCoordinatorRehearsal_FailedAttemptInvalidatesPriorPass`). The
+Canary on stale evidence (`TestCoordinatorRehearsal_FailedAttemptInvalidatesPriorPass`). When the same
+fault (e.g. a read-only volume) also blocks that durable invalidation, an in-memory poison latch keeps row
+20 closed against the still-readable record until a successful re-run supersedes it — parity with the
+mechanics path's `write_failed` blocker, lost on restart (a documented residual still gated by the
+durability-health prerequisites; `TestCoordinatorRehearsal_InvalidationFailurePoisonsRow20`). The
 mechanics fact (row 19) stays distinct. Production transition semantics are byte-identical (the wrapper
 just delegates to the shared core). The shipped default keeps row 20 open because the drill requires
 the full shadow tier (the unshipped tool-approval slice), which is the correct posture: such a node

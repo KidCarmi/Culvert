@@ -81,6 +81,15 @@ type mcpRollout struct {
 	persistMu       sync.Mutex
 	persistGateway  string
 	persistManageme string
+
+	// coordRehearsalStalePoison latches, per capability, that a FAILED authoritative rollback rehearsal
+	// could not durably invalidate an earlier build-bound PASS record (e.g. the same read-only volume that
+	// failed the drill/evidence write also failed the truncation of the prior record). While set, row 20
+	// fails CLOSED regardless of the still-readable on-disk record, so a stale PASS cannot qualify after a
+	// failed re-run (Codex P2). Set/cleared/read only under durableMu. Process-scoped: like the mechanics
+	// path's in-memory write_failed blocker it is lost on restart — a restart on a still-broken volume can
+	// re-expose the stale record, which the durability-health prerequisites still gate (documented residual).
+	coordRehearsalStalePoison map[rollout.Capability]bool
 }
 
 // setPersistStatus records the durable-state health for a capability (admin surface).

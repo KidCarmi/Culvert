@@ -168,6 +168,9 @@ func (r *mcpRollout) recordCoordinatorRehearsal(capb rollout.Capability) error {
 		r.invalidatePriorCoordinatorRehearsalLocked(capb)
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, serr)
 	}
+	// A fresh, valid, durable record was just written (the volume is writable), so any prior in-memory
+	// poison from an earlier failed re-run is superseded and must be cleared.
+	delete(r.coordRehearsalStalePoison, capb)
 	return nil
 }
 
@@ -179,8 +182,21 @@ func (r *mcpRollout) recordCoordinatorRehearsal(capb rollout.Capability) error {
 // Callers hold r.durableMu; the helper only touches the fixed operator-owned evidence file.
 func (r *mcpRollout) invalidatePriorCoordinatorRehearsalLocked(capb rollout.Capability) {
 	if rerr := removeCoordinatorRehearsalDurable(capb); rerr != nil {
-		logger.Printf("MCP rollout coordinator rehearsal record for %s could not be durably invalidated after a failed rehearsal (a crash could expose a record reported as stale; re-run the rehearsal): %q", capb.String(), sanitizeLog(rerr.Error()))
+		// The prior record could not be durably invalidated (e.g. a read-only volume that also failed the
+		// drill/evidence write). It may still be readable on disk, so latching an IN-MEMORY poison here is
+		// the only way to keep row 20 fail-closed against the surviving record without relying on the very
+		// filesystem that is failing (Codex P2, 2nd round). coordinatorRollbackRehearsalAttestedLocked
+		// consults this latch; a successful re-run clears it. Mirrors the mechanics path's write_failed
+		// blocker and, like it, is lost on restart (documented residual, gated by durability-health rows).
+		if r.coordRehearsalStalePoison == nil {
+			r.coordRehearsalStalePoison = make(map[rollout.Capability]bool)
+		}
+		r.coordRehearsalStalePoison[capb] = true
+		logger.Printf("MCP rollout coordinator rehearsal record for %s could not be durably invalidated after a failed rehearsal; row 20 is poisoned in-memory until a successful re-run (a restart on a still-broken volume could re-expose the stale record — re-run the rehearsal): %q", capb.String(), sanitizeLog(rerr.Error()))
+		return
 	}
+	// The record is confirmed gone; clear any prior poison for this capability.
+	delete(r.coordRehearsalStalePoison, capb)
 }
 
 // coordinatorRehearsalAtomicWrite is the durable-write seam for the coordinator-rehearsal record (tests
@@ -199,6 +215,12 @@ func saveCoordinatorRehearsal(capb rollout.Capability, rec *canary.CoordinatorRo
 	return removeVisibleFileAfterNotSyncedWrite(path, coordinatorRehearsalAtomicWrite(path, raw, 0o600))
 }
 
+// coordinatorRehearsalInvalidateContent is the durable content-invalidation seam for the coordinator
+// rehearsal record. Tests inject a failure to simulate a read-only volume where the prior record cannot
+// be truncated (proving row 20 still fails closed via the in-memory poison latch). Production is
+// invalidateFileContentDurably.
+var coordinatorRehearsalInvalidateContent = invalidateFileContentDurably
+
 // removeCoordinatorRehearsalDurable fails a coordinator-rehearsal record CLOSED (durably invalidate the
 // content first, then best-effort remove + dir sync), mirroring removeRollbackRehearsalDurable. It is
 // called on every failure exit of recordCoordinatorRehearsal so a failed authoritative rehearsal cannot
@@ -208,7 +230,7 @@ func saveCoordinatorRehearsal(capb rollout.Capability, rec *canary.CoordinatorRo
 // exists. Only the content invalidation failing is escalated to the caller.
 func removeCoordinatorRehearsalDurable(capb rollout.Capability) error {
 	path := coordinatorRehearsalPath(capb)
-	if ierr := invalidateFileContentDurably(path); ierr != nil {
+	if ierr := coordinatorRehearsalInvalidateContent(path); ierr != nil {
 		return ierr
 	}
 	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
@@ -272,6 +294,11 @@ func (r *mcpRollout) coordinatorRollbackRehearsalAttested(capb rollout.Capabilit
 // rather than the locking wrapper (which would self-deadlock). The read is consistent against an
 // in-flight rehearsal because that writer holds durableMu too.
 func (r *mcpRollout) coordinatorRollbackRehearsalAttestedLocked(capb rollout.Capability) bool {
+	// Fail closed if a failed re-run could not durably invalidate a prior record (the record may still be
+	// readable on disk; the in-memory poison latch is the row-20 backstop — Codex P2, 2nd round).
+	if r.coordRehearsalStalePoison[capb] {
+		return false
+	}
 	rec, err := loadCoordinatorRehearsal(capb)
 	if err != nil {
 		return false

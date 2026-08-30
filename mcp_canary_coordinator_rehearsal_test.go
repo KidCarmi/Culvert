@@ -205,6 +205,59 @@ func TestCoordinatorRehearsal_FailedAttemptInvalidatesPriorPass(t *testing.T) {
 	}
 }
 
+// TestCoordinatorRehearsal_InvalidationFailurePoisonsRow20 proves the fail-closed backstop for the
+// worst case (Codex P2, 2nd round): a re-run in which the SAME filesystem fault fails BOTH the drill and
+// the durable invalidation of the prior record (a read-only volume), so the earlier build-bound PASS
+// stays READABLE on disk. Discarding the invalidation error would leave row 20 closed on that stale
+// record; instead an in-memory poison latch makes productionCoordinatorRollbackRehearsed fail closed
+// regardless of the surviving record, and a successful re-run on a recovered volume clears it.
+func TestCoordinatorRehearsal_InvalidationFailurePoisonsRow20(t *testing.T) {
+	r := withCoordinatorRehearsalEnv(t)
+	capb := rollout.CapabilityGateway
+
+	// (1) A first rehearsal succeeds → valid record, row 20 closed.
+	if err := r.recordCoordinatorRehearsal(capb); err != nil {
+		t.Fatalf("the first rehearsal on a ready node must succeed, got %v", err)
+	}
+	if !productionCoordinatorRollbackRehearsed(r, capb, false) {
+		t.Fatal("precondition: row 20 must be closed after the first successful rehearsal")
+	}
+
+	// (2) A re-run where BOTH the drill (scratch persist) AND the durable invalidation of the prior record
+	// fail — modeling a read-only volume. The prior record is left untouched and still readable.
+	prevW := rolloutStateAtomicWrite
+	prevInv := coordinatorRehearsalInvalidateContent
+	t.Cleanup(func() { rolloutStateAtomicWrite = prevW; coordinatorRehearsalInvalidateContent = prevInv })
+	rolloutStateAtomicWrite = func(string, []byte, os.FileMode) error { return errors.New("read-only fs") }
+	coordinatorRehearsalInvalidateContent = func(string) error { return errors.New("read-only fs") }
+	if err := r.recordCoordinatorRehearsal(capb); err == nil {
+		t.Fatal("SECURITY: the re-run must FAIL when the volume is read-only")
+	}
+
+	// (3) Test premise: the prior record is STILL on disk and would validate on its own...
+	if rec, _ := loadCoordinatorRehearsal(capb); rec == nil {
+		t.Fatal("test premise: the prior record must still be present (invalidation was blocked)")
+	}
+	// ...but row 20 fails CLOSED via the in-memory poison latch (both accessors agree).
+	if productionCoordinatorRollbackRehearsed(r, capb, false) {
+		t.Fatal("SECURITY: a failed re-run whose invalidation also failed must poison row 20 despite the readable record")
+	}
+	if r.coordinatorRollbackRehearsalAttested(capb) {
+		t.Fatal("SECURITY: coordinatorRollbackRehearsalAttested must be false under the poison latch")
+	}
+
+	// (4) Recovery: once the volume is writable again, a successful re-run clears the poison and re-closes
+	// row 20 (a fresh valid record supersedes the poisoned prior one).
+	rolloutStateAtomicWrite = prevW
+	coordinatorRehearsalInvalidateContent = prevInv
+	if err := r.recordCoordinatorRehearsal(capb); err != nil {
+		t.Fatalf("the recovery rehearsal on a writable volume must succeed, got %v", err)
+	}
+	if !productionCoordinatorRollbackRehearsed(r, capb, false) {
+		t.Fatal("a successful re-run on a recovered volume must clear the poison and re-close row 20")
+	}
+}
+
 // TestCoordinatorRehearse_HTTPHandler pins the admin surface: non-admins are forbidden, an unversioned
 // build is refused 409, and on a ready node an admin POST runs the coordinator-routed drill and closes
 // row 20 (authoritative_rollback_rehearsed:true).
