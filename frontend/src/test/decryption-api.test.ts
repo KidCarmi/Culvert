@@ -38,7 +38,9 @@ const HEALTH = {
     top: [{ category: "handshake", stage: "client_hello", count: 2 }],
   },
   coverage: { inspected: 8, bypassed: 3, failed: 1, inspected_ratio: 0.7272 },
-  trend: [{ ts: 1700000000000, inspected: 2, bypassed: 1, failed: 0, ratio: 0.66 }],
+  trend: [
+    { ts: 1700000000000, inspected: 2, bypassed: 1, failed: 0, ratio: 0.66 },
+  ],
   autoexclude: {
     active: 1,
     pending: 0,

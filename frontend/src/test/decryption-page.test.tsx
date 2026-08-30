@@ -328,9 +328,7 @@ it("rotation is a T3 typed ceremony bound to fresh truth, with no CA confusion",
     expect(container.textContent).toContain(
       "Rotate the destination-pseudonym key",
     );
-    expect(container.textContent).toContain(
-      "NOT the TLS inspection Root CA",
-    );
+    expect(container.textContent).toContain("NOT the TLS inspection Root CA");
     expect(container.textContent).toContain("no longer correlate");
   });
   // The typed word gates the confirm.
@@ -366,7 +364,9 @@ it("rotation is a T3 typed ceremony bound to fresh truth, with no CA confusion",
   expect(put.body["rotate_key"]).toBe(true);
   expect(put.body["ifRevision"]).toBe("sha256:rev-gen-aaaa-true");
   await flushUntil(() => {
-    expect(container.textContent).toContain("New pseudonym generation: gen-bbbb");
+    expect(container.textContent).toContain(
+      "New pseudonym generation: gen-bbbb",
+    );
   });
 });
 
