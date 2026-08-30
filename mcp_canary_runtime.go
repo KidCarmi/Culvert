@@ -89,37 +89,58 @@ func canaryRuntimeStatePath(capb rollout.Capability) string {
 // errCanaryBudgetInvalid marks an activation refused because its budget is not first-Canary valid.
 var errCanaryBudgetInvalid = errors.New("canary_budget_invalid")
 
+// canarySyncParentDir is the parent-directory fsync seam for the runtime fail-closed cleanup, so a
+// test can inject a dir-sync failure and prove the cleanup reports the pre-rename-revival risk as
+// UNRESOLVED rather than claiming a durable removal. Production is the real syncParentDir.
+var canarySyncParentDir = syncParentDir
+
 // removeRuntimeStateAfterSafetyPersistFailure DURABLY removes the runtime file after a FAIL-CLOSED
 // safety mutation (a whole-Canary abort, a demotion, or a failed begin) could not be persisted, so a
 // restart cannot restore the pre-mutation record and revive an execution-eligible activation the
-// mutation was meant to stop. A missing file restores to the dormant default (the safe direction).
+// mutation was meant to stop. A missing file restores to the dormant default (the safe direction). It
+// returns nil ONLY when the fail-closed removal is confirmed crash-durable; a non-nil return names an
+// UNRESOLVED durability risk (the caller has already disarmed the in-memory activation, so the running
+// process is safe — the residual is a crash in this window).
 //
-// A bare unlink is NOT crash-durable until the parent directory is synced, and that sync can itself
-// fail: on filesystems where the directory entry survives in cache, an immediate crash could then
-// restore the stale Active record after os.Remove logged success (Codex P1). So the CONTENT is DURABLY
-// INVALIDATED FIRST — truncate the record to empty and fsync the FILE inode, independent of the
-// parent-directory fsync — mirroring removeVisibleFileAfterNotSyncedWrite: a crash-restored directory
-// entry then points to an EMPTY file that decodes as corrupt (quarantined on restore → dormant), so
-// the safety stop holds even when the unlink or its dir-sync cannot be confirmed. Only that
-// content-invalidation failing (a total filesystem failure) is reported as UNRESOLVED; a best-effort
-// remove/dir-sync failure afterward can no longer revive a valid record and is logged, not escalated.
-// Caller holds cr.mu.
-func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollout.Capability, what string, persistErr error) {
+// The safety-mutation persist that just failed with fileutil.ErrReplacedNotSynced RENAMED a new record
+// over the prior Active:true file but could not fsync the parent directory, so there are TWO crash-
+// revert windows, and each needs a distinct guard:
+//   - a revert to the JUST-RENAMED inode — covered by invalidating the CONTENT first (truncate + fsync
+//     the FILE inode): that inode is then durably empty, so restore quarantines it → dormant, even if
+//     the directory can never be synced;
+//   - a revert PAST the rename to the PRE-rename inode (the stale Active:true record the rename
+//     displaced) — NOT covered by the content invalidation, because that stale inode was never
+//     truncated (it is not the one `path` currently names). Only a CONFIRMED parent-directory fsync
+//     makes the rename + the removal durable and that stale inode permanently unreachable.
+//
+// So the removal is treated as fail-closed-COMPLETE only when the dir sync is confirmed; a dir-sync
+// failure is reported UNRESOLVED (the stale record could revive on a crash), not silently logged as a
+// durable removal — Codex round-23 P1 ("require the directory mutation to be confirmed before treating
+// cleanup as fail-closed"). Caller holds cr.mu.
+func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollout.Capability, what string, persistErr error) error {
 	path := canaryRuntimeStatePath(capb)
 	if ierr := invalidateFileContentDurably(path); ierr != nil {
 		logger.Printf("MCP canary runtime: %s persist failed and the record for %s could not be durably invalidated; a restart may revive the activation: persist=%q invalidate=%q",
 			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(ierr.Error()))
-		return
+		return ierr
 	}
-	// Best-effort remove the now-empty record + dir sync for cleanliness. The content is already durably
-	// invalid, so a failure here can no longer revive a valid Active record — log, do not escalate.
 	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-		logger.Printf("MCP canary runtime: %s persist for %s failed; record durably invalidated but its removal failed (fail-closed holds): persist=%q remove=%q",
+		// The empty record could not be removed. A crash-restored entry to THIS inode decodes empty →
+		// dormant, but the removal is not durable and a revert past the rename to the stale inode stays
+		// possible — report unresolved.
+		logger.Printf("MCP canary runtime: %s persist for %s failed; record content invalidated but its removal failed (a crash could revive the pre-rename record): persist=%q remove=%q",
 			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(rerr.Error()))
-		return
+		return rerr
 	}
-	_ = syncParentDir(path)
+	// CONFIRM the directory mutation: only a successful parent-dir fsync makes the rename + removal
+	// crash-durable and the displaced pre-rename inode permanently unreachable.
+	if serr := canarySyncParentDir(path); serr != nil {
+		logger.Printf("MCP canary runtime: %s persist for %s failed; record content invalidated and removed but the directory sync is UNCONFIRMED — a crash could revive the pre-rename record: persist=%q dirsync=%q",
+			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(serr.Error()))
+		return serr
+	}
 	logger.Printf("MCP canary runtime: %s persist for %s failed; durably removed the state to fail closed to dormant: %q", what, capb.String(), sanitizeLog(persistErr.Error()))
+	return nil
 }
 
 // removeVisibleFileAfterNotSyncedWrite eliminates a record that AtomicWrite REPLACED but could not
@@ -234,7 +255,7 @@ func (rt *canaryRuntime) beginCanaryActivation(capb rollout.Capability, budget c
 		// The persist may have left a VISIBLE Active record on disk (e.g. an AtomicWrite that replaced
 		// the target but could not fsync — ErrReplacedNotSynced). Durably remove it so a restart cannot
 		// re-arm an activation the caller was told never became durable (Codex P1).
-		rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "begin", err)
+		_ = rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "begin", err) // in-memory already disarmed; residual risk is logged
 		return gen, err
 	}
 	return gen, nil
@@ -264,7 +285,7 @@ func (rt *canaryRuntime) demoteCanary(capb rollout.Capability) error {
 		// Persisting the disarmed record failed — remove the durable file so a restart cannot restore
 		// the prior Active:true record and undo the rollback. The error is RETURNED so the caller
 		// never reports a durable rollback that a restart could reverse.
-		rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "demote", err)
+		_ = rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "demote", err) // in-memory already disarmed; residual risk is logged
 		return err
 	}
 	return nil
@@ -352,7 +373,7 @@ func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now tim
 		// the (pre-abort) Active/not-aborted activation and let previously-admitted work run again —
 		// the same fail-closed handling as tripCanaryAbort/demoteCanary (Codex P1).
 		if outcome.WholeCanaryExhaustion() || outcome.IdentityCapExceeded() {
-			rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "reserve-abort", err)
+			_ = rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "reserve-abort", err) // in-memory already disarmed; residual risk is logged
 		}
 		if outcome.Granted() {
 			// The grant is being turned into a denial (no side effect will cross the boundary), but
@@ -403,7 +424,7 @@ func (rt *canaryRuntime) tripCanaryAbort(capb rollout.Capability, code string, n
 	res := cr.aborter.Trip(code, cr.generation, now)
 	if res == canary.TripCanaryLatched {
 		if err := canaryRuntimePersist(rt, capb, cr); err != nil {
-			rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "abort", err)
+			_ = rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "abort", err) // in-memory already disarmed; residual risk is logged
 		}
 	}
 	return res

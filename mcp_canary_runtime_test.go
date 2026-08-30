@@ -650,6 +650,44 @@ func TestSyncParentDir_ReportsFailure(t *testing.T) {
 	}
 }
 
+// TestRemoveRuntimeStateAfterSafetyPersistFailure_ReportsUnconfirmedDirSync is the Codex round-23 P1
+// proof: content-invalidating and removing the runtime record is treated as a fail-closed COMPLETE
+// removal only when the parent-directory fsync is CONFIRMED. A failed safety-mutation persist
+// (ErrReplacedNotSynced) renamed a new record over the prior Active:true file without syncing the
+// directory, so a crash could revert PAST the rename to that stale inode — which the content
+// invalidation never truncated. So a dir-sync failure is reported UNRESOLVED (the error is returned)
+// rather than logged as a durable removal.
+func TestRemoveRuntimeStateAfterSafetyPersistFailure_ReportsUnconfirmedDirSync(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	path := canaryRuntimeStatePath(capb)
+
+	// A CONFIRMED dir sync (production seam) ⇒ clean fail-closed removal; the record is gone and nil is
+	// returned.
+	if err := os.WriteFile(path, []byte(`{"active":true}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "abort", errors.New("persist boom")); err != nil {
+		t.Fatalf("a confirmed dir sync must report a durable removal, got %v", err)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Fatal("the record must be removed on a confirmed cleanup")
+	}
+
+	// An UNCONFIRMED dir sync (injected failure) ⇒ the cleanup returns that error (UNRESOLVED), never
+	// nil — the stale pre-rename record could revive on a crash.
+	prev := canarySyncParentDir
+	dirSyncErr := errors.New("dir sync boom")
+	canarySyncParentDir = func(string) error { return dirSyncErr }
+	t.Cleanup(func() { canarySyncParentDir = prev })
+	if err := os.WriteFile(path, []byte(`{"active":true}`), 0o600); err != nil {
+		t.Fatalf("seed 2: %v", err)
+	}
+	if err := rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "abort", errors.New("persist boom")); !errors.Is(err, dirSyncErr) {
+		t.Fatalf("an unconfirmed dir sync must be reported UNRESOLVED, got %v", err)
+	}
+}
+
 // TestInvalidateFileContentDurably_EmptiesFile is the Codex P1 (round-9) durability-anchor proof:
 // invalidateFileContentDurably truncates a record to empty and fsyncs the FILE inode (independent of
 // the parent-directory fsync), so a not-synced write whose directory cleanup cannot be synced is
