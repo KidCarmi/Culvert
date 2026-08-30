@@ -217,5 +217,5 @@ cd "$FRONTEND"
 CULVERT_E2E_BASE_URL="http://127.0.0.1:$UI_PORT" \
 CULVERT_E2E_FRESH_URL="http://127.0.0.1:$FRESH_PORT" \
 CULVERT_E2E_SETUPFAIL_URL="http://127.0.0.1:$FAIL_PORT" \
-  npx playwright test --config e2e/playwright.config.ts
+  npx playwright test --config e2e/playwright.config.ts "$@"
 echo "e2e-smoke: PASS"

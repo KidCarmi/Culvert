@@ -241,16 +241,21 @@ function EnrollConfirmDialog({
   form,
   onDone,
   onUnknown,
+  onFail,
   onCancel,
 }: {
   page: InstPage;
   form: EnrollForm;
   onDone: (inst: CDRInstance) => void;
   onUnknown: () => void;
+  /** Failure closes the ceremony and reports at page level — the parent
+   * clears the single-use token field on EVERY dispatch outcome (secret
+   * hygiene: a controlled input's value is serialized into the DOM, so a
+   * dispatched token must not linger there). */
+  onFail: (error: string) => void;
   onCancel: () => void;
 }): JSX.Element {
   const [result, setResult] = useState<ConfirmResult>("idle");
-  const [errorText, setErrorText] = useState("");
   return (
     <ConfirmationDialog
       open
@@ -270,7 +275,6 @@ function EnrollConfirmDialog({
       rollback="Revoke the credential (preferred) or delete the instance locally."
       confirmLabel="Enroll instance"
       result={result}
-      {...(errorText !== "" ? { errorText } : {})}
       onConfirm={() => {
         if (result === "pending") return;
         const signal = page.owner.begin();
@@ -296,7 +300,7 @@ function EnrollConfirmDialog({
               return;
             }
             setResult("failed");
-            setErrorText(serverErrorText(err, "The enrollment failed."));
+            onFail(serverErrorText(err, "The enrollment failed."));
           })
           .finally(() => {
             page.owner.settle(signal);
@@ -317,6 +321,7 @@ export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element 
   const [form, setForm] = useState<EnrollForm>(EMPTY_FORM);
   const [confirmEnroll, setConfirmEnroll] = useState(false);
   const [enrollUnknown, setEnrollUnknown] = useState(false);
+  const [enrollError, setEnrollError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<CDRInstance | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<CDRInstance | null>(null);
   const [notice, setNotice] = useState<{
@@ -348,6 +353,15 @@ export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element 
           The outcome of the last change is unknown (the appliance did not
           answer). Refresh to load the authoritative registry before making
           further changes.
+        </Callout>
+      )}
+
+      {enrollError !== "" && (
+        <Callout variant="critical" title="Enrollment failed">
+          {enrollError} For safety the token field was cleared — re-enter a
+          token to retry (a name or validation error never reached the engine,
+          so the same token is still unused; after an engine-side rejection,
+          request a fresh token).
         </Callout>
       )}
 
@@ -573,6 +587,7 @@ export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element 
           onDone={(inst) => {
             setForm(EMPTY_FORM);
             setEnrollUnknown(false);
+            setEnrollError("");
             setNotice({
               kind: "enrolled",
               name: inst.name,
@@ -583,7 +598,17 @@ export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element 
           onUnknown={() => {
             // The single-use token must not linger for an accidental retry.
             setForm({ ...form, token: "" });
+            setEnrollError("");
             setEnrollUnknown(true);
+            setConfirmEnroll(false);
+          }}
+          onFail={(error) => {
+            // Secret hygiene: a dispatched token is cleared on EVERY
+            // outcome — a controlled input's value is serialized into the
+            // DOM, and a sent token must not be reconstructable from it.
+            setForm({ ...form, token: "" });
+            setEnrollUnknown(false);
+            setEnrollError(error);
             setConfirmEnroll(false);
           }}
           onCancel={() => {
