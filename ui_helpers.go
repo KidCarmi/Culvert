@@ -24,20 +24,43 @@ func auditEvent(r *http.Request, action, object, detail string) {
 // accountability; the username adds readability. Callers that drive a backend
 // service (which audits via the headless auditAdd) use this to pass the same
 // actor string the audit ring would record.
+//
+// It resolves the name from the SAME two authenticated sources sessionAdmin does, in the
+// same order: the admin UI session cookie, else the HTTP Basic username uiAuthMiddleware
+// stored in the request context after VerifyUIUser succeeded. Keeping the two in step is
+// the point — sessionAdmin gained the Basic fallback so an admin action taken
+// programmatically is attributed to the real actor, but auditActor feeds the AUDIT RING
+// (the compliance record every mutating handler writes through auditEvent), so without the
+// same fallback a Basic-auth admin action was recorded with an IP and no username. On an
+// appliance where several admins reach the API through one bastion or NAT egress, that IP
+// does not identify WHO approved a tool-trust grant or attested a Shadow Exit Review. The
+// name is never taken from a header or a request field: uiUser reads only the context value
+// the middleware sets after authenticating the credentials, so it cannot be spoofed. The IP
+// is always retained — the username is added to it, never substituted for it.
 func auditActor(r *http.Request) string {
 	// RISK-019: attribute to the real client behind a configured trusted proxy
 	// so audit lines don't all name the reverse proxy (falls back to the peer).
 	actor := realClientIP(r)
-	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
-		name := sess.Sub
-		if name == "" {
-			name = sess.Email
-		}
-		if name != "" {
-			actor = name + "@" + actor
-		}
+	if name := auditActorName(r); name != "" {
+		actor = name + "@" + actor
 	}
 	return actor
+}
+
+// auditActorName returns the authenticated admin's name for attribution, or "" when the
+// request carries neither an admin UI session nor an authenticated Basic identity. Cookie
+// first (the interactive path), then the Basic username — the same precedence sessionAdmin
+// uses, so the audit ring and the durable records name the same actor.
+func auditActorName(r *http.Request) string {
+	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
+		if sess.Sub != "" {
+			return sess.Sub
+		}
+		if sess.Email != "" {
+			return sess.Email
+		}
+	}
+	return uiUser(r)
 }
 
 // auditEventDiff records an audit event with optional before/after JSON snapshots.

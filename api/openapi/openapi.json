@@ -12134,9 +12134,13 @@
               "schema": {
                 "properties": {
                   "evidence_digest": {
+                    "description": "Canonical lowercase-hex SHA-256 (exactly 64 characters matching ^[0-9a-f]{64}$) of the reviewed Shadow Exit evidence bundle — the \"which evidence\" binding. A non-empty but non-digest value is rejected with 400 so a review can never be attested against an unidentifiable evidence reference.",
+                    "example": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
                     "type": "string"
                   },
                   "review_id": {
+                    "description": "The exact Shadow Exit Review artifact / case id. Must be non-empty and at most 256 bytes — it is the only free-text field that reaches the durable attestation record, so it is bounded at the trust boundary rather than inheriting the admin middleware's 1 MiB body cap. Over-bound input is rejected with 400, never truncated (a truncated identity would name a different review than the operator attested).",
+                    "example": "SXR-2026-08-30-gateway-shadow-exit-review",
                     "type": "string"
                   }
                 },

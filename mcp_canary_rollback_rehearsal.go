@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -226,17 +225,10 @@ func loadRollbackRehearsal(capb rollout.Capability) (*canary.RollbackRehearsalRe
 
 // strictDecodeRehearsalJSON decodes exactly one JSON value into v, rejecting unknown fields and
 // trailing data — the same discipline the Shadow Exit attestation uses so a malformed or tampered
-// record is corruption, not silently accepted.
+// record is corruption, not silently accepted. It delegates the end-of-stream proof to
+// strictDecodeSingleJSONValue.
 func strictDecodeRehearsalJSON(raw []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if dec.More() {
-		return errors.New("trailing data after JSON value")
-	}
-	return nil
+	return strictDecodeSingleJSONValue(raw, v)
 }
 
 // rollbackRehearsalAttested reports whether a durable, build-bound rollback-rehearsal record

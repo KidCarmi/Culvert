@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -557,14 +558,35 @@ func (rt *canaryRuntime) restoreCapability(capb rollout.Capability) {
 }
 
 // strictDecodeCanaryRuntimeJSON decodes exactly one JSON value into v, rejecting unknown fields and
-// trailing data (the tooltrust/attestation discipline — a tampered record is corruption).
+// trailing data (the tooltrust/attestation discipline — a tampered record is corruption). It
+// delegates the end-of-stream proof to strictDecodeSingleJSONValue.
 func strictDecodeCanaryRuntimeJSON(raw []byte, v any) error {
+	return strictDecodeSingleJSONValue(raw, v)
+}
+
+// strictDecodeSingleJSONValue is THE shared strict decoder for the Canary activation gate's three
+// durable records (Shadow Exit attestation, rollback-rehearsal evidence, Canary runtime state). It
+// decodes exactly one JSON value into v, rejecting unknown fields and ANY trailing bytes.
+//
+// The end-of-stream proof is a SECOND Decode that must report io.EOF, NOT Decoder.More().
+// json.Decoder.More is an array/object ITERATION predicate: it reports whether another ELEMENT
+// follows in the container being ranged, and it deliberately returns false for a trailing `]` or
+// `}`. So `{...}}` — a stray closing delimiter, the shape a partial/tampered rewrite produces —
+// passes a More()-based check and the truncated-but-parseable prefix is accepted as valid evidence.
+// internal/mcp/tooltrust/store.go and internal/catoverride already carry this reasoning and use the
+// io.EOF form; these three records are the Canary gate's strongest fail-closed claims, so they use
+// it too rather than the weaker predicate their comments described.
+//
+// A record written by json.Marshal never carries trailing bytes, so tightening this can only ever
+// reject a corrupt or tampered file — which every caller then quarantines and treats as ABSENT
+// (fail-closed: not attested, not rehearsed, runtime disarmed). No valid record is affected.
+func strictDecodeSingleJSONValue(raw []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	if dec.More() {
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data after JSON value")
 	}
 	return nil
