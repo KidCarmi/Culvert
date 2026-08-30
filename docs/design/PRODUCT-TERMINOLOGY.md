@@ -18,7 +18,7 @@ is listed under "replaces".
 | **Decision** | The evaluated result for one request (tester output, log `ruleMatched`) | "result", "verdict" (reserve "verdict" for Diagnostics checks) |
 | **Event** | One row in a monitoring feed (request log entry, audit entry) | — |
 | **Alert** | A condition Culvert fires to webhooks (`fireAlert`, `/api/alerts/webhooks`) | Today "alert" only appears as "Alert Webhooks"; keep "Alert" for the condition, "Webhook" for the delivery channel |
-| **Incident** | *Not a product concept.* No backend entity — MUST NOT appear in the UI | — |
+| **Incident** | *Not a general product concept* — there is no incident-tracking/ticketing entity (no incident list, ID, or lifecycle) and none should be invented | the Support Bundle's `IncidentScope` (`internal/support`, `?scope=`, GUI "Scope" field: `tls`/`upstream`/`policy`/`storage`/`dns`/`cluster`/`scan`) is a distinct, already-shipped concept — a bundle-focus selector, not the forbidden entity — and MAY keep using "incident" adjectivally (e.g. the Support panel's "Incident scope" tooltip, `resolveSupportBundlesPostParams`'s "unknown incident scope" error) |
 | **Engine** | A scanning/enforcement subsystem: ClamAV, YARA, DPI, Threat Feeds, CDR, GeoIP | "scanner", "threat engine" (keep "Threat engine breakdown" as a chart title is fine) |
 | **Object** | A reusable referenced entity: URL category, category group, file profile, rewrite rule, identity provider | new umbrella (nav section) |
 | **Profile** | A named object bundle (file profile — `Executables`, `Archives`; IdP profile) | — |
