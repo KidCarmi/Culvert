@@ -98,7 +98,7 @@ import (
 //   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
 //     feed freshness/failure counts, previously Prometheus-only).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 235 // 234 + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)
+	const want = 236 // 235 + 1 authoritative rollback rehearsal route (/api/mcp/rollout/rehearse-rollback-authoritative)
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

@@ -180,6 +180,7 @@ func registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/rollout/evidence", apiMCPRolloutEvidence)
 	mux.HandleFunc("/api/mcp/rollout/emergency", apiMCPRolloutEmergency)
 	mux.HandleFunc("/api/mcp/rollout/rehearse-rollback", apiMCPRolloutRehearse)
+	mux.HandleFunc("/api/mcp/rollout/rehearse-rollback-authoritative", apiMCPRolloutRehearseAuthoritative)
 	mux.HandleFunc("/api/mcp/canary/shadow-exit-review", apiMCPShadowExitReview)
 	mux.HandleFunc("/api/mcp/executions", apiMCPExecutions)
 	mux.HandleFunc("/api/mcp/upstream-health", apiMCPUpstreamHealth)

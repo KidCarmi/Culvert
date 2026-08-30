@@ -148,3 +148,37 @@ func TestCoordinatorRehearsal_InvalidConfigRejected(t *testing.T) {
 		t.Fatal("SECURITY: an invalid-config rehearsal must leave row 20 unmet")
 	}
 }
+
+// TestCoordinatorRehearse_HTTPHandler pins the admin surface: non-admins are forbidden, an unversioned
+// build is refused 409, and on a ready node an admin POST runs the coordinator-routed drill and closes
+// row 20 (authoritative_rollback_rehearsed:true).
+func TestCoordinatorRehearse_HTTPHandler(t *testing.T) {
+	const path = "/api/mcp/rollout/rehearse-rollback-authoritative"
+	t.Run("rbac_non_admin_forbidden", func(t *testing.T) {
+		withCoordinatorRehearsalEnv(t)
+		for _, role := range []UIRole{RoleViewer, RoleOperator} {
+			if got := mcpReq("POST", path, role, `{"capability":"gateway"}`).Code; got != 403 {
+				t.Fatalf("role %v must be forbidden, got %d", role, got)
+			}
+		}
+	})
+	t.Run("unversioned_build_refused", func(t *testing.T) {
+		withTempDataDir(t)
+		prevVer, prevCommit := version, buildCommit
+		version, buildCommit = "dev", ""
+		t.Cleanup(func() { version, buildCommit = prevVer, prevCommit })
+		if got := mcpReq("POST", path, RoleAdmin, `{"capability":"gateway"}`).Code; got != 409 {
+			t.Fatalf("unversioned build must be 409, got %d", got)
+		}
+	})
+	t.Run("admin_on_ready_node_closes_row20", func(t *testing.T) {
+		r := withCoordinatorRehearsalEnv(t)
+		rec := mcpReq("POST", path, RoleAdmin, `{"capability":"gateway"}`)
+		if rec.Code != 200 {
+			t.Fatalf("admin rehearse on a ready node = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if !r.coordinatorRollbackRehearsalAttested(rollout.CapabilityGateway) {
+			t.Fatal("row 20 must be closed after the HTTP authoritative rehearse")
+		}
+	})
+}

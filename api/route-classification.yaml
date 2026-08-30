@@ -3567,6 +3567,16 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/mcp/rollout/rehearse-rollback-authoritative"
+    method: "POST"
+    handler: "apiMCPRolloutRehearseAuthoritative"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/mcp/canary/shadow-exit-review"
     method: "GET"
     handler: "apiMCPShadowExitReview"

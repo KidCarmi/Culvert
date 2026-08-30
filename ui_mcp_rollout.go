@@ -292,6 +292,60 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true, "persisted": true})
 }
 
+// apiMCPRolloutRehearseAuthoritative runs the AUTHORITATIVE rollback rehearsal: it drives the
+// Canary→Shadow→Observe demotion ladder through the REAL rollout coordinator core
+// (commitRolloutTransitionCore — the same body every production transition runs) on a scratch state,
+// so it fails for every security reason a real rollback would fail (Shadow preflight, emergency kill,
+// config validity, durability). On full success it records durable, build-bound evidence that closes
+// the CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite (readiness reason
+// rollback_coordinator_rehearsal_pending, row 20). It is DISTINCT from the mechanics rehearsal above
+// (rollback_path_healthy, row 19): the two facts never merge. It NEVER mutates live rollout state,
+// arms live execution, or activates Canary — it is evidence-only, like the mechanics rehearsal.
+//
+// Capability isolation and the uniquely-versioned-build guard are identical to apiMCPRolloutRehearse.
+func apiMCPRolloutRehearseAuthoritative(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req struct {
+		Capability string `json:"capability"`
+	}
+	if err := decodeJSON(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	capab := mcpRolloutCapability(r)
+	if req.Capability != "" {
+		parsed, err := rollout.ParseCapability(req.Capability)
+		if err != nil {
+			http.Error(w, "rollout_capability_invalid", http.StatusBadRequest)
+			return
+		}
+		capab = parsed
+	}
+	// The evidence is build-bound; a placeholder/non-unique build stamp can never satisfy the read-time
+	// check, so refuse rather than record a record the gate will immediately reject.
+	if !currentRuntimeIdentity().Valid() {
+		http.Error(w, "rollback_rehearsal_requires_a_uniquely_versioned_build", http.StatusConflict)
+		return
+	}
+	if err := getMCPRollout().recordCoordinatorRehearsal(capab); err != nil {
+		auditEvent(r, "mcp.rollout.rehearse-rollback-authoritative", capab.String(), "")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		// A failure means no valid evidence was recorded (the drill failed a real coordinator gate, or the
+		// evidence write was not crash-durable and was invalidated), so the gate treats it as ABSENT.
+		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "authoritative_rollback_rehearsed": false, "error": "rollout_persist_failed"})
+		return
+	}
+	auditEvent(r, "mcp.rollout.rehearse-rollback-authoritative", capab.String(), "")
+	jsonOK(w, map[string]any{"capability": capab.String(), "authoritative_rollback_rehearsed": true})
+}
+
 // apiMCPExecutions returns the bounded, safe execution history (counts only — no
 // tenant/subject/argument/URL/token content).
 func apiMCPExecutions(w http.ResponseWriter, r *http.Request) {
