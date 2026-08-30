@@ -281,7 +281,11 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 		auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "rollback_rehearsed": true, "persisted": false, "error": "rollout_persist_failed"})
+		// A persist failure means recordRehearsal removed/invalidated the record and reverted the
+		// evidence marker, so the status model and the activation gate treat the rehearsal as ABSENT.
+		// Report rollback_rehearsed:false so clients/operators are not told a rehearsal occurred when
+		// both the durable record and the gate say it did not (Codex round-21 P2).
+		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "rollback_rehearsed": false, "persisted": false, "error": "rollout_persist_failed"})
 		return
 	}
 	auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")

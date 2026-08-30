@@ -13401,7 +13401,7 @@
                 }
               }
             },
-            "description": "Rehearsal drill or its persistence failed (not durably recorded). JSON object with rollback_rehearsed, persisted:false, error."
+            "description": "Rehearsal drill or its persistence failed (not durably recorded). JSON object with rollback_rehearsed:false, persisted:false, error."
           }
         },
         "security": [
