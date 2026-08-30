@@ -725,6 +725,32 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-B FINAL STORAGE-READ FAIL-CLOSED CLOSURE (this branch, 2026-08-30).**
+> External review of the freeze candidate (465316df) found the last
+> lifecycle defect: the recovery read collapsed "cannot read / cannot
+> interpret the recovery store" into `null`, and `null` meant "no pending
+> recovery" — a transient sessionStorage failure or an unsupported/
+> malformed record forgot a pending operation and re-armed Rotate (the
+> write-side fail-closed rule cannot help once storage recovers and a NEW
+> operation writes its own valid marker). Red-before at the exact candidate
+> (`decryption-recovery-storage.test.tsx`, 4 red + the true-absence control
+> green). Closure: `readRotationRecovery` is RESULT-TYPED
+> (`none | valid | unavailable | unreadable`) — "none" (storage readable,
+> key absent) is the ONLY entry to the ordinary no-recovery state;
+> "unavailable" blocks Rotate with the mandated copy and an explicit
+> "Retry storage check"; "unreadable" (existing but malformed /
+> unsupported-version record) blocks Rotate, never silently deletes, and is
+> retired ONLY by the new admin-only T3 typed ceremony "Discard unreadable
+> recovery record…" (word DISCARD; NO appliance mutation; VERIFIED removal
+> — a removal whose read-back cannot prove absence keeps everything
+> blocked; then re-inspection + authoritative refresh). No future-version
+> migration logic. The subject-isolation rule is unchanged (a well-formed
+> v1 foreign-subject marker still discards to "none"), and
+> `writeRotationRecovery` verifies through the typed reader (read must be
+> VALID with the exact operationId/preSeq). Frontend-only; backend,
+> OpenAPI, receipts, freshness gate, and SPA-navigation semantics
+> untouched.
+>
 > **2E-B TRUE FINAL RECOVERY-FRESHNESS CLOSURE (this branch, 2026-08-30).**
 > External source review of the lifecycle candidate (3669666e) found two
 > remaining frontend defects; red-before at the exact candidate
