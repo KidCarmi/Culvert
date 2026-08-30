@@ -241,7 +241,12 @@ export function deleteCDRInstance(
       const o = readRecord(v, path);
       return {
         removed: field(o, "removed", readString, path),
-        clientCertFingerprint: field(o, "clientCertFingerprint", readString, path),
+        clientCertFingerprint: field(
+          o,
+          "clientCertFingerprint",
+          readString,
+          path,
+        ),
       };
     },
     { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
@@ -417,15 +422,11 @@ export function addCDRPolicy(
   input: CDRPolicyInput,
   signal?: AbortSignal,
 ): Promise<CDRPolicyRule> {
-  return apiRequest(
-    "/api/cdr/policies",
-    (v, path = "$") => readRule(v, path),
-    {
-      method: "POST",
-      body: input,
-      ...(signal !== undefined ? { signal } : {}),
-    },
-  );
+  return apiRequest("/api/cdr/policies", (v, path = "$") => readRule(v, path), {
+    method: "POST",
+    body: input,
+    ...(signal !== undefined ? { signal } : {}),
+  });
 }
 
 export function deleteCDRPolicy(
@@ -553,7 +554,8 @@ const decodeTestResult: Decoder<CDRTestResult> = (v, path = "$") => {
       const p = `${path}.threats[${i}]`;
       const t = readRecord(item, p);
       threats.push({
-        type: opt(t, "Type", readString, p) ?? opt(t, "type", readString, p) ?? "",
+        type:
+          opt(t, "Type", readString, p) ?? opt(t, "type", readString, p) ?? "",
         location:
           opt(t, "Location", readString, p) ??
           opt(t, "location", readString, p) ??

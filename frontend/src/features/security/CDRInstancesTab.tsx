@@ -78,20 +78,23 @@ function DeleteDialog({
           <p>
             This removes <Mono>{target.name}</Mono> from THIS appliance only:
             the registry entry is pruned and the local mTLS key material is
-            destroyed. It does NOT revoke anything on the Sluice side —
-            Sluice keeps trusting client certificate{" "}
-            <Mono>{target.clientCertFingerprint === "" ? "(fingerprint unknown)" : target.clientCertFingerprint}</Mono>{" "}
+            destroyed. It does NOT revoke anything on the Sluice side — Sluice
+            keeps trusting client certificate{" "}
+            <Mono>
+              {target.clientCertFingerprint === ""
+                ? "(fingerprint unknown)"
+                : target.clientCertFingerprint}
+            </Mono>{" "}
             until it expires or is revoked there.
           </p>
           <p>
-            If this credential may be compromised, use{" "}
-            <strong>Revoke</strong> instead — after Delete, revoking from this
-            appliance is no longer possible (the local key and certificate are
-            shredded).
+            If this credential may be compromised, use <strong>Revoke</strong>{" "}
+            instead — after Delete, revoking from this appliance is no longer
+            possible (the local key and certificate are shredded).
           </p>
           <p>
-            If this is the only dialed instance, CDR calls stop being served
-            and matching downloads follow the configured fail mode. Reversal
+            If this is the only dialed instance, CDR calls stop being served and
+            matching downloads follow the configured fail mode. Reversal
             requires re-enrollment with a NEW single-use token.
           </p>
         </>
@@ -161,11 +164,15 @@ function RevokeDialog({
         <>
           <p>
             This tells Sluice to permanently refuse client certificate{" "}
-            <Mono>{target.clientCertFingerprint === "" ? "(fingerprint read from disk at revoke time)" : target.clientCertFingerprint}</Mono>
+            <Mono>
+              {target.clientCertFingerprint === ""
+                ? "(fingerprint read from disk at revoke time)"
+                : target.clientCertFingerprint}
+            </Mono>
             , then removes <Mono>{target.name}</Mono> from this appliance and
             destroys the local key material. The revocation is IRREVERSIBLE —
-            using this engine again requires re-enrollment with a new
-            single-use token.
+            using this engine again requires re-enrollment with a new single-use
+            token.
           </p>
           <p>
             Sluice refuses self-revocation, so the call is issued through
@@ -263,12 +270,12 @@ function EnrollConfirmDialog({
       title={`Enroll ${form.name}`}
       body={
         <>
-          Contacts <Mono>{form.endpoint}</Mono>, verifies its server
-          certificate against the pasted fingerprint (trust-on-first-use pin),
-          and exchanges the single-use token for an mTLS client credential
-          stored on this appliance. The token is consumed by a successful
-          exchange and cannot be used again. The first successful enrollment
-          also enables CDR processing (persisted).
+          Contacts <Mono>{form.endpoint}</Mono>, verifies its server certificate
+          against the pasted fingerprint (trust-on-first-use pin), and exchanges
+          the single-use token for an mTLS client credential stored on this
+          appliance. The token is consumed by a successful exchange and cannot
+          be used again. The first successful enrollment also enables CDR
+          processing (persisted).
         </>
       }
       impact="Establishes mutual trust with the engine; with CDR enabled, matching file downloads are processed by it."
@@ -315,7 +322,11 @@ function EnrollConfirmDialog({
 
 // ── Tab ─────────────────────────────────────────────────────────────────────
 
-export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
+export function CDRInstancesTab({
+  isAdmin,
+}: {
+  isAdmin: boolean;
+}): JSX.Element {
   const page = useObjectPage(["security", "cdr", "instances"], getCDRInstances);
   const d = page.q.data;
   const [form, setForm] = useState<EnrollForm>(EMPTY_FORM);
@@ -370,10 +381,10 @@ export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element 
           The appliance did not answer, so the enrollment may or may not have
           completed. Do NOT retry with the same token — it is single-use.
           Refresh: if the instance appears in the list, the enrollment landed.
-          If it does not appear and the token was consumed on the engine side,
-          a certificate may exist in the engine&apos;s ledger that this
-          appliance never stored — issue a new token to enroll again, and
-          revoke the orphaned certificate on the Sluice side if required.
+          If it does not appear and the token was consumed on the engine side, a
+          certificate may exist in the engine&apos;s ledger that this appliance
+          never stored — issue a new token to enroll again, and revoke the
+          orphaned certificate on the Sluice side if required.
         </Callout>
       )}
 
@@ -409,8 +420,8 @@ export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element 
           {notice.kind === "enrolled" && (
             <>
               Credential issued; client certificate fingerprint{" "}
-              <Mono>{notice.fingerprint}</Mono>. CDR was auto-enabled if it
-              was off.
+              <Mono>{notice.fingerprint}</Mono>. CDR was auto-enabled if it was
+              off.
             </>
           )}{" "}
           <Button
@@ -513,9 +524,9 @@ export function CDRInstancesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element 
             </div>
           )}
           <p className={styles.refDetail}>
-            &ldquo;Last probe answered&rdquo; means the most recent health
-            probe succeeded — it is not a claim that production file traffic
-            is flowing through the instance. A row&apos;s fingerprint is the
+            &ldquo;Last probe answered&rdquo; means the most recent health probe
+            succeeded — it is not a claim that production file traffic is
+            flowing through the instance. A row&apos;s fingerprint is the
             credential Sluice uses to identify this appliance; an
             &ldquo;unknown&rdquo; fingerprint marks an entry enrolled before
             fingerprints were recorded durably.

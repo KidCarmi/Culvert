@@ -192,9 +192,7 @@ test("admin: runtime toggle round-trip through the T2 ceremony, restored", async
     expect((await put).ok()).toBe(true);
 
     // Authoritative truth flipped.
-    await expect
-      .poll(async () => getConfigEnabled(api))
-      .toBe(!before);
+    await expect.poll(async () => getConfigEnabled(api)).toBe(!before);
     // And the page reflects it after its own refresh.
     await expect(
       page.getByRole("button", {
@@ -225,15 +223,15 @@ test("admin: enrollment ceremony fails truthfully against an unreachable engine;
     await expect(page.getByText("Enroll a new instance")).toBeVisible();
 
     await page.getByLabel("Instance name").fill(name);
-    await page
-      .getByLabel("Endpoint (host:port)")
-      .fill("127.0.0.1:1"); // nothing listens here — deterministic refusal
+    await page.getByLabel("Endpoint (host:port)").fill("127.0.0.1:1"); // nothing listens here — deterministic refusal
     await page
       .getByLabel("Server certificate fingerprint (TOFU pin)")
       .fill("ab".repeat(32));
     await page.getByLabel("Enrollment token (single-use)").fill(token);
     await page.getByRole("button", { name: "Enroll instance…" }).click();
-    await expect(page.getByText(/consumed by a successful exchange/)).toBeVisible();
+    await expect(
+      page.getByText(/consumed by a successful exchange/),
+    ).toBeVisible();
 
     const post = page.waitForResponse(
       (r) =>
@@ -250,7 +248,9 @@ test("admin: enrollment ceremony fails truthfully against an unreachable engine;
     await expect(
       page.getByText("Enrollment failed", { exact: true }),
     ).toBeVisible();
-    await expect(page.getByText(/connection refused|enrollment failed/).first()).toBeVisible();
+    await expect(
+      page.getByText(/connection refused|enrollment failed/).first(),
+    ).toBeVisible();
     await expect(page.getByLabel("Enrollment token (single-use)")).toHaveValue(
       "",
     );
@@ -335,8 +335,12 @@ test("admin: policy add → duplicate 409 → unknown-outcome latch → real del
       .getByRole("row", { name: new RegExp(ruleName) })
       .getByRole("button", { name: "Delete…" })
       .click();
-    await expect(page.getByText(/Enforcement changes immediately/)).toBeVisible();
-    await page.getByRole("button", { name: "Delete rule", exact: true }).click();
+    await expect(
+      page.getByText(/Enforcement changes immediately/),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Delete rule", exact: true })
+      .click();
     await expect(page.getByText("Last change unconfirmed")).toBeVisible();
     await expect(page.getByRole("button", { name: "Add rule" })).toBeDisabled();
     await page.unroute("**/api/cdr/policies?name=*");
@@ -357,7 +361,9 @@ test("admin: policy add → duplicate 409 → unknown-outcome latch → real del
       .getByRole("row", { name: new RegExp(ruleName) })
       .getByRole("button", { name: "Delete…" })
       .click();
-    await page.getByRole("button", { name: "Delete rule", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Delete rule", exact: true })
+      .click();
     expect((await del).ok()).toBe(true);
     await expect(page.getByRole("cell", { name: ruleName })).toHaveCount(0);
     expect(await listRuleNames(api)).not.toContain(ruleName);
@@ -382,13 +388,11 @@ test("admin: the test harness reports the truthful no-active-client failure once
     await page.getByRole("tab", { name: "Test" }).click();
     await expect(page.getByText(/report-only/).first()).toBeVisible();
 
-    await page
-      .getByLabel("Test file")
-      .setInputFiles({
-        name: "sample.txt",
-        mimeType: "text/plain",
-        buffer: Buffer.from("e2e cdr test payload"),
-      });
+    await page.getByLabel("Test file").setInputFiles({
+      name: "sample.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("e2e cdr test payload"),
+    });
     const post = page.waitForResponse(
       (r) =>
         r.url().includes("/api/cdr/test") && r.request().method() === "POST",
@@ -397,9 +401,7 @@ test("admin: the test harness reports the truthful no-active-client failure once
     const resp = await post;
     expect(resp.status()).toBe(503);
     await expect(page.getByText(/no active CDR client/)).toBeVisible();
-    await expect(
-      page.getByText(/never retried automatically/),
-    ).toBeVisible();
+    await expect(page.getByText(/never retried automatically/)).toBeVisible();
     expect(
       calls.filter((c) => c.method === "POST" && c.path === "/api/cdr/test"),
     ).toHaveLength(1);

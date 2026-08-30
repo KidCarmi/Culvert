@@ -13,7 +13,10 @@ import {
   Mono,
   Skeleton,
 } from "../../design-system/primitives";
-import { ConfirmationDialog, type ConfirmResult } from "../../design-system/dialog";
+import {
+  ConfirmationDialog,
+  type ConfirmResult,
+} from "../../design-system/dialog";
 import { Button } from "../../design-system/primitives";
 import { SnapshotBar } from "../../shared/snapshot";
 import { useObjectPage, type ObjectPageState } from "../objects/useObjectPage";
@@ -82,17 +85,17 @@ function ToggleDialog({
         target ? (
           <>
             Enables the CDR stage at runtime and dials every enrolled, enabled
-            instance. Matching downloaded files are then sent to Sluice per
-            the policy rules — in ENFORCE mode their content can be modified
-            or blocked. The choice persists across restarts.
+            instance. Matching downloaded files are then sent to Sluice per the
+            policy rules — in ENFORCE mode their content can be modified or
+            blocked. The choice persists across restarts.
           </>
         ) : (
           <>
             Disables the CDR stage at runtime and drains the client pool. NO
-            file sanitization, detection, or reporting happens through CDR
-            while it is off — regardless of policy rules or fail mode.
-            Enrolled instances and policy rules are kept. The choice persists
-            across restarts.
+            file sanitization, detection, or reporting happens through CDR while
+            it is off — regardless of policy rules or fail mode. Enrolled
+            instances and policy rules are kept. The choice persists across
+            restarts.
           </>
         )
       }
@@ -159,8 +162,8 @@ export function CDROverviewTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
       {page.unknown !== null && (
         <Callout variant="warning" title="Last change unconfirmed">
           The outcome of the last change is unknown (the appliance did not
-          answer). Refresh to load the authoritative state before making
-          further changes.
+          answer). Refresh to load the authoritative state before making further
+          changes.
         </Callout>
       )}
 
@@ -198,9 +201,9 @@ export function CDROverviewTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
             {d.config.enabled && d.config.failOpen && (
               <Callout variant="warning" title="Fail-open posture">
                 When no Sluice instance is reachable (or a call errors),
-                matching files are delivered WITHOUT sanitization. Fail mode
-                is configured in YAML/CLI (cdr.fail_mode) and requires a
-                restart to change.
+                matching files are delivered WITHOUT sanitization. Fail mode is
+                configured in YAML/CLI (cdr.fail_mode) and requires a restart to
+                change.
               </Callout>
             )}
             {isAdmin && (
@@ -239,7 +242,9 @@ export function CDROverviewTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                 ],
                 [
                   "Default mode",
-                  d.config.defaultMode === "" ? "ENFORCE" : d.config.defaultMode,
+                  d.config.defaultMode === ""
+                    ? "ENFORCE"
+                    : d.config.defaultMode,
                 ],
                 [
                   "Per-file timeout",
@@ -269,8 +274,9 @@ export function CDROverviewTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                     The background poller has{" "}
                     {String(d.health.consecutiveFailures)} consecutive failed
                     probe(s); the values below are the last snapshot that
-                    succeeded{d.health.lastSeen !== "" ? ` (${d.health.lastSeen})` : ""}
-                    , not the current engine state.
+                    succeeded
+                    {d.health.lastSeen !== "" ? ` (${d.health.lastSeen})` : ""},
+                    not the current engine state.
                   </Callout>
                 )}
                 <KeyValue
@@ -287,7 +293,10 @@ export function CDROverviewTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                         ? "at least one instance answered its last probe"
                         : "no instance answered its last probe",
                     ],
-                    ["Engine version", d.health.version === "" ? "—" : d.health.version],
+                    [
+                      "Engine version",
+                      d.health.version === "" ? "—" : d.health.version,
+                    ],
                     [
                       "Workers",
                       `${String(d.health.activeWorkers)} active / ${String(d.health.maxWorkers)} max`,
@@ -334,7 +343,9 @@ export function CDROverviewTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                             <td>
                               <Mono>{p.name}</Mono>
                             </td>
-                            <td>{p.description === "" ? "—" : p.description}</td>
+                            <td>
+                              {p.description === "" ? "—" : p.description}
+                            </td>
                             <td>
                               {p.maxFileSizeBytes === 0
                                 ? "—"

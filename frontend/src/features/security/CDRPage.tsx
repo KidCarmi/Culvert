@@ -42,11 +42,7 @@ export function CDRPage(): JSX.Element {
         title="CDR Integration"
         subtitle="Content Disarm & Reconstruction via enrolled Sluice engines — runtime enablement, instance trust lifecycle, sanitization policy rules, and an admin test harness. Node-local; refreshed on demand."
       />
-      <div
-        className={styles.toolbar}
-        role="tablist"
-        aria-label="CDR sections"
-      >
+      <div className={styles.toolbar} role="tablist" aria-label="CDR sections">
         {TABS.map((t) => (
           <Button
             key={t}

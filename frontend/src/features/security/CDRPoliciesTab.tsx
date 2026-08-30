@@ -45,8 +45,10 @@ function ruleMatchSummary(r: CDRPolicyRule): string {
   if (r.authSource !== "") parts.push(`authSrc=${r.authSource}`);
   if (r.destFQDN !== "") parts.push(`destFQDN=${r.destFQDN}`);
   if (r.destCategory !== "") parts.push(`destCat=${r.destCategory}`);
-  if (r.destCategoryGroup !== "") parts.push(`destCatGrp=${r.destCategoryGroup}`);
-  if (r.destCountry.length > 0) parts.push(`destCountry=${r.destCountry.join(",")}`);
+  if (r.destCategoryGroup !== "")
+    parts.push(`destCatGrp=${r.destCategoryGroup}`);
+  if (r.destCountry.length > 0)
+    parts.push(`destCountry=${r.destCountry.join(",")}`);
   return parts.length === 0 ? "any traffic" : parts.join(" ");
 }
 
@@ -71,9 +73,10 @@ function DeleteRuleDialog({
       body={
         <>
           Removes the rule <Mono>{target.name}</Mono> (priority{" "}
-          {String(target.priority)}, matches {ruleMatchSummary(target)},
-          profile{" "}
-          <Mono>{target.profileName === "" ? "default" : target.profileName}</Mono>
+          {String(target.priority)}, matches {ruleMatchSummary(target)}, profile{" "}
+          <Mono>
+            {target.profileName === "" ? "default" : target.profileName}
+          </Mono>
           , mode <Mono>{target.mode === "" ? "ENFORCE" : target.mode}</Mono>).
           Traffic it matched falls through to lower-priority rules or the
           startup defaults on the next request.
@@ -215,7 +218,9 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
       )}
 
       {d !== undefined && (
-        <Card title={`Rules (${String(d.count)}) — first match by priority, highest first`}>
+        <Card
+          title={`Rules (${String(d.count)}) — first match by priority, highest first`}
+        >
           {d.rules.length === 0 ? (
             <EmptyState title="No CDR policy rules">
               With no rules, every CDR-processed download uses the startup
@@ -246,7 +251,9 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                       </td>
                       <td>{ruleMatchSummary(r)}</td>
                       <td>
-                        <Mono>{r.profileName === "" ? "default" : r.profileName}</Mono>
+                        <Mono>
+                          {r.profileName === "" ? "default" : r.profileName}
+                        </Mono>
                       </td>
                       <td>
                         <Mono>{r.mode === "" ? "ENFORCE" : r.mode}</Mono>
@@ -274,8 +281,8 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
           )}
           <p className={styles.refDetail}>
             Hit counters are process-lifetime (reset on restart) and are not
-            persisted. This surface has no draft/commit or config versioning
-            by design — changes apply immediately and are audited.
+            persisted. This surface has no draft/commit or config versioning by
+            design — changes apply immediately and are audited.
           </p>
         </Card>
       )}

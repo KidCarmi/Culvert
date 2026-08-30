@@ -127,9 +127,7 @@ beforeEach(() => {
       const method = init?.method ?? "GET";
       if (method !== "GET") {
         const body: unknown =
-          typeof init?.body === "string"
-            ? JSON.parse(init.body)
-            : undefined;
+          typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
         mutations.push({ method, url, body });
         return onMutate(method, url);
       }
@@ -341,9 +339,7 @@ it("revoke failure surfaces the server's second-instance requirement verbatim", 
   setInput("Type sluice-a to confirm", "sluice-a");
   clickButton((t) => t === "Revoke credential");
   await flushUntil(() => {
-    expect(container.textContent).toContain(
-      "enroll a second instance first",
-    );
+    expect(container.textContent).toContain("enroll a second instance first");
   });
   expect(mutations).toHaveLength(1); // no auto-retry
 });
@@ -360,7 +356,9 @@ it("an unknown enrollment outcome latches, clears the single-use token, and neve
   setInput("Enrollment token (single-use)", "tok-secret-1");
   clickButton((t) => t.includes("Enroll instance…"));
   await flushUntil(() => {
-    expect(container.textContent).toContain("consumed by a successful exchange");
+    expect(container.textContent).toContain(
+      "consumed by a successful exchange",
+    );
   });
   clickButton((t) => t === "Enroll instance");
   await flushUntil(() => {
@@ -375,8 +373,8 @@ it("an unknown enrollment outcome latches, clears the single-use token, and neve
   expect(tokenInput instanceof HTMLInputElement && tokenInput.value).toBe("");
   expect(container.textContent).toContain("Last change unconfirmed");
   // The latch blocks further mutations until a fresh refresh succeeds.
-  const enrollBtn = Array.from(container.querySelectorAll("button")).find(
-    (b) => (b.textContent ?? "").includes("Enroll instance…"),
+  const enrollBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+    (b.textContent ?? "").includes("Enroll instance…"),
   );
   expect(enrollBtn?.disabled).toBe(true);
 });

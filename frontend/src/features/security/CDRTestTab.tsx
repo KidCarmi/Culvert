@@ -36,14 +36,14 @@ export function CDRTestTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
   if (!isAdmin) {
     return (
       <Callout variant="info" title="Admin only">
-        Running a file through the CDR engine exercises live credentials and
-        the engine path, so the test harness is available to administrators
-        only.
+        Running a file through the CDR engine exercises live credentials and the
+        engine path, so the test harness is available to administrators only.
       </Callout>
     );
   }
 
-  const maxMB = cfg !== undefined && cfg.maxFileSizeMB > 0 ? cfg.maxFileSizeMB : 50;
+  const maxMB =
+    cfg !== undefined && cfg.maxFileSizeMB > 0 ? cfg.maxFileSizeMB : 50;
   const tooLarge = file !== null && file.size > maxMB * 1024 * 1024;
 
   const start = (): void => {
@@ -75,11 +75,11 @@ export function CDRTestTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
     <div>
       <Card title="Run a file through the engine (report-only)">
         <p className={styles.refDetail}>
-          The file is uploaded to this appliance and streamed to a pooled
-          Sluice instance with mode REPORT_ONLY: the engine reports what it
-          would flag, and the original bytes are never replaced. The run is
-          attributed to your admin identity in the audit trail. Bounded at{" "}
-          {String(maxMB)} MB and about 60 seconds.
+          The file is uploaded to this appliance and streamed to a pooled Sluice
+          instance with mode REPORT_ONLY: the engine reports what it would flag,
+          and the original bytes are never replaced. The run is attributed to
+          your admin identity in the audit trail. Bounded at {String(maxMB)} MB
+          and about 60 seconds.
         </p>
         <input
           ref={fileInput}
@@ -92,8 +92,8 @@ export function CDRTestTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
         />
         {tooLarge && file !== null && (
           <Callout variant="critical" title="File too large">
-            {file.name} exceeds the configured {String(maxMB)} MB cap and
-            would be refused by the appliance.
+            {file.name} exceeds the configured {String(maxMB)} MB cap and would
+            be refused by the appliance.
           </Callout>
         )}
         <div className={styles.toolbar}>
@@ -115,8 +115,8 @@ export function CDRTestTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
       {run.kind === "unknown" && (
         <Callout variant="warning" title={`No result for ${run.filename}`}>
           The appliance did not answer within the deadline. The engine may or
-          may not have finished processing the file — no result is inferred,
-          and the test is never retried automatically. You may run it again
+          may not have finished processing the file — no result is inferred, and
+          the test is never retried automatically. You may run it again
           explicitly (report-only tests do not change any configuration).
         </Callout>
       )}
@@ -153,7 +153,9 @@ export function CDRTestTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
           ) : (
             <div className={styles.tableWrap}>
               <table className={styles.table}>
-                <caption className="sr-only">Threats the engine flagged</caption>
+                <caption className="sr-only">
+                  Threats the engine flagged
+                </caption>
                 <thead>
                   <tr>
                     <th scope="col">Type</th>
