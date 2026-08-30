@@ -130,6 +130,11 @@ const NAV: readonly NavSection[] = [
         to: "/security/decryption",
         minRole: "viewer",
       },
+      {
+        label: "CDR Integration",
+        to: "/security/cdr",
+        minRole: "viewer",
+      },
       { label: "Certificates", minRole: "viewer" },
     ],
   },

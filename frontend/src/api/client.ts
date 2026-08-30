@@ -107,6 +107,12 @@ export interface RequestOptions {
   method?: Method;
   /** JSON-serialized body for mutating requests */
   body?: unknown;
+  /** Raw (non-JSON) request body for upload-style endpoints (2E-C: the CDR
+   * admin test upload). Mutually exclusive with `body`; the Content-Type is
+   * `rawContentType` (the server treats an absent type as octet-stream). The
+   * same target gate, error model, and 401 boundary apply. */
+  rawBody?: BodyInit;
+  rawContentType?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   unauthorizedPolicy?: UnauthorizedPolicy;
@@ -146,6 +152,11 @@ export async function apiRequest<T>(
     if (opts.body !== undefined) {
       init.body = JSON.stringify(opts.body);
       init.headers = { "Content-Type": "application/json" };
+    } else if (opts.rawBody !== undefined) {
+      init.body = opts.rawBody;
+      if (opts.rawContentType !== undefined && opts.rawContentType !== "") {
+        init.headers = { "Content-Type": opts.rawContentType };
+      }
     }
     resp = await fetch(path, init);
   } catch (err) {

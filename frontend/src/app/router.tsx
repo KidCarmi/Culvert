@@ -28,6 +28,7 @@ import { DecryptionProfilesPage } from "../features/objects/DecryptionProfilesPa
 import { FileProfilesPage } from "../features/objects/FileProfilesPage";
 import { ContentSecurityPage } from "../features/security/ContentSecurityPage";
 import { DecryptionPage } from "../features/security/DecryptionPage";
+import { CDRPage } from "../features/security/CDRPage";
 
 function NotFoundPage(): JSX.Element {
   return (
@@ -86,6 +87,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           {
             path: "security/decryption",
             element: <DecryptionPage />,
+          },
+          {
+            path: "security/cdr",
+            element: <CDRPage />,
           },
           { path: "diagnostics", element: <DiagnosticsPage /> },
           { path: "governance", element: <GovernancePage /> },
