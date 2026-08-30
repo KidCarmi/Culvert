@@ -99,6 +99,13 @@ func withReadyShadowNode(t *testing.T) {
 		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
 		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
 		_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
+		// publishMCPInventory(mcpInvLoaded, ...) above eagerly binds the process-wide MCP admin
+		// singleton with the loaded inventory/decision sources wired. Un-publishing the inventory does
+		// NOT un-wire the already-built singleton, so without this reset a later test that expects the
+		// dormant default (e.g. TestMCP_DisabledDefaults) would observe leaked sources under an
+		// unlucky -shuffle order. Reset it so the next getMCPAdmin() rebuilds fresh against the now
+		// un-published (nil) inventory.
+		resetMCPAdminSingleton()
 	})
 }
 
@@ -558,6 +565,7 @@ func gwCanaryCfg(rev uint64, servers ...string) *rollout.SignedConfig {
 // two disjoint Shadow periods are never treated as one continuous window.
 func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	withTempDataDir(t)
+	pinTestBuildVersion(t) // valid attestation/rehearsal require a non-placeholder build stamp
 	withReadyShadowNode(t) // shadow-ready node — for the Shadow legs
 	r := newTestRollout()
 	// Shadow at t=1000. The Gateway Shadow preflight forbids a node that ALSO has the live

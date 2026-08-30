@@ -220,6 +220,13 @@ func apiMCPShadowExitReviewPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "shadow_exit_evidence_digest_must_be_hex_sha256", http.StatusBadRequest)
 		return
 	}
+	// An attestation is only meaningful if it binds to a UNIQUE runtime identity — a placeholder or
+	// non-unique build stamp ("dev" on a local/untagged build) cannot prove which code was reviewed, so
+	// refuse to create one here rather than write a record that will never validate on read (Codex P1).
+	if !currentRuntimeIdentity().Valid() {
+		http.Error(w, "shadow_exit_review_requires_a_uniquely_versioned_build", http.StatusConflict)
+		return
+	}
 	a := &canary.ShadowExitAttestation{
 		SchemaVersion:      canary.ShadowExitAttestationSchemaVersion,
 		Status:             canary.ShadowExitStatusPassed,

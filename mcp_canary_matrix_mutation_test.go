@@ -176,6 +176,7 @@ func TestCanaryMutation3_RestoreClampsHandCraftedCanary(t *testing.T) {
 // EvidenceSummary.RollbackRehearsed boolean (the old self-attested marker) WITHOUT the executable
 // rollback-rehearsal evidence must NOT make the rollback path ready.
 func TestCanaryMutation9_SelfAttestedMarkerWithoutDrillIsNotReady(t *testing.T) {
+	pinTestBuildVersion(t) // a valid rehearsal record requires a non-placeholder build stamp
 	_ = getMCPRollout()
 	prevR, prevDir := globalMCPRollout, dataDir
 	globalMCPRollout = &mcpRollout{

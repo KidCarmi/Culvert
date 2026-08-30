@@ -108,3 +108,24 @@ func TestValidEvidenceDigest(t *testing.T) {
 		t.Fatalf("a valid digest must validate, got %q", r)
 	}
 }
+
+// TestRuntimeIdentity_PlaceholderStampsAreNotUnique is the Codex P1 (round-12) proof: a placeholder
+// or non-unique build stamp ("dev" on a local/untagged build, and common CI fillers) is NOT a valid
+// unique runtime identity, so an old attestation cannot cover materially changed code on such a build.
+func TestRuntimeIdentity_PlaceholderStampsAreNotUnique(t *testing.T) {
+	for _, s := range []string{"", "dev", "unknown", "none", "latest"} {
+		if (RuntimeIdentity{BuildVersion: s}).Valid() {
+			t.Fatalf("placeholder build stamp %q must not be a valid unique identity", s)
+		}
+	}
+	if !(RuntimeIdentity{BuildVersion: "v1.2.3"}).Valid() {
+		t.Fatal("a concrete version stamp must be a valid identity")
+	}
+	// An attestation bound to a placeholder build fails the identity binding (fail closed), even when
+	// the current build carries the same placeholder stamp.
+	a := validAttestation()
+	a.Identity = RuntimeIdentity{BuildVersion: "dev"}
+	if r := ValidateAttestation(a, RuntimeIdentity{BuildVersion: "dev"}); r != AttestationIdentityMismatch {
+		t.Fatalf("a dev-stamped attestation must fail the identity binding, got %q", r)
+	}
+}

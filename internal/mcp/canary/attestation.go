@@ -31,8 +31,29 @@ type RuntimeIdentity struct {
 	BuildVersion string `json:"build_version"`
 }
 
-// Valid reports whether an identity carries a concrete build stamp (never the empty default).
-func (i RuntimeIdentity) Valid() bool { return i.BuildVersion != "" }
+// nonUniqueBuildStamps are build-version values that are NOT a unique runtime identity: the default
+// local stamp and common CI/placeholder fillers. An attestation or rollback rehearsal bound to one of
+// these does not prove WHICH code was reviewed/rehearsed — the same stamp can cover materially
+// different commits (a "dev" local build, or a floating tag) — so it must not satisfy the identity
+// binding. Fail closed (Codex P1). A production Canary is only ever attestable on a build carrying a
+// concrete, non-placeholder version stamp. (A reused *real* release tag across commits is the
+// residual the placeholder set cannot detect; fully closing it needs a commit-digest binding injected
+// at build time — a build-pipeline change tracked separately.)
+var nonUniqueBuildStamps = map[string]struct{}{
+	"":        {},
+	"dev":     {},
+	"unknown": {},
+	"none":    {},
+	"latest":  {},
+}
+
+// Valid reports whether an identity carries a concrete, UNIQUE build stamp — never the empty default
+// and never a known non-unique placeholder (see nonUniqueBuildStamps). A placeholder stamp fails the
+// identity binding so an old review can never cover materially changed code on an unversioned build.
+func (i RuntimeIdentity) Valid() bool {
+	_, placeholder := nonUniqueBuildStamps[i.BuildVersion]
+	return !placeholder
+}
 
 // ShadowExitAttestation is the durable, schema-versioned record that the Shadow Exit Review
 // PASSED. It is created ONLY by an explicit privileged admin action (or an accepted signed

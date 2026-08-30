@@ -52,8 +52,20 @@ func writeValidRollbackRehearsal(t *testing.T, capb rollout.Capability) {
 // the gate refuses. NOTE: this arms the live tier permanently, so a test using it must NOT also
 // commit a Shadow config (the Shadow preflight forbids a live-armed node) — use the surgical
 // helpers above for a test that toggles the live tier around a single Canary commit.
+// pinTestBuildVersion sets the process build stamp to a concrete, non-placeholder value for the
+// duration of a test, restoring it on cleanup. The attestation/rehearsal identity binding now rejects
+// placeholder stamps ("dev", the process default — Codex P1), so any test that must produce a VALID
+// attestation or rehearsal record must run under a real version.
+func pinTestBuildVersion(t *testing.T) {
+	t.Helper()
+	prev := version
+	version = "v-canary-test-1"
+	t.Cleanup(func() { version = prev })
+}
+
 func withCanaryReadyNode(t *testing.T) {
 	t.Helper()
+	pinTestBuildVersion(t) // a valid attestation/rehearsal requires a non-placeholder build stamp
 	withReadyShadowNode(t) // durable events, inspection, inventory, policy, listener + shadow tier
 	prevLive := globalExecDeps.gateway.Load()
 	globalExecDeps.gateway.Store(true)

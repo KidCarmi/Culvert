@@ -153,7 +153,8 @@ func TestCanaryActivationPreflight_WiresScopeApprovalBudget(t *testing.T) {
 // rehearsal evidence as one consistent snapshot under durableMu (no torn read of an in-flight
 // rehearsal). The concurrent half is a race-detector gate.
 func TestRollbackPathHealthy_DurableRehearsalAndRace(t *testing.T) {
-	_ = getMCPRollout() // fire the sync.Once before swapping
+	pinTestBuildVersion(t) // a valid rehearsal record requires a non-placeholder build stamp
+	_ = getMCPRollout()    // fire the sync.Once before swapping
 	prevR := globalMCPRollout
 	globalMCPRollout = &mcpRollout{
 		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
