@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
 )
@@ -44,6 +45,53 @@ var pacProfileAlertOnce = struct {
 	seen map[string]bool
 }{seen: map[string]bool{}}
 
+// pacDegradedProfile is the last-observed serve-time compile-warning state
+// for one PAC profile.
+type pacDegradedProfile struct {
+	Warnings []pac.ValidationIssue `json:"warnings"`
+	At       time.Time             `json:"at"`
+}
+
+// pacDegraded tracks, per profile ID ("default" for the legacy PAC config),
+// the most recent serve-time compile warnings (dropped rule, unresolvable
+// pool reference, secure-mode conflict).
+//
+// Enterprise Product Experience finding: pacObserveServe already computes
+// this fact on every serve and turns it into a log line, a counter, and a
+// once-per-profile alert — but nothing kept the CURRENT state around for a
+// later read. An admin who missed the alert (or never configured a webhook)
+// had no way to ask "is my PAC currently degraded" without SSHing in to read
+// server logs or standing up Prometheus. Cleared the next time a profile
+// serves with zero warnings — recovery on OBSERVED evidence only, the same
+// convention storage_health.go/ca_health.go use, never on elapsed time.
+var pacDegraded = struct {
+	mu    sync.Mutex
+	state map[string]pacDegradedProfile
+}{state: map[string]pacDegradedProfile{}}
+
+// pacUpdateDegraded records or clears profileID's degraded state.
+func pacUpdateDegraded(profileID string, warnings []pac.ValidationIssue) {
+	pacDegraded.mu.Lock()
+	defer pacDegraded.mu.Unlock()
+	if len(warnings) == 0 {
+		delete(pacDegraded.state, profileID)
+		return
+	}
+	pacDegraded.state[profileID] = pacDegradedProfile{Warnings: warnings, At: time.Now().UTC()}
+}
+
+// pacDegradedSnapshot returns a copy of the currently-degraded profiles,
+// safe to encode directly into an API response.
+func pacDegradedSnapshot() map[string]pacDegradedProfile {
+	pacDegraded.mu.Lock()
+	defer pacDegraded.mu.Unlock()
+	out := make(map[string]pacDegradedProfile, len(pacDegraded.state))
+	for k, v := range pacDegraded.state {
+		out[k] = v
+	}
+	return out
+}
+
 // pacObserveServe records a served PAC and surfaces any compile warnings.
 // profileID is "default" for the legacy surface. notModified reports whether
 // the response was a 304 (still counted as a serve of that profile).
@@ -53,6 +101,7 @@ func pacObserveServe(profileID string, art pac.Artifact, notModified bool) {
 	} else {
 		pacServesTotal.Add(1)
 	}
+	pacUpdateDegraded(profileID, art.Warnings)
 	if len(art.Warnings) == 0 {
 		return
 	}
@@ -93,6 +142,18 @@ func pacResetProfileAlert(profileID string) {
 	pacProfileAlertOnce.mu.Lock()
 	delete(pacProfileAlertOnce.seen, profileID)
 	pacProfileAlertOnce.mu.Unlock()
+}
+
+// pacForgetDegraded drops a deleted profile's degraded-state entry so it
+// cannot linger in pacDegradedSnapshot() forever (it will never be served
+// again to naturally clear itself). Update/create deliberately do NOT clear
+// this — the badge must keep reflecting the true last-served reality until a
+// clean serve is actually observed, not the admin's hope that an edit fixed
+// it.
+func pacForgetDegraded(profileID string) {
+	pacDegraded.mu.Lock()
+	delete(pacDegraded.state, profileID)
+	pacDegraded.mu.Unlock()
 }
 
 // pacWritePrometheus appends PAC metrics to the exposition buffer.

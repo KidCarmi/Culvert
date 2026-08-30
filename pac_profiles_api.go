@@ -172,6 +172,12 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 			"defaultProfile": pacDefaultView(),
 			"profiles":       cfg.Profiles,
 			"pools":          cfg.Pools,
+			// degraded is keyed by profile ID ("default" for the legacy
+			// profile) and carries only profiles whose most recent serve
+			// compiled with warnings (dropped rule, unresolvable pool
+			// reference, secure-mode conflict) — empty when every profile
+			// last served clean.
+			"degraded": pacDegradedSnapshot(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
@@ -274,6 +280,7 @@ func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
 			logger.Printf("PAC: exception delete for %s: %v", sanitizeLog(id), err)
 		}
 		pacExceptionsMu.Unlock()
+		pacForgetDegraded(id)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
