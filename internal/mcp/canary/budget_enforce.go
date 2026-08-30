@@ -260,6 +260,21 @@ func isNewBeyondCap(set map[string]struct{}, v string, capLimit int) bool {
 	return len(set) >= capLimit
 }
 
+// WindowOpen reports whether the time-boxed window is still open at now: false once the configured
+// Window has elapsed, AND false on a backward clock step (now earlier than the activation instant) —
+// mirroring Reserve's window gate exactly, so a status/eligibility read agrees with what a Reserve
+// would actually do rather than reporting eligible for an activation whose every reserve would return
+// BudgetDeniedWindow (Codex P2). A nil enforcer is not open.
+func (e *BudgetEnforcer) WindowOpen(now time.Time) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	elapsed := now.UnixNano() - e.startNanos
+	return elapsed >= 0 && elapsed < int64(e.budget.Window)
+}
+
 // Release returns one in-flight concurrency slot after an execution completes. It NEVER decrements
 // the monotonic total (the slot is spent whether the execution succeeded or failed — no replay).
 // It is idempotent-safe against underflow (inflight never goes below zero).

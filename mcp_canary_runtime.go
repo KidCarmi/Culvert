@@ -403,14 +403,17 @@ func (rt *canaryRuntime) tripCanaryAbort(capb rollout.Capability, code string, n
 
 // executionEligible reports whether a live Canary execution could proceed right now (armed,
 // eligible, budget remaining). Read-only.
-func (rt *canaryRuntime) executionEligible(capb rollout.Capability) bool {
+func (rt *canaryRuntime) executionEligible(capb rollout.Capability, now time.Time) bool {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if !cr.active || cr.enforcer == nil || cr.aborter == nil {
 		return false
 	}
-	return cr.aborter.ExecutionEligible(cr.generation) && cr.enforcer.Remaining() > 0
+	// The window is part of eligibility: an activation that has outlived its Window (or whose clock
+	// rolled back) is NOT execution-eligible even with total slots remaining — every reserve would
+	// return BudgetDeniedWindow — so the status surface must report false rather than true (Codex P2).
+	return cr.aborter.ExecutionEligible(cr.generation) && cr.enforcer.Remaining() > 0 && cr.enforcer.WindowOpen(now)
 }
 
 // persistLocked writes the capability's durable runtime state. Caller holds cr.mu.

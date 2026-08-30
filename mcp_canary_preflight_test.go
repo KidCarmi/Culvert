@@ -193,6 +193,7 @@ func TestRollbackPathHealthy_DurableRehearsalAndRace(t *testing.T) {
 // rehearsal clears a prior write_failed persistence status, so the rollback path is not stuck
 // reporting unhealthy forever after one transient write failure.
 func TestRollbackPathHealthy_ClearsStaleWriteFailed(t *testing.T) {
+	pinTestBuildVersion(t) // a valid rehearsal record requires a non-placeholder build stamp
 	_ = getMCPRollout()
 	prevR := globalMCPRollout
 	globalMCPRollout = &mcpRollout{

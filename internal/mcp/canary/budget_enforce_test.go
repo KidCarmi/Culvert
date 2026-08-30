@@ -140,6 +140,33 @@ func TestBudgetEnforcer_WindowTTL(t *testing.T) {
 	}
 }
 
+// TestBudgetEnforcer_WindowOpenMirrorsReserve proves the WindowOpen eligibility read agrees with the
+// window gate a Reserve would apply (Codex P2): open inside the window, closed at/after the window
+// boundary, and closed on a backward clock step (now earlier than the activation instant). A nil
+// enforcer is never open.
+func TestBudgetEnforcer_WindowOpenMirrorsReserve(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := testBudget(100)
+	b.Window = 10 * time.Minute
+	e := NewBudgetEnforcer(b, 1, now)
+	if !e.WindowOpen(now) {
+		t.Fatal("the window must be open at the activation instant")
+	}
+	if !e.WindowOpen(now.Add(9 * time.Minute)) {
+		t.Fatal("the window must be open just before it elapses")
+	}
+	if e.WindowOpen(now.Add(10 * time.Minute)) {
+		t.Fatal("the window must be closed at the boundary (>= elapsed), mirroring Reserve")
+	}
+	if e.WindowOpen(now.Add(-time.Second)) {
+		t.Fatal("a backward clock step must read as closed (fail closed), mirroring Reserve")
+	}
+	var nilE *BudgetEnforcer
+	if nilE.WindowOpen(now) {
+		t.Fatal("a nil enforcer is never window-open")
+	}
+}
+
 // TestBudgetEnforcer_GenerationBinding proves a Reserve carrying a different generation is refused —
 // a stale reservation against a superseded/rolled-back activation can never consume the budget.
 func TestBudgetEnforcer_GenerationBinding(t *testing.T) {

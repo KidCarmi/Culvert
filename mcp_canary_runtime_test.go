@@ -47,7 +47,7 @@ func TestCanaryRuntime_DormantDefault(t *testing.T) {
 	if rt.currentGeneration(capb) != 0 {
 		t.Fatal("no activation ⇒ generation 0")
 	}
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, time.Now()) {
 		t.Fatal("a dormant runtime must never be execution-eligible")
 	}
 	if o, _ := rt.reserveCanaryExecution(capb, time.Unix(1, 0), rtIdent); o != canary.BudgetDeniedInvalid {
@@ -83,12 +83,42 @@ func TestCanaryRuntime_BudgetExhaustionTripsWholeCanaryAbort(t *testing.T) {
 	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedTotal {
 		t.Fatalf("the N+1th reserve must be denied on total, got %s", o)
 	}
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, now) {
 		t.Fatal("budget exhaustion must trip the whole-Canary abort — no longer eligible")
 	}
 	// Every later reserve is denied because the Canary is aborted (not merely out of budget).
 	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedInvalid {
 		t.Fatalf("an aborted Canary must deny every reserve, got %s", o)
+	}
+}
+
+// TestCanaryRuntime_WindowExpiryEndsEligibility is the Codex P2 (round-13) proof: an activation with
+// total budget remaining but whose time-boxed Window has elapsed is NOT execution-eligible, so the
+// status surface never reports execution_eligible:true for a Canary whose every reserve would return
+// BudgetDeniedWindow. The window is part of eligibility, not merely of a per-request Reserve.
+func TestCanaryRuntime_WindowExpiryEndsEligibility(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	b := runtimeTestBudget(100) // plenty of total slots remain; only the window will end eligibility
+	if _, err := rt.beginCanaryActivation(capb, b, now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// Inside the window (Window == 1h): eligible, with slots to spare.
+	if !rt.executionEligible(capb, now.Add(59*time.Minute)) {
+		t.Fatal("an armed activation inside its window with slots remaining must be eligible")
+	}
+	// Past the window: NOT eligible even though the total budget is untouched.
+	if rt.executionEligible(capb, now.Add(time.Hour+time.Second)) {
+		t.Fatal("SECURITY: an activation past its window must not be execution-eligible (every reserve denies on window)")
+	}
+	// A reserve at that instant confirms the window gate agrees with the eligibility read.
+	if o, _ := rt.reserveCanaryExecution(capb, now.Add(time.Hour+time.Second), rtIdent); o != canary.BudgetDeniedWindow {
+		t.Fatalf("a reserve past the window must be denied on window, got %s", o)
+	}
+	// A backward clock step (now earlier than the activation instant) also ends eligibility.
+	if rt.executionEligible(capb, now.Add(-time.Second)) {
+		t.Fatal("SECURITY: a backward clock step must not be execution-eligible (fail closed)")
 	}
 }
 
@@ -104,13 +134,13 @@ func TestCanaryRuntime_PerRequestTripDoesNotStopCanary(t *testing.T) {
 	if r := rt.tripCanaryAbort(capb, "policy_deny", now); r != canary.TripRequestScoped {
 		t.Fatalf("a per-request code must be request-scoped, got %s", r)
 	}
-	if !rt.executionEligible(capb) {
+	if !rt.executionEligible(capb, now) {
 		t.Fatal("a per-request fail-closed must NOT stop the Canary")
 	}
 	if r := rt.tripCanaryAbort(capb, "scope_escape", now); r != canary.TripCanaryLatched {
 		t.Fatalf("a whole-Canary code must latch, got %s", r)
 	}
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, now) {
 		t.Fatal("a whole-Canary breach must stop the Canary")
 	}
 }
@@ -162,7 +192,7 @@ func TestCanaryRuntime_RestartPreservesAbortLatch(t *testing.T) {
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a whole-Canary abort must survive a restart (never auto-cleared)")
 	}
 	if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedInvalid {
@@ -184,7 +214,7 @@ func TestCanaryRuntime_BuildMismatchDisarms(t *testing.T) {
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a build change must disarm the Canary runtime (no cross-build budget resume)")
 	}
 	// The monotonic generation is preserved so a re-activation bumps past the stale one.
@@ -214,7 +244,7 @@ func TestCanaryRuntime_DemotionInvalidatesOldGeneration(t *testing.T) {
 	if err := rt.demoteCanary(capb); err != nil {
 		t.Fatalf("demote: %v", err)
 	}
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, now) {
 		t.Fatal("a demoted Canary must not be execution-eligible")
 	}
 	gen2, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now)
@@ -248,7 +278,7 @@ func TestCanaryRuntime_RestartAfterDemotionStaysDisarmed(t *testing.T) {
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a demoted-then-restarted Canary must stay disarmed")
 	}
 	if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedInvalid {
@@ -276,10 +306,10 @@ func TestCanaryRuntime_CapabilityIsolation(t *testing.T) {
 	if rt.currentGeneration(mg) != 1 {
 		t.Fatalf("Management generation must be 1, got %d", rt.currentGeneration(mg))
 	}
-	if rt.executionEligible(gw) {
+	if rt.executionEligible(gw, now) {
 		t.Fatal("Gateway must stay dormant while only Management is armed")
 	}
-	if !rt.executionEligible(mg) {
+	if !rt.executionEligible(mg, now) {
 		t.Fatal("Management must be execution-eligible after its activation")
 	}
 	// A per-request trip on Management does not stop it (taxonomy split holds per-capability).
@@ -298,7 +328,7 @@ func TestCanaryRuntime_CapabilityIsolation(t *testing.T) {
 	if err := rt.demoteCanary(mg); err != nil {
 		t.Fatalf("demote(management): %v", err)
 	}
-	if rt.executionEligible(mg) || rt.executionEligible(gw) {
+	if rt.executionEligible(mg, now) || rt.executionEligible(gw, now) {
 		t.Fatal("after demoting Management, neither capability is eligible")
 	}
 }
@@ -335,7 +365,7 @@ func TestCanaryRuntime_FailedDemoteDoesNotReviveOnRestart(t *testing.T) {
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a failed demote must not revive the Canary on restart")
 	}
 }
@@ -356,7 +386,7 @@ func TestCanaryRuntime_BeginPersistFailureDisarms(t *testing.T) {
 	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(5), now); err == nil {
 		t.Fatal("begin must return the persist error")
 	}
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a begin whose persist failed must disarm in memory (no execution)")
 	}
 	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedInvalid {
@@ -396,7 +426,7 @@ func TestCanaryRuntime_AbortPersistFailureRemovesState(t *testing.T) {
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a restart after a failed abort persist must not revive an eligible Canary")
 	}
 }
@@ -433,7 +463,7 @@ func TestCanaryRuntime_ReserveAbortPersistFailureRemovesState(t *testing.T) {
 	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedTotal {
 		t.Fatalf("the exhausting reserve must be denied on total, got %s", o)
 	}
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, now) {
 		t.Fatal("the exhausting reserve must have latched the whole-Canary abort (no longer eligible)")
 	}
 	// The fix removes the durable record so a restart cannot revive the un-aborted activation.
@@ -444,7 +474,7 @@ func TestCanaryRuntime_ReserveAbortPersistFailureRemovesState(t *testing.T) {
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a restart after a failed reserve-abort persist must not revive an eligible Canary")
 	}
 }
@@ -517,7 +547,7 @@ func TestCanaryRuntime_BeginNotSyncedPersistRemovesRecord(t *testing.T) {
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, now) {
 		t.Fatal("SECURITY: a not-synced begin must not re-arm the activation on restart")
 	}
 }
@@ -658,7 +688,7 @@ func TestCanaryRuntime_RestoreForeignAbortSnapshotDisarms(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	rt.restore()
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, time.Now()) {
 		t.Fatal("SECURITY: an active record with a foreign-generation abort snapshot must disarm")
 	}
 }
@@ -707,14 +737,14 @@ func TestCanaryRuntime_RestoreReconcileDisarmsWithoutLiveMode(t *testing.T) {
 	}
 	// …but the reconcile disarms it because the rollout mode is not a live-execution mode.
 	reconcileCanaryRuntimeAfterRestore()
-	if globalCanaryRuntime.armed(capb) || globalCanaryRuntime.executionEligible(capb) {
+	if globalCanaryRuntime.armed(capb) || globalCanaryRuntime.executionEligible(capb, time.Now()) {
 		t.Fatal("SECURITY: a restored runtime with no live-execution rollout mode must be disarmed by the reconcile")
 	}
 	// The disarm is durable across a further restart.
 	fresh := &canaryRuntime{}
 	globalCanaryRuntime = fresh
 	fresh.restore()
-	if fresh.executionEligible(capb) {
+	if fresh.executionEligible(capb, time.Now()) {
 		t.Fatal("SECURITY: the reconcile disarm must survive a restart")
 	}
 }
@@ -729,7 +759,7 @@ func TestCanaryRuntime_CorruptStateQuarantined(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	rt.restore()
-	if rt.executionEligible(capb) {
+	if rt.executionEligible(capb, time.Now()) {
 		t.Fatal("a corrupt runtime state must fail closed to disarmed")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

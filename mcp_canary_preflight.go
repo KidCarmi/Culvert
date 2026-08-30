@@ -276,7 +276,7 @@ func mcpCanaryStatus() map[string]any {
 		// (generation 0, not eligible) — no Canary ever activated.
 		"activation_runtime": map[string]any{
 			"generation":          globalCanaryRuntime.currentGeneration(rollout.CapabilityGateway),
-			"execution_eligible":  globalCanaryRuntime.executionEligible(rollout.CapabilityGateway),
+			"execution_eligible":  globalCanaryRuntime.executionEligible(rollout.CapabilityGateway, time.Now()),
 			"budget_ceilings_are": "first_canary",
 		},
 		"first_canary_bounds": map[string]any{
