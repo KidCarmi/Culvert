@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -133,10 +134,17 @@ func BenchmarkRateLimitWindow_AllowAtCapParallel(b *testing.B) {
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
-			var seed int
+			// RunParallel invokes the body once per worker GOROUTINE, so the
+			// starting offset must be handed out atomically: a plain counter
+			// races (which fails `go test -race -bench`) and, worse for the
+			// measurement, lost updates start several workers on the SAME IP
+			// and therefore the same shard, manufacturing exactly the
+			// contention this benchmark exists to rule out. The atomic is paid
+			// once per worker, not per iteration, so it is outside what is
+			// being measured.
+			var seed atomic.Int64
 			b.RunParallel(func(pb *testing.PB) {
-				i := seed
-				seed++
+				i := int(seed.Add(1))
 				for pb.Next() {
 					i++
 					if r.Allow(ips[i&255]) {
