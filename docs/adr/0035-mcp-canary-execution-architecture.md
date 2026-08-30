@@ -204,3 +204,79 @@ gate by the Canary mutation campaign; 5–12 are covered by existing execution-p
   synthetic identity, one controlled recording upstream, one exact fingerprinted read tool, a
   short-lived four-eyes approval, a bounded budget, and immediate kill+rollback controls — never
   customer traffic.
+
+## Addendum — Canary Activation Gate & Runtime Budget (implemented; still dormant)
+
+ADR-0035 pinned the readiness CONTRACT (facts, scope, budget shape, abort taxonomy) as pure,
+observable data. This addendum records the control-plane/runtime safety GATES that must exist
+before the live execution plane is composed. They are implemented and **dormant by construction**:
+no LiveExecutor is composed, `markGatewayExecDepsReady` stays uncalled, `live_execution` approvals
+stay unissuable, Canary/Production stay unreachable, and no real upstream side effect is possible.
+
+1. **Shadow Exit attestation is durable, build-bound, and admin-created (§1).**
+   `shadowExitReviewAttested()` (root `mcp_canary_attestation.go` + pure `canary.ShadowExitAttestation`)
+   reads a schema-versioned JSON record under `dataDir`, created ONLY by an explicit admin
+   `POST /api/mcp/canary/shadow-exit-review` — never on startup, never because tests passed. It is
+   bound to the build identity (`version`), so a redeploy invalidates a prior review; a
+   corrupt/unknown-schema/forged/stale record fails closed and is quarantined. `Facts.ShadowExitReviewPassed`
+   is driven by it.
+
+2. **The Canary preflight is the authoritative activation gate (§2).**
+   `commitRolloutTransitionAt` — the single shared commit path used by the CP→DP apply
+   (`applyMCPCapabilityEnvelope`), the startup reconcile (`reconcileRolloutWithAppliers`), and any
+   future caller — refuses a transition into a live-execution mode unless the WHOLE
+   `evaluateCanaryActivationPreflight` verdict (`canary.Evaluate`) is Ready: node readiness AND the
+   activation-level facts (bounded read-first scope, one valid live approval per scoped tool,
+   blast-radius budget, target usability/fingerprint). The scope comes from the SIGNED config
+   (authoritative); the other activation inputs are resolved from authoritative node state via the
+   `canaryActivationInputsProbe` seam — never a request-supplied claim — which in this build returns
+   fail-closed empties (no approval/budget store exists), so the full verdict can never pass. Using
+   node readiness alone would let a future armed build commit Canary without scope/approval/budget
+   validation (Codex P1); the full verdict closes that. `restore()` clamps a restored executing mode
+   to Disabled. There is no API, restart, CP→DP, or restore bypass; the syntactic validity of a
+   signed Canary config is never sufficient. Redundant with `modeExecReady` (defense-in-depth), and
+   always refuses in this build.
+
+3. **Runtime blast-radius budget (§3).** `canary.BudgetEnforcer` is generation-bound, atomic under
+   concurrency (one mutex over the whole check-then-reserve), and fail-closed: exactly
+   `MaxTotalExecutions` grants then deny (no off-by-one), a MONOTONIC total that is never rolled back
+   (a crash between reserve and side effect cannot replay the budget), plus concurrency, per-minute
+   rate, and a time-boxed window (TTL). Restart preserves the spend via a generation-keyed snapshot;
+   a stale-generation or over-cap snapshot never restores.
+
+4. **Whole-Canary abort controller (§4).** `canary.AbortController` is a generation-bound MONOTONIC
+   latch over the 10 `AbortCanary` breach codes: a single occurrence makes execution ineligible
+   immediately and permanently for that generation (resuming requires a new activation/generation).
+   The 6 `AbortRequest` codes NEVER latch it (an unknown code fails closed to a whole-Canary latch).
+   An abort survives a restart.
+
+5. **Executable rollback rehearsal (§5).** The self-attested `RollbackRehearsed` marker is replaced
+   by a real Canary→Shadow→Observe demotion drill driven through the actual rollout persist/restore
+   mechanics on a scratch state/file (`mcp_canary_rollback_rehearsal.go`), recorded as durable,
+   build-bound evidence (`canary.RollbackRehearsalRecord`). `rollbackPathHealthy` requires that
+   evidence to validate for the current build; the marker alone no longer satisfies readiness.
+
+6. **Activation runtime lifecycle (`mcp_canary_runtime.go`).** A monotonic activation generation is
+   bumped on each Shadow→Canary activation and keys both the budget enforcer and the abort
+   controller, so a demotion/reactivation structurally invalidates the previous generation's runtime
+   state (a stale reserve/trip is refused; an old snapshot never restores into a new generation).
+   `beginCanaryActivation` is the future-arming seam and is **uninvoked in this build**, so no
+   generation is ever bumped and no execution is ever reserved in production; restore is a no-op
+   because no durable canary-runtime file exists.
+
+Mutation coverage (10, each caught by a named gate): allow Canary without attestation, bypass the
+preflight via CP→DP, bypass on restart/restore, permit the N+1 budget execution, race the budget
+counters, clear the whole-Canary abort automatically, treat a per-request deny as a whole-Canary
+abort, accept a corrupt/stale attestation, accept a self-attested rollback without a drill, and
+reuse an old budget/abort generation after reactivation. See
+`mcp_canary_matrix_mutation_test.go` for the roster.
+
+Codex-review hardening (P1, each with a dedicated gate): the runtime budget's rate-window position
+is durable generation-bound state so a restart cannot replay a `MaxExecutionsPerMinute` burst
+mid-window (`TestBudgetEnforcer_RestartDoesNotReplayRateWindow`); a demotion whose persist fails
+removes the durable record so a failed rollback cannot revive on restart
+(`TestCanaryRuntime_FailedDemoteDoesNotReviveOnRestart`); the commit gate requires the FULL
+activation verdict, not just node readiness (`TestCanaryCommitGate_RefusesWhenActivationInputsMissing`
+/ `_AllowsWhenFullyReady`); and the rollback-rehearsal drill runs through the REAL production
+`persistRolloutStateTo`/`restoreRolloutStateFrom` (destination path injected) rather than a parallel
+persistence copy.

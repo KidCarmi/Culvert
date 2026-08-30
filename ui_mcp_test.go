@@ -124,6 +124,14 @@ func TestMCP_DecisionFilterParamsAccepted(t *testing.T) {
 // inventory/decision sources are wired (empty results), and durable
 // approval/publication commit fails closed rather than fabricating evidence.
 func TestMCP_DisabledDefaults(t *testing.T) {
+	// Order-independence (test-isolation hardening): this test asserts the DORMANT default, so it must
+	// establish that precondition itself rather than depend on -shuffle order. A prior test may have
+	// published inventory/telemetry and eagerly built the process-wide admin singleton with sources
+	// wired; un-publish them and reset the singleton so getMCPAdmin() rebuilds against the nil sources.
+	publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+	publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
+	resetMCPAdminSingleton()
+	t.Cleanup(resetMCPAdminSingleton)
 	m := getMCPAdmin()
 	if m.svc.Inventory != nil || m.svc.Decisions != nil {
 		t.Fatal("disabled default must not wire inventory/decision sources")

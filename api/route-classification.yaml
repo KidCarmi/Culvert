@@ -3567,6 +3567,36 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/mcp/canary/shadow-exit-review"
+    method: "GET"
+    handler: "apiMCPShadowExitReview"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/canary/shadow-exit-review"
+    method: "POST"
+    handler: "apiMCPShadowExitReview"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/mcp/canary/shadow-exit-review"
+    method: "DELETE"
+    handler: "apiMCPShadowExitReview"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/mcp/executions"
     method: "GET"
     handler: "apiMCPExecutions"

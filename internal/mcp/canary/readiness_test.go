@@ -9,26 +9,27 @@ import (
 // yields Ready. Tests flip one field at a time to prove each is independently load-bearing.
 func allTrueFacts() Facts {
 	return Facts{
-		CapabilityGateway:         true,
-		ShadowExitReviewPassed:    true,
-		ScopeBounded:              true,
-		ScopeReadFirst:            true,
-		LiveExecutorComposed:      true,
-		UpstreamCallerPresent:     true,
-		CredentialPathReady:       true,
-		DurableEventsHealthy:      true,
-		ResponseInspectionReady:   true,
-		RegistryHealthy:           true,
-		CatalogHealthy:            true,
-		PolicyHealthy:             true,
-		EmergencyKillClear:        true,
-		KillBoundaryGuardPresent:  true,
-		ToolFreshnessGuardPresent: true,
-		LiveApprovalValid:         true,
-		ServerUsable:              true,
-		ToolFingerprintCurrent:    true,
-		RollbackPathHealthy:       true,
-		BudgetConfigured:          true,
+		CapabilityGateway:            true,
+		ShadowExitReviewPassed:       true,
+		ScopeBounded:                 true,
+		ScopeReadFirst:               true,
+		LiveExecutorComposed:         true,
+		UpstreamCallerPresent:        true,
+		CredentialPathReady:          true,
+		DurableEventsHealthy:         true,
+		ResponseInspectionReady:      true,
+		RegistryHealthy:              true,
+		CatalogHealthy:               true,
+		PolicyHealthy:                true,
+		EmergencyKillClear:           true,
+		KillBoundaryGuardPresent:     true,
+		ToolFreshnessGuardPresent:    true,
+		LiveApprovalValid:            true,
+		ServerUsable:                 true,
+		ToolFingerprintCurrent:       true,
+		RollbackPathHealthy:          true,
+		RollbackCoordinatorRehearsed: true,
+		BudgetConfigured:             true,
 	}
 }
 
@@ -87,6 +88,7 @@ func TestEvaluate_EachFactIsIndependentlyLoadBearing(t *testing.T) {
 		{"ServerUsable", ReasonServerNotUsable},
 		{"ToolFingerprintCurrent", ReasonToolFingerprintStale},
 		{"RollbackPathHealthy", ReasonRollbackPathUnhealthy},
+		{"RollbackCoordinatorRehearsed", ReasonRollbackCoordinatorRehearsalPending},
 		{"BudgetConfigured", ReasonBudgetNotConfigured},
 	}
 	// Guard: the number of flip cases must equal the number of bool prerequisite fields
@@ -130,7 +132,8 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 		"KillBoundaryGuardPresent": ReasonKillBoundaryGuardAbsent, "ToolFreshnessGuardPresent": ReasonToolFreshnessGuardAbsent,
 		"LiveApprovalValid": ReasonLiveApprovalInvalid, "ServerUsable": ReasonServerNotUsable,
 		"ToolFingerprintCurrent": ReasonToolFingerprintStale, "RollbackPathHealthy": ReasonRollbackPathUnhealthy,
-		"BudgetConfigured": ReasonBudgetNotConfigured,
+		"RollbackCoordinatorRehearsed": ReasonRollbackCoordinatorRehearsalPending,
+		"BudgetConfigured":             ReasonBudgetNotConfigured,
 	}
 	for field := range fieldReason {
 		f := allTrueFacts()

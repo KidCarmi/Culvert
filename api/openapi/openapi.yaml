@@ -11247,6 +11247,82 @@ paths:
         '200': { description: Rehearsal recorded, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+        '500':
+          description: Rehearsal drill or its persistence failed (not durably recorded). JSON object with rollback_rehearsed:false, persisted:false, error.
+          content:
+            application/json: { schema: { type: object, additionalProperties: true } }
+  /api/mcp/canary/shadow-exit-review:
+    get:
+      operationId: getMCPShadowExitReview
+      tags: [mcp]
+      summary: Shadow Exit Review attestation status
+      description: Reports whether a durable, current-build Shadow Exit Review attestation is present and valid (the Canary readiness prerequisite). Never returns the raw review evidence — only bounded status fields.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: none
+      responses:
+        '200': { description: Attestation status, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createMCPShadowExitReview
+      tags: [mcp]
+      summary: Create the Shadow Exit Review attestation
+      description: Creates the durable, build-bound Shadow Exit Review PASSED attestation — the explicit privileged review sign-off. This is the ONLY path that writes a PASSED attestation; it is never created on startup or because tests passed.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: mcp.canary.shadow-exit-review.attest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [review_id, evidence_digest]
+              properties:
+                review_id: { type: string }
+                evidence_digest: { type: string }
+      responses:
+        '200': { description: Attestation created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+        '500':
+          description: Attestation persistence failed (not durably written). JSON object with attested:false, persisted:false, error.
+          content:
+            application/json: { schema: { type: object, additionalProperties: true } }
+    delete:
+      operationId: deleteMCPShadowExitReview
+      tags: [mcp]
+      summary: Revoke the Shadow Exit Review attestation
+      description: Revokes the durable Shadow Exit Review attestation. After revocation the Canary readiness prerequisite fails closed to not-attested.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: mcp.canary.shadow-exit-review.revoke
+      responses:
+        '200': { description: Attestation revoked, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: Revocation failed (unlink or directory sync could not be confirmed). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
   /api/mcp/executions:
     get:
       operationId: getMCPExecutions

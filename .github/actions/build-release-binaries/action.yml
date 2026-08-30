@@ -63,7 +63,15 @@ runs:
         # embedded vcs.modified and changes the hash — making the SLSA subject
         # order-dependent. The commit is already carried by the git tag + SLSA
         # provenance, so the embedded VCS stamp is redundant.
-        go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${REF_NAME}" \
+        #
+        # buildCommit: stamp the immutable commit digest alongside the version so
+        # the MCP canary runtime identity (currentRuntimeIdentity → version+commit)
+        # is UNIQUE PER COMMIT on the release-binary path too — two commits built
+        # under the same release tag must NOT share attestation/rehearsal/runtime
+        # records. Deterministic per commit, so byte-reproducibility per commit is
+        # preserved (same as the Docker image build). Independent of -buildvcs.
+        COMMIT=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "")
+        go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${REF_NAME} -X main.buildCommit=${COMMIT}" \
           -o culvert-${{ inputs.goos }}-${{ inputs.goarch }}${{ inputs.ext }} .
 
     # Maintenance agent (cmd/culvert-maint) is a SEPARATE Go module and is

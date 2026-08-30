@@ -63,6 +63,30 @@ func TestSessionAdmin_IgnoresProxyUserCookie(t *testing.T) {
 	}
 }
 
+// TestSessionAdmin_BasicAuthUsernameFromContext is the Codex P2 (round-11) proof: an admin action
+// taken via the HTTP Basic fallback (no session cookie) is attributed to the real actor — the UI
+// middleware stores the authenticated username in context and sessionAdmin resolves it — rather than
+// "unknown".
+func TestSessionAdmin_BasicAuthUsernameFromContext(t *testing.T) {
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/mcp/canary/shadow-exit-review", nil)
+	r = r.WithContext(context.WithValue(r.Context(), uiUserKey{}, "basic-admin"))
+	if got := sessionAdmin(r); got != "basic-admin" {
+		t.Fatalf("sessionAdmin must resolve the Basic-auth username from context, got %q", got)
+	}
+	// With neither a cookie nor a context username, the actor is unknown.
+	r2 := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/x", nil)
+	if got := sessionAdmin(r2); got != "unknown" {
+		t.Fatalf("sessionAdmin with no identity must be unknown, got %q", got)
+	}
+	// The session cookie still wins over any context username.
+	r3 := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/x", nil)
+	r3.AddCookie(uiSessionCookieForTest(t, "cookie-admin"))
+	r3 = r3.WithContext(context.WithValue(r3.Context(), uiUserKey{}, "basic-admin"))
+	if got := sessionAdmin(r3); got != "cookie-admin" {
+		t.Fatalf("the session cookie identity must win over the context username, got %q", got)
+	}
+}
+
 func TestAuditEvent_ActorEnrichedFromUISession(t *testing.T) {
 	// Both cookies present: the admin identity must win, not the proxy user.
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/policy", nil)

@@ -285,7 +285,10 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		user, pass, ok := r.BasicAuth()
 		if ok {
 			if role, valid := cfg.VerifyUIUser(user, pass); valid {
+				// Store the authenticated username too (no cookie exists on this path), so admin-action
+				// attribution resolves the real actor instead of "unknown" (Codex P2).
 				ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
+				ctx = context.WithValue(ctx, uiUserKey{}, user)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}

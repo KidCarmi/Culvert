@@ -265,13 +265,27 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 		}
 		capab = parsed
 	}
+	// A rollback rehearsal is durable, build-bound evidence that ValidateRehearsal re-checks against the
+	// current runtime identity on read; a placeholder/non-unique build stamp ("dev" on a local/untagged
+	// build) makes currentRuntimeIdentity().Valid() false, so the record can never satisfy that check.
+	// Refuse to run or persist the drill here rather than report rollback_rehearsed:true/persisted:true
+	// for a record the activation gate will immediately reject as rollback_path_unhealthy (Codex P2).
+	// Analogous to the Shadow Exit review POST's uniquely-versioned-build guard.
+	if !currentRuntimeIdentity().Valid() {
+		http.Error(w, "rollback_rehearsal_requires_a_uniquely_versioned_build", http.StatusConflict)
+		return
+	}
 	// Rehearsal is durable evidence; record + persist under the durable-mutation lock
 	// so a restart preserves it. A persist failure is surfaced truthfully.
 	if err := getMCPRollout().recordRehearsal(capab); err != nil {
 		auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "rollback_rehearsed": true, "persisted": false, "error": "rollout_persist_failed"})
+		// A persist failure means recordRehearsal removed/invalidated the record and reverted the
+		// evidence marker, so the status model and the activation gate treat the rehearsal as ABSENT.
+		// Report rollback_rehearsed:false so clients/operators are not told a rehearsal occurred when
+		// both the durable record and the gate say it did not (Codex round-21 P2).
+		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "rollback_rehearsed": false, "persisted": false, "error": "rollout_persist_failed"})
 		return
 	}
 	auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
