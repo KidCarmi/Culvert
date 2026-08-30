@@ -299,9 +299,17 @@ func TestRateLimitWindow_AllowEnforcesLimitEndToEnd(t *testing.T) {
 // TestRateLimitWindow_ExportHotDeltasCountsInWindowOnly pins that the delta
 // export still reports in-window occupancy after the eviction moved into
 // clientBucket.expire.
+// It ages the window out by BACK-DATING the recorded stamps rather than by
+// sleeping past a short window. A 50ms window with a 60ms sleep would have been
+// the obvious shape and is a latent flake: the nine Allow calls are only
+// microseconds of work, but on a loaded machine — the full suite under -race is
+// exactly that — the goroutine can be descheduled long enough for the first
+// stamps to age out before the first export runs, and the test would fail on
+// timing rather than on behaviour. Back-dating is deterministic, and it shifts
+// every stamp by the same amount so the ring's ordering invariant still holds.
 func TestRateLimitWindow_ExportHotDeltasCountsInWindowOnly(t *testing.T) {
 	r := newRateLimiter()
-	r.Configure(10, 50*time.Millisecond)
+	r.Configure(10, time.Minute)
 	const ip = "203.0.113.11"
 	for i := 0; i < 9; i++ {
 		r.Allow(ip)
@@ -309,7 +317,16 @@ func TestRateLimitWindow_ExportHotDeltasCountsInWindowOnly(t *testing.T) {
 	if got := r.ExportHotDeltas(); len(got) != 1 || got[0].IP != ip || got[0].Count != 9 {
 		t.Fatalf("deltas = %+v, want one entry for %s with count 9", got, ip)
 	}
-	time.Sleep(60 * time.Millisecond)
+
+	s := r.shard(ip)
+	s.mu.Lock()
+	b := s.clients[ip]
+	for i := 0; i < b.n; i++ {
+		j := (b.head + i) % len(b.stamps)
+		b.stamps[j] = b.stamps[j].Add(-2 * time.Minute)
+	}
+	s.mu.Unlock()
+
 	if got := r.ExportHotDeltas(); len(got) != 0 {
 		t.Fatalf("deltas = %+v after the window elapsed, want none", got)
 	}
