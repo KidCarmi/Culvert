@@ -16,8 +16,9 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
       VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev"); \
     fi && \
     : "${VERSION:=dev}" && \
+    COMMIT=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "") && \
     echo "$VERSION" > /app/VERSION && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.buildCommit=${COMMIT}" -o culvert .
 # No `go mod tidy` here — the image must build from the EXACT reviewed module
 # graph (go.mod/go.sum COPYed + `go mod download`ed above), not re-resolve deps
 # at build time (a divergent-recipe supply-chain smell). Tidiness is enforced in

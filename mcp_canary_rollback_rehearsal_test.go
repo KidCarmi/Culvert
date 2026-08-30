@@ -35,10 +35,11 @@ func TestRollbackRehearsal_NotSyncedWriteFails(t *testing.T) {
 // restoring both on cleanup (the same isolation the attestation tests use).
 func withRehearsalTestEnv(t *testing.T, buildVer string) {
 	t.Helper()
-	prevDir, prevVer := dataDir, version
+	prevDir, prevVer, prevCommit := dataDir, version, buildCommit
 	dataDir = t.TempDir()
 	version = buildVer
-	t.Cleanup(func() { dataDir = prevDir; version = prevVer })
+	buildCommit = "" // deterministic identity = bare version (composeBuildStamp), matching hardcoded BuildVersion fixtures
+	t.Cleanup(func() { dataDir = prevDir; version = prevVer; buildCommit = prevCommit })
 }
 
 // TestRollbackRehearsal_PersistFailureRemovesRecord is the Codex P1 (round-15) proof: when the drill

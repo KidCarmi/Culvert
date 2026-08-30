@@ -94,23 +94,31 @@ var errCanaryBudgetInvalid = errors.New("canary_budget_invalid")
 // restart cannot restore the pre-mutation record and revive an execution-eligible activation the
 // mutation was meant to stop. A missing file restores to the dormant default (the safe direction).
 //
-// The unlink is NOT crash-durable until the parent directory is synced: on filesystems where the
-// directory entry survives in cache, an immediate crash could restore the stale Active record after a
-// bare os.Remove logged success (Codex P1). So the parent directory is fsynced after the remove, and
-// a remove OR a directory-sync failure is reported as UNRESOLVED — the stale record may still revive
-// on restart — rather than logged as a clean fail-closed removal. Caller holds cr.mu.
+// A bare unlink is NOT crash-durable until the parent directory is synced, and that sync can itself
+// fail: on filesystems where the directory entry survives in cache, an immediate crash could then
+// restore the stale Active record after os.Remove logged success (Codex P1). So the CONTENT is DURABLY
+// INVALIDATED FIRST — truncate the record to empty and fsync the FILE inode, independent of the
+// parent-directory fsync — mirroring removeVisibleFileAfterNotSyncedWrite: a crash-restored directory
+// entry then points to an EMPTY file that decodes as corrupt (quarantined on restore → dormant), so
+// the safety stop holds even when the unlink or its dir-sync cannot be confirmed. Only that
+// content-invalidation failing (a total filesystem failure) is reported as UNRESOLVED; a best-effort
+// remove/dir-sync failure afterward can no longer revive a valid record and is logged, not escalated.
+// Caller holds cr.mu.
 func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollout.Capability, what string, persistErr error) {
 	path := canaryRuntimeStatePath(capb)
+	if ierr := invalidateFileContentDurably(path); ierr != nil {
+		logger.Printf("MCP canary runtime: %s persist failed and the record for %s could not be durably invalidated; a restart may revive the activation: persist=%q invalidate=%q",
+			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(ierr.Error()))
+		return
+	}
+	// Best-effort remove the now-empty record + dir sync for cleanliness. The content is already durably
+	// invalid, so a failure here can no longer revive a valid Active record — log, do not escalate.
 	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-		logger.Printf("MCP canary runtime: %s persist AND remove for %s failed; a restart may revive the activation: persist=%q remove=%q",
+		logger.Printf("MCP canary runtime: %s persist for %s failed; record durably invalidated but its removal failed (fail-closed holds): persist=%q remove=%q",
 			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(rerr.Error()))
 		return
 	}
-	if derr := syncParentDir(path); derr != nil {
-		logger.Printf("MCP canary runtime: %s persist failed and the fail-closed removal for %s is NOT durably synced; a restart may revive the activation: persist=%q dirsync=%q",
-			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(derr.Error()))
-		return
-	}
+	_ = syncParentDir(path)
 	logger.Printf("MCP canary runtime: %s persist for %s failed; durably removed the state to fail closed to dormant: %q", what, capb.String(), sanitizeLog(persistErr.Error()))
 }
 

@@ -36,9 +36,11 @@ type RuntimeIdentity struct {
 // these does not prove WHICH code was reviewed/rehearsed — the same stamp can cover materially
 // different commits (a "dev" local build, or a floating tag) — so it must not satisfy the identity
 // binding. Fail closed (Codex P1). A production Canary is only ever attestable on a build carrying a
-// concrete, non-placeholder version stamp. (A reused *real* release tag across commits is the
-// residual the placeholder set cannot detect; fully closing it needs a commit-digest binding injected
-// at build time — a build-pipeline change tracked separately.)
+// concrete, non-placeholder version stamp. The BuildVersion passed here is composed as
+// "<version>+<commit>" (currentRuntimeIdentity → composeBuildStamp) with the immutable commit digest
+// stamped at build time (Dockerfile `-X main.buildCommit`), so two commits released under the same
+// release tag get DISTINCT identities — closing the reused-real-tag residual the placeholder set alone
+// could not detect (Codex P1). A tag-only stamp with no commit still fails closed via this set.
 var nonUniqueBuildStamps = map[string]struct{}{
 	"":        {},
 	"dev":     {},

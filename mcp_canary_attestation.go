@@ -33,11 +33,24 @@ func shadowExitAttestationPath() string {
 	return filepath.Join(dataDir, "mcp_shadow_exit_review.json")
 }
 
-// currentRuntimeIdentity is the software identity an attestation is bound to. Build version is
-// the linker-injected stamp (`version`); a redeploy to a different build changes it, so a prior
-// attestation no longer covers the current runtime.
+// currentRuntimeIdentity is the software identity an attestation is bound to. The build stamp is the
+// linker-injected version, COMPOSED with the immutable commit digest (`buildCommit`) when present, so
+// the identity is UNIQUE PER COMMIT — two commits released under the same tag get distinct identities
+// and cannot share an attestation/rehearsal/runtime record (Codex P1). A redeploy to a different build
+// changes it, so a prior attestation no longer covers the current runtime. Local builds have no commit
+// stamp and version "dev", so they remain non-attestable via RuntimeIdentity.Valid()'s placeholder set.
 func currentRuntimeIdentity() canary.RuntimeIdentity {
-	return canary.RuntimeIdentity{BuildVersion: version}
+	return canary.RuntimeIdentity{BuildVersion: composeBuildStamp(version, buildCommit)}
+}
+
+// composeBuildStamp binds the version tag to the immutable commit digest as "<version>+<commit>" when
+// a commit is stamped, so the runtime identity is unique per commit rather than per (reusable) tag.
+// With no commit stamp it is the bare version, preserving the local/"dev" placeholder behavior.
+func composeBuildStamp(ver, commit string) string {
+	if commit == "" {
+		return ver
+	}
+	return ver + "+" + commit
 }
 
 // loadShadowExitAttestation is a PURE read of the durable attestation. A missing file returns

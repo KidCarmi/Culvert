@@ -12053,6 +12053,16 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Revocation failed (unlink or directory sync could not be confirmed). Body is plain text."
           }
         },
         "security": [
@@ -12160,6 +12170,17 @@
           },
           "409": {
             "$ref": "#/components/responses/PlainConflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Attestation persistence failed (not durably written). JSON object with attested:false, persisted:false, error."
           }
         },
         "security": [
@@ -13370,6 +13391,17 @@
           },
           "409": {
             "$ref": "#/components/responses/PlainConflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rehearsal drill or its persistence failed (not durably recorded). JSON object with rollback_rehearsed, persisted:false, error."
           }
         },
         "security": [

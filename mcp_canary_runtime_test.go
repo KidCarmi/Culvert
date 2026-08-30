@@ -21,11 +21,12 @@ var rtIdent = canary.ExecutionIdentity{Principal: "p1", Tool: "t1", Server: "s1"
 // deterministic build version, restoring all three on cleanup.
 func withCanaryRuntimeTestEnv(t *testing.T, buildVer string) *canaryRuntime {
 	t.Helper()
-	prevDir, prevVer, prevRt := dataDir, version, globalCanaryRuntime
+	prevDir, prevVer, prevCommit, prevRt := dataDir, version, buildCommit, globalCanaryRuntime
 	dataDir = t.TempDir()
 	version = buildVer
+	buildCommit = "" // deterministic identity = bare version (composeBuildStamp)
 	globalCanaryRuntime = &canaryRuntime{}
-	t.Cleanup(func() { dataDir = prevDir; version = prevVer; globalCanaryRuntime = prevRt })
+	t.Cleanup(func() { dataDir = prevDir; version = prevVer; buildCommit = prevCommit; globalCanaryRuntime = prevRt })
 	return globalCanaryRuntime
 }
 

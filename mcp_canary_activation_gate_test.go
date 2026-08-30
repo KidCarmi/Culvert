@@ -58,9 +58,10 @@ func writeValidRollbackRehearsal(t *testing.T, capb rollout.Capability) {
 // attestation or rehearsal record must run under a real version.
 func pinTestBuildVersion(t *testing.T) {
 	t.Helper()
-	prev := version
+	prev, prevCommit := version, buildCommit
 	version = "v-canary-test-1"
-	t.Cleanup(func() { version = prev })
+	buildCommit = "" // deterministic identity = bare version (composeBuildStamp)
+	t.Cleanup(func() { version = prev; buildCommit = prevCommit })
 }
 
 func withCanaryReadyNode(t *testing.T) {

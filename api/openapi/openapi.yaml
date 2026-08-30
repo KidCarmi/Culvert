@@ -11248,6 +11248,10 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '409': { $ref: '#/components/responses/PlainConflict' }
+        '500':
+          description: Rehearsal drill or its persistence failed (not durably recorded). JSON object with rollback_rehearsed, persisted:false, error.
+          content:
+            application/json: { schema: { type: object, additionalProperties: true } }
   /api/mcp/canary/shadow-exit-review:
     get:
       operationId: getMCPShadowExitReview
@@ -11294,6 +11298,10 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '409': { $ref: '#/components/responses/PlainConflict' }
+        '500':
+          description: Attestation persistence failed (not durably written). JSON object with attested:false, persisted:false, error.
+          content:
+            application/json: { schema: { type: object, additionalProperties: true } }
     delete:
       operationId: deleteMCPShadowExitReview
       tags: [mcp]
@@ -11311,6 +11319,10 @@ paths:
       responses:
         '200': { description: Attestation revoked, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: Revocation failed (unlink or directory sync could not be confirmed). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
   /api/mcp/executions:
     get:
       operationId: getMCPExecutions

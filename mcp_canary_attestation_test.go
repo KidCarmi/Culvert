@@ -163,10 +163,11 @@ func TestShadowExitAttestation_RevokeIsDurable(t *testing.T) {
 // restoring both on cleanup so the process-global state is not polluted.
 func withAttestationTestEnv(t *testing.T, buildVer string) {
 	t.Helper()
-	prevDir, prevVer := dataDir, version
+	prevDir, prevVer, prevCommit := dataDir, version, buildCommit
 	dataDir = t.TempDir()
 	version = buildVer
-	t.Cleanup(func() { dataDir = prevDir; version = prevVer })
+	buildCommit = "" // deterministic identity = bare version (composeBuildStamp), matching hardcoded BuildVersion fixtures
+	t.Cleanup(func() { dataDir = prevDir; version = prevVer; buildCommit = prevCommit })
 }
 
 // TestShadowExitAttestation_NeverAttestedByDefault is the load-bearing dormancy proof: with no
@@ -221,6 +222,67 @@ func TestShadowExitAttestation_BuildMismatchDoesNotAttest(t *testing.T) {
 	}
 	if shadowExitReviewAttested() {
 		t.Fatal("SECURITY: an attestation bound to a different build must not attest the current runtime")
+	}
+}
+
+// TestBuildStamp_CommitMakesIdentityUniquePerCommit is the Codex round-19 P1 proof: the runtime
+// identity binds to an immutable commit digest, so two builds released under the SAME version tag but
+// from DIFFERENT commits get distinct identities and cannot share an attestation/rehearsal/runtime
+// record. composeBuildStamp is the composition point; currentRuntimeIdentity uses it.
+func TestBuildStamp_CommitMakesIdentityUniquePerCommit(t *testing.T) {
+	// No commit stamp ⇒ bare version (local/"dev" placeholder behavior preserved).
+	if got := composeBuildStamp("v1.2.3", ""); got != "v1.2.3" {
+		t.Fatalf("no commit ⇒ bare version, got %q", got)
+	}
+	if (canary.RuntimeIdentity{BuildVersion: composeBuildStamp("dev", "")}).Valid() {
+		t.Fatal("dev with no commit must remain a non-unique placeholder (not valid)")
+	}
+	// Same tag, DIFFERENT commits ⇒ DISTINCT, valid identities (closes the reused-real-tag residual).
+	a := composeBuildStamp("v1.2.3", "aaaaaaaaaaaa")
+	b := composeBuildStamp("v1.2.3", "bbbbbbbbbbbb")
+	if a == b {
+		t.Fatalf("SECURITY: two commits under one tag must produce distinct stamps, got %q == %q", a, b)
+	}
+	if !(canary.RuntimeIdentity{BuildVersion: a}).Valid() || !(canary.RuntimeIdentity{BuildVersion: b}).Valid() {
+		t.Fatal("a tag+commit stamp must be a valid unique identity")
+	}
+	// A dev build WITH a commit is uniquely identifiable, so it is valid (unique, not a placeholder).
+	if !(canary.RuntimeIdentity{BuildVersion: composeBuildStamp("dev", "abc123def456")}).Valid() {
+		t.Fatal("dev+commit is a unique identity and must be valid")
+	}
+	// currentRuntimeIdentity composes the live version+commit.
+	prevV, prevC := version, buildCommit
+	version, buildCommit = "v9.9.9", "deadbeefcafe"
+	t.Cleanup(func() { version, buildCommit = prevV, prevC })
+	if id := currentRuntimeIdentity(); id.BuildVersion != "v9.9.9+deadbeefcafe" || !id.Valid() {
+		t.Fatalf("currentRuntimeIdentity must compose version+commit and be valid, got %q valid=%v", id.BuildVersion, id.Valid())
+	}
+}
+
+// TestShadowExitAttestation_CommitMismatchDoesNotAttest proves the commit binding end to end: an
+// attestation created under one commit does not attest a runtime built from a DIFFERENT commit under
+// the same version tag (Codex round-19 P1).
+func TestShadowExitAttestation_CommitMismatchDoesNotAttest(t *testing.T) {
+	withAttestationTestEnv(t, "v1.0.0")
+	buildCommit = "commit-A-aaaa" // the runtime that CREATES the attestation
+	a := &canary.ShadowExitAttestation{
+		SchemaVersion:  canary.ShadowExitAttestationSchemaVersion,
+		Status:         canary.ShadowExitStatusPassed,
+		ReviewID:       "SXR-commit",
+		EvidenceDigest: testEvidenceDigest,
+		Identity:       currentRuntimeIdentity(), // v1.0.0+commit-A-aaaa
+		AttestedBy:     "admin",
+	}
+	if err := saveShadowExitAttestation(a); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if !shadowExitReviewAttested() {
+		t.Fatal("precondition: the attestation must cover its own commit")
+	}
+	// A redeploy of a DIFFERENT commit under the SAME tag must NOT inherit the attestation.
+	buildCommit = "commit-B-bbbb"
+	if shadowExitReviewAttested() {
+		t.Fatal("SECURITY: an attestation bound to commit A must not attest a runtime built from commit B under the same tag")
 	}
 }
 
