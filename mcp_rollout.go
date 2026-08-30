@@ -498,8 +498,12 @@ func (r *mcpRollout) recordRehearsal(capb rollout.Capability) error {
 		// and revert the in-memory marker so the gate fails CLOSED to "not rehearsed" until a
 		// fully-successful drill+persist runs.
 		st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = false })
+		// removeRollbackRehearsalDurable invalidates the record content durably FIRST, so it returns an
+		// error ONLY when even that content-invalidation failed (a total filesystem failure). In that
+		// residual case the record may survive a crash and the sole remaining guarantee is the in-memory
+		// write_failed blocker (lost on restart) — logged loudly so the operator re-runs the rehearsal.
 		if rerr := removeRollbackRehearsalDurable(capb); rerr != nil {
-			logger.Printf("MCP rollout rehearsal cleanup for %s failed after a persist error (record may survive; gate stays blocked by write_failed until re-run): %q", capb.String(), sanitizeLog(rerr.Error()))
+			logger.Printf("MCP rollout rehearsal record for %s could not be durably invalidated after a persist error (a crash could expose a record reported as failed; re-run the rehearsal): %q", capb.String(), sanitizeLog(rerr.Error()))
 		}
 		logger.Printf("MCP rollout rehearsal persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)

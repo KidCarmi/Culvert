@@ -173,18 +173,29 @@ func saveRollbackRehearsal(capb rollout.Capability, rec *canary.RollbackRehearsa
 // including fileutil.ErrReplacedNotSynced, to prove the write fails closed).
 var rehearsalAtomicWrite = fileutil.AtomicWrite
 
-// removeRollbackRehearsalDurable unlinks the rehearsal record and fsyncs the parent directory so the
-// removal is crash-durable. A missing file is success; a non-ENOENT unlink error or a parent-dir sync
-// failure is returned. Used to fail CLOSED when the record was written but a later step failed: the
-// record is durable while its in-memory "unhealthy" blocker is not, so a restart that restores the
-// pre-rehearsal state would otherwise let the still-present valid record satisfy the activation gate —
-// accepting a rehearsal the operator was told failed (Codex P1). Mirrors removeAttestationDurable.
+// removeRollbackRehearsalDurable fails a rehearsal record CLOSED so a restart cannot let a still-present
+// valid record satisfy the activation gate after the operator was told the rehearsal failed (Codex P1).
+// The in-memory "unhealthy" blocker (persistStatus write_failed) does NOT survive a restart, so the
+// on-disk record must be made restart-durably invalid. It mirrors removeVisibleFileAfterNotSyncedWrite:
+// DURABLY INVALIDATE THE CONTENT FIRST — truncate the record to empty and fsync the FILE inode, which
+// is independent of the parent-directory fsync — so even if the unlink or its dir-sync below cannot be
+// confirmed, a crash-restored directory entry points to an EMPTY file that strictDecode rejects
+// (quarantined on read → not attested). Only that content-invalidation failing is escalated to the
+// caller; a best-effort remove/dir-sync failure afterwards cannot expose a VALID record and is logged,
+// not returned. A missing file is success (nothing to invalidate).
 func removeRollbackRehearsalDurable(capb rollout.Capability) error {
 	path := rollbackRehearsalPath(capb)
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if ierr := invalidateFileContentDurably(path); ierr != nil {
+		return ierr // the record could not be made durably invalid — the caller must escalate
 	}
-	return syncParentDir(path)
+	// Best-effort remove the now-empty file + dir sync for cleanliness. The content is already durably
+	// invalid, so a failure here no longer risks a valid record surviving a crash — log, do not escalate.
+	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		logger.Printf("MCP rollout rehearsal record for %s was durably invalidated but its removal failed (fail-closed holds): %q", capb.String(), sanitizeLog(rerr.Error()))
+		return nil
+	}
+	_ = syncParentDir(path)
+	return nil
 }
 
 // loadRollbackRehearsal reads the durable rehearsal record. A missing file returns (nil, nil) (no

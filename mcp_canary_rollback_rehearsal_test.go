@@ -84,6 +84,44 @@ func TestRollbackRehearsal_PersistFailureRemovesRecord(t *testing.T) {
 	}
 }
 
+// TestRemoveRollbackRehearsalDurable_InvalidatesFirst covers the Codex round-18 P1 cleanup helper: on
+// a writable dir it invalidates the record content and removes the file, so nothing attests afterward,
+// and it is idempotent on an already-absent record. The invalidate-content-FIRST ordering (so a
+// crash-restored directory entry the parent-dir fsync could not undo points to an empty, quarantined
+// file) mirrors the reviewed removeVisibleFileAfterNotSyncedWrite; the residual both-fail escalation is
+// returned to the caller and logged.
+func TestRemoveRollbackRehearsalDurable_InvalidatesFirst(t *testing.T) {
+	withRehearsalTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	rec := &canary.RollbackRehearsalRecord{
+		SchemaVersion: canary.RollbackRehearsalSchemaVersion,
+		Capability:    capb.String(),
+		Identity:      currentRuntimeIdentity(),
+		Executed:      true,
+		Steps:         canary.RequiredRollbackPath(),
+	}
+	if err := saveRollbackRehearsal(capb, rec); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if !rollbackRehearsalAttested(capb) {
+		t.Fatal("precondition: a valid record must attest before cleanup")
+	}
+	if err := removeRollbackRehearsalDurable(capb); err != nil {
+		t.Fatalf("durable cleanup on a writable dir must succeed, got %v", err)
+	}
+	// Normal path: the file is removed and nothing attests.
+	if _, statErr := os.Stat(rollbackRehearsalPath(capb)); !os.IsNotExist(statErr) {
+		t.Fatal("cleanup must remove the record file on a writable dir")
+	}
+	if rollbackRehearsalAttested(capb) {
+		t.Fatal("SECURITY: no rehearsal may be attested after durable cleanup")
+	}
+	// Idempotent: cleaning up an already-absent record is a no-op success (nothing to invalidate).
+	if err := removeRollbackRehearsalDurable(capb); err != nil {
+		t.Fatalf("cleanup of an absent record must be a no-op success, got %v", err)
+	}
+}
+
 // TestRollbackRehearsal_NotSyncedWriteRemovesVisibleRecord is the Codex P1 (round-7) proof: a
 // not-durably-synced rehearsal write leaves the record visible (ErrReplacedNotSynced is post-rename),
 // so the write must remove the possibly-installed evidence before returning the failure — the
