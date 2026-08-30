@@ -41,12 +41,16 @@ export interface RotationRecoveryMarker {
 }
 
 /** Persist the recovery identity for one dispatched-but-unconfirmed
- * rotation. Called BEFORE the network dispatch. Storage failure degrades to
- * the in-memory latch only (never blocks the ceremony). */
+ * rotation, VERIFIED: the marker is written and then read back through the
+ * strict reader; only an exactly-recoverable marker returns true. Called
+ * BEFORE the network dispatch, and its result is LOAD-BEARING (TRUE FINAL
+ * closure, Blocker 2): NO DURABLE RECOVERY MARKER ⇒ NO T3 ROTATION
+ * DISPATCH. There is deliberately no memory-only or localStorage fallback —
+ * this is a fail-closed safety dependency for one irreversible operation. */
 export function writeRotationRecovery(
   subject: string,
   m: RotationRecoveryMarker,
-): void {
+): boolean {
   try {
     // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2E-B lifecycle closure): the single NON-SECRET T3 rotation-recovery marker; field allowlist pinned by decryption-rotation-lifecycle.test.tsx.
     sessionStorage.setItem(
@@ -59,8 +63,17 @@ export function writeRotationRecovery(
         subject,
       }),
     );
+    // Read-back through the strict subject-bound reader: a silently-failing
+    // or lying storage (quota, privacy mode, extension interference) must
+    // fail the write, not the recovery that would later depend on it.
+    const back = readRotationRecovery(subject);
+    return (
+      back !== null &&
+      back.operationId === m.operationId &&
+      back.preSeq === m.preSeq
+    );
   } catch {
-    // sessionStorage unavailable — recovery degrades to component state.
+    return false;
   }
 }
 

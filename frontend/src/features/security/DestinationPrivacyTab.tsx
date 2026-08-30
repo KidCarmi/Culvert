@@ -13,7 +13,7 @@
 // resolution converts into a durable local notice and CLEARS the latch, so
 // a deliberate NEW rotation (with a NEW operation id) becomes possible;
 // nothing is ever re-dispatched automatically.
-import { useEffect, useState, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import {
   Callout,
   Card,
@@ -97,6 +97,59 @@ export function DestinationPrivacyTab({
   const [unresolvedRotation, setUnresolvedRotation] =
     useState<UnresolvedRotation | null>(null);
 
+  // RECOVERY-HYDRATION GATE (TRUE FINAL closure, Blocker 1). The snapshot
+  // model caches with staleTime:Infinity and a SPA route-away/route-back
+  // keeps the QueryClient alive, so `p` can be the PRE-operation snapshot —
+  // classifying a restored marker against it can falsely prove NOT-LANDED
+  // and re-arm Rotate toward a second continuity-breaking rotation.
+  //   "inspecting"  — the marker has not been checked yet (first render;
+  //                   Rotate withheld even under a warm cache).
+  //   "stale"       — a marker was restored; a FRESH authoritative GET,
+  //                   initiated AFTER recovery entry, is in flight. Cached
+  //                   data may render for context but must not classify,
+  //                   clear the marker, or enable Rotate.
+  //   "fetch-failed"— that recovery GET failed: marker + latch retained,
+  //                   Rotate stays blocked, explicit retry offered.
+  //   "fresh"       — no marker existed, or the post-restore GET succeeded;
+  //                   classification and Rotate follow the normal rules.
+  const [recoveryGate, setRecoveryGate] = useState<
+    "inspecting" | "stale" | "fetch-failed" | "fresh"
+  >("inspecting");
+
+  // The pre-recovery dataUpdatedAt stamp: only a successful fetch that
+  // completed STRICTLY AFTER this stamp is post-restore authoritative truth.
+  const recoveryStaleStampRef = useRef(0);
+
+  const refetchPrivacy = page.q.refetch;
+  const runRecoveryFetch = useCallback((): void => {
+    setRecoveryGate("stale");
+    // The refetch promise is used ONLY for the failure transition. Its
+    // success value must NOT open the gate: a refetch cancelled by an
+    // unmount (StrictMode's simulated one included) resolves "success"
+    // while ECHOING the pre-recovery cached result — exactly the stale
+    // truth this gate exists to keep inert. Freshness is judged solely by
+    // the dataUpdatedAt stamp effect below.
+    void refetchPrivacy().then((res) => {
+      if (res.status === "error") {
+        setRecoveryGate((cur) => (cur === "stale" ? "fetch-failed" : cur));
+      }
+    });
+  }, [refetchPrivacy]);
+
+  // Freshness judge: the gate opens only when a SUCCESSFUL, settled fetch
+  // carries data newer than the pre-recovery stamp — i.e. an authoritative
+  // GET that completed after recovery entry (whoever initiated it).
+  useEffect(() => {
+    if (recoveryGate !== "stale" && recoveryGate !== "fetch-failed") return;
+    if (
+      page.q.isSuccess &&
+      !page.q.isFetching &&
+      page.q.dataUpdatedAt > recoveryStaleStampRef.current
+    ) {
+      setRecoveryGate("fresh");
+    }
+  }, [recoveryGate, page.q.isSuccess, page.q.isFetching, page.q.dataUpdatedAt]);
+
   // Restore the DURABLE recovery marker on mount (lifecycle closure): the
   // identity of a dispatched-but-unconfirmed T3 operation survives route
   // navigation and page reload until a terminal/recovery decision. An
@@ -104,11 +157,24 @@ export function DestinationPrivacyTab({
   // boundary cleanup clears the transient latch state, and StrictMode's
   // simulated unmount would otherwise wipe the restored value; the effect
   // re-reads after every (re)mount pass. A foreign-subject marker is
-  // discarded by the read itself, never inherited.
+  // discarded by the read itself, never inherited. A restored marker
+  // immediately forces the fresh recovery GET.
   useEffect(() => {
     const m = readRotationRecovery(subject);
-    if (m !== null) setUnresolvedRotation(m);
-  }, [subject]);
+    if (m === null) {
+      setRecoveryGate("fresh");
+      return;
+    }
+    setUnresolvedRotation(m);
+    // Everything the query holds RIGHT NOW is pre-recovery: stamp it stale.
+    recoveryStaleStampRef.current = Math.max(
+      recoveryStaleStampRef.current,
+      page.q.dataUpdatedAt,
+    );
+    runRecoveryFetch();
+    // The restore re-runs per (re)mount pass and identity change only —
+    // page.q.dataUpdatedAt is read at restore time, deliberately not a dep.
+  }, [subject, runRecoveryFetch]);
   // Durable local record of the last authoritative resolution (survives the
   // latch clearing; replaced only by a new ceremony or the auth boundary).
   const [resolution, setResolution] = useState<RotationResolution | null>(null);
@@ -129,7 +195,10 @@ export function DestinationPrivacyTab({
   // NOT LANDED; (3) anything else ⇒ AMBIGUOUS (another admin may have
   // rotated, or our receipt aged out of the bounded window) — no claim.
   const pendingClass =
-    unresolvedRotation !== null && p !== undefined && page.unknown === null
+    unresolvedRotation !== null &&
+    p !== undefined &&
+    page.unknown === null &&
+    recoveryGate === "fresh"
       ? ((): "landed" | "not-landed" | "ambiguous" => {
           const rcpt = p.receipts.find(
             (r) => r.operationId === unresolvedRotation.operationId,
@@ -144,7 +213,12 @@ export function DestinationPrivacyTab({
   // (2E-B correction, Minor C) — a fresh deliberate rotation becomes possible
   // again. AMBIGUOUS deliberately stays latched. Never dispatches anything.
   useEffect(() => {
-    if (unresolvedRotation === null || p === undefined || page.unknown !== null)
+    if (
+      unresolvedRotation === null ||
+      p === undefined ||
+      page.unknown !== null ||
+      recoveryGate !== "fresh" // never resolve from pre-recovery cache
+    )
       return;
     const rcpt = p.receipts.find(
       (r) => r.operationId === unresolvedRotation.operationId,
@@ -158,7 +232,7 @@ export function DestinationPrivacyTab({
       setUnresolvedRotation(null);
       clearRotationRecovery(); // terminal: proven not landed
     }
-  }, [unresolvedRotation, p, page.unknown]);
+  }, [unresolvedRotation, p, page.unknown, recoveryGate]);
 
   const closeCeremony = (): void => {
     setCeremony(null);
@@ -212,15 +286,25 @@ export function DestinationPrivacyTab({
   };
 
   const runRotation = (c: Ceremony & { kind: "rotate" }): void => {
+    // LOAD-BEARING ORDER + FAIL-CLOSED PERSISTENCE (TRUE FINAL closure,
+    // Blocker 2): the recovery identity is persisted AND verified
+    // recoverable BEFORE the network dispatch. No durable marker ⇒ no T3
+    // rotation — there is deliberately no memory-only fallback for this one
+    // irreversible operation.
+    if (
+      !writeRotationRecovery(subject, {
+        operationId: c.operationId,
+        preSeq: c.preSeq,
+      })
+    ) {
+      setResult("failed");
+      setErrorText(
+        "The browser could not create the recovery record required for a safe key rotation. No rotation was sent.",
+      );
+      return;
+    }
     const signal = page.owner.begin();
     setResult("pending");
-    // LOAD-BEARING ORDER: persist the recovery identity BEFORE the network
-    // dispatch — a navigation/crash between dispatch and a later write
-    // would recreate the forgotten-operation defect.
-    writeRotationRecovery(subject, {
-      operationId: c.operationId,
-      preSeq: c.preSeq,
-    });
     rotatePseudonymKey(c.operationId, c.revision, signal)
       .then((res) => {
         clearRotationRecovery(); // terminal: outcome confirmed by response
@@ -261,6 +345,40 @@ export function DestinationPrivacyTab({
             <div className={styles.fallbackAction}>
               <Button size="sm" onClick={page.refreshToResolve}>
                 Refresh state
+              </Button>
+            </div>
+          </Callout>
+        </div>
+      )}
+
+      {unresolvedRotation !== null &&
+        (recoveryGate === "inspecting" || recoveryGate === "stale") && (
+          <div className={styles.calloutSpace}>
+            <Callout
+              variant="unknown"
+              title="Verifying an unresolved rotation"
+              role="status"
+            >
+              An earlier rotation&apos;s outcome is unconfirmed. The appliance
+              is being asked for fresh truth; cached information is NOT used to
+              resolve it, and the rotate action stays unavailable until the
+              appliance answers.
+            </Callout>
+          </div>
+        )}
+      {unresolvedRotation !== null && recoveryGate === "fetch-failed" && (
+        <div className={styles.calloutSpace}>
+          <Callout
+            variant="critical"
+            title="Unresolved rotation not verified"
+            role="alert"
+          >
+            The appliance could not be reached to verify the unresolved
+            rotation. Cached information may be stale and is not used to resolve
+            it; the rotate action stays unavailable until fresh truth arrives.
+            <div className={styles.fallbackAction}>
+              <Button size="sm" onClick={runRecoveryFetch}>
+                Retry verification
               </Button>
             </div>
           </Callout>
@@ -423,7 +541,11 @@ export function DestinationPrivacyTab({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={page.unknown !== null || unresolvedRotation !== null}
+                disabled={
+                  page.unknown !== null ||
+                  unresolvedRotation !== null ||
+                  recoveryGate !== "fresh"
+                }
                 onClick={() => {
                   // A NEW deliberate operation: fresh identity, fresh anchors,
                   // and the previous resolution notice retires. An old
