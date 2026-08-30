@@ -371,7 +371,7 @@ func (tf *Feed) firstDelay(decision bootDecision, floorLeft time.Duration) time.
 		// of these attempts BEFORE the floor expires, quietly defeating it.
 		// Spreading a fleet is still worth doing, so the jitter is kept and
 		// only its direction is constrained.
-		return jitterUp(floorLeft, syncJitterFrac)
+		return jitterUp(floorLeft)
 	}
 	return d
 }
@@ -425,7 +425,7 @@ func (tf *Feed) nextSyncDelay() time.Duration {
 	tf.mu.RLock()
 	interval, fails := tf.syncInterval, tf.consecutiveFailures
 	tf.mu.RUnlock()
-	return jitterDuration(retryDelay(interval, fails), syncJitterFrac)
+	return jitterDuration(retryDelay(interval, fails))
 }
 
 // retryDelay is nextSyncDelay's pure core (jitter-free, so it is exactly
@@ -447,13 +447,13 @@ func retryDelay(interval time.Duration, consecutiveFailures int) time.Duration {
 	return d
 }
 
-// jitterDuration spreads d by ±frac so a fleet sharing a boot time does not
-// converge on one cadence against a shared third-party feed.
-func jitterDuration(d time.Duration, frac float64) time.Duration {
-	if d <= 0 || frac <= 0 {
+// jitterDuration spreads d by ±syncJitterFrac so a fleet sharing a boot time
+// does not converge on one cadence against a shared third-party feed.
+func jitterDuration(d time.Duration) time.Duration {
+	if d <= 0 {
 		return d
 	}
-	span := float64(d) * frac
+	span := float64(d) * syncJitterFrac
 	off := (rand.Float64()*2 - 1) * span // #nosec G404 -- fleet spread, not crypto
 	out := d + time.Duration(off)
 	if out < time.Millisecond {
@@ -462,13 +462,13 @@ func jitterDuration(d time.Duration, frac float64) time.Duration {
 	return out
 }
 
-// jitterUp spreads d by up to +frac, never below d. Used where the delay is a
-// floor that must not be breached; see firstDelay.
-func jitterUp(d time.Duration, frac float64) time.Duration {
-	if d <= 0 || frac <= 0 {
+// jitterUp spreads d by up to +syncJitterFrac, never below d. Used where the
+// delay is a floor that must not be breached; see firstDelay.
+func jitterUp(d time.Duration) time.Duration {
+	if d <= 0 {
 		return d
 	}
-	return d + time.Duration(rand.Float64()*frac*float64(d)) // #nosec G404 -- fleet spread, not crypto
+	return d + time.Duration(rand.Float64()*syncJitterFrac*float64(d)) // #nosec G404 -- fleet spread, not crypto
 }
 
 // SetSyncObserver installs the callback invoked after every completed sync

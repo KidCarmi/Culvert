@@ -245,11 +245,11 @@ func TestChaos57_ScheduledDelayIsJittered(t *testing.T) {
 // inputs a misconfiguration can produce.
 func TestChaos57_JitterNeverReturnsZero(t *testing.T) {
 	for _, d := range []time.Duration{time.Nanosecond, time.Millisecond, time.Second, time.Hour} {
-		if got := jitterDuration(d, syncJitterFrac); got <= 0 {
+		if got := jitterDuration(d); got <= 0 {
 			t.Fatalf("jitterDuration(%s) = %s, must stay positive", d, got)
 		}
 	}
-	if got := jitterDuration(0, syncJitterFrac); got != 0 {
+	if got := jitterDuration(0); got != 0 {
 		t.Fatalf("jitterDuration(0) = %s, want 0 (caller decides what a zero interval means)", got)
 	}
 }
