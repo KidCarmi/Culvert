@@ -734,7 +734,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/cdr/config", Handler: "apiCDRConfig", Domain: "cdr", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
-			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "audits via delegated apiCDRConfigToggle (auditEventDiff cdr.config.toggle)"},
 		}},
 	{Path: "/api/cdr/instances", Handler: "apiCDRInstances", Domain: "cdr", Public: false,
 		Methods: []uiRouteMethod{
