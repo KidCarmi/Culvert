@@ -434,10 +434,13 @@ func (rt *canaryRuntime) persistLocked(capb rollout.Capability, cr *canaryCapRun
 	st := canaryRuntimeState{
 		SchemaVersion: canaryRuntimeSchemaVersion,
 		Capability:    capb.String(),
-		BuildVersion:  version,
-		Generation:    cr.generation,
-		Active:        cr.active,
-		Budget:        cr.budget,
+		// Bind to the COMPOSED build identity (version+commit), same as the attestation/rehearsal
+		// records, so a live budget/abort/generation cannot resume on a different commit that happens to
+		// share a release tag (Codex round-20 P1). currentRuntimeIdentity() composes version+buildCommit.
+		BuildVersion: currentRuntimeIdentity().BuildVersion,
+		Generation:   cr.generation,
+		Active:       cr.active,
+		Budget:       cr.budget,
 	}
 	if cr.enforcer != nil {
 		st.BudgetSnapshot = cr.enforcer.Snapshot()
@@ -491,9 +494,11 @@ func (rt *canaryRuntime) restoreCapability(capb rollout.Capability) {
 	defer cr.mu.Unlock()
 	cr.generation = st.Generation
 	// A build-version mismatch disarms the runtime: a live budget/abort from a different build must
-	// not resume on a materially changed runtime (fail-closed). The monotonic generation is kept so
-	// a fresh activation bumps past the stale one.
-	if !st.Active || st.BuildVersion != version || st.Generation == 0 {
+	// not resume on a materially changed runtime (fail-closed). The comparison is against the COMPOSED
+	// version+commit identity (currentRuntimeIdentity), so a different commit under the same release tag
+	// disarms too — matching the commit-bound attestation/rehearsal records (Codex round-20 P1). The
+	// monotonic generation is kept so a fresh activation bumps past the stale one.
+	if !st.Active || st.BuildVersion != currentRuntimeIdentity().BuildVersion || st.Generation == 0 {
 		cr.active = false
 		cr.enforcer = nil
 		cr.aborter = nil

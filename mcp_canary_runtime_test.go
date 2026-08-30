@@ -254,6 +254,32 @@ func TestCanaryRuntime_BuildMismatchDisarms(t *testing.T) {
 	}
 }
 
+// TestCanaryRuntime_CommitMismatchDisarms is the Codex round-20 P1 proof: the durable runtime record
+// is bound to the COMPOSED build identity (version+commit), so a different commit built under the SAME
+// release tag does not resume the earlier build's active generation / budget / abort — matching the
+// commit-bound attestation and rehearsal records.
+func TestCanaryRuntime_CommitMismatchDisarms(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v1.0.0")
+	buildCommit = "commit-A-aaaa" // the build that ARMS the activation (helper set it to ""; override)
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(5), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// Restart under the SAME version tag but a DIFFERENT commit.
+	buildCommit = "commit-B-bbbb"
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+	if fresh.executionEligible(capb, now) {
+		t.Fatal("SECURITY: a different commit under the same version tag must disarm the runtime (commit-bound identity)")
+	}
+	// The monotonic generation is preserved so a fresh activation bumps past the stale one.
+	if fresh.currentGeneration(capb) != 1 {
+		t.Fatalf("generation must be preserved across a commit change, got %d", fresh.currentGeneration(capb))
+	}
+}
+
 // TestCanaryRuntime_DemotionInvalidatesOldGeneration is the §8 anti-reuse proof: after a demotion,
 // the OLD generation's budget/abort cannot be reused — a re-activation bumps the generation, and a
 // reserve carrying the old generation is refused; the old spend does not carry into the new budget.
