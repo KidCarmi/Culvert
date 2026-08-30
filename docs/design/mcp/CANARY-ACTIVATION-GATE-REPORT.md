@@ -127,7 +127,10 @@ build-bound evidence. The rehearsal FAILS whenever the real rollback would (Shad
 kill, config validity, durability) — pinned by a parity wall (`TestCoordinatorRehearsalParity_*`), a
 routing-is-load-bearing control, a mutation campaign, and durable-evidence + concurrency tests.
 `productionCoordinatorRollbackRehearsed` now reads that evidence, so row 20 CLOSES for a build once a
-coordinator-routed drill succeeds (`POST /api/mcp/rollout/rehearse-rollback-authoritative`). The
+coordinator-routed drill succeeds (`POST /api/mcp/rollout/rehearse-rollback-authoritative`). Fail-closed
+on FRESH negative evidence: a later rehearsal that fails (drill or evidence-write) durably invalidates any
+earlier PASS for the build, so a node whose most recent authoritative rehearsal failed can never activate
+Canary on stale evidence (`TestCoordinatorRehearsal_FailedAttemptInvalidatesPriorPass`). The
 mechanics fact (row 19) stays distinct. Production transition semantics are byte-identical (the wrapper
 just delegates to the shared core). The shipped default keeps row 20 open because the drill requires
 the full shadow tier (the unshipped tool-approval slice), which is the correct posture: such a node

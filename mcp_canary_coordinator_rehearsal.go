@@ -101,13 +101,17 @@ func (r *mcpRollout) executeCoordinatorRollbackRehearsalLocked(capb rollout.Capa
 		countTransition: func() {},       // scratch: never bump the live transition metric
 	}
 
-	for _, rung := range []struct {
+	// Index-based range: rollout.SignedConfig is large (832 bytes), so a value range would copy it
+	// per iteration (gocritic rangeValCopy).
+	rungs := []struct {
 		step string
 		cfg  rollout.SignedConfig
 	}{
 		{"shadow", shadowCfg},
 		{"observe", observeCfg},
-	} {
+	}
+	for i := range rungs {
+		rung := &rungs[i]
 		if rung.cfg.Mode.RequiresLiveExecution() { // defense-in-depth: a demotion never is
 			return steps, "", errCoordinatorRehearsalLiveTarget
 		}
@@ -147,6 +151,7 @@ func (r *mcpRollout) recordCoordinatorRehearsal(capb rollout.Capability) error {
 	steps, recovered, err := r.executeCoordinatorRollbackRehearsalLocked(capb, time.Now())
 	if err != nil {
 		logger.Printf("MCP rollout authoritative rollback rehearsal for %s failed (no evidence recorded): %q", capb.String(), sanitizeLog(err.Error()))
+		r.invalidatePriorCoordinatorRehearsalLocked(capb)
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
 	rec := canary.CoordinatorRollbackRehearsalRecord{
@@ -160,9 +165,22 @@ func (r *mcpRollout) recordCoordinatorRehearsal(capb rollout.Capability) error {
 	}
 	if serr := saveCoordinatorRehearsal(capb, &rec); serr != nil {
 		logger.Printf("MCP rollout authoritative rollback rehearsal for %s: evidence write failed: %q", capb.String(), sanitizeLog(serr.Error()))
+		r.invalidatePriorCoordinatorRehearsalLocked(capb)
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, serr)
 	}
 	return nil
+}
+
+// invalidatePriorCoordinatorRehearsalLocked durably invalidates any existing coordinator-rehearsal
+// record after a failed rehearsal attempt, so a fresh failure can never leave an earlier PASS for this
+// build still qualifying row 20 (Codex P2). It is best-effort: the residual case where even the durable
+// content-invalidation fails is logged loudly (a crash could then expose a record the operator was told
+// is stale — re-run the rehearsal), but the attempt already returns an error to the caller regardless.
+// Callers hold r.durableMu; the helper only touches the fixed operator-owned evidence file.
+func (r *mcpRollout) invalidatePriorCoordinatorRehearsalLocked(capb rollout.Capability) {
+	if rerr := removeCoordinatorRehearsalDurable(capb); rerr != nil {
+		logger.Printf("MCP rollout coordinator rehearsal record for %s could not be durably invalidated after a failed rehearsal (a crash could expose a record reported as stale; re-run the rehearsal): %q", capb.String(), sanitizeLog(rerr.Error()))
+	}
 }
 
 // coordinatorRehearsalAtomicWrite is the durable-write seam for the coordinator-rehearsal record (tests
@@ -179,6 +197,26 @@ func saveCoordinatorRehearsal(capb rollout.Capability, rec *canary.CoordinatorRo
 	}
 	path := coordinatorRehearsalPath(capb)
 	return removeVisibleFileAfterNotSyncedWrite(path, coordinatorRehearsalAtomicWrite(path, raw, 0o600))
+}
+
+// removeCoordinatorRehearsalDurable fails a coordinator-rehearsal record CLOSED (durably invalidate the
+// content first, then best-effort remove + dir sync), mirroring removeRollbackRehearsalDurable. It is
+// called on every failure exit of recordCoordinatorRehearsal so a failed authoritative rehearsal cannot
+// leave an EARLIER build-bound PASS still satisfying row 20 (Codex P2): the operator was just told the
+// rehearsal failed, so productionCoordinatorRollbackRehearsed must not keep returning true on stale
+// evidence. invalidateFileContentDurably no-ops on a missing file, so this is safe when no prior record
+// exists. Only the content invalidation failing is escalated to the caller.
+func removeCoordinatorRehearsalDurable(capb rollout.Capability) error {
+	path := coordinatorRehearsalPath(capb)
+	if ierr := invalidateFileContentDurably(path); ierr != nil {
+		return ierr
+	}
+	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		logger.Printf("MCP rollout coordinator rehearsal record for %s was durably invalidated but its removal failed (fail-closed holds): %q", capb.String(), sanitizeLog(rerr.Error()))
+		return nil
+	}
+	_ = syncParentDir(path)
+	return nil
 }
 
 // loadCoordinatorRehearsal reads the durable coordinator-rehearsal record. A missing file returns

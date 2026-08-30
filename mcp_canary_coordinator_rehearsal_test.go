@@ -149,6 +149,62 @@ func TestCoordinatorRehearsal_InvalidConfigRejected(t *testing.T) {
 	}
 }
 
+// TestCoordinatorRehearsal_FailedAttemptInvalidatesPriorPass proves the Codex P2 fail-closed rule: once
+// a build has a valid coordinator-rehearsal PASS (row 20 closed), a LATER rehearsal that fails — for any
+// reason a real rollback would fail — must durably invalidate that prior PASS so row 20 REOPENS. The
+// operator was just told the authoritative rehearsal failed; productionCoordinatorRollbackRehearsed must
+// not keep returning true on stale evidence and let Canary activate on it. Both failure exits of
+// recordCoordinatorRehearsal are covered: a drill failure (before the evidence write) and an
+// evidence-write failure (after a successful drill).
+func TestCoordinatorRehearsal_FailedAttemptInvalidatesPriorPass(t *testing.T) {
+	capb := rollout.CapabilityGateway
+	cases := []struct {
+		name   string
+		break_ func(t *testing.T)
+	}{
+		{"drill_failure_after_prior_pass", func(t *testing.T) {
+			// Break the scratch durability gate inside the coordinator core so the second drill FAILS
+			// (exercises the drill-failure exit). Real os ops used by the invalidation are unaffected.
+			prev := rolloutStateAtomicWrite
+			rolloutStateAtomicWrite = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+			t.Cleanup(func() { rolloutStateAtomicWrite = prev })
+		}},
+		{"evidence_write_failure_after_prior_pass", func(t *testing.T) {
+			// Let the second drill SUCCEED but fail the evidence write (exercises the save-failure exit).
+			prev := coordinatorRehearsalAtomicWrite
+			coordinatorRehearsalAtomicWrite = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+			t.Cleanup(func() { coordinatorRehearsalAtomicWrite = prev })
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := withCoordinatorRehearsalEnv(t)
+			// (1) A first rehearsal succeeds and closes row 20 for this build.
+			if err := r.recordCoordinatorRehearsal(capb); err != nil {
+				t.Fatalf("the first rehearsal on a ready node must succeed, got %v", err)
+			}
+			if !productionCoordinatorRollbackRehearsed(r, capb, false) {
+				t.Fatal("precondition: row 20 must be closed after the first successful rehearsal")
+			}
+			// (2) A second rehearsal now fails.
+			tc.break_(t)
+			if err := r.recordCoordinatorRehearsal(capb); err == nil {
+				t.Fatalf("SECURITY: the second rehearsal must FAIL for %s", tc.name)
+			}
+			// (3) The prior PASS is durably invalidated — row 20 reopens (fail-closed on fresh failure).
+			if productionCoordinatorRollbackRehearsed(r, capb, false) {
+				t.Fatalf("SECURITY: a failed rehearsal (%s) must invalidate the prior PASS, but row 20 stayed closed", tc.name)
+			}
+			if r.coordinatorRollbackRehearsalAttested(capb) {
+				t.Fatalf("SECURITY: coordinatorRollbackRehearsalAttested must be false after the failed re-run (%s)", tc.name)
+			}
+			if rec, _ := loadCoordinatorRehearsal(capb); rec != nil {
+				t.Fatalf("a failed re-run (%s) must leave no valid durable record, got %+v", tc.name, rec)
+			}
+		})
+	}
+}
+
 // TestCoordinatorRehearse_HTTPHandler pins the admin surface: non-admins are forbidden, an unversioned
 // build is refused 409, and on a ready node an admin POST runs the coordinator-routed drill and closes
 // row 20 (authoritative_rollback_rehearsed:true).
