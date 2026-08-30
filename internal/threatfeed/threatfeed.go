@@ -192,9 +192,19 @@ func New() *Feed {
 	return tf
 }
 
-const (
+// Feed origins. These are vars rather than consts for ONE reason: without a
+// seam, the only way to exercise Sync is to let the test suite fetch the real
+// URLhaus and OpenPhish endpoints — two 60-second timeouts per run on a CI
+// runner with no egress, and a request to a free public service on every
+// invocation. A change whose whole subject is not hammering those feeds must
+// not hammer them from CI. They are never reassigned in production; the
+// in-package test seam is swapFeedURLsForTest.
+var (
 	urlHausTextFeed = "https://urlhaus.abuse.ch/downloads/text/"
 	openPhishFeed   = "https://openphish.com/feed.txt"
+)
+
+const (
 	feedUserAgent   = "Culvert/1.0 (+https://github.com/KidCarmi/Claude-Test)"
 	feedHTTPTimeout = 60 * time.Second
 	maxFeedLines    = 500_000 // safety cap per feed to limit memory usage

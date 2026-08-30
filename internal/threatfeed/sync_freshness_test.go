@@ -24,6 +24,9 @@ package threatfeed
 // already refusing us. Both are pinned below.
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -251,20 +254,62 @@ func TestChaos57_JitterNeverReturnsZero(t *testing.T) {
 
 // ── The observer seam ────────────────────────────────────────────────────────
 
+// swapFeedURLsForTest points both feed origins at a test server and restores
+// them. Without this the only way to exercise Sync is to fetch the real
+// URLhaus and OpenPhish endpoints — two 60-second timeouts on a CI runner with
+// no egress, and a request to a free public service on every run. A change
+// about not hammering those feeds must not hammer them from its own tests.
+func swapFeedURLsForTest(t *testing.T, urlhaus, openphish string) {
+	t.Helper()
+	prevU, prevO := urlHausTextFeed, openPhishFeed
+	urlHausTextFeed, openPhishFeed = urlhaus, openphish
+	t.Cleanup(func() { urlHausTextFeed, openPhishFeed = prevU, prevO })
+}
+
 // TestChaos57_ObserverFiresOnEverySyncRound pins that the freshness plane is
 // notified by the admin's manual Sync too — otherwise a successful "Sync Now"
-// would leave a stale alert latched until the next scheduled window.
+// would leave a stale alert latched until the next scheduled window — and that
+// it is notified on a FAILED round as well, which is the round an operator
+// most needs to hear about.
 func TestChaos57_ObserverFiresOnEverySyncRound(t *testing.T) {
-	tf := New()
-	calls := 0
-	tf.SetSyncObserver(func() { calls++ })
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "http://malware.example/payload.bin")
+	}))
+	defer good.Close()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream down", http.StatusServiceUnavailable)
+	}))
+	defer bad.Close()
 
-	// Sync with no network reachable still completes a round (both fetches
-	// fail, carryForward keeps the empty tables) and must notify.
-	tf.Sync()
-	if calls != 1 {
-		t.Fatalf("observer called %d times after one Sync, want 1", calls)
-	}
+	t.Run("successful round", func(t *testing.T) {
+		swapFeedURLsForTest(t, good.URL, good.URL)
+		tf := New()
+		calls := 0
+		tf.SetSyncObserver(func() { calls++ })
+
+		tf.Sync()
+		if calls != 1 {
+			t.Fatalf("observer called %d times after one Sync, want 1", calls)
+		}
+		if got := tf.ConsecutiveFailures(); got != 0 {
+			t.Fatalf("ConsecutiveFailures = %d after a clean round, want 0", got)
+		}
+	})
+
+	t.Run("failed round still notifies", func(t *testing.T) {
+		swapFeedURLsForTest(t, bad.URL, bad.URL)
+		tf := New()
+		calls := 0
+		tf.SetSyncObserver(func() { calls++ })
+
+		tf.Sync()
+		if calls != 1 {
+			t.Fatalf("observer called %d times after a failed Sync, want 1 — a failed round is exactly the one the freshness plane must hear about", calls)
+		}
+		if got := tf.ConsecutiveFailures(); got != 1 {
+			t.Fatalf("ConsecutiveFailures = %d after a round that fetched nothing, want 1", got)
+		}
+	})
 }
 
 // TestChaos57_ObserverIsCalledWithoutHoldingTheLock is the deadlock gate. The
