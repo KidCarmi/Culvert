@@ -1,0 +1,319 @@
+package threatfeed
+
+// CHAOS-57 — gates for the sync loop's freshness, retry and jitter behaviour.
+//
+// Provenance, stated precisely because "verified failing against the pre-fix
+// tree" is a claim that has to be earned per gate:
+//
+//   - The DEFECT gates are the boot-sync ones. They were run against the
+//     pre-fix condition (`needSync := tf.lastSync.IsZero() ||
+//     tf.totalEntries.Load() == 0`) reintroduced in place, and fail:
+//     TestChaos57_BootSyncOnStaleData and the resume half of
+//     TestChaos57_BootSyncFlooredOnCrashLoop both go red.
+//   - The retry and jitter gates pin ARMING conditions. They cannot be run
+//     against the pre-fix tree in the same sense, because pre-fix there was no
+//     retry and no jitter to test — a bare time.NewTicker(syncInterval) has no
+//     delay function to call. They fail against a fix that ships the wrong
+//     shape (an unbounded retry, a retry that slows a short interval, a
+//     collapse back to a fixed cadence), which is what they are for.
+//
+// The CONTROL gates matter as much as the defect gates: an "always sync at
+// boot" fix would pass the staleness gate while turning every rolling restart
+// of a fleet into a synchronised burst against a free public feed, and a retry
+// with no floor would pass the retry gate while hammering a service that is
+// already refusing us. Both are pinned below.
+
+import (
+	"testing"
+	"time"
+)
+
+// newTestFeed returns a Feed with a controlled freshness state and no disk.
+func newTestFeed(t *testing.T, entries int64, lastSuccess, lastAttempt time.Time, interval time.Duration) *Feed {
+	t.Helper()
+	tf := New()
+	tf.mu.Lock()
+	tf.enabled = true
+	tf.syncInterval = interval
+	tf.lastSuccess = lastSuccess
+	tf.lastSync = lastAttempt
+	tf.publishLocked()
+	tf.mu.Unlock()
+	tf.totalEntries.Store(entries)
+	return tf
+}
+
+// ── Boot-sync freshness (the CHAOS-57 defect) ────────────────────────────────
+
+// TestChaos57_BootSyncOnStaleData is the DEFECT gate. An appliance that was
+// powered off long enough for its persisted intelligence to go stale must
+// fetch at startup. Pre-fix this returned false precisely BECAUSE the node had
+// data, so a three-week-old feed was served for another full interval and a
+// restart — the operator's remedy — made a recovered node strictly worse off
+// than a fresh install.
+func TestChaos57_BootSyncOnStaleData(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	interval := 6 * time.Hour
+	// Synced three weeks ago; last attempt was then too (the node was off).
+	stale := now.Add(-21 * 24 * time.Hour)
+	tf := newTestFeed(t, 200_000, stale, stale, interval)
+
+	if !tf.needBootSync(now) {
+		t.Fatal("stale persisted feed must trigger a boot sync; pre-fix it was skipped because the node had entries")
+	}
+}
+
+// TestChaos57_BootSyncSkippedWhenFresh is the CONTROL. A node restarted ten
+// minutes after a clean sync must NOT refetch: that is the direction which
+// turns a rolling upgrade into a thundering herd against a shared upstream.
+func TestChaos57_BootSyncSkippedWhenFresh(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-10 * time.Minute)
+	tf := newTestFeed(t, 200_000, fresh, fresh, 6*time.Hour)
+
+	if tf.needBootSync(now) {
+		t.Fatal("a feed synced 10 minutes ago must not refetch at boot")
+	}
+}
+
+// TestChaos57_BootSyncFlooredOnCrashLoop is the other CONTROL. Stale data
+// justifies a boot fetch; a process restarting every few seconds must not turn
+// that into one outbound request per restart.
+func TestChaos57_BootSyncFlooredOnCrashLoop(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	// Data is stale (last SUCCESS is ancient) but we attempted a minute ago:
+	// this is the crash-loop shape.
+	tf := newTestFeed(t, 200_000, now.Add(-21*24*time.Hour), now.Add(-time.Minute), 6*time.Hour)
+
+	if tf.needBootSync(now) {
+		t.Fatal("a boot sync one minute after the previous attempt must be floored (crash-loop protection)")
+	}
+	// ... and it must resume once the floor has elapsed.
+	if !tf.needBootSync(now.Add(bootResyncFloor)) {
+		t.Fatal("boot sync must resume once bootResyncFloor has elapsed since the last attempt")
+	}
+}
+
+// TestChaos57_BootSyncOnEmptyOrNeverSynced pins that the pre-fix triggers are
+// preserved: the new condition is a strict SUPERSET of the old one, so the
+// loop can only ever sync at least as often as it used to.
+func TestChaos57_BootSyncOnEmptyOrNeverSynced(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	t.Run("no entries", func(t *testing.T) {
+		tf := newTestFeed(t, 0, now.Add(-time.Minute), now.Add(-time.Minute), 6*time.Hour)
+		if !tf.needBootSync(now) {
+			t.Fatal("an empty feed must always sync at boot")
+		}
+	})
+	t.Run("never synced", func(t *testing.T) {
+		tf := newTestFeed(t, 100, time.Time{}, time.Time{}, 6*time.Hour)
+		if !tf.needBootSync(now) {
+			t.Fatal("a feed that never synced cleanly must sync at boot")
+		}
+	})
+}
+
+// ── Retry cadence ────────────────────────────────────────────────────────────
+
+// TestChaos57_FailedRoundRetriesBeforeTheFullInterval pins the retry's reason
+// for existing. Pre-fix a failed sync waited one full syncInterval — six hours
+// by default — so a thirty-second resolver blip landing on the tick froze
+// threat intelligence for the rest of the day.
+func TestChaos57_FailedRoundRetriesBeforeTheFullInterval(t *testing.T) {
+	const interval = 6 * time.Hour
+	got := retryDelay(interval, 1)
+	if got >= interval {
+		t.Fatalf("first retry after a failed round = %s, want well under the %s interval", got, interval)
+	}
+	if got != syncRetryInitial {
+		t.Fatalf("first retry = %s, want %s", got, syncRetryInitial)
+	}
+}
+
+// TestChaos57_RetryBacksOffAndIsBounded pins that the retry is bounded in RATE
+// (so a persistently-down feed is not hammered) and never in ATTEMPTS (so a
+// feed that returns after a day is picked up on the next window).
+func TestChaos57_RetryBacksOffAndIsBounded(t *testing.T) {
+	const interval = 6 * time.Hour
+	var prev time.Duration
+	for fails := 1; fails <= 12; fails++ {
+		d := retryDelay(interval, fails)
+		if d <= 0 {
+			t.Fatalf("failures=%d: retry delay %s must be positive — a zero delay is a spin loop", fails, d)
+		}
+		if d > syncRetryMax {
+			t.Fatalf("failures=%d: retry delay %s exceeds the %s ceiling", fails, d, syncRetryMax)
+		}
+		if d < prev {
+			t.Fatalf("failures=%d: retry delay %s went backwards from %s — backoff must be monotonic", fails, d, prev)
+		}
+		prev = d
+	}
+	if prev != syncRetryMax {
+		t.Fatalf("backoff settled at %s, want the %s ceiling", prev, syncRetryMax)
+	}
+}
+
+// TestChaos57_RetryNeverSlowsAShortInterval: a deployment configured to sync
+// every minute must not have its cadence SLOWED to five minutes by the retry
+// path. The retry exists to make a failed round recover sooner, never later.
+func TestChaos57_RetryNeverSlowsAShortInterval(t *testing.T) {
+	const interval = time.Minute
+	for fails := 0; fails <= 5; fails++ {
+		if d := retryDelay(interval, fails); d > interval {
+			t.Fatalf("failures=%d: retry delay %s exceeds the configured %s interval", fails, d, interval)
+		}
+	}
+}
+
+// TestChaos57_SuccessResetsTheCadence pins that a good round returns to the
+// full interval rather than staying at the retry floor.
+func TestChaos57_SuccessResetsTheCadence(t *testing.T) {
+	const interval = 6 * time.Hour
+	if d := retryDelay(interval, 0); d != interval {
+		t.Fatalf("delay after a successful round = %s, want the full %s interval", d, interval)
+	}
+}
+
+// ── Failure accounting ───────────────────────────────────────────────────────
+
+// TestChaos57_ConsecutiveFailuresCountRoundsThatFetchedNothing pins the
+// narrower definition: a round in which ONE of two feeds succeeded refreshed
+// real intelligence and is not a failure. Counting it would hold a fleet at
+// the retry floor forever against a feed that is permanently 403ing — which is
+// the ordinary steady state of a free public service, not an incident.
+func TestChaos57_ConsecutiveFailuresCountRoundsThatFetchedNothing(t *testing.T) {
+	tf := New()
+	now := time.Now()
+
+	// Both feeds failed: nothing replaced.
+	tf.applySync(map[string]entry{}, map[string]entry{},
+		[]string{"URLhaus: boom", "OpenPhish: boom"}, map[string]bool{}, now)
+	if got := tf.ConsecutiveFailures(); got != 1 {
+		t.Fatalf("after a round that fetched nothing: failures=%d, want 1", got)
+	}
+	tf.applySync(map[string]entry{}, map[string]entry{},
+		[]string{"URLhaus: boom", "OpenPhish: boom"}, map[string]bool{}, now)
+	if got := tf.ConsecutiveFailures(); got != 2 {
+		t.Fatalf("after a second empty round: failures=%d, want 2", got)
+	}
+
+	// Partial success: one source replaced. Not a failure round.
+	tf.applySync(map[string]entry{"http://a.test": {Source: sourceURLhaus}}, map[string]entry{},
+		[]string{"OpenPhish: boom"}, map[string]bool{sourceURLhaus: true}, now)
+	if got := tf.ConsecutiveFailures(); got != 0 {
+		t.Fatalf("a round that refreshed one source must reset the counter, got %d", got)
+	}
+}
+
+// ── Jitter ───────────────────────────────────────────────────────────────────
+
+// TestChaos57_ScheduledDelayIsJittered pins the fix for the phase lock (WK-13).
+// Pre-fix the loop used a bare time.NewTicker(syncInterval), so every node in a
+// fleet that booted together stayed aligned for the life of the deployment,
+// aiming a synchronised burst at a free public feed on every window. The gate
+// is structural — it asserts the delays are not all identical — rather than
+// asserting a distribution, which would flake.
+func TestChaos57_ScheduledDelayIsJittered(t *testing.T) {
+	tf := newTestFeed(t, 100, time.Now(), time.Now(), time.Hour)
+
+	seen := make(map[time.Duration]struct{})
+	for i := 0; i < 64; i++ {
+		d := tf.nextSyncDelay()
+		if d <= 0 {
+			t.Fatalf("jittered delay %s must be positive", d)
+		}
+		// ±10% of an hour.
+		if d < 54*time.Minute || d > 66*time.Minute {
+			t.Fatalf("jittered delay %s outside the ±10%% band around 1h", d)
+		}
+		seen[d] = struct{}{}
+	}
+	if len(seen) < 8 {
+		t.Fatalf("only %d distinct delays in 64 draws — the schedule is effectively phase-locked", len(seen))
+	}
+}
+
+// TestChaos57_JitterNeverReturnsZero: a zero or negative delay would turn the
+// loop into a spin that fetches continuously. Pinned across the degenerate
+// inputs a misconfiguration can produce.
+func TestChaos57_JitterNeverReturnsZero(t *testing.T) {
+	for _, d := range []time.Duration{time.Nanosecond, time.Millisecond, time.Second, time.Hour} {
+		if got := jitterDuration(d, syncJitterFrac); got <= 0 {
+			t.Fatalf("jitterDuration(%s) = %s, must stay positive", d, got)
+		}
+	}
+	if got := jitterDuration(0, syncJitterFrac); got != 0 {
+		t.Fatalf("jitterDuration(0) = %s, want 0 (caller decides what a zero interval means)", got)
+	}
+}
+
+// ── The observer seam ────────────────────────────────────────────────────────
+
+// TestChaos57_ObserverFiresOnEverySyncRound pins that the freshness plane is
+// notified by the admin's manual Sync too — otherwise a successful "Sync Now"
+// would leave a stale alert latched until the next scheduled window.
+func TestChaos57_ObserverFiresOnEverySyncRound(t *testing.T) {
+	tf := New()
+	calls := 0
+	tf.SetSyncObserver(func() { calls++ })
+
+	// Sync with no network reachable still completes a round (both fetches
+	// fail, carryForward keeps the empty tables) and must notify.
+	tf.Sync()
+	if calls != 1 {
+		t.Fatalf("observer called %d times after one Sync, want 1", calls)
+	}
+}
+
+// TestChaos57_ObserverIsCalledWithoutHoldingTheLock is the deadlock gate. The
+// observer reads the feed's own accessors, every one of which takes tf.mu;
+// invoking it under the write lock would wedge the sync goroutine forever on a
+// non-reentrant RWMutex — the CHAOS-50 cluster-CA defect exactly. The gate
+// deadlocks (and so times out) against that shape rather than failing softly.
+func TestChaos57_ObserverIsCalledWithoutHoldingTheLock(t *testing.T) {
+	tf := New()
+	done := make(chan struct{})
+	tf.SetSyncObserver(func() {
+		// Every one of these takes tf.mu.
+		_ = tf.Freshness()
+		_, _, _ = tf.Stats()
+		_, _, _ = tf.SyncStatus()
+		_ = tf.ConsecutiveFailures()
+		close(done)
+	})
+
+	go tf.notifySyncObserver()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("observer deadlocked reading feed state — it must be invoked with tf.mu released")
+	}
+}
+
+// TestChaos57_FreshnessIsOneConsistentRead pins that Freshness reports the
+// fields of a single generation. Composing the same view from Stats +
+// SyncStatus + ConsecutiveFailures takes tf.mu three times and can straddle a
+// concurrent applySync, reporting a fresh lastSuccess beside the failure count
+// that preceded it.
+func TestChaos57_FreshnessIsOneConsistentRead(t *testing.T) {
+	tf := New()
+	now := time.Now()
+	tf.applySync(map[string]entry{"http://a.test": {Source: sourceURLhaus}}, map[string]entry{},
+		nil, map[string]bool{sourceURLhaus: true, sourceOpenPhish: true}, now)
+
+	f := tf.Freshness()
+	if !f.LastSuccess.Equal(now) {
+		t.Fatalf("LastSuccess = %s, want %s", f.LastSuccess, now)
+	}
+	if f.ConsecutiveFailures != 0 {
+		t.Fatalf("ConsecutiveFailures = %d after a clean round, want 0", f.ConsecutiveFailures)
+	}
+	if f.LastErr != "" {
+		t.Fatalf("LastErr = %q after a clean round, want empty", f.LastErr)
+	}
+	if f.Entries != 1 {
+		t.Fatalf("Entries = %d, want 1", f.Entries)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -85,6 +86,24 @@ type Feed struct {
 	totalEntries    atomic.Int64
 	maskedHits      atomic.Int64 // domain hits suppressed by the allowlist (security-bypass observability)
 	enabled         bool
+
+	// consecutiveFailures counts sync rounds that brought in NOTHING — no
+	// feed replaced its entries. It is deliberately not "any failure": with
+	// two feeds, one of them 403ing indefinitely (which is the ordinary
+	// steady state of a free public feed) would otherwise hold the retry
+	// cadence at its floor forever, aiming a fleet at a service that is
+	// already refusing it. A round that refreshed at least one source did
+	// its job; only a round that refreshed none is a failure to retry.
+	// Process-lifetime, not persisted: the retry cadence is a runtime
+	// decision, and the durable record of "how long since fresh data" is
+	// lastSuccess, which IS persisted.
+	consecutiveFailures int
+
+	// syncObserver is called after every completed sync round (and once at
+	// startup when the boot round is skipped). It is the seam the freshness
+	// alert plane hangs off in package main — this package deliberately
+	// knows nothing about alerts, metrics or diagnostics.
+	syncObserver func()
 
 	// view is the lock-free read side of the three per-request lookups
 	// (Enabled / CheckDomain / CheckURL). See readView.
@@ -217,33 +236,175 @@ func (tf *Feed) Init(dbPath string, syncInterval time.Duration) {
 	}
 }
 
+// Scheduling constants for the background sync loop (CHAOS-57).
+const (
+	// syncJitterFrac spreads every scheduled sync by ±10% so a fleet that
+	// booted together does not stay phase-locked against a free public
+	// service for the life of the deployment. Same fraction, and the same
+	// reasoning, as the release-catalog refresh loop.
+	syncJitterFrac = 0.10
+
+	// syncRetryInitial / syncRetryMax bound the cadence of the retry that
+	// follows a round which fetched NOTHING. Before CHAOS-57 there was no
+	// retry at all: the next attempt was one full syncInterval away, so a
+	// 30-second resolver blip landing on the tick cost six hours of frozen
+	// threat intelligence. The retry is bounded in RATE and never in
+	// ATTEMPTS — a feed that is down for a day must still be picked up the
+	// minute it returns — which is the same posture the HA lease recovery
+	// loop settled on, and it is not a hidden retry: every attempt logs its
+	// outcome and the failure count is on /metrics.
+	syncRetryInitial = 5 * time.Minute
+	syncRetryMax     = 30 * time.Minute
+
+	// bootResyncFloor is the anti-hammer floor on the freshness-triggered
+	// boot sync. Stale data justifies fetching at startup; a process that
+	// is crash-looping must not turn that into a request per restart, so a
+	// boot sync is skipped when the previous ATTEMPT (success or failure,
+	// which is what lastSync records and persists) is more recent than
+	// this.
+	bootResyncFloor = 15 * time.Minute
+)
+
 // Start launches the background sync goroutine.
-// An immediate sync is performed when the cache is empty or has never synced.
+//
+// An immediate sync is performed when the cache is empty, has never synced, or
+// is STALE — the last of which is the CHAOS-57 fix. The previous condition was
+// `lastSync.IsZero() || totalEntries == 0`, and because lastSync is restored
+// from the persisted DB, an appliance that had been powered off for three
+// weeks came up holding three-week-old malware intelligence and skipped its
+// boot sync precisely BECAUSE it had data — then served that data for another
+// full interval. Restart is the operator's remedy for a stale feed, and it
+// made a fresh install strictly better off than a recovered one. This is the
+// same shape as the CHAOS-28 finding in StartCAAutoRotation, whose first check
+// at +24h skipped exactly the restart an operator makes to recover.
+//
+// The new condition is a strict superset of the old one (lastSync.IsZero()
+// implies lastSuccess.IsZero() — loadFromDisk only back-fills lastSuccess FROM
+// lastSync), so the loop can only ever sync at least as often as before.
 func (tf *Feed) Start(ctx context.Context) {
+	go tf.runSyncLoop(ctx, time.Now())
+}
+
+// runSyncLoop is Start's body, split out so tests can drive it directly with a
+// controlled "now" and a cancellable context.
+func (tf *Feed) runSyncLoop(ctx context.Context, now time.Time) {
+	// CHAOS-24: Sync parses third-party feed bodies (URLhaus/OpenPhish), so
+	// its panic surface is attacker-adjacent input this operator does not
+	// control. Guard the ROUND, not the goroutine: a bad feed pass costs
+	// one sync, not the whole gateway, and the loop keeps running so the
+	// next window can recover on its own.
+	if tf.needBootSync(now) {
+		obs.SafeCall("threatfeed", tf.Sync)
+	} else {
+		// No boot fetch, but the freshness plane must still be evaluated
+		// once at startup — otherwise an appliance that comes up holding
+		// data too old to be useful stays silent until the first tick.
+		// Mirrors evaluateSaaSFeedStartupAlerts / the release-catalog
+		// startup stale evaluation.
+		tf.notifySyncObserver()
+	}
+
+	timer := time.NewTimer(tf.nextSyncDelay())
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			obs.SafeCall("threatfeed", tf.Sync)
+			timer.Reset(tf.nextSyncDelay())
+		}
+	}
+}
+
+// needBootSync decides whether to fetch immediately at startup. See Start.
+func (tf *Feed) needBootSync(now time.Time) bool {
 	tf.mu.RLock()
-	needSync := tf.lastSync.IsZero() || tf.totalEntries.Load() == 0
+	lastSuccess, lastAttempt, interval := tf.lastSuccess, tf.lastSync, tf.syncInterval
 	tf.mu.RUnlock()
 
-	go func() {
-		// CHAOS-24: Sync parses third-party feed bodies (URLhaus/OpenPhish), so
-		// its panic surface is attacker-adjacent input this operator does not
-		// control. Guard the ROUND, not the goroutine: a bad feed pass costs
-		// one sync, not the whole gateway, and the ticker keeps running so the
-		// next window can recover on its own.
-		if needSync {
-			obs.SafeCall("threatfeed", tf.Sync)
-		}
-		ticker := time.NewTicker(tf.syncInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				obs.SafeCall("threatfeed", tf.Sync)
-			}
-		}
-	}()
+	// Nothing usable on disk: fetch, exactly as before this change.
+	if tf.totalEntries.Load() == 0 || lastSuccess.IsZero() {
+		return true
+	}
+	// Fresh enough to serve: the scheduled cadence is sufficient. A node
+	// restarted ten minutes after a clean sync must NOT refetch — that is
+	// the direction that builds a thundering herd out of a rolling upgrade.
+	if now.Sub(lastSuccess) < interval {
+		return false
+	}
+	// Stale. Fetch, unless we already attempted recently (crash-loop floor).
+	return now.Sub(lastAttempt) >= bootResyncFloor
+}
+
+// nextSyncDelay returns the jittered wait before the next scheduled sync: the
+// configured interval after a round that fetched something, an exponentially
+// backed-off retry after a round that fetched nothing. The retry is clamped to
+// the interval so a deployment configured with a short interval never has its
+// cadence SLOWED by the retry path.
+func (tf *Feed) nextSyncDelay() time.Duration {
+	tf.mu.RLock()
+	interval, fails := tf.syncInterval, tf.consecutiveFailures
+	tf.mu.RUnlock()
+	return jitterDuration(retryDelay(interval, fails), syncJitterFrac)
+}
+
+// retryDelay is nextSyncDelay's pure core (jitter-free, so it is exactly
+// testable).
+func retryDelay(interval time.Duration, consecutiveFailures int) time.Duration {
+	if consecutiveFailures <= 0 {
+		return interval
+	}
+	d := syncRetryInitial
+	for i := 1; i < consecutiveFailures && d < syncRetryMax; i++ {
+		d *= 2
+	}
+	if d > syncRetryMax {
+		d = syncRetryMax
+	}
+	if d > interval {
+		d = interval
+	}
+	return d
+}
+
+// jitterDuration spreads d by ±frac so a fleet sharing a boot time does not
+// converge on one cadence against a shared third-party feed.
+func jitterDuration(d time.Duration, frac float64) time.Duration {
+	if d <= 0 || frac <= 0 {
+		return d
+	}
+	span := float64(d) * frac
+	off := (rand.Float64()*2 - 1) * span // #nosec G404 -- fleet spread, not crypto
+	out := d + time.Duration(off)
+	if out < time.Millisecond {
+		out = time.Millisecond
+	}
+	return out
+}
+
+// SetSyncObserver installs the callback invoked after every completed sync
+// round, and once at startup when the boot round is skipped. Package main
+// wires the freshness alert/metric evaluation through it; this package stays
+// free of any dependency on that plane. Not safe to call concurrently with a
+// running loop — it is a startup wiring call.
+func (tf *Feed) SetSyncObserver(fn func()) {
+	tf.mu.Lock()
+	tf.syncObserver = fn
+	tf.mu.Unlock()
+}
+
+// notifySyncObserver invokes the observer with the lock RELEASED. The observer
+// reads the feed's own status accessors (Stats / SyncStatus / SyncFailures),
+// every one of which takes tf.mu — calling it under the lock would deadlock on
+// a non-reentrant RWMutex, which is the CHAOS-50 cluster-CA defect exactly.
+func (tf *Feed) notifySyncObserver() {
+	tf.mu.RLock()
+	fn := tf.syncObserver
+	tf.mu.RUnlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // Sync downloads all configured feeds and atomically replaces the in-memory
@@ -275,6 +436,11 @@ func (tf *Feed) Sync() {
 			obs.Printf("ThreatFeed: save to disk failed: %v", err)
 		}
 	}
+
+	// Last, and outside every lock: let the freshness plane re-evaluate. This
+	// runs for the admin's manual "sync now" too, so a successful manual sync
+	// clears a stale alert immediately instead of at the next tick.
+	tf.notifySyncObserver()
 }
 
 // applySync installs freshly-fetched feed tables. Only entries owned by a
@@ -303,6 +469,15 @@ func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []strin
 		tf.lastSyncErr = ""
 	} else {
 		tf.lastSyncErr = strings.Join(failures, "; ")
+	}
+	// A round that replaced NO source brought in nothing at all — that is the
+	// condition the retry cadence and the sync-failing alert key on. A round
+	// where one of two feeds succeeded refreshed real intelligence and is not
+	// charged as a failure (see the consecutiveFailures field comment).
+	if len(replacedSources) == 0 {
+		tf.consecutiveFailures++
+	} else {
+		tf.consecutiveFailures = 0
 	}
 	tf.publishLocked()
 	tf.mu.Unlock()
@@ -435,6 +610,53 @@ func (tf *Feed) SyncStatus() (ok bool, lastSuccess time.Time, errSummary string)
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 	return tf.lastSyncErr == "", tf.lastSuccess, tf.lastSyncErr
+}
+
+// ConsecutiveFailures returns the number of sync rounds in a row that replaced
+// NO source — i.e. that brought in no fresh intelligence at all. It is the
+// signal the freshness alert plane trips on, and it is deliberately narrower
+// than "the last sync reported an error": see the field comment.
+func (tf *Feed) ConsecutiveFailures() int {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	return tf.consecutiveFailures
+}
+
+// Freshness is the single self-consistent read of everything the freshness
+// plane needs. Composing it from Stats + SyncStatus + ConsecutiveFailures
+// would take tf.mu three times and could straddle a concurrent applySync,
+// reporting (for example) a fresh lastSuccess alongside the failure count that
+// preceded it — the half-applied read the readView contract exists to
+// prevent on the request path.
+//
+// A zero lastSuccess means "never fetched successfully", which the caller must
+// distinguish from "fetched successfully at the Unix epoch": staleness is not
+// computable from it, and an unconfigured feed must not be reported as
+// infinitely stale (the CHAOS-54 rule — a zero on a node that never had the
+// feature is indistinguishable from a broken one).
+func (tf *Feed) Freshness() FreshnessSnapshot {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	return FreshnessSnapshot{
+		Enabled:             tf.enabled,
+		Entries:             tf.totalEntries.Load(),
+		LastAttempt:         tf.lastSync,
+		LastSuccess:         tf.lastSuccess,
+		LastErr:             tf.lastSyncErr,
+		ConsecutiveFailures: tf.consecutiveFailures,
+		SyncInterval:        tf.syncInterval,
+	}
+}
+
+// FreshnessSnapshot is one consistent view of the feed's sync health.
+type FreshnessSnapshot struct {
+	Enabled             bool
+	Entries             int64
+	LastAttempt         time.Time // most recent attempt, success or failure
+	LastSuccess         time.Time // most recent round where every feed fetched cleanly; zero = never
+	LastErr             string    // summary of the most recent failure(s)
+	ConsecutiveFailures int
+	SyncInterval        time.Duration
 }
 
 // defaultDomainAllowlist seeds the threat-feed domain allowlist with popular
