@@ -288,7 +288,7 @@ test("SPA navigation (no reload): the stale cache never classifies; a post-retur
     await expect(
       page.getByRole("tab", { name: "Destination Privacy" }),
     ).toHaveCount(0);
-    await page.getByRole("link", { name: "Decryption" }).click();
+    await page.getByRole("link", { name: "Decryption", exact: true }).click();
     await page.getByRole("tab", { name: "Destination Privacy" }).click();
 
     // The stale cache must not classify; an actual post-return GET is
