@@ -181,23 +181,6 @@ func saveCoordinatorRehearsal(capb rollout.Capability, rec *canary.CoordinatorRo
 	return removeVisibleFileAfterNotSyncedWrite(path, coordinatorRehearsalAtomicWrite(path, raw, 0o600))
 }
 
-// removeCoordinatorRehearsalDurable fails a coordinator-rehearsal record CLOSED (durably invalidate the
-// content first, then best-effort remove + dir sync), mirroring removeRollbackRehearsalDurable so a
-// restart cannot let a record the operator was told failed satisfy row 20. Only the content
-// invalidation failing is escalated to the caller.
-func removeCoordinatorRehearsalDurable(capb rollout.Capability) error {
-	path := coordinatorRehearsalPath(capb)
-	if ierr := invalidateFileContentDurably(path); ierr != nil {
-		return ierr
-	}
-	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-		logger.Printf("MCP rollout coordinator rehearsal record for %s was durably invalidated but its removal failed (fail-closed holds): %q", capb.String(), sanitizeLog(rerr.Error()))
-		return nil
-	}
-	_ = syncParentDir(path)
-	return nil
-}
-
 // loadCoordinatorRehearsal reads the durable coordinator-rehearsal record. A missing file returns
 // (nil, nil) (the fail-closed default). A corrupt/undecodable file is QUARANTINED and returns (nil, nil).
 // A transient read error on an existing file is returned so the caller does not misread it as "absent".
