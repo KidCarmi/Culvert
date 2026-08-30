@@ -196,6 +196,10 @@ func getMCPRollout() *mcpRollout {
 func initMCPRollout(_ *startupState) {
 	getMCPRollout().restore()
 	globalCanaryRuntime.restore()
+	// Reconcile the two independently-restored durable domains: disarm any Canary runtime whose
+	// rollout mode was clamped (or is otherwise not a live-execution mode) so a restart never resumes
+	// an execution-eligible runtime under a mode a fresh commit would reject (Codex P1).
+	reconcileCanaryRuntimeAfterRestore()
 }
 
 // stateFor returns the capability-local rollout state (never shared).
@@ -392,6 +396,29 @@ func (r *mcpRollout) restore() {
 					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
 					r.setPersistStatus(st.Capability(), "degraded")
 					logger.Printf("MCP rollout restore for %s: restored Shadow failed activation preflight %v; clamped to Disabled (fail-closed)", st.Capability().String(), pf.Reasons)
+					continue
+				}
+			}
+			// A restored LIVE-EXECUTION mode (Canary/Production) must ALSO pass the FULL activation
+			// preflight, not just the coarse exec-deps tier: a prerequisite (attestation, rehearsal,
+			// per-tool approval, target, budget) may have been removed while the process was down, and a
+			// restart must never resume a live mode a fresh commit would now reject (Codex P1). The scope
+			// comes from the restored config; the other activation inputs are resolved from AUTHORITATIVE
+			// state via the probe (never trusted from the restored record). In this build the exec-deps
+			// check above already clamps every live mode (the live tier is unarmed), so this is the
+			// future-arming safety net; the paired runtime disarm is reconcileCanaryRuntimeAfterRestore.
+			if st.CurrentMode().RequiresLiveExecution() {
+				restored := st.CurrentConfig()
+				ai := canaryActivationInputsProbe(st.Capability(), restored.Scope, restored.ScopeRevision)
+				rd := evaluateCanaryActivationPreflight(CanaryActivationInput{
+					Capability: st.Capability(), Scope: restored.Scope, ScopeRev: restored.ScopeRevision,
+					ToolApprovals: ai.ToolApprovals, Budget: ai.Budget,
+					ServerUsable: ai.ServerUsable, FingerprintCurrent: ai.FingerprintCurrent, Now: time.Now(),
+				})
+				if !rd.Ready {
+					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
+					r.setPersistStatus(st.Capability(), "degraded")
+					logger.Printf("MCP rollout restore for %s: restored live mode failed activation preflight %v; clamped to Disabled (fail-closed)", st.Capability().String(), rd.Unmet)
 					continue
 				}
 			}

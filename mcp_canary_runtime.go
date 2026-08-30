@@ -214,6 +214,42 @@ func (rt *canaryRuntime) currentGeneration(capb rollout.Capability) uint64 {
 	return cr.generation
 }
 
+// armed reports whether the capability's runtime is currently armed (an activation record was
+// restored/begun and not demoted). It is distinct from executionEligible, which is additionally false
+// once an abort has latched — a restored aborted activation is still "armed" and must be reconciled.
+func (rt *canaryRuntime) armed(capb rollout.Capability) bool {
+	cr := rt.capRuntime(capb)
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	return cr.active
+}
+
+// reconcileCanaryRuntimeAfterRestore disarms any restored Canary runtime whose capability's rollout
+// mode is NOT a live-execution mode. At startup r.restore() clamps a restored Canary/Production mode
+// to Disabled unless it passes the full activation preflight (a prerequisite removed while the process
+// was down fails it), but the canary runtime (budget/abort) is restored independently from its own
+// durable record — so without this a restart could re-arm an execution-eligible runtime under a mode
+// that was just clamped, resuming executions a fresh commit would reject. Fail-closed: an armed
+// runtime with no live-execution rollout mode is demoted (disarmed + durable record made dormant), so
+// the two durable domains cannot disagree after a restart (Codex P1). Must run AFTER both
+// r.restore() and globalCanaryRuntime.restore().
+func reconcileCanaryRuntimeAfterRestore() {
+	r := getMCPRollout()
+	for _, capb := range []rollout.Capability{rollout.CapabilityGateway, rollout.CapabilityManagement} {
+		if !globalCanaryRuntime.armed(capb) {
+			continue // dormant — nothing to reconcile
+		}
+		if r.stateFor(capb).CurrentMode().RequiresLiveExecution() {
+			continue // a ready live-execution mode legitimately keeps its armed runtime
+		}
+		if err := globalCanaryRuntime.demoteCanary(capb); err != nil {
+			logger.Printf("MCP canary runtime: restore reconcile: disarm %s (rollout mode not live-execution) failed: %q", capb.String(), sanitizeLog(err.Error()))
+		} else {
+			logger.Printf("MCP canary runtime: restore reconcile: disarmed %s runtime (rollout mode is not a live-execution mode after restore)", capb.String())
+		}
+	}
+}
+
 // reserveCanaryExecution is the pre-side-effect gate a live Canary would call: it refuses unless an
 // activation is armed AND the abort controller is execution-eligible AND the budget grants a slot
 // for the execution's identity ident (enforcing the distinct principal/tool/server ceilings). A

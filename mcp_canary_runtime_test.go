@@ -636,6 +636,62 @@ func TestCanaryRuntime_RestoreForeignAbortSnapshotDisarms(t *testing.T) {
 	}
 }
 
+// TestCanaryRuntime_RestoreReconcileDisarmsWithoutLiveMode is the Codex P1 (round-6) restart-recovery
+// proof: the canary runtime and the rollout mode are restored from INDEPENDENT durable domains. If a
+// node restarts with an ACTIVE runtime record but its rollout mode is not a live-execution mode (e.g.
+// it was clamped by the restore preflight because a prerequisite was removed while down), the
+// reconcile must disarm the runtime so a restart never resumes an execution-eligible runtime under a
+// mode a fresh commit would reject.
+func TestCanaryRuntime_RestoreReconcileDisarmsWithoutLiveMode(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	_ = rt
+	capb := rollout.CapabilityGateway
+	// Craft an ACTIVE durable runtime record, as if a Canary had been armed before the restart.
+	st := canaryRuntimeState{
+		SchemaVersion:  canaryRuntimeSchemaVersion,
+		Capability:     capb.String(),
+		BuildVersion:   version,
+		Generation:     1,
+		Active:         true,
+		Budget:         runtimeTestBudget(5),
+		BudgetSnapshot: canary.BudgetSnapshot{Generation: 1, StartUnixNano: 1, RateWindowStartNano: 1},
+		AbortSnapshot:  canary.AbortSnapshot{Generation: 1},
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(canaryRuntimeStatePath(capb), raw, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Fresh singleton rollout — mode Disabled (NOT a live-execution mode), as a restore clamp leaves it.
+	_ = getMCPRollout()
+	prev := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	t.Cleanup(func() { globalMCPRollout = prev })
+
+	// Runtime restore alone re-arms the active durable record…
+	globalCanaryRuntime.restore()
+	if !globalCanaryRuntime.armed(capb) {
+		t.Fatal("precondition: restore must re-arm the active durable record")
+	}
+	// …but the reconcile disarms it because the rollout mode is not a live-execution mode.
+	reconcileCanaryRuntimeAfterRestore()
+	if globalCanaryRuntime.armed(capb) || globalCanaryRuntime.executionEligible(capb) {
+		t.Fatal("SECURITY: a restored runtime with no live-execution rollout mode must be disarmed by the reconcile")
+	}
+	// The disarm is durable across a further restart.
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+	if fresh.executionEligible(capb) {
+		t.Fatal("SECURITY: the reconcile disarm must survive a restart")
+	}
+}
+
 // TestCanaryRuntime_CorruptStateQuarantined proves a tampered durable state is quarantined and the
 // runtime falls back to the safe dormant default (fail closed).
 func TestCanaryRuntime_CorruptStateQuarantined(t *testing.T) {

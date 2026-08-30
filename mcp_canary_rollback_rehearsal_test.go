@@ -5,9 +5,31 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
+
+// TestRollbackRehearsal_NotSyncedWriteFails is the Codex P1 (round-6) durability proof: the rehearsal
+// is a durable Canary prerequisite, so a write that is visible but not crash-durable
+// (fileutil.ErrReplacedNotSynced) must be returned as a FAILURE — recordRehearsal must never certify
+// a drill as durably recorded when an immediate crash could lose it.
+func TestRollbackRehearsal_NotSyncedWriteFails(t *testing.T) {
+	withRehearsalTestEnv(t, "v9.9.9")
+	prev := rehearsalAtomicWrite
+	rehearsalAtomicWrite = func(_ string, _ []byte, _ os.FileMode) error { return fileutil.ErrReplacedNotSynced }
+	t.Cleanup(func() { rehearsalAtomicWrite = prev })
+	rec := &canary.RollbackRehearsalRecord{
+		SchemaVersion: canary.RollbackRehearsalSchemaVersion,
+		Capability:    rollout.CapabilityGateway.String(),
+		Identity:      currentRuntimeIdentity(),
+		Executed:      true,
+		Steps:         canary.RequiredRollbackPath(),
+	}
+	if err := saveRollbackRehearsal(rollout.CapabilityGateway, rec); err == nil {
+		t.Fatal("a not-durably-synced rehearsal write must be returned as a failure, not certified as recorded")
+	}
+}
 
 // withRehearsalTestEnv points dataDir at a temp dir and pins a deterministic build version,
 // restoring both on cleanup (the same isolation the attestation tests use).

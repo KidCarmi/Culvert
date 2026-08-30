@@ -98,17 +98,17 @@ func saveShadowExitAttestation(a *canary.ShadowExitAttestation) error {
 	if err != nil {
 		return err
 	}
-	if err := fileutil.AtomicWrite(shadowExitAttestationPath(), raw, 0o600); err != nil {
-		// ErrReplacedNotSynced means the target already carries the new content (only the
-		// parent-dir fsync failed) — the durable domain HOLDS the write, so it is a success
-		// for our purposes; any other error is a real persist failure.
-		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
-			return nil
-		}
-		return err
-	}
-	return nil
+	// The attestation is a DURABLE Canary prerequisite that authorizes a live-mode transition, so a
+	// write that is visible but not crash-durable must NOT be reported as persisted:
+	// fileutil.ErrReplacedNotSynced (the replacement landed but the parent-dir fsync failed) is
+	// returned as a failure like any other, so a crash cannot lose a record the API called durable and
+	// let a live-mode commit proceed on an attestation that no longer exists (Codex P1).
+	return attestationAtomicWrite(shadowExitAttestationPath(), raw, 0o600)
 }
+
+// attestationAtomicWrite is the durable-write seam for the attestation (tests inject failures,
+// including fileutil.ErrReplacedNotSynced, to prove the write fails closed).
+var attestationAtomicWrite = fileutil.AtomicWrite
 
 // apiMCPShadowExitReview is the admin surface for the Shadow Exit Review attestation.
 //
@@ -198,11 +198,34 @@ func apiMCPShadowExitReviewDelete(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if err := os.Remove(shadowExitAttestationPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// Serialize the revocation with the activation commit AND make the unlink crash-durable.
+	// The commit reads the attestation INSIDE mcpRollout.durableMu (canaryNodeFactsLocked →
+	// shadowExitReviewAttested), so taking the same lock here makes revoke-vs-activate mutually
+	// exclusive: a commit can never install Canary from an attestation that a concurrent,
+	// already-acknowledged revocation removed (Codex P1). The unlink is then fsynced to the parent
+	// directory so a crash right after the API returns revoked:true cannot resurrect the old PASSED
+	// record and satisfy the gate again (Codex P1). Only a crash-durable removal is acknowledged.
+	rr := getMCPRollout()
+	rr.durableMu.Lock()
+	err := removeAttestationDurable()
+	rr.durableMu.Unlock()
+	if err != nil {
 		auditEvent(r, "mcp.canary.shadow-exit-review.revoke", "", "remove_failed")
 		http.Error(w, "attestation_revoke_failed", http.StatusInternalServerError)
 		return
 	}
 	auditEvent(r, "mcp.canary.shadow-exit-review.revoke", "", "")
 	jsonOK(w, map[string]any{"attested": false, "revoked": true})
+}
+
+// removeAttestationDurable unlinks the attestation and fsyncs the parent directory so the removal is
+// crash-durable before the caller acknowledges the revocation. A missing file is success (already
+// revoked); a non-ENOENT unlink error or a parent-dir sync failure is returned so the handler reports
+// the revocation as failed rather than acknowledging a removal a crash could undo.
+func removeAttestationDurable() error {
+	path := shadowExitAttestationPath()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncParentDir(path)
 }

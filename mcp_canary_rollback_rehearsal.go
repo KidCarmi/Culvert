@@ -152,21 +152,22 @@ func rehearseRollback(capb rollout.Capability) (canary.RollbackRehearsalRecord, 
 	return rec, nil
 }
 
-// saveRollbackRehearsal atomically writes the rehearsal record (0600). ErrReplacedNotSynced is a
-// success (the durable domain holds the content). Any other error is a real persist failure.
+// saveRollbackRehearsal atomically writes the rehearsal record (0600). The rehearsal is a DURABLE
+// Canary prerequisite that a later activation consumes, so a write that is visible but not
+// crash-durable must NOT be certified: fileutil.ErrReplacedNotSynced (the replacement landed but the
+// parent-dir fsync failed) is returned as a failure like any other, so recordRehearsal never reports
+// a drill as durably recorded when an immediate crash could lose it (Codex P1).
 func saveRollbackRehearsal(capb rollout.Capability, rec *canary.RollbackRehearsalRecord) error {
 	raw, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	if werr := fileutil.AtomicWrite(rollbackRehearsalPath(capb), raw, 0o600); werr != nil {
-		if errors.Is(werr, fileutil.ErrReplacedNotSynced) {
-			return nil
-		}
-		return werr
-	}
-	return nil
+	return rehearsalAtomicWrite(rollbackRehearsalPath(capb), raw, 0o600)
 }
+
+// rehearsalAtomicWrite is the durable-write seam for the rehearsal record (tests inject failures,
+// including fileutil.ErrReplacedNotSynced, to prove the write fails closed).
+var rehearsalAtomicWrite = fileutil.AtomicWrite
 
 // loadRollbackRehearsal reads the durable rehearsal record. A missing file returns (nil, nil) (no
 // evidence — the fail-closed default). A corrupt/undecodable file is QUARANTINED (moved aside) and

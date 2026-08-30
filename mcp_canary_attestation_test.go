@@ -5,8 +5,58 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 )
+
+// TestShadowExitAttestation_NotSyncedWriteFails is the Codex P1 (round-6) durability proof: the
+// attestation authorizes a live-mode transition, so a write that is visible but not crash-durable
+// (fileutil.ErrReplacedNotSynced) must be returned as a FAILURE — the POST handler then reports
+// persisted:false rather than certifying a record a crash could lose.
+func TestShadowExitAttestation_NotSyncedWriteFails(t *testing.T) {
+	withAttestationTestEnv(t, "v9.9.9")
+	prev := attestationAtomicWrite
+	attestationAtomicWrite = func(_ string, _ []byte, _ os.FileMode) error { return fileutil.ErrReplacedNotSynced }
+	t.Cleanup(func() { attestationAtomicWrite = prev })
+	a := &canary.ShadowExitAttestation{
+		SchemaVersion: canary.ShadowExitAttestationSchemaVersion,
+		Status:        canary.ShadowExitStatusPassed,
+		ReviewID:      "SXR-notsynced",
+		Identity:      currentRuntimeIdentity(),
+	}
+	if err := saveShadowExitAttestation(a); err == nil {
+		t.Fatal("a not-durably-synced attestation write must be returned as a failure, not certified as persisted")
+	}
+}
+
+// TestShadowExitAttestation_RevokeIsDurable proves revocation removes the record and syncs the parent
+// directory (Codex P1, round-6): removeAttestationDurable deletes the file and returns nil on success,
+// so a subsequent readiness read fails closed to not-attested.
+func TestShadowExitAttestation_RevokeIsDurable(t *testing.T) {
+	withAttestationTestEnv(t, "v9.9.9")
+	a := &canary.ShadowExitAttestation{
+		SchemaVersion: canary.ShadowExitAttestationSchemaVersion,
+		Status:        canary.ShadowExitStatusPassed,
+		ReviewID:      "SXR-revoke",
+		Identity:      currentRuntimeIdentity(),
+	}
+	if err := saveShadowExitAttestation(a); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := removeAttestationDurable(); err != nil {
+		t.Fatalf("durable revoke must succeed, got %v", err)
+	}
+	if _, err := os.Stat(shadowExitAttestationPath()); !os.IsNotExist(err) {
+		t.Fatal("revocation must remove the durable attestation file")
+	}
+	if shadowExitReviewAttested() {
+		t.Fatal("after revocation the node must fail closed to not-attested")
+	}
+	// Revoking again (already absent) is still a durable success (nothing to remove).
+	if err := removeAttestationDurable(); err != nil {
+		t.Fatalf("revoking an absent attestation must be a durable success, got %v", err)
+	}
+}
 
 // withAttestationTestEnv points dataDir at a temp dir and pins a deterministic build version,
 // restoring both on cleanup so the process-global state is not polluted.
