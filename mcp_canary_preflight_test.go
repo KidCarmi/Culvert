@@ -220,6 +220,63 @@ func TestRollbackPathHealthy_ClearsStaleWriteFailed(t *testing.T) {
 	}
 }
 
+// TestCanaryRollbackCoordinatorRehearsal_OpenPrerequisiteBlocksReadiness is the owner-directed proof
+// for finding CANARY-ROLLBACK-COORDINATOR-REHEARSAL: the executable persist/restore rehearsal proves
+// rollback MECHANICS only, so a node that has satisfied EVERY OTHER node prerequisite — including the
+// mechanics rehearsal (rollback_path_healthy) — is STILL not Canary-ready while the authoritative
+// coordinator-routed rollback rehearsal is OPEN. No transition can become READY merely because the
+// mechanics rehearsal passed; it fails closed with rollback_coordinator_rehearsal_pending.
+func TestCanaryRollbackCoordinatorRehearsal_OpenPrerequisiteBlocksReadiness(t *testing.T) {
+	withTempDataDir(t)
+	withCanaryReadyNode(t) // arms EVERYTHING, including the coordinator-rehearsal seam
+	// Sanity (non-vacuity): with the seam armed the node IS Canary-ready.
+	if rd := evaluateCanaryNodeReadiness(rollout.CapabilityGateway); !rd.Ready {
+		t.Fatalf("precondition: a fully-armed node must be node-ready, unmet=%v", rd.Unmet)
+	}
+	// Now restore the PRODUCTION posture for the coordinator-rehearsal seam only — the authoritative
+	// rollback rehearsal is OPEN. Everything else (incl. the mechanics rehearsal) stays satisfied.
+	prev := coordinatorRollbackRehearsedFn
+	coordinatorRollbackRehearsedFn = productionCoordinatorRollbackRehearsed
+	t.Cleanup(func() { coordinatorRollbackRehearsedFn = prev })
+
+	rd := evaluateCanaryNodeReadiness(rollout.CapabilityGateway)
+	if rd.Ready {
+		t.Fatal("SECURITY: a node whose MECHANICS rehearsal passed must NOT be Canary-ready while the authoritative coordinator-routed rehearsal is open")
+	}
+	if !canaryUnmetHas(rd, canary.ReasonRollbackCoordinatorRehearsalPending) {
+		t.Fatalf("the open prerequisite must surface rollback_coordinator_rehearsal_pending, got %v", rd.Unmet)
+	}
+	// The mechanics rehearsal stays satisfied — proving this is a SEPARATE hard prerequisite, not a
+	// regression of rollback_path_healthy.
+	if canaryUnmetHas(rd, canary.ReasonRollbackPathUnhealthy) {
+		t.Fatalf("rollback_path_healthy (mechanics) must remain satisfied; the sole rollback block is the coordinator rehearsal, got %v", rd.Unmet)
+	}
+}
+
+// TestCanaryRollbackCoordinatorRehearsal_ProductionFailsClosed proves the production seam never
+// certifies the authoritative rollback rehearsal for any capability — the
+// CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is unmet by construction in this build (no
+// coordinator-routed rehearsal exists), so the mechanics rehearsal can never substitute for it.
+func TestCanaryRollbackCoordinatorRehearsal_ProductionFailsClosed(t *testing.T) {
+	for _, capb := range []rollout.Capability{rollout.CapabilityGateway, rollout.CapabilityManagement} {
+		if productionCoordinatorRollbackRehearsed(capb) {
+			t.Fatalf("production must never certify the authoritative rollback rehearsal for %s", capb)
+		}
+	}
+	// The node dry-run must advertise the prerequisite in its full vocabulary even when everything is unmet.
+	all := canary.AllReasons()
+	found := false
+	for _, r := range all {
+		if r == canary.ReasonRollbackCoordinatorRehearsalPending {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("rollback_coordinator_rehearsal_pending must be in the advertised prerequisite vocabulary")
+	}
+}
+
 // TestMCPCanaryStatus_ReadOnlyContract proves the admin surface reports the contract honestly:
 // defined but not ready, a non-empty unmet list, the full prerequisite vocabulary, and the
 // live tier unarmed.

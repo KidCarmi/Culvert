@@ -51,17 +51,19 @@ live tier; Canary *requires* it).
 | 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`) | **unissuable** |
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |
-| 19 | Rollback path healthy | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND a build-bound EXECUTABLE rollback-rehearsal record (a real Canary→Shadow→Observe drill through the actual persist/restore path, §5) validates for the current build | **NO (undrilled)** |
-| 20 | Budget configured | `canary_budget_not_configured` | `canary.ValidateBudget` | activation input |
+| 19 | Rollback path healthy (**mechanics**) | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND a build-bound EXECUTABLE rollback-rehearsal record (a real Canary→Shadow→Observe drill through the actual persist/restore path, §5) validates for the current build. **Rollback MECHANICS evidence only** — it does NOT traverse the authoritative coordinator (see row 20). | **NO (undrilled)** |
+| 20 | Authoritative rollback rehearsed (coordinator) | `rollback_coordinator_rehearsal_pending` | `coordinatorRollbackRehearsedFn` — a rehearsal routed through the real `commitRolloutTransitionAt` coordinator, proving parity with its Shadow preflight, emergency-kill, revision, durability, and rollback guards. **OPEN hard prerequisite `CANARY-ROLLBACK-COORDINATOR-REHEARSAL`**: `productionCoordinatorRollbackRehearsed` returns false by construction, so a node whose row-19 mechanics rehearsal passed is STILL not ready. Deferred to a dedicated follow-up (owner decision). | **NO (open)** |
+| 21 | Budget configured | `canary_budget_not_configured` | `canary.ValidateBudget` | activation input |
 
 Live-tier facts (5, 6, 7, 14, 15) are all false together in this build (the guarded live
 executor — whose boundary guards are pinned by `internal/mcp/execution`'s PREREQ-MCP-KILL-1
 tests — composes as one unit and is never composed).
 
-**Node vs activation readiness (two evaluators).** Rows 3, 4, 16, 17, 18, 20 (scope bounded,
+**Node vs activation readiness (two evaluators).** Rows 3, 4, 16, 17, 18, 21 (scope bounded,
 scope read-first, live approval, server usable, tool fingerprint, budget) are **activation-
 level**: they are meaningful only once an operator supplies a concrete scope, approval, and
-budget. Every other row is **node-level**. `canary.EvaluateNode` (the `node_ready` dry run at
+budget. Every other row is **node-level** (including row 20, the open coordinator-rehearsal
+prerequisite, which the `node_ready` dry run surfaces). `canary.EvaluateNode` (the `node_ready` dry run at
 `GET /api/mcp/rollout` → `canary`) evaluates ONLY node-level rows, so a node that has satisfied
 every node prerequisite reports `node_ready` true even before a scope is chosen, instead of
 being permanently not-ready because the six activation facts default false. `canary.Evaluate`
@@ -155,9 +157,17 @@ composed are now implemented and dormant-by-construction (Execution posture stay
   over the 10 AbortCanary breach codes; a single occurrence makes execution ineligible immediately
   and permanently for that generation (resume requires a new activation/generation). The 6
   AbortRequest codes NEVER latch it (request-fails-closed ≠ Canary-stops).
-- **§5 Executable rollback rehearsal** — the self-attested marker is replaced by a real
+- **§5 Executable rollback rehearsal (mechanics)** — the self-attested marker is replaced by a real
   Canary→Shadow→Observe drill through the actual rollout persist/restore path, recorded as durable
-  build-bound evidence; readiness (`rollbackPathHealthy`) requires that evidence to validate.
+  build-bound evidence; readiness row 19 (`rollbackPathHealthy`) requires that evidence to validate.
+  This is rollback **mechanics** evidence: it drives the scratch ladder directly (`SetConfig` +
+  `persistRolloutStateTo`), NOT through the authoritative `commitRolloutTransitionAt` coordinator, so
+  it does not prove parity with that coordinator's Shadow preflight, emergency-kill, revision,
+  durability, and rollback guards. The authoritative rehearsal is a SEPARATE, OPEN hard prerequisite
+  (row 20, `rollback_coordinator_rehearsal_pending`, `CANARY-ROLLBACK-COORDINATOR-REHEARSAL`) that
+  keeps Canary readiness FALSE regardless of the mechanics rehearsal — no transition can become READY
+  on the mechanics rehearsal alone. Deferred to a dedicated follow-up (owner decision; the coordinator
+  is not refactored here and the readiness criterion is not weakened).
 - **Runtime lifecycle** — `mcp_canary_runtime.go` owns the monotonic activation generation and the
   durable budget/abort state; `beginCanaryActivation` (the future-arming seam) is UNINVOKED in this
   build, so no generation is ever bumped and no execution is ever reserved in production.
@@ -172,6 +182,12 @@ Every one is a **separately-reviewed activation**, not a config change:
    `tooltrust.Purpose.Issuable()` and the issue path.
 3. Call `beginCanaryActivation` from the (future) armed live path so the runtime budget/abort
    generation is armed, and drive `reserveCanaryExecution` at the pre-side-effect boundary.
-4. Execute the first Canary per `CANARY-FIRST-RUNBOOK.md` (synthetic identity, recording
+4. Close **`CANARY-ROLLBACK-COORDINATOR-REHEARSAL`** (row 20): refactor the coordinator into a
+   locked, side-effect-injectable core; route a scratch rehearsal through the same authoritative
+   `commitRolloutTransitionAt` gates with an injected persistence destination; make it FAIL whenever
+   the real rollback would fail; avoid live rollout-state mutation; add parity + mutation proofs.
+   Until this lands, the Canary Activation Gate is **INCOMPLETE — AUTHORITATIVE ROLLBACK REHEARSAL
+   REMAINS**.
+5. Execute the first Canary per `CANARY-FIRST-RUNBOOK.md` (synthetic identity, recording
    upstream, never customer traffic).
 </content>

@@ -66,6 +66,9 @@ func TestCanaryMatrix_DormantNodeRejections(t *testing.T) {
 		canary.ReasonKillBoundaryGuardAbsent,
 		canary.ReasonToolFreshnessGuardAbsent,
 		canary.ReasonRollbackPathUnhealthy,
+		// CANARY-ROLLBACK-COORDINATOR-REHEARSAL: the authoritative coordinator-routed rollback rehearsal
+		// is OPEN (production seam false), so a dormant node surfaces this hard prerequisite too.
+		canary.ReasonRollbackCoordinatorRehearsalPending,
 	}
 	if len(rd.Unmet) != len(want) {
 		t.Fatalf("dormant node unmet = %v (%d), want %d reasons", rd.Unmet, len(rd.Unmet), len(want))
@@ -88,7 +91,7 @@ func TestCanaryMatrix_DormantNodeRejections(t *testing.T) {
 
 // TestCanaryMatrix_EveryReasonReachable pins Facts↔Reason parity at the composition layer: starting
 // from an all-true fact set (Ready), flipping each fact false surfaces exactly its reason, and the
-// full 20-reason vocabulary is covered. One false prerequisite ⇒ NOT READY.
+// full 21-reason vocabulary is covered. One false prerequisite ⇒ NOT READY.
 func TestCanaryMatrix_EveryReasonReachable(t *testing.T) {
 	allTrue := canary.Facts{
 		CapabilityGateway: true, ShadowExitReviewPassed: true, ScopeBounded: true, ScopeReadFirst: true,
@@ -96,32 +99,34 @@ func TestCanaryMatrix_EveryReasonReachable(t *testing.T) {
 		DurableEventsHealthy: true, ResponseInspectionReady: true, RegistryHealthy: true, CatalogHealthy: true,
 		PolicyHealthy: true, EmergencyKillClear: true, KillBoundaryGuardPresent: true, ToolFreshnessGuardPresent: true,
 		LiveApprovalValid: true, ServerUsable: true, ToolFingerprintCurrent: true, RollbackPathHealthy: true,
-		BudgetConfigured: true,
+		RollbackCoordinatorRehearsed: true,
+		BudgetConfigured:             true,
 	}
 	if !canary.Evaluate(allTrue).Ready {
 		t.Fatal("an all-true fact set must be Ready (positive control for the matrix)")
 	}
 	flip := map[canary.Reason]func(*canary.Facts){
-		canary.ReasonShadowExitNotPassed:        func(f *canary.Facts) { f.ShadowExitReviewPassed = false },
-		canary.ReasonScopeNotBounded:            func(f *canary.Facts) { f.ScopeBounded = false },
-		canary.ReasonScopeNotReadFirst:          func(f *canary.Facts) { f.ScopeReadFirst = false },
-		canary.ReasonLiveExecutorAbsent:         func(f *canary.Facts) { f.LiveExecutorComposed = false },
-		canary.ReasonUpstreamCallerAbsent:       func(f *canary.Facts) { f.UpstreamCallerPresent = false },
-		canary.ReasonCredentialPathNotReady:     func(f *canary.Facts) { f.CredentialPathReady = false },
-		canary.ReasonDurableEventsDegraded:      func(f *canary.Facts) { f.DurableEventsHealthy = false },
-		canary.ReasonResponseInspectionNotReady: func(f *canary.Facts) { f.ResponseInspectionReady = false },
-		canary.ReasonRegistryUnhealthy:          func(f *canary.Facts) { f.RegistryHealthy = false },
-		canary.ReasonCatalogUnhealthy:           func(f *canary.Facts) { f.CatalogHealthy = false },
-		canary.ReasonPolicyUnhealthy:            func(f *canary.Facts) { f.PolicyHealthy = false },
-		canary.ReasonEmergencyKillActive:        func(f *canary.Facts) { f.EmergencyKillClear = false },
-		canary.ReasonKillBoundaryGuardAbsent:    func(f *canary.Facts) { f.KillBoundaryGuardPresent = false },
-		canary.ReasonToolFreshnessGuardAbsent:   func(f *canary.Facts) { f.ToolFreshnessGuardPresent = false },
-		canary.ReasonLiveApprovalInvalid:        func(f *canary.Facts) { f.LiveApprovalValid = false },
-		canary.ReasonServerNotUsable:            func(f *canary.Facts) { f.ServerUsable = false },
-		canary.ReasonToolFingerprintStale:       func(f *canary.Facts) { f.ToolFingerprintCurrent = false },
-		canary.ReasonRollbackPathUnhealthy:      func(f *canary.Facts) { f.RollbackPathHealthy = false },
-		canary.ReasonBudgetNotConfigured:        func(f *canary.Facts) { f.BudgetConfigured = false },
-		canary.ReasonCapabilityNotGateway:       func(f *canary.Facts) { f.CapabilityGateway = false },
+		canary.ReasonShadowExitNotPassed:                 func(f *canary.Facts) { f.ShadowExitReviewPassed = false },
+		canary.ReasonScopeNotBounded:                     func(f *canary.Facts) { f.ScopeBounded = false },
+		canary.ReasonScopeNotReadFirst:                   func(f *canary.Facts) { f.ScopeReadFirst = false },
+		canary.ReasonLiveExecutorAbsent:                  func(f *canary.Facts) { f.LiveExecutorComposed = false },
+		canary.ReasonUpstreamCallerAbsent:                func(f *canary.Facts) { f.UpstreamCallerPresent = false },
+		canary.ReasonCredentialPathNotReady:              func(f *canary.Facts) { f.CredentialPathReady = false },
+		canary.ReasonDurableEventsDegraded:               func(f *canary.Facts) { f.DurableEventsHealthy = false },
+		canary.ReasonResponseInspectionNotReady:          func(f *canary.Facts) { f.ResponseInspectionReady = false },
+		canary.ReasonRegistryUnhealthy:                   func(f *canary.Facts) { f.RegistryHealthy = false },
+		canary.ReasonCatalogUnhealthy:                    func(f *canary.Facts) { f.CatalogHealthy = false },
+		canary.ReasonPolicyUnhealthy:                     func(f *canary.Facts) { f.PolicyHealthy = false },
+		canary.ReasonEmergencyKillActive:                 func(f *canary.Facts) { f.EmergencyKillClear = false },
+		canary.ReasonKillBoundaryGuardAbsent:             func(f *canary.Facts) { f.KillBoundaryGuardPresent = false },
+		canary.ReasonToolFreshnessGuardAbsent:            func(f *canary.Facts) { f.ToolFreshnessGuardPresent = false },
+		canary.ReasonLiveApprovalInvalid:                 func(f *canary.Facts) { f.LiveApprovalValid = false },
+		canary.ReasonServerNotUsable:                     func(f *canary.Facts) { f.ServerUsable = false },
+		canary.ReasonToolFingerprintStale:                func(f *canary.Facts) { f.ToolFingerprintCurrent = false },
+		canary.ReasonRollbackPathUnhealthy:               func(f *canary.Facts) { f.RollbackPathHealthy = false },
+		canary.ReasonRollbackCoordinatorRehearsalPending: func(f *canary.Facts) { f.RollbackCoordinatorRehearsed = false },
+		canary.ReasonBudgetNotConfigured:                 func(f *canary.Facts) { f.BudgetConfigured = false },
+		canary.ReasonCapabilityNotGateway:                func(f *canary.Facts) { f.CapabilityGateway = false },
 	}
 	// Parity: every declared reason has a flip.
 	for _, r := range canary.AllReasons() {

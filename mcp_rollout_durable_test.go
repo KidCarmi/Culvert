@@ -590,6 +590,9 @@ func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	// The Shadow legs never consult it (Shadow does not require live execution), so arming it for
 	// the whole test is inert for them and only satisfies the Canary leg's full preflight.
 	armCanaryActivationInputs(t, vin)
+	// The CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is OPEN in production; arm its seam so this
+	// artificial Canary commit is reachable (inert for the Shadow legs, like the other seams).
+	armCoordinatorRollbackRehearsed(t)
 	globalExecDeps.gateway.Store(true)
 	err := r.commitRolloutTransition(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now2)
 	globalExecDeps.gateway.Store(false) // disarm live so the demotion-to-Shadow preflight passes

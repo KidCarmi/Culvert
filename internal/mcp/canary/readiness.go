@@ -56,8 +56,19 @@ const (
 	// match the approved fingerprint (a rug-pull; fail closed).
 	ReasonToolFingerprintStale Reason = "tool_fingerprint_stale"
 	// ReasonRollbackPathUnhealthy — the deterministic Canary→Shadow/Observe rollback path is
-	// not healthy (an emergency demotion could not be performed).
+	// not healthy (an emergency demotion could not be performed). Driven by the executable
+	// persist/restore rehearsal — rollback MECHANICS evidence.
 	ReasonRollbackPathUnhealthy Reason = "rollback_path_unhealthy"
+	// ReasonRollbackCoordinatorRehearsalPending — the AUTHORITATIVE rollback path (a rehearsal
+	// routed through the real commitRolloutTransitionAt coordinator, proving parity with its Shadow
+	// preflight, emergency-kill, revision, durability, and rollback guards) has NOT been rehearsed.
+	// The executable persist/restore drill (RollbackPathHealthy) proves rollback MECHANICS only — not
+	// that the authoritative coordinator would actually PERMIT the demotion — so it is not sufficient
+	// on its own. This is a SEPARATE, machine-visible HARD prerequisite
+	// (CANARY-ROLLBACK-COORDINATOR-REHEARSAL) that is OPEN in this build and keeps Canary readiness
+	// false so no transition can become READY merely because the mechanics rehearsal passed. It closes
+	// only when a follow-up implements the coordinator-routed rehearsal (owner decision: not in this PR).
+	ReasonRollbackCoordinatorRehearsalPending Reason = "rollback_coordinator_rehearsal_pending"
 	// ReasonBudgetNotConfigured — no valid machine-enforced blast-radius budget is set (see
 	// ValidateBudget). The first Canary may never run without hard execution ceilings.
 	ReasonBudgetNotConfigured Reason = "canary_budget_not_configured"
@@ -99,7 +110,12 @@ type Facts struct {
 	LiveApprovalValid      bool // a valid live_execution approval satisfies the scope
 	ServerUsable           bool
 	ToolFingerprintCurrent bool
-	RollbackPathHealthy    bool
+	RollbackPathHealthy    bool // the persist/restore rollback MECHANICS were executably rehearsed
+	// RollbackCoordinatorRehearsed — the AUTHORITATIVE rollback path was rehearsed through the real
+	// commitRolloutTransitionAt coordinator. It is a SEPARATE hard prerequisite from RollbackPathHealthy
+	// (which is mechanics-only) and is FALSE in this build (CANARY-ROLLBACK-COORDINATOR-REHEARSAL open),
+	// so a rehearsed-mechanics node is still not ready. See ReasonRollbackCoordinatorRehearsalPending.
+	RollbackCoordinatorRehearsed bool
 
 	BudgetConfigured bool // ValidateBudget returned no error
 }
@@ -156,6 +172,7 @@ var readinessChecks = []readinessCheck{
 	{func(f Facts) bool { return f.ServerUsable }, ReasonServerNotUsable, factActivation},
 	{func(f Facts) bool { return f.ToolFingerprintCurrent }, ReasonToolFingerprintStale, factActivation},
 	{func(f Facts) bool { return f.RollbackPathHealthy }, ReasonRollbackPathUnhealthy, factNode},
+	{func(f Facts) bool { return f.RollbackCoordinatorRehearsed }, ReasonRollbackCoordinatorRehearsalPending, factNode},
 	{func(f Facts) bool { return f.BudgetConfigured }, ReasonBudgetNotConfigured, factActivation},
 }
 
@@ -219,6 +236,7 @@ func AllReasons() []Reason {
 		ReasonServerNotUsable,
 		ReasonToolFingerprintStale,
 		ReasonRollbackPathUnhealthy,
+		ReasonRollbackCoordinatorRehearsalPending,
 		ReasonBudgetNotConfigured,
 		ReasonCapabilityNotGateway,
 	}

@@ -79,8 +79,12 @@ func canaryNodeFactsWith(capb rollout.Capability, emergencyKillClear, rollbackHe
 
 		// Rollback: NOT mere coordinator existence. A durable, rehearsed rollback path is
 		// required — emergencyDisable that only lands in memory can be silently re-admitted on
-		// restart (Codex P1, PR #1249). See rollbackPathHealthy.
+		// restart (Codex P1, PR #1249). See rollbackPathHealthy. This is rollback MECHANICS evidence.
 		RollbackPathHealthy: rollbackHealthy,
+		// The AUTHORITATIVE rollback path (coordinator-routed rehearsal) is a SEPARATE hard
+		// prerequisite (CANARY-ROLLBACK-COORDINATOR-REHEARSAL), FALSE in this build, so a node whose
+		// mechanics rehearsal passed is still not ready (owner decision — follow-up implements it).
+		RollbackCoordinatorRehearsed: coordinatorRollbackRehearsedFn(capb),
 
 		// Scope/approval/budget facts default false here. They are ACTIVATION-level, so the node
 		// dry-run (EvaluateNode) skips them entirely — they are set and evaluated only by
@@ -122,6 +126,24 @@ func durableEventsHealthy(capb rollout.Capability) bool {
 	}
 	return dh.CriticalState == "normal"
 }
+
+// coordinatorRollbackRehearsedFn reports whether the AUTHORITATIVE rollback path — a rehearsal routed
+// through the real commitRolloutTransitionAt coordinator, so it exercises that coordinator's Shadow
+// preflight, emergency-kill, revision, durability, and rollback guards — has been rehearsed for the
+// capability. It is a SEAM: production is productionCoordinatorRollbackRehearsed, which returns FALSE
+// in this build. The existing executable rehearsal drives rollbackPathHealthy and proves rollback
+// MECHANICS (persist/restore) only, NOT that the authoritative coordinator would permit the demotion,
+// so this is a SEPARATE hard prerequisite (CANARY-ROLLBACK-COORDINATOR-REHEARSAL) that keeps Canary
+// readiness false — no transition can be READY merely because the mechanics rehearsal passed. It is
+// OPEN by owner decision (the coordinator-routed rehearsal is a follow-up, not this PR); a future
+// change flips the production impl to a real per-capability coordinator-rehearsal check. Tests that
+// must exercise downstream activation logic arm this seam.
+var coordinatorRollbackRehearsedFn = productionCoordinatorRollbackRehearsed
+
+// productionCoordinatorRollbackRehearsed is fail-closed by construction: no coordinator-routed rollback
+// rehearsal exists in this build, so the authoritative rollback path is never certified and the
+// CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is always unmet.
+func productionCoordinatorRollbackRehearsed(_ rollout.Capability) bool { return false }
 
 // rollbackPathHealthy reports whether the deterministic Canary→Shadow/Observe rollback path is
 // actually durable and EXECUTABLY rehearsed for the capability — not merely that the rollout

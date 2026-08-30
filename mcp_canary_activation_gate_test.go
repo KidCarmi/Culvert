@@ -79,6 +79,18 @@ func withCanaryReadyNode(t *testing.T) {
 	t.Cleanup(func() { globalExecDeps.gateway.Store(prevLive) })
 	writeValidShadowExitAttestation(t)
 	writeValidRollbackRehearsal(t, rollout.CapabilityGateway)
+	armCoordinatorRollbackRehearsed(t) // the CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is OPEN in production; arm the seam so downstream activation logic is reachable in tests
+}
+
+// armCoordinatorRollbackRehearsed points the coordinator-rollback-rehearsal seam at "rehearsed" for
+// the duration of a test, restoring it on cleanup. Production returns false (the
+// CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is OPEN), so any test that must reach a
+// canary-ready NODE arms it, exactly as it arms the live-execution and activation-input seams.
+func armCoordinatorRollbackRehearsed(t *testing.T) {
+	t.Helper()
+	prev := coordinatorRollbackRehearsedFn
+	coordinatorRollbackRehearsedFn = func(_ rollout.Capability) bool { return true }
+	t.Cleanup(func() { coordinatorRollbackRehearsedFn = prev })
 }
 
 // TestCanaryCommitGate_RefusesWhenNodeNotReady is the §2 authoritative-gate proof: the shared
