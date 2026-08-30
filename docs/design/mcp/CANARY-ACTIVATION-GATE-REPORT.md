@@ -153,6 +153,12 @@ fault (e.g. a read-only volume) also blocks that durable invalidation, an in-mem
 mechanics path's `write_failed` blocker, lost on restart (a documented residual still gated by the
 durability-health prerequisites; `TestCoordinatorRehearsal_InvalidationFailurePoisonsRow20`). The
 mechanics fact (row 19) stays distinct. Production transition semantics are byte-identical (the wrapper
-just delegates to the shared core). The shipped default keeps row 20 open because the drill requires
-the full shadow tier (the unshipped tool-approval slice), which is the correct posture: such a node
-cannot yet perform a real Canary→Shadow rollback.
+just delegates to the shared core). The rehearsal's Shadow config is genuinely Shadow-ELIGIBLE: its scope
+admits the WRITE risk class (tools/call is write-class, so the coordinator's usable-tool gate —
+`shadowScopeHasUsableTool` → `Scope.AdmitsToolForEvaluation` — requires it), so the SOLE remaining
+blocker once tools become Usable is the tool-approval slice, not a structurally read-only scope
+(`TestCoordinatorRehearsal_ShadowScopeAdmitsWriteClassTool`). The shipped default therefore keeps row 20
+open for exactly ONE reason — the unshipped tool-approval slice makes no catalog tool Usable, so the real
+usable-tool probe yields `no_usable_shadow_tools` — which is the correct posture: such a node cannot yet
+perform a real `Canary→Shadow` rollback. Once that slice ships, the coordinator-routed drill can actually
+close row 20 (it is not permanently blocked by the rehearsal config).

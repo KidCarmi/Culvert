@@ -297,6 +297,35 @@ func TestCoordinatorRehearsal_LiveArmedRejectsBothPathsIdentically(t *testing.T)
 	}
 }
 
+// TestCoordinatorRehearsal_ShadowScopeAdmitsWriteClassTool proves the rehearsal's Shadow config is
+// genuinely Shadow-ELIGIBLE (Codex P1): the real usable-tool gate (shadowScopeHasUsableTool ->
+// Scope.AdmitsToolForEvaluation) requires the scope to admit the WRITE risk class, so a read-only
+// rehearsal scope would fail the real probe with no_usable_shadow_tools even after the tool-approval
+// slice makes catalog tools Usable — permanently blocking row 20. This asserts the compiled Shadow scope
+// admits a write-class tool for evaluation, so once tools become Usable the coordinator-routed drill can
+// actually close row 20. It fails against the previous read-only (RiskRead-only) scope.
+func TestCoordinatorRehearsal_ShadowScopeAdmitsWriteClassTool(t *testing.T) {
+	_, shadowCfg, _ := rehearsalDrillConfigs(rollout.CapabilityGateway)
+	sc, err := rollout.Compile(shadowCfg.Scope, shadowCfg.ScopeRevision, rollout.DefaultLimits())
+	if err != nil {
+		t.Fatalf("the rehearsal Shadow scope must compile, got %v", err)
+	}
+	if !sc.AdmitsToolForEvaluation("any-server", "any-tool", "any-fingerprint") {
+		t.Fatal("the rehearsal Shadow scope must admit a write-class tool for evaluation, else the real usable-tool probe always yields no_usable_shadow_tools and row 20 can never close")
+	}
+	// The Canary rung is deliberately read-first (read-only): a real Canary requires it, and the scratch
+	// Canary is established by direct SetConfig (never through the Canary activation preflight), so it is
+	// not subject to — and must not conflict with — the Shadow rung's write-admitting scope.
+	canaryCfg, _, _ := rehearsalDrillConfigs(rollout.CapabilityGateway)
+	csc, err := rollout.Compile(canaryCfg.Scope, canaryCfg.ScopeRevision, rollout.DefaultLimits())
+	if err != nil {
+		t.Fatalf("the rehearsal Canary scope must compile, got %v", err)
+	}
+	if csc.AdmitsToolForEvaluation("any-server", "any-tool", "any-fingerprint") {
+		t.Fatal("the rehearsal Canary scope is read-first and must NOT admit a write-class tool")
+	}
+}
+
 // TestCoordinatorRehearse_HTTPHandler pins the admin surface: non-admins are forbidden, an unversioned
 // build is refused 409, and on a ready node an admin POST runs the coordinator-routed drill and closes
 // row 20 (authoritative_rollback_rehearsed:true).
