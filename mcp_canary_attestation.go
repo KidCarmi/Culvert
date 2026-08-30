@@ -104,7 +104,17 @@ func saveShadowExitAttestation(a *canary.ShadowExitAttestation) error {
 	// returned as a failure. Because that error is POST-rename, the not-durable record is already
 	// visible at the target — removeVisibleFileAfterNotSyncedWrite removes it before returning, so a
 	// write the POST reports as persisted:false is not readable by the gate (Codex P1).
+	//
+	// The whole write + compensating cleanup runs under mcpRollout.durableMu — the SAME lock the
+	// activation commit holds while it reads the attestation (canaryNodeFactsLocked →
+	// shadowExitReviewAttested) and the DELETE holds while it revokes. Without it, a commit could
+	// observe the transient VISIBLE replacement in the window between a not-synced rename and its
+	// removal and install Canary from a record the POST then reports as not persisted (Codex P1). No
+	// caller of this function holds durableMu, so taking it here cannot self-deadlock.
 	path := shadowExitAttestationPath()
+	rr := getMCPRollout()
+	rr.durableMu.Lock()
+	defer rr.durableMu.Unlock()
 	return removeVisibleFileAfterNotSyncedWrite(path, attestationAtomicWrite(path, raw, 0o600))
 }
 

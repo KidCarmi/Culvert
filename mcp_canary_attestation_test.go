@@ -4,10 +4,46 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 )
+
+// TestShadowExitAttestation_WriteSerializedWithDurableMu is the Codex P1 (round-8) proof: the
+// attestation write + compensating cleanup runs under mcpRollout.durableMu — the same lock the
+// activation commit holds while it reads the attestation — so a commit can never observe the
+// transient visible replacement of a not-synced write. Structural gate: while durableMu is held the
+// write must BLOCK, and it must complete once the lock is released.
+func TestShadowExitAttestation_WriteSerializedWithDurableMu(t *testing.T) {
+	withAttestationTestEnv(t, "v9.9.9")
+	rr := getMCPRollout()
+	a := &canary.ShadowExitAttestation{
+		SchemaVersion: canary.ShadowExitAttestationSchemaVersion,
+		Status:        canary.ShadowExitStatusPassed,
+		ReviewID:      "SXR-serialize",
+		Identity:      currentRuntimeIdentity(),
+	}
+	rr.durableMu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- saveShadowExitAttestation(a) }()
+	select {
+	case <-done:
+		rr.durableMu.Unlock()
+		t.Fatal("saveShadowExitAttestation must block while durableMu is held (write is not serialized with the commit)")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: the write is blocked on durableMu.
+	}
+	rr.durableMu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("save after releasing durableMu must succeed, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("saveShadowExitAttestation must complete once durableMu is released")
+	}
+}
 
 // TestShadowExitAttestation_NotSyncedWriteFails is the Codex P1 (round-6) durability proof: the
 // attestation authorizes a live-mode transition, so a write that is visible but not crash-durable

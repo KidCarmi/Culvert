@@ -129,7 +129,14 @@ func removeVisibleFileAfterNotSyncedWrite(path string, writeErr error) error {
 				filepath.Base(path), sanitizeLog(writeErr.Error()), sanitizeLog(rerr.Error()))
 			return writeErr
 		}
-		_ = syncParentDir(path)
+		// The unlink is not crash-durable until the parent directory is synced; a dir-sync failure
+		// means the removal could be undone by an immediate crash and the record the API reported as
+		// not persisted could reappear and satisfy the gate. It does not change the returned failure
+		// (the write already failed), but it must NOT be silently ignored (Codex P1).
+		if derr := syncParentDir(path); derr != nil {
+			logger.Printf("MCP canary: not-synced write cleanup for %s is not durably synced; a crash could restore a record reported as not persisted: write=%q dirsync=%q",
+				filepath.Base(path), sanitizeLog(writeErr.Error()), sanitizeLog(derr.Error()))
+		}
 	}
 	return writeErr
 }
