@@ -424,9 +424,10 @@ func TestChaos57_FlooredBootRetriesWhenTheFloorExpires(t *testing.T) {
 	// Bounded ABOVE by the floor plus its upward jitter — the point of the fix
 	// is that the wait is the floor remainder, not the 6h interval.
 	got := tf.firstDelay(decision, floorLeft)
-	if max := floorLeft + time.Duration(syncJitterFrac*float64(floorLeft)); got > max {
+	upperBound := floorLeft + time.Duration(syncJitterFrac*float64(floorLeft))
+	if got > upperBound {
 		t.Fatalf("first scheduled attempt after a floored boot = %s, want <= %s "+
-			"(pre-fix it waited the full 6h interval)", got, max)
+			"(pre-fix it waited the full 6h interval)", got, upperBound)
 	}
 	// And bounded BELOW by the floor itself. The floor exists so a crash loop
 	// cannot fetch on every restart; symmetric jitter would push half of these
