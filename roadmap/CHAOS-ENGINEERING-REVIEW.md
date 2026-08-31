@@ -36,6 +36,36 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-31 — CHAOS-57 sweep (credential verification as an unauthenticated CPU amplifier).**
+Every sweep since §20 went after a component that fails. This one went after one that **works
+exactly as designed** and is dangerous for that reason: bcrypt is slow on purpose, and on the proxy
+data path a stranger can invoke it at will. `handleRequest` reaches `verifyAuthWithSnapshot` for any
+request carrying a `Proxy-Authorization: Basic` header — before the requester has proved anything,
+because that IS the proving. Measured **73.8 ms per hash**, i.e. **~54 req/s saturates a 4-core
+gateway** from one unauthenticated keep-alive connection; reproduced end to end at 74.4 ms/request.
+The three things that look like they would stop it do not: the rate limiter and connection limiter
+both ship DISABLED and, when armed, count requests and connections rather than work — neither can
+bound a per-request CPU cost — and `loginLimiter`, the one control in this tree whose whole purpose
+is making repeated credential failures expensive for the CALLER, is wired into `ui_auth.go` and
+nowhere else. **The cheapest form of the attack was cheaper than AU-3 recorded and needed no valid
+username**: the RISK-008 timing equaliser ran an UNCACHED bcrypt on the wrong-username branch, so a
+*repeated identical* bogus credential paid a full hash every time while the wrong-password branch
+beside it paid one and then answered from cache — a hardening measure that had become the amplifier.
+Second-order, and the same finding `internal/authstate` produced in a different store: the auth
+cache is written by UNAUTHENTICATED traffic and evicted an ARBITRARY entry at its cap, so a flood of
+unique wrong credentials displaced *valid cached credentials* — eviction policy as a security
+control. Shipped: `auth_verify_cost.go`, a bounded admission gate in `internal/clamav`'s vocabulary
+(fail CLOSED, saturation never cached and counted separately from rejection, absolute rather than
+proportional cap, wrapping the HASH only so a slow directory never throttles a CPU it does not
+consume); both rejection branches folded onto one cached path; the cache partitioned so a failure
+flood can only evict other failures. The refactor that closes a DoS came within one conjunction of
+opening an authentication bypass — folding the branches means a comparison now runs against
+`dummyBcryptHash` and reaches a variable that decides authentication, so `&& !wrongUser` is
+load-bearing and `TestChaos57_EqualiserPlaintextNeverAuthenticates` is why. Five defect gates
+verified failing against the pre-fix tree; the saturation gates are structural, not timing-based.
+Deferred with an owner: per-client failure accounting on the proxy path (**AU-3b**) — a lockout keyed
+on client identity has a real false-positive cost behind CGNAT and needs a GUI surface. See §25.
+
 **2026-08-24 — CHAOS-55 sweep (the fencing lease's recovery paths).** ADR-0005 built the
 fence to answer *may this node write?* and answers it correctly in every direction. What it never
 built was the way BACK. The lease has three exits from write authority — denied on promotion,
@@ -505,8 +535,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 |---|----------|---------|-----|----------|
 | AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP | H | `auth_oidc_flow.go:344-363,608-627` (no cache field); loop `proxy.go:209-220`; contrast `auth_oidc.go:210-238` |
 | AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. | GAP | H | `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245` |
-| AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. | GAP | M | `store.go:440-444`, limiter only at `ui_auth.go:48,116`, proxy call `proxy.go:223` |
+| AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. **Re-scoped by CHAOS-57 and worse than recorded in two ways:** the cheapest form needs no valid username at all — the RISK-008 timing equaliser ran an UNCACHED bcrypt on the wrong-username branch, so a repeated IDENTICAL bogus credential paid the full hash every time — and the cost was measured at **73.8 ms**, i.e. **~54 req/s saturates a 4-core gateway** from one unauthenticated keep-alive connection. Both default-off limiters (rate, connection) are request/connection counters and cannot bound a per-request CPU cost. | GAP → **CLOSED** (CHAOS-57 §25: `comparePasswordHashGated` bounded-concurrency admission gate, fail-closed + not cached; both rejection branches share one cached path; auth cache partitioned so a failure flood cannot evict a valid credential) | M → **H** | was: `store.go:440-444`, limiter only at `ui_auth.go:48,116`; now `auth_verify_cost.go`, `store.go` `verifyAuthWithSnapshot`/`authCacheStore` — see §25 |
 | AU-4 | Lockout store is bounded + fail-closed, and TOTP failures now feed it. But it is **not persisted** (resets on restart) and **per-node** (attacker gets MaxAttempts per node in a cluster). | ✓ (+2 gaps) | M | `lockout.go:111-126,102-110`; per-node note `roadmap/edge-case-audit.md:138` |
+| AU-3b | **Posture**: the proxy and SOCKS5 credential paths still have NO per-client failure accounting — `loginLimiter` (internal/lockout) remains wired to the admin UI only. CHAOS-57 bounds what a credential flood can COST the node (fail-closed admission gate) but does not make it expensive for the CALLER, so a distributed unique-credential flood still occupies the gate and legitimate uncached verifications are refused while it lasts (counted, alerted, never admitted). | GAP (**owner decision**; now bounded, counted and alerted rather than unbounded) | M | `auth_verify_cost.go` (the bound), `internal/lockout` + `ui_auth.go:101,160` (the unused-on-this-path control) — see §25.8 |
 | AU-5 | LDAP proxy auth fails closed, but the 10s timeout covers only the **dial** — `Bind`/`Search` have no per-op deadline, so a server that accepts then stalls hangs the request goroutine. | GAP | M | `auth_ldap.go:128-180` |
 | AU-6 | SAML metadata & OIDC discovery fetched **once** at compile — no periodic refresh. IdP SAML signing-cert rotation breaks assertion validation until re-save/restart. (OIDC JWKs *do* auto-refresh every 15 min + serve-stale.) | GAP | M | `auth_saml.go:54-57,249-294`; JWKs OK `auth_oidc_flow.go:129-157` |
 | AU-7 | IdP 5xx / network error / expired token all collapse to fail-closed "auth fail" — correct posture, but an IdP outage is indistinguishable from a brute-force spike (no distinct `idp.unreachable` metric). | ✓ (obs gap) | L | `auth_oidc.go:152-162`, `auth_oidc_flow.go:623-636` |
@@ -2768,3 +2799,219 @@ first draft of the fix as its rationale, and it was wrong — the idle case is
 bounded at 6s. Measuring it, rather than shipping the plausible story, is what
 surfaced the active-stream case, which is both unbounded and reachable by
 faults this codebase already has runbooks for.
+
+---
+
+## 25. CHAOS-57 — Credential verification as an unauthenticated CPU amplifier
+
+*Sweep date: 2026-08-31. Domain: authentication / proxy data path / resource
+exhaustion. Register rows: AU-3 (re-scoped, closed), and a new cache-eviction
+row in the same class as the `internal/authstate` fairness finding.*
+
+### 25.1 Why this domain
+
+Every sweep since §20 has gone after a component that fails. This one goes after
+one that **works exactly as designed** and is dangerous for that reason.
+
+bcrypt is slow on purpose. That is the correct property for a credential store
+and the wrong property for something a stranger can invoke at will — and on the
+proxy data path they can. `handleRequest` reaches `Config.verifyAuthWithSnapshot`
+for any request carrying a `Proxy-Authorization: Basic` header, and SOCKS5 reaches
+the same function through `cfg.VerifyAuth` during RFC 1929 sub-negotiation.
+Neither caller has validated anything yet — that IS the validation — so the cost
+is paid *before* the requester has proved anything at all.
+
+Measured on the 4-core Xeon this repository's benchgates run on, one
+`bcrypt.CompareHashAndPassword` at `bcrypt.DefaultCost` costs **73.8 ms**. Four
+cores divided by 73.8 ms is **~54 requests per second to saturate the entire
+gateway** — one client, one keep-alive connection, no credentials, no privilege.
+Reproduced end to end through `handleRequest` at **74.4 ms per request** before
+the fix.
+
+### 25.2 The three guards that do not guard this
+
+- **The per-IP RATE LIMITER** ships disabled (`-rate-limit` defaults to `0`,
+  `main.go:246`) and, when armed, counts REQUESTS. It cannot distinguish a 74 ms
+  request from a 100 µs one, so a limit generous enough for real browsing still
+  admits enough hashing to pin the box. It is a fairness control, not a cost
+  control.
+- **The per-IP CONNECTION LIMITER** also ships disabled, and bounds concurrent
+  connections rather than work. One keep-alive connection is enough.
+- **The LOCKOUT engine** (`loginLimiter`, `internal/lockout`) — the one component
+  in the tree whose entire purpose is making repeated credential failures
+  expensive for the CALLER — is wired into `ui_auth.go` and nowhere else. The
+  proxy and SOCKS5 credential paths have never had any failure accounting at all.
+
+That last one is the finding inside the finding. The mechanism existed, was
+correct, and was pointed at the surface that needed it least: the admin UI is a
+small, usually-restricted port, while the proxy port is the one the entire user
+population — and anything else that can route to it — talks to.
+
+### 25.3 The defect that made it cheapest to exploit
+
+AU-3 recorded this as *"correct-username + N wrong-passwords is a cache miss
+every time"*. The reachable form is cheaper than that and needs no valid username:
+
+```go
+if user != snapshot.user {
+    // RISK-008 timing equaliser
+    _ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(pass))
+    return false
+}
+```
+
+That branch consulted **no cache and populated none**. So a *repeated, identical*
+bogus credential paid a full hash on every single request, while the
+wrong-password branch below it paid one and then answered from cache. An
+attacker did not need to know a username, guess one, or even vary the input.
+
+The asymmetry is also, on its own terms, a small RISK-008 regression: the
+equaliser exists to make a wrong username indistinguishable from a wrong
+password, and caching exactly one of the two branches is an observable
+difference — just pointing the other way.
+
+### 25.4 The second-order defect: eviction as a security control
+
+`authCacheStore` is written by UNAUTHENTICATED traffic — anyone who can reach the
+proxy port mints an entry by presenting a credential — and at
+`maxAuthCacheSize` (5 000) it evicted an **arbitrary** entry via a single-key map
+range. Successful and failed verdicts shared one budget, so a flood of unique
+wrong credentials displaced *valid cached credentials*, pushing legitimate users
+back onto the 74 ms path at an attacker's discretion.
+
+This is the `internal/authstate` finding again, in a different store: *when a
+bounded store is populated by unauthenticated traffic, its eviction policy is a
+security control, not housekeeping.*
+
+The fix here does not need `authstate`'s fairness key, because the asymmetry is
+**structural**: minting a POSITIVE entry requires a credential that actually
+verifies, so an attacker can only ever write to the negative partition.
+Splitting the two budgets therefore yields the same *"a flooding source evicts
+ITSELF"* property for free.
+
+### 25.5 What shipped
+
+`auth_verify_cost.go` — a bounded admission gate in front of every password
+hash, deliberately reusing `internal/clamav`'s vocabulary rather than inventing
+a second dialect for the same problem class. Four rules, none of which may be
+relaxed:
+
+1. **The gate wraps the HASH, nothing else.** An external provider (LDAP bind,
+   OIDC introspection) is a NETWORK call already bounded by the CHAOS-47 probe
+   gate; routing it through a CPU-sized semaphore would let one slow directory
+   throttle a resource it does not consume, and would couple two independent
+   failure domains. `verifyAuthWithSnapshot` returns on the provider branch
+   before reaching the gate.
+2. **Saturation fails CLOSED and is NOT a verdict.** Out of slots ⇒ deny, never
+   admit — but do not cache the denial. This is CHAOS-47's rule applied to a
+   local resource: only an AUTHORITATIVE answer may be remembered. Caching a
+   capacity refusal would deny a VALID credential for the full 5-minute TTL
+   after the load passed, trading CPU exhaustion for the stale-deny defect
+   CHAOS-47 closed.
+3. **Saturation is counted separately from rejection.** "At capacity" and "wrong
+   password" need opposite operator responses and are indistinguishable in an
+   auth-failure count — the `ErrQueueFull` lesson from CHAOS-52, where a
+   saturated scanner was reported as a broken daemon.
+4. **The cap is ABSOLUTE, not proportional** (`authVerifyMaxSlots` = 4). A
+   proportional cap leaves the data plane starved on exactly the large hosts
+   this appliance ships to: half of 32 cores is still 16 cores of bcrypt.
+
+Alongside it, in `store.go`:
+
+- Both rejection branches now share ONE path — same cache probe, same gate, one
+  hash — differing only in *which* hash is compared. Keeping them on one path is
+  the point; as two branches they drifted, which is what produced §25.3.
+- **A guard that must never be deleted as redundant.** Folding the branches means
+  a comparison now runs against `dummyBcryptHash` and its result reaches a
+  variable that decides authentication. Without the explicit `&& !wrongUser`
+  conjunction, presenting the equaliser's own plaintext
+  (`"culvert-timing-equaliser"`) would authenticate under **any** username. The
+  refactor that closes a DoS must not open an authentication bypass;
+  `TestChaos57_EqualiserPlaintextNeverAuthenticates` is why that conjunction
+  exists.
+- The auth cache is partitioned into `entries` (successes) and `negatives`, each
+  under its own `maxAuthCacheSize` budget.
+
+### 25.6 Observability
+
+`culvert_auth_verify_hashes_total` (the CPU bill — multiply by the per-hash cost
+for core-time), `culvert_auth_verify_saturated_total` (the blast radius:
+authentications failing closed for capacity, not credentials),
+`culvert_auth_verify_inflight` and `culvert_auth_verify_slots` (how close the
+gate is to its bound before it starts refusing). A rate-limited log line
+(one per 5 min, carrying the suppressed count) and a `HasSubscriber`-gated
+`auth_verify_saturated` alert with a BOUNDED Detail — `Dispatch` dedups on
+`event + ":" + Detail`, so a per-request value would defeat the window by
+construction (the WK-12/RS-5 defect).
+
+The alert is deliberately distinct from `identity_backend_unreachable`: that one
+says a REMOTE backend is down, this one says THIS node hit its own CPU bound, and
+the two call for opposite actions.
+
+### 25.7 Gates
+
+`auth_verify_cost_chaos_test.go` (11), split by what each can honestly claim:
+
+- **Five DEFECT gates, each verified FAILING** against the pre-fix tree
+  (reconstructed by restoring the uncached wrong-username early return and
+  collapsing the cache back to one partition): `RepeatedWrongUsernameIsHashedOnce`,
+  `SaturationDenialIsNotCached`, `FailureFloodCannotEvictAValidCredential`,
+  `BothRejectionBranchesCacheIdentically`,
+  `ProxyPathRepeatedBogusCredentialHashesOnce`.
+- **Four NEW-BEHAVIOUR gates** — the admission gate had no pre-fix counterpart,
+  so they cannot fail against a tree that lacks it, and saying otherwise would
+  overclaim.
+- **Two INVARIANT gates / CONTROLS** that pass in BOTH trees by design — which is
+  what makes them controls. `ControlIdleGateAdmits` exists because a gate that
+  refused *everything* would pass the saturation gate while being a total
+  authentication outage, i.e. strictly worse than the defect.
+
+The saturation gates are **structural, not timing-based**: slots are held
+explicitly and the assertion is that a further verification is refused AND
+performs no hash — deterministic on any hardware, at any load, with or without
+`-race`. The scaling-ratio form was rejected for the reason `connlimit`'s was: a
+gate that can flake gets muted.
+
+### 25.8 What is deliberately left
+
+- **The unique-credential flood still costs a hash each.** It must: distinct
+  credentials cannot be answered from cache without deciding them. What changed
+  is that the CPU it can consume is now bounded and the refusals are counted —
+  the flood is answered from the gate, not from bcrypt.
+- **No per-client failure accounting on the proxy path.** Extending
+  `loginLimiter` to the proxy and SOCKS5 credential paths is the natural next
+  step and the one that would make the flood expensive for the *caller* rather
+  than merely bounded for the node. It is deliberately NOT in this change: a
+  lockout keyed on a client identity is a policy decision with a real
+  false-positive cost behind CGNAT and a shared enterprise egress, and it needs
+  an owner and a GUI surface. **Recorded as AU-3b.**
+- **`VerifyUIUser` (admin-UI login) is not gated**, by design: it already has
+  `loginLimiter`, and coupling admin-login availability to a proxy-port flood
+  would remove the operator's way in during exactly the incident this gate
+  bounds. The gate protects it indirectly by capping what the proxy path can
+  consume.
+- **`authVerifyMaxSlots` and `authVerifyWaitBudget` are constants.** Same posture
+  as `jwksStaleMaxAge` (§SEC-JWKS-1): the only use for an operator override here
+  is widening the bound this exists to impose.
+
+### 25.9 The process lesson
+
+§21 stated it for back ends, §22 for listeners, §23 for decisions, §24 for
+documented residuals. This sweep adds one about **controls that exist but are
+aimed elsewhere**:
+
+> A mitigation wired into one surface is evidence that the risk was understood,
+> not that it was handled. `loginLimiter` is a correct, tested brute-force
+> control that has been in this tree the whole time — pointed at the admin UI,
+> which has a handful of users behind a restricted port, while the proxy port
+> that the entire user population reaches had no failure accounting at all. The
+> question worth asking of any control is not "does it exist?" but "does it
+> cover every path that reaches the thing it protects?"
+
+There is a second lesson in where the cost actually was. AU-3 had recorded this
+risk for months, framed as *correct-username + wrong-passwords* — a shape that
+requires knowing a valid username. The cheapest form needed no username at all
+and sat inside a **security fix**: the RISK-008 timing equaliser, added to close
+an enumeration oracle, was the uncached hash. A hardening measure became the
+amplifier, and the register's framing of the risk is what kept anyone from
+looking at it.

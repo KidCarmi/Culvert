@@ -1112,6 +1112,40 @@ culvert_auth_backend_gated_denials_total %d
 		abSnap.GatedDenials,
 	)
 
+	// CHAOS-57: credential hashing is the one unauthenticated CPU sink on the
+	// proxy path. `hashes_total` is the bill (multiply by the per-hash cost for
+	// core-time), `inflight`/`slots` show how close the gate is to its bound
+	// before it starts refusing, and `saturated_total` is the blast radius —
+	// authentications failing CLOSED for capacity rather than for credentials.
+	// The paging signal is a rising saturated_total, which is deliberately NOT
+	// folded into culvert_auth_failures: an operator seeing only the latter
+	// would go looking for a brute-force attack that is not there.
+	authVerifySlots := 0
+	if g := authVerifyGateSingleton.Load(); g != nil {
+		authVerifySlots = cap(g.sem)
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_auth_verify_hashes_total Password hash comparisons performed on the credential path
+# TYPE culvert_auth_verify_hashes_total counter
+culvert_auth_verify_hashes_total %d
+
+# HELP culvert_auth_verify_saturated_total Credential verifications refused because all hashing slots were busy (failed closed)
+# TYPE culvert_auth_verify_saturated_total counter
+culvert_auth_verify_saturated_total %d
+
+# HELP culvert_auth_verify_inflight Password hash comparisons running right now
+# TYPE culvert_auth_verify_inflight gauge
+culvert_auth_verify_inflight %d
+
+# HELP culvert_auth_verify_slots Concurrent password-hash comparisons this node permits
+# TYPE culvert_auth_verify_slots gauge
+culvert_auth_verify_slots %d
+`,
+		authVerifyHashTotal.Load(),
+		authVerifySaturatedTotal.Load(),
+		authVerifyInFlight.Load(),
+		authVerifySlots,
+	)
+
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated
 	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
 	_, _ = fmt.Fprintf(w, `# HELP culvert_inspect_upstream_alpn_total Inspected-tunnel upstream (origin) leg negotiated protocol

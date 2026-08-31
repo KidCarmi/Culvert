@@ -18676,6 +18676,7 @@ function resetBlockPage() {
              Distinct from an auth-failure spike: this is infrastructure, and
              the denials clear as soon as the backend answers again. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="identity_backend_unreachable"> Identity backend unreachable (auth failing closed)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="auth_verify_saturated"> Credential hashing at capacity (auth failing closed)</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>

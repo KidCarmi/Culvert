@@ -260,16 +260,45 @@ type authCacheEntry struct {
 	expiry time.Time
 }
 
+// authCacheStore caches verification outcomes under two SEPARATE budgets.
+//
+// The partition is a security control, not tidiness (CHAOS-57). Entries are
+// keyed on HMAC(user:pass) with no client attribution, and the store is
+// populated by UNAUTHENTICATED traffic: anyone who can reach the proxy port can
+// mint a cache entry by presenting a credential. With one shared budget and the
+// arbitrary eviction below, a flood of unique wrong credentials evicted a
+// VALID cached credential roughly as often as another failure — so an
+// unauthenticated stranger could push legitimate users back onto the ~74 ms
+// hashing path at will, which is the amplifier this partition exists to remove.
+//
+// The fix does not need per-client attribution, because the asymmetry is
+// structural: minting a POSITIVE entry requires credentials that actually
+// verify, so an attacker can only ever write to `negatives`. Splitting the
+// budgets therefore makes a failure flood evict only other failures — the same
+// "a flooding source evicts ITSELF" property internal/authstate reaches for
+// interactive-login state, obtained here without a fairness key.
+//
+// Both maps are lazily created by set(), so a zero-valued or partially
+// constructed store (several tests build one with only `entries`) stays usable.
 type authCacheStore struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// entries holds SUCCESSFUL verdicts. Only a caller presenting a credential
+	// that verified can create one, so this map is unreachable to a flood.
 	entries map[string]*authCacheEntry
+	// negatives holds REJECTED verdicts, on their own budget. Attacker-writable
+	// by construction; bounded so that is merely useless rather than harmful.
+	negatives map[string]*authCacheEntry
 }
 
 func (a *authCacheStore) get(user, pass string) (ok, hit bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	k := cacheKey(user, pass)
-	if e, found := a.entries[k]; found && time.Now().Before(e.expiry) {
+	now := time.Now()
+	if e, found := a.entries[k]; found && now.Before(e.expiry) {
+		return e.ok, true
+	}
+	if e, found := a.negatives[k]; found && now.Before(e.expiry) {
 		return e.ok, true
 	}
 	return false, false
@@ -277,35 +306,50 @@ func (a *authCacheStore) get(user, pass string) (ok, hit bool) {
 
 // maxAuthCacheSize caps the number of cached auth results to prevent unbounded
 // memory growth from credential-stuffing attacks with unique user/pass pairs.
+// Applied PER PARTITION — see the authCacheStore doc comment for why the two
+// budgets must stay separate.
 const maxAuthCacheSize = 5_000
+
+// evictOneLocked frees a slot in m when it is at capacity: an expired entry if
+// one is found, otherwise an arbitrary one. Arbitrary eviction is acceptable
+// WITHIN a partition — the entries there are all the same kind, so the choice
+// of victim cannot cross a trust boundary. It was not acceptable across kinds,
+// which is what the partition fixes.
+func evictOneLocked(m map[string]*authCacheEntry) {
+	if len(m) < maxAuthCacheSize {
+		return
+	}
+	now := time.Now()
+	for k, e := range m {
+		if now.After(e.expiry) {
+			delete(m, k)
+			return
+		}
+	}
+	for k := range m {
+		delete(m, k)
+		return
+	}
+}
 
 func (a *authCacheStore) set(user, pass string, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.entries) >= maxAuthCacheSize {
-		// Evict one expired entry first; if none found, drop an arbitrary one.
-		now := time.Now()
-		evicted := false
-		for k, e := range a.entries {
-			if now.After(e.expiry) {
-				delete(a.entries, k)
-				evicted = true
-				break
-			}
-		}
-		if !evicted {
-			for k := range a.entries {
-				delete(a.entries, k)
-				break
-			}
-		}
+	target := &a.entries
+	if !ok {
+		target = &a.negatives
 	}
-	a.entries[cacheKey(user, pass)] = &authCacheEntry{ok: ok, expiry: time.Now().Add(authCacheTTL)}
+	if *target == nil {
+		*target = map[string]*authCacheEntry{}
+	}
+	evictOneLocked(*target)
+	(*target)[cacheKey(user, pass)] = &authCacheEntry{ok: ok, expiry: time.Now().Add(authCacheTTL)}
 }
 
 func (a *authCacheStore) clear() {
 	a.mu.Lock()
 	a.entries = map[string]*authCacheEntry{}
+	a.negatives = map[string]*authCacheEntry{}
 	a.mu.Unlock()
 }
 
@@ -509,18 +553,34 @@ func (c *Config) snapshotAuthBackend() authBackendSnapshot {
 
 func (c *Config) verifyAuthWithSnapshot(snapshot authBackendSnapshot, user, pass string) bool {
 	if snapshot.provider != nil {
+		// An external provider is a NETWORK call, not a CPU one. It is bounded
+		// by the CHAOS-47 probe gate and must NOT be routed through the
+		// CPU-sized hashing gate — see rule 1 in auth_verify_cost.go.
 		return snapshot.provider.Verify(user, pass)
 	}
 	if snapshot.user == "" {
 		return true // auth disabled
 	}
-	if user != snapshot.user {
-		// RISK-008: equalise timing with the correct-username path so a wrong
-		// username is indistinguishable from a wrong password — defeats
-		// username enumeration via a timing oracle.
-		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(pass))
-		return false
+
+	// RISK-008: a wrong username must stay indistinguishable from a wrong
+	// password, or the difference is a username-enumeration oracle. The
+	// equaliser is therefore not a separate early-return branch any more but a
+	// choice of WHICH hash the one shared sequence compares against: both
+	// branches now run the same cache probe, the same admission gate and one
+	// hash of the same cost, and differ only in that input.
+	//
+	// Keeping them on one path is the point. As two branches, the wrong-username
+	// one consulted no cache and populated none, so a REPEATED IDENTICAL bogus
+	// username paid a full ~74 ms hash every time while the wrong-password
+	// branch paid it once — an asymmetry in the exact direction RISK-008 exists
+	// to remove, and the amplifier CHAOS-57 measured. Any future change here
+	// must move both together.
+	hash := snapshot.passHash
+	wrongUser := user != snapshot.user
+	if wrongUser {
+		hash = dummyBcryptHash
 	}
+
 	c.mu.RLock()
 	if c.authRevision == snapshot.revision {
 		if ok, hit := c.cache.get(user, pass); hit {
@@ -529,7 +589,25 @@ func (c *Config) verifyAuthWithSnapshot(snapshot authBackendSnapshot, user, pass
 		}
 	}
 	c.mu.RUnlock()
-	ok := bcrypt.CompareHashAndPassword(snapshot.passHash, []byte(pass)) == nil
+
+	match, admitted := comparePasswordHashGated(hash, pass)
+	if !admitted {
+		// CHAOS-57 rule 2: the node was at its hashing capacity and no
+		// comparison ran. Deny this request — never admit an unverified
+		// credential — but do NOT remember the denial: a saturation refusal is
+		// not an authoritative verdict, and caching it would deny a VALID
+		// credential for the full TTL after the load passed (the stale-deny
+		// defect CHAOS-47 closed for unreachable backends).
+		return false
+	}
+
+	// The comparison above ran against dummyBcryptHash whenever the username
+	// did not match, purely to equalise timing; its result is not an
+	// authentication verdict and must never become one. Without this guard a
+	// caller presenting the equaliser's own plaintext would authenticate under
+	// ANY username.
+	ok := match && !wrongUser
+
 	c.mu.RLock()
 	if c.authRevision == snapshot.revision {
 		c.cache.set(user, pass, ok)

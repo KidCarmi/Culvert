@@ -29,6 +29,13 @@ package alerts
 //                             Deliberately not "idp_unreachable" — Culvert's "IdP" vocabulary is reserved for the
 //                             federated Identity Provider registry (auth_idp.go, the "Identity Providers" GUI panel),
 //                             a distinct, uncached subsystem (CHAOS-49) this alert does not cover.
+//   "auth_verify_saturated" — every credential-hashing slot is busy, so authentication is failing
+//                             CLOSED for CAPACITY rather than for credentials (CHAOS-57). Distinct
+//                             from identity_backend_unreachable, which is about a remote backend:
+//                             this one says THIS node is at its own CPU bound, and the two need
+//                             opposite responses (add capacity / shed load vs. fix the directory).
+//                             Rate-limited to one per 5 min; the magnitude lives in
+//                             culvert_auth_verify_saturated_total.
 //   "state_file_corrupt"    — corrupt state file quarantined at startup (CHAOS-05/07)
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
 //   "ha_sync_panic"         — a standby HA sync round panicked and was contained: state replication
