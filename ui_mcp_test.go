@@ -19,7 +19,16 @@ func mcpReq(method, target string, role UIRole, body string) *httptest.ResponseR
 	}
 	r := httptest.NewRequest(method, target, b)
 	if role != "" {
-		r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
+		ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
+		// Inject a stable authenticated IDENTITY alongside the role, the way
+		// uiAuthMiddleware's Basic-auth path does. Handlers that record a four-eyes
+		// principal (approvalPrincipal / mcpFourEyesPrincipal) fail closed on an
+		// unattributable caller, so a role with no identity is not a realistic admin
+		// request. Deriving the identity from the ROLE also gives the operator-requests /
+		// admin-approves pair two DISTINCT principals, which is what the documented
+		// two-person workflow actually is.
+		ctx = context.WithValue(ctx, uiUserKey{}, "test-"+string(role))
+		r = r.WithContext(ctx)
 	}
 	w := httptest.NewRecorder()
 	mux := http.NewServeMux()

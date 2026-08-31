@@ -53,6 +53,45 @@ func sessionAdmin(r *http.Request) string {
 	return "unknown"
 }
 
+// approvalPrincipal returns the STABLE authenticated identity of the caller, for use as
+// a separation-of-duty (four-eyes) principal. It returns "" when no authenticated
+// identity can be resolved, and every caller MUST treat that as fail-closed: a decision
+// that cannot be attributed to a named human can never satisfy four-eyes.
+//
+// ── Why this is NOT auditActor ────────────────────────────────────────────────
+//
+// auditActor(r) is the AUDIT attribution string and is deliberately
+// "<identity>@<clientIP>" (RISK-019) — it names WHO acted and FROM WHERE, which is what
+// an audit line wants. It is the wrong value for a four-eyes comparison, because the
+// half it appends is a NETWORK COORDINATE the acting principal controls:
+//
+//   - realClientIP honours X-Forwarded-For whenever the request arrives through a
+//     CONFIGURED trusted proxy — the ordinary enterprise shape for an admin UI behind a
+//     reverse proxy. One admin, one session cookie, two requests differing only in the
+//     XFF header therefore yields two different strings.
+//   - With no trusted proxy configured it is still the peer address, so the same human
+//     moving between office/VPN/home, or holding a new DHCP lease, is a different
+//     "principal" — and two DIFFERENT humans behind one NAT egress can collapse into
+//     the same one when neither is logged in (both "unknown@<nat-ip>").
+//
+// Every four-eyes gate in the MCP subsystem is a string equality on this value —
+// approval.Store.Approve's `approver == r.requester`, and canary.EvaluateTrust's
+// `RequestedBy == ApprovedBy` — so an IP-bearing principal makes the control both
+// bypassable (one human reads as two) and, in the NAT case, wrongly restrictive.
+// Separation of duties must compare the AUTHENTICATED SUBJECT and nothing else.
+//
+// Resolution order matches sessionAdmin (session Sub → session Email → the Basic-auth
+// username uiAuthMiddleware placed in context), minus its "unknown" sentinel: an
+// unresolvable identity is reported as absent rather than as a principal literally
+// named "unknown", which would make every unauthenticated actor the SAME principal and
+// let a four-eyes gate read as satisfied between two anonymous callers.
+func approvalPrincipal(r *http.Request) string {
+	if p := sessionAdmin(r); p != "unknown" {
+		return p
+	}
+	return ""
+}
+
 // requireRole returns true when the current session has at least minRole.
 // Writes HTTP 403 and returns false when the check fails.
 //
