@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/KidCarmi/Sluice v0.2.0
-	github.com/andybalholm/brotli v1.2.2
+	github.com/andybalholm/brotli v1.2.3
 	github.com/beevik/etree v1.7.1
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.6
