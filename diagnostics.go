@@ -150,6 +150,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigSnapshotApply(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
+		checkOIDCBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
 		checkConfigSourcePrecedence(),
@@ -923,6 +924,84 @@ func checkSAMLBaseURLPosture() OperatorContractCheck {
 		Status:  diagOK,
 		Message: "SAML SP Entity ID, metadata URL, and ACS URL have an explicit external base URL",
 	}
+}
+
+// checkOIDCBaseURLPosture is the OIDC sibling of checkSAMLBaseURLPosture.
+// resolveByIntrospection's redirect_uri is built by string concatenation —
+// proxyBaseURL(r) + "/auth/oidc/callback" — and proxyBaseURL falls back to
+// the REQUEST Host header whenever proxy.base_url is unset (auth_oidc_flow.go
+// proxyBaseURL). Most OIDC providers pin the client's redirect URI to one
+// exact registered value, so a Host-derived redirect_uri is a login that
+// works from whichever hostname the operator happened to test with and
+// silently breaks (or, behind a misconfigured trust_forwarded_headers, can
+// be steered) from any other — previously visible only as a one-line startup
+// log ("base_url not set") that a browser-side login failure never surfaces
+// to the operator.
+func checkOIDCBaseURLPosture() OperatorContractCheck {
+	if !hasEnabledOIDCProfile() {
+		return OperatorContractCheck{
+			Code:    "oidc_base_url",
+			Status:  diagOK,
+			Message: "no enabled OIDC IdP requires SP callback base URL validation",
+		}
+	}
+	baseURL := ""
+	if cfg != nil {
+		baseURL = strings.TrimSpace(cfg.ProxyBaseURL())
+	}
+	if baseURL == "" {
+		return OperatorContractCheck{
+			Code:           "oidc_base_url",
+			Status:         diagWarn,
+			Message:        "OIDC IdP enabled but proxy.base_url is unset",
+			OperatorAction: "Set proxy.base_url to the externally reachable UI origin, and register proxy.base_url + /auth/oidc/callback as the IdP client's redirect URI. Without it, redirect_uri is derived from the request Host header and can vary per request or load-balancer hop.",
+		}
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return OperatorContractCheck{
+			Code:           "oidc_base_url",
+			Status:         diagFail,
+			Message:        "OIDC IdP enabled but proxy.base_url is not a valid absolute URL",
+			OperatorAction: "Set proxy.base_url to a full external URL such as https://proxy.example.com or https://proxy.example.com/culvert, then update the IdP client's redirect URI to match.",
+		}
+	}
+	// redirect_uri is built by string concatenation from proxy.base_url, so a
+	// query, fragment, or userinfo component would silently produce a wrong
+	// redirect_uri — same rationale as checkSAMLBaseURLPosture.
+	if hasNonBaseURLComponents(u) {
+		return OperatorContractCheck{
+			Code:           "oidc_base_url",
+			Status:         diagFail,
+			Message:        "OIDC IdP enabled but proxy.base_url contains query, fragment, or userinfo components",
+			OperatorAction: "Set proxy.base_url to a bare external origin (optionally with a path prefix) such as https://proxy.example.com or https://proxy.example.com/culvert. Remove any \"?query\", \"#fragment\", or \"user:pass@\" parts, then update the IdP client's redirect URI to match.",
+		}
+	}
+	if isLocalhostBaseURL(u) {
+		return OperatorContractCheck{
+			Code:           "oidc_base_url",
+			Status:         diagWarn,
+			Message:        "OIDC IdP enabled but proxy.base_url points at localhost",
+			OperatorAction: "Use the externally reachable DNS name that browsers and the IdP can reach. Localhost is only safe for single-node local development.",
+		}
+	}
+	if u.Scheme != "https" {
+		return OperatorContractCheck{
+			Code:           "oidc_base_url",
+			Status:         diagWarn,
+			Message:        "OIDC IdP enabled but proxy.base_url is not HTTPS",
+			OperatorAction: "Use an HTTPS external URL for production OIDC. Most identity providers require HTTPS redirect URIs, and browser SSO cookies are safest behind TLS.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "oidc_base_url",
+		Status:  diagOK,
+		Message: "OIDC redirect_uri has an explicit external base URL",
+	}
+}
+
+func hasEnabledOIDCProfile() bool {
+	return idpRegistry != nil && idpRegistry.HasEnabledOIDC()
 }
 
 func hasEnabledSAMLProfile() bool {
