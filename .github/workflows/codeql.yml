@@ -96,7 +96,7 @@ jobs:
         # silent loss of SAST coverage rather than a finding. Dependabot
         # updates these three as separate ecosystems, so a bump can land on
         # one and not the others; codeql_action_pin_test.go pins them equal.
-        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v3
         with:
           languages: go
           # Use the extended security-and-quality query suite for maximum coverage.
