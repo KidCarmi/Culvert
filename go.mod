@@ -8,7 +8,7 @@ require (
 	github.com/beevik/etree v1.7.1
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.6
-	github.com/getkin/kin-openapi v0.147.0
+	github.com/getkin/kin-openapi v0.148.0
 	github.com/go-ldap/ldap/v3 v3.4.14
 	github.com/goccy/go-yaml v1.19.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -103,7 +103,7 @@ require (
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/russellhaering/goxmldsig v1.6.0 // indirect
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/sassoftware/relic v7.2.1+incompatible // indirect
 	github.com/secure-systems-lab/go-securesystemslib v0.11.0 // indirect
 	github.com/shibumi/go-pathspec v1.3.0 // indirect
