@@ -11,14 +11,16 @@ shutdown. Root admin-plane, `internal/fileblock`, `internal/mcp/catalog`,
 security-critical code.
 **Branch:** `claude/epic-bardeen-iox87x` · baseline `0336149`
 **Predecessor:** `2026-08-25-shadow-layerb-and-ldap-window.md`
-**Method:** read the window, then REVIEW → PROVE → FIX → TEST → MUTATE. Both
-findings below were **reproduced against the unmodified `0336149` tree before
-either fix was written** (§4 quotes the reproduction output), and both fixes were
-**mutation-verified**: the fix was reverted and the new gates were required to fail.
+**Method:** read the window, then REVIEW → PROVE → FIX → TEST → MUTATE. SEC-FE-1
+and SEC-FE-2 were **reproduced against the unmodified `0336149` tree before either
+fix was written** (§3 quotes the reproduction output); SEC-FE-3 and SEC-FE-4 were
+raised by the Codex review bot against the first push and verified against the
+source before being actioned (§4a). Every fix is **mutation-verified**: the fix was
+reverted and the new gates were required to fail.
 
-> **Verdict (§8): no security regression was introduced by this window. Two
-> pre-existing separation-of-duty defects were found — one of them reachable on
-> live admin routes today — and both are closed here. This document does not
+> **Verdict (§8): no security regression was introduced by this window. Four
+> pre-existing or fix-adjacent separation-of-duty defects were found — one of them
+> reachable on live admin routes today — and all are closed here. This document does not
 > authorise enabling execution: Shadow stays env-gated and default-off, and
 > Canary/Production remain fail-closed at an unarmed live-execution tier.**
 
@@ -36,7 +38,7 @@ the live-execution registration hooks (`markGatewayExecDepsReady`,
 sweep, so every Canary/Production transition still fails closed at
 `modeExecReady`.
 
-The two findings are not regressions from this window. They are
+The findings are not regressions from this window. They are
 **separation-of-duty (four-eyes) defects** that the window's own new code made
 visible, because `internal/mcp/canary/trust.go` now states the four-eyes
 requirement explicitly as a Canary-readiness predicate — and doing so exposed
@@ -47,6 +49,8 @@ requirement was never enforced at the tool-trust decision boundary at all.
 |---|---|---|---|
 | SEC-FE-1 | **High** | Every four-eyes gate in MCP compares a principal string that embeds a **client-controlled network coordinate** (`auditActor` = `"<identity>@<clientIP>"`). One authenticated admin defeats all of them by varying the source address — trivially, via `X-Forwarded-For`, when the admin UI sits behind a configured trusted proxy. Reachable on live admin routes today. | **Fixed** — stable `approvalPrincipal` |
 | SEC-FE-2 | **Medium** | `tooltrust.Store.Approve` enforced no four-eyes check at all. A self-approved tool-trust grant became durably active and promoted the tool to `catalog.Usable` immediately; `canary.EvaluateTrust` only *observed* the violation later, at Canary-readiness time. | **Fixed** — enforced at the decision boundary |
+| SEC-FE-3 | **Medium** | *(review follow-up)* A pending tool-trust record written before SEC-FE-1 carries an IP-bearing `RequestedBy`, so it compares unequal to the same human's now-coordinate-free principal — she could approve her own request and walk straight through the SEC-FE-2 gate. | **Fixed** — `SchemaVersion` 1→2, pre-change stores fail `Load` closed |
+| SEC-FE-4 | **Low** | *(review follow-up)* `approvalPrincipal` decided identity presence by comparing against `sessionAdmin`'s `"unknown"` sentinel, which is also a legal username — a real user named `unknown` was read as unauthenticated and 403'd. | **Fixed** — presence decided from field lookup, not name |
 
 ---
 
@@ -248,6 +252,52 @@ mirroring `internal/mcp/approval`. Placement is deliberate and tested:
 
 ---
 
+## 4a. Review follow-ups (SEC-FE-3, SEC-FE-4)
+
+Both were raised by the Codex review bot against the first push and verified against
+the source before being actioned.
+
+### SEC-FE-3 — a pre-upgrade pending record defeats the new gate
+
+**Severity: Medium** · CWE-863 · Regression risk of the fix: **low**
+
+Up to `SchemaVersion` 1, `RequestedBy`/`ApprovedBy` were written from `auditActor`.
+The SEC-FE-2 gate compares `approver == RequestedBy`, and that comparison is only
+meaningful between values in the **same** coordinate-free format: a v1 pending record
+naming `alice@198.51.100.1` compares unequal to the very same human approving as
+`alice`, so she walks straight through the gate.
+
+**Fix:** `SchemaVersion` 1 → 2. A v1 store fails `Load` closed, `initMCPToolTrust`
+composes nothing, and no tool is promoted.
+
+The bump is deliberately **whole-store, not per-record**. A v1 record's four-eyes
+evidence is untrustworthy whether it is pending or **already active** — an active v1
+grant may itself have been self-approved under the old, bypassable comparison — so
+keeping the active ones while refusing the pending ones would preserve exactly the
+grants whose provenance this change calls into question.
+
+`Load` names the pre-change version explicitly rather than reporting the generic
+unknown-schema error: this is not corruption, and the two call for opposite operator
+responses (retake the decisions vs. investigate a damaged file).
+
+### SEC-FE-4 — `"unknown"` is a username, not a sentinel
+
+**Severity: Low** (availability, fail-closed direction) · CWE-287 · Regression risk
+of the fix: **low**
+
+`approvalPrincipal` decided identity presence by filtering `sessionAdmin`'s `"unknown"`
+sentinel. But `ui_auth.go` admits any 1–64 byte username with no reserved words, so
+`unknown` is a creatable account — and that user was read as unauthenticated and 403'd
+out of every decision route.
+
+**Fix:** `approvalPrincipal` resolves the identity itself (session `Sub` → `Email` →
+the context username) and reports presence from whether a field was **found**, never by
+comparing the resolved name against a value a real user may hold. `sessionAdmin`'s own
+contract is unchanged. A user named `unknown` and an unauthenticated caller must stay
+distinguishable — collapsing them would let four-eyes read as satisfied between the two —
+and that is pinned.
+
+
 ## 5. Files changed by this review
 
 | File | Change |
@@ -255,7 +305,8 @@ mirroring `internal/mcp/approval`. Placement is deliberate and tested:
 | `ui_rbac.go` | `approvalPrincipal(r)` — the stable four-eyes principal (+ the reasoning that separates it from `auditActor`) |
 | `ui_mcp.go` | `mcpFourEyesPrincipal(w, r)` fail-closed helper; publication create + publication decision + approval decision now use it |
 | `ui_mcp_tooltrust.go` | tool-trust request `RequestedBy` and the approve/reject/revoke actor now use it |
-| `internal/mcp/tooltrust/store.go` | four-eyes enforcement on the pending→active transition |
+| `internal/mcp/tooltrust/store.go` | four-eyes enforcement on the pending→active transition; precise pre-change-schema load error (SEC-FE-3) |
+| `internal/mcp/tooltrust/tooltrust.go` | `SchemaVersion` 1→2 + the named pre-change version (SEC-FE-3) |
 | `internal/mcp/tooltrust/store_foureyes_test.go` | **new** — 10 gates (below) |
 | `mcp_four_eyes_principal_test.go` | **new** — 7 gates (below) |
 | `ui_mcp_test.go` | `mcpReq` now injects a stable identity derived from the role, so the operator-requests/admin-approves pair is two distinct principals — which is what the documented workflow is |
@@ -281,13 +332,23 @@ absent, not `"unknown"`; the handler 403s with `approval_not_authorized`;
 an authenticated caller is admitted and the admit path writes nothing), the
 Basic-auth transport yields the same principal as the browser one, and a source
 **anti-drift wall** forbidding any four-eyes principal from being re-derived from
-`auditActor`.
+`auditActor`, and (SEC-FE-4) a user literally named `unknown` authenticating on both
+the session and Basic-auth paths while staying distinguishable from an absent identity.
+
+For SEC-FE-3: a verbatim v1 store fails `Load` closed with a message naming the cause,
+recovers nothing, and leaves no record reachable; the bump is a real forward step; and a
+store written by this build still round-trips. Schema fixtures elsewhere in the suite
+were re-pinned to the live constant so a future bump cannot silently turn a
+"valid envelope, other defect" test into a schema-rejection test that passes for the
+wrong reason.
 
 **Mutation verification.** Reverting the `tooltrust` guard fails 4 gates
 (`RefusesSelfApproval`, `SelfApprovalOutranksTargetMismatch`,
 `ConcurrentSelfApprovalsAllRefused`, `SelfApprovalLeavesNoDurableGrant`).
-Reverting `approvalPrincipal` to `auditActor` fails 5 gates. Full suite:
-**105 packages ok**, `go vet ./...` clean.
+Reverting `approvalPrincipal` to `auditActor` fails 5 gates. Restoring the
+sentinel-comparison shape fails 2 (SEC-FE-4); reverting the schema bump fails 2
+(SEC-FE-3). Full suite: **105 packages ok**; `go vet ./...`, `gofmt`, `staticcheck` and
+`gocritic` (repo tag set) all clean.
 
 ## 7. Residual risk
 
@@ -303,10 +364,10 @@ Reverting `approvalPrincipal` to `auditActor` fails 5 gates. Full suite:
   reads `?tenant=` verbatim; Culvert's admin roles are global, not tenant-scoped.
   This is the pre-existing convention across the whole MCP admin surface and was
   not changed here. It prevents accidental cross-tenant action, not malicious.
-- **In-flight records created before this change** carry an IP-bearing
-  `RequestedBy`; a later approve by the same human now records a bare subject and
-  will not compare equal. MCP is disabled by default with no production state, so
-  this is noted rather than migrated.
+- **Pre-upgrade records are refused, not migrated.** A store written before this
+  change carries IP-bearing `RequestedBy`/`ApprovedBy`, which the new comparison
+  cannot trust. `SchemaVersion` is bumped to 2 so such a store fails `Load`
+  closed; the operator retakes every decision. See SEC-FE-3.
 - **Attestations are admin-created, not signed.** `ShadowExitAttestation` is
   durable local evidence bound to the build identity; it is not
   cryptographically attested by an external issuer. Consistent with the recorded
@@ -323,8 +384,9 @@ split that keeps live execution unarmed, a single-resolution fix that closes a
 routing TOCTOU, an emergency-kill re-check at the side-effect boundary, and
 faithful cost work in `internal/fileblock` and the shutdown path.
 
-Two **pre-existing** separation-of-duty defects were found and closed. SEC-FE-1
-is the material one: it is reachable on live admin routes today and voided every
+Four separation-of-duty defects were found and closed — two pre-existing
+(SEC-FE-1, SEC-FE-2) and two raised by review against the fix itself (SEC-FE-3,
+SEC-FE-4). SEC-FE-1 is the material one: it is reachable on live admin routes today and voided every
 four-eyes gate in the MCP subsystem. It was surfaced *by* this window, because
 `internal/mcp/canary/trust.go` is the first place the four-eyes requirement is
 written down as a predicate — and writing it down is what made it checkable.

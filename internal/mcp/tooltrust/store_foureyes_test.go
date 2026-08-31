@@ -1,6 +1,9 @@
 package tooltrust
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -317,5 +320,96 @@ func TestApprove_SelfApprovalLeavesNoDurableGrant(t *testing.T) {
 	}
 	if n := len(reloaded.ActiveApprovals(clk.t)); n != 0 {
 		t.Fatalf("recovered %d active grants after a refused self-approval, want 0", n)
+	}
+}
+
+// --- pre-upgrade records cannot slip past the new gate ---------------------
+//
+// Up to SchemaVersion 1, RequestedBy/ApprovedBy were written from the admin plane's AUDIT
+// actor, "<identity>@<clientIP>". The new Approve gate compares approver == RequestedBy,
+// and that comparison is only meaningful between values in the same coordinate-free
+// format: a v1 pending record naming "alice@198.51.100.1" compares unequal to the very
+// same human approving as "alice", so she would walk straight through the gate this suite
+// exists to enforce (Codex P2). The envelope bump closes it by refusing to load such a
+// store at all.
+
+func TestLoad_PreFourEyesPrincipalStoreFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0).UTC()}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+
+	// A v1 record exactly as the previous build would have written it: a pending request
+	// whose requester carries the client coordinate.
+	legacy := `{"schema_version":1,"approvals":[{` +
+		`"schema_version":1,"approval_id":"a1","tenant":"tenant-a","server_id":"srv-1",` +
+		`"tool_name":"search","fingerprint_format_version":1,"catalog_revision":7,` +
+		`"purpose":1,"status":1,"requested_by":"alice@198.51.100.1",` +
+		`"requested_at":"2026-08-30T00:00:00Z"}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := NewStore(Config{Path: path, Clock: clk.now, MaxRecords: 64, MaxPerTenant: 8})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	err = s.Load()
+	if err == nil {
+		t.Fatal("a pre-four-eyes-principal store must fail closed, not load")
+	}
+	// The operator must be able to tell this from a damaged file — the two call for
+	// opposite responses (re-decide vs. investigate corruption).
+	if !strings.Contains(err.Error(), "predates the four-eyes principal change") {
+		t.Fatalf("error must name the cause precisely, got: %v", err)
+	}
+	// Fail CLOSED: nothing is recovered, so no legacy grant can be approved or promoted.
+	if n := len(s.ActiveApprovals(clk.t)); n != 0 {
+		t.Fatalf("recovered %d grants from a refused load, want 0", n)
+	}
+	if _, gerr := s.Get("a1", "tenant-a"); gerr == nil {
+		t.Fatal("a record from a refused load must not be reachable")
+	}
+}
+
+// The bump must be a real forward step, not a silent no-op, and the version it supersedes
+// must stay named so the message above can never go stale.
+func TestSchemaVersion_IsPastThePreFourEyesPrincipalVersion(t *testing.T) {
+	if SchemaVersion <= schemaVersionPreFourEyesPrincipal {
+		t.Fatalf("SchemaVersion = %d must be greater than the pre-change version %d",
+			SchemaVersion, schemaVersionPreFourEyesPrincipal)
+	}
+}
+
+// A store written by THIS build round-trips, so the bump did not break ordinary recovery.
+func TestLoad_CurrentSchemaRoundTripsAfterBump(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0).UTC()}
+	dir := t.TempDir()
+	cfg := Config{Path: filepath.Join(dir, "approvals.json"), Clock: clk.now, MaxRecords: 64, MaxPerTenant: 8}
+
+	s, err := NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load fresh: %v", err)
+	}
+	in := goodRequest()
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	if _, err := s.Approve(a.ApprovalID, "security-lead@corp", matchingTarget(in)); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	reloaded, err := NewStore(cfg)
+	if err != nil {
+		t.Fatalf("NewStore(reload): %v", err)
+	}
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("a store written by this build must reload: %v", err)
+	}
+	if n := len(reloaded.ActiveApprovals(clk.t)); n != 1 {
+		t.Fatalf("recovered %d active grants, want 1", n)
 	}
 }

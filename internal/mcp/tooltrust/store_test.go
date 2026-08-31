@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +75,14 @@ func matchingTarget(in RequestInput) CurrentTarget {
 		CatalogRevision:          in.CatalogRevision,
 		ServerRevision:           in.ServerRevision,
 	}
+}
+
+// curEnvelope builds a store envelope at the CURRENT SchemaVersion with an optional extra
+// raw member. Fixtures that mean "a valid envelope with some OTHER defect" must be built
+// from the live constant: hard-coding a version means a later bump silently converts them
+// into schema-rejection tests that still pass, but no longer test what they claim.
+func curEnvelope(extra string) string {
+	return `{"schema_version":` + strconv.Itoa(int(SchemaVersion)) + `,"approvals":[]` + extra + `}`
 }
 
 func mustReason(t *testing.T, err error, want mcperr.Reason) {
@@ -512,7 +521,7 @@ func TestLoad_UnknownFieldFailsClosed(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "approvals.json")
-	if err := os.WriteFile(path, []byte(`{"schema_version":1,"approvals":[],"evil":true}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(curEnvelope(`,"evil":true`)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := NewStore(Config{Path: path, Clock: clk.now})
@@ -526,10 +535,10 @@ func TestLoad_TrailingDataFailsClosed(t *testing.T) {
 	// Each of these is a valid envelope followed by trailing bytes that a naive
 	// Decoder.More check misses (a trailing delimiter reads as "no more elements").
 	for name, body := range map[string]string{
-		"second_value":    `{"schema_version":1,"approvals":[]}{"evil":1}`,
-		"closing_bracket": `{"schema_version":1,"approvals":[]}]`,
-		"closing_brace":   `{"schema_version":1,"approvals":[]}}`,
-		"garbage":         `{"schema_version":1,"approvals":[]} not json`,
+		"second_value":    curEnvelope("") + `{"evil":1}`,
+		"closing_bracket": curEnvelope("") + `]`,
+		"closing_brace":   curEnvelope("") + `}`,
+		"garbage":         curEnvelope("") + ` not json`,
 	} {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "approvals.json")

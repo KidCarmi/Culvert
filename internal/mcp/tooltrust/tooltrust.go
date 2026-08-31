@@ -20,7 +20,30 @@ import "time"
 
 // SchemaVersion is the durable ToolApproval envelope version. A pre-change reader rejects a
 // newer version (fail closed); a same-version reader is byte-stable.
-const SchemaVersion uint16 = 1
+//
+// v2 — the four-eyes principal change. Up to v1, RequestedBy/ApprovedBy were written from
+// the admin plane's AUDIT actor, "<identity>@<clientIP>", whose second half is a network
+// coordinate the acting principal controls. Approve now refuses approver == RequestedBy,
+// but that comparison is only meaningful between values in the SAME, coordinate-free
+// format: a v1 pending record recording "alice@198.51.100.1" would compare unequal to the
+// very same human approving as "alice", so she could approve her own request and walk
+// straight through the new gate (Codex P2).
+//
+// The version bump is the fix, and it is deliberately whole-store rather than per-record.
+// A v1 record's four-eyes evidence is untrustworthy whether it is pending or ALREADY
+// ACTIVE — an active v1 grant may itself have been self-approved under the old,
+// bypassable comparison — so keeping the active ones while refusing the pending ones would
+// preserve exactly the grants whose provenance this change calls into question. Load fails
+// closed on a v1 file, no trust is materialized, and every decision must be retaken with
+// attributable principals. See Store.Load for the operator-facing message.
+const SchemaVersion uint16 = 2
+
+// schemaVersionPreFourEyesPrincipal is the last envelope version written before the
+// four-eyes principal change. It exists so Load can tell an operator "this store predates
+// the principal change and must be re-decided" instead of the generic
+// unknown-schema/corruption message, which would send them looking for a fault that is
+// not there.
+const schemaVersionPreFourEyesPrincipal uint16 = 1
 
 // Bounds on the free-text and reference fields, so a hostile or careless caller can never
 // grow the durable record without limit. Enforced at construction; over-bound input is a

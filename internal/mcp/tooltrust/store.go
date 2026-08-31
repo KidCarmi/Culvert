@@ -184,6 +184,16 @@ func (s *Store) Load() error {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file has trailing data")
 	}
 	if env.SchemaVersion != SchemaVersion {
+		// Name the pre-four-eyes-principal version explicitly. It is not corruption: the
+		// file was written correctly by an older build whose RequestedBy/ApprovedBy carry
+		// a client-controlled network coordinate, which the four-eyes comparison in
+		// Approve cannot trust. Failing closed here is the intended outcome — no trust is
+		// materialized and every decision is retaken — but an operator must be able to
+		// tell that from a damaged file, because the two call for opposite responses.
+		if env.SchemaVersion == schemaVersionPreFourEyesPrincipal {
+			return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load",
+				"store predates the four-eyes principal change; its approvals carry unattributable requester/approver identities and must be re-decided")
+		}
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "unknown store schema version")
 	}
 	// Enforce the configured TOTAL-record bound before publishing: a file with more records

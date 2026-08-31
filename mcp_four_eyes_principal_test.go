@@ -205,3 +205,56 @@ func readSourceForTest(t *testing.T, name string) string {
 	}
 	return string(b)
 }
+
+// --- "unknown" is a USERNAME, not a sentinel -------------------------------
+//
+// sessionAdmin reports "unknown" when it cannot resolve an identity, but ui_auth.go admits
+// any 1–64 byte username with no reserved words — so "unknown" is also a perfectly legal
+// account name. approvalPrincipal must therefore decide identity PRESENCE from whether a
+// field was found, never by comparing the resolved name against a value a real user may
+// hold; otherwise that user is read as unauthenticated and 403'd out of every decision
+// route (Codex P2).
+func TestApprovalPrincipal_UserLiterallyNamedUnknownIsAuthenticated(t *testing.T) {
+	withTrustedProxy(t)
+
+	// Session path.
+	if got := approvalPrincipal(mkAuthedReq(t, "unknown", "198.51.100.1")); got != "unknown" {
+		t.Fatalf("session principal = %q, want %q — a real user named \"unknown\" must not "+
+			"be read as unauthenticated", got, "unknown")
+	}
+	// Basic-auth path.
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", http.NoBody)
+	r.RemoteAddr = "10.0.0.9:1234"
+	r = r.WithContext(context.WithValue(r.Context(), uiUserKey{}, "unknown"))
+	if got := approvalPrincipal(r); got != "unknown" {
+		t.Fatalf("basic-auth principal = %q, want %q", got, "unknown")
+	}
+	// And the handler must admit them rather than 403.
+	w := httptest.NewRecorder()
+	got, ok := mcpFourEyesPrincipal(w, mkAuthedReq(t, "unknown", "198.51.100.1"))
+	if !ok {
+		t.Fatalf("a user named \"unknown\" must be admitted; body=%q", w.Body.String())
+	}
+	if string(got) != "unknown" {
+		t.Fatalf("principal = %q, want %q", got, "unknown")
+	}
+}
+
+// The two cases must stay distinguishable: a user NAMED "unknown" is present, an
+// unauthenticated caller is absent, and they must not collapse into one principal.
+func TestApprovalPrincipal_NamedUnknownDiffersFromAbsent(t *testing.T) {
+	withTrustedProxy(t)
+	named := approvalPrincipal(mkAuthedReq(t, "unknown", "198.51.100.1"))
+
+	anon := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", http.NoBody)
+	anon.RemoteAddr = "198.51.100.7:1111"
+	absent := approvalPrincipal(anon)
+
+	if named == absent {
+		t.Fatalf("a user named %q and an unauthenticated caller resolved to the same "+
+			"principal %q — four-eyes could then read as satisfied between them", "unknown", named)
+	}
+	if absent != "" {
+		t.Fatalf("absent principal = %q, want \"\"", absent)
+	}
+}

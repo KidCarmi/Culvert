@@ -80,16 +80,29 @@ func sessionAdmin(r *http.Request) string {
 // bypassable (one human reads as two) and, in the NAT case, wrongly restrictive.
 // Separation of duties must compare the AUTHENTICATED SUBJECT and nothing else.
 //
-// Resolution order matches sessionAdmin (session Sub → session Email → the Basic-auth
-// username uiAuthMiddleware placed in context), minus its "unknown" sentinel: an
-// unresolvable identity is reported as absent rather than as a principal literally
-// named "unknown", which would make every unauthenticated actor the SAME principal and
-// let a four-eyes gate read as satisfied between two anonymous callers.
+// Resolution order matches sessionAdmin — session Sub → session Email → the Basic-auth
+// username uiAuthMiddleware placed in context — but it is resolved HERE rather than by
+// calling sessionAdmin and filtering its "unknown" sentinel. That filtering would be a
+// real defect: "unknown" is a perfectly legal username (ui_auth.go admits any 1–64 byte
+// name, with no reserved words), so an authenticated local or Basic-auth user actually
+// named "unknown" would be read as unauthenticated and 403'd out of every decision route.
+// Identity PRESENCE has to be decided from whether a field was found, never by comparing
+// the resolved name against a value a real user may hold (Codex P2).
+//
+// The absent case is reported as "" and never as a name, because a sentinel name would
+// make every unauthenticated actor the SAME principal — and a four-eyes gate would then
+// read as satisfied between two different anonymous callers while refusing one honest
+// retry.
 func approvalPrincipal(r *http.Request) string {
-	if p := sessionAdmin(r); p != "unknown" {
-		return p
+	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
+		if sess.Sub != "" {
+			return sess.Sub
+		}
+		if sess.Email != "" {
+			return sess.Email
+		}
 	}
-	return ""
+	return uiUser(r)
 }
 
 // requireRole returns true when the current session has at least minRole.
