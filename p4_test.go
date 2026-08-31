@@ -167,48 +167,48 @@ func TestSetKeyProvider(t *testing.T) {
 // ── Per-Rule Metrics ─────────────────────────────────────────────────────────
 
 func TestRuleMetrics_RecordHit(t *testing.T) {
-	rm := &ruleMetrics{hits: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	rm.RecordHit("rule-A")
 	rm.RecordHit("rule-A")
 	rm.RecordHit("rule-B")
 
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	if len(rm.hits) != 2 {
-		t.Fatalf("expected 2 rules, got %d", len(rm.hits))
+	if len(rm.view().hits) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rm.view().hits))
 	}
-	if got := atomic.LoadInt64(rm.hits["rule-A"]); got != 2 {
+	if got := atomic.LoadInt64(rm.view().hits["rule-A"]); got != 2 {
 		t.Fatalf("rule-A hits = %d, want 2", got)
 	}
-	if got := atomic.LoadInt64(rm.hits["rule-B"]); got != 1 {
+	if got := atomic.LoadInt64(rm.view().hits["rule-B"]); got != 1 {
 		t.Fatalf("rule-B hits = %d, want 1", got)
 	}
 }
 
 func TestRuleMetrics_EmptyName(t *testing.T) {
-	rm := &ruleMetrics{hits: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	rm.RecordHit("")
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	if len(rm.hits) != 0 {
+	if len(rm.view().hits) != 0 {
 		t.Fatal("empty rule name should be ignored")
 	}
 }
 
 func TestRuleMetrics_CardinalityCap(t *testing.T) {
-	rm := &ruleMetrics{hits: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	for i := 0; i < maxRuleMetrics+50; i++ {
 		rm.RecordHit(big.NewInt(int64(i)).Text(36))
 	}
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	if len(rm.hits) > maxRuleMetrics {
-		t.Fatalf("cardinality cap breached: %d > %d", len(rm.hits), maxRuleMetrics)
+	if len(rm.view().hits) > maxRuleMetrics {
+		t.Fatalf("cardinality cap breached: %d > %d", len(rm.view().hits), maxRuleMetrics)
 	}
 }
 
 func TestRuleMetrics_WritePrometheus(t *testing.T) {
-	rm := &ruleMetrics{hits: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	rm.RecordHit("test-rule")
 	rm.RecordHit("test-rule")
 
@@ -224,7 +224,7 @@ func TestRuleMetrics_WritePrometheus(t *testing.T) {
 }
 
 func TestRuleMetrics_WritePrometheusEmpty(t *testing.T) {
-	rm := &ruleMetrics{hits: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	var buf strings.Builder
 	rm.WritePrometheus(&buf)
 	if buf.Len() != 0 {
@@ -233,7 +233,7 @@ func TestRuleMetrics_WritePrometheusEmpty(t *testing.T) {
 }
 
 func TestRuleMetrics_ConcurrentRecordHit(t *testing.T) {
-	rm := &ruleMetrics{hits: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -246,7 +246,7 @@ func TestRuleMetrics_ConcurrentRecordHit(t *testing.T) {
 	}
 	wg.Wait()
 	rm.mu.RLock()
-	got := atomic.LoadInt64(rm.hits["concurrent-rule"])
+	got := atomic.LoadInt64(rm.view().hits["concurrent-rule"])
 	rm.mu.RUnlock()
 	if got != 2000 {
 		t.Fatalf("concurrent hits = %d, want 2000", got)

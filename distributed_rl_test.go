@@ -427,15 +427,12 @@ func TestOTLPRuleMetrics_Empty(t *testing.T) {
 	// rule bleeds into this test and the "0 rules" assertion fires. Snapshot
 	// and clear ruleMet for the duration of the test, then restore.
 	ruleMet.mu.Lock()
-	savedHits := ruleMet.hits
-	savedOrder := ruleMet.order
-	ruleMet.hits = map[string]*int64{}
-	ruleMet.order = nil
+	savedView := ruleMet.view()
+	ruleMet.publishLocked(&ruleCounterView{hits: map[string]*int64{}, last: map[string]*int64{}})
 	ruleMet.mu.Unlock()
 	t.Cleanup(func() {
 		ruleMet.mu.Lock()
-		ruleMet.hits = savedHits
-		ruleMet.order = savedOrder
+		ruleMet.publishLocked(savedView)
 		ruleMet.mu.Unlock()
 	})
 

@@ -73,19 +73,24 @@ func TestPolicyCounters_ListNeverReportsStaleLastHit(t *testing.T) {
 func withCleanRuleMet(t *testing.T) {
 	t.Helper()
 	ruleMet.mu.Lock()
-	oh, ol, oi, on, oa, oo := ruleMet.hits, ruleMet.last, ruleMet.byID, ruleMet.loadedByName, ruleMet.appliedByName, ruleMet.order
-	ruleMet.hits = make(map[string]*int64)
-	ruleMet.last = make(map[string]*int64)
-	ruleMet.byID = make(map[string]persistedRuleCounter)
-	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
-	ruleMet.appliedByName = make(map[string]int64)
-	ruleMet.order = nil
+	ov, oi, on, oa := ruleMet.view(), ruleMet.byID, ruleMet.loadedByName, ruleMet.appliedByName
+	resetRuleMetLocked()
 	ruleMet.mu.Unlock()
 	t.Cleanup(func() {
 		ruleMet.mu.Lock()
-		ruleMet.hits, ruleMet.last, ruleMet.byID, ruleMet.loadedByName, ruleMet.appliedByName, ruleMet.order = oh, ol, oi, on, oa, oo
+		ruleMet.byID, ruleMet.loadedByName, ruleMet.appliedByName = oi, on, oa
+		ruleMet.publishLocked(ov)
 		ruleMet.mu.Unlock()
 	})
+}
+
+// resetRuleMetLocked wipes every ruleMet index back to empty. Caller holds
+// ruleMet.mu.
+func resetRuleMetLocked() {
+	ruleMet.byID = make(map[string]persistedRuleCounter)
+	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
+	ruleMet.appliedByName = make(map[string]int64)
+	ruleMet.publishLocked(&ruleCounterView{hits: make(map[string]*int64), last: make(map[string]*int64)})
 }
 
 func withEmptyPolicyStore(t *testing.T) {
@@ -106,20 +111,14 @@ func TestHitCounters_LastHitPersistRoundTrip(t *testing.T) {
 
 	// Wipe in-memory, reload from disk.
 	ruleMet.mu.Lock()
-	ruleMet.hits = make(map[string]*int64)
-	ruleMet.last = make(map[string]*int64)
-	ruleMet.byID = make(map[string]persistedRuleCounter)
-	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
-	ruleMet.appliedByName = make(map[string]int64)
-	ruleMet.order = nil
+	resetRuleMetLocked()
 	ruleMet.mu.Unlock()
 
 	loadHitCounters(path)
 
-	ruleMet.mu.RLock()
-	h := ruleMet.hits["persist-rule"]
-	l := ruleMet.last["persist-rule"]
-	ruleMet.mu.RUnlock()
+	cur := ruleMet.view()
+	h := cur.hits["persist-rule"]
+	l := cur.last["persist-rule"]
 	if h == nil || atomic.LoadInt64(h) != 2 {
 		t.Errorf("hits not restored: %v", h)
 	}
@@ -136,9 +135,7 @@ func TestHitCounters_LegacyFormatStillLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	loadHitCounters(path)
-	ruleMet.mu.RLock()
-	h := ruleMet.hits["old-rule"]
-	ruleMet.mu.RUnlock()
+	h := ruleMet.view().hits["old-rule"]
 	if h == nil || atomic.LoadInt64(h) != 9 {
 		t.Errorf("legacy count not restored: %v", h)
 	}
@@ -191,19 +188,12 @@ func TestSaveHitCountersTracksRenamedRule(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hit_counters.json")
 	saveHitCounters(path)
 	ruleMet.mu.Lock()
-	ruleMet.hits = make(map[string]*int64)
-	ruleMet.last = make(map[string]*int64)
-	ruleMet.byID = make(map[string]persistedRuleCounter)
-	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
-	ruleMet.appliedByName = make(map[string]int64)
-	ruleMet.order = nil
+	resetRuleMetLocked()
 	ruleMet.mu.Unlock()
 	current = policyStore.List()[0]
 	policyStore.ReplaceAll([]PolicyRule{current}) // simulate freshly loaded rules with reset live accounting
 	loadHitCounters(path)
-	ruleMet.mu.RLock()
-	_, staleNamePersisted := ruleMet.hits["before-rename"]
-	ruleMet.mu.RUnlock()
+	_, staleNamePersisted := ruleMet.view().hits["before-rename"]
 	if staleNamePersisted {
 		t.Fatal("pre-rename telemetry alias was persisted")
 	}
@@ -239,12 +229,7 @@ func TestHitCountersStableIDSurvivesRenameBeforeCounterResave(t *testing.T) {
 	}
 	policyStore.ReplaceAll(policyStore.List()) // simulate restart from renamed policy
 	ruleMet.mu.Lock()
-	ruleMet.hits = make(map[string]*int64)
-	ruleMet.last = make(map[string]*int64)
-	ruleMet.byID = make(map[string]persistedRuleCounter)
-	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
-	ruleMet.appliedByName = make(map[string]int64)
-	ruleMet.order = nil
+	resetRuleMetLocked()
 	ruleMet.mu.Unlock()
 	loadHitCounters(path) // still keyed by old name, joined by stable ID
 	RestoreHitCounts()
@@ -256,14 +241,14 @@ func TestHitCountersStableIDSurvivesRenameBeforeCounterResave(t *testing.T) {
 }
 
 func TestRestoreRecordsCapsStableIDIndex(t *testing.T) {
-	rm := &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	recs := make(map[string]persistedRuleCounter, maxRuleMetrics+5)
 	for i := 0; i < maxRuleMetrics+5; i++ {
 		recs[fmt.Sprintf("rule-%03d", i)] = persistedRuleCounter{ID: newRuleID(), Hits: 1}
 	}
 	rm.restoreRecords(recs)
-	if len(rm.hits) != maxRuleMetrics || len(rm.byID) != maxRuleMetrics || len(rm.loadedByName) != maxRuleMetrics || len(rm.appliedByName) != maxRuleMetrics {
-		t.Fatalf("restored cardinality hits=%d ids=%d names=%d applied=%d, want all %d", len(rm.hits), len(rm.byID), len(rm.loadedByName), len(rm.appliedByName), maxRuleMetrics)
+	if len(rm.view().hits) != maxRuleMetrics || len(rm.byID) != maxRuleMetrics || len(rm.loadedByName) != maxRuleMetrics || len(rm.appliedByName) != maxRuleMetrics {
+		t.Fatalf("restored cardinality hits=%d ids=%d names=%d applied=%d, want all %d", len(rm.view().hits), len(rm.byID), len(rm.loadedByName), len(rm.appliedByName), maxRuleMetrics)
 	}
 }
 
@@ -344,33 +329,27 @@ func TestPolicyLoadPreservesLiveCountersByStableID(t *testing.T) {
 }
 
 func TestRestoreRecordsPreservesLiveTelemetryAcrossReloads(t *testing.T) {
-	rm := &ruleMetrics{
-		hits:          make(map[string]*int64),
-		last:          make(map[string]*int64),
-		byID:          make(map[string]persistedRuleCounter),
-		loadedByName:  make(map[string]persistedRuleCounter),
-		appliedByName: make(map[string]int64),
-	}
+	rm := newRuleMetrics()
 	old := time.Now().Add(-time.Hour).Unix()
 	future := time.Now().Add(time.Hour).Unix()
 	rm.restoreRecords(map[string]persistedRuleCounter{"reload": {Hits: 10, LastHit: old}})
 	rm.RecordHit("reload")
-	atomic.StoreInt64(rm.last["reload"], future)
+	atomic.StoreInt64(rm.view().last["reload"], future)
 
 	// Repeating or temporarily omitting a snapshot cannot erase live telemetry.
 	rm.restoreRecords(map[string]persistedRuleCounter{"reload": {Hits: 10, LastHit: old}})
 	rm.restoreRecords(map[string]persistedRuleCounter{})
 	rm.restoreRecords(map[string]persistedRuleCounter{"reload": {Hits: 10, LastHit: old}})
-	if got := atomic.LoadInt64(rm.hits["reload"]); got != 11 {
+	if got := atomic.LoadInt64(rm.view().hits["reload"]); got != 11 {
 		t.Fatalf("hits after repeated/omitted reload = %d, want persisted 10 + one live hit", got)
 	}
-	if got := atomic.LoadInt64(rm.last["reload"]); got != future {
+	if got := atomic.LoadInt64(rm.view().last["reload"]); got != future {
 		t.Fatalf("lastHit after older reload = %d, want newer live timestamp %d", got, future)
 	}
 
 	// A genuinely newer persisted baseline contributes only its positive delta.
 	rm.restoreRecords(map[string]persistedRuleCounter{"reload": {Hits: 12, LastHit: old}})
-	if got := atomic.LoadInt64(rm.hits["reload"]); got != 13 {
+	if got := atomic.LoadInt64(rm.view().hits["reload"]); got != 13 {
 		t.Fatalf("hits after baseline growth = %d, want persisted 12 + one live hit", got)
 	}
 }
@@ -387,10 +366,15 @@ func TestLastHitWritersAreMonotonic(t *testing.T) {
 		t.Fatalf("Evaluate reduced lastHitUnix from %d to %d", future, got)
 	}
 
-	rm := &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64)}
+	rm := newRuleMetrics()
 	zero, last := int64(0), future
-	rm.hits["future-hit"] = &zero
-	rm.last["future-hit"] = &last
+	rm.mu.Lock()
+	seed := rm.cloneViewLocked()
+	seed.hits["future-hit"] = &zero
+	seed.last["future-hit"] = &last
+	seed.order = append(seed.order, "future-hit")
+	rm.publishLocked(seed)
+	rm.mu.Unlock()
 	rm.RecordHit("future-hit")
 	if got := atomic.LoadInt64(&last); got != future {
 		t.Fatalf("RecordHit reduced last timestamp from %d to %d", future, got)
@@ -442,9 +426,7 @@ func TestStartHitCounterPersistence_DoesNotLoad(t *testing.T) {
 	done := startHitCounterPersistence(ctx, path)
 	t.Cleanup(func() { cancel(); <-done })
 
-	ruleMet.mu.RLock()
-	_, loaded := ruleMet.hits["decoupled-rule"]
-	ruleMet.mu.RUnlock()
+	_, loaded := ruleMet.view().hits["decoupled-rule"]
 	if loaded {
 		t.Fatal("startHitCounterPersistence loaded the baseline itself; load must be caller-driven (before RestoreHitCounts)")
 	}

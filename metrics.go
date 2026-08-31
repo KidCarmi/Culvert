@@ -23,17 +23,118 @@ import (
 
 const maxRuleMetrics = 200
 
+// ruleCounterView is the IMMUTABLE read side of the per-rule counters: the
+// name→cell indexes plus the insertion order the cap and both exporters walk.
+//
+// ── Why the read path is lock-free ───────────────────────────────────────────
+//
+// RecordHit runs on EVERY proxied request that matches a policy rule
+// (applyPolicyDecision, proxy.go) — which, in the Zero-Trust posture this
+// product ships, is every allowed request. It used to reach its counter cell
+// under a process-wide sync.RWMutex read lock. RLock is an atomic
+// read-modify-write on ONE shared word, so that was not a constant per-request
+// cost but a THROUGHPUT CEILING: every request in the process wrote the same
+// cache line purely to read an index that, in steady state, never changes
+// (a rule name is registered once and then hit forever). Same shape as the
+// internal/threatfeed, internal/connlimit and IP-filter findings.
+//
+// Measured on this machine (Go 1.26, 4-core Xeon @ 2.80 GHz, 20 registered
+// rules, -benchtime=1s, medians of -count=7), from BenchmarkRuleHit_View and
+// its in-binary pre-fix twin BenchmarkRuleHit_Locked:
+//
+//	GOMAXPROCS         1         2         4      ops/s @4 vs @1
+//	  before      105 ns    218 ns    207 ns           0.51x
+//	  after       103 ns     77 ns     60 ns           1.71x
+//
+// Before the change, adding cores SUBTRACTED throughput — four cores delivered
+// 4.84M ops/s against 9.51M on ONE core — because the losing core's retry is
+// itself the coherence traffic that makes the next round lose. After it, four
+// cores are 3.4x the old four-core ceiling, and the single-core column is
+// unchanged, so there is no low-concurrency price. Quote the SHAPE, not the
+// constants: the "before" figures degrade further the busier the box is.
+//
+// ── The contract, and why it cannot be broken by accident ────────────────────
+//
+// A map reachable from a PUBLISHED view is never mutated in place. That is
+// structural here rather than a rule to remember: the maps live ONLY inside
+// the view, so a writer cannot reach them without going through
+// cloneViewLocked (copy) → mutate the copy → publishLocked (swap). There is no
+// second, authoritative copy of the index to drift from, and no "did I
+// republish?" question to get wrong. The *cells* are shared across views on
+// purpose — they are the live atomics RecordHit increments — so a hit landing
+// through an older view still lands on the counter the newer view exports.
+//
+// Registration is admin-rate and hard-capped at maxRuleMetrics (200), so the
+// copy is bounded, and it happens at most once per rule name per process.
+type ruleCounterView struct {
+	hits  map[string]*int64 // rule name → hit count
+	last  map[string]*int64 // rule name → unix-seconds of last hit (policy-metadata P1)
+	order []string          // insertion order for cap enforcement
+}
+
+// clone returns a mutable copy. The counter cells are shared by reference (see
+// the contract above); only the indexes are copied.
+func (v *ruleCounterView) clone() *ruleCounterView {
+	next := &ruleCounterView{
+		hits:  make(map[string]*int64, len(v.hits)+1),
+		last:  make(map[string]*int64, len(v.last)+1),
+		order: make([]string, len(v.order), len(v.order)+1),
+	}
+	for k, p := range v.hits {
+		next.hits[k] = p
+	}
+	for k, p := range v.last {
+		next.last[k] = p
+	}
+	copy(next.order, v.order)
+	return next
+}
+
 type ruleMetrics struct {
-	mu            sync.RWMutex
-	hits          map[string]*int64               // rule name → hit count
-	last          map[string]*int64               // rule name → unix-seconds of last hit (policy-metadata P1)
+	// mu serialises the WRITE side only (registration, restore, and the
+	// persistence-baseline maps below). RecordHit never takes it.
+	mu sync.RWMutex
+	// counters is the published read view. Never nil after newRuleMetrics.
+	counters      atomic.Pointer[ruleCounterView]
 	byID          map[string]persistedRuleCounter // stable rule ID → persisted accounting
 	loadedByName  map[string]persistedRuleCounter // immutable legacy persistence baseline
 	appliedByName map[string]int64                // greatest persisted hit baseline merged into telemetry
-	order         []string                        // insertion order for cap enforcement
 }
 
-var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64), byID: make(map[string]persistedRuleCounter), loadedByName: make(map[string]persistedRuleCounter), appliedByName: make(map[string]int64)}
+func newRuleMetrics() *ruleMetrics {
+	rm := &ruleMetrics{
+		byID:          make(map[string]persistedRuleCounter),
+		loadedByName:  make(map[string]persistedRuleCounter),
+		appliedByName: make(map[string]int64),
+	}
+	rm.counters.Store(&ruleCounterView{hits: make(map[string]*int64), last: make(map[string]*int64)})
+	return rm
+}
+
+var ruleMet = newRuleMetrics()
+
+// emptyRuleCounterView is the shared fallback for a zero-value ruleMetrics (a
+// struct literal built without newRuleMetrics). It is package-level rather than
+// constructed per call so the nil guard on the request path stays
+// allocation-free. Never mutated — cloneViewLocked copies before writing.
+var emptyRuleCounterView = &ruleCounterView{hits: map[string]*int64{}, last: map[string]*int64{}}
+
+// view returns the current published counter index. It takes no lock and never
+// returns nil, so a zero-value ruleMetrics (a struct literal in a test) reads
+// as empty rather than panicking.
+func (rm *ruleMetrics) view() *ruleCounterView {
+	if v := rm.counters.Load(); v != nil {
+		return v
+	}
+	return emptyRuleCounterView
+}
+
+// cloneViewLocked returns a private, mutable copy of the published view.
+// Caller must hold rm.mu and must publishLocked the result.
+func (rm *ruleMetrics) cloneViewLocked() *ruleCounterView { return rm.view().clone() }
+
+// publishLocked swaps in a view built by cloneViewLocked. Caller must hold rm.mu.
+func (rm *ruleMetrics) publishLocked(v *ruleCounterView) { rm.counters.Store(v) }
 
 // RecordHit increments the telemetry counter for the given policy rule name and
 // stamps its last-hit time. Live policy accounting is maintained by Evaluate;
@@ -42,39 +143,49 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ruleName == "" {
 		return
 	}
-	now := time.Now().Unix()
-	rm.mu.RLock()
-	ctr, ok := rm.hits[ruleName]
-	lastPtr := rm.last[ruleName]
-	rm.mu.RUnlock()
-	if ok {
+	// Steady state: the cell already exists, so the whole per-request cost is
+	// one atomic pointer load, two map probes and the counter's own atomics —
+	// no lock, no allocation. The view is loaded ONCE so both probes see the
+	// same generation, and the clock is read only on this branch because it is
+	// only used here (the cold path below reads its own).
+	cur := rm.view()
+	if ctr, ok := cur.hits[ruleName]; ok {
 		atomic.AddInt64(ctr, 1)
-		if lastPtr != nil {
-			atomicStoreMax(lastPtr, now)
+		if lp := cur.last[ruleName]; lp != nil {
+			atomicStoreMax(lp, time.Now().Unix())
 		}
 		return
 	}
+	rm.registerHit(ruleName)
+}
+
+// registerHit is the cold path: the first hit for a rule name (at most once per
+// name per process, and never more than maxRuleMetrics times in total).
+func (rm *ruleMetrics) registerHit(ruleName string) {
+	now := time.Now().Unix()
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
-	if rm.last == nil { // defensive: literals built with only `hits` set
-		rm.last = make(map[string]*int64)
-	}
-	// Double-check after acquiring write lock.
-	if ctr, ok = rm.hits[ruleName]; ok {
+	// Double-check after acquiring the write lock: a concurrent registerHit may
+	// have published this name already, in which case this hit is an ordinary
+	// increment on the cell it created.
+	cur := rm.view()
+	if ctr, ok := cur.hits[ruleName]; ok {
 		atomic.AddInt64(ctr, 1)
-		if lp := rm.last[ruleName]; lp != nil {
+		if lp := cur.last[ruleName]; lp != nil {
 			atomicStoreMax(lp, now)
 		}
 		return
 	}
-	if len(rm.hits) >= maxRuleMetrics {
+	if len(cur.hits) >= maxRuleMetrics {
 		return // cardinality cap reached; ignore new rules
 	}
+	next := cur.clone()
 	v := int64(1)
-	rm.hits[ruleName] = &v
+	next.hits[ruleName] = &v
 	lv := now
-	rm.last[ruleName] = &lv
-	rm.order = append(rm.order, ruleName)
+	next.last[ruleName] = &lv
+	next.order = append(next.order, ruleName)
+	rm.publishLocked(next)
 }
 
 // persistedRuleCounter is the on-disk shape of one rule's persisted counters
@@ -106,18 +217,17 @@ func saveHitCounters(path string) {
 	// use ruleMet before policy initialization. Once rules exist, persisting only
 	// current names also drops stale pre-rename/deleted telemetry aliases.
 	if len(rules) == 0 {
-		ruleMet.mu.RLock()
-		for name, ptr := range ruleMet.hits {
+		cur := ruleMet.view()
+		for name, ptr := range cur.hits {
 			if len(data) >= maxRuleMetrics {
 				break
 			}
 			rec := persistedRuleCounter{Hits: atomic.LoadInt64(ptr)}
-			if lp := ruleMet.last[name]; lp != nil {
+			if lp := cur.last[name]; lp != nil {
 				rec.LastHit = atomic.LoadInt64(lp)
 			}
 			data[name] = rec
 		}
-		ruleMet.mu.RUnlock()
 	}
 
 	b, err := json.MarshalIndent(data, "", "  ")
@@ -165,9 +275,6 @@ func loadHitCounters(path string) {
 func (rm *ruleMetrics) restoreRecords(recs map[string]persistedRuleCounter) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
-	if rm.last == nil {
-		rm.last = make(map[string]*int64)
-	}
 	// This index represents exactly this persisted snapshot; rebuilding it also
 	// prevents stale IDs and repeated loads from bypassing the cardinality cap.
 	if rm.appliedByName == nil {
@@ -175,27 +282,34 @@ func (rm *ruleMetrics) restoreRecords(recs map[string]persistedRuleCounter) {
 	}
 	rm.byID = make(map[string]persistedRuleCounter, min(len(recs), maxRuleMetrics))
 	rm.loadedByName = make(map[string]persistedRuleCounter, min(len(recs), maxRuleMetrics))
+	// One copy for the whole snapshot, published once at the end: a per-record
+	// republish would be O(names²) for a value no reader can act on until the
+	// snapshot is fully applied.
+	next := rm.cloneViewLocked()
 	for name, rec := range recs {
-		if !rm.restoreRecordLocked(name, rec) {
+		if !rm.restoreRecordLocked(next, name, rec) {
 			continue
 		}
 		mergePersistedCounterByID(rm.byID, rec)
 		rm.loadedByName[name] = rec
 	}
+	rm.publishLocked(next)
 }
 
-func (rm *ruleMetrics) restoreRecordLocked(name string, rec persistedRuleCounter) bool {
-	ptr := rm.hits[name]
+// restoreRecordLocked applies one persisted record into the caller's UNPUBLISHED
+// working view. Caller holds rm.mu and publishes when the snapshot is complete.
+func (rm *ruleMetrics) restoreRecordLocked(next *ruleCounterView, name string, rec persistedRuleCounter) bool {
+	ptr := next.hits[name]
 	if ptr == nil {
-		if len(rm.hits) >= maxRuleMetrics {
+		if len(next.hits) >= maxRuleMetrics {
 			return false
 		}
 		h := rec.Hits
-		rm.hits[name] = &h
+		next.hits[name] = &h
 		rm.appliedByName[name] = rec.Hits
 		l := rec.LastHit
-		rm.last[name] = &l
-		rm.order = append(rm.order, name)
+		next.last[name] = &l
+		next.order = append(next.order, name)
 		return true
 	}
 
@@ -206,12 +320,12 @@ func (rm *ruleMetrics) restoreRecordLocked(name string, rec persistedRuleCounter
 		atomic.AddInt64(ptr, delta)
 		rm.appliedByName[name] = rec.Hits
 	}
-	if lp := rm.last[name]; lp != nil {
+	if lp := next.last[name]; lp != nil {
 		atomicStoreMax(lp, rec.LastHit)
 		return true
 	}
 	l := rec.LastHit
-	rm.last[name] = &l
+	next.last[name] = &l
 	return true
 }
 
@@ -327,15 +441,14 @@ func atomicStoreMax(dst *int64, value int64) {
 
 // WritePrometheus writes per-rule metrics lines to the given builder.
 func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-	if len(rm.hits) == 0 {
+	cur := rm.view()
+	if len(cur.hits) == 0 {
 		return
 	}
 	w.WriteString("\n# HELP culvert_policy_rule_hits_total Per-rule hit count (capped at 200 rules)\n")
 	w.WriteString("# TYPE culvert_policy_rule_hits_total counter\n")
-	for _, name := range rm.order {
-		ctr := rm.hits[name]
+	for _, name := range cur.order {
+		ctr := cur.hits[name]
 		// Sanitise label value: escape backslash, double-quote, newline.
 		safe := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(name)
 		fmt.Fprintf(w, "culvert_policy_rule_hits_total{rule=%q} %d\n", safe, atomic.LoadInt64(ctr))

@@ -282,22 +282,27 @@ func TestBandwidthConflictDetection(t *testing.T) {
 func cleanupRuleMet(names ...string) {
 	ruleMet.mu.Lock()
 	defer ruleMet.mu.Unlock()
+	next := ruleMet.cloneViewLocked()
 	for _, name := range names {
-		delete(ruleMet.hits, name)
-		delete(ruleMet.last, name)
+		delete(next.hits, name)
+		delete(next.last, name)
 	}
-	// Rebuild order without the deleted names.
+	// Rebuild order without the deleted names. This walks into a FRESH slice
+	// rather than compacting in place: the pre-copy order slice is reachable
+	// from the published view, and overwriting it would race every concurrent
+	// RecordHit / exporter read.
 	nameSet := make(map[string]bool, len(names))
 	for _, n := range names {
 		nameSet[n] = true
 	}
-	clean := ruleMet.order[:0]
-	for _, n := range ruleMet.order {
+	clean := make([]string, 0, len(next.order))
+	for _, n := range next.order {
 		if !nameSet[n] {
 			clean = append(clean, n)
 		}
 	}
-	ruleMet.order = clean
+	next.order = clean
+	ruleMet.publishLocked(next)
 }
 
 // ── Hit counter persistence (metrics.go) ────────────────────────────────────
@@ -343,10 +348,9 @@ func TestSaveAndLoadHitCounters(t *testing.T) {
 
 	loadHitCounters(path)
 
-	ruleMet.mu.RLock()
-	alphaPtr := ruleMet.hits["test-save-alpha"]
-	betaPtr := ruleMet.hits["test-save-beta"]
-	ruleMet.mu.RUnlock()
+	cur := ruleMet.view()
+	alphaPtr := cur.hits["test-save-alpha"]
+	betaPtr := cur.hits["test-save-beta"]
 
 	if alphaPtr == nil {
 		t.Fatal("test-save-alpha not restored")
