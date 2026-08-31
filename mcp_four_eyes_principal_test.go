@@ -27,7 +27,7 @@ import (
 func mkAuthedReq(t *testing.T, user, xff string) *http.Request {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	seed := httptest.NewRequest(http.MethodGet, "/", nil)
+	seed := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	if err := setUISessionCookie(rec, seed, user, RoleAdmin); err != nil {
 		t.Fatalf("setUISessionCookie: %v", err)
 	}
@@ -35,7 +35,7 @@ func mkAuthedReq(t *testing.T, user, xff string) *http.Request {
 	if len(cookies) == 0 {
 		t.Fatal("no session cookie minted")
 	}
-	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", http.NoBody)
 	r.RemoteAddr = "10.0.0.9:1234" // inside the trusted-proxy set below
 	if xff != "" {
 		r.Header.Set("X-Forwarded-For", xff)
@@ -108,7 +108,7 @@ func TestAuditActor_StillCarriesTheClientCoordinate(t *testing.T) {
 // satisfied by two DIFFERENT anonymous callers while refusing one honest retry. Absent
 // is the only correct answer, and the handler must refuse.
 func TestApprovalPrincipal_UnauthenticatedIsAbsent(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", http.NoBody)
 	r.RemoteAddr = "198.51.100.7:1111"
 	if got := approvalPrincipal(r); got != "" {
 		t.Fatalf("principal = %q, want \"\" for an unauthenticated caller", got)
@@ -120,7 +120,7 @@ func TestApprovalPrincipal_UnauthenticatedIsAbsent(t *testing.T) {
 
 func TestMCPFourEyesPrincipal_RefusesUnattributableCaller(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", http.NoBody)
 	r.RemoteAddr = "198.51.100.7:1111"
 
 	got, ok := mcpFourEyesPrincipal(w, r)
@@ -158,7 +158,7 @@ func TestMCPFourEyesPrincipal_AdmitsAuthenticatedCaller(t *testing.T) {
 // request by the SAME human do not read as two principals.
 func TestApprovalPrincipal_UsesBasicAuthIdentity(t *testing.T) {
 	withTrustedProxy(t)
-	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/publication?tenant=acme", http.NoBody)
 	r.RemoteAddr = "10.0.0.9:1234"
 	r.Header.Set("X-Forwarded-For", "198.51.100.42")
 	r = r.WithContext(context.WithValue(r.Context(), uiUserKey{}, "alice"))
