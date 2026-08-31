@@ -13426,6 +13426,84 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/mcp/rollout/rehearse-rollback-authoritative": {
+      "post": {
+        "description": "Drives the Canary→Shadow→Observe demotion ladder through the REAL rollout coordinator core (the same body every production transition runs) on a scratch state, so it fails for every security reason a real rollback would fail (Shadow preflight, emergency kill, config validity, durability). On full success it records durable build-bound evidence that closes the CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite (row 20). Distinct from the mechanics rehearsal (row 19). Evidence-only — it never mutates live rollout state, arms live execution, or activates Canary.",
+        "operationId": "createMCPRolloutRehearseAuthoritative",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Authoritative rehearsal recorded (row 20 closed for this build)"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The coordinator-routed drill or its persistence failed (not durably recorded). JSON object with authoritative_rollback_rehearsed:false, error."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run the authoritative rollback rehearsal",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.rehearse-rollback-authoritative",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/mcp/rollout/scope": {
       "get": {
         "description": "Returns the current rollout scope for a capability. PR-UX-5 enriches it beyond revision/hash/connector/high-risk with a safe structured summary: kind (enumerated / percentage / matches-nothing), enumerable + matches-nothing flags, percent, operations, per-dimension selector and exclusion counts, and the exact serializable scope spec (reviewed config identifiers only; no secret, token, or raw request/response).",

@@ -253,14 +253,26 @@ func TestCanaryRollbackCoordinatorRehearsal_OpenPrerequisiteBlocksReadiness(t *t
 	}
 }
 
-// TestCanaryRollbackCoordinatorRehearsal_ProductionFailsClosed proves the production seam never
-// certifies the authoritative rollback rehearsal for any capability — the
-// CANARY-ROLLBACK-COORDINATOR-REHEARSAL prerequisite is unmet by construction in this build (no
-// coordinator-routed rehearsal exists), so the mechanics rehearsal can never substitute for it.
+// TestCanaryRollbackCoordinatorRehearsal_ProductionFailsClosed proves the production seam certifies the
+// authoritative rollback rehearsal ONLY from durable coordinator-routed evidence: with no such evidence
+// (a fresh node — the shipped default, where no coordinator drill has run) it returns false for every
+// capability, so the mechanics rehearsal can never substitute for it. Both the locked and locking
+// accessors agree.
 func TestCanaryRollbackCoordinatorRehearsal_ProductionFailsClosed(t *testing.T) {
+	withTempDataDir(t) // no coordinator-rehearsal record on disk
+	_ = getMCPRollout()
+	prevR := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	t.Cleanup(func() { globalMCPRollout = prevR })
 	for _, capb := range []rollout.Capability{rollout.CapabilityGateway, rollout.CapabilityManagement} {
-		if productionCoordinatorRollbackRehearsed(capb) {
-			t.Fatalf("production must never certify the authoritative rollback rehearsal for %s", capb)
+		if productionCoordinatorRollbackRehearsed(globalMCPRollout, capb, false) {
+			t.Fatalf("production (locking) must not certify the rehearsal for %s with no durable evidence", capb)
+		}
+		if productionCoordinatorRollbackRehearsed(globalMCPRollout, capb, true) {
+			t.Fatalf("production (locked) must not certify the rehearsal for %s with no durable evidence", capb)
 		}
 	}
 	// The node dry-run must advertise the prerequisite in its full vocabulary even when everything is unmet.

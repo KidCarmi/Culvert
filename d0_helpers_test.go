@@ -192,7 +192,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 235 // 234 + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)
+	const want = 236 // 235 + 1 authoritative rollback rehearsal route (/api/mcp/rollout/rehearse-rollback-authoritative)
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
