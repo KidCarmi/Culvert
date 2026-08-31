@@ -3853,7 +3853,7 @@ Firefox (all platforms):
             How much of this node's TLS is actually being inspected right now, and why the rest is not.
             Coverage is <strong>inspected ÷ (inspected + bypass/exclusion)</strong> - decryption
             <em>failures</em> are counted separately (they are sessions to triage, not a deliberate coverage gap).
-            Counts are per-process since start; click any outcome or failure to see those sessions in the Live Feed.
+            Counts are per-process since start; click any outcome or failure to see those sessions in Traffic.
           </p>
           <div id="dechealth-coverage" style="margin:14px 0"></div>
           <div id="dechealth-bar" style="margin:14px 0"></div>
@@ -6004,7 +6004,7 @@ const viewMeta = {
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
   policylearn: { title: 'Policy Learning', meta: 'Advisory, node-local learning - observes traffic during an explicit session and proposes born-disabled Allow rules with evidence; cannot alter enforcement policy' },
   decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) - volatile, per-node, expiring; every entry reduces inspection coverage' },
-  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into the Live Feed' },
+  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into Traffic' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension - Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice - enrolled instances, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
