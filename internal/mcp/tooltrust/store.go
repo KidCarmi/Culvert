@@ -184,6 +184,16 @@ func (s *Store) Load() error {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file has trailing data")
 	}
 	if env.SchemaVersion != SchemaVersion {
+		// Name the pre-four-eyes-principal version explicitly. It is not corruption: the
+		// file was written correctly by an older build whose RequestedBy/ApprovedBy carry
+		// a client-controlled network coordinate, which the four-eyes comparison in
+		// Approve cannot trust. Failing closed here is the intended outcome — no trust is
+		// materialized and every decision is retaken — but an operator must be able to
+		// tell that from a damaged file, because the two call for opposite responses.
+		if env.SchemaVersion == schemaVersionPreFourEyesPrincipal {
+			return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load",
+				"store predates the four-eyes principal change; its approvals carry unattributable requester/approver identities and must be re-decided")
+		}
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "unknown store schema version")
 	}
 	// Enforce the configured TOTAL-record bound before publishing: a file with more records
@@ -433,6 +443,26 @@ func (s *Store) Approve(id, approver string, target CurrentTarget) (*ToolApprova
 		// fall through to the decision below
 	default:
 		return nil, terminalApproveErr(a.Status)
+	}
+	// Four-eyes (separation of duties). A tool-trust grant is a supply-chain trust
+	// decision that promotes a tool to catalog.Usable, so the human who ASKED for it may
+	// not be the human who GRANTS it — the same rule internal/mcp/approval has always
+	// enforced for operational/publication approvals, and the rule canary.EvaluateTrust
+	// already REQUIRES of this record (TrustNoFourEyes: RequestedBy == ApprovedBy).
+	//
+	// Until now that requirement was only OBSERVED, at Canary-readiness time, long after
+	// the grant had already taken effect: a self-approved approval still promoted the tool
+	// to Usable immediately and the gate merely refused Canary later. Enforcing it HERE
+	// makes the readiness fact a consequence of the decision boundary rather than a
+	// late audit of it, so a self-approved grant can never become effective at all.
+	//
+	// Checked on the pending→active transition only (mirroring approval.Store.Approve):
+	// the idempotent re-approve of an ALREADY-active grant above has, by construction,
+	// already passed this gate. An empty approver was rejected at entry, and an empty
+	// RequestedBy cannot reach here (RequestInput.validate requires it), so this can
+	// never collapse into "" == "".
+	if approver == a.RequestedBy {
+		return nil, mcperr.New(mcperr.ReasonApprovalSelfApproval, "tooltrust.approve", "requester may not approve own tool-trust request")
 	}
 	if !a.Purpose.Issuable() {
 		return nil, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "tooltrust.approve", "purpose not issuable")

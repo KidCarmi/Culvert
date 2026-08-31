@@ -238,6 +238,32 @@ func mcpMethodNotAllowed(w http.ResponseWriter) {
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
+// mcpFourEyesPrincipal resolves the caller's STABLE authenticated identity for a
+// separation-of-duty (four-eyes) record — the requester on a create, the approver /
+// rejecter / revoker on a decision. It writes a fail-closed error and reports ok=false
+// when no identity can be resolved.
+//
+// It is deliberately NOT auditActor: that value carries a client-controlled network
+// coordinate, and every four-eyes gate downstream (approval.Store.Approve's
+// `approver == requester`, canary.EvaluateTrust's `RequestedBy == ApprovedBy`) is a
+// plain string equality on it — so one human reads as two whenever the coordinate
+// differs. See approvalPrincipal (ui_rbac.go) for the full reasoning. auditActor
+// remains what the AUDIT ring records; only the four-eyes principal changes.
+//
+// Refusing an unattributable actor is the fail-closed half: before setup completes
+// uiAuthMiddleware grants RoleAdmin with no identity at all, and admitting that would
+// make every anonymous caller the SAME principal — a four-eyes gate that reads as
+// satisfied between two callers who are not two people.
+func mcpFourEyesPrincipal(w http.ResponseWriter, r *http.Request) (approval.PrincipalID, bool) {
+	p := approvalPrincipal(r)
+	if p == "" {
+		mcpErr(w, mcperr.New(mcperr.ReasonApprovalNotAuthorized, "mcp",
+			"no authenticated identity to attribute this decision to"))
+		return "", false
+	}
+	return approval.PrincipalID(p), true
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
@@ -598,7 +624,16 @@ func apiMCPPublications(w http.ResponseWriter, r *http.Request) {
 			mcpErr(w, mcperr.New(mcperr.ReasonAdminNotFound, "mcp", "publication unavailable"))
 			return
 		}
-		id, err := m.publication.Create(req.Capability, req.Tenant, approval.PrincipalID(auditActor(r)), req.Candidate, req.ExpectedBase)
+		// The requester is the STABLE authenticated identity, never auditActor's
+		// "<identity>@<clientIP>" — the four-eyes gate at decision time is a string
+		// equality against this value, and a network coordinate in it lets one human
+		// read as two (see approvalPrincipal, ui_rbac.go). Fail closed when no identity
+		// can be resolved: an unattributable request can never be four-eyes approved.
+		requester, ok := mcpFourEyesPrincipal(w, r)
+		if !ok {
+			return
+		}
+		id, err := m.publication.Create(req.Capability, req.Tenant, requester, req.Candidate, req.ExpectedBase)
 		if err != nil {
 			mcpErr(w, err)
 			return
@@ -644,7 +679,13 @@ func apiMCPPublicationDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := approval.ID(req.RequestID)
-	actor := approval.PrincipalID(auditActor(r))
+	// Four-eyes principal: the STABLE authenticated identity, never auditActor's
+	// "<identity>@<clientIP>" (see approvalPrincipal, ui_rbac.go). Fail closed when it
+	// cannot be resolved rather than deciding under an unattributable actor.
+	actor, ok := mcpFourEyesPrincipal(w, r)
+	if !ok {
+		return
+	}
 	switch req.Action {
 	case "approve":
 		rc, err := m.publication.Approve(id, actor, m.appCommit)
@@ -719,7 +760,13 @@ func apiMCPApprovalDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	m := getMCPAdmin()
 	id := approval.ID(req.RequestID)
-	actor := approval.PrincipalID(auditActor(r))
+	// Four-eyes principal: the STABLE authenticated identity, never auditActor's
+	// "<identity>@<clientIP>" (see approvalPrincipal, ui_rbac.go). Fail closed when it
+	// cannot be resolved rather than deciding under an unattributable actor.
+	actor, ok := mcpFourEyesPrincipal(w, r)
+	if !ok {
+		return
+	}
 	switch req.Action {
 	case "approve":
 		// Live revisions default to zero (operational approvals bind their own

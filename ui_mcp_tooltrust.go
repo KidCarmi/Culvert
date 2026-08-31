@@ -233,6 +233,15 @@ func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		mcpErr(w, err)
 		return
 	}
+	// RequestedBy is the STABLE authenticated identity, never auditActor's
+	// "<identity>@<clientIP>": it is one half of the four-eyes pair the approve
+	// boundary and canary.EvaluateTrust compare by string equality, and a network
+	// coordinate in it lets one human read as two (approvalPrincipal, ui_rbac.go).
+	// Fail closed on an unattributable requester.
+	requester, rok := mcpFourEyesPrincipal(w, r)
+	if !rok {
+		return
+	}
 	in := toolTrustRequestInput{
 		Tenant:              tenant,
 		ServerID:            body.ServerID,
@@ -240,7 +249,7 @@ func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		ExpectedFingerprint: body.Fingerprint,
 		ExpectedCatalogRev:  body.CatalogRevision,
 		Purpose:             purpose,
-		RequestedBy:         auditActor(r),
+		RequestedBy:         string(requester),
 		Reason:              body.Reason,
 		TicketRef:           body.TicketRef,
 		ExpiresAt:           expiresAt,
@@ -275,7 +284,15 @@ func apiMCPToolApprovalDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	actor := auditActor(r)
+	// The deciding principal is the STABLE authenticated identity (see
+	// mcpFourEyesPrincipal / approvalPrincipal): the store refuses an approve whose
+	// approver equals the recorded requester, and that comparison is only meaningful
+	// on an identity with no network coordinate in it. Fail closed when unresolvable.
+	decider, dok := mcpFourEyesPrincipal(w, r)
+	if !dok {
+		return
+	}
+	actor := string(decider)
 	switch body.Action {
 	case "approve":
 		a, err := mcpToolTrust.ApproveShadow(body.ApprovalID, actor, tenant)
