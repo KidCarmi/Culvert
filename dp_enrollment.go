@@ -57,6 +57,17 @@ func runEnrollment(enrollURLStr string) (*dpEnrollmentConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	// An enrollment URL with no ?ca-fp= parameter (a copy/paste mistake, a
+	// hand-typed URL, or a custom tool that built one) skips CA fingerprint
+	// verification entirely below — this connection is then indistinguishable
+	// from one to an impersonating Control Plane. That must never be silent:
+	// every other fail-open path in this codebase is counted/logged, and the
+	// success case here already prints "CA fingerprint verified ✓", so saying
+	// nothing in the opposite case reads as "nothing to report" rather than
+	// "verification was skipped".
+	if info.CAFingerprint == "" {
+		fmt.Printf("[Culvert] WARNING: enrollment URL has no ?ca-fp= parameter — the Control Plane's CA will NOT be verified. This connection is vulnerable to an on-path attacker (MITM). Re-generate the enrollment command from the CP admin UI, which always includes ca-fp.\n")
+	}
 	nodeID, _ := os.Hostname()
 	if nodeID == "" {
 		nodeID = "dp-node"
