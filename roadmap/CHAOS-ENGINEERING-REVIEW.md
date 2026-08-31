@@ -2912,9 +2912,24 @@ relaxed:
    password" need opposite operator responses and are indistinguishable in an
    auth-failure count — the `ErrQueueFull` lesson from CHAOS-52, where a
    saturated scanner was reported as a broken daemon.
-4. **The cap is ABSOLUTE, not proportional** (`authVerifyMaxSlots` = 4). A
-   proportional cap leaves the data plane starved on exactly the large hosts
-   this appliance ships to: half of 32 cores is still 16 cores of bcrypt.
+4. **The gate RESERVES CPU, it does not merely CAP it** (`authVerifySlotsFor`:
+   at most HALF the host's CPUs, hard capped at `authVerifyMaxSlots` = 4,
+   floored at 1 — 1→1, 2→1, 4→2, 8→4, 32→4). Both halves are load-bearing and
+   **neither alone is a bound**, which review caught the hard way: the first
+   shipped shape was `min(GOMAXPROCS, 4)`, and on the very 4-core box these
+   measurements come from that is FOUR slots — 100% of the machine, i.e.
+   precisely the saturation the gate exists to prevent, with the semaphore
+   beginning to refuse only once the data plane was *already* starved. A pure
+   fraction is wrong the other way: half of 32 cores is still 16 cores of
+   bcrypt. The single-CPU floor of 1 is a recorded degeneration — a zero-slot
+   gate fails EVERY authentication closed, which is worse than the exhaustion it
+   bounds — and the Go scheduler's preemption is all that separates them there.
+
+   The gate is pinned as **headroom, not a table**
+   (`TestChaos57_SlotSizingReservesCPUForTheDataPlane`: for every core count,
+   `slots < procs` AND `slots <= procs/2` AND `slots <= authVerifyMaxSlots`), so
+   it keeps holding if the constants are retuned. Verified failing against the
+   cap-only shape.
 
 Alongside it, in `store.go`:
 
@@ -2950,7 +2965,7 @@ the two call for opposite actions.
 
 ### 25.7 Gates
 
-`auth_verify_cost_chaos_test.go` (11), split by what each can honestly claim:
+`auth_verify_cost_chaos_test.go` (12), split by what each can honestly claim:
 
 - **Five DEFECT gates, each verified FAILING** against the pre-fix tree
   (reconstructed by restoring the uncached wrong-username early return and
@@ -2958,6 +2973,9 @@ the two call for opposite actions.
   `SaturationDenialIsNotCached`, `FailureFloodCannotEvictAValidCredential`,
   `BothRejectionBranchesCacheIdentically`,
   `ProxyPathRepeatedBogusCredentialHashesOnce`.
+- **One DEFECT gate against the FIX ITSELF** — `SlotSizingReservesCPUForTheDataPlane`, verified failing against the
+  cap-only `min(GOMAXPROCS, 4)` sizing this PR originally shipped (see
+  §25.10).
 - **Four NEW-BEHAVIOUR gates** — the admission gate had no pre-fix counterpart,
   so they cannot fail against a tree that lacks it, and saying otherwise would
   overclaim.
@@ -3015,3 +3033,43 @@ and sat inside a **security fix**: the RISK-008 timing equaliser, added to close
 an enumeration oracle, was the uncached hash. A hardening measure became the
 amplifier, and the register's framing of the risk is what kept anyone from
 looking at it.
+
+### 25.10 Review follow-up — the bound that was not a bound
+
+Raised by Codex against the first push of this PR (#1280), P1, and correct.
+
+`defaultAuthVerifySlots` shipped as `min(GOMAXPROCS, authVerifyMaxSlots)`. On a
+host with four or fewer CPUs that returns one slot **per core** — so on the very
+4-core box every measurement in this section comes from, the gate permitted four
+concurrent bcrypts on four cores. That is 100% of the machine: the same ~54
+req/s still consumed everything, and the semaphore only began refusing *surplus*
+work once the data plane was already starved. The gate bounded the queue and not
+the thing it was written to bound.
+
+The mechanism is worth naming because it is not a typo — it is a **rule stated
+and then not applied to its own edge case**. Rule 4 said the cap was absolute
+"so the bound is on how much of the MACHINE credential hashing may consume", and
+the reasoning behind it was worked through entirely on the *large*-host case (32
+cores, where an absolute 4 is a genuine bound and a proportional cap would not
+be). The small-host case inverts it — an absolute 4 on a 4-core box is the whole
+machine — and was never checked, because the rule *sounded* like it had already
+settled the question.
+
+The fix reserves rather than caps: at most half the CPUs, still capped at 4,
+floored at 1. Both halves are now required, and the gate is written as
+**headroom** (`slots < procs`) rather than as an expected table, so retuning the
+constants cannot quietly reintroduce the same hole.
+
+Two things this adds to the sweep's own lessons:
+
+> A bound expressed as a constant is only a bound relative to something. "At
+> most 4" says nothing until you ask "out of how many?" — and the answer differs
+> at each end of the hardware range this appliance ships to. The three earlier
+> rules in this file each name what they are relative to; the fourth did not,
+> and that is exactly the one that was wrong.
+
+And, more uncomfortably: **the measurement that proved the defect was reused as
+if it also proved the fix.** "73.8 ms × 4 cores = the whole box" is what made the
+finding real, and the same arithmetic applied to the shipped gate would have
+shown it changed nothing on that host. Having the number was not the same as
+running it against the remedy.

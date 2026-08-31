@@ -46,11 +46,25 @@ credential authenticates immediately, with no TTL to wait out.
 | `culvert_auth_verify_inflight` | gauge | Hashes running right now. |
 | `culvert_auth_verify_slots` | gauge | The bound. `inflight` sitting at `slots` means the next arrival queues. |
 
+**How `slots` is sized.** Credential hashing is allowed at most **half** this
+host's CPUs, hard capped at 4 and floored at 1 — so a saturated gate always
+leaves the proxy data path something to run on:
+
+| CPUs | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| slots | 1 | 1 | 2 | 4 | 4 | 4 |
+
+It is not tunable, deliberately: the only use for an operator override would be
+widening the bound this exists to impose. On a **single-CPU** host the
+reservation degenerates — one slot is still one core — and nothing but the Go
+scheduler's preemption separates hashing from the data plane there. Give a node
+that authenticates local credentials at least two CPUs.
+
 **Log** — one line per 5 minutes while saturated, carrying the count suppressed
 since the last one:
 
 ```
-AUTH_VERIFY_SATURATED all 4 credential-hashing slots busy for 750ms; authentication is failing closed (suppressed=812 total=1043)
+AUTH_VERIFY_SATURATED all 2 credential-hashing slots busy for 750ms; authentication is failing closed (suppressed=812 total=1043)
 ```
 
 **Alert** — `auth_verify_saturated`, subscribable per webhook in

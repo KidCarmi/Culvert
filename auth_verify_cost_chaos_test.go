@@ -144,6 +144,55 @@ func TestChaos57_ControlIdleGateAdmits(t *testing.T) {
 	}
 }
 
+// ── DEFECT gate 2b: the gate must RESERVE CPU, not just cap it ───────────────
+//
+// The first shipped shape was min(GOMAXPROCS, authVerifyMaxSlots), which reads
+// like a bound and is not one on a small host: on a 4-core box — the very host
+// these measurements come from — it yielded FOUR slots, i.e. four concurrent
+// bcrypts on four cores, exactly the 100%-of-the-machine saturation the gate
+// exists to prevent. The semaphore would have begun refusing only after the
+// data plane was already starved (caught in review by Codex, PR #1280).
+//
+// The invariant is expressed as headroom rather than as a table lookup, so it
+// keeps holding if the constants are ever retuned.
+func TestChaos57_SlotSizingReservesCPUForTheDataPlane(t *testing.T) {
+	for _, procs := range []int{2, 3, 4, 6, 8, 12, 16, 32, 64, 128} {
+		slots := authVerifySlotsFor(procs)
+
+		if slots >= procs {
+			t.Errorf("procs=%d: %d slots leaves NO CPU for the data plane — "+
+				"a saturated gate would starve the proxy before it refused anything",
+				procs, slots)
+		}
+		if slots > procs/2 {
+			t.Errorf("procs=%d: %d slots exceeds half the machine (%d)", procs, slots, procs/2)
+		}
+		if slots > authVerifyMaxSlots {
+			t.Errorf("procs=%d: %d slots exceeds the absolute cap %d — hashing's share "+
+				"must not grow with the host", procs, slots, authVerifyMaxSlots)
+		}
+		if slots < 1 {
+			t.Errorf("procs=%d: %d slots — a zero-slot gate fails EVERY authentication "+
+				"closed, which is worse than the exhaustion it bounds", procs, slots)
+		}
+	}
+
+	// The single-CPU floor is a deliberate, recorded degeneration: there is no
+	// reservation to make, and refusing all authentication would be worse.
+	if got := authVerifySlotsFor(1); got != 1 {
+		t.Errorf("procs=1: got %d slots, want the floor of 1", got)
+	}
+	if got := authVerifySlotsFor(0); got != 1 { // defensive: GOMAXPROCS should never be 0
+		t.Errorf("procs=0: got %d slots, want the floor of 1", got)
+	}
+
+	// The specific regression: the measured 4-core host must not hand hashing
+	// the whole machine.
+	if got := authVerifySlotsFor(4); got != 2 {
+		t.Errorf("the 4-core host these measurements come from got %d slots, want 2", got)
+	}
+}
+
 // ── DEFECT gate 3: a saturation denial must not be remembered ────────────────
 //
 // CHAOS-57 rule 2, and the CHAOS-47 rule it inherits: only an AUTHORITATIVE

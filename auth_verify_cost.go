@@ -63,12 +63,15 @@ package main
 //     lesson from CHAOS-52, where a saturated scanner was reported as a broken
 //     daemon.
 //
-//  4. THE CAP IS ABSOLUTE, NOT PROPORTIONAL. Slots are capped at
-//     `authVerifyMaxSlots` rather than scaling with core count, so the bound is
-//     on how much of the MACHINE credential hashing may consume. A proportional
-//     cap (say, half the cores) leaves the data plane starved on exactly the
-//     large hosts this appliance ships to: half of 32 cores is still 16 cores
-//     of bcrypt.
+//  4. THE GATE RESERVES CPU, IT DOES NOT MERELY CAP IT. Slots are a FRACTION of
+//     the host's CPUs (at most half) AND hard capped at `authVerifyMaxSlots`,
+//     so a saturated gate always leaves the proxy data path something to run
+//     on. Both halves are load-bearing and neither alone is a bound: a pure cap
+//     of 4 is 100% of a 4-core box — the exact host these measurements come
+//     from — so the gate would only have begun refusing once the data plane was
+//     already starved; and a pure fraction hands hashing a growing absolute
+//     share, since half of 32 cores is still 16 cores of bcrypt. See
+//     `authVerifySlotsFor` for the table and the single-CPU residual.
 
 import (
 	"runtime"
@@ -134,20 +137,56 @@ func newAuthVerifyGate(slots int, budget time.Duration) *authVerifyGate {
 	return &authVerifyGate{sem: make(chan struct{}, slots), waitBudget: budget}
 }
 
-// defaultAuthVerifySlots sizes the gate for this host: one slot per core, so a
-// small node is not throttled below what it can actually run in parallel, hard
-// capped at authVerifyMaxSlots so a large node does not hand credential
-// hashing an unbounded share of itself.
-func defaultAuthVerifySlots() int {
-	n := runtime.GOMAXPROCS(0)
-	if n > authVerifyMaxSlots {
-		n = authVerifyMaxSlots
+// authVerifySlotsFor sizes the gate for a host with `procs` schedulable CPUs.
+//
+// It RESERVES CPU rather than merely capping it, and that distinction is the
+// whole point. The first shipped shape was `min(GOMAXPROCS, 4)`, which reads
+// like a bound and is not one on a small host: on the very 4-core box these
+// measurements come from it yields FOUR slots — four concurrent bcrypts on four
+// cores, i.e. exactly the 100%-of-the-machine saturation this file exists to
+// prevent. The semaphore would have started refusing work only once the data
+// plane was already starved, which is the wrong side of the bound to defend
+// (caught in review by Codex on PR #1280).
+//
+// So the policy is a FRACTION of the machine, floored and capped:
+//
+//		procs:   1    2    3    4    6    8   16   32
+//		slots:   1    1    1    2    3    4    4    4
+//
+//	  - At most HALF the CPUs, so a saturated gate always leaves the proxy data
+//	    path something to run on. Credential hashing is pure CPU with no I/O to
+//	    yield on, so an unreserved core is not a theoretical nicety.
+//	  - Hard capped at authVerifyMaxSlots so a large host does not hand hashing a
+//	    growing absolute share — half of 32 cores would still be 16 cores of
+//	    bcrypt.
+//	  - Never zero. A gate with no slots fails EVERY authentication closed, which
+//	    is a far worse outage than the exhaustion this bounds. On a single-CPU
+//	    host one slot is therefore unavoidable and the reservation degenerates;
+//	    the Go scheduler's preemption is all that separates them there, and that
+//	    is recorded as the residual rather than papered over.
+//
+// The legitimate load this must not throttle is small by construction: the
+// local-credential path serves ONE account, and a successful verification is
+// cached for authCacheTTL, so even two slots is ~27 uncached verifications per
+// second — orders of magnitude above the real rate.
+func authVerifySlotsFor(procs int) int {
+	if procs < 1 {
+		procs = 1
 	}
-	if n < 1 {
-		n = 1
+	slots := procs / 2
+	if slots > authVerifyMaxSlots {
+		slots = authVerifyMaxSlots
 	}
-	return n
+	if slots < 1 {
+		slots = 1
+	}
+	return slots
 }
+
+// defaultAuthVerifySlots sizes the gate for this host. Split from
+// authVerifySlotsFor so the policy is testable across core counts without
+// mutating GOMAXPROCS out from under a running test binary.
+func defaultAuthVerifySlots() int { return authVerifySlotsFor(runtime.GOMAXPROCS(0)) }
 
 // authVerifyGateSingleton is the process-wide gate. Swapped only by
 // swapAuthVerifyGate (tests).
