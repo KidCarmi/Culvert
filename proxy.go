@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -664,11 +663,13 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		if match.Rule.LogFullURI {
 			ruleURI = policyLogURI(r.Host, r.URL.Path)
 		}
+		// Each branch below emits its decision line through one of the
+		// logPolicy* helpers (see below the function) rather than inline.
 		switch match.Action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", ruleURI, authLog)
-			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logPolicyDrop(match.Rule.Name, match.Rule.Priority, clientIP, host, match.MatchedConditions, reqID, authenticatedIdentity)
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
 				if conn, _, err := hj.Hijack(); err == nil && conn != nil {
@@ -686,7 +687,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
-			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logPolicyBlock(match.Rule.Name, match.Rule.Priority, clientIP, host, match.MatchedConditions, reqID, authenticatedIdentity)
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return "POLICY_BLOCK", true
 
@@ -698,7 +699,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return "POLICY_REDIRECT", true
 			}
-			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logPolicyRedirect(match.Rule.Name, match.Rule.Priority, clientIP, host, match.Rule.RedirectURL, match.MatchedConditions, reqID, authenticatedIdentity)
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound) // #nosec G710 -- admin-configured rule action target; the isSafeRedirectURL guard above blocks unsafe values
 			return "POLICY_REDIRECT", true
 
@@ -725,7 +726,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 				// write no feed/history entry (volume control).
 				recordStats(clientIP, r.Host, "OK", match.Rule.Name, string(ActionAllow))
 			}
-			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			logPolicyAllow(match.Rule.Name, match.Rule.Priority, clientIP, r.Method, r.Host, match.MatchedConditions, reqID, authenticatedIdentity)
 			// Fall through to normal handling below.
 		}
 	} else {
@@ -746,6 +747,73 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		return "POLICY_DEFAULT_DENY", true
 	}
 	return "OK", false
+}
+
+// ── Policy decision lines ───────────────────────────────────────────────────
+//
+// applyPolicyDecision emits exactly ONE of these per proxied request, so they
+// sit on the hot path and their argument construction is the largest single
+// allocator in the dispatch pipeline outside the upstream round trip.
+//
+// They are named functions rather than inline logger.Printf calls for two
+// reasons. The argument lists are long enough to bury the dispatch logic they
+// sat in. And the allocation gate (TestBenchGate_PolicyDecisionLineAllocs) can
+// now measure the PRODUCTION construction instead of a copy of it — a gate that
+// measures a replica cannot fail for the regression it names, so a later change
+// that reintroduced a per-request allocation here would have left it green
+// (Codex review, PR #1256).
+//
+// Two contracts they share, both of which the gate enforces:
+//
+//   - The rule name is sanitized ONCE and used for both the leading rule=%q and
+//     the trailing rule=%s. sanitizeLog scans the whole string, so naming the
+//     rule twice on one line used to pay that scan twice per request for one
+//     value. Taking the RAW name as the parameter is deliberate: it puts the
+//     sanitize-once decision inside the measured function, where reintroducing
+//     a second call fails the gate.
+//
+//   - The priority is rendered with %d. It was previously spelled
+//     strings.ReplaceAll(fmt.Sprintf("%d", …), "\n", ""), which formatted an int
+//     to a string and then scanned that string for newlines a decimal integer
+//     cannot contain — two heap allocations per proxied request (the Sprintf
+//     result, then boxing that result back into the Printf argument list) for a
+//     no-op. This is NOT the CWE-117 idiom the code conventions require: that
+//     rule covers STRING values reaching a log sink, whereas Priority is an int
+//     field of the admin-configured rulebase, carries no client-controlled data,
+//     and %d on an int can only ever emit [-0-9]. The rendered digits are
+//     identical either way, so the emitted line is byte-for-byte what it was
+//     (pinned by TestPolicyDecisionLine_RenderIsByteIdentical). Every
+//     genuinely string-typed argument still goes through sanitizeLog.
+
+// logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
+// authority as the client sent it), not the port-stripped host the block
+// branches log — preserved from the pre-extraction call sites verbatim.
+func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}",
+		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+// logPolicyDrop emits the POLICY_DROP decision line.
+func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}",
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+// logPolicyBlock emits the POLICY_BLOCK decision line.
+func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}",
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+// logPolicyRedirect emits the POLICY_REDIRECT decision line. Reached only after
+// isSafeRedirectURL has accepted redirectURL.
+func logPolicyRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}",
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:
