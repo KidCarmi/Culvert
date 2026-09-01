@@ -21,16 +21,16 @@ package main
 // ACROSS CORE COUNTS, not at one. RWMutex cannot help a path that mutates, so
 // the flat result said nothing about the bound; and the shared cache line is
 // only inherent while the counter stays shared. Sharding the current minute
-// (2026-09, store.go) took tsRecordResult from 172.6 → 38.7 ns/op at
-// GOMAXPROCS=4 with no cost at GOMAXPROCS=1, and the full recordStats fan-out
-// from 275.8 → 131.6 ns/op. The ceiling, not the constant, is the thing these
-// benchmarks exist to expose:
+// (2026-09, store.go) took tsRecordResult from 172.6 → 36.1 ns/op at
+// GOMAXPROCS=4 and the full recordStats fan-out from 275.8 → 131.2 ns/op, with
+// one core coming out ahead too. The ceiling, not the constant, is the thing
+// these benchmarks exist to expose:
 //
-//	                        │ -cpu=1 │ -cpu=2 │ -cpu=4 │
-//	tsRecordResult   before │  87.4  │   —    │ 172.6  │  cores SUBTRACTED throughput
-//	tsRecordResult    after │  87.6  │  66.3  │  38.7  │
-//	recordStats      before │ 142.9  │   —    │ 275.8  │
-//	recordStats       after │ 136.4  │ 163.9  │ 131.6  │
+//	                        │ -cpu=1 │ -cpu=4 │
+//	tsRecordResult   before │  87.4  │ 172.6  │  cores SUBTRACTED throughput
+//	tsRecordResult    after │  78.6  │  36.1  │
+//	recordStats      before │ 142.9  │ 275.8  │
+//	recordStats       after │ 130.0  │ 131.2  │
 //
 // Run locally:
 //   go test -run '^$' -bench 'BenchmarkTopHosts|BenchmarkTSRecord|BenchmarkRecordStats' -benchmem -cpu=1,2,4 .

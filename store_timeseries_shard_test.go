@@ -135,6 +135,95 @@ func TestTimeSeries_ConservedAcrossRollover(t *testing.T) {
 	}
 }
 
+// TestTimeSeries_PerBucketVerdictsStayConsistent is the gate for the defect
+// Codex found on PR #1286, and it is the one the window-sum tests above cannot
+// see. /api/timeseries hands the dashboard three parallel arrays, so the
+// invariant is PER BUCKET (allowed[i]+blocked[i] == buckets[i]), not just over
+// the window. With a separate total/allowed/blocked triple the writer took two
+// independent adds and the fold three independent swaps, so a fold landing
+// between a writer's two adds banked its total in the old bucket and its
+// verdict in the new one — a permanent per-bucket mismatch that conserved the
+// window total perfectly.
+//
+// Folds are driven underneath running writers so the interleave is actually
+// exercised; the assertion is structural, so it does not depend on hitting a
+// particular schedule.
+func TestTimeSeries_PerBucketVerdictsStayConsistent(t *testing.T) {
+	withFreshTimeSeries(t)
+
+	const writers, rollovers = 4, 20
+	var recorded atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			i := 0
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				tsRecordResult(i%3 != 0) // a mixed allow/block stream
+				recorded.Add(1)
+				i++
+			}
+		}(w)
+	}
+
+	base := time.Now().Unix() / 60
+	for k := 1; k <= rollovers; k++ {
+		time.Sleep(time.Millisecond)
+		ts.rollover(base + int64(k))
+	}
+	close(stop)
+	wg.Wait()
+
+	ts.mu.Lock()
+	ts.foldLiveLocked()
+	var total int64
+	for i := range ts.buckets {
+		if got, want := ts.allowed[i]+ts.blocked[i], ts.buckets[i]; got != want {
+			ts.mu.Unlock()
+			t.Fatalf("bucket %d: allowed+blocked = %d, buckets = %d — a request's total and verdict "+
+				"were drained into different minutes", i, got, want)
+		}
+		total += ts.buckets[i]
+	}
+	ts.mu.Unlock()
+
+	if want := recorded.Load(); total != want {
+		t.Errorf("total = %d, want %d", total, want)
+	}
+}
+
+// TestTimeSeries_PlainAndVerdictRecordsBothCount pins that the unverdicted
+// counter (tsRecord) still contributes to the request total while adding to
+// neither verdict array — the one case where allowed+blocked < buckets is
+// correct.
+func TestTimeSeries_PlainAndVerdictRecordsBothCount(t *testing.T) {
+	withFreshTimeSeries(t)
+
+	for i := 0; i < 5; i++ {
+		tsRecord()
+	}
+	for i := 0; i < 3; i++ {
+		tsRecordResult(true)
+	}
+	tsRecordResult(false)
+
+	total, allowed, blocked := tsWindowTotals()
+	if total != 9 {
+		t.Errorf("total = %d, want 9 (5 unverdicted + 4 with a verdict)", total)
+	}
+	if allowed != 3 || blocked != 1 {
+		t.Errorf("allowed/blocked = %d/%d, want 3/1", allowed, blocked)
+	}
+}
+
 // TestTimeSeries_ReadDoesNotDrain pins that tsGet is side-effect-free. The live
 // shards are summed in, not swapped out — if a read drained them the dashboard
 // would report traffic once and then show zero on the very next poll.
@@ -283,7 +372,7 @@ func TestTimeSeriesShards_DistributionIsNotDegenerate(t *testing.T) {
 		used = 0
 		ts.mu.Lock()
 		for i := range ts.live {
-			if ts.live[i].total > 0 {
+			if ts.live[i].verdicts != 0 || ts.live[i].plain != 0 {
 				used++
 			}
 		}

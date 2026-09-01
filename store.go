@@ -86,13 +86,13 @@ var (
 // the old ceiling, and the gap widens on the 16- and 32-core hardware this
 // ships to.
 //
-// In this tree rather than the model, at GOMAXPROCS 1 / 4 (n=6):
-// BenchmarkTSRecordResultParallel 87.4 / 172.6 -> 87.6 / 38.7, and the whole
+// In this tree rather than the model, at GOMAXPROCS 1 / 4 (n=5):
+// BenchmarkTSRecordResultParallel 87.4 / 172.6 -> 78.6 / 36.1, and the whole
 // per-request stats fan-out, BenchmarkRecordStatsAllowedParallel, 142.9 /
-// 275.8 -> 136.4 / 131.6. The model's ~0.4 ns cost of picking a shard is the
-// honest price at one core; measured end to end it is inside the noise, and
-// recordStats came out slightly AHEAD there because dropping the lock/unlock
-// pair more than pays for it. So there is no low-concurrency price to trade.
+// 275.8 -> 130.0 / 131.2. There is no low-concurrency price to trade: one core
+// came out AHEAD too, because dropping the lock/unlock pair and collapsing the
+// verdict pair into a single atomic add (see tsLiveShard) together cost less
+// than picking a shard.
 //
 // Only the CURRENT minute is hot, so only it is sharded: the 60-bucket ring is
 // untouched and still mutex-guarded. Requests accumulate into `live`, and a
@@ -121,11 +121,44 @@ const (
 )
 
 // tsLiveShard is one padded slice of the current minute's counters.
+//
+// A request's counters live in ONE word, and that is a correctness requirement,
+// not a packing trick. With a separate total/allowed/blocked triple the writer
+// took two independent atomic adds and the fold three independent swaps, so a
+// fold landing between a writer's two adds banked its total in the OLD bucket
+// and its verdict in the NEW one. Whole-window conservation still held — which
+// is exactly why the window-sum tests passed — but the per-bucket invariant
+// allowed[i]+blocked[i] == buckets[i] was permanently broken for every request
+// in flight across a minute rollover, and /api/timeseries hands those three
+// arrays straight to the dashboard. (Codex review, PR #1286.)
+//
+// So the allow/block pair is packed into one word — allowed in the high 32
+// bits, blocked in the low 32 — and a verdict is a SINGLE atomic add. Requests
+// recorded without a verdict (tsRecord) get their own word. Each writer touches
+// exactly one of the two, so no request can be drained apart, and the fold's
+// two swaps are independent by construction rather than by luck.
+//
+// The 32-bit halves bound one shard's traffic between two folds, i.e. one
+// wall-clock minute: 4.29e9 requests on a single shard, which at 64 shards is
+// ~4.6 billion requests/second process-wide. That is not reachable on any
+// hardware this runs on, and the fold interval does not grow when traffic
+// stops (an idle shard accumulates nothing).
 type tsLiveShard struct {
-	total   int64
-	allowed int64
-	blocked int64
-	_       [tsCacheLine - 24]byte
+	verdicts int64 // allowed<<32 | blocked
+	plain    int64 // recorded without a verdict (tsRecord)
+	_        [tsCacheLine - 16]byte
+}
+
+const (
+	tsAllowedUnit int64 = 1 << 32   // one allowed request, added to verdicts
+	tsBlockedUnit int64 = 1         // one blocked request, added to verdicts
+	tsBlockedMask int64 = 1<<32 - 1 // low half of a packed verdicts word
+)
+
+// split decomposes a packed verdicts word. Both halves are non-negative, so
+// the shift and mask stay plain int64 arithmetic — no conversions.
+func tsSplitVerdicts(v int64) (allowed, blocked int64) {
+	return v >> 32, v & tsBlockedMask
 }
 
 type timeSeries struct {
@@ -167,22 +200,23 @@ func tsRecord() { ts.record(false, false) }
 // tsRecordResult counts a request and its allow/block verdict.
 func tsRecordResult(isAllowed bool) { ts.record(true, isAllowed) }
 
-// record is the per-request hot path: one clock read, one atomic load, and two
-// or three atomic adds against a shard nobody else is likely to be touching.
+// record is the per-request hot path: one clock read, one atomic load, and
+// exactly ONE atomic add against a shard nobody else is likely to be touching.
+// The single add is what keeps a request's counters in one bucket — see the
+// tsLiveShard comment.
 func (t *timeSeries) record(withVerdict, isAllowed bool) {
 	now := time.Now().Unix() / 60
 	if t.liveMin.Load() != now {
 		t.rollover(now)
 	}
 	s := &t.live[tsShardIndex()]
-	atomic.AddInt64(&s.total, 1)
-	if !withVerdict {
-		return
-	}
-	if isAllowed {
-		atomic.AddInt64(&s.allowed, 1)
-	} else {
-		atomic.AddInt64(&s.blocked, 1)
+	switch {
+	case !withVerdict:
+		atomic.AddInt64(&s.plain, 1)
+	case isAllowed:
+		atomic.AddInt64(&s.verdicts, tsAllowedUnit)
+	default:
+		atomic.AddInt64(&s.verdicts, tsBlockedUnit)
 	}
 }
 
@@ -202,13 +236,17 @@ func (t *timeSeries) rollover(now int64) {
 
 // foldLiveLocked drains every shard into the CURRENT bucket. The swap-to-zero
 // is what makes conservation hold: an increment that arrives after the swap is
-// simply carried into the next fold instead of being overwritten.
+// simply carried into the next fold instead of being overwritten. The two
+// swaps are safe to take independently because no single request writes both
+// words — see the tsLiveShard comment.
 func (t *timeSeries) foldLiveLocked() {
 	for i := range t.live {
 		s := &t.live[i]
-		t.buckets[t.cur] += atomic.SwapInt64(&s.total, 0)
-		t.allowed[t.cur] += atomic.SwapInt64(&s.allowed, 0)
-		t.blocked[t.cur] += atomic.SwapInt64(&s.blocked, 0)
+		allowed, blocked := tsSplitVerdicts(atomic.SwapInt64(&s.verdicts, 0))
+		plain := atomic.SwapInt64(&s.plain, 0)
+		t.allowed[t.cur] += allowed
+		t.blocked[t.cur] += blocked
+		t.buckets[t.cur] += allowed + blocked + plain
 	}
 }
 
@@ -255,9 +293,10 @@ func tsGet() (total, allowed, blocked []int64) {
 	}
 	for i := range ts.live {
 		s := &ts.live[i]
-		total[59] += atomic.LoadInt64(&s.total)
-		allowed[59] += atomic.LoadInt64(&s.allowed)
-		blocked[59] += atomic.LoadInt64(&s.blocked)
+		a, b := tsSplitVerdicts(atomic.LoadInt64(&s.verdicts))
+		allowed[59] += a
+		blocked[59] += b
+		total[59] += a + b + atomic.LoadInt64(&s.plain)
 	}
 	return
 }
