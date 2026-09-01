@@ -183,6 +183,19 @@ func TestChaos57_WebSocketTunnelIsVisibleToTheDrain(t *testing.T) {
 	if got := atomic.LoadInt64(&tunnelClassActive[tunnelClassWebSocket]); got != 1 {
 		t.Errorf("culvert_tunnels_active{class=websocket} = %d, want 1", got)
 	}
+
+	// Tear the tunnel down and WAIT for the relay to actually release before the
+	// test returns. This is not tidiness — it is the determinism contract. The
+	// relay releases on its own goroutine some time after the client conn closes,
+	// so without this wait `isolateDrainRegistry`'s cleanup can zero activeConns
+	// FIRST and the late release then decrements it to -1. A negative activeConns
+	// makes `active <= 0` true for every later test, so the next test that expects
+	// the drain to WAIT would see it return immediately — this test would silently
+	// break a different one, and only under `-shuffle=on`.
+	_ = conn.Close()
+	if !waitForActiveConnsZero(t, 5*time.Second) {
+		t.Fatalf("WebSocket tunnel did not release after the client closed (activeConns = %d)", getActiveConns())
+	}
 }
 
 // TestChaos57_SeveredTunnelStillRecordsItsAccounting is the data-integrity gate, and
@@ -536,6 +549,22 @@ func TestChaos57_BreakdownFormatting(t *testing.T) {
 	if got, want := formatTunnelClassBreakdown(mixed), "websocket=3, socks5=12"; got != want {
 		t.Errorf("breakdown = %q, want %q", got, want)
 	}
+}
+
+// waitForActiveConnsZero polls until activeConns drains to zero. Any test that leaves
+// a tunnel to be released by a goroutine it does not join MUST call this before
+// returning, or its late release lands after the registry reset and drives the gauge
+// negative for every test that follows.
+func waitForActiveConnsZero(t *testing.T, within time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if getActiveConns() <= 0 {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
 }
 
 // waitForActiveConns polls until activeConns reaches at least want, or the deadline
