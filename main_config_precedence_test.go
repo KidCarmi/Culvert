@@ -151,6 +151,78 @@ func TestValidatePortCollisions_DisabledSOCKS5Ignored(t *testing.T) {
 	}
 }
 
+// ── Port-range validation (validatePortRanges) ───────────────────────────────
+//
+// config.yaml's proxy.port/ui_port/socks5_port are range-checked by
+// FileConfig.validateLimits (config.go) — but that check runs on the raw
+// YAML fields BEFORE CLI-flag overrides are merged in loadFileConfigAndFlags
+// (main.go), and a value that reaches loadFileConfigAndFlags only via a CLI
+// flag (e.g. -port on a hand-edited docker-compose.yml `command:` override,
+// or a systemd ExecStart line) never passes through validateLimits at all.
+// The resolved value then flows straight to
+// http.Server{Addr: fmt.Sprintf(":%d", s.pPort)} with no gate in between, so
+// an out-of-range CLI port (e.g. -port 99999 or -port -1) was previously
+// caught only much later, inside ListenAndServe's own error return — after
+// the admin UI server has already started (startAdminUI runs before
+// buildAndStartProxyServer in main's boot sequence) — with a bare
+// OS-level "listen tcp: address :-1: invalid port" instead of a clear,
+// immediate startup error naming the bad flag. validatePortRanges closes
+// that gap the same way validatePortCollisions closes the collision gap:
+// it runs on the RESOLVED values in loadFileConfigAndFlags, so both the
+// YAML and CLI paths are checked identically regardless of which one
+// supplied the value.
+
+func TestValidatePortRanges_AllValid(t *testing.T) {
+	if err := validatePortRanges(8080, 9090, 1080); err != nil {
+		t.Errorf("expected no error for in-range ports, got: %v", err)
+	}
+}
+
+func TestValidatePortRanges_Boundaries(t *testing.T) {
+	if err := validatePortRanges(1, 65535, 0); err != nil {
+		t.Errorf("expected no error at the valid boundaries 1 and 65535, got: %v", err)
+	}
+}
+
+func TestValidatePortRanges_ProxyPortNegative(t *testing.T) {
+	err := validatePortRanges(-1, 9090, 0)
+	if err == nil {
+		t.Fatal("expected an error for a negative proxy port, got nil")
+	}
+	if !strings.Contains(err.Error(), "proxy port") {
+		t.Errorf("expected the error to name the proxy port, got: %v", err)
+	}
+}
+
+func TestValidatePortRanges_UIPortTooLarge(t *testing.T) {
+	err := validatePortRanges(8080, 65536, 0)
+	if err == nil {
+		t.Fatal("expected an error for a UI port above 65535, got nil")
+	}
+	if !strings.Contains(err.Error(), "UI port") {
+		t.Errorf("expected the error to name the UI port, got: %v", err)
+	}
+}
+
+func TestValidatePortRanges_SOCKS5PortOutOfRange(t *testing.T) {
+	err := validatePortRanges(8080, 9090, 99999)
+	if err == nil {
+		t.Fatal("expected an error for a SOCKS5 port above 65535, got nil")
+	}
+	if !strings.Contains(err.Error(), "SOCKS5 port") {
+		t.Errorf("expected the error to name the SOCKS5 port, got: %v", err)
+	}
+}
+
+// TestValidatePortRanges_DisabledSOCKS5Ignored proves SOCKS5's documented
+// "disabled" sentinel (0) is never treated as out-of-range, matching
+// validatePortCollisions's handling of the same sentinel.
+func TestValidatePortRanges_DisabledSOCKS5Ignored(t *testing.T) {
+	if err := validatePortRanges(8080, 9090, 0); err != nil {
+		t.Errorf("expected no error with SOCKS5 port disabled (0), got: %v", err)
+	}
+}
+
 // TestLoadFileConfigAndFlags_PortCollision_ResolvedByCLIOverride proves the
 // false-positive the raw-field check would have produced: config.yaml sets
 // proxy.port and proxy.ui_port to the SAME value, but a CLI -ui-port flag

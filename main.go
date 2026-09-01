@@ -522,6 +522,9 @@ func loadFileConfigAndFlags(s *startupState) {
 	// 8080 too). Must run before any of the three listeners bind, so a
 	// collision fails fast here instead of deep into startup with a bare
 	// OS-level "listen tcp :N: bind: address already in use".
+	if err := validatePortRanges(s.pPort, s.uPort, s.socks5PortVal); err != nil {
+		log.Fatalf("Invalid port configuration: %v", err)
+	}
 	if err := validatePortCollisions(s.pPort, s.uPort, s.socks5PortVal); err != nil {
 		log.Fatalf("Invalid port configuration: %v", err)
 	}
@@ -1185,6 +1188,40 @@ func firstNonZero(vals ...int) int {
 		}
 	}
 	return 0
+}
+
+// validatePortRanges checks the three RESOLVED listener ports (proxy, admin
+// UI, SOCKS5 — already merged through firstNonZero(CLI, config.yaml,
+// default)) fall within the valid TCP port range 1-65535.
+// config.yaml's proxy.port/ui_port/socks5_port are range-checked by
+// FileConfig.validateLimits, but that check runs on the raw YAML fields
+// BEFORE CLI-flag overrides are merged in loadFileConfigAndFlags — a value
+// that reaches this function only via a CLI flag never passes through
+// validateLimits at all, and previously flowed straight to
+// http.Server{Addr: fmt.Sprintf(":%d", port)} unchecked, surfacing only as
+// a bare ListenAndServe error well into startup (after the admin UI is
+// already listening). Checking here, on the resolved values, closes that
+// gap for both the YAML and CLI paths identically — mirrors
+// validatePortCollisions's resolved-value approach and SOCKS5-disabled
+// exemption.
+func validatePortRanges(proxyPort, uiPort, socks5Port int) error {
+	named := []struct {
+		name string
+		port int
+	}{
+		{"proxy port", proxyPort},
+		{"UI port", uiPort},
+		{"SOCKS5 port", socks5Port},
+	}
+	for _, n := range named {
+		if n.port == 0 {
+			continue
+		}
+		if n.port < 1 || n.port > 65535 {
+			return fmt.Errorf("%s must be 1-65535, got %d", n.name, n.port)
+		}
+	}
+	return nil
 }
 
 // validatePortCollisions checks the three RESOLVED listener ports (proxy,
