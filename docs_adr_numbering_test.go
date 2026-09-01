@@ -2,13 +2,67 @@ package main
 
 import (
 	"bufio"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
+
+// adrHeaderRE matches a Markdown file's own self-declared ADR title (a
+// level-1 heading). A body citation of another decision's number (e.g.
+// "Relates to ADR-0016") never starts a line with "# ", so it is never
+// mistaken for a self-declaration.
+var adrHeaderRE = regexp.MustCompile(`^#\s*ADR-(\d{4})\b`)
+
+// scanADRHeaders walks docs/ through a root-scoped, symlink-TOCTOU-safe
+// os.Root (rather than raw path strings re-joined after WalkDir hands them
+// back — the gosec G122 concern) and returns, for every Markdown file, the
+// ADR number it self-declares in its own first matching heading (if any).
+// claimants maps an ADR number to every file that declares it; fileCount is
+// the number of files with at least one such heading.
+func scanADRHeaders(t *testing.T) (claimants map[string][]string, fileCount int) {
+	t.Helper()
+
+	root, err := os.OpenRoot("docs")
+	if err != nil {
+		t.Fatalf("opening docs/ as a scoped root: %v", err)
+	}
+	defer root.Close()
+
+	claimants = map[string][]string{}
+	err = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		f, ferr := root.Open(path)
+		if ferr != nil {
+			return ferr
+		}
+		defer f.Close()
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			m := adrHeaderRE.FindStringSubmatch(strings.TrimSpace(scanner.Text()))
+			if m == nil {
+				continue
+			}
+			num := m[1]
+			claimants[num] = append(claimants[num], "docs/"+path)
+			fileCount++
+			break // only the file's own declared title counts
+		}
+		return scanner.Err()
+	})
+	if err != nil {
+		t.Fatalf("walking docs/ for ADR headers: %v", err)
+	}
+	return claimants, fileCount
+}
 
 // TestDocsADRNumberingIsUnique guards against the recurring "ADR-number
 // collision" defect class documented in docs/engineering/
@@ -25,43 +79,9 @@ import (
 // (docs/adr/ for accepted architecture decisions; docs/support/rfc/ also
 // self-titles this way for not-yet-adopted proposals sharing the same
 // numbering space, per the T-16/T-46/T-47/T-48 history) and fails if any
-// four-digit number is claimed by more than one file. Only the header line
-// counts — a body citation of another decision's number (e.g. "Relates to
-// ADR-0016") is prose, not a self-declaration, and must not be mistaken for
-// one.
+// four-digit number is claimed by more than one file.
 func TestDocsADRNumberingIsUnique(t *testing.T) {
-	headerRE := regexp.MustCompile(`^#\s*ADR-([0-9]{4})\b`)
-
-	claimants := map[string][]string{} // ADR number -> declaring file paths
-	err := filepath.WalkDir("docs", func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			m := headerRE.FindStringSubmatch(line)
-			if m == nil {
-				continue
-			}
-			num := m[1]
-			claimants[num] = append(claimants[num], path)
-			break // only the file's own declared title counts
-		}
-		return scanner.Err()
-	})
-	if err != nil {
-		t.Fatalf("walking docs/ for ADR headers: %v", err)
-	}
+	claimants, _ := scanADRHeaders(t)
 
 	var numbers []string
 	for num := range claimants {
@@ -89,36 +109,11 @@ func TestDocsADRNumberingIsUnique(t *testing.T) {
 // silently breaks the `# ADR-NNNN` convention doesn't make
 // TestDocsADRNumberingIsUnique pass vacuously.
 func TestDocsADRNumberingHeaderFormat(t *testing.T) {
-	headerRE := regexp.MustCompile(`^#\s*ADR-([0-9]{4})\b`)
-	count := 0
-	err := filepath.WalkDir("docs", func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-		f, ferr := os.Open(path)
-		if ferr != nil {
-			return ferr
-		}
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			if headerRE.MatchString(strings.TrimSpace(scanner.Text())) {
-				count++
-				break
-			}
-		}
-		return scanner.Err()
-	})
-	if err != nil {
-		t.Fatalf("walking docs/ for ADR headers: %v", err)
-	}
+	_, fileCount := scanADRHeaders(t)
 	const minExpected = 30 // well below the current count; guards against a scanner regression, not a headcount
-	if count < minExpected {
+	if fileCount < minExpected {
 		t.Fatalf("found only %d files with a `# ADR-NNNN` header, expected at least %d — "+
 			"the header convention may have changed and TestDocsADRNumberingIsUnique would pass vacuously",
-			count, minExpected)
+			fileCount, minExpected)
 	}
 }
