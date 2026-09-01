@@ -281,3 +281,48 @@ func TestAPINetworkSettings_SurfacesCustomCertCorrupt(t *testing.T) {
 		t.Error("ui_custom_cert_corrupt should be true so the GUI can warn that a restart will not help, instead of telling the admin to restart")
 	}
 }
+
+// TestAPICertsUpload_UI_ClearsCorruptLatch is the regression test for a
+// review finding on this same PR: uiCustomTLSCorrupt is a process-wide latch
+// set once at boot when resolveUITLSCertKey finds a mismatched persisted
+// pair. Before this fix, a successful re-upload of a VALID replacement
+// pair (the exact recovery action the corrupt-state warning tells the admin
+// to take) persisted the new pair but never cleared the latch — so
+// GET /api/settings/network, and therefore the GUI, kept reporting the
+// now-valid certificate as corrupt indefinitely, even though
+// certMgr.ParseTLSPair had already proven the new pair sound before it was
+// written to disk.
+func TestAPICertsUpload_UI_ClearsCorruptLatch(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	badCertPEM, _, _ := generateSelfSignedECDSA(t)
+	_, badKeyPEM, _ := generateSelfSignedECDSA(t)
+	if err := persistCustomUITLS(badCertPEM, badKeyPEM); err != nil {
+		t.Fatal(err)
+	}
+	if cert, key := resolveUITLSCertKey("", ""); cert != "" || key != "" {
+		t.Fatalf("expected fallback for a mismatched pair, got (%q, %q)", cert, key)
+	}
+	if !uiCustomTLSCorrupt {
+		t.Fatal("premise broken: uiCustomTLSCorrupt should be latched true before the re-upload")
+	}
+
+	goodCertPEM, goodKeyPEM, _ := generateSelfSignedECDSA(t)
+	var body strings.Builder
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("target", "ui")
+	_ = mw.WriteField("cert", string(goodCertPEM))
+	_ = mw.WriteField("key", string(goodKeyPEM))
+	_ = mw.Close()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload", strings.NewReader(body.String()))
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	r.RemoteAddr = "127.0.0.1:9999"
+	r = adminCtx(r)
+	apiCertsUpload(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	if uiCustomTLSCorrupt {
+		t.Error("uiCustomTLSCorrupt should be cleared once a valid replacement pair is persisted — otherwise the GUI keeps warning about corruption that no longer exists")
+	}
+}
