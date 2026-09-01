@@ -412,15 +412,15 @@ func TestChaos57_FenceRefusesATunnelTheDrainCouldNotAccount(t *testing.T) {
 // sessions the drain would happily have covered; raised too late (at or after the
 // drain) it would not close the window at all.
 func TestChaos57_FenceIsOrderedBetweenTheListenersAndTheDrain(t *testing.T) {
-	if !(shutdownOrderSOCKS5ListenerStop < shutdownOrderTunnelEstablishFence) {
+	if shutdownOrderTunnelEstablishFence <= shutdownOrderSOCKS5ListenerStop {
 		t.Errorf("fence (%d) must run AFTER the SOCKS5 listener stops (%d), or it refuses sessions the drain could still cover",
 			shutdownOrderTunnelEstablishFence, shutdownOrderSOCKS5ListenerStop)
 	}
-	if !(shutdownOrderProxyServerShutdown < shutdownOrderTunnelEstablishFence) {
+	if shutdownOrderTunnelEstablishFence <= shutdownOrderProxyServerShutdown {
 		t.Errorf("fence (%d) must run AFTER the proxy server shuts down (%d)",
 			shutdownOrderTunnelEstablishFence, shutdownOrderProxyServerShutdown)
 	}
-	if !(shutdownOrderTunnelEstablishFence < shutdownOrderTunnelDrain) {
+	if shutdownOrderTunnelEstablishFence >= shutdownOrderTunnelDrain {
 		t.Errorf("fence (%d) must run BEFORE the drain (%d), or a tunnel can establish behind the drain's back",
 			shutdownOrderTunnelEstablishFence, shutdownOrderTunnelDrain)
 	}
