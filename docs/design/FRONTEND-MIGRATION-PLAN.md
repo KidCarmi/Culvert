@@ -145,7 +145,15 @@ FE-8, then required). All gates are evidence gates.
 Design artifacts produced; external review received; corrections incorporated; ADR-FE-001
 Accepted. Exit: this round.
 
-### FE-1A — Frontend Build Foundation (no Go changes)
+### FE-1A — Frontend Build Foundation (no Go changes) — IMPLEMENTED (this branch)
+
+> **Implemented contract (FE-1A round).** The `frontend/` scaffold (package.json,
+> package-lock.json, `.node-version`, tsconfig/vite/eslint/prettier configs, committed
+> `dist/`, `src/`) is in the tree at the pins recorded in ADR-FE-001. The frontend
+> verification/drift lane is wired as `frontend-verify.yml`, invoked as the `frontend` gate
+> job of `pr-fast-gate.yml` (path-classified on `frontend/*`, `ui_frontend_v2*`,
+> `api/openapi/openapi.json`, and the two workflow files themselves). This entry is
+> evidenced by the two files, not asserted from the phase objective below.
 - **Objective**: `frontend/` scaffold with the exact ADR baseline pins; strict TypeScript;
   ESLint rules (incl. the contract §4 inline-style bans and §7 no-cast rules); generated +
   committed `types.gen.ts`; deterministic committed `dist/`; the full drift & determinism
