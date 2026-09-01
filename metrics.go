@@ -883,7 +883,11 @@ culvert_h2_inspect_drain_forced_total %d
 # TYPE culvert_tunnel_drain_forced_total counter
 culvert_tunnel_drain_forced_total %d
 
-`, atomic.LoadInt64(&statTunnelForced))
+# HELP culvert_tunnel_fence_refused_total Sessions refused because the node was already draining
+# TYPE culvert_tunnel_fence_refused_total counter
+culvert_tunnel_fence_refused_total %d
+
+`, atomic.LoadInt64(&statTunnelForced), atomic.LoadInt64(&statTunnelFenceRefused))
 
 	// CHAOS-11: parent-proxy chain fail-open visibility. fallback_active=1
 	// means the pool is CURRENTLY bypassed (all parents unhealthy or

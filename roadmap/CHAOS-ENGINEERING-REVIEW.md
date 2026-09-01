@@ -2982,12 +2982,12 @@ non-idempotent release is its own control: a negative gauge makes
 
 ### 25.6 What is deliberately left
 
-- **New tunnels are not fenced during the drain.** Inspected H2 raises
-  `h2InspectShuttingDown`; the raw classes have no equivalent, because their
-  listeners are already closed by the time the drain runs (SOCKS5 at order 80,
-  proxy at 90) and the drain's per-tick loop picks up any late registrant. A
-  CONNECT arriving on an already-accepted keep-alive conn during
-  `proxySrv.Shutdown` is the residual window. Recorded, not fixed.
+- ~~**New tunnels are not fenced during the drain.**~~ **This was recorded as a
+  residual and the reasoning given for it was WRONG.** The original note claimed
+  the raw classes need no fence "because their listeners are already closed by
+  the time the drain runs and the drain's per-tick loop picks up any late
+  registrant." Codex review of PR #1288 showed that is false for SOCKS5, and
+  §25.8 records it — the fence shipped in the same PR.
 - **`go trackDestinationCountry` remains an unguarded async spawn** (PX-4
   residual). It is not a relay and holds no conn; recorded rather than swept in
   with a tunnel change.
@@ -3011,3 +3011,69 @@ a correctness requirement. This sweep adds one about **counters as interfaces**:
 > call site that incremented it; the defect lived entirely in the sites that
 > did not, and it reached three consumers with three different consequences
 > (no grace, lost accounting, a false gauge) without any of them being wrong.
+
+### 25.8 Review follow-up — the defect surviving inside its own fix
+
+Raised by Codex review against PR #1288 and fixed in the same PR. It is the
+sharpest kind of finding this series produces: **the fix was correct for every
+tunnel the drain could see, and PX-8 survived in the window where the drain
+could not see one yet.**
+
+`handleSOCKS5` sets a 30 s negotiation deadline, dials with a 10 s timeout, and
+only then calls `socks5Relay` — which is where CHAOS-57 registers the tunnel. So
+a connection accepted moments before `Stop` can register **up to ~40 s after the
+listener closed.** And `socks5Server.Stop` waits only for the ACCEPT LOOP,
+because each session is a detached `go handleSOCKS5(conn)`, so nothing in the
+sequence is waiting for that handler.
+
+The consequence is not a race the drain narrowly loses — it is a drain that has
+already finished. `drainActiveTunnels` returns IMMEDIATELY when
+`activeConns <= 0`, and that is exactly the state of a node whose SOCKS5 sessions
+are all still negotiating. So the drain returns instantly, the force-close
+backstop runs against an empty registry, the flush hooks complete — and only
+*then* does the handler send `0x00 success` and establish a long-lived tunnel
+that nothing will close and nothing will account for. PX-8, inside the change
+that closed PX-8.
+
+**Why SOCKS5 and not the HTTP classes.** This is the distinction the original
+residual note missed:
+
+> `proxySrv.Shutdown` (order 90) waits for every in-flight request, so a CONNECT
+> or WebSocket either completes or hijacks-and-registers before the drain at
+> order 100 looks. **The HTTP paths have a synchronization barrier before the
+> drain. SOCKS5 has none at all.**
+
+**The fix is to refuse, not to register earlier.** Codex offered both. Registering
+at handler entry would make the drain wait on sessions that may never become
+tunnels, and would redefine `culvert_tunnels_active` from *live tunnels* to
+*attempts* — a monitoring contract change to fix a shutdown bug. Refusing is
+protocol-correct (SOCKS5 reply `0x01`, general server failure) and strictly
+kinder to the client: it learns the request failed and retries, on a fleet
+against another node, instead of being handed a success reply and a tunnel that
+dies seconds later with no record it existed. A node that is shutting down should
+not be minting new long-lived tunnels.
+
+`fenceTunnelEstablishment` is a shutdown hook at **order 94**, and the ordering is
+the correctness argument, not a detail: after the listeners stop (80/90) so a
+session that can still be drained is never refused needlessly, and before the
+drain (100) so nothing establishes behind its back. The check sits after the dial
+and immediately before the success reply, so the unavoidable check-to-register
+window is microseconds rather than spanning a 10 s dial. Pinned by
+`TestChaos57_FenceIsOrderedBetweenTheListenersAndTheDrain`, which fails if the
+fence is moved to either side of its bracket.
+
+The control matters as much as the gate here: a fence stuck raised refuses every
+SOCKS5 session on a healthy node — a total protocol outage, far worse than the
+window it closes — so `ControlFenceIsDownDuringNormalOperation` pins that it is
+down in normal operation and that the test reset clears it (the PR3d
+fence-pollution class), and `ControlFencedSOCKS5StillEstablishesWhenNotDraining`
+drives the real establishment path to prove an unfenced session still relays and
+still records its accounting.
+
+**The process lesson**, and it is the second time this sweep produced one about
+documentation rather than code: §25.6 recorded this as a deliberate residual
+*with a stated reason*, and the reason was false. A "deliberately left" entry
+carries more authority than an unexamined gap — it tells the next reader the
+question was asked and answered — so a wrong one is worse than silence. The
+entry has been struck rather than quietly deleted, so the record shows the claim
+was made and refuted.

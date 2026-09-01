@@ -194,6 +194,11 @@ const (
 	// PR3d: after the CONNECT listener is closed (no new inspected-H2 tunnels can
 	// begin) and before the tunnel drain waits, fence new tunnels and send the first
 	// GOAWAY wave to every active inspected-H2 tunnel.
+	// CHAOS-57: refuse NEW long-lived tunnels before the drain looks. After the
+	// listeners stop (80/90) so nothing that could still be drained is refused,
+	// and before the drain (100) so nothing establishes behind its back.
+	shutdownOrderTunnelEstablishFence = 94
+
 	shutdownOrderH2InspectGOAWAY = 95
 	shutdownOrderTunnelDrain     = 100
 
@@ -427,6 +432,11 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		}
 		return nil
 	})
+	// CHAOS-57: stop minting new long-lived tunnels before the drain runs. SOCKS5
+	// needs this because its Stop waits only for the accept loop, so an
+	// already-accepted session can still establish ~40s later — after the drain,
+	// the backstop and the flush hooks have all finished.
+	reg.Register("tunnel-establish-fence", shutdownOrderTunnelEstablishFence, fenceTunnelEstablishment)
 	// PR3d: send the first GOAWAY wave to active inspected-H2 tunnels (and fence new
 	// ones) before the drain waits on them. No-op when native H2 was never used.
 	reg.Register("h2-inspect-goaway", shutdownOrderH2InspectGOAWAY, beginH2InspectDrain)

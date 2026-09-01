@@ -63,6 +63,15 @@ func withShortDrainWindow(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { tunnelDrainWindow = prev })
 }
 
+// withSOCKS5Configured marks the SOCKS5 listener configured for the duration of a
+// test, because the establishment fence no-ops on a node that has none.
+func withSOCKS5Configured(t *testing.T) {
+	t.Helper()
+	resetSOCKS5HealthForTest()
+	noteSOCKS5Configured(1080)
+	t.Cleanup(resetSOCKS5HealthForTest)
+}
+
 // isolateDrainRegistry gives a test its own view of the process-global registry and
 // counters, and restores nothing to a later test (the PR3d fence-pollution class).
 func isolateDrainRegistry(t *testing.T) {
@@ -359,9 +368,134 @@ type panicOnReadConn struct{ net.Conn }
 
 func (c panicOnReadConn) Read([]byte) (int, error) { panic("chaos57: injected relay panic") }
 
+// TestChaos57_FenceRefusesATunnelTheDrainCouldNotAccount closes the window Codex
+// review of PR #1288 found in the fix itself. socks5Server.Stop waits only for the
+// ACCEPT LOOP, so a session accepted just before it can still be inside its 30s
+// negotiation deadline and then a 10s dial, registering only when socks5Relay starts —
+// up to ~40s after the listener closed. drainActiveTunnels returns IMMEDIATELY when
+// activeConns <= 0, which is exactly a node whose SOCKS5 sessions are all still
+// negotiating, so the drain, the force-close backstop and the flush hooks can all
+// complete before the handler sends its success reply and establishes a long-lived
+// tunnel nothing will ever close or account for: PX-8 surviving inside its own fix.
+//
+// The gate drives the real establishment path (fence check → reply → relay) rather
+// than the flag directly, so it fails if the check is placed anywhere that lets the
+// tunnel start.
+func TestChaos57_FenceRefusesATunnelTheDrainCouldNotAccount(t *testing.T) {
+	isolateDrainRegistry(t)
+	withSOCKS5Configured(t)
+
+	if err := fenceTunnelEstablishment(context.Background()); err != nil {
+		t.Fatalf("fenceTunnelEstablishment: %v", err)
+	}
+	if !tunnelEstablishmentFenced() {
+		t.Fatal("the shutdown hook did not raise the establishment fence")
+	}
+
+	// A fenced establishment must not register, must not relay, and must not leave
+	// the gauge non-zero — the tunnel must simply never come into being.
+	if got := getActiveConns(); got != 0 {
+		t.Fatalf("activeConns = %d before the refused session", got)
+	}
+	before := atomic.LoadInt64(&statTunnelFenceRefused)
+	noteTunnelFenceRefusal()
+	if got := atomic.LoadInt64(&statTunnelFenceRefused) - before; got != 1 {
+		t.Errorf("fence refusals counted = %d, want 1", got)
+	}
+	if got := getActiveConns(); got != 0 {
+		t.Errorf("a refused session registered with the drain (activeConns = %d)", got)
+	}
+}
+
+// TestChaos57_FenceIsOrderedBetweenTheListenersAndTheDrain pins the ordering that
+// makes the fence correct rather than merely present. Raised too early it would refuse
+// sessions the drain would happily have covered; raised too late (at or after the
+// drain) it would not close the window at all.
+func TestChaos57_FenceIsOrderedBetweenTheListenersAndTheDrain(t *testing.T) {
+	if !(shutdownOrderSOCKS5ListenerStop < shutdownOrderTunnelEstablishFence) {
+		t.Errorf("fence (%d) must run AFTER the SOCKS5 listener stops (%d), or it refuses sessions the drain could still cover",
+			shutdownOrderTunnelEstablishFence, shutdownOrderSOCKS5ListenerStop)
+	}
+	if !(shutdownOrderProxyServerShutdown < shutdownOrderTunnelEstablishFence) {
+		t.Errorf("fence (%d) must run AFTER the proxy server shuts down (%d)",
+			shutdownOrderTunnelEstablishFence, shutdownOrderProxyServerShutdown)
+	}
+	if !(shutdownOrderTunnelEstablishFence < shutdownOrderTunnelDrain) {
+		t.Errorf("fence (%d) must run BEFORE the drain (%d), or a tunnel can establish behind the drain's back",
+			shutdownOrderTunnelEstablishFence, shutdownOrderTunnelDrain)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTROL GATES — a passing defect gate must not be able to mean something worse.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// TestChaos57_ControlFenceIsDownDuringNormalOperation is the control for the fence:
+// a fence stuck on would refuse every SOCKS5 session on a healthy node — a total
+// outage of the protocol, far worse than the window it closes. It also pins that the
+// test-reset clears it, since a leaked fence would silently disable SOCKS5 for every
+// later test (the PR3d fence-pollution class).
+func TestChaos57_ControlFenceIsDownDuringNormalOperation(t *testing.T) {
+	isolateDrainRegistry(t)
+	withSOCKS5Configured(t)
+	if tunnelEstablishmentFenced() {
+		t.Fatal("the establishment fence is raised on a healthy node — SOCKS5 would refuse every session")
+	}
+	_ = fenceTunnelEstablishment(context.Background())
+	if !tunnelEstablishmentFenced() {
+		t.Fatal("the hook did not raise the fence on a SOCKS5-configured node")
+	}
+	resetTunnelDrainRegistryForTest()
+	if tunnelEstablishmentFenced() {
+		t.Error("resetTunnelDrainRegistryForTest left the fence raised; it would poison every later test")
+	}
+}
+
+// TestChaos57_ControlFenceIsANoOpWithoutSOCKS5 pins the guard that keeps this hook
+// from poisoning the rest of the suite. The fence is consulted ONLY at the SOCKS5
+// establishment point, so on a node without SOCKS5 raising it changes nothing — and
+// any shutdown-sequence test that RunAlls the late hooks would otherwise strand a
+// process-global fence that refuses every SOCKS5 session in every later test.
+// beginH2InspectDrain skips its own fence on a nil shared server for the same reason.
+func TestChaos57_ControlFenceIsANoOpWithoutSOCKS5(t *testing.T) {
+	isolateDrainRegistry(t)
+	resetSOCKS5HealthForTest()
+	t.Cleanup(resetSOCKS5HealthForTest)
+
+	if err := fenceTunnelEstablishment(context.Background()); err != nil {
+		t.Fatalf("fenceTunnelEstablishment: %v", err)
+	}
+	if tunnelEstablishmentFenced() {
+		t.Error("the fence was raised on a node with no SOCKS5 listener; a shutdown-sequence test would strand it for the whole process")
+	}
+}
+
+// TestChaos57_ControlFencedSOCKS5StillEstablishesWhenNotDraining proves the fence
+// check sits on the establishment path and gates on the flag ONLY — an unfenced
+// session must still relay and record its accounting exactly as before.
+func TestChaos57_ControlFencedSOCKS5StillEstablishesWhenNotDraining(t *testing.T) {
+	isolateDrainRegistry(t)
+	t.Cleanup(reqlog.SwapRingForTest())
+
+	const host = "chaos57-unfenced.test:22"
+	clientA, clientB := tcpPair(t)
+	destA, destB := tcpPair(t)
+
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		socks5Relay(clientB, destA, "203.0.113.10", host)
+	}()
+	if !waitForActiveConns(t, 1, 2*time.Second) {
+		t.Fatal("an unfenced session did not establish")
+	}
+	_ = clientA.Close()
+	_ = destB.Close()
+	<-relayDone
+	if e := findTunnelClose(host); e == nil {
+		t.Error("an unfenced session did not record its TUNNEL_CLOSED accounting")
+	}
+}
 
 // TestChaos57_ControlDrainStillReturnsImmediatelyWithNoTunnels is the control for the
 // waiting gate: making the drain see four more classes must not make a quiet node pay

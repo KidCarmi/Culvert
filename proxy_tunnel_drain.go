@@ -128,7 +128,67 @@ var (
 
 	// statTunnelForced counts conns hard-closed by the drain-deadline backstop.
 	statTunnelForced int64
+
+	// tunnelEstablishFenced refuses NEW long-lived tunnels once shutdown has reached
+	// the point where the drain is about to run. See fenceTunnelEstablishment.
+	tunnelEstablishFenced atomic.Bool
+
+	// statTunnelFenceRefused counts sessions refused by that fence.
+	statTunnelFenceRefused int64
 )
+
+// fenceTunnelEstablishment is the shutdown hook (order 94) that stops a departing
+// node from minting NEW long-lived tunnels moments before — or after — the drain runs.
+//
+// It exists because SOCKS5 has NO synchronization barrier before the drain, and the
+// HTTP paths do. `proxySrv.Shutdown` (order 90) waits for every in-flight request, so a
+// CONNECT or WebSocket either finishes or hijacks-and-registers before the drain at
+// order 100 ever looks. `socks5Server.Stop` (order 80) waits only for the ACCEPT LOOP —
+// each session is a detached `go handleSOCKS5(conn)` — so a connection accepted just
+// before Stop can still be inside its 30 s negotiation deadline and then a 10 s dial,
+// and it registers only when `socks5Relay` starts. That is up to ~40 s AFTER the
+// listener closed. `drainActiveTunnels` returns IMMEDIATELY when `activeConns <= 0`,
+// which is exactly the state of a node whose SOCKS5 sessions are all still
+// negotiating — so the drain can finish, the force-close backstop can run, and the
+// flush hooks can complete, and only THEN does the handler send its success reply and
+// establish a long-lived tunnel nothing will ever account for or close. That is the
+// PX-8 defect surviving inside its own fix. Raised by Codex review of PR #1288.
+//
+// Refusing is the right posture rather than registering the session earlier. Registering
+// at handler entry would make the drain wait on sessions that may never become tunnels
+// and would redefine `culvert_tunnels_active` from live tunnels to attempts. Refusing is
+// protocol-correct and strictly kinder to the client: it learns the request failed and
+// retries — against another node, on a fleet — instead of being handed a success reply
+// and a tunnel that dies seconds later with no record that it existed.
+//
+// Order 94 is deliberate: it is AFTER the listeners stop and BEFORE the drain, so a
+// session that establishes early enough is still covered by the drain (never refused
+// needlessly), and one that would establish too late is refused instead of orphaned.
+// No-op when SOCKS5 was never configured. That is not just an optimisation: the
+// fence is consulted ONLY at the SOCKS5 establishment point, so on a node without
+// SOCKS5 raising it changes nothing — and leaving it down keeps a shutdown-sequence
+// test that RunAlls the late hooks from stranding a process-global fence that would
+// refuse every SOCKS5 session in every later test. `beginH2InspectDrain` skips its own
+// fence on a nil shared server for exactly this reason (the PR3d fence-pollution class).
+func fenceTunnelEstablishment(context.Context) error {
+	socks5Listener.mu.Lock()
+	configured := socks5Listener.configured
+	socks5Listener.mu.Unlock()
+	if !configured {
+		return nil
+	}
+	tunnelEstablishFenced.Store(true)
+	return nil
+}
+
+// tunnelEstablishmentFenced reports whether new long-lived tunnels are being refused.
+// Callers must check it at the LAST point before the tunnel becomes long-lived and
+// immediately before registering, so the unavoidable check-to-register window stays
+// microseconds rather than spanning a dial.
+func tunnelEstablishmentFenced() bool { return tunnelEstablishFenced.Load() }
+
+// noteTunnelFenceRefusal counts one refused session for `culvert_tunnel_fence_refused_total`.
+func noteTunnelFenceRefusal() { atomic.AddInt64(&statTunnelFenceRefused, 1) }
 
 // registerDrainableTunnel records a live hijacked tunnel and returns its release
 // function. It OWNS the `activeConns` accounting for its class, so a caller must not
@@ -288,5 +348,9 @@ func resetTunnelDrainRegistryForTest() {
 		atomic.StoreInt64(&tunnelClassActive[i], 0)
 	}
 	atomic.StoreInt64(&statTunnelForced, 0)
+	atomic.StoreInt64(&statTunnelFenceRefused, 0)
 	atomic.StoreInt64(&activeConns, 0)
+	// A leaked fence would refuse every tunnel in every later test — the PR3d
+	// fence-pollution class, which is why h2InspectShuttingDown is guarded the same way.
+	tunnelEstablishFenced.Store(false)
 }

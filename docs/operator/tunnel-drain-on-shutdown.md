@@ -33,15 +33,25 @@ The shutdown sequence stops accepting first, then drains:
 
 1. **order 80** — the SOCKS5 listener stops accepting.
 2. **order 90** — the proxy HTTP listener stops accepting.
-3. **order 95** — inspected-H2 tunnels are sent a `GOAWAY` (in-flight streams
+3. **order 94 — the establishment fence.** New long-lived tunnels are refused
+   from here on. In practice this affects SOCKS5: a session accepted just before
+   the listener closed can still be negotiating or dialling, and if it were
+   allowed to establish now it would do so *behind* the drain and be reset at
+   process exit with no record. Such a client gets a SOCKS5 `0x01` (general
+   server failure) and a `SOCKS5 SHUTTING_DOWN` log line, so it can retry —
+   against another node, on a fleet — instead of receiving a success reply and a
+   tunnel that dies seconds later. Counted by
+   `culvert_tunnel_fence_refused_total`. A handful of these during a restart is
+   expected and healthy; the alternative is a silently orphaned tunnel.
+4. **order 95** — inspected-H2 tunnels are sent a `GOAWAY` (in-flight streams
    may finish; no new ones start).
-4. **order 100 — the drain.** It waits for every live tunnel of every class to
+5. **order 100 — the drain.** It waits for every live tunnel of every class to
    end on its own, up to **15 s** *or* whatever the shutdown phase has left,
    whichever is shorter.
-5. **At the drain deadline**, any tunnel still live is **force-closed**. Its
+6. **At the drain deadline**, any tunnel still live is **force-closed**. Its
    relay unblocks, and its `TUNNEL_CLOSED` accounting entry (bytes each way,
    duration, matched rule, identity) is written.
-6. **order ≥ 110** — the flush hooks close the syslog socket, the category
+7. **order ≥ 110** — the flush hooks close the syslog socket, the category
    store, the request log, the audit log and the process log.
 
 A force-close is a clean, deliberate teardown — not a failure. It is what
@@ -94,6 +104,7 @@ culvert_tunnels_active{class="inspect_fallback"}   gauge
 culvert_tunnels_active{class="websocket"}          gauge
 culvert_tunnels_active{class="socks5"}             gauge
 culvert_tunnel_drain_forced_total                  counter
+culvert_tunnel_fence_refused_total                 counter
 ```
 
 **Use `culvert_tunnels_active` for capacity, not for alerting.** Each tunnel
@@ -137,3 +148,11 @@ can therefore be sent a graceful `GOAWAY`.
 Yes, up to the point of the close. Force-closing is a teardown, not a policy
 bypass: no security control is skipped, and the session's `TUNNEL_CLOSED` entry
 records the bytes that did flow.
+
+**I see `SOCKS5 SHUTTING_DOWN` lines during every restart — is something wrong?**
+No. That is the establishment fence doing its job: a session that was still
+negotiating or dialling when the node started draining is refused rather than
+allowed to establish behind the drain, where it would be reset at process exit
+with no accounting. The client gets a clean protocol-level failure and retries.
+`culvert_tunnel_fence_refused_total` counts them. A large number would mean your
+SOCKS5 clients reconnect very aggressively, not that the node misbehaved.
