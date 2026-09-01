@@ -507,15 +507,16 @@ component, acceptance criteria, dependencies, estimated PR size, priority. -->
 - **Estimated PR size:** M.
 - **Priority:** P2 (strongly wanted before the first supported enterprise customer).
 
-### GAP-MON-02 — Audit log has no GUI bulk export
+### GAP-MON-02 — Audit log has no GUI bulk export — **RESOLVED**
 
 - **Blocked step:** Logging/auditing (step 37); compliance handoff.
-- **Current behaviour:** The Audit panel offers Filter + Refresh only; bulk export is API-only (`GET /api/audit?source=file`). The traffic log has ⬇CSV/⬇JSON, so the UX is asymmetric.
+- **Current behaviour (as audited):** The Audit panel offers Filter + Refresh only; bulk export is API-only (`GET /api/audit?source=file`). The traffic log has ⬇CSV/⬇JSON, so the UX is asymmetric.
 - **Evidence:** `static/index.html:3137-3144`; `ui_config.go:23-55`.
 - **Category:** UX · **Severity:** P3.
 - **Workaround:** `curl /api/audit?source=file` or rely on syslog forwarding. **Acceptable for scripted SIEM.**
 - **Recommended change:** Add ⬇CSV/⬇JSON to the Audit panel.
 - **Estimated PR size:** S. **Priority:** P3.
+- **Resolution:** `apiAudit` (`ui_config.go`) now accepts `?format=csv|json`, streaming the same `Content-Disposition: attachment` download shape as `apiExport`'s traffic-log CSV/JSON (defaulting to the persistent `source=file` history and a 10000-entry cap on export, both still overridable). The Audit Log panel (`static/index.html`) gained CSV/JSON buttons beside Refresh, calling the new `exportAuditLog(format)`. No route, role, or method change — purely an additive query parameter and a GUI affordance for an export the API already supported.
 
 ### GAP-MON-03 — `/metrics` unauthenticated by default; logging destination flags-only
 

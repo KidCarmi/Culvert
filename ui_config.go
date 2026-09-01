@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,14 @@ import (
 // Supports date filtering via ?from=UNIX_MS&to=UNIX_MS.
 // Use ?source=file to read from the persistent JSONL audit log file instead of
 // the in-memory ring buffer (default: memory for backwards compat) (Finding 6.2).
+// Use ?format=csv or ?format=json to download the matched entries as an
+// attachment instead of the normal paginated API response, mirroring
+// apiExport's traffic-log download shape (GAP-MON-02: the Audit panel had no
+// bulk-export parity with the traffic log's CSV/JSON buttons, forcing an
+// operator to script `curl /api/audit?source=file` for a compliance handoff).
+// An export request defaults to the persistent file (the durable compliance
+// record) and a higher entry cap, since the point is capturing history beyond
+// the in-memory ring — both stay overridable via the existing ?source=/&limit=.
 func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -42,17 +51,59 @@ func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
+	format := q.Get("format")
+	exporting := format == "csv" || format == "json"
 	if limit <= 0 || limit > 10000 {
-		limit = 500
+		if exporting {
+			limit = 10000
+		} else {
+			limit = 500
+		}
+	}
+	source := q.Get("source")
+	if exporting && source == "" {
+		source = "file"
 	}
 	var entries []AuditEntry
 	var total int
-	if q.Get("source") == "file" {
+	if source == "file" {
 		entries, total = auditGetPersistent(offset, limit, fromTS, toTS)
 	} else {
 		entries, total = auditGetMemory(offset, limit, fromTS, toTS)
 	}
+	if exporting {
+		writeAuditExport(w, format, entries)
+		return
+	}
 	jsonOK(w, map[string]any{"entries": entries, "count": len(entries), "total": total, "offset": offset, "limit": limit})
+}
+
+// writeAuditExport streams audit entries as a downloadable attachment, same
+// Content-Disposition convention as apiExport's traffic-log download.
+func writeAuditExport(w http.ResponseWriter, format string, entries []AuditEntry) {
+	ts := time.Now().Format("20060102-150405")
+	switch format {
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-audit-%s.csv"`, ts))
+		cw := csv.NewWriter(w)
+		cw.Write([]string{"timestamp", "time", "actor", "action", "object", "object_id", "detail", "before", "after"}) //nolint:errcheck // CSV write
+		for i := range entries {
+			e := &entries[i]
+			cw.Write([]string{ //nolint:errcheck // CSV write
+				fmt.Sprintf("%d", e.TS), e.Time, e.Actor, e.Action, e.Object, e.ObjectID, e.Detail, e.Before, e.After,
+			})
+		}
+		cw.Flush()
+	default: // json
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-audit-%s.json"`, ts))
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // HTTP response write
+			"exported": ts,
+			"count":    len(entries),
+			"entries":  entries,
+		})
+	}
 }
 
 // GET /api/stats

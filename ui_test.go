@@ -858,6 +858,59 @@ func TestAPIAudit_WrongMethod(t *testing.T) {
 	assertStatus(t, w, http.StatusMethodNotAllowed)
 }
 
+// TestAPIAudit_ExportCSV covers GAP-MON-02: the Audit panel's export must
+// stream a downloadable CSV attachment (Content-Disposition set), same shape
+// as apiExport's traffic-log download, rather than the normal paginated body.
+func TestAPIAudit_ExportCSV(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiAudit(w, getReq("/api/audit?format=csv"))
+	assertStatus(t, w, http.StatusOK)
+	if ct := w.Header().Get("Content-Type"); ct != "text/csv" {
+		t.Errorf("Content-Type = %q, want text/csv", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, ".csv") {
+		t.Errorf("Content-Disposition = %q, want an attachment naming a .csv file", cd)
+	}
+	if !strings.HasPrefix(w.Body.String(), "timestamp,time,actor,action,object,object_id,detail,before,after") {
+		t.Errorf("CSV export missing expected header row: %q", w.Body.String())
+	}
+}
+
+// TestAPIAudit_ExportJSON covers the JSON half of the same export.
+func TestAPIAudit_ExportJSON(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiAudit(w, getReq("/api/audit?format=json"))
+	assertStatus(t, w, http.StatusOK)
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, ".json") {
+		t.Errorf("Content-Disposition = %q, want an attachment naming a .json file", cd)
+	}
+	var body struct {
+		Entries []AuditEntry `json:"entries"`
+		Count   int          `json:"count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("export body is not valid JSON: %v", err)
+	}
+	if body.Count != len(body.Entries) {
+		t.Errorf("count = %d, want len(entries) = %d", body.Count, len(body.Entries))
+	}
+}
+
+// TestAPIAudit_NoFormatStaysPlainResponse guards backwards compatibility: a
+// request with no ?format= (what the live Audit panel table sends) must keep
+// returning the plain paginated body, never a download.
+func TestAPIAudit_NoFormatStaysPlainResponse(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiAudit(w, getReq("/api/audit"))
+	assertStatus(t, w, http.StatusOK)
+	if w.Header().Get("Content-Disposition") != "" {
+		t.Errorf("a plain (non-export) request must not carry a download header, got %q", w.Header().Get("Content-Disposition"))
+	}
+}
+
 // ─── /api/blocklist ───────────────────────────────────────────────────────────
 
 func TestAPIBlocklist_Get(t *testing.T) {
