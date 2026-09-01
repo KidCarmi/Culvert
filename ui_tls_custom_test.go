@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -16,12 +17,15 @@ func withTempDataDirForUITLS(t *testing.T) string {
 	t.Helper()
 	prev := dataDir
 	prevActive := uiCustomTLSActive
+	prevCorrupt := uiCustomTLSCorrupt
 	dir := t.TempDir()
 	dataDir = dir
 	uiCustomTLSActive = false
+	uiCustomTLSCorrupt = false
 	t.Cleanup(func() {
 		dataDir = prev
 		uiCustomTLSActive = prevActive
+		uiCustomTLSCorrupt = prevCorrupt
 	})
 	return dir
 }
@@ -57,6 +61,9 @@ func TestResolveUITLSCertKey_ExplicitWinsOverPersisted(t *testing.T) {
 	if uiCustomTLSActive {
 		t.Error("uiCustomTLSActive must stay false when the explicit flag is used")
 	}
+	if uiCustomTLSCorrupt {
+		t.Error("uiCustomTLSCorrupt must stay false for a valid, merely-unselected persisted pair")
+	}
 }
 
 func TestResolveUITLSCertKey_FallsBackToPersisted(t *testing.T) {
@@ -71,6 +78,9 @@ func TestResolveUITLSCertKey_FallsBackToPersisted(t *testing.T) {
 	}
 	if !uiCustomTLSActive {
 		t.Error("uiCustomTLSActive should be true once the persisted cert is selected")
+	}
+	if uiCustomTLSCorrupt {
+		t.Error("uiCustomTLSCorrupt must stay false for a valid persisted pair")
 	}
 }
 
@@ -110,6 +120,13 @@ func TestResolveUITLSCertKey_IgnoresMismatchedPersistedPair(t *testing.T) {
 	if uiCustomTLSActive {
 		t.Error("uiCustomTLSActive must stay false when the persisted pair fails to parse")
 	}
+	// Regression guard for the "restart will fix it" false recovery message:
+	// a mismatched pair is corrupt in a way no restart resolves, and the GUI
+	// (loadUICertStatus in static/index.html) must be able to tell this apart
+	// from the ordinary "uploaded, not yet restarted" state via this flag.
+	if !uiCustomTLSCorrupt {
+		t.Error("uiCustomTLSCorrupt should be true when the persisted pair is mismatched — this is what tells the GUI restarting will not help")
+	}
 }
 
 // TestResolveUITLSCertKey_IgnoresCorruptPersistedPair covers plain on-disk
@@ -126,6 +143,9 @@ func TestResolveUITLSCertKey_IgnoresCorruptPersistedPair(t *testing.T) {
 	}
 	if uiCustomTLSActive {
 		t.Error("uiCustomTLSActive must stay false when the persisted pair is corrupt")
+	}
+	if !uiCustomTLSCorrupt {
+		t.Error("uiCustomTLSCorrupt should be true when the persisted pair does not parse as PEM")
 	}
 }
 
@@ -213,5 +233,51 @@ func TestAPICertsUpload_UI_Persists(t *testing.T) {
 	}
 	if !customUITLSFilesPresent() {
 		t.Error("customUITLSFilesPresent should report true after a successful upload")
+	}
+}
+
+// TestAPINetworkSettings_SurfacesCustomCertCorrupt is the regression test for
+// the finding this file's ui_custom_cert_corrupt field exists to close:
+// GET /api/settings/network used to report only ui_custom_cert_uploaded and
+// ui_custom_cert_active, which look IDENTICAL (uploaded=true, active=false)
+// whether the admin simply hasn't restarted yet (self-resolving) or the
+// persisted pair is corrupt/mismatched (every future restart still falls
+// back to self-signed — restarting will never help). The GUI's
+// loadUICertStatus() cannot tell these apart without a third field.
+func TestAPINetworkSettings_SurfacesCustomCertCorrupt(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	certPEM, _, _ := generateSelfSignedECDSA(t)
+	_, otherKeyPEM, _ := generateSelfSignedECDSA(t)
+	if err := persistCustomUITLS(certPEM, otherKeyPEM); err != nil {
+		t.Fatal(err)
+	}
+	// resolveUITLSCertKey is what actually detects and latches the corruption
+	// (it runs once at boot); exercise it exactly as startup does.
+	if cert, key := resolveUITLSCertKey("", ""); cert != "" || key != "" {
+		t.Fatalf("expected fallback to self-signed for a mismatched pair, got (%q, %q)", cert, key)
+	}
+
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleViewer)
+	r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/settings/network", http.NoBody)
+	w := httptest.NewRecorder()
+	apiNetworkSettings(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	var resp struct {
+		Uploaded bool `json:"ui_custom_cert_uploaded"`
+		Active   bool `json:"ui_custom_cert_active"`
+		Corrupt  bool `json:"ui_custom_cert_corrupt"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Uploaded {
+		t.Error("ui_custom_cert_uploaded should be true — the files are on disk")
+	}
+	if resp.Active {
+		t.Error("ui_custom_cert_active should be false — the mismatched pair was never selected")
+	}
+	if !resp.Corrupt {
+		t.Error("ui_custom_cert_corrupt should be true so the GUI can warn that a restart will not help, instead of telling the admin to restart")
 	}
 }

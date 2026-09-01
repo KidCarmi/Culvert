@@ -13327,11 +13327,21 @@ async function loadUICertStatus() {
   if (!el) return;
   try {
     const n = await api('/api/settings/network');
-    if (!n.ui_custom_cert_uploaded) { el.textContent = ''; return; }
+    if (!n.ui_custom_cert_uploaded) { el.textContent = ''; el.style.color = ''; return; }
+    if (n.ui_custom_cert_corrupt) {
+      // The saved pair failed to parse as a matching cert/key (interrupted or
+      // corrupted upload). Restarting will NOT fix this — every restart keeps
+      // falling back to the self-signed certificate — so this must never be
+      // conflated with the ordinary "awaiting restart" state below.
+      el.textContent = 'Saved certificate is corrupt or mismatched — the proxy is running on the self-signed fallback and a restart will not fix this. Re-upload a valid certificate.';
+      el.style.color = 'var(--warn)';
+      return;
+    }
+    el.style.color = '';
     el.textContent = n.ui_custom_cert_active
       ? 'Custom certificate uploaded and active.'
       : 'Custom certificate saved — restart the proxy to activate it.';
-  } catch(e) { el.textContent = ''; }
+  } catch(e) { el.textContent = ''; el.style.color = ''; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

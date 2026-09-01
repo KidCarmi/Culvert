@@ -29,6 +29,17 @@ const (
 // tell "uploaded" apart from "uploaded and live" instead of guessing.
 var uiCustomTLSActive bool
 
+// uiCustomTLSCorrupt records whether resolveUITLSCertKey found a persisted
+// cert/key pair on disk that does NOT parse as a matching TLS pair. Without
+// this, customUITLSFilesPresent()==true / uiCustomTLSActive==false is
+// ambiguous between "uploaded, awaiting the restart that activates it"
+// (normal, self-resolving) and "uploaded, but the pair is corrupt or
+// mismatched and every future restart will keep falling back to the
+// self-signed certificate" (broken, needs a re-upload) — the two states
+// look identical to an admin polling GET /api/settings/network, and only
+// the second one makes the GUI's "restart to activate" message false.
+var uiCustomTLSCorrupt bool
+
 func customUITLSCertPath() string { return filepath.Join(dataDir, customUITLSCertFile) }
 func customUITLSKeyPath() string  { return filepath.Join(dataDir, customUITLSKeyFile) }
 
@@ -90,6 +101,7 @@ func resolveUITLSCertKey(cert, key string) (certPath, keyPath string) {
 	}
 	if customUITLSFilesPresent() {
 		if !customUITLSPairValid() {
+			uiCustomTLSCorrupt = true
 			fmt.Printf("[Culvert] UITLS: persisted custom UI cert/key pair under %s does not parse as a matching TLS "+
 				"pair (interrupted or corrupted upload) — ignoring it and falling back to the auto self-signed "+
 				"certificate. Upload a valid pair from the Certificates panel to replace it.\n", dataDir)
