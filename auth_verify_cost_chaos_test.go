@@ -419,6 +419,24 @@ func TestChaos57_ProxyPathRepeatedBogusCredentialHashesOnce(t *testing.T) {
 	setupAuthGateTest(t)
 	withGate(t, 4, authVerifyWaitBudget)
 
+	// The IdP registry is process-global and setupProxyTest does NOT reset it
+	// (it resets bl/ipf/rl/cfg and the policy store, but not this). That matters
+	// here specifically: resolveRequestAuth tries EnabledCredentialProviders()
+	// BEFORE the local credential path, so a single enabled provider left behind
+	// by another test would resolve — or simply intercept — this bogus credential
+	// and the local path would hash ZERO times. The assertion below would then
+	// fail with "0 hashes, want 1" and read like a defect in the gate rather than
+	// leakage from an unrelated test.
+	//
+	// Pin an empty registry so this gate measures the local credential path it is
+	// actually about. Every other test that installs a registry restores it via
+	// t.Cleanup (auth_idp_displayname_test.go is the canonical shape), so this is
+	// belt-and-braces — but a counter assertion this exact is worth making
+	// independent of that convention holding everywhere, forever.
+	origRegistry := idpRegistry
+	t.Cleanup(func() { idpRegistry = origRegistry })
+	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+
 	const n = 10
 	before := authVerifyHashTotal.Load()
 	cred := "Basic " + base64.StdEncoding.EncodeToString([]byte("nosuchuser:x"))
