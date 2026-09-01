@@ -913,6 +913,37 @@ culvert_catfeeddb_quarantined_copies %d
 		cfdb.ResidualCopies,
 	)
 
+	// CHAOS-57: request-history store health, the same triple for the same
+	// reasons. `available` is 0 both when history saving is off and when the
+	// store failed to open — the `request_history` diagnostics row distinguishes
+	// them, while an alerting rule that only cares "is history being saved?"
+	// needs a single series. `quarantined_copies` keeps an incident visible
+	// across restarts even after the store self-healed.
+	lsh := logStoreHealthState()
+	lsAvailable, lsRecovered := 0, 0
+	if lsh.Available {
+		lsAvailable = 1
+	}
+	if lsh.Recovered {
+		lsRecovered = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_logstore_available 1 when the request-history store is open and saving history
+# TYPE culvert_logstore_available gauge
+culvert_logstore_available %d
+
+# HELP culvert_logstore_recovered 1 when a damaged request-history store was quarantined and re-created during this process's lifetime
+# TYPE culvert_logstore_recovered gauge
+culvert_logstore_recovered %d
+
+# HELP culvert_logstore_quarantined_copies Quarantined (.corrupt.*) copies of the request-history store still on the data volume
+# TYPE culvert_logstore_quarantined_copies gauge
+culvert_logstore_quarantined_copies %d
+`,
+		lsAvailable,
+		lsRecovered,
+		lsh.ResidualCopies,
+	)
+
 	// CHAOS-54: SOCKS5 accept-loop health. Emitted ONLY when a SOCKS5 listener
 	// is configured — on the ordinary appliance (-socks5-port 0) these series
 	// are absent entirely, because `listener_up 0` on a node that never had

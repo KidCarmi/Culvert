@@ -36,6 +36,38 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-29 — CHAOS-57 sweep (the request-history store under a damaged data volume).**
+§19.6 opened row **R-E** and marked it *"next sweep candidate"*: `internal/logstore` calls
+`badger.Open` with the same uncatchable-panic exposure CHAOS-50 had just fixed for the category
+store — a corrupt `.sst` panics from a goroutine badger spawns, so no `recover()` at any call site
+contains it. Re-measured against THIS store's options (encryption on, 128 MiB value log) it
+reproduces exactly. **Both clauses of the deferral inverted on re-derivation.** *"Quarantining it
+silently is an evidence decision"* argues FOR the fix: the CHAOS-05/07 contract MOVES ASIDE, never
+deletes, so the evidence survives either way — what the deferral preserved was a crash-looping
+appliance whose history is equally unreadable and whose entire service is down as well. And
+*"bounded by being opt-in"* is backwards: opt-in means DURABLE in `admin_settings.json`, so one
+unclean kill becomes an **unattended crash loop** with no admin UI left to turn the setting back
+off, and it means reachable from the **LIVE ADMIN API**, so the toggle kills a gateway carrying
+production traffic rather than merely failing a boot. The clause meant to bound the severity was
+the mechanism that raised it. **Two further defects.** **LS-3:** on a KEYED store badger reports a
+changed passphrase, a lost salt and real KEYREGISTRY damage with the SAME error, and CHAOS-50's
+classifier lists that message as corruption on the explicit rationale *"this store is never opened
+with a key"* — so reusing it unmodified would have moved a HEALTHY store aside over an ordinary
+config change. That is why the classifier is now a per-store `Policy` that can only ever SUBTRACT.
+**LS-4:** `EncKey` minted and WROTE a fresh salt over an existing encrypted store whenever the
+sidecar was unreadable — destroying, on the READ path, the only value that could decrypt it, and
+leaving an error indistinguishable from a passphrase change so the operator's remedy became
+"purge". The codebase had already adopted that exact rule elsewhere (SEC-WHSIGN-1, *"a failed
+decrypt never mints a key"*); nothing was checking whether anywhere else did the same thing.
+Shipped: `internal/storeguard` (the CHAOS-50 engine extracted verbatim — a second copy would have
+duplicated the empirical badger message table that is pinned by a test precisely so an upgrade
+which rewords a message fails the build), `catdb` reduced to a thin adapter with its 21 recovery gates
+unchanged and green, `logstore.OpenResilientTTL`, the `EncKey` refusal, and a full health plane
+(`request_history` row, three `culvert_logstore_*` series, the existing `state_file_corrupt`
+alert). 37 new gates; every defect gate verified failing against the reintroduced pre-fix shape, plus
+a permanent defect proof that the bare open still panics uncatchably. R-E CLOSED. See §25 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-29.md`.
+
 **2026-08-24 — CHAOS-55 sweep (the fencing lease's recovery paths).** ADR-0005 built the
 fence to answer *may this node write?* and answers it correctly in every direction. What it never
 built was the way BACK. The lease has three exits from write authority — denied on promotion,
@@ -1844,6 +1876,17 @@ pinned by `TestCheckCategoryFeedDB_RowCarriesNoRawCause`.
   on. Not fixed here because its content is request history with retention
   semantics: quarantining it silently is an evidence decision, not a cache
   decision. **Next sweep candidate.**
+
+  > **CLOSED by CHAOS-57 (2026-08-29) — and both bounding clauses above were
+  > WRONG.** "Quarantining it silently is an evidence decision" argues FOR the
+  > fix: the CHAOS-05/07 contract moves aside and never deletes, so the evidence
+  > survives either way; what this deferral preserved was a crash loop whose
+  > history is equally unreadable and whose whole service is down too. And
+  > "bounded by being opt-in" is backwards — opt-in means DURABLE in
+  > `admin_settings.json` (so the crash loop is self-latching, with no admin UI
+  > left to turn the setting off) and reachable from the LIVE admin API (so it
+  > is a runtime kill of a gateway carrying traffic, not a boot failure). See
+  > §25. The severity was Critical, not the bounded case recorded here.
 - **R-F — three fatal boot loads remain with no declared principle.**
   `catStore.Load`, `blocklist_startup.go:59`, `main.go:724`. `categories.json` is
   the closest analogue to the two files CHAOS-05/07 chose to quarantine, and it
@@ -2768,3 +2811,177 @@ first draft of the fix as its rationale, and it was wrong — the idle case is
 bounded at 6s. Measuring it, rather than shipping the plausible story, is what
 surfaced the active-stream case, which is both unbounded and reachable by
 faults this codebase already has runbooks for.
+
+---
+
+## 25. CHAOS-57 — The request-history store under a damaged data volume
+
+**Date:** 2026-08-29 · **Domain:** storage / persistence (`internal/logstore`) ·
+**Status:** shipped · **Gates:** `internal/storeguard/storeguard_test.go` (19),
+`internal/logstore/{resilient,enckey}_chaos_test.go` (13),
+`logstore_chaos_test.go` (5) · **Register rows:** R-E (CLOSED), LS-3, LS-4
+
+### 25.1 Why this domain
+
+§19.6 opened row **R-E** and marked it *"next sweep candidate"*: `logstore.OpenTTL`
+calls `badger.Open` with the same version and the same uncatchable-panic
+exposure that CHAOS-50 had just fixed for the community category store. It was
+deferred with a two-clause bound — *"bounded by being opt-in and already
+non-fatal on ERROR"* and *"its content is request history with retention
+semantics, [so] quarantining it silently is an evidence decision, not a cache
+decision."*
+
+Re-deriving both clauses from the wiring inverted them, which is §25.4.
+
+### 25.2 The panic, re-measured for THIS store
+
+CHAOS-50's table was measured with `catdb.Open`'s options. This store's differ —
+encryption on, 128 MiB value log — so the premise was re-measured rather than
+inherited. It reproduces exactly (badger v4.9.6):
+
+```
+panic: ... [recovered, repanicked]
+  table.(*Table).initBiggestAndSmallest ← table.OpenTable
+created by github.com/dgraph-io/badger/v4.newLevelsController in goroutine 21
+```
+
+A `recover()` in the frame directly above `OpenTTL` never fires: the panic is
+raised on a goroutine badger spawns. This is kept as a permanent DEFECT PROOF
+(`TestChaos57_BareOpenTTLPanicIsUncatchableAtTheCallSite`) so a future badger
+change cannot let the recovery gate quietly prove less than it claims.
+
+The same run also produced the table that forced `storeguard.Policy` to exist —
+on a KEYED store, three conditions are indistinguishable:
+
+| Injected condition | Error | Is the data intact? |
+|---|---|---|
+| passphrase changed | `saved logs use a different encryption key` | **yes** |
+| `.salt` sidecar truncated | `saved logs use a different encryption key` | **yes** |
+| KEYREGISTRY scrambled | `saved logs use a different encryption key` | no |
+| `MANIFEST` scrambled | `manifest has bad magic` | no |
+
+CHAOS-50's classifier lists `encryption key mismatch` as CORRUPTION, on the
+stated rationale *"this store is never opened with a key"* — correct for that
+store, false for this one. Reusing it unmodified would have moved a **healthy**
+history store aside over an ordinary passphrase change: data loss caused by the
+recovery mechanism (**LS-3**).
+
+### 25.3 What made this worse than the category store
+
+Two things, both from the wiring rather than the engine.
+
+**It is reachable at RUNTIME.** `enableLogStore` is called from `ui_config.go`'s
+history toggle, so a damaged store kills a gateway carrying production traffic
+the moment an admin flips a switch — no restart, no warning, and no error the
+handler could return, because the process is gone.
+
+**It LATCHES.** The toggle is durable in `admin_settings.json` and re-applied by
+`LoadAdminSettings` on every boot. Under the shipped compose file's
+`restart: unless-stopped`, one unclean kill that damages a table becomes an
+**unattended crash loop** — no proxy, no admin UI, no health endpoint, and no
+way to turn the setting back off, because that requires the admin UI the setting
+prevents from starting. The category store needed a CLI flag to reach that
+state; this one gets there from an admin's saved preference.
+
+### 25.4 The deferral's own reasoning, inverted
+
+- *"Quarantining it silently is an evidence decision"* — true, and it argues FOR
+  the fix. The CHAOS-05/07 contract **moves aside, never deletes**; the evidence
+  survives either way. What the deferral preserved was the alternative: a
+  crash-looping appliance whose history is equally unreadable and whose entire
+  service is down as well.
+- *"Bounded by being opt-in"* — opt-in means DURABLE (the latch) and reachable
+  from the LIVE ADMIN API (the runtime kill). The clause meant to bound the
+  severity was the mechanism that raised it.
+
+### 25.5 LS-4 — the read path destroyed the key
+
+Found by asking the obvious next question of the key path rather than the
+corruption path. `EncKey` minted and **wrote** a fresh 32-byte salt whenever the
+sidecar was unreadable or the wrong length — including next to an existing
+encrypted store. The key is a pure function of `(passphrase, salt)`, so the
+overwrite replaced the only value that could ever decrypt it; the resulting
+error is indistinguishable from a passphrase change, so the operator's remedy
+became *purge*, destroying history that was intact until the read ran. Reachable
+by exactly the fault this store must survive — a torn sidecar after an unclean
+kill (verified: `salt regenerated by EncKey: true`).
+
+**This codebase had already written the rule down.** `internal/alerts`
+(SEC-WHSIGN-1): *a failed decrypt never mints a key; creation happens on first
+encrypt.* Nothing was checking whether anywhere else did the same thing. The
+rule now holds here: mint only when there is no store to be locked out of,
+otherwise `ErrSaltUnusable` with the sidecar untouched — so restoring one 32-byte
+file recovers the whole history, a path that previously did not exist.
+
+### 25.6 What shipped
+
+`internal/storeguard` — the CHAOS-50 engine extracted verbatim and made
+store-agnostic. A second COPY was rejected: the badger message table is
+empirical and pinned by a test *precisely* so an upgrade that rewords a message
+fails the build rather than silently switching recovery off; two copies is how
+that protection rots. `catdb.OpenResilient` is now a thin adapter with an EMPTY
+policy, and its 21 recovery gates run unchanged against the extracted engine —
+21 test functions, 97 assertions, identical before and after, the only edits
+being identifier renames. That is the evidence the extraction is
+behaviour-preserving.
+
+`storeguard.Policy` can only ever **SUBTRACT**. There is deliberately no field
+for ADDING corruption signals: widening destruction from a call site is how a
+shared safety mechanism becomes an unsafe one.
+
+Plus `logstore.OpenResilientTTL` (exempting encryption errors both structurally
+and textually), the `EncKey` fix, the `request_history` contract row, three
+`culvert_logstore_*` series, the existing `state_file_corrupt` alert, and a
+distinct 409 for the salt case naming its own reversible remedy. **Not** wired
+into `/readyz` — a node with history degraded is fully able to serve.
+
+### 25.6b Review follow-up — a defect in the mechanism itself (LS-5)
+
+Raised by Codex against the extraction and **verified in both directions before
+fixing**. Discovery used `filepath.Glob(base + suffix + "*")`, so a glob
+metacharacter in the operator-configurable store path silently broke the
+mechanism:
+
+| Store path | `filepath.Glob` result | Consequence |
+|---|---|---|
+| `/data/hist[1]` | `[]` — reads `[1]` as a character class and looks for `hist1.opening.*` | the store's OWN poison marker is undiscoverable, so the next start hands badger the corrupt directory again — **the crash loop survives its own remedy** |
+| `/data/hist?` | matches `histX.opening.999` | a **healthy** store is quarantined on a NEIGHBOUR's evidence |
+
+The first row is the exact failure this package exists to prevent, reached
+through the package itself. It is inherited from CHAOS-50 — the shipped catdb
+code has it today — and is fixed here for both stores.
+
+Escaping the metacharacters would close only the first row and is
+platform-specific (Go's glob does not honour backslash escapes on Windows).
+Discovery is now a prefix match over the parent directory (`siblings`), which
+has no pattern semantics at all, so the class is gone rather than patched.
+Gates: `TestDiscovery_IsNotFooledByGlobMetacharactersInThePath` (4 paths),
+`TestDiscovery_DoesNotClaimANeighboursMarker`, both verified failing against the
+glob implementation.
+
+A second Codex finding (P2) corrected the health record: a runtime enable that
+fails to open returns BEFORE `adminSettingsSave`, so the persisted setting stays
+off — a record asserting `Enabled: true` reported a configuration that was never
+written. The field is now `SaveRequested` ("an open was attempted"), which is
+true on both the boot and admin paths, and the contract row no longer claims the
+feature is enabled.
+
+### 25.7 What is deliberately left
+
+- **Real KEYREGISTRY damage does not self-heal.** It is indistinguishable from
+  the two benign conditions, and of the four postures the only unacceptable one
+  is destroying intact history over a config change. Degrades loudly; the
+  operator purges. Recorded owner-visible trade.
+- **Recovery still costs one process death** for the panic case (inherited from
+  CHAOS-50 — the marker cannot act until the run after the crash).
+- **No circuit breaker on repeated quarantines**; the metric and the row are the
+  signal.
+- **Nothing backs up the `.salt` sidecar**, which is correctly excluded from
+  archives as key material. An operator who loses it with no backup still loses
+  the history. Whether the appliance should hold a second copy under the KEK is
+  a key-custody decision, not a patch — for an owner.
+- **No third unguarded BadgerDB open remains** in the tree; `catdb` and
+  `logstore` were the two.
+
+See `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-29.md` and
+`docs/operator/request-history-recovery.md`.

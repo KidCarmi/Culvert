@@ -41,6 +41,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"strings"
@@ -186,25 +187,71 @@ const (
 // remediation is to purge the on-disk store and re-enable.
 var ErrEncMismatch = errors.New("saved logs use a different encryption key")
 
+// ErrSaltUnusable is returned when a passphrase is configured, history already
+// exists on disk, and the salt sidecar that derives its key is missing or
+// damaged. See EncKey for why this is a refusal rather than a fresh salt.
+var ErrSaltUnusable = errors.New("saved logs exist but their encryption salt is missing or damaged")
+
 // EncKey derives the AES key from the configured passphrase plus a persistent
 // random salt (sidecar file dir+".salt"). Returns (nil, nil) when no
 // passphrase is configured (encryption disabled).
+//
+// A NEW SALT IS MINTED ONLY WHEN THERE IS NO STORE IT COULD LOCK US OUT OF
+// (CHAOS-57). Minting unconditionally on an unreadable sidecar looks like
+// making the common case work, and is in fact a one-way destruction of key
+// material by the READ path: the derived key is a pure function of
+// (passphrase, salt), so overwriting a torn 32-byte sidecar next to an existing
+// encrypted store replaces the only value that could ever decrypt it. The store
+// then fails to open with "different encryption key" — indistinguishable from
+// an ordinary passphrase change — and the operator's remedy becomes "purge",
+// destroying history that was intact right up until this function ran. That the
+// sidecar can be truncated by exactly the unclean shutdown this store has to
+// survive makes it reachable, not theoretical.
+//
+// This is the same rule `internal/alerts` adopted for webhook signing secrets
+// (SEC-WHSIGN-1): a failed decrypt never mints a key; creation belongs to first
+// use, which for this store means a directory with nothing in it yet.
+//
+// Refusing costs nothing that minting bought. Both paths fail to open; this one
+// fails BEFORE overwriting the sidecar, so restoring it from a backup still
+// recovers the history, and the operator who has no backup reaches the same
+// purge they would have reached anyway.
 func EncKey(dir, passphrase string) ([]byte, error) {
 	if passphrase == "" {
 		return nil, nil
 	}
 	saltPath := dir + ".salt"
 	salt, err := os.ReadFile(saltPath) //nolint:gosec // path is server-configured
-	if err != nil || len(salt) != encSaltLen {
-		salt = make([]byte, encSaltLen)
-		if _, e := rand.Read(salt); e != nil {
-			return nil, fmt.Errorf("logstore salt: %w", e)
-		}
-		if e := os.WriteFile(saltPath, salt, 0o600); e != nil {
-			return nil, fmt.Errorf("write logstore salt: %w", e)
-		}
+	if err == nil && len(salt) == encSaltLen {
+		return pbkdf2.Key([]byte(passphrase), salt, encIters, encKeyLen, sha256.New), nil
+	}
+	if storeHasContent(dir) {
+		return nil, fmt.Errorf("%w (%s)", ErrSaltUnusable, saltPath)
+	}
+	salt = make([]byte, encSaltLen)
+	if _, e := rand.Read(salt); e != nil {
+		return nil, fmt.Errorf("logstore salt: %w", e)
+	}
+	if e := os.WriteFile(saltPath, salt, 0o600); e != nil {
+		return nil, fmt.Errorf("write logstore salt: %w", e)
 	}
 	return pbkdf2.Key([]byte(passphrase), salt, encIters, encKeyLen, sha256.New), nil
+}
+
+// storeHasContent reports whether dir holds anything a lost salt would strand.
+// An absent directory (first ever enable, or the state right after a purge) and
+// an empty one (badger MkdirAll'd it and then failed) both answer false, so the
+// minting path stays reachable for every case where there is nothing to lose.
+//
+// An unreadable directory answers TRUE: the fail-safe direction here is to
+// refuse and keep the sidecar, because the alternative overwrites key material
+// on a guess about a directory we could not see.
+func storeHasContent(dir string) bool {
+	entries, err := os.ReadDir(dir) //nolint:gosec // G703: dir is the server-configured store path, never request-derived
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return len(entries) > 0
 }
 
 // Package-level observability counters (read by main's /metrics exposition

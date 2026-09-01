@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/logstore"
+	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
 // logStore and LogEntry are re-exposed unqualified (engine types are
@@ -33,8 +34,16 @@ type (
 	DecryptionBlock = logstore.DecryptionBlock
 )
 
-// errLogStoreEncMismatch is re-exposed for the retention API handler.
-var errLogStoreEncMismatch = logstore.ErrEncMismatch
+// errLogStoreEncMismatch / errLogStoreSaltUnusable are re-exposed for the
+// retention API handler, which turns each into its own actionable 409 (the two
+// have DIFFERENT remedies — see apiLogsRetention).
+var (
+	errLogStoreEncMismatch  = logstore.ErrEncMismatch
+	errLogStoreSaltUnusable = logstore.ErrSaltUnusable
+)
+
+// logstoreQuarantinedCopies is re-exposed for the health plane.
+var logstoreQuarantinedCopies = logstore.QuarantinedCopies
 
 // logEntryLowPriority is re-exposed for logguard's minimal-mode path and its
 // tests (engine func is logstore.LowPriority).
@@ -86,7 +95,13 @@ var logStoreEnableMu sync.Mutex
 // retention settings (days, GB) into the internal TTL/byte limits, deriving
 // the encryption key from the configured passphrase, and wiring logguard's
 // minimal-mode state as the engine's emergency hook.
-func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, error) {
+//
+// It goes through OpenResilientTTL, not OpenTTL, because a damaged store used
+// to be able to kill this process outright — badger.Open panics from a
+// goroutine it spawns on a corrupt table, so no recover() here could contain it
+// (CHAOS-57). The Recovery is returned alongside so the caller can report the
+// outcome ONCE, after it knows whether the replacement store actually opened.
+func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, storeguard.Recovery, error) {
 	var ttl time.Duration
 	if retentionDays > 0 {
 		ttl = time.Duration(retentionDays) * 24 * time.Hour
@@ -97,9 +112,12 @@ func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, erro
 	}
 	encKey, err := logstore.EncKey(dir, logStorePassphrase)
 	if err != nil {
-		return nil, err
+		// Key derivation failed, so nothing has touched the store directory.
+		// Report the residual quarantines anyway: an unreconciled copy from an
+		// earlier incident is still occupying the volume.
+		return nil, storeguard.Recovery{ResidualQuarantines: logstore.QuarantinedCopies(dir)}, err
 	}
-	return logstore.OpenTTL(dir, ttl, maxBytes, encKey, minimalMode)
+	return logstore.OpenResilientTTL(dir, ttl, maxBytes, encKey, minimalMode)
 }
 
 // enableLogStore opens (or re-uses) the history store and publishes it as the
@@ -118,10 +136,15 @@ func enableLogStore(ctx context.Context, dir string, days int, gb float64) error
 	if dir == "" {
 		return fmt.Errorf("log store path not configured")
 	}
-	ls, err := openLogStore(dir, days, gb)
+	ls, rec, err := openLogStore(dir, days, gb)
 	if err != nil {
+		// Degrade, never exit: history off is the posture of a node that never
+		// had the toggle switched on. The caller decides what to tell the admin;
+		// this records + reports the storage-level outcome.
+		noteLogStoreOpenFailed(dir, rec, err)
 		return err
 	}
+	noteLogStoreOpened(dir, rec)
 	jctx, cancel := context.WithCancel(ctx)
 	ls.SetCancelJanitor(cancel)
 	startLogStoreRetention(jctx, ls, time.Minute)
@@ -138,6 +161,7 @@ func disableLogStore() {
 	if old := globalLogStore.Swap(nil); old != nil {
 		_ = old.Close()
 	}
+	noteLogStoreDisabled(logStoreDir)
 }
 
 // purgeLogStore deletes all stored history. When saving is ON it drops the live

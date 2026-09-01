@@ -8,6 +8,12 @@ package catdb
 // claim is proven live (not asserted from documentation) by
 // TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot.
 
+// CHAOS-57 note: the machinery these gates exercise moved to
+// `internal/storeguard` so the request-history store could reuse it. The gates
+// themselves are unchanged and still run against the REAL community store — the
+// aliases below only re-point the identifiers at their new home, so what is
+// asserted, and the store it is asserted against, are exactly what they were.
+
 import (
 	"errors"
 	"os"
@@ -15,7 +21,38 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
+
+// ── the machinery under test, at its new address ─────────────────────────────
+
+type openErrClass = storeguard.OpenErrClass
+
+const (
+	classUnknown         = storeguard.ClassUnknown
+	classEnvironment     = storeguard.ClassEnvironment
+	classCorrupt         = storeguard.ClassCorrupt
+	markerSuffix         = storeguard.MarkerSuffix
+	markerTempSuffix     = storeguard.MarkerTempSuffix
+	quarantineSuffix     = storeguard.QuarantineSuffix
+	maxQuarantinedCopies = storeguard.MaxQuarantinedCopies
+)
+
+var (
+	lockStore           = storeguard.LockStore
+	quarantineDir       = storeguard.QuarantineDir
+	abandonedMarkers    = storeguard.AbandonedMarkers
+	beginAttempt        = storeguard.BeginAttempt
+	errStoreLockNotHeld = storeguard.ErrStoreLockNotHeld
+	trimSep             = func(p string) string { return strings.TrimSuffix(p, string(os.PathSeparator)) }
+)
+
+// classifyOpenError classifies under THIS store's policy, which is the empty
+// one — see communityStorePolicy.
+func classifyOpenError(err error) openErrClass {
+	return storeguard.ClassifyOpenError(err, communityStorePolicy)
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -298,21 +335,21 @@ func TestOpenResilient_QuarantinedCopiesAreBounded(t *testing.T) {
 func TestOpenResilient_MarkerIsASiblingNotAChild(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 	a := beginAttempt(dir)
-	defer a.end()
-	if a.path == "" {
+	defer a.End()
+	if a.Path == "" {
 		t.Fatal("marker could not be armed")
 	}
-	if filepath.Dir(a.path) != filepath.Dir(dir) {
-		t.Errorf("marker %q is not a sibling of %q", a.path, dir)
+	if filepath.Dir(a.Path) != filepath.Dir(dir) {
+		t.Errorf("marker %q is not a sibling of %q", a.Path, dir)
 	}
-	if strings.HasPrefix(a.path, dir+string(filepath.Separator)) {
-		t.Errorf("marker %q lives INSIDE the store — a quarantine would carry it away", a.path)
+	if strings.HasPrefix(a.Path, dir+string(filepath.Separator)) {
+		t.Errorf("marker %q lives INSIDE the store — a quarantine would carry it away", a.Path)
 	}
 	// A trailing separator must not produce a nested marker either.
 	b := beginAttempt(dir + string(filepath.Separator))
-	defer b.end()
-	if filepath.Dir(b.path) != filepath.Dir(dir) {
-		t.Errorf("marker %q for a trailing-separator path is not a sibling", b.path)
+	defer b.End()
+	if filepath.Dir(b.Path) != filepath.Dir(dir) {
+		t.Errorf("marker %q for a trailing-separator path is not a sibling", b.Path)
 	}
 }
 
@@ -553,7 +590,7 @@ func TestOpenResilient_HeldStoreLockRefusesACompetingOpen(t *testing.T) {
 	other, oerr := lockStore(dir)
 	if oerr != nil || other != nil {
 		if other != nil {
-			other.release()
+			other.Release()
 		}
 		t.Fatalf("a held store lock was reported free: (%v, %v)", other, oerr)
 	}
@@ -561,11 +598,11 @@ func TestOpenResilient_HeldStoreLockRefusesACompetingOpen(t *testing.T) {
 	// And badger itself must be refused for the whole window.
 	if db, derr := Open(dir); derr == nil {
 		_ = db.Close()
-		lock.release()
+		lock.Release()
 		t.Fatal("badger opened a store whose lock the quarantine path was holding — the rename window is not closed")
 	}
 
-	lock.release()
+	lock.Release()
 
 	db, derr := Open(dir)
 	if derr != nil {
@@ -595,7 +632,7 @@ func TestOpenResilient_QuarantineReleasesTheStoreLock(t *testing.T) {
 	if lerr != nil || lock == nil {
 		t.Fatalf("quarantined copy is still locked — the rename leaked its handle: (%v, %v)", lock, lerr)
 	}
-	lock.release()
+	lock.Release()
 }
 
 // A marker whose owner is still inside badger.Open must never be treated as
@@ -604,18 +641,18 @@ func TestOpenResilient_LiveAttemptMarkerIsNotAbandoned(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 
 	live := beginAttempt(dir)
-	if live.path == "" {
+	if live.Path == "" {
 		t.Fatal("could not arm a marker")
 	}
 	if got := abandonedMarkers(dir); len(got) != 0 {
 		t.Errorf("a LIVE attempt's marker was reported abandoned: %v", got)
 	}
 	// Once the owner is gone the same file becomes the poison signal.
-	live.lock.release()
+	live.Lock.Release()
 	if got := abandonedMarkers(dir); len(got) != 1 {
 		t.Errorf("abandoned markers after the owner released = %v, want 1", got)
 	}
-	_ = os.Remove(live.path)
+	_ = os.Remove(live.Path)
 }
 
 // Temp markers left by a death during arming are litter, not a poison signal:
@@ -659,7 +696,7 @@ func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
 	if err != nil || lock == nil {
 		t.Fatalf("lockStore = (%v, %v)", lock, err)
 	}
-	lock.release()
+	lock.Release()
 	if _, err := quarantineDir(lock, dir); !errors.Is(err, errStoreLockNotHeld) {
 		t.Errorf("quarantineDir(released) = %v, want errStoreLockNotHeld", err)
 	}
@@ -672,7 +709,7 @@ func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
 	if err != nil || lock2 == nil {
 		t.Fatalf("re-lock = (%v, %v)", lock2, err)
 	}
-	defer lock2.release()
+	defer lock2.Release()
 	if _, err := quarantineDir(lock2, dir); err != nil {
 		t.Errorf("quarantineDir with a held lock: %v", err)
 	}
@@ -684,11 +721,11 @@ func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
 func TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 	a := beginAttempt(dir)
-	if a.path == "" {
+	if a.Path == "" {
 		t.Fatal("could not arm a marker")
 	}
-	a.end()
-	if _, err := os.Stat(a.path); err == nil {
+	a.End()
+	if _, err := os.Stat(a.Path); err == nil {
 		t.Error("marker still on disk after end()")
 	}
 	if got := abandonedMarkers(dir); len(got) != 0 {
