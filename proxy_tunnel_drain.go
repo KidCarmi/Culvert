@@ -164,6 +164,7 @@ var (
 // Order 94 is deliberate: it is AFTER the listeners stop and BEFORE the drain, so a
 // session that establishes early enough is still covered by the drain (never refused
 // needlessly), and one that would establish too late is refused instead of orphaned.
+//
 // No-op when SOCKS5 was never configured. That is not just an optimisation: the
 // fence is consulted ONLY at the SOCKS5 establishment point, so on a node without
 // SOCKS5 raising it changes nothing — and leaving it down keeps a shutdown-sequence
@@ -239,9 +240,8 @@ func registerDrainableTunnel(class tunnelClass, conns ...net.Conn) func() {
 // legs). Registry entries are left in place: the relay's own release removes them, and
 // deleting here would race a concurrent release into double-decrementing the gauge.
 // A double Close is a harmless already-closed error.
-func forceCloseDrainableTunnels() (int, string) {
+func forceCloseDrainableTunnels() (closed int, breakdown string) {
 	var perClass [tunnelClassCount]int
-	n := 0
 	tunnelDrainConns.Range(func(k, _ any) bool {
 		e, ok := k.(*tunnelDrainEntry)
 		if !ok {
@@ -253,13 +253,13 @@ func forceCloseDrainableTunnels() (int, string) {
 		if e.class >= 0 && e.class < tunnelClassCount {
 			perClass[e.class]++
 		}
-		n++
+		closed++
 		return true
 	})
-	if n > 0 {
-		atomic.AddInt64(&statTunnelForced, int64(n))
+	if closed > 0 {
+		atomic.AddInt64(&statTunnelForced, int64(closed))
 	}
-	return n, formatTunnelClassBreakdown(perClass)
+	return closed, formatTunnelClassBreakdown(perClass)
 }
 
 // formatTunnelClassBreakdown renders a stable, comma-separated "class=n" list of the
