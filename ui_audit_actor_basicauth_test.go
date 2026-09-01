@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -197,8 +198,10 @@ func TestAuditActor_BasicIdentityOriginatesOnlyFromVerifiedLogin(t *testing.T) {
 		if rerr != nil {
 			t.Fatalf("read %s: %v", f, rerr)
 		}
-		if n := strings.Count(string(raw), "context.WithValue(ctx, uiUserKey{}") +
-			strings.Count(string(raw), "context.WithValue(r.Context(), uiUserKey{}"); n > 0 {
+		// bytes.Count over the raw file, not strings.Count(string(raw), …): converting
+		// every source file to a string allocates a copy per file (gocritic indexAlloc).
+		if n := bytes.Count(raw, []byte("context.WithValue(ctx, uiUserKey{}")) +
+			bytes.Count(raw, []byte("context.WithValue(r.Context(), uiUserKey{}")); n > 0 {
 			writers[filepath.Base(f)] = n
 		}
 	}
@@ -209,8 +212,8 @@ func TestAuditActor_BasicIdentityOriginatesOnlyFromVerifiedLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ui_middleware.go: %v", err)
 	}
-	verifyAt := strings.Index(string(mw), "cfg.VerifyUIUser(user, pass)")
-	writeAt := strings.Index(string(mw), "uiUserKey{}")
+	verifyAt := bytes.Index(mw, []byte("cfg.VerifyUIUser(user, pass)"))
+	writeAt := bytes.Index(mw, []byte("uiUserKey{}"))
 	if verifyAt < 0 || writeAt < 0 || writeAt < verifyAt {
 		t.Fatalf("the uiUserKey write must follow cfg.VerifyUIUser (verify@%d, write@%d)", verifyAt, writeAt)
 	}
