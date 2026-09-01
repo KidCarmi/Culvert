@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -706,6 +707,7 @@ func sameRuleContent(a, b PolicyRule) bool {
 	// Precomputed unexported hot-path caches are derived, not content.
 	a.normFQDN, b.normFQDN = "", ""
 	a.srcIPNet, b.srcIPNet = nil, nil
+	a.srcPrefix, b.srcPrefix = netip.Prefix{}, netip.Prefix{}
 	a.matchedConds, b.matchedConds = "", ""
 	// Provenance stamps are a denormalized cache of audit truth, not definition.
 	a.CreatedAt, b.CreatedAt = "", ""
