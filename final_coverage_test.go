@@ -917,10 +917,15 @@ func TestIsSafeRedirectURL_FTPScheme(t *testing.T) {
 // ─── tsRecord: diff > 0 path ──────────────────────────────────────────────────
 
 func TestTsRecord_DiffPath(_ *testing.T) {
-	// Force ts.lastMin to be in the past to trigger the diff > 0 branch
+	// Force the ring two minutes into the past to trigger advanceLocked's
+	// diff > 0 branch. liveMin is what the per-request path actually checks, so
+	// it has to move back too — setting lastMin alone would leave liveMin equal
+	// to the current minute and tsRecord would never reach the rollover.
+	now := time.Now().Unix() / 60
 	ts.mu.Lock()
-	ts.lastMin = (time.Now().Unix() / 60) - 2 // 2 minutes ago
+	ts.lastMin = now - 2
 	ts.mu.Unlock()
+	ts.liveMin.Store(now - 2)
 
 	tsRecord()
 	tsRecord()

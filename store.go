@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
 	"os"
 	"sort"
 	"strings"
@@ -54,60 +55,192 @@ var (
 
 // ─── Time-series: requests per minute, last 60 minutes ───────────────────────
 
-// timeSeries deliberately keeps a plain mutex: an RLock+atomic fast path was
-// benchmarked (2026-07) and measured FLAT under parallelism — every request
-// increments the same current-minute bucket, so the shared cache line, not
-// the lock, is the bound. See store_stats_bench_test.go.
+// ── The current minute's counters are SHARDED ────────────────────────────────
+//
+// tsRecordResult runs on EVERY proxied request — HTTP, CONNECT, WebSocket,
+// SOCKS5 — from recordStats. It used to take one process-wide sync.Mutex and,
+// while HOLDING it, read the clock (tsAdvance's time.Now) before bumping three
+// counters. So every request in the process serialised on one lock across a
+// vDSO clock read, which is not a constant cost but a throughput CEILING: the
+// same shape as the internal/threatfeed, internal/connlimit, IP-filter and
+// latency-histogram findings already closed in this tree.
+//
+// The header this replaces recorded that an RLock+atomic fast path had been
+// benchmarked and measured FLAT, concluding "the shared cache line, not the
+// lock, is the bound". That conclusion was right about RWMutex and wrong about
+// the bound: swapping Mutex for RWMutex cannot help a path that MUTATES, and
+// the shared cache line is only inherent if the counter stays shared. Measured
+// on a 4-core box (Go 1.26, one record per iteration, n=4, ns/op):
+//
+//	                                    │ GOMAXPROCS=1 │ GOMAXPROCS=4 │
+//	mutex + clock INSIDE the lock (old) │     85.5     │    178.6     │
+//	mutex, clock hoisted out            │     83.1     │    144.9     │
+//	lock-free, counters still SHARED    │     78.9     │     62.2     │
+//	lock-free, counters SHARDED (this)  │     85.9     │     38.1     │
+//	time.Now().Unix()/60 alone (floor)  │     64.8     │     16.6     │
+//
+// Read the last row first: the clock is the irreducible floor, and at four
+// cores the old path spent 162 of its 179 ns NOT doing the work. Sharding
+// removes ~92% of that. Four cores went from 5.6M records/s (WORSE than one
+// core's 11.7M — adding cores subtracted throughput) to 26.2M, a 4.7x lift of
+// the old ceiling, and the gap widens on the 16- and 32-core hardware this
+// ships to.
+//
+// In this tree rather than the model, at GOMAXPROCS 1 / 4 (n=6):
+// BenchmarkTSRecordResultParallel 87.4 / 172.6 -> 87.6 / 38.7, and the whole
+// per-request stats fan-out, BenchmarkRecordStatsAllowedParallel, 142.9 /
+// 275.8 -> 136.4 / 131.6. The model's ~0.4 ns cost of picking a shard is the
+// honest price at one core; measured end to end it is inside the noise, and
+// recordStats came out slightly AHEAD there because dropping the lock/unlock
+// pair more than pays for it. So there is no low-concurrency price to trade.
+//
+// Only the CURRENT minute is hot, so only it is sharded: the 60-bucket ring is
+// untouched and still mutex-guarded. Requests accumulate into `live`, and a
+// rollover folds those accumulators into the bucket they belong to. Readers
+// (tsGet — the SSE dashboard tick, /api/stats, the history-store estimate) sum
+// the shards in. That moves work read-ward, exactly as the sharded latency
+// histogram does: a read happens once per dashboard poll, a write once per
+// request.
+//
+// THE INVARIANT IS CONSERVATION, NOT INSTANT ATTRIBUTION. A request that reads
+// liveMin, is descheduled, and increments after a concurrent rollover lands in
+// the NEXT minute's accumulator rather than the one it read. Nothing is ever
+// lost — the fold SWAPS each shard to zero, so a late increment is simply
+// carried to the following fold — and the boundary shift is at most one bucket
+// on a 60-minute dashboard sparkline. Pinned by
+// TestTimeSeries_ConcurrentRecordsAreConserved.
+const (
+	// tsShardCount is a power of two so the shard index is a mask, not a
+	// division. 64 mirrors the per-IP rate limiter (rlShardCount) and
+	// internal/connlimit, which reached the same figure for the same reason.
+	tsShardCount = 64
+	// tsCacheLine is the padding target. Three int64s is 24 bytes, so without
+	// padding two shards share a line and incrementing one invalidates the
+	// other — false sharing that hands back most of what splitting just bought.
+	tsCacheLine = 64
+)
+
+// tsLiveShard is one padded slice of the current minute's counters.
+type tsLiveShard struct {
+	total   int64
+	allowed int64
+	blocked int64
+	_       [tsCacheLine - 24]byte
+}
+
 type timeSeries struct {
+	// mu guards the 60-minute ring below. It is taken on a rollover (at most
+	// once per minute) and by readers — never by the per-request counting path.
 	mu      sync.Mutex
 	buckets [60]int64
 	allowed [60]int64
 	blocked [60]int64
 	cur     int
 	lastMin int64
+
+	// liveMin is the minute `live` belongs to; it is the only field the
+	// per-request path reads, and a plain atomic load is the whole check.
+	liveMin atomic.Int64
+	live    [tsShardCount]tsLiveShard
 }
 
 var ts = &timeSeries{}
 
-func tsAdvance() {
+// tsShardIndex picks the accumulator this request increments.
+//
+// Unlike every other sharded structure in this tree there is NO key to shard
+// on — a request contributes to a global count, not to a per-IP or per-host
+// slot — so the index comes from the runtime's per-P generator, which is
+// lock-free and needs no shared state of its own. The counters are only ever
+// SUMMED, so which shard a given request lands in is not observable.
+//
+// math/rand/v2 (aliased: this file's `rand` is crypto/rand) rather than a
+// shared atomic round-robin counter, which would reintroduce exactly the
+// contended cache line this change exists to remove.
+func tsShardIndex() uint64 {
+	return mrand.Uint64() & (tsShardCount - 1) // #nosec G404 -- shard spread, not crypto
+}
+
+// tsRecord counts a request without an allow/block verdict.
+func tsRecord() { ts.record(false, false) }
+
+// tsRecordResult counts a request and its allow/block verdict.
+func tsRecordResult(isAllowed bool) { ts.record(true, isAllowed) }
+
+// record is the per-request hot path: one clock read, one atomic load, and two
+// or three atomic adds against a shard nobody else is likely to be touching.
+func (t *timeSeries) record(withVerdict, isAllowed bool) {
 	now := time.Now().Unix() / 60
-	if ts.lastMin == 0 {
-		ts.lastMin = now
+	if t.liveMin.Load() != now {
+		t.rollover(now)
 	}
-	diff := now - ts.lastMin
-	if diff > 0 {
-		if diff > 60 {
-			diff = 60
-		}
-		for i := int64(0); i < diff; i++ {
-			ts.cur = (ts.cur + 1) % 60
-			ts.buckets[ts.cur] = 0
-			ts.allowed[ts.cur] = 0
-			ts.blocked[ts.cur] = 0
-		}
-		ts.lastMin = now
+	s := &t.live[tsShardIndex()]
+	atomic.AddInt64(&s.total, 1)
+	if !withVerdict {
+		return
 	}
-}
-
-func tsRecord() {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	tsAdvance()
-	ts.buckets[ts.cur]++
-}
-
-func tsRecordResult(isAllowed bool) {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	tsAdvance()
-	ts.buckets[ts.cur]++
 	if isAllowed {
-		ts.allowed[ts.cur]++
+		atomic.AddInt64(&s.allowed, 1)
 	} else {
-		ts.blocked[ts.cur]++
+		atomic.AddInt64(&s.blocked, 1)
 	}
 }
 
+// rollover folds the live accumulators into the minute they belong to and
+// advances the ring. It runs at most once per minute on a busy proxy; the
+// re-check under the lock makes the losers of a concurrent rollover no-ops.
+func (t *timeSeries) rollover(now int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.liveMin.Load() == now {
+		return
+	}
+	t.foldLiveLocked()
+	t.advanceLocked(now)
+	t.liveMin.Store(now)
+}
+
+// foldLiveLocked drains every shard into the CURRENT bucket. The swap-to-zero
+// is what makes conservation hold: an increment that arrives after the swap is
+// simply carried into the next fold instead of being overwritten.
+func (t *timeSeries) foldLiveLocked() {
+	for i := range t.live {
+		s := &t.live[i]
+		t.buckets[t.cur] += atomic.SwapInt64(&s.total, 0)
+		t.allowed[t.cur] += atomic.SwapInt64(&s.allowed, 0)
+		t.blocked[t.cur] += atomic.SwapInt64(&s.blocked, 0)
+	}
+}
+
+// advanceLocked moves the ring forward to `now`, zeroing each newly-current
+// bucket. Behaviour is carried over verbatim from the old tsAdvance, including
+// the first-record (lastMin == 0) and clock-went-backwards (diff <= 0) cases.
+func (t *timeSeries) advanceLocked(now int64) {
+	if t.lastMin == 0 {
+		t.lastMin = now
+		return
+	}
+	diff := now - t.lastMin
+	if diff <= 0 {
+		return
+	}
+	if diff > 60 {
+		diff = 60
+	}
+	for i := int64(0); i < diff; i++ {
+		t.cur = (t.cur + 1) % 60
+		t.buckets[t.cur] = 0
+		t.allowed[t.cur] = 0
+		t.blocked[t.cur] = 0
+	}
+	t.lastMin = now
+}
+
+// tsGet returns the last 60 minutes, oldest first. Like the version it
+// replaces it does NOT advance the ring, so an idle proxy keeps reporting the
+// window as it stood at the last request. The live shards belong to the
+// current bucket and are summed in WITHOUT draining — a read never mutates the
+// series, so two consecutive reads with no traffic between them agree.
 func tsGet() (total, allowed, blocked []int64) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -119,6 +252,12 @@ func tsGet() (total, allowed, blocked []int64) {
 		total[59-i] = ts.buckets[idx]
 		allowed[59-i] = ts.allowed[idx]
 		blocked[59-i] = ts.blocked[idx]
+	}
+	for i := range ts.live {
+		s := &ts.live[i]
+		total[59] += atomic.LoadInt64(&s.total)
+		allowed[59] += atomic.LoadInt64(&s.allowed)
+		blocked[59] += atomic.LoadInt64(&s.blocked)
 	}
 	return
 }
