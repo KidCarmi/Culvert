@@ -1,8 +1,9 @@
 //go:build unix
 
-package catdb
+package badgerguard
 
-// dirlock_unix.go — CHAOS-50: the one primitive the recovery path trusts.
+// dirlock_unix.go — the one primitive the recovery path trusts (CHAOS-50, §19;
+// generalised to every Badger store by CHAOS-57, §25).
 //
 // Two questions have to be answered before a damaged store can be moved aside,
 // and both reduce to "is a live process holding this?":

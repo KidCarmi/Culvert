@@ -86,7 +86,17 @@ var logStoreEnableMu sync.Mutex
 // retention settings (days, GB) into the internal TTL/byte limits, deriving
 // the encryption key from the configured passphrase, and wiring logguard's
 // minimal-mode state as the engine's emergency hook.
-func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, error) {
+//
+// CHAOS-57: the open goes through logstore.OpenResilientTTL, never bare
+// OpenTTL. A corrupt `.sst` makes badger.Open PANIC from a goroutine badger
+// spawns, which no recover() here could contain — and this function is reached
+// from the ADMIN API as well as from boot, so an unguarded open lets a damaged
+// store kill a serving gateway from an HTTP handler, and lets the durable
+// `LogStoreEnabled` setting replay that death into a crash loop. The guard
+// quarantines a directory a previous process died inside of before badger is
+// handed it again. The recovery is returned, not logged here: the caller owns
+// the operator-facing surfaces.
+func openLogStore(dir string, retentionDays int, maxGB float64) (store *logStore, recovery logstore.Recovery, err error) {
 	var ttl time.Duration
 	if retentionDays > 0 {
 		ttl = time.Duration(retentionDays) * 24 * time.Hour
@@ -97,9 +107,9 @@ func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, erro
 	}
 	encKey, err := logstore.EncKey(dir, logStorePassphrase)
 	if err != nil {
-		return nil, err
+		return nil, logstore.Recovery{}, err
 	}
-	return logstore.OpenTTL(dir, ttl, maxBytes, encKey, minimalMode)
+	return logstore.OpenResilientTTL(dir, ttl, maxBytes, encKey, minimalMode)
 }
 
 // enableLogStore opens (or re-uses) the history store and publishes it as the
@@ -118,7 +128,11 @@ func enableLogStore(ctx context.Context, dir string, days int, gb float64) error
 	if dir == "" {
 		return fmt.Errorf("log store path not configured")
 	}
-	ls, err := openLogStore(dir, days, gb)
+	ls, rec, err := openLogStore(dir, days, gb)
+	// Record the outcome BEFORE the error branch: a recovery that was triggered
+	// and then SKIPPED (a live lock holder, a rename that failed) is exactly the
+	// state an operator has to see, and it is only reachable on the error path.
+	noteLogStoreOpen(dir, rec, err)
 	if err != nil {
 		return err
 	}

@@ -36,6 +36,27 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-28 — CHAOS-57 sweep (the last unguarded `badger.Open`).** §19 closed a crash loop
+caused by a corrupt BadgerDB store panicking out of a goroutine badger spawns — uncatchable at any
+call site — and recorded the other store with the same exposure as **R-E, "next sweep candidate"**.
+This is that sweep, and the exposure is larger than "the same panic elsewhere". The history store's
+open is reached from the **admin API** as well as from boot, so a damaged store turned
+`POST /api/logs/retention {"enabled":true}` into the death of a SERVING gateway from an HTTP
+handler goroutine; and because the enable decision is DURABLE in `admin_settings.json` and replayed
+on every start, that death then became an unattended crash loop **whose off switch lives in an
+admin UI that never finishes starting**. R-E deferred on evidence semantics — quarantining history
+"is an evidence decision, not a cache decision" — and that blocker does not survive reading
+`reqlog.Add`: the durable request log is the JSONL file, and this store is the queryable INDEX over
+it, so the cost of a quarantine is a reset search index, not a lost record. Shipped: the mechanism
+moved to `internal/badgerguard` (moved, not copied — catdb's 697-line suite runs unchanged against
+it and is the proof the move was faithful), `logstore.OpenResilientTTL` puts both paths behind the
+guard, and the recovery is alerted, audited (`logstore.quarantine`) and surfaced on a `history_store`
+contract row that CLEARS when the operator reclaims the disk. The finding inside the fix: the shared
+corruption list treats `"encryption key mismatch"` as damage because the community store is never
+opened with a key — the history store IS, so under a copied list a **passphrase typo would have
+moved the operator's entire saved history aside**. Sharing the mechanism forced that assumption into
+a parameter where it had to be stated and tested. See §25.
+
 **2026-08-24 — CHAOS-55 sweep (the fencing lease's recovery paths).** ADR-0005 built the
 fence to answer *may this node write?* and answers it correctly in every direction. What it never
 built was the way BACK. The lease has three exits from write authority — denied on promotion,
@@ -1844,6 +1865,16 @@ pinned by `TestCheckCategoryFeedDB_RowCarriesNoRawCause`.
   on. Not fixed here because its content is request history with retention
   semantics: quarantining it silently is an evidence decision, not a cache
   decision. **Next sweep candidate.**
+
+  > **CLOSED by CHAOS-57 (§25), 2026-08-28.** The evidence objection did not
+  > survive reading `reqlog.Add`: the durable request log is the JSONL file and
+  > this store is the queryable INDEX over it, so a quarantine costs saved-log
+  > search rather than the record. The mechanism above moved to
+  > `internal/badgerguard` and both the boot path and the admin API now reach
+  > it through `logstore.OpenResilientTTL`. The recovery is alerted, AUDITED
+  > (`logstore.quarantine` — the answer to "silently") and surfaced on a
+  > `history_store` row that clears when the operator reclaims the disk.
+
 - **R-F — three fatal boot loads remain with no declared principle.**
   `catStore.Load`, `blocklist_startup.go:59`, `main.go:724`. `categories.json` is
   the closest analogue to the two files CHAOS-05/07 chose to quarantine, and it
@@ -2768,3 +2799,287 @@ first draft of the fix as its rationale, and it was wrong — the idle case is
 bounded at 6s. Measuring it, rather than shipping the plausible story, is what
 surfaced the active-stream case, which is both unbounded and reachable by
 faults this codebase already has runbooks for.
+
+---
+
+## 25. CHAOS-57 — The request-history store, and the last unguarded `badger.Open`
+
+**Date:** 2026-08-28
+**Scope:** Every BadgerDB open in the tree, driven by the one §19 left open.
+**Status:** shipped.
+
+### 25.1 Why this domain
+
+§19 closed a crash loop: a corrupt Layer-2 community category store made
+`badger.Open` **panic from a goroutine badger spawns**, so no `recover()` at any
+call site could contain it, and `restart: unless-stopped` turned one unclean
+container kill into a permanent refusal to boot. It shipped
+`catdb.OpenResilient` and, in *§19.6 What is deliberately left*, recorded the
+other store with the same exposure:
+
+> **R-E — `internal/logstore` has the same uncatchable panic.** … Bounded by
+> being opt-in and already non-fatal on ERROR; made worse by being reachable
+> from the **admin API** … so an admin can kill the gateway by turning history
+> on. Not fixed here because its content is request history with retention
+> semantics: quarantining it silently is an evidence decision, not a cache
+> decision. **Next sweep candidate.**
+
+This is that sweep. Two of R-E's three clauses hold up. The third — the reason
+it was deferred — does not survive reading the write path, and that is what
+unblocked the fix.
+
+### 25.2 The exposure is larger than "the same panic, elsewhere"
+
+`internal/logstore/logstore.go:298` was the **last unguarded `badger.Open` in
+the tree** (`internal/catdb/catdb.go:53` is the guarded one; there are no
+others). What makes it the more dangerous of the pair is not the fault, which
+is identical, but **where it is reached from**. Both paths funnel through one
+chokepoint, `openLogStore` (`logstore.go`):
+
+| Path | Reached by | Cost of the panic |
+|---|---|---|
+| Boot | `loadLogStore` (`log_store_path` seed) and `LoadAdminSettings` replaying `LogStoreEnabled` | Crash loop under `restart: unless-stopped` |
+| **Runtime** | `POST /api/logs/retention {"enabled":true}` → `applyRetentionUpdate` → `enableLogStore` | **A serving gateway dies mid-request, from an HTTP handler goroutine** |
+
+The runtime path has no analogue in §19 — the community store is opened once, at
+boot. Here an authenticated admin toggling "save logs" on a damaged store kills
+the process: every in-flight tunnel dropped, no 500, no handler return.
+
+The two paths then compose into something worse than either. The enable decision
+is **durable** (`LogStoreEnabledSaved` / `LogStoreEnabled` in
+`admin_settings.json`) and is replayed on every start
+(`admin_settings.go:412`). So a store that becomes damaged *after* it was
+legitimately enabled — the ordinary case, an unclean kill — produces an
+unattended crash loop **whose off switch lives in an admin UI that never
+finishes starting**. The operator's only lever is shell access to the volume.
+This is F-23's "crash loop on fatal config" reached through a *setting* rather
+than a flag, which is why no config review would have caught it.
+
+Note what the error path proves about the panic path. A *returned* error was
+already handled correctly and always has been: `loadLogStore` logs and degrades,
+`applyRetentionUpdate` returns 500 or the 409 "purge saved logs" guidance. The
+store is genuinely opt-in and genuinely non-fatal *for the failures badger
+reports*. The whole defect is the failure it does not report.
+
+### 25.3 The deferral was based on a claim the code does not support
+
+R-E deferred on evidence semantics: quarantining request history "is an evidence
+decision, not a cache decision". That is the right question and it has a
+definite answer in the write path.
+
+`reqlog.Add` (`internal/reqlog/reqlog.go:161`) does three things in order: ring
+the entry in memory, `enqueue(e)` onto the **durable JSONL drain**, and only then
+hand the same entry to the history store through the `history` hook — installed
+at `store.go:204`, `reqlog.SetHistory(func(e LogEntry) { globalLogStore.Load().Add(e) })`.
+
+So this store is **not the record of truth**. The JSONL file is the durable
+request log; the Badger store is the *queryable index over it*. Quarantining it
+costs the admin their saved-log search, not their record — and §19's own
+convention already forbids the destructive reading: the directory is **moved
+aside, never deleted**, so even the index is recoverable.
+
+That reduces the evidence question to a visibility question, which is answered
+by not doing it silently (§25.5).
+
+### 25.4 One mechanism, not two dialects
+
+The obvious fix — copy `catdb/resilient.go` and change the types — was rejected.
+Two independently-maintained copies of a recovery routine that renames
+directories on a live data volume is exactly the drift this register keeps
+warning about, and the copy would have inherited a bug (§25.6).
+
+The mechanism moved to **`internal/badgerguard`**: per-attempt flock-owned
+poison markers, the store lock held across the rename, quarantine-never-delete
+with a bounded copy count, and the empirically-derived open-error classifier.
+`catdb.OpenResilient` keeps its exported API and delegates. **Its 697-line chaos
+suite — including the subprocess gate that proves the panic is uncatchable —
+runs unchanged against the moved code, and that is the evidence the extraction
+was faithful.** Only the private seam *names* changed (`release`→`Release`);
+not one assertion did.
+
+`internal/logstore.OpenResilientTTL` is the new constructor, and `openLogStore`
+is the single place both the boot path and the admin API reach it.
+
+### 25.5 What is different for this store — and it is a data-loss trap
+
+The mechanism is shared; the **corruption policy is not**, because one signal
+means opposite things in the two stores.
+
+`"encryption key mismatch"` is in the shared corruption list because for the
+community store — which is **never** opened with a key — it can only be
+KEYREGISTRY damage. The history store **is** opened with a key
+(`logstore.EncKey`, PBKDF2 over `CULVERT_LOGSTORE_PASSPHRASE` plus a `.salt`
+sidecar). For it, that message means the passphrase changed or the salt was
+lost: a recoverable operator mistake the admin API already handles **by name**
+(`ErrEncMismatch` → *"saved logs use a different encryption key — purge saved
+logs, then enable again"*, HTTP 409).
+
+Under the shared list, that would have moved the operator's **entire saved
+history aside at the exact moment they were trying to fix their passphrase** — a
+resilience feature causing the data loss it exists to prevent. `historyStorePolicy()`
+is therefore `DefaultPolicy().Without("encryption key mismatch")`, spelled at
+the call site rather than forked into a second constant.
+
+**The guard is real, not ceremonial, and the reason is worth recording.**
+`OpenTTL` maps badger's encrypt errors onto `ErrEncMismatch` *before* anything
+classifies them, and that sentinel's current wording happens not to contain the
+substring `"mismatch"` — so today the default policy would already decline to
+quarantine, **by accident**. One reword of a user-facing string would silently
+arm the destructive branch. `Without()` makes that unreachable and
+`TestHistoryPolicy_EncryptionMismatchIsNeverCorruption` pins it **with a control
+half** that fails if `Without` ever stops removing anything.
+
+The residual is accepted and documented: a store that is genuinely damaged *and*
+encrypted may surface as `ErrEncMismatch` and never auto-recover. It lands on
+the documented manual remedy (purge, then re-enable), which is the right posture
+for the one case where "damaged" and "the operator changed the key" are
+indistinguishable from outside.
+
+### 25.6 Visibility, and one place the catdb precedent was improved
+
+Surfaces reuse existing vocabulary — no new operator dialect:
+
+- **`/api/diagnostics`** — the `history_store` operator-contract row.
+- **`/metrics`** — `culvert_logstore_{recovered,quarantines_total,quarantined_copies}`.
+- **alerts** — the existing `state_file_corrupt` event (CHAOS-05/07). A new name
+  would arrive **unsubscribed on every configured webhook**, since
+  `HasSubscriber` matches exactly.
+- **audit** — `logstore.quarantine`. This is the one deliberate divergence from
+  `catfeeddb_health.go`: that store is a re-downloadable cache, whereas
+  resetting searchable history is evidence-affecting, and it belongs in the
+  record that already carries `logstore.purge` and `logstore.cleanup`. This is
+  the answer to R-E's objection — not *don't quarantine*, but *never
+  quarantine silently*.
+
+Deliberately **not** on `/readyz`: history is an enhancement over the in-memory
+ring and the durable JSONL, so failing readiness would pull a fully-serving
+gateway out of rotation over a degraded index.
+
+**The improvement on the precedent:** the residual-copy count is read **live off
+the disk**, not snapshotted at open. `catfeeddb_health.go` snapshots because its
+store opens once per boot, so nothing else is available there — but this store is
+opened and closed repeatedly by an admin, and a snapshot would leave the contract
+row warning until the next *process restart* even after the operator had done
+exactly what `OperatorAction` told them to. That is the defect `ca_health.go`'s
+persistence warning was fixed for, stated as a rule the copy would have
+inherited: **key an operator-facing row on the degraded STATE, never on a
+cumulative counter that can no longer clear.** The cumulative counter still
+exists — `culvert_logstore_quarantines_total`, for "did this ever happen?" — and
+is deliberately *not* what the row reads.
+
+### 25.7 Gates
+
+`internal/badgerguard/badgerguard_test.go` (18), `internal/logstore/resilient_test.go` (9),
+`logstore_chaos_test.go` (7), plus `internal/catdb/resilient_test.go` unchanged.
+
+Every **defect** gate was verified failing against the pre-fix shape (the guard
+replaced by a bare `OpenTTL`): the four root gates for the admin path, the boot
+replay, the audit record and the self-clearing row, and the four engine gates
+including the live subprocess panic proof. The **controls** correctly kept
+passing under the same substitution — a healthy store is never disturbed, an
+environmental fault degrades without renaming anything, and a key mismatch
+preserves the store — so a passing suite cannot mean the guard simply stopped
+being reached.
+
+Two gates are **structural rather than behavioural**, on purpose, because the
+fault they prevent is a process death that a runtime assertion would have to
+survive to observe:
+
+- `TestChaos57_NoRootPathOpensTheHistoryStoreUnguarded` — no root file may call
+  `logstore.OpenTTL`, and some root file must call `OpenResilientTTL`.
+- `TestOpen_PoisonMarkerQuarantinesBeforeCallingOpen` — observes from *inside*
+  the open func that the quarantine already happened, pinning the ordering that
+  is the entire mechanism.
+
+### 25.7b Review follow-ups — three defects in the fix, raised by Codex
+
+All three were verified against the code before being accepted, and each is
+pinned by a gate verified failing against the shape it replaces.
+
+**A stale marker outlived the incident it described — and this one was
+INHERITED, so it was latent in the shipped catdb store too.** A process killed
+after `BeginAttempt` but BEFORE badger created the directory leaves a marker
+describing a store that never existed. The quarantine is then correctly skipped
+(there is nothing to move aside), but the marker cleanup was gated solely on
+`Quarantined`, so the marker survived. The next open created a healthy store
+beside it; the open AFTER that read the same marker as poison and quarantined
+that healthy store. **The mechanism manufactured, one open later, exactly the
+data loss it exists to prevent.**
+
+The fix is a distinction the original code did not draw. `Skipped` was a single
+human-readable string, so "there is nothing here to quarantine" and "something
+is in the way" were indistinguishable to the caller — and they demand opposite
+handling. `applyQuarantine` now returns a `quarantineSkip`: `skipNoStore`
+retires the markers (nothing was ever created, so nothing can be damaged),
+while `skipBlocked` keeps them (a live lock holder, an unreadable path or a
+failed rename all leave the condition genuinely unresolved, and discarding the
+breadcrumb there would silently disarm the recovery). The control gate pins
+that second half, because a fix that cleared markers unconditionally would pass
+the defect gate while being strictly worse than the defect.
+
+**The contract row contradicted its own documented rule.** §25.6 claims every
+warn is keyed on evidence still on disk so the row clears when the operator
+reclaims it. The `Recovered` branch was keyed on the historical flag instead, so
+after the copies were deleted it went on warning — while interpolating
+`residual` into its own message and thus reporting *"0 quarantined copy/copies
+on disk"*. Worse, the gate did not catch it: it asserted `ok` only after a
+disable/re-enable, which resets the flag, so the row cleared for the wrong
+reason and the test proved less than it claimed. Both branches now sit under
+`residual > 0`, and the gate asserts the row clears IMMEDIATELY, with the
+toggle kept as a separate follow-on assertion.
+
+**"Open" was a claim about the past.** The row read `Attempted` — "an enable was
+tried in this process" — so after any `disableLogStore` (a runtime toggle, or
+persisted admin settings switching off a YAML-seeded store) it kept reporting
+`request-history store open`. It now reads `globalLogStore.Load()`. A blind spot
+in the direction that looks healthy is the §1 theme, on the very row added to
+close one.
+
+The second and third are the same error in two places, and it is worth naming:
+**a status surface must be derived from current state, not from a latch set when
+something once happened.** That is `ca_health.go`'s rule, cited in this
+section's own prose while two of its three branches broke it.
+
+### 25.8 What is deliberately left
+
+- **R-F is untouched and still open.** Three fatal boot loads (`catStore.Load`,
+  `blocklist_startup.go:59`, `main.go:724`) still `logFatalf` on a parse
+  failure. That is a posture question for an owner, not a patch, and this sweep
+  deliberately did not widen into it.
+- **Recovery still costs one restart** on the boot path, and one failed API call
+  plus a restart on the admin path — the marker cannot act until after the death
+  it records. Zero-crash recovery means probing the store in a child process
+  first; still larger than the fault warrants.
+- **A spurious quarantine is possible** when a kill lands inside `badger.Open`
+  for an unrelated reason. The cost is a reset search index, the copy is
+  preserved, and it is alerted and audited. Accepted.
+- **No circuit breaker on repeated quarantines.** Same as §19: a dying disk
+  re-quarantines on every enable, and the counter plus the contract row are the
+  operator's only signal that it is happening.
+- **`internal/catdb`'s suite now covers shared code from one package.** It is
+  the extraction's proof today; if a third store adopts `badgerguard`, the
+  mechanism-level assertions should migrate to
+  `internal/badgerguard/badgerguard_test.go`, which already carries the
+  store-agnostic contract.
+
+### 25.9 The process lesson
+
+§24 recorded one about documented residuals. This sweep adds one about
+**documented deferrals**:
+
+> A deferral records the reasoning available at the time, and reasoning ages
+> differently from facts. R-E's blocker was a claim about *what the data is* —
+> "request history with retention semantics" — that could be settled in one
+> reading of `reqlog.Add`, which shows the durable record is written somewhere
+> else entirely. The deferral was correct as a scheduling decision and wrong as
+> a technical one, and nothing in the register distinguished those, so the item
+> sat for a month behind an objection that a five-minute read dissolves.
+> **When deferring, record whether the blocker is effort or a belief — a belief
+> is a question someone can answer, and it should be written as one.**
+
+The corollary is the encryption-key divergence. Porting a fix by copying it
+would have carried across a constant whose justification (*"this store is never
+opened with a key"*) was true at its origin and false at its destination — a
+comment that was accurate in one file and a data-loss bug in the next. Sharing
+the mechanism forced that assumption into a parameter, where it had to be stated
+out loud and could be tested.

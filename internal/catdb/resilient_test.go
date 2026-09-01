@@ -298,21 +298,21 @@ func TestOpenResilient_QuarantinedCopiesAreBounded(t *testing.T) {
 func TestOpenResilient_MarkerIsASiblingNotAChild(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 	a := beginAttempt(dir)
-	defer a.end()
-	if a.path == "" {
+	defer a.End()
+	if a.MarkerPath() == "" {
 		t.Fatal("marker could not be armed")
 	}
-	if filepath.Dir(a.path) != filepath.Dir(dir) {
-		t.Errorf("marker %q is not a sibling of %q", a.path, dir)
+	if filepath.Dir(a.MarkerPath()) != filepath.Dir(dir) {
+		t.Errorf("marker %q is not a sibling of %q", a.MarkerPath(), dir)
 	}
-	if strings.HasPrefix(a.path, dir+string(filepath.Separator)) {
-		t.Errorf("marker %q lives INSIDE the store — a quarantine would carry it away", a.path)
+	if strings.HasPrefix(a.MarkerPath(), dir+string(filepath.Separator)) {
+		t.Errorf("marker %q lives INSIDE the store — a quarantine would carry it away", a.MarkerPath())
 	}
 	// A trailing separator must not produce a nested marker either.
 	b := beginAttempt(dir + string(filepath.Separator))
-	defer b.end()
-	if filepath.Dir(b.path) != filepath.Dir(dir) {
-		t.Errorf("marker %q for a trailing-separator path is not a sibling", b.path)
+	defer b.End()
+	if filepath.Dir(b.MarkerPath()) != filepath.Dir(dir) {
+		t.Errorf("marker %q for a trailing-separator path is not a sibling", b.MarkerPath())
 	}
 }
 
@@ -553,7 +553,7 @@ func TestOpenResilient_HeldStoreLockRefusesACompetingOpen(t *testing.T) {
 	other, oerr := lockStore(dir)
 	if oerr != nil || other != nil {
 		if other != nil {
-			other.release()
+			other.Release()
 		}
 		t.Fatalf("a held store lock was reported free: (%v, %v)", other, oerr)
 	}
@@ -561,11 +561,11 @@ func TestOpenResilient_HeldStoreLockRefusesACompetingOpen(t *testing.T) {
 	// And badger itself must be refused for the whole window.
 	if db, derr := Open(dir); derr == nil {
 		_ = db.Close()
-		lock.release()
+		lock.Release()
 		t.Fatal("badger opened a store whose lock the quarantine path was holding — the rename window is not closed")
 	}
 
-	lock.release()
+	lock.Release()
 
 	db, derr := Open(dir)
 	if derr != nil {
@@ -574,7 +574,7 @@ func TestOpenResilient_HeldStoreLockRefusesACompetingOpen(t *testing.T) {
 	_ = db.Close()
 }
 
-// applyQuarantine must not leak the lock it takes: the quarantined copy has to
+// The quarantine must not leak the lock it takes: the quarantined copy has to
 // be openable afterwards (an operator inspecting the evidence) and the
 // replacement has to be openable by this very process on the retry.
 func TestOpenResilient_QuarantineReleasesTheStoreLock(t *testing.T) {
@@ -595,7 +595,7 @@ func TestOpenResilient_QuarantineReleasesTheStoreLock(t *testing.T) {
 	if lerr != nil || lock == nil {
 		t.Fatalf("quarantined copy is still locked — the rename leaked its handle: (%v, %v)", lock, lerr)
 	}
-	lock.release()
+	lock.Release()
 }
 
 // A marker whose owner is still inside badger.Open must never be treated as
@@ -604,18 +604,18 @@ func TestOpenResilient_LiveAttemptMarkerIsNotAbandoned(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 
 	live := beginAttempt(dir)
-	if live.path == "" {
+	if live.MarkerPath() == "" {
 		t.Fatal("could not arm a marker")
 	}
 	if got := abandonedMarkers(dir); len(got) != 0 {
 		t.Errorf("a LIVE attempt's marker was reported abandoned: %v", got)
 	}
 	// Once the owner is gone the same file becomes the poison signal.
-	live.lock.release()
+	live.ReleaseLock()
 	if got := abandonedMarkers(dir); len(got) != 1 {
 		t.Errorf("abandoned markers after the owner released = %v, want 1", got)
 	}
-	_ = os.Remove(live.path)
+	_ = os.Remove(live.MarkerPath())
 }
 
 // Temp markers left by a death during arming are litter, not a poison signal:
@@ -659,7 +659,7 @@ func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
 	if err != nil || lock == nil {
 		t.Fatalf("lockStore = (%v, %v)", lock, err)
 	}
-	lock.release()
+	lock.Release()
 	if _, err := quarantineDir(lock, dir); !errors.Is(err, errStoreLockNotHeld) {
 		t.Errorf("quarantineDir(released) = %v, want errStoreLockNotHeld", err)
 	}
@@ -672,7 +672,7 @@ func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
 	if err != nil || lock2 == nil {
 		t.Fatalf("re-lock = (%v, %v)", lock2, err)
 	}
-	defer lock2.release()
+	defer lock2.Release()
 	if _, err := quarantineDir(lock2, dir); err != nil {
 		t.Errorf("quarantineDir with a held lock: %v", err)
 	}
@@ -684,11 +684,11 @@ func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
 func TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 	a := beginAttempt(dir)
-	if a.path == "" {
+	if a.MarkerPath() == "" {
 		t.Fatal("could not arm a marker")
 	}
-	a.end()
-	if _, err := os.Stat(a.path); err == nil {
+	a.End()
+	if _, err := os.Stat(a.MarkerPath()); err == nil {
 		t.Error("marker still on disk after end()")
 	}
 	if got := abandonedMarkers(dir); len(got) != 0 {

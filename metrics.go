@@ -913,6 +913,35 @@ culvert_catfeeddb_quarantined_copies %d
 		cfdb.ResidualCopies,
 	)
 
+	// CHAOS-57: the request-history store's recovery signal. `_quarantines_total`
+	// is the cumulative "did this ever happen in this process?" counter — the one
+	// to alert on. `_quarantined_copies` is read LIVE off the volume, so it is the
+	// one that CLEARS when the operator reclaims the disk, and is therefore the
+	// right series for a "there is still evidence to reconcile" rule. Both are
+	// emitted unconditionally: unlike the catfeeddb gauges these carry no
+	// "available" semantics, so a 0 on a node that never enabled history is
+	// unambiguous rather than indistinguishable from a dead store.
+	lsRecovered := 0
+	if logStoreOpenState().Recovered {
+		lsRecovered = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_logstore_recovered 1 when the most recent request-history store open had to quarantine a damaged store
+# TYPE culvert_logstore_recovered gauge
+culvert_logstore_recovered %d
+
+# HELP culvert_logstore_quarantines_total Damaged request-history stores moved aside since this process started
+# TYPE culvert_logstore_quarantines_total counter
+culvert_logstore_quarantines_total %d
+
+# HELP culvert_logstore_quarantined_copies Quarantined (.corrupt.*) copies of the request-history store still on the data volume
+# TYPE culvert_logstore_quarantined_copies gauge
+culvert_logstore_quarantined_copies %d
+`,
+		lsRecovered,
+		logStoreQuarantines.Load(),
+		logStoreResidualQuarantines(),
+	)
+
 	// CHAOS-54: SOCKS5 accept-loop health. Emitted ONLY when a SOCKS5 listener
 	// is configured — on the ordinary appliance (-socks5-port 0) these series
 	// are absent entirely, because `listener_up 0` on a node that never had
