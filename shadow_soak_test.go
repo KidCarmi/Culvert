@@ -852,9 +852,11 @@ func (r *soakRun) toolTrustExpire() {
 	base := time.Now()
 	var nowNanos atomic.Int64
 	nowNanos.Store(base.UnixNano())
-	prev := mcpToolTrust.nowFn
-	mcpToolTrust.nowFn = func() time.Time { return time.Unix(0, nowNanos.Load()) }
-	defer func() { mcpToolTrust.nowFn = prev }()
+	// Swap UNDER mcpToolTrust.mu: a reconcile loop leaked by an earlier test still reads
+	// nowFn through now()'s RLock, so a bare assignment here races it (see
+	// swapToolTrustNowFnForTest).
+	prev := swapToolTrustNowFnForTest(func() time.Time { return time.Unix(0, nowNanos.Load()) })
+	defer func() { swapToolTrustNowFnForTest(prev) }()
 
 	// Replace confirmtool's standing approval with a short-lived one.
 	r.revokeTool(ctrlServer, toolConfirm)
@@ -1433,9 +1435,9 @@ func TestShadowSoakMutationCampaign(t *testing.T) {
 		base := time.Now()
 		var nn atomic.Int64
 		nn.Store(base.UnixNano())
-		prev := mcpToolTrust.nowFn
-		mcpToolTrust.nowFn = func() time.Time { return time.Unix(0, nn.Load()) }
-		defer func() { mcpToolTrust.nowFn = prev }()
+		// Swap UNDER mcpToolTrust.mu — same leaked-reconcile-loop race as toolTrustExpire.
+		prev := swapToolTrustNowFnForTest(func() time.Time { return time.Unix(0, nn.Load()) })
+		defer func() { swapToolTrustNowFnForTest(prev) }()
 		r.revokeTool(ctrlServer, toolConfirm)
 		r.approvals[toolConfirm] = r.approveWithExpiry(ctrlServer, toolConfirm, base.Add(5*time.Second))
 		nn.Store(base.Add(time.Hour).UnixNano())
