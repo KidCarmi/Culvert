@@ -1599,6 +1599,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Remote scan round trips in flight. The saturation gauge for a sidecar deployment, where 'Scans in flight' is always zero.">Remote scans in flight</div>
               <div id="sec-remote-inflight" style="font-weight:600;font-size:.85rem">0</div>
             </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="A YARA regex match panicked (an internal crash, not a slow match) and was contained instead of taking down the scan. The verdict was decided by the configured on-timeout posture (block/allow), not by the rule itself. Non-zero points at a bug in a specific rule's regex, not a timeout — raising the timeout will not help.">YARA match panics</div>
+              <div id="sec-yara-match-panics" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
           </div>
           <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
 
@@ -9442,6 +9446,7 @@ async function loadSecScanStatus() {
     setMetric('sec-clam-error', s.stat_clam_scan_error, 1, 10);
     setMetric('sec-clam-saturated', s.stat_clam_saturated, 1, 10);
     setMetric('sec-scan-inflight', s.scan_inflight, 4, 16);
+    setMetric('sec-yara-match-panics', s.yara_match_panics, 1, 10);
     setMetric('sec-scan-late-discard', s.stat_scan_late_discard, 1, 10);
   } catch(e) { console.error(e); }
 }
