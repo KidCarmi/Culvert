@@ -194,7 +194,11 @@ func mcpErr(w http.ResponseWriter, err error) {
 	switch reason {
 	case mcperr.ReasonAdminNotFound, mcperr.ReasonApprovalNotFound, mcperr.ReasonToolNotFound:
 		status = http.StatusNotFound
-	case mcperr.ReasonAdminForbidden, mcperr.ReasonManagementToolUnauthorized, mcperr.ReasonApprovalNotAuthorized:
+	case mcperr.ReasonAdminForbidden, mcperr.ReasonManagementToolUnauthorized,
+		mcperr.ReasonApprovalNotAuthorized, mcperr.ReasonApprovalSelfApproval:
+		// A four-eyes refusal is an AUTHORIZATION outcome for this principal (403), not
+		// malformed input (400): the request is well-formed and the record is decidable —
+		// by somebody else.
 		status = http.StatusForbidden
 	case mcperr.ReasonApprovalTerminalState, mcperr.ReasonApprovalRevoked,
 		mcperr.ReasonApprovalTenantConflict, mcperr.ReasonToolNotApprovable,
@@ -598,7 +602,7 @@ func apiMCPPublications(w http.ResponseWriter, r *http.Request) {
 			mcpErr(w, mcperr.New(mcperr.ReasonAdminNotFound, "mcp", "publication unavailable"))
 			return
 		}
-		id, err := m.publication.Create(req.Capability, req.Tenant, approval.PrincipalID(auditActor(r)), req.Candidate, req.ExpectedBase)
+		id, err := m.publication.Create(req.Capability, req.Tenant, approval.PrincipalID(mcpApprovalPrincipal(r)), req.Candidate, req.ExpectedBase)
 		if err != nil {
 			mcpErr(w, err)
 			return
@@ -644,7 +648,7 @@ func apiMCPPublicationDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := approval.ID(req.RequestID)
-	actor := approval.PrincipalID(auditActor(r))
+	actor := approval.PrincipalID(mcpApprovalPrincipal(r))
 	switch req.Action {
 	case "approve":
 		rc, err := m.publication.Approve(id, actor, m.appCommit)
@@ -719,7 +723,7 @@ func apiMCPApprovalDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	m := getMCPAdmin()
 	id := approval.ID(req.RequestID)
-	actor := approval.PrincipalID(auditActor(r))
+	actor := approval.PrincipalID(mcpApprovalPrincipal(r))
 	switch req.Action {
 	case "approve":
 		// Live revisions default to zero (operational approvals bind their own

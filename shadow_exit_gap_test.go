@@ -606,6 +606,19 @@ func mcpAdminJSON(t *testing.T, method, target string, role UIRole, body string)
 	return w.Code, out
 }
 
+// mcpAdminJSONAs is mcpAdminJSON issued as a NAMED authenticated human (an admin UI
+// session subject). The runbook needs it because a tool-trust grant is a four-eyes
+// decision: the requester and the approver must be two different principals
+// (SEC-MCP-4E-2), so the two runbook steps cannot share one anonymous caller.
+func mcpAdminJSONAs(t *testing.T, method, target string, role UIRole, body, sub string) (status int, out map[string]any) {
+	t.Helper()
+	w := mcpReqAs(t, method, target, role, body, sub, "")
+	if w.Body.Len() > 0 {
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+	}
+	return w.Code, out
+}
+
 // mcpAdminArray is the array-bodied variant (e.g. GET /api/mcp/tools).
 func mcpAdminArray(t *testing.T, method, target string, role UIRole) (status int, out []any) {
 	t.Helper()
@@ -668,17 +681,28 @@ func TestShadowExitC12_OperatorRunbookEndToEnd(t *testing.T) {
 		"SECURITY: a signed Shadow config bypassed the fail-closed preflight (mode=%s)", getMCPRollout().gateway.CurrentMode())
 	env.ev("C12 step3 preflight-gate: preflight NOT ready (reasons=%v) -> signed Shadow activation REFUSED (mode stays %s); preflight is not bypassable", pfEarly.Reasons, getMCPRollout().gateway.CurrentMode())
 
-	// (4) Tool approval — the real operator two-step over HTTP: request (operator) then approve
-	// (admin). This promotes echo to catalog.Usable.
+	// (4) Tool approval — the real operator two-step over HTTP by TWO NAMED HUMANS: request
+	// (operator "opal") then approve (admin "adele"). This promotes echo to catalog.Usable.
+	// The runbook is deliberately driven by two distinct authenticated principals because the
+	// grant is a four-eyes decision (SEC-MCP-4E-2): the requester may not approve their own
+	// tool-trust request, and the refusal below is part of the evidence.
 	echoFP, echoRev, _ := catRec(t, env.cat, ctrlServer, toolEcho)
 	reqBody := `{"server_id":"` + ctrlServer + `","tool_name":"` + toolEcho + `","fingerprint":"` + echoFP +
 		`","catalog_revision":` + strconv.FormatUint(echoRev, 10) + `,"purpose":"shadow_evaluation","reason":"reviewed for controlled shadow"}`
-	code, appr := mcpAdminJSON(t, http.MethodPost, "/api/mcp/tool-approvals"+tenantQ, RoleOperator, reqBody)
+	code, appr := mcpAdminJSONAs(t, http.MethodPost, "/api/mcp/tool-approvals"+tenantQ, RoleOperator, reqBody, "opal")
 	req(t, code == 200, "runbook approval request: POST /api/mcp/tool-approvals = %d (%v)", code, appr)
 	approvalID, _ := appr["approval_id"].(string)
 	req(t, approvalID != "", "runbook approval request: missing approval_id in %v", appr)
 	decBody := `{"approval_id":"` + approvalID + `","action":"approve","reason":"reviewed"}`
-	code, dec := mcpAdminJSON(t, http.MethodPost, "/api/mcp/tool-approval-decision"+tenantQ, RoleAdmin, decBody)
+	// SEPARATION OF DUTIES — the requester, even holding the admin role, may not grant their
+	// own request. This must be refused BEFORE the legitimate approval, so the runbook proves
+	// the control fires on the live HTTP surface rather than only in a unit test.
+	selfCode, _ := mcpAdminJSONAs(t, http.MethodPost, "/api/mcp/tool-approval-decision"+tenantQ, RoleAdmin, decBody, "opal")
+	req(t, selfCode == 403, "runbook four-eyes: the requester's own approve = %d, want 403", selfCode)
+	_, _, eligAfterSelf := catRec(t, env.cat, ctrlServer, toolEcho)
+	req(t, eligAfterSelf != catalog.Usable,
+		"SECURITY: a refused self-approval promoted echo to Usable (elig=%v)", eligAfterSelf)
+	code, dec := mcpAdminJSONAs(t, http.MethodPost, "/api/mcp/tool-approval-decision"+tenantQ, RoleAdmin, decBody, "adele")
 	// StatusActive ("active") is the live grant that materializes catalog.Usable (tooltrust.go).
 	req(t, code == 200 && dec["status"] == "active", "runbook approval decision: POST /api/mcp/tool-approval-decision = %d status=%v", code, dec["status"])
 	// Approve danger too (needed so the scope has a usable tool set the operator expects). Use the
@@ -686,7 +710,9 @@ func TestShadowExitC12_OperatorRunbookEndToEnd(t *testing.T) {
 	_ = approveToUsable(t, env.cat, ctrlServer, toolDanger)
 	_, _, elig := catRec(t, env.cat, ctrlServer, toolEcho)
 	req(t, elig == catalog.Usable, "runbook approval: echo must be Usable after the HTTP approve, got %v", elig)
-	env.ev("C12 step4 approval: POST /api/mcp/tool-approvals -> approval_id=%s ; POST /api/mcp/tool-approval-decision action=approve -> status=approved ; echo now Usable", approvalID)
+	env.ev("C12 step4 approval: POST /api/mcp/tool-approvals (operator opal) -> approval_id=%s ; "+
+		"POST /api/mcp/tool-approval-decision action=approve BY THE REQUESTER -> 403 approval_self_approval (echo still not Usable) ; "+
+		"same call by admin adele -> status=active ; echo now Usable", approvalID)
 
 	// (5) Preflight dry-run — now READY. GET /api/mcp/rollout shadow.preflight + scope validate.
 	code, roll = mcpAdminJSON(t, http.MethodGet, "/api/mcp/rollout", RoleViewer, "")
