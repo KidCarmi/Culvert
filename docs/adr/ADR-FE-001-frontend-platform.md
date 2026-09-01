@@ -4,7 +4,10 @@
 - **Date**: 2026-08-21 (proposed and accepted same day; accepted after the external
   architecture review's correction round was incorporated)
 - **Deciders**: project owner, on the recommendation of the external architecture review
-  (2026-08-21). Implementation remains blocked until FE-1A begins by explicit go-ahead.
+  (2026-08-21). Implementation proceeded under this ADR through FE-4 (see
+  `docs/design/FRONTEND-MIGRATION-PLAN.md` §3 for the current per-phase status); the new
+  frontend stays disabled by default in shipped builds (`CULVERT_EXPERIMENTAL_UI`) until FE-8
+  cutover.
 - **Supersedes**: the un-ratified "no framework / vanilla JS" position recorded in prose in
   `docs/design/REDESIGN-ROADMAP.md` (lines 6–10), `docs/design/CURRENT-UI-AUDIT.md` (§1
   verdict), and `docs/design/mcp/PRODUCTION-INTEGRATION.md` (§ non-negotiables). No ADR ever

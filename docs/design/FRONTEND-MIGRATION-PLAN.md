@@ -1,7 +1,10 @@
 # Frontend Migration Plan
 
 - **Status**: Accepted with ADR-FE-001 (2026-08-21, external architecture review corrections
-  incorporated). **Implementation has not begun**; FE-1A starts only on explicit go-ahead.
+  incorporated). **Implementation is underway**: FE-0 through FE-4 are IMPLEMENTED (see the
+  phase table in §3, each carrying its own implementation record); FE-5 onward have not
+  started. The new frontend stays disabled by default in shipped builds — see the FE-1B entry
+  below and `CULVERT_EXPERIMENTAL_UI` — until FE-8 cutover.
 - **Shape**: clean parallel replacement. The legacy `static/index.html` keeps serving `/` until
   cutover; the new app is developed under `frontend/` and its `/app/` preview route is
   **disabled by default**, available only under an explicit experimental development/test flag
