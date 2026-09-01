@@ -72,7 +72,7 @@ func TestResolveFileBlockStartupConfig_CLIWinsOverFileConfig(t *testing.T) {
 	fc.Proxy.FileProfilesFile = "/etc/culvert/fileprofiles.json"
 	fc.FileBlock.Extensions = []string{".exe", ".dll"}
 
-	got := resolveFileBlockStartupConfig(fc, "/override/fileprofiles.json")
+	got := resolveFileBlockStartupConfig(fc, "/override/fileprofiles.json", "/data")
 
 	if got.ProfilesPath != "/override/fileprofiles.json" {
 		t.Errorf("CLI flag should win: got %q", got.ProfilesPath)
@@ -83,11 +83,14 @@ func TestResolveFileBlockStartupConfig_CLIWinsOverFileConfig(t *testing.T) {
 }
 
 // With no CLI override and no FileConfig path, the resolver falls back to
-// the default filename.
+// dataDir/fileprofiles.json — NOT a bare CWD-relative filename, so the
+// default survives a container restart (dataDir is the persisted volume)
+// and lands where backup.go's defaultBackupArtifacts() looks for it (Codex
+// review, PR #1255).
 func TestResolveFileBlockStartupConfig_DefaultPath(t *testing.T) {
-	got := resolveFileBlockStartupConfig(&FileConfig{}, "")
-	if got.ProfilesPath != "fileprofiles.json" {
-		t.Errorf("expected default 'fileprofiles.json', got %q", got.ProfilesPath)
+	got := resolveFileBlockStartupConfig(&FileConfig{}, "", "/data")
+	if want := "/data/fileprofiles.json"; got.ProfilesPath != want {
+		t.Errorf("expected default %q, got %q", want, got.ProfilesPath)
 	}
 	if len(got.Extensions) != 0 {
 		t.Errorf("empty FileConfig should yield empty Extensions, got %v", got.Extensions)
@@ -98,7 +101,7 @@ func TestResolveFileBlockStartupConfig_DefaultPath(t *testing.T) {
 func TestResolveFileBlockStartupConfig_FileConfigPathUsedWhenNoCLI(t *testing.T) {
 	fc := &FileConfig{}
 	fc.Proxy.FileProfilesFile = "/from/config.json"
-	got := resolveFileBlockStartupConfig(fc, "")
+	got := resolveFileBlockStartupConfig(fc, "", "/data")
 	if got.ProfilesPath != "/from/config.json" {
 		t.Errorf("expected FileConfig path, got %q", got.ProfilesPath)
 	}
