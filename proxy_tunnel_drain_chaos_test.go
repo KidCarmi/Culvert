@@ -28,7 +28,7 @@ import (
 // test — a relay parked in a deadline-less io.Copy that only a Close can end.
 func tcpPair(t *testing.T) (client, server net.Conn) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ctxListen("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -42,7 +42,7 @@ func tcpPair(t *testing.T) (client, server net.Conn) {
 		c, err := ln.Accept()
 		ch <- res{c, err}
 	}()
-	client, err = net.Dial("tcp", ln.Addr().String())
+	client, err = dialTimeout(ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -163,6 +163,11 @@ func TestChaos57_WebSocketTunnelIsVisibleToTheDrain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read 101: %v", err)
 	}
+	// A 1xx response is bodyless by construction (net/http's fixLength returns 0
+	// for status/100 == 1), so this Close is a no-op that does not touch the
+	// hijacked conn the rest of the test relies on — it satisfies bodyclose
+	// without draining the tunnel.
+	defer resp.Body.Close() //nolint:errcheck // bodyless 1xx; close is a no-op
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status = %d, want 101", resp.StatusCode)
 	}
