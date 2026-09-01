@@ -1868,6 +1868,10 @@
             "description": "True when the running UI server was started using the uploaded custom certificate (i.e. it is already live, not just saved pending a restart).",
             "type": "boolean"
           },
+          "ui_custom_cert_corrupt": {
+            "description": "True when the persisted custom UI certificate/key pair does not parse as a matching TLS pair (interrupted or corrupted upload). The running server is on the self-signed fallback and a restart will NOT fix this — the pair must be re-uploaded.",
+            "type": "boolean"
+          },
           "ui_custom_cert_uploaded": {
             "description": "True when a custom UI certificate uploaded via POST /api/certs/upload (target=ui) is saved to disk and will be used on the next restart.",
             "type": "boolean"

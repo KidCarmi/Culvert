@@ -480,6 +480,7 @@ components:
         ui_tls_fallback_reason: { type: string, description: "The self-sign error, when ui_tls_fallback is true." }
         ui_custom_cert_uploaded: { type: boolean, description: "True when a custom UI certificate uploaded via POST /api/certs/upload (target=ui) is saved to disk and will be used on the next restart." }
         ui_custom_cert_active: { type: boolean, description: "True when the running UI server was started using the uploaded custom certificate (i.e. it is already live, not just saved pending a restart)." }
+        ui_custom_cert_corrupt: { type: boolean, description: "True when the persisted custom UI certificate/key pair does not parse as a matching TLS pair (interrupted or corrupted upload). The running server is on the self-signed fallback and a restart will NOT fix this — the pair must be re-uploaded." }
     RewriteList:
       type: object
       required: [rules, count]

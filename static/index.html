@@ -13327,11 +13327,25 @@ async function loadUICertStatus() {
   if (!el) return;
   try {
     const n = await api('/api/settings/network');
-    if (!n.ui_custom_cert_uploaded) { el.textContent = ''; return; }
+    if (!n.ui_custom_cert_uploaded) { el.textContent = ''; el.style.color = ''; return; }
+    if (n.ui_custom_cert_corrupt) {
+      // The saved pair failed to parse as a matching cert/key (interrupted or
+      // corrupted upload). Restarting will NOT fix this — every restart keeps
+      // rejecting the same corrupt pair — so this must never be conflated
+      // with the ordinary "awaiting restart" state below. Deliberately does
+      // NOT claim the running server fell back to a self-signed cert: if
+      // self-sign generation also failed, or -ui-no-tls was set, the actual
+      // fallback is plain HTTP, and asserting "self-signed" would misstate
+      // the transport-security posture in those cases.
+      el.textContent = 'Saved certificate is corrupt or mismatched — it is NOT active, and a restart will not fix this. Re-upload a valid certificate.';
+      el.style.color = 'var(--warn)';
+      return;
+    }
+    el.style.color = '';
     el.textContent = n.ui_custom_cert_active
       ? 'Custom certificate uploaded and active.'
       : 'Custom certificate saved — restart the proxy to activate it.';
-  } catch(e) { el.textContent = ''; }
+  } catch(e) { el.textContent = ''; el.style.color = ''; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

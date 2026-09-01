@@ -357,6 +357,12 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The pair just written already passed certMgr.ParseTLSPair above, so any
+	// PRIOR corruption latch (a leftover pair from an earlier interrupted
+	// upload, surfaced as ui_custom_cert_corrupt) no longer describes what's
+	// on disk — clear it, or a successful re-upload would still show as
+	// "corrupt, restart won't help" until the next restart re-evaluates it.
+	uiCustomTLSCorrupt = false
 	auditEvent(r, "certs.upload_ui", "custom UI cert (requires restart)", "")
 	jsonOK(w, map[string]any{
 		"status":    "ok",
