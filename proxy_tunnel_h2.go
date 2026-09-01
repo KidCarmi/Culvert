@@ -191,8 +191,14 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	down := clientTLS.ConnectionState().NegotiatedProtocol
 	recordInspectUpstreamALPN(up)
 	logger.Printf("SSLInspect(native): tunnel %q up=%q down=%q", sanitizeLog(targetHost), sanitizeLog(up), sanitizeLog(down))
-	recordActiveConn(1)
-	defer recordActiveConn(-1)
+	// CHAOS-57: counted before, but held by no registry — a native tunnel that
+	// negotiated http/1.1 (dispatchNativeInspect → runH1InspectLoop) had no deadline
+	// backstop at all. A tunnel that negotiates h2 ALSO registers its client leg in
+	// h2InspectConns; that is deliberate and not double-counting — this registry owns
+	// the single activeConns increment, while culvert_h2_inspect_active measures the
+	// GOAWAY-capable subset. Both backstops fire at the same deadline and a second
+	// Close is a no-op.
+	defer registerDrainableTunnel(tunnelClassConnectInspect, clientTLS, upstreamTLS)()
 
 	dispatchNativeInspect(r, clientTLS, upstreamTLS, up, down, hostOnly, dec, match, id, effectiveSkip)
 }
@@ -222,13 +228,34 @@ func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up
 // plaintext upstream TCP conn (idle-bounded) and records a TUNNEL_CLOSED entry —
 // the native-path equivalent of the strip path's non-TLS fallback.
 func relayPlaintextInspectFallback(rawClient net.Conn, peekBuf io.Reader, rawUpstream net.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity) {
+	// CHAOS-57: the native path's non-TLS fallback was invisible to the shutdown
+	// drain for the same reason as its strip-path twin — the recordActiveConn call
+	// sits after the client handshake this branch returns before.
+	defer registerDrainableTunnel(tunnelClassInspectFallback, rawClient, rawUpstream)()
 	start := time.Now()
 	var toUp, toCl int64
 	shared := newTunnelActivityStamp()
 	done := make(chan struct{}, 2)
+	// PX-4 residual (CHAOS-57): this was the ONE relay goroutine in the tree with no
+	// panic guard — every other raw relay (relayCounted, the strip-path fallback,
+	// rawRelay, socks5Relay) has carried one since CHAOS-24. A panic inside
+	// idleCopyCounted here propagated to the runtime and killed an in-line security
+	// appliance, dropping every other in-flight tunnel with it. Containing it is
+	// strictly fail-closed: a relay goroutine holds no authority the recovery could
+	// extend (the CHAOS-24 objection), and closing BOTH legs unblocks the peer relay,
+	// which may be parked in a deadline-less Write that only a close can end.
 	relay := func(dst net.Conn, src io.Reader, srcConn net.Conn, count *int64) {
+		defer func() {
+			if v := recover(); v != nil {
+				recordCrash("tunnel-relay", "", v)
+				_ = dst.Close()
+				if srcConn != nil {
+					_ = srcConn.Close()
+				}
+			}
+			done <- struct{}{} // sole sender
+		}()
 		*count = idleCopyCounted(dst, src, srcConn, shared)
-		done <- struct{}{}
 	}
 	go relay(rawUpstream, peekBuf, rawClient, &toUp)
 	go relay(rawClient, rawUpstream, rawUpstream, &toCl)

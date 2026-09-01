@@ -538,6 +538,12 @@ func handleSOCKS5(conn net.Conn) {
 // entry (byte counts + lifetime); log-only — the OK request-log entry already
 // ran the stats fan-out for this connection.
 func socks5Relay(client, dest net.Conn, clientIP, host string) {
+	// CHAOS-57: SOCKS5 sessions were the drain's largest blind spot. `Stop` waits
+	// only for the ACCEPT LOOP — every session runs in a detached
+	// `go handleSOCKS5(conn)` — so nothing in the shutdown sequence waited for or
+	// closed them, and a long-lived SSH-over-SOCKS5 session was reset by process
+	// exit without its TUNNEL_CLOSED accounting ever being written.
+	defer registerDrainableTunnel(tunnelClassSOCKS5, client, dest)()
 	start := time.Now()
 	// Byte counts: each direction is written by exactly one goroutine before
 	// its done-send and read only after both receives (channel happens-before).

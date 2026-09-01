@@ -150,6 +150,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 	}
 
 	logger.Printf("WS: tunnel established %q", sanitizeLog(host))
+	// CHAOS-57: a WebSocket is a hijacked conn, so net/http's Shutdown stops
+	// tracking it — before this, SIGTERM severed live WS sessions with zero grace
+	// while a CONNECT tunnel beside them got 15 s, and the per-connection byte
+	// accounting below never ran.
+	defer registerDrainableTunnel(tunnelClassWebSocket, clientConn, destConn)()
 	start := time.Now()
 
 	// Bridge both directions. client → target reads via clientBuf.Reader, NOT
@@ -493,8 +498,11 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 		return
 	}
 
-	recordActiveConn(1)
-	defer recordActiveConn(-1)
+	// CHAOS-57: register with the shutdown drain. This OWNS the activeConns
+	// accounting for the tunnel (do not also call recordActiveConn) and hands the
+	// drain both legs so its deadline backstop can end the tunnel deterministically
+	// instead of leaving it to the container SIGKILL.
+	defer registerDrainableTunnel(tunnelClassConnectBypass, clientConn, destConn)()
 
 	start := time.Now()
 	var toDest, toClient int64
@@ -833,6 +841,12 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		// share an idle stamp (idleCopyCounted) so a half-open peer cannot pin
 		// the tunnel forever; the client direction reads through peekBuf, so
 		// its deadline anchors on the underlying rawClient conn.
+		// CHAOS-57: this relay was invisible to the shutdown drain — the strip
+		// path's recordActiveConn sits after the client TLS handshake, which this
+		// branch returns before, so an SSH-over-CONNECT session on an inspect rule
+		// was severed with zero grace and lost its TUNNEL_CLOSED accounting.
+		releaseDrain := registerDrainableTunnel(tunnelClassInspectFallback, rawClient, upstreamTLS)
+		defer releaseDrain()
 		start := time.Now()
 		var toUpstream, toClient int64
 		shared := newTunnelActivityStamp()
@@ -875,8 +889,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	}
 
 	logger.Printf("SSLInspect: tunnel %q", sanitizeLog(targetHost))
-	recordActiveConn(1)
-	defer recordActiveConn(-1)
+	// CHAOS-57: this tunnel was already counted, but held by no registry — so the
+	// drain waited on it and had no way to end the wait. Registering both legs gives
+	// it the deadline backstop the inspected-H2 path has had since PR3d.
+	defer registerDrainableTunnel(tunnelClassConnectInspect, clientTLS, upstreamTLS)()
 
 	// ADR-0011: build the inspected decryption-observability outcome ONCE from the
 	// completed origin TLS state, count the session (this is the inspect-success
