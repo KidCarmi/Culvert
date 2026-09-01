@@ -194,6 +194,7 @@ Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 | `CULVERT_RELEASE_CATALOG_VERIFY` | Signature mode: enforce (default when a trust root is present), `permissive`, or `disabled`. **Break-glass only** - leave unset in production. |
 | `CULVERT_RELEASE_CATALOG_URL` | Optional signed-catalog origin for verified auto-seed at startup (enforce mode only). |
 | `CULVERT_RELEASE_SIGSTORE_IDENTITY` / `_TRUSTED_ROOT` | Optional overrides for the keyless (Sigstore-identity) release-trust policy. Public material only. |
+| `CULVERT_EXPERIMENTAL_UI` | Arms the new React/TypeScript admin frontend at `/app/` + `/assets/`. Default off (both routes 404); the legacy `/` UI keeps serving regardless. Development/preview only — not yet a supported production surface. |
 
 ---
 
@@ -330,7 +331,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in 63 packages under `internal/`. A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in 65 packages under `internal/`. A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
