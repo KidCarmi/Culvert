@@ -1,15 +1,41 @@
-# MCP First Controlled Canary — Runbook (future; NOT yet executable)
+# MCP First Controlled Canary — Runbook (future; NOT yet executable by default)
 
-**Status:** FUTURE protocol. Canary is architecturally defined but **not activatable** in the
-shipped build (`live_executor_absent` — the live tier is never armed). This runbook is the
-reviewable procedure the separately-approved Canary *activation* phase must follow. It must never
-involve customer traffic.
+**Status:** FUTURE protocol. This runbook is the reviewable procedure the separately-approved
+Canary *activation* phase must follow. It must never involve customer traffic. The precise
+current posture (do NOT collapse these into "done" or "not done"):
 
-> **What changed:** `live_execution` ToolApprovals are now **issuable** under governance (four-eyes,
-> ≤24h TTL, exact-current-state) — step 3 below is executable today, and readiness row 16
-> (`live_execution_approval_invalid`) is satisfiable. Issuing an approval is a TRUST decision only:
-> it arms no executor and does not clear `live_executor_absent` (step 1), so the runbook as a whole
-> is still gated on the unshipped live-tier arming.
+| Layer | State today |
+|---|---|
+| Canary architecture (preflight, scope, budget, abort, trust firewall) | **IMPLEMENTED** |
+| Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
+| Live tier arming | **ARMABLE** — via the governed, node-readiness-gated `armLiveTier`; NOT a posture-wall edit |
+| Armed by default | **NO** — a stock build composes nothing and arms nothing (`live_executor_absent`) |
+| Canary active | **NO** — no production path begins a Canary generation or reaches an upstream |
+| A controlled upstream reachable under the supported production trust model | **NOT AVAILABLE TODAY** — see the connectivity blocker below |
+
+> **What changed (PR #1291):** the production live-tier dependency graph is now composable
+> (`composeProductionGatewayLiveTier`, opt-in via `CULVERT_MCP_LIVE_DEPS`) and the tier is armable
+> through the single governed path (`armLiveTier`). This does **not** activate a Canary and does
+> not arm anything on a stock node.
+>
+> **What changed earlier:** `live_execution` ToolApprovals are **issuable** under governance
+> (four-eyes, ≤24h TTL, exact-current-state) — step 3 below is executable today, and readiness row
+> 16 (`live_execution_approval_invalid`) is satisfiable. Issuing an approval is a TRUST decision
+> only: it arms no executor and does not clear `live_executor_absent`.
+>
+> **Connectivity blocker (recorded, fail-closed — PR #1291 + First Controlled Canary Review).**
+> The production upstream client (`newProductionUpstreamClient`) uses `DefaultGatewayPolicy`
+> (https-only, no-private, no-downgrade) and the default SPKI verifier (base64 SHA-256 of the leaf
+> SubjectPublicKeyInfo). The registry stores an endpoint/identity as OPAQUE tokens, so a controlled
+> server registered with a plain `https://` endpoint, a PUBLIC host, and a real base64 SHA-256 SPKI
+> pin IS dialable under this model. But the only documented controlled inventory
+> (`docs/operator/mcp-qualification-inventory.md`) fails closed on **three independent axes**: the
+> `mcp+https://` scheme is rejected by the https-only policy at `destination.Canonicalize`; the
+> `*.qual.svc` host is private/internal and rejected at `destination.Resolve` (SSRF), and
+> `AllowPrivate` has **no production caller** (enabling it is a design change, not a flag flip); and
+> the SPIFFE-format identity is read as an SPKI digest and rejected by the verifier. No public-HTTPS
+> controlled MCP server with an SPKI pin is provisioned today. Every axis fails toward NO
+> connection, never toward an unauthenticated one.
 
 **Authority:** ADR-0035, `CANARY-READINESS-MATRIX.md`, `ROLLOUT-AND-ROLLBACK.md` §1.4.
 
@@ -25,9 +51,13 @@ Run the Canary preflight (`GET /api/mcp/rollout` → `canary`) and confirm `node
 activation preflight (`evaluateCanaryActivationPreflight`) returns `Ready:true` — i.e. the Unmet
 set is empty. This requires the separately-reviewed activation to have:
 
-1. **Armed the live tier** — composed a live `execution.Executor` + bounded `UpstreamCaller` +
-   materialize-broker + inspection, and called `markGatewayExecDepsReady` (edits the
-   execution-posture wall — the reviewer sees it).
+1. **Armed the live tier** — composed the production live-tier dependency graph
+   (`composeProductionGatewayLiveTier`, opt-in via `CULVERT_MCP_LIVE_DEPS`: a live
+   `execution.Executor` + bounded `UpstreamCaller` + materialize-broker + inspection) and then
+   armed it through the single governed, node-readiness-gated path (`armLiveTier`, which is the
+   sole caller of `markGatewayExecDepsReady`). Arming is NOT a hand edit of the posture wall and is
+   NOT Canary activation — the rollout mode is untouched and no upstream is reached. On a stock
+   node this step has not run, so the facts report `live_executor_absent`.
 2. **Made `live_execution` issuable** under four-eyes + short-TTL governance — **shipped**; the
    governed issue/approve path (`RequestLiveApproval`/`ApproveLive`) is available today.
 3. **Attested the Shadow Exit Review** (`shadowExitReviewAttested`).

@@ -198,10 +198,18 @@ Every one is a **separately-reviewed activation**, not a config change:
    phase).** The real live executor is composable (`composeGatewayLiveTierInto`, `mcp_live_startup.go`)
    and the tier is explicitly ARMABLE through the single authoritative, node-readiness-gated path
    (`armLiveTier`, `mcp_live_arming.go`), with a quiesce/disarm inverse and the CANARY-ROLLBACK-LIVE-
-   QUIESCE-REHEARSAL closed. **COMPOSED != ARMED != Canary ACTIVE** is pinned. What REMAINS for a real
-   deployment: the production KEK / destination-resolver / profile-store dependency wiring (a documented,
-   separately-reviewed prerequisite — no production caller composes the tier this slice), and the
-   operational decision to actually arm on a real node. Composed-but-unarmed still reports
+   QUIESCE-REHEARSAL closed. **COMPOSED != ARMED != Canary ACTIVE** is pinned. **Production dependency
+   composition now EXISTS (PR #1291):** `composeProductionGatewayLiveTier` (`mcp_live_production_deps.go`)
+   is the single production caller, opt-in behind `CULVERT_MCP_LIVE_DEPS` (default OFF), wiring the real
+   KEK / destination-resolver / profile-store / registry / catalog. What REMAINS for a real deployment:
+   (a) the production **credential Provider adapter** — the broker is composed with ZERO providers
+   (`broker_composed_no_provider`), so a credential-REQUIRING tool fails closed at the broker (a
+   no-credential / read-first tool still executes once armed); (b) **upstream connectivity provisioning**
+   — the production client uses `DefaultGatewayPolicy` (https-only, no-private) + the default SPKI
+   verifier, so a controlled server needs a plain `https://` endpoint on a PUBLIC host with a base64
+   SHA-256 SPKI pin; the documented `mcp+https://` scheme, `*.qual.svc` private host, and SPIFFE-format
+   identity are all rejected fail-closed, and no public-HTTPS controlled MCP server is provisioned today;
+   and (c) the operational decision to actually arm on a real node. Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.
 2. ~~Make `live_execution` issuable under stronger governance (four-eyes, short TTL).~~ **DONE
