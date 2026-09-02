@@ -330,7 +330,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in 63 packages under `internal/`. A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in 65 packages under `internal/`. A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
