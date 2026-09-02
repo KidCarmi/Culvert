@@ -299,6 +299,16 @@ func (rt *canaryRuntime) currentGeneration(capb rollout.Capability) uint64 {
 	return cr.generation
 }
 
+// activeBudget returns the budget the active generation is enforcing, and whether an activation is
+// currently armed. It lets a same-mode live update detect an authoritative-budget change that the
+// running generation would otherwise never pick up (Codex P2 round-6).
+func (rt *canaryRuntime) activeBudget(capb rollout.Capability) (canary.Budget, bool) {
+	cr := rt.capRuntime(capb)
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	return cr.budget, cr.active
+}
+
 // armed reports whether the capability's runtime is currently armed (an activation record was
 // restored/begun and not demoted). It is distinct from executionEligible, which is additionally false
 // once an abort has latched — a restored aborted activation is still "armed" and must be reconciled.

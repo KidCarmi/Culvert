@@ -66,6 +66,13 @@ var errRolloutPersistFailed = errors.New("rollout_persist_failed")
 var errRolloutCanaryActivationFailed = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
 	"rollout.transition", "canary_runtime_activation_failed")
 
+// errRolloutCanaryBudgetChanged marks a SAME-MODE live update (e.g. a scope revision within Canary)
+// whose authoritative activation budget differs from the active generation's. The generation is not
+// re-begun on such an update, so the runtime would keep enforcing the OLD budget and a tightened cap
+// would go unenforced; the update is rejected fail-closed and a budget change must go through a
+// demote → re-activate cycle that begins a fresh generation with the new budget (Codex P2 round-6).
+var errRolloutCanaryBudgetChanged = errors.New("canary_budget_changed_requires_reactivation")
+
 // mcpRollout is the process-wide, DISABLED-BY-DEFAULT PR-11 rollout composition.
 // It owns the two capability-local rollout states (Gateway + Management) and the
 // bounded low-cardinality rollout metrics. Gateway and Management are physically
@@ -470,41 +477,23 @@ func (r *mcpRollout) reconcileCanaryRuntimeAfterCommit(tgt commitTransitionTarge
 	if !tgt.reconcileRuntime {
 		return nil
 	}
-	st := tgt.st
 	enteringLive := cfg.Mode.RequiresLiveExecution() && !prevMode.RequiresLiveExecution()
 	leavingLive := !cfg.Mode.RequiresLiveExecution() && prevMode.RequiresLiveExecution()
 	switch {
 	case enteringLive:
 		if _, err := globalCanaryRuntime.beginCanaryActivation(cfg.Capability, activationBudget, now); err != nil {
-			// Roll the durable rollout state back to the prior (non-live) mode. The runtime is already
-			// disarmed and its durable record removed by the failed begin, so this is purely undoing the
-			// step-(4) rollout persist.
-			st.UpdateEvidence(func(e *rollout.EvidenceSummary) { *e = prevEvidence })
-			if rerr := st.SetConfig(prevCfg, actor, now.UnixNano()); rerr != nil {
-				// prevCfg was valid, so this should never fail; if it ever does, force Disabled rather than
-				// leave the advanced (live) mode installed while rejecting the transition.
-				_ = st.SetConfig(rollout.DisabledConfig(cfg.Capability), actor, now.UnixNano())
-				logger.Printf("MCP rollout: rollback of %s failed after activation error; forced Disabled (fail-closed): %q", cfg.Capability.String(), sanitizeLog(rerr.Error()))
-			}
-			if perr := tgt.persist(st); perr != nil {
-				// The durable rollback could not be written. The runtime is disarmed (safe), and a restart
-				// re-reads the on-disk mode: a restored live mode without the required execution deps is
-				// clamped to Disabled by restore() (modeExecReady gate), so this is still fail-closed across
-				// a crash — only the RAM view and disk momentarily disagree until the next successful write.
-				// Record write_failed (NOT activation_failed): the compensating rollback persist failed, so
-				// this is a durability failure, and rollbackPathReadyLocked rejects exactly degraded/
-				// write_failed — recording activation_failed would let the node treat this known persistence
-				// failure as a healthy rollback path and retry activation (Codex P2 round-5, PR #1290).
-				logger.Printf("MCP rollout: %s activation rejected (beginCanaryActivation failed) but durable rollback persist ALSO failed; runtime disarmed, on-disk state may be inconsistent (fail-closed): %q / %q",
-					cfg.Capability.String(), sanitizeLog(err.Error()), sanitizeLog(perr.Error()))
-				tgt.setStatus("write_failed")
-			} else {
-				// The rollback persisted cleanly: durability is intact, only the activation was rejected.
-				logger.Printf("MCP rollout: %s activation rejected — beginCanaryActivation failed; durable rollout state rolled back to %s (fail-closed): %q",
-					cfg.Capability.String(), prevMode.String(), sanitizeLog(err.Error()))
-				tgt.setStatus("activation_failed")
-			}
-			return fmt.Errorf("%w: %v", errRolloutCanaryActivationFailed, err)
+			// The runtime is already disarmed and its durable record removed by the failed begin; roll the
+			// step-(4) rollout persist back to the prior (non-live) mode and reject the transition.
+			return r.rejectActivationAndRollback(tgt, cfg, prevMode, prevCfg, prevEvidence, actor, now, err)
+		}
+	case cfg.Mode.RequiresLiveExecution() && prevMode.RequiresLiveExecution():
+		// A SAME-MODE live update (e.g. a scope revision within Canary) does NOT re-begin the generation,
+		// so the runtime keeps enforcing the ACTIVE generation's budget. If the authoritative budget for
+		// this update differs, a tightened total/rate/window/identity cap would go unenforced — reject
+		// fail-closed. A budget change must go through a demote → re-activate cycle, which begins a fresh
+		// generation with the new budget (Codex P2 round-6, PR #1290). A same-budget scope update proceeds.
+		if active, ok := globalCanaryRuntime.activeBudget(cfg.Capability); ok && active != activationBudget {
+			return r.rejectActivationAndRollback(tgt, cfg, prevMode, prevCfg, prevEvidence, actor, now, errRolloutCanaryBudgetChanged)
 		}
 	case leavingLive:
 		if err := globalCanaryRuntime.demoteCanary(cfg.Capability); err != nil {
@@ -512,6 +501,35 @@ func (r *mcpRollout) reconcileCanaryRuntimeAfterCommit(tgt commitTransitionTarge
 		}
 	}
 	return nil
+}
+
+// rejectActivationAndRollback undoes the step-(4) rollout persist for a live transition that must be
+// REJECTED after commit — a failed beginCanaryActivation, or a same-mode budget change the running
+// generation cannot pick up. It rolls the durable rollout state back to prevCfg and records the
+// persist-status truthfully: write_failed when the compensating persist ALSO fails (a durability
+// failure rollbackPathReadyLocked must reject so the node never retries over an inconsistent disk),
+// activation_failed on a clean rollback. It returns errRolloutCanaryActivationFailed wrapping cause.
+func (r *mcpRollout) rejectActivationAndRollback(tgt commitTransitionTarget, cfg *rollout.SignedConfig, prevMode rollout.Mode, prevCfg rollout.SignedConfig, prevEvidence rollout.EvidenceSummary, actor string, now time.Time, cause error) error {
+	st := tgt.st
+	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { *e = prevEvidence })
+	if rerr := st.SetConfig(prevCfg, actor, now.UnixNano()); rerr != nil {
+		// prevCfg was valid, so this should never fail; if it ever does, force Disabled rather than leave
+		// the advanced (live) mode installed while rejecting the transition.
+		_ = st.SetConfig(rollout.DisabledConfig(cfg.Capability), actor, now.UnixNano())
+		logger.Printf("MCP rollout: rollback of %s failed after activation rejection; forced Disabled (fail-closed): %q", cfg.Capability.String(), sanitizeLog(rerr.Error()))
+	}
+	if perr := tgt.persist(st); perr != nil {
+		logger.Printf("MCP rollout: %s activation rejected but durable rollback persist ALSO failed; on-disk state may be inconsistent (fail-closed): %q / %q",
+			cfg.Capability.String(), sanitizeLog(cause.Error()), sanitizeLog(perr.Error()))
+		tgt.setStatus("write_failed")
+	} else {
+		logger.Printf("MCP rollout: %s activation rejected; durable rollout state rolled back to %s (fail-closed): %q",
+			cfg.Capability.String(), prevMode.String(), sanitizeLog(cause.Error()))
+		tgt.setStatus("activation_failed")
+	}
+	// Wrap BOTH sentinels (%w: %w) so mcperr.ReasonOf still finds errRolloutCanaryActivationFailed's
+	// bounded reason AND a caller can errors.Is the specific cause (e.g. errRolloutCanaryBudgetChanged).
+	return fmt.Errorf("%w: %w", errRolloutCanaryActivationFailed, cause)
 }
 
 // restore re-establishes both capabilities' node-local rollout state from durable

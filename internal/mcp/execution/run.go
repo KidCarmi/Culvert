@@ -119,6 +119,14 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// pre-materialization gate still adds its own commit before any provider or
 	// cache is touched (defense in depth, not a substitute).
 	profileRef := in.Decision.Obligations.CredentialProfile
+	if profileRef != "" && e.cfg.Broker == nil {
+		// A credential is REQUIRED (the decision carries a CredentialProfile obligation) but no broker is
+		// composed to plan/materialize it. Fail CLOSED: reaching the upstream with an empty Authorization
+		// header would let a credential-required operation hit an upstream that accepts ambient/
+		// unauthenticated access, bypassing the required credential planning (Codex P2 round-6, PR #1290).
+		// The nil-broker composition is valid ONLY for tools that need no credential.
+		return e.blocked(in, mcperr.ReasonCredentialProfileMissing, false)
+	}
 	useBroker := e.cfg.Broker != nil && profileRef != ""
 	var blockedOut runtime.ExecOutput
 	var didBlock bool

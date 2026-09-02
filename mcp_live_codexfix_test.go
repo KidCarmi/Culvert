@@ -126,6 +126,49 @@ func TestLiveCommit_ActivationFailureStatusReflectsPersistOutcome(t *testing.T) 
 	})
 }
 
+// P2 (round-6): a SAME-MODE live update (Canary→Canary scope revision) whose authoritative budget
+// differs from the active generation's is REJECTED — the generation is not re-begun, so a tightened
+// cap would go unenforced. A same-budget update proceeds.
+func TestLiveCommit_SameModeLiveBudgetChangeIsRejected(t *testing.T) {
+	resetLiveTierGlobals(t)
+	setDataDirForTest(t, t.TempDir())
+	capb := rollout.CapabilityGateway
+	// Arm a canary generation with budget B1.
+	if _, err := globalCanaryRuntime.beginCanaryActivation(capb, runtimeTestBudget(10), time.Unix(0, 1)); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	r := newTestRollout()
+	st := r.gateway
+	prevCfg := *gwCanaryCfg(1) // prior Canary (live)
+	if err := st.SetConfig(prevCfg, "prev", time.Unix(0, 1).UnixNano()); err != nil {
+		t.Fatalf("install prev canary: %v", err)
+	}
+	cfg := gwCanaryCfg(2) // SAME mode (Canary), new scope revision
+	if err := st.SetConfig(*cfg, "new", time.Unix(0, 2).UnixNano()); err != nil {
+		t.Fatalf("install new canary: %v", err)
+	}
+	tgt := commitTransitionTarget{
+		st:               st,
+		persist:          func(*rollout.State) error { return nil },
+		setStatus:        func(string) {},
+		countTransition:  func() {},
+		reconcileRuntime: true,
+	}
+	// A DIFFERENT budget (B2) than the active generation's B1 ⇒ reject + roll back.
+	err := r.reconcileCanaryRuntimeAfterCommit(tgt, cfg, prevCfg.Mode, prevCfg, st.Evidence(), runtimeTestBudget(20), "new", time.Unix(0, 2))
+	if !errors.Is(err, errRolloutCanaryActivationFailed) || !errors.Is(err, errRolloutCanaryBudgetChanged) {
+		t.Fatalf("a same-mode live update with a changed budget must be rejected, got %v", err)
+	}
+	if st.CurrentMode() != prevCfg.Mode {
+		t.Fatalf("state must roll back to the prior live mode, got %v", st.CurrentMode())
+	}
+
+	// The SAME budget (B1) ⇒ no reject; the scope update proceeds.
+	if err := r.reconcileCanaryRuntimeAfterCommit(tgt, cfg, prevCfg.Mode, prevCfg, st.Evidence(), runtimeTestBudget(10), "same", time.Unix(0, 3)); err != nil {
+		t.Fatalf("a same-mode live update with the SAME budget must proceed, got %v", err)
+	}
+}
+
 // P2: resetLiveTierGlobals must clear the process-global live-gate denial counters, so a prior shuffled
 // test's denials cannot leak into a later test's telemetry assertions.
 func TestLiveGate_DenialCountersResetByHelper(t *testing.T) {
