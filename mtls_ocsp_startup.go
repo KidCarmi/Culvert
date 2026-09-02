@@ -61,35 +61,26 @@ func mtlsClientCertHealth() mtlsClientCertStatus {
 	return mtlsClientCertState
 }
 
-// loadMTLSAndOCSP applies cfg.
-//
-// Behaviour preserved vs the pre-P5.3 implementation:
-//   - Empty cfg ⇒ no-op (no swap).
-//   - Bad cert ⇒ logged; mTLS not applied; OCSP still applied if
-//     cfg.OCSPCheck=true.
-//   - When the existing TLS template already has a non-zero
-//     MinVersion (operator pre-set), it is preserved.
-//   - When the template is fresh, the mTLS branch defaults
-//     MinVersion to TLS 1.2; the OCSP-only branch defaults to TLS
-//     1.3. This matches the pre-P5.3 asymmetry exactly.
-//   - Existing Certificates / VerifyPeerCertificate / VerifyConnection
-//     fields on a pre-set template are replaced by this update.
-func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
-	var clientCert *tls.Certificate
+// loadMTLSClientCert loads cfg's client cert/key pair (when both are set),
+// recording the outcome via recordMTLSClientCertStatus for the admin API.
+// Returns the loaded certificate, or nil if unconfigured or the load
+// failed. Split out of loadMTLSAndOCSP to keep that function's cyclomatic
+// complexity under the project's cyclop threshold (15).
+func loadMTLSClientCert(cfg mtlsOCSPStartupConfig) *tls.Certificate {
 	switch {
 	case cfg.ClientCertFile != "" && cfg.ClientKeyFile != "":
 		c, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
 		if err != nil {
 			logger.Printf("mTLS: failed to load client cert: %v", err)
 			recordMTLSClientCertStatus(cfg.ClientCertFile, false, time.Time{}, err.Error())
-		} else {
-			clientCert = &c
-			var notAfter time.Time
-			if leaf, perr := x509.ParseCertificate(c.Certificate[0]); perr == nil {
-				notAfter = leaf.NotAfter
-			}
-			recordMTLSClientCertStatus(cfg.ClientCertFile, true, notAfter, "")
+			return nil
 		}
+		var notAfter time.Time
+		if leaf, perr := x509.ParseCertificate(c.Certificate[0]); perr == nil {
+			notAfter = leaf.NotAfter
+		}
+		recordMTLSClientCertStatus(cfg.ClientCertFile, true, notAfter, "")
+		return &c
 	case cfg.ClientCertFile != "" || cfg.ClientKeyFile != "":
 		// One-sided config: FileConfig.validate doesn't reject a lone
 		// client_cert_file/client_key_file, but tls.LoadX509KeyPair requires
@@ -104,7 +95,27 @@ func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 		errMsg := fmt.Sprintf("%s is not set (both client_cert_file and client_key_file are required)", missing)
 		logger.Printf("mTLS: client cert not loaded: %s", errMsg)
 		recordMTLSClientCertStatus(file, false, time.Time{}, errMsg)
+		return nil
+	default:
+		return nil
 	}
+}
+
+// loadMTLSAndOCSP applies cfg.
+//
+// Behaviour preserved vs the pre-P5.3 implementation:
+//   - Empty cfg ⇒ no-op (no swap).
+//   - Bad cert ⇒ logged; mTLS not applied; OCSP still applied if
+//     cfg.OCSPCheck=true.
+//   - When the existing TLS template already has a non-zero
+//     MinVersion (operator pre-set), it is preserved.
+//   - When the template is fresh, the mTLS branch defaults
+//     MinVersion to TLS 1.2; the OCSP-only branch defaults to TLS
+//     1.3. This matches the pre-P5.3 asymmetry exactly.
+//   - Existing Certificates / VerifyPeerCertificate / VerifyConnection
+//     fields on a pre-set template are replaced by this update.
+func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
+	clientCert := loadMTLSClientCert(cfg)
 
 	if clientCert == nil && !cfg.OCSPCheck {
 		return
