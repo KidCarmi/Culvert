@@ -31,6 +31,11 @@ type cdrStartupConfig struct {
 	// registry with path=="" silently no-ops its Save.
 	InstancesPath string
 	PoliciesPath  string
+
+	// EnrollReceiptsPath holds the bounded enrollment recovery receipts
+	// (2E-C R8, cdr_enroll_receipts.go) — non-secret operation identities
+	// that let an unknown-outcome enrollment be resolved after a restart.
+	EnrollReceiptsPath string
 }
 
 // resolveCDRStartupConfig merges CLI flags over the config file (CLI wins,
@@ -67,8 +72,9 @@ func resolveCDRStartupConfig(fc *FileConfig, flags cdrCLIFlags) cdrStartupConfig
 		cfg.CertsDir = d
 	}
 	return cdrStartupConfig{
-		CDR:           cfg,
-		InstancesPath: "/data/cdr_instances.json",
-		PoliciesPath:  "/data/cdr_policies.json",
+		CDR:                cfg,
+		InstancesPath:      "/data/cdr_instances.json",
+		PoliciesPath:       "/data/cdr_policies.json",
+		EnrollReceiptsPath: "/data/cdr_enroll_receipts.json",
 	}
 }

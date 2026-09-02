@@ -743,6 +743,13 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/cdr/instances/enroll", Handler: "apiCDREnroll", Domain: "cdr", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/cdr/instances/enroll/recover", Handler: "apiCDREnrollRecover", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "2E-C R8: fresh authoritative EnrollStatus resolution; mutates only the local recovery receipt"}}},
+	{Path: "/api/cdr/instances/enroll/receipts", Handler: "apiCDREnrollReceipts", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/cdr/instances/revoke", Handler: "apiCDRRevokeRPC", Domain: "cdr", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 	{Path: "/api/cdr/policies", Handler: "apiCDRPolicies", Domain: "cdr", Public: false,

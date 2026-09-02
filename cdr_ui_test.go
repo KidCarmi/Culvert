@@ -56,11 +56,13 @@ func resetCDRState(t *testing.T) {
 	cdrPool.shutdown()
 	cdrInstances = &CDRInstanceRegistry{}
 	cdrPolicyStore = &CDRPolicyStore{}
+	cdrEnrollReceipts = &cdrEnrollReceiptStore{}
 	t.Cleanup(func() {
 		shutdownCDRClient()
 		cdrPool.shutdown()
 		cdrInstances = &CDRInstanceRegistry{}
 		cdrPolicyStore = &CDRPolicyStore{}
+		cdrEnrollReceipts = &cdrEnrollReceiptStore{}
 	})
 }
 

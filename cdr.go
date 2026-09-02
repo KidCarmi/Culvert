@@ -611,7 +611,12 @@ func (c *CDRClient) RevokeClient(ctx context.Context, req *pb.RevokeClientReques
 //
 // On success, caller must persist {CaCert, ClientCert, ClientKey, Endpoint}
 // and use them for all subsequent RPCs.
-func Enroll(ctx context.Context, endpoint, fingerprintHx, token string) (*pb.EnrollResponse, error) {
+//
+// operationID (2E-C R8, Sluice v0.3) is the client-minted 128-bit
+// operation identity Sluice binds DURABLY to the issued fingerprint
+// before responding, so a lost response can be resolved through
+// EnrollStatus. Empty = legacy v0.2 exchange with no recovery identity.
+func Enroll(ctx context.Context, endpoint, fingerprintHx, token, operationID string) (*pb.EnrollResponse, error) {
 	if endpoint == "" {
 		return nil, errors.New("cdr.enroll: endpoint required")
 	}
@@ -621,28 +626,14 @@ func Enroll(ctx context.Context, endpoint, fingerprintHx, token string) (*pb.Enr
 	if token == "" {
 		return nil, errors.New("cdr.enroll: token required")
 	}
-
-	// Bootstrap TLS: pinned fingerprint, no client cert yet.
-	tlsCfg, err := buildCDRTLSConfig(CDRClientConfig{
-		ServerFingerprintHx: fingerprintHx,
-	})
+	conn, ctx, cancel, err := dialCDRBootstrap(ctx, endpoint, fingerprintHx, "cdr.enroll")
 	if err != nil {
-		return nil, fmt.Errorf("cdr.enroll: tls: %w", err)
+		return nil, err
 	}
-
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-	}
-
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
-	if err != nil {
-		return nil, fmt.Errorf("cdr.enroll: dial %s: %w", sanitizeLog(endpoint), err)
-	}
+	defer cancel()
 	defer func() { _ = conn.Close() }()
 
-	resp, err := pb.NewSluiceServiceClient(conn).Enroll(ctx, &pb.EnrollRequest{Token: token})
+	resp, err := pb.NewSluiceServiceClient(conn).Enroll(ctx, &pb.EnrollRequest{Token: token, OperationId: operationID})
 	if err != nil {
 		return nil, fmt.Errorf("cdr.enroll: rpc: %w", err)
 	}
@@ -650,4 +641,58 @@ func Enroll(ctx context.Context, endpoint, fingerprintHx, token string) (*pb.Enr
 		return nil, errors.New("cdr.enroll: server returned incomplete cert bundle")
 	}
 	return resp, nil
+}
+
+// EnrollStatus asks Sluice (v0.3) for the authoritative outcome of an
+// enrollment or renewal operation over the same bootstrap channel Enroll
+// uses (TOFU pin, no client credential — EnrollStatus is allowed without
+// one). Idempotent and side-effect free on the Sluice side.
+func EnrollStatus(ctx context.Context, endpoint, fingerprintHx, operationID string) (*pb.EnrollStatusResponse, error) {
+	if endpoint == "" || fingerprintHx == "" {
+		return nil, errors.New("cdr.enrollstatus: endpoint and fingerprint required")
+	}
+	if !cdrOperationIDRE.MatchString(operationID) {
+		return nil, errors.New("cdr.enrollstatus: invalid operation id")
+	}
+	conn, ctx, cancel, err := dialCDRBootstrap(ctx, endpoint, fingerprintHx, "cdr.enrollstatus")
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	defer func() { _ = conn.Close() }()
+	resp, err := pb.NewSluiceServiceClient(conn).EnrollStatus(ctx, &pb.EnrollStatusRequest{OperationId: operationID})
+	if err != nil {
+		return nil, fmt.Errorf("cdr.enrollstatus: rpc: %w", err)
+	}
+	return resp, nil
+}
+
+// dialCDRBootstrap opens the short-lived, fingerprint-pinned, credential-
+// less connection shared by Enroll and EnrollStatus.
+func dialCDRBootstrap(ctx context.Context, endpoint, fingerprintHx, op string) (*grpc.ClientConn, context.Context, context.CancelFunc, error) {
+	tlsCfg, err := buildCDRTLSConfig(CDRClientConfig{ServerFingerprintHx: fingerprintHx})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%s: tls: %w", op, err)
+	}
+	cancel := context.CancelFunc(func() {})
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+	}
+	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+	if err != nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("%s: dial %s: %w", op, sanitizeLog(endpoint), err)
+	}
+	return conn, ctx, cancel, nil
+}
+
+// EnrollStatus resolves an operation over the pooled mTLS channel (used
+// by the health poller to reconcile a renewal whose response was lost).
+func (c *CDRClient) EnrollStatus(ctx context.Context, operationID string) (*pb.EnrollStatusResponse, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
+	return c.stub.EnrollStatus(ctx, &pb.EnrollStatusRequest{OperationId: operationID})
 }

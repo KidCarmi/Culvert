@@ -104,6 +104,10 @@ func probeCDRHealth(ctx context.Context) {
 	updateRegistryMetadataFromPool(members)
 	propagateServerRotation(members)
 
+	// 2E-C R7: resolve renewals whose outcome was lost BEFORE deciding on
+	// new ones (an unresolved generation refuses further staging).
+	reconcilePendingRenewals(members)
+
 	// Opportunistic auto-renewal: any instance whose client cert is
 	// within the renewal window gets a RenewCert call fired off in a
 	// background goroutine.  Single-flight prevents double-renewal
@@ -201,70 +205,85 @@ func maybeRenewExpiringClients(members []*cdrPooledClient) {
 	}
 }
 
-// runRenewFor performs a single RenewCert RPC, persists the new
-// cert/key atomically, and re-initialises the pool so the fresh
-// credentials take effect for subsequent RPCs.  Errors are logged
-// but non-fatal — the old cert still works until its own NotAfter,
-// giving us up to cdrRenewWindow days of retries.
+// runRenewFor performs ONE renewal as a recoverable transaction (2E-C R7,
+// cdr_lineage.go) and re-initialises the pool so the fresh credential
+// takes effect. `inst` is the registry snapshot the DECISION was taken
+// from; the instance is re-validated under its lifecycle lock before
+// anything is staged, so a renewal decided before a delete/revoke never
+// writes PEMs, resurrects registry state or introduces a new fingerprint
+// after the removal committed.
+//
+// Durable order: intent (operation id) → RPC → issued fingerprint →
+// tmp PEMs → cert rename → key rename → activation. Every step after the
+// RPC leaves the durable lineage able to name the credential Sluice now
+// trusts, and reconcileCredentialLineage finishes an interrupted swap at
+// the next boot. Errors are logged, not fatal — the previous credential
+// keeps working until its NotAfter, giving cdrRenewWindow days of retries.
 func runRenewFor(pc *cdrPooledClient, inst CDREnrolledInstance) {
 	defer pc.renewInFlight.Store(0)
+	unlock := cdrLifecycle.lock(inst.Name)
+	defer unlock()
+
+	cur, ok := cdrInstances.GetCopy(inst.Name)
+	if !ok || !cur.EnrolledAt.Equal(inst.EnrolledAt) || cur.ClientCertPath != inst.ClientCertPath {
+		logger.Printf("CDR: RenewCert %q: instance removed or re-enrolled before the renewal ran; skipping", sanitizeLog(inst.Name))
+		return
+	}
+	inst = cur
+
+	opID := mintCDROperationID()
+	seq, err := cdrInstances.StageRenewal(inst.Name, opID)
+	if err != nil {
+		logger.Printf("CDR: RenewCert %q: stage renewal intent: %v", sanitizeLog(inst.Name), err)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	resp, err := pc.Client.RenewCert(ctx, &pb.RenewCertRequest{})
+	resp, err := pc.Client.RenewCert(ctx, &pb.RenewCertRequest{OperationId: opID})
 	if err != nil {
-		logger.Printf("CDR: RenewCert failed for %q (will retry next poll): %v",
-			sanitizeLog(pc.Name), err)
+		// Outcome unknown: the "renewing" generation stays durable and the
+		// poller resolves it through EnrollStatus (issued ⇒ orphaned and
+		// revocable; not issued ⇒ dropped). Never silently forgotten.
+		logger.Printf("CDR: RenewCert failed for %q (operation %s left for reconciliation): %v",
+			sanitizeLog(inst.Name), opID, err)
 		return
 	}
 	if len(resp.ClientCert) == 0 || len(resp.ClientKey) == 0 {
-		logger.Printf("CDR: RenewCert for %q returned empty material; skipping", sanitizeLog(pc.Name))
+		logger.Printf("CDR: RenewCert for %q returned empty material (operation %s left for reconciliation)", sanitizeLog(inst.Name), opID)
+		return
+	}
+	fp, ferr := sluiceauth.Fingerprint(resp.ClientCert)
+	if ferr != nil {
+		logger.Printf("CDR: RenewCert %q: fingerprint renewed cert: %v (operation %s left for reconciliation)", sanitizeLog(inst.Name), ferr, opID)
+		return
+	}
+	if resp.ClientCertFingerprint != "" && resp.ClientCertFingerprint != fp {
+		logger.Printf("CDR: RenewCert %q: server-reported fingerprint %s differs from the issued cert %s; using the cert",
+			sanitizeLog(inst.Name), sanitizeLog(resp.ClientCertFingerprint), fp)
+	}
+
+	// The issued credential is durable BEFORE any PEM is written: a
+	// failure here means the bundle is discarded and the generation stays
+	// "renewing" for reconciliation (EnrollStatus names the fingerprint).
+	if serr := cdrInstances.RecordIssuedCredential(inst.Name, seq, fp, certNotAfterUnix(resp.ClientCert), cdrCredStaged); serr != nil {
+		logger.Printf("CDR: RenewCert %q: record issued credential %s: %v — bundle discarded, operation %s left for reconciliation",
+			sanitizeLog(inst.Name), fp, serr, opID)
 		return
 	}
 
-	// Write the new bundle to disk atomically via tmp + rename, so a
-	// crash mid-rename leaves either the old or the new cert intact —
-	// never a half-written one.  Same 0600 perms as enrollment.
-	if werr := os.WriteFile(inst.ClientCertPath+".tmp", resp.ClientCert, 0o600); werr != nil {
-		logger.Printf("CDR: RenewCert %q: write cert tmp: %v", sanitizeLog(pc.Name), werr)
+	if !installRenewedPEMs(inst, resp.ClientCert, resp.ClientKey) {
 		return
 	}
-	// CA-3: encrypt the client key at rest when enabled; plaintext otherwise.
-	// The cert above stays a plaintext public cert.
-	keyOut, kerr := encodeCDRClientKeyForWrite(inst.ClientKeyPath, resp.ClientKey)
-	if kerr != nil {
-		_ = os.Remove(inst.ClientCertPath + ".tmp")
-		logger.Printf("CDR: RenewCert %q: encrypt key: %v", sanitizeLog(pc.Name), kerr)
+	if aerr := cdrInstances.ActivateCredential(inst.Name, seq); aerr != nil {
+		// Disk holds the new credential and the durable lineage already
+		// names it (staged); the next boot's reconcile activates it.
+		logger.Printf("CDR: RenewCert %q: activate seq %d: %v (durable lineage names %s as staged; reconciled at next boot)",
+			sanitizeLog(inst.Name), seq, aerr, fp)
 		return
 	}
-	if werr := os.WriteFile(inst.ClientKeyPath+".tmp", keyOut, 0o600); werr != nil {
-		_ = os.Remove(inst.ClientCertPath + ".tmp")
-		logger.Printf("CDR: RenewCert %q: write key tmp: %v", sanitizeLog(pc.Name), werr)
-		return
-	}
-	if werr := os.Rename(inst.ClientCertPath+".tmp", inst.ClientCertPath); werr != nil {
-		logger.Printf("CDR: RenewCert %q: swap cert: %v", sanitizeLog(pc.Name), werr)
-		return
-	}
-	if werr := os.Rename(inst.ClientKeyPath+".tmp", inst.ClientKeyPath); werr != nil {
-		logger.Printf("CDR: RenewCert %q: swap key: %v", sanitizeLog(pc.Name), werr)
-		return
-	}
-
-	logger.Printf("CDR: RenewCert %q succeeded — days_until_expiry=%d",
-		sanitizeLog(pc.Name), resp.DaysUntilExpiry)
-
-	// 2E-C: the live credential changed, so refresh the durably recorded
-	// client-cert fingerprint (the Sluice-side revocation key — see
-	// CDREnrolledInstance.ClientCertFingerprint). Failure is logged, not
-	// fatal: the in-memory value is updated either way.
-	if fp, ferr := sluiceauth.Fingerprint(resp.ClientCert); ferr == nil {
-		if serr := cdrInstances.SetClientCertFingerprint(pc.Name, fp); serr != nil {
-			logger.Printf("CDR: RenewCert %q: record fingerprint: %v", sanitizeLog(pc.Name), serr)
-		}
-	} else {
-		logger.Printf("CDR: RenewCert %q: fingerprint renewed cert: %v", sanitizeLog(pc.Name), ferr)
-	}
+	logger.Printf("CDR: RenewCert %q succeeded — seq=%d fingerprint=%s days_until_expiry=%d",
+		sanitizeLog(inst.Name), seq, fp, resp.DaysUntilExpiry)
 
 	// Re-init the client so the next RPC uses the new cert.  The old
 	// *CDRClient (and its grpc.ClientConn) gets closed inside
@@ -273,7 +292,104 @@ func runRenewFor(pc *cdrPooledClient, inst CDREnrolledInstance) {
 	// continues — next poll retries the reinit.
 	if err := initCDRClient(cdrActiveConfig()); err != nil {
 		logger.Printf("CDR: RenewCert %q: reinit failed (old cert still valid): %q",
-			sanitizeLog(pc.Name), sanitizeLog(err.Error()))
+			sanitizeLog(inst.Name), sanitizeLog(err.Error()))
+	}
+}
+
+// installRenewedPEMs writes the new bundle atomically via tmp + rename
+// (cert first, then key), so a crash mid-swap leaves either the old or
+// the new material intact — never a half-written file — and the staged
+// lineage entry lets reconcileCredentialLineage finish the swap.
+func installRenewedPEMs(inst CDREnrolledInstance, certPEM, keyPEM []byte) bool {
+	if werr := os.WriteFile(inst.ClientCertPath+".tmp", certPEM, 0o600); werr != nil {
+		logger.Printf("CDR: RenewCert %q: write cert tmp: %v", sanitizeLog(inst.Name), werr)
+		return false
+	}
+	// CA-3: encrypt the client key at rest when enabled; plaintext otherwise.
+	// The cert above stays a plaintext public cert.
+	keyOut, kerr := encodeCDRClientKeyForWrite(inst.ClientKeyPath, keyPEM)
+	if kerr != nil {
+		_ = os.Remove(inst.ClientCertPath + ".tmp")
+		logger.Printf("CDR: RenewCert %q: encrypt key: %v", sanitizeLog(inst.Name), kerr)
+		return false
+	}
+	if werr := os.WriteFile(inst.ClientKeyPath+".tmp", keyOut, 0o600); werr != nil {
+		_ = os.Remove(inst.ClientCertPath + ".tmp")
+		logger.Printf("CDR: RenewCert %q: write key tmp: %v", sanitizeLog(inst.Name), werr)
+		return false
+	}
+	if werr := os.Rename(inst.ClientCertPath+".tmp", inst.ClientCertPath); werr != nil {
+		logger.Printf("CDR: RenewCert %q: swap cert: %v", sanitizeLog(inst.Name), werr)
+		return false
+	}
+	if werr := os.Rename(inst.ClientKeyPath+".tmp", inst.ClientKeyPath); werr != nil {
+		logger.Printf("CDR: RenewCert %q: swap key: %v", sanitizeLog(inst.Name), werr)
+		return false
+	}
+	return true
+}
+
+// reconcilePendingRenewals resolves every "renewing" generation whose RPC
+// outcome was lost, by asking Sluice (EnrollStatus is authoritative and
+// idempotent): issued ⇒ recorded as ORPHANED with its fingerprint (key
+// material never arrived; it must be revoked), not issued ⇒ dropped.
+// Runs before maybeRenewExpiringClients so an unresolved renewal never
+// blocks the next one indefinitely.
+func reconcilePendingRenewals(members []*cdrPooledClient) {
+	for _, pc := range members {
+		inst, ok := cdrInstances.GetCopy(pc.Name)
+		if !ok {
+			continue
+		}
+		for _, g := range inst.Credentials {
+			if g.State != cdrCredRenewing || g.OperationID == "" {
+				continue
+			}
+			if !pc.renewInFlight.CompareAndSwap(0, 1) {
+				break // a renewal is running for this member; it owns the lock
+			}
+			resolveRenewingGeneration(pc, inst, g)
+			pc.renewInFlight.Store(0)
+		}
+	}
+}
+
+func resolveRenewingGeneration(pc *cdrPooledClient, inst CDREnrolledInstance, g CDRCredentialGeneration) {
+	unlock := cdrLifecycle.lock(inst.Name)
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), cdrHealthProbeDeadline)
+	defer cancel()
+	st, err := pc.Client.EnrollStatus(ctx, g.OperationID)
+	if err != nil {
+		logger.Printf("CDR: lineage: %q EnrollStatus(%s) unavailable (retry next poll): %v", sanitizeLog(inst.Name), g.OperationID, err)
+		return
+	}
+	switch st.GetOutcome() {
+	case pb.EnrollOutcome_ENROLL_NOT_ISSUED:
+		if err := cdrInstances.DropUnissuedRenewal(inst.Name, g.Seq); err != nil {
+			logger.Printf("CDR: lineage: %q drop unissued seq %d: %v", sanitizeLog(inst.Name), g.Seq, err)
+		}
+	case pb.EnrollOutcome_ENROLL_ISSUED:
+		fp := st.GetClientCertFingerprint()
+		state := cdrCredOrphaned
+		if st.GetRevoked() {
+			state = cdrCredRevoked
+		}
+		if err := cdrInstances.RecordIssuedCredential(inst.Name, g.Seq, fp, 0, state); err != nil {
+			logger.Printf("CDR: lineage: %q record orphan %s: %v", sanitizeLog(inst.Name), fp, err)
+			return
+		}
+		if state == cdrCredOrphaned {
+			logger.Printf("CDR: lineage: %q renewal operation %s was ISSUED as %s but the credential never landed locally — marked orphaned; revoke it",
+				sanitizeLog(inst.Name), g.OperationID, fp)
+			auditAdd(AuditEntry{
+				TS: time.Now().UnixMilli(), Time: time.Now().Format("2006-01-02 15:04:05"),
+				Actor: "system:cdr-lineage", Action: "cdr.instance.credential.orphaned", Object: inst.Name,
+				Detail: "renewal operation " + g.OperationID + " issued fingerprint " + fp + " but the credential was not stored locally; it remains trusted by Sluice until revoked",
+			})
+		}
+	default:
+		// A v0.2 server has no EnrollStatus; leave the generation as-is.
 	}
 }
 

@@ -34,6 +34,15 @@ func loadCDR(cfg cdrStartupConfig, ctx context.Context) {
 	if err := cdrPolicyStore.Load(cfg.PoliciesPath); err != nil {
 		logger.Printf("CDR: policy store load failed: %v", err)
 	}
+	if issues := cdrPolicyStore.Integrity(); !issues.OK {
+		logger.Printf("CDR: policy store is DEGRADED (%d identity issue(s)) — resolve them via the admin API before adding rules", len(issues.Issues))
+	}
+	if err := cdrEnrollReceipts.Load(cfg.EnrollReceiptsPath); err != nil {
+		logger.Printf("CDR: enrollment receipts load failed: %v", err)
+	}
+	// 2E-C R7: finish or abandon any renewal interrupted by a crash, from
+	// the durable lineage + on-disk PEMs, BEFORE the pool dials.
+	reconcileCredentialLineage()
 
 	if !cdrCfg.Enabled {
 		return

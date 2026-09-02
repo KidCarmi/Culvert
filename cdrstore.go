@@ -62,6 +62,14 @@ type CDREnrolledInstance struct {
 	// Non-secret (a public-cert digest). Empty on pre-2E-C entries.
 	ClientCertFingerprint string `json:"clientCertFingerprint,omitempty"`
 
+	// Credentials is the bounded, durable credential LINEAGE (2E-C R7,
+	// cdr_lineage.go): every generation Sluice issued for this instance
+	// with its own state, so a still-valid predecessor stays identifiable
+	// (and revocable) after a renewal, a restart or a local delete.
+	// Non-secret. Synthesised from ClientCertFingerprint for pre-lineage
+	// entries at load.
+	Credentials []CDRCredentialGeneration `json:"credentials,omitempty"`
+
 	// Metadata for the admin GUI (Phase 3); populated from Enroll + Health.
 	EnrolledAt time.Time `json:"enrolledAt"`
 	Version    string    `json:"version,omitempty"`    // from last Health
@@ -129,6 +137,11 @@ func (r *CDRInstanceRegistry) Load(path string) error {
 	var list []*CDREnrolledInstance
 	if err := json.Unmarshal(data, &list); err != nil {
 		return fmt.Errorf("cdr instances: parse %q: %w", sanitizeLog(path), err)
+	}
+	for i := range list {
+		if list[i] != nil {
+			normalizeLineageLocked(list[i])
+		}
 	}
 	r.instances = list
 	r.bumpVersion()
@@ -205,6 +218,7 @@ func (r *CDRInstanceRegistry) Add(inst CDREnrolledInstance) (CDREnrolledInstance
 	// instance the next boot will not load (2E-C commit boundary).
 	prev := r.instances
 	copy := inst
+	normalizeLineageLocked(&copy)
 	r.instances = append(append([]*CDREnrolledInstance(nil), prev...), &copy)
 	if err := r.saveLocked(); err != nil {
 		r.instances = prev

@@ -152,11 +152,13 @@ func (f *fakeSluice) Enroll(ctx context.Context, _ *pb.EnrollRequest) (*pb.Enrol
 }
 
 // RevokeClient is a minimal success stub used by the
-// cdr_revoke_rpc_no_versioning_test. Returns an empty response without
-// validating the request body; the test that depends on this exercises
-// the apiCDRRevokeRPC handler's success path past the gRPC call.
+// cdr_revoke_rpc_no_versioning_test. It returns the v0.3 durable-deny
+// PROOF (outcome REVOKED) without validating the request body; the test
+// that depends on this exercises the apiCDRRevokeRPC handler's success
+// path past the gRPC call. An EMPTY response is deliberately no longer
+// the default — 2E-C R6 refuses it as unproven (see tlFakeSluice).
 func (f *fakeSluice) RevokeClient(_ context.Context, _ *pb.RevokeClientRequest) (*pb.RevokeClientResponse, error) {
-	return &pb.RevokeClientResponse{}, nil
+	return &pb.RevokeClientResponse{Revoked: true, Outcome: pb.RevokeOutcome_REVOKE_OUTCOME_REVOKED}, nil
 }
 
 // startFakeSluice brings up a bufconn-backed gRPC server with the given
@@ -758,7 +760,7 @@ func TestEnroll_ReturnsCertBundle(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := Enroll(ctx, lis.Addr().String(), fpHex, "one-time-token")
+	resp, err := Enroll(ctx, lis.Addr().String(), fpHex, "one-time-token", "")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -769,13 +771,13 @@ func TestEnroll_ReturnsCertBundle(t *testing.T) {
 
 func TestEnroll_RejectsEmptyInputs(t *testing.T) {
 	ctx := context.Background()
-	if _, err := Enroll(ctx, "", "fp", "tok"); err == nil {
+	if _, err := Enroll(ctx, "", "fp", "tok", ""); err == nil {
 		t.Fatal("empty endpoint must fail")
 	}
-	if _, err := Enroll(ctx, "host:1", "", "tok"); err == nil {
+	if _, err := Enroll(ctx, "host:1", "", "tok", ""); err == nil {
 		t.Fatal("empty fingerprint must fail")
 	}
-	if _, err := Enroll(ctx, "host:1", strings.Repeat("ab", 32), ""); err == nil {
+	if _, err := Enroll(ctx, "host:1", strings.Repeat("ab", 32), "", ""); err == nil {
 		t.Fatal("empty token must fail")
 	}
 }

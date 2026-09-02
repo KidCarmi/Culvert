@@ -557,6 +557,36 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/cdr/instances/enroll/receipts"
+    method: "GET"
+    handler: "apiCDREnrollReceipts"
+    domain: "cdr"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/cdr/instances/enroll/receipts"
+    method: "DELETE"
+    handler: "apiCDREnrollReceipts"
+    domain: "cdr"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/cdr/instances/enroll/recover"
+    method: "POST"
+    handler: "apiCDREnrollRecover"
+    domain: "cdr"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/cdr/instances/revoke"
     method: "POST"
     handler: "apiCDRRevokeRPC"
