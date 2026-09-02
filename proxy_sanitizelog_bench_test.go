@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -52,36 +53,44 @@ func BenchmarkSanitizeLog(b *testing.B) {
 	}
 }
 
+// sanitizeLogParallelSink keeps the parallel benchmark's results alive without
+// letting the HARNESS become the shared state it is trying to measure.
+//
+// The obvious form — each RunParallel worker assigning its last result to a
+// package-level string — is a data race: every worker writes the same variable
+// when its iterations run out, so `go test -race -bench BenchmarkSanitizeLogParallel`
+// fails and the benchmark also measures cross-core contention on that write
+// rather than on sanitizeLog. (Caught by Codex review on PR #1299; the irony of
+// putting shared state in the harness built to detect shared state is noted.)
+//
+// Each worker therefore accumulates into a LOCAL and folds the total in once,
+// atomically, at the end. Summing len() of the result is what keeps the call
+// from being optimised away; sanitizeLog contains loops and is not inlinable,
+// so the length cannot be constant-folded past the work.
+var sanitizeLogParallelSink atomic.Int64
+
 // BenchmarkSanitizeLogParallel is the concurrency half. sanitizeLog is reached
 // from every request goroutine, so a form that shared state — a package-level
 // buffer, a sync.Pool used wrongly — would show up here as a cost that RISES
 // with core count even though the serial figure improved. The single-pass form
 // touches nothing outside its own frame, so this must scale flat.
 func BenchmarkSanitizeLogParallel(b *testing.B) {
+	run := func(b *testing.B, f func(string) string, in string) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			var n int
+			for pb.Next() {
+				n += len(f(in))
+			}
+			sanitizeLogParallelSink.Add(int64(n))
+		})
+	}
 	for _, sh := range []struct {
 		name string
 		in   string
 	}{sanitizeLogBenchShapes[0], sanitizeLogBenchShapes[3], sanitizeLogBenchShapes[6]} {
-		b.Run(sh.name+"/after", func(b *testing.B) {
-			b.ReportAllocs()
-			b.RunParallel(func(pb *testing.PB) {
-				var local string
-				for pb.Next() {
-					local = sanitizeLog(sh.in)
-				}
-				sanitizeLogSink = local
-			})
-		})
-		b.Run(sh.name+"/before", func(b *testing.B) {
-			b.ReportAllocs()
-			b.RunParallel(func(pb *testing.PB) {
-				var local string
-				for pb.Next() {
-					local = legacySanitizeLog(sh.in)
-				}
-				sanitizeLogSink = local
-			})
-		})
+		b.Run(sh.name+"/after", func(b *testing.B) { run(b, sanitizeLog, sh.in) })
+		b.Run(sh.name+"/before", func(b *testing.B) { run(b, legacySanitizeLog, sh.in) })
 	}
 }
 
