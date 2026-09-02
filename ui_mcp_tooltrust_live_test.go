@@ -27,7 +27,7 @@ func mcpReqLive(method, target string, role UIRole, body, sub string) *httptest.
 	if sub != "" {
 		tok, err := encodeSession(&Session{Sub: sub, Role: string(role), Provider: "local", Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti()})
 		if err == nil {
-			r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: tok})
+			r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: tok}) // #nosec G124 -- request-side session-cookie fixture sent TO the handler; Secure/HttpOnly/SameSite are response attributes, irrelevant here
 		}
 	}
 	w := httptest.NewRecorder()
