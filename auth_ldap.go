@@ -54,6 +54,10 @@ var ldapRoundTripBudget = 10 * time.Second
 // that consumed the whole budget without answering did not answer.
 var errLDAPBudgetExhausted = errors.New("ldap: directory round-trip budget exhausted")
 
+// ldapCloseTimeout bounds a teardown that happens after the round-trip budget
+// is already spent, so the close itself cannot become the next unbounded wait.
+const ldapCloseTimeout = time.Second
+
 // armLDAPConnWatchdog closes conn if it is still open after d, returning the
 // canceller.
 //
@@ -416,6 +420,13 @@ func (a *LDAPAuth) dialBounded(tlsCfg *tls.Config) (*ldap.Conn, func(), error) {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		logger.Printf("LDAP: dial consumed the whole %s round-trip budget", ldapRoundTripBudget)
+		// Bound the teardown too. go-ldap's Close waits for the message loop to
+		// confirm its quit, and it bounds that wait with the SAME requestTimeout
+		// this function otherwise sets below — which is still 0 here. The loop is
+		// healthy on a freshly dialed conn so it confirms promptly, but leaving
+		// one unbounded wait inside a change whose whole purpose is bounding them
+		// is the shape this sweep exists to remove.
+		conn.SetTimeout(ldapCloseTimeout)
 		conn.Close() //nolint:errcheck // best-effort close of a connection we will not use
 		return nil, nil, fmt.Errorf("dial: %w", errLDAPBudgetExhausted)
 	}
