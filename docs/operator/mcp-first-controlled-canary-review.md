@@ -217,9 +217,21 @@ This axis is GO.
 `FirstCanaryMaxTotalCeiling=1000` / `FirstCanaryMaxWindowCeiling=7d`. Runtime enforcement
 (`BudgetEnforcer.Reserve`, `budget_enforce.go:177`) is atomic, generation-bound, monotonic
 (`total` never rolled back), persist-before-grant, and restart-safe: **exactly N grants, N+1
-impossible** (`e.total >= MaxTotalExecutions → BudgetDeniedTotal`). Specifiable and GO in isolation;
-but no *authoritative* budget input path feeds `productionCanaryActivationInputs`, so the
-`BudgetConfigured` activation fact stays false in production today (contributes to §13).
+impossible** (`e.total >= MaxTotalExecutions → BudgetDeniedTotal`). Specifiable in isolation; but no
+*authoritative* budget input path feeds `productionCanaryActivationInputs`, so the `BudgetConfigured`
+activation fact stays false in production today (contributes to §13).
+
+**Correction (Codex P1) — the budget bounds LOGICAL reservations, not PHYSICAL upstream invocations.**
+`mcpLiveSideEffectGate` reserves the budget ONCE (`reserveCanaryExecution`), then calls
+`Upstream.Call` once — but `upstreamclient.Client.Call` (`client.go:130-141`) runs its OWN retry loop
+bounded by `MaxReadRetries()`, retrying an IDEMPOTENT call on a pre-response failure. `runExecute`
+marks `OpRead`/`OpDiscovery` idempotent, so under production `DefaultLimits` a single budgeted
+request can send the POST up to `1 + MaxReadRetries` times (≈3). A pre-response failure can occur
+AFTER the server already received and processed the POST, so those retries are REAL additional
+invocations. Consequently "N allowed / N+1 impossible" bounds reservations, NOT upstream side effects,
+and the §14 executed==received reconciliation would diverge by retry amplification. For a First
+Canary this must be closed: disable transport retries, charge EACH physical attempt to the budget, or
+require upstream idempotency/dedup (added to §26). Not GO until then.
 
 ---
 
@@ -292,6 +304,13 @@ Reconciliation plan: Culvert's executed count MUST equal the controlled server's
 independently-recorded received count MUST equal the expected count. The witness is the §5 server's
 own invocation log, which does not exist today; the reconciliation procedure is specified for when
 it does.
+
+**Correction (Codex P1) — naive count-equality is broken by retry amplification.** Because the
+transport retries idempotent reads (§9), one budgeted logical request can produce up to
+`1 + MaxReadRetries` physical POSTs the controlled server records. So Culvert's per-Reserve executed
+count and the server's received count need NOT be equal even when nothing is wrong — the
+reconciliation must correlate on an idempotency key / wire id and account for retries, or the First
+Canary must disable retries so each Reserve maps to exactly one physical invocation (§26).
 
 **Correction (Codex P1) — reconciliation and its breach are NOT automatic.** `outcome_evidence_loss`
 and `unexpected_upstream_response` are declared abort codes (`abort.go`) but NO production code
@@ -392,6 +411,14 @@ server receives the request but before/around the success-path outcome commit le
 answerable from the durable events. This contradicts the review-contract §18 requirement and is part
 of the durable-evidence product-defect prerequisite (§26). The re-arm/allowance guarantees hold; the
 determinability guarantee does not, today.
+
+**Further (Codex P1) — completeness alone cannot close the post-send window.** Making the
+normal-return outcome record complete and non-success-only is necessary but NOT sufficient: a crash
+AFTER the controlled server receives the POST but BEFORE `Upstream.Call` returns can emit no post-call
+event at all, so the `executing` record stays ambiguous no matter how rich the outcome record is.
+Resolving the post-send window additionally requires a durable pre-send intent correlated to an
+independent upstream receipt (or an idempotency-key reconciliation) — reflected in the §26 unblock
+item.
 
 ---
 
@@ -500,11 +527,12 @@ BLOCKED-vs-FAILED note in §26).
 | Shadow trust ≠ live trust proven; live approval does not activate Canary | YES (§8) |
 | Tight scope validated (no percentage/group/wildcard; server & tenant capped at 1) | YES (§10) |
 | Machine gate enforces exactly-one tool AND exactly-one principal | **NO — caps are 2; must be an external prerequisite (§10)** |
-| Tiny budget; N allowed / N+1 impossible | YES (§9) |
+| Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
+| Budget bounds PHYSICAL upstream invocations (retries charged/disabled) | **NO — idempotent read retries up to ~3× per reservation (§9)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
-| Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; §5 server absent (§14)** |
+| Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
-| Durable record determines whether a pre-crash upstream invocation occurred | **NO — outcome evidence success-only (§15/§18)** |
+| Durable record determines whether a pre-crash upstream invocation occurred | **NO — success-only outcome evidence + unclosable post-send crash window (§15/§18)** |
 | Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **NO — only budget/scope auto-trip (§16)** |
 | Crash/restart does not silently re-arm/resume | YES (§18) |
 | Unresolved P0/P1 finding | **YES — two product-defect prerequisites (auto-abort wiring, durable outcome evidence), each a dedicated PR (§21/§24)** |
@@ -564,12 +592,21 @@ Canary activatable, axes 4–5 would have made the verdict FAILED.)
   count==1 constraint to the activation path) — `ValidateScope` alone permits up to two of each
   (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate does not enforce the
   one-of-everything shape (§10);
+- for the First Canary, **disable transport read-retries** (or charge each physical attempt to the
+  budget, or require upstream idempotency/dedup) so one budget reservation maps to exactly one
+  physical upstream invocation — `upstreamclient.Call` otherwise retries an idempotent read up to
+  `MaxReadRetries` times outside the single budget `Reserve`, so one budgeted request can hit the
+  server up to ~3 times (§9), breaking both the request-count bound and the §14 count reconciliation;
 - **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
   `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
   `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
   `elevated_error_rate`, `latency_pathology` — plus an automatic witness-reconciliation trip;
-- **[dedicated PR]** emit a complete, non-success-only durable outcome record so a pre-crash
-  invocation is always determinable.
+- **[dedicated PR]** durable invocation determinability — a complete, non-success-only outcome record
+  is necessary but NOT sufficient: a crash AFTER the server receives the POST but BEFORE `Upstream.Call`
+  returns can emit no post-call event at all, so the `executing` record stays ambiguous. Closing the
+  post-send window additionally requires a durable pre-send intent record correlated to an independent
+  upstream receipt (or an idempotency-key reconciliation protocol) — determinability cannot be
+  promised from Culvert-side outcome records alone.
 
 Then re-run this review against the new exact SHA.
 
