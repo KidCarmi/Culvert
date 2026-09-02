@@ -16,8 +16,8 @@ several axes (scope validation, shadow≠live trust firewall, budget ceiling / N
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
 cannot be assembled today on **TEN independent blockers** (exhaustive as a set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
-witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable under the supported
-production trust model; (2) the production activation preflight cannot return `Ready:true` on a stock
+witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable AND usable under the supported
+production trust model (even a provisioned HTTPS+SPKI target is rejected because the client drives no MCP initialize/version/session lifecycle); (2) the production activation preflight cannot return `Ready:true` on a stock
 node; (3) no governed production arming entry point — `armLiveTier` has no production caller, so an
 operator cannot arm the tier; (4) the read-first classifier refuses the one-exact-tool call and
 discovery cannot bind one tool; (5) the machine gate does not enforce exactly-one tool/principal
@@ -166,6 +166,18 @@ pin + exactly one harmless read tool + an independent invocation log + no produc
 is provisioned.** Per the review contract, "if the only available server requires unsupported pin
 provisioning or private/internal trust semantics, verdict is NO-GO" — which the documented
 inventory does on all three axes. This is the primary blocker.
+
+**Reachable ≠ usable (Codex P1) — the MCP protocol lifecycle is not driven by the client.**
+Even a provisioned HTTPS+SPKI+public target may reject every request: `execution.Discover` sends
+`tools/list` directly, `upstreamclient.Call` explicitly leaves version negotiation "to the caller"
+(`client.go:160-161`) and NO production path invokes `NegotiateVersion` (referenced only in tests),
+and `roundTrip` sends a single JSON-RPC message with only `Content-Type`/`Accept` headers — no
+`initialize`/`notifications/initialized` handshake, no `MCP-Protocol-Version`, no `Mcp-Session-Id`
+(`transport.go:103-110`). A spec-compliant MCP server that requires initialization would reject
+discovery and every tool call as pre-initialization / missing-session traffic. So satisfying blocker
+1 additionally requires EITHER a target whose supported protocol legitimately permits these
+sessionless `tools/list`/`tools/call` requests, OR a Culvert-side upstream lifecycle implementation
+(initialize handshake + version negotiation + protocol/session headers) — the latter a code change.
 
 ---
 
@@ -598,6 +610,7 @@ BLOCKED-vs-FAILED note in §26).
 | Tool requires no production credential | **CONDITIONAL — unverifiable until tool + rule fixed (§4)** |
 | A read-first-admissible one-exact-tool operation exists | **NO — classifier refuses `tools/call`; discovery cannot bind one tool (§6)** |
 | Supported upstream trust model for a controlled server available today | **NO** (§5) |
+| A provisioned target is USABLE (MCP initialize/version/session lifecycle) | **NO — client sends no `initialize`/version/session; a spec-compliant server rejects sessionless calls (§5)** |
 | Shadow trust ≠ live trust proven; live approval does not activate Canary | YES (§8) |
 | Tight scope validated (no percentage/group/wildcard; server & tenant capped at 1) | YES (§10) |
 | Machine gate enforces exactly-one tool AND exactly-one principal | **NO — caps are 2; must be an external prerequisite (§10)** |
@@ -631,10 +644,14 @@ every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary 
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
 
-1. **No controlled upstream reachable under the supported production trust model (§5).** The only
-   documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
+1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
+   The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
    `*.qual.svc`), and identity (SPIFFE). No public-HTTPS controlled MCP server with a base64 SHA-256
-   SPKI pin, a plain `https://` endpoint, and one harmless read tool is provisioned.
+   SPKI pin, a plain `https://` endpoint, and one harmless read tool is provisioned. And even a
+   provisioned target may be UNUSABLE: the client sends no MCP `initialize` handshake / version
+   negotiation / protocol+session headers, so a spec-compliant server would reject the sessionless
+   `tools/list`/`tools/call` — closing this also needs a target that permits sessionless calls OR a
+   Culvert-side upstream lifecycle implementation.
 2. **The production activation preflight cannot return `Ready:true` (§13).** The live tier is unarmed
    by default and `productionCanaryActivationInputs` leaves `ServerUsable`/`ToolFingerprintCurrent`/
    `Budget` fail-closed.
@@ -678,7 +695,11 @@ verdict FAILED.)
 - provision a public-HTTPS, non-production, independently-recording controlled MCP server exposing
   exactly one harmless read/discovery tool, registered with a plain `https://` endpoint and its real
   base64 SHA-256 SPKI pin; OR land the recorded connectivity work (endpoint-scheme translation and/or
-  an identity-type-aware verifier + a per-target private-destination policy) in a dedicated PR;
+  an identity-type-aware verifier + a per-target private-destination policy) in a dedicated PR. AND
+  ensure the target is USABLE, not just reachable: the client drives no MCP `initialize` handshake /
+  version negotiation / protocol+session headers (§5), so either the target must legitimately permit
+  sessionless `tools/list`/`tools/call`, or a Culvert-side upstream lifecycle implementation is
+  required (a code change);
 - wire an authoritative `ServerUsable`/`FingerprintCurrent`/`Budget` input path for the activation
   preflight;
 - wire a **governed production arming entry point** (startup path or admin API) that invokes

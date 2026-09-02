@@ -209,7 +209,11 @@ Every one is a **separately-reviewed activation**, not a config change:
    — the production client uses `DefaultGatewayPolicy` (https-only, no-private) + the default SPKI
    verifier, so a controlled server needs a plain `https://` endpoint on a PUBLIC host with a base64
    SHA-256 SPKI pin; the documented `mcp+https://` scheme, `*.qual.svc` private host, and SPIFFE-format
-   identity are all rejected fail-closed, and no public-HTTPS controlled MCP server is provisioned today;
+   identity are all rejected fail-closed, and no public-HTTPS controlled MCP server is provisioned today.
+   Reachable is not enough — the target must also be USABLE: the client drives no MCP `initialize` /
+   version-negotiation / protocol+session headers (review §5), so a spec-compliant server rejects the
+   sessionless `tools/list`/`tools/call` unless the target permits sessionless calls or Culvert adds an
+   upstream lifecycle implementation;
    (c) a **governed production arming entry point** — `armLiveTier` (the sole caller of
    `markGatewayExecDepsReady`) has NO production caller today (only tests invoke it), so an operator
    cannot actually arm the tier in the shipped process; a startup path or admin API must wire it,
