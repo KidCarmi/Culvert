@@ -217,9 +217,17 @@ Every one is a **separately-reviewed activation**, not a config change:
    operation** — `policyOperation` classifies every `tools/call` as `OpWrite` (refused read-first)
    and `tools/list` binds no exact tool for the live-approval revalidation, so arming does NOT by
    itself make a one-exact-tool call executable; a finer operation classifier or a designed
-   discovery-trust path is required (review §6); and (e) two **product-defect prerequisites** — the
-   whole-Canary auto-abort is unwired for drift / `outcome_evidence_loss` / `unexpected_upstream_response`
-   / thresholds, and the durable outcome record is success-only (review §14–§16, §18). **Arming is
+   discovery-trust path is required (review §6); (e) an **exactly-one-tool/principal constraint** —
+   `ValidateScope` caps tools/principals at 2, not 1, so the one-of-everything shape must be imposed
+   as an authorization prerequisite or a count==1 activation constraint (review §10); (f) a
+   **per-physical-invocation budget** — an idempotent read retries up to `MaxReadRetries` times
+   outside the single budget reservation, so one budgeted request can send the POST ~3×; the First
+   Canary must disable transport retries, charge each attempt, or require upstream dedup (review §9);
+   a **credential-selection resolution** (verify a matched rule with no `CredentialProfile`, or a
+   working credential provider/path — the production broker has zero providers, review §4); and (g)
+   two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
+   declared breaches beyond `budget_exhausted`/`scope_escape`, and the durable outcome record is
+   success-only with an unclosable post-send crash window (review §14–§16, §18). **Arming is
    NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.

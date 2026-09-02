@@ -594,8 +594,10 @@ exhaustive: closing ALL of it is necessary and sufficient to pass §25.
 8. **Durable outcome evidence is incomplete/success-only, with an unclosable post-send crash window
    (§15/§18) — a product defect.** A pre-crash upstream invocation is not always determinable.
 
-Additionally, the no-credential status is CONDITIONAL until a concrete tool + policy rule are fixed
-(§4) — a further prerequisite, folded into blocker 1's target provisioning.
+Additionally, the credential path is a SEPARATE prerequisite (§4): credential selection comes from
+the tool's matched policy RULE, not from provisioning a server/tool, and the production broker has
+ZERO providers. Provisioning a target (blocker 1) does NOT by itself establish no-credential status —
+it must be closed explicitly (see the unblock list).
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
@@ -619,6 +621,10 @@ verdict FAILED.)
   process (§12) — and then arm the live tier on the controlled node via that path;
 - ship a finer operation classifier (or a designed discovery-trust path) so exactly one harmless
   operation is read-first-admissible AND bindable to one exact tool;
+- resolve the credential path explicitly (§4): either verify the chosen tool's matched policy rule
+  attaches NO `CredentialProfile` (so the no-credential branch is proven for this exact request), OR
+  implement a working credential provider/path — the production broker composes zero providers, so a
+  credential-requiring rule fails closed;
 - impose "exactly one tool AND exactly one principal" as an authorization prerequisite (or add a
   count==1 constraint to the activation path) — `ValidateScope` alone permits up to two of each
   (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate does not enforce the
