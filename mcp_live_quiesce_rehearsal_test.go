@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
@@ -162,7 +165,7 @@ func TestLiveQuiesceRehearsal_EvidenceIsBuildBound(t *testing.T) {
 	if liveQuiesceRehearsed(capb) {
 		t.Fatal("no record ⇒ not rehearsed (fail-closed)")
 	}
-	if err := recordLiveQuiesceRehearsal(capb, []string{"x"}, time.Unix(0, 1)); err != nil {
+	if err := recordLiveQuiesceRehearsal(capb, append([]string(nil), liveQuiesceRehearsalRequiredProofs...), time.Unix(0, 1)); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if !liveQuiesceRehearsed(capb) {
@@ -175,5 +178,77 @@ func TestLiveQuiesceRehearsal_EvidenceIsBuildBound(t *testing.T) {
 	t.Cleanup(func() { version = prev })
 	if liveQuiesceRehearsed(capb) {
 		t.Fatal("a record from a DIFFERENT build must not count as rehearsed (fail-closed)")
+	}
+}
+
+// TestLiveQuiesceRehearsal_RequiresCompleteProofRoster proves the record must carry the EXACT required
+// proof roster, not merely a non-empty slice — a partial record is refused on write AND reads as not
+// rehearsed (Codex P2 round-7, PR #1290).
+func TestLiveQuiesceRehearsal_RequiresCompleteProofRoster(t *testing.T) {
+	setDataDirForTest(t, t.TempDir())
+	pinTestBuildVersion(t)
+	capb := rollout.CapabilityGateway
+
+	// A write with a partial roster is refused fail-closed and leaves no consumable record.
+	if err := recordLiveQuiesceRehearsal(capb, []string{"armed_live_execution_crossed_boundary"}, time.Unix(0, 1)); !errors.Is(err, errLiveQuiesceRehearsalIncompleteProofs) {
+		t.Fatalf("a partial proof roster must be refused on write, got %v", err)
+	}
+	if liveQuiesceRehearsed(capb) {
+		t.Fatal("a refused write must leave no consumable record")
+	}
+
+	// A record written to disk with a partial roster (bypassing the write guard) must READ as not
+	// rehearsed — the read path validates the exact roster independently.
+	partial := liveQuiesceRehearsalRecord{
+		SchemaVersion: liveQuiesceRehearsalSchemaVersion,
+		Capability:    capb.String(),
+		BuildVersion:  currentRuntimeIdentity().BuildVersion,
+		Proofs:        append([]string(nil), liveQuiesceRehearsalRequiredProofs[:3]...), // only the first 3
+		RehearsedAt:   1,
+	}
+	raw, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatalf("marshal partial: %v", err)
+	}
+	if werr := fileutil.AtomicWrite(liveQuiesceRehearsalPath(capb), raw, 0o600); werr != nil {
+		t.Fatalf("write partial: %v", werr)
+	}
+	if liveQuiesceRehearsed(capb) {
+		t.Fatal("a record missing required proofs must not count as rehearsed (fail-closed)")
+	}
+
+	// The EXACT complete roster reads rehearsed.
+	if err := recordLiveQuiesceRehearsal(capb, append([]string(nil), liveQuiesceRehearsalRequiredProofs...), time.Unix(0, 2)); err != nil {
+		t.Fatalf("full-roster record: %v", err)
+	}
+	if !liveQuiesceRehearsed(capb) {
+		t.Fatal("the exact complete roster must read rehearsed")
+	}
+}
+
+// TestLiveQuiesceRehearsal_RejectsTrailingDelimiter proves the strict decoder rejects a valid record
+// followed by any trailing token — including a "}" or "]" that dec.More() alone would let slip past
+// (Codex P2 round-7, PR #1290).
+func TestLiveQuiesceRehearsal_RejectsTrailingDelimiter(t *testing.T) {
+	valid := `{"schema_version":1,"capability":"gateway","build_version":"x","proofs":["a"],"rehearsed_at_unix":1}`
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"clean", valid, false},
+		{"trailing_brace", valid + "}", true},
+		{"trailing_bracket", valid + "]", true},
+		{"trailing_value", valid + " 5", true},
+		{"trailing_object", valid + " {}", true},
+	} {
+		var rec liveQuiesceRehearsalRecord
+		err := strictDecodeLiveQuiesceRehearsalJSON([]byte(tc.raw), &rec)
+		if tc.wantErr && err == nil {
+			t.Fatalf("%s: trailing data must be rejected (fail-closed)", tc.name)
+		}
+		if !tc.wantErr && err != nil {
+			t.Fatalf("%s: a single valid value must decode, got %v", tc.name, err)
+		}
 	}
 }

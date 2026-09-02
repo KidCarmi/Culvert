@@ -496,12 +496,32 @@ func (r *mcpRollout) reconcileCanaryRuntimeAfterCommit(tgt commitTransitionTarge
 			return r.rejectActivationAndRollback(tgt, cfg, prevMode, prevCfg, prevEvidence, actor, now, errRolloutCanaryBudgetChanged)
 		}
 	case leavingLive:
+		// QUIESCE THE LIVE TIER BEFORE INVALIDATING THE GENERATION (Codex P1 round-7, PR #1290). A
+		// leaving-live commit installs+persists the non-live mode (steps 2/4) while the live tier is
+		// still armed, so without this a request could reserve its budget just before demoteCanary and
+		// then, AFTER the transition persisted the non-live mode and returned success, pass preCallGuard
+		// (kill+freshness only — it does not re-read the Canary generation) and still call the upstream.
+		// Quiescing here closes admission so no NEW execution can be admitted, and the bounded drain lets
+		// an already-admitted in-flight execution complete under the STILL-VALID generation before
+		// demoteCanary invalidates it — so once this transition returns success no upstream call happens
+		// for the demoted (non-live) mode. We already hold durableMu, so we use the durableMu-holding
+		// quiesce variant (quiesce() would self-deadlock re-acquiring the non-reentrant lock). A residual
+		// that outlives the drain bound completes under emergency-kill authority (the quiesce posture).
+		lt := mcpLiveTierFor(cfg.Capability)
+		if residual := lt.quiesceHoldingDurableMu(drainWaitFn(lt, time.Now().Add(liveDemoteDrainBudget))); residual > 0 {
+			logger.Printf("MCP rollout: %s leaving-live demotion quiesced with %d live execution(s) still in flight at the drain bound (they complete under emergency-kill authority; generation now invalidated)", cfg.Capability.String(), residual)
+		}
 		if err := globalCanaryRuntime.demoteCanary(cfg.Capability); err != nil {
 			logger.Printf("MCP rollout: %s demoted from a live mode but demoteCanary failed: %q", cfg.Capability.String(), sanitizeLog(err.Error()))
 		}
 	}
 	return nil
 }
+
+// liveDemoteDrainBudget bounds the in-flight drain when a leaving-live rollout commit quiesces the live
+// tier before invalidating the Canary generation. It is a var so a deterministic test can shrink it; a
+// residual still in flight at the bound completes under emergency-kill authority (the quiesce posture).
+var liveDemoteDrainBudget = 5 * time.Second
 
 // rejectActivationAndRollback undoes the step-(4) rollout persist for a live transition that must be
 // REJECTED after commit — a failed beginCanaryActivation, or a same-mode budget change the running

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
 )
@@ -283,5 +286,145 @@ func TestRolloutCanaryActivationFailed_IsClassified(t *testing.T) {
 	wrapped := fmt.Errorf("%w: %v", errRolloutCanaryActivationFailed, errors.New("persist failed"))
 	if got := mcperr.ReasonOf(wrapped); got != direct {
 		t.Fatalf("a wrapped activation failure must keep its bounded reason %s, got %s", direct.Code(), got.Code())
+	}
+}
+
+// P1 (round-7): a leaving-live rollout commit (Canary→Observe) QUIESCES the live tier before it
+// invalidates the Canary generation, so once the transition returns no NEW execution can be admitted and
+// the generation is invalidated. Closes the window where a request could reserve budget just before
+// demoteCanary and then, after the non-live mode was persisted and the transition returned success, still
+// pass preCallGuard (kill+freshness only) and call the upstream.
+func TestLiveCommit_LeavingLiveQuiescesBeforeDemote(t *testing.T) {
+	up := &recordingUpstream{}
+	armCanaryLiveTier(t, up, true, 10) // composed + armed + Canary generation active
+	capb := rollout.CapabilityGateway
+	lt := mcpLiveTierFor(capb)
+	if !lt.armed() || !globalCanaryRuntime.armed(capb) {
+		t.Fatal("precondition: the live tier must be armed with an active Canary generation")
+	}
+	r := getMCPRollout()
+	obs := gwObserveCfg()
+	prevCfg := *gwCanaryCfg(1)
+	tgt := commitTransitionTarget{
+		st:               r.gateway,
+		persist:          func(*rollout.State) error { return nil },
+		setStatus:        func(string) {},
+		countTransition:  func() {},
+		reconcileRuntime: true,
+	}
+	if err := r.reconcileCanaryRuntimeAfterCommit(tgt, obs, prevCfg.Mode, prevCfg, r.gateway.Evidence(), canary.Budget{}, "test", time.Unix(0, 2)); err != nil {
+		t.Fatalf("leaving-live reconcile must succeed, got %v", err)
+	}
+	if lt.armed() {
+		t.Fatal("a leaving-live demotion must un-arm the live tier")
+	}
+	if release, ok := lt.admitExecution(); ok {
+		release()
+		t.Fatal("a quiesced tier must reject new execution admission after a leaving-live demotion")
+	}
+	if globalCanaryRuntime.armed(capb) {
+		t.Fatal("a leaving-live demotion must invalidate the Canary generation (demoteCanary)")
+	}
+}
+
+// P1 (round-7): the leaving-live quiesce DRAINS in-flight work before demoting — the reconcile un-arms
+// the tier immediately (reject-new) but does not invalidate the generation or return until an
+// admitted-but-blocked execution releases. This is the load-bearing half: an in-flight execution
+// completes under the STILL-VALID generation, and only then is the generation invalidated.
+func TestLiveCommit_LeavingLiveDrainsInflightBeforeDemote(t *testing.T) {
+	up := &recordingUpstream{block: make(chan struct{}, 1)}
+	cfg := armCanaryLiveTier(t, up, true, 10)
+	ex := cfg.Deps.Executor
+	capb := rollout.CapabilityGateway
+	lt := mcpLiveTierFor(capb)
+	in := liveExecInput(policy.OpRead, "t1", "p1")
+
+	execDone := make(chan struct{})
+	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(execDone) }()
+	for i := 0; i < 5_000_000 && lt.inFlightCount() == 0; i++ {
+	}
+	if lt.inFlightCount() != 1 {
+		t.Fatalf("one execution must be in flight before the demotion, got %d", lt.inFlightCount())
+	}
+
+	prev := liveDemoteDrainBudget
+	liveDemoteDrainBudget = 5 * time.Second
+	t.Cleanup(func() { liveDemoteDrainBudget = prev })
+
+	r := getMCPRollout()
+	obs := gwObserveCfg()
+	prevCfg := *gwCanaryCfg(1)
+	tgt := commitTransitionTarget{
+		st:               r.gateway,
+		persist:          func(*rollout.State) error { return nil },
+		setStatus:        func(string) {},
+		countTransition:  func() {},
+		reconcileRuntime: true,
+	}
+	reconcileDone := make(chan struct{})
+	go func() {
+		_ = r.reconcileCanaryRuntimeAfterCommit(tgt, obs, prevCfg.Mode, prevCfg, r.gateway.Evidence(), canary.Budget{}, "test", time.Unix(0, 2))
+		close(reconcileDone)
+	}()
+
+	// The demotion un-arms the tier at the START of the drain (reject-new), before the drain completes.
+	for i := 0; i < 5_000_000 && lt.armed(); i++ {
+	}
+	if lt.armed() {
+		t.Fatal("the demotion must un-arm the tier before the drain completes (reject-new)")
+	}
+	// While the execution is in flight the reconcile must block in the drain and NOT invalidate the gen.
+	select {
+	case <-reconcileDone:
+		t.Fatal("the reconcile must block in the drain until the in-flight execution releases")
+	default:
+	}
+	if !globalCanaryRuntime.armed(capb) {
+		t.Fatal("the generation must NOT be invalidated until the drain completes")
+	}
+	// Release the in-flight execution → drain completes → demote proceeds.
+	up.block <- struct{}{}
+	<-execDone
+	<-reconcileDone
+	if globalCanaryRuntime.armed(capb) {
+		t.Fatal("after the drain completes the Canary generation must be invalidated")
+	}
+}
+
+// P2 (round-7): a repeated quiesce preserves the residual in-flight count. A first bounded quiesce that
+// times out leaves the tier composed/unarmed with nonzero inFlight; a retry must NOT take a not-armed
+// early return and falsely report a clean drain (0) while the upstream request is still running.
+func TestQuiesce_RepeatedAttemptPreservesResidualCount(t *testing.T) {
+	up := &recordingUpstream{block: make(chan struct{}, 1)}
+	cfg := armCanaryLiveTier(t, up, true, 10)
+	ex := cfg.Deps.Executor
+	capb := rollout.CapabilityGateway
+	lt := mcpLiveTierFor(capb)
+	in := liveExecInput(policy.OpRead, "t1", "p1")
+
+	done := make(chan struct{})
+	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(done) }()
+	for i := 0; i < 5_000_000 && lt.inFlightCount() == 0; i++ {
+	}
+	if lt.inFlightCount() != 1 {
+		t.Fatalf("one execution must be in flight, got %d", lt.inFlightCount())
+	}
+
+	// First quiesce with a zero drain budget ⇒ times out with residual 1; tier left composed/unarmed.
+	if rem := quiesceLiveTier(capb, 0); rem != 1 {
+		t.Fatalf("a zero-budget quiesce with one in flight must report residual 1, got %d", rem)
+	}
+	if lt.armed() {
+		t.Fatal("the tier must be un-armed after the first quiesce")
+	}
+	// A RETRY (tier not armed, residual still in flight) must still report the residual, never a false 0.
+	if rem := quiesceLiveTier(capb, 0); rem != 1 {
+		t.Fatalf("a retry with residual in flight must still report 1, not a false clean drain, got %d", rem)
+	}
+	// Release the in-flight execution; a final quiesce now drains cleanly to 0.
+	up.block <- struct{}{}
+	<-done
+	if rem := quiesceLiveTier(capb, time.Second); rem != 0 {
+		t.Fatalf("after the in-flight releases, quiesce must report a clean drain 0, got %d", rem)
 	}
 }

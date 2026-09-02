@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,6 +32,36 @@ import (
 
 const liveQuiesceRehearsalSchemaVersion = 1
 
+// liveQuiesceRehearsalRequiredProofs is the EXACT, ORDERED proof roster a valid live-quiesce rehearsal
+// record must carry — one entry per required proof of the §15 drill, in the order the drill establishes
+// them (arm → drain → kill → demotion → restart → trust). It is the machine-verifiable qualification
+// vocabulary, so the record is accepted ONLY when its Proofs equal this roster exactly; a partial or
+// schema-drifted record (e.g. a single placeholder proof) must NOT report the prerequisite CLOSED
+// (Codex P2 round-7, PR #1290). Changing the drill's proofs is a schema change: bump the schema version.
+var liveQuiesceRehearsalRequiredProofs = []string{
+	"armed_live_execution_crossed_boundary",
+	"quiesce_rejected_new_and_drained_inflight",
+	"emergency_kill_terminated_side_effect_window",
+	"coordinator_demotion_invalidated_generation",
+	"restart_does_not_re_arm",
+	"live_trust_not_resurrected",
+}
+
+// proofsMatchRequiredRoster reports whether proofs equals liveQuiesceRehearsalRequiredProofs exactly —
+// same length, same values, same order. It is the single authority for a complete roster, consulted on
+// both the write and the read path so neither can accept an incomplete record.
+func proofsMatchRequiredRoster(proofs []string) bool {
+	if len(proofs) != len(liveQuiesceRehearsalRequiredProofs) {
+		return false
+	}
+	for i, want := range liveQuiesceRehearsalRequiredProofs {
+		if proofs[i] != want {
+			return false
+		}
+	}
+	return true
+}
+
 // liveQuiesceRehearsalRecord is the durable, node-local, build-bound evidence of a successful
 // live-armed quiesce-then-demote rehearsal. It carries NO tenant/subject/secret.
 type liveQuiesceRehearsalRecord struct {
@@ -56,9 +87,18 @@ func liveQuiesceRehearsalPath(capb rollout.Capability) string {
 // liveQuiesceRehearsalAtomicWrite is the durable-write seam (tests inject failures).
 var liveQuiesceRehearsalAtomicWrite = fileutil.AtomicWrite
 
+// errLiveQuiesceRehearsalIncompleteProofs refuses a write whose proofs are not the exact required
+// roster, so a partial drill can never persist a record a later read would count as CLOSED.
+var errLiveQuiesceRehearsalIncompleteProofs = errors.New("mcp live quiesce rehearsal: incomplete proof roster")
+
 // recordLiveQuiesceRehearsal writes the durable build-bound evidence after a successful drill. A
-// not-synced replacement is removed so a write reported failed leaves no consumable record.
+// not-synced replacement is removed so a write reported failed leaves no consumable record. It refuses
+// fail-closed unless proofs are the EXACT required roster — the evidence must name every required proof,
+// not merely be non-empty (Codex P2 round-7, PR #1290).
 func recordLiveQuiesceRehearsal(capb rollout.Capability, proofs []string, now time.Time) error {
+	if !proofsMatchRequiredRoster(proofs) {
+		return errLiveQuiesceRehearsalIncompleteProofs
+	}
 	rec := liveQuiesceRehearsalRecord{
 		SchemaVersion: liveQuiesceRehearsalSchemaVersion,
 		Capability:    capb.String(),
@@ -94,7 +134,9 @@ func liveQuiesceRehearsed(capb rollout.Capability) bool {
 	if rec.BuildVersion != currentRuntimeIdentity().BuildVersion {
 		return false // a materially changed build does not inherit a prior build's rehearsal
 	}
-	return len(rec.Proofs) > 0
+	// The record must carry the EXACT required proof roster, not merely a non-empty slice — a partial
+	// or schema-drifted record does not qualify the deferred deployment (Codex P2 round-7, PR #1290).
+	return proofsMatchRequiredRoster(rec.Proofs)
 }
 
 // strictDecodeLiveQuiesceRehearsalJSON rejects unknown fields and trailing data (a tampered record is
@@ -105,7 +147,11 @@ func strictDecodeLiveQuiesceRehearsalJSON(raw []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	if dec.More() {
+	// Require EOF after the value: dec.More() is NOT a reliable top-level end check — a trailing "}" or
+	// "]" makes it report false, so junk like `{...}}` would slip past. A SECOND decode must fail with
+	// io.EOF for the input to be exactly one value; any trailing token invalidates the record (Codex P2
+	// round-7, PR #1290).
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data after JSON value")
 	}
 	return nil

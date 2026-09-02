@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -574,7 +575,11 @@ func strictDecodeCanaryRuntimeJSON(raw []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	if dec.More() {
+	// Require EOF after the value: dec.More() is NOT a reliable top-level end check — a trailing "}" or
+	// "]" makes it report false, so junk like `{...}}` would slip past. A SECOND decode must fail with
+	// io.EOF for the input to be exactly one value; any trailing token invalidates the record (Codex P2
+	// round-7, PR #1290).
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data after JSON value")
 	}
 	return nil
