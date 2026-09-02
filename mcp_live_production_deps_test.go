@@ -463,6 +463,51 @@ func unmetContainsReason(rs []canary.Reason, want string) bool {
 	return false
 }
 
+// ── Startup-failure invalidation (Codex P2, PR #1291): a composed live tier must not report
+// stale "composed"/events_ready when the runtime listener fails to start after composition ──
+
+func TestLiveProd_InvalidateOnStartupFailureClearsComposed(t *testing.T) {
+	resetLiveProdGlobals(t)
+	reg, cat := prodInventory()
+	ev := liveTestEvents(t)
+	cfg := &mcpruntime.Config{}
+	composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
+
+	// Precondition: composed + events_ready recorded.
+	if !globalMCPLiveProd.snapshot().Composed || !mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+		t.Fatal("precondition: tier must be composed after composition")
+	}
+
+	// Simulate the runtime-start failure cleanup.
+	invalidateMCPLiveOnStartupFailure()
+
+	s := globalMCPLiveProd.snapshot()
+	if s.Composed || s.Reason != "runtime_start_failed" {
+		t.Fatalf("status must be invalidated to runtime_start_failed, got %+v", s)
+	}
+	if s.Deps.Events == liveDepEventsReady {
+		t.Fatal("events must no longer report ready after a listener that never started")
+	}
+	if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+		t.Fatal("lifecycle tier must be reset to absent (a retry starts clean)")
+	}
+	if liveExecDepsConfigured(false) {
+		t.Fatal("invalidation must never arm")
+	}
+}
+
+// A node that never composed the live tier: invalidation is a no-op (no stale runtime_start_failed).
+func TestLiveProd_InvalidateOnStartupFailureNoOpWhenNotComposed(t *testing.T) {
+	resetLiveProdGlobals(t)
+	invalidateMCPLiveOnStartupFailure()
+	if got := globalMCPLiveProd.snapshot().Reason; got != liveDepsReasonNotRequested {
+		t.Fatalf("uncomposed node must stay not_requested, got %q", got)
+	}
+	if mcpLiveTierFor(rollout.CapabilityGateway).State() != liveTierAbsent {
+		t.Fatal("uncomposed tier must stay absent")
+	}
+}
+
 // ── §28 Post-arming dependency degradation → fail-closed ────────────────────────────────────
 
 func TestLiveProd_PostArmingDegradationFailsClosed(t *testing.T) {

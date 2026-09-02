@@ -162,6 +162,23 @@ func (lt *mcpLiveTier) markComposed() {
 	lt.composeReason = "composed"
 }
 
+// resetForStartupFailure moves a COMPOSED (never armed) tier back to absent when the runtime
+// listener failed to start AFTER composition, so the status surface stops reporting a composed
+// live executor for a listener that never started and an in-process retry starts clean. It is
+// fail-closed and idempotent: it acts ONLY on the composed state and refuses to touch an armed
+// or quiescing tier (arming is a separate act that never runs during config load, so a live
+// tier is at most composed here; refusing an armed tier avoids desyncing the execdeps armed bit
+// from the lifecycle). An already-absent tier is a no-op.
+func (lt *mcpLiveTier) resetForStartupFailure() {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	if lt.state != liveTierComposed {
+		return
+	}
+	lt.state = liveTierAbsent
+	lt.composeReason = "runtime_start_failed"
+}
+
 // setComposeReason records a bounded classification for a composition that did NOT proceed
 // (opt-out, missing dependency), leaving the state absent.
 func (lt *mcpLiveTier) setComposeReason(reason string) {

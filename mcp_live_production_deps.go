@@ -151,6 +151,32 @@ func (h *mcpLiveProdHolder) snapshot() mcpLiveProdStatus {
 	return h.status
 }
 
+// invalidateForStartupFailure resets the production live-deps status to a bounded
+// "runtime_start_failed" (not composed, all deps pending) when the runtime listener fails to
+// start AFTER a successful composition. It acts ONLY on a currently-composed status, so a node
+// that never composed the live tier is a no-op — the operator surface stops reporting
+// events_ready / a composed executor for a listener that never started and whose event manager
+// was closed.
+func (h *mcpLiveProdHolder) invalidateForStartupFailure() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.status.Composed {
+		return
+	}
+	h.status = mcpLiveProdStatus{Requested: true, Reason: "runtime_start_failed", Deps: pendingLiveProdDeps()}
+}
+
+// invalidateMCPLiveOnStartupFailure clears the live-tier holders this package publishes during
+// composition (the lifecycle object + the production-deps status) after the runtime listener
+// failed to start. Both are guarded to act only when the live tier was actually composed, so a
+// stock node is a no-op. Called from invalidateMCPActivationOnStartupFailure alongside the
+// policy/inventory/telemetry invalidation, so a startup failure leaves NO stale "composed"
+// signal on any surface and an in-process retry starts clean.
+func invalidateMCPLiveOnStartupFailure() {
+	globalMCPLiveProd.invalidateForStartupFailure()
+	mcpLiveTierFor(rollout.CapabilityGateway).resetForStartupFailure()
+}
+
 // mcpLiveProdStatusView returns the current production live-deps status as a viewer-safe,
 // bounded map for the read-only tier/health surface (§22). Every value is a machine-readable
 // token or a bool — never a path, error, or secret. The KEK appears ONLY as a readiness

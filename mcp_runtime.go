@@ -175,4 +175,9 @@ func invalidateMCPActivationOnStartupFailure() {
 		publishMCPInventory(mcpInvInvalid, "runtime_start_failed", nil, nil)
 	}
 	closeMCPTelemetryOnStartupFailure()
+	// Reset the live-tier holders composed during loadMCPObserveRuntime (the lifecycle object
+	// + production-deps status), so a listener that never started stops reporting a composed
+	// executor / events_ready (the event manager was just closed above) and an in-process retry
+	// starts clean. No-op on a node that never composed the live tier.
+	invalidateMCPLiveOnStartupFailure()
 }
