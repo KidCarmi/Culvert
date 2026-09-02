@@ -399,6 +399,69 @@ func (c *mcpToolTrustCoordinator) RequestApproval(in toolTrustRequestInput) (*to
 	})
 }
 
+// RequestLiveApproval records a pending LIVE-execution trust request. It is the explicit,
+// dedicated live issue path (§3): it forces Purpose = live_execution so a live request can never
+// be confused for a shadow one, then reuses the same authoritative resolve→validate→create as
+// RequestApproval (exact current fingerprint + reviewed catalog revision). The store additionally
+// requires a live request to carry an explicit finite expiry within the short-TTL ceiling (§6);
+// four-eyes is enforced later, at ApproveLive. Issuing a request is NEVER a grant and arms nothing.
+func (c *mcpToolTrustCoordinator) RequestLiveApproval(in toolTrustRequestInput) (*tooltrust.ToolApproval, error) {
+	in.Purpose = tooltrust.PurposeLiveExecution
+	return c.RequestApproval(in)
+}
+
+// ApproveLive approves a pending LIVE-execution request under the stronger live governance, WITHOUT
+// touching the catalog (§14/§15). Unlike ApproveShadow it never promotes the tool to catalog.Usable:
+// live trust is ORTHOGONAL to Shadow usability — a live grant is consumed only by the Canary
+// activation preflight, never by evaluateShadowActivationPreflight. It re-loads the CURRENT target
+// under deriveMu (so a concurrent ingest cannot advance the revision between the load and the store
+// decision — the same optimistic-concurrency window ApproveShadow closes) and delegates to
+// store.Approve, which enforces exact-current-state (verifyTarget + revisionStale), FOUR-EYES
+// (approver distinct from the requester — both canonical authenticated principals supplied by the
+// admin surface), a mandatory expiry, and the ≤MaxLiveExecutionApprovalTTL ceiling measured from
+// the approval instant. Approving a live grant arms NOTHING: no executor, no live tier, no Canary
+// transition (§22). It refuses a non-live approval fail-closed so the shadow path is never reached
+// through it.
+func (c *mcpToolTrustCoordinator) ApproveLive(id, approver, tenant string) (*tooltrust.ToolApproval, error) {
+	store, err := c.getStore()
+	if err != nil {
+		return nil, err
+	}
+	existing, err := store.Get(id, tenant)
+	if err != nil {
+		return nil, err
+	}
+	if existing.Purpose != tooltrust.PurposeLiveExecution {
+		// Route mismatch: a shadow approval must be decided via ApproveShadow. Fail closed rather
+		// than silently approving a shadow grant without promotion (or a live grant with it).
+		return nil, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "tooltrust.approve", "not a live_execution approval")
+	}
+	// Serialize the load→approve against ingest/reconcile/approve/revoke exactly as ApproveShadow
+	// does, so the exact-target optimistic-concurrency check runs against a revision that cannot be
+	// advanced underneath it. Taken before the store lock, never from under it.
+	c.deriveMu.Lock()
+	defer c.deriveMu.Unlock()
+	ti := c.loadTarget(existing.ServerID, existing.ToolName)
+	granted, err := store.Approve(id, approver, ti.target)
+	if err != nil {
+		return nil, err
+	}
+	// Deliberately NO promoteFor / catalog mutation: live trust never materializes catalog.Usable.
+	return granted, nil
+}
+
+// activeLiveApprovals returns copies of every active, unexpired live-execution grant across all
+// tenants for the Canary activation preflight to bind per scoped tool. It is a trusted in-process
+// read (never a tenant-scoped request path); an uncomposed coordinator yields nil (fail-closed:
+// no live approvals, so the live_execution_approval_invalid row stays unmet).
+func (c *mcpToolTrustCoordinator) activeLiveApprovals(now time.Time) []*tooltrust.ToolApproval {
+	store, err := c.getStore()
+	if err != nil {
+		return nil
+	}
+	return store.ActiveLiveApprovals(now)
+}
+
 // ApproveShadow approves a pending request (shadow purpose) after re-verifying the
 // bound target against freshly-loaded CURRENT facts, then materializes the trust by
 // promoting the tool to catalog.Usable. Commit order is durable-first (ADR-0034
@@ -416,6 +479,13 @@ func (c *mcpToolTrustCoordinator) ApproveShadow(id, approver, tenant string) (*t
 	existing, err := store.Get(id, tenant)
 	if err != nil {
 		return nil, err
+	}
+	// Route isolation (§3/§15): ApproveShadow is the SHADOW path — it promotes the tool to
+	// catalog.Usable. A live_execution approval must NEVER be approved here (that would both skip the
+	// live route's intent and, worse, materialize catalog.Usable from a live grant). Refuse it
+	// fail-closed; ApproveLive is its only decision path. Symmetric with ApproveLive's live-only guard.
+	if existing.Purpose != tooltrust.PurposeShadowEvaluation {
+		return nil, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "tooltrust.approve", "not a shadow_evaluation approval")
 	}
 	// Serialize the approve+promote with reconcile/revoke so the durable transition and
 	// the catalog promotion are one critical section (no interleaving demote/promote).

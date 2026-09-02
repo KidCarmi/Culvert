@@ -326,6 +326,21 @@ func (s *Store) CreateRequest(in RequestInput) (*ToolApproval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
+	// A live_execution request's expiry must be in the FUTURE and within the short-TTL ceiling
+	// measured from now (§6). validate() already proved it is present; this needs the clock. The
+	// AUTHORITATIVE ceiling is re-checked at Approve against ApprovedAt (the instant the grant
+	// becomes live), so a request that sits pending as the clock advances can never smuggle a
+	// window longer than the ceiling — but rejecting an over-ceiling window here fails a bad
+	// request early rather than letting it become a dead pending record.
+	if in.Purpose == PurposeLiveExecution {
+		exp := *in.ExpiresAt
+		if !exp.After(now) {
+			return nil, mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.request", "live_execution expiry must be in the future")
+		}
+		if exp.Sub(now) > MaxLiveExecutionApprovalTTL {
+			return nil, mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.request", "live_execution approval ttl exceeds ceiling")
+		}
+	}
 	// Decide capacity + id BEFORE any mutation, so an id-generation failure prunes
 	// nothing.
 	pruneID, err := s.capacityCheckLocked(in.Tenant, now)
@@ -437,6 +452,18 @@ func (s *Store) Approve(id, approver string, target CurrentTarget) (*ToolApprova
 	if !a.Purpose.Issuable() {
 		return nil, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "tooltrust.approve", "purpose not issuable")
 	}
+	// LIVE-execution governance (§5/§6), enforced at the pending→active transition — the moment the
+	// grant becomes a real side-effect authority. FOUR-EYES: the approver must be a DISTINCT principal
+	// from the requester (the caller supplies a canonical authenticated principal for a live approval,
+	// so this compares stable identities, never display strings). Short TTL: the grant must carry an
+	// expiry within MaxLiveExecutionApprovalTTL measured from ApprovedAt (= now here). pastExpiry above
+	// already rejected an elapsed window, so the accepted window is necessarily positive and bounded —
+	// exactly the contract canary.SatisfiesLiveExecution re-checks at consumption.
+	if a.Purpose == PurposeLiveExecution {
+		if err := a.validateLiveApproveLocked(approver, now); err != nil {
+			return nil, err
+		}
+	}
 	if err := a.verifyTarget(target); err != nil {
 		return nil, err
 	}
@@ -475,6 +502,32 @@ func terminalApproveErr(status Status) error {
 	default:
 		return mcperr.New(mcperr.ReasonApprovalTerminalState, "tooltrust.approve", "not approvable")
 	}
+}
+
+// validateLiveApproveLocked enforces the live_execution-specific governance at the
+// pending→active transition (§5/§6): FOUR-EYES (a present approver distinct from the requester)
+// and the short-TTL contract (a present expiry within MaxLiveExecutionApprovalTTL measured from
+// the approval instant `now`). It is called with s.mu held, only for a PurposeLiveExecution
+// approval, after the caller has already verified the approver is present and the grant is not
+// past its expiry. Both requester and approver are canonical authenticated principals for a live
+// approval (the admin surface supplies them), so the equality check is a real separation of
+// duties, never a display-name comparison.
+func (a *ToolApproval) validateLiveApproveLocked(approver string, now time.Time) error {
+	// Four-eyes: requester and approver must both be present and DISTINCT. RequestedBy is required
+	// at request; approver is required by the Approve caller. A live grant a single human both
+	// requested and approved is refused fail-closed.
+	if a.RequestedBy == "" || approver == a.RequestedBy {
+		return mcperr.New(mcperr.ReasonApprovalSelfApproval, "tooltrust.approve", "live_execution approval requires a distinct requester and approver (four-eyes)")
+	}
+	// Short-TTL contract: a live grant MUST carry an expiry (defense-in-depth; the request path
+	// already required one), and the window from the approval instant must not exceed the ceiling.
+	if a.ExpiresAt == nil {
+		return mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.approve", "live_execution approval requires an explicit expiry")
+	}
+	if a.ExpiresAt.Sub(now) > MaxLiveExecutionApprovalTTL {
+		return mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.approve", "live_execution approval ttl exceeds ceiling")
+	}
+	return nil
 }
 
 // verifyTarget checks the approval's bound identity + fingerprint against the
@@ -754,6 +807,27 @@ func (s *Store) ActiveApprovals(now time.Time) []*ToolApproval {
 	return out
 }
 
+// ActiveLiveApprovals returns copies of every LIVE-execution grant that is live as of now
+// (active, live-purpose, unexpired) across ALL tenants. The coordinator (a trusted, in-process
+// caller — never a tenant-scoped request handler) uses it to feed the Canary activation
+// preflight's per-tool live-approval bindings. Like ActiveApprovals it is the mirror for the live
+// firewall half and NEVER consults a fingerprint — the caller matches each against the tool's
+// CURRENT observed target, and canary.SatisfiesLiveExecution re-checks four-eyes, the TTL
+// ceiling, and the exact target. It NEVER materializes catalog.Usable: live trust is orthogonal
+// to Shadow usability (§15), so no live grant reaches the ActiveApprovals→Usable projection.
+func (s *Store) ActiveLiveApprovals(now time.Time) []*ToolApproval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*ToolApproval
+	for _, a := range s.byID {
+		if a.activeLiveAsOf(now) {
+			out = append(out, a.clone())
+		}
+	}
+	sortApprovals(out)
+	return out
+}
+
 // --- locked helpers -------------------------------------------------------
 
 // persistLocked rewrites the whole durable file atomically. Called with s.mu held,
@@ -864,9 +938,15 @@ func (in RequestInput) validate() error {
 		return err
 	}
 	if !in.Purpose.Issuable() {
-		// live_execution (and any non-shadow purpose) is refused at issue — fail
-		// closed. The live-execution firewall's negative half.
+		// PurposeUnset (and any unknown purpose) is refused at issue — fail closed.
 		return mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "tooltrust.request", "purpose not issuable")
+	}
+	// A live_execution request MUST carry an explicit finite expiry. This is the structural half
+	// of the §6 short-TTL contract — no expiry is ever silently defaulted in for a live grant; the
+	// operator must request one. The window/future/ceiling checks that need the clock are enforced
+	// in CreateRequest (and again at Approve, from ApprovedAt, the authoritative instant).
+	if in.Purpose == PurposeLiveExecution && in.ExpiresAt == nil {
+		return mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.request", "live_execution approval requires an explicit expiry")
 	}
 	if len(in.Reason) > maxReasonBytes {
 		return mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.request", "reason exceeds byte bound")
@@ -916,7 +996,8 @@ func (a *ToolApproval) validateStored() error {
 	if err := boundedToken(a.ToolName, maxToolNameBytes, "tool name"); err != nil {
 		return err
 	}
-	if a.Purpose != PurposeShadowEvaluation {
+	if !a.Purpose.Issuable() {
+		// PurposeUnset (or an unknown purpose byte) is corruption — it was never issuable.
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "record carries a non-issuable purpose")
 	}
 	if a.freeTextOverBound() {
@@ -924,6 +1005,31 @@ func (a *ToolApproval) validateStored() error {
 	}
 	if err := a.validateStatusLifecycle(); err != nil {
 		return err
+	}
+	if err := a.validateLiveInvariantsStored(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateLiveInvariantsStored fails Load closed for a live_execution record that violates the
+// live governance contract, so a corrupt, hand-edited, or downgrade-crafted file can never
+// resurrect a live grant that was never legitimately issued (§2, §19). A live record ALWAYS
+// carries an expiry (the issue path requires it), and an ACTIVE live grant ALWAYS carries
+// four-eyes evidence — a present approver DISTINCT from the requester. A shadow record is
+// unaffected: these invariants apply only to PurposeLiveExecution. This is defense-in-depth at
+// rest; canary.SatisfiesLiveExecution re-checks the same facts at consumption.
+func (a *ToolApproval) validateLiveInvariantsStored() error {
+	if a.Purpose != PurposeLiveExecution {
+		return nil
+	}
+	if a.ExpiresAt == nil {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "live_execution record without an expiry")
+	}
+	if a.Status == StatusActive {
+		if a.ApprovedBy == "" || a.RequestedBy == "" || a.ApprovedBy == a.RequestedBy {
+			return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "active live_execution record without four-eyes evidence")
+		}
 	}
 	return nil
 }
