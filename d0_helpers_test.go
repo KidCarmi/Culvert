@@ -192,7 +192,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 240 // 238 (the 2E-C-era baseline: 237 (the 2E-B-era baseline: 222 incl. the 3 ADR-0027 LDAP IdP routes + 6 /api/policy-learning/* + 1 /api/backups + 3 FrontendV2 preview routes + 1 /api/urlcat/state + 2 ADR-0034 tool-trust routes + 2 2D-C v2 state reads) + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)) + 2 2E-C trust-lifecycle routes (/api/cdr/instances/enroll/recover + /api/cdr/instances/enroll/receipts)
+	const want = 241 // 240 (the 2E-C trust-lifecycle-era branch baseline: 238 (the 2E-C-era baseline: 237 (the 2E-B-era baseline: 222 incl. the 3 ADR-0027 LDAP IdP routes + 6 /api/policy-learning/* + 1 /api/backups + 3 FrontendV2 preview routes + 1 /api/urlcat/state + 2 ADR-0034 tool-trust routes + 2 2D-C v2 state reads) + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)) + 2 2E-C trust-lifecycle routes (/api/cdr/instances/enroll/recover + /api/cdr/instances/enroll/receipts)) + 1 authoritative rollback rehearsal route merged from main (/api/mcp/rollout/rehearse-rollback-authoritative)
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

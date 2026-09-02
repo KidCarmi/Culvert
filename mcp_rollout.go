@@ -81,6 +81,15 @@ type mcpRollout struct {
 	persistMu       sync.Mutex
 	persistGateway  string
 	persistManageme string
+
+	// coordRehearsalStalePoison latches, per capability, that a FAILED authoritative rollback rehearsal
+	// could not durably invalidate an earlier build-bound PASS record (e.g. the same read-only volume that
+	// failed the drill/evidence write also failed the truncation of the prior record). While set, row 20
+	// fails CLOSED regardless of the still-readable on-disk record, so a stale PASS cannot qualify after a
+	// failed re-run (Codex P2). Set/cleared/read only under durableMu. Process-scoped: like the mechanics
+	// path's in-memory write_failed blocker it is lost on restart — a restart on a still-broken volume can
+	// re-expose the stale record, which the durability-health prerequisites still gate (documented residual).
+	coordRehearsalStalePoison map[rollout.Capability]bool
 }
 
 // setPersistStatus records the durable-state health for a capability (admin surface).
@@ -232,9 +241,37 @@ func (r *mcpRollout) commitRolloutTransition(cfg *rollout.SignedConfig, actor st
 	return r.commitRolloutTransitionAt(cfg, actor, now, rollout.OriginProduction)
 }
 
+// commitTransitionTarget is the INJECTABLE side-effect destination of the coordinator core. The core's
+// SECURITY DECISIONS (exec-deps tier, Gateway Shadow preflight, Canary/Production activation gate) are
+// identical regardless of this target — they read node-authoritative facts from r/globals, NEVER from
+// the target — so a rehearsal that swaps in a scratch destination exercises the EXACT SAME gates a real
+// transition would, while touching no live state. Production supplies the live State + canonical
+// persistence + live status/metric sinks (liveCommitTarget); the authoritative rollback rehearsal
+// (mcp_canary_coordinator_rehearsal.go) supplies a scratch State + scratch-file persist + no-op sinks.
+type commitTransitionTarget struct {
+	st              *rollout.State             // the State the transition mutates (live capability state, or a scratch)
+	persist         func(*rollout.State) error // how the mutated state is persisted (canonical path, or a scratch path)
+	setStatus       func(status string)        // record a persist status ("recovered"/"write_failed") — live sink or no-op
+	countTransition func()                     // record a successful transition — live metric or no-op
+}
+
+// liveCommitTarget is the PRODUCTION side-effect destination: the live capability State, the canonical
+// per-capability persistence, and the live persist-status + transition-metric sinks. Production commits
+// route through this so their behavior is byte-identical to the pre-extraction coordinator.
+func (r *mcpRollout) liveCommitTarget(capb rollout.Capability) commitTransitionTarget {
+	return commitTransitionTarget{
+		st:              r.stateFor(capb),
+		persist:         persistRolloutState,
+		setStatus:       func(status string) { r.setPersistStatus(capb, status) },
+		countTransition: func() { r.metrics.transitions.Add(1) },
+	}
+}
+
 // commitRolloutTransitionAt is commitRolloutTransition with an explicit evidence
 // origin so deterministic tests can assert that synthetic elapsed time is labeled
-// OriginSynthetic and can never masquerade as OriginProduction evidence.
+// OriginSynthetic and can never masquerade as OriginProduction evidence. It is a THIN wrapper: it
+// acquires durableMu once and delegates to the single authoritative coordinator core, which every
+// rollout transition (production AND the authoritative rollback rehearsal) shares.
 func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor string, now time.Time, origin rollout.EvidenceOrigin) error {
 	if cfg == nil {
 		return nil
@@ -243,7 +280,23 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	// mutations (kill switch, rehearsal, another commit).
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
-	st := r.stateFor(cfg.Capability)
+	return r.commitRolloutTransitionCore(r.liveCommitTarget(cfg.Capability), cfg, actor, now, origin)
+}
+
+// commitRolloutTransitionCore is THE single authoritative rollout coordinator. EVERY rollout transition
+// — production (commitRolloutTransitionAt) and the authoritative rollback rehearsal
+// (executeCoordinatorRollbackRehearsalLocked) — runs through this one body, so a security gate added
+// here is enforced for BOTH by construction: parity is architectural, not a duplicated checklist, and is
+// pinned by the coordinator-rehearsal parity tests. The caller MUST already hold r.durableMu
+// (non-reentrant): both entry points acquire it exactly once, so the core never re-locks (this is what
+// lets the rehearsal, which holds durableMu, route through the coordinator without self-deadlock — the
+// re-entrancy hazard the previous investigation flagged). The gates read node-authoritative state from
+// r/globals; only the transition side effects (in-memory install, evidence window, persist, status,
+// metric) touch the injected target, so a scratch target isolates every side effect while the gates stay
+// real. The Canary/Production activation gate (1c) reads r's LIVE state, but it is reachable only for a
+// live-execution target, which the rehearsal never drives through the core (it drives demotions only).
+func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg *rollout.SignedConfig, actor string, now time.Time, origin rollout.EvidenceOrigin) error {
+	st := tgt.st
 	// (1) Execution-dependency precondition: fail closed unless the readiness TIER the
 	// target mode requires is composed. Shadow requires only the non-executing shadow
 	// plane; Canary/Production require the live-execution plane (never composed in this
@@ -342,8 +395,10 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 			e.BeginWindow(cfg.Mode, now.Unix(), origin)
 		})
 	}
-	// (4) Persist before acknowledging; roll back in memory on failure.
-	if err := persistRolloutState(st); err != nil {
+	// (4) Persist before acknowledging; roll back in memory on failure. The persistence DESTINATION is
+	// injected (tgt.persist): production writes the canonical per-capability file, the rehearsal a
+	// scratch file — the durability GATE is identical, only the target differs.
+	if err := tgt.persist(st); err != nil {
 		// Revert the in-memory install to the prior config. prevCfg was previously
 		// valid, so this should never fail — but if it ever did, we must NOT leave the
 		// advanced (new) mode active while telling the caller the transition was
@@ -353,11 +408,11 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 			logger.Printf("MCP rollout: rollback of %s failed after persist error; forced Disabled (fail-closed): %q", cfg.Capability.String(), sanitizeLog(rerr.Error()))
 		}
 		st.UpdateEvidence(func(e *rollout.EvidenceSummary) { *e = prevEvidence })
-		r.setPersistStatus(cfg.Capability, "write_failed")
+		tgt.setStatus("write_failed")
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
-	r.setPersistStatus(cfg.Capability, "recovered")
-	r.metrics.transitions.Add(1)
+	tgt.setStatus("recovered")
+	tgt.countTransition()
 	return nil
 }
 

@@ -990,6 +990,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/mcp/rollout/rehearse-rollback", Handler: "apiMCPRolloutRehearse", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "PR-11 record a rollback rehearsal (local evidence)"}}},
+	{Path: "/api/mcp/rollout/rehearse-rollback-authoritative", Handler: "apiMCPRolloutRehearseAuthoritative", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "Canary-gate: run the AUTHORITATIVE rollback rehearsal through the real coordinator core (closes row 20; local evidence only)"}}},
 	{Path: "/api/mcp/canary/shadow-exit-review", Handler: "apiMCPShadowExitReview", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "Canary-gate: Shadow Exit Review attestation status"},

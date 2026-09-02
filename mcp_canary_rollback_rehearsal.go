@@ -55,20 +55,34 @@ func rollbackRehearsalScratchPath(capb rollout.Capability) string {
 // tenant+principal inclusion; Observe uses the empty scope. Every config starts from
 // DisabledConfig so the selector schema and (Gateway) connector mode are correct by construction.
 func rehearsalDrillConfigs(capb rollout.Capability) (canaryCfg, shadowCfg, observeCfg rollout.SignedConfig) {
-	enumerable := rollout.ScopeSpec{
+	// The Canary rung uses a read-first (read-only) scope — the posture a real Canary requires.
+	readFirst := rollout.ScopeSpec{
 		Capability: capb,
 		Tenants:    []string{"rehearsal-tenant"},
 		Principals: []string{"rehearsal-principal"},
 		Operations: []rollout.RiskClass{rollout.RiskRead},
 	}
+	// The Shadow rung must be genuinely Shadow-ELIGIBLE: the coordinator's usable-tool gate
+	// (shadowScopeHasUsableTool -> Scope.AdmitsToolForEvaluation) requires the scope to admit the WRITE
+	// risk class, because tools/call — the thing Shadow evaluates — is write-class; a read-only scope
+	// targets no tools/call and would fail the real probe with no_usable_shadow_tools even AFTER the
+	// tool-approval slice makes catalog tools Usable, permanently blocking row 20 (Codex P1). So the
+	// Shadow scope admits read+write; HighRisk must be true for a write-admitting scope to compile.
+	shadowScope := rollout.ScopeSpec{
+		Capability: capb,
+		Tenants:    []string{"rehearsal-tenant"},
+		Principals: []string{"rehearsal-principal"},
+		Operations: []rollout.RiskClass{rollout.RiskRead, rollout.RiskWrite},
+		HighRisk:   true,
+	}
 	canaryCfg = rollout.DisabledConfig(capb)
 	canaryCfg.Mode = rollout.ModeCanary
-	canaryCfg.Scope = enumerable
+	canaryCfg.Scope = readFirst
 	canaryCfg.ScopeRevision = 1
 
 	shadowCfg = rollout.DisabledConfig(capb)
 	shadowCfg.Mode = rollout.ModeShadow
-	shadowCfg.Scope = enumerable
+	shadowCfg.Scope = shadowScope
 	shadowCfg.ScopeRevision = 1
 
 	observeCfg = rollout.DisabledConfig(capb)
