@@ -817,6 +817,17 @@ const (
 	// unavailable), never 400 — the caller's input was valid. Distinct from
 	// ReasonConfigInvalid, which is reserved for a corrupt/marshal/decode fault.
 	ReasonApprovalStoreUnavailable
+	// ReasonRolloutBudgetExhausted — the Canary blast-radius budget denied a live execution
+	// (whole-Canary total/window/concurrency/rate spent, or a per-identity blast-radius cap
+	// exceeded). No upstream call is made. Distinct from an emergency kill and from a trust
+	// failure so §14 evidence can tell "approved + budget-aborted" apart from the others.
+	ReasonRolloutBudgetExhausted
+	// ReasonLiveTrustRevalidationFailed — the runtime live-execution trust revalidation at the
+	// side-effect boundary found no currently-valid live_execution approval binding the exact
+	// tenant/server/tool/fingerprint (revoked, expired, tool drifted, or never approved). No
+	// upstream call is made. Distinct from ReasonApprovalRequired (a policy-level obligation) so
+	// evidence can tell a runtime trust withdrawal apart from a decision-time approval gap.
+	ReasonLiveTrustRevalidationFailed
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -1047,16 +1058,18 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonDecisionSnapshotStale:        "decision_snapshot_stale",
 
 	// ─── tool-trust approval / promotion (ADR-0034) ───
-	ReasonToolNotApprovable:          "tool_not_approvable",
-	ReasonToolApprovalStale:          "tool_approval_stale",
-	ReasonToolFingerprintMismatch:    "tool_fingerprint_mismatch",
-	ReasonServerNotUsable:            "server_not_usable",
-	ReasonToolNotFound:               "tool_not_found",
-	ReasonApprovalRevoked:            "approval_revoked",
-	ReasonApprovalTenantConflict:     "approval_tenant_conflict",
-	ReasonApprovalPurposeUnsupported: "approval_purpose_unsupported",
-	ReasonApprovalNotAuthorized:      "approval_not_authorized",
-	ReasonApprovalStoreUnavailable:   "approval_store_unavailable",
+	ReasonToolNotApprovable:           "tool_not_approvable",
+	ReasonToolApprovalStale:           "tool_approval_stale",
+	ReasonToolFingerprintMismatch:     "tool_fingerprint_mismatch",
+	ReasonServerNotUsable:             "server_not_usable",
+	ReasonToolNotFound:                "tool_not_found",
+	ReasonApprovalRevoked:             "approval_revoked",
+	ReasonApprovalTenantConflict:      "approval_tenant_conflict",
+	ReasonApprovalPurposeUnsupported:  "approval_purpose_unsupported",
+	ReasonApprovalNotAuthorized:       "approval_not_authorized",
+	ReasonApprovalStoreUnavailable:    "approval_store_unavailable",
+	ReasonRolloutBudgetExhausted:      "rollout_budget_exhausted",
+	ReasonLiveTrustRevalidationFailed: "live_trust_revalidation_failed",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").
@@ -1129,11 +1142,23 @@ func ReasonOf(err error) Reason {
 		if e, ok := err.(*Error); ok {
 			return e.Reason
 		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
+		switch u := err.(type) {
+		case interface{ Unwrap() error }:
+			err = u.Unwrap()
+		case interface{ Unwrap() []error }:
+			// A multi-error tree (e.g. fmt.Errorf with more than one %w verb). errors.As/errors.Is
+			// traverse these; ReasonOf must too, or a bounded reason wrapped alongside another cause
+			// would read as ReasonNone. Return the FIRST bounded reason found across the branches,
+			// mirroring the single-chain "first wrapped reason wins" semantics.
+			for _, branch := range u.Unwrap() {
+				if r := ReasonOf(branch); r != ReasonNone {
+					return r
+				}
+			}
+			return ReasonNone
+		default:
 			return ReasonNone
 		}
-		err = u.Unwrap()
 	}
 	return ReasonNone
 }

@@ -864,3 +864,29 @@ func TestCanaryRuntime_CorruptStateQuarantined(t *testing.T) {
 		t.Fatal("a corrupt runtime state must leave a .corrupt.* quarantine copy")
 	}
 }
+
+// TestStrictDecodeCanaryRuntimeJSON_RejectsTrailingDelimiter proves the durable-record decoder rejects
+// a valid object followed by any trailing token — including a "}" or "]" that dec.More() alone would let
+// slip past (Codex P2 round-7, PR #1290).
+func TestStrictDecodeCanaryRuntimeJSON_RejectsTrailingDelimiter(t *testing.T) {
+	valid := `{"schema_version":1,"capability":"gateway","generation":1,"active":false}`
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"clean", valid, false},
+		{"trailing_brace", valid + "}", true},
+		{"trailing_bracket", valid + "]", true},
+		{"trailing_value", valid + " 5", true},
+	} {
+		var st canaryRuntimeState
+		err := strictDecodeCanaryRuntimeJSON([]byte(tc.raw), &st)
+		if tc.wantErr && err == nil {
+			t.Fatalf("%s: trailing data must be rejected (fail-closed)", tc.name)
+		}
+		if !tc.wantErr && err != nil {
+			t.Fatalf("%s: a single valid value must decode, got %v", tc.name, err)
+		}
+	}
+}

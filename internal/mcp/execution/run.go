@@ -71,13 +71,41 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// redefined. Re-checking here makes the refusal precede the side effect.
 	staleAtCall := false
 	killedAtCall := false
+	gateRefused := false
+	var gateReason mcperr.Reason
 	callUpstream := func(authHeader string) error {
-		// Last-moment boundary re-checks (tool drift, then the emergency kill) run inside
-		// preCallGuard so nothing sits between them and Upstream.Call. Setting the flags from
-		// the returned sentinel (rather than a branch) keeps this closure to a single decision.
-		if gerr := e.preCallGuard(in, admKillGen); gerr != nil {
+		// (1) Composition-layer LIVE side-effect gate — budget reservation, runtime live-trust
+		// revalidation, read-first — runs BEFORE preCallGuard so the emergency-kill re-read
+		// stays the LAST authoritative check before Upstream.Call (PREREQ-MCP-KILL-1). A denial
+		// fails closed with the gate's bounded reason and Upstream.Call is never reached. On an
+		// admit, Release runs after the upstream leg (deferred) so a reserved slot is never
+		// leaked even if the freshness/kill guard below then aborts (§11). nil gate ⇒ unchanged.
+		var release func()
+		var revalidate func() bool
+		if e.cfg.LiveGate != nil {
+			d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
+			if !d.Admit {
+				gateRefused = true
+				gateReason = d.Reason
+				return errLiveGateRefused
+			}
+			release = d.Release
+			revalidate = d.Revalidate
+		}
+		if release != nil {
+			defer release()
+		}
+		// (2) Last-moment boundary re-checks (tool drift, then the composition-layer live-generation
+		// revalidation, then the emergency kill) run inside preCallGuard so nothing sits between them and
+		// Upstream.Call. The kill re-read stays LAST (PREREQ-MCP-KILL-1). A demoted-generation refusal is
+		// mapped to the gate-refusal classification path with a bounded rollout reason.
+		if gerr := e.preCallGuard(in, admKillGen, revalidate); gerr != nil {
 			staleAtCall = errors.Is(gerr, errToolDriftedBeforeCall)
 			killedAtCall = errors.Is(gerr, errKilledAtBoundary)
+			if errors.Is(gerr, errLiveGenerationDemotedAtBoundary) {
+				gateRefused = true
+				gateReason = mcperr.ReasonRolloutModeInvalid
+			}
 			return gerr
 		}
 		r, err := e.cfg.Upstream.Call(ctx, target, in.Method, json.RawMessage(in.RawParams), upstreamclient.CallOptions{
@@ -98,6 +126,14 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// pre-materialization gate still adds its own commit before any provider or
 	// cache is touched (defense in depth, not a substitute).
 	profileRef := in.Decision.Obligations.CredentialProfile
+	if profileRef != "" && e.cfg.Broker == nil {
+		// A credential is REQUIRED (the decision carries a CredentialProfile obligation) but no broker is
+		// composed to plan/materialize it. Fail CLOSED: reaching the upstream with an empty Authorization
+		// header would let a credential-required operation hit an upstream that accepts ambient/
+		// unauthenticated access, bypassing the required credential planning (Codex P2 round-6, PR #1290).
+		// The nil-broker composition is valid ONLY for tools that need no credential.
+		return e.blocked(in, mcperr.ReasonCredentialProfileMissing, false)
+	}
 	useBroker := e.cfg.Broker != nil && profileRef != ""
 	var blockedOut runtime.ExecOutput
 	var didBlock bool
@@ -108,10 +144,10 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
 		return nil
 	}); err != nil {
-		// A boundary drift/kill refusal outranks the generic error mapping and must read as its
-		// own reason, never as a transport/durability fault. This branch carries the
+		// A boundary drift/kill/gate refusal outranks the generic error mapping and must read as
+		// its own reason, never as a transport/durability fault. This branch carries the
 		// NO-credential path, whose callUpstream error escapes CommitThenAct verbatim.
-		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall); ok {
+		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall, gateRefused, gateReason); ok {
 			return out
 		}
 		return e.blocked(in, mcperr.ReasonOf(err), false)
@@ -124,7 +160,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// detected inside the broker callback must therefore be reclassified HERE too, or
 		// clients and block telemetry would read `none` where the no-credential path reads the
 		// correct reason.
-		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall); ok {
+		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall, gateRefused, gateReason); ok {
 			return out
 		}
 		return blockedOut
@@ -161,13 +197,21 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 // makes the outcome MORE restrictive. This is the ONE side-effect boundary shared by both the
 // credential and no-credential paths, so the check lives here and nowhere else, and callUpstream
 // places NOTHING between this guard and Upstream.Call.
-func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64) error {
+func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() bool) error {
 	drifted := in.ToolStillCurrent != nil && !in.ToolStillCurrent()
+	// The composition-layer live-generation revalidation is evaluated BEFORE the kill re-read (like the
+	// freshness callback), so the kill generation stays the LAST authoritative state read before
+	// Upstream.Call. It NEVER engages the kill, so evaluating it here cannot reopen the F7 TOCTOU. A
+	// nil predicate (no gate, or Shadow) leaves this byte-identical to the pre-gate boundary.
+	liveDemoted := liveRevalidate != nil && !liveRevalidate()
 	if e.cfg.State.KillGeneration() != admKillGen {
-		return errKilledAtBoundary // emergency stop is paramount, even if the tool also drifted
+		return errKilledAtBoundary // emergency stop is paramount, even if the tool also drifted or demoted
 	}
 	if drifted {
 		return errToolDriftedBeforeCall
+	}
+	if liveDemoted {
+		return errLiveGenerationDemotedAtBoundary // the reserved Canary generation was demoted mid-flight
 	}
 	return nil
 }
@@ -179,12 +223,23 @@ func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64) error {
 // reason each refusal carries; both read as a fail-closed refusal, never a transport/durability
 // fault or ReasonNone. Shared by the no-credential (CommitThenAct-error) and credential
 // (materializeAndCall-absorbed) branches so both reclassify identically.
-func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, staleAtCall bool) (runtime.ExecOutput, bool) {
+func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, staleAtCall, gateRefused bool, gateReason mcperr.Reason) (runtime.ExecOutput, bool) {
 	switch {
 	case killedAtCall:
 		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false), true
 	case staleAtCall:
 		return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false), true
+	case gateRefused:
+		// The composition-layer gate denied the side effect (budget exhausted, live-trust
+		// revoked/expired/drifted, or not read-first). Surface its bounded reason, never a
+		// transport/durability fault or ReasonNone. The gate runs BEFORE the kill re-check, so a
+		// gate refusal and a kill refusal are mutually exclusive by construction (kill wins only
+		// if the gate admitted first) — the ordering here just fixes the named reason.
+		r := gateReason
+		if r == mcperr.ReasonNone {
+			r = mcperr.ReasonRolloutModeInvalid // defensive: a gate must always name a reason
+		}
+		return e.blocked(in, r, false), true
 	default:
 		return runtime.ExecOutput{}, false
 	}
@@ -260,15 +315,16 @@ func (e *Executor) materializeAndCall(ctx context.Context, in runtime.ExecInput,
 		return callUpstream(authFromMaterial(kind, m))
 	})
 	if mErr != nil {
-		// A boundary drift/kill refusal (errToolDriftedBeforeCall/errKilledAtBoundary) is
-		// reclassified AND metered exactly once by the caller via classifyBoundaryRefusal.
-		// Building a blocked output here would meter it a SECOND time — and, because both
-		// sentinels are package-private (ReasonOf == ReasonNone), that premature meter would
-		// land on the `none` reason series, double-counting the refusal and contaminating
-		// reason/total-rate telemetry (Codex P2, PR #1248). Return the un-metered signal and
-		// let the caller own the single classification+meter. errors.Is unwraps in case the
-		// broker wraps the callback error.
-		if errors.Is(mErr, errKilledAtBoundary) || errors.Is(mErr, errToolDriftedBeforeCall) {
+		// A boundary refusal — tool drift, emergency kill, OR the composition-layer live-gate
+		// (errToolDriftedBeforeCall / errKilledAtBoundary / errLiveGateRefused) — is reclassified
+		// AND metered exactly once by the caller via classifyBoundaryRefusal. Building a blocked
+		// output here would meter it a SECOND time — and, because all three sentinels are
+		// package-private (ReasonOf == ReasonNone), that premature meter would land on the `none`
+		// reason series, double-counting the refusal and contaminating reason/total-rate telemetry
+		// (Codex P2, PR #1248 for drift/kill; PR #1290 for the live gate). Return the un-metered
+		// signal and let the caller own the single classification+meter. errors.Is unwraps in case
+		// the broker wraps the callback error.
+		if errors.Is(mErr, errKilledAtBoundary) || errors.Is(mErr, errToolDriftedBeforeCall) || errors.Is(mErr, errLiveGateRefused) || errors.Is(mErr, errLiveGenerationDemotedAtBoundary) {
 			return runtime.ExecOutput{}, true
 		}
 		return e.blocked(in, mcperr.ReasonOf(mErr), false), true

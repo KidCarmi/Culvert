@@ -178,6 +178,12 @@ func (p Profile) Capability() string { return p.capability }
 // Revision returns the inspection revision.
 func (p Profile) Revision() uint64 { return p.revision }
 
+// MaxOutputBytes exposes the response-inspection output-size bound. A zero value means the profile
+// carries no usable inspection limits (a zero-value or limits-less profile): every non-empty upstream
+// response would then exceed the bound and be reported oversized AFTER the irreversible call, so a
+// composition that requires real response DLP must reject such a profile.
+func (p Profile) MaxOutputBytes() int { return p.lim.MaxOutputBytes() }
+
 // RedactionProfile looks up an immutable redaction profile by ref.
 func (p Profile) RedactionProfile(ref string) (profile RedactionProfile, ok bool) {
 	rp, ok := p.redactionProfiles[ref]

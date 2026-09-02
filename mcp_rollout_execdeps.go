@@ -62,15 +62,45 @@ func markGatewayShadowDepsReady() { globalExecDeps.shadowGateway.Store(true) }
 // Management Shadow path is not composed in this phase.
 func markManagementShadowDepsReady() { globalExecDeps.shadowManagement.Store(true) }
 
-// markGatewayExecDepsReady is the registration hook the FUTURE live-execution
-// composition would call once it has composed the live executor, upstream client,
-// credential broker (with Materialize), event manager, and inspection/DLP plane for
-// the Gateway capability. It is intentionally UNCALLED in this build, so
-// Canary/Production stay fail-closed. Arming it is a separately-reviewed activation.
+// markGatewayExecDepsReady is the live-execution ARMING hook: it sets the Gateway live tier
+// armed so a Canary/Production MODE transition can be authorized (modeExecReady). It has
+// exactly ONE authoritative production caller — the live-tier arming path (mcp_live_tier.go's
+// arm → setLiveExecDepsArmed), pinned by the evolved execution-posture wall. Arming composes
+// no executor and reaches no upstream; it only flips this readiness bit. Setting it is a
+// deliberate, node-readiness-gated act, never a side effect of another change.
 func markGatewayExecDepsReady() { globalExecDeps.gateway.Store(true) }
 
 // markManagementExecDepsReady mirrors the Gateway live hook for Management.
 func markManagementExecDepsReady() { globalExecDeps.management.Store(true) }
+
+// clearGatewayExecDepsReady DISARMS the Gateway live tier (quiesce / restart fail-closed
+// posture). Once cleared, modeExecReady refuses every live-execution transition again. It is
+// safe to call redundantly.
+func clearGatewayExecDepsReady() { globalExecDeps.gateway.Store(false) }
+
+// clearManagementExecDepsReady mirrors the Gateway disarm for Management.
+func clearManagementExecDepsReady() { globalExecDeps.management.Store(false) }
+
+// setLiveExecDepsArmed is the single arm/disarm dispatcher the live-tier lifecycle uses to keep
+// the authoritative execdeps armed bit in lock-step with the lifecycle state. arm passes true
+// (→ markGateway/ManagementExecDepsReady), quiesce/restart pass false (→ the clear hooks). It
+// is the ONLY production path that toggles the live armed bit; the wall permits the arming file
+// to reach the underlying hooks through it.
+func setLiveExecDepsArmed(capb rollout.Capability, armed bool) {
+	if capb == rollout.CapabilityManagement {
+		if armed {
+			markManagementExecDepsReady()
+		} else {
+			clearManagementExecDepsReady()
+		}
+		return
+	}
+	if armed {
+		markGatewayExecDepsReady()
+	} else {
+		clearGatewayExecDepsReady()
+	}
+}
 
 // shadowDepsConfigured reports whether the non-executing Shadow evaluation plane for a
 // capability is composed. False (fail-closed) is the shipped default.
