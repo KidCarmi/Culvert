@@ -322,12 +322,17 @@ independently-recorded received count MUST equal the expected count. The witness
 own invocation log, which does not exist today; the reconciliation procedure is specified for when
 it does.
 
-**Correction (Codex P1) — naive count-equality is broken by retry amplification.** Because the
-transport retries idempotent reads (§9), one budgeted logical request can produce up to
-`1 + MaxReadRetries` physical POSTs the controlled server records. So Culvert's per-Reserve executed
-count and the server's received count need NOT be equal even when nothing is wrong — the
-reconciliation must correlate on an idempotency key / wire id and account for retries, or the First
-Canary must disable retries so each Reserve maps to exactly one physical invocation (§26).
+**Correction (Codex P1) — naive count-equality is broken by retry amplification, and the current wire
+ID cannot fix it.** Because the transport retries idempotent reads (§9), one budgeted logical request
+can produce up to `1 + MaxReadRetries` physical POSTs the controlled server records. So Culvert's
+per-Reserve executed count and the server's received count need NOT be equal even when nothing is
+wrong. Correlating/deduplicating on the JSON-RPC wire ID does NOT work today: the executor sets
+`WireID = "u-" + target.ServerID` (`run.go:112`), which is per-SERVER — with the experiment's single
+server, ALL reservations AND their retries share ONE id, so witness records cannot be mapped to
+individual reservations and dedup by that id would collapse the WHOLE corpus, not just retries. The
+only remedy that works with today's code is therefore to **disable transport retries** so each Reserve
+maps to exactly one physical invocation; a correlation/dedup approach would first require adding a
+UNIQUE-per-reservation key that is STABLE across that reservation's retries (a code change, §26).
 
 **Correction (Codex P1) — reconciliation and its breach are NOT automatic.** `outcome_evidence_loss`
 and `unexpected_upstream_response` are declared abort codes (`abort.go`) but NO production code
@@ -414,10 +419,11 @@ RE-ENABLING action — it must be treated with the same caution as any widening,
 **Correction (Codex P2) — quiesce is NOT operator-invokable.** `quiesceLiveTier` (the live-tier
 un-arm-and-drain) has NO production caller — a repo-wide search of non-test Go finds only its
 definition; no route or startup hook invokes it. So the "un-arm first, close admission, bounded
-drain" action cannot be performed by an operator during a Canary. A governed production quiesce entry
-point is added to the §26 unblock list. Kill + rollout-demotion remain available as mechanisms, so
-the "no GO unless rollback and kill are available" bar is met by those two; none can be *exercised
-against a live Canary* today because none can be activated.
+drain" action cannot be performed by an operator during a Canary. Wiring a governed quiesce entry
+point is listed in §26 as **recommended hardening, NOT one of the nine GO criteria**: kill +
+rollout-demotion remain available as mechanisms, so the "no GO unless rollback and kill are available"
+bar is met by those two. None can be *exercised against a live Canary* today because none can be
+activated.
 
 ---
 
@@ -649,11 +655,14 @@ verdict FAILED.)
   `principalCount` sums Principals+Clients+Agents, so one shared client/agent with no Principals would
   satisfy it while leaving the principal dimension unrestricted; and `ValidateScope` permits up to two
   of each (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate enforces none of this (§10);
-- for the First Canary, **disable transport read-retries** (or charge each physical attempt to the
-  budget, or require upstream idempotency/dedup) so one budget reservation maps to exactly one
-  physical upstream invocation — `upstreamclient.Call` otherwise retries an idempotent read up to
+- for the First Canary, **disable transport read-retries** so one budget reservation maps to exactly
+  one physical upstream invocation — `upstreamclient.Call` otherwise retries an idempotent read up to
   `MaxReadRetries` times outside the single budget `Reserve`, so one budgeted request can hit the
-  server up to ~3 times (§9), breaking both the request-count bound and the §14 count reconciliation;
+  server up to ~3 times (§9), breaking both the request-count bound and the §14 count reconciliation.
+  Charging each physical attempt to the budget, or a correlation/dedup scheme, are alternatives ONLY
+  with a code change: the current wire ID is per-server (`run.go:112`), so dedup by it would collapse
+  the whole corpus, not just retries — a unique-per-reservation, stable-across-retries key must be
+  added first (§14);
 - **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
   `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
   `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
