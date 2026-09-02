@@ -101,10 +101,29 @@ func resetLiveTierGlobals(t *testing.T) {
 	globalMCPLiveTierMgmt = newMCPLiveTier(rollout.CapabilityManagement)
 	globalExecDeps = &execDepsRegistry{}
 	globalCanaryRuntime = &canaryRuntime{}
+	// composeGatewayLiveTierInto sets globalMCPShadow.inspectionComposed (a SHARED flag the dormant-node
+	// readiness reads); snapshot + reset it so a prior/next shuffled test sees a clean baseline.
+	prevInsp := globalMCPShadow.inspectionComposed.Load()
+	globalMCPShadow.inspectionComposed.Store(false)
+	// Give the SHARED global rollout gateway a clean, known state so a prior (shuffled) test's leaked
+	// kill or mode cannot pollute this one: snapshot the current config + kill, force a cleared kill
+	// and a Disabled mode, and restore both on cleanup.
+	gw := getMCPRollout().gateway
+	prevGwCfg := gw.CurrentConfig()
+	prevKilled := gw.Killed()
+	gw.ClearKillSwitch()
+	_ = gw.SetConfig(rollout.DisabledConfig(rollout.CapabilityGateway), "live-test-reset", time.Unix(0, 1).UnixNano())
 	t.Cleanup(func() {
 		globalMCPLiveTier, globalMCPLiveTierMgmt = prevTier, prevMgmt
 		globalExecDeps = prevExecDeps
 		globalCanaryRuntime = prevRuntime
+		globalMCPShadow.inspectionComposed.Store(prevInsp)
+		_ = gw.SetConfig(prevGwCfg, "live-test-restore", time.Unix(0, 2).UnixNano())
+		if prevKilled {
+			gw.EngageKillSwitch("live-test-restore", time.Unix(0, 3).UnixNano())
+		} else {
+			gw.ClearKillSwitch()
+		}
 	})
 }
 
