@@ -11,12 +11,19 @@ production MCP server, and arms no production node.
 #1291, "Production Live Dependency Composition & Arming Preflight"). Branch:
 `claude/mcp-first-canary-review`.
 
-**Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary machinery is sound
-and fail-closed on every axis reviewed, but there is no controlled upstream MCP server reachable
-under the *supported production trust model available today*, and the production activation
-preflight cannot return `Ready:true` on a stock node. Both are recorded, intentional, fail-closed
-pre-Canary gaps — not safety defects and not something to "fix" inside this review. The experiment
-is specified below up to the exact point where it becomes unauthorizable, and the precise
+**Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
+several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
+per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
+cannot be assembled today on FIVE independent axes: (1) no controlled upstream reachable under the
+supported production trust model; (2) the production activation preflight cannot return `Ready:true`
+on a stock node; (3) the read-first classifier refuses the one-exact-tool call and discovery cannot
+bind one tool; and — genuine PRODUCT DEFECTS, not merely capability gaps — (4) whole-Canary
+auto-abort is unwired for drift / evidence-loss / unexpected-response / thresholds (so an
+outcome-commit failure only meters and later requests stay eligible) and (5) the durable outcome
+record is success-only, so a pre-crash invocation is not always determinable. Axes 1–2 are
+intentional fail-closed capability gaps; axes 4–5 are defects recorded here for dedicated PRs (§21).
+The experiment is specified below up to the exact point where it becomes unauthorizable, and the
+precise
 provisioning that would unblock it is named.
 
 ---
@@ -84,12 +91,13 @@ reversible:
 | MCP servers | **1** controlled server that independently records every received invocation |
 | tools | **1** exact tool |
 | fingerprints | **1** exact reviewed fingerprint (F2); rug-pull invalidates the approval |
-| operation | **read / discovery only** (Culvert's own classification, never `readOnlyHint`) |
-| credential | **none** (`CredentialProfile=""` — see §4) |
+| operation | **read / discovery only** (Culvert's own classification, never `readOnlyHint`) — but NOT executable today: a `tools/call` is `OpWrite` (refused read-first) and `tools/list` binds no exact tool (§6) |
+| credential | **UNRESOLVED** — intended none, but `CredentialProfile` is a policy obligation, not a tool property; unverifiable until the exact tool + rule are fixed (§4) |
 | customer data / traffic / prod creds | **none** |
 | request count | machine-enforced tiny `canary.Budget` (see §9) |
 
 No percentages, groups, wildcards, or a second of anything (`canary.ValidateScope` enforces this — §10).
+This table is the *intended* shape; §4–§6 record why it is not yet executable or fully resolvable.
 
 ---
 

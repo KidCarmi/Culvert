@@ -203,13 +203,21 @@ Every one is a **separately-reviewed activation**, not a config change:
    is the single production caller, opt-in behind `CULVERT_MCP_LIVE_DEPS` (default OFF), wiring the real
    KEK / destination-resolver / profile-store / registry / catalog. What REMAINS for a real deployment:
    (a) the production **credential Provider adapter** — the broker is composed with ZERO providers
-   (`broker_composed_no_provider`), so a credential-REQUIRING tool fails closed at the broker (a
-   no-credential / read-first tool still executes once armed); (b) **upstream connectivity provisioning**
+   (`broker_composed_no_provider`), so a credential-REQUIRING tool fails closed at the broker (the
+   no-credential *code path* skips the broker, but whether a given request selects it depends on the
+   tool's matched policy rule, so it is not an intrinsic property — see the review §4); (b) **upstream connectivity provisioning**
    — the production client uses `DefaultGatewayPolicy` (https-only, no-private) + the default SPKI
    verifier, so a controlled server needs a plain `https://` endpoint on a PUBLIC host with a base64
    SHA-256 SPKI pin; the documented `mcp+https://` scheme, `*.qual.svc` private host, and SPIFFE-format
    identity are all rejected fail-closed, and no public-HTTPS controlled MCP server is provisioned today;
-   and (c) the operational decision to actually arm on a real node. Composed-but-unarmed still reports
+   (c) the operational decision to actually arm on a real node; (d) a **read-first-executable
+   operation** — `policyOperation` classifies every `tools/call` as `OpWrite` (refused read-first)
+   and `tools/list` binds no exact tool for the live-approval revalidation, so arming does NOT by
+   itself make a one-exact-tool call executable; a finer operation classifier or a designed
+   discovery-trust path is required (review §6); and (e) two **product-defect prerequisites** — the
+   whole-Canary auto-abort is unwired for drift / `outcome_evidence_loss` / `unexpected_upstream_response`
+   / thresholds, and the durable outcome record is success-only (review §14–§16, §18). **Arming is
+   NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.
 2. ~~Make `live_execution` issuable under stronger governance (four-eyes, short TTL).~~ **DONE
