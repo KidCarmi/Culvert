@@ -164,7 +164,7 @@ func TestLiveTier_LifecycleStatesAreDistinct(t *testing.T) {
 	if lt.composed() || lt.armed() {
 		t.Fatal("absent tier is neither composed nor armed")
 	}
-	lt.markComposed("composed")
+	lt.markComposed()
 	if lt.State() != liveTierComposed || !lt.composed() || lt.armed() {
 		t.Fatalf("composed tier must be composed and NOT armed, state=%s", lt.State())
 	}
@@ -201,7 +201,7 @@ func TestLiveTier_ArmRefusesWhenNotComposed(t *testing.T) {
 func TestLiveTier_ArmRefusesWhenNotReady(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed("composed")
+	lt.markComposed()
 	if err := lt.arm(false, "not_ready"); err != errLiveTierNotReady {
 		t.Fatalf("arming without readiness must fail errLiveTierNotReady, got %v", err)
 	}
@@ -380,7 +380,7 @@ func TestLiveGate_AdmitReleasesBothSlots(t *testing.T) {
 func TestLiveTier_QuiesceRejectsNewAndDrainsInFlight(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed("composed")
+	lt.markComposed()
 	if err := lt.arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestLiveTier_QuiesceRejectsNewAndDrainsInFlight(t *testing.T) {
 func TestLiveTier_QuiesceBoundedDrainReportsResidual(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed("composed")
+	lt.markComposed()
 	if err := lt.arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestLiveTier_QuiesceBoundedDrainReportsResidual(t *testing.T) {
 func TestLiveTier_RestartDoesNotReArm(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed("composed")
+	lt.markComposed()
 	if err := lt.arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestLiveArming_RefusesWhenNodeNotReady(t *testing.T) {
 	// Composed, but the downstream node-readiness prerequisites are not satisfied (fresh globals:
 	// durable events not healthy / inspection not composed / no attestation), so armLiveTier refuses
 	// with the FIRST unmet reason and never arms.
-	mcpLiveTierFor(rollout.CapabilityGateway).markComposed("composed")
+	mcpLiveTierFor(rollout.CapabilityGateway).markComposed()
 	rd, err := armLiveTier(rollout.CapabilityGateway)
 	if err == nil || rd.Ready {
 		t.Fatalf("armLiveTier without node readiness must refuse, rd=%+v err=%v", rd, err)

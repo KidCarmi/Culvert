@@ -151,14 +151,15 @@ func (lt *mcpLiveTier) armed() bool {
 }
 
 // markComposed records that the live executor object was composed and installed. It moves
-// absent→composed. It never arms. A second call is idempotent. reason is a bounded code.
-func (lt *mcpLiveTier) markComposed(reason string) {
+// absent→composed. It never arms. A second call is idempotent. The bounded reason is fixed
+// ("composed") — a composition that does NOT proceed records its reason via setComposeReason.
+func (lt *mcpLiveTier) markComposed() {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
 	if lt.state == liveTierAbsent {
 		lt.state = liveTierComposed
 	}
-	lt.composeReason = reason
+	lt.composeReason = "composed"
 }
 
 // setComposeReason records a bounded classification for a composition that did NOT proceed

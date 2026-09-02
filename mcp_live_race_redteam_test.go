@@ -44,7 +44,7 @@ func TestLiveRace_ConcurrentExecutionsRespectBudget(t *testing.T) {
 func TestLiveRace_ArmQuiesceAdmitStress(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed("composed")
+	lt.markComposed()
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)

@@ -132,7 +132,7 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 	globalMCPShadow.inspectionComposed.Store(true)
 	// Record the tier COMPOSED. This NEVER arms: markComposed moves absent→composed and leaves the
 	// armed bit false, so modeExecReady still refuses every live-execution transition.
-	lt.markComposed("composed")
+	lt.markComposed()
 	logger.Printf("MCP gateway LIVE execution tier composed (executor + upstream + broker present; NOT armed). Arming is a separate, node-readiness-gated act.")
 	return nil
 }
