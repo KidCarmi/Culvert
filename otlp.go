@@ -152,11 +152,10 @@ func otlpHistogramMetric(now string) otlp.Metric {
 }
 
 func otlpRuleMetrics(now string) []otlp.Metric {
-	ruleMet.mu.RLock()
-	defer ruleMet.mu.RUnlock()
-	metrics := make([]otlp.Metric, 0, len(ruleMet.order))
-	for _, name := range ruleMet.order {
-		ctr := ruleMet.hits[name]
+	cur := ruleMet.view()
+	metrics := make([]otlp.Metric, 0, len(cur.order))
+	for _, name := range cur.order {
+		ctr := cur.hits[name]
 		v := atomic.LoadInt64(ctr)
 		metrics = append(metrics, otlp.Metric{
 			Name:        "culvert.policy.rule_hits",
