@@ -794,6 +794,96 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > `enabled` flag) has no admin API endpoint — surfaced read-only,
 > recorded as a backend gap for a future slice, not invented client-side.
 >
+> **2E-C TRUST-LIFECYCLE CORRECTION (this branch, 2026-09-02).** External
+> review REJECTED candidate 978f95b5: five trust-lifecycle defects, each
+> pinned RED-first at exactly that SHA (`cdr_2ec_tl_red_test.go`, 8 tests,
+> plus the frontend `cdr-enroll-recovery.test.tsx`, 4 tests) and closed
+> with a protocol change on the engine side (Sluice v0.3 contract,
+> `KidCarmi/Sluice` branch `claude/culvert-2ec-trust-lifecycle`, pinned as
+> `v0.2.1-0.20260902055746-d6d4394ab74f`) — not with UI copy.
+>
+> **R6 — revocation proves an effective durable deny.** The appliance
+> discarded `RevokeClientResponse.Revoked`, and the engine treated an
+> unknown fingerprint as a no-op, so a response that proved NOTHING still
+> produced 200, a pruned registry, shredded PEMs and a success audit.
+> Sluice now returns an explicit outcome (`REVOKED` / `ALREADY_REVOKED` /
+> `TOMBSTONED` — an unknown fingerprint becomes a durable deny tombstone),
+> every ledger mutation is persist-before-publish under one lock (a failed
+> write leaves memory and disk unchanged and is retried; a restart
+> preserves every acknowledged deny; a revoked/tombstoned fingerprint can
+> never be re-recorded as issued). The appliance prunes/shreds/audits ONLY
+> on that proof (or a v0.2 `revoked=true`); anything else is 502 and
+> changes nothing, and "unknown fingerprint" is never presented as
+> "already safely revoked".
+>
+> **R7 — renewal preserves the complete credential lineage.** RenewCert
+> does not retire the presented certificate, yet the appliance overwrote
+> the PEMs and the ONE recorded fingerprint, so the still-valid predecessor
+> became unidentifiable; a renewal decided before a delete resurrected
+> PEMs; a persistence failure after the swap left new PEMs + an old
+> durable fingerprint. Option B implemented (`cdr_lineage.go`): a bounded
+> (16) durable generation list per instance with per-generation state
+> (`renewing → staged → active / superseded / orphaned / revoked`); only
+> revoked/expired generations are ever pruned and renewal is REFUSED when
+> the cap holds live ones. Renewal is a recoverable transaction: the
+> intent (operation id) is durable BEFORE the RPC, the issued fingerprint
+> is durable BEFORE any PEM is written, activation is the last durable
+> step, and `reconcileCredentialLineage` finishes or abandons an
+> interrupted swap at boot (each crash boundary pinned); a lost RPC
+> response is resolved by the poller through `EnrollStatus` (issued ⇒
+> orphaned + audited, not issued ⇒ dropped). Renewal, revoke, delete and
+> enroll of the same instance are serialized on a per-instance lifecycle
+> lock and the renewal re-validates the immutable instance identity under
+> it. Revoke covers every live generation with durable per-generation
+> progress; delete's audit + response name every orphaned fingerprint.
+>
+> **R8 — identifiable unknown-outcome recovery for enrollment.** Every
+> dispatch carries a 128-bit operation id (client-minted, server-minted
+> when absent) that Sluice binds durably to the issued fingerprint before
+> responding (`EnrollRequest.operation_id`, `EnrollStatus`, at-most-once
+> refusal with the fingerprint, bundle discarded when the durable record
+> fails). The appliance persists a NON-SECRET receipt BEFORE the RPC (no
+> receipt ⇒ 503, nothing sent), upgrades it to `issued_not_stored` WITH
+> the fingerprint + an audit record on a local commit failure, and
+> exposes `POST /api/cdr/instances/enroll/recover` (fresh authoritative
+> classification `LANDED_AND_STORED` / `ISSUED_BUT_NOT_STORED` — with the
+> exact revocation path: API by fingerprint or the Sluice-host CLI — /
+> `NOT_ISSUED` / `AMBIGUOUS`), `GET|DELETE …/enroll/receipts`, and revoke
+> by fingerprint. The browser writes a verified, subject-bound marker
+> (`culvert.cdr.enroll-recovery.v1`, never the token) BEFORE the POST —
+> no marker ⇒ nothing is sent — keeps it across reload for an unresolved
+> outcome, resolves it against the engine, and offers the orphan
+> revocation T3 ceremony (proof required) or an explicit abandon.
+>
+> **R9 — strict config action contract.** `PUT /api/cdr/config` decoded
+> `{}` as `enabled=false` (a silent disable). Presence-aware decoding now
+> refuses `{}`, `null`, a missing/non-boolean `enabled`, unknown fields,
+> trailing JSON and an empty body with 400 and provably mutates nothing
+> (runtime flag, sentinel, audit); valid bodies stay idempotent.
+>
+> **R10 — policy identity across restart.** Uniqueness lived only in
+> `Add`; a pre-2E-C durable file with duplicate/empty names loaded and
+> DELETE silently chose a victim. Identity (trimmed, non-empty, unique)
+> is enforced in Load/Replace/Add; a legacy file loads VERBATIM as
+> DEGRADED (`integrity` on GET), adds are refused, delete by an ambiguous
+> name is refused, and the operator repairs by fenced position
+> (`DELETE ?name=<verbatim>&position=<n>`, only while degraded); the
+> Policies tab renders the degraded state and the repair ceremony.
+>
+> **Proofs:** RED matrix at 978f95b5 (each test fails for the named
+> reason; evidence logs in the report), post-fix Go suites incl. `-race`,
+> `cdr_2ec_tl_green_test.go` (13: proof matrix, lineage revoke progress,
+> crash boundaries, lost-response reconciliation, cap, receipts before
+> dispatch, storage failure, duplicate operation, handler persist failure,
+> recovery classification, auth boundary, orphan revoke, degraded repair +
+> restart), `cdr_sluice_integration_test.go` (the PINNED Sluice daemon
+> built from the module cache and driven end to end with a restart —
+> outcomes, tombstone, bindings and the deny survive), Sluice's own v0.3
+> suites, frontend unit suites (29) and the rewritten real-binary e2e
+> proof 4 (unresolved outcome → resolve AMBIGUOUS → abandon; receipts
+> removed in finally). Route count 238 → 240; OpenAPI + generated types
+> reconciled.
+>
 > **2E-B FINAL STORAGE-READ FAIL-CLOSED CLOSURE (this branch, 2026-08-30).**
 > External review of the freeze candidate (465316df) found the last
 > lifecycle defect: the recovery read collapsed "cannot read / cannot
