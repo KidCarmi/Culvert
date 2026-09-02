@@ -47,6 +47,11 @@ type mcpLiveSideEffectGate struct {
 	reserve func(now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64)
 	// releaseBudget returns the in-flight concurrency slot for a reservation made under gen.
 	releaseBudget func(gen uint64)
+	// generationCurrent is the final-boundary revalidation: it reports whether the activation
+	// generation a reservation was made under is STILL the current, armed, execution-eligible
+	// generation. A concurrent Canary demotion between admission and the upstream call makes it
+	// return false so the executor refuses at the boundary (§10 completeness; Codex P1 round-8).
+	generationCurrent func(gen uint64) bool
 	// note records a bounded denial reason for metrics/telemetry (never a secret). Optional.
 	note func(reason mcperr.Reason)
 }
@@ -65,8 +70,9 @@ func newMCPLiveSideEffectGate(capb rollout.Capability) *mcpLiveSideEffectGate {
 		reserve: func(now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
 			return globalCanaryRuntime.reserveCanaryExecution(capb, now, ident)
 		},
-		releaseBudget: func(gen uint64) { globalCanaryRuntime.releaseCanaryExecution(capb, gen) },
-		note:          noteMCPLiveGateDenied,
+		releaseBudget:     func(gen uint64) { globalCanaryRuntime.releaseCanaryExecution(capb, gen) },
+		generationCurrent: func(gen uint64) bool { return globalCanaryRuntime.generationActive(capb, gen) },
+		note:              noteMCPLiveGateDenied,
 	}
 }
 
@@ -111,11 +117,21 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 		return deny(mcperr.ReasonRolloutBudgetExhausted)
 	}
 
-	// Admitted. The release runs exactly once after the upstream leg (executor defers it), and
-	// returns BOTH the budget concurrency slot and the lifecycle in-flight count — including the
-	// §11 case where a later kill/freshness abort occurs after this admit.
+	// Admitted. Revalidate is the final-boundary re-check the executor runs right before the kill
+	// re-read: it fails closed if the generation this reservation was made under is no longer current
+	// (a concurrent demotion), so an already-admitted request cannot cross the boundary after a
+	// leaving-live transition returned (Codex P1 round-8). The release runs exactly once after the
+	// upstream leg (executor defers it), and returns BOTH the budget concurrency slot and the lifecycle
+	// in-flight count — including the §11 case where a later kill/freshness/demotion abort occurs after
+	// this admit.
 	return execution.LiveGateDecision{
 		Admit: true,
+		Revalidate: func() bool {
+			if g.generationCurrent == nil {
+				return true // no revalidation seam wired ⇒ preserve prior behavior (never falsely refuse)
+			}
+			return g.generationCurrent(gen)
+		},
 		Release: func() {
 			g.releaseBudget(gen)
 			releaseAdmit()

@@ -260,27 +260,35 @@ func (lt *mcpLiveTier) quiesce(waitFn func(inFlight func() int) int) int {
 	return lt.drainAndLeaveQuiesce(needDrain, waitFn)
 }
 
-// quiesceHoldingDurableMu is quiesce for a caller that ALREADY holds mcpRollout.durableMu — the
-// rollout commit path, which quiesces the live tier before invalidating the Canary generation on a
-// leaving-live demotion (Codex P1 round-7, PR #1290). quiesce() would self-deadlock re-acquiring the
-// non-reentrant durableMu, so the revocation runs under the already-held lock. Unlike quiesce, the
-// bounded drain therefore runs while durableMu is still held — acceptable because a demotion is a
-// terminal safety action bounded by the caller's drain deadline, and lock order stays durableMu → lt.mu
-// (the drain waits on lt.mu's drainCond; the release path takes only lt.mu, never durableMu).
-func (lt *mcpLiveTier) quiesceHoldingDurableMu(waitFn func(inFlight func() int) int) int {
+// unarmForDemote forces the tier to composed/unarmed and CLOSES admission WITHOUT draining — the
+// leaving-live demotion posture (Codex P1 round-8, PR #1290). It is the inverse of arm reduced to its
+// fail-closed half: no new execution can be admitted after it, while already-admitted in-flight work is
+// invalidated at the executor's FINAL BOUNDARY (its reserved Canary generation is no longer current once
+// demoteCanary runs), not by a drain. A drain is deliberately avoided here: a bounded drain could time
+// out and still let a residual request cross the boundary after the demotion committed, and holding
+// mcpRollout.durableMu across a drain would block the emergency kill from engaging. It takes only lt.mu,
+// so the rollout commit that calls it (holding durableMu) releases durableMu promptly. Safe on any state.
+func (lt *mcpLiveTier) unarmForDemote() {
 	lt.mu.Lock()
-	needDrain := lt.enterQuiesceLocked()
-	lt.mu.Unlock()
-	return lt.drainAndLeaveQuiesce(needDrain, waitFn)
+	defer lt.mu.Unlock()
+	if lt.state == liveTierArmed || lt.state == liveTierQuiescing {
+		lt.state = liveTierComposed
+	}
+	lt.admitClosed = true
+	lt.composeReason = "demoted"
+	setLiveExecDepsArmed(lt.capb, false)
 }
 
 // enterQuiesceLocked performs the fail-closed revocation half of a quiesce and reports whether a drain
-// is required. Caller holds lt.mu (and, for the commit path, durableMu). An armed tier transitions to
-// quiescing, closes admission, and un-arms the mode gate. A tier that is NOT armed but still carries
-// residual in-flight work — a prior bounded quiesce whose drain bound elapsed left it composed/unarmed
-// with inFlight>0 — keeps admission closed and still needs a drain: a retry MUST NOT report a clean
-// drain (0) while an upstream request is still running (Codex P2 round-7, PR #1290). A truly idle
-// not-armed tier needs no drain (idempotent no-op).
+// is required. Caller holds lt.mu (and durableMu). An armed tier transitions to quiescing, closes
+// admission, and un-arms the mode gate. A tier that is NOT armed but still carries residual in-flight
+// work — a prior bounded quiesce whose drain bound elapsed left it composed/unarmed with inFlight>0 —
+// re-enters the quiescing state, keeps admission closed, and still needs a drain: a retry MUST NOT
+// report a clean drain (0) while an upstream request is still running (Codex P2 round-7). Re-entering
+// quiescing (not staying composed) is load-bearing: while a retry drains, a concurrent authoritative
+// re-arm must stay REFUSED (arm requires liveTierComposed), so the retry's drainAndLeaveQuiesce landing
+// back at composed cannot leave the lifecycle state and the armed exec-deps bit inconsistent with a
+// re-arm that slipped in (Codex P2 round-8). A truly idle not-armed tier needs no drain (idempotent).
 func (lt *mcpLiveTier) enterQuiesceLocked() (needDrain bool) {
 	switch {
 	case lt.state == liveTierArmed:
@@ -292,10 +300,14 @@ func (lt *mcpLiveTier) enterQuiesceLocked() (needDrain bool) {
 		setLiveExecDepsArmed(lt.capb, false)
 		return true
 	case lt.inFlight > 0:
-		// Residual in-flight under a composed/unarmed tier (a prior bounded quiesce timed out). Admission
-		// is already closed from that quiesce; keep it closed and drain/report the residual rather than
-		// falsely reporting a clean drain.
+		// Residual in-flight under a composed/unarmed tier (a prior bounded quiesce timed out). Re-enter
+		// quiescing so a concurrent re-arm stays refused for the retry's duration, keep admission closed,
+		// and drain/report the residual rather than falsely reporting a clean drain. The armed bit is
+		// already false from the prior quiesce; keep it false.
+		lt.state = liveTierQuiescing
 		lt.admitClosed = true
+		lt.composeReason = "quiescing"
+		setLiveExecDepsArmed(lt.capb, false)
 		return true
 	default:
 		return false
@@ -303,8 +315,8 @@ func (lt *mcpLiveTier) enterQuiesceLocked() (needDrain bool) {
 }
 
 // drainAndLeaveQuiesce runs the bounded drain (when needed) and lands the tier composed/unarmed. It is
-// shared by quiesce and quiesceHoldingDurableMu; the only difference between them is whether durableMu
-// is held across it (see quiesceHoldingDurableMu). A not-needed drain is an idempotent no-op returning 0.
+// the second half of quiesce (the first is enterQuiesceLocked), run after durableMu is released so a
+// slow drain never holds it. A not-needed drain is an idempotent no-op returning 0.
 func (lt *mcpLiveTier) drainAndLeaveQuiesce(needDrain bool, waitFn func(inFlight func() int) int) int {
 	if !needDrain {
 		return 0

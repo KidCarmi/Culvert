@@ -59,15 +59,33 @@ type LiveGateInput struct {
 // LiveGateDecision is the gate's verdict. Admit==false fails closed with Reason and Upstream.Call
 // is never reached. Release (non-nil only when Admit) is run exactly once after the upstream leg.
 type LiveGateDecision struct {
-	Admit   bool
-	Reason  mcperr.Reason
-	Release func()
+	Admit  bool
+	Reason mcperr.Reason
+	// Revalidate (non-nil only when Admit) is a FINAL-BOUNDARY re-check the executor runs inside
+	// preCallGuard, immediately before the emergency-kill re-read. It returns false when the
+	// activation this request was admitted under is no longer current — e.g. a concurrent Canary
+	// demotion invalidated the reserved generation AFTER admission but BEFORE the irreversible call.
+	// Because the admission-time reservation cannot see a later demotion, and preCallGuard's kill
+	// re-read does not consult the Canary generation, WITHOUT this an already-admitted request could
+	// still reach the upstream after a leaving-live transition returned success (Codex P1 round-8,
+	// PR #1290). It is a composition-layer concern (the generation lives in the canary runtime), so it
+	// enters this package only as an injected predicate — the executor stays generic and byte-identical
+	// when the gate (or Revalidate) is nil.
+	Revalidate func() bool
+	Release    func()
 }
 
 // errLiveGateRefused aborts callUpstream when the composition-layer gate denied the side effect.
 // Like the drift/kill sentinels it never escapes the package: callUpstream captures the gate's
 // bounded Reason in a local and classifyBoundaryRefusal surfaces it.
 var errLiveGateRefused = errors.New("mcp: live side-effect gate refused")
+
+// errLiveGenerationDemotedAtBoundary aborts callUpstream when the gate's final-boundary Revalidate
+// reports the reserved activation generation is no longer current (a concurrent demotion). Like the
+// other boundary sentinels it never escapes the package: callUpstream maps it to a bounded rollout
+// reason via classifyBoundaryRefusal so a client and block telemetry read a fail-closed refusal, never
+// a transport/durability fault or ReasonNone.
+var errLiveGenerationDemotedAtBoundary = errors.New("mcp: live activation generation demoted before upstream call")
 
 // liveGateInput builds the gate input from the already-resolved ExecInput at the boundary. It
 // reads ONLY resolved decision facts (principal/tool/server/operation), never a raw request

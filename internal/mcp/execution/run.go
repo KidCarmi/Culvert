@@ -81,6 +81,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// admit, Release runs after the upstream leg (deferred) so a reserved slot is never
 		// leaked even if the freshness/kill guard below then aborts (§11). nil gate ⇒ unchanged.
 		var release func()
+		var revalidate func() bool
 		if e.cfg.LiveGate != nil {
 			d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
 			if !d.Admit {
@@ -89,16 +90,22 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 				return errLiveGateRefused
 			}
 			release = d.Release
+			revalidate = d.Revalidate
 		}
 		if release != nil {
 			defer release()
 		}
-		// (2) Last-moment boundary re-checks (tool drift, then the emergency kill) run inside
-		// preCallGuard so nothing sits between them and Upstream.Call. Setting the flags from
-		// the returned sentinel (rather than a branch) keeps this closure to a single decision.
-		if gerr := e.preCallGuard(in, admKillGen); gerr != nil {
+		// (2) Last-moment boundary re-checks (tool drift, then the composition-layer live-generation
+		// revalidation, then the emergency kill) run inside preCallGuard so nothing sits between them and
+		// Upstream.Call. The kill re-read stays LAST (PREREQ-MCP-KILL-1). A demoted-generation refusal is
+		// mapped to the gate-refusal classification path with a bounded rollout reason.
+		if gerr := e.preCallGuard(in, admKillGen, revalidate); gerr != nil {
 			staleAtCall = errors.Is(gerr, errToolDriftedBeforeCall)
 			killedAtCall = errors.Is(gerr, errKilledAtBoundary)
+			if errors.Is(gerr, errLiveGenerationDemotedAtBoundary) {
+				gateRefused = true
+				gateReason = mcperr.ReasonRolloutModeInvalid
+			}
 			return gerr
 		}
 		r, err := e.cfg.Upstream.Call(ctx, target, in.Method, json.RawMessage(in.RawParams), upstreamclient.CallOptions{
@@ -190,13 +197,21 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 // makes the outcome MORE restrictive. This is the ONE side-effect boundary shared by both the
 // credential and no-credential paths, so the check lives here and nowhere else, and callUpstream
 // places NOTHING between this guard and Upstream.Call.
-func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64) error {
+func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() bool) error {
 	drifted := in.ToolStillCurrent != nil && !in.ToolStillCurrent()
+	// The composition-layer live-generation revalidation is evaluated BEFORE the kill re-read (like the
+	// freshness callback), so the kill generation stays the LAST authoritative state read before
+	// Upstream.Call. It NEVER engages the kill, so evaluating it here cannot reopen the F7 TOCTOU. A
+	// nil predicate (no gate, or Shadow) leaves this byte-identical to the pre-gate boundary.
+	liveDemoted := liveRevalidate != nil && !liveRevalidate()
 	if e.cfg.State.KillGeneration() != admKillGen {
-		return errKilledAtBoundary // emergency stop is paramount, even if the tool also drifted
+		return errKilledAtBoundary // emergency stop is paramount, even if the tool also drifted or demoted
 	}
 	if drifted {
 		return errToolDriftedBeforeCall
+	}
+	if liveDemoted {
+		return errLiveGenerationDemotedAtBoundary // the reserved Canary generation was demoted mid-flight
 	}
 	return nil
 }
@@ -309,7 +324,7 @@ func (e *Executor) materializeAndCall(ctx context.Context, in runtime.ExecInput,
 		// (Codex P2, PR #1248 for drift/kill; PR #1290 for the live gate). Return the un-metered
 		// signal and let the caller own the single classification+meter. errors.Is unwraps in case
 		// the broker wraps the callback error.
-		if errors.Is(mErr, errKilledAtBoundary) || errors.Is(mErr, errToolDriftedBeforeCall) || errors.Is(mErr, errLiveGateRefused) {
+		if errors.Is(mErr, errKilledAtBoundary) || errors.Is(mErr, errToolDriftedBeforeCall) || errors.Is(mErr, errLiveGateRefused) || errors.Is(mErr, errLiveGenerationDemotedAtBoundary) {
 			return runtime.ExecOutput{}, true
 		}
 		return e.blocked(in, mcperr.ReasonOf(mErr), false), true

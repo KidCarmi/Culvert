@@ -310,6 +310,24 @@ func (rt *canaryRuntime) activeBudget(capb rollout.Capability) (canary.Budget, b
 	return cr.budget, cr.active
 }
 
+// generationActive reports whether the SPECIFIC activation generation gen is still the current, armed,
+// execution-eligible generation. It is the final-boundary revalidation the live side-effect gate runs
+// right before the irreversible upstream call: a request admitted (budget-reserved) under generation gen
+// must be REFUSED if that generation was demoted (cr.active=false), superseded by a re-activation
+// (cr.generation != gen), or aborted (ExecutionEligible false) AFTER admission but before the call
+// (Codex P1 round-8, PR #1290). Fail-closed: a not-armed / nil-controller / generation-mismatch reads
+// false. It does NOT consume budget or evaluate the window — the reservation already did — so it can
+// only ever make an admitted request MORE restrictive, never admit one the reserve denied.
+func (rt *canaryRuntime) generationActive(capb rollout.Capability, gen uint64) bool {
+	cr := rt.capRuntime(capb)
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if !cr.active || cr.aborter == nil || cr.generation != gen {
+		return false
+	}
+	return cr.aborter.ExecutionEligible(gen)
+}
+
 // armed reports whether the capability's runtime is currently armed (an activation record was
 // restored/begun and not demoted). It is distinct from executionEligible, which is additionally false
 // once an abort has latched — a restored aborted activation is still "armed" and must be reconciled.

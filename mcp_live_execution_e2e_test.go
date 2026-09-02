@@ -34,8 +34,9 @@ func liveRealGate(capb rollout.Capability, trustOK bool) *mcpLiveSideEffectGate 
 		reserve: func(now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
 			return globalCanaryRuntime.reserveCanaryExecution(capb, now, ident)
 		},
-		releaseBudget: func(gen uint64) { globalCanaryRuntime.releaseCanaryExecution(capb, gen) },
-		note:          noteMCPLiveGateDenied,
+		releaseBudget:     func(gen uint64) { globalCanaryRuntime.releaseCanaryExecution(capb, gen) },
+		generationCurrent: func(gen uint64) bool { return globalCanaryRuntime.generationActive(capb, gen) },
+		note:              noteMCPLiveGateDenied,
 	}
 }
 
