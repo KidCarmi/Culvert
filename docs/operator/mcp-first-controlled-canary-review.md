@@ -17,7 +17,7 @@ per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a s
 cannot be assembled today on **TEN independent blockers** (exhaustive as a set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable AND usable under the supported
-production trust model (even a provisioned HTTPS+SPKI target is rejected because the client drives no MCP initialize/version/session lifecycle); (2) the production activation preflight cannot return `Ready:true` on a stock
+production trust model (a provisioned HTTPS+SPKI target must ALSO speak a protocol that permits Culvert's sessionless calls — a standard initialization-requiring server is rejected because the client drives no MCP initialize/version/session lifecycle); (2) the production activation preflight cannot return `Ready:true` on a stock
 node; (3) no governed production arming entry point — `armLiveTier` has no production caller, so an
 operator cannot arm the tier; (4) the read-first classifier refuses the one-exact-tool call and
 discovery cannot bind one tool; (5) the machine gate does not enforce exactly-one tool/principal
