@@ -18,6 +18,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -75,7 +76,8 @@ func mtlsClientCertHealth() mtlsClientCertStatus {
 //     fields on a pre-set template are replaced by this update.
 func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 	var clientCert *tls.Certificate
-	if cfg.ClientCertFile != "" && cfg.ClientKeyFile != "" {
+	switch {
+	case cfg.ClientCertFile != "" && cfg.ClientKeyFile != "":
 		c, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
 		if err != nil {
 			logger.Printf("mTLS: failed to load client cert: %v", err)
@@ -88,6 +90,20 @@ func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 			}
 			recordMTLSClientCertStatus(cfg.ClientCertFile, true, notAfter, "")
 		}
+	case cfg.ClientCertFile != "" || cfg.ClientKeyFile != "":
+		// One-sided config: FileConfig.validate doesn't reject a lone
+		// client_cert_file/client_key_file, but tls.LoadX509KeyPair requires
+		// both. Record this as a load failure — the operator clearly
+		// attempted to configure mTLS — rather than silently reporting "not
+		// configured", which would hide a broken config behind the same
+		// state as "never touched this setting".
+		missing, file := "client_key_file", cfg.ClientCertFile
+		if cfg.ClientCertFile == "" {
+			missing, file = "client_cert_file", cfg.ClientKeyFile
+		}
+		errMsg := fmt.Sprintf("%s is not set (both client_cert_file and client_key_file are required)", missing)
+		logger.Printf("mTLS: client cert not loaded: %s", errMsg)
+		recordMTLSClientCertStatus(file, false, time.Time{}, errMsg)
 	}
 
 	if clientCert == nil && !cfg.OCSPCheck {

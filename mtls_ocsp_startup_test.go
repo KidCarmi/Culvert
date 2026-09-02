@@ -298,6 +298,47 @@ func TestLoadMTLSAndOCSP_ClientCertHealthUnconfiguredByDefault(t *testing.T) {
 	}
 }
 
+// One-sided config (only cert OR only key set) must be reported as a load
+// failure, not silently treated as "not configured" — FileConfig.validate
+// doesn't reject this shape, so it's a reachable operator misconfiguration.
+func TestLoadMTLSAndOCSP_OneSidedConfigIsRecordedAsFailure(t *testing.T) {
+	resetMTLSOCSPGlobals(t)
+	ensureMTLSOCSPTestLogger(t)
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
+
+	loadMTLSAndOCSP(mtlsOCSPStartupConfig{ClientCertFile: "/etc/culvert/client.crt"})
+
+	health := mtlsClientCertHealth()
+	if !health.configured {
+		t.Fatal("expected configured=true for a one-sided cert-only config")
+	}
+	if health.loaded {
+		t.Error("expected loaded=false when client_key_file is missing")
+	}
+	if health.lastError == "" {
+		t.Error("expected lastError to explain the missing key file")
+	}
+	if getUpstreamTransport().TLSClientConfig != nil {
+		t.Error("TLSClientConfig should remain nil — no cert was actually loaded")
+	}
+}
+
+func TestLoadMTLSAndOCSP_OneSidedConfigKeyOnlyIsRecordedAsFailure(t *testing.T) {
+	resetMTLSOCSPGlobals(t)
+	ensureMTLSOCSPTestLogger(t)
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
+
+	loadMTLSAndOCSP(mtlsOCSPStartupConfig{ClientKeyFile: "/etc/culvert/client.key"})
+
+	health := mtlsClientCertHealth()
+	if !health.configured || health.loaded {
+		t.Fatalf("expected configured+not-loaded, got %+v", health)
+	}
+	if health.file != "/etc/culvert/client.key" {
+		t.Errorf("file: got %q, want the one path that was actually set", health.file)
+	}
+}
+
 func TestLoadMTLSAndOCSP_OCSPDisabledByDefault(t *testing.T) {
 	resetMTLSOCSPGlobals(t)
 	ensureMTLSOCSPTestLogger(t)

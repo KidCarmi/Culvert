@@ -422,6 +422,40 @@ func TestAPIOCSPConfig_GETSurfacesMTLSExpiry(t *testing.T) {
 	}
 }
 
+// A loaded-but-expired certificate must still report loaded=true with a
+// negative daysRemaining — the GUI (loadCAMgmt) is the layer that turns
+// that into an "Expired" red state; the API contract is just an honest
+// clock computation, never clamped at zero.
+func TestAPIOCSPConfig_GETSurfacesMTLSExpired(t *testing.T) {
+	notAfter := time.Now().Add(-48 * time.Hour)
+	mtlsClientCertMu.Lock()
+	orig := mtlsClientCertState
+	mtlsClientCertState = mtlsClientCertStatus{
+		configured: true,
+		loaded:     true,
+		file:       "/etc/culvert/client.crt",
+		notAfter:   notAfter,
+	}
+	mtlsClientCertMu.Unlock()
+	t.Cleanup(func() {
+		mtlsClientCertMu.Lock()
+		mtlsClientCertState = orig
+		mtlsClientCertMu.Unlock()
+	})
+
+	w := httptest.NewRecorder()
+	apiOCSPConfig(w, getReq("/api/ocsp"))
+	assertStatus(t, w, http.StatusOK)
+	m := assertJSON(t, w)
+	if loaded, _ := m["mtlsClientCertLoaded"].(bool); !loaded {
+		t.Error("mtlsClientCertLoaded should stay true — the cert loaded fine at startup, it has just since expired")
+	}
+	days, ok := m["mtlsClientCertDaysRemaining"].(float64)
+	if !ok || days >= 0 {
+		t.Errorf("mtlsClientCertDaysRemaining = %v, want a negative value for an expired cert", m["mtlsClientCertDaysRemaining"])
+	}
+}
+
 func TestAPIOCSPConfig_POSTBadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/ocsp", strings.NewReader("not json"))
