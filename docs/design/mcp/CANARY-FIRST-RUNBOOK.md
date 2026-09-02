@@ -39,6 +39,13 @@ current posture (do NOT collapse these into "done" or "not done"):
 > the SPIFFE-format identity is read as an SPKI digest and rejected by the verifier. No public-HTTPS
 > controlled MCP server with an SPKI pin is provisioned today. Every axis fails toward NO
 > connection, never toward an unauthenticated one.
+>
+> **Reachable is not usable.** Even a dialable HTTPS+SPKI+public target may reject every request:
+> Culvert's client drives no MCP `initialize`/`notifications/initialized` handshake, no version
+> negotiation (`NegotiateVersion` has no production caller), and no `MCP-Protocol-Version`/
+> `Mcp-Session-Id` headers, so a spec-compliant server rejects the sessionless `tools/list`/
+> `tools/call`. Closing connectivity therefore also needs a target that permits sessionless calls OR a
+> Culvert-side upstream lifecycle implementation (review §5, blocker 1).
 
 **Authority:** ADR-0035, `CANARY-READINESS-MATRIX.md`, `ROLLOUT-AND-ROLLBACK.md` §1.4.
 
@@ -92,7 +99,11 @@ set is empty. This requires the separately-reviewed activation to have:
    executions admitted and durable evidence preserved.
 2. **Stand up the recording upstream**: a controlled MCP server that logs every invocation it
    receives independently of Culvert, so "did Culvert cause exactly the executions we expect?"
-   is answerable from the upstream side, not only Culvert's evidence.
+   is answerable from the upstream side, not only Culvert's evidence. The server must be reachable
+   AND usable: a plain `https://` endpoint on a PUBLIC host with a base64 SHA-256 SPKI pin AND a
+   supported protocol that permits Culvert's sessionless `tools/list`/`tools/call` (Culvert drives no
+   MCP `initialize`/version/session lifecycle — review §5); otherwise a Culvert-side lifecycle
+   implementation is required first.
 3. **Issue the live approval** (executable today): `POST /api/mcp/tool-approvals` with
    `purpose=live_execution`, a finite `expires_in_seconds` ≤ 86400, and the exact reviewed
    `fingerprint`+`catalog_revision` — attributed to the requester's authenticated session
