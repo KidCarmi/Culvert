@@ -64,6 +64,12 @@ type liveTierComposition struct {
 	ResponseProfile inspection.Profile
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
+	// LiveGate overrides the composition-layer side-effect gate. Production ALWAYS leaves it nil
+	// (the real newMCPLiveSideEffectGate is composed); it exists ONLY so a controlled rehearsal can
+	// exercise the real budget + lifecycle + read-first admission with a deterministic trust seam
+	// (runtime live-trust revalidation is separately proven by the gate-logic and red-team tests).
+	// A production build never sets it, so it can never widen the production gate.
+	LiveGate execution.LiveExecutionGate
 }
 
 // composeGatewayLiveTierInto composes the live Executor and installs it as cfg.Deps.Executor,
@@ -91,6 +97,11 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 		lt.setComposeReason("durable_events_unavailable")
 		return errLiveComposeEventsAbsent
 	}
+	gate := comp.LiveGate
+	if gate == nil {
+		// Production path: the real gate wired to the composition-layer singletons.
+		gate = newMCPLiveSideEffectGate(rollout.CapabilityGateway)
+	}
 	ex, err := execution.New(execution.Config{
 		State:           getMCPRollout().gateway,
 		Broker:          comp.Broker,
@@ -102,7 +113,7 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 		Actor: mcpLiveActor,
 		// The composition-layer side-effect gate: budget reservation + runtime live-trust
 		// revalidation + read-first, consulted at the boundary BEFORE the executor's kill re-check.
-		LiveGate: newMCPLiveSideEffectGate(rollout.CapabilityGateway),
+		LiveGate: gate,
 	})
 	if err != nil {
 		lt.setComposeReason("executor_construct_failed")
