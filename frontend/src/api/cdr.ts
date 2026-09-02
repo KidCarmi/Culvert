@@ -31,8 +31,9 @@
 //     are 409) and the only DELETE key. Rules match first-by-priority;
 //     unknown mode strings are rendered verbatim (the engine treats unknown
 //     as ENFORCE — fail-safe — but the UI never relabels them).
-import { apiRequest } from "./client";
+import { ApiError, apiRequest } from "./client";
 import {
+  DecodeError,
   field,
   readArray,
   readBoolean,
@@ -152,20 +153,73 @@ export interface CDRInstance {
   cbTotalOpens?: number;
   cbTotalTrips?: number;
   poolHealthy?: boolean;
+  /** 2E-C R7: the bounded durable credential LINEAGE — every generation
+   * Sluice issued for this instance with its own state. Sluice keeps
+   * trusting every LIVE generation (not revoked, not expired) until it
+   * expires or is revoked there; a renewal never retires its predecessor. */
+  credentials: readonly CDRCredentialGeneration[];
+  /** Every fingerprint Sluice may still trust (active first). */
+  liveFingerprints: readonly string[];
+}
+
+export interface CDRCredentialGeneration {
+  seq: number;
+  fingerprint: string;
+  notAfterUnix: number;
+  /** renewing | staged | active | superseded | orphaned | revoked —
+   * rendered verbatim. */
+  state: string;
+  issuedAt: string;
+  operationId: string;
+  /** enroll | renewal | legacy */
+  source: string;
+}
+
+function readGeneration(v: unknown, path: string): CDRCredentialGeneration {
+  const o = readRecord(v, path);
+  return {
+    seq: field(o, "seq", readNumber, path),
+    fingerprint: opt(o, "fingerprint", readString, path) ?? "",
+    notAfterUnix: opt(o, "notAfterUnix", readNumber, path) ?? 0,
+    state: field(o, "state", readString, path),
+    issuedAt: opt(o, "issuedAt", readString, path) ?? "",
+    operationId: opt(o, "operationId", readString, path) ?? "",
+    source: opt(o, "source", readString, path) ?? "",
+  };
 }
 
 function readInstance(v: unknown, path: string): CDRInstance {
   const o = readRecord(v, path);
+  const rawCreds = o["credentials"];
+  const credentials: CDRCredentialGeneration[] = [];
+  if (rawCreds !== undefined && rawCreds !== null) {
+    for (const [i, item] of readArray((x, p) => readRecord(x, p))(
+      rawCreds,
+      `${path}.credentials`,
+    ).entries()) {
+      credentials.push(readGeneration(item, `${path}.credentials[${i}]`));
+    }
+  }
+  const rawLive = o["liveFingerprints"];
+  const clientCertFingerprint =
+    opt(o, "clientCertFingerprint", readString, path) ?? "";
+  const liveFingerprints =
+    rawLive === undefined || rawLive === null
+      ? clientCertFingerprint === ""
+        ? []
+        : [clientCertFingerprint]
+      : field(o, "liveFingerprints", readArray(readString), path);
   const out: CDRInstance = {
     name: field(o, "name", readString, path),
     endpoint: field(o, "endpoint", readString, path),
     serverFingerprint: field(o, "serverFingerprint", readString, path),
-    clientCertFingerprint:
-      opt(o, "clientCertFingerprint", readString, path) ?? "",
+    clientCertFingerprint,
     enrolledAt: field(o, "enrolledAt", readString, path),
     version: opt(o, "version", readString, path) ?? "",
     lastHealth: opt(o, "lastHealth", readString, path) ?? "",
     enabled: opt(o, "enabled", readBoolean, path) ?? true,
+    credentials,
+    liveFingerprints,
   };
   const notAfter = opt(o, "clientCertNotAfter", readString, path);
   if (notAfter !== undefined) out.clientCertNotAfter = notAfter;
@@ -221,16 +275,19 @@ export function getCDRInstances(signal?: AbortSignal): Promise<CDRInstances> {
 
 export interface CDRDeleteResult {
   removed: string;
-  /** The orphaned trust identity — Sluice keeps trusting this fingerprint
-   * until it expires or is revoked on the Sluice side. "" = unknown (legacy
-   * entry whose cert could not be read before the shred). */
+  /** The ACTIVE orphaned trust identity — Sluice keeps trusting this
+   * fingerprint until it expires or is revoked on the Sluice side. "" =
+   * unknown (legacy entry whose cert could not be read before the shred). */
   clientCertFingerprint: string;
+  /** EVERY still-valid generation Sluice keeps trusting (active first) —
+   * the full lineage the local removal orphans. */
+  clientCertFingerprints: readonly string[];
 }
 
 /** LOCAL-only removal: prunes this appliance's registry and shreds its copy
  * of the credential. Does NOT revoke anything on the Sluice side — after
- * this call the fingerprint in the result is the only remaining handle for
- * revoking the still-trusted credential there. */
+ * this call the fingerprints in the result are the only remaining handles
+ * for revoking the still-trusted credentials there. */
 export function deleteCDRInstance(
   name: string,
   signal?: AbortSignal,
@@ -247,6 +304,12 @@ export function deleteCDRInstance(
           readString,
           path,
         ),
+        clientCertFingerprints: field(
+          o,
+          "clientCertFingerprints",
+          readArray(readString),
+          path,
+        ),
       };
     },
     { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
@@ -261,6 +324,11 @@ export interface CDREnrollInput {
    * exchange — an unknown-outcome enrollment must NEVER be blindly retried
    * with the same token. Never echoed by any read DTO. */
   token: string;
+  /** 2E-C R8: the client-minted 128-bit recovery identity, persisted in the
+   * browser marker BEFORE dispatch and bound by the appliance + Sluice to
+   * the outcome, so a lost response is RESOLVED (recoverCDREnrollment),
+   * never guessed. */
+  operationId: string;
 }
 
 /** Enroll response: the stored registry entry (struct-tag JSON keys — same
@@ -281,6 +349,7 @@ export function enrollCDRInstance(
       endpoint: input.endpoint,
       serverFingerprint: input.serverFingerprint,
       token: input.token,
+      operationId: input.operationId,
     },
     // The Enroll RPC has a 30s server-side deadline; expire after it so a
     // slow-but-successful exchange is not misread as unknown.
@@ -289,36 +358,239 @@ export function enrollCDRInstance(
   });
 }
 
+/** An enrollment failure whose Sluice-side outcome is NOT settled — the
+ * appliance names the operation in the body (unknown outcome, an
+ * already-issued duplicate, or a local commit failure after issuance) so it
+ * can be resolved. A refusal that names no operation issued nothing. */
+export function enrollFailureIsUnresolved(
+  err: unknown,
+  operationId: string,
+): boolean {
+  return (
+    err instanceof ApiError &&
+    err.kind === "http" &&
+    err.bodyText !== undefined &&
+    err.bodyText.includes(operationId)
+  );
+}
+
 export interface CDRRevokeResult {
   revoked: string;
   fingerprint: string;
+  /** Every fingerprint Sluice PROVED a durable deny for. */
+  fingerprints: readonly string[];
+  /** Per-fingerprint proven outcome: revoked | already_revoked | tombstoned. */
+  outcomes: Readonly<Record<string, string>>;
+  localPruned: boolean;
 }
 
-/** Revoke the instance's credential ON THE SLUICE SIDE (RevokeClient by
- * fingerprint), then prune locally. Idempotent at Sluice (an
- * already-revoked/unknown fingerprint still succeeds), so a retry after an
- * unknown outcome is safe. Requires a second enrolled, reachable instance
- * (self-revocation is refused → 503). */
+const decodeRevokeResult: Decoder<CDRRevokeResult> = (v, path = "$") => {
+  const o = readRecord(v, path);
+  const rawOutcomes = readRecord(o["outcomes"], `${path}.outcomes`);
+  const outcomes: Record<string, string> = {};
+  for (const [k, val] of Object.entries(rawOutcomes)) {
+    outcomes[k] = readString(val, `${path}.outcomes.${k}`);
+  }
+  return {
+    revoked: field(o, "revoked", readString, path),
+    fingerprint: field(o, "fingerprint", readString, path),
+    fingerprints: field(o, "fingerprints", readArray(readString), path),
+    outcomes,
+    localPruned: field(o, "localPruned", readBoolean, path),
+  };
+};
+
+/** Revoke EVERY live credential of the instance ON THE SLUICE SIDE
+ * (RevokeClient by fingerprint, one per generation); the appliance prunes
+ * locally ONLY after Sluice PROVES a durable deny for each (a response that
+ * proves nothing is a 502 and prunes nothing). Per-generation progress is
+ * durable, so a retry after a failure or unknown outcome is safe. Requires
+ * a second enrolled, reachable instance (self-revocation is refused → 503). */
 export function revokeCDRInstance(
   name: string,
   reason: string,
   signal?: AbortSignal,
 ): Promise<CDRRevokeResult> {
+  return apiRequest("/api/cdr/instances/revoke", decodeRevokeResult, {
+    method: "POST",
+    body: { name, reason },
+    timeoutMs: 20_000,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+}
+
+/** Revoke ONE orphaned credential by fingerprint (issued-but-not-stored
+ * enrollment, lost renewal). Same proof rule; 503 with the Sluice-host CLI
+ * instruction when no pooled client can issue the call. */
+export function revokeCDRFingerprint(
+  fingerprint: string,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<CDRRevokeResult> {
+  return apiRequest("/api/cdr/instances/revoke", decodeRevokeResult, {
+    method: "POST",
+    body: { fingerprint, reason },
+    timeoutMs: 20_000,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+}
+
+// ── Enrollment recovery (POST …/enroll/recover, GET/DELETE …/enroll/receipts) ─
+
+export type CDRRecoveryClassification =
+  "LANDED_AND_STORED" | "ISSUED_BUT_NOT_STORED" | "NOT_ISSUED" | "AMBIGUOUS";
+
+export interface CDREnrollRecovery {
+  operationId: string;
+  classification: CDRRecoveryClassification;
+  /** Issued client-cert fingerprint when Sluice reports ISSUED. */
+  fingerprint: string;
+  /** Sluice already denies the issued fingerprint. */
+  revoked: boolean;
+  name: string;
+  endpoint: string;
+  receiptState: string;
+  hasReceipt: boolean;
+  retryable: boolean;
+  error: string;
+  /** Exact revocation path for ISSUED_BUT_NOT_STORED. */
+  revocation?: { apiAvailable: boolean; cli: string };
+}
+
+const decodeRecovery: Decoder<CDREnrollRecovery> = (v, path = "$") => {
+  const o = readRecord(v, path);
+  const cls = field(o, "classification", readString, path);
+  if (
+    cls !== "LANDED_AND_STORED" &&
+    cls !== "ISSUED_BUT_NOT_STORED" &&
+    cls !== "NOT_ISSUED" &&
+    cls !== "AMBIGUOUS"
+  ) {
+    throw new DecodeError(
+      `${path}.classification`,
+      "a recovery classification",
+      cls,
+    );
+  }
+  const out: CDREnrollRecovery = {
+    operationId: field(o, "operationId", readString, path),
+    classification: cls,
+    fingerprint: opt(o, "fingerprint", readString, path) ?? "",
+    revoked: field(o, "revoked", readBoolean, path),
+    name: opt(o, "name", readString, path) ?? "",
+    endpoint: opt(o, "endpoint", readString, path) ?? "",
+    receiptState: opt(o, "receiptState", readString, path) ?? "",
+    hasReceipt: field(o, "hasReceipt", readBoolean, path),
+    retryable: field(o, "retryable", readBoolean, path),
+    error: opt(o, "error", readString, path) ?? "",
+  };
+  const rev = o["revocation"];
+  if (rev !== undefined && rev !== null) {
+    const r = readRecord(rev, `${path}.revocation`);
+    out.revocation = {
+      apiAvailable: field(r, "apiAvailable", readBoolean, `${path}.revocation`),
+      cli: field(r, "cli", readString, `${path}.revocation`),
+    };
+  }
+  return out;
+};
+
+/** Fresh authoritative resolution of one enrollment operation through
+ * Sluice's EnrollStatus. Mutates only the local receipt; never mints,
+ * stores or revokes anything. */
+export function recoverCDREnrollment(
+  input: { operationId: string; endpoint?: string; serverFingerprint?: string },
+  signal?: AbortSignal,
+): Promise<CDREnrollRecovery> {
+  return apiRequest("/api/cdr/instances/enroll/recover", decodeRecovery, {
+    method: "POST",
+    body: {
+      operationId: input.operationId,
+      ...(input.endpoint !== undefined ? { endpoint: input.endpoint } : {}),
+      ...(input.serverFingerprint !== undefined
+        ? { serverFingerprint: input.serverFingerprint }
+        : {}),
+    },
+    timeoutMs: 20_000,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+}
+
+export interface CDREnrollReceipt {
+  operationId: string;
+  name: string;
+  endpoint: string;
+  serverFingerprint: string;
+  /** dispatched | stored | issued_not_stored | not_issued | revoked */
+  state: string;
+  fingerprint: string;
+  actor: string;
+  startedAt: string;
+  updatedAt: string;
+  note: string;
+}
+
+export interface CDREnrollReceipts {
+  receipts: readonly CDREnrollReceipt[];
+  count: number;
+  unresolved: number;
+}
+
+export const decodeCDREnrollReceipts: Decoder<CDREnrollReceipts> = (
+  v,
+  path = "$",
+) => {
+  const o = readRecord(v, path);
+  const raw = o["receipts"];
+  const receipts: CDREnrollReceipt[] = [];
+  if (raw !== undefined && raw !== null) {
+    for (const [i, item] of readArray((x, p) => readRecord(x, p))(
+      raw,
+      `${path}.receipts`,
+    ).entries()) {
+      const p = `${path}.receipts[${i}]`;
+      receipts.push({
+        operationId: field(item, "operationId", readString, p),
+        name: field(item, "name", readString, p),
+        endpoint: field(item, "endpoint", readString, p),
+        serverFingerprint: field(item, "serverFingerprint", readString, p),
+        state: field(item, "state", readString, p),
+        fingerprint: opt(item, "fingerprint", readString, p) ?? "",
+        actor: opt(item, "actor", readString, p) ?? "",
+        startedAt: field(item, "startedAt", readString, p),
+        updatedAt: field(item, "updatedAt", readString, p),
+        note: opt(item, "note", readString, p) ?? "",
+      });
+    }
+  }
+  return {
+    receipts,
+    count: field(o, "count", readNumber, path),
+    unresolved: field(o, "unresolved", readNumber, path),
+  };
+};
+
+export function getCDREnrollReceipts(
+  signal?: AbortSignal,
+): Promise<CDREnrollReceipts> {
   return apiRequest(
-    "/api/cdr/instances/revoke",
+    "/api/cdr/instances/enroll/receipts",
+    decodeCDREnrollReceipts,
+    signal !== undefined ? { signal } : {},
+  );
+}
+
+export function deleteCDREnrollReceipt(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<{ removed: string }> {
+  return apiRequest(
+    `/api/cdr/instances/enroll/receipts?operationId=${encodeURIComponent(operationId)}`,
     (v, path = "$") => {
       const o = readRecord(v, path);
-      return {
-        revoked: field(o, "revoked", readString, path),
-        fingerprint: field(o, "fingerprint", readString, path),
-      };
+      return { removed: field(o, "removed", readString, path) };
     },
-    {
-      method: "POST",
-      body: { name, reason },
-      timeoutMs: 20_000,
-      ...(signal !== undefined ? { signal } : {}),
-    },
+    { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
   );
 }
 
@@ -367,12 +639,26 @@ function readRule(v: unknown, path: string): CDRPolicyRule {
   };
 }
 
+/** 2E-C R10: identity truth of the durable policy store. ok=false means
+ * the file on disk carries duplicate or empty rule names (loaded verbatim —
+ * nothing silently chosen); while degraded, adding is refused, deleting by
+ * an ambiguous name is refused, and the operator repairs BY POSITION. */
+export interface CDRPolicyIntegrity {
+  ok: boolean;
+  issues: readonly {
+    kind: string;
+    name: string;
+    positions: readonly number[];
+  }[];
+}
+
 export interface CDRPolicies {
   rules: readonly CDRPolicyRule[];
   count: number;
   version: number;
   epoch: number;
   updatedAt: string;
+  integrity: CDRPolicyIntegrity;
 }
 
 export const decodeCDRPolicies: Decoder<CDRPolicies> = (v, path = "$") => {
@@ -387,12 +673,36 @@ export const decodeCDRPolicies: Decoder<CDRPolicies> = (v, path = "$") => {
       rules.push(readRule(item, `${path}.rules[${i}]`));
     }
   }
+  const integ = readRecord(o["integrity"], `${path}.integrity`);
+  const rawIssues = integ["issues"];
+  const issues: {
+    kind: string;
+    name: string;
+    positions: readonly number[];
+  }[] = [];
+  if (rawIssues !== undefined && rawIssues !== null) {
+    for (const [i, item] of readArray((x, p) => readRecord(x, p))(
+      rawIssues,
+      `${path}.integrity.issues`,
+    ).entries()) {
+      const p = `${path}.integrity.issues[${i}]`;
+      issues.push({
+        kind: field(item, "kind", readString, p),
+        name: opt(item, "name", readString, p) ?? "",
+        positions: field(item, "positions", readArray(readNumber), p),
+      });
+    }
+  }
   return {
     rules,
     count: field(o, "count", readNumber, path),
     version: field(o, "version", readNumber, path),
     epoch: field(o, "epoch", readNumber, path),
     updatedAt: opt(o, "updatedAt", readString, path) ?? "",
+    integrity: {
+      ok: field(integ, "ok", readBoolean, `${path}.integrity`),
+      issues,
+    },
   };
 };
 
@@ -438,6 +748,31 @@ export function deleteCDRPolicy(
     (v, path = "$") => {
       const o = readRecord(v, path);
       return { removed: field(o, "removed", readString, path) };
+    },
+    { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
+  );
+}
+
+/** Degraded-store repair: delete the rule at `position` (0-based, current
+ * order), fenced on its VERBATIM name. Available ONLY while the store is
+ * degraded (409 otherwise). */
+export function deleteCDRPolicyAt(
+  position: number,
+  verbatimName: string,
+  signal?: AbortSignal,
+): Promise<{ removed: string; integrity: CDRPolicyIntegrity }> {
+  return apiRequest(
+    `/api/cdr/policies?name=${encodeURIComponent(verbatimName)}&position=${String(position)}`,
+    (v, path = "$") => {
+      const o = readRecord(v, path);
+      const integ = readRecord(o["integrity"], `${path}.integrity`);
+      return {
+        removed: field(o, "removed", readString, path),
+        integrity: {
+          ok: field(integ, "ok", readBoolean, `${path}.integrity`),
+          issues: [],
+        },
+      };
     },
     { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
   );

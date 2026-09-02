@@ -118,6 +118,7 @@ describe("decodeCDRPolicies", () => {
         count: 1,
         version: 3,
         epoch: 9,
+        integrity: { ok: true, issues: [] },
       },
       "$",
     );
@@ -183,12 +184,23 @@ describe("request shapes (fetch stub)", () => {
     await expect(deleteCDRInstance("a")).rejects.toMatchObject({
       kind: "decode",
     });
+    // The 2E-C trust-lifecycle shape names EVERY still-trusted generation.
     respond = () =>
       okJSON({ removed: "a", clientCertFingerprint: "sha256:ff" });
+    await expect(deleteCDRInstance("a")).rejects.toMatchObject({
+      kind: "decode",
+    });
+    respond = () =>
+      okJSON({
+        removed: "a",
+        clientCertFingerprint: "sha256:ff",
+        clientCertFingerprints: ["sha256:ff", "sha256:ee"],
+      });
     const res = await deleteCDRInstance("a");
     expect(res.clientCertFingerprint).toBe("sha256:ff");
-    expect(calls[1]?.url).toBe("/api/cdr/instances?name=a");
-    expect(calls[1]?.init?.method).toBe("DELETE");
+    expect(res.clientCertFingerprints).toEqual(["sha256:ff", "sha256:ee"]);
+    expect(calls[2]?.url).toBe("/api/cdr/instances?name=a");
+    expect(calls[2]?.init?.method).toBe("DELETE");
   });
 
   it("enrollCDRInstance sends the token once and returns a token-free DTO", async () => {
@@ -205,10 +217,12 @@ describe("request shapes (fetch stub)", () => {
       endpoint: "h:1",
       serverFingerprint: "ab",
       token: "one-time-secret",
+      operationId: "0123456789abcdef0123456789abcdef",
     });
     const sent = calls[0]?.init?.body;
     if (typeof sent !== "string") throw new Error("body was not JSON text");
     expect(sent).toContain("one-time-secret");
+    expect(sent).toContain("0123456789abcdef0123456789abcdef");
     // The read DTO carries no token-shaped field at all.
     expect(JSON.stringify(inst)).not.toContain("one-time-secret");
     expect(inst.clientCertFingerprint).toBe("sha256:cc");

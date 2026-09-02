@@ -14,10 +14,16 @@
 //   3. Reversible config mutation: the T2 runtime toggle round-trip,
 //      verified against the authoritative API, restored in finally.
 //   4. Enrollment lifecycle, isolated: the T2 ceremony dispatches exactly
-//      one POST against an unreachable endpoint → truthful 502; the
-//      single-use token appears in NO storage and NOT in the DOM
-//      serialization afterwards; no instance and no sentinel side effect
-//      is left behind (the auto-enable runs only after a successful RPC).
+//      one POST against an unreachable endpoint → the truthful 502 names
+//      the OPERATION (the outcome is not settled: Sluice could not be
+//      asked), the verified non-secret recovery marker survives, the
+//      "Resolve enrollment" action performs a fresh authoritative
+//      resolution (AMBIGUOUS — the engine is unreachable, retryable), and
+//      the explicit abandon ceremony clears the browser marker while the
+//      appliance keeps its durable receipt (listed, then removed in
+//      finally). The single-use token appears in NO storage (the marker
+//      included) and NOT in the DOM serialization afterwards; no instance
+//      and no sentinel side effect is left behind.
 //   5. Policy lifecycle: add → visible; duplicate name → 409 conflict
 //      rendered; T2 delete → gone (authoritative API verified).
 //   6. Bounded test action: one POST, truthful "no active CDR client"
@@ -210,13 +216,14 @@ test("admin: runtime toggle round-trip through the T2 ceremony, restored", async
   }
 });
 
-// ── 4: enrollment lifecycle — truthful failure, no secret residue ──────────
-test("admin: enrollment ceremony fails truthfully against an unreachable engine; the single-use token leaves no residue", async ({
+// ── 4: enrollment lifecycle — unresolved outcome, resolution, no residue ───
+test("admin: enrollment against an unreachable engine is UNRESOLVED (operation named), resolvable, abandonable; the single-use token leaves no residue", async ({
   page,
 }) => {
   const api = await newAdminClient("198.51.100.83");
   const token = "e2e-one-time-token-771cbb";
   const name = "e2e-unreachable";
+  const MARKER_KEY = "culvert.cdr.enroll-recovery.v1";
   try {
     await page.goto(ROUTE);
     await page.getByRole("tab", { name: "Instances" }).click();
@@ -243,22 +250,28 @@ test("admin: enrollment ceremony fails truthfully against an unreachable engine;
       .click();
     const resp = await post;
     expect(resp.status()).toBe(502); // truthful RPC failure, not invented
-    // Failure closes the ceremony and reports at page level, clearing the
-    // single-use token field on the way out.
-    await expect(
-      page.getByText("Enrollment failed", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      page.getByText(/connection refused|enrollment failed/).first(),
-    ).toBeVisible();
+    const body = await resp.text();
+    // The appliance names the operation: the outcome is NOT settled (the
+    // engine could not be asked), so nothing is presented as "failed".
+    const opMatch = /operation ([A-Za-z0-9._-]{16,64})/.exec(body);
+    expect(opMatch).not.toBeNull();
+    const operationId = opMatch?.[1] ?? "";
+    await expect(page.getByText("Enrollment outcome unknown")).toBeVisible();
+    await expect(page.getByText(operationId).first()).toBeVisible();
     await expect(page.getByLabel("Enrollment token (single-use)")).toHaveValue(
       "",
     );
+    // A second enrollment is blocked until this one is resolved.
+    await expect(
+      page.getByRole("button", { name: "Enroll instance…" }),
+    ).toBeDisabled();
 
-    // No secret residue: the dispatched token is in no browser storage and
-    // not reconstructable from the serialized DOM (secret hygiene — the
-    // token field is cleared on every dispatch outcome).
-    const residue = await page.evaluate(() => {
+    // The verified, subject-bound, NON-SECRET marker survived the dispatch
+    // and a reload; the token is in no storage and not in the DOM.
+    await page.reload();
+    await page.getByRole("tab", { name: "Instances" }).click();
+    await expect(page.getByText("Enrollment outcome unknown")).toBeVisible();
+    const residue = await page.evaluate((key: string) => {
       const stores: string[] = [];
       for (let i = 0; i < sessionStorage.length; i++) {
         const k = sessionStorage.key(i);
@@ -270,16 +283,86 @@ test("admin: enrollment ceremony fails truthfully against an unreachable engine;
       }
       return {
         storageBlob: stores.join("|"),
+        marker: sessionStorage.getItem(key),
         html: document.body.innerHTML,
       };
-    });
+    }, MARKER_KEY);
     expect(residue.storageBlob).not.toContain(token);
     expect(residue.html).not.toContain(token);
+    expect(residue.marker).not.toBeNull();
+    expect(residue.marker ?? "").toContain(operationId);
+    expect(residue.marker ?? "").toContain(name);
+
+    // Fresh authoritative resolution: the engine is unreachable, so the
+    // truthful classification is AMBIGUOUS (retryable) — never NOT_ISSUED
+    // by assumption.
+    const recover = page.waitForResponse(
+      (r) =>
+        r.url().includes("/api/cdr/instances/enroll/recover") &&
+        r.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: "Resolve enrollment" }).click();
+    const rec = await recover;
+    expect(rec.ok()).toBe(true);
+    const recBody: unknown = await rec.json();
+    expect(isRecord(recBody) && recBody["classification"]).toBe("AMBIGUOUS");
+    await expect(page.getByText(/AMBIGUOUS/)).toBeVisible();
+    expect(
+      await page.evaluate(
+        (key: string) => sessionStorage.getItem(key),
+        MARKER_KEY,
+      ),
+    ).not.toBeNull();
+
+    // The appliance holds the durable receipt for the operation.
+    const receipts = await api.get("/api/cdr/instances/enroll/receipts");
+    expect(receipts.ok()).toBe(true);
+    const rv: unknown = await receipts.json();
+    const found =
+      isRecord(rv) && Array.isArray(rv["receipts"])
+        ? rv["receipts"].some(
+            (r) => isRecord(r) && r["operationId"] === operationId,
+          )
+        : false;
+    expect(found).toBe(true);
+
+    // Explicit abandon: the browser forgets; the appliance keeps the receipt.
+    await page.getByRole("button", { name: "Abandon recovery…" }).click();
+    await expect(page.getByText(/keeps its durable receipt/)).toBeVisible();
+    await page
+      .getByRole("button", { name: "Abandon recovery", exact: true })
+      .click();
+    await expect(page.getByText("Enrollment outcome unknown")).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        (key: string) => sessionStorage.getItem(key),
+        MARKER_KEY,
+      ),
+    ).toBeNull();
+    await expect(
+      page.getByRole("button", { name: "Enroll instance…" }),
+    ).toBeDisabled(); // the form is empty again (token cleared) — not a latch
 
     // Nothing was left behind on the appliance: no instance, and the
     // auto-enable never ran (it follows a SUCCESSFUL RPC only).
     expect(await listInstanceNames(api)).not.toContain(name);
   } finally {
+    // /data hygiene: remove every receipt this spec created.
+    const receipts = await api.get("/api/cdr/instances/enroll/receipts");
+    const rv: unknown = await receipts.json();
+    if (isRecord(rv) && Array.isArray(rv["receipts"])) {
+      for (const r of rv["receipts"]) {
+        if (
+          isRecord(r) &&
+          r["name"] === name &&
+          typeof r["operationId"] === "string"
+        ) {
+          await api.delete(
+            `/api/cdr/instances/enroll/receipts?operationId=${encodeURIComponent(r["operationId"])}`,
+          );
+        }
+      }
+    }
     await api.dispose();
   }
 });

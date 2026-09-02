@@ -100,6 +100,7 @@ const POLICIES = {
   version: 2,
   epoch: 5,
   updatedAt: "2026-08-30T08:00:00Z",
+  integrity: { ok: true, issues: [] },
 };
 
 beforeEach(() => {
@@ -299,6 +300,7 @@ it("delete is a typed T3 ceremony and the notice carries the orphaned fingerprin
     okJSON({
       removed: "sluice-a",
       clientCertFingerprint: "sha256:" + "ee".repeat(32),
+      clientCertFingerprints: ["sha256:" + "ee".repeat(32)],
     });
   await mountPage("admin");
   await openTab("Instances", "Enrolled instances");

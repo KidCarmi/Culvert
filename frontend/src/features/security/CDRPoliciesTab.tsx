@@ -27,6 +27,7 @@ import { unknownOutcome, serverErrorText } from "../../shared/mutationOutcome";
 import {
   addCDRPolicy,
   deleteCDRPolicy,
+  deleteCDRPolicyAt,
   getCDRPolicies,
   type CDRPolicies,
   type CDRPolicyRule,
@@ -34,6 +35,76 @@ import {
 import styles from "../policy/policy.module.css";
 
 type PolPage = ObjectPageState<CDRPolicies>;
+
+// 2E-C R10: the degraded-store repair ceremony — deletes the rule at ONE
+// position, fenced on its verbatim name; the only mutation the appliance
+// accepts while the durable file carries duplicate or empty identities.
+function DeleteRuleAtDialog({
+  page,
+  target,
+  position,
+  onDone,
+  onCancel,
+}: {
+  page: PolPage;
+  target: CDRPolicyRule;
+  position: number;
+  onDone: () => void;
+  onCancel: () => void;
+}): JSX.Element {
+  const [result, setResult] = useState<ConfirmResult>("idle");
+  const [errorText, setErrorText] = useState("");
+  return (
+    <ConfirmationDialog
+      open
+      tier={2}
+      title={`Delete the rule at position ${String(position)}`}
+      body={
+        <>
+          Repairs the degraded policy store by removing the rule at position{" "}
+          {String(position)} — name <Mono>{JSON.stringify(target.name)}</Mono>{" "}
+          (verbatim), priority {String(target.priority)}, matches{" "}
+          {ruleMatchSummary(target)}, mode{" "}
+          <Mono>{target.mode === "" ? "ENFORCE" : target.mode}</Mono>. The
+          appliance refuses the request if the rule at that position no longer
+          carries this exact name, so a concurrent edit cannot redirect it.
+        </>
+      }
+      impact="Enforcement changes immediately: matched downloads are handled by whichever rule or default now applies."
+      rollback="Re-create the rule with the same fields once the store is healthy again."
+      confirmLabel="Delete at position"
+      destructive
+      result={result}
+      {...(errorText !== "" ? { errorText } : {})}
+      onConfirm={() => {
+        if (result === "pending") return;
+        const signal = page.owner.begin();
+        setResult("pending");
+        deleteCDRPolicyAt(position, target.name, signal)
+          .then(() => {
+            onDone();
+            page.refreshToResolve();
+          })
+          .catch((err: unknown) => {
+            if (unknownOutcome(err)) {
+              page.latchUnknown("delete");
+              setResult("unknown");
+              onCancel();
+              return;
+            }
+            setResult("failed");
+            setErrorText(serverErrorText(err, "The delete failed."));
+          })
+          .finally(() => {
+            page.owner.settle(signal);
+          });
+      }}
+      onCancel={() => {
+        if (result !== "pending") onCancel();
+      }}
+    />
+  );
+}
 
 const MODES = ["ENFORCE", "REPORT_ONLY", "BYPASS_WITH_REPORT"] as const;
 
@@ -147,10 +218,18 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<CDRPolicyRule | null>(null);
+  const [repairTarget, setRepairTarget] = useState<{
+    rule: CDRPolicyRule;
+    position: number;
+  } | null>(null);
 
+  const degraded = d !== undefined && !d.integrity.ok;
   const priorityNum = Number(form.priority);
   const canAdd =
-    form.name.trim() !== "" && Number.isInteger(priorityNum) && !addBusy;
+    form.name.trim() !== "" &&
+    Number.isInteger(priorityNum) &&
+    !addBusy &&
+    !degraded;
 
   const submitAdd = (): void => {
     if (!canAdd || page.unknown !== null) return;
@@ -208,6 +287,28 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
         </Callout>
       )}
 
+      {d !== undefined && degraded && (
+        <Callout variant="critical" title="Policy store degraded">
+          The durable rule file on this appliance carries rule identities that
+          are not unique: nothing was silently chosen or dropped — every rule
+          loaded verbatim and still enforces — but adding rules and deleting by
+          an ambiguous name are refused until it is repaired. Repair by deleting
+          the offending rule AT ITS POSITION:
+          <ul>
+            {d.integrity.issues.map((issue) => (
+              <li key={`${issue.kind}-${issue.name}`}>
+                {issue.kind === "duplicate_name"
+                  ? `duplicate name ${JSON.stringify(issue.name)}`
+                  : issue.kind === "empty_name"
+                    ? "empty name"
+                    : issue.kind}{" "}
+                at position(s) {issue.positions.map(String).join(", ")}
+              </li>
+            ))}
+          </ul>
+        </Callout>
+      )}
+
       {d === undefined && page.q.isPending && (
         <Skeleton>Loading CDR policy rules…</Skeleton>
       )}
@@ -232,6 +333,7 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                 <caption className="sr-only">CDR policy rules</caption>
                 <thead>
                   <tr>
+                    {degraded && <th scope="col">Position</th>}
                     <th scope="col">Priority</th>
                     <th scope="col">Name</th>
                     <th scope="col">Matches</th>
@@ -242,11 +344,12 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                   </tr>
                 </thead>
                 <tbody>
-                  {d.rules.map((r) => (
-                    <tr key={r.name}>
+                  {d.rules.map((r, position) => (
+                    <tr key={`${String(position)}:${r.name}`}>
+                      {degraded && <td>{String(position)}</td>}
                       <td>{String(r.priority)}</td>
                       <td>
-                        <Mono>{r.name}</Mono>
+                        <Mono>{r.name === "" ? "(empty)" : r.name}</Mono>
                         {!r.enabled && " (disabled)"}
                       </td>
                       <td>{ruleMatchSummary(r)}</td>
@@ -261,16 +364,29 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                       <td>{String(r.hitCount)}</td>
                       {isAdmin && (
                         <td>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={page.unknown !== null}
-                            onClick={() => {
-                              setDeleteTarget(r);
-                            }}
-                          >
-                            Delete…
-                          </Button>
+                          {degraded ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={page.unknown !== null}
+                              onClick={() => {
+                                setRepairTarget({ rule: r, position });
+                              }}
+                            >
+                              Delete at position {String(position)}…
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={page.unknown !== null}
+                              onClick={() => {
+                                setDeleteTarget(r);
+                              }}
+                            >
+                              Delete…
+                            </Button>
+                          )}
                         </td>
                       )}
                     </tr>
@@ -289,6 +405,12 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
 
       {isAdmin && (
         <Card title="Add a rule">
+          {degraded && (
+            <p className={styles.refDetail}>
+              Adding is refused while the store is degraded — repair the
+              identities listed above first.
+            </p>
+          )}
           <InputField
             label="Name (unique — this is the rule's identity)"
             required
@@ -381,6 +503,19 @@ export function CDRPoliciesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
           }}
           onCancel={() => {
             setDeleteTarget(null);
+          }}
+        />
+      )}
+      {repairTarget !== null && (
+        <DeleteRuleAtDialog
+          page={page}
+          target={repairTarget.rule}
+          position={repairTarget.position}
+          onDone={() => {
+            setRepairTarget(null);
+          }}
+          onCancel={() => {
+            setRepairTarget(null);
           }}
         />
       )}
