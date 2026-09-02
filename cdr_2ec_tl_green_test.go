@@ -35,11 +35,11 @@ import (
 // with a scripted outcome per fingerprint (default REVOKED).
 type tlRecordingSluice struct {
 	tlFakeSluice
-	mu       sync.Mutex
-	revoked  []string
-	outcomes map[string]*pb.RevokeClientResponse
+	mu        sync.Mutex
+	revoked   []string
+	outcomes  map[string]*pb.RevokeClientResponse
 	revokeErr error
-	status   *pb.EnrollStatusResponse
+	status    *pb.EnrollStatusResponse
 }
 
 func (f *tlRecordingSluice) RevokeClient(_ context.Context, req *pb.RevokeClientRequest) (*pb.RevokeClientResponse, error) {
@@ -556,7 +556,9 @@ func TestCDR2ECTLG_Recover_ClassifiesEveryOutcome(t *testing.T) {
 			if tc.seed != nil {
 				tc.seed(t)
 			}
-			tlStubStatus(t, func(context.Context, string, string, string) (*pb.EnrollStatusResponse, error) { return tc.status, tc.err })
+			tlStubStatus(t, func(context.Context, string, string, string) (*pb.EnrollStatusResponse, error) {
+				return tc.status, tc.err
+			})
 			body, _ := json.Marshal(map[string]string{"operationId": op})
 			w := httptest.NewRecorder()
 			apiCDREnrollRecover(w, newAdminRequest(http.MethodPost, cdrEnrollRecoverPath, body))
