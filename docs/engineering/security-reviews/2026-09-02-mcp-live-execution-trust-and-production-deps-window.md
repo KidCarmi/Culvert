@@ -13,12 +13,22 @@
 
 ## 1. Executive summary
 
-**No security regressions were found.** This window moves the MCP Agent Security Gateway from
+**No security regressions were found**, and **one new MEDIUM finding (F-1) was**, on a code path
+that is unreachable in a shipped build. This window moves the MCP Agent Security Gateway from
 "live execution is structurally impossible" to "live execution is *composable* and its trust
 model is *issuable*", which is the single largest posture change in the MCP program to date —
 and it is the change class most likely to weaken a fail-closed boundary by accident. Every
 gate I could find is still closed, and several are closed by more than one independent
 mechanism.
+
+F-1 (§3.0, §7.1) is the one exception to "everything is closed": the *new* credential-KEK
+acquisition path accepts a key file from a directory it never validates, so a pre-created
+`0600` 32-byte file is adopted verbatim as the key-encryption key. It is not a regression —
+there was no MCP credential KEK before this window — and it cannot be reached today, but it is
+a hard blocker on the deferred arming deployment, which is what would first seal credential
+material under that key. *(This finding was raised by the Codex review bot on PR #1296 against
+an earlier draft of this report that rated it "low" on an assumption the code does not enforce;
+the analysis was re-done from the source and corrected. The audit trail is preserved in §7.1.)*
 
 The three posture-relevant changes and the state they leave the shipped build in:
 
@@ -80,6 +90,19 @@ the new tests are non-vacuous (§5).
 
 ## 3. Security findings
 
+### 3.0 Summary of findings
+
+| ID | Finding | Severity | Reachable in a shipped build? |
+|---|---|---|---|
+| **F-1** | Credential KEK adopted from an unvalidated parent directory — attacker-chosen key material | **Medium** | **No** (requires `CULVERT_MCP_LIVE_DEPS`; nothing arms; broker composes zero providers) |
+| D-1 | `canary/trust.go` doc claims `live_execution` is unissuable — no longer true | Informational | n/a |
+| D-2 | `mcp_live_startup.go` doc claims no production caller of `composeGatewayLiveTierInto` — no longer true | Informational | n/a |
+
+F-1 is **not a regression** — it is a *new* weakness on a *new*, currently unreachable code path
+(there was no MCP credential KEK before this window). It is recorded here rather than fixed
+because the remedy is a production security-behavior change whose policy choice belongs to an
+owner; §7.1 carries the analysis, the patch, and the required tests.
+
 ### 3.1 No exploitable regression identified
 
 The checklist below records each attack class I actively probed for in this diff and the
@@ -101,7 +124,7 @@ took a comment at its word.
 | **Fail-open on missing credential broker** | Does a credential-required tool reach the upstream with no `Authorization`? | **No — this window *closed* a fail-open.** `run.go` now blocks `profileRef != "" && Broker == nil` with `ReasonCredentialProfileMissing`; the Shadow evaluator was changed in lock-step so its prediction stays equivalent. This is a strict tightening. |
 | **SSRF / MITM on the new upstream client** | Is the production upstream client permissive anywhere? | **No.** `DefaultGatewayPolicy` (https only, no private addresses, no cross-origin redirect, no scheme downgrade), destination pinned at resolve time, `InsecureSkipVerify` never set, per-server SPKI pin is the trust anchor. `prodDestinationResolver` performs no filtering of its own and cannot widen the guard. An unsupported endpoint scheme (`mcp+https://`) fails closed rather than downgrading. |
 | **Secret exposure** | Does anything new log or serve key material, paths, or raw errors? | **No.** `mcpLiveProdStatusView` emits only bounded tokens (`kek_ready`/`kek_unavailable`/`pending`) — never the path or the key. Log lines pass `sanitizeLog`. The gate's denial counters are keyed on a fixed `mcperr.Reason` vocabulary (bounded map). |
-| **Unsafe file / symlink attack** | Can the KEK path be redirected? | **Improved.** `kekPathNotSymlink` (lstat, final component) is a *new* defense-in-depth check the pre-existing `secret.FileProvider` (which uses `os.Stat`/`os.ReadFile`, no `O_NOFOLLOW`) does not have. Config validation additionally requires an absolute, canonical path. Residual TOCTOU recorded in §7.1. |
+| **Unsafe file / untrusted search path (KEK)** | Can the credential KEK be attacker-chosen? | ⚠️ **Partially — this is finding F-1 (MEDIUM), see §3.2 and §7.1.** `kekPathNotSymlink` is a genuine new guard, but it defends only the symlink variant. The parent directory is never validated and `secret.FileProvider` checks mode and size but **never ownership**, so a pre-created `0600` 32-byte file is adopted verbatim — no race, no symlink. Unreachable in a shipped build (nothing arms; the broker composes zero providers), but it is a new weakness this window introduces, not a residual of an old one. |
 | **Unsafe deserialization** | Any new decode path? | **Tightened.** `strictDecodeCanaryRuntimeJSON` and `strictDecodeLiveQuiesceRehearsalJSON` replaced `dec.More()` with a second-decode-must-be-`io.EOF` check, closing a trailing-token acceptance (`{...}}`). Unknown fields already disallowed. |
 | **Unauthenticated information disclosure** | Does the new status reach an unauthenticated surface? | **No.** `mcpLiveTierStatus()` is added only to `apiMCPRollout` (viewer-gated). Nothing was added to `/health`, `/ready`, `/readyz`, or `/healthz`. |
 | **DoS — unbounded work on an admin read** | `buildLiveApprovalBindings` is `O(tenants × tools)`. | **Bounded.** `rollout.Limits.MaxSelectors` caps total selector entries at 256, so the worst case is ~16k in-memory map probes; `MaxCanaryTools`/`MaxCanaryTenants` bound a real Canary at 2 × 1. No I/O in the loop. |
@@ -132,9 +155,9 @@ chain has no production entry point and is pinned by the execution-posture wall
 
 | Dimension | Rating |
 |---|---|
-| **Security severity of findings** | **None** (no exploitable regression). Two informational documentation defects (§6). |
+| **Security severity of findings** | **Medium** — one finding (**F-1**, §7.1: attacker-choosable credential KEK via an unvalidated parent directory), unreachable in a shipped build. No exploitable *regression*. Two informational documentation defects (§6). |
 | **Regression risk of the change itself** | **Medium** — the diff adds a new authority (live trust issuance) and a new code path in front of the irreversible side-effect boundary. Mitigated by four independent fail-closed layers and by a large existing test campaign; further mitigated by the two walls added in §5. |
-| **Residual risk after this review** | **Low** for the shipped default (nothing arms). **Medium** for the deferred real-arming deployment, which must clear §7 before it proceeds. |
+| **Residual risk after this review** | **Low** for the shipped default (nothing arms, and F-1 is unreachable there). **Medium-High** for the deferred real-arming deployment, which must clear §7 — **F-1 is a hard blocker on it**, since arming is what first seals credential material under that KEK. |
 
 ---
 
@@ -215,14 +238,80 @@ so that this review changes no production file.
 
 ## 7. Residual risk
 
-**7.1 KEK path TOCTOU (low).** `acquireProductionKEK` lstats the final component and then opens
-via `secret.FileProvider`, which uses `os.Stat`/`os.ReadFile` with no `O_NOFOLLOW`. The window
-between the lstat and the open is exploitable by anyone who can write the containing directory.
-The code documents the *parent-directory* symlink race; the *final-component* swap race is the
-same class and is not called out. Both require write access to a root-owned data directory, so
-the precondition is already a compromise. A future hardening would push the check into
-`internal/secret` as an `O_NOFOLLOW` open, which would also protect the telemetry KEK (which has
-no symlink guard at all today).
+**7.1 The credential KEK is adopted from an unvalidated directory — attacker-chosen key material
+(MEDIUM; corrected after review).**
+
+> **Correction.** The first version of this section rated this *low* and justified it with
+> "both require write access to a root-owned data directory, so the precondition is already a
+> compromise." That was wrong, and the reasoning was an assumption I did not verify against the
+> code. It was caught by the Codex review bot on PR #1296 and is corrected here. The original
+> framing also described only a symlink TOCTOU; the primary variant needs neither a symlink nor
+> a race.
+
+**The path is unconstrained.** `CULVERT_MCP_LIVE_CREDENTIAL_KEK` is a free absolute path.
+`validateMCPLiveProductionConfig` checks only `IsAbs` and `Clean`-idempotence; nothing confines
+it to `dataDir`, and nothing validates the parent directory's owner or mode. An operator may
+legitimately point it at a shared or group-writable location.
+
+**The provider checks mode and size, never provenance.** `fileProvider.kek()` calls `os.Stat`;
+if the file exists it calls `load()`, which rejects `perm & 0o077 != 0` and a length other than
+`KEKLen`, then returns the bytes. There is **no ownership check** — `fileProvider` carries only
+a `path` field. Empirically confirmed against `internal/secret`: a pre-created `0600`, 32-byte
+file is adopted **verbatim** as the KEK, with `ValidateProvider` returning nil.
+
+**Primary attack — no race, no symlink.** An attacker who can write the parent directory
+pre-creates the KEK file with `0600` and 32 bytes they chose. `kekPathNotSymlink` does not fire
+(it is a regular file). `load()` accepts it. Every credential subsequently sealed by the broker
+is sealed under a key the attacker knows. This defeats the entire point of model-B at-rest
+protection for MCP credential material.
+
+**Secondary attack — the TOCTOU.** `acquireProductionKEK` lstats the final component and
+`secret.FileProvider` then opens with `os.Stat`/`os.ReadFile` and no `O_NOFOLLOW`, so the final
+component can also be swapped for a symlink between the two. The code documents only the
+*parent-directory* race; this final-component swap is the same class and is not called out.
+
+**Exploitability / impact.** Preconditions: write access to the KEK's parent directory, and an
+operator who set `CULVERT_MCP_LIVE_DEPS` — which no shipped node does. Impact if reached:
+attacker-known KEK for credential material at rest (CWE-427 untrusted search path / CWE-732
+incorrect permission assignment; OWASP A04 Insecure Design). **Current exposure is nil** — the
+tier never arms, and the broker composes with *zero* providers, so nothing is sealed under this
+KEK yet. But that is a statement about today's reachability, not about the control, and this
+section exists precisely for the deferred arming deployment.
+
+**Recommended fix** (production change; deliberately not made in this review PR, because
+choosing the acceptable-ownership policy is an owner decision — see §8). Add a parent-directory
+guard beside `kekPathNotSymlink` in `mcp_live_production_deps.go`, so `internal/secret` and the
+telemetry KEK are untouched:
+
+```go
+// kekParentTrusted rejects a KEK whose parent directory is writable by group or other, or is
+// owned by neither the running process nor root — either lets a third party pre-create or swap
+// the key file, which load() would accept (it checks mode and size, never ownership).
+func kekParentTrusted(path string) error {
+    fi, err := os.Stat(filepath.Dir(path))
+    if err != nil { return err }
+    if !fi.IsDir() { return errLiveDepsKEKParentNotDir }
+    if fi.Mode().Perm()&0o022 != 0 { return errLiveDepsKEKParentWritable }
+    st, ok := fi.Sys().(*syscall.Stat_t)
+    if !ok { return errLiveDepsKEKParentUnverifiable } // fail closed
+    if int(st.Uid) != os.Getuid() && st.Uid != 0 { return errLiveDepsKEKParentForeignOwner }
+    return nil
+}
+```
+
+Note the container runs as the non-root `proxy` user (`Dockerfile:99`), so a *root-owned-only*
+rule would be wrong; owned-by-self-or-root with no group/other write is the correct policy and
+mirrors the existing `0600` file doctrine. This closes the primary attack outright and narrows
+the TOCTOU to a directory the attacker cannot write. Pushing an `O_NOFOLLOW` open into
+`internal/secret` would additionally close the residual final-component race and would also
+protect the telemetry KEK, which has no symlink guard at all today — but that changes a shared
+credential path and belongs in its own reviewed change.
+
+**Required tests for the fix:** positive (trusted parent accepted); negative (group-writable,
+other-writable, foreign-owner parent each rejected with its own bounded reason); boundary
+(parent `0755` root-owned accepted, `0775` rejected); malformed (parent missing, parent not a
+directory); regression (a pre-created foreign 0600 32-byte KEK is refused — the test that fails
+against today's tree).
 
 **7.2 Live TTL ceiling is not enforced at rest (low).** `validateLiveInvariantsStored` enforces
 four-eyes and the presence of an expiry for an *active* live record, but not
@@ -246,23 +335,36 @@ identity read as an SPKI digest mismatches). They are correctly tracked as pre-C
 
 **7.5 The deferred real-arming deployment remains the highest-risk future step.** Everything in
 §1 rests on `armLiveTier` having no production caller. Whichever change adds one must be
-reviewed as its own window, and should be gated on: a real credential `Provider` adapter (the
-broker currently composes with **zero** providers registered, which is the honest fail-closed
-posture), an authoritative budget store, and a completed
-`CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL` for that build.
+reviewed as its own window, and should be gated on: **F-1 fixed** (§7.1 — arming is what first
+seals credential material under the KEK, so an attacker-choosable KEK stops being theoretical at
+exactly that moment), a real credential `Provider` adapter (the broker currently composes with
+**zero** providers registered, which is the honest fail-closed posture), an authoritative budget
+store, and a completed `CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL` for that build.
 
 ---
 
 ## 8. Verdict
 
-The window is **safe to ship**. The changes consistently move in the restrictive direction: a new
-fail-closed branch for a credential-required tool with no broker, a stricter JSON end-of-stream
-check in two decoders, a response-profile capability + output-bound check at composition, a
-symlink guard on the KEK path, four-eyes and a hard TTL ceiling enforced at three separate layers
-for the new trust purpose, and a final-boundary generation revalidation that can only make an
-admitted request more restrictive. The one genuinely new authority — issuable `live_execution`
+The window is **safe to ship**, with F-1 tracked as a blocker on the *next* window rather than
+this one. The changes consistently move in the restrictive direction: a new fail-closed branch
+for a credential-required tool with no broker, a stricter JSON end-of-stream check in two
+decoders, a response-profile capability + output-bound check at composition, a symlink guard on
+the KEK path (partial — see F-1), four-eyes and a hard TTL ceiling enforced at three separate
+layers for the new trust purpose, and a final-boundary generation revalidation that can only make
+an admitted request more restrictive. The one genuinely new authority — issuable `live_execution`
 trust — arms nothing on its own and is walled from the Shadow usability projection by a purpose
 predicate that this review has now pinned with a test.
+
+The one thing that must not be lost between windows: **F-1 is invisible today precisely because
+the feature is off.** It will become live in the same change that turns the feature on, which is
+the worst moment to discover it. §7.1 carries a ready-to-apply patch and its test roster.
+
+**A note on this review's own process.** The first draft rated F-1 "low" and supported that with
+"the precondition is already a compromise" — an assumption about directory ownership that the
+code does not enforce and that I did not check. A review bot caught it. The lesson generalises
+beyond this file: a residual-risk rating is a security claim like any other and needs the same
+source-level verification as the findings, or it becomes the place where real issues go to be
+quietly downgraded.
 
 ---
 
