@@ -150,6 +150,30 @@ func (h *mcpLiveProdHolder) snapshot() mcpLiveProdStatus {
 	return h.status
 }
 
+// mcpLiveProdStatusView returns the current production live-deps status as a viewer-safe,
+// bounded map for the read-only tier/health surface (§22). Every value is a machine-readable
+// token or a bool — never a path, error, or secret. The KEK appears ONLY as a readiness
+// token (kek_ready / kek_unavailable / pending), never as key material or a file path.
+func mcpLiveProdStatusView() map[string]any {
+	s := globalMCPLiveProd.snapshot()
+	return map[string]any{
+		"requested": s.Requested,
+		"composed":  s.Composed,
+		"reason":    s.Reason,
+		"dependencies": map[string]any{
+			"kek":                  s.Deps.KEK,
+			"credential_profiles":  s.Deps.ProfileStore,
+			"credential_broker":    s.Deps.Broker,
+			"destination_resolver": s.Deps.Resolver,
+			"destination_policy":   s.Deps.DestinationPol,
+			"trust_roots":          s.Deps.TrustRoots,
+			"upstream_client":      s.Deps.Upstream,
+			"durable_events":       s.Deps.Events,
+			"response_inspection":  s.Deps.ResponseProfile,
+		},
+	}
+}
+
 // prodDestinationResolver adapts a bounded net.Resolver to destination.Resolver. It returns
 // addresses only (LookupNetIP, never a CNAME chain) and honors the caller's context
 // deadline. It performs NO private-address filtering itself: the SSRF rejection is owned by
