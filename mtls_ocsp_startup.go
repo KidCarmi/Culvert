@@ -17,8 +17,48 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"net/http"
+	"sync"
+	"time"
 )
+
+// mtlsClientCertMu guards mtlsClientCertState, which mirrors the outcome of
+// the last upstream-mTLS client-cert load for the admin API. Without this,
+// "no mTLS configured" and "mTLS configured but the cert failed to load /
+// has since expired" are indistinguishable from the GUI — loadMTLSAndOCSP's
+// own doc says a bad cert is "logged" and nothing else, so today the only
+// way to tell them apart is grepping the process log for one startup line.
+var mtlsClientCertMu sync.RWMutex
+var mtlsClientCertState mtlsClientCertStatus
+
+type mtlsClientCertStatus struct {
+	configured bool
+	loaded     bool
+	file       string
+	notAfter   time.Time
+	lastError  string
+}
+
+func recordMTLSClientCertStatus(file string, loaded bool, notAfter time.Time, lastErr string) {
+	mtlsClientCertMu.Lock()
+	defer mtlsClientCertMu.Unlock()
+	mtlsClientCertState = mtlsClientCertStatus{
+		configured: true,
+		loaded:     loaded,
+		file:       file,
+		notAfter:   notAfter,
+		lastError:  lastErr,
+	}
+}
+
+// mtlsClientCertHealth returns the current client-cert status for the
+// admin API (apiOCSPConfig). Read-only; never mutates load behavior.
+func mtlsClientCertHealth() mtlsClientCertStatus {
+	mtlsClientCertMu.RLock()
+	defer mtlsClientCertMu.RUnlock()
+	return mtlsClientCertState
+}
 
 // loadMTLSAndOCSP applies cfg.
 //
@@ -39,8 +79,14 @@ func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 		c, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
 		if err != nil {
 			logger.Printf("mTLS: failed to load client cert: %v", err)
+			recordMTLSClientCertStatus(cfg.ClientCertFile, false, time.Time{}, err.Error())
 		} else {
 			clientCert = &c
+			var notAfter time.Time
+			if leaf, perr := x509.ParseCertificate(c.Certificate[0]); perr == nil {
+				notAfter = leaf.NotAfter
+			}
+			recordMTLSClientCertStatus(cfg.ClientCertFile, true, notAfter, "")
 		}
 	}
 

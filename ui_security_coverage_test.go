@@ -323,6 +323,105 @@ func TestAPIOCSPConfig_POSTTogglesEnabled(t *testing.T) {
 	}
 }
 
+// GET must stay silent about upstream mTLS when it was never configured —
+// the admin panel treats field-absence as "not configured" (see
+// static/index.html's loadCAMgmt).
+func TestAPIOCSPConfig_GETOmitsMTLSFieldsWhenUnconfigured(t *testing.T) {
+	mtlsClientCertMu.Lock()
+	orig := mtlsClientCertState
+	mtlsClientCertState = mtlsClientCertStatus{}
+	mtlsClientCertMu.Unlock()
+	t.Cleanup(func() {
+		mtlsClientCertMu.Lock()
+		mtlsClientCertState = orig
+		mtlsClientCertMu.Unlock()
+	})
+
+	w := httptest.NewRecorder()
+	apiOCSPConfig(w, getReq("/api/ocsp"))
+	assertStatus(t, w, http.StatusOK)
+	m := assertJSON(t, w)
+	if _, ok := m["mtlsClientCertConfigured"]; ok {
+		t.Error("mtlsClientCertConfigured should be omitted when no client cert is configured")
+	}
+}
+
+// GET must surface a failed client-cert load — this is the operator-facing
+// contract the panel banner depends on (a bad/expired upstream mTLS cert
+// must be visible without grepping the process log).
+func TestAPIOCSPConfig_GETSurfacesMTLSLoadFailure(t *testing.T) {
+	mtlsClientCertMu.Lock()
+	orig := mtlsClientCertState
+	mtlsClientCertState = mtlsClientCertStatus{
+		configured: true,
+		loaded:     false,
+		file:       "/etc/culvert/client.crt",
+		lastError:  "x509: malformed certificate",
+	}
+	mtlsClientCertMu.Unlock()
+	t.Cleanup(func() {
+		mtlsClientCertMu.Lock()
+		mtlsClientCertState = orig
+		mtlsClientCertMu.Unlock()
+	})
+
+	w := httptest.NewRecorder()
+	apiOCSPConfig(w, getReq("/api/ocsp"))
+	assertStatus(t, w, http.StatusOK)
+	m := assertJSON(t, w)
+	if configured, _ := m["mtlsClientCertConfigured"].(bool); !configured {
+		t.Error("mtlsClientCertConfigured should be true")
+	}
+	if loaded, _ := m["mtlsClientCertLoaded"].(bool); loaded {
+		t.Error("mtlsClientCertLoaded should be false")
+	}
+	if m["mtlsClientCertLastError"] != "x509: malformed certificate" {
+		t.Errorf("mtlsClientCertLastError = %v, want the recorded load error", m["mtlsClientCertLastError"])
+	}
+	if _, ok := m["mtlsClientCertNotAfter"]; ok {
+		t.Error("mtlsClientCertNotAfter should be omitted when the cert never loaded")
+	}
+}
+
+// GET must surface expiry once the cert is loaded, so an admin can catch an
+// impending expiry before it silently drops upstream mTLS.
+func TestAPIOCSPConfig_GETSurfacesMTLSExpiry(t *testing.T) {
+	notAfter := time.Now().Add(72 * time.Hour)
+	mtlsClientCertMu.Lock()
+	orig := mtlsClientCertState
+	mtlsClientCertState = mtlsClientCertStatus{
+		configured: true,
+		loaded:     true,
+		file:       "/etc/culvert/client.crt",
+		notAfter:   notAfter,
+	}
+	mtlsClientCertMu.Unlock()
+	t.Cleanup(func() {
+		mtlsClientCertMu.Lock()
+		mtlsClientCertState = orig
+		mtlsClientCertMu.Unlock()
+	})
+
+	w := httptest.NewRecorder()
+	apiOCSPConfig(w, getReq("/api/ocsp"))
+	assertStatus(t, w, http.StatusOK)
+	m := assertJSON(t, w)
+	if loaded, _ := m["mtlsClientCertLoaded"].(bool); !loaded {
+		t.Error("mtlsClientCertLoaded should be true")
+	}
+	if m["mtlsClientCertNotAfter"] != notAfter.UTC().Format(time.RFC3339) {
+		t.Errorf("mtlsClientCertNotAfter = %v, want %v", m["mtlsClientCertNotAfter"], notAfter.UTC().Format(time.RFC3339))
+	}
+	// Tolerate the sub-hour of wall-clock time between setting notAfter
+	// above and the daysUntil() computation inside the handler.
+	if days, ok := m["mtlsClientCertDaysRemaining"].(float64); !ok || (int(days) != 2 && int(days) != 3) {
+		t.Errorf("mtlsClientCertDaysRemaining = %v, want 2 or 3", m["mtlsClientCertDaysRemaining"])
+	}
+	if _, ok := m["mtlsClientCertLastError"]; ok {
+		t.Error("mtlsClientCertLastError should be omitted on a healthy load")
+	}
+}
+
 func TestAPIOCSPConfig_POSTBadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/ocsp", strings.NewReader("not json"))

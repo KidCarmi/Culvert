@@ -46,11 +46,18 @@ func resetMTLSOCSPGlobals(t *testing.T) {
 	// Clear at start so tests don't inherit state from a prior test.
 	upstreamOpTLSCfg = nil
 	upstreamTransportWriteMu.Unlock()
+	mtlsClientCertMu.Lock()
+	origCertStatus := mtlsClientCertState
+	mtlsClientCertState = mtlsClientCertStatus{}
+	mtlsClientCertMu.Unlock()
 	t.Cleanup(func() {
 		upstreamTransportPtr.Store(origPtr)
 		upstreamTransportWriteMu.Lock()
 		upstreamOpTLSCfg = origOpTLS
 		upstreamTransportWriteMu.Unlock()
+		mtlsClientCertMu.Lock()
+		mtlsClientCertState = origCertStatus
+		mtlsClientCertMu.Unlock()
 		if origOCSP {
 			globalOCSP.Enable()
 		} else {
@@ -219,6 +226,75 @@ func TestLoadMTLSAndOCSP_EnablesOCSP(t *testing.T) {
 	loadMTLSAndOCSP(mtlsOCSPStartupConfig{OCSPCheck: true})
 	if !globalOCSP.Enabled() {
 		t.Error("OCSP should be enabled after loadMTLSAndOCSP")
+	}
+}
+
+func TestLoadMTLSAndOCSP_RecordsClientCertHealthOnSuccess(t *testing.T) {
+	resetMTLSOCSPGlobals(t)
+	ensureMTLSOCSPTestLogger(t)
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
+
+	dir := t.TempDir()
+	certPath, keyPath := writeTestClientCert(t, dir)
+	loadMTLSAndOCSP(mtlsOCSPStartupConfig{ClientCertFile: certPath, ClientKeyFile: keyPath})
+
+	health := mtlsClientCertHealth()
+	if !health.configured || !health.loaded {
+		t.Fatalf("expected configured+loaded, got %+v", health)
+	}
+	if health.file != certPath {
+		t.Errorf("file: got %q, want %q", health.file, certPath)
+	}
+	if health.lastError != "" {
+		t.Errorf("lastError: expected empty, got %q", health.lastError)
+	}
+	if health.notAfter.IsZero() {
+		t.Error("notAfter should be populated from the leaf certificate")
+	} else if wantAfter := time.Now().Add(time.Hour); health.notAfter.After(wantAfter.Add(time.Minute)) || health.notAfter.Before(wantAfter.Add(-time.Minute)) {
+		t.Errorf("notAfter: got %v, want ~%v (writeTestClientCert's NotAfter template)", health.notAfter, wantAfter)
+	}
+}
+
+func TestLoadMTLSAndOCSP_RecordsClientCertHealthOnFailure(t *testing.T) {
+	resetMTLSOCSPGlobals(t)
+	ensureMTLSOCSPTestLogger(t)
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
+
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "bad.crt")
+	keyPath := filepath.Join(dir, "bad.key")
+	if err := os.WriteFile(certPath, []byte("not a pem"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte("not a pem"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	loadMTLSAndOCSP(mtlsOCSPStartupConfig{ClientCertFile: certPath, ClientKeyFile: keyPath})
+
+	health := mtlsClientCertHealth()
+	if !health.configured {
+		t.Fatal("expected configured=true even on a failed load")
+	}
+	if health.loaded {
+		t.Error("expected loaded=false for an unparsable cert")
+	}
+	if health.lastError == "" {
+		t.Error("expected lastError to be populated")
+	}
+	if !health.notAfter.IsZero() {
+		t.Errorf("notAfter should stay zero on a failed load, got %v", health.notAfter)
+	}
+}
+
+func TestLoadMTLSAndOCSP_ClientCertHealthUnconfiguredByDefault(t *testing.T) {
+	resetMTLSOCSPGlobals(t)
+	ensureMTLSOCSPTestLogger(t)
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
+	loadMTLSAndOCSP(mtlsOCSPStartupConfig{})
+
+	health := mtlsClientCertHealth()
+	if health.configured {
+		t.Errorf("expected configured=false with no cert files set, got %+v", health)
 	}
 }
 
