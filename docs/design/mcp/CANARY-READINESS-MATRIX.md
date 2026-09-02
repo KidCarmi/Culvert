@@ -224,11 +224,12 @@ Every one is a **separately-reviewed activation**, not a config change:
    INSUFFICIENT — `principalCount` sums `Principals`+`Clients`+`Agents`, so one shared client/agent with
    no `Principals` would satisfy it while leaving the principal dimension unrestricted (review §10);
    (f) a
-   **per-physical-invocation budget** — an idempotent read retries up to `MaxReadRetries` times
-   outside the single budget reservation, so one budgeted request can send the POST ~3×. With today's
-   code the ONLY workable remedy is to disable transport retries; charging each attempt or a dedup
-   scheme first requires ADDING a unique-per-reservation, stable-across-retries key (the current
-   `WireID` is per-server, so dedup by it collapses the whole corpus, not just retries — review §9/§14);
+   **per-physical-invocation budget (CODE CHANGE)** — an idempotent read retries up to `MaxReadRetries`
+   times outside the single budget reservation, so one budgeted request can send the POST ~3×.
+   Retry-disablement is NOT representable today (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects
+   negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code:
+   make retry-disablement representable + wire a retry-free client, OR charge each attempt, OR add a
+   unique-per-reservation key (the per-server `WireID` cannot be used for dedup — review §9/§14);
    a **credential-selection resolution** (verify a matched rule with no `CredentialProfile`, or a
    working credential provider/path — the production broker has zero providers, review §4); and (g)
    two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight

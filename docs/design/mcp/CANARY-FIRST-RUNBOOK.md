@@ -81,7 +81,7 @@ set is empty. This requires the separately-reviewed activation to have:
 | approval | **1** `live_execution` ToolApproval — four-eyes, ≤24h TTL, exact target |
 | operation class | **read/discovery only** (Culvert's own classification, not `readOnlyHint`) |
 | credential | synthetic/non-production credential **only if the tool requires one** |
-| request count | bounded by the machine-enforced `canary.Budget` (total/rate/concurrency/window) — but the budget bounds RESERVATIONS, not physical POSTs: `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries` times per reservation (~3 physical POSTs), so **transport read-retries MUST be disabled** for this Canary before the count is truly bounded (review §9/§14) |
+| request count | bounded by the machine-enforced `canary.Budget` (total/rate/concurrency/window) — but the budget bounds RESERVATIONS, not physical POSTs: `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries` times per reservation (~3 physical POSTs). Retry-disablement is **not representable today** (`NewLimits` coerces `MaxReadRetries==0`→2, rejects negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so bounding physical POSTs is a **required CODE-CHANGE prerequisite**, not an operator config (review §9/§14) |
 | controls | immediate kill switch + Canary→Shadow/Observe rollback rehearsed first |
 
 ## Procedure

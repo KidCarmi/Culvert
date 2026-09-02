@@ -240,11 +240,15 @@ request can send the POST up to `1 + MaxReadRetries` times (≈3). A pre-respons
 AFTER the server already received and processed the POST, so those retries are REAL additional
 invocations. Consequently "N allowed / N+1 impossible" bounds reservations, NOT upstream side effects,
 and the §14 executed==received reconciliation would diverge by retry amplification. For a First
-Canary this must be closed. With today's code the ONLY workable remedy is to **disable transport
-retries** so each reservation maps to exactly one physical invocation; charging each attempt or a
-dedup scheme first requires ADDING a unique-per-reservation, stable-across-retries key — the current
-`WireID` is per-server (`run.go:112`), so dedup by it collapses the whole corpus, not just retries
-(§14/§26). Not GO until then.
+Canary this must be closed, and **every option is a CODE CHANGE — retry-disablement is not
+representable today** (Codex P1, verified). `newProductionUpstreamClient` hard-codes
+`upstreamclient.DefaultLimits()` (2 retries), and `NewLimits` COERCES `MaxReadRetries == 0` to the
+default `2` and REJECTS negatives (`limits.go:98-99,107`), so no config value disables retries.
+Closing this requires code: make retry-disablement representable (an explicit zero/sentinel or a
+no-retry flag) and wire a retry-free `Limits` into the Canary's production client — OR charge each
+physical attempt to the budget — OR add a unique-per-reservation, stable-across-retries key (the
+current `WireID` is per-server, `run.go:112`, so dedup by it collapses the whole corpus, not just
+retries; §14/§26). Not GO until then.
 
 ---
 
@@ -661,14 +665,13 @@ verdict FAILED.)
   `principalCount` sums Principals+Clients+Agents, so one shared client/agent with no Principals would
   satisfy it while leaving the principal dimension unrestricted; and `ValidateScope` permits up to two
   of each (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate enforces none of this (§10);
-- for the First Canary, **disable transport read-retries** so one budget reservation maps to exactly
-  one physical upstream invocation — `upstreamclient.Call` otherwise retries an idempotent read up to
-  `MaxReadRetries` times outside the single budget `Reserve`, so one budgeted request can hit the
-  server up to ~3 times (§9), breaking both the request-count bound and the §14 count reconciliation.
-  Charging each physical attempt to the budget, or a correlation/dedup scheme, are alternatives ONLY
-  with a code change: the current wire ID is per-server (`run.go:112`), so dedup by it would collapse
-  the whole corpus, not just retries — a unique-per-reservation, stable-across-retries key must be
-  added first (§14);
+- **[code change]** bound PHYSICAL upstream invocations to the budget — `upstreamclient.Call` retries
+  an idempotent read up to `MaxReadRetries` times outside the single budget `Reserve`, so one budgeted
+  request can hit the server up to ~3 times (§9). Disabling retries is NOT currently representable:
+  `NewLimits` coerces `MaxReadRetries==0` to `2` and rejects negatives, and `newProductionUpstreamClient`
+  hard-codes `DefaultLimits()` — so this requires code to make retry-disablement representable and wire
+  a retry-free `Limits` in, OR to charge each physical attempt to the budget, OR to add a
+  unique-per-reservation, stable-across-retries key (the per-server `WireID` cannot be used for dedup, §14);
 - **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
   `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
   `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
