@@ -256,7 +256,9 @@ test("admin: enrollment against an unreachable engine is UNRESOLVED (operation n
     const opMatch = /operation ([A-Za-z0-9._-]{16,64})/.exec(body);
     expect(opMatch).not.toBeNull();
     const operationId = opMatch?.[1] ?? "";
-    await expect(page.getByText("Enrollment outcome unknown")).toBeVisible();
+    await expect(
+      page.getByText("Enrollment outcome unknown").first(),
+    ).toBeVisible();
     await expect(page.getByText(operationId).first()).toBeVisible();
     await expect(page.getByLabel("Enrollment token (single-use)")).toHaveValue(
       "",
@@ -270,7 +272,9 @@ test("admin: enrollment against an unreachable engine is UNRESOLVED (operation n
     // and a reload; the token is in no storage and not in the DOM.
     await page.reload();
     await page.getByRole("tab", { name: "Instances" }).click();
-    await expect(page.getByText("Enrollment outcome unknown")).toBeVisible();
+    await expect(
+      page.getByText("Enrollment outcome unknown").first(),
+    ).toBeVisible();
     const residue = await page.evaluate((key: string) => {
       const stores: string[] = [];
       for (let i = 0; i < sessionStorage.length; i++) {
