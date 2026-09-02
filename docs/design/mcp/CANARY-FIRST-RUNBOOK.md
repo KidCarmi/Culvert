@@ -115,6 +115,13 @@ out_of_scope_execution · scope_escape · tool_fingerprint_drift · server_ident
 outcome_evidence_loss · credential_safety_failure · budget_exhausted · elevated_error_rate ·
 latency_pathology · unexpected_upstream_response.
 
+> **Current wiring (do not assume all are automatic).** As of this baseline only
+> `budget_exhausted` and `scope_escape` auto-trip the whole Canary (from `reserveCanaryExecution`);
+> `tool_fingerprint_drift`/`server_identity_drift` only DENY the offending request, `outcome_evidence_loss`
+> only increments a metric, and `unexpected_upstream_response`/`elevated_error_rate`/`latency_pathology`
+> plus witness reconciliation have no automatic tripper yet. Wiring the rest is a pre-Canary
+> product-defect prerequisite — see `docs/operator/mcp-first-controlled-canary-review.md` §16.
+
 ## Explicit non-goals
 
 - No customer traffic, no production credential, no production upstream.

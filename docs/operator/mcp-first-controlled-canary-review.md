@@ -103,9 +103,15 @@ executor takes `callUpstream("")` — the broker's `Plan`/`Materialize` are neve
 a no-credential tool: providers are consulted only inside `Broker.Materialize`, which this path
 never reaches. (A credential-REQUIRING tool with no broker fails closed with
 `ReasonCredentialProfileMissing` at `run.go:135`; with the zero-provider production broker it fails
-closed inside `Broker.Plan`.) **No credential Provider is implemented in this review.** If the
-chosen tool required any credential, the verdict would be NO-GO on this axis; the specified tool
-requires none.
+closed inside `Broker.Plan`.) **No credential Provider is implemented in this review.**
+
+**Correction (Codex P2).** `CredentialProfile` is a policy-decision *obligation*
+(`policy/obligation.go:80`), not an intrinsic tool property. The no-credential *code path* is proven
+safe (empty `profileRef` ⇒ broker skipped ⇒ no `Authorization`). But the experiment does not name a
+concrete server/tool AND its matched policy rule (it cannot — no server exists, §5), so the review
+CANNOT yet establish that the proposed request selects the empty-profile branch. Credential
+readiness is therefore an **additional unresolved prerequisite**, not a settled YES: it is
+verifiable only once the exact tool and its matched rule are fixed against a provisioned target.
 
 ---
 
@@ -147,9 +153,18 @@ Verified: `internal/mcp/runtime/policy.go:270-291` derives `OperationClass` from
 asserting it is NOT used). Read-first is enforced twice: the scope fact `ScopeReadFirst`
 (`scope.go:274`, necessary-but-not-sufficient) and the request-time boundary gate
 `canary.IsReadFirstOperation` (`operation.go:25-33`) wired at `mcp_live_gate.go:96-100`. A `tools/call`
-defaulting to `OpWrite` is refused read-first at the boundary. For a First Canary this constrains
-the harmless operation to a discovery-class method (or a tool a finer classifier proves `OpRead`);
-that is a further constraint on §5's yet-to-exist server, not an independent blocker.
+defaulting to `OpWrite` is refused read-first at the boundary.
+
+**Blocker (Codex P1) — the read-first classifier makes the "one exact harmless tool call"
+unexecutable today.** `policyOperation` classifies ONLY `tools/list` as `OpDiscovery`; every
+`tools/call` is `OpWrite`, which the live gate rejects at its read-first check. So a "one exact
+tool" call — the experiment's §3 shape — cannot pass read-first. The only read-first-admissible
+method, `tools/list`, resolves no specific tool, so `liveGateInput` supplies an empty tool
+name/fingerprint and the exact-tool live-approval revalidation (`mcpLiveTrustRevalidate`) fails.
+Consequently NO request can execute the claimed one exact harmless tool even after the §5 target and
+§13 activation inputs are provided: a **shipped finer operation classifier** (proving a specific
+tool `OpRead`) OR a **separately designed discovery-trust path** is an additional, independent
+prerequisite. This is a first-class blocker in §26, not "a further constraint."
 
 ---
 
@@ -252,25 +267,43 @@ bypassing. This is a second, independent reason the experiment is not authorizab
 
 ## §14 Independent upstream witness
 
-Reconciliation plan: Culvert's executed count (`ExecOutput.Executed`, set only on real execution,
-`run.go`) MUST equal the controlled server's independently-recorded received count MUST equal the
-expected count. Any mismatch is a whole-Canary breach (`outcome_evidence_loss` /
-`unexpected_upstream_response`) → auto-stop. The witness is the §5 server's own invocation log,
-which does not exist today; the reconciliation procedure is specified for when it does.
+Reconciliation plan: Culvert's executed count MUST equal the controlled server's
+independently-recorded received count MUST equal the expected count. The witness is the §5 server's
+own invocation log, which does not exist today; the reconciliation procedure is specified for when
+it does.
+
+**Correction (Codex P1) — reconciliation and its breach are NOT automatic.** `outcome_evidence_loss`
+and `unexpected_upstream_response` are declared abort codes (`abort.go`) but NO production code
+reconciles an independent witness or trips either. So a witness divergence would NOT auto-stop the
+Canary — it would have to be caught by an operator out of band. This is a product-defect
+prerequisite (see §16), and it also means the "any mismatch → auto-stop" property this section would
+rely on is **not present today**. Additionally, `ExecOutput.Executed` is an in-memory return value,
+not a durable event field (see §15), so Culvert's own "executed count" is not reconstructible from
+the durable record alone.
 
 ---
 
 ## §15 Evidence plan (no secrets)
 
-Per attempted request, the durable event carries: correlation ID + digest (`events/decide.go`),
-action + reason code + matched rule ID + policy revision + operation class + execution state +
-`PolicySnapshotHash`, identity (tenant/principal/type/client/server/tool + tool fingerprint), the
-live approval binding, the budget reservation outcome, the upstream outcome + response-inspection
-result, `Executed` bool, and the final reason. **No secrets, no `Authorization`, no credential
-material**: `DecisionFacts` is a typed-facts-only API (a secret cannot reach it by construction),
-`backstopScan` marshals and scrubs every event and rejects on any secret pattern
-(`ReasonEventSecretPresent`), and credential evidence is a digest only (`events/gate.go:52`). GO as
-a mechanism.
+**No-secrets property — GO.** `DecisionFacts` is a typed-facts-only API (a secret cannot reach it by
+construction, `events/decide.go:10-15`), `backstopScan` marshals and scrubs every event and rejects
+on any secret pattern (`ReasonEventSecretPresent`, `decide.go:138-147`), and credential evidence is
+a digest only (`events/gate.go:52`). No `Authorization` header value ever enters a fact. This axis
+holds.
+
+**Correction (Codex P1) — the durable evidence inventory was OVERstated.** Every committed event is
+a single `Phase: PhaseDecision` envelope (`decide.go:90-110`) carrying only: correlation ID + digest,
+`SnapshotHash`, and the `Identity` / `Decision` / `Inspection` / `Credential` evidence structs.
+There is **no** `OutcomeEvidence`, and the following claimed fields are NOT carried as distinct
+durable evidence: the live approval binding, the budget reservation outcome, request duration, and a
+durable `Executed` flag (`Executed` is an in-memory `ExecOutput` field only). Worse, the post-call
+outcome commit runs ONLY on the success path (`finishUpstream:281` calls `CommitDecision(outcomeFacts)`);
+the upstream-error, nil-response, and DLP-block paths return through `e.blocked` and commit **no**
+post-call event, and an ordinary outcome-commit failure is only metered
+(`ObserveOutcomeEvidenceLoss`, `run.go:282`), never tripped. The pre-call decision commits durably
+before the side effect (good), but the OUTCOME record is incomplete and success-only. Consequence
+for §18: the durable record alone cannot always tell an operator whether the upstream invocation
+occurred. This is a product-defect prerequisite (§26), NOT a GO mechanism.
 
 ---
 
@@ -281,13 +314,23 @@ Whole-Canary breaches (a single occurrence stops the Canary): `out_of_scope_exec
 `credential_safety_failure`, `budget_exhausted`, `elevated_error_rate`, `latency_pathology`,
 `unexpected_upstream_response` (`abort.go:54-86`). The controller latches monotonically and
 generation-bound; an unknown code fails closed to `AbortCanary` (`abort_control.go:35-40`).
-`budget_exhausted`/`scope_escape` are tripped from the reservation path (`mcp_canary_runtime.go:388-395`).
-**Applicability note (not fabricated):** the two THRESHOLD-based conditions — `elevated_error_rate`
-and `latency_pathology` — are present in the taxonomy but their runtime threshold wiring to an
-automatic tripper is not established in this build the way `budget_exhausted`/`scope_escape` are;
-they would rely on operator/observer-driven trips today. This is recorded as an applicability gap
-for the eventual experiment, not fabricated as an automatic control. The scope/budget/drift/kill
-controls ARE automatic.
+**Correction (Codex P1) — most whole-Canary trips are NOT wired to an automatic tripper.** A
+repository-wide search finds exactly TWO production `aborter.Trip` sites in the execution path, both
+in `reserveCanaryExecution` (`mcp_canary_runtime.go:391,394`): `budget_exhausted` and `scope_escape`.
+The remaining `AbortCanary` codes are declared in the taxonomy but NOT auto-tripped:
+- `tool_fingerprint_drift` / `server_identity_drift`: tool drift only DENIES the single request at
+  `preCallGuard` (`errToolDriftedBeforeCall`); it does not trip the whole Canary.
+- `outcome_evidence_loss`: only increments a metric (`ObserveOutcomeEvidenceLoss`, `run.go:282`).
+- `unexpected_upstream_response`: nothing reconciles the witness (see §14); no auto-trip.
+- `elevated_error_rate` / `latency_pathology`: no threshold tripper wired.
+
+So after an outcome-commit failure or a witness divergence, LATER requests could still reach the
+upstream instead of the Canary auto-stopping. The automatic controls that DO hold are the budget
+ceiling, the identity/blast-radius cap (`scope_escape`), the per-request kill re-read, per-request
+tool-drift denial, and manual demotion/kill. The gap is a **product-defect prerequisite** (§26): the
+whole-Canary auto-abort must be wired for drift, evidence loss, unexpected response, and the two
+threshold conditions before a First Canary is authorized. My earlier "scope/budget/drift/kill
+controls ARE automatic" claim was wrong for drift and for the evidence/response conditions.
 
 ---
 
@@ -309,8 +352,17 @@ authoritative state and clamps any live mode to Disabled on failure (`mcp_rollou
 canary runtime disarms on build-version or generation mismatch (`mcp_canary_runtime.go:527-586`);
 `reconcileCanaryRuntimeAfterRestore` disarms an armed runtime with no live mode; the live tier
 forces composed/unarmed (`disarmForRestart`). The monotonic generation and monotonic budget `total`
-are preserved, so an old generation/budget cannot become fresh allowance, and a pre-crash upstream
-invocation is determinable from the durable decision/outcome events (§15). GO as a mechanism.
+are preserved, so an old generation/budget cannot become fresh allowance. **No silent re-arm** and
+**no stale allowance** are GO.
+
+**Correction (Codex P1) — pre-crash invocation is NOT reliably determinable.** As established in
+§15, the only durable pre-side-effect record is the `PhaseDecision` event (`ExecutionState:"executing"`);
+the post-call outcome event is committed only on the success path. A crash after the controlled
+server receives the request but before/around the success-path outcome commit leaves only the
+"executing" record — so "did the upstream invocation occur before the crash?" is NOT always
+answerable from the durable events. This contradicts the review-contract §18 requirement and is part
+of the durable-evidence product-defect prerequisite (§26). The re-arm/allowance guarantees hold; the
+determinability guarantee does not, today.
 
 ---
 
@@ -345,20 +397,26 @@ Attacks considered and where each is stopped:
   last check (`preCallGuard`), paramount over drift/demotion.
 - *Get a no-credential call to leak a header* → `callUpstream("")` sets no `Authorization`.
 
-No "probably safe" path was left open. Every concern maps to an existing gate. **The one concern
-that does NOT resolve to a gate is the absence of a supported-trust-model controlled target (§5) and
-the unreachable activation preflight (§13)** — these become the blockers, not residual risks.
+No "probably safe" path was left open for the attacks that DO resolve to a gate. **The concerns that
+do NOT resolve to a gate become the blockers, not residual risks (§26):** (a) no supported-trust-model
+controlled target (§5); (b) the unreachable activation preflight (§13); (c) the read-first classifier
+refuses the one-exact-tool call and discovery cannot bind an exact tool (§6, Codex P1); (d) most
+whole-Canary aborts are declared-but-unwired, so a witness divergence or evidence loss does not
+auto-stop later requests (§14/§16, Codex P1); and (e) the durable outcome record is incomplete and
+success-only, so a pre-crash invocation is not always determinable (§15/§18, Codex P1).
 
 ---
 
 ## §21 No code changes during the eventual experiment
 
-No product code is changed by this review (documentation-only; see §23). The connectivity gap is a
-documented, intentional, fail-closed pre-Canary capability gap, explicitly "NOT a defect"
-(`mcp_live_production_deps.go:293-309`), so §21's "if a product defect is found, stop and fix in a
-dedicated PR" is not triggered. If the eventual experiment reveals a defect, it must be fixed in a
-dedicated PR, Codex-reviewed and merged, and this review re-run against the new exact SHA — no
-hot-fixing during a live experiment.
+No product code is changed by this review (documentation-only; see §23). The connectivity gap (§5)
+is a documented, intentional, fail-closed pre-Canary capability gap, explicitly "NOT a defect"
+(`mcp_live_production_deps.go:293-309`). **However, this review DID identify genuine product-defect
+prerequisites** (Codex adversarial round, §24): the incomplete whole-Canary auto-abort wiring
+(§14/§16) and the incomplete/success-only durable outcome evidence (§15/§18). Per §21, these are
+RECORDED here and must each be fixed in a **dedicated, Codex-reviewed PR** — not in this
+documentation PR and never as a hot-fix during a live experiment — after which this review is re-run
+against the new exact SHA. This is a further reason no Canary may be authorized from the current SHA.
 
 ---
 
@@ -379,11 +437,26 @@ semantics were changed. Because the verdict is BLOCKED (not PASS), no implementa
 ## §24 Adversarial review
 
 The re-derivation and this artifact were stress-tested for any path by which the exact experiment
-could cause more, different, or less-observable side effects than claimed (§20). The dominant
-adversarial finding is that the *only documented* controlled target is unreachable fail-closed on
-three axes and would tempt an operator toward `AllowPrivate` / a scheme hack / a SPIFFE shim — each
-of which is a design change this review forbids. That finding is what fixes the verdict at BLOCKED
-rather than GO.
+could cause more, different, or less-observable side effects than claimed (§20), including a Codex
+adversarial review round (PR #1292) that surfaced four findings, all accepted after verification
+against the code:
+
+- **P1 — read-first classifier (§6):** a `tools/call` is `OpWrite` and refused read-first; discovery
+  (`tools/list`) cannot bind one exact tool for the live-approval revalidation. Confirmed.
+- **P2 — credential conditional (§4):** `CredentialProfile` is a policy obligation, so no-credential
+  status is unverifiable until the exact tool + rule are fixed. Corrected.
+- **P1 — durable outcome evidence (§15/§18):** every event is a `PhaseDecision` with no
+  `OutcomeEvidence`; the outcome commit is success-only, so a pre-crash invocation is not always
+  determinable. Confirmed against `events/decide.go` + `execution/run.go`.
+- **P1 — unwired whole-Canary aborts (§14/§16):** only `budget_exhausted`/`scope_escape` auto-trip;
+  drift/evidence-loss/unexpected-response/threshold conditions do not. Confirmed against
+  `mcp_canary_runtime.go`.
+
+The dominant adversarial finding remains that the only documented controlled target is unreachable
+fail-closed on three axes and would tempt an operator toward `AllowPrivate` / a scheme hack / a
+SPIFFE shim — each a design change this review forbids. Codex's findings did not weaken the verdict;
+they ADDED independent blockers and two product-defect prerequisites, reinforcing BLOCKED (see the
+BLOCKED-vs-FAILED note in §26).
 
 ---
 
@@ -392,19 +465,22 @@ rather than GO.
 | Criterion | Status |
 |---|---|
 | Exactly one node / tenant / principal / server / tool / fingerprint, read-only, synthetic | Specifiable — YES |
-| Tool requires no production credential | YES (§4) |
+| Tool requires no production credential | **CONDITIONAL — unverifiable until tool + rule fixed (§4)** |
+| A read-first-admissible one-exact-tool operation exists | **NO — classifier refuses `tools/call`; discovery cannot bind one tool (§6)** |
 | Supported upstream trust model for a controlled server available today | **NO** (§5) |
 | Shadow trust ≠ live trust proven; live approval does not activate Canary | YES (§8) |
 | Tight scope validated; every near-miss outside scope | YES (§10) |
 | Tiny budget; N allowed / N+1 impossible | YES (§9) |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
-| Independent upstream witness reconcilable | Depends on §5 server — NOT AVAILABLE |
+| Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
-| Automatic abort + manual kill/rollback currently available | Mechanisms YES; not live-exercisable (§16/§17) |
+| Durable record determines whether a pre-crash upstream invocation occurred | **NO — outcome evidence success-only (§15/§18)** |
+| Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **NO — only budget/scope auto-trip (§16)** |
 | Crash/restart does not silently re-arm/resume | YES (§18) |
-| Unresolved P0/P1 finding | None found — the blockers are intentional capability gaps, not defects |
+| Unresolved P0/P1 finding | **YES — two product-defect prerequisites (auto-abort wiring, durable outcome evidence), each a dedicated PR (§21/§24)** |
 
-Two mandatory criteria are NO. A GO is therefore forbidden.
+Multiple mandatory criteria are NO and two P1 product-defect prerequisites are open. A GO is
+therefore forbidden.
 
 ---
 
@@ -412,25 +488,54 @@ Two mandatory criteria are NO. A GO is therefore forbidden.
 
 ### `FIRST CONTROLLED CANARY REVIEW: BLOCKED — NO SAFE FIRST CANARY TARGET`
 
-The Canary architecture is sound and fail-closed across preflight, scope, trust firewall, budget,
-abort, evidence, kill/rollback, and crash-restart. It is BLOCKED — not FAILED — because two
-intentional, fail-closed prerequisites are unmet today:
+The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
+re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
+assembled today on **five independent axes** — the first two are intentional capability gaps, the
+last three are prerequisites/defects the Codex adversarial round (§24) surfaced and this review
+verified against the code:
 
-1. **No controlled upstream is reachable under the supported production trust model (§5).** The only
+1. **No controlled upstream reachable under the supported production trust model (§5).** The only
    documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
    `*.qual.svc`), and identity (SPIFFE). No public-HTTPS controlled MCP server with a base64 SHA-256
    SPKI pin, a plain `https://` endpoint, and one harmless read tool is provisioned.
 2. **The production activation preflight cannot return `Ready:true` (§13).** The live tier is unarmed
    by default and `productionCanaryActivationInputs` leaves `ServerUsable`/`ToolFingerprintCurrent`/
    `Budget` fail-closed.
+3. **The read-first classifier refuses the one-exact-tool call (§6).** `tools/call` is `OpWrite`
+   (refused read-first); `tools/list` binds no exact tool for the live-approval revalidation. A
+   finer classifier or a designed discovery-trust path is required.
+4. **Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.** Only
+   `budget_exhausted`/`scope_escape` auto-trip; drift, evidence loss, unexpected upstream response,
+   and the threshold conditions do not, and nothing reconciles the independent witness — so a
+   divergence would not auto-stop later requests.
+5. **Durable outcome evidence is incomplete/success-only (§15/§18) — a product defect.** A pre-crash
+   upstream invocation is not always determinable from the durable record.
 
-**To unblock (each a separately-reviewed change, none performed here):** provision a public-HTTPS,
-non-production, independently-recording controlled MCP server exposing exactly one harmless
-read/discovery tool, register it with a plain `https://` endpoint and its real base64 SHA-256 SPKI
-pin; OR land the recorded connectivity work (endpoint-scheme translation at the execution boundary
-and/or an identity-type-aware verifier) plus a per-target private-destination policy in a dedicated,
-Codex-reviewed PR; AND wire an authoritative `ServerUsable`/`FingerprintCurrent`/`Budget` input path
-for the activation preflight; AND arm the live tier on the controlled node via the governed path.
+**Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
+experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
+execute — nothing is reachable (axis 1), no Canary can activate (axis 2), and no admissible one-tool
+operation exists (axis 3). Axes 4 and 5 are unmet *prerequisites* (missing auto-abort wiring,
+incomplete durable evidence), not a live unsafe path, precisely because axes 1–3 mean zero real side
+effects are possible from this SHA. So the honest label is BLOCKED — a safe first experiment cannot
+be *assembled*, on five independent axes — and axes 4–5 must be closed as dedicated PRs before any
+authorization, reinforcing rather than weakening that verdict. (Had a target been reachable and a
+Canary activatable, axes 4–5 would have made the verdict FAILED.)
+
+**To unblock (each a separately-reviewed change, none performed here):**
+- provision a public-HTTPS, non-production, independently-recording controlled MCP server exposing
+  exactly one harmless read/discovery tool, registered with a plain `https://` endpoint and its real
+  base64 SHA-256 SPKI pin; OR land the recorded connectivity work (endpoint-scheme translation and/or
+  an identity-type-aware verifier + a per-target private-destination policy) in a dedicated PR;
+- wire an authoritative `ServerUsable`/`FingerprintCurrent`/`Budget` input path for the activation
+  preflight, and arm the live tier on the controlled node via the governed path;
+- ship a finer operation classifier (or a designed discovery-trust path) so exactly one harmless
+  operation is read-first-admissible AND bindable to one exact tool;
+- **[dedicated PR]** wire whole-Canary auto-abort for `tool_fingerprint_drift`,
+  `server_identity_drift`, `outcome_evidence_loss`, `unexpected_upstream_response`, and the two
+  threshold conditions, plus an automatic witness-reconciliation trip;
+- **[dedicated PR]** emit a complete, non-success-only durable outcome record so a pre-crash
+  invocation is always determinable.
+
 Then re-run this review against the new exact SHA.
 
 **This review did not activate Canary, did not execute any tool, did not arm any production node,
