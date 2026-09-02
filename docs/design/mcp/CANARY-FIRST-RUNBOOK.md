@@ -8,7 +8,7 @@ current posture (do NOT collapse these into "done" or "not done"):
 |---|---|
 | Canary architecture (preflight, scope, budget, abort, trust firewall) | **IMPLEMENTED** |
 | Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
-| Live tier arming | **ARMABLE** — via the governed, node-readiness-gated `armLiveTier`; NOT a posture-wall edit |
+| Live tier arming | **NOT OPERATOR-PERFORMABLE YET** — the governed, node-readiness-gated `armLiveTier` function exists and is correct, but has NO production caller (no startup path, admin API, or other non-test code invokes it); arming is reachable only from tests today |
 | Armed by default | **NO** — a stock build composes nothing and arms nothing (`live_executor_absent`) |
 | Canary active | **NO** — no production path begins a Canary generation or reaches an upstream |
 | A controlled upstream reachable under the supported production trust model | **NOT AVAILABLE TODAY** — see the connectivity blocker below |
@@ -54,10 +54,13 @@ set is empty. This requires the separately-reviewed activation to have:
 1. **Armed the live tier** — composed the production live-tier dependency graph
    (`composeProductionGatewayLiveTier`, opt-in via `CULVERT_MCP_LIVE_DEPS`: a live
    `execution.Executor` + bounded `UpstreamCaller` + materialize-broker + inspection) and then
-   armed it through the single governed, node-readiness-gated path (`armLiveTier`, which is the
-   sole caller of `markGatewayExecDepsReady`). Arming is NOT a hand edit of the posture wall and is
-   NOT Canary activation — the rollout mode is untouched and no upstream is reached. On a stock
-   node this step has not run, so the facts report `live_executor_absent`.
+   armed it through the single governed, node-readiness-gated path (`armLiveTier`, the sole caller
+   of `markGatewayExecDepsReady`). **Gap:** `armLiveTier` currently has NO production caller — no
+   startup path or admin API invokes it (only tests do), so an operator cannot actually perform this
+   step in the shipped process. A governed production arming entry point must be wired first. Arming
+   is NOT a hand edit of the posture wall and is NOT Canary activation — the rollout mode is
+   untouched and no upstream is reached. On a stock node this step has not run, so the facts report
+   `live_executor_absent`.
 2. **Made `live_execution` issuable** under four-eyes + short-TTL governance — **shipped**; the
    governed issue/approve path (`RequestLiveApproval`/`ApproveLive`) is available today.
 3. **Attested the Shadow Exit Review** (`shadowExitReviewAttested`).

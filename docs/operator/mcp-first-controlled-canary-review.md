@@ -274,9 +274,15 @@ fail-closed/deterministic. Correct and GO as a mechanism.
 Sequence verified: `composeProductionGatewayLiveTier` (opt-in) → `evaluateLiveArmReadiness` PASS →
 explicit `armLiveTier` (the sole caller of `markGatewayExecDepsReady`). Arming leaves the rollout
 mode untouched, begins no Canary generation, reaches no upstream (`mcp_live_arming.go:83-91`), and
-`quiesceLiveTier` is its inverse. **This review arms nothing** and leaves no real node armed:
-arming is exercised only in existing test seams, never against production deps here. Correct and GO
-as a mechanism; not exercised live.
+`quiesceLiveTier` is its inverse. **This review arms nothing** and leaves no real node armed.
+
+**Correction (Codex P1) — `armLiveTier` has NO production caller.** A repo-wide search of non-test
+Go finds only the definition of `armLiveTier` (and its sole would-be effect `markGatewayExecDepsReady`);
+it is invoked ONLY from tests. No startup path and no admin API triggers arming, so even after
+composing the production deps (`CULVERT_MCP_LIVE_DEPS`) an operator CANNOT actually arm the tier in
+the shipped process. The arming logic is correct as a mechanism, but "armable" is function-level
+only — a governed production arming entry point (startup wiring or an admin endpoint) must be added
+before precondition 1 is performable. Added to the §26 unblock list.
 
 ---
 
@@ -493,9 +499,9 @@ semantics were changed. Because the verdict is BLOCKED (not PASS), no implementa
 ## §24 Adversarial review
 
 The re-derivation and this artifact were stress-tested for any path by which the exact experiment
-could cause more, different, or less-observable side effects than claimed (§20), including a Codex
-adversarial review round (PR #1292) that surfaced four findings, all accepted after verification
-against the code:
+could cause more, different, or less-observable side effects than claimed (§20), including successive
+Codex adversarial review rounds (PR #1292), each finding accepted only after verification against the
+code:
 
 - **P1 — read-first classifier (§6):** a `tools/call` is `OpWrite` and refused read-first; discovery
   (`tools/list`) cannot bind one exact tool for the live-approval revalidation. Confirmed.
@@ -503,10 +509,18 @@ against the code:
   status is unverifiable until the exact tool + rule are fixed. Corrected.
 - **P1 — durable outcome evidence (§15/§18):** every event is a `PhaseDecision` with no
   `OutcomeEvidence`; the outcome commit is success-only, so a pre-crash invocation is not always
-  determinable. Confirmed against `events/decide.go` + `execution/run.go`.
+  determinable, and the post-send crash window cannot be closed by outcome records alone. Confirmed
+  against `events/decide.go` + `execution/run.go`.
 - **P1 — unwired whole-Canary aborts (§14/§16):** only `budget_exhausted`/`scope_escape` auto-trip;
-  drift/evidence-loss/unexpected-response/threshold conditions do not. Confirmed against
-  `mcp_canary_runtime.go`.
+  the other eight declared breaches do not. Confirmed against `mcp_canary_runtime.go`.
+- **P1 — scope not exactly-one (§10):** `MaxCanaryTools`/`MaxCanaryPrincipals` are 2; the machine
+  gate does not enforce the one-of-everything shape. Confirmed against `scope.go`.
+- **P1 — budget vs physical invocations (§9/§14):** idempotent read retries send the POST up to ~3×
+  per single budget reservation. Confirmed against `upstreamclient/client.go`.
+- **P1 — no production arming caller (§12):** `armLiveTier` is invoked only from tests, so an
+  operator cannot arm the tier in the shipped process. Confirmed by repo-wide search.
+- **P2 — consistency:** propagation of the above into the summary, the §3 table, the §25 census, and
+  the §26 blocker enumeration (kept exhaustive and aligned with §25).
 
 The dominant adversarial finding remains that the only documented controlled target is unreachable
 fail-closed on three axes and would tempt an operator toward `AllowPrivate` / a scheme hack / a
@@ -530,6 +544,7 @@ BLOCKED-vs-FAILED note in §26).
 | Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
 | Budget bounds PHYSICAL upstream invocations (retries charged/disabled) | **NO — idempotent read retries up to ~3× per reservation (§9)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
+| Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
 | Durable record determines whether a pre-crash upstream invocation occurred | **NO — success-only outcome evidence + unclosable post-send crash window (§15/§18)** |
@@ -548,9 +563,10 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **five independent axes** — the first two are intentional capability gaps, the
-last three are prerequisites/defects the Codex adversarial round (§24) surfaced and this review
-verified against the code:
+assembled today on **eight independent blockers** (each maps to a NO/CONDITIONAL row in §25) — some
+are intentional capability gaps, some are prerequisites, and two are genuine product defects the
+Codex adversarial rounds (§24) surfaced and this review verified against the code. The list below is
+exhaustive: closing ALL of it is necessary and sufficient to pass §25.
 
 1. **No controlled upstream reachable under the supported production trust model (§5).** The only
    documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -559,25 +575,33 @@ verified against the code:
 2. **The production activation preflight cannot return `Ready:true` (§13).** The live tier is unarmed
    by default and `productionCanaryActivationInputs` leaves `ServerUsable`/`ToolFingerprintCurrent`/
    `Budget` fail-closed.
-3. **The read-first classifier refuses the one-exact-tool call (§6).** `tools/call` is `OpWrite`
+3. **No governed production arming entry point (§12).** `armLiveTier` has no production caller (only
+   tests invoke it), so an operator cannot arm the tier in the shipped process.
+4. **The read-first classifier refuses the one-exact-tool call (§6).** `tools/call` is `OpWrite`
    (refused read-first); `tools/list` binds no exact tool for the live-approval revalidation. A
    finer classifier or a designed discovery-trust path is required.
-4. **Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.** Only
-   `budget_exhausted`/`scope_escape` auto-trip; drift, evidence loss, unexpected upstream response,
-   and the threshold conditions do not, and nothing reconciles the independent witness — so a
-   divergence would not auto-stop later requests.
-5. **Durable outcome evidence is incomplete/success-only (§15/§18) — a product defect.** A pre-crash
-   upstream invocation is not always determinable from the durable record.
+5. **The machine gate does not enforce exactly-one tool/principal (§10).** `MaxCanaryTools`/
+   `MaxCanaryPrincipals` are 2, so the one-of-everything shape is an external prerequisite.
+6. **The budget does not bound physical upstream invocations (§9).** Idempotent read retries can
+   send the POST ~3× per single budget reservation.
+7. **Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.** Only
+   `budget_exhausted`/`scope_escape` auto-trip; the other eight declared breaches do not, and nothing
+   reconciles the independent witness — so a divergence would not auto-stop later requests.
+8. **Durable outcome evidence is incomplete/success-only, with an unclosable post-send crash window
+   (§15/§18) — a product defect.** A pre-crash upstream invocation is not always determinable.
+
+Additionally, the no-credential status is CONDITIONAL until a concrete tool + policy rule are fixed
+(§4) — a further prerequisite, folded into blocker 1's target provisioning.
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
-execute — nothing is reachable (axis 1), no Canary can activate (axis 2), and no admissible one-tool
-operation exists (axis 3). Axes 4 and 5 are unmet *prerequisites* (missing auto-abort wiring,
-incomplete durable evidence), not a live unsafe path, precisely because axes 1–3 mean zero real side
-effects are possible from this SHA. So the honest label is BLOCKED — a safe first experiment cannot
-be *assembled*, on five independent axes — and axes 4–5 must be closed as dedicated PRs before any
-authorization, reinforcing rather than weakening that verdict. (Had a target been reachable and a
-Canary activatable, axes 4–5 would have made the verdict FAILED.)
+execute — nothing is reachable (1), no Canary can activate (2), no operator can arm (3), and no
+admissible one-tool operation exists (4). Blockers 5–8 are unmet *prerequisites*/defects, not a live
+unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA. So the
+honest label is BLOCKED — a safe first experiment cannot be *assembled* — and the two product defects
+(7, 8) must be closed as dedicated PRs before any authorization, reinforcing rather than weakening
+that verdict. (Had a target been reachable and a Canary activatable, defects 7–8 would have made the
+verdict FAILED.)
 
 **To unblock (each a separately-reviewed change, none performed here):**
 - provision a public-HTTPS, non-production, independently-recording controlled MCP server exposing
@@ -585,7 +609,10 @@ Canary activatable, axes 4–5 would have made the verdict FAILED.)
   base64 SHA-256 SPKI pin; OR land the recorded connectivity work (endpoint-scheme translation and/or
   an identity-type-aware verifier + a per-target private-destination policy) in a dedicated PR;
 - wire an authoritative `ServerUsable`/`FingerprintCurrent`/`Budget` input path for the activation
-  preflight, and arm the live tier on the controlled node via the governed path;
+  preflight;
+- wire a **governed production arming entry point** (startup path or admin API) that invokes
+  `armLiveTier` — it has no production caller today, so an operator cannot arm the tier in the shipped
+  process (§12) — and then arm the live tier on the controlled node via that path;
 - ship a finer operation classifier (or a designed discovery-trust path) so exactly one harmless
   operation is read-first-admissible AND bindable to one exact tool;
 - impose "exactly one tool AND exactly one principal" as an authorization prerequisite (or add a

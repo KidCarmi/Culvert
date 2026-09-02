@@ -210,7 +210,10 @@ Every one is a **separately-reviewed activation**, not a config change:
    verifier, so a controlled server needs a plain `https://` endpoint on a PUBLIC host with a base64
    SHA-256 SPKI pin; the documented `mcp+https://` scheme, `*.qual.svc` private host, and SPIFFE-format
    identity are all rejected fail-closed, and no public-HTTPS controlled MCP server is provisioned today;
-   (c) the operational decision to actually arm on a real node; (d) a **read-first-executable
+   (c) a **governed production arming entry point** — `armLiveTier` (the sole caller of
+   `markGatewayExecDepsReady`) has NO production caller today (only tests invoke it), so an operator
+   cannot actually arm the tier in the shipped process; a startup path or admin API must wire it,
+   plus the operational decision to arm on a real node; (d) a **read-first-executable
    operation** — `policyOperation` classifies every `tools/call` as `OpWrite` (refused read-first)
    and `tools/list` binds no exact tool for the live-approval revalidation, so arming does NOT by
    itself make a one-exact-tool call executable; a finer operation classifier or a designed
