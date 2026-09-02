@@ -48,11 +48,31 @@ func customUITLSFilesPresent() bool {
 // subsequent restart activates it. The key is written 0600 (private key
 // material); the cert 0644 (public, and self-signed cert generation already
 // treats it as non-sensitive).
+//
+// The two files are written as SEPARATE atomic writes, so a failure on the
+// second (key) write — a wedged volume, ENOSPC, a permissions change
+// mid-upload — must not leave the cert half already overwritten with the
+// rejected upload: apiCertsUpload reports that failure to the admin as
+// "the current UI certificate is unchanged", which would be false if a
+// previously-persisted, working cert had just been silently replaced. On a
+// key-write failure the cert half is rolled back to what was on disk before
+// this call (or removed, if nothing was persisted yet) so the on-disk state
+// genuinely matches what the admin was told.
 func persistCustomUITLS(certPEM, keyPEM []byte) error {
+	prevCert, prevCertErr := os.ReadFile(customUITLSCertPath())
+	hadPrevCert := prevCertErr == nil
 	if err := fileutil.AtomicWrite(customUITLSCertPath(), certPEM, 0o644); err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(customUITLSKeyPath(), keyPEM, 0o600)
+	if err := fileutil.AtomicWrite(customUITLSKeyPath(), keyPEM, 0o600); err != nil {
+		if hadPrevCert {
+			_ = fileutil.AtomicWrite(customUITLSCertPath(), prevCert, 0o644)
+		} else {
+			_ = os.Remove(customUITLSCertPath())
+		}
+		return err
+	}
+	return nil
 }
 
 // customUITLSPairValid reports whether the persisted cert/key pair on disk
