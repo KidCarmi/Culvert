@@ -14,7 +14,7 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **TEN independent blockers** (exhaustive as a set — together they cover
+cannot be assembled today on **ELEVEN independent blockers** (exhaustive as a set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable AND usable under the supported
 production trust model (a provisioned HTTPS+SPKI target must ALSO speak a protocol that permits Culvert's sessionless calls — a standard initialization-requiring server is rejected because the client drives no MCP initialize/version/session lifecycle); (2) the production activation preflight cannot return `Ready:true` on a stock
@@ -30,8 +30,11 @@ pre-crash invocation is not always determinable; and (9) the credential path is 
 comes from the matched policy rule and the production broker has zero providers, so it must be closed
 explicitly by a no-`CredentialProfile` rule or a working provider/path (§4); and (10) no
 operator-reachable graceful rollback — §17 requires rollback AND kill, but only the emergency kill is
-reachable (quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`, §17).
-Blockers 1–6, 9, and 10 are gaps/prerequisites; 7–8 are defects recorded here for dedicated PRs (§21).
+reachable (quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`, §17);
+and (11) the reviewed fingerprint is operator-declared, not peer-observed — `seedServer`/`seedTools`/
+`Ingest` compute it from operator JSON and no non-test caller of `Discovery.Discover` re-observes the
+peer, so exact-current fingerprint + rug-pull invalidation bind only the seeded record (§7).
+Blockers 1–6 and 9–11 are gaps/prerequisites; 7–8 are defects recorded here for dedicated PRs (§21).
 The experiment is specified below up to the exact point where it becomes unauthorizable, and the
 precise provisioning that would unblock it is named.
 
@@ -102,7 +105,7 @@ reversible:
 | principals | **1** synthetic principal (canonical session `Sub`), no customer identity |
 | MCP servers | **1** controlled server that independently records every received invocation |
 | tools | **1** exact tool |
-| fingerprints | **1** exact reviewed fingerprint (F2); rug-pull invalidates the approval |
+| fingerprints | **1** exact reviewed fingerprint (F2); rug-pull invalidates the approval — BUT the shipped provisioning seeds the fingerprint from operator-declared JSON, not an observed peer, and nothing re-observes the server, so this binds only the seeded record (§7, blocker 11) |
 | operation | **read / discovery only** (Culvert's own classification, never `readOnlyHint`) — but NOT executable today: a `tools/call` is `OpWrite` (refused read-first) and `tools/list` binds no exact tool (§6) |
 | credential | **UNRESOLVED** — intended none, but `CredentialProfile` is a policy obligation, not a tool property; unverifiable until the exact tool + rule are fixed (§4) |
 | customer data / traffic / prod creds | **none** |
@@ -211,12 +214,23 @@ prerequisite. This is a first-class blocker in §26, not "a further constraint."
 
 ## §7 Real inventory / exact fingerprint
 
-Fingerprints must come from normal registry/catalog discovery
-(`seedServer`/`seedTools`/`VerifyIdentity`/`Ingest`), never hand-authored. The reviewed fingerprint
-(F2, `FingerprintFormatVersion`+32-byte digest) is what the live approval and scope must both name;
-`tooltrust` re-verifies exact current state at approve time and the boundary re-checks tool freshness
-(`ToolStillCurrent`, `run.go:201`). This is specifiable but presupposes the §5 server exists to be
-discovered against; it does not exist today.
+The reviewed fingerprint (F2, `FingerprintFormatVersion`+32-byte digest) is what the live approval
+and scope must both name; `tooltrust` re-verifies exact current state at approve time and the
+boundary re-checks tool freshness (`ToolStillCurrent`, `run.go:201`). **But the only shipped
+provisioning path binds that fingerprint to OPERATOR-DECLARED JSON, not to the observed live peer,
+and nothing re-observes the peer (blocker 11).** `seedTools` (`mcp_inventory.go:447`) re-encodes the
+operator-supplied tool metadata and lets `catalog.Ingest` recompute the fingerprint from THOSE fields;
+`seedServer` (`:421`) calls `VerifyIdentity` with the configured `PinnedIdentity` checked against its
+own register stamp, not against a dialed server. And `execution.NewDiscovery`/`Discovery.Discover` —
+the only path that would refresh the catalog FROM a live server — has NO non-test caller
+(`mcp_tooltrust.go:138` installs a reconcile hook but nothing invokes discovery), so `ToolStillCurrent`
+validates the unchanged LOCAL record indefinitely. Consequence: "exact reviewed fingerprint" and
+"rug-pull invalidates the approval" only bind the seeded record — an operator editing the inventory is
+caught, but the actual upstream drifting behind the same identity is NOT. Treating exact-current
+fingerprint + rug-pull invalidation as satisfied requires either authenticated production
+discovery/freshness verification (a non-test `Discover` caller) OR an externally-verified ingestion
+procedure that establishes seeded-fingerprint == the live peer's advertised tool. This is also gated
+on the §5 server existing to be discovered against, which it does not today.
 
 ---
 
@@ -519,7 +533,10 @@ Attacks considered and where each is stopped:
 - *Approve a shadow grant and ride it into live* → `SatisfiesLiveExecution` rejects non-live purpose.
 - *Widen scope via a group or percentage* → `ValidateScope` rejects.
 - *Smuggle a longer approval TTL by sitting pending* → TTL measured from `ApprovedAt`, ceiling ≤24h.
-- *Rug-pull the tool after approval* → `MatchesTool` exact-fingerprint + boundary `ToolStillCurrent`.
+- *Rug-pull the tool after approval* → `MatchesTool` exact-fingerprint + boundary `ToolStillCurrent`
+  catch a change to the SEEDED record; but the seed is operator-declared and never re-observed from the
+  peer (no non-test `Discovery.Discover` caller), so a live server drifting behind the same identity is
+  NOT caught (blocker 11, §7).
 - *Force an activation fact true via a signed config* → activation facts are node-authoritative, not
   request-supplied.
 - *Reach the FIRST `Upstream.Call` POST past an emergency kill* → the final monotonic kill-generation
@@ -594,6 +611,12 @@ code:
   per single budget reservation. Confirmed against `upstreamclient/client.go`.
 - **P1 — no production arming caller (§12):** `armLiveTier` is invoked only from tests, so an
   operator cannot arm the tier in the shipped process. Confirmed by repo-wide search.
+- **P1 — fingerprint operator-declared, not peer-observed (§7, blocker 11):** the shipped provisioning
+  (`seedServer`/`seedTools`/`Ingest`, `mcp_inventory.go`) computes the fingerprint from operator JSON and
+  verifies the pinned identity against its own register stamp; `execution.Discovery.Discover` has no
+  non-test caller, so `ToolStillCurrent` re-checks only the seeded record. Exact-current fingerprint +
+  rug-pull invalidation therefore bind the SEED, not the live peer. Confirmed against `mcp_inventory.go`
+  + a repo-wide `Discover` search. Added as blocker 11.
 - **P2 — consistency:** propagation of the above into the summary, the §3 table, the §25 census, and
   the §26 blocker enumeration (kept exhaustive and aligned with §25).
 
@@ -614,6 +637,7 @@ BLOCKED-vs-FAILED note in §26).
 | A read-first-admissible one-exact-tool operation exists | **NO — classifier refuses `tools/call`; discovery cannot bind one tool (§6)** |
 | Supported upstream trust model for a controlled server available today | **NO** (§5) |
 | A provisioned target is USABLE (MCP initialize/version/session lifecycle) | **NO — client sends no `initialize`/version/session; a spec-compliant server rejects sessionless calls (§5)** |
+| Reviewed fingerprint bound to the OBSERVED live peer (not operator-declared) | **NO — seeded from operator JSON; identity verified against its own register stamp; no non-test `Discovery.Discover` caller (§7, blocker 11)** |
 | Shadow trust ≠ live trust proven; live approval does not activate Canary | YES (§8) |
 | Tight scope validated (no percentage/group/wildcard; server & tenant capped at 1) | YES (§10) |
 | Machine gate enforces exactly-one tool AND exactly-one principal | **NO — caps are 2; must be an external prerequisite (§10)** |
@@ -640,9 +664,9 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **ten independent blockers** — some are intentional capability gaps, some are
+assembled today on **eleven independent blockers** — some are intentional capability gaps, some are
 prerequisites, and two are genuine product defects the Codex adversarial rounds (§24) surfaced and
-this review verified against the code. The list below is exhaustive AS A SET: together the ten cover
+this review verified against the code. The list below is exhaustive AS A SET: together the eleven cover
 every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
@@ -683,12 +707,22 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    a Canary→Shadow/Observe target (the demotion runs only via the unwired signed-distribution path). A
    governed operator-reachable rollback control (wire quiesce, or wire the demotion/publication path)
    must be added.
+11. **The reviewed fingerprint is operator-declared, not peer-observed (§7).** The only shipped
+   provisioning path (`seedServer`/`seedTools`/`Ingest`, `mcp_inventory.go`) computes the fingerprint
+   from operator-supplied JSON and verifies the pinned identity against its own register stamp, and
+   `execution.Discovery.Discover` has no non-test caller, so nothing re-observes the live peer.
+   `ToolStillCurrent` therefore validates the unchanged local record — "exact reviewed fingerprint" and
+   "rug-pull invalidation" bind the SEED, not the actual upstream. Closing this needs authenticated
+   production discovery/freshness verification OR an externally-verified ingestion procedure proving
+   seeded-fingerprint == the live peer's advertised tool.
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
 execute — nothing is reachable (1), no Canary can activate (2), no operator can arm (3), and no
-admissible one-tool operation exists (4). Blockers 5–10 are unmet *prerequisites*/defects, not a live
-unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA. So the
+admissible one-tool operation exists (4). Blockers 5–11 are unmet *prerequisites*/defects, not a live
+unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA (blocker 11
+adds that even a reachable+usable target would carry a fingerprint bound to operator-declared JSON, not
+the observed peer). So the
 honest label is BLOCKED — a safe first experiment cannot be *assembled* — and the two product defects
 (7, 8) must be closed as dedicated PRs before any authorization, reinforcing rather than weakening
 that verdict. (Had a target been reachable and a Canary activatable, defects 7–8 would have made the
@@ -749,6 +783,13 @@ verdict FAILED.)
   `distribution_not_configured` for a Canary→Shadow/Observe target (the demotion runs only via the
   unwired signed-distribution path). Wire `quiesceLiveTier`, OR wire the demotion/publication path so
   an admin can drive Canary→Shadow/Observe.
+- bind the reviewed fingerprint to the OBSERVED live peer (blocker 11, §7) — the shipped provisioning
+  (`seedServer`/`seedTools`/`Ingest`) computes the fingerprint from operator-declared JSON and verifies
+  the pinned identity against its own register stamp, and `execution.Discovery.Discover` has no non-test
+  caller, so `ToolStillCurrent` re-checks only the seeded record. Add authenticated production
+  discovery/freshness verification (a non-test `Discover` caller), OR require an externally-verified
+  ingestion procedure proving seeded-fingerprint == the live peer's advertised tool, before treating
+  exact-current fingerprint and rug-pull invalidation as satisfied.
 
 Then re-run this review against the new exact SHA.
 

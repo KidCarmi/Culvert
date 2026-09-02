@@ -245,7 +245,14 @@ Every one is a **separately-reviewed activation**, not a config change:
    success-only with an unclosable post-send crash window (review §14–§16, §18); and (h) a
    **governed operator-reachable graceful rollback** — only the emergency kill is reachable today
    (`quiesceLiveTier` has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`
-   for a Canary→Shadow/Observe target), yet the review contract requires rollback AND kill (review §17).
+   for a Canary→Shadow/Observe target), yet the review contract requires rollback AND kill (review §17);
+   and (i) a **peer-observed fingerprint** — the shipped provisioning (`seedServer`/`seedTools`/`Ingest`)
+   computes the fingerprint from operator-declared JSON and verifies the pinned identity against its own
+   register stamp, and `execution.Discovery.Discover` has no non-test caller, so `ToolStillCurrent`
+   re-checks only the seeded record; exact-current fingerprint + rug-pull invalidation bind the SEED, not
+   the live peer. Closing this needs authenticated production discovery/freshness verification OR an
+   externally-verified ingestion procedure proving seeded-fingerprint == the peer's advertised tool
+   (review §7).
    **Arming is NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.

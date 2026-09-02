@@ -86,7 +86,7 @@ set is empty. This requires the separately-reviewed activation to have:
 | identity | **1** synthetic/non-production principal |
 | MCP server | **1** controlled server that **independently records every received invocation** |
 | tool | **1** exact tool |
-| fingerprint | **1** exact reviewed fingerprint (rug-pull invalidates the approval) |
+| fingerprint | **1** exact reviewed fingerprint (rug-pull invalidates the approval) — but the shipped provisioning (`seedServer`/`seedTools`/`Ingest`) seeds the fingerprint from OPERATOR-DECLARED JSON and verifies the pinned identity against its own register stamp, and nothing re-observes the live peer (`execution.Discovery.Discover` has no non-test caller), so `ToolStillCurrent` re-checks only the seeded record — the peer drifting behind the same identity is NOT caught (review §7, blocker 11) |
 | approval | **1** `live_execution` ToolApproval — four-eyes, ≤24h TTL, exact target |
 | operation class | **read/discovery only** (Culvert's own classification, not `readOnlyHint`) |
 | credential | synthetic/non-production credential **only if the tool requires one** |
