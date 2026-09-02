@@ -1,7 +1,8 @@
 // FE-1B real-binary browser smoke (directive §16): the committed production
 // dist, embedded in the real CULVERT Go binary, served under the experimental
 // /app preview with the strict nonce-free CSP — rendered by a real Chromium.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 
 const strictCSP =
   "default-src 'self'; script-src 'self'; script-src-attr 'none'; " +

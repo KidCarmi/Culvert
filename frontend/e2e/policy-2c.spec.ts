@@ -24,7 +24,8 @@
 // rules). Learning state persists in the SHARED /data (recorded harness
 // debt), so the learning premise cancels any inherited active session and
 // never asserts exact retained-session counts.
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { identityHeaders, test } from "./test";
 import type { Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 
@@ -245,8 +246,12 @@ test("auth rules: fixture rules render with Exempt-is-not-Allow; admin create/ed
 test("operator: authentication rules render read-only — no mutation or default-outcome controls", async ({
   browser,
   baseURL,
+  clientIdentity,
 }) => {
-  const ctx = await browser.newContext({ storageState: EMPTY_STATE });
+  const ctx = await browser.newContext({
+    storageState: EMPTY_STATE,
+    extraHTTPHeaders: identityHeaders(clientIdentity),
+  });
   const page = await ctx.newPage();
   const w = watch(page, baseURL ?? AUTH_URL);
   await page.goto(`${AUTH_URL}${AUTH_ROUTE}`);

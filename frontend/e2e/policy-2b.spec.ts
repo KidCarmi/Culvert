@@ -16,7 +16,8 @@
 // AUTH policy fixture is regenerated per harness run, and RequireCommit
 // persists in the SHARED /data admin settings — leaving it armed would leak
 // into later specs and later runs).
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { identityHeaders, test } from "./test";
 import type { Browser, Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 
@@ -256,8 +257,11 @@ test("500-rule scale: stage, discard, and apply a reorder with deterministic con
 
 // ── §36 A–E: two clients, live mode ─────────────────────────────────────────
 
-async function operatorPage(browser: Browser): Promise<Page> {
-  const ctx = await browser.newContext({ storageState: EMPTY_STATE });
+async function operatorPage(browser: Browser, identity: string): Promise<Page> {
+  const ctx = await browser.newContext({
+    storageState: EMPTY_STATE,
+    extraHTTPHeaders: identityHeaders(identity),
+  });
   const page = await ctx.newPage();
   await page.goto(`${AUTH_URL}${RULES_ROUTE}`);
   await login(page, USERS.operator.user, USERS.operator.pass);
@@ -266,13 +270,14 @@ async function operatorPage(browser: Browser): Promise<Page> {
 }
 
 test("two clients, same version: A edits, B's stale edit gets the REAL server 409 and is not applied", async ({
+  clientIdentity,
   page,
   baseURL,
   browser,
 }) => {
   const w = watch(page, baseURL ?? AUTH_URL);
   await resetDraftMode(page);
-  const pageB = await operatorPage(browser);
+  const pageB = await operatorPage(browser, clientIdentity);
 
   // Both clients load the same snapshot version.
   await page.goto(RULES_ROUTE);
@@ -309,13 +314,14 @@ test("two clients, same version: A edits, B's stale edit gets the REAL server 40
 // ── §36 draft + commit fencing: two clients, shared candidate ──────────────
 
 test("shared draft: actor warning for the second operator; stale draft mutation conflicts; commit fence refuses unreviewed changes", async ({
+  clientIdentity,
   page,
   baseURL,
   browser,
 }) => {
   const w = watch(page, baseURL ?? AUTH_URL);
   await resetDraftMode(page);
-  const pageB = await operatorPage(browser);
+  const pageB = await operatorPage(browser, clientIdentity);
   try {
     // Admin (page A) arms Require Commit through the ceremony.
     await page.goto(RULES_ROUTE);

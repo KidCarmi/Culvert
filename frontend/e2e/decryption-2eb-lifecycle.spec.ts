@@ -16,7 +16,8 @@
 // rotation never touches shared /data. The rotation is posture-neutral
 // (rotate-only preserves the OFF posture), so the sibling decryption spec's
 // starting assumptions are unaffected.
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import type { APIRequestContext } from "@playwright/test";
 import { AUTH_URL, USERS } from "./fixtures";
 

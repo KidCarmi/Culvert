@@ -21,7 +21,8 @@
 //
 // The YARA rules directory is a per-run LOCAL premise of the harness
 // (e2e-smoke.sh) — deterministic, empty at boot, no external service.
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 

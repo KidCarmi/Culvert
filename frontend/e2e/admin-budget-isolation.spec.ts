@@ -22,7 +22,8 @@
 // endpoint until the appliance refuses (proving the posture is armed), then
 // requires a browser-driven ceremony to succeed anyway. A browser context
 // must carry its own client identity, never the shared loopback one.
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import { AUTH_URL, USERS } from "./fixtures";
 
 const LEARNING_ROUTE = "/app/policies/learning";
@@ -59,7 +60,14 @@ test("a browser-driven admin ceremony succeeds after the loopback mutation budge
   // neither lock the account nor change appliance state. The budget may
   // already be partly spent by the harness seed and the auth-setup login,
   // so spend until refused rather than asserting a fixed count.
-  const loopback = await request.newContext({ baseURL: AUTH_URL });
+  // Playwright applies the test's context options (including the per-test
+  // identity header from ./test) to request.newContext() for every option
+  // key the call does not name, so the flood client names an EMPTY header
+  // set: it must be the bare loopback peer, never this test's identity.
+  const loopback = await request.newContext({
+    baseURL: AUTH_URL,
+    extraHTTPHeaders: {},
+  });
   let refused = false;
   for (let i = 0; i <= BURST; i++) {
     const r = await loopback.post("/api/auth/login", {
@@ -71,9 +79,10 @@ test("a browser-driven admin ceremony succeeds after the loopback mutation budge
     }
     expect(r.status(), `loopback login ${String(i + 1)}`).toBe(200);
   }
-  expect(refused, "the appliance refuses the loopback client past its budget").toBe(
-    true,
-  );
+  expect(
+    refused,
+    "the appliance refuses the loopback client past its budget",
+  ).toBe(true);
   // Still exhausted: the posture is a fixed window, not a leaky bucket.
   const again = await loopback.post("/api/auth/login", {
     data: { user: USERS.admin.user, pass: USERS.admin.pass },

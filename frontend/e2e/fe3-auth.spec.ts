@@ -2,7 +2,8 @@
 // appliance (seeded roster: admin, op-user, view-user, totp-user). Every
 // flow starts unauthenticated (storageState override) and watches for
 // console/page errors and external-origin requests.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 import type { Page } from "@playwright/test";
 import {
   AUTH_URL,

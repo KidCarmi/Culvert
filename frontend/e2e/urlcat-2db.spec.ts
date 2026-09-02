@@ -12,7 +12,8 @@
 //     must never contact the public signed-feed hostname, asserted per test,
 //   - settings interval-only save (fenced; enablement untouched ⇒ no network),
 //   - overrides full-set replace + clear-all with the override revision.
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { AUTH_URL, USERS } from "./fixtures";
 

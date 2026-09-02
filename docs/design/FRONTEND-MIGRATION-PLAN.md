@@ -930,6 +930,65 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > on the shared /data (bounded by the receipt cap; terminal receipts are
 > pruned first).
 >
+> **2E-C FINAL QUALIFICATION CORRECTION — full-suite Playwright gate (this
+> branch, 2026-09-02).** Review of candidate 5a2e948c held the complete
+> real-binary Playwright suite as the remaining blocker: the policy-learning
+> journey in `policy-2c.spec.ts` failed in three consecutive full runs (twice
+> at the session-start assertion, once at the enable assertion) while
+> passing 8/8 in isolation. **Root cause (harness identity sharing, not a
+> product defect):** the admin plane refuses more than `lockout.Burst` (60)
+> mutating API requests per `lockout.RateWindow` (one minute, FIXED window)
+> from one real client IP — a deliberate, hard-coded security posture that
+> stays fully armed. `realClientIP` honours X-Forwarded-For only from a
+> trusted proxy, and the harness establishes loopback as one (RISK-019)
+> through the supported network-settings API; the multi-client API specs
+> already presented their own identities, but every BROWSER context the
+> suite opened presented the bare loopback peer, so that one budget was a
+> suite-length shared resource across all page-driven specs. A traced full
+> run showed the server window opening during `policy-2b` and holding 50
+> loopback mutations when the enable PUT arrived (54 by the end of the
+> journey, all inside one window); faster untraced runs (1.9–2.1 min vs
+> 3.1 min traced) pushed the count past 60 exactly at the journey's first
+> page-driven mutations — the enable PUT or the session-start POST, the two
+> assertion sites observed — and the page rendered the refusal truthfully
+> (dialog alert "Action failed Too Many Requests") while the 5 s assertion
+> waited for the success text. Not shared-/data contamination, not the CDR
+> receipt, not readiness, not learning-state reset, not eventual consistency.
+> **RED regression, committed before the fix:**
+> `e2e/admin-budget-isolation.spec.ts` spends the loopback budget through
+> the supported login endpoint until the appliance refuses, then requires
+> the enable ceremony to succeed in the browser — RED at 5a2e948c AND at the
+> rejected predecessor d567f4d5 with the identical failure text as the
+> full-suite runs (round 2 did not change the behaviour; the sensitivity
+> predates it). **Correction (harness only, production unchanged):**
+> `e2e/test.ts` is the suite base every spec imports `test` from; it derives
+> a DETERMINISTIC per-test client identity (private-range, from Playwright's
+> stable testId) and overrides the `extraHTTPHeaders` option so the default
+> context, `page.request`, and — because Playwright applies the test's
+> context options to every `browser.newContext()`/`request.newContext()`
+> call that does not name the option — additional contexts present it too;
+> the two specs that open explicit contexts pass it visibly through
+> `identityHeaders(clientIdentity)`; a client that must be the bare loopback
+> peer names `extraHTTPHeaders: {}`. Sessions are signed cookies, not
+> IP-bound, so the shared storageState still authenticates; FRESH/SETUPFAIL
+> trust no proxy and ignore the header by construction. Not done, by
+> directive: no timeout widening, no retries, no skip/quarantine, no weaker
+> assertion, no production-API receipt deletion, no suite reordering — and
+> no product change: the rate posture is correct; only the harness compressed
+> hours of admin activity from one address into one minute. **Separately
+> observed, recorded, not corrected here:** once, with the regression running
+> immediately before `policy-2c`, the two-client auth-fencing proof's
+> concurrent reorder-vs-edit race returned `[200, 400]` instead of the
+> accepted `[200, 409|404]`: `apiAuthPolicyUpdate` pre-validates the edit
+> (target resolution + `validatePolicyRule`) OUTSIDE the coordinator fence,
+> so a reorder that lands between its unfenced version pre-check and its
+> fenced mutate makes the stale edit fail validation (400) instead of
+> receiving the structured 409. Exactly one mutation lands either way (the
+> fence holds); only the loser's status is untruthful. A deterministic
+> reproduction needs an interleaving seam the handler does not expose;
+> recorded as a candidate product correction (move target resolution and
+> validation inside the fenced closure), not silently widened in the test.
+>
 > **2E-B FINAL STORAGE-READ FAIL-CLOSED CLOSURE (this branch, 2026-08-30).**
 > External review of the freeze candidate (465316df) found the last
 > lifecycle defect: the recovery read collapsed "cannot read / cannot

@@ -41,7 +41,8 @@
 // the toggle is restored to its observed pre-test state, created rules are
 // deleted, and the enrollment deliberately never succeeds (nothing to
 // clean; asserted).
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 

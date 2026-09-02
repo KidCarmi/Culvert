@@ -2,7 +2,8 @@
 // is set; screenshots are evidence artifacts, never committed. Setup-screen
 // shots use the SETUPFAIL appliance (permanently needsSetup — visually
 // identical to any fresh appliance and immune to spec ordering).
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 import { AUTH_URL, EMPTY_STATE, SETUPFAIL_URL, USERS } from "./fixtures";
 
 const dir = process.env["CULVERT_EVIDENCE_DIR"];

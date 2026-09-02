@@ -4,7 +4,8 @@
 //   SETUPFAIL — the appliance whose durable credential save always fails
 //               (500 + server-side rollback): error shown, retry possible.
 // Every flow: zero console/page errors, zero external-origin requests.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 import type { Page } from "@playwright/test";
 import { EMPTY_STATE, FRESH_URL, SETUPFAIL_URL } from "./fixtures";
 

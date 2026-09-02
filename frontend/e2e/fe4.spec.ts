@@ -15,7 +15,8 @@
 //     error state for the viewer.
 //   * ZERO /api/events traffic anywhere (§16), zero external requests, zero
 //     unexpected console/page errors, strict CSP untouched.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 import type { Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, FRESH_URL, USERS } from "./fixtures";
 

@@ -23,7 +23,8 @@
 // X-Forwarded-For identities (the harness trusts loopback as a reverse
 // proxy), so this spec's API traffic draws on its own admin-plane rate
 // budgets instead of the suite-shared 127.0.0.1 budget.
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 

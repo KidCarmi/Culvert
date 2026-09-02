@@ -4,7 +4,8 @@
 // the replacement at the approved revalidation boundary (window focus /
 // visibility restoration), tears the admin state down, and adopts the
 // viewer identity. No production bypass; real appliance, real cookies.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 import type { Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 

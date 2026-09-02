@@ -3,7 +3,8 @@
 // dialog focus lifecycle, Tier-3 typed confirmation, reduced motion, zoom
 // reflow — all against the real Go binary, committed production dist, strict
 // CSP, with console/error/external-request monitoring throughout.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 import type { Page } from "@playwright/test";
 import { expectNavLinkReachable, openNavToFinalState } from "./nav-open";
 

@@ -1,7 +1,7 @@
 // Visual-evidence captures (FE-2 §21). Runs only when CULVERT_EVIDENCE_DIR
 // is set (qualification runs); screenshots are evidence artifacts, never
 // committed to the repository.
-import { test } from "@playwright/test";
+import { test } from "./test";
 import { openNavToFinalState } from "./nav-open";
 
 const dir = process.env["CULVERT_EVIDENCE_DIR"];

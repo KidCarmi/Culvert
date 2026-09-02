@@ -21,7 +21,8 @@
 // Unknown-outcome and auth-boundary mechanics are owned by the component
 // suites (deterministic network-fault injection against the same shared
 // useObjectPage machinery).
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import type { APIRequestContext } from "@playwright/test";
 import { AUTH_URL, USERS } from "./fixtures";
 

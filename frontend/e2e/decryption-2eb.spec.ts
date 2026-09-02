@@ -22,7 +22,8 @@
 //   6. Node-local ownership scope is visible in the UI.
 //   7. The Decryption journey makes NO request to CDR, Content Security
 //      write surfaces, or certificate-rotation endpoints.
-import { expect, request, test } from "@playwright/test";
+import { expect, request } from "@playwright/test";
+import { test } from "./test";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 

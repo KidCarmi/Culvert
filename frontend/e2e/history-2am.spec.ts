@@ -7,7 +7,8 @@
 // retention) is ESTABLISHED through the supported admin API inside the test,
 // never assumed from historical shared-/data state, and FRESH is left
 // disabled at the end.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 import type { Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, FRESH_URL, USERS } from "./fixtures";
 

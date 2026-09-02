@@ -5,7 +5,8 @@
 // The diagnostics fail-with-action shot uses a network-layer fixture over
 // the REAL /api/diagnostics response (the FE-3 TLS-fallback precedent) —
 // nothing server-side is mutated.
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./test";
 
 const dir = process.env["CULVERT_EVIDENCE_DIR"];
 
