@@ -46,17 +46,17 @@ live tier; Canary *requires* it).
 | 2 | Shadow Exit Review attested | `shadow_exit_review_not_passed` | `shadowExitReviewAttested()` — durable, schema-versioned, build-bound attestation created ONLY by admin `POST /api/mcp/canary/shadow-exit-review` (§1); fail-closed on missing/corrupt/stale | **NO (unattested)** |
 | 3 | Scope bounded/enumerable/exact | `canary_scope_not_bounded` | `canary.ValidateScope` | activation input |
 | 4 | Scope read-first only | `canary_scope_not_read_first` | `canary.ScopeReadFirst` | activation input |
-| 5 | Live executor composed | `live_executor_absent` | `liveExecDepsConfigured` | **NO (dormant)** |
-| 6 | Authoritative UpstreamCaller | `upstream_caller_absent` | live tier | **NO** |
-| 7 | Credential path ready | `credential_path_not_ready` | live tier | **NO** |
+| 5 | Live executor composed | `live_executor_absent` | `liveExecDepsConfigured` (armed). In a production build the guarded executor unit is composed ONLY by `composeProductionGatewayLiveTier` (the sole production caller of `composeGatewayLiveTierInto`, pinned by the execution-posture wall); its real per-dependency status is surfaced read-only on the tier `production_dependencies` view. | **NO (dormant)** |
+| 6 | Authoritative UpstreamCaller | `upstream_caller_absent` | live tier (armed). The real dependency is the bounded `upstreamclient.Client` (system-root trust, no `InsecureSkipVerify`, Gateway destination policy) built by `composeProductionGatewayLiveTier`; readiness token `upstream_client` on the `production_dependencies` view. | **NO** |
+| 7 | Credential path ready | `credential_path_not_ready` | live tier (armed). The real dependency is the `broker.Broker` (real KEK + profile store) built by `composeProductionGatewayLiveTier`; token `credential_broker` = `broker_composed_no_provider` (the honest pre-Canary gap: no production credential Provider adapter, so a credential-requiring tool fails closed at the broker). | **NO** |
 | 8 | Durable events healthy | `durable_events_degraded` | `durableEventsHealthy()` — domain CriticalState=="normal" | node-dependent |
 | 9 | Response inspection ready | `response_inspection_not_ready` | `globalMCPShadow.inspectionComposed` | node-dependent |
 | 10 | Registry healthy | `registry_unhealthy` | `mcpInventory.sharedInventory()` | node-dependent |
 | 11 | Catalog healthy | `catalog_unhealthy` | `mcpInventory.sharedInventory()` | node-dependent |
 | 12 | Policy healthy | `policy_unhealthy` | `mcpPolicy.composed()` | node-dependent |
 | 13 | Emergency kill clear | `emergency_kill_active` | `State.Killed()` | node-dependent |
-| 14 | Kill-generation boundary guard | `kill_boundary_guard_absent` | live tier (PREREQ-MCP-KILL-1) | **NO** |
-| 15 | Tool-freshness boundary guard | `tool_freshness_guard_absent` | live tier | **NO** |
+| 14 | Kill-generation boundary guard | `kill_boundary_guard_absent` | live tier (armed, PREREQ-MCP-KILL-1) — the final kill-generation boundary guard lives inside the guarded `*execution.Executor` composed by `composeProductionGatewayLiveTier`; asserted present as one unit with the executor. | **NO** |
+| 15 | Tool-freshness boundary guard | `tool_freshness_guard_absent` | live tier (armed) — the final tool-freshness (drift) boundary guard inside the same guarded executor; asserted present as one unit. | **NO** |
 | 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`), driven by the authoritative `tooltrust.Store` through `buildLiveApprovalBindings` in `productionCanaryActivationInputs` | **satisfiable; unmet until a valid grant is issued** |
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |

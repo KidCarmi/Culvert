@@ -41,6 +41,21 @@ import (
 // actor, so evidence can tell a live execution apart from a Shadow evaluation).
 const mcpLiveActor = "mcp-gateway-live"
 
+// mcpLiveExecutorMetrics returns the metrics sink for the live executor's execution.Config.Metrics.
+// The live executor embeds a capability-reduced Shadow evaluator; when both CULVERT_MCP_SHADOW_READY
+// and CULVERT_MCP_LIVE_DEPS are enabled the live executor SUPERSEDES the standalone Shadow evaluator,
+// so its embedded evaluator must keep writing the SAME process-wide shadow metrics singleton or the
+// culvert_mcp_shadow_* counters + exit-criteria monitoring silently freeze (Codex P1, PR #1291).
+// mcpShadowMetricsSnapshotOrNil returns nil when Shadow readiness was never requested this boot; we
+// return a genuine nil execution.Metrics in that case (NOT a typed-nil pointer wrapped in a non-nil
+// interface) so execution.New falls back to noopMetrics rather than dereferencing a nil sink.
+func mcpLiveExecutorMetrics() execution.Metrics {
+	if sink := mcpShadowMetricsSnapshotOrNil(); sink != nil {
+		return sink
+	}
+	return nil
+}
+
 // Composition errors (bounded, fail-closed). Composition leaves Deps.Executor untouched on any.
 var (
 	errLiveComposeNilConfig             = errors.New("mcp live tier: nil runtime config")
@@ -125,9 +140,14 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 		Events:          comp.Events,
 		Upstream:        comp.Upstream,
 		ResponseProfile: comp.ResponseProfile,
-		// Metrics nil ⇒ noop; the composition-layer gate carries the live-specific counters.
-		Clock: comp.Clock,
-		Actor: mcpLiveActor,
+		// Metrics: when a Shadow experiment is running this boot, the live executor SUPERSEDES the
+		// standalone Shadow evaluator (both flags enabled), so execution.New must give the embedded
+		// evaluator the SAME shadow metrics sink or culvert_mcp_shadow_* + the Shadow exit-criteria
+		// monitoring silently freeze (Codex P1, PR #1291). nil (no Shadow experiment this boot) ⇒
+		// noopMetrics; the composition-layer gate still carries the live-specific counters.
+		Metrics: mcpLiveExecutorMetrics(),
+		Clock:   comp.Clock,
+		Actor:   mcpLiveActor,
 		// The composition-layer side-effect gate: budget reservation + runtime live-trust
 		// revalidation + read-first, consulted at the boundary BEFORE the executor's kill re-check.
 		LiveGate: gate,
