@@ -292,15 +292,16 @@ func (e *Executor) materializeAndCall(ctx context.Context, in runtime.ExecInput,
 		return callUpstream(authFromMaterial(kind, m))
 	})
 	if mErr != nil {
-		// A boundary drift/kill refusal (errToolDriftedBeforeCall/errKilledAtBoundary) is
-		// reclassified AND metered exactly once by the caller via classifyBoundaryRefusal.
-		// Building a blocked output here would meter it a SECOND time — and, because both
-		// sentinels are package-private (ReasonOf == ReasonNone), that premature meter would
-		// land on the `none` reason series, double-counting the refusal and contaminating
-		// reason/total-rate telemetry (Codex P2, PR #1248). Return the un-metered signal and
-		// let the caller own the single classification+meter. errors.Is unwraps in case the
-		// broker wraps the callback error.
-		if errors.Is(mErr, errKilledAtBoundary) || errors.Is(mErr, errToolDriftedBeforeCall) {
+		// A boundary refusal — tool drift, emergency kill, OR the composition-layer live-gate
+		// (errToolDriftedBeforeCall / errKilledAtBoundary / errLiveGateRefused) — is reclassified
+		// AND metered exactly once by the caller via classifyBoundaryRefusal. Building a blocked
+		// output here would meter it a SECOND time — and, because all three sentinels are
+		// package-private (ReasonOf == ReasonNone), that premature meter would land on the `none`
+		// reason series, double-counting the refusal and contaminating reason/total-rate telemetry
+		// (Codex P2, PR #1248 for drift/kill; PR #1290 for the live gate). Return the un-metered
+		// signal and let the caller own the single classification+meter. errors.Is unwraps in case
+		// the broker wraps the callback error.
+		if errors.Is(mErr, errKilledAtBoundary) || errors.Is(mErr, errToolDriftedBeforeCall) || errors.Is(mErr, errLiveGateRefused) {
 			return runtime.ExecOutput{}, true
 		}
 		return e.blocked(in, mcperr.ReasonOf(mErr), false), true

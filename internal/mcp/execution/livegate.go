@@ -74,6 +74,13 @@ var errLiveGateRefused = errors.New("mcp: live side-effect gate refused")
 // value. in.Server is guaranteed non-nil here (runExecute blocks a nil/unusable server before
 // callUpstream); in.Input.Tool may be nil for a non-tool method, in which case the target fields
 // are empty and the gate's trust revalidation fails closed (no tool to approve).
+//
+// Now is read from the EXECUTOR'S CLOCK at this call — the boundary instant — NOT the request-entry
+// timestamp in.Now. liveGateInput is built inside callUpstream, AFTER the durable decision commit and
+// any credential materialization, which can each block; reusing in.Now would let the gate's live-trust
+// revalidation treat an approval that expired during that delay as still valid, and evaluate the Canary
+// budget window at an earlier instant (Codex P1, PR #1290). e.cfg.Clock is guaranteed non-nil (New
+// defaults it to time.Now), so this evaluates trust/expiry/budget against the actual side-effect time.
 func (e *Executor) liveGateInput(in runtime.ExecInput) LiveGateInput {
 	var toolName, fp string
 	if in.Input.Tool != nil {
@@ -92,6 +99,6 @@ func (e *Executor) liveGateInput(in runtime.ExecInput) LiveGateInput {
 		ServerID:    serverID,
 		ToolName:    toolName,
 		Fingerprint: fp,
-		Now:         in.Now,
+		Now:         e.cfg.Clock(), // the boundary instant, not the request-entry in.Now (see doc above)
 	}
 }
