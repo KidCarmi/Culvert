@@ -3,7 +3,7 @@ module github.com/KidCarmi/Culvert
 go 1.26.6
 
 require (
-	github.com/KidCarmi/Sluice v0.2.0
+	github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f
 	github.com/andybalholm/brotli v1.2.2
 	github.com/beevik/etree v1.7.1
 	github.com/crewjam/saml v0.5.1

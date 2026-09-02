@@ -32,8 +32,8 @@ github.com/Azure/go-ntlmssp v0.1.1 h1:l+FM/EEMb0U9QZE7mKNEDw5Mu3mFiaa2GKOoTSsNDP
 github.com/Azure/go-ntlmssp v0.1.1/go.mod h1:NYqdhxd/8aAct/s4qSYZEerdPuH1liG2/X9DiVTbhpk=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.7.0 h1:4iB+IesclUXdP0ICgAabvq2FYLXrJWKx1fJQ+GxSo3Y=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.7.0/go.mod h1:HKpQxkWaGLJ+D/5H8QRpyQXA1eKjxkFlOMwck5+33Jk=
-github.com/KidCarmi/Sluice v0.2.0 h1:Wtcp/E+KTY5UTVjJ8Nx4FXhr9Z8QsOODoc9GwOaZDfM=
-github.com/KidCarmi/Sluice v0.2.0/go.mod h1:j5EoYLp4wZUanBPOgzhxzwyIYD24Hb+KoNvBUSCuPlQ=
+github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f h1:OaB5cHZSv/t/4XHPZ5CbVVe1uWb+MZl2kUT9yLS3eeg=
+github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f/go.mod h1:j5EoYLp4wZUanBPOgzhxzwyIYD24Hb+KoNvBUSCuPlQ=
 github.com/alessio/shellescape v1.4.1 h1:V7yhSDDn8LP4lc4jS8pFkt0zCnzVJlG5JXy9BVKJUX0=
 github.com/alessio/shellescape v1.4.1/go.mod h1:PZAiSCk0LJaZkiCSkPv8qIobYglO3FPpyFjDCtHLS30=
 github.com/alexbrainman/sspi v0.0.0-20250919150558-7d374ff0d59e h1:4dAU9FXIyQktpoUAgOJK3OTFc/xug0PCXYCqU0FgDKI=
