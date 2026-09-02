@@ -150,5 +150,13 @@ func mcpLiveTierStatus() map[string]any {
 	// evaluateLiveArmReadiness); surface its durable, build-bound status read-only so an operator can
 	// see whether THIS build has qualified for a real Canary activation.
 	m["live_quiesce_rehearsed"] = liveQuiesceRehearsed(capb)
+	// The REAL production dependency composition status (§13/§18/§22): whether this node opted into
+	// the production live-dependency graph, whether it composed, and the machine-readable per-
+	// dependency readiness reason tokens. This is the "real dep status" behind readiness rows
+	// 6/7/14/15 (UpstreamCaller / credential path / boundary guards): in a production build the
+	// lifecycle-composed bit those rows derive from can ONLY have been set by this real composition
+	// (the execution-posture wall pins composeGatewayLiveTierInto's sole production caller as
+	// composeProductionGatewayLiveTier). It carries no secret — only bounded tokens.
+	m["production_dependencies"] = mcpLiveProdStatusView()
 	return m
 }

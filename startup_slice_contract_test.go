@@ -54,6 +54,7 @@ func TestStartupSliceContract_PureAndDeterministic(t *testing.T) {
 		{"logstore", func(fc *FileConfig) any { return resolveLogStoreStartupConfig(fc, "", "", "") }},
 		{"metrics_token", func(fc *FileConfig) any { return resolveMetricsTokenStartupConfig(fc, "") }},
 		{"mcp_observe", func(fc *FileConfig) any { return resolveMCPObserveStartupConfig(fc) }},
+		{"mcp_live_production", func(_ *FileConfig) any { return resolveMCPLiveProductionConfig("", "") }},
 		{"mtls_ocsp", func(fc *FileConfig) any { return resolveMTLSOCSPStartupConfig(fc) }},
 		{"observability", func(fc *FileConfig) any {
 			return resolveObservabilityStartupConfig(fc, "", "", "", "", "", 0)

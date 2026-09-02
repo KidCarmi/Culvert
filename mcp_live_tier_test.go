@@ -242,6 +242,32 @@ func TestLiveTier_ArmRefusesWhenNotReady(t *testing.T) {
 	}
 }
 
+// The live executor SUPERSEDES the standalone Shadow evaluator when both CULVERT_MCP_SHADOW_READY
+// and CULVERT_MCP_LIVE_DEPS are enabled; it must reuse the RUNNING Shadow metrics sink so
+// culvert_mcp_shadow_* + the Shadow exit-criteria monitoring do not silently freeze (Codex P1, PR #1291).
+func TestLiveTier_ComposeReusesRunningShadowMetricsSink(t *testing.T) {
+	resetLiveTierGlobals(t)
+	// A running Shadow experiment owns the process-wide sink singleton.
+	sink := newMCPShadowMetrics()
+	if got := mcpLiveExecutorMetrics(); got != sink {
+		t.Fatalf("live executor must reuse the running shadow metrics sink; got %v want %v", got, sink)
+	}
+	// Compose the live executor while the shadow experiment runs, then drive a record-only
+	// evaluation: it must construct with the real sink and not panic (a nil sink would).
+	up := &recordingUpstream{}
+	cfg := &mcpruntime.Config{}
+	if err := composeGatewayLiveTierInto(cfg, liveTierComposition{
+		Upstream: up, Events: liveTestEvents(t),
+		ResponseProfile: inspection.DefaultGatewayProfile(1),
+		Clock:           func() time.Time { return time.Unix(0, 1) },
+	}); err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	ex := cfg.Deps.Executor
+	in := liveExecInput(policy.OpRead, "t1", "p1")
+	_ = ex.Execute(context.Background(), in, ex.Resolve(in))
+}
+
 // ── §16 the non-negotiable regression: compose + arm does NOT activate Canary ──
 
 func TestLiveTier_ComposeAndArmDoesNotActivateCanary(t *testing.T) {
