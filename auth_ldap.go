@@ -29,6 +29,65 @@ func ldapTLSConfig(rawURL string, skipVerify bool) *tls.Config {
 	return cfg
 }
 
+// ── Directory round-trip bounds (CHAOS-57) ───────────────────────────────────
+//
+// ldapRoundTripBudget bounds ONE directory round trip END TO END — dial,
+// optional StartTLS, service bind, search, user bind — as a single envelope
+// rather than a per-step allowance. It is deliberately the SAME budget this
+// process already gives one identity resolution against an OIDC IdP
+// (`auth_oidc.go`, `auth_oidc_flow.go`: `http.Client{Timeout: 10s}` covers
+// dial + handshake + request + response). Two identity backends answering the
+// same question on the same request path must not disagree about how long that
+// decision may take — the CHAOS-53 rule for the two body-scan back ends,
+// applied to the two credential back ends. Dial is a COMPONENT of the
+// envelope, so the historical 10 s dial timeout becomes the ceiling for the
+// whole flow instead of for its first step.
+//
+// It is a var, not a const, purely so the chaos gates can drive it down
+// instead of sleeping for the production budget. Never mutated in production.
+var ldapRoundTripBudget = 10 * time.Second
+
+// errLDAPBudgetExhausted is returned when the round-trip envelope is spent
+// before an operation could be attempted. It is deliberately NOT an
+// *ldap.Error: ldapUserBindIsUnreachable treats a non-*ldap.Error as
+// unreachable (fail safe), which is the correct classification — a directory
+// that consumed the whole budget without answering did not answer.
+var errLDAPBudgetExhausted = errors.New("ldap: directory round-trip budget exhausted")
+
+// armLDAPConnWatchdog closes conn if it is still open after d, returning the
+// canceller.
+//
+// This is the SECOND of two non-redundant layers, and it exists because
+// go-ldap's own request timer structurally cannot reach every blocking wait.
+// `conn.SetTimeout` arms a per-message timer that covers Bind, Search and the
+// StartTLS extended-RESPONSE wait; it does NOT cover the post-response
+// `tls.Conn.Handshake()` that `Conn.StartTLS` runs on the RAW socket, outside
+// the message loop. A directory that ACKs StartTLS and then never negotiates
+// TLS therefore hangs forever with SetTimeout armed — proven directly against
+// the library by TestChaos57_SetTimeoutDoesNotBoundStartTLSHandshake, so a
+// go-ldap upgrade that changed this would fail the build rather than silently
+// leave the backstop guarding nothing.
+//
+// CLOSING is what unblocks a deadline-less read — the same reason
+// idleCopyCounted hard-closes both conns on idle (CHAOS-03) rather than
+// relying on a deadline the peer goroutine may not be able to observe.
+// go-ldap's Close is idempotent (setClosing) and takes messageMutex, which no
+// in-flight operation holds across its network wait (sendMessageWithFlags
+// releases it before waiting; the StartTLS handshake runs with it released),
+// so firing this from a timer goroutine cannot deadlock the operation it is
+// rescuing.
+func armLDAPConnWatchdog(conn *ldap.Conn, d time.Duration, backend string) func() {
+	t := time.AfterFunc(d, func() {
+		// Bounded reason class only: the directory's address and any
+		// server-controlled diagnostic stay out of this line, which is a
+		// per-request path.
+		logger.Printf("LDAP: directory %q did not complete an operation within %s — closing the connection so the request goroutine is released",
+			sanitizeLog(backend), d)
+		_ = conn.Close() //nolint:errcheck // best-effort rescue close
+	})
+	return func() { t.Stop() }
+}
+
 // errLDAPAccountRejected marks a user-bind the directory ANSWERED but did not
 // accept for a reason that is not "wrong password" — a locked, disabled or
 // expired account, an entry with no bindable credential, a referral. It is the
@@ -340,16 +399,40 @@ func (a *LDAPAuth) noteVerifyError(err error) {
 func (a *LDAPAuth) verify(username, password string) (*Identity, bool, error) { //nolint:gocognit,cyclop // the two-step-bind decision tree with its blast-radius error classification is inherently branchy; single-sourced for legacy + registry engines
 	tlsCfg := ldapTLSConfig(a.cfg.URL, a.cfg.TLSSkipVerify)
 
-	// Dial with timeout to prevent DoS from hung LDAP servers.
+	// The whole round trip runs under ONE envelope (CHAOS-57). A directory
+	// that ACCEPTS the connection and then stops answering — an overloaded
+	// server, a firewall that drops after the handshake, a half-open socket
+	// after a peer reboot — used to block HERE, in the request goroutine,
+	// forever: go-ldap's default requestTimeout is 0, which arms no timer at
+	// all, so Bind and Search waited on a response that never came. Every such
+	// request pinned a goroutine, an FD and a per-IP connection slot until the
+	// process was restarted, and because CHAOS-47's provider-wide cooldown is
+	// armed only by an error that RETURNS, the one mitigation designed for an
+	// unreachable directory could never see this fault class.
+	deadline := time.Now().Add(ldapRoundTripBudget)
 	conn, err := ldap.DialURL(a.cfg.URL,
 		ldap.DialWithTLSConfig(tlsCfg),
-		ldap.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}),
+		ldap.DialWithDialer(&net.Dialer{Timeout: ldapRoundTripBudget}),
 	)
 	if err != nil {
 		logger.Printf("LDAP dial error: %v", err)
 		return nil, false, fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close() //nolint:errcheck // best-effort close of a bind connection
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		logger.Printf("LDAP: dial consumed the whole %s round-trip budget", ldapRoundTripBudget)
+		return nil, false, fmt.Errorf("dial: %w", errLDAPBudgetExhausted)
+	}
+	// Layer 1: go-ldap's own per-message timer. Every message round trip below
+	// now fails with an ErrorNetwork the CHAOS-47 classifier already reads as
+	// unreachable, so a stall arms the cooldown exactly like a refused dial.
+	conn.SetTimeout(remaining)
+	// Layer 2: the envelope backstop. NOT redundant with layer 1 — see
+	// armLDAPConnWatchdog for the StartTLS handshake it is the only bound on.
+	stopWatchdog := armLDAPConnWatchdog(conn, remaining, a.backendName)
+	defer stopWatchdog()
 
 	// Optional STARTTLS upgrade.
 	if a.cfg.StartTLS && !strings.HasPrefix(strings.ToLower(a.cfg.URL), "ldaps") {
