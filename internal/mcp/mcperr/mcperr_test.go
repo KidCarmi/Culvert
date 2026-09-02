@@ -151,6 +151,8 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonApprovalPurposeUnsupported, "approval_purpose_unsupported"},
 		{ReasonApprovalNotAuthorized, "approval_not_authorized"},
 		{ReasonApprovalStoreUnavailable, "approval_store_unavailable"},
+		{ReasonRolloutBudgetExhausted, "rollout_budget_exhausted"},
+		{ReasonLiveTrustRevalidationFailed, "live_trust_revalidation_failed"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {

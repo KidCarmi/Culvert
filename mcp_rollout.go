@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -253,6 +254,12 @@ type commitTransitionTarget struct {
 	persist         func(*rollout.State) error // how the mutated state is persisted (canonical path, or a scratch path)
 	setStatus       func(status string)        // record a persist status ("recovered"/"write_failed") — live sink or no-op
 	countTransition func()                     // record a successful transition — live metric or no-op
+	// reconcileRuntime gates the Canary-runtime generation reconciliation (beginCanaryActivation on a
+	// live activation, demoteCanary on a demotion). TRUE only for a PRODUCTION commit — a rehearsal
+	// drives a scratch target and leaves this false, so a rollback drill never begins or demotes the
+	// real live budget/abort runtime (the drill proves the rollout demotion mechanics, not the runtime
+	// generation lifecycle, which its own tests cover).
+	reconcileRuntime bool
 }
 
 // liveCommitTarget is the PRODUCTION side-effect destination: the live capability State, the canonical
@@ -260,10 +267,11 @@ type commitTransitionTarget struct {
 // route through this so their behavior is byte-identical to the pre-extraction coordinator.
 func (r *mcpRollout) liveCommitTarget(capb rollout.Capability) commitTransitionTarget {
 	return commitTransitionTarget{
-		st:              r.stateFor(capb),
-		persist:         persistRolloutState,
-		setStatus:       func(status string) { r.setPersistStatus(capb, status) },
-		countTransition: func() { r.metrics.transitions.Add(1) },
+		st:               r.stateFor(capb),
+		persist:          persistRolloutState,
+		setStatus:        func(status string) { r.setPersistStatus(capb, status) },
+		countTransition:  func() { r.metrics.transitions.Add(1) },
+		reconcileRuntime: true, // production commits reconcile the real Canary runtime generation
 	}
 }
 
@@ -334,6 +342,7 @@ func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg
 	// envelope cannot smuggle an approval or budget past the gate (Codex P1). In this build the
 	// authoritative approval/budget store does not exist (the probe returns empties) and the live
 	// tier is never armed, so a Canary/Production transition ALWAYS fails here.
+	var activationBudget canary.Budget
 	if cfg.Mode.RequiresLiveExecution() {
 		// Evaluate the FULL activation verdict INSIDE the serialized section, against THIS rollout's
 		// state, so a mutable fail-closed fact that changed after the caller's checks — an
@@ -360,6 +369,10 @@ func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg
 				cfg.Capability.String(), cfg.Mode.String(), rd.Unmet)
 			return errCanaryActivationPreflightFailed
 		}
+		// The authoritative activation budget for beginCanaryActivation below (§7/§8). It comes from
+		// node-authoritative state (the probe), never the signed config, and was just proven valid by the
+		// preflight.
+		activationBudget = ai.Budget
 	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
 	// for the scope-change continuity check below.
@@ -413,6 +426,31 @@ func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg
 	}
 	tgt.setStatus("recovered")
 	tgt.countTransition()
+	// (5) Canary activation RUNTIME reconciliation (§7). The rollout state committed durably above;
+	// now bring the per-capability budget/abort generation into agreement with the new mode. This runs
+	// through the REAL globalCanaryRuntime ONLY for a production commit — the rehearsal drives a SCRATCH
+	// target and sets tgt.reconcileRuntime=false so a drill never begins/demotes the live runtime.
+	// beginCanaryActivation increments the monotonic generation EXACTLY ONCE per accepted activation
+	// (entering a live mode from a non-live mode); a scope change within Canary is not a new activation
+	// and does not re-begin; a demotion (leaving a live mode) invalidates the generation so the demoted
+	// budget/abort can never govern a later activation. A failed begin/demote leaves the runtime
+	// fail-closed (disarmed) — an executing request then denies at reserveCanaryExecution — so the
+	// rollout commit is never reported as a durable live activation the runtime cannot back.
+	if tgt.reconcileRuntime {
+		enteringLive := cfg.Mode.RequiresLiveExecution() && !prevMode.RequiresLiveExecution()
+		leavingLive := !cfg.Mode.RequiresLiveExecution() && prevMode.RequiresLiveExecution()
+		switch {
+		case enteringLive:
+			if _, err := globalCanaryRuntime.beginCanaryActivation(cfg.Capability, activationBudget, now); err != nil {
+				logger.Printf("MCP rollout: %s activated to %s but beginCanaryActivation failed (runtime fail-closed; executions will deny): %q",
+					cfg.Capability.String(), cfg.Mode.String(), sanitizeLog(err.Error()))
+			}
+		case leavingLive:
+			if err := globalCanaryRuntime.demoteCanary(cfg.Capability); err != nil {
+				logger.Printf("MCP rollout: %s demoted from a live mode but demoteCanary failed: %q", cfg.Capability.String(), sanitizeLog(err.Error()))
+			}
+		}
+	}
 	return nil
 }
 

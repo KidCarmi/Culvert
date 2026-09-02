@@ -71,8 +71,29 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// redefined. Re-checking here makes the refusal precede the side effect.
 	staleAtCall := false
 	killedAtCall := false
+	gateRefused := false
+	var gateReason mcperr.Reason
 	callUpstream := func(authHeader string) error {
-		// Last-moment boundary re-checks (tool drift, then the emergency kill) run inside
+		// (1) Composition-layer LIVE side-effect gate — budget reservation, runtime live-trust
+		// revalidation, read-first — runs BEFORE preCallGuard so the emergency-kill re-read
+		// stays the LAST authoritative check before Upstream.Call (PREREQ-MCP-KILL-1). A denial
+		// fails closed with the gate's bounded reason and Upstream.Call is never reached. On an
+		// admit, Release runs after the upstream leg (deferred) so a reserved slot is never
+		// leaked even if the freshness/kill guard below then aborts (§11). nil gate ⇒ unchanged.
+		var release func()
+		if e.cfg.LiveGate != nil {
+			d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
+			if !d.Admit {
+				gateRefused = true
+				gateReason = d.Reason
+				return errLiveGateRefused
+			}
+			release = d.Release
+		}
+		if release != nil {
+			defer release()
+		}
+		// (2) Last-moment boundary re-checks (tool drift, then the emergency kill) run inside
 		// preCallGuard so nothing sits between them and Upstream.Call. Setting the flags from
 		// the returned sentinel (rather than a branch) keeps this closure to a single decision.
 		if gerr := e.preCallGuard(in, admKillGen); gerr != nil {
@@ -108,10 +129,10 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
 		return nil
 	}); err != nil {
-		// A boundary drift/kill refusal outranks the generic error mapping and must read as its
-		// own reason, never as a transport/durability fault. This branch carries the
+		// A boundary drift/kill/gate refusal outranks the generic error mapping and must read as
+		// its own reason, never as a transport/durability fault. This branch carries the
 		// NO-credential path, whose callUpstream error escapes CommitThenAct verbatim.
-		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall); ok {
+		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall, gateRefused, gateReason); ok {
 			return out
 		}
 		return e.blocked(in, mcperr.ReasonOf(err), false)
@@ -124,7 +145,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// detected inside the broker callback must therefore be reclassified HERE too, or
 		// clients and block telemetry would read `none` where the no-credential path reads the
 		// correct reason.
-		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall); ok {
+		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall, gateRefused, gateReason); ok {
 			return out
 		}
 		return blockedOut
@@ -179,12 +200,23 @@ func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64) error {
 // reason each refusal carries; both read as a fail-closed refusal, never a transport/durability
 // fault or ReasonNone. Shared by the no-credential (CommitThenAct-error) and credential
 // (materializeAndCall-absorbed) branches so both reclassify identically.
-func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, staleAtCall bool) (runtime.ExecOutput, bool) {
+func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, staleAtCall, gateRefused bool, gateReason mcperr.Reason) (runtime.ExecOutput, bool) {
 	switch {
 	case killedAtCall:
 		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false), true
 	case staleAtCall:
 		return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false), true
+	case gateRefused:
+		// The composition-layer gate denied the side effect (budget exhausted, live-trust
+		// revoked/expired/drifted, or not read-first). Surface its bounded reason, never a
+		// transport/durability fault or ReasonNone. The gate runs BEFORE the kill re-check, so a
+		// gate refusal and a kill refusal are mutually exclusive by construction (kill wins only
+		// if the gate admitted first) — the ordering here just fixes the named reason.
+		r := gateReason
+		if r == mcperr.ReasonNone {
+			r = mcperr.ReasonRolloutModeInvalid // defensive: a gate must always name a reason
+		}
+		return e.blocked(in, r, false), true
 	default:
 		return runtime.ExecOutput{}, false
 	}
