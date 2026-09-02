@@ -507,8 +507,14 @@ Attacks considered and where each is stopped:
 - *Rug-pull the tool after approval* → `MatchesTool` exact-fingerprint + boundary `ToolStillCurrent`.
 - *Force an activation fact true via a signed config* → activation facts are node-authoritative, not
   request-supplied.
-- *Reach `Upstream.Call` past an emergency kill* → final monotonic kill-generation re-read is the
-  last check (`preCallGuard`), paramount over drift/demotion.
+- *Reach the FIRST `Upstream.Call` POST past an emergency kill* → the final monotonic kill-generation
+  re-read (`preCallGuard`) is the last check before it, paramount over drift/demotion. **But this
+  holds only for the FIRST physical POST (Codex P1):** `preCallGuard` runs ONCE, then
+  `upstreamclient.Client.Call` retries an idempotent read inside its own loop (`client.go:132-141`)
+  with NO kill/generation re-check between attempts, so a kill engaged AFTER the first POST but before
+  a retry does NOT stop the retry POST. The kill is therefore authoritative at admission, NOT across
+  the retry window — a real gap folded into blocker 6 (§9/§26): a retry-free client closes it, and
+  merely charging each attempt to the budget does NOT (the POST still fires after the kill).
 - *Get a no-credential call to leak a header* → `callUpstream("")` sets no `Authorization`.
 
 No "probably safe" path was left open for the attacks that DO resolve to a gate. **The concerns that
@@ -516,8 +522,10 @@ do NOT resolve to a gate become the blockers, not residual risks (§26):** (a) n
 controlled target (§5); (b) the unreachable activation preflight (§13); (c) the read-first classifier
 refuses the one-exact-tool call and discovery cannot bind an exact tool (§6, Codex P1); (d) most
 whole-Canary aborts are declared-but-unwired, so a witness divergence or evidence loss does not
-auto-stop later requests (§14/§16, Codex P1); and (e) the durable outcome record is incomplete and
-success-only, so a pre-crash invocation is not always determinable (§15/§18, Codex P1).
+auto-stop later requests (§14/§16, Codex P1); (e) the durable outcome record is incomplete and
+success-only, so a pre-crash invocation is not always determinable (§15/§18, Codex P1); and (f) the
+transport retry loop bypasses the kill re-read, so an admitted request's retry POSTs can land after
+an emergency kill (§9/blocker 6, Codex P1).
 
 ---
 
@@ -688,16 +696,19 @@ verdict FAILED.)
   `principalCount` sums Principals+Clients+Agents, so one shared client/agent with no Principals would
   satisfy it while leaving the principal dimension unrestricted; and `ValidateScope` permits up to two
   of each (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate enforces none of this (§10);
-- **[code change]** bound PHYSICAL upstream invocations to the budget — `upstreamclient.Call` retries
-  an idempotent read up to `MaxReadRetries` times outside the single budget `Reserve`, so one budgeted
-  request can hit the server up to ~3 times (§9). Only TWO options actually bound the physical POSTs,
-  and BOTH are code: (a) make retry-disablement representable and wire a retry-free `Limits` into the
-  Canary client — it is not representable today (`NewLimits` coerces `MaxReadRetries==0`→`2` and rejects
-  negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`); or (b) charge each physical
-  attempt to the budget. A per-reservation correlation key is NOT a third option: it only lets the
-  witness be reconciled and (with an upstream dedup protocol) lets the SERVER ignore duplicate
-  side-effects — it neither stops the retry loop nor charges its attempts, so the physical POSTs the
-  server records are unbounded by it (§14);
+- **[code change]** bound PHYSICAL upstream invocations to the budget AND keep the emergency kill
+  authoritative across retries — `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries`
+  times outside the single budget `Reserve` AND without re-checking kill/generation between attempts
+  (`client.go:132-141`), so one budgeted request can hit the server up to ~3 times (§9) and a retry POST
+  can land after an emergency kill (§20). The clean fix is (a) make retry-disablement representable and
+  wire a retry-free `Limits` into the Canary client — it is not representable today (`NewLimits` coerces
+  `MaxReadRetries==0`→`2` and rejects negatives; `newProductionUpstreamClient` hard-codes
+  `DefaultLimits()`) — which closes BOTH the count and the kill gap. Charging each physical attempt to
+  the budget bounds the COUNT but does NOT restore kill authority (the POST still fires after the kill),
+  so it must be paired with per-attempt kill/generation revalidation inside the retry loop. A
+  per-reservation correlation key is NOT a bound at all: it only lets the witness be reconciled and
+  (with an upstream dedup protocol) lets the SERVER ignore duplicate side-effects — it neither stops the
+  retry loop, charges its attempts, nor re-checks the kill (§14/§20);
 - **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
   `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
   `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,

@@ -112,8 +112,11 @@ set is empty. This requires the separately-reviewed activation to have:
    recording upstream's independent log. Any mismatch is a whole-Canary breach → auto-stop.
 8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16) — auto-demote
    to Shadow and/or engage the kill switch.
-9. **Roll back** at the first sign of any whole-Canary breach; the kill generation remains
-   authoritative for requests already admitted (PREREQ-MCP-KILL-1).
+9. **Roll back** at the first sign of any whole-Canary breach; the kill generation is authoritative at
+   the admission boundary (PREREQ-MCP-KILL-1) — but NOT across the transport retry loop:
+   `upstreamclient.Call` retries an idempotent read without re-checking the kill, so a retry POST can
+   land after a kill engaged mid-flight. Until the retry loop is made retry-free or kill-revalidating
+   (review §9/§20, blocker 6), an admitted request's retries are outside the kill's authority.
 
 ## Automatic-abort conditions (whole-Canary; §16)
 
