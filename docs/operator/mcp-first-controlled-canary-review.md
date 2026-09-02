@@ -244,11 +244,12 @@ Canary this must be closed, and **every option is a CODE CHANGE — retry-disabl
 representable today** (Codex P1, verified). `newProductionUpstreamClient` hard-codes
 `upstreamclient.DefaultLimits()` (2 retries), and `NewLimits` COERCES `MaxReadRetries == 0` to the
 default `2` and REJECTS negatives (`limits.go:98-99,107`), so no config value disables retries.
-Closing this requires code: make retry-disablement representable (an explicit zero/sentinel or a
-no-retry flag) and wire a retry-free `Limits` into the Canary's production client — OR charge each
-physical attempt to the budget — OR add a unique-per-reservation, stable-across-retries key (the
-current `WireID` is per-server, `run.go:112`, so dedup by it collapses the whole corpus, not just
-retries; §14/§26). Not GO until then.
+Closing this requires code, and only TWO options actually bound the physical POSTs: make
+retry-disablement representable (an explicit zero/sentinel or a no-retry flag) and wire a retry-free
+`Limits` into the Canary's production client, OR charge each physical attempt to the budget. A
+per-reservation correlation key is NOT a third bound — it only enables witness correlation and (with
+an upstream dedup protocol) server-side de-duplication of side-effects; it does not stop the retry
+loop, so the server still records up to ~3 POSTs (§14/§26). Not GO until then.
 
 ---
 
@@ -337,10 +338,14 @@ per-Reserve executed count and the server's received count need NOT be equal eve
 wrong. Correlating/deduplicating on the JSON-RPC wire ID does NOT work today: the executor sets
 `WireID = "u-" + target.ServerID` (`run.go:112`), which is per-SERVER — with the experiment's single
 server, ALL reservations AND their retries share ONE id, so witness records cannot be mapped to
-individual reservations and dedup by that id would collapse the WHOLE corpus, not just retries. The
-only remedy that works with today's code is therefore to **disable transport retries** so each Reserve
-maps to exactly one physical invocation; a correlation/dedup approach would first require adding a
-UNIQUE-per-reservation key that is STABLE across that reservation's retries (a code change, §26).
+individual reservations and dedup by that id would collapse the WHOLE corpus, not just retries. NO
+remedy works with today's code — all require a code change (§9/§26): disabling retries is not
+representable (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects negatives; the production client
+hard-codes `DefaultLimits()`), and charging each attempt to the budget is likewise code. A
+unique-per-reservation, stable-across-retries key would let the witness be *correlated* to reservations,
+but a key ALONE does NOT bound physical POSTs — it neither stops the retry loop nor charges its
+attempts, so the server still records up to ~3 POSTs per reservation; only disabling retries or
+charging each attempt actually bounds the physical invocations (§26).
 
 **Correction (Codex P1) — reconciliation and its breach are NOT automatic.** `outcome_evidence_loss`
 and `unexpected_upstream_response` are declared abort codes (`abort.go`) but NO production code
@@ -667,11 +672,14 @@ verdict FAILED.)
   of each (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate enforces none of this (§10);
 - **[code change]** bound PHYSICAL upstream invocations to the budget — `upstreamclient.Call` retries
   an idempotent read up to `MaxReadRetries` times outside the single budget `Reserve`, so one budgeted
-  request can hit the server up to ~3 times (§9). Disabling retries is NOT currently representable:
-  `NewLimits` coerces `MaxReadRetries==0` to `2` and rejects negatives, and `newProductionUpstreamClient`
-  hard-codes `DefaultLimits()` — so this requires code to make retry-disablement representable and wire
-  a retry-free `Limits` in, OR to charge each physical attempt to the budget, OR to add a
-  unique-per-reservation, stable-across-retries key (the per-server `WireID` cannot be used for dedup, §14);
+  request can hit the server up to ~3 times (§9). Only TWO options actually bound the physical POSTs,
+  and BOTH are code: (a) make retry-disablement representable and wire a retry-free `Limits` into the
+  Canary client — it is not representable today (`NewLimits` coerces `MaxReadRetries==0`→`2` and rejects
+  negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`); or (b) charge each physical
+  attempt to the budget. A per-reservation correlation key is NOT a third option: it only lets the
+  witness be reconciled and (with an upstream dedup protocol) lets the SERVER ignore duplicate
+  side-effects — it neither stops the retry loop nor charges its attempts, so the physical POSTs the
+  server records are unbounded by it (§14);
 - **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
   `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
   `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,

@@ -227,9 +227,10 @@ Every one is a **separately-reviewed activation**, not a config change:
    **per-physical-invocation budget (CODE CHANGE)** — an idempotent read retries up to `MaxReadRetries`
    times outside the single budget reservation, so one budgeted request can send the POST ~3×.
    Retry-disablement is NOT representable today (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects
-   negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code:
-   make retry-disablement representable + wire a retry-free client, OR charge each attempt, OR add a
-   unique-per-reservation key (the per-server `WireID` cannot be used for dedup — review §9/§14);
+   negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code —
+   only two options actually bound the physical POSTs: make retry-disablement representable + wire a
+   retry-free client, OR charge each attempt to the budget. A per-reservation key is not a third bound
+   (it enables correlation/server-side dedup but does not stop the retry loop — review §9/§14);
    a **credential-selection resolution** (verify a matched rule with no `CredentialProfile`, or a
    working credential provider/path — the production broker has zero providers, review §4); and (g)
    two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
