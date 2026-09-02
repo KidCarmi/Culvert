@@ -8,6 +8,7 @@ current posture (do NOT collapse these into "done" or "not done"):
 |---|---|
 | Canary architecture — preflight, scope gate, budget ceiling, trust firewall | **IMPLEMENTED** |
 | Canary architecture — whole-Canary AUTOMATIC abort | **PARTIAL / DEFECTIVE** — only `budget_exhausted` and `scope_escape` have automatic trippers; the other eight declared breaches do not auto-stop (see §16 below and the review §16) |
+| Canary architecture — durable invocation evidence | **PARTIAL / DEFECTIVE** — events carry no `OutcomeEvidence`; the post-call outcome commit is success-only (upstream errors + DLP blocks emit no post-call event) and a post-send crash is indeterminate, so the executed/status/duration reconciliation the procedure below assumes is not fully backed (review §15/§18) |
 | Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
 | Live tier arming | **NOT OPERATOR-PERFORMABLE YET** — the governed, node-readiness-gated `armLiveTier` function exists and is correct, but has NO production caller (no startup path, admin API, or other non-test code invokes it); arming is reachable only from tests today |
 | Armed by default | **NO** — a stock build composes nothing and arms nothing (`live_executor_absent`) |

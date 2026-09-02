@@ -14,8 +14,8 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **EIGHT independent blockers** (exhaustive; each maps 1:1 to a mandatory
-NO row in §25 and an item in §26): (1) no controlled upstream reachable under the supported
+cannot be assembled today on **NINE independent blockers** (exhaustive; each maps 1:1 to a mandatory
+NO/CONDITIONAL row in §25 and an item in §26): (1) no controlled upstream reachable under the supported
 production trust model; (2) the production activation preflight cannot return `Ready:true` on a stock
 node; (3) no governed production arming entry point — `armLiveTier` has no production caller, so an
 operator cannot arm the tier; (4) the read-first classifier refuses the one-exact-tool call and
@@ -25,9 +25,10 @@ invocations (idempotent read retries send the POST up to ~3× per reservation); 
 DEFECTS, not merely capability gaps — (7) whole-Canary auto-abort is unwired for the eight declared
 breaches beyond `budget_exhausted`/`scope_escape` (so later requests stay eligible after a breach)
 and (8) the durable outcome record is success-only with an unclosable post-send crash window, so a
-pre-crash invocation is not always determinable. The no-credential status is additionally CONDITIONAL
-until a concrete tool + rule are fixed (§4). Blockers 1–6 are gaps/prerequisites; 7–8 are defects
-recorded here for dedicated PRs (§21). The experiment is specified below up to the exact point where
+pre-crash invocation is not always determinable; and (9) the credential path is unresolved — selection
+comes from the matched policy rule and the production broker has zero providers, so it must be closed
+explicitly by a no-`CredentialProfile` rule or a working provider/path (§4). Blockers 1–6 and 9 are
+gaps/prerequisites; 7–8 are defects recorded here for dedicated PRs (§21). The experiment is specified below up to the exact point where
 it becomes unauthorizable, and the precise provisioning that would unblock it is named.
 
 ---
@@ -120,7 +121,11 @@ executor takes `callUpstream("")` — the broker's `Plan`/`Materialize` are neve
 a no-credential tool: providers are consulted only inside `Broker.Materialize`, which this path
 never reaches. (A credential-REQUIRING tool with no broker fails closed with
 `ReasonCredentialProfileMissing` at `run.go:135`; with the zero-provider production broker it fails
-closed inside `Broker.Plan`.) **No credential Provider is implemented in this review.**
+closed inside `Broker.Materialize` — the `doFetch` provider lookup returns not-found — NOT in
+`Broker.Plan`, which is pure and "consults no provider" (`broker.go:119-120`) and so SUCCEEDS. The
+failure therefore lands AFTER `Plan` and after the credential gate has authorized and committed its
+evidence, still fail-closed but at a later stage.) **No credential Provider is implemented in this
+review.**
 
 **Correction (Codex P2).** `CredentialProfile` is a policy-decision *obligation*
 (`policy/obligation.go:80`), not an intrinsic tool property. The no-credential *code path* is proven
@@ -567,7 +572,7 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **eight independent blockers** (each maps to a NO/CONDITIONAL row in §25) — some
+assembled today on **nine independent blockers** (each maps to a NO/CONDITIONAL row in §25) — some
 are intentional capability gaps, some are prerequisites, and two are genuine product defects the
 Codex adversarial rounds (§24) surfaced and this review verified against the code. The list below is
 exhaustive: closing ALL of it is necessary and sufficient to pass §25.
@@ -593,16 +598,16 @@ exhaustive: closing ALL of it is necessary and sufficient to pass §25.
    reconciles the independent witness — so a divergence would not auto-stop later requests.
 8. **Durable outcome evidence is incomplete/success-only, with an unclosable post-send crash window
    (§15/§18) — a product defect.** A pre-crash upstream invocation is not always determinable.
-
-Additionally, the credential path is a SEPARATE prerequisite (§4): credential selection comes from
-the tool's matched policy RULE, not from provisioning a server/tool, and the production broker has
-ZERO providers. Provisioning a target (blocker 1) does NOT by itself establish no-credential status —
-it must be closed explicitly (see the unblock list).
+9. **Credential path unresolved (§4).** Credential selection comes from the tool's matched policy
+   RULE, not from provisioning a server/tool, and the production broker has ZERO providers, so a
+   `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning a target
+   (blocker 1) does NOT by itself establish no-credential status; it must be closed explicitly by
+   verifying a no-`CredentialProfile` matched rule OR implementing a working credential provider/path.
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
 execute — nothing is reachable (1), no Canary can activate (2), no operator can arm (3), and no
-admissible one-tool operation exists (4). Blockers 5–8 are unmet *prerequisites*/defects, not a live
+admissible one-tool operation exists (4). Blockers 5–9 are unmet *prerequisites*/defects, not a live
 unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA. So the
 honest label is BLOCKED — a safe first experiment cannot be *assembled* — and the two product defects
 (7, 8) must be closed as dedicated PRs before any authorization, reinforcing rather than weakening
