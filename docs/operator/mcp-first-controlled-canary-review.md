@@ -255,13 +255,15 @@ First-Canary bounds (`MaxCanaryServers=1`, `MaxCanaryTools=2`, `MaxCanaryPrincip
 TENANT (caps are 1), a percentage, a group, a wildcard/fingerprint-less tool, a different
 fingerprint/format, a control op — each by a distinct sub-reason.
 
-**Correction (Codex P1) — `ValidateScope` does NOT enforce exactly-one tool/principal.**
-`MaxCanaryTools` and `MaxCanaryPrincipals` are **2**, so a two-tool or two-principal scope PASSES
-the scope gate. A second tool or second principal is therefore NOT a rejected near-miss. For the
-one-of-everything experiment, "exactly one tool AND exactly one principal" must be imposed as an
-EXTERNAL authorization prerequisite (or the activation path must additionally require count==1 on
-both axes); the machine gate alone permits two. This is not GO as claimed — it is an external
-constraint to add to the unblock list (§26).
+**Correction (Codex P1) — `ValidateScope` does NOT enforce exactly-one tool/principal, and a plain
+count==1 remedy is insufficient.** `MaxCanaryTools` and `MaxCanaryPrincipals` are **2**, so a
+two-tool or two-principal scope PASSES the scope gate. Worse, `principalCount` sums `Principals` +
+`Clients` + `Agents`, so a `count==1` remedy is satisfiable by ONE shared `Client` or `Agent` with
+ZERO `Principals` — which leaves the principal dimension unrestricted, letting any non-synthetic user
+of that client/agent become the admitted caller. The correct external prerequisite is therefore:
+**exactly one `Principals` entry, zero `Clients`/`Agents`/`Groups`, and exactly one tool** (or a
+proof that the selected client/agent maps one-to-one to the synthetic principal). The machine gate
+alone enforces none of this — it is an external constraint on the unblock list (§26).
 
 ---
 
@@ -399,12 +401,18 @@ scope_escape.
 
 ## §17 Manual emergency controls
 
-Available and admin-gated: emergency kill engage/clear (`POST /api/mcp/rollout/emergency`,
-`emergencyDisable`/`clearEmergency`, monotonic `killGen`, narrows only), quiesce
-(`quiesceLiveTier` → un-arm first, close admission, bounded drain), and Canary→Shadow/Observe
-demotion (`demoteCanary`). A GO decision is forbidden unless rollback and kill are currently
-available; they are, as mechanisms. (They cannot be *exercised against a live Canary* today because
-none can be activated.)
+Reachable, admin-gated controls: emergency kill engage/clear (`POST /api/mcp/rollout/emergency`,
+`emergencyDisable`/`clearEmergency`, monotonic `killGen`, narrows only) and Canary→Shadow/Observe
+demotion (`demoteCanary`, reached from the rollout-mode commit path `mcp_rollout.go:511`, so an admin
+driving a rollout-mode transition triggers it). Both are operator-invokable today.
+
+**Correction (Codex P2) — quiesce is NOT operator-invokable.** `quiesceLiveTier` (the live-tier
+un-arm-and-drain) has NO production caller — a repo-wide search of non-test Go finds only its
+definition; no route or startup hook invokes it. So the "un-arm first, close admission, bounded
+drain" action cannot be performed by an operator during a Canary. A governed production quiesce entry
+point is added to the §26 unblock list. Kill + rollout-demotion remain available as mechanisms, so
+the "no GO unless rollback and kill are available" bar is met by those two; none can be *exercised
+against a live Canary* today because none can be activated.
 
 ---
 
@@ -624,16 +632,22 @@ verdict FAILED.)
 - wire a **governed production arming entry point** (startup path or admin API) that invokes
   `armLiveTier` — it has no production caller today, so an operator cannot arm the tier in the shipped
   process (§12) — and then arm the live tier on the controlled node via that path;
+- wire a **governed production quiesce entry point** (route or hook) that invokes `quiesceLiveTier` —
+  it too has no production caller (§17), so the un-arm-and-drain control is not operator-invokable;
+  the emergency kill and Canary→Shadow/Observe demotion ARE reachable and remain the available
+  controls until quiesce is wired;
 - ship a finer operation classifier (or a designed discovery-trust path) so exactly one harmless
   operation is read-first-admissible AND bindable to one exact tool;
 - resolve the credential path explicitly (§4): either verify the chosen tool's matched policy rule
   attaches NO `CredentialProfile` (so the no-credential branch is proven for this exact request), OR
   implement a working credential provider/path — the production broker composes zero providers, so a
   credential-requiring rule fails closed;
-- impose "exactly one tool AND exactly one principal" as an authorization prerequisite (or add a
-  count==1 constraint to the activation path) — `ValidateScope` alone permits up to two of each
-  (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate does not enforce the
-  one-of-everything shape (§10);
+- impose the exact one-of-everything identity shape as an authorization prerequisite: **exactly one
+  `Principals` entry, zero `Clients`/`Agents`/`Groups`, exactly one tool** (or prove the selected
+  client/agent maps one-to-one to the synthetic principal). A plain count==1 check is INSUFFICIENT —
+  `principalCount` sums Principals+Clients+Agents, so one shared client/agent with no Principals would
+  satisfy it while leaving the principal dimension unrestricted; and `ValidateScope` permits up to two
+  of each (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate enforces none of this (§10);
 - for the First Canary, **disable transport read-retries** (or charge each physical attempt to the
   budget, or require upstream idempotency/dedup) so one budget reservation maps to exactly one
   physical upstream invocation — `upstreamclient.Call` otherwise retries an idempotent read up to
