@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net"
 	"runtime"
@@ -73,7 +74,7 @@ func startTLSAckThenStallDirectory(t *testing.T) string {
 
 func stallingDirectory(t *testing.T, handle func(net.Conn)) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -304,9 +305,14 @@ func TestChaos57_ConcurrentStallsDoNotAccumulateGoroutines(t *testing.T) {
 
 	// Give the library's own reader/message goroutines a moment to unwind
 	// after their connections were closed, then require the process to have
-	// come back down. The tolerance is generous because the test binary has
-	// unrelated background goroutines; a LEAK of n per wave is what this
-	// catches, not a handful of stragglers.
+	// come back down.
+	//
+	// The threshold is measured, not guessed. Mid-flight, these 12 stalled
+	// authentications hold +60 goroutines — five per call: the caller, plus
+	// go-ldap's reader, message loop and timers. After the fix they settle to
+	// delta 0. So requiring "< baseline+n" leaves 48 goroutines of headroom
+	// before a real leak could hide under it, while tolerating the handful of
+	// unrelated stragglers a shuffled full-suite run can leave behind.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if runtime.NumGoroutine() < baseline+n {

@@ -389,6 +389,45 @@ func (a *LDAPAuth) noteVerifyError(err error) {
 	noteAuthBackendUnavailable(a.backendName, err.Error())
 }
 
+// dialBounded dials the directory and arms BOTH round-trip bounds, returning
+// the connection and the watchdog canceller (which the caller must defer).
+//
+// The whole round trip runs under ONE envelope (CHAOS-57). A directory that
+// ACCEPTS the connection and then stops answering — an overloaded server, a
+// firewall that drops after the handshake, a half-open socket after a peer
+// reboot — used to block in the REQUEST goroutine, forever: go-ldap's default
+// requestTimeout is 0, which arms no timer at all, so Bind and Search waited on
+// a response that never came. Every such request pinned a goroutine, an FD and
+// a per-IP connection slot until the process was restarted, and because
+// CHAOS-47's provider-wide cooldown is armed only by an error that RETURNS, the
+// one mitigation designed for an unreachable directory could never see this
+// fault class.
+func (a *LDAPAuth) dialBounded(tlsCfg *tls.Config) (*ldap.Conn, func(), error) {
+	deadline := time.Now().Add(ldapRoundTripBudget)
+	conn, err := ldap.DialURL(a.cfg.URL,
+		ldap.DialWithTLSConfig(tlsCfg),
+		ldap.DialWithDialer(&net.Dialer{Timeout: ldapRoundTripBudget}),
+	)
+	if err != nil {
+		logger.Printf("LDAP dial error: %v", err)
+		return nil, nil, fmt.Errorf("dial: %w", err)
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		logger.Printf("LDAP: dial consumed the whole %s round-trip budget", ldapRoundTripBudget)
+		conn.Close() //nolint:errcheck // best-effort close of a connection we will not use
+		return nil, nil, fmt.Errorf("dial: %w", errLDAPBudgetExhausted)
+	}
+	// Layer 1: go-ldap's own per-message timer. Every message round trip now
+	// fails with an ErrorNetwork the CHAOS-47 classifier already reads as
+	// unreachable, so a stall arms the cooldown exactly like a refused dial.
+	conn.SetTimeout(remaining)
+	// Layer 2: the envelope backstop. NOT redundant with layer 1 — see
+	// armLDAPConnWatchdog for the StartTLS handshake it is the only bound on.
+	return conn, armLDAPConnWatchdog(conn, remaining, a.backendName), nil
+}
+
 // verify performs one directory round trip.
 //
 // The returned error is reserved for INFRASTRUCTURE failure — the directory
@@ -399,39 +438,13 @@ func (a *LDAPAuth) noteVerifyError(err error) {
 func (a *LDAPAuth) verify(username, password string) (*Identity, bool, error) { //nolint:gocognit,cyclop // the two-step-bind decision tree with its blast-radius error classification is inherently branchy; single-sourced for legacy + registry engines
 	tlsCfg := ldapTLSConfig(a.cfg.URL, a.cfg.TLSSkipVerify)
 
-	// The whole round trip runs under ONE envelope (CHAOS-57). A directory
-	// that ACCEPTS the connection and then stops answering — an overloaded
-	// server, a firewall that drops after the handshake, a half-open socket
-	// after a peer reboot — used to block HERE, in the request goroutine,
-	// forever: go-ldap's default requestTimeout is 0, which arms no timer at
-	// all, so Bind and Search waited on a response that never came. Every such
-	// request pinned a goroutine, an FD and a per-IP connection slot until the
-	// process was restarted, and because CHAOS-47's provider-wide cooldown is
-	// armed only by an error that RETURNS, the one mitigation designed for an
-	// unreachable directory could never see this fault class.
-	deadline := time.Now().Add(ldapRoundTripBudget)
-	conn, err := ldap.DialURL(a.cfg.URL,
-		ldap.DialWithTLSConfig(tlsCfg),
-		ldap.DialWithDialer(&net.Dialer{Timeout: ldapRoundTripBudget}),
-	)
+	conn, stopWatchdog, err := a.dialBounded(tlsCfg)
 	if err != nil {
-		logger.Printf("LDAP dial error: %v", err)
-		return nil, false, fmt.Errorf("dial: %w", err)
+		return nil, false, err
 	}
+	// LIFO: stop the watchdog first, then close — so the timer can never fire
+	// against a connection this call is already tearing down.
 	defer conn.Close() //nolint:errcheck // best-effort close of a bind connection
-
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		logger.Printf("LDAP: dial consumed the whole %s round-trip budget", ldapRoundTripBudget)
-		return nil, false, fmt.Errorf("dial: %w", errLDAPBudgetExhausted)
-	}
-	// Layer 1: go-ldap's own per-message timer. Every message round trip below
-	// now fails with an ErrorNetwork the CHAOS-47 classifier already reads as
-	// unreachable, so a stall arms the cooldown exactly like a refused dial.
-	conn.SetTimeout(remaining)
-	// Layer 2: the envelope backstop. NOT redundant with layer 1 — see
-	// armLDAPConnWatchdog for the StartTLS handshake it is the only bound on.
-	stopWatchdog := armLDAPConnWatchdog(conn, remaining, a.backendName)
 	defer stopWatchdog()
 
 	// Optional STARTTLS upgrade.
