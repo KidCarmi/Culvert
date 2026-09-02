@@ -2,12 +2,30 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
+
+// errUITLSRollbackFailed marks a persistCustomUITLS failure where the
+// compensating cert rollback (below) ALSO failed — typically the same
+// wedged/full/read-only volume that failed the key write. Callers must not
+// report "the current certificate is unchanged" on this error: the on-disk
+// cert may now be the rejected upload, possibly paired with neither the old
+// nor the new key. Test with errors.Is.
+var errUITLSRollbackFailed = errors.New("custom UI cert/key rollback failed")
+
+// uiTLSAtomicWrite is fileutil.AtomicWrite behind a seam, used by
+// persistCustomUITLS for the KEY write and the compensating CERT rollback
+// write — the two calls whose failure modes (fileutil.ErrReplacedNotSynced;
+// the rollback write itself failing) are not practically reproducible
+// against a real filesystem in a test (a parent-directory fsync failure is
+// not portably injectable). Production always resolves to the real
+// fileutil.AtomicWrite; only tests swap it.
+var uiTLSAtomicWrite = fileutil.AtomicWrite
 
 // A custom UI TLS certificate uploaded via POST /api/certs/upload
 // (target="ui") used to be validated and then discarded: apiCertsUpload told
@@ -58,17 +76,42 @@ func customUITLSFilesPresent() bool {
 // key-write failure the cert half is rolled back to what was on disk before
 // this call (or removed, if nothing was persisted yet) so the on-disk state
 // genuinely matches what the admin was told.
+//
+// Two failure modes of the key write itself need distinct handling (Codex
+// review, PR #1297):
+//
+//   - fileutil.ErrReplacedNotSynced means the key rename already landed —
+//     the NEW key is live and visible on disk, only the best-effort parent-
+//     directory fsync afterward failed. Its contract explicitly forbids a
+//     compensating rollback here: restoring the OLD cert would pair it with
+//     the NEW key, producing exactly the mismatched-pair hazard this
+//     function exists to prevent, just inverted. The (new cert, new key)
+//     pair already on disk is the one that was actually uploaded, so it is
+//     left in place; the error is still returned (durability across an
+//     immediate crash is not guaranteed).
+//   - Any other error means the key write did not land, so the cert half is
+//     rolled back — but that compensating write/remove can itself fail on
+//     the same wedged/full/read-only volume that failed the key write. That
+//     failure must not be silently discarded: it is wrapped in
+//     errUITLSRollbackFailed so the caller can stop claiming "unchanged".
 func persistCustomUITLS(certPEM, keyPEM []byte) error {
 	prevCert, prevCertErr := os.ReadFile(customUITLSCertPath())
 	hadPrevCert := prevCertErr == nil
 	if err := fileutil.AtomicWrite(customUITLSCertPath(), certPEM, 0o644); err != nil {
 		return err
 	}
-	if err := fileutil.AtomicWrite(customUITLSKeyPath(), keyPEM, 0o600); err != nil {
+	if err := uiTLSAtomicWrite(customUITLSKeyPath(), keyPEM, 0o600); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			return err
+		}
+		var rollbackErr error
 		if hadPrevCert {
-			_ = fileutil.AtomicWrite(customUITLSCertPath(), prevCert, 0o644)
+			rollbackErr = uiTLSAtomicWrite(customUITLSCertPath(), prevCert, 0o644)
 		} else {
-			_ = os.Remove(customUITLSCertPath())
+			rollbackErr = os.Remove(customUITLSCertPath())
+		}
+		if rollbackErr != nil {
+			return fmt.Errorf("%w: %w: rollback also failed: %w", err, errUITLSRollbackFailed, rollbackErr)
 		}
 		return err
 	}

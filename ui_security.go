@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -346,14 +347,28 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := persistCustomUITLS(certPEM, keyPEM); err != nil {
 		logger.Printf("certs upload UI: persist failed: %v", err)
+		warning := "The uploaded certificate is valid but could not be saved — it will NOT " +
+			"be active after a restart, and the current UI certificate is unchanged. Restore " +
+			"write access to the data directory, then upload again."
+		if errors.Is(err, errUITLSRollbackFailed) {
+			// persistCustomUITLS could not restore the previously-persisted
+			// cert after the key write failed — the on-disk state is now
+			// indeterminate (possibly the rejected upload, possibly paired
+			// with neither the old nor the new key). Telling the admin
+			// "unchanged" here would be false and could mask a broken pair
+			// until the next restart.
+			warning = "The uploaded certificate is valid but could not be saved, AND the " +
+				"previous certificate could not be restored — the on-disk UI certificate may " +
+				"now be in an inconsistent state. Do not restart the proxy until this is " +
+				"resolved: check disk space/permissions on the data directory, then re-upload " +
+				"a known-good certificate pair."
+		}
 		auditEvent(r, "certs.upload_ui", "custom UI cert", "NOT PERSISTED — validation only")
 		jsonOK(w, map[string]any{
 			"status":    "ok",
 			"target":    "ui",
 			"persisted": false,
-			"warning": "The uploaded certificate is valid but could not be saved — it will NOT " +
-				"be active after a restart, and the current UI certificate is unchanged. Restore " +
-				"write access to the data directory, then upload again.",
+			"warning":   warning,
 		})
 		return
 	}

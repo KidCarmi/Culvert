@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // TestPersistCustomUITLS_KeyWriteFailureDoesNotCorruptExistingCert is the
@@ -68,5 +71,114 @@ func TestPersistCustomUITLS_KeyWriteFailureDoesNotCorruptExistingCert(t *testing
 		t.Fatalf("persistCustomUITLS corrupted the previously-persisted cert on a failed key write: "+
 			"on-disk cert changed from the original upload to the rejected one (got %d bytes matching cert2=%v, cert1=%v)",
 			len(gotCert), bytes.Equal(gotCert, cert2), bytes.Equal(gotCert, cert1))
+	}
+}
+
+// TestPersistCustomUITLS_KeyReplacedNotSyncedDoesNotRollback is the
+// regression test for the Codex P1 finding on this PR (#1297): when the key
+// write fails with fileutil.ErrReplacedNotSynced, the key RENAME has already
+// landed — the new key is live and visible on disk, only the best-effort
+// parent-directory fsync afterward failed. Rolling the cert back to its
+// previous value in this case would pair the OLD cert with the NEW key,
+// producing exactly the mismatched-pair hazard this whole rollback exists to
+// prevent — just inverted. persistCustomUITLS must leave the (new cert, new
+// key) pair that was actually uploaded in place.
+func TestPersistCustomUITLS_KeyReplacedNotSyncedDoesNotRollback(t *testing.T) {
+	withTempDataDirForUITLS(t)
+
+	cert1, key1, _ := generateSelfSignedECDSA(t)
+	if err := persistCustomUITLS(cert1, key1); err != nil {
+		t.Fatalf("initial persist: %v", err)
+	}
+
+	cert2, key2, _ := generateSelfSignedECDSA(t)
+	prev := uiTLSAtomicWrite
+	t.Cleanup(func() { uiTLSAtomicWrite = prev })
+	uiTLSAtomicWrite = func(path string, data []byte, perm os.FileMode) error {
+		if path != customUITLSKeyPath() {
+			t.Fatalf("rollback must not run on ErrReplacedNotSynced — unexpected write to %s", path)
+		}
+		// Simulate the rename having actually landed: the new key content
+		// is genuinely on disk, and only the post-rename parent-dir fsync
+		// is reported as failed.
+		if err := os.WriteFile(path, data, perm); err != nil {
+			return err
+		}
+		return fileutil.ErrReplacedNotSynced
+	}
+
+	err := persistCustomUITLS(cert2, key2)
+	if !errors.Is(err, fileutil.ErrReplacedNotSynced) {
+		t.Fatalf("expected fileutil.ErrReplacedNotSynced, got %v", err)
+	}
+
+	gotCert, rerr := os.ReadFile(customUITLSCertPath())
+	if rerr != nil || !bytes.Equal(gotCert, cert2) {
+		t.Fatalf("cert must NOT be rolled back on ErrReplacedNotSynced (the new key already landed): "+
+			"read err=%v, matches cert2=%v, matches cert1=%v", rerr, bytes.Equal(gotCert, cert2), bytes.Equal(gotCert, cert1))
+	}
+	gotKey, rerr := os.ReadFile(customUITLSKeyPath())
+	if rerr != nil || !bytes.Equal(gotKey, key2) {
+		t.Fatalf("key must reflect the landed write: read err=%v, matches key2=%v", rerr, bytes.Equal(gotKey, key2))
+	}
+}
+
+// TestPersistCustomUITLS_RollbackFailureIsSurfaced is the regression test
+// for the Codex P2 finding on this PR (#1297): when the key write fails for
+// an ordinary reason (not ErrReplacedNotSynced) AND the compensating cert
+// rollback ALSO fails — the same wedged/full/read-only volume plausibly
+// fails both — persistCustomUITLS must not silently discard the rollback
+// error. The caller (apiCertsUpload) needs to distinguish this from a clean
+// rollback so it stops claiming "the current certificate is unchanged" when
+// the on-disk cert may now be the rejected upload.
+func TestPersistCustomUITLS_RollbackFailureIsSurfaced(t *testing.T) {
+	withTempDataDirForUITLS(t)
+
+	cert1, key1, _ := generateSelfSignedECDSA(t)
+	if err := persistCustomUITLS(cert1, key1); err != nil {
+		t.Fatalf("initial persist: %v", err)
+	}
+
+	cert2, key2, _ := generateSelfSignedECDSA(t)
+	keyErr := errors.New("simulated wedged volume: key write")
+	rollbackErr := errors.New("simulated wedged volume: rollback write")
+	prev := uiTLSAtomicWrite
+	t.Cleanup(func() { uiTLSAtomicWrite = prev })
+	uiTLSAtomicWrite = func(path string, _ []byte, _ os.FileMode) error {
+		switch path {
+		case customUITLSKeyPath():
+			return keyErr
+		case customUITLSCertPath():
+			return rollbackErr
+		default:
+			t.Fatalf("unexpected write to %s", path)
+			return nil
+		}
+	}
+
+	err := persistCustomUITLS(cert2, key2)
+	if !errors.Is(err, errUITLSRollbackFailed) {
+		t.Fatalf("expected errUITLSRollbackFailed, got %v", err)
+	}
+	if !errors.Is(err, keyErr) {
+		t.Fatalf("expected the original key-write error to still be wrapped, got %v", err)
+	}
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("expected the rollback error to be wrapped, got %v", err)
+	}
+
+	// The cert half was actually replaced with cert2 on disk (a real,
+	// unstubbed write) before the stubbed rollback failed to restore it —
+	// exactly the indeterminate on-disk state errUITLSRollbackFailed exists
+	// to make callers aware of, rather than reporting "unchanged".
+	gotCert, rerr := os.ReadFile(customUITLSCertPath())
+	if rerr != nil || !bytes.Equal(gotCert, cert2) {
+		t.Fatalf("sanity: expected the rejected cert2 to be left on disk after a failed rollback, "+
+			"read err=%v, matches cert2=%v", rerr, bytes.Equal(gotCert, cert2))
+	}
+	gotKey, rerr := os.ReadFile(customUITLSKeyPath())
+	if rerr != nil || !bytes.Equal(gotKey, key1) {
+		t.Fatalf("sanity: key write was stubbed to fail before any write, key should still be key1: "+
+			"read err=%v, matches key1=%v", rerr, bytes.Equal(gotKey, key1))
 	}
 }
