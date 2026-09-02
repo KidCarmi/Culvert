@@ -37,7 +37,7 @@ const (
 
 // liveFakeClock returns a fixed clock so expiry is deterministic across the whole vertical (store +
 // coordinator + bridge all read it).
-func liveFakeClock() (*liveTrustClock, func() time.Time) {
+func liveFakeClock() (clk *liveTrustClock, now func() time.Time) {
 	c := &liveTrustClock{t: time.Unix(1_700_000_000, 0)}
 	return c, c.now
 }
