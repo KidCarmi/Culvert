@@ -45,7 +45,7 @@ const mcpLiveDepsEnvVar = "CULVERT_MCP_LIVE_DEPS"
 // key-encryption key that seals credential material at rest). REQUIRED whenever
 // mcpLiveDepsEnvVar is truthy; a missing path fails closed (no ephemeral/insecure
 // fallback). Same file-provider doctrine as the telemetry KEK.
-const mcpLiveCredentialKEKEnvVar = "CULVERT_MCP_LIVE_CREDENTIAL_KEK"
+const mcpLiveCredentialKEKEnvVar = "CULVERT_MCP_LIVE_CREDENTIAL_KEK" // #nosec G101 -- env-var name, not a credential
 
 // Fail-closed config-validation reasons (§21). All are key-free — they name the constraint,
 // never the path value.
