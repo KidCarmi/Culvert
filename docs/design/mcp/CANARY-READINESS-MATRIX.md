@@ -231,12 +231,15 @@ Every one is a **separately-reviewed activation**, not a config change:
    no `Principals` would satisfy it while leaving the principal dimension unrestricted (review §10);
    (f) a
    **per-physical-invocation budget (CODE CHANGE)** — an idempotent read retries up to `MaxReadRetries`
-   times outside the single budget reservation, so one budgeted request can send the POST ~3×.
-   Retry-disablement is NOT representable today (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects
-   negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code —
-   only two options actually bound the physical POSTs: make retry-disablement representable + wire a
-   retry-free client, OR charge each attempt to the budget. A per-reservation key is not a third bound
-   (it enables correlation/server-side dedup but does not stop the retry loop — review §9/§14); and (g)
+   times outside the single budget reservation, so one budgeted request can send the POST ~3×, and a
+   retry POST can land after an emergency kill engaged mid-flight (blocker 6). Retry-disablement is NOT
+   representable today (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects negatives;
+   `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code. A retry-free
+   client is the ONLY standalone remedy — it closes BOTH the count and the kill-authority gap. Charging
+   each attempt to the budget bounds the COUNT only and does NOT restore kill authority (the POST still
+   fires after the kill), so it must be PAIRED with per-attempt kill/generation revalidation inside the
+   retry loop (review §9/§20/§26). A per-reservation key is not a bound at all (it enables
+   correlation/server-side dedup but does not stop the retry loop — review §9/§14); and (g)
    two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
    declared breaches beyond `budget_exhausted`/`scope_escape`, and the durable outcome record is
    success-only with an unclosable post-send crash window (review §14–§16, §18); and (h) a

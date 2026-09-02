@@ -79,9 +79,12 @@ provisioned today.
 
 `docs/design/mcp/CANARY-FIRST-RUNBOOK.md` and `docs/design/mcp/CANARY-READINESS-MATRIX.md` were
 reconciled with current reality (documentation-only; no security semantics changed). The distinct
-layers are now stated explicitly: architecture IMPLEMENTED; production deps COMPOSABLE (opt-in,
-default OFF); live tier ARMABLE (governed, not a posture-wall edit); armed-by-default NO;
-Canary-active NO; and a supported-trust-model controlled upstream NOT AVAILABLE TODAY. The stale
+layers are now stated explicitly: architecture preflight + budget ceiling + trust firewall
+IMPLEMENTED, while the scope gate (`ValidateScope`), automatic-abort coverage, and durable invocation
+evidence are PARTIAL/DEFECTIVE (matching the split runbook posture table — see §10, §14–§16, §18);
+production deps COMPOSABLE (opt-in, default OFF); live tier ARMABLE (governed, not a posture-wall
+edit); armed-by-default NO; Canary-active NO; and a supported-trust-model controlled upstream NOT
+AVAILABLE TODAY. The stale
 "no production caller composes the tier" claim and the stale "call `markGatewayExecDepsReady`"
 precondition were corrected.
 
