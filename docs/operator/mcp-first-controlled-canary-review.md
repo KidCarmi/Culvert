@@ -240,8 +240,11 @@ request can send the POST up to `1 + MaxReadRetries` times (≈3). A pre-respons
 AFTER the server already received and processed the POST, so those retries are REAL additional
 invocations. Consequently "N allowed / N+1 impossible" bounds reservations, NOT upstream side effects,
 and the §14 executed==received reconciliation would diverge by retry amplification. For a First
-Canary this must be closed: disable transport retries, charge EACH physical attempt to the budget, or
-require upstream idempotency/dedup (added to §26). Not GO until then.
+Canary this must be closed. With today's code the ONLY workable remedy is to **disable transport
+retries** so each reservation maps to exactly one physical invocation; charging each attempt or a
+dedup scheme first requires ADDING a unique-per-reservation, stable-across-retries key — the current
+`WireID` is per-server (`run.go:112`), so dedup by it collapses the whole corpus, not just retries
+(§14/§26). Not GO until then.
 
 ---
 
