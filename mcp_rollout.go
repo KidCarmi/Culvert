@@ -51,6 +51,15 @@ var errCanaryActivationPreflightFailed = mcperr.New(mcperr.ReasonRolloutTransiti
 // transition rather than acknowledge a RAM-only mode change.
 var errRolloutPersistFailed = errors.New("rollout_persist_failed")
 
+// errRolloutCanaryActivationFailed marks a transition whose durable rollout state committed but whose
+// Canary runtime activation (beginCanaryActivation) could not be established. Left as-is that state is
+// durable-live + disarmed-runtime — every execution denies at reserveCanaryExecution AND an idempotent
+// replay can never repair it (prevMode is now live, so a re-apply computes enteringLive=false and never
+// retries the begin). The transition is therefore REJECTED and the durable rollout state rolled back to
+// the prior mode, so the caller and any replay see a clean prior-mode state a retry re-attempts cleanly
+// (Codex P1, PR #1290). Fail-closed: the runtime stays disarmed throughout.
+var errRolloutCanaryActivationFailed = errors.New("rollout_canary_activation_failed")
+
 // mcpRollout is the process-wide, DISABLED-BY-DEFAULT PR-11 rollout composition.
 // It owns the two capability-local rollout states (Gateway + Management) and the
 // bounded low-cardinality rollout metrics. Gateway and Management are physically
@@ -424,31 +433,70 @@ func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg
 		tgt.setStatus("write_failed")
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	// (5) Canary activation RUNTIME reconciliation (§7), BEFORE the transition is marked
+	// recovered/counted: a runtime-init failure must REJECT the whole transition (rolling the durable
+	// rollout state back), not report a durable live activation the runtime cannot back.
+	if err := r.reconcileCanaryRuntimeAfterCommit(tgt, cfg, prevMode, prevCfg, prevEvidence, activationBudget, actor, now); err != nil {
+		return err
+	}
 	tgt.setStatus("recovered")
 	tgt.countTransition()
-	// (5) Canary activation RUNTIME reconciliation (§7). The rollout state committed durably above;
-	// now bring the per-capability budget/abort generation into agreement with the new mode. This runs
-	// through the REAL globalCanaryRuntime ONLY for a production commit — the rehearsal drives a SCRATCH
-	// target and sets tgt.reconcileRuntime=false so a drill never begins/demotes the live runtime.
-	// beginCanaryActivation increments the monotonic generation EXACTLY ONCE per accepted activation
-	// (entering a live mode from a non-live mode); a scope change within Canary is not a new activation
-	// and does not re-begin; a demotion (leaving a live mode) invalidates the generation so the demoted
-	// budget/abort can never govern a later activation. A failed begin/demote leaves the runtime
-	// fail-closed (disarmed) — an executing request then denies at reserveCanaryExecution — so the
-	// rollout commit is never reported as a durable live activation the runtime cannot back.
-	if tgt.reconcileRuntime {
-		enteringLive := cfg.Mode.RequiresLiveExecution() && !prevMode.RequiresLiveExecution()
-		leavingLive := !cfg.Mode.RequiresLiveExecution() && prevMode.RequiresLiveExecution()
-		switch {
-		case enteringLive:
-			if _, err := globalCanaryRuntime.beginCanaryActivation(cfg.Capability, activationBudget, now); err != nil {
-				logger.Printf("MCP rollout: %s activated to %s but beginCanaryActivation failed (runtime fail-closed; executions will deny): %q",
-					cfg.Capability.String(), cfg.Mode.String(), sanitizeLog(err.Error()))
+	return nil
+}
+
+// reconcileCanaryRuntimeAfterCommit brings the per-capability budget/abort generation into agreement
+// with the just-committed rollout mode (§7). It runs through the REAL globalCanaryRuntime ONLY for a
+// production commit — the rehearsal drives a SCRATCH target with tgt.reconcileRuntime=false so a drill
+// never begins/demotes the live runtime. beginCanaryActivation increments the monotonic generation
+// EXACTLY ONCE per accepted activation (entering a live mode from a non-live mode); a scope change
+// within Canary is not a new activation and does not re-begin; a demotion (leaving a live mode)
+// invalidates the generation so the demoted budget/abort can never govern a later activation.
+//
+// A failed DEMOTION is log-only and non-fatal — the target mode is already non-live so nothing can
+// execute regardless, and demoteCanary has itself failed closed (disarmed in memory, durable record
+// removed). A failed ACTIVATION, by contrast, REJECTS the transition: beginCanaryActivation leaves the
+// runtime disarmed and its durable record removed (fail-closed), but the rollout state is durably
+// committed to the live mode, so left as-is every execution denies AND an idempotent replay can never
+// repair it (prevMode is now live ⇒ enteringLive=false on the re-apply). We therefore roll the durable
+// rollout state back to the prior mode and return errRolloutCanaryActivationFailed, so the caller and a
+// replay see a clean prior-mode state a retry re-attempts cleanly (Codex P1, PR #1290).
+func (r *mcpRollout) reconcileCanaryRuntimeAfterCommit(tgt commitTransitionTarget, cfg *rollout.SignedConfig, prevMode rollout.Mode, prevCfg rollout.SignedConfig, prevEvidence rollout.EvidenceSummary, activationBudget canary.Budget, actor string, now time.Time) error {
+	if !tgt.reconcileRuntime {
+		return nil
+	}
+	st := tgt.st
+	enteringLive := cfg.Mode.RequiresLiveExecution() && !prevMode.RequiresLiveExecution()
+	leavingLive := !cfg.Mode.RequiresLiveExecution() && prevMode.RequiresLiveExecution()
+	switch {
+	case enteringLive:
+		if _, err := globalCanaryRuntime.beginCanaryActivation(cfg.Capability, activationBudget, now); err != nil {
+			// Roll the durable rollout state back to the prior (non-live) mode. The runtime is already
+			// disarmed and its durable record removed by the failed begin, so this is purely undoing the
+			// step-(4) rollout persist.
+			st.UpdateEvidence(func(e *rollout.EvidenceSummary) { *e = prevEvidence })
+			if rerr := st.SetConfig(prevCfg, actor, now.UnixNano()); rerr != nil {
+				// prevCfg was valid, so this should never fail; if it ever does, force Disabled rather than
+				// leave the advanced (live) mode installed while rejecting the transition.
+				_ = st.SetConfig(rollout.DisabledConfig(cfg.Capability), actor, now.UnixNano())
+				logger.Printf("MCP rollout: rollback of %s failed after activation error; forced Disabled (fail-closed): %q", cfg.Capability.String(), sanitizeLog(rerr.Error()))
 			}
-		case leavingLive:
-			if err := globalCanaryRuntime.demoteCanary(cfg.Capability); err != nil {
-				logger.Printf("MCP rollout: %s demoted from a live mode but demoteCanary failed: %q", cfg.Capability.String(), sanitizeLog(err.Error()))
+			if perr := tgt.persist(st); perr != nil {
+				// The durable rollback could not be written. The runtime is disarmed (safe), and a restart
+				// re-reads the on-disk mode: a restored live mode without the required execution deps is
+				// clamped to Disabled by restore() (modeExecReady gate), so this is still fail-closed across
+				// a crash — only the RAM view and disk momentarily disagree until the next successful write.
+				logger.Printf("MCP rollout: %s activation rejected (beginCanaryActivation failed) but durable rollback persist ALSO failed; runtime disarmed, on-disk state may be inconsistent (fail-closed): %q / %q",
+					cfg.Capability.String(), sanitizeLog(err.Error()), sanitizeLog(perr.Error()))
+			} else {
+				logger.Printf("MCP rollout: %s activation rejected — beginCanaryActivation failed; durable rollout state rolled back to %s (fail-closed): %q",
+					cfg.Capability.String(), prevMode.String(), sanitizeLog(err.Error()))
 			}
+			tgt.setStatus("activation_failed")
+			return fmt.Errorf("%w: %v", errRolloutCanaryActivationFailed, err)
+		}
+	case leavingLive:
+		if err := globalCanaryRuntime.demoteCanary(cfg.Capability); err != nil {
+			logger.Printf("MCP rollout: %s demoted from a live mode but demoteCanary failed: %q", cfg.Capability.String(), sanitizeLog(err.Error()))
 		}
 	}
 	return nil

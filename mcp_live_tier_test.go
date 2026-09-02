@@ -105,6 +105,16 @@ func resetLiveTierGlobals(t *testing.T) {
 	// readiness reads); snapshot + reset it so a prior/next shuffled test sees a clean baseline.
 	prevInsp := globalMCPShadow.inspectionComposed.Load()
 	globalMCPShadow.inspectionComposed.Store(false)
+	// noteMCPLiveGateDenied writes the process-global denial counter (surfaced on mcpLiveTierStatus);
+	// snapshot + clear it so a prior shuffled test's denials cannot leak into this one's telemetry
+	// assertions, and restore it on cleanup (the isolation contract this helper promises).
+	mcpLiveGateDenials.mu.Lock()
+	prevDenials := make(map[string]uint64, len(mcpLiveGateDenials.m))
+	for k, v := range mcpLiveGateDenials.m {
+		prevDenials[k] = v
+	}
+	mcpLiveGateDenials.m = map[string]uint64{}
+	mcpLiveGateDenials.mu.Unlock()
 	// Give the SHARED global rollout gateway a clean, known state so a prior (shuffled) test's leaked
 	// kill or mode cannot pollute this one: snapshot the current config + kill, force a cleared kill
 	// and a Disabled mode, and restore both on cleanup.
@@ -118,6 +128,9 @@ func resetLiveTierGlobals(t *testing.T) {
 		globalExecDeps = prevExecDeps
 		globalCanaryRuntime = prevRuntime
 		globalMCPShadow.inspectionComposed.Store(prevInsp)
+		mcpLiveGateDenials.mu.Lock()
+		mcpLiveGateDenials.m = prevDenials
+		mcpLiveGateDenials.mu.Unlock()
 		_ = gw.SetConfig(prevGwCfg, "live-test-restore", time.Unix(0, 2).UnixNano())
 		if prevKilled {
 			gw.EngageKillSwitch("live-test-restore", time.Unix(0, 3).UnixNano())

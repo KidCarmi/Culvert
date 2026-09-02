@@ -43,9 +43,10 @@ const mcpLiveActor = "mcp-gateway-live"
 
 // Composition errors (bounded, fail-closed). Composition leaves Deps.Executor untouched on any.
 var (
-	errLiveComposeNilConfig      = errors.New("mcp live tier: nil runtime config")
-	errLiveComposeUpstreamAbsent = errors.New("mcp live tier: upstream client absent (required)")
-	errLiveComposeEventsAbsent   = errors.New("mcp live tier: durable events absent (required)")
+	errLiveComposeNilConfig             = errors.New("mcp live tier: nil runtime config")
+	errLiveComposeUpstreamAbsent        = errors.New("mcp live tier: upstream client absent (required)")
+	errLiveComposeEventsAbsent          = errors.New("mcp live tier: durable events absent (required)")
+	errLiveComposeResponseProfileAbsent = errors.New("mcp live tier: response inspection profile absent (required)")
 )
 
 // liveTierComposition carries the collaborators the live Executor needs. In this PR there is NO
@@ -96,6 +97,17 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 	if comp.Events == nil {
 		lt.setComposeReason("durable_events_unavailable")
 		return errLiveComposeEventsAbsent
+	}
+	// The live tier REQUIRES response DLP: the executor inspects every upstream response BEFORE egress.
+	// A zero-value Profile carries zero inspection limits (MaxOutputBytes==0), so the irreversible
+	// upstream side effect would occur and THEN any non-empty response would be blocked on egress as
+	// oversized — a real side effect reported as a blocked response, which invites retries. A zero
+	// Profile has an empty Capability (DefaultGatewayProfile sets it non-empty), so reject a
+	// missing/uninitialised profile fail-closed at composition, exactly like a missing upstream or events
+	// manager (Codex P2, PR #1290). The response profile installed into the executor MUST be a real one.
+	if comp.ResponseProfile.Capability() == "" {
+		lt.setComposeReason("response_profile_absent")
+		return errLiveComposeResponseProfileAbsent
 	}
 	gate := comp.LiveGate
 	if gate == nil {
