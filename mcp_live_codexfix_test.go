@@ -392,11 +392,13 @@ func TestLiveCommit_DemotedGenerationRefusedAtFinalBoundary(t *testing.T) {
 	// A gate that ADMITS (reserve granted) but whose final-boundary generationCurrent reports the
 	// reserved generation is no longer current — the exact demote-after-reserve TOCTOU the boundary closes.
 	gate := &mcpLiveSideEffectGate{
-		capb:              capb,
-		admit:             mcpLiveTierFor(capb).admitExecution,
-		readFirst:         canary.IsReadFirstOperation,
-		trustOK:           func(string, string, string, string, time.Time) bool { return true },
-		reserve:           func(time.Time, canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) { return canary.BudgetGranted, 7 },
+		capb:      capb,
+		admit:     mcpLiveTierFor(capb).admitExecution,
+		readFirst: canary.IsReadFirstOperation,
+		trustOK:   func(string, string, string, string, time.Time) bool { return true },
+		reserve: func(time.Time, canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
+			return canary.BudgetGranted, 7
+		},
 		releaseBudget:     func(uint64) {},
 		generationCurrent: func(uint64) bool { return false }, // demoted after reserve
 		note:              noteMCPLiveGateDenied,
