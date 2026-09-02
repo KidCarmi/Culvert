@@ -234,19 +234,33 @@ func TestToolTrust_PurposeFirewall_ShadowNeverArmsLiveTier(t *testing.T) {
 	}
 }
 
-// live_execution is refused at issue (the firewall's negative half, mutation #10).
-func TestToolTrust_LiveExecutionPurposeRefusedAtIssue(t *testing.T) {
+// live_execution is now ISSUABLE, but only WITH an explicit finite expiry (§6). A live request with
+// no expiry is refused as a request-shape error (admin_request_invalid), never silently defaulted;
+// a live request WITH a valid in-ceiling expiry is accepted as a pending request (a grant still
+// requires four-eyes at approve). This replaces the old "live is unissuable" assertion.
+func TestToolTrust_LiveExecutionIssuableOnlyWithExpiry(t *testing.T) {
 	resetInventory(t)
 	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
 	composeToolTrust(t, nil)
-	in := toolTrustRequestInput{
+	base := toolTrustRequestInput{
 		Tenant: ttTenant, ServerID: sid, ToolName: tool,
 		ExpectedFingerprint: fpHex, ExpectedCatalogRev: cat.Current().Revision(),
 		Purpose: tooltrust.PurposeLiveExecution, RequestedBy: "operator@corp",
 	}
-	_, err := mcpToolTrust.RequestApproval(in)
-	if mcperr.ReasonOf(err) != mcperr.ReasonApprovalPurposeUnsupported {
-		t.Fatalf("live_execution must be refused at issue, got %v", mcperr.ReasonOf(err).Code())
+	// No expiry ⇒ refused as an invalid request (not purpose-unsupported).
+	if _, err := mcpToolTrust.RequestLiveApproval(base); mcperr.ReasonOf(err) != mcperr.ReasonAdminRequestInvalid {
+		t.Fatalf("live_execution without expiry must be admin_request_invalid, got %v", mcperr.ReasonOf(err).Code())
+	}
+	// Valid expiry ⇒ accepted as a pending live request.
+	withExp := base
+	exp := time.Now().Add(time.Hour)
+	withExp.ExpiresAt = &exp
+	a, err := mcpToolTrust.RequestLiveApproval(withExp)
+	if err != nil {
+		t.Fatalf("live_execution with a valid expiry must be issuable, got %v", err)
+	}
+	if a.Purpose != tooltrust.PurposeLiveExecution || a.Status != tooltrust.StatusPending {
+		t.Fatalf("want pending live request, got purpose=%v status=%v", a.Purpose, a.Status)
 	}
 }
 

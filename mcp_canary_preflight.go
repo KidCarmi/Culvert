@@ -6,6 +6,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
 )
 
 // Canary activation preflight (ADR-0035). This is the root composition-layer bridge between
@@ -232,20 +233,79 @@ type canaryActivationInputs struct {
 }
 
 // canaryActivationInputsProbe derives the authoritative activation-level inputs for a Canary
-// transition into a scope. It is a SEAM: production is productionCanaryActivationInputs, which — in
-// this build — returns fail-closed empties because no authoritative approval/budget store exists,
-// so the full activation preflight can never be satisfied and a Canary transition always refuses. A
-// future, separately-reviewed live activation wires the real authoritative sources here (the
-// tool-trust store for per-tool live approvals, the admin budget, the registry/catalog for
-// server-usability and fingerprint currency). Tests arm it to supply valid inputs.
+// transition into a scope. It is a SEAM: production is productionCanaryActivationInputs. Tests arm
+// it to supply valid inputs.
 var canaryActivationInputsProbe = productionCanaryActivationInputs
 
-// productionCanaryActivationInputs is fail-closed by construction: this build ships NO authoritative
-// live-approval or budget store, and activation-level facts must never be taken from a request, so
-// it returns empties. The full preflight therefore reports live_execution_approval_invalid +
-// canary_budget_not_configured (+ the unarmed-node reasons), keeping Canary unreachable.
-func productionCanaryActivationInputs(_ rollout.Capability, _ rollout.ScopeSpec, _ uint64) canaryActivationInputs {
-	return canaryActivationInputs{}
+// productionCanaryActivationInputs resolves the activation-level inputs from AUTHORITATIVE node
+// state, never a request. As of the live-execution-trust slice it wires ONE of them for real — the
+// per-tool live_execution approvals, pulled from the tool-trust store — so the
+// live_execution_approval_invalid readiness row becomes SATISFIABLE (a scope whose every tool has a
+// valid, four-eyes, ≤24h, exact-target live approval passes canary.ValidateScopeApprovals; a stock
+// node with no approved target still reports it unmet — §13/§27).
+//
+// Budget, ServerUsable, and FingerprintCurrent stay fail-closed (zero values) DELIBERATELY: this
+// build ships no authoritative budget store, and the live tier is never armed. So even a fully
+// approved scope leaves canary_budget_not_configured (+ server/fingerprint) unmet AND the node fact
+// LiveExecutorComposed stays false — the ultimate backstop — so the FULL activation preflight can
+// still never be satisfied and no Canary transition can occur (§0/§22). Wiring live approvals is a
+// pure READ (the tool-trust store + the catalog observation); it arms nothing.
+func productionCanaryActivationInputs(_ rollout.Capability, scope rollout.ScopeSpec, _ uint64) canaryActivationInputs {
+	return canaryActivationInputs{
+		ToolApprovals: buildLiveApprovalBindings(scope),
+	}
+}
+
+// liveApprovalKey indexes an active live_execution approval by its exact (tenant, server, tool)
+// identity so a scoped tool binds only to an approval for the SAME tenant — an approval for another
+// tenant can never count as coverage (the tenant-isolation half of §13).
+type liveApprovalKey struct{ tenant, serverID, toolName string }
+
+// buildLiveApprovalBindings resolves, for every (tenant × tool) the scope admits, the tool's CURRENT
+// authoritative target (registry+catalog via the coordinator's loadTarget — never a request value)
+// and the active live_execution approval(s) that bind that exact (tenant, server, tool). It returns
+// one canary.ToolApprovalBinding per matching approval, so canary.ValidateScopeApprovals then decides
+// coverage: a scoped tool with no matching approval, an approval whose target fingerprint drifted
+// from the current observation (rug-pull, §8) or from the scope's declared fingerprint, a wrong-tenant
+// approval, or a duplicate all fail closed there. It is a pure read and NEVER promotes catalog.Usable
+// (live trust is orthogonal to Shadow usability, §15). An uncomposed coordinator or missing inventory
+// yields no bindings (fail-closed → the row stays unmet).
+func buildLiveApprovalBindings(scope rollout.ScopeSpec) []canary.ToolApprovalBinding {
+	if len(scope.Tools) == 0 || len(scope.Tenants) == 0 {
+		return nil
+	}
+	// Use the coordinator clock (time.Now in production; injectable in tests) so the active-live
+	// snapshot and the store share one clock; canary.SatisfiesLiveExecution re-checks expiry at the
+	// caller's in.Now, which is the authoritative instant.
+	now := mcpToolTrust.now()
+	byTool := make(map[liveApprovalKey][]*tooltrust.ToolApproval)
+	for _, a := range mcpToolTrust.activeLiveApprovals(now) {
+		k := liveApprovalKey{tenant: a.Tenant, serverID: a.ServerID, toolName: a.ToolName}
+		byTool[k] = append(byTool[k], a)
+	}
+	var bindings []canary.ToolApprovalBinding
+	for _, tenant := range scope.Tenants {
+		for i := range scope.Tools {
+			st := scope.Tools[i]
+			ti := mcpToolTrust.loadTarget(st.Server, st.Name)
+			// A tool absent from the current catalog, or owned by a different tenant than the scope
+			// admits, has no resolvable target — emit no binding, so the scoped tool is uncovered.
+			if !ti.found || ti.target.Tenant != tenant {
+				continue
+			}
+			target := canary.LiveTarget{
+				Tenant:            tenant,
+				ServerID:          st.Server,
+				ToolName:          st.Name,
+				Fingerprint:       ti.target.Fingerprint,
+				FingerprintFormat: ti.target.FingerprintFormatVersion,
+			}
+			for _, a := range byTool[liveApprovalKey{tenant: tenant, serverID: st.Server, toolName: st.Name}] {
+				bindings = append(bindings, canary.ToolApprovalBinding{Target: target, Approval: a})
+			}
+		}
+	}
+	return bindings
 }
 
 // evaluateCanaryActivationPreflight returns the FULL Canary readiness verdict for a capability

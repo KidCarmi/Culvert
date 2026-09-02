@@ -91,9 +91,11 @@ approval no longer matches (the rug-pull invariant).
 
 ### D5 — Approval purpose / trust ceiling; the live-execution firewall
 
-`ToolApproval.Purpose` ∈ {`shadow_evaluation`, `live_execution`}. **Only
-`shadow_evaluation` is issuable** in this slice; `live_execution` is defined and
-**refused at issue** (`ReasonApprovalPurposeUnsupported`, fail closed). A
+`ToolApproval.Purpose` ∈ {`shadow_evaluation`, `live_execution`}. In this slice **only
+`shadow_evaluation` was issuable**; `live_execution` was defined and **refused at issue**.
+_Superseded by **Addendum 2026-09** below: `live_execution` is now issuable through a dedicated
+governed path (four-eyes, ≤24h TTL, exact-current-state) — it remains a TRUST decision only and
+never arms the live tier or makes a tool `catalog.Usable`._ A
 `shadow_evaluation` approval satisfies ONLY `evaluateShadowActivationPreflight` (via
 `catalog.Usable`); it can NEVER arm `liveExecDepsConfigured` / `modeExecReady` for a
 `RequiresLiveExecution()` (Canary/Production) mode — that tier is armed only by the
@@ -142,8 +144,10 @@ never an auto-clear by ingestion). Revoked/expired approvals never re-satisfy.
 
 ### D9 — What this slice does NOT do
 
-No server-wide/wildcard/bulk/auto approval; no `live_execution` issuance; no Shadow/
-Canary/Production activation; no live Executor / UpstreamCaller / Materialize; MCP
+No server-wide/wildcard/bulk/auto approval; ~~no `live_execution` issuance~~ (governed
+`live_execution` issuance landed subsequently — see Addendum 2026-09; it is trust only and still
+performs no activation); no Shadow/Canary/Production activation; no live Executor / UpstreamCaller
+/ Materialize; MCP
 Management stays `mutation_tools: 0` (trust mutation is an admin-HTTP action, not a
 Management MCP tool); MCP ToolAnnotations remain untrusted hints that can never flip
 `Quarantined → Usable`.
@@ -161,3 +165,39 @@ because it is shadow-only and byte-identical to the reviewed capability (documen
 D8). The AtomicWrite store and the best-effort event evidence can momentarily disagree on
 an abrupt crash between the two writes; the AtomicWrite store is the recovery authority
 and the event is tamper-evidence only.
+
+## Addendum (2026-09) — governed `live_execution` issuance
+
+`live_execution` ToolApprovals are now issuable, but ONLY through a dedicated governed path that
+enforces stronger requirements than shadow issuance — it does not simply flip `Issuable()` and
+reuse shadow request semantics. This is a **trust decision only**: it composes no executor, wires
+no `UpstreamCaller`, materializes no credential, never calls `markGatewayExecDepsReady` or
+`beginCanaryActivation`, and never makes a tool `catalog.Usable` (that projection stays driven only
+by active shadow-purpose approvals). "Trust is not availability, and neither is authorization —
+runtime policy stays authoritative for every call."
+
+- **Dedicated path + route isolation.** `RequestLiveApproval`/`ApproveLive` (coordinator) and
+  `validateLiveApproveLocked` (store) own the live path. `ApproveShadow` refuses a non-shadow
+  purpose and `ApproveLive` refuses a non-live one, so a live grant can never be minted through the
+  shadow promotion path and vice-versa (`TestLiveTrust_RouteIsolation`).
+- **Four-eyes, mandatory, on the canonical principal.** `RequestedBy != ApprovedBy`, both present,
+  compared on the authenticated session subject (`mcpLivePrincipal`), never display names or client
+  IP; a live request with no authenticated session is refused fail-closed.
+- **Mandatory finite TTL ≤ 24h.** An explicit expiry is required at request (no silent default) and
+  the window is capped by the single authority `MaxLiveExecutionApprovalTTL` (24h) — enforced at
+  request (from now) and authoritatively at approval (from `approved_at`).
+- **Exact-current-state at approval + rug-pull.** Approval revalidates the exact reviewed target
+  (server/tool exist, identity+fingerprint+format match, catalog+server revision current, tenant)
+  and fails closed on any drift; an F1→F2 fingerprint change never auto-upgrades the F1 grant.
+- **Revoke/expiry fail closed across restart.** A revoked or expired live approval fails the Canary
+  scope preflight, does not resurrect on reload (`validateStored` live invariants + fail-closed
+  strict decode), and reapproval is a new decision (`now == expires_at` fails closed).
+- **No broad forms.** No server-wide, wildcard, all-fingerprints, all-tenants, group-wide,
+  purpose=both, or approve-future live grant is expressible.
+- **Consumed only by the Canary preflight.** `productionCanaryActivationInputs` builds bindings
+  from the authoritative store (`buildLiveApprovalBindings`); `canary.ValidateScopeApprovals`
+  requires each admitted `(tenant, server, tool, fingerprint)` to carry its own valid live approval.
+  Readiness row `live_execution_approval_invalid` becomes SATISFIABLE, not auto-satisfied.
+
+Every lifecycle event (request/approve/reject/revoke) is durably audited and never persists a
+credential or secret. See `docs/operator/mcp-tool-trust-approvals.md` for the operator procedure.

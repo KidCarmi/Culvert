@@ -11,7 +11,11 @@ import (
 // a real, irreversible upstream side effect, so it must be short-lived: it expires quickly
 // and must be deliberately re-issued, so a stale approval can never silently re-authorize
 // execution weeks later. A later phase may relax this under its own review.
-const MaxInitialCanaryApprovalTTL = 24 * time.Hour
+//
+// It is DEFINED AS tooltrust.MaxLiveExecutionApprovalTTL so the ISSUE path (tooltrust, which
+// enforces the ceiling when a live approval is created/approved) and this CONSUMPTION path can
+// never disagree about the ceiling — one authority, referenced from both sides.
+const MaxInitialCanaryApprovalTTL = tooltrust.MaxLiveExecutionApprovalTTL
 
 // TrustReason is a bounded classification for WHY a candidate live_execution approval does
 // not satisfy the Canary trust requirement. Fixed vocabulary; never interpolated with

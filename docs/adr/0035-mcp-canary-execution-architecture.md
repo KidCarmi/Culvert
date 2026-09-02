@@ -25,7 +25,7 @@ It does **not** activate Canary, and the code it introduces is **dormant by cons
 |---|---|---|
 | production LiveExecutor composed | **NO** | `mcp_execution_posture_test.go` (4 AST gates); `execution.New` has no production caller |
 | `markGatewayExecDepsReady` production caller | **NO** | `TestExecPosture_LiveArmingHooksHaveNoProductionCaller`; `liveExecDepsConfigured==false` |
-| `live_execution` ToolApproval issuable | **NO** | `tooltrust.Purpose.Issuable()` (shadow only); `CreateRequest`+`Approve` refuse fail-closed |
+| `live_execution` ToolApproval issuable | **NO** _(at time of writing; see Addendum 2026-09 — now governed-issuable)_ | `tooltrust.Purpose.Issuable()` (shadow only); `CreateRequest`+`Approve` refuse fail-closed |
 | Canary activation reachable | **NO** | `modeExecReady` gates Canary/Production on the unarmed live tier |
 
 ## Decision
@@ -75,8 +75,9 @@ a missing, duplicate, wrong-fingerprint, wrong-tenant, or out-of-scope binding f
 Keying coverage on the **tenant** is load-bearing: a rollout scope admits a subject only when its
 tenant matches, so an approval for tenant `t2` can never count as coverage for a scope admitting
 `t1` (Codex P1). The preflight's `LiveApprovalValid` fact is driven by this, not by an
-unconstrained target supplied alongside the scope. Issuance stays refused in this build; these
-predicates are what a future, separately-reviewed live phase's issue path must satisfy.
+unconstrained target supplied alongside the scope. _At the time this ADR was accepted, issuance
+stayed refused; the governed issue path landed subsequently — see **Addendum 2026-09**._ These
+predicates are what the live-execution issue path must satisfy.
 
 ### 3. Bounded, read-first Canary scope (§4/§5)
 
@@ -280,3 +281,46 @@ activation verdict, not just node readiness (`TestCanaryCommitGate_RefusesWhenAc
 / `_AllowsWhenFullyReady`); and the rollback-rehearsal drill runs through the REAL production
 `persistRolloutStateTo`/`restoreRolloutStateFrom` (destination path injected) rather than a parallel
 persistence copy.
+
+## Addendum (2026-09) — governed `live_execution` issuance (trust only; live tier stays dormant)
+
+The live-execution TRUST decision is now expressible, durable, reviewable, revocable, and
+machine-verifiable. This addendum records **only** a trust/authorization change; it composes no
+`LiveExecutor`, wires no `UpstreamCaller`, never calls `markGatewayExecDepsReady` or
+`beginCanaryActivation`, and leaves the four dormancy facts unchanged: LiveExecutor composed **NO**,
+`markGatewayExecDepsReady` caller **NO**, Canary active **NO**, Production active **NO**, upstream
+side effects **0**, production credential retrievals **0** (`mcp_execution_posture_test.go`,
+`TestLiveTrust_NoActivationCoupling`).
+
+- **Issuable through a dedicated governed path only.** `Purpose.Issuable()` now admits
+  `live_execution`, but issuance does **not** reuse shadow request semantics: the coordinator's
+  `RequestLiveApproval`+`ApproveLive` and the store's `validateLiveApproveLocked` enforce the
+  stronger requirements. `ApproveShadow` refuses a non-shadow purpose and `ApproveLive` refuses a
+  non-live one (`TestLiveTrust_RouteIsolation`), so a live grant can never be minted through the
+  shadow promotion path (which materializes `catalog.Usable`), and a shadow request can never be
+  promoted to live.
+- **Four-eyes, mandatory.** `RequestedBy != ApprovedBy`, both present, compared on the **canonical
+  authenticated principal** (`mcpLivePrincipal` → session `Sub`), not display names or client IP.
+  A live request with no authenticated session is refused fail-closed
+  (`TestLiveTrustHTTP_UnauthenticatedRequestFailsClosed`).
+- **Short, mandatory TTL.** A finite expiry is required at request time (no silent default) and the
+  window is capped at `tooltrust.MaxLiveExecutionApprovalTTL` (24h) — enforced at request (from now)
+  and, authoritatively, at approval (from `approved_at`). One constant is the single authority,
+  referenced from `canary.MaxInitialCanaryApprovalTTL`.
+- **Exact-current-state approval + rug-pull.** Approval revalidates the exact reviewed target
+  (server/tool exist, identity+fingerprint+format match, catalog and server revision current) and
+  fails closed on any drift between request and approve; an F1→F2 fingerprint change invalidates the
+  F1 grant and never auto-upgrades (`TestLiveApprove_ExactStateFingerprintDrift`,
+  `TestLiveTrust_RugPull_DriftInvalidatesLiveApproval`).
+- **Revocation + expiry fail closed, across restart.** A revoked or expired approval fails the
+  scope preflight, does not resurrect on reload (fail-closed strict decode + `validateStored` live
+  invariants), and reapproval is a new decision. `now == expires_at` fails closed.
+- **Wired into the real preflight bridge.** `productionCanaryActivationInputs` builds
+  `ToolApprovalBinding`s from the authoritative `tooltrust.Store` via `buildLiveApprovalBindings`,
+  so `canary.ValidateScopeApprovals` consumes real grants: every admitted `(tenant, server, tool,
+  fingerprint)` needs its own valid live approval. Readiness row 16
+  (`live_execution_approval_invalid`) is therefore **satisfiable, not auto-satisfied** — a stock
+  node with no grant still reports it unmet, and issuing a grant clears only that row.
+- **Trust ≠ availability ≠ authorization.** A live grant does not make a tool `catalog.Usable`
+  (that stays a shadow-only projection) and is not runtime authorization — the policy engine stays
+  authoritative for every call. `CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL` remains **OPEN**.

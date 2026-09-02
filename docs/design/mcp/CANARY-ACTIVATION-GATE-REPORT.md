@@ -103,9 +103,11 @@ old budget/abort generation after reactivation.
 ## What still gates the first real Canary (out of scope here)
 
 Arming the live tier (compose a live executor + upstream + materialize-broker, call
-`markGatewayExecDepsReady`), making `live_execution` issuable under four-eyes governance, calling
-`beginCanaryActivation` from that armed path, and executing the first Canary per
-`CANARY-FIRST-RUNBOOK.md` — each a **separately-reviewed activation**, none performed here.
+`markGatewayExecDepsReady`), calling `beginCanaryActivation` from that armed path, and executing
+the first Canary per `CANARY-FIRST-RUNBOOK.md` — each a **separately-reviewed activation**, none
+performed here. (Making `live_execution` issuable under four-eyes governance has since landed as a
+trust-only slice — ADR-0034 Addendum 2026-09 — and does not arm the live tier or change this
+report's posture: LiveExecutor composed NO, Canary active NO.)
 
 **Deferred to the live-tier phase — `CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL`.** The shared Shadow
 preflight forbids a Shadow target while the live-execution tier is armed

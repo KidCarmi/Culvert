@@ -88,32 +88,235 @@ func mustReason(t *testing.T, err error, want mcperr.Reason) {
 
 // --- purpose / trust ceiling ---------------------------------------------
 
-func TestPurpose_OnlyShadowIssuable(t *testing.T) {
+func TestPurpose_ShadowAndLiveIssuable(t *testing.T) {
+	// Both shadow_evaluation and live_execution are now issuable at the coarse purpose gate; the
+	// live-execution-specific governance (mandatory ≤24h expiry, four-eyes) is layered by the
+	// issue path, not by Issuable().
 	if !PurposeShadowEvaluation.Issuable() {
 		t.Fatal("shadow_evaluation must be issuable")
 	}
-	if PurposeLiveExecution.Issuable() {
-		t.Fatal("live_execution must NOT be issuable")
+	if !PurposeLiveExecution.Issuable() {
+		t.Fatal("live_execution must now be issuable (under stronger governance)")
 	}
 	if PurposeUnset.Issuable() {
 		t.Fatal("unset purpose must not be issuable")
 	}
-	// The live-execution firewall's positive half: only shadow permits shadow eval.
-	if !PurposeShadowEvaluation.PermitsShadowEvaluation() {
-		t.Fatal("shadow must permit shadow evaluation")
+	// The live-execution firewall stays disjoint: shadow permits ONLY shadow eval, live permits
+	// ONLY live execution — no purpose satisfies both.
+	if !PurposeShadowEvaluation.PermitsShadowEvaluation() || PurposeShadowEvaluation.PermitsLiveExecution() {
+		t.Fatal("shadow must permit shadow evaluation and never live execution")
 	}
-	if PurposeLiveExecution.PermitsShadowEvaluation() {
-		t.Fatal("live_execution must never satisfy the shadow prerequisite")
+	if PurposeLiveExecution.PermitsShadowEvaluation() || !PurposeLiveExecution.PermitsLiveExecution() {
+		t.Fatal("live_execution must permit live execution and never satisfy the shadow prerequisite")
 	}
 }
 
-func TestRequest_LiveExecutionPurposeRefused(t *testing.T) {
+func TestRequest_LiveExecutionRequiresExplicitExpiry(t *testing.T) {
+	// A live_execution request with NO expiry is refused: no expiry is ever silently defaulted in
+	// for a live grant (§6). The refusal is a request-shape error, not purpose-unsupported.
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	s := newTestStore(t, clk)
 	in := goodRequest()
 	in.Purpose = PurposeLiveExecution
+	in.ExpiresAt = nil
 	_, err := s.CreateRequest(in)
-	mustReason(t, err, mcperr.ReasonApprovalPurposeUnsupported)
+	mustReason(t, err, mcperr.ReasonAdminRequestInvalid)
+}
+
+func TestRequest_LiveExecutionTTLCeiling(t *testing.T) {
+	// A live_execution request whose window exceeds MaxLiveExecutionApprovalTTL is refused early.
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest()
+	in.Purpose = PurposeLiveExecution
+	tooLong := clk.t.Add(MaxLiveExecutionApprovalTTL + time.Hour)
+	in.ExpiresAt = &tooLong
+	_, err := s.CreateRequest(in)
+	mustReason(t, err, mcperr.ReasonAdminRequestInvalid)
+}
+
+func TestRequest_LiveExecutionWithExpirySucceeds(t *testing.T) {
+	// A live_execution request WITH a valid finite in-ceiling expiry is now accepted as a pending
+	// request (issuance under governance). It is not yet a grant — four-eyes is enforced at approve.
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest()
+	in.Purpose = PurposeLiveExecution
+	exp := clk.t.Add(time.Hour)
+	in.ExpiresAt = &exp
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("live request with valid expiry must succeed, got %v", err)
+	}
+	if a.Purpose != PurposeLiveExecution || a.Status != StatusPending {
+		t.Fatalf("want pending live request, got purpose=%v status=%v", a.Purpose, a.Status)
+	}
+	if a.ExpiresAt == nil {
+		t.Fatal("live request must retain its expiry")
+	}
+}
+
+// liveRequest builds a valid live_execution request with a short in-ceiling expiry from the clock.
+func liveRequest(clk *fakeClock) RequestInput {
+	in := goodRequest()
+	in.Purpose = PurposeLiveExecution
+	exp := clk.t.Add(time.Hour)
+	in.ExpiresAt = &exp
+	return in
+}
+
+func TestLiveApprove_FourEyesRequiresDistinctApprover(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := liveRequest(clk)
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("create live: %v", err)
+	}
+	// Self-approval (approver == requester) is refused fail-closed with the precise reason.
+	if _, err := s.Approve(a.ApprovalID, in.RequestedBy, matchingTarget(in)); mcperr.ReasonOf(err) != mcperr.ReasonApprovalSelfApproval {
+		t.Fatalf("self-approval must be refused with self_approval, got %v", mcperr.ReasonOf(err).Code())
+	}
+	// A DISTINCT approver succeeds — the grant becomes active with four-eyes evidence.
+	g, err := s.Approve(a.ApprovalID, "approver@corp", matchingTarget(in))
+	if err != nil {
+		t.Fatalf("four-eyes approve must succeed: %v", err)
+	}
+	if g.Status != StatusActive || g.ApprovedBy != "approver@corp" || g.ApprovedBy == g.RequestedBy {
+		t.Fatalf("want a distinct-approver active grant, got %+v", g)
+	}
+}
+
+func TestLiveApprove_TTLCeilingFromApprovedAt(t *testing.T) {
+	// Request a valid 23h window, then approve under a clock rolled BACK so the window measured from
+	// ApprovedAt (= approve-now) exceeds MaxLiveExecutionApprovalTTL — the approve-time ceiling
+	// (defense-in-depth vs a clock-skew / long-dormant grant) must refuse it.
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest()
+	in.Purpose = PurposeLiveExecution
+	exp := clk.t.Add(23 * time.Hour)
+	in.ExpiresAt = &exp
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	clk.t = clk.t.Add(-2 * time.Hour) // approvedAt = T-2h, expiry = T+23h ⇒ window 25h > 24h
+	if _, err := s.Approve(a.ApprovalID, "approver@corp", matchingTarget(in)); mcperr.ReasonOf(err) != mcperr.ReasonAdminRequestInvalid {
+		t.Fatalf("approve with a >24h window from ApprovedAt must be refused, got %v", mcperr.ReasonOf(err).Code())
+	}
+}
+
+func TestLiveApprove_ExactStateFingerprintDrift(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := liveRequest(clk)
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	tgt := matchingTarget(in)
+	tgt.Fingerprint = fp(0x22) // the tool drifted since review — exact-state revalidation must fail closed
+	if _, err := s.Approve(a.ApprovalID, "approver@corp", tgt); mcperr.ReasonOf(err) != mcperr.ReasonToolFingerprintMismatch {
+		t.Fatalf("a drifted target must fail with fingerprint mismatch, got %v", mcperr.ReasonOf(err).Code())
+	}
+}
+
+func TestLiveApprove_StaleCatalogRevisionRefused(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := liveRequest(clk)
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	tgt := matchingTarget(in)
+	tgt.CatalogRevision = in.CatalogRevision + 1 // the reviewed catalog revision advanced under the decision
+	if _, err := s.Approve(a.ApprovalID, "approver@corp", tgt); mcperr.ReasonOf(err) != mcperr.ReasonToolApprovalStale {
+		t.Fatalf("a stale catalog revision must be refused, got %v", mcperr.ReasonOf(err).Code())
+	}
+}
+
+func TestLiveApprove_StaleServerRevisionRefused(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := liveRequest(clk)
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	tgt := matchingTarget(in)
+	tgt.ServerRevision = in.ServerRevision + 1 // the reviewed server revision advanced under the decision
+	if _, err := s.Approve(a.ApprovalID, "approver@corp", tgt); mcperr.ReasonOf(err) != mcperr.ReasonToolApprovalStale {
+		t.Fatalf("a stale server revision must be refused, got %v", mcperr.ReasonOf(err).Code())
+	}
+}
+
+func TestLiveApprove_PersistFailureRevertsState(t *testing.T) {
+	// Durable-before-effect: if the authoritative durable write fails, the live approve must NOT change
+	// the trust state — the record stays pending, not laundered into an active grant.
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := liveRequest(clk)
+	a, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	s.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	if _, err := s.Approve(a.ApprovalID, "approver@corp", matchingTarget(in)); err == nil {
+		t.Fatal("approve must fail when the durable write fails")
+	}
+	// Get reads the in-memory index (no write); the revert restored it to pending.
+	got, err := s.Get(a.ApprovalID, in.Tenant)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusPending {
+		t.Fatalf("a failed durable write must leave the live approval pending, got %v", got.Status)
+	}
+}
+
+func TestLoad_LiveWithoutExpiryFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	a := &ToolApproval{
+		SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+		FingerprintFormatVersion: 1, Purpose: PurposeLiveExecution, Status: StatusActive,
+		RequestedBy: "op", RequestedAt: time.Unix(1000, 0),
+		ApprovedBy: "adm", ApprovedAt: time.Unix(1001, 0),
+		// ExpiresAt nil — a live record must ALWAYS carry an expiry; Load fails closed.
+	}
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{a}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s.Load(); err == nil {
+		t.Fatal("a live_execution record without an expiry must fail closed")
+	}
+}
+
+func TestLoad_ActiveLiveWithoutFourEyesFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	exp := time.Unix(2000, 0)
+	a := &ToolApproval{
+		SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+		FingerprintFormatVersion: 1, Purpose: PurposeLiveExecution, Status: StatusActive,
+		RequestedBy: "same", RequestedAt: time.Unix(1000, 0),
+		ApprovedBy: "same", ApprovedAt: time.Unix(1001, 0), // approver == requester — no four-eyes
+		ExpiresAt: &exp,
+	}
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{a}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s.Load(); err == nil {
+		t.Fatal("an active live_execution record without four-eyes evidence must fail closed")
+	}
 }
 
 // --- lifecycle: request → approve ----------------------------------------
