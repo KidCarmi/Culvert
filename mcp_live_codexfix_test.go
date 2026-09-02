@@ -26,7 +26,11 @@ func TestLiveCommit_BeginActivationFailureRejectsAndRollsBack(t *testing.T) {
 	}
 	t.Cleanup(func() { canaryRuntimePersist = prevPersist })
 
-	r := getMCPRollout()
+	// Use an ISOLATED rollout state (not the shared getMCPRollout singleton) so this test's config +
+	// evidence + transition-history mutations cannot leak into other root-package tests under shuffle;
+	// reconcileCanaryRuntimeAfterCommit reads only tgt.st and the (reset-isolated) globalCanaryRuntime,
+	// never its receiver's state, so an isolated *mcpRollout drives the exact same path.
+	r := newTestRollout()
 	st := r.gateway
 	capb := rollout.CapabilityGateway
 	prevCfg := rollout.DisabledConfig(capb)
@@ -100,39 +104,6 @@ func TestLiveGate_DenialCountersResetByHelper(t *testing.T) {
 	noteMCPLiveGateDenied(mcperr.ReasonLiveTrustRevalidationFailed)
 	if got := mcpLiveGateDenialSnapshot()[mcperr.ReasonLiveTrustRevalidationFailed.Code()]; got != 1 {
 		t.Fatalf("post-reset denial must count from zero, got %d", got)
-	}
-}
-
-// P1 (arming): the live-armed quiesce-then-demote rehearsal (§15) is a HARD arming prerequisite. With
-// every OTHER node-readiness prerequisite satisfied but no valid live-quiesce rehearsal record for this
-// build, arming must refuse with live_quiesce_rehearsal_pending; recording the evidence flips it ready.
-func TestLiveArming_RequiresLiveQuiesceRehearsal(t *testing.T) {
-	withTempDataDir(t)
-	resetLiveTierGlobals(t)
-	withCanaryReadyNode(t) // pins build + satisfies every arming prerequisite EXCEPT compose + live-quiesce
-	capb := rollout.CapabilityGateway
-	mcpLiveTierFor(capb).markComposed()
-
-	// All node prerequisites hold except the live-quiesce rehearsal ⇒ refuse with exactly that reason.
-	rd := evaluateLiveArmReadiness(capb)
-	if rd.Ready || rd.Reason != "live_quiesce_rehearsal_pending" {
-		t.Fatalf("without the live-quiesce rehearsal, arming must refuse with live_quiesce_rehearsal_pending, got %+v", rd)
-	}
-	if _, err := armLiveTier(capb); err == nil {
-		t.Fatal("armLiveTier must refuse while the live-quiesce rehearsal is pending")
-	}
-	// Check the lifecycle object's armed state (the thing arm() controls): the canary-ready harness
-	// stores the gateway execdeps bit directly, so liveExecDepsConfigured is not the arm invariant here.
-	if mcpLiveTierFor(capb).armed() {
-		t.Fatal("a refused arm must not transition the tier to armed")
-	}
-
-	// Record the durable build-bound evidence; arming now becomes ready.
-	if err := recordLiveQuiesceRehearsal(capb, []string{"proof"}, time.Unix(0, 1)); err != nil {
-		t.Fatalf("record live-quiesce rehearsal: %v", err)
-	}
-	if rd2 := evaluateLiveArmReadiness(capb); !rd2.Ready {
-		t.Fatalf("with every prerequisite incl. the live-quiesce rehearsal, arming must be ready, got %+v", rd2)
 	}
 }
 

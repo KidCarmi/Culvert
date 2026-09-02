@@ -18,11 +18,19 @@ import (
 // live tier needs to EXIST safely — executor composed, upstream/credential path present (implied by
 // composition), durable events / response inspection / registry / catalog / policy healthy, the
 // final kill + tool-freshness boundary guards present (implied by the composed live executor),
-// emergency kill clear, Shadow-Exit attestation valid, rollback MECHANICS evidence valid, the
-// AUTHORITATIVE coordinator rollback rehearsal valid, AND the live-armed quiesce-then-demote
-// rehearsal (CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL, §15) valid for this build. It deliberately does NOT check the
+// emergency kill clear, Shadow-Exit attestation valid, rollback MECHANICS evidence valid, and the
+// AUTHORITATIVE coordinator rollback rehearsal valid. It deliberately does NOT check the
 // ACTIVATION-level facts (scope / per-tool live approval / budget) — those belong to the separate
 // Shadow→Canary transition preflight, not to arming the tier.
+//
+// The live-armed quiesce-then-demote rehearsal (CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL, §15) is
+// deliberately NOT an arming prerequisite: that rehearsal STARTS by arming the tier, so gating arming
+// on it is a bootstrap paradox (you would need the evidence to arm, yet must arm to produce it). It is
+// a POST-arming qualification — produced by the controlled drill on an armed synthetic tier and
+// required by the deferred real-arming DEPLOYMENT (which also provides the operator producer), the same
+// deferred-prerequisite class as the production composition deps. Its durable, build-bound evidence is
+// surfaced read-only on the tier status (liveQuiesceRehearsed) so an operator can see whether this
+// build has qualified, without arming depending on it.
 
 // liveArmReadiness is the bounded result of the arming node-readiness gate.
 type liveArmReadiness struct {
@@ -62,12 +70,6 @@ func evaluateLiveArmReadiness(capb rollout.Capability) liveArmReadiness {
 		return liveArmReadiness{Reason: "rollback_path_unhealthy"}
 	case !coordinatorRollbackRehearsedFn(r, capb, false):
 		return liveArmReadiness{Reason: "rollback_coordinator_rehearsal_pending"}
-	case !liveQuiesceRehearsed(capb):
-		// The CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL (§15) durable, build-bound evidence must exist for
-		// THIS build before the tier can arm for real: the drill proves the live-armed quiesce-then-demote
-		// sequence works, and a build change / corrupt / foreign-build record reads fail-closed. Without
-		// it, arming would grant readiness the rollback path has never been shown to have on this build.
-		return liveArmReadiness{Reason: "live_quiesce_rehearsal_pending"}
 	default:
 		return liveArmReadiness{Ready: true}
 	}
@@ -144,5 +146,9 @@ func mcpLiveTierStatus() map[string]any {
 	rd := evaluateLiveArmReadiness(capb)
 	m["arm_ready"] = rd.Ready
 	m["arm_unmet_reason"] = rd.Reason
+	// The §15 live-quiesce rehearsal is a POST-arming qualification (not an arming gate — see
+	// evaluateLiveArmReadiness); surface its durable, build-bound status read-only so an operator can
+	// see whether THIS build has qualified for a real Canary activation.
+	m["live_quiesce_rehearsed"] = liveQuiesceRehearsed(capb)
 	return m
 }
