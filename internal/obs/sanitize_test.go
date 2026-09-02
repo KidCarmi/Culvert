@@ -1,6 +1,9 @@
 package obs
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math/rand"
 	"strings"
 	"testing"
@@ -149,5 +152,64 @@ func BenchmarkSanitize(b *testing.B) {
 				sanitizeSink = legacySanitize(sh.in)
 			}
 		})
+	}
+}
+
+// TestSanitize_IsSinglePassWithLeadingBarrier is the structural gate for this
+// copy, mirroring TestBenchGate_SanitizeLogScansInputOnce in package main.
+//
+// It is structural rather than a timing ratio for the reason recorded there:
+// the cost of a strings.ReplaceAll call relative to the scalar control-byte
+// scan swings by an order of magnitude between CPUs, so a same-run ratio is
+// NOT machine-independent (a 0.80 bound that held on the development box
+// measured 0.90 on CI for identical code). The two properties below are
+// decidable in the source and are exactly the ones that matter:
+//
+//  1. Exactly one strings.ReplaceAll — three was the pre-change shape, and
+//     \n, \r and \t are all < 0x20 and all map to '_', so the single
+//     control-byte pass already covers them.
+//  2. It is the first statement, so every return path is downstream of it.
+//     This copy exists SPECIFICALLY to keep CodeQL's CWE-117 recognition
+//     inside this package (see the comment on Sanitize), so losing the
+//     barrier's position would defeat the whole reason for the duplication.
+func TestSanitize_IsSinglePassWithLeadingBarrier(t *testing.T) {
+	const file = "obs.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "Sanitize" {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatalf("%s: func Sanitize not found — if it was renamed, update this gate rather than deleting it", file)
+	}
+
+	var replaceAlls []*ast.CallExpr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "ReplaceAll" {
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "strings" {
+				replaceAlls = append(replaceAlls, call)
+			}
+		}
+		return true
+	})
+	if len(replaceAlls) != 1 {
+		t.Fatalf("%s: Sanitize makes %d strings.ReplaceAll calls, want exactly 1 "+
+			"(three re-adds the redundant scans; zero drops the CodeQL barrier)", file, len(replaceAlls))
+	}
+	first, ok := fn.Body.List[0].(*ast.AssignStmt)
+	if !ok || len(first.Rhs) != 1 || first.Rhs[0] != replaceAlls[0] {
+		t.Errorf("%s: Sanitize's first statement is not the strings.ReplaceAll assignment; "+
+			"it must come first so every return path is downstream of it", file)
 	}
 }

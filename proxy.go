@@ -1184,7 +1184,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 // CodeQL barrier verbatim while the other two scans and containsControl fold
 // into the scan below.
 //
-// Measured on this machine (Go 1.26, 4-core Xeon @ 2.80GHz, medians of
+// Measured on the development box (Go 1.26, 4-core Xeon @ 2.80GHz, medians of
 // n=3x1M, both forms timed in the same run — see the benchmarks):
 //
 //	shape                     before      after      delta
@@ -1196,13 +1196,21 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 //	empty                     39.7 ns     15.7 ns    -60%
 //	with controls (28 B)       340 ns      147 ns    -57%  (4 -> 2 allocs)
 //
-// In situ, the five calls behind one POLICY_ALLOW line go 463 -> 284 ns, i.e.
-// this takes ~180 ns of CPU off every allowed request, before counting the
-// tunnel, block and audit paths.
+// In situ there, the five calls behind one POLICY_ALLOW line go 463 -> 284 ns.
+//
+// The SIZE of the win is hardware-dependent and the spread is wide, so do not
+// quote one number as the number: it is governed by how expensive
+// strings.ReplaceAll's per-call overhead is relative to the scalar
+// control-byte scan, which differs by an order of magnitude between CPUs. The
+// CI runner measured the two removed calls at ~3 ns each against ~24 ns here,
+// so the same commit improves the 57-byte shape by 47% on this box and 10% on
+// that one (15 B: 52% here, 40% there). The DIRECTION never changes — this
+// form strictly does less work than the one it replaces — which is why the
+// gate that protects it is structural rather than a timing threshold.
 //
 // The clean path stays allocation-free, exactly as before; the control-byte
 // path halves its allocations because it no longer builds an intermediate
-// string per replaced class.
+// string per replaced class. That part is hardware-independent.
 //
 // A SWAR (8-bytes-per-word) scan was built and measured — it wins a further
 // ~60 ns on 270-byte inputs and nothing on the short strings that dominate
@@ -1213,6 +1221,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 // Equivalence with the four-scan form is exact, not approximate, and is pinned
 // by a differential test against a verbatim copy of the old implementation
 // plus a fuzz target (proxy_sanitizelog_test.go).
+//
+// The scan count itself is pinned STRUCTURALLY, by an AST gate requiring
+// exactly one strings.ReplaceAll as the FIRST statement
+// (proxy_sanitizelog_benchgate_test.go). Keep it first: that is what puts it
+// on every return path, which is what keeps CodeQL's go/log-injection query
+// recognising this function as a sanitiser.
 func sanitizeLog(s string) string {
 	// CWE-117 barrier CodeQL recognises. Also the only class common enough to
 	// be worth a dedicated SIMD scan (strings.Count uses IndexByte); on a
