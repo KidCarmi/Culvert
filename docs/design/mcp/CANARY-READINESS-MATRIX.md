@@ -225,8 +225,10 @@ Every one is a **separately-reviewed activation**, not a config change:
    no `Principals` would satisfy it while leaving the principal dimension unrestricted (review §10);
    (f) a
    **per-physical-invocation budget** — an idempotent read retries up to `MaxReadRetries` times
-   outside the single budget reservation, so one budgeted request can send the POST ~3×; the First
-   Canary must disable transport retries, charge each attempt, or require upstream dedup (review §9);
+   outside the single budget reservation, so one budgeted request can send the POST ~3×. With today's
+   code the ONLY workable remedy is to disable transport retries; charging each attempt or a dedup
+   scheme first requires ADDING a unique-per-reservation, stable-across-retries key (the current
+   `WireID` is per-server, so dedup by it collapses the whole corpus, not just retries — review §9/§14);
    a **credential-selection resolution** (verify a matched rule with no `CredentialProfile`, or a
    working credential provider/path — the production broker has zero providers, review §4); and (g)
    two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight

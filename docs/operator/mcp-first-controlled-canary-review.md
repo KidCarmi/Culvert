@@ -14,8 +14,9 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **NINE independent blockers** (exhaustive; each maps 1:1 to a mandatory
-NO/CONDITIONAL row in §25 and an item in §26): (1) no controlled upstream reachable under the supported
+cannot be assembled today on **NINE independent blockers** (exhaustive as a set — together they cover
+every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
+witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable under the supported
 production trust model; (2) the production activation preflight cannot return `Ready:true` on a stock
 node; (3) no governed production arming entry point — `armLiveTier` has no production caller, so an
 operator cannot arm the tier; (4) the read-first classifier refuses the one-exact-tool call and
@@ -591,10 +592,12 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **nine independent blockers** (each maps to a NO/CONDITIONAL row in §25) — some
-are intentional capability gaps, some are prerequisites, and two are genuine product defects the
-Codex adversarial rounds (§24) surfaced and this review verified against the code. The list below is
-exhaustive: closing ALL of it is necessary and sufficient to pass §25.
+assembled today on **nine independent blockers** — some are intentional capability gaps, some are
+prerequisites, and two are genuine product defects the Codex adversarial rounds (§24) surfaced and
+this review verified against the code. The list below is exhaustive AS A SET: together the nine cover
+every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
+§25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
+blocker 7's auto-abort and also depends on blockers 1 and 6).
 
 1. **No controlled upstream reachable under the supported production trust model (§5).** The only
    documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
