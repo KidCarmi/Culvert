@@ -45,7 +45,6 @@ import (
 	"net/netip"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker"
@@ -259,7 +258,7 @@ func acquireProductionKEK(path string) (*secret.Provider, error) {
 // SPKI/SPIFFE pin-provisioning as the pre-Canary connectivity blockers (see the report). The
 // fail-closed direction is preserved throughout: an unsupported scheme or a mismatched identity
 // means NO connection, never an unauthenticated one.
-func newProductionUpstreamClient(clock func() time.Time) (*upstreamclient.Client, error) {
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
 	resolver := prodDestinationResolver{r: &net.Resolver{}}
 	return upstreamclient.New(upstreamclient.Config{
 		Limits:           upstreamclient.DefaultLimits(),
@@ -268,7 +267,7 @@ func newProductionUpstreamClient(clock func() time.Time) (*upstreamclient.Client
 		InspectionLimits: limits.DefaultGatewayInspection(),
 		Identity:         nil, // ⇒ default SPKI verifier (pins the registry PinnedIdentity when present)
 		RootCAs:          nil, // ⇒ system roots for the unpinned branch
-		Clock:            clock,
+		Clock:            nil, // ⇒ time.Now
 	}, limits.DefaultGateway())
 }
 
@@ -284,11 +283,13 @@ func newProductionUpstreamClient(clock func() time.Time) (*upstreamclient.Client
 //   - lp:  the resolved+cleaned live-deps config (opt-in + KEK path).
 //   - reg/cat: the shared read-only inventory backing the broker.
 //   - evMgr: the durable events manager (tel.Manager()); REQUIRED — nil fails closed.
-//   - clock: injected for tests; nil ⇒ time.Now inside the collaborators.
+//
+// The collaborators are constructed with a nil clock (⇒ time.Now); a production node has no
+// clock to inject and the tests that need determinism inject it into their own events manager.
 //
 // It records the machine-readable status on globalMCPLiveProd on every path (composed or
 // fail-closed) so the operator health surface and the Canary readiness rows can read WHY.
-func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProductionConfig, reg *registry.Registry, cat *catalog.Catalog, evMgr *events.Manager, clock func() time.Time) {
+func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProductionConfig, reg *registry.Registry, cat *catalog.Catalog, evMgr *events.Manager) {
 	// Not requested: record and compose nothing (byte-identical to a build without the flag).
 	if !lp.Requested {
 		globalMCPLiveProd.set(mcpLiveProdStatus{Requested: false, Reason: liveDepsReasonNotRequested, Deps: pendingLiveProdDeps()})
@@ -339,7 +340,7 @@ func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProducti
 		Registry: reg,
 		Catalog:  cat,
 		KEK:      kek,
-		Clock:    clock,
+		Clock:    nil, // ⇒ time.Now
 	}, limits.DefaultCredential())
 	deps.Broker = liveDepBrokerNoProvider
 
@@ -348,7 +349,7 @@ func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProducti
 	deps.DestinationPol = liveDepDestPolicyGateway
 	deps.TrustRoots = liveDepTrustSystemRoots
 	deps.Resolver = liveDepResolverReady
-	upstream, err := newProductionUpstreamClient(clock)
+	upstream, err := newProductionUpstreamClient()
 	if err != nil {
 		deps.Upstream = liveDepUpstreamFailed
 		globalMCPLiveProd.set(mcpLiveProdStatus{Requested: true, Reason: liveDepUpstreamFailed, Deps: deps})
@@ -373,7 +374,7 @@ func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProducti
 		Broker:          brk,
 		Events:          evMgr,
 		ResponseProfile: responseProfile,
-		Clock:           clock,
+		Clock:           nil, // ⇒ time.Now
 		// LiveGate: nil — production real gate.
 	}); err != nil {
 		globalMCPLiveProd.set(mcpLiveProdStatus{Requested: true, Reason: mcpLiveTierFor(rollout.CapabilityGateway).Reason(), Deps: deps})

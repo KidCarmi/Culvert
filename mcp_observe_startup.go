@@ -238,7 +238,7 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 	composeProductionGatewayLiveTier(
 		&cfg,
 		resolveMCPLiveProductionConfig(os.Getenv(mcpLiveDepsEnvVar), os.Getenv(mcpLiveCredentialKEKEnvVar)),
-		reg, cat, tel.Manager(), nil,
+		reg, cat, tel.Manager(),
 	)
 	// Publish the seeded inventory + telemetry as the single sources of truth ONLY
 	// after the whole activation is valid, so the Admin API and runtime observe the

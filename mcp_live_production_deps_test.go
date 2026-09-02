@@ -62,7 +62,7 @@ func TestLiveProd_E2E_ComposesRealGraphNeverArms(t *testing.T) {
 	kekPath := tempKEKPath(t)
 
 	cfg := &mcpruntime.Config{}
-	composeProductionGatewayLiveTier(cfg, requestedConfig(kekPath), reg, cat, ev, nil)
+	composeProductionGatewayLiveTier(cfg, requestedConfig(kekPath), reg, cat, ev)
 
 	// The real executor was installed via the seam.
 	if cfg.Deps.Executor == nil {
@@ -110,7 +110,7 @@ func TestLiveProd_StatusViewCarriesNoSecret(t *testing.T) {
 	ev := liveTestEvents(t)
 	kekPath := tempKEKPath(t)
 	cfg := &mcpruntime.Config{}
-	composeProductionGatewayLiveTier(cfg, requestedConfig(kekPath), reg, cat, ev, nil)
+	composeProductionGatewayLiveTier(cfg, requestedConfig(kekPath), reg, cat, ev)
 
 	view := mcpLiveProdStatusView()
 	// The KEK path (a filesystem location) must NOT appear anywhere in the view.
@@ -222,7 +222,7 @@ func TestLiveProd_FailureMatrix_NeverArmsRecordsReason(t *testing.T) {
 			resetLiveProdGlobals(t)
 			reg, cat := prodInventory()
 			cfg := &mcpruntime.Config{}
-			composeProductionGatewayLiveTier(cfg, tc.cfg(t), reg, cat, mgrOrNil(t, tc.events), nil)
+			composeProductionGatewayLiveTier(cfg, tc.cfg(t), reg, cat, mgrOrNil(t, tc.events))
 
 			if cfg.Deps.Executor != nil {
 				t.Fatalf("§24 %s: a fail-closed path must NEVER install an executor", tc.name)
@@ -263,7 +263,7 @@ func TestLiveProd_ConcurrentCompositionAndReads(t *testing.T) {
 			defer wg.Done()
 			cfg := &mcpruntime.Config{}
 			// Each worker uses its OWN KEK dir (distinct local temp files).
-			composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev, nil)
+			composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
 			_ = mcpLiveProdStatusView()
 			_ = globalMCPLiveProd.snapshot()
 			_ = mcpLiveTierStatus()
@@ -304,7 +304,7 @@ func TestLiveProd_MutationCampaign(t *testing.T) {
 		resetLiveProdGlobals(t)
 		reg, cat := prodInventory()
 		cfg := &mcpruntime.Config{}
-		composeProductionGatewayLiveTier(cfg, mcpLiveProductionConfig{Requested: false}, reg, cat, liveTestEvents(t), nil)
+		composeProductionGatewayLiveTier(cfg, mcpLiveProductionConfig{Requested: false}, reg, cat, liveTestEvents(t))
 		if cfg.Deps.Executor != nil {
 			t.Fatal("M1: disabled node must not compose")
 		}
@@ -315,7 +315,7 @@ func TestLiveProd_MutationCampaign(t *testing.T) {
 		resetLiveProdGlobals(t)
 		reg, cat := prodInventory()
 		cfg := &mcpruntime.Config{}
-		composeProductionGatewayLiveTier(cfg, mcpLiveProductionConfig{Requested: true}, reg, cat, liveTestEvents(t), nil)
+		composeProductionGatewayLiveTier(cfg, mcpLiveProductionConfig{Requested: true}, reg, cat, liveTestEvents(t))
 		if cfg.Deps.Executor != nil || globalMCPLiveProd.snapshot().Reason != liveDepsReasonConfigInvalid {
 			t.Fatal("M2: partial config must fail closed")
 		}
@@ -348,7 +348,7 @@ func TestLiveProd_MutationCampaign(t *testing.T) {
 		resetLiveProdGlobals(t)
 		reg, cat := prodInventory()
 		cfg := &mcpruntime.Config{}
-		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, nil, nil)
+		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, nil)
 		if cfg.Deps.Executor != nil || globalMCPLiveProd.snapshot().Reason != liveDepsReasonEventsAbsent {
 			t.Fatal("M6: nil events must fail closed")
 		}
@@ -359,7 +359,7 @@ func TestLiveProd_MutationCampaign(t *testing.T) {
 		resetLiveProdGlobals(t)
 		reg, cat := prodInventory()
 		cfg := &mcpruntime.Config{}
-		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, nil, nil)
+		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, nil)
 		if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
 			t.Fatal("M7: a failed composition must not leave the tier composed")
 		}
@@ -370,7 +370,7 @@ func TestLiveProd_MutationCampaign(t *testing.T) {
 		resetLiveProdGlobals(t)
 		reg, cat := prodInventory()
 		cfg := &mcpruntime.Config{}
-		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, liveTestEvents(t), nil)
+		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, liveTestEvents(t))
 		if liveExecDepsConfigured(false) {
 			t.Fatal("M8: composition must never arm")
 		}
@@ -428,7 +428,7 @@ func TestLiveProd_RedTeam(t *testing.T) {
 		resetLiveProdGlobals(t)
 		reg, cat := prodInventory()
 		cfg := &mcpruntime.Config{}
-		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, liveTestEvents(t), nil)
+		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, liveTestEvents(t))
 		rd := evaluateCanaryNodeReadiness(rollout.CapabilityGateway)
 		if rd.Ready {
 			t.Fatal("R5: a composed-but-not-armed node must not be Canary node-ready")
@@ -443,8 +443,8 @@ func TestLiveProd_RedTeam(t *testing.T) {
 		reg, cat := prodInventory()
 		ev := liveTestEvents(t)
 		cfg := &mcpruntime.Config{}
-		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev, nil)
-		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev, nil)
+		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
+		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
 		if liveExecDepsConfigured(false) {
 			t.Fatal("R6: re-composition must never arm")
 		}
@@ -475,7 +475,7 @@ func TestLiveProd_PostArmingDegradationFailsClosed(t *testing.T) {
 	// once armed, engaging the emergency kill makes the arm-readiness gate report not-ready, so a
 	// re-arm is refused and quiesce cleanly disarms.
 	cfg := &mcpruntime.Config{}
-	composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev, nil)
+	composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
 
 	// Force-arm through the lifecycle object directly (bypassing the full node gate) to model an
 	// already-armed node, then degrade a dependency.
