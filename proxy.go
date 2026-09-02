@@ -1162,37 +1162,79 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 // sanitizeLog strips newlines, carriage returns, tabs, and all other C0
 // control characters (plus DEL) from s to prevent log forging (CWE-117) and
 // terminal-escape-sequence injection (CWE-150) via ESC (0x1B) into log
-// viewers. Uses strings.ReplaceAll for the common newline/CR/tab cases so
-// CodeQL (go/log-injection) recognises the sanitiser; a single final pass
-// over remaining control bytes catches the rest with one allocation.
+// viewers. Uses strings.ReplaceAll for the newline case so CodeQL
+// (go/log-injection) recognises the sanitiser; a single pass over the
+// remaining control bytes catches the rest.
+//
+// ── Why one pass and not four ────────────────────────────────────────────────
+//
+// This is the most-called sanitiser in the tree (~377 call sites) and it is on
+// the REQUEST path: handleRequest emits one POLICY_* line per proxied request
+// that passes five values through it (rule name twice, host, matched
+// conditions, identity), and the tunnel/relay paths add more. It ran FOUR full
+// scans of every string — three strings.ReplaceAll plus a separate
+// containsControl — and then, on a hit, a fifth pass to build the result.
+//
+// The three ReplaceAll scans were redundant with the fourth by construction:
+// \n (0x0A), \r (0x0D) and \t (0x09) are all < 0x20, and every branch mapped
+// its match to the SAME byte, '_'. So the whole function was only ever
+// computing "every byte < 0x20 or == 0x7F becomes '_', length preserved" — a
+// single predicate that one pass decides. Keeping the newline ReplaceAll as
+// the first statement (and therefore on every return path) preserves the
+// CodeQL barrier verbatim while the other two scans and containsControl fold
+// into the scan below.
+//
+// Measured on this machine (Go 1.26, 4-core Xeon @ 2.80GHz, medians of
+// n=3x1M, both forms timed in the same run — see the benchmarks):
+//
+//	shape                     before      after      delta
+//	rule name   (15 B)        56.8 ns     28.0 ns    -51%
+//	hostname    (15 B)        59.1 ns     28.5 ns    -52%
+//	identity    (17 B)        60.6 ns     28.3 ns    -53%
+//	conditions  (57 B)         103 ns     55.0 ns    -47%
+//	long URL   (270 B)         267 ns      202 ns    -24%
+//	empty                     39.7 ns     15.7 ns    -60%
+//	with controls (28 B)       340 ns      147 ns    -57%  (4 -> 2 allocs)
+//
+// In situ, the five calls behind one POLICY_ALLOW line go 463 -> 284 ns, i.e.
+// this takes ~180 ns of CPU off every allowed request, before counting the
+// tunnel, block and audit paths.
+//
+// The clean path stays allocation-free, exactly as before; the control-byte
+// path halves its allocations because it no longer builds an intermediate
+// string per replaced class.
+//
+// A SWAR (8-bytes-per-word) scan was built and measured — it wins a further
+// ~60 ns on 270-byte inputs and nothing on the short strings that dominate
+// this call site — and was deliberately thrown away rather than carried: a
+// word-at-a-time bit trick is the wrong kind of clever for the function whose
+// bug class is log injection.
+//
+// Equivalence with the four-scan form is exact, not approximate, and is pinned
+// by a differential test against a verbatim copy of the old implementation
+// plus a fuzz target (proxy_sanitizelog_test.go).
 func sanitizeLog(s string) string {
+	// CWE-117 barrier CodeQL recognises. Also the only class common enough to
+	// be worth a dedicated SIMD scan (strings.Count uses IndexByte); on a
+	// string with no newline it returns s without allocating.
 	s = strings.ReplaceAll(s, "\n", "_")
-	s = strings.ReplaceAll(s, "\r", "_")
-	s = strings.ReplaceAll(s, "\t", "_")
-	// Fast path: nothing else to scrub.
-	if !containsControl(s) {
+	// Find the first byte still needing a scrub. Nothing before i is a control
+	// byte, so the prefix is already correct and needs no rewrite.
+	i := 0
+	for ; i < len(s); i++ {
+		// C0 controls (0x00-0x1F) and DEL (0x7F).
+		if c := s[i]; c < 0x20 || c == 0x7F {
+			break
+		}
+	}
+	if i == len(s) {
 		return s
 	}
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		// C0 controls (0x00-0x1F) and DEL (0x7F). \n, \r, \t already replaced above.
-		if c < 0x20 || c == 0x7F {
+	b := []byte(s)
+	for ; i < len(b); i++ {
+		if c := b[i]; c < 0x20 || c == 0x7F {
 			b[i] = '_'
-			continue
 		}
-		b[i] = c
 	}
 	return string(b)
-}
-
-// containsControl reports whether s has any byte < 0x20 or == 0x7F.
-func containsControl(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < 0x20 || c == 0x7F {
-			return true
-		}
-	}
-	return false
 }

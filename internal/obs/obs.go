@@ -71,33 +71,30 @@ func Debugf(format string, args ...any) {
 // strings.ReplaceAll sanitiser at each call site, and delegating across a
 // package boundary risks losing that recognition. The two copies are tiny and
 // each behaviour-tested; the property (no control byte survives) is the contract.
+//
+// Single-pass for the same reason as its twin: \n, \r and \t are all < 0x20
+// and every branch mapped its match to the SAME byte, '_', so the four scans
+// were only ever computing "every byte < 0x20 or == 0x7F becomes '_'". The
+// newline ReplaceAll stays first — and therefore on every return path — so the
+// CodeQL barrier this copy exists to preserve is unchanged. See the extended
+// rationale and measurements on sanitizeLog in proxy.go.
 func Sanitize(s string) string {
 	s = strings.ReplaceAll(s, "\n", "_")
-	s = strings.ReplaceAll(s, "\r", "_")
-	s = strings.ReplaceAll(s, "\t", "_")
-	// Fast path: nothing else to scrub.
-	if !containsControl(s) {
+	i := 0
+	for ; i < len(s); i++ {
+		// C0 controls (0x00-0x1F) and DEL (0x7F).
+		if c := s[i]; c < 0x20 || c == 0x7F {
+			break
+		}
+	}
+	if i == len(s) {
 		return s
 	}
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		// C0 controls (0x00-0x1F) and DEL (0x7F). \n, \r, \t already replaced above.
-		if c < 0x20 || c == 0x7F {
+	b := []byte(s)
+	for ; i < len(b); i++ {
+		if c := b[i]; c < 0x20 || c == 0x7F {
 			b[i] = '_'
-			continue
 		}
-		b[i] = c
 	}
 	return string(b)
-}
-
-func containsControl(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < 0x20 || c == 0x7F {
-			return true
-		}
-	}
-	return false
 }
