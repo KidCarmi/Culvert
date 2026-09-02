@@ -34,16 +34,19 @@ package main
 //	revoked    a durable-deny proof was received from Sluice
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/KidCarmi/Sluice/pkg/sluiceauth"
+	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
 const (
@@ -423,4 +426,112 @@ func certNotAfterUnix(certPEM []byte) int64 {
 		return t.Unix()
 	}
 	return 0
+}
+
+// ─── R11: unresolved renewals block destructive lifecycle operations ────────
+
+var (
+	errCDRResolveUnavailable = errors.New("cdr lineage: an unresolved renewal operation could not be resolved against the engine")
+	errCDRResolvePersist     = errors.New("cdr lineage: an unresolved renewal operation was resolved but its outcome could not be persisted")
+)
+
+// UnresolvedOperations lists the operation ids of every "renewing"
+// generation — trust identities whose fingerprint is not yet known.
+func (i *CDREnrolledInstance) UnresolvedOperations() []string {
+	var out []string
+	for _, g := range i.Credentials {
+		if g.State == cdrCredRenewing && g.OperationID != "" {
+			out = append(out, g.OperationID)
+		}
+	}
+	return out
+}
+
+// cdrStatusViaBootstrap asks Sluice for an operation's outcome over the
+// credential-less bootstrap channel (TOFU pin only) — usable with CDR
+// disabled, with no pool, and right after a restart. A staged server-cert
+// rotation window is honoured by retrying with the rotated pin.
+func cdrStatusViaBootstrap(ctx context.Context, inst CDREnrolledInstance, opID string) (*pb.EnrollStatusResponse, error) {
+	st, err := cdrEnrollStatusRPC(ctx, inst.Endpoint, inst.ServerFingerprint, opID)
+	if err != nil && inst.RotatedFingerprint != "" &&
+		(inst.RotatedFingerprintUntilUnix == 0 || time.Now().Unix() < inst.RotatedFingerprintUntilUnix) {
+		st, err = cdrEnrollStatusRPC(ctx, inst.Endpoint, inst.RotatedFingerprint, opID)
+	}
+	return st, err
+}
+
+// resolveUnresolvedGenerations resolves EVERY "renewing" generation of the
+// instance synchronously and authoritatively BEFORE a destructive
+// lifecycle operation may proceed (caller holds the lifecycle lock):
+//
+//	NOT_ISSUED        the renewal intent is durably removed
+//	ISSUED            the fingerprint is durably bound (orphaned — the key
+//	                  material never landed here) before continuing
+//	ISSUED + revoked  recorded as revoked
+//	anything else     (unreachable, malformed, unspecified, unsupported, or
+//	                  a persistence failure) ⇒ an error the caller maps to
+//	                  503/409 with ZERO mutation and ZERO loss of the id
+//
+// Returns the refreshed instance copy.
+func resolveUnresolvedGenerations(ctx context.Context, inst CDREnrolledInstance) (CDREnrolledInstance, error) {
+	for _, g := range inst.Credentials {
+		if g.State != cdrCredRenewing {
+			continue
+		}
+		if g.OperationID == "" {
+			// No identity exists to resolve or to lose: nothing Sluice could
+			// have bound. Recorded as impossible by construction.
+			return inst, fmt.Errorf("%w: generation %d has no operation id", errCDRResolvePersist, g.Seq)
+		}
+		st, err := cdrStatusViaBootstrap(ctx, inst, g.OperationID)
+		if err != nil {
+			return inst, fmt.Errorf("%w: operation %s: %v", errCDRResolveUnavailable, g.OperationID, err)
+		}
+		switch st.GetOutcome() {
+		case pb.EnrollOutcome_ENROLL_NOT_ISSUED:
+			if err := cdrInstances.DropUnissuedRenewal(inst.Name, g.Seq); err != nil {
+				return inst, fmt.Errorf("%w: operation %s: %v", errCDRResolvePersist, g.OperationID, err)
+			}
+		case pb.EnrollOutcome_ENROLL_ISSUED:
+			fp := st.GetClientCertFingerprint()
+			if !cdrFingerprintRE.MatchString(fp) {
+				return inst, fmt.Errorf("%w: operation %s: engine reported a malformed fingerprint", errCDRResolveUnavailable, g.OperationID)
+			}
+			state := cdrCredOrphaned
+			if st.GetRevoked() {
+				state = cdrCredRevoked
+			}
+			if err := cdrInstances.RecordIssuedCredential(inst.Name, g.Seq, fp, 0, state); err != nil {
+				return inst, fmt.Errorf("%w: operation %s: %v", errCDRResolvePersist, g.OperationID, err)
+			}
+			logger.Printf("CDR: lineage: %q operation %s resolved as ISSUED (%s, %s) before a lifecycle mutation", sanitizeLog(inst.Name), g.OperationID, fp, state)
+		default:
+			return inst, fmt.Errorf("%w: operation %s: the engine reported an unspecified outcome (unsupported server)", errCDRResolveUnavailable, g.OperationID)
+		}
+	}
+	cur, ok := cdrInstances.GetCopy(inst.Name)
+	if !ok {
+		return inst, fmt.Errorf("%w: instance vanished during resolution", errCDRResolvePersist)
+	}
+	return cur, nil
+}
+
+// resolveUnresolvedOrRefuse runs the resolution and writes the truthful
+// refusal (503 unreachable / 409 persistence) when it cannot complete.
+func resolveUnresolvedOrRefuse(w http.ResponseWriter, r *http.Request, inst CDREnrolledInstance) (CDREnrolledInstance, bool) {
+	if len(inst.UnresolvedOperations()) == 0 {
+		return inst, true
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	cur, err := resolveUnresolvedGenerations(ctx, inst)
+	if err == nil {
+		return cur, true
+	}
+	code := http.StatusConflict
+	if errors.Is(err, errCDRResolveUnavailable) {
+		code = http.StatusServiceUnavailable
+	}
+	http.Error(w, fmt.Sprintf("%v — nothing was changed; the unresolved renewal operation(s) %v remain recorded", err, inst.UnresolvedOperations()), code)
+	return inst, false
 }

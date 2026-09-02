@@ -701,6 +701,53 @@
           "count": {
             "type": "integer"
           },
+          "integrity": {
+            "additionalProperties": false,
+            "description": "Receipt-file truth (R12.8): ok=false means DEGRADED — duplicate ids, bad grammar, impossible states, missing identity fields or more than the cap; no new enrollment is created until repaired by position.",
+            "properties": {
+              "issues": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "duplicate_operation",
+                        "invalid_operation_id",
+                        "invalid_state",
+                        "missing_identity",
+                        "over_capacity",
+                        "unparsable_file"
+                      ],
+                      "type": "string"
+                    },
+                    "operationId": {
+                      "type": "string"
+                    },
+                    "positions": {
+                      "items": {
+                        "type": "integer"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "positions"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "issues"
+            ],
+            "type": "object"
+          },
           "receipts": {
             "items": {
               "$ref": "#/components/schemas/CDREnrollReceipt"
@@ -715,7 +762,8 @@
         "required": [
           "receipts",
           "count",
-          "unresolved"
+          "unresolved",
+          "integrity"
         ],
         "type": "object"
       },
@@ -750,8 +798,15 @@
           "operationId": {
             "type": "string"
           },
+          "receiptError": {
+            "type": "string"
+          },
           "receiptState": {
             "type": "string"
+          },
+          "receiptUpdated": {
+            "description": "false when the classification is authoritative but the local receipt transition could not be persisted (previous state kept).",
+            "type": "boolean"
           },
           "retryable": {
             "description": "AMBIGUOUS and worth retrying.",
@@ -786,6 +841,77 @@
           "retryable",
           "revoked",
           "hasReceipt"
+        ],
+        "type": "object"
+      },
+      "CDREnrollResult": {
+        "additionalProperties": false,
+        "description": "Enrollment success with the ACTUAL post-operation facts (R13).",
+        "properties": {
+          "autoEnable": {
+            "additionalProperties": false,
+            "properties": {
+              "attempted": {
+                "type": "boolean"
+              },
+              "error": {
+                "type": "string"
+              },
+              "succeeded": {
+                "description": "false with a non-empty error when the durable sentinel write failed — CDR stays DISABLED; the credential IS stored, so enable CDR from the toggle, never re-enroll.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "attempted",
+              "succeeded",
+              "error"
+            ],
+            "type": "object"
+          },
+          "cdrEnabled": {
+            "description": "The truthful runtime flag after the operation.",
+            "type": "boolean"
+          },
+          "clientActive": {
+            "type": "boolean"
+          },
+          "clientInitError": {
+            "type": "string"
+          },
+          "instance": {
+            "$ref": "#/components/schemas/GenericRead"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "receiptError": {
+            "type": "string"
+          },
+          "receiptRecorded": {
+            "description": "false when the receipt's stored transition could not be persisted (it stays dispatched; recovery classifies LANDED from the registry).",
+            "type": "boolean"
+          },
+          "receiptState": {
+            "enum": [
+              "stored",
+              "dispatched"
+            ],
+            "type": "string"
+          },
+          "stored": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instance",
+          "stored",
+          "operationId",
+          "receiptState",
+          "receiptRecorded",
+          "cdrEnabled",
+          "clientActive",
+          "autoEnable"
         ],
         "type": "object"
       },
@@ -7636,7 +7762,7 @@
     },
     "/api/cdr/instances": {
       "delete": {
-        "description": "Remove an enrolled instance from THIS appliance's registry and shred its local mTLS material. LOCAL ONLY — Sluice keeps trusting the issued client certificate until it expires or is revoked on the Sluice side — EVERY still-valid generation of the credential lineage; the response and the audit record carry all of their fingerprints (the Sluice-side revocation keys) so that remains possible after the local shred. Use /api/cdr/instances/revoke to actually revoke the credential.",
+        "description": "Remove an enrolled instance from THIS appliance's registry and shred its local mTLS material. LOCAL ONLY — Sluice keeps trusting the issued client certificate until it expires or is revoked on the Sluice side — EVERY still-valid generation of the credential lineage; the response and the audit record carry all of their fingerprints (the Sluice-side revocation keys) so that remains possible after the local shred. An UNRESOLVED renewal (a generation with an operation id but no fingerprint — the RenewCert response was lost) is resolved AUTHORITATIVELY through Sluice's EnrollStatus BEFORE any mutation (works with CDR disabled, no pool, no poller, right after a restart): NOT_ISSUED drops the intent, ISSUED binds the fingerprint durably and it is then reported as still trusted; when the engine cannot be asked (503) or the outcome cannot be persisted (409) NOTHING changes. Use /api/cdr/instances/revoke to actually revoke the credential.",
         "operationId": "deleteCDRInstance",
         "parameters": [
           {
@@ -7696,6 +7822,26 @@
               }
             },
             "description": "Instance not found. Body is plain text."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "An unresolved renewal was resolved but its outcome could not be persisted; nothing changed. Body is plain text."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "An unresolved renewal could not be resolved against the engine; nothing changed. Body is plain text."
           }
         },
         "security": [
@@ -7806,11 +7952,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/CDREnrollResult"
                 }
               }
             },
-            "description": "Enrolled and registered."
+            "description": "Enrolled and registered. The body reports the ACTUAL post-operation state (R13) — never assume auto-enable succeeded."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -7826,7 +7972,7 @@
                 }
               }
             },
-            "description": "An instance with that name is already enrolled, OR this operation id already issued a credential at Sluice that is not stored here (recorded issued-but-not-stored; revoke it or resolve it). Body is plain text."
+            "description": "An instance with that name is already enrolled; OR the operation id ALREADY EXISTS (the binding operationId→name+endpoint+pin+actor is immutable — any repeated dispatch, an exact retry included, performs NO RPC and the body names the current receipt state + the recovery path); OR this operation id already issued a credential at Sluice that is not stored here (recorded issued-but-not-stored; revoke it or resolve it). Body is plain text."
           },
           "500": {
             "content": {
@@ -7856,7 +8002,7 @@
                 }
               }
             },
-            "description": "The recovery receipt could not be persisted; NO enrollment was sent. Body is plain text."
+            "description": "The recovery receipt could not be persisted (or the receipt store is DEGRADED / full); NO enrollment was sent. Body is plain text."
           }
         },
         "security": [
@@ -7883,7 +8029,7 @@
     },
     "/api/cdr/instances/enroll/receipts": {
       "delete": {
-        "description": "Removes one receipt by operation id (local bookkeeping only; nothing changes at Sluice).",
+        "description": "Removes one TERMINAL receipt (stored / not_issued / revoked) by operation id — local bookkeeping only; nothing changes at Sluice. An unresolved receipt (dispatched / issued_not_stored) is REFUSED with 409: it is the only durable identity of an operation whose credential may exist. While the receipt file is DEGRADED, the fenced positional repair `?position=N&operationId=<verbatim>` removes one defective record.",
         "operationId": "deleteCDREnrollReceipt",
         "parameters": [
           {
@@ -7892,6 +8038,15 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "Degraded-store repair only — the 0-based record position, fenced on the verbatim operationId.",
+            "in": "query",
+            "name": "position",
+            "required": false,
+            "schema": {
+              "type": "integer"
             }
           }
         ],
@@ -7930,6 +8085,16 @@
               }
             },
             "description": "Receipt not found. Body is plain text."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The receipt is unresolved (dispatched / issued_not_stored) and cannot be removed; or the positional repair fence did not match. Body is plain text."
           }
         },
         "security": [
@@ -7993,7 +8158,7 @@
     },
     "/api/cdr/instances/enroll/recover": {
       "post": {
-        "description": "Fresh, authoritative resolution of one enrollment (or renewal) operation through Sluice's EnrollStatus, classified as LANDED_AND_STORED (issued and held in the registry), ISSUED_BUT_NOT_STORED (issued at Sluice, not held here — the response carries the exact revocation path: the API by fingerprint when a pooled client can issue it, else the Sluice-host CLI command), NOT_ISSUED, or AMBIGUOUS (Sluice could not be asked; retry). Updates only the local receipt; never mints, stores or revokes anything. Endpoint + TOFU pin default to the receipt and may be supplied for a receipt-less recovery.",
+        "description": "Fresh, authoritative resolution of one enrollment (or renewal) operation through Sluice's EnrollStatus, classified as LANDED_AND_STORED (issued and held in the registry), ISSUED_BUT_NOT_STORED (issued at Sluice, not held here — the response carries the exact revocation path: the API by fingerprint when a pooled client can issue it, else the Sluice-host CLI command), NOT_ISSUED, or AMBIGUOUS (Sluice could not be asked; retry). Updates only the local receipt; never mints, stores or revokes anything. When a receipt exists its BOUND endpoint + TOFU pin are authoritative — a supplied value that conflicts is refused with 409 before any network activity; the values are consulted only for a receipt-less recovery. A failed receipt transition is reported (receiptUpdated=false + receiptError) with the previous durable state kept.",
         "operationId": "recoverCDREnrollment",
         "requestBody": {
           "content": {
@@ -8039,6 +8204,16 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The supplied endpoint or server fingerprint conflicts with the receipt's immutable binding; nothing was sent. Body is plain text."
           }
         },
         "security": [
@@ -8065,7 +8240,7 @@
     },
     "/api/cdr/instances/revoke": {
       "post": {
-        "description": "Tell Sluice to refuse the named instance's client credentials — EVERY still-valid generation in its lineage (RevokeClient by SHA-256 fingerprint) — and only after Sluice PROVES a durable deny for each (v0.3 outcome REVOKED / ALREADY_REVOKED / TOMBSTONED, or a v0.2 revoked=true) prune the local registry entry and shred the local PEMs. A response that proves nothing (revoked=false with no outcome — e.g. an unknown fingerprint on a v0.2 server) is 502 and prunes NOTHING. Per-generation progress is durable, so a failure midway is retried safely. Sluice refuses self-revocation, so at least one OTHER enrolled, reachable instance is required to issue the call — a single-instance deployment gets 503. With `fingerprint` instead of `name`, an orphaned credential (issued-but-not-stored enrollment, lost renewal) is revoked directly.",
+        "description": "Tell Sluice to refuse the named instance's client credentials — EVERY still-valid generation in its lineage (RevokeClient by SHA-256 fingerprint) — and only after Sluice PROVES a durable deny for each (v0.3 outcome REVOKED / ALREADY_REVOKED / TOMBSTONED, or a v0.2 revoked=true) prune the local registry entry and shred the local PEMs. A response that proves nothing (revoked=false with no outcome — e.g. an unknown fingerprint on a v0.2 server) is 502 and prunes NOTHING. Per-generation progress is durable, so a failure midway is retried safely. Sluice refuses self-revocation, so at least one OTHER enrolled, reachable instance is required to issue the call — a single-instance deployment gets 503. An UNRESOLVED renewal is resolved authoritatively through EnrollStatus first (R11) so the issued-but-unrecorded credential is part of the whole-lineage revocation; when it cannot be resolved (503) or persisted (409) nothing changes. With `fingerprint` instead of `name`, an orphaned credential (issued-but-not-stored enrollment, lost renewal) is revoked directly.",
         "operationId": "revokeCDRInstance",
         "requestBody": {
           "content": {
@@ -8111,7 +8286,7 @@
                       "type": "array"
                     },
                     "localPruned": {
-                      "description": "false when the deny is proven but the local registry prune could not be persisted (retry is idempotent).",
+                      "description": "false when the deny is proven but a local record (registry prune / lineage / receipt) could not be persisted (retry is idempotent).",
                       "type": "boolean"
                     },
                     "outcomes": {
@@ -8125,6 +8300,13 @@
                       },
                       "description": "Per-fingerprint Sluice-reported outcome.",
                       "type": "object"
+                    },
+                    "receiptsUnrecorded": {
+                      "description": "Fingerprint mode: receipts whose revoked transition could not be persisted (previous state kept).",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
                     },
                     "revoked": {
                       "description": "The instance name ('' in fingerprint mode).",
@@ -8160,6 +8342,16 @@
             },
             "description": "Instance not found. Body is plain text."
           },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "An unresolved renewal was resolved but its outcome could not be persisted; nothing changed. Body is plain text."
+          },
           "502": {
             "content": {
               "text/plain": {
@@ -8178,7 +8370,7 @@
                 }
               }
             },
-            "description": "No other enrolled, reachable instance to issue the revoke (Sluice refuses self-revocation). Body is plain text."
+            "description": "No other enrolled, reachable instance to issue the revoke (Sluice refuses self-revocation), OR an unresolved renewal could not be resolved against the engine; nothing changed. Body is plain text."
           }
         },
         "security": [

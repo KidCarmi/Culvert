@@ -254,6 +254,15 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "instance not found", http.StatusNotFound)
 			return
 		}
+		// R11: an unresolved renewal is a trust identity whose fingerprint
+		// is not yet known — it is resolved AUTHORITATIVELY (EnrollStatus
+		// over the bootstrap channel: works with CDR disabled, no pool, no
+		// poller, right after a restart) BEFORE any mutation; when it
+		// cannot be, NOTHING changes.
+		inst, ok := resolveUnresolvedOrRefuse(w, r, inst)
+		if !ok {
+			return
+		}
 
 		// 2E-C trust-orphan remediation: a local delete only prunes OUR
 		// registry and shreds OUR copy of the credential — Sluice keeps
@@ -417,18 +426,33 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name already enrolled", http.StatusConflict)
 		return
 	}
-	if prior, ok := cdrEnrollReceipts.Get(req.OperationID); ok && prior.State != cdrReceiptDispatched {
-		http.Error(w, fmt.Sprintf("operation %s was already resolved (%s); mint a new operation id", req.OperationID, prior.State), http.StatusConflict)
+
+	// 0. 2E-C R8/R12: the recovery receipt is durable BEFORE the dispatch
+	//    — no receipt, no enrollment — and the operation binding is
+	//    IMMUTABLE: an existing operation id (any state, any name, any
+	//    endpoint, an exact retry included) performs NO RPC and is refused
+	//    with its current state + the recovery path. Creation is an atomic
+	//    create-if-absent under the store lock, additionally serialized on
+	//    the operation id, so concurrent dispatches cannot both create.
+	//    The receipt carries NO token or key material.
+	opUnlock := cdrLifecycle.lock("op:" + req.OperationID)
+	if prior, ok := cdrEnrollReceipts.Get(req.OperationID); ok {
+		opUnlock()
+		http.Error(w, fmt.Sprintf("operation %s already exists (state %s, bound to %s at %s); the enrollment was NOT re-dispatched — resolve it via %s or mint a new operation id",
+			req.OperationID, prior.State, sanitizeLog(prior.Name), sanitizeLog(prior.Endpoint), cdrEnrollRecoverPath), http.StatusConflict)
 		return
 	}
-
-	// 0. 2E-C R8: the recovery receipt is durable BEFORE the dispatch —
-	//    no receipt, no enrollment. It carries NO token or key material.
-	if err := cdrEnrollReceipts.Put(CDREnrollReceipt{
+	cerr := cdrEnrollReceipts.Create(CDREnrollReceipt{
 		OperationID: req.OperationID, Name: req.Name, Endpoint: req.Endpoint,
 		ServerFingerprint: req.ServerFingerprint, State: cdrReceiptDispatched, Actor: auditActor(r),
-	}); err != nil {
-		http.Error(w, fmt.Sprintf("cannot persist the enrollment recovery receipt; no enrollment was sent: %v", err), http.StatusServiceUnavailable)
+	})
+	opUnlock()
+	if cerr != nil {
+		if errors.Is(cerr, errCDRReceiptExists) {
+			http.Error(w, fmt.Sprintf("operation %s already exists; the enrollment was NOT re-dispatched — resolve it via %s", req.OperationID, cdrEnrollRecoverPath), http.StatusConflict)
+			return
+		}
+		http.Error(w, fmt.Sprintf("cannot persist the enrollment recovery receipt; no enrollment was sent: %v", cerr), http.StatusServiceUnavailable)
 		return
 	}
 
@@ -450,11 +474,20 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("%v (operation %s — resolve via %s)", err, req.OperationID, cdrEnrollRecoverPath), http.StatusInternalServerError)
 		return
 	}
+	// R12.11: a failed receipt transition changes lifecycle truth and is
+	// REPORTED, never hidden — the durable receipt stays "dispatched" and
+	// recovery classifies the operation as LANDED from the registry.
+	receiptState := cdrReceiptStored
+	receiptRecorded := true
+	receiptErr := ""
 	if rerr := cdrEnrollReceipts.Update(req.OperationID, func(rc *CDREnrollReceipt) {
 		rc.State = cdrReceiptStored
 		rc.Fingerprint = stored.ClientCertFingerprint
 	}); rerr != nil {
 		logger.Printf("CDR: enrollment receipt %s: record stored: %v", req.OperationID, rerr)
+		receiptState = cdrReceiptDispatched
+		receiptRecorded = false
+		receiptErr = sanitizeLog(rerr.Error())
 	}
 
 	// 3. Auto-enable on first enrollment + re-init the pool.  An admin
@@ -463,30 +496,53 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 	//    CLI flag, so fresh installs fell into a "registry has entries
 	//    but no client dialled" hole.  We flip the runtime sentinel
 	//    here (survives restarts) and kick the client init so the Pool
-	//    tab goes green immediately.  Failure on the sentinel write
-	//    is logged but non-fatal: the in-memory flag still flips, so
-	//    this session works; only a restart would revert.
+	//    tab goes green immediately.
+	//
+	//    R13: the response reports the ACTUAL post-operation state. A
+	//    sentinel write failure leaves CDR disabled (setCDREnabledRuntime
+	//    is durable-or-nothing) and is reported as such — the credential
+	//    IS stored, so the operator must enable CDR from the toggle, never
+	//    re-enroll.
 	cfg := cdrActiveConfig()
+	autoEnable := map[string]any{"attempted": false, "succeeded": false, "error": ""}
 	if !cfg.Enabled {
+		autoEnable["attempted"] = true
 		if terr := setCDREnabledRuntime(true); terr != nil {
 			logger.Printf("CDR: auto-enable on enroll: persist sentinel: %q",
 				sanitizeLog(terr.Error()))
+			autoEnable["error"] = sanitizeLog(terr.Error())
+		} else {
+			autoEnable["succeeded"] = true
+			logger.Printf("CDR: auto-enabled on first enrollment (%q)", sanitizeLog(req.Name))
 		}
-		cfg = cdrActiveConfig() // pick up the flipped flag
-		logger.Printf("CDR: auto-enabled on first enrollment (%q)", sanitizeLog(req.Name))
+		cfg = cdrActiveConfig() // the truthful flag (unchanged on failure)
 	}
+	initErr := ""
 	if cfg.Enabled {
 		if rerr := initCDRClient(cfg); rerr != nil {
 			logger.Printf("CDR: enroll succeeded but client re-init failed: %q",
 				sanitizeLog(rerr.Error()))
+			initErr = sanitizeLog(rerr.Error())
 		}
 	}
 
 	auditEventDiff(r, "cdr.instance.enroll", req.Name,
-		fmt.Sprintf("endpoint=%s fingerprint=%s", req.Endpoint, shortFingerprint(req.ServerFingerprint)),
+		fmt.Sprintf("endpoint=%s fingerprint=%s operation=%s cdrEnabled=%t autoEnable=%v receiptRecorded=%t",
+			req.Endpoint, shortFingerprint(req.ServerFingerprint), req.OperationID, cfg.Enabled, autoEnable["succeeded"], receiptRecorded),
 		nil, stored)
 	// No saveConfigVersion — see file header.
-	jsonOK(w, stored)
+	jsonOK(w, map[string]any{
+		"instance":        stored,
+		"stored":          true,
+		"operationId":     req.OperationID,
+		"receiptState":    receiptState,
+		"receiptRecorded": receiptRecorded,
+		"receiptError":    receiptErr,
+		"cdrEnabled":      cfg.Enabled,
+		"clientActive":    cdrActiveClient() != nil,
+		"clientInitError": initErr,
+		"autoEnable":      autoEnable,
+	})
 }
 
 // enrollDispatchFailed classifies an Enroll RPC failure for the receipt
@@ -504,16 +560,22 @@ func enrollDispatchFailed(w http.ResponseWriter, r *http.Request, req cdrEnrollR
 		if st, serr := cdrEnrollStatusRPC(ctx, req.Endpoint, req.ServerFingerprint, req.OperationID); serr == nil && st.GetOutcome() == pb.EnrollOutcome_ENROLL_ISSUED {
 			fp = st.GetClientCertFingerprint()
 		}
-		_ = cdrEnrollReceipts.Update(req.OperationID, func(rc *CDREnrollReceipt) {
+		note := ""
+		if uerr := cdrEnrollReceipts.Update(req.OperationID, func(rc *CDREnrollReceipt) {
 			rc.State = cdrReceiptIssuedNotStored
 			rc.Fingerprint = fp
-		})
+		}); uerr != nil {
+			note = fmt.Sprintf("; the receipt could not be updated (%v) and stays dispatched — resolve it", uerr)
+		}
 		auditEvent(r, "cdr.instance.enroll.issued_not_stored", req.Name,
 			fmt.Sprintf("operation %s already issued fingerprint %q at Sluice; the credential is not stored locally and remains trusted until revoked", req.OperationID, fp))
-		http.Error(w, fmt.Sprintf("enrollment operation %s already issued a credential (%s) that is not stored here; revoke it or resolve via %s", req.OperationID, fp, cdrEnrollRecoverPath), http.StatusConflict)
+		http.Error(w, fmt.Sprintf("enrollment operation %s already issued a credential (%s) that is not stored here; revoke it or resolve via %s%s", req.OperationID, fp, cdrEnrollRecoverPath, note), http.StatusConflict)
 	case !cdrEnrollOutcomeUnknown(err):
-		_ = cdrEnrollReceipts.Update(req.OperationID, func(rc *CDREnrollReceipt) { rc.State = cdrReceiptNotIssued })
-		http.Error(w, fmt.Sprintf("enrollment failed: %v", err), http.StatusBadGateway)
+		note := ""
+		if uerr := cdrEnrollReceipts.Update(req.OperationID, func(rc *CDREnrollReceipt) { rc.State = cdrReceiptNotIssued }); uerr != nil {
+			note = fmt.Sprintf(" (the receipt could not be marked not_issued: %v; it stays dispatched — resolve via %s)", uerr, cdrEnrollRecoverPath)
+		}
+		http.Error(w, fmt.Sprintf("enrollment failed: %v%s", err, note), http.StatusBadGateway)
 	default:
 		http.Error(w, fmt.Sprintf("enrollment outcome unknown (operation %s): %v — resolve via %s before retrying", req.OperationID, err, cdrEnrollRecoverPath), http.StatusBadGateway)
 	}
@@ -538,6 +600,7 @@ func persistCDREnrollment(req cdrEnrollRequest, resp *pb.EnrollResponse) (CDREnr
 	if fperr != nil {
 		fp = "unknown (unfingerprintable cert)"
 	}
+	receiptNote := ""
 	if req.OperationID != "" {
 		if rerr := cdrEnrollReceipts.Update(req.OperationID, func(rc *CDREnrollReceipt) {
 			rc.State = cdrReceiptIssuedNotStored
@@ -545,6 +608,7 @@ func persistCDREnrollment(req cdrEnrollRequest, resp *pb.EnrollResponse) (CDREnr
 			rc.Note = err.Error()
 		}); rerr != nil {
 			logger.Printf("CDR: enrollment receipt %s: record issued_not_stored: %v", req.OperationID, rerr)
+			receiptNote = fmt.Sprintf("; the receipt could not be updated (%v) and stays dispatched", rerr)
 		}
 	}
 	now := time.Now()
@@ -555,7 +619,7 @@ func persistCDREnrollment(req cdrEnrollRequest, resp *pb.EnrollResponse) (CDREnr
 			fp, req.OperationID, err),
 	})
 	logger.Printf("CDR: enrollment %q: issued credential %s was NOT stored (operation %s): %v", sanitizeLog(req.Name), fp, req.OperationID, err)
-	return CDREnrolledInstance{}, fmt.Errorf("%w; issued credential %s is not stored — revoke it", err, fp)
+	return CDREnrolledInstance{}, fmt.Errorf("%w; issued credential %s is not stored — revoke it%s", err, fp, receiptNote)
 }
 
 func persistCDREnrollmentUnrecorded(req cdrEnrollRequest, resp *pb.EnrollResponse) (CDREnrolledInstance, error) {
@@ -908,6 +972,12 @@ func apiCDRRevokeRPC(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "instance not found", http.StatusNotFound)
 		return
 	}
+	// R11: resolve every unresolved renewal first so the issued (but never
+	// recorded) credential is part of the whole-lineage revocation.
+	target, ok := resolveUnresolvedOrRefuse(w, r, target)
+	if !ok {
+		return
+	}
 
 	// Targets: every still-valid generation (active first) from the
 	// durable lineage; a pre-lineage entry falls back to the cert on disk.
@@ -1013,16 +1083,18 @@ func apiCDRRevokeOrphan(w http.ResponseWriter, r *http.Request, fp, reason strin
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	markReceiptFingerprintRevoked(fp)
+	unrecorded := markReceiptFingerprintRevoked(fp)
+	localOK := len(unrecorded) == 0
 	if name, held := cdrRegistryHoldsFingerprint(fp); held {
 		if merr := cdrInstances.MarkCredentialRevoked(name, fp); merr != nil {
 			logger.Printf("CDR: revoke %s: record on %q: %v", fp, sanitizeLog(name), merr)
+			localOK = false
 		}
 	}
 	auditEvent(r, "cdr.instance.revoke_rpc", fp,
-		fmt.Sprintf("fingerprints=%s outcomes=map[%s:%s] reason=%q (orphan revocation)", fp, fp, outcome, sanitizeLog(reason)))
+		fmt.Sprintf("fingerprints=%s outcomes=map[%s:%s] reason=%q (orphan revocation; localRecorded=%t)", fp, fp, outcome, sanitizeLog(reason), localOK))
 	jsonOK(w, map[string]any{"revoked": "", "fingerprint": fp, "fingerprints": []string{fp},
-		"outcomes": map[string]string{fp: outcome}, "localPruned": true})
+		"outcomes": map[string]string{fp: outcome}, "localPruned": localOK, "receiptsUnrecorded": unrecorded})
 }
 
 // loadCertFingerprint reads a PEM cert and returns its SHA-256
@@ -1268,6 +1340,7 @@ func cdrInstanceToMap(inst *CDREnrolledInstance) map[string]any {
 		"clientCertFingerprint": inst.ClientCertFingerprint,
 		"credentials":           creds,
 		"liveFingerprints":      inst.LiveFingerprints(time.Now()),
+		"unresolvedOperations":  append([]string{}, inst.UnresolvedOperations()...),
 		"caCertPath":            inst.CACertPath,
 		"clientCertPath":        inst.ClientCertPath,
 		"clientKeyPath":         inst.ClientKeyPath,

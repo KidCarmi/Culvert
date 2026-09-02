@@ -550,7 +550,7 @@ func TestCDR2ECTLG_Recover_ClassifiesEveryOutcome(t *testing.T) {
 		t.Run(tc.label, func(t *testing.T) {
 			resetCDRState(t)
 			tlReceiptsOnDisk(t)
-			if err := cdrEnrollReceipts.Put(CDREnrollReceipt{OperationID: op, Name: "cdr-tlg-rec", Endpoint: "sluice:8443", ServerFingerprint: strings.Repeat("ab", 32), State: cdrReceiptDispatched}); err != nil {
+			if err := cdrEnrollReceipts.Put(CDREnrollReceipt{OperationID: op, Name: "cdr-tlg-rec", Endpoint: "sluice:8443", ServerFingerprint: strings.Repeat("ab", 32), State: cdrReceiptDispatched, Actor: "admin@198.51.100.1"}); err != nil {
 				t.Fatal(err)
 			}
 			if tc.seed != nil {
@@ -626,7 +626,7 @@ func TestCDR2ECTLG_RevokeOrphanByFingerprint_ClosesTheReceipt(t *testing.T) {
 	tlReceiptsOnDisk(t)
 	orphan := "sha256:" + strings.Repeat("0a", 32)
 	const op = "tlg-orphan-0123456789abcdef"
-	if err := cdrEnrollReceipts.Put(CDREnrollReceipt{OperationID: op, Name: "x", Endpoint: "e", ServerFingerprint: "f", State: cdrReceiptIssuedNotStored, Fingerprint: orphan}); err != nil {
+	if err := cdrEnrollReceipts.Put(CDREnrollReceipt{OperationID: op, Name: "x", Endpoint: "e", ServerFingerprint: "f", State: cdrReceiptIssuedNotStored, Fingerprint: orphan, Actor: "admin@198.51.100.1"}); err != nil {
 		t.Fatal(err)
 	}
 	// No pooled client: the exact CLI instruction is returned.
