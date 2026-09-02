@@ -20,7 +20,23 @@ import "time"
 
 // SchemaVersion is the durable ToolApproval envelope version. A pre-change reader rejects a
 // newer version (fail closed); a same-version reader is byte-stable.
+//
+// It stays 1 across the live-execution-trust slice: a live_execution record uses the SAME
+// envelope and the SAME fields as a shadow_evaluation record (only Purpose differs, plus the
+// mandatory expiry + four-eyes evidence a live record must carry), so a pre-change reader that
+// somehow saw a live record would reject it as a non-issuable purpose (validateStored), not as
+// an unknown schema. No field was added, so no version bump is warranted.
 const SchemaVersion uint16 = 1
+
+// MaxLiveExecutionApprovalTTL is the hard ceiling on how long a live_execution approval may
+// remain valid for the FIRST Canary (§6). A live-execution grant is the authority to cause a
+// real, irreversible upstream side effect, so it is short-lived by construction: it must be
+// deliberately re-issued rather than lingering to silently re-authorize execution weeks later.
+// This is the SINGLE authority for the ceiling — canary.MaxInitialCanaryApprovalTTL is defined
+// as this value, so the ISSUE path (this package) and the CONSUMPTION path (internal/mcp/canary)
+// can never disagree about how long a live grant may live. A later phase may relax it under its
+// own review. It never applies to a shadow_evaluation approval (evaluation causes no side effect).
+const MaxLiveExecutionApprovalTTL = 24 * time.Hour
 
 // Bounds on the free-text and reference fields, so a hostile or careless caller can never
 // grow the durable record without limit. Enforced at construction; over-bound input is a
@@ -56,9 +72,14 @@ const (
 	// PurposeShadowEvaluation trusts the tool ONLY for Controlled Shadow evaluation. It is
 	// the ONLY purpose issuable in this slice.
 	PurposeShadowEvaluation
-	// PurposeLiveExecution is defined so the model is complete and the firewall is
-	// expressible, but it is NEVER issuable here — Approve refuses it fail-closed. A future
-	// live-execution phase must add its own explicit issue path and stronger controls.
+	// PurposeLiveExecution trusts the tool for a real upstream side effect. It is issuable ONLY
+	// under the stronger live-execution governance the issue path enforces (§3): a mandatory
+	// finite expiry no longer than MaxLiveExecutionApprovalTTL, FOUR-EYES (a distinct requester
+	// and approver, compared on canonical authenticated principals), and exact-current-state
+	// revalidation at approve. A shadow_evaluation approval can NEVER become a live grant, and a
+	// live grant never materializes catalog.Usable (live trust is orthogonal to Shadow usability
+	// — it is consumed only by the Canary preflight). Issuing one arms NOTHING: no executor, no
+	// live tier, no Canary transition (§22).
 	PurposeLiveExecution
 )
 
@@ -87,9 +108,16 @@ func ParsePurpose(s string) (Purpose, bool) {
 	}
 }
 
-// Issuable reports whether this purpose may be issued in the current slice. Only
-// shadow_evaluation is issuable; live_execution is defined but fail-closed (ADR-0034 D5).
-func (p Purpose) Issuable() bool { return p == PurposeShadowEvaluation }
+// Issuable reports whether this purpose may be issued at all. Both shadow_evaluation and
+// live_execution are now issuable — but at very different governance ceilings, and this coarse
+// gate does NOT convey them: live_execution issuance additionally requires the stronger controls
+// the issue path enforces (mandatory finite ≤MaxLiveExecutionApprovalTTL expiry, four-eyes on
+// canonical principals, exact-current-state revalidation). PurposeUnset stays non-issuable
+// (fails closed). A caller must never read this predicate as "may be issued with shadow
+// semantics" — the request/approve/load paths layer the purpose-specific requirements on top.
+func (p Purpose) Issuable() bool {
+	return p == PurposeShadowEvaluation || p == PurposeLiveExecution
+}
 
 // PermitsShadowEvaluation reports whether an approval of this purpose may satisfy the
 // Controlled Shadow "usable scoped tool" prerequisite. ONLY shadow_evaluation qualifies —
@@ -224,6 +252,23 @@ func (a *ToolApproval) activeAsOf(now time.Time) bool {
 		return false
 	}
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
+		return false
+	}
+	return true
+}
+
+// activeLiveAsOf reports whether the approval is a live-execution grant as of now: StatusActive,
+// purpose permits LIVE execution, and not past its expiry. It is the mirror of activeAsOf for the
+// live firewall half, and — like activeAsOf — NEVER consults the tool fingerprint (the caller
+// matches the current observation separately, and the full live firewall re-checks four-eyes and
+// the TTL ceiling in canary.SatisfiesLiveExecution). A live grant always carries an expiry (the
+// issue path enforces it), so the nil-expiry branch is defensive: a live grant with no expiry is
+// never treated as active.
+func (a *ToolApproval) activeLiveAsOf(now time.Time) bool {
+	if a.Status != StatusActive || !a.Purpose.PermitsLiveExecution() {
+		return false
+	}
+	if a.ExpiresAt == nil || !now.Before(*a.ExpiresAt) {
 		return false
 	}
 	return true

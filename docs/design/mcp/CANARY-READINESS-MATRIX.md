@@ -10,10 +10,19 @@ Unmet set is empty. Canary is architecturally defined and **NOT activatable** in
 ## The one fact that drives the phase
 
 **Canary is dormant by construction.** The live-execution tier is never armed
-(`liveExecDepsConfigured==false`; `mcp_execution_posture_test.go`), `live_execution` approvals
-are unissuable (`tooltrust.Purpose.Issuable()`), and `canary.Evaluate` therefore always returns
-NOT-READY with at least `live_executor_absent`. There is no code path — API, envelope, or
-restart — that makes a real MCP upstream side effect reachable.
+(`liveExecDepsConfigured==false`; `mcp_execution_posture_test.go`), so `canary.Evaluate` always
+returns NOT-READY with at least `live_executor_absent` (row 5) — the node-level backstop that no
+API, envelope, or restart can clear. There is no code path that makes a real MCP upstream side
+effect reachable.
+
+A `live_execution` ToolApproval **is now issuable** under strict governance (four-eyes on the
+authenticated principal, a mandatory finite TTL ≤ 24h, and exact-current-state revalidation —
+see the trust firewall below), so readiness row 16 (`live_execution_approval_invalid`) is
+**SATISFIABLE, not automatically satisfied**: a stock node with no approval still reports it
+unmet, and issuing a valid grant clears only that one row. Issuing a live approval is a TRUST
+decision only — it composes no executor, calls `markGatewayExecDepsReady` NEVER, and cannot move
+Canary out of `live_executor_absent`. Pinned by `TestLiveTrust_NoActivationCoupling` (a valid
+live grant ⇒ `liveExecDepsConfigured==false`, Canary mode unchanged, upstream calls 0).
 
 ```
 Canary architecture defined         YES
@@ -48,7 +57,7 @@ live tier; Canary *requires* it).
 | 13 | Emergency kill clear | `emergency_kill_active` | `State.Killed()` | node-dependent |
 | 14 | Kill-generation boundary guard | `kill_boundary_guard_absent` | live tier (PREREQ-MCP-KILL-1) | **NO** |
 | 15 | Tool-freshness boundary guard | `tool_freshness_guard_absent` | live tier | **NO** |
-| 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`) | **unissuable** |
+| 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`), driven by the authoritative `tooltrust.Store` through `buildLiveApprovalBindings` in `productionCanaryActivationInputs` | **satisfiable; unmet until a valid grant is issued** |
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |
 | 19 | Rollback path healthy (**mechanics**) | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND a build-bound EXECUTABLE rollback-rehearsal record (a real Canary→Shadow→Observe drill through the actual persist/restore path, §5) validates for the current build. **Rollback MECHANICS evidence only** — it does NOT traverse the authoritative coordinator (see row 20). | **NO (undrilled)** |
@@ -81,7 +90,7 @@ exist) checks both. Pinned by `TestEvaluateNode_ExcludesActivationInputs` (Codex
 | expiry | present, unelapsed, ≤ 24h measured from a real, non-future approval instant | same + `TestSatisfiesLiveExecution_Rejections/{approved_in_future,approved_zero}` |
 | four-eyes | distinct present requester + approver | same |
 | per-(tenant,tool) coverage | EVERY admitted (tenant × tool) has its OWN approval bound to that exact tenant+tool+fingerprint; no unconstrained target; no approval outside scope (a t2 approval never covers a t1 scope) | `canary.ValidateScopeApprovals` (`approval_test.go`) |
-| issuance | refused fail-closed in this build | `tooltrust.Purpose.Issuable()` |
+| issuance | issuable ONLY through the dedicated governed path (`RequestLiveApproval`+`ApproveLive`): mandatory finite TTL ≤ 24h, four-eyes at approval on the canonical authenticated principal, exact-current-state revalidation, no shadow-request reuse, no catalog promotion | `tooltrust.Purpose.Issuable()`, `store.validateLiveApproveLocked`, `TestLiveApprove_*`, `TestLiveTrust_RouteIsolation` |
 
 ### Read-first is TWO gates, not one (§5)
 
@@ -186,8 +195,12 @@ Every one is a **separately-reviewed activation**, not a config change:
 
 1. Arm the live tier (compose a live `execution.Executor` + UpstreamCaller + materialize-broker;
    call `markGatewayExecDepsReady`) — **edits the execution-posture wall**.
-2. Make `live_execution` issuable under stronger governance (four-eyes, short TTL) — edits
-   `tooltrust.Purpose.Issuable()` and the issue path.
+2. ~~Make `live_execution` issuable under stronger governance (four-eyes, short TTL).~~ **DONE
+   (this slice).** `live_execution` is issuable through the dedicated governed path
+   (`RequestLiveApproval`+`ApproveLive`): mandatory finite TTL ≤ 24h, four-eyes at approval on the
+   canonical authenticated principal, exact-current-state revalidation, no shadow-request reuse, no
+   catalog promotion. Row 16 is now satisfiable (not auto-satisfied). This is a TRUST decision only —
+   it arms no executor and cannot clear `live_executor_absent` (row 5), which item 1 still gates.
 3. Call `beginCanaryActivation` from the (future) armed live path so the runtime budget/abort
    generation is armed, and drive `reserveCanaryExecution` at the pre-side-effect boundary.
 4. Close **`CANARY-ROLLBACK-COORDINATOR-REHEARSAL`** (row 20) by running the authoritative rehearsal

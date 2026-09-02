@@ -372,10 +372,18 @@
      Machine-signal: `live_executor_absent` / `upstream_caller_absent` /
      `credential_path_not_ready` / `kill_boundary_guard_absent` / `tool_freshness_guard_absent`
      clear.
-  2. **Make `live_execution` issuable** under stronger governance (four-eyes distinct
-     requester+approver, ≤24h TTL, exact target). Blocked by `tooltrust.Purpose.Issuable()`
-     (shadow-only). The consumption predicate already exists (`canary.SatisfiesLiveExecution`);
-     the ISSUE path does not.
+  2. ~~**Make `live_execution` issuable** under stronger governance (four-eyes distinct
+     requester+approver, ≤24h TTL, exact target).~~ **DONE** (Live Execution Trust slice,
+     2026-09). `tooltrust.Purpose.Issuable()` now admits `live_execution`, issued ONLY through the
+     dedicated governed path (`RequestLiveApproval`/`ApproveLive`, `store.validateLiveApproveLocked`)
+     that enforces four-eyes on the canonical authenticated principal, a mandatory finite TTL ≤ 24h
+     (single authority `tooltrust.MaxLiveExecutionApprovalTTL`), exact-current-state at approval,
+     route isolation (shadow↔live cannot cross), and no `catalog.Usable` promotion. Wired into the
+     real preflight via `buildLiveApprovalBindings` in `productionCanaryActivationInputs`, so
+     readiness row 16 (`live_execution_approval_invalid`) is now **satisfiable, not auto-satisfied**.
+     This is a TRUST decision only — it arms no executor and cannot clear `live_executor_absent`
+     (item 1), pinned by `TestLiveTrust_NoActivationCoupling` and the execution-posture wall. See
+     ADR-0034 Addendum 2026-09.
   3. **Bounded read-first scope** at activation (`canary.ValidateScope` → `ScopeOK`): enumerable,
      ≤1 server / ≤2 tools / ≤2 principals, exact fingerprints, ≥1 EXACT principal with groups
      forbidden, read/discovery only. Read-first is TWO gates: the scope axis (`ScopeReadFirst`

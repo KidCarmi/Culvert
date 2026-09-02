@@ -1,9 +1,15 @@
 # MCP First Controlled Canary — Runbook (future; NOT yet executable)
 
 **Status:** FUTURE protocol. Canary is architecturally defined but **not activatable** in the
-shipped build (`live_executor_absent`; `live_execution` approvals unissuable). This runbook is
-the reviewable procedure the separately-approved Canary *activation* phase must follow. It must
-never involve customer traffic.
+shipped build (`live_executor_absent` — the live tier is never armed). This runbook is the
+reviewable procedure the separately-approved Canary *activation* phase must follow. It must never
+involve customer traffic.
+
+> **What changed:** `live_execution` ToolApprovals are now **issuable** under governance (four-eyes,
+> ≤24h TTL, exact-current-state) — step 3 below is executable today, and readiness row 16
+> (`live_execution_approval_invalid`) is satisfiable. Issuing an approval is a TRUST decision only:
+> it arms no executor and does not clear `live_executor_absent` (step 1), so the runbook as a whole
+> is still gated on the unshipped live-tier arming.
 
 **Authority:** ADR-0035, `CANARY-READINESS-MATRIX.md`, `ROLLOUT-AND-ROLLBACK.md` §1.4.
 
@@ -22,7 +28,8 @@ set is empty. This requires the separately-reviewed activation to have:
 1. **Armed the live tier** — composed a live `execution.Executor` + bounded `UpstreamCaller` +
    materialize-broker + inspection, and called `markGatewayExecDepsReady` (edits the
    execution-posture wall — the reviewer sees it).
-2. **Made `live_execution` issuable** under four-eyes + short-TTL governance.
+2. **Made `live_execution` issuable** under four-eyes + short-TTL governance — **shipped**; the
+   governed issue/approve path (`RequestLiveApproval`/`ApproveLive`) is available today.
 3. **Attested the Shadow Exit Review** (`shadowExitReviewAttested`).
 4. **Confirmed** durable events, inspection, registry, catalog, policy healthy; kill clear;
    rollback path healthy.
@@ -50,9 +57,15 @@ set is empty. This requires the separately-reviewed activation to have:
 2. **Stand up the recording upstream**: a controlled MCP server that logs every invocation it
    receives independently of Culvert, so "did Culvert cause exactly the executions we expect?"
    is answerable from the upstream side, not only Culvert's evidence.
-3. **Issue the live approval**: four-eyes (distinct requester + approver), exact
-   tenant+server+tool+fingerprint, ≤24h expiry. Confirm `canary.SatisfiesLiveExecution` accepts
-   it against the current observed target.
+3. **Issue the live approval** (executable today): `POST /api/mcp/tool-approvals` with
+   `purpose=live_execution`, a finite `expires_in_seconds` ≤ 86400, and the exact reviewed
+   `fingerprint`+`catalog_revision` — attributed to the requester's authenticated session
+   principal (operator+). A DISTINCT admin principal then `POST /api/mcp/tool-approval-decision`
+   with `action=approve` (four-eyes is enforced on the canonical session subject, not display
+   names or IPs; self-approval is refused). The approval re-verifies exact current state at approve
+   time and fails closed on any drift. Confirm `canary.SatisfiesLiveExecution` accepts it against
+   the current observed target. Issuing the grant promotes nothing to `catalog.Usable` and arms no
+   executor — it only makes readiness row 16 satisfiable.
 4. **Set the budget**: `canary.Budget` with tight total/rate/concurrency caps and a short window;
    confirm `ValidateBudget` accepts it.
 5. **Preflight**: confirm `evaluateCanaryActivationPreflight` returns `Ready:true` (empty Unmet).

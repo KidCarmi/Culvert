@@ -148,10 +148,10 @@ type mcpToolApprovalRequestBody struct {
 	ToolName         string `json:"tool_name"`
 	Fingerprint      string `json:"fingerprint"`      // 64-char hex of the reviewed digest
 	CatalogRevision  uint64 `json:"catalog_revision"` // REQUIRED: the reviewed per-record revision (ToolView.Revision); 0/omitted is rejected
-	Purpose          string `json:"purpose"`          // shadow_evaluation (default; only issuable)
+	Purpose          string `json:"purpose"`          // shadow_evaluation (default) | live_execution (requires expiry, four-eyes)
 	Reason           string `json:"reason"`
 	TicketRef        string `json:"ticket_ref"`
-	ExpiresInSeconds int64  `json:"expires_in_seconds"` // 0 ⇒ no expiry; negative or > ~10y is rejected
+	ExpiresInSeconds int64  `json:"expires_in_seconds"` // shadow: 0 ⇒ no expiry; live: REQUIRED, 1..≤24h; negative or > ~10y is rejected
 }
 
 // mcpToolApprovalDecisionBody is the approve/reject/revoke body.
@@ -233,6 +233,20 @@ func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		mcpErr(w, err)
 		return
 	}
+	live := purpose == tooltrust.PurposeLiveExecution
+	// A live_execution request is bound to the CANONICAL authenticated principal (session subject),
+	// not auditActor's username@IP string, so the four-eyes check at approval compares stable
+	// identities. It fails closed for an unauthenticated (IP-only) caller: a live-execution trust
+	// request may never be attributed to an anonymous actor (§5). shadow_evaluation keeps auditActor.
+	requestedBy := auditActor(r)
+	if live {
+		principal, perr := mcpLivePrincipal(r)
+		if perr != nil {
+			mcpErr(w, perr)
+			return
+		}
+		requestedBy = principal
+	}
 	in := toolTrustRequestInput{
 		Tenant:              tenant,
 		ServerID:            body.ServerID,
@@ -240,18 +254,40 @@ func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		ExpectedFingerprint: body.Fingerprint,
 		ExpectedCatalogRev:  body.CatalogRevision,
 		Purpose:             purpose,
-		RequestedBy:         auditActor(r),
+		RequestedBy:         requestedBy,
 		Reason:              body.Reason,
 		TicketRef:           body.TicketRef,
 		ExpiresAt:           expiresAt,
 	}
-	a, err := mcpToolTrust.RequestApproval(in)
+	// Route through the dedicated live path (§3) so a live request can never be created with shadow
+	// semantics; the store enforces the mandatory ≤24h expiry either way.
+	var a *tooltrust.ToolApproval
+	if live {
+		a, err = mcpToolTrust.RequestLiveApproval(in)
+	} else {
+		a, err = mcpToolTrust.RequestApproval(in)
+	}
 	if err != nil {
 		mcpErr(w, err)
 		return
 	}
 	auditEvent(r, "mcp.tooltrust.request", a.ApprovalID, a.ServerID+"/"+a.ToolName)
 	jsonOK(w, mcpToolApprovalViewOf(a))
+}
+
+// mcpLivePrincipal returns the CANONICAL authenticated principal for a live-execution trust
+// decision — the stable subject of the admin UI session, which four-eyes is compared on. It fails
+// CLOSED when the request carries no authenticated admin session or an empty subject: a
+// live-execution trust decision (request OR approval) may never be attributed to an anonymous,
+// IP-only actor, because four-eyes over bare IPs is not a real separation of duties (§5). It reads
+// the same ps_ui_session cookie auditActor does, but returns ONLY the canonical subject — never
+// the IP-enriched display string.
+func mcpLivePrincipal(r *http.Request) (string, error) {
+	sess, err := readUISessionCookie(r)
+	if err != nil || sess == nil || sess.Sub == "" {
+		return "", mcperr.New(mcperr.ReasonApprovalNotAuthorized, "mcp", "live_execution trust requires an authenticated principal")
+	}
+	return sess.Sub, nil
 }
 
 // apiMCPToolApprovalDecision approves (shadow), rejects, or revokes a tool-trust
@@ -278,19 +314,7 @@ func apiMCPToolApprovalDecision(w http.ResponseWriter, r *http.Request) {
 	actor := auditActor(r)
 	switch body.Action {
 	case "approve":
-		a, err := mcpToolTrust.ApproveShadow(body.ApprovalID, actor, tenant)
-		// A non-nil grant means the durable active grant was committed even if the catalog
-		// projection (promotion) failed afterward (a stale CAS). That IS a real trust
-		// decision — it becomes effective on the next reconcile — so audit it regardless of
-		// the projection error, then surface any error.
-		if a != nil {
-			auditEvent(r, "mcp.tooltrust.approve", a.ApprovalID, a.ServerID+"/"+a.ToolName)
-		}
-		if err != nil {
-			mcpErr(w, err)
-			return
-		}
-		jsonOK(w, mcpToolApprovalViewOf(a))
+		apiMCPToolApprovalApprove(w, r, body.ApprovalID, tenant, actor)
 	case "reject":
 		if err := mcpToolTrust.Reject(body.ApprovalID, actor, tenant, body.Reason); err != nil {
 			mcpErr(w, err)
@@ -311,10 +335,53 @@ func apiMCPToolApprovalDecision(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// apiMCPToolApprovalApprove decides a pending approval, ROUTING by the stored purpose (§3/§15). A
+// live_execution approval is approved via the dedicated ApproveLive path — four-eyes on the
+// canonical authenticated principal (a distinct requester and approver), and NO catalog promotion
+// (live trust never materializes catalog.Usable). A shadow_evaluation approval keeps its existing
+// path (approve + promote), attributed to the auditActor string. Routing on the stored purpose (not
+// a request field) means the caller can never pick which governance applies.
+func apiMCPToolApprovalApprove(w http.ResponseWriter, r *http.Request, id, tenant, shadowActor string) {
+	existing, err := mcpToolTrust.Get(id, tenant)
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	if existing.Purpose == tooltrust.PurposeLiveExecution {
+		approver, perr := mcpLivePrincipal(r)
+		if perr != nil {
+			mcpErr(w, perr)
+			return
+		}
+		a, aerr := mcpToolTrust.ApproveLive(id, approver, tenant)
+		if a != nil {
+			auditEvent(r, "mcp.tooltrust.approve-live", a.ApprovalID, a.ServerID+"/"+a.ToolName)
+		}
+		if aerr != nil {
+			mcpErr(w, aerr)
+			return
+		}
+		jsonOK(w, mcpToolApprovalViewOf(a))
+		return
+	}
+	a, aerr := mcpToolTrust.ApproveShadow(id, shadowActor, tenant)
+	// A non-nil grant means the durable active grant was committed even if the catalog projection
+	// (promotion) failed afterward (a stale CAS). That IS a real trust decision — it becomes
+	// effective on the next reconcile — so audit it regardless of the projection error.
+	if a != nil {
+		auditEvent(r, "mcp.tooltrust.approve", a.ApprovalID, a.ServerID+"/"+a.ToolName)
+	}
+	if aerr != nil {
+		mcpErr(w, aerr)
+		return
+	}
+	jsonOK(w, mcpToolApprovalViewOf(a))
+}
+
 // parseToolApprovalPurpose resolves the request purpose, defaulting an empty value to
-// shadow_evaluation (the only issuable purpose). live_execution parses successfully
-// so the store refuses it with the precise purpose-unsupported reason (the firewall's
-// negative half); an unknown label is rejected here.
+// shadow_evaluation. Both shadow_evaluation and live_execution parse successfully and are now
+// issuable — live_execution under the stronger governance the issue path enforces (mandatory
+// ≤24h expiry, four-eyes, exact-state). An unknown label is rejected here.
 func parseToolApprovalPurpose(s string) (tooltrust.Purpose, bool) {
 	if s == "" {
 		return tooltrust.PurposeShadowEvaluation, true
