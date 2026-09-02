@@ -14,7 +14,7 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **NINE independent blockers** (exhaustive as a set — together they cover
+cannot be assembled today on **TEN independent blockers** (exhaustive as a set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable under the supported
 production trust model; (2) the production activation preflight cannot return `Ready:true` on a stock
@@ -28,9 +28,12 @@ breaches beyond `budget_exhausted`/`scope_escape` (so later requests stay eligib
 and (8) the durable outcome record is success-only with an unclosable post-send crash window, so a
 pre-crash invocation is not always determinable; and (9) the credential path is unresolved — selection
 comes from the matched policy rule and the production broker has zero providers, so it must be closed
-explicitly by a no-`CredentialProfile` rule or a working provider/path (§4). Blockers 1–6 and 9 are
-gaps/prerequisites; 7–8 are defects recorded here for dedicated PRs (§21). The experiment is specified below up to the exact point where
-it becomes unauthorizable, and the precise provisioning that would unblock it is named.
+explicitly by a no-`CredentialProfile` rule or a working provider/path (§4); and (10) no
+operator-reachable graceful rollback — §17 requires rollback AND kill, but only the emergency kill is
+reachable (quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`, §17).
+Blockers 1–6, 9, and 10 are gaps/prerequisites; 7–8 are defects recorded here for dedicated PRs (§21).
+The experiment is specified below up to the exact point where it becomes unauthorizable, and the
+precise provisioning that would unblock it is named.
 
 ---
 
@@ -407,7 +410,8 @@ So the ONLY whole-Canary breaches that auto-stop are `budget_exhausted` and `sco
 EIGHT declared breaches do not. After any of them, LATER requests could still reach the upstream
 instead of the Canary auto-stopping. The automatic controls that DO hold are the budget ceiling, the
 identity/blast-radius cap (`scope_escape`), the per-request kill re-read, per-request tool-drift
-denial, and manual demotion/kill. The gap is a **product-defect prerequisite** (§26): whole-Canary
+denial, and the operator emergency kill (the graceful demotion/quiesce rollback is NOT
+operator-reachable — §17, blocker 10). The gap is a **product-defect prerequisite** (§26): whole-Canary
 auto-abort must be wired for ALL eight remaining declared breaches
 (`out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
 `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
@@ -419,24 +423,31 @@ scope_escape.
 
 ## §17 Manual emergency controls
 
-Reachable, admin-gated controls: emergency kill engage/clear (`POST /api/mcp/rollout/emergency`,
-`emergencyDisable`/`clearEmergency`) and Canary→Shadow/Observe demotion (`demoteCanary`, reached from
-the rollout-mode commit path `mcp_rollout.go:511`, so an admin driving a rollout-mode transition
-triggers it). Both are operator-invokable today. **Note (Codex P2) — only the ENGAGE direction
-narrows.** Engaging the kill advances the monotonic `killGen` and disables execution; `clear`
-(`clearEmergency`/`ClearKillSwitch`) clears the kill flag but leaves the rollout mode and active
-Canary runtime UNCHANGED, so subsequent requests can become eligible again. Clearing is a
-RE-ENABLING action — it must be treated with the same caution as any widening, not as part of a
-"narrows only" pair.
+The ONLY operator-reachable control today is the **emergency kill** engage/clear
+(`POST /api/mcp/rollout/emergency`, `emergencyDisable`/`clearEmergency`). **Note — only the ENGAGE
+direction narrows.** Engaging the kill advances the monotonic `killGen` and disables execution;
+`clear` (`clearEmergency`/`ClearKillSwitch`) clears the kill flag but leaves the rollout mode and
+active Canary runtime UNCHANGED, so subsequent requests can become eligible again. Clearing is a
+RE-ENABLING action — treat it with the same caution as any widening, not as part of a "narrows only"
+pair.
 
-**Correction (Codex P2) — quiesce is NOT operator-invokable.** `quiesceLiveTier` (the live-tier
-un-arm-and-drain) has NO production caller — a repo-wide search of non-test Go finds only its
-definition; no route or startup hook invokes it. So the "un-arm first, close admission, bounded
-drain" action cannot be performed by an operator during a Canary. Wiring a governed quiesce entry
-point is listed in §26 as **recommended hardening, NOT one of the nine GO criteria**: kill +
-rollout-demotion remain available as mechanisms, so the "no GO unless rollback and kill are available"
-bar is met by those two. None can be *exercised against a live Canary* today because none can be
-activated.
+**Correction (Codex P1) — NEITHER graceful rollback path is operator-invokable, so §17's bar is not
+met.** Two earlier claims were wrong:
+- **Quiesce.** `quiesceLiveTier` (live-tier un-arm-and-drain) has NO production caller — only its
+  definition exists; no route or startup hook invokes it.
+- **Canary→Shadow/Observe demotion.** `demoteCanary` IS reached from the rollout-commit core
+  (`mcp_rollout.go:511`), but that core is driven ONLY by the signed-distribution apply path, NOT by
+  an operator. The operator-facing admin handler `apiMCPRolloutTransition` always returns
+  `distribution_not_configured` for a non-Production target (`ui_mcp_rollout.go:114-116`) and never
+  calls the commit path, so an admin cannot drive a Canary→Shadow/Observe demotion in the
+  disabled-default posture.
+
+So the review-contract §17 bar — "no GO unless **rollback AND kill** are available" — is met only on
+the KILL side; there is no operator-reachable graceful rollback today. This is a **GO blocker**
+(blocker 10 in §26), not recommended hardening: a governed operator-reachable rollback control must
+be wired (either `quiesceLiveTier`, or the demotion/publication path so `apiMCPRolloutTransition`
+reaches the commit core). None can be *exercised against a live Canary* today anyway because none can
+be activated.
 
 ---
 
@@ -590,6 +601,7 @@ BLOCKED-vs-FAILED note in §26).
 | Evidence carries no secrets/credentials | YES (§15) |
 | Durable record determines whether a pre-crash upstream invocation occurred | **NO — success-only outcome evidence + unclosable post-send crash window (§15/§18)** |
 | Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **NO — only budget/scope auto-trip (§16)** |
+| Operator-reachable graceful rollback (quiesce or Canary→Shadow/Observe demotion) — §17's "rollback AND kill" bar | **NO — quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured` (§17)** |
 | Crash/restart does not silently re-arm/resume | YES (§18) |
 | Unresolved P0/P1 finding | **YES — two product-defect prerequisites (auto-abort wiring, durable outcome evidence), each a dedicated PR (§21/§24)** |
 
@@ -604,9 +616,9 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **nine independent blockers** — some are intentional capability gaps, some are
+assembled today on **ten independent blockers** — some are intentional capability gaps, some are
 prerequisites, and two are genuine product defects the Codex adversarial rounds (§24) surfaced and
-this review verified against the code. The list below is exhaustive AS A SET: together the nine cover
+this review verified against the code. The list below is exhaustive AS A SET: together the ten cover
 every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
@@ -637,11 +649,17 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning a target
    (blocker 1) does NOT by itself establish no-credential status; it must be closed explicitly by
    verifying a no-`CredentialProfile` matched rule OR implementing a working credential provider/path.
+10. **No operator-reachable graceful rollback (§17).** §17's contract bar is "no GO unless rollback
+   AND kill are available." Only the emergency kill is reachable: `quiesceLiveTier` has no production
+   caller, and the operator-facing `apiMCPRolloutTransition` returns `distribution_not_configured` for
+   a Canary→Shadow/Observe target (the demotion runs only via the unwired signed-distribution path). A
+   governed operator-reachable rollback control (wire quiesce, or wire the demotion/publication path)
+   must be added.
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
 execute — nothing is reachable (1), no Canary can activate (2), no operator can arm (3), and no
-admissible one-tool operation exists (4). Blockers 5–9 are unmet *prerequisites*/defects, not a live
+admissible one-tool operation exists (4). Blockers 5–10 are unmet *prerequisites*/defects, not a live
 unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA. So the
 honest label is BLOCKED — a safe first experiment cannot be *assembled* — and the two product defects
 (7, 8) must be closed as dedicated PRs before any authorization, reinforcing rather than weakening
@@ -690,14 +708,12 @@ verdict FAILED.)
   post-send window additionally requires a durable pre-send intent record correlated to an independent
   upstream receipt (or an idempotency-key reconciliation protocol) — determinability cannot be
   promised from Culvert-side outcome records alone.
-
-**Recommended hardening (NOT one of the nine GO criteria).** Wire a governed production quiesce entry
-point (route or hook) that invokes `quiesceLiveTier` — it has no production caller today (§17), so the
-graceful un-arm-and-drain control is not operator-invokable. This is NOT a GO blocker: the review
-contract's §17 bar ("no GO unless rollback and kill are available") is met by the emergency kill and
-the Canary→Shadow/Observe demotion, both of which ARE reachable. Quiesce is a graceful alternative to
-the abrupt kill and should be wired before a standing deployment, but its absence does not by itself
-fail §25.
+- wire a **governed operator-reachable graceful rollback control** (blocker 10, §17) — the review
+  contract requires rollback AND kill before GO, and today only the emergency kill is reachable:
+  `quiesceLiveTier` has no production caller, and `apiMCPRolloutTransition` returns
+  `distribution_not_configured` for a Canary→Shadow/Observe target (the demotion runs only via the
+  unwired signed-distribution path). Wire `quiesceLiveTier`, OR wire the demotion/publication path so
+  an admin can drive Canary→Shadow/Observe.
 
 Then re-run this review against the new exact SHA.
 

@@ -235,8 +235,11 @@ Every one is a **separately-reviewed activation**, not a config change:
    working credential provider/path — the production broker has zero providers, review §4); and (g)
    two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
    declared breaches beyond `budget_exhausted`/`scope_escape`, and the durable outcome record is
-   success-only with an unclosable post-send crash window (review §14–§16, §18). **Arming is
-   NOT a promise of execution.** Composed-but-unarmed still reports
+   success-only with an unclosable post-send crash window (review §14–§16, §18); and (h) a
+   **governed operator-reachable graceful rollback** — only the emergency kill is reachable today
+   (`quiesceLiveTier` has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`
+   for a Canary→Shadow/Observe target), yet the review contract requires rollback AND kill (review §17).
+   **Arming is NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.
 2. ~~Make `live_execution` issuable under stronger governance (four-eyes, short TTL).~~ **DONE
