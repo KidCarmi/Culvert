@@ -225,6 +225,21 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 	// evaluate. It requires the durable events manager (tel.Manager()); fail-closed to a
 	// nil executor otherwise. Metrics are the bounded Shadow sink (nil ⇒ no-op).
 	composeGatewayShadowIntoConfig(&cfg, mcpShadowReadyEnabled(), tel.Manager())
+	// Controlled LIVE production dependency composition (§3/§4): when the operator has
+	// explicitly opted this node into the live-tier dependency graph
+	// (CULVERT_MCP_LIVE_DEPS), compose the REAL upstream/broker/durable-events/response-DLP
+	// graph and install the guarded live executor via the same composition seam. Disabled by
+	// default: unset ⇒ nothing composed and the Shadow/Observe executor above is untouched
+	// (byte-identical). It NEVER arms — arming is a separate, node-readiness-gated act. When
+	// both this and Shadow are enabled the live executor supersedes the Shadow one (it embeds
+	// its own capability-reduced Shadow evaluator, so no Shadow evaluation is lost). Requires
+	// the durable events manager (tel.Manager()); fail-closed to "not composed" otherwise. The
+	// env is read HERE (the shim) and passed to the pure resolver, so the resolver stays pure.
+	composeProductionGatewayLiveTier(
+		&cfg,
+		resolveMCPLiveProductionConfig(os.Getenv(mcpLiveDepsEnvVar), os.Getenv(mcpLiveCredentialKEKEnvVar)),
+		reg, cat, tel.Manager(), nil,
+	)
 	// Publish the seeded inventory + telemetry as the single sources of truth ONLY
 	// after the whole activation is valid, so the Admin API and runtime observe the
 	// identical instances.

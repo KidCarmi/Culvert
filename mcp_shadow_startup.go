@@ -22,7 +22,6 @@ package main
 
 import (
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -149,12 +148,7 @@ func mcpShadowStatus() map[string]any {
 // Shadow readiness. Fail-safe default-OFF: only an explicit true-ish value enables it
 // (same convention as CULVERT_EXPERIMENTAL_UI / CULVERT_CLUSTER_GRPC_COMPRESSION).
 func mcpShadowReadyEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(mcpShadowReadyEnvVar))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return mcpEnvTruthy(os.Getenv(mcpShadowReadyEnvVar))
 }
 
 // composeGatewayShadowIntoConfig composes the non-executing Shadow evaluator and, on
