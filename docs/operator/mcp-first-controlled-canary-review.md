@@ -14,17 +14,21 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on FIVE independent axes: (1) no controlled upstream reachable under the
-supported production trust model; (2) the production activation preflight cannot return `Ready:true`
-on a stock node; (3) the read-first classifier refuses the one-exact-tool call and discovery cannot
-bind one tool; and — genuine PRODUCT DEFECTS, not merely capability gaps — (4) whole-Canary
-auto-abort is unwired for drift / evidence-loss / unexpected-response / thresholds (so an
-outcome-commit failure only meters and later requests stay eligible) and (5) the durable outcome
-record is success-only, so a pre-crash invocation is not always determinable. Axes 1–2 are
-intentional fail-closed capability gaps; axes 4–5 are defects recorded here for dedicated PRs (§21).
-The experiment is specified below up to the exact point where it becomes unauthorizable, and the
-precise
-provisioning that would unblock it is named.
+cannot be assembled today on **EIGHT independent blockers** (exhaustive; each maps 1:1 to a mandatory
+NO row in §25 and an item in §26): (1) no controlled upstream reachable under the supported
+production trust model; (2) the production activation preflight cannot return `Ready:true` on a stock
+node; (3) no governed production arming entry point — `armLiveTier` has no production caller, so an
+operator cannot arm the tier; (4) the read-first classifier refuses the one-exact-tool call and
+discovery cannot bind one tool; (5) the machine gate does not enforce exactly-one tool/principal
+(`MaxCanaryTools`/`MaxCanaryPrincipals` = 2); (6) the budget does not bound physical upstream
+invocations (idempotent read retries send the POST up to ~3× per reservation); and — genuine PRODUCT
+DEFECTS, not merely capability gaps — (7) whole-Canary auto-abort is unwired for the eight declared
+breaches beyond `budget_exhausted`/`scope_escape` (so later requests stay eligible after a breach)
+and (8) the durable outcome record is success-only with an unclosable post-send crash window, so a
+pre-crash invocation is not always determinable. The no-credential status is additionally CONDITIONAL
+until a concrete tool + rule are fixed (§4). Blockers 1–6 are gaps/prerequisites; 7–8 are defects
+recorded here for dedicated PRs (§21). The experiment is specified below up to the exact point where
+it becomes unauthorizable, and the precise provisioning that would unblock it is named.
 
 ---
 
