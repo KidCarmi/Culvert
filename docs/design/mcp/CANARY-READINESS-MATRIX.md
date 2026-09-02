@@ -219,7 +219,11 @@ Every one is a **separately-reviewed activation**, not a config change:
    itself make a one-exact-tool call executable; a finer operation classifier or a designed
    discovery-trust path is required (review §6); (e) an **exactly-one-tool/principal constraint** —
    `ValidateScope` caps tools/principals at 2, not 1, so the one-of-everything shape must be imposed
-   as an authorization prerequisite or a count==1 activation constraint (review §10); (f) a
+   as an authorization prerequisite: **exactly one `Principals` entry, zero `Clients`/`Agents`/`Groups`,
+   and exactly one tool** (or a proven 1:1 client/agent→principal mapping). A plain `count==1` check is
+   INSUFFICIENT — `principalCount` sums `Principals`+`Clients`+`Agents`, so one shared client/agent with
+   no `Principals` would satisfy it while leaving the principal dimension unrestricted (review §10);
+   (f) a
    **per-physical-invocation budget** — an idempotent read retries up to `MaxReadRetries` times
    outside the single budget reservation, so one budgeted request can send the POST ~3×; the First
    Canary must disable transport retries, charge each attempt, or require upstream dedup (review §9);

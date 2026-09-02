@@ -402,9 +402,14 @@ scope_escape.
 ## §17 Manual emergency controls
 
 Reachable, admin-gated controls: emergency kill engage/clear (`POST /api/mcp/rollout/emergency`,
-`emergencyDisable`/`clearEmergency`, monotonic `killGen`, narrows only) and Canary→Shadow/Observe
-demotion (`demoteCanary`, reached from the rollout-mode commit path `mcp_rollout.go:511`, so an admin
-driving a rollout-mode transition triggers it). Both are operator-invokable today.
+`emergencyDisable`/`clearEmergency`) and Canary→Shadow/Observe demotion (`demoteCanary`, reached from
+the rollout-mode commit path `mcp_rollout.go:511`, so an admin driving a rollout-mode transition
+triggers it). Both are operator-invokable today. **Note (Codex P2) — only the ENGAGE direction
+narrows.** Engaging the kill advances the monotonic `killGen` and disables execution; `clear`
+(`clearEmergency`/`ClearKillSwitch`) clears the kill flag but leaves the rollout mode and active
+Canary runtime UNCHANGED, so subsequent requests can become eligible again. Clearing is a
+RE-ENABLING action — it must be treated with the same caution as any widening, not as part of a
+"narrows only" pair.
 
 **Correction (Codex P2) — quiesce is NOT operator-invokable.** `quiesceLiveTier` (the live-tier
 un-arm-and-drain) has NO production caller — a repo-wide search of non-test Go finds only its
@@ -632,10 +637,6 @@ verdict FAILED.)
 - wire a **governed production arming entry point** (startup path or admin API) that invokes
   `armLiveTier` — it has no production caller today, so an operator cannot arm the tier in the shipped
   process (§12) — and then arm the live tier on the controlled node via that path;
-- wire a **governed production quiesce entry point** (route or hook) that invokes `quiesceLiveTier` —
-  it too has no production caller (§17), so the un-arm-and-drain control is not operator-invokable;
-  the emergency kill and Canary→Shadow/Observe demotion ARE reachable and remain the available
-  controls until quiesce is wired;
 - ship a finer operation classifier (or a designed discovery-trust path) so exactly one harmless
   operation is read-first-admissible AND bindable to one exact tool;
 - resolve the credential path explicitly (§4): either verify the chosen tool's matched policy rule
@@ -663,6 +664,14 @@ verdict FAILED.)
   post-send window additionally requires a durable pre-send intent record correlated to an independent
   upstream receipt (or an idempotency-key reconciliation protocol) — determinability cannot be
   promised from Culvert-side outcome records alone.
+
+**Recommended hardening (NOT one of the nine GO criteria).** Wire a governed production quiesce entry
+point (route or hook) that invokes `quiesceLiveTier` — it has no production caller today (§17), so the
+graceful un-arm-and-drain control is not operator-invokable. This is NOT a GO blocker: the review
+contract's §17 bar ("no GO unless rollback and kill are available") is met by the emergency kill and
+the Canary→Shadow/Observe demotion, both of which ARE reachable. Quiesce is a graceful alternative to
+the abrupt kill and should be wired before a standing deployment, but its absence does not by itself
+fail §25.
 
 Then re-run this review against the new exact SHA.
 
