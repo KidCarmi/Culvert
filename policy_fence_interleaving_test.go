@@ -89,8 +89,9 @@ func ruleByName(name string) *PolicyRule {
 
 func ilCountRulesNamed(name string) int {
 	n := 0
-	for _, r := range policyStore.List() {
-		if strings.EqualFold(r.Name, name) {
+	rules := policyStore.List()
+	for i := range rules { // index-based: PolicyRule is large (rangeValCopy)
+		if strings.EqualFold(rules[i].Name, name) {
 			n++
 		}
 	}
@@ -125,11 +126,23 @@ func assertLoser(t *testing.T, w *httptest.ResponseRecorder, want ...int) {
 // recorded since `since` (content-scan, never a len() delta).
 func assertNoLoserAudit(t *testing.T, action string, since int64) {
 	t.Helper()
-	for _, e := range auditGet() {
+	if objs := loserAuditObjects(action, since); len(objs) > 0 {
+		t.Fatalf("loser produced a success audit %q on %q", action, objs[0])
+	}
+}
+
+// loserAuditObjects returns the objects of every audit entry the loser's
+// actor recorded for action since `since` (content-scan, never a len() delta).
+func loserAuditObjects(action string, since int64) []string {
+	var out []string
+	entries := auditGet()
+	for i := range entries { // index-based: audit.Entry is large (rangeValCopy)
+		e := &entries[i]
 		if e.TS >= since && e.Action == action && strings.Contains(e.Actor, loserActor) {
-			t.Fatalf("loser produced a success audit %q on %q", e.Action, e.Object)
+			out = append(out, e.Object)
 		}
 	}
+	return out
 }
 
 func assertVersionDelta(t *testing.T, before int64, want int64) {
@@ -278,22 +291,20 @@ func TestFenceInterleave_AuthDeleteByPriority_VsReorder_AuditIsTruthful(t *testi
 		t.Fatalf("unasserted priority delete = %d, want 204 (deleted the rule now at that priority) or 409", rh.Code)
 	}
 	assertVersionDelta(t, ver, map[int]int64{http.StatusNoContent: 2, http.StatusConflict: 1}[rh.Code])
-	if rh.Code == http.StatusNoContent {
-		vanished := "auth-il-a"
-		if policyStore.findByIDCopy(a.ID) != nil {
-			vanished = "auth-il-b"
-		}
-		found := false
-		for _, e := range auditGet() {
-			if e.TS >= since && e.Action == "authpolicy.remove" && strings.Contains(e.Actor, loserActor) {
-				found = true
-				if e.Object != vanished {
-					t.Fatalf("audit names %q but the rule that vanished is %q", e.Object, vanished)
-				}
-			}
-		}
-		if !found {
-			t.Fatal("no authpolicy.remove audit recorded for the delete")
+	if rh.Code != http.StatusNoContent {
+		return
+	}
+	vanished := "auth-il-a"
+	if policyStore.findByIDCopy(a.ID) != nil {
+		vanished = "auth-il-b"
+	}
+	objs := loserAuditObjects("authpolicy.remove", since)
+	if len(objs) == 0 {
+		t.Fatal("no authpolicy.remove audit recorded for the delete")
+	}
+	for _, obj := range objs {
+		if obj != vanished {
+			t.Fatalf("audit names %q but the rule that vanished is %q", obj, vanished)
 		}
 	}
 }
