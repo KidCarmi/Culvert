@@ -47,9 +47,19 @@ const mcpLiveDepsEnvVar = "CULVERT_MCP_LIVE_DEPS"
 // fallback). Same file-provider doctrine as the telemetry KEK.
 const mcpLiveCredentialKEKEnvVar = "CULVERT_MCP_LIVE_CREDENTIAL_KEK"
 
-// errLiveDepsKEKMissing is the fail-closed reason for a partial opt-in: live deps
-// requested but no KEK file supplied.
-var errLiveDepsKEKMissing = errors.New("mcp live deps: enabled but no credential KEK file (CULVERT_MCP_LIVE_CREDENTIAL_KEK) supplied")
+// Fail-closed config-validation reasons (§21). All are key-free — they name the constraint,
+// never the path value.
+var (
+	// errLiveDepsKEKMissing — a partial opt-in: live deps requested but no KEK file supplied.
+	errLiveDepsKEKMissing = errors.New("mcp live deps: enabled but no credential KEK file (CULVERT_MCP_LIVE_CREDENTIAL_KEK) supplied")
+	// errLiveDepsKEKNotAbsolute — a relative KEK path is rejected: it is ambiguous (resolved
+	// against the process cwd) and defeats traversal reasoning. An operator must supply a
+	// canonical absolute path.
+	errLiveDepsKEKNotAbsolute = errors.New("mcp live deps: credential KEK path must be absolute")
+	// errLiveDepsKEKNotCanonical — the KEK path is not in cleaned/canonical form (residual
+	// "."/".." or redundant separators), so its traversal footprint is not statically clear.
+	errLiveDepsKEKNotCanonical = errors.New("mcp live deps: credential KEK path is not canonical")
+)
 
 // mcpLiveProductionConfig is the resolved, pure DTO describing whether this node opts into
 // the production live-tier dependency graph and where the credential KEK lives. It carries
@@ -86,6 +96,15 @@ func validateMCPLiveProductionConfig(cfg mcpLiveProductionConfig) error {
 	}
 	if cfg.KEKFile == "" {
 		return errLiveDepsKEKMissing
+	}
+	if !filepath.IsAbs(cfg.KEKFile) {
+		return errLiveDepsKEKNotAbsolute
+	}
+	// The resolver cleans the path, so on a well-formed input Clean is idempotent. A mismatch
+	// here means the stored path is not canonical (a caller built the DTO directly with a raw
+	// value) — reject rather than reason about a non-canonical traversal footprint.
+	if cfg.KEKFile != filepath.Clean(cfg.KEKFile) {
+		return errLiveDepsKEKNotCanonical
 	}
 	return nil
 }

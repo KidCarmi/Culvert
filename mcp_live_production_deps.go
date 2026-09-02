@@ -40,8 +40,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"time"
 
@@ -184,6 +186,28 @@ type prodDestinationResolver struct {
 	r *net.Resolver
 }
 
+// errLiveDepsKEKSymlink is the fail-closed reason for a KEK path whose final component is a
+// symlink (§21). Key-free — it names the constraint, never the path.
+var errLiveDepsKEKSymlink = errors.New("mcp live deps: credential KEK path final component is a symlink")
+
+// kekPathNotSymlink rejects a KEK path whose final component is a symlink. A non-existent
+// path is accepted (the provider generates a fresh 0600 file there). Any other lstat error
+// (e.g. a permission error on the parent) is returned so composition fails closed rather than
+// proceeding on an unverifiable path.
+func kekPathNotSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errLiveDepsKEKSymlink
+	}
+	return nil
+}
+
 func (p prodDestinationResolver) LookupIP(ctx context.Context, host string) ([]netip.Addr, error) {
 	// "ip" ⇒ both A and AAAA; addresses only. The caller bounds this with a context deadline
 	// and the destination inspector caps the answer count (MaxDNSAddresses).
@@ -232,9 +256,20 @@ func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProducti
 	}
 	deps.Events = liveDepEventsReady
 
-	// (2) Production credential KEK (§5). The SAME file-provider doctrine telemetry uses:
-	// a wrong/unreadable/unavailable KEK fails closed with NO plaintext or ephemeral
-	// fallback. ValidateProvider generates-or-loads the 0600 key file once.
+	// (2) Production credential KEK (§5/§21). The SAME file-provider doctrine telemetry uses:
+	// a wrong/unreadable/unavailable KEK fails closed with NO plaintext or ephemeral fallback.
+	// ValidateProvider generates-or-loads the 0600 key file once and REJECTS a world/group-
+	// readable or wrong-size file. Before that, reject a KEK path whose final component is a
+	// SYMLINK — a symlinked key file could redirect the 0600 write/read to an
+	// attacker-controlled target that secret.load's permission check would not see through
+	// (defense-in-depth; a parent-directory symlink race is the recorded residual, out of
+	// scope for a config-time lstat).
+	if err := kekPathNotSymlink(lp.KEKFile); err != nil {
+		deps.KEK = liveDepKEKUnavailable
+		globalMCPLiveProd.set(mcpLiveProdStatus{Requested: true, Reason: liveDepKEKUnavailable, Deps: deps})
+		logger.Printf("MCP gateway live production deps not composed: credential KEK path rejected (fail-closed): %v", sanitizeLog(err.Error()))
+		return
+	}
 	kek := secret.FileProvider(lp.KEKFile)
 	if err := secret.ValidateProvider(kek); err != nil {
 		deps.KEK = liveDepKEKUnavailable
