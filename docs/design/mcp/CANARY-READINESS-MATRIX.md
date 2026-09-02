@@ -252,7 +252,13 @@ Every one is a **separately-reviewed activation**, not a config change:
    re-checks only the seeded record; exact-current fingerprint + rug-pull invalidation bind the SEED, not
    the live peer. Closing this needs authenticated production discovery/freshness verification OR an
    externally-verified ingestion procedure proving seeded-fingerprint == the peer's advertised tool
-   (review §7).
+   (review §7); and (j) an **operator-reachable governed Canary ACTIVATION (forward transition) entry
+   point** — arming and the activation inputs are NOT sufficient to start the Canary: the admin
+   `apiMCPRolloutTransition` returns `distribution_not_configured` for a Canary target
+   (`ui_mcp_rollout.go:116`) and nothing in non-test code constructs the distribution publication
+   coordinator (`publication.New`) or calls `coord.Publish`, so the signed-distribution apply that begins
+   the generation is never fed (review §13/§17, blocker 12 — the forward twin of the graceful-rollback
+   gap in (h)).
    **Arming is NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.

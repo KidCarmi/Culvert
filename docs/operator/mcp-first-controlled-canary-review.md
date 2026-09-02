@@ -14,7 +14,7 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **ELEVEN independent blockers** (exhaustive as a set — together they cover
+cannot be assembled today on **TWELVE independent blockers** (exhaustive as a set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable AND usable under the supported
 production trust model (a provisioned HTTPS+SPKI target must ALSO speak a protocol that permits Culvert's sessionless calls — a standard initialization-requiring server is rejected because the client drives no MCP initialize/version/session lifecycle); (2) the production activation preflight cannot return `Ready:true` on a stock
@@ -33,8 +33,12 @@ operator-reachable graceful rollback — §17 requires rollback AND kill, but on
 reachable (quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`, §17);
 and (11) the reviewed fingerprint is operator-declared, not peer-observed — `seedServer`/`seedTools`/
 `Ingest` compute it from operator JSON and no non-test caller of `Discovery.Discover` re-observes the
-peer, so exact-current fingerprint + rug-pull invalidation bind only the seeded record (§7).
-Blockers 1–6 and 9–11 are gaps/prerequisites; 7–8 are defects recorded here for dedicated PRs (§21).
+peer, so exact-current fingerprint + rug-pull invalidation bind only the seeded record (§7); and (12)
+no operator-reachable governed Canary ACTIVATION entry point — `apiMCPRolloutTransition` returns
+`distribution_not_configured` and no non-test code constructs/`Publish`es the distribution publication
+coordinator, so even with arming + activation inputs closed nothing transitions the node into Canary
+mode (§13/§17). Blockers 1–6 and 9–12 are gaps/prerequisites; 7–8 are defects recorded here for
+dedicated PRs (§21).
 The experiment is specified below up to the exact point where it becomes unauthorizable, and the
 precise provisioning that would unblock it is named.
 
@@ -617,6 +621,11 @@ code:
   non-test caller, so `ToolStillCurrent` re-checks only the seeded record. Exact-current fingerprint +
   rug-pull invalidation therefore bind the SEED, not the live peer. Confirmed against `mcp_inventory.go`
   + a repo-wide `Discover` search. Added as blocker 11.
+- **P1 — no Canary activation entry point (§13/§17, blocker 12):** `apiMCPRolloutTransition` returns
+  `distribution_not_configured` for a Canary target (`ui_mcp_rollout.go:116`) and no non-test code
+  constructs the distribution publication coordinator (`publication.New`) or calls `coord.Publish`, so
+  even with arming + activation inputs closed nothing transitions the node into Canary mode. Confirmed
+  against `ui_mcp_rollout.go` + a repo-wide `publication.New`/`Publish` search. Added as blocker 12.
 - **P2 — consistency:** propagation of the above into the summary, the §3 table, the §25 census, and
   the §26 blocker enumeration (kept exhaustive and aligned with §25).
 
@@ -644,6 +653,7 @@ BLOCKED-vs-FAILED note in §26).
 | Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
 | Budget bounds PHYSICAL upstream invocations (retries charged/disabled) | **NO — idempotent read retries up to ~3× per reservation (§9)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
+| Operator-reachable governed path to TRANSITION the node into Canary mode | **NO — `apiMCPRolloutTransition` returns `distribution_not_configured`; no non-test `publication.New`/`Publish` caller (§13/§17, blocker 12)** |
 | Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
@@ -664,9 +674,9 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **eleven independent blockers** — some are intentional capability gaps, some are
+assembled today on **twelve independent blockers** — some are intentional capability gaps, some are
 prerequisites, and two are genuine product defects the Codex adversarial rounds (§24) surfaced and
-this review verified against the code. The list below is exhaustive AS A SET: together the eleven cover
+this review verified against the code. The list below is exhaustive AS A SET: together the twelve cover
 every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
@@ -715,11 +725,23 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    "rug-pull invalidation" bind the SEED, not the actual upstream. Closing this needs authenticated
    production discovery/freshness verification OR an externally-verified ingestion procedure proving
    seeded-fingerprint == the live peer's advertised tool.
+12. **No operator-reachable governed Canary ACTIVATION entry point (§13/§17).** Even with arming
+   (blocker 3) and the activation inputs (blocker 2) closed, nothing lets an operator TRANSITION the
+   node into Canary mode: the admin `apiMCPRolloutTransition` ends with `distribution_not_configured`
+   for a Canary target (`ui_mcp_rollout.go:116`), and the only production path that begins the Canary
+   generation is the signed-distribution apply, which merely CONSUMES an already-signed snapshot —
+   nothing in non-test code constructs the distribution publication coordinator (`publication.New`) or
+   calls `coord.Publish` to PRODUCE that snapshot (repo-wide search: callers are test-only; the
+   `gw.Publish` at `mcp_policy.go:173` is the gateway *policy* store, unrelated). This is the forward
+   twin of blocker 10 (which is the same unwired path in the rollback direction), and it means the
+   §25 checklist — wire arming + activation inputs — is NOT sufficient to start the Canary. A governed
+   operator-reachable forward-transition/publication entry point must be wired.
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
-execute — nothing is reachable (1), no Canary can activate (2), no operator can arm (3), and no
-admissible one-tool operation exists (4). Blockers 5–11 are unmet *prerequisites*/defects, not a live
+execute — nothing is reachable (1), the activation preflight cannot go Ready (2), no operator can arm
+(3), no admissible one-tool operation exists (4), and no operator-reachable path even transitions the
+node into Canary mode (12). Blockers 5–12 are unmet *prerequisites*/defects, not a live
 unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA (blocker 11
 adds that even a reachable+usable target would carry a fingerprint bound to operator-declared JSON, not
 the observed peer). So the
@@ -790,6 +812,13 @@ verdict FAILED.)
   discovery/freshness verification (a non-test `Discover` caller), OR require an externally-verified
   ingestion procedure proving seeded-fingerprint == the live peer's advertised tool, before treating
   exact-current fingerprint and rug-pull invalidation as satisfied.
+- wire a **governed operator-reachable Canary ACTIVATION (forward transition) entry point** (blocker 12,
+  §13/§17) — arming (blocker 3) and the activation inputs (blocker 2) are NOT sufficient to start the
+  Canary: `apiMCPRolloutTransition` returns `distribution_not_configured` for a Canary target
+  (`ui_mcp_rollout.go:116`) and nothing in non-test code constructs the distribution publication
+  coordinator (`publication.New`) or calls `coord.Publish`, so the signed-distribution apply that begins
+  the generation is never fed. Wire a governed forward-transition/publication path (the same wiring that
+  closes blocker 10's rollback direction, but for →Canary).
 
 Then re-run this review against the new exact SHA.
 

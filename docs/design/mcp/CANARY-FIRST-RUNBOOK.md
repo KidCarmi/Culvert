@@ -13,6 +13,7 @@ current posture (do NOT collapse these into "done" or "not done"):
 | Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
 | Live tier arming | **NOT OPERATOR-PERFORMABLE YET** — the governed, node-readiness-gated `armLiveTier` function exists and is correct, but has NO production caller (no startup path, admin API, or other non-test code invokes it); arming is reachable only from tests today |
 | Manual controls — graceful rollback | **NOT OPERATOR-REACHABLE** — only the emergency kill (`POST /api/mcp/rollout/emergency`) is wired; `quiesceLiveTier` has no production caller and `apiMCPRolloutTransition` returns `distribution_not_configured` for a Canary→Shadow/Observe target, so the "rollback rehearsed first" control below is not admin-invokable today (review §17) |
+| Canary activation (forward transition) | **NOT OPERATOR-REACHABLE** — `apiMCPRolloutTransition` returns `distribution_not_configured` for a Canary target (`ui_mcp_rollout.go:116`) and nothing in non-test code constructs the distribution publication coordinator (`publication.New`) or calls `coord.Publish`, so an operator cannot transition the node into Canary mode even with arming + activation inputs closed (review §13/§17, blocker 12 — the forward twin of the graceful-rollback gap above) |
 | Armed by default | **NO** — a stock build composes nothing and arms nothing (`live_executor_absent`) |
 | Canary active | **NO** — no production path begins a Canary generation or reaches an upstream |
 | A controlled upstream reachable under the supported production trust model | **NOT AVAILABLE TODAY** — see the connectivity blocker below |
@@ -118,7 +119,11 @@ set is empty. This requires the separately-reviewed activation to have:
    confirm `ValidateBudget` accepts it.
 5. **Preflight**: confirm `evaluateCanaryActivationPreflight` returns `Ready:true` (empty Unmet).
 6. **Activate** Canary for the bounded scope. Drive the bounded request corpus from the synthetic
-   identity.
+   identity. **NOT OPERATOR-REACHABLE TODAY:** `apiMCPRolloutTransition` returns
+   `distribution_not_configured` for a Canary target (`ui_mcp_rollout.go:116`) and nothing in non-test
+   code constructs the distribution publication coordinator (`publication.New`) or calls `coord.Publish`,
+   so the signed-distribution apply that begins the Canary generation is never fed — a governed
+   forward-transition/publication entry point must be wired first (review §13/§17, blocker 12).
 7. **Observe** continuously: Culvert outcome evidence (executed=true/false, upstream
    success/failure, response-inspection result, abort class, duration) reconciled against the
    recording upstream's independent log. Any mismatch is a whole-Canary breach → auto-stop.
