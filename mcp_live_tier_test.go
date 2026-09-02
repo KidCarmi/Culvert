@@ -134,15 +134,6 @@ func liveExecInput(opClass policy.OperationClass, tenant, principal string) mcpr
 	}
 }
 
-// alwaysAdmitGate is an execution.LiveExecutionGate that admits every request — used to prove that
-// even with the gate satisfied, an out-of-scope/record-only disposition makes no upstream call.
-type alwaysAdmitGate struct{ admitted int }
-
-func (g *alwaysAdmitGate) AdmitSideEffect(execution.LiveGateInput) execution.LiveGateDecision {
-	g.admitted++
-	return execution.LiveGateDecision{Admit: true, Release: func() {}}
-}
-
 // ── §2 lifecycle: absent → composed → armed → quiescing → composed ──
 
 func TestLiveTier_LifecycleStatesAreDistinct(t *testing.T) {
@@ -453,5 +444,39 @@ func TestLiveTier_RestartDoesNotReArm(t *testing.T) {
 	}
 	if _, ok := lt.admitExecution(); ok {
 		t.Fatal("an unarmed (restart) tier admits no execution")
+	}
+}
+
+// ── §5 arming readiness gate (armLiveTier is the authoritative, node-readiness-gated path) ──
+
+func TestLiveArming_RefusesWhenNotComposed(t *testing.T) {
+	resetLiveTierGlobals(t)
+	rd, err := armLiveTier(rollout.CapabilityGateway)
+	if err == nil {
+		t.Fatal("armLiveTier on a node with no composed executor must refuse")
+	}
+	if rd.Ready || rd.Reason != "live_executor_absent" {
+		t.Fatalf("readiness reason=%q want live_executor_absent", rd.Reason)
+	}
+	if liveExecDepsConfigured(false) {
+		t.Fatal("a refused arm must not set the armed bit")
+	}
+}
+
+func TestLiveArming_RefusesWhenNodeNotReady(t *testing.T) {
+	resetLiveTierGlobals(t)
+	// Composed, but the downstream node-readiness prerequisites are not satisfied (fresh globals:
+	// durable events not healthy / inspection not composed / no attestation), so armLiveTier refuses
+	// with the FIRST unmet reason and never arms.
+	mcpLiveTierFor(rollout.CapabilityGateway).markComposed("composed")
+	rd, err := armLiveTier(rollout.CapabilityGateway)
+	if err == nil || rd.Ready {
+		t.Fatalf("armLiveTier without node readiness must refuse, rd=%+v err=%v", rd, err)
+	}
+	if rd.Reason == "" || rd.Reason == "live_executor_absent" {
+		t.Fatalf("a composed-but-unready node must name a downstream unmet prerequisite, got %q", rd.Reason)
+	}
+	if liveExecDepsConfigured(false) {
+		t.Fatal("a not-ready arm must not set the armed bit")
 	}
 }

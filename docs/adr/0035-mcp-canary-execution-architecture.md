@@ -324,3 +324,47 @@ side effects **0**, production credential retrievals **0** (`mcp_execution_postu
 - **Trust ≠ availability ≠ authorization.** A live grant does not make a tool `catalog.Usable`
   (that stays a shadow-only projection) and is not runtime authorization — the policy engine stays
   authoritative for every call. `CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL` remains **OPEN**.
+
+## Addendum (live-tier composition phase) — the live tier is COMPOSED (not armed, not active)
+
+This phase introduces the production live-execution tier. It is the first change permitted to make the
+live executor structurally present and explicitly ARMABLE, but it is NOT the First Controlled Canary:
+no customer traffic, no uncontrolled upstream side effect. The three states the core principle requires
+stay separate — **COMPOSED != ARMED != Canary ACTIVE** — and are individually observable.
+
+- **Composition (`mcp_live_startup.go`).** `composeGatewayLiveTierInto` composes the REAL
+  `execution.New`/`Executor`/`UpstreamCaller`/`broker.Broker` (never a Canary-specific fork), so there
+  remains exactly ONE irreversible upstream boundary and one commit-before-side-effect discipline, and
+  installs it as `runtime.Deps.Executor`. Composing does NOT arm: the executor resolves record-only for
+  every Observe/Shadow request and `modeExecReady` refuses every Canary/Production transition. There is
+  deliberately NO production caller (the KEK / destination-resolver / profile-store wiring is a
+  documented, separately-reviewed deferred prerequisite that lands with the arming deployment); a stock
+  build composes nothing, and the controlled rehearsal + mutation/red-team campaigns inject SYNTHETIC
+  collaborators through this exact production path.
+- **Lifecycle (`mcp_live_tier.go`): absent → composed → armed → quiescing → composed.** The armed bit
+  is the ONE thing that governs Canary mode transitions (mirrored into the execdeps registry, the single
+  `modeExecReady` authority). `arm`/`quiesce`/`disarmForRestart` are the ONLY writers of it.
+- **Arming (`mcp_live_arming.go`): one explicit authoritative path.** `armLiveTier` is the sole
+  production caller of the arming hook, gated on NODE readiness (executor composed; durable events /
+  inspection / registry / catalog / policy healthy; kill clear; Shadow-Exit attested; rollback mechanics
+  + coordinator rehearsal valid) — deliberately NOT the activation-level scope/approval/budget facts.
+  Arming grants readiness, never activation: it begins no Canary generation and reaches no upstream.
+- **Quiesce (§6).** Un-arms first (so no new Canary transition and no new admission), then bounds the
+  drain of in-flight executions; preserves evidence and trust records; never widens scope; emergency
+  kill stays authoritative throughout.
+- **The side-effect gate (`mcp_live_gate.go`).** A composition-layer `execution.LiveExecutionGate`,
+  consulted at the boundary BEFORE the executor's tool-freshness + emergency-kill re-check (so the kill
+  re-read stays the LAST check before `Upstream.Call` — PREREQ-MCP-KILL-1), runs lifecycle admission
+  (quiesce rejects new), read-first (§9), runtime live-trust revalidation (§10), and Canary budget
+  reservation (§8). A denial fails closed with a distinct bounded reason; `Upstream.Call == 0`.
+- **Runtime reconciliation (`mcp_rollout.go`).** `beginCanaryActivation`/`demoteCanary` are wired into
+  the single authoritative commit gate — a production commit into a live mode begins the generation
+  exactly once, a demotion invalidates it — the rehearsal leaves this off (scratch target).
+- **CANARY-ROLLBACK-LIVE-QUIESCE-REHEARSAL is CLOSED** by the executed live-armed quiesce-then-demote
+  rehearsal with durable build-bound evidence (`mcp_live_quiesce_rehearsal*.go`).
+
+The evolved execution-posture wall pins the exact composition-file set, contains the arming hooks to one
+dispatcher, and STRENGTHENS Layer B (the Shadow composition file may reference no live-executor symbol).
+Final posture: **LiveExecutor production-composed NO (armable), armed-by-default NO, Canary active NO,
+Production active NO, customer traffic 0, production credentials 0, uncontrolled upstream side effects 0.**
+The next phase is a separate First Controlled Canary Review + experiment.

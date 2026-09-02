@@ -125,3 +125,17 @@ func drainWaitFn(lt *mcpLiveTier, deadline time.Time) func(inFlight func() int) 
 		return 0
 	}
 }
+
+// mcpLiveTierStatus is the read-only, viewer-safe status for the Gateway live-execution tier. It
+// composes the lifecycle state (composed/armed/quiescing), the in-flight/quiesce accounting, the
+// bounded gate-denial counters, and the NODE readiness gate result (so an operator can see WHY the
+// tier is not armable without any ability to arm). It carries no secret/tenant/subject.
+func mcpLiveTierStatus() map[string]any {
+	capb := rollout.CapabilityGateway
+	m := mcpLiveTierFor(capb).status()
+	m["gate_denials"] = mcpLiveGateDenialSnapshot()
+	rd := evaluateLiveArmReadiness(capb)
+	m["arm_ready"] = rd.Ready
+	m["arm_unmet_reason"] = rd.Reason
+	return m
+}
