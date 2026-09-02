@@ -175,6 +175,17 @@ func (h *mcpLiveProdHolder) invalidateForStartupFailure() {
 func invalidateMCPLiveOnStartupFailure() {
 	globalMCPLiveProd.invalidateForStartupFailure()
 	mcpLiveTierFor(rollout.CapabilityGateway).resetForStartupFailure()
+	// Response-inspection readiness (globalMCPShadow.inspectionComposed) is set by BOTH the Shadow
+	// composition and the live composition (composeGatewayLiveTierInto). On a live-ONLY startup
+	// rollback the inspection provider lived in the now-discarded runtime config, so leaving the
+	// flag set would make canaryNodeFacts / GET /api/mcp/rollout keep reporting response inspection
+	// ready for a listener that never started. Clear it — UNLESS an independently valid Shadow
+	// composition set globalMCPShadow.composed (Shadow sets inspectionComposed BEFORE composed, so a
+	// true composed bit means Shadow owns the flag and its non-executing evaluator still holds a
+	// live inspection provider). This never clears a flag Shadow legitimately owns (Codex, PR #1291).
+	if !globalMCPShadow.composed.Load() {
+		globalMCPShadow.inspectionComposed.Store(false)
+	}
 }
 
 // mcpLiveProdStatusView returns the current production live-deps status as a viewer-safe,

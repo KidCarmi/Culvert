@@ -468,14 +468,22 @@ func unmetContainsReason(rs []canary.Reason, want string) bool {
 
 func TestLiveProd_InvalidateOnStartupFailureClearsComposed(t *testing.T) {
 	resetLiveProdGlobals(t)
+	// Live-ONLY: ensure Shadow does not own the inspection flag for this scenario.
+	prevShadowComposed := globalMCPShadow.composed.Load()
+	globalMCPShadow.composed.Store(false)
+	t.Cleanup(func() { globalMCPShadow.composed.Store(prevShadowComposed) })
+
 	reg, cat := prodInventory()
 	ev := liveTestEvents(t)
 	cfg := &mcpruntime.Config{}
 	composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
 
-	// Precondition: composed + events_ready recorded.
+	// Precondition: composed + events_ready + inspection readiness recorded.
 	if !globalMCPLiveProd.snapshot().Composed || !mcpLiveTierFor(rollout.CapabilityGateway).composed() {
 		t.Fatal("precondition: tier must be composed after composition")
+	}
+	if !globalMCPShadow.inspectionComposed.Load() {
+		t.Fatal("precondition: live composition sets inspectionComposed")
 	}
 
 	// Simulate the runtime-start failure cleanup.
@@ -491,8 +499,37 @@ func TestLiveProd_InvalidateOnStartupFailureClearsComposed(t *testing.T) {
 	if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
 		t.Fatal("lifecycle tier must be reset to absent (a retry starts clean)")
 	}
+	// Live-only: the inspection readiness flag must be cleared (its provider was in the discarded cfg).
+	if globalMCPShadow.inspectionComposed.Load() {
+		t.Fatal("live-only startup rollback must clear inspectionComposed (Codex P2)")
+	}
 	if liveExecDepsConfigured(false) {
 		t.Fatal("invalidation must never arm")
+	}
+}
+
+// When Shadow independently composed (owns inspectionComposed), a live startup rollback must NOT
+// clear the flag — Shadow's non-executing evaluator still holds a live inspection provider.
+func TestLiveProd_InvalidateOnStartupFailurePreservesShadowInspection(t *testing.T) {
+	resetLiveProdGlobals(t)
+	prevShadowComposed := globalMCPShadow.composed.Load()
+	globalMCPShadow.composed.Store(true) // Shadow owns the inspection flag
+	globalMCPShadow.inspectionComposed.Store(true)
+	t.Cleanup(func() { globalMCPShadow.composed.Store(prevShadowComposed) })
+
+	reg, cat := prodInventory()
+	ev := liveTestEvents(t)
+	cfg := &mcpruntime.Config{}
+	composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
+
+	invalidateMCPLiveOnStartupFailure()
+
+	if !globalMCPShadow.inspectionComposed.Load() {
+		t.Fatal("Shadow-owned inspectionComposed must be preserved across a live startup rollback")
+	}
+	// The live-tier holders are still reset regardless.
+	if globalMCPLiveProd.snapshot().Composed {
+		t.Fatal("live production-deps status must still be invalidated")
 	}
 }
 
