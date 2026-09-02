@@ -236,9 +236,7 @@ Every one is a **separately-reviewed activation**, not a config change:
    negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code —
    only two options actually bound the physical POSTs: make retry-disablement representable + wire a
    retry-free client, OR charge each attempt to the budget. A per-reservation key is not a third bound
-   (it enables correlation/server-side dedup but does not stop the retry loop — review §9/§14);
-   a **credential-selection resolution** (verify a matched rule with no `CredentialProfile`, or a
-   working credential provider/path — the production broker has zero providers, review §4); and (g)
+   (it enables correlation/server-side dedup but does not stop the retry loop — review §9/§14); and (g)
    two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
    declared breaches beyond `budget_exhausted`/`scope_escape`, and the durable outcome record is
    success-only with an unclosable post-send crash window (review §14–§16, §18); and (h) a

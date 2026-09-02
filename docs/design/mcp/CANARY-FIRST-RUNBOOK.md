@@ -6,7 +6,8 @@ current posture (do NOT collapse these into "done" or "not done"):
 
 | Layer | State today |
 |---|---|
-| Canary architecture — preflight, scope gate, budget ceiling, trust firewall | **IMPLEMENTED** |
+| Canary architecture — preflight, budget ceiling, trust firewall | **IMPLEMENTED** |
+| Canary architecture — scope gate (`ValidateScope`) | **PARTIAL** — forbids percentage/group/wildcard and caps server & tenant at 1, but `MaxCanaryTools`/`MaxCanaryPrincipals` are **2** and `principalCount` sums Principals+Clients+Agents, so the machine gate does NOT enforce the one-tool/one-synthetic-principal experiment; that must be imposed as an external authorization prerequisite (review §10) |
 | Canary architecture — whole-Canary AUTOMATIC abort | **PARTIAL / DEFECTIVE** — only `budget_exhausted` and `scope_escape` have automatic trippers; the other eight declared breaches do not auto-stop (see §16 below and the review §16) |
 | Canary architecture — durable invocation evidence | **PARTIAL / DEFECTIVE** — events carry no `OutcomeEvidence`; the post-call outcome commit is success-only (upstream errors + DLP blocks emit no post-call event) and a post-send crash is indeterminate, so the executed/status/duration reconciliation the procedure below assumes is not fully backed (review §15/§18) |
 | Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
