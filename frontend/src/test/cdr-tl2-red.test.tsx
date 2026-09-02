@@ -316,6 +316,9 @@ it("a failed auto-enable is rendered from the returned facts, never as 'auto-ena
         enrolledAt: "2026-09-02T00:00:00Z",
       },
       stored: true,
+      operationId: OP,
+      receiptState: "stored",
+      receiptRecorded: true,
       cdrEnabled: false,
       clientActive: false,
       autoEnable: {
@@ -323,7 +326,6 @@ it("a failed auto-enable is rendered from the returned facts, never as 'auto-ena
         succeeded: false,
         error: "cdr toggle: mkdir: not a directory",
       },
-      receiptState: "stored",
     });
   await mountInstances();
   await dispatchEnroll();

@@ -50,6 +50,7 @@ import {
   revokeCDRFingerprint,
   revokeCDRInstance,
   type CDREnrollRecovery,
+  type CDREnrollResult,
   type CDRInstance,
   type CDRInstances,
   type CDRRevokeResult,
@@ -366,7 +367,7 @@ function EnrollConfirmDialog({
   page: InstPage;
   form: EnrollForm;
   subject: string;
-  onDone: (inst: CDRInstance) => void;
+  onDone: (res: CDREnrollResult) => void;
   /** The outcome is NOT settled (transport lost, or the appliance named the
    * operation in its refusal): the marker stays for resolution. */
   onUnresolved: (transportLost: boolean, serverText: string) => void;
@@ -428,9 +429,9 @@ function EnrollConfirmDialog({
           { name, endpoint, serverFingerprint, token: form.token, operationId },
           signal,
         )
-          .then((inst) => {
+          .then((res) => {
             clearEnrollRecovery();
-            onDone(inst);
+            onDone(res);
             page.refreshToResolve();
           })
           .catch((err: unknown) => {
@@ -582,6 +583,13 @@ function RecoverySurface({
           how to revoke it.
         </p>
         {resolveError !== "" && <p>Resolution failed: {resolveError}</p>}
+        {resolution !== null && !resolution.receiptUpdated && (
+          <p>
+            The appliance classified the operation but could not persist the
+            receipt transition ({resolution.receiptError}); its previous durable
+            state is kept — resolve again later.
+          </p>
+        )}
         {resolution !== null && cls === "AMBIGUOUS" && (
           <p>
             <strong>AMBIGUOUS</strong> — the engine could not be asked
@@ -720,7 +728,12 @@ export function CDRInstancesTab({
   const [notice, setNotice] = useState<
     | { kind: "deleted"; name: string; fingerprints: readonly string[] }
     | { kind: "revoked"; name: string; result: CDRRevokeResult }
-    | { kind: "enrolled"; name: string; fingerprint: string }
+    | {
+        kind: "enrolled";
+        name: string;
+        fingerprint: string;
+        facts: CDREnrollResult | null;
+      }
     | null
   >(null);
 
@@ -787,7 +800,7 @@ export function CDRInstancesTab({
             rereadRecovery();
           }}
           onLanded={(name, fingerprint) => {
-            setNotice({ kind: "enrolled", name, fingerprint });
+            setNotice({ kind: "enrolled", name, fingerprint, facts: null });
             rereadRecovery();
           }}
         />
@@ -848,9 +861,33 @@ export function CDRInstancesTab({
           )}
           {notice.kind === "enrolled" && (
             <>
-              Credential issued; client certificate fingerprint{" "}
-              <Mono>{notice.fingerprint}</Mono>. CDR was auto-enabled if it was
-              off.
+              Credential issued and stored; client certificate fingerprint{" "}
+              <Mono>{notice.fingerprint}</Mono>.{" "}
+              {notice.facts === null
+                ? "The engine confirmed the enrollment landed."
+                : notice.facts.cdrEnabled
+                  ? notice.facts.autoEnable.succeeded
+                    ? `CDR processing was enabled (persisted); ${notice.facts.clientActive ? "a client is active." : "no client is active yet — check the pool state after a refresh."}`
+                    : `CDR processing is enabled; ${notice.facts.clientActive ? "a client is active." : "no client is active yet."}`
+                  : notice.facts.autoEnable.attempted
+                    ? "CDR is still disabled: the automatic enable could NOT be persisted" +
+                      (notice.facts.autoEnable.error !== ""
+                        ? ` (${notice.facts.autoEnable.error})`
+                        : "") +
+                      ". Do not re-enroll — the credential is already stored; enable CDR processing from the Overview toggle."
+                    : "CDR is still disabled."}
+              {notice.facts !== null && !notice.facts.receiptRecorded && (
+                <>
+                  {" "}
+                  The recovery receipt could not be marked stored (
+                  {notice.facts.receiptError}); it stays
+                  &ldquo;dispatched&rdquo; and a later resolution reports LANDED
+                  from the registry.
+                </>
+              )}
+              {notice.facts !== null && notice.facts.clientInitError !== "" && (
+                <> Client dial failed: {notice.facts.clientInitError}.</>
+              )}
             </>
           )}{" "}
           <Button
@@ -1035,14 +1072,15 @@ export function CDRInstancesTab({
           page={page}
           form={form}
           subject={subject}
-          onDone={(inst) => {
+          onDone={(res) => {
             setForm(EMPTY_FORM);
             setEnrollBlocked(false);
             setEnrollError("");
             setNotice({
               kind: "enrolled",
-              name: inst.name,
-              fingerprint: inst.clientCertFingerprint,
+              name: res.instance.name,
+              fingerprint: res.instance.clientCertFingerprint,
+              facts: res,
             });
             setConfirmEnroll(false);
             rereadRecovery();

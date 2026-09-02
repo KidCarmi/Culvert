@@ -20,6 +20,7 @@ WORK="$(mktemp -d)"
 BIN="$WORK/culvert"
 
 cleanup() {
+  [ -n "${SLUICE_PID:-}" ] && kill "$SLUICE_PID" 2>/dev/null || true
   [ -n "${AUTH_PID:-}" ] && kill "$AUTH_PID" 2>/dev/null || true
   [ -n "${FRESH_PID:-}" ] && kill "$FRESH_PID" 2>/dev/null || true
   [ -n "${FAIL_PID:-}" ] && kill "$FAIL_PID" 2>/dev/null || true
@@ -30,6 +31,49 @@ trap cleanup EXIT
 
 echo "e2e-smoke: building CULVERT binary (embeds committed frontend/dist)"
 (cd "$ROOT" && CGO_ENABLED=0 go build -o "$BIN" .)
+
+# ── 2E-C real engine: the PINNED Sluice daemon (go.mod) runs as a real
+# subprocess with real mTLS, so the browser enrollment journey exercises a
+# genuine token exchange, a genuine definite refusal, and genuine receipts
+# — never a mock. Tokens are per-process (first-boot token file); the
+# daemon is per-run and lives in the harness tmp dir.
+SLUICE_PORT="${CULVERT_E2E_SLUICE_PORT:-19443}"
+SLUICE_BIN="$WORK/sluice"
+echo "e2e-smoke: building the pinned Sluice daemon"
+(cd "$ROOT" && CGO_ENABLED=0 go build -o "$SLUICE_BIN" github.com/KidCarmi/Sluice/cmd/sluice)
+mkdir -p "$WORK/sl"
+cat > "$WORK/sl/config.yaml" <<EOF2
+server:
+  grpc_addr: "127.0.0.1:$SLUICE_PORT"
+  http_addr: "127.0.0.1:$((SLUICE_PORT + 1))"
+  tls:
+    cert_file: $WORK/sl/server.pem
+    key_file: $WORK/sl/server-key.pem
+    ca_file: $WORK/sl/ca.pem
+enrollment:
+  enabled: true
+  token_file: $WORK/sl/enrollment_token
+cli:
+  socket_path: $WORK/sl/s.sock
+logging:
+  format: json
+  level: warn
+EOF2
+("$SLUICE_BIN" -config "$WORK/sl/config.yaml" >"$WORK/sluice.log" 2>&1) &
+SLUICE_PID=$!
+i=0
+until [ -s "$WORK/sl/enrollment_token" ] && [ -s "$WORK/sl/server.pem" ]; do
+  i=$((i + 1))
+  if [ "$i" -gt 120 ]; then
+    echo "e2e-smoke: Sluice daemon did not come up; log tail:" >&2
+    tail -30 "$WORK/sluice.log" >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+SLUICE_TOKEN="$(cat "$WORK/sl/enrollment_token")"
+SLUICE_FP="$(openssl x509 -in "$WORK/sl/server.pem" -noout -fingerprint -sha256 | sed 's/^.*=//; s/://g' | tr 'A-F' 'a-f')"
+echo "e2e-smoke: Sluice daemon ready on 127.0.0.1:$SLUICE_PORT (pin ${SLUICE_FP%????????????????????????????????????????????????}…)"
 
 # ── AUTH instance: seeded roster ─────────────────────────────────────────
 # bcrypt hashes (hex, cost 10) for the fixture credentials in e2e/fixtures.ts;
@@ -217,5 +261,8 @@ cd "$FRONTEND"
 CULVERT_E2E_BASE_URL="http://127.0.0.1:$UI_PORT" \
 CULVERT_E2E_FRESH_URL="http://127.0.0.1:$FRESH_PORT" \
 CULVERT_E2E_SETUPFAIL_URL="http://127.0.0.1:$FAIL_PORT" \
+CULVERT_E2E_SLUICE_ADDR="127.0.0.1:$SLUICE_PORT" \
+CULVERT_E2E_SLUICE_FP="$SLUICE_FP" \
+CULVERT_E2E_SLUICE_TOKEN="$SLUICE_TOKEN" \
   npx playwright test --config e2e/playwright.config.ts "$@"
 echo "e2e-smoke: PASS"

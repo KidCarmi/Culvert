@@ -60,6 +60,7 @@ export function writeEnrollRecovery(
   subject: string,
   m: EnrollRecoveryMarker,
 ): boolean {
+  if (!markerGrammarValid({ ...m, subject })) return false;
   try {
     // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2E-C trust-lifecycle correction): the single NON-SECRET enrollment-recovery marker; field allowlist pinned by cdr-enroll-recovery.test.tsx.
     sessionStorage.setItem(
@@ -74,15 +75,46 @@ export function writeEnrollRecovery(
         subject,
       }),
     );
+    // R13.4: the read-back must match EVERY written field — a lying or
+    // corrupting storage (quota, extension, privacy mode) must fail the
+    // write, not the recovery that would later depend on it. The subject
+    // is verified implicitly: a foreign-subject marker reads as "none".
     const back = readEnrollRecovery(subject);
     return (
       back.kind === "valid" &&
       back.marker.operationId === m.operationId &&
-      back.marker.name === m.name
+      back.marker.name === m.name &&
+      back.marker.endpoint === m.endpoint &&
+      back.marker.serverFingerprint === m.serverFingerprint &&
+      back.marker.startedAt === m.startedAt
     );
   } catch {
     return false;
   }
+}
+
+/** The marker grammar (R13.5): a valid operation id (16–64 chars of
+ * [A-Za-z0-9._-]), non-empty identity fields, a well-formed SHA-256 pin
+ * (64 hex, optional sha256: prefix), and a finite timestamp. */
+const OPERATION_ID_RE = /^[A-Za-z0-9._-]{16,64}$/;
+const FINGERPRINT_RE = /^(sha256:)?[0-9a-fA-F]{64}$/;
+
+export function markerGrammarValid(v: {
+  operationId: string;
+  name: string;
+  endpoint: string;
+  serverFingerprint: string;
+  startedAt: number;
+  subject: string;
+}): boolean {
+  return (
+    OPERATION_ID_RE.test(v.operationId) &&
+    v.name.trim() !== "" &&
+    v.endpoint.trim() !== "" &&
+    FINGERPRINT_RE.test(v.serverFingerprint.trim()) &&
+    Number.isFinite(v.startedAt) &&
+    v.subject.trim() !== ""
+  );
 }
 
 /** Inspect the recovery store for the CURRENT subject — TYPED: "cannot
@@ -107,12 +139,19 @@ export function readEnrollRecovery(subject: string): EnrollRecoveryRead {
     !isRecord(v) ||
     v["version"] !== 1 ||
     typeof v["operationId"] !== "string" ||
-    v["operationId"] === "" ||
     typeof v["name"] !== "string" ||
     typeof v["endpoint"] !== "string" ||
     typeof v["serverFingerprint"] !== "string" ||
     typeof v["startedAt"] !== "number" ||
-    typeof v["subject"] !== "string"
+    typeof v["subject"] !== "string" ||
+    !markerGrammarValid({
+      operationId: v["operationId"],
+      name: v["name"],
+      endpoint: v["endpoint"],
+      serverFingerprint: v["serverFingerprint"],
+      startedAt: v["startedAt"],
+      subject: v["subject"],
+    })
   ) {
     return { kind: "unreadable" };
   }

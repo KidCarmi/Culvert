@@ -331,17 +331,54 @@ export interface CDREnrollInput {
   operationId: string;
 }
 
-/** Enroll response: the stored registry entry (struct-tag JSON keys — same
- * names as the list entries; no token, no key material). */
-const decodeEnrollResult: Decoder<CDRInstance> = (v, path = "$") =>
-  readInstance(v, path);
+/** Enroll result (R13): the stored registry entry PLUS the actual
+ * post-operation facts — CDR enabled or not, a client active or not, and
+ * whether the auto-enable was attempted / succeeded / failed. The UI
+ * renders conditional copy from these facts; it never assumes. */
+export interface CDREnrollResult {
+  instance: CDRInstance;
+  stored: boolean;
+  operationId: string;
+  /** stored, or dispatched when the receipt transition could not be
+   * persisted (receiptRecorded=false; recovery still classifies LANDED). */
+  receiptState: string;
+  receiptRecorded: boolean;
+  receiptError: string;
+  cdrEnabled: boolean;
+  clientActive: boolean;
+  clientInitError: string;
+  autoEnable: { attempted: boolean; succeeded: boolean; error: string };
+}
 
-/** NON-idempotent trust establishment. First successful enrollment
- * auto-enables CDR (persisted sentinel) — the ceremony copy says so. */
+const decodeEnrollResult: Decoder<CDREnrollResult> = (v, path = "$") => {
+  const o = readRecord(v, path);
+  const auto = readRecord(o["autoEnable"], `${path}.autoEnable`);
+  return {
+    instance: readInstance(o["instance"], `${path}.instance`),
+    stored: field(o, "stored", readBoolean, path),
+    operationId: field(o, "operationId", readString, path),
+    receiptState: field(o, "receiptState", readString, path),
+    receiptRecorded: field(o, "receiptRecorded", readBoolean, path),
+    receiptError: opt(o, "receiptError", readString, path) ?? "",
+    cdrEnabled: field(o, "cdrEnabled", readBoolean, path),
+    clientActive: field(o, "clientActive", readBoolean, path),
+    clientInitError: opt(o, "clientInitError", readString, path) ?? "",
+    autoEnable: {
+      attempted: field(auto, "attempted", readBoolean, `${path}.autoEnable`),
+      succeeded: field(auto, "succeeded", readBoolean, `${path}.autoEnable`),
+      error: opt(auto, "error", readString, `${path}.autoEnable`) ?? "",
+    },
+  };
+};
+
+/** NON-idempotent trust establishment. The operation id is bound
+ * IMMUTABLY by the appliance: a second POST with the same id (any name or
+ * endpoint) performs no RPC and is refused (409 naming the recovery
+ * path). */
 export function enrollCDRInstance(
   input: CDREnrollInput,
   signal?: AbortSignal,
-): Promise<CDRInstance> {
+): Promise<CDREnrollResult> {
   return apiRequest("/api/cdr/instances/enroll", decodeEnrollResult, {
     method: "POST",
     body: {
@@ -453,6 +490,11 @@ export interface CDREnrollRecovery {
   hasReceipt: boolean;
   retryable: boolean;
   error: string;
+  /** false when the classification is authoritative but the local receipt
+   * transition could not be persisted (the previous durable state is kept;
+   * resolve again later). */
+  receiptUpdated: boolean;
+  receiptError: string;
   /** Exact revocation path for ISSUED_BUT_NOT_STORED. */
   revocation?: { apiAvailable: boolean; cli: string };
 }
@@ -483,6 +525,8 @@ const decodeRecovery: Decoder<CDREnrollRecovery> = (v, path = "$") => {
     hasReceipt: field(o, "hasReceipt", readBoolean, path),
     retryable: field(o, "retryable", readBoolean, path),
     error: opt(o, "error", readString, path) ?? "",
+    receiptUpdated: opt(o, "receiptUpdated", readBoolean, path) ?? true,
+    receiptError: opt(o, "receiptError", readString, path) ?? "",
   };
   const rev = o["revocation"];
   if (rev !== undefined && rev !== null) {
@@ -497,7 +541,10 @@ const decodeRecovery: Decoder<CDREnrollRecovery> = (v, path = "$") => {
 
 /** Fresh authoritative resolution of one enrollment operation through
  * Sluice's EnrollStatus. Mutates only the local receipt; never mints,
- * stores or revokes anything. */
+ * stores or revokes anything. When a receipt exists its BOUND endpoint and
+ * pin are authoritative (a conflicting value is refused with 409 before any
+ * network activity); endpoint/pin are consulted only for a receipt-less
+ * recovery. */
 export function recoverCDREnrollment(
   input: { operationId: string; endpoint?: string; serverFingerprint?: string },
   signal?: AbortSignal,
@@ -530,10 +577,24 @@ export interface CDREnrollReceipt {
   note: string;
 }
 
+/** R12.8: the receipt file's integrity truth — ok=false means the store is
+ * DEGRADED (duplicate ids, bad grammar, impossible states, missing identity
+ * fields, or more than the cap): no new enrollment is created until the
+ * offending records are repaired by position. */
+export interface CDREnrollReceiptIntegrity {
+  ok: boolean;
+  issues: readonly {
+    kind: string;
+    operationId: string;
+    positions: readonly number[];
+  }[];
+}
+
 export interface CDREnrollReceipts {
   receipts: readonly CDREnrollReceipt[];
   count: number;
   unresolved: number;
+  integrity: CDREnrollReceiptIntegrity;
 }
 
 export const decodeCDREnrollReceipts: Decoder<CDREnrollReceipts> = (
@@ -563,10 +624,34 @@ export const decodeCDREnrollReceipts: Decoder<CDREnrollReceipts> = (
       });
     }
   }
+  const integ = readRecord(o["integrity"], `${path}.integrity`);
+  const rawIssues = integ["issues"];
+  const issues: {
+    kind: string;
+    operationId: string;
+    positions: readonly number[];
+  }[] = [];
+  if (rawIssues !== undefined && rawIssues !== null) {
+    for (const [i, item] of readArray((x, p) => readRecord(x, p))(
+      rawIssues,
+      `${path}.integrity.issues`,
+    ).entries()) {
+      const p = `${path}.integrity.issues[${i}]`;
+      issues.push({
+        kind: field(item, "kind", readString, p),
+        operationId: opt(item, "operationId", readString, p) ?? "",
+        positions: field(item, "positions", readArray(readNumber), p),
+      });
+    }
+  }
   return {
     receipts,
     count: field(o, "count", readNumber, path),
     unresolved: field(o, "unresolved", readNumber, path),
+    integrity: {
+      ok: field(integ, "ok", readBoolean, `${path}.integrity`),
+      issues,
+    },
   };
 };
 

@@ -203,16 +203,25 @@ describe("request shapes (fetch stub)", () => {
     expect(calls[2]?.init?.method).toBe("DELETE");
   });
 
-  it("enrollCDRInstance sends the token once and returns a token-free DTO", async () => {
+  it("enrollCDRInstance sends the token once and returns a token-free result with the post-operation facts", async () => {
     respond = () =>
       okJSON({
-        name: "n1",
-        endpoint: "h:1",
-        serverFingerprint: "ab",
-        clientCertFingerprint: "sha256:cc",
-        enrolledAt: "2026-08-30T00:00:00Z",
+        instance: {
+          name: "n1",
+          endpoint: "h:1",
+          serverFingerprint: "ab",
+          clientCertFingerprint: "sha256:cc",
+          enrolledAt: "2026-08-30T00:00:00Z",
+        },
+        stored: true,
+        operationId: "0123456789abcdef0123456789abcdef",
+        receiptState: "stored",
+        receiptRecorded: true,
+        cdrEnabled: false,
+        clientActive: false,
+        autoEnable: { attempted: true, succeeded: false, error: "mkdir" },
       });
-    const inst = await enrollCDRInstance({
+    const res = await enrollCDRInstance({
       name: "n1",
       endpoint: "h:1",
       serverFingerprint: "ab",
@@ -224,8 +233,28 @@ describe("request shapes (fetch stub)", () => {
     expect(sent).toContain("one-time-secret");
     expect(sent).toContain("0123456789abcdef0123456789abcdef");
     // The read DTO carries no token-shaped field at all.
-    expect(JSON.stringify(inst)).not.toContain("one-time-secret");
-    expect(inst.clientCertFingerprint).toBe("sha256:cc");
+    expect(JSON.stringify(res)).not.toContain("one-time-secret");
+    expect(res.instance.clientCertFingerprint).toBe("sha256:cc");
+    // The facts are decoded fail-closed: a pre-R13 flat instance is a
+    // decode failure, never a silent "auto-enabled".
+    expect(res.cdrEnabled).toBe(false);
+    expect(res.autoEnable.succeeded).toBe(false);
+    respond = () =>
+      okJSON({
+        name: "n1",
+        endpoint: "h:1",
+        serverFingerprint: "ab",
+        enrolledAt: "x",
+      });
+    await expect(
+      enrollCDRInstance({
+        name: "n1",
+        endpoint: "h:1",
+        serverFingerprint: "ab",
+        token: "t",
+        operationId: "0123456789abcdef0123456789abcdef",
+      }),
+    ).rejects.toMatchObject({ kind: "decode" });
   });
 
   it("testCDRFile uploads raw bytes (no JSON header) with the filename query", async () => {

@@ -884,6 +884,52 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > removed in finally). Route count 238 → 240; OpenAPI + generated types
 > reconciled.
 >
+> **2E-C TRUST-LIFECYCLE CORRECTION — ROUND 2 (this branch, 2026-09-02).**
+> Review of candidate d567f4d5 found two remaining ways the appliance could
+> forget the only identity of a credential Sluice may trust. RED-first at
+> exactly d567f4d5 (`cdr_2ec_tl2_red_test.go` 13/13 FAIL,
+> `cdr_sluice_integration_tl2_test.go` FAIL on the pinned daemon,
+> `cdr-tl2-red.test.tsx` 8 FAIL / 5 baseline), then corrected.
+> **R11 — unresolved renewals block destructive lifecycle operations:** a
+> `renewing` generation (durable operation id, no fingerprint yet) is a
+> trust identity; DELETE and revoke-by-name now resolve every one of them
+> SYNCHRONOUSLY and AUTHORITATIVELY through `EnrollStatus` over the
+> credential-less bootstrap channel (works with CDR disabled, no pool, no
+> poller, right after a restart) under the lifecycle lock BEFORE any
+> mutation — NOT_ISSUED drops the intent, ISSUED binds the fingerprint
+> durably (orphaned / revoked) and it is then reported as still trusted or
+> included in the whole-lineage revocation with proof; unreachable,
+> unsupported, malformed or unpersistable outcomes return 503/409 with
+> zero prune, zero shred, zero success audit, zero loss of the id.
+> **R12 — the enrollment operation binding is immutable:** receipt
+> creation is an atomic create-if-absent (plus an operation-id lock around
+> check+create), so a repeated dispatch of an operation id — concurrent or
+> serial, any name, any endpoint, an exact retry included — performs NO
+> RPC and is refused (409 naming the state + recovery path); Update can
+> change only state/fingerprint/note; recovery uses the bound endpoint +
+> pin and refuses conflicting caller values before any network activity
+> (receipt-less recovery still accepts explicit values); DELETE refuses
+> unresolved receipts (409) and only terminal ones are removable; a
+> receipt file with duplicate ids, bad grammar, impossible states, missing
+> identity fields or more than the cap loads DEGRADED (integrity on GET,
+> creation refused, fenced positional repair); a failed receipt
+> transition is reported (`receiptRecorded`/`receiptUpdated` false with
+> the error) and the previous durable state is kept. Browser Abandon
+> clears only the marker. **R13 — truth:** the enrollment result carries
+> the ACTUAL post-operation facts (stored, cdrEnabled, clientActive,
+> autoEnable attempted/succeeded/error, receipt state) — a sentinel write
+> failure is rendered as "CDR is still disabled … Do not re-enroll", never
+> as "auto-enabled"; the browser marker read-back compares every written
+> field and validates the full grammar (operation id, non-empty identity
+> fields, SHA-256 pin form, finite timestamp). The e2e harness now runs
+> the PINNED Sluice daemon (real mTLS, first-boot token) so the browser
+> enrollment journey is a genuine exchange, a genuine definite refusal, a
+> lineage-aware delete and the receipt-immutability/AMBIGUOUS proofs on
+> the real appliance. Recorded harness debt: the deliberately unresolved
+> receipt created by that proof is, by contract, not removable and stays
+> on the shared /data (bounded by the receipt cap; terminal receipts are
+> pruned first).
+>
 > **2E-B FINAL STORAGE-READ FAIL-CLOSED CLOSURE (this branch, 2026-08-30).**
 > External review of the freeze candidate (465316df) found the last
 > lifecycle defect: the recovery read collapsed "cannot read / cannot
