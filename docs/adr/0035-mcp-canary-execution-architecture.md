@@ -368,3 +368,51 @@ dispatcher, and STRENGTHENS Layer B (the Shadow composition file may reference n
 Final posture: **LiveExecutor production-composed NO (armable), armed-by-default NO, Canary active NO,
 Production active NO, customer traffic 0, production credentials 0, uncontrolled upstream side effects 0.**
 The next phase is a separate First Controlled Canary Review + experiment.
+
+## Addendum (production live-dependency composition phase) — the live tier is production-COMPOSABLE (still not armed, not active)
+
+The prior addendum left the live tier composable ONLY through synthetic collaborators injected in tests:
+there was deliberately NO production caller of `composeGatewayLiveTierInto`, so a real node could never
+reach even the COMPOSED state. This phase closes that mechanical gap by wiring the REAL production
+dependency graph, while holding every safety invariant. It is NOT the First Controlled Canary.
+
+- **One production entrypoint (`mcp_live_production_deps.go`).** `composeProductionGatewayLiveTier` is
+  the single production caller of `composeGatewayLiveTierInto`. It constructs the real collaborators from
+  production authorities — a `secret.FileProvider` KEK (`secret.ValidateProvider`, no ephemeral/insecure
+  fallback), a `profile.Store` + a materialize-capable `broker.Broker` over the SHARED registry/catalog,
+  a bounded `upstreamclient.Client` (system-root trust, no `InsecureSkipVerify`, `DefaultGatewayPolicy`
+  https-only/no-private, a thin `net.Resolver` adapter whose SSRF rejection is owned by
+  `destination.Resolve`), the durable `events.Manager`, and a Gateway response-DLP profile — and delegates
+  the single `Deps.Executor` assignment to the seam. It does NOT import `internal/mcp/execution` and does
+  NOT assign `Deps.Executor`, so the execution-posture wall is unchanged.
+- **Disabled by default (`CULVERT_MCP_LIVE_DEPS`).** Env-only, startup-scoped, read once (same doctrine as
+  `CULVERT_MCP_SHADOW_READY`; no YAML/CLI/config-surface). Unset ⇒ nothing composed, byte-identical to a
+  build without the flag. The credential KEK path (`CULVERT_MCP_LIVE_CREDENTIAL_KEK`) is REQUIRED when
+  enabled; a partial opt-in fails closed.
+- **Atomic + fail-closed (§14/§15/§5–§12).** Every collaborator is built into locals and validated BEFORE
+  the seam is called once; any failure (missing/unreadable/symlinked/world-readable/wrong-size KEK,
+  relative/non-canonical KEK path, nil durable events, upstream construction error) returns early with a
+  bounded machine-readable reason and leaves `Deps.Executor` untouched. There is no half-composed tier and
+  a composition failure can never arm (nothing is published).
+- **The honest pre-Canary gap.** The broker is composed with its real KEK + profile store but ZERO
+  providers registered — no production credential Provider adapter exists yet — so a credential-requiring
+  tool fails closed at the broker (`broker_composed_no_provider`) while a no-credential / read-first tool
+  can execute once the node is explicitly armed. SPKI pin-provisioning for private/internal pinned servers
+  is the second recorded remaining blocker before the First Canary. Neither blocks composing/arming the
+  guarded graph for the public / no-credential read-first path.
+- **COMPOSED still != ARMED (§16/§17).** Composition records the tier COMPOSED and stops; arming stays the
+  separate `armLiveTier` act. A restart re-runs composition but never re-arms (the armed bit is not
+  persisted and no startup path calls the arming hook).
+- **Anti-synthetic wall (§20).** `mcp_live_production_deps_wall_test.go` pins `composeGatewayLiveTierInto`
+  and `composeProductionGatewayLiveTier` each to a single production call site and forbids any root
+  package-main reference to the test-only synthetic KEK/provider constructors (`secret.MemoryProvider`,
+  `provider.NewInMemory`). A synthetic collaborator can prove the executor works; it can never be the
+  reason a production node believes it is safe to execute.
+- **Observability (§13/§18/§22).** The machine-readable per-dependency status (`production_dependencies`)
+  is surfaced read-only on the tier status; the Canary readiness-matrix rows 5/6/7/14/15 are documented as
+  sourced from this real composition rather than a placeholder.
+
+Final posture (unchanged in every safety dimension, one capability added): **real production dependency
+composition YES, live tier production-composable YES, live tier explicitly armable YES; armed-by-default
+NO, Canary active NO, Production active NO, customer traffic 0, production credentials 0, uncontrolled
+upstream side effects 0.** The next phase remains a separate First Controlled Canary Review + experiment.
