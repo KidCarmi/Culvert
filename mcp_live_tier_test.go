@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,24 @@ import (
 // recordingUpstream is a synthetic execution.UpstreamCaller that COUNTS every irreversible call and
 // records the last method/auth, so a test can assert "upstream invocations == 0" (§16/§19) or count
 // the exact executions the rehearsal expects. It performs no network I/O.
+// waitForLiveTier polls cond until it returns true or the deadline elapses, YIELDING the scheduler each
+// iteration (runtime.Gosched) so a worker goroutine — an in-flight Execute reaching the admission
+// inFlight++, or a background quiesce reaching the un-armed state — can make progress. It replaces the
+// iteration-bounded busy spins (`for i := 0; i < N && !cond; i++`) that could exhaust their fixed
+// iteration budget BEFORE the awaited goroutine was ever scheduled under GOMAXPROCS=1 or a loaded CI
+// runner, a timing flake the determinism gate surfaced (PR #1290). It returns whether cond became true
+// within the deadline; callers assert on the result so a genuine stall still fails loudly.
+func waitForLiveTier(cond func() bool, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for !cond() {
+		if !time.Now().Before(deadline) {
+			return cond() // one last check, in case the deadline and the transition raced
+		}
+		runtime.Gosched()
+	}
+	return true
+}
+
 type recordingUpstream struct {
 	mu       sync.Mutex
 	calls    int
@@ -409,8 +428,9 @@ func TestLiveTier_QuiesceRejectsNewAndDrainsInFlight(t *testing.T) {
 	// in-flight execution. Use a channel barrier (not a sleep) to sequence.
 	done := make(chan int, 1)
 	go func() { done <- lt.quiesce(drainWaitFn(lt, time.Now().Add(5*time.Second))) }()
-	// Spin until the quiesce has un-armed (state==quiescing) — deterministic via the observable bit.
-	for i := 0; i < 100000 && lt.armed(); i++ {
+	// Wait until the quiesce has un-armed (state==quiescing) — deterministic via the observable bit.
+	if !waitForLiveTier(func() bool { return !lt.armed() }, 5*time.Second) {
+		t.Fatal("quiesce did not un-arm the tier within the deadline")
 	}
 	if liveExecDepsConfigured(false) {
 		t.Fatal("quiesce must clear the armed bit BEFORE draining (reject new Canary transitions)")

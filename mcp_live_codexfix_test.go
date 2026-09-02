@@ -346,9 +346,7 @@ func TestLiveCommit_LeavingLiveDemoteDoesNotBlockOnInflight(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(done) }()
-	for i := 0; i < 5_000_000 && lt.inFlightCount() == 0; i++ {
-	}
-	if lt.inFlightCount() != 1 {
+	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
 		t.Fatalf("one execution must be in flight before the demotion, got %d", lt.inFlightCount())
 	}
 
@@ -450,9 +448,7 @@ func TestQuiesce_RepeatedAttemptPreservesResidualCount(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(done) }()
-	for i := 0; i < 5_000_000 && lt.inFlightCount() == 0; i++ {
-	}
-	if lt.inFlightCount() != 1 {
+	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
 		t.Fatalf("one execution must be in flight, got %d", lt.inFlightCount())
 	}
 
@@ -488,9 +484,7 @@ func TestQuiesce_ResidualRetryRefusesConcurrentRearm(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(done) }()
-	for i := 0; i < 5_000_000 && lt.inFlightCount() == 0; i++ {
-	}
-	if lt.inFlightCount() != 1 {
+	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
 		t.Fatalf("one execution must be in flight, got %d", lt.inFlightCount())
 	}
 
@@ -502,9 +496,7 @@ func TestQuiesce_ResidualRetryRefusesConcurrentRearm(t *testing.T) {
 	// A retry quiesce with a generous budget re-enters quiescing and blocks on the in-flight.
 	retryDone := make(chan int, 1)
 	go func() { retryDone <- quiesceLiveTier(capb, 5*time.Second) }()
-	for i := 0; i < 5_000_000 && lt.State() != liveTierQuiescing; i++ {
-	}
-	if lt.State() != liveTierQuiescing {
+	if !waitForLiveTier(func() bool { return lt.State() == liveTierQuiescing }, 5*time.Second) {
 		t.Fatal("a residual-retry quiesce must re-enter the quiescing state so re-arm stays refused")
 	}
 

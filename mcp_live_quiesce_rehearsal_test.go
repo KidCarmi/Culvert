@@ -52,15 +52,14 @@ func TestLiveQuiesceRehearsal_FullSequence(t *testing.T) {
 	<-inflightStarted
 	// Wait until the in-flight execution has been admitted (in-flight count == 1) — deterministic via
 	// the observable count, not a sleep.
-	for i := 0; i < 5_000_000 && lt.inFlightCount() == 0; i++ {
-	}
-	if lt.inFlightCount() != 1 {
+	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
 		t.Fatalf("one execution must be in flight before quiesce, got %d", lt.inFlightCount())
 	}
 	// Quiesce on a goroutine — it un-arms immediately, then drains the one in-flight execution.
 	quiesceDone := make(chan int, 1)
 	go func() { quiesceDone <- quiesceLiveTier(capb, 5*time.Second) }()
-	for i := 0; i < 5_000_000 && lt.armed(); i++ {
+	if !waitForLiveTier(func() bool { return !lt.armed() }, 5*time.Second) {
+		t.Fatal("quiesce must un-arm the tier before draining")
 	}
 	// Live is now OFF — the demote precondition (§15 "quiesce the live tier before the demotion").
 	if liveExecDepsConfigured(false) {
