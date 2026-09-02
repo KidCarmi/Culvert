@@ -50,7 +50,7 @@ func TestPersistCustomUITLS_KeyWriteFailureDoesNotCorruptExistingCert(t *testing
 	if err := os.Remove(customUITLSKeyPath()); err != nil {
 		t.Fatalf("remove key to stage failure: %v", err)
 	}
-	if err := os.Mkdir(customUITLSKeyPath(), 0o755); err != nil {
+	if err := os.Mkdir(customUITLSKeyPath(), 0o750); err != nil {
 		t.Fatalf("mkdir over key path: %v", err)
 	}
 
