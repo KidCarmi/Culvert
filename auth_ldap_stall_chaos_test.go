@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"runtime"
@@ -291,7 +292,7 @@ func TestChaos57_ConcurrentStallsDoNotAccumulateGoroutines(t *testing.T) {
 			defer wg.Done()
 			// Distinct credentials so nothing is served from the cache and
 			// every call has to reach the stalled directory.
-			a.Verify("user", string(rune('a'+i)))
+			a.Verify("user", fmt.Sprintf("pw-%d", i))
 		}(i)
 	}
 
