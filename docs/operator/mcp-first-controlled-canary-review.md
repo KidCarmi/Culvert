@@ -96,8 +96,13 @@ reversible:
 | customer data / traffic / prod creds | **none** |
 | request count | machine-enforced tiny `canary.Budget` (see §9) |
 
-No percentages, groups, wildcards, or a second of anything (`canary.ValidateScope` enforces this — §10).
-This table is the *intended* shape; §4–§6 record why it is not yet executable or fully resolvable.
+No percentages, groups, or wildcards (`canary.ValidateScope` enforces these — §10). **But
+`ValidateScope` does NOT enforce "exactly one" of everything:** `MaxCanaryServers`/`MaxCanaryTenants`
+are 1 (so servers/tenants are capped at one), while `MaxCanaryTools` and `MaxCanaryPrincipals` are
+**2** — a two-tool or two-principal scope passes the gate. The exact one-tool/one-principal shape is
+therefore an EXTERNAL authorization prerequisite (or the activation path must additionally require
+exactly one), not a machine-enforced property. This table is the *intended* shape; §4–§6 and §10
+record why it is not yet executable, fully resolvable, or fully enforced.
 
 ---
 
@@ -225,9 +230,17 @@ but no *authoritative* budget input path feeds `productionCanaryActivationInputs
 change without a scope edit), empty tenants, and unbounded identity; it requires ≥1 exact server,
 ≥1 exact tool with a fingerprint, a concrete tenant, and a named principal, all within the
 First-Canary bounds (`MaxCanaryServers=1`, `MaxCanaryTools=2`, `MaxCanaryPrincipals=2`,
-`MaxCanaryTenants=1`) and read-first operations. Every near-miss (a second server/tool/tenant, a
-percentage, a group, a wildcard tool, a different fingerprint/format, a control op) is rejected by a
-distinct sub-reason. Specifiable and GO in isolation.
+`MaxCanaryTenants=1`) and read-first operations. Rejected near-misses: a second SERVER or second
+TENANT (caps are 1), a percentage, a group, a wildcard/fingerprint-less tool, a different
+fingerprint/format, a control op — each by a distinct sub-reason.
+
+**Correction (Codex P1) — `ValidateScope` does NOT enforce exactly-one tool/principal.**
+`MaxCanaryTools` and `MaxCanaryPrincipals` are **2**, so a two-tool or two-principal scope PASSES
+the scope gate. A second tool or second principal is therefore NOT a rejected near-miss. For the
+one-of-everything experiment, "exactly one tool AND exactly one principal" must be imposed as an
+EXTERNAL authorization prerequisite (or the activation path must additionally require count==1 on
+both axes); the machine gate alone permits two. This is not GO as claimed — it is an external
+constraint to add to the unblock list (§26).
 
 ---
 
@@ -325,20 +338,28 @@ generation-bound; an unknown code fails closed to `AbortCanary` (`abort_control.
 **Correction (Codex P1) — most whole-Canary trips are NOT wired to an automatic tripper.** A
 repository-wide search finds exactly TWO production `aborter.Trip` sites in the execution path, both
 in `reserveCanaryExecution` (`mcp_canary_runtime.go:391,394`): `budget_exhausted` and `scope_escape`.
-The remaining `AbortCanary` codes are declared in the taxonomy but NOT auto-tripped:
-- `tool_fingerprint_drift` / `server_identity_drift`: tool drift only DENIES the single request at
+The generic `tripCanaryAbort` wrapper (`mcp_canary_runtime.go:453`) has NO production caller (Codex
+P1, verified), so ALL the other declared `AbortCanary` codes are NOT auto-tripped:
+- `out_of_scope_execution`: no auto-trip (the per-request read-first/scope gate denies the request
+  but does not stop the Canary).
+- `tool_fingerprint_drift` / `server_identity_drift`: drift only DENIES the single request at
   `preCallGuard` (`errToolDriftedBeforeCall`); it does not trip the whole Canary.
+- `credential_safety_failure`: no auto-trip.
 - `outcome_evidence_loss`: only increments a metric (`ObserveOutcomeEvidenceLoss`, `run.go:282`).
 - `unexpected_upstream_response`: nothing reconciles the witness (see §14); no auto-trip.
 - `elevated_error_rate` / `latency_pathology`: no threshold tripper wired.
 
-So after an outcome-commit failure or a witness divergence, LATER requests could still reach the
-upstream instead of the Canary auto-stopping. The automatic controls that DO hold are the budget
-ceiling, the identity/blast-radius cap (`scope_escape`), the per-request kill re-read, per-request
-tool-drift denial, and manual demotion/kill. The gap is a **product-defect prerequisite** (§26): the
-whole-Canary auto-abort must be wired for drift, evidence loss, unexpected response, and the two
-threshold conditions before a First Canary is authorized. My earlier "scope/budget/drift/kill
-controls ARE automatic" claim was wrong for drift and for the evidence/response conditions.
+So the ONLY whole-Canary breaches that auto-stop are `budget_exhausted` and `scope_escape`; the other
+EIGHT declared breaches do not. After any of them, LATER requests could still reach the upstream
+instead of the Canary auto-stopping. The automatic controls that DO hold are the budget ceiling, the
+identity/blast-radius cap (`scope_escape`), the per-request kill re-read, per-request tool-drift
+denial, and manual demotion/kill. The gap is a **product-defect prerequisite** (§26): whole-Canary
+auto-abort must be wired for ALL eight remaining declared breaches
+(`out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
+`credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
+`elevated_error_rate`, `latency_pathology`) before a First Canary is authorized. My earlier
+"scope/budget/drift/kill controls ARE automatic" claim was wrong for everything except budget and
+scope_escape.
 
 ---
 
@@ -477,7 +498,8 @@ BLOCKED-vs-FAILED note in §26).
 | A read-first-admissible one-exact-tool operation exists | **NO — classifier refuses `tools/call`; discovery cannot bind one tool (§6)** |
 | Supported upstream trust model for a controlled server available today | **NO** (§5) |
 | Shadow trust ≠ live trust proven; live approval does not activate Canary | YES (§8) |
-| Tight scope validated; every near-miss outside scope | YES (§10) |
+| Tight scope validated (no percentage/group/wildcard; server & tenant capped at 1) | YES (§10) |
+| Machine gate enforces exactly-one tool AND exactly-one principal | **NO — caps are 2; must be an external prerequisite (§10)** |
 | Tiny budget; N allowed / N+1 impossible | YES (§9) |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; §5 server absent (§14)** |
@@ -538,9 +560,14 @@ Canary activatable, axes 4–5 would have made the verdict FAILED.)
   preflight, and arm the live tier on the controlled node via the governed path;
 - ship a finer operation classifier (or a designed discovery-trust path) so exactly one harmless
   operation is read-first-admissible AND bindable to one exact tool;
-- **[dedicated PR]** wire whole-Canary auto-abort for `tool_fingerprint_drift`,
-  `server_identity_drift`, `outcome_evidence_loss`, `unexpected_upstream_response`, and the two
-  threshold conditions, plus an automatic witness-reconciliation trip;
+- impose "exactly one tool AND exactly one principal" as an authorization prerequisite (or add a
+  count==1 constraint to the activation path) — `ValidateScope` alone permits up to two of each
+  (`MaxCanaryTools`/`MaxCanaryPrincipals` = 2), so the machine gate does not enforce the
+  one-of-everything shape (§10);
+- **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
+  `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
+  `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
+  `elevated_error_rate`, `latency_pathology` — plus an automatic witness-reconciliation trip;
 - **[dedicated PR]** emit a complete, non-success-only durable outcome record so a pre-crash
   invocation is always determinable.
 
