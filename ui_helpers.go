@@ -24,18 +24,35 @@ func auditEvent(r *http.Request, action, object, detail string) {
 // accountability; the username adds readability. Callers that drive a backend
 // service (which audits via the headless auditAdd) use this to pass the same
 // actor string the audit ring would record.
+//
+// It resolves the SAME identity family as sessionAdmin, in the same precedence
+// order (UI session cookie Sub → Email → the HTTP Basic username the auth
+// middleware authenticated into context). Keeping the two in step is the point:
+// one admin action writes an actor to BOTH the audit ring (here) and the
+// config-version store (sessionAdmin), so if only one of them learned the Basic
+// fallback the same action would be attributed to two different identities —
+// a bare IP in the audit trail next to a username in config history. The Basic
+// username is only ever present after cfg.VerifyUIUser succeeded
+// (uiAuthMiddleware), so it is authenticated, never request-asserted.
 func auditActor(r *http.Request) string {
 	// RISK-019: attribute to the real client behind a configured trusted proxy
 	// so audit lines don't all name the reverse proxy (falls back to the peer).
 	actor := realClientIP(r)
+	name := ""
 	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
-		name := sess.Sub
+		name = sess.Sub
 		if name == "" {
 			name = sess.Email
 		}
-		if name != "" {
-			actor = name + "@" + actor
-		}
+	}
+	if name == "" {
+		// Basic-auth fallback: programmatic/CLI admin access carries no session
+		// cookie, so without this the audit ring records the bare IP for an
+		// action whose actor the middleware already authenticated.
+		name = uiUser(r)
+	}
+	if name != "" {
+		actor = name + "@" + actor
 	}
 	return actor
 }

@@ -98,6 +98,27 @@ func seedToolTrustInventory2(t *testing.T) twoToolInv {
 	}
 }
 
+// swapToolTrustNowFnForTest swaps the coordinator clock UNDER mcpToolTrust.mu and returns the
+// previous value so a caller restores it the same way.
+//
+// It exists because the lock is only half the contract. mcpToolTrust.now() reads nowFn under
+// c.mu.RLock PRECISELY because the background reconcile loop can call it while a test swaps
+// the clock — and that loop (startToolTrustReconcileLoop) is bound to the process lifecycle
+// ctx, so it keeps ticking long after the test that composed it returned, into whatever test
+// runs next. A bare `mcpToolTrust.nowFn = …` assignment does not hold up the WRITER's end, so
+// the reader's lock bought nothing and the pair is a genuine data race (CI caught exactly
+// that: the leaked reconcile loop from TestControlledShadowRestartDrill reading now() against
+// TestShadowSoak's deferred clock restore). resetMCPToolTrustForTest and the composition
+// helpers here already take the lock; routing every swap through this makes it impossible to
+// forget in a new one.
+func swapToolTrustNowFnForTest(fn func() time.Time) func() time.Time {
+	mcpToolTrust.mu.Lock()
+	defer mcpToolTrust.mu.Unlock()
+	prev := mcpToolTrust.nowFn
+	mcpToolTrust.nowFn = fn
+	return prev
+}
+
 // composeToolTrust composes the coordinator against a temp data dir with the given
 // clock (nil ⇒ real time). It isolates the process-global singleton for the test.
 func composeToolTrust(t *testing.T, clk func() time.Time) {
