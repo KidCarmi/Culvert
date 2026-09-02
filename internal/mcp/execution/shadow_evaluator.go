@@ -365,14 +365,14 @@ func (s *ShadowEvaluator) credentialReadiness(in runtime.ExecInput) (string, boo
 		return "", true
 	}
 	if s.plan == nil {
-		// No planning capability is composed. Shadow must PREDICT what live does, not
-		// fail closed: the live executor gates credential materialization on
-		// `useBroker := e.cfg.Broker != nil && profileRef != ""` (run.go), so with no
-		// broker it attaches NO Authorization and PROCEEDS to the call. Failing closed
-		// here would diverge from live enforcement. The outcome stays WOULD_EXECUTE; the
-		// label records that the request would run with no credential attached — the
-		// truthful nuance an operator needs to read from the evidence.
-		return planStatusNoPlanner, true
+		// No planning capability is composed but a credential IS required. Shadow PREDICTS what live
+		// does, and live now FAILS CLOSED here: a credential-required request with no broker would
+		// otherwise reach the upstream with NO Authorization, letting a credential-required operation
+		// hit an upstream that accepts ambient/unauthenticated access (Codex P2 round-6, PR #1290). The
+		// live executor blocks this before any side effect (run.go: profileRef != "" && Broker == nil ⇒
+		// ReasonCredentialProfileMissing), so Shadow reports WOULD_FAIL_CREDENTIAL_READINESS to stay
+		// equivalent; the planStatusNoPlanner label records WHY (no planner composed).
+		return planStatusNoPlanner, false
 	}
 	if _, err := s.plan(planInput(in, profileRef)); err != nil {
 		return planStatusInvalid, false

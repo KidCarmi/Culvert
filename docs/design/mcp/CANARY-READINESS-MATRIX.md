@@ -193,16 +193,29 @@ composed are now implemented and dormant-by-construction (Execution posture stay
 
 Every one is a **separately-reviewed activation**, not a config change:
 
-1. Arm the live tier (compose a live `execution.Executor` + UpstreamCaller + materialize-broker;
-   call `markGatewayExecDepsReady`) — **edits the execution-posture wall**.
+1. ~~Arm the live tier (compose a live `execution.Executor` + UpstreamCaller + materialize-broker;
+   call `markGatewayExecDepsReady`).~~ **COMPOSITION + ARMING LIFECYCLE DONE (live-tier composition
+   phase).** The real live executor is composable (`composeGatewayLiveTierInto`, `mcp_live_startup.go`)
+   and the tier is explicitly ARMABLE through the single authoritative, node-readiness-gated path
+   (`armLiveTier`, `mcp_live_arming.go`), with a quiesce/disarm inverse and the CANARY-ROLLBACK-LIVE-
+   QUIESCE-REHEARSAL closed. **COMPOSED != ARMED != Canary ACTIVE** is pinned. What REMAINS for a real
+   deployment: the production KEK / destination-resolver / profile-store dependency wiring (a documented,
+   separately-reviewed prerequisite — no production caller composes the tier this slice), and the
+   operational decision to actually arm on a real node. Composed-but-unarmed still reports
+   `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
+   5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.
 2. ~~Make `live_execution` issuable under stronger governance (four-eyes, short TTL).~~ **DONE
    (this slice).** `live_execution` is issuable through the dedicated governed path
    (`RequestLiveApproval`+`ApproveLive`): mandatory finite TTL ≤ 24h, four-eyes at approval on the
    canonical authenticated principal, exact-current-state revalidation, no shadow-request reuse, no
    catalog promotion. Row 16 is now satisfiable (not auto-satisfied). This is a TRUST decision only —
    it arms no executor and cannot clear `live_executor_absent` (row 5), which item 1 still gates.
-3. Call `beginCanaryActivation` from the (future) armed live path so the runtime budget/abort
-   generation is armed, and drive `reserveCanaryExecution` at the pre-side-effect boundary.
+3. ~~Call `beginCanaryActivation` from the armed live path; drive `reserveCanaryExecution` at the
+   pre-side-effect boundary.~~ **WIRED (live-tier composition phase).** `beginCanaryActivation`/
+   `demoteCanary` are wired into the single authoritative rollout commit gate (a production commit into
+   a live mode begins the generation exactly once; a demotion invalidates it), and the live side-effect
+   gate (`mcp_live_gate.go`) drives `reserveCanaryExecution` at the boundary before the executor's
+   kill re-check. Still gated on the tier being armed AND a real Shadow→Canary transition committing.
 4. Close **`CANARY-ROLLBACK-COORDINATOR-REHEARSAL`** (row 20) by running the authoritative rehearsal
    on a genuinely rollback-capable node (`POST /api/mcp/rollout/rehearse-rollback-authoritative`). The
    machinery landed (coordinator core extracted; the rehearsal routes the scratch demotion through it,

@@ -2,6 +2,7 @@ package mcperr
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -151,6 +152,8 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonApprovalPurposeUnsupported, "approval_purpose_unsupported"},
 		{ReasonApprovalNotAuthorized, "approval_not_authorized"},
 		{ReasonApprovalStoreUnavailable, "approval_store_unavailable"},
+		{ReasonRolloutBudgetExhausted, "rollout_budget_exhausted"},
+		{ReasonLiveTrustRevalidationFailed, "live_trust_revalidation_failed"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
@@ -183,6 +186,29 @@ func TestReasonOfAndIs(t *testing.T) {
 	other := New(ReasonResourceLimit, "", "")
 	if !errors.Is(base, other) {
 		t.Fatal("same-reason errors should match via Is")
+	}
+}
+
+// TestReasonOfTraversesMultiError proves ReasonOf finds the bounded reason inside a multi-error tree
+// (fmt.Errorf with more than one %w), like errors.As — a single-chain-only traversal would return
+// ReasonNone and lose the classification (Codex round-9, PR #1290).
+func TestReasonOfTraversesMultiError(t *testing.T) {
+	reasoned := New(ReasonRolloutTransitionInvalid, "rollout.transition", "activation_failed")
+	cause := errors.New("some_specific_cause")
+	// Reason first, cause second (the production order) — and the reverse — must both classify.
+	if got := ReasonOf(fmt.Errorf("%w: %w", reasoned, cause)); got != ReasonRolloutTransitionInvalid {
+		t.Fatalf("multi-error (reason first) ReasonOf = %v, want ReasonRolloutTransitionInvalid", got)
+	}
+	if got := ReasonOf(fmt.Errorf("%w: %w", cause, reasoned)); got != ReasonRolloutTransitionInvalid {
+		t.Fatalf("multi-error (reason second) ReasonOf = %v, want ReasonRolloutTransitionInvalid", got)
+	}
+	// A multi-error with no bounded reason in any branch stays None.
+	if got := ReasonOf(fmt.Errorf("%w: %w", errors.New("a"), errors.New("b"))); got != ReasonNone {
+		t.Fatalf("multi-error with no bounded reason ReasonOf = %v, want ReasonNone", got)
+	}
+	// Nested: a multi-error wrapped again in a single chain still resolves.
+	if got := ReasonOf(fmt.Errorf("outer: %w", fmt.Errorf("%w: %w", reasoned, cause))); got != ReasonRolloutTransitionInvalid {
+		t.Fatalf("nested multi-error ReasonOf = %v, want ReasonRolloutTransitionInvalid", got)
 	}
 }
 

@@ -182,7 +182,10 @@ func TestExitGapC8_CredentialReadinessFromPlanAlone(t *testing.T) {
 		t.Fatalf("invalid-plan: Planner.Plan must be called exactly once, got %d", invalidPlanner.count())
 	}
 
-	// (4) Profile named but NO planner composed — mirrors live no-broker (proceeds, no cred attached).
+	// (4) Profile named but NO planner composed — mirrors live no-broker, which now FAILS CLOSED: a
+	// credential is required but cannot be planned/materialized, so live blocks before any side effect
+	// rather than reach the upstream with no Authorization (Codex P2 round-6). Shadow predicts the same
+	// would_fail_credential_readiness; the no_planner_composed label records WHY.
 	evNoPlanner, err := NewShadowEvaluator(ShadowConfig{
 		State: stateForMode(t, rollout.ModeShadow), Events: realEvents(t, nil), // Planner: nil
 	})
@@ -190,8 +193,8 @@ func TestExitGapC8_CredentialReadinessFromPlanAlone(t *testing.T) {
 		t.Fatalf("NewShadowEvaluator: %v", err)
 	}
 	d = evNoPlanner.decide(credProfileInput("profile:ro"))
-	if d.Outcome != ShadowWouldExecute || d.CredentialPlan != planStatusNoPlanner {
-		t.Fatalf("no-planner: want would_execute/%s (mirror live no-broker), got %q/%q", planStatusNoPlanner, d.Outcome, d.CredentialPlan)
+	if d.Outcome != ShadowWouldFailCredentialReadiness || d.CredentialPlan != planStatusNoPlanner {
+		t.Fatalf("no-planner: want would_fail_credential_readiness/%s (fail closed, mirror live no-broker), got %q/%q", planStatusNoPlanner, d.Outcome, d.CredentialPlan)
 	}
 }
 

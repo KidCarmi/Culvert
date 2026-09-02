@@ -121,8 +121,18 @@ const (
 	// names deliberately avoid the "credential" pattern (repo gosec convention).
 	shadowOutWouldFailCredReady = "would_fail_credential_readiness"
 	shadowPlanInvalid           = "credential_plan_invalid"
+	shadowPlanNoPlanner         = "no_planner_composed"
 	shadowPlanNone              = "no_credential_profile"
 )
+
+// shadowCredReadyFailPlans are the credential-plan statuses that a would_fail_credential_readiness
+// outcome may carry: an invalid plan (planned and rejected), or no planner composed while a credential
+// was required (the live executor fails closed rather than reach the upstream with no Authorization —
+// Codex P2 round-6). Both are failure statuses in a biconditional with the fail outcome.
+var shadowCredReadyFailPlans = map[string]struct{}{
+	shadowPlanInvalid:   {},
+	shadowPlanNoPlanner: {},
+}
 
 // shadowPrePlanningOutcomes are the outcomes decide() returns BEFORE the credential-readiness
 // step (step 5): the pre-executor inspection hard-fail and hard control (step 1), the
@@ -414,13 +424,14 @@ func validateShadowOutcomeSubfacts(sh *ShadowEvidence) error {
 	if sh.RequestInspection == shadowReqInspWouldFail && sh.Outcome != shadowOutWouldFailInspection {
 		return evtErr(mcperr.ReasonEventInvalid, "a failing request inspection must yield would_fail_inspection")
 	}
-	if sh.Outcome == shadowOutWouldFailCredReady && sh.CredentialPlan != shadowPlanInvalid {
-		return evtErr(mcperr.ReasonEventInvalid, "would_fail_credential_readiness without an invalid credential plan")
+	if _, credFail := shadowCredReadyFailPlans[sh.CredentialPlan]; sh.Outcome == shadowOutWouldFailCredReady && !credFail {
+		return evtErr(mcperr.ReasonEventInvalid, "would_fail_credential_readiness without a failing credential plan (invalid or no_planner_composed)")
 	}
-	// decide() sets planStatusInvalid only on the fail branch that also sets this outcome,
-	// and no ready-branch outcome ever carries the invalid plan, so it is a biconditional.
-	if sh.CredentialPlan == shadowPlanInvalid && sh.Outcome != shadowOutWouldFailCredReady {
-		return evtErr(mcperr.ReasonEventInvalid, "an invalid credential plan must yield would_fail_credential_readiness")
+	// decide() sets a failing plan status (invalid, or no_planner_composed while a credential is
+	// required) only on the fail branch that also sets this outcome, and no ready-branch outcome ever
+	// carries a failing plan, so it is a biconditional.
+	if _, credFail := shadowCredReadyFailPlans[sh.CredentialPlan]; credFail && sh.Outcome != shadowOutWouldFailCredReady {
+		return evtErr(mcperr.ReasonEventInvalid, "a failing credential plan must yield would_fail_credential_readiness")
 	}
 	// An outcome decide() returns before the credential step never evaluated the plan, so it
 	// must carry the unplanned default — a valid/invalid/no_planner status would falsely claim
