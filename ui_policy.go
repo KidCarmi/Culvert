@@ -1892,23 +1892,6 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// findRuleByPriorityCopy returns a copy of the stored rule at the given
-// priority (nil if none) — the before-state snapshot for diff/audit.
-func findRuleByPriorityCopy(priority int) *PolicyRule {
-	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy
-	// convention) — copy only the matched rule, not every iteration.
-	// Effective list: candidate while drafting, else running (policy-draft G2) —
-	// the before-state for a diff/audit must come from what is being edited.
-	rules := effectivePolicyList()
-	for i := range rules {
-		if rules[i].Priority == priority {
-			r2 := rules[i]
-			return &r2
-		}
-	}
-	return nil
-}
-
 // effectiveRuleByID returns a copy of the rule with the given ID from the
 // effective rulebase (candidate while drafting, else running), or nil. The
 // before-state lookup for the id-addressed update/delete paths (policy-draft G2).
@@ -1950,8 +1933,10 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	policyWriteStateDecision(r, "resolved")
-	if err := validatePolicyRule(rule, effectivePolicyList(), -1); err != nil {
+	// Structural validation (state-independent) stays a pre-fence 400; the
+	// name/priority uniqueness checks run INSIDE the fence below (2E-C
+	// concurrency-status correction).
+	if err := validateRuleShape(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1966,15 +1951,26 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	// Atomic fence + mutation (2B.0a): when ?ifVersion= is asserted, the
-	// version comparison and the Add run in one coordinator critical section —
-	// the early policyVersionConflict above stays as fast-path/400 only.
-	var added PolicyRule
+	// Atomic fence + uniqueness validation + mutation (2B.0a): the version
+	// comparison, the duplicate-name/priority check and the Add run in one
+	// coordinator critical section against the same snapshot — the early
+	// policyVersionConflict above stays as fast-path/400 only.
+	var (
+		added  PolicyRule
+		ref    fencedRefusal
+		curVer int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		curVer, _ = target.policyVersion()
+		if err := validateRuleUniqueness(rule, target.List(), -1); err != nil {
+			ref = fencedRefusal{reason: err.Error()}
+			return false
+		}
 		added = target.Add(rule)
 		return true
 	})
@@ -1984,6 +1980,10 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if res.err != nil {
 		writePolicyPersistFailure(w, res.err)
+		return
+	}
+	if !res.ok {
+		writeFencedRefusal(w, r, ref, curVer)
 		return
 	}
 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
@@ -2021,12 +2021,6 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
 		return
 	}
-	beforeRule := findRuleByPriorityCopy(priority)
-	// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
-	if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
-		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-		return
-	}
 	var rule PolicyRule
 	if err := decodeJSON(r, &rule); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -2036,28 +2030,50 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	policyWriteStateDecision(r, "resolved")
-	if err := validatePolicyRule(rule, effectivePolicyList(), priority); err != nil {
+	if err := validateRuleShape(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// SERVER CANONICALIZATION FIRST (ID-trust correction): stamp metadata and
 	// re-derive object IDs from NAMES (client-supplied IDs are discarded),
 	// then validate the FINAL canonical rule — reference validation must
-	// never trust a client ID, and no restamp may follow it.
-	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	// never trust a client ID, and no restamp may follow it. CreatedAt is
+	// carried from the target resolved INSIDE the fence.
+	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Blocker B delete-first order: validate referenced objects under the
 	// shared gate before committing the edit.
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	// Atomic fence + mutation (2B.0a); a failed mutation that opened the draft
-	// fork is discarded inside the same critical section.
+	// Target existence, rule type and uniqueness are decided against the
+	// FENCED snapshot (2E-C concurrency-status correction).
+	var (
+		beforeRule *PolicyRule
+		ref        fencedRefusal
+		curVer     int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		curVer, _ = target.policyVersion()
+		beforeRule = findByPriorityIn(target, priority)
+		if beforeRule == nil {
+			ref = fencedRefusal{notFound: true}
+			return false
+		}
+		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
+		if ruleTypeOf(beforeRule) == ruleTypeAuth {
+			ref = fencedRefusal{reason: "auth rules are managed via /api/authpolicy (admin only)"}
+			return false
+		}
+		if err := validateRuleUniqueness(rule, target.List(), priority); err != nil {
+			ref = fencedRefusal{reason: err.Error()}
+			return false
+		}
+		rule.CreatedAt = beforeRule.CreatedAt
 		return target.Update(priority, rule)
 	})
 	if res.conflict != nil {
@@ -2069,7 +2085,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !res.ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
+		writeFencedRefusal(w, r, ref, curVer)
 		return
 	}
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
@@ -2103,19 +2119,32 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
 		return
 	}
-	beforeRule := findRuleByPriorityCopy(priority)
-	// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
-	if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
-		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-		return
-	}
 	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	// Atomic fence + mutation (2B.0a).
+	// Atomic fence + in-fence target resolution + mutation (2B.0a; 2E-C): the
+	// rule at this priority is identified at the authoritative moment, so the
+	// auth-rule guard cannot be bypassed by a reorder and the audit names the
+	// rule that actually vanished.
+	var (
+		beforeRule *PolicyRule
+		ref        fencedRefusal
+		curVer     int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		curVer, _ = target.policyVersion()
+		beforeRule = findByPriorityIn(target, priority)
+		if beforeRule == nil {
+			ref = fencedRefusal{notFound: true}
+			return false
+		}
+		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
+		if ruleTypeOf(beforeRule) == ruleTypeAuth {
+			ref = fencedRefusal{reason: "auth rules are managed via /api/authpolicy (admin only)"}
+			return false
+		}
 		return target.Delete(priority)
 	})
 	if res.conflict != nil {
@@ -2127,16 +2156,12 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !res.ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
+		writeFencedRefusal(w, r, ref, curVer)
 		return
-	}
-	name := fmt.Sprintf("priority=%d", priority)
-	if beforeRule != nil {
-		name = beforeRule.Name
 	}
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
-	auditEventDiffID(r, "policy.remove", name, ruleAuditID(beforeRule), "", beforeRule, nil)
+	auditEventDiffID(r, "policy.remove", beforeRule.Name, ruleAuditID(beforeRule), "", beforeRule, nil)
 	finalizeFencedPolicyWrite(r, "policy.remove", res)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -2155,16 +2180,6 @@ func ruleAuditID(r *PolicyRule) string {
 // addressing path. Mirrors the priority path's validation, auth-rule guard, and
 // metadata stamping but resolves the target by stable ULID (§1 identity seam).
 func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
-	beforeRule := effectiveRuleByID(id)
-	if beforeRule == nil {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
-	if ruleTypeOf(beforeRule) == ruleTypeAuth {
-		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-		return
-	}
 	var rule PolicyRule
 	if err := decodeJSON(r, &rule); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -2174,29 +2189,53 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	// Exclude the rule's CURRENT slot from duplicate checks (same as the
-	// priority path passes the URL priority).
-	policyWriteStateDecision(r, "resolved")
-	if err := validatePolicyRule(rule, effectivePolicyList(), beforeRule.Priority); err != nil {
+	if err := validateRuleShape(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// SERVER CANONICALIZATION FIRST (ID-trust correction): stamp metadata and
 	// re-derive object IDs from NAMES (client-supplied IDs are discarded),
 	// then validate the FINAL canonical rule — reference validation must
-	// never trust a client ID, and no restamp may follow it.
-	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	// never trust a client ID, and no restamp may follow it. CreatedAt is
+	// carried from the target resolved INSIDE the fence.
+	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Blocker B delete-first order: validate referenced objects under the
 	// shared gate (held by the apiPolicyUpdate caller) before committing.
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	// Atomic fence + mutation (2B.0a).
+	// Atomic fence + in-fence resolution/validation + mutation (2B.0a; 2E-C):
+	// the rule's CURRENT slot is excluded from the duplicate checks at the
+	// authoritative moment, so a concurrent reorder yields the structured 409
+	// instead of a stale-slot "rule name already exists".
+	var (
+		beforeRule *PolicyRule
+		ref        fencedRefusal
+		curVer     int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		curVer, _ = target.policyVersion()
+		beforeRule = target.findByIDCopy(id)
+		if beforeRule == nil {
+			ref = fencedRefusal{notFound: true}
+			return false
+		}
+		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only —
+		// an id never changes rule type, so this verdict is state-invariant.
+		if ruleTypeOf(beforeRule) == ruleTypeAuth {
+			ref = fencedRefusal{reason: "auth rules are managed via /api/authpolicy (admin only)", invariant: true}
+			return false
+		}
+		if err := validateRuleUniqueness(rule, target.List(), beforeRule.Priority); err != nil {
+			ref = fencedRefusal{reason: err.Error()}
+			return false
+		}
+		rule.CreatedAt = beforeRule.CreatedAt
 		return target.UpdateByID(id, rule)
 	})
 	if res.conflict != nil {
@@ -2208,7 +2247,7 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if !res.ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
+		writeFencedRefusal(w, r, ref, curVer)
 		return
 	}
 	logger.Printf("UI: policy rule updated id=%s name=%q", sanitizeLog(id), sanitizeLog(rule.Name))
@@ -2220,22 +2259,28 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 
 // apiPolicyDeleteByID handles DELETE /api/policy?id=<ulid> — reorder-safe delete.
 func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
-	beforeRule := effectiveRuleByID(id)
-	if beforeRule == nil {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	if ruleTypeOf(beforeRule) == ruleTypeAuth {
-		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-		return
-	}
 	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	// Atomic fence + mutation (2B.0a).
+	// Atomic fence + in-fence resolution + mutation (2B.0a; 2E-C).
+	var (
+		beforeRule *PolicyRule
+		ref        fencedRefusal
+		curVer     int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		curVer, _ = target.policyVersion()
+		beforeRule = target.findByIDCopy(id)
+		if beforeRule == nil {
+			ref = fencedRefusal{notFound: true}
+			return false
+		}
+		if ruleTypeOf(beforeRule) == ruleTypeAuth {
+			ref = fencedRefusal{reason: "auth rules are managed via /api/authpolicy (admin only)", invariant: true}
+			return false
+		}
 		return target.DeleteByID(id)
 	})
 	if res.conflict != nil {
@@ -2247,7 +2292,7 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if !res.ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
+		writeFencedRefusal(w, r, ref, curVer)
 		return
 	}
 	logger.Printf("UI: policy rule deleted id=%s", sanitizeLog(id))
@@ -2277,14 +2322,6 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing priority param or priorities body", http.StatusBadRequest)
 		return
 	}
-	// Auth rules are admin-managed via /api/authpolicy only — reject the
-	// whole batch rather than silently skipping (explicit > silent).
-	for _, p := range body.Priorities {
-		if isAuthRulePriority(p) {
-			http.Error(w, fmt.Sprintf("priority %d is an auth rule — managed via /api/authpolicy (admin only)", p), http.StatusBadRequest)
-			return
-		}
-	}
 	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
@@ -2292,11 +2329,26 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 	defer endPolicyWrite()
 	// Atomic fence + mutation (2B.0a): the whole batch runs in one critical
 	// section, so a fenced bulk delete is all-checked-then-deleted against the
-	// generation the client asserted. NOTE (recorded for the v2 client): this
-	// endpoint addresses rules by PRIORITY, which is not stable across a
-	// reorder — the v2 frontend does not use it (see the 2B parity record).
-	deleted := 0
+	// generation the client asserted. The auth-rule guard runs INSIDE the
+	// fence (2E-C): a priority that belongs to an admin-managed auth rule at
+	// the authoritative moment refuses the whole batch — explicit, never a
+	// silent skip, and never reachable by a reorder that moved an auth rule
+	// onto a listed slot after a pre-fence check. NOTE (recorded for the v2
+	// client): this endpoint addresses rules by PRIORITY, which is not stable
+	// across a reorder — the v2 frontend does not use it (2B parity record).
+	var (
+		deleted int
+		ref     fencedRefusal
+		curVer  int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		curVer, _ = target.policyVersion()
+		for _, p := range body.Priorities {
+			if rule := findByPriorityIn(target, p); rule != nil && ruleTypeOf(rule) == ruleTypeAuth {
+				ref = fencedRefusal{reason: fmt.Sprintf("priority %d is an auth rule — managed via /api/authpolicy (admin only)", p)}
+				return false
+			}
+		}
 		for _, p := range body.Priorities {
 			if target.Delete(p) {
 				deleted++
@@ -2311,6 +2363,10 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 	if res.err != nil {
 		// Rolled back — nothing durable changed; the count must not be reported.
 		writePolicyPersistFailure(w, res.err)
+		return
+	}
+	if !res.ok && ref.reason != "" {
+		writeFencedRefusal(w, r, ref, curVer)
 		return
 	}
 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
@@ -2357,35 +2413,45 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	// Access-only contract: the list must be exactly the current Stage-2 access-
-	// rule priority set. Stage-1 auth rules are reordered exclusively via
-	// /api/authpolicy (admin-only) and keep their priorities, so this endpoint
-	// permutes access rules among their own slots and never touches an auth rule
-	// (no operator/admin escalation). Rejecting any auth priority — and any
-	// partial/stale list — keeps the permutation well-defined.
-	access := listPolicyRules()
-	accessPris := make(map[int]bool, len(access))
-	for i := range access {
-		accessPris[access[i].Priority] = true
-	}
-	if len(body.Priorities) != len(accessPris) {
+	if len(body.Priorities) == 0 {
 		http.Error(w, "priorities must list every access rule exactly once", http.StatusBadRequest)
 		return
-	}
-	for _, p := range body.Priorities {
-		if !accessPris[p] {
-			http.Error(w, fmt.Sprintf("priority %d is not an access rule", p), http.StatusBadRequest)
-			return
-		}
 	}
 	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	// Atomic fence + mutation (2B.0a).
+	// Access-only contract, decided INSIDE the fence (2E-C): the list must be
+	// exactly the current Stage-2 access-rule priority set at the
+	// authoritative moment. Stage-1 auth rules are reordered exclusively via
+	// /api/authpolicy (admin-only) and keep their priorities, so this endpoint
+	// permutes access rules among their own slots and never touches an auth
+	// rule (no operator/admin escalation). A list that no longer covers the
+	// set — a rule was added or removed since the client loaded — is a state
+	// conflict, never a silently applied stale permutation.
+	var (
+		ref    fencedRefusal
+		curVer int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
-		return target.PermutePriorities(body.Priorities)
+		curVer, _ = target.policyVersion()
+		accessPris := accessPrioritySet(target)
+		if len(body.Priorities) != len(accessPris) {
+			ref = fencedRefusal{reason: "priorities must list every access rule exactly once"}
+			return false
+		}
+		for _, p := range body.Priorities {
+			if !accessPris[p] {
+				ref = fencedRefusal{reason: fmt.Sprintf("priority %d is not an access rule", p)}
+				return false
+			}
+		}
+		if !target.PermutePriorities(body.Priorities) {
+			ref = fencedRefusal{reason: "priority list length mismatch or unknown priority"}
+			return false
+		}
+		return true
 	})
 	if res.conflict != nil {
 		writePolicyVersionConflictError(w, res.conflict)
@@ -2396,13 +2462,38 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !res.ok {
-		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
+		writeFencedRefusal(w, r, ref, curVer)
 		return
 	}
 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
 	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
 	finalizeFencedPolicyWrite(r, "policy.reorder", res)
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// accessPrioritySet returns the Stage-2 access-rule priority set of ps — the
+// in-fence authority for the reorder/move contracts.
+func accessPrioritySet(ps *PolicyStore) map[int]bool {
+	rules := ps.List()
+	out := make(map[int]bool, len(rules))
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
+			out[rules[i].Priority] = true
+		}
+	}
+	return out
+}
+
+// accessRulesIn returns the Stage-2 access rules of ps in priority order.
+func accessRulesIn(ps *PolicyStore) []PolicyRule {
+	rules := ps.List()
+	out := make([]PolicyRule, 0, len(rules))
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
+			out = append(out, rules[i])
+		}
+	}
+	return out
 }
 
 // POST /api/policy/move — move a rule to first/last/before/after a target rule.
@@ -2493,29 +2584,52 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Access-only: build the moved order over Stage-2 access rules and permute
-	// just those priorities. Stage-1 auth rules are reordered via /api/authpolicy
-	// and keep their priorities, so an access move never crosses or renumbers one
-	// (no operator/admin escalation). Moving an auth rule via this endpoint is
-	// rejected because buildMovedPriorities won't find it among the access rules.
-	access := listPolicyRules()
-	if len(access) == 0 {
-		http.Error(w, "no rules to reorder", http.StatusBadRequest)
-		return
-	}
-	priorities, err := buildMovedPriorities(access, body.Priority, body.Position, body.TargetName)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	policyWriteStateDecision(r, "resolved")
 	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	// Atomic fence + mutation (2B.0a).
+	// Access-only: the moved order is built INSIDE the fence over the CURRENT
+	// Stage-2 access rules (2E-C), so the requested relation ("before/after
+	// this rule") is honoured against the authoritative order rather than a
+	// permutation computed on the order the client saw. Stage-1 auth rules
+	// are reordered via /api/authpolicy and keep their priorities, so an
+	// access move never crosses or renumbers one (no operator/admin
+	// escalation); moving an auth rule here is refused because it is not
+	// among the access rules.
+	var (
+		ref    fencedRefusal
+		curVer int64
+	)
 	res := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
-		return target.PermutePriorities(priorities)
+		curVer, _ = target.policyVersion()
+		// The moved priority must belong to an ACCESS rule at the
+		// authoritative moment: an auth rule there is a current-state refusal
+		// (a reorder can change which rule holds a priority), no rule there
+		// is not-found.
+		if moved := findByPriorityIn(target, body.Priority); moved != nil && ruleTypeOf(moved) == ruleTypeAuth {
+			ref = fencedRefusal{reason: "auth rules are managed via /api/authpolicy (admin only)"}
+			return false
+		}
+		access := accessRulesIn(target)
+		if len(access) == 0 {
+			ref = fencedRefusal{notFound: true}
+			return false
+		}
+		priorities, err := buildMovedPriorities(access, body.Priority, body.Position, body.TargetName)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				ref = fencedRefusal{notFound: true}
+			} else {
+				ref = fencedRefusal{reason: err.Error()}
+			}
+			return false
+		}
+		if !target.PermutePriorities(priorities) {
+			ref = fencedRefusal{reason: "reorder failed (concurrent modification?)"}
+			return false
+		}
+		return true
 	})
 	if res.conflict != nil {
 		writePolicyVersionConflictError(w, res.conflict)
@@ -2526,7 +2640,7 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !res.ok {
-		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
+		writeFencedRefusal(w, r, ref, curVer)
 		return
 	}
 	safePri := strings.ReplaceAll(fmt.Sprintf("%d", body.Priority), "\n", "")

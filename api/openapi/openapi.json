@@ -5950,16 +5950,16 @@
             "description": "Deleted."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
           },
           "404": {
-            "description": "No auth rule with this id/priority."
+            "description": "The addressed rule identity does not exist at the authoritative moment (decided inside the coordinator fence)."
           },
           "409": {
-            "description": "Version fence conflict ({error, currentVersion, yourVersion})."
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           },
           "500": {
             "description": "Durable persist failed — the mutation was rolled back."
@@ -6061,13 +6061,13 @@
             "description": "Create auth policy rule."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
           },
           "409": {
-            "description": "Version fence conflict — the running rulebase changed since the asserted generation ({error, currentVersion, yourVersion})."
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           },
           "500": {
             "description": "Durable persist failed — the mutation was rolled back, nothing durable changed."
@@ -6150,16 +6150,16 @@
             "description": "Update auth policy rule."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
           },
           "404": {
-            "description": "No auth rule with this id/priority."
+            "description": "The addressed rule identity does not exist at the authoritative moment (decided inside the coordinator fence)."
           },
           "409": {
-            "description": "Version fence conflict ({error, currentVersion, yourVersion})."
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           },
           "500": {
             "description": "Durable persist failed — the mutation was rolled back."
@@ -6226,13 +6226,13 @@
             "description": "Reorder auth policy rules."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
           },
           "409": {
-            "description": "Version fence conflict ({error, currentVersion, yourVersion})."
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           },
           "500": {
             "description": "Durable persist failed — the reorder was rolled back."
@@ -17383,10 +17383,16 @@
             "description": "Delete policy rule."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "The addressed rule identity does not exist at the authoritative moment (decided inside the coordinator fence)."
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           }
         },
         "security": [
@@ -17473,10 +17479,13 @@
             "description": "Create policy rule."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           }
         },
         "security": [
@@ -17526,10 +17535,16 @@
             "description": "Update policy rule."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "The addressed rule identity does not exist at the authoritative moment (decided inside the coordinator fence)."
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           }
         },
         "security": [
@@ -18242,10 +18257,16 @@
             "description": "Move a policy rule."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "The addressed rule identity does not exist at the authoritative moment (decided inside the coordinator fence)."
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           }
         },
         "security": [
@@ -18297,10 +18318,13 @@
             "description": "Reorder policy rules."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "description": "Malformed input, independent of the rulebase (grammar, body shape, a missing name, a bad timezone, an id that belongs to the other rule type), or — WITH a matching ifVersion assertion — a request that conflicts with the very rulebase it asserted (name or priority already in use, an order list that does not cover the set): reloading would change nothing."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion}); or — WITHOUT an ifVersion assertion — a request that conflicts with the CURRENT rulebase (name/priority already in use, a priority that now belongs to the other rule type, an order list that no longer covers the set), decided inside the coordinator fence: {error, currentVersion} — refresh and reapply, the mutation did not run."
           }
         },
         "security": [

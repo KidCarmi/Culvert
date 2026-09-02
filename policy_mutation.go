@@ -59,6 +59,72 @@ func writePolicyPersistFailure(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
+// fencedRefusal is a refusal decided INSIDE the coordinator fence, against
+// the authoritative snapshot the mutation would have applied to (2E-C
+// concurrency-status correction). Every identity-, existence-, position-,
+// version- and ordering-dependent check a rule-mutation handler makes lives
+// in its fenced closure and reports through this type; only structurally
+// malformed input (method, body grammar, id grammar, an unknown position
+// word, a missing name, a bad timezone …) is refused before the fence.
+type fencedRefusal struct {
+	// notFound: the addressed target identity does not exist at the
+	// authoritative moment (404).
+	notFound bool
+	// reason: the request conflicts with the CURRENT rulebase (a name or
+	// priority already in use, a priority that now belongs to the other rule
+	// type, an order list that no longer covers the set …).
+	reason string
+	// invariant: the verdict cannot change with the rulebase state — the
+	// request is wrong on its own terms (a stable id that belongs to the
+	// other rule type: an id never changes type). Always 400, whatever the
+	// client asserted.
+	invariant bool
+}
+
+// writeFencedRefusal maps an in-fence refusal to the truthful status:
+//   - the target vanished → 404;
+//   - a conflict WITHOUT an ?ifVersion= assertion → 409 {error,
+//     currentVersion}: the client made no claim about the state it saw, so
+//     the conflict may be a concurrent change — a refresh-and-retry verdict,
+//     never "your request is malformed";
+//   - a conflict WITH a (necessarily matching — the fence admitted it)
+//     assertion → 400: the rulebase is exactly the one the client loaded, so
+//     the conflict is the request's own (it picked a name already in use,
+//     listed the wrong priorities …) and a reload would change nothing;
+//   - an invariant refusal (see fencedRefusal.invariant) → 400 always.
+//
+// A zero refusal with a false mutation (the store refused the write for a
+// target it no longer holds) reads as not-found.
+func writeFencedRefusal(w http.ResponseWriter, r *http.Request, ref fencedRefusal, current int64) {
+	if ref.notFound || ref.reason == "" {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	if ref.invariant || parseIfVersion(r) != nil {
+		http.Error(w, ref.reason, http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+		"error":          ref.reason + " — the rulebase may have changed since you loaded it; reload (current version " + fmt.Sprint(current) + ") and reapply your change",
+		"currentVersion": current,
+	})
+}
+
+// findByPriorityIn returns a detached copy of the rule at priority in ps,
+// or nil — for in-fence target resolution on the legacy priority path.
+func findByPriorityIn(ps *PolicyStore, priority int) *PolicyRule {
+	rules := ps.List()
+	for i := range rules {
+		if rules[i].Priority == priority {
+			r := rules[i]
+			return &r
+		}
+	}
+	return nil
+}
+
 // policyWriteStateDecisionHook is a TEST-ONLY interleaving seam (nil in
 // production, one nil check per stage). A rule-mutation handler reports the
 // stage it is about to enter: "resolved" — its structural work (method, RBAC,

@@ -989,6 +989,62 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded as a candidate product correction (move target resolution and
 > validation inside the fenced closure), not silently widened in the test.
 >
+> **2E-C CONCURRENCY-STATUS CORRECTION — rule mutations validated inside
+> the coordinator fence (this branch, 2026-09-02).** Review of candidate
+> efafc9f9 held the product race disclosed in its report as the blocker: a
+> concurrent reorder-versus-edit returned `[200, 400]` instead of the
+> fenced `[200, 409]`. **Exact root cause:** every Stage-1
+> (`/api/authpolicy`) and Stage-2 (`/api/policy`) rule-mutation handler
+> resolved its target and ran its state-dependent validation OUTSIDE the
+> coordinator's critical section — target existence and rule type,
+> `validatePolicyRule`'s duplicate-name/priority checks against a list
+> read before the fence, the reorder/move set and permutation computed on
+> the pre-fence order, the bulk-delete auth-rule guard — and only then
+> entered `fencedMutate`/`fencedRunningMutate`. The fence held (exactly one
+> mutation landed, never a partial write), but a competitor landing in that
+> window made the loser fail VALIDATION against changed state: the edit's
+> stale exclusion slot let the duplicate-name check see the rule itself at
+> its new priority ("rule name already exists", 400 — "your request is
+> malformed" — for a request that had lost a state race); at the fence
+> window the same pattern let two same-name creates both succeed, a
+> priority-addressed delete audit the wrong rule, an unasserted reorder
+> apply a stale permutation over a changed set, a move honour a stale
+> relation, and an operator bulk delete remove an admin-managed auth rule
+> that had taken a freed priority. **Deterministic RED (committed first,
+> `policy_fence_interleaving_test.go`, no sleeps):** the test-only
+> `policyWriteStateDecision` seam lets a test park one request at the
+> "resolved" (structural work done, about to validate) or "fence" (about
+> to enter the coordinator) stage while a competitor commits through the
+> real handler, then release it; 8 of 9 cases were RED on exactly the
+> defects above, the fenced delete-by-id control green. **Correction:**
+> `validatePolicyRule` is split into `validateRuleShape` (state-independent,
+> pre-fence 400) and `validateRuleUniqueness` (in-fence); every handler
+> resolves its target, checks rule type, uniqueness, the order set and the
+> move relation INSIDE its fenced closure against that snapshot, and reports
+> refusals through `fencedRefusal` → `writeFencedRefusal`. **Status
+> semantics:** 400 only for input that is wrong on its own terms (grammar,
+> shape, a missing name, a duplicate entry inside the client's own list, an
+> id that belongs to the other rule type — an id never changes type) or, WITH
+> a matching `ifVersion`, a request that conflicts with the very rulebase it
+> asserted (reloading would change nothing); 404 when the addressed identity
+> does not exist at the authoritative moment; 409 for the version fence
+> (`{error, currentVersion, yourVersion}`) and, WITHOUT an assertion, for a
+> request that conflicts with the CURRENT rulebase (`{error, currentVersion}`
+> — refresh and reapply). The loser performs zero mutation, records no
+> success audit, advances no version, and the priority-addressed delete
+> audit names the rule that actually vanished. The one recorded contract
+> shift: unasserted PRIORITY-addressed wrong-type refusals (an auth rule
+> addressed through `/api/policy`, an access priority in an auth reorder)
+> were 400 and are now 409 + currentVersion, because a priority can change
+> type under a concurrent reorder; the corresponding legacy tests were
+> updated to assert both the unasserted 409 and the asserted 400, plus zero
+> mutation. The v2 frontend always asserts `ifVersion`, so its verdicts are
+> unchanged except that a lost race is now the structured 409 it already
+> handles. OpenAPI 400/404/409 descriptions updated for all seven paths.
+> Gates: the interleaving suite ×100 under `-race`; the two-client auth
+> fencing proof unchanged. R11–R13 and the per-test browser identity harness
+> are untouched.
+>
 > **2E-B FINAL STORAGE-READ FAIL-CLOSED CLOSURE (this branch, 2026-08-30).**
 > External review of the freeze candidate (465316df) found the last
 > lifecycle defect: the recovery read collapsed "cannot read / cannot

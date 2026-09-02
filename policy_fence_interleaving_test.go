@@ -431,10 +431,13 @@ func TestFenceInterleave_AccessBulkDelete_VsAuthTakeover_RefusesEscalation(t *te
 	assertNoLoserAudit(t, "policy.bulk_remove", since)
 }
 
-// An unasserted move ("R1 after R3") whose competitor reorders first must be
-// resolved against the authoritative order, so the requested relation holds
-// afterwards; pre-fix the permutation computed on the stale order is applied
-// over the new one and R1 lands elsewhere.
+// An unasserted, PRIORITY-addressed move ("the rule at 10 after R3") whose
+// competitor reorders first: priority addressing cannot carry identity intent
+// across a reorder (priority 10 is now a different rule), so the move must be
+// resolved against the authoritative order and REFUSED when the relation no
+// longer resolves (404: the addressed identity is gone / 409: state conflict)
+// — never a permutation computed on the stale order and applied over the new
+// one, which is what pre-fix produced (200, with R1 landing elsewhere).
 func TestFenceInterleave_AccessMove_VsReorder_HonoursIntent(t *testing.T) {
 	draftTestSetup(t)
 	createAccessRuleAt(t, "R1", 10)
@@ -450,21 +453,24 @@ func TestFenceInterleave_AccessMove_VsReorder_HonoursIntent(t *testing.T) {
 		func() *httptest.ResponseRecorder { return accessReorderReq([]int{30, 20, 10}, ver) },
 	)
 	assertStatus(t, rc, 200)
-	if rh.Code != 200 && rh.Code != http.StatusConflict {
-		t.Fatalf("move = %d, want 200 (resolved against the current order) or 409", rh.Code)
+	order := []string{}
+	for _, r := range policyStore.List() {
+		order = append(order, r.Name)
 	}
 	if rh.Code == 200 {
-		order := []string{}
-		for _, r := range policyStore.List() {
-			order = append(order, r.Name)
-		}
+		// Only acceptable if the relation actually holds against the
+		// authoritative order (R1 immediately after R3).
 		if strings.Join(order, ",") != "R3,R1,R2" {
-			t.Fatalf("move did not honour 'R1 after R3' against the authoritative order: %v", order)
+			t.Fatalf("move returned 200 but did not honour 'after R3' against the authoritative order: %v", order)
 		}
 		assertVersionDelta(t, ver, 2)
-	} else {
-		assertVersionDelta(t, ver, 1)
+		return
 	}
+	assertLoser(t, rh, http.StatusNotFound, http.StatusConflict)
+	if strings.Join(order, ",") != "R3,R2,R1" {
+		t.Fatalf("refused move must leave the winner's order intact, got %v", order)
+	}
+	assertVersionDelta(t, ver, 1)
 }
 
 // Control (already fenced): two unasserted deletes of the same id — the loser

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -218,11 +219,13 @@ func TestSlice8_ReorderAuthOnly(t *testing.T) {
 		t.Errorf("access rule priority disturbed: %d, want 2", byName["access-mid"])
 	}
 
-	// A list naming an access-rule priority is rejected.
+	// A list naming an access-rule priority is rejected — decided against
+	// the current rulebase inside the fence: 409 (+currentVersion) without
+	// an assertion (2E-C concurrency-status correction).
 	w = httptest.NewRecorder()
 	apiAuthPolicyReorder(w, roleReq(RoleAdmin, "POST", "/api/authpolicy/reorder", map[string]any{"priorities": []int{2, 1}}))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("reorder including access priority = %d, want 400", w.Code)
+	if w.Code != http.StatusConflict {
+		t.Errorf("reorder including access priority = %d, want 409", w.Code)
 	}
 }
 
@@ -240,25 +243,38 @@ func TestSlice8_PolicyEndpointRejectsAuthRules(t *testing.T) {
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "/api/authpolicy") {
 		t.Errorf("POST auth rule via /api/policy = %d (%q), want 400 pointing at /api/authpolicy", w.Code, w.Body.String())
 	}
-	// PUT targeting the stored auth rule → 400.
+	// Priority-addressed writes over the stored auth rule are refused against
+	// the CURRENT rulebase inside the fence (a priority can change type under
+	// a reorder): 409 (+currentVersion) without an assertion, 400 against the
+	// asserted matching generation (2E-C concurrency-status correction).
+	// Either way: refused, and the auth rule is untouched.
+	ver, _ := policyStore.policyVersion()
 	w = httptest.NewRecorder()
 	apiPolicy(w, jsonReq("PUT", "/api/policy?priority=7", map[string]any{"name": "overwrite", "action": "Allow"}))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("PUT over auth rule via /api/policy = %d, want 400", w.Code)
+	if w.Code != http.StatusConflict {
+		t.Errorf("PUT over auth rule via /api/policy = %d, want 409", w.Code)
 	}
-	// DELETE targeting the auth rule → 400.
+	w = httptest.NewRecorder()
+	apiPolicy(w, jsonReq("PUT", fmt.Sprintf("/api/policy?priority=7&ifVersion=%d", ver), map[string]any{"name": "overwrite", "action": "Allow"}))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("PUT over auth rule via /api/policy (asserted) = %d, want 400", w.Code)
+	}
+	// DELETE targeting the auth rule → refused the same way.
 	w = httptest.NewRecorder()
 	apiPolicy(w, jsonReq("DELETE", "/api/policy?priority=7", nil))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("DELETE auth rule via /api/policy = %d, want 400", w.Code)
+	if w.Code != http.StatusConflict {
+		t.Errorf("DELETE auth rule via /api/policy = %d, want 409", w.Code)
 	}
-	// Bulk DELETE containing the auth rule → 400, nothing deleted.
+	// Bulk DELETE containing the auth rule → refused, nothing deleted.
 	acc := PolicyRule{Priority: 8, Name: "bulk-access", Action: ActionAllow}
 	policyStore.Add(acc)
 	w = httptest.NewRecorder()
 	apiPolicy(w, jsonReq("DELETE", "/api/policy", map[string]any{"priorities": []int{8, 7}}))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("bulk DELETE including auth rule = %d, want 400", w.Code)
+	if w.Code != http.StatusConflict {
+		t.Errorf("bulk DELETE including auth rule = %d, want 409", w.Code)
+	}
+	if got := policyStore.List(); len(got) != 2 || got[0].Name != exempt.Name && got[1].Name != exempt.Name {
+		t.Errorf("refused writes must leave the auth rule untouched: %+v", got)
 	}
 	if len(policyStore.List()) != 2 {
 		t.Errorf("rejected bulk delete must not remove anything")
@@ -424,8 +440,10 @@ func TestSlice8_OperatorReorderMoveCannotShiftAuthRules(t *testing.T) {
 	for _, role := range []UIRole{RoleOperator, RoleAdmin} {
 		w = httptest.NewRecorder()
 		apiPolicyReorder(w, roleReq(role, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{10, 20, 21}}))
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("%s reorder including auth priority = %d, want 400", role, w.Code)
+		// Decided against the current access set inside the fence: 409
+		// (+currentVersion) without an assertion (2E-C correction).
+		if w.Code != http.StatusConflict {
+			t.Fatalf("%s reorder including auth priority = %d, want 409", role, w.Code)
 		}
 	}
 
@@ -438,13 +456,22 @@ func TestSlice8_OperatorReorderMoveCannotShiftAuthRules(t *testing.T) {
 	}
 	authPriUnchanged("move")
 
-	// Moving the auth rule itself via the access endpoint is rejected: it is not
-	// among the access rules buildMovedPriorities considers.
+	// Moving the auth rule itself via the access endpoint is refused against
+	// the current rulebase inside the fence (a priority can change type under
+	// a reorder): 409 (+currentVersion) without an assertion, 400 against the
+	// asserted matching generation (2E-C concurrency-status correction).
 	w = httptest.NewRecorder()
 	apiPolicyMove(w, roleReq(RoleOperator, "POST", "/api/policy/move", map[string]any{"priority": 21, "position": "last"}))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("move of auth rule via access endpoint = %d, want 400", w.Code)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("move of auth rule via access endpoint = %d, want 409", w.Code)
 	}
+	ver, _ := policyStore.policyVersion()
+	w = httptest.NewRecorder()
+	apiPolicyMove(w, roleReq(RoleOperator, "POST", fmt.Sprintf("/api/policy/move?ifVersion=%d", ver), map[string]any{"priority": 21, "position": "last"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("move of auth rule via access endpoint (asserted) = %d, want 400", w.Code)
+	}
+	authPriUnchanged("refused move")
 }
 
 // ── Diagnostics integration ──────────────────────────────────────────────────

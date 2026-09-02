@@ -113,6 +113,19 @@ func isValidBlocklistWildcard(h string) bool {
 // being edited (use -1 when adding a new rule) so its own name is not flagged as
 // a duplicate.
 func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriority int) error {
+	if err := validateRuleUniqueness(rule, existingRules, editPriority); err != nil {
+		return err
+	}
+	return validateRuleShape(rule)
+}
+
+// validateRuleUniqueness is the STATE-DEPENDENT half of validatePolicyRule:
+// the duplicate-name and duplicate-priority checks against an existing rule
+// list. The API handlers run it INSIDE the coordinator fence against the
+// authoritative snapshot (2E-C concurrency-status correction) — run outside
+// it, a concurrent reorder or create between resolution and validation made
+// a request that had merely lost a state race look malformed.
+func validateRuleUniqueness(rule PolicyRule, existingRules []PolicyRule, editPriority int) error {
 	if rule.Name == "" {
 		return fmt.Errorf("name is required")
 	}
@@ -132,6 +145,16 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 				return fmt.Errorf("priority %d is already in use", rule.Priority)
 			}
 		}
+	}
+	return nil
+}
+
+// validateRuleShape is the STATE-INDEPENDENT half of validatePolicyRule: the
+// structural checks a request fails on its own, whatever the rulebase holds.
+// The API handlers run it BEFORE the fence (a 400 that no refresh can fix).
+func validateRuleShape(rule PolicyRule) error {
+	if rule.Name == "" {
+		return fmt.Errorf("name is required")
 	}
 	// Schedule timezone is validated for both rule types.
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {

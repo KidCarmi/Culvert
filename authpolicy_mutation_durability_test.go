@@ -222,19 +222,38 @@ func TestAuthReorder_ByIDs_ContractMatrix(t *testing.T) {
 	w = authReorderReq(map[string]any{"ids": []string{a.ID, b.ID}}, "")
 	assertStatus(t, w, 200)
 
-	rejected := []map[string]any{
-		{"ids": []string{a.ID, a.ID}},                            // duplicate
-		{"ids": []string{a.ID}},                                  // partial
-		{"ids": []string{a.ID, b.ID, acc1.ID}},                   // wrong count (access smuggled)
-		{"ids": []string{a.ID, acc1.ID}},                         // access-rule id at right count
-		{"ids": []string{a.ID, "01ARZ3NDEKTSV4RRFFQ69G5FAV"}},    // unknown ULID
-		{"ids": []string{a.ID, "not-a-ulid"}},                    // malformed
-		{"ids": []string{a.ID, b.ID}, "priorities": []int{1, 2}}, // both shapes
-		{}, // neither shape
+	// Status semantics (2E-C concurrency-status correction): a list that is
+	// malformed on its own terms (duplicate entry, bad ULID grammar, both or
+	// neither shape, an id that belongs to an ACCESS rule — an id never
+	// changes type) is 400 whatever the rulebase holds; a list that fails
+	// against the CURRENT rulebase (partial, wrong count, an id that is not a
+	// current auth rule) is a state conflict — 409 carrying currentVersion
+	// when the client asserted no generation, 400 when it asserted the
+	// matching one (nothing changed, the list is simply wrong).
+	rejected := []struct {
+		body map[string]any
+		want int
+	}{
+		{map[string]any{"ids": []string{a.ID, a.ID}}, 400},                            // duplicate (structural)
+		{map[string]any{"ids": []string{a.ID}}, 409},                                  // partial (state)
+		{map[string]any{"ids": []string{a.ID, b.ID, acc1.ID}}, 409},                   // wrong count (state)
+		{map[string]any{"ids": []string{a.ID, acc1.ID}}, 400},                         // access-rule id (invariant)
+		{map[string]any{"ids": []string{a.ID, "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}, 409},    // unknown ULID (state)
+		{map[string]any{"ids": []string{a.ID, "not-a-ulid"}}, 400},                    // malformed (structural)
+		{map[string]any{"ids": []string{a.ID, b.ID}, "priorities": []int{1, 2}}, 400}, // both shapes
+		{map[string]any{}, 400}, // neither shape
 	}
-	for i, body := range rejected {
-		if w := authReorderReq(body, ""); w.Code != 400 {
-			t.Fatalf("rejection case %d: want 400, got %d (%s)", i, w.Code, w.Body.String())
+	for i, tc := range rejected {
+		if w := authReorderReq(tc.body, ""); w.Code != tc.want {
+			t.Fatalf("rejection case %d: want %d, got %d (%s)", i, tc.want, w.Code, w.Body.String())
+		}
+		// The same state-dependent list against the ASSERTED matching
+		// generation is the request's own fault: 400.
+		if tc.want == 409 {
+			ver, _ := policyStore.policyVersion()
+			if w := authReorderReq(tc.body, fmt.Sprintf("?ifVersion=%d", ver)); w.Code != 400 {
+				t.Fatalf("rejection case %d asserted: want 400, got %d (%s)", i, w.Code, w.Body.String())
+			}
 		}
 	}
 	// Nothing moved during the rejections.
@@ -284,9 +303,15 @@ func TestAuthReorder_LegacyPriorities(t *testing.T) {
 	if rulePriority(t, mem, "auth-second") != a.Priority || rulePriority(t, mem, "auth-first") != b.Priority {
 		t.Fatal("legacy priorities reorder did not swap")
 	}
-	// Access-rule priority in the list → 400 (unchanged contract).
+	// Access-rule priority in the list → refused against the current
+	// rulebase: 409 (+currentVersion) unasserted, 400 against the asserted
+	// matching generation (2E-C concurrency-status correction).
 	acc := seedRule(t, "access-one")
-	if w := authReorderReq(map[string]any{"priorities": []int{acc.Priority, a.Priority}}, ""); w.Code != 400 {
-		t.Fatalf("access priority in legacy list: want 400, got %d", w.Code)
+	if w := authReorderReq(map[string]any{"priorities": []int{acc.Priority, a.Priority}}, ""); w.Code != 409 {
+		t.Fatalf("access priority in legacy list: want 409, got %d", w.Code)
+	}
+	ver, _ := policyStore.policyVersion()
+	if w := authReorderReq(map[string]any{"priorities": []int{acc.Priority, a.Priority}}, fmt.Sprintf("?ifVersion=%d", ver)); w.Code != 400 {
+		t.Fatalf("access priority in legacy list (asserted): want 400, got %d", w.Code)
 	}
 }
