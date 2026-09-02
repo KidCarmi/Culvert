@@ -1950,6 +1950,7 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
 	if err := validatePolicyRule(rule, effectivePolicyList(), -1); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1965,6 +1966,7 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -2034,6 +2036,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
 	if err := validatePolicyRule(rule, effectivePolicyList(), priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2048,6 +2051,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -2105,6 +2109,8 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -2170,6 +2176,7 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	// Exclude the rule's CURRENT slot from duplicate checks (same as the
 	// priority path passes the URL priority).
+	policyWriteStateDecision(r, "resolved")
 	if err := validatePolicyRule(rule, effectivePolicyList(), beforeRule.Priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2184,6 +2191,7 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -2221,6 +2229,8 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -2275,6 +2285,8 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	policyWriteStateDecision(r, "resolved")
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -2366,6 +2378,8 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	policyWriteStateDecision(r, "resolved")
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -2494,6 +2508,8 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()

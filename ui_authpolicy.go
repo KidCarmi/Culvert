@@ -246,6 +246,7 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
 	if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -270,6 +271,7 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "fence")
 	// Serialize with commit/revert exactly like the Stage-2 handlers.
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -318,6 +320,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
 	if err := validatePolicyRule(rule, policyStore.List(), target.priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -339,6 +342,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
+	policyWriteStateDecision(r, "fence")
 	beginPolicyWrite()
 	defer endPolicyWrite()
 	res := policyDraft.fencedRunningMutate(parseIfVersion(r), func(ps *PolicyStore) bool {
@@ -375,6 +379,8 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	policyWriteStateDecision(r, "resolved")
+	policyWriteStateDecision(r, "fence")
 	beginPolicyWrite()
 	defer endPolicyWrite()
 	res := policyDraft.fencedRunningMutate(parseIfVersion(r), func(ps *PolicyStore) bool {
@@ -458,6 +464,8 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	policyWriteStateDecision(r, "resolved")
+	policyWriteStateDecision(r, "fence")
 	beginPolicyWrite()
 	defer endPolicyWrite()
 	var (

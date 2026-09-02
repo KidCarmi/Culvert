@@ -59,6 +59,25 @@ func writePolicyPersistFailure(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
+// policyWriteStateDecisionHook is a TEST-ONLY interleaving seam (nil in
+// production, one nil check per stage). A rule-mutation handler reports the
+// stage it is about to enter: "resolved" — its structural work (method, RBAC,
+// body decode, shape checks) and any optimistic target resolution are done and
+// it is about to VALIDATE against the rulebase; "fence" — it is about to enter
+// the coordinator's critical section. A test installs a hook that holds ONE
+// request (matched by a request header it set) at the requested stage while a
+// competing mutation commits, then releases it — which turns an ordering-
+// dependent outcome into a deterministic proof without sleeps. The handlers
+// must call it at exactly the points where the authoritative-state decision
+// begins, so the proof pins the real window and not a synthetic one.
+var policyWriteStateDecisionHook func(r *http.Request, stage string)
+
+func policyWriteStateDecision(r *http.Request, stage string) {
+	if h := policyWriteStateDecisionHook; h != nil {
+		h(r, stage)
+	}
+}
+
 // persistRunningPolicy is the live-mode durable persist, swappable ONLY for
 // fault injection in tests (the ErrReplacedNotSynced branch cannot be induced
 // through the real filesystem deterministically). Production behavior is
