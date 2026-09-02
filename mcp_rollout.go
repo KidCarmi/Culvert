@@ -491,13 +491,19 @@ func (r *mcpRollout) reconcileCanaryRuntimeAfterCommit(tgt commitTransitionTarge
 				// re-reads the on-disk mode: a restored live mode without the required execution deps is
 				// clamped to Disabled by restore() (modeExecReady gate), so this is still fail-closed across
 				// a crash — only the RAM view and disk momentarily disagree until the next successful write.
+				// Record write_failed (NOT activation_failed): the compensating rollback persist failed, so
+				// this is a durability failure, and rollbackPathReadyLocked rejects exactly degraded/
+				// write_failed — recording activation_failed would let the node treat this known persistence
+				// failure as a healthy rollback path and retry activation (Codex P2 round-5, PR #1290).
 				logger.Printf("MCP rollout: %s activation rejected (beginCanaryActivation failed) but durable rollback persist ALSO failed; runtime disarmed, on-disk state may be inconsistent (fail-closed): %q / %q",
 					cfg.Capability.String(), sanitizeLog(err.Error()), sanitizeLog(perr.Error()))
+				tgt.setStatus("write_failed")
 			} else {
+				// The rollback persisted cleanly: durability is intact, only the activation was rejected.
 				logger.Printf("MCP rollout: %s activation rejected — beginCanaryActivation failed; durable rollout state rolled back to %s (fail-closed): %q",
 					cfg.Capability.String(), prevMode.String(), sanitizeLog(err.Error()))
+				tgt.setStatus("activation_failed")
 			}
-			tgt.setStatus("activation_failed")
 			return fmt.Errorf("%w: %v", errRolloutCanaryActivationFailed, err)
 		}
 	case leavingLive:

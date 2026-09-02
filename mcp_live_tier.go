@@ -241,9 +241,22 @@ func (lt *mcpLiveTier) arm(ready bool, reason string) error {
 // concurrent gate admission is rejected even before the armed bit is observed — the two
 // together are the "reject new" guarantee that holds mid-transition.
 func (lt *mcpLiveTier) quiesce(waitFn func(inFlight func() int) int) int {
+	// SERIALIZE the readiness revocation with rollout commits (Codex P1 round-5, PR #1290). A Canary
+	// transition reads liveExecDepsConfigured under mcpRollout.durableMu and then installs+persists
+	// Canary while still holding it; if quiesce cleared the armed bit under lt.mu alone it could
+	// interleave between that read and the install, so the commit would be acknowledged and the runtime
+	// armed AFTER the tier reached composed/unarmed — and a later arm would resume that Canary with no
+	// fresh activation transition. Taking durableMu here forces the revocation to land either wholly
+	// before the commit's armed read or wholly after its install. Lock order is durableMu → lt.mu, which
+	// is deadlock-free: no durableMu holder (the commit path, kill switch, rehearsal) ever takes lt.mu.
+	// durableMu is held ONLY for the fail-closed revocation phase and is released BEFORE the bounded
+	// (possibly slow) in-flight drain, so quiesce never blocks a commit for the drain duration.
+	r := getMCPRollout()
+	r.durableMu.Lock()
 	lt.mu.Lock()
 	if lt.state != liveTierArmed {
 		lt.mu.Unlock()
+		r.durableMu.Unlock()
 		return 0 // not armed — nothing to quiesce (idempotent)
 	}
 	lt.state = liveTierQuiescing
@@ -253,6 +266,7 @@ func (lt *mcpLiveTier) quiesce(waitFn func(inFlight func() int) int) int {
 	// never be admitted now, and no new Canary transition can be authorized.
 	setLiveExecDepsArmed(lt.capb, false)
 	lt.mu.Unlock()
+	r.durableMu.Unlock()
 
 	// Bounded drain of in-flight executions. The caller owns the deadline; the wait reads the
 	// live in-flight count under the lock via inFlightLocked.

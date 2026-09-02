@@ -81,6 +81,51 @@ func TestLiveCommit_BeginActivationFailureRejectsAndRollsBack(t *testing.T) {
 	}
 }
 
+// P2 (round-5): the persist-status recorded on a failed activation reflects DURABILITY. A rollback that
+// persists cleanly records activation_failed; a rollback whose compensating persist ALSO fails records
+// write_failed — because rollbackPathReadyLocked treats only degraded/write_failed as unhealthy, and
+// recording activation_failed on a real persistence failure would let the node retry activation over a
+// disk that still holds the un-rolled-back live mode.
+func TestLiveCommit_ActivationFailureStatusReflectsPersistOutcome(t *testing.T) {
+	run := func(t *testing.T, persistErr error, wantStatus string) {
+		resetLiveTierGlobals(t)
+		setDataDirForTest(t, t.TempDir())
+		prevPersist := canaryRuntimePersist
+		canaryRuntimePersist = func(*canaryRuntime, rollout.Capability, *canaryCapRuntime) error {
+			return errors.New("synthetic canary persist failure")
+		}
+		t.Cleanup(func() { canaryRuntimePersist = prevPersist })
+
+		r := newTestRollout()
+		st := r.gateway
+		capb := rollout.CapabilityGateway
+		prevCfg := rollout.DisabledConfig(capb)
+		cfg := gwCanaryCfg(1)
+		if err := st.SetConfig(*cfg, "test", time.Unix(0, 1).UnixNano()); err != nil {
+			t.Fatalf("install canary: %v", err)
+		}
+		var gotStatus string
+		tgt := commitTransitionTarget{
+			st:               st,
+			persist:          func(*rollout.State) error { return persistErr },
+			setStatus:        func(s string) { gotStatus = s },
+			countTransition:  func() {},
+			reconcileRuntime: true,
+		}
+		err := r.reconcileCanaryRuntimeAfterCommit(tgt, cfg, prevCfg.Mode, prevCfg, st.Evidence(), runtimeTestBudget(10), "test", time.Unix(0, 1))
+		if !errors.Is(err, errRolloutCanaryActivationFailed) {
+			t.Fatalf("a failed begin must reject the transition, got %v", err)
+		}
+		if gotStatus != wantStatus {
+			t.Fatalf("persist err=%v ⇒ status %q, want %q", persistErr, gotStatus, wantStatus)
+		}
+	}
+	t.Run("clean rollback persist ⇒ activation_failed", func(t *testing.T) { run(t, nil, "activation_failed") })
+	t.Run("failed rollback persist ⇒ write_failed", func(t *testing.T) {
+		run(t, errors.New("compensating persist failed"), "write_failed")
+	})
+}
+
 // P2: resetLiveTierGlobals must clear the process-global live-gate denial counters, so a prior shuffled
 // test's denials cannot leak into a later test's telemetry assertions.
 func TestLiveGate_DenialCountersResetByHelper(t *testing.T) {
@@ -154,6 +199,30 @@ func TestLiveCompose_RejectsZeroLimitProfile(t *testing.T) {
 	})
 	if !errors.Is(err, errLiveComposeResponseProfileAbsent) {
 		t.Fatalf("composition must reject a zero-limits profile, got %v", err)
+	}
+	if cfg.Deps.Executor != nil {
+		t.Fatal("a rejected composition must not install an executor")
+	}
+}
+
+// P2 (round-5): a valid NON-Gateway profile (Management) has a non-empty capability AND positive
+// limits, but the Gateway executor must use a GATEWAY profile — a Management profile's independent
+// limits would block a response the Gateway bound admits, only AFTER the irreversible call.
+func TestLiveCompose_RejectsNonGatewayProfile(t *testing.T) {
+	resetLiveTierGlobals(t)
+	mgmt := inspection.DefaultManagementProfile(1)
+	if mgmt.Capability() == "gateway" || mgmt.MaxOutputBytes() <= 0 {
+		t.Skipf("test premise invalid: capability=%q maxOut=%d", mgmt.Capability(), mgmt.MaxOutputBytes())
+	}
+	cfg := &mcpruntime.Config{}
+	err := composeGatewayLiveTierInto(cfg, liveTierComposition{
+		Upstream:        &recordingUpstream{},
+		Events:          liveTestEvents(t),
+		ResponseProfile: mgmt, // valid, but Management — must be rejected for the Gateway tier
+		Clock:           func() time.Time { return time.Unix(0, 1) },
+	})
+	if !errors.Is(err, errLiveComposeResponseProfileAbsent) {
+		t.Fatalf("composition must reject a non-Gateway profile, got %v", err)
 	}
 	if cfg.Deps.Executor != nil {
 		t.Fatal("a rejected composition must not install an executor")

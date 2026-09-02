@@ -99,15 +99,18 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 		return errLiveComposeEventsAbsent
 	}
 	// The live tier REQUIRES response DLP: the executor inspects every upstream response BEFORE egress.
-	// A profile with zero inspection limits (MaxOutputBytes==0) makes the irreversible upstream side
-	// effect occur and THEN reports every non-empty response oversized — a real side effect reported as
-	// a blocked response, which invites retries. Validate the LIMITS, not merely the capability: a
-	// profile built with a real capability but a zero-value InspectionLimits
-	// (NewProfile(ProfileConfig{Capability:"gateway"})) has a non-empty Capability() yet
-	// MaxOutputBytes()==0, so a capability-only check would let it through (Codex P2, PR #1290). Reject a
-	// missing/limitless profile fail-closed at composition, exactly like a missing upstream or events
-	// manager. The response profile installed into the executor MUST carry usable inspection limits.
-	if comp.ResponseProfile.Capability() == "" || comp.ResponseProfile.MaxOutputBytes() <= 0 {
+	// The profile installed into the GATEWAY executor MUST be a GATEWAY profile with usable limits.
+	// Two ways a wrong profile defeats response DLP, both rejected fail-closed at composition:
+	//   - zero inspection limits (MaxOutputBytes==0): the irreversible upstream call occurs and THEN
+	//     every non-empty response is reported oversized — a real side effect reported as blocked, which
+	//     invites retries. A profile built with a real capability but a zero-value InspectionLimits
+	//     (NewProfile(ProfileConfig{Capability:"gateway"})) has a non-empty Capability() yet
+	//     MaxOutputBytes()==0, so a capability-only check would let it through (Codex P2, PR #1290).
+	//   - a NON-Gateway profile (e.g. DefaultManagementProfile, Capability()=="management"): its
+	//     independent, tighter limits would block a response the Gateway bound would admit, again only
+	//     AFTER the irreversible call (Codex P2 round-5, PR #1290).
+	// So require the GATEWAY capability specifically AND a positive output bound.
+	if comp.ResponseProfile.Capability() != "gateway" || comp.ResponseProfile.MaxOutputBytes() <= 0 {
 		lt.setComposeReason("response_profile_absent")
 		return errLiveComposeResponseProfileAbsent
 	}
