@@ -214,6 +214,64 @@ func (p prodDestinationResolver) LookupIP(ctx context.Context, host string) ([]n
 	return p.r.LookupNetIP(ctx, "ip", host)
 }
 
+// acquireProductionKEK validates the KEK path and opens the file-based KEK provider fail-closed.
+// It rejects a path whose final component is a SYMLINK — a symlinked key file could redirect the
+// 0600 write/read to an attacker-controlled target that secret.load's permission check would not
+// see through (defense-in-depth; a parent-directory symlink race is the recorded residual, out of
+// scope for a config-time lstat). secret.ValidateProvider then generates-or-loads the 0600 key
+// once and REJECTS a world/group-readable or wrong-size file. There is NO plaintext or ephemeral
+// fallback (§5).
+func acquireProductionKEK(path string) (*secret.Provider, error) {
+	if err := kekPathNotSymlink(path); err != nil {
+		return nil, err
+	}
+	kek := secret.FileProvider(path)
+	if err := secret.ValidateProvider(kek); err != nil {
+		return nil, err
+	}
+	return kek, nil
+}
+
+// newProductionUpstreamClient builds the hardened upstream MCP client. NOT a generic
+// http.Client: upstreamclient bounds per-server pools, admits only the V1 upstream method set,
+// pins the resolved destination (no connect-time re-resolution), enforces the narrow Gateway
+// destination policy (DefaultGatewayPolicy: https only, no private, no cross-origin redirect,
+// no scheme downgrade), and NEVER uses InsecureSkipVerify for the unpinned branch.
+//
+// TRUST MODEL + the recorded connectivity gap (Codex PR #1291). RootCAs nil ⇒ the SYSTEM root
+// pool is the CA pool for a server WITHOUT a pinned identity; Identity nil ⇒ the default
+// spkiVerifier compares the leaf's base64 SHA-256 SPKI against the registry's PinnedIdentity
+// when one is present. In the current inventory contract EVERY registered server MUST carry a
+// nonempty PinnedIdentity (mcp_inventory.go), so in practice the client always takes the
+// pinned branch and the system-roots-only path is not reached for a real server — the
+// per-server SPKI pin is the trust anchor, not a public chain. Two documented formats are
+// therefore NOT yet consumable by this client and are part of the remaining pre-Canary
+// connectivity work, NOT a defect here (the tier never arms/executes in this build, and the
+// qualification endpoint is a never-dialed reference today):
+//   - the documented endpoint scheme `mcp+https://` (DefaultGatewayPolicy admits only literal
+//     `https`, so destination.Canonicalize rejects it — an unsupported scheme fails closed, it
+//     never downgrades or dials insecurely); and
+//   - a SPIFFE-format PinnedIdentity (the default spkiVerifier reads it as an SPKI digest, so it
+//     would fail closed rather than trust the wrong leaf).
+//
+// Supporting either — endpoint-scheme translation at the execution boundary and an
+// identity-type-aware verifier — is tracked with the credential-Provider adapter and
+// SPKI/SPIFFE pin-provisioning as the pre-Canary connectivity blockers (see the report). The
+// fail-closed direction is preserved throughout: an unsupported scheme or a mismatched identity
+// means NO connection, never an unauthenticated one.
+func newProductionUpstreamClient(clock func() time.Time) (*upstreamclient.Client, error) {
+	resolver := prodDestinationResolver{r: &net.Resolver{}}
+	return upstreamclient.New(upstreamclient.Config{
+		Limits:           upstreamclient.DefaultLimits(),
+		Resolver:         resolver,
+		Policy:           destination.DefaultGatewayPolicy(),
+		InspectionLimits: limits.DefaultGatewayInspection(),
+		Identity:         nil, // ⇒ default SPKI verifier (pins the registry PinnedIdentity when present)
+		RootCAs:          nil, // ⇒ system roots for the unpinned branch
+		Clock:            clock,
+	}, limits.DefaultGateway())
+}
+
 // composeProductionGatewayLiveTier is THE single production composition entrypoint (§3). It
 // resolves the opt-in, validates it, constructs the real dependency graph from production
 // authorities, and — only if every collaborator is valid — delegates to
@@ -256,25 +314,14 @@ func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProducti
 	}
 	deps.Events = liveDepEventsReady
 
-	// (2) Production credential KEK (§5/§21). The SAME file-provider doctrine telemetry uses:
-	// a wrong/unreadable/unavailable KEK fails closed with NO plaintext or ephemeral fallback.
-	// ValidateProvider generates-or-loads the 0600 key file once and REJECTS a world/group-
-	// readable or wrong-size file. Before that, reject a KEK path whose final component is a
-	// SYMLINK — a symlinked key file could redirect the 0600 write/read to an
-	// attacker-controlled target that secret.load's permission check would not see through
-	// (defense-in-depth; a parent-directory symlink race is the recorded residual, out of
-	// scope for a config-time lstat).
-	if err := kekPathNotSymlink(lp.KEKFile); err != nil {
+	// (2) Production credential KEK (§5/§21). acquireProductionKEK rejects a symlinked path then
+	// opens the file-based KEK fail-closed (no plaintext/ephemeral fallback; world/group-readable
+	// or wrong-size rejected by secret.load).
+	kek, err := acquireProductionKEK(lp.KEKFile)
+	if err != nil {
 		deps.KEK = liveDepKEKUnavailable
 		globalMCPLiveProd.set(mcpLiveProdStatus{Requested: true, Reason: liveDepKEKUnavailable, Deps: deps})
-		logger.Printf("MCP gateway live production deps not composed: credential KEK path rejected (fail-closed): %v", sanitizeLog(err.Error()))
-		return
-	}
-	kek := secret.FileProvider(lp.KEKFile)
-	if err := secret.ValidateProvider(kek); err != nil {
-		deps.KEK = liveDepKEKUnavailable
-		globalMCPLiveProd.set(mcpLiveProdStatus{Requested: true, Reason: liveDepKEKUnavailable, Deps: deps})
-		logger.Printf("MCP gateway live production deps not composed: credential KEK provider unavailable (fail-closed)")
+		logger.Printf("MCP gateway live production deps not composed: credential KEK unavailable (fail-closed): %v", sanitizeLog(err.Error()))
 		return
 	}
 	deps.KEK = liveDepKEKReady
@@ -296,26 +343,12 @@ func composeProductionGatewayLiveTier(cfg *mcpruntime.Config, lp mcpLiveProducti
 	}, limits.DefaultCredential())
 	deps.Broker = liveDepBrokerNoProvider
 
-	// (4) Hardened upstream client (§7). NOT a generic http.Client: upstreamclient bounds
-	// per-server pools, admits only the V1 upstream method set, pins the resolved destination
-	// (no connect-time re-resolution), enforces the narrow Gateway destination policy (https
-	// only, no private, no cross-origin redirect, no scheme downgrade), and trusts SYSTEM
-	// roots (RootCAs nil ⇒ system pool; NEVER InsecureSkipVerify). Identity nil ⇒ the default
-	// SPKI verifier (pinning a private/internal server's SPKI is the separately-tracked
-	// pre-Canary gap; the public-CA path needs no pin).
+	// (4) Hardened upstream client (§7). Constructed by newProductionUpstreamClient (see its
+	// doc for the trust model and the recorded connectivity gap).
 	deps.DestinationPol = liveDepDestPolicyGateway
 	deps.TrustRoots = liveDepTrustSystemRoots
-	resolver := prodDestinationResolver{r: &net.Resolver{}}
 	deps.Resolver = liveDepResolverReady
-	upstream, err := upstreamclient.New(upstreamclient.Config{
-		Limits:           upstreamclient.DefaultLimits(),
-		Resolver:         resolver,
-		Policy:           destination.DefaultGatewayPolicy(),
-		InspectionLimits: limits.DefaultGatewayInspection(),
-		Identity:         nil, // ⇒ default SPKI verifier
-		RootCAs:          nil, // ⇒ system roots
-		Clock:            clock,
-	}, limits.DefaultGateway())
+	upstream, err := newProductionUpstreamClient(clock)
 	if err != nil {
 		deps.Upstream = liveDepUpstreamFailed
 		globalMCPLiveProd.set(mcpLiveProdStatus{Requested: true, Reason: liveDepUpstreamFailed, Deps: deps})

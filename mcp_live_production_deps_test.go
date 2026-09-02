@@ -195,6 +195,7 @@ func TestLiveProd_FailureMatrix_NeverArmsRecordsReason(t *testing.T) {
 			cfg: func(t *testing.T) mcpLiveProductionConfig {
 				p := tempKEKPath(t)
 				// A correctly-sized but world-readable key file is rejected by secret.load.
+				// #nosec G306 -- intentionally world-readable to verify secret.load rejects it
 				if err := os.WriteFile(p, make([]byte, 32), 0o644); err != nil {
 					t.Fatalf("write kek: %v", err)
 				}

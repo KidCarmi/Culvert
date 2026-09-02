@@ -79,11 +79,23 @@ wall forbids any root package-main reference to the test-only synthetic KEK/prov
 1. **Production credential Provider adapter.** No production `provider.Provider` exists yet, so the
    broker is composed with ZERO providers and a credential-requiring tool fails closed. A read-first /
    no-credential Canary needs none; a credential-bearing one is blocked until this lands.
-2. **SPKI pin-provisioning** for private/internal pinned MCP servers. The public-CA path needs no pin;
-   a private pinned server does.
+2. **Upstream connectivity against the documented inventory format** (Codex review, PR #1291). The
+   composed client is bounded and fail-closed, but two documented qualification-inventory formats are
+   not yet consumable by it — an accepted, honest gap, not a defect (the tier never arms/executes here,
+   and the qualification endpoint is a never-dialed reference today):
+   - **Endpoint scheme.** The inventory records `mcp+https://…` endpoints, while `DefaultGatewayPolicy`
+     admits only literal `https`, so `destination.Canonicalize` rejects them. This fails CLOSED (an
+     unsupported scheme never downgrades or dials insecurely). Endpoint-scheme translation belongs at
+     the execution boundary that dials the registry endpoint, not this composition file.
+   - **Identity format / SPKI pin-provisioning.** Every registered server requires a nonempty
+     `PinnedIdentity`, so the client always takes the pinned branch and the system-roots-only path is
+     never reached for a real server — the per-server SPKI pin is the trust anchor. A SPIFFE-format
+     identity is read by the default `spkiVerifier` as an SPKI digest and therefore fails CLOSED. An
+     identity-type-aware verifier + SPKI/SPIFFE pin-provisioning is the second connectivity prerequisite.
 
-Both are fail-closed and are remaining blockers before the First Controlled Canary. Neither blocks
-composing or arming the guarded graph for the public / no-credential read-first path.
+All are fail-closed and are remaining blockers before the First Controlled Canary. None blocks composing
+the guarded graph, and none can produce an unauthenticated or downgraded connection — an unsupported
+scheme or a mismatched identity means NO connection.
 
 ## Verdict
 
