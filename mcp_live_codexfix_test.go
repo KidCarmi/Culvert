@@ -283,9 +283,17 @@ func TestRolloutCanaryActivationFailed_IsClassified(t *testing.T) {
 	if direct == mcperr.ReasonNone {
 		t.Fatal("errRolloutCanaryActivationFailed must carry a bounded reason, not ReasonNone")
 	}
-	wrapped := fmt.Errorf("%w: %v", errRolloutCanaryActivationFailed, errors.New("persist failed"))
+	// Reproduce the REAL production shape: rejectActivationAndRollback wraps with TWO %w verbs
+	// (fmt.Errorf("%w: %w", ...)) so both sentinels are errors.Is-discoverable — which builds a
+	// multi-error (Unwrap() []error). mcperr.ReasonOf must traverse that, or AbortApplied would see
+	// ReasonNone (Codex round-9, PR #1290). The earlier %v shape missed this.
+	wrapped := fmt.Errorf("%w: %w", errRolloutCanaryActivationFailed, errRolloutCanaryBudgetChanged)
 	if got := mcperr.ReasonOf(wrapped); got != direct {
-		t.Fatalf("a wrapped activation failure must keep its bounded reason %s, got %s", direct.Code(), got.Code())
+		t.Fatalf("a multi-error-wrapped activation failure must keep its bounded reason %s, got %s", direct.Code(), got.Code())
+	}
+	// Both sentinels must stay individually discoverable through the multi-error.
+	if !errors.Is(wrapped, errRolloutCanaryActivationFailed) || !errors.Is(wrapped, errRolloutCanaryBudgetChanged) {
+		t.Fatal("both wrapped sentinels must remain errors.Is-discoverable through the multi-error")
 	}
 }
 

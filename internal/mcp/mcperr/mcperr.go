@@ -1142,11 +1142,23 @@ func ReasonOf(err error) Reason {
 		if e, ok := err.(*Error); ok {
 			return e.Reason
 		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
+		switch u := err.(type) {
+		case interface{ Unwrap() error }:
+			err = u.Unwrap()
+		case interface{ Unwrap() []error }:
+			// A multi-error tree (e.g. fmt.Errorf with more than one %w verb). errors.As/errors.Is
+			// traverse these; ReasonOf must too, or a bounded reason wrapped alongside another cause
+			// would read as ReasonNone. Return the FIRST bounded reason found across the branches,
+			// mirroring the single-chain "first wrapped reason wins" semantics.
+			for _, branch := range u.Unwrap() {
+				if r := ReasonOf(branch); r != ReasonNone {
+					return r
+				}
+			}
+			return ReasonNone
+		default:
 			return ReasonNone
 		}
-		err = u.Unwrap()
 	}
 	return ReasonNone
 }
