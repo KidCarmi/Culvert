@@ -199,7 +199,7 @@ func armCanaryLiveTierTrust(t *testing.T, up *recordingUpstream, trust func() bo
 	}
 	t.Cleanup(func() { _ = gw.SetConfig(prevCfg, "test-restore", time.Unix(0, 2).UnixNano()) })
 	gate := liveRealGate(rollout.CapabilityGateway, true)
-	gate.trustOK = func(string, string, string, time.Time) bool { return trust() }
+	gate.trustOK = func(string, string, string, string, time.Time) bool { return trust() }
 	cfg := &mcpruntime.Config{}
 	if err := composeGatewayLiveTierInto(cfg, liveTierComposition{
 		Upstream: up, Events: liveTestEvents(t),

@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
@@ -127,5 +129,47 @@ func TestLiveCompose_RejectsMissingResponseProfile(t *testing.T) {
 	}
 	if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
 		t.Fatal("a rejected composition must not mark the tier composed")
+	}
+}
+
+// P2 (composition, round-4): a profile with a real Capability but ZERO inspection limits
+// (MaxOutputBytes()==0) must also be rejected — a capability-only check would let it through, and then
+// every non-empty response would be reported oversized AFTER the irreversible upstream call.
+func TestLiveCompose_RejectsZeroLimitProfile(t *testing.T) {
+	resetLiveTierGlobals(t)
+	// A named-but-limitless profile: Capability()=="gateway" (non-empty) yet MaxOutputBytes()==0.
+	prof, err := inspection.NewProfile(inspection.ProfileConfig{Capability: "gateway", Revision: 1})
+	if err != nil {
+		t.Fatalf("NewProfile: %v", err)
+	}
+	if prof.Capability() == "" || prof.MaxOutputBytes() > 0 {
+		t.Skipf("test premise invalid: capability=%q maxOut=%d", prof.Capability(), prof.MaxOutputBytes())
+	}
+	cfg := &mcpruntime.Config{}
+	err = composeGatewayLiveTierInto(cfg, liveTierComposition{
+		Upstream:        &recordingUpstream{},
+		Events:          liveTestEvents(t),
+		ResponseProfile: prof, // non-empty capability, zero limits — must still fail closed
+		Clock:           func() time.Time { return time.Unix(0, 1) },
+	})
+	if !errors.Is(err, errLiveComposeResponseProfileAbsent) {
+		t.Fatalf("composition must reject a zero-limits profile, got %v", err)
+	}
+	if cfg.Deps.Executor != nil {
+		t.Fatal("a rejected composition must not install an executor")
+	}
+}
+
+// P2 (round-4): the Canary runtime activation failure carries a bounded, alertable mcperr.Reason (not a
+// plain sentinel that would derive ReasonNone through AbortApplied's mcperr.ReasonOf), and it survives
+// the %w wrap the reconcile helper applies.
+func TestRolloutCanaryActivationFailed_IsClassified(t *testing.T) {
+	direct := mcperr.ReasonOf(errRolloutCanaryActivationFailed)
+	if direct == mcperr.ReasonNone {
+		t.Fatal("errRolloutCanaryActivationFailed must carry a bounded reason, not ReasonNone")
+	}
+	wrapped := fmt.Errorf("%w: %v", errRolloutCanaryActivationFailed, errors.New("persist failed"))
+	if got := mcperr.ReasonOf(wrapped); got != direct {
+		t.Fatalf("a wrapped activation failure must keep its bounded reason %s, got %s", direct.Code(), got.Code())
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -38,8 +39,9 @@ type mcpLiveSideEffectGate struct {
 	admit func() (release func(), ok bool)
 	// readFirst decides whether the operation class may cross the boundary.
 	readFirst func(policy.OperationClass) bool
-	// trustOK revalidates the exact current live approval for (tenant, server, tool) as of now.
-	trustOK func(tenant, serverID, toolName string, now time.Time) bool
+	// trustOK revalidates the exact current live approval for (tenant, server, tool) as of now,
+	// bound to the DECISION's fingerprint (the fingerprint the request was actually decided against).
+	trustOK func(tenant, serverID, toolName, fingerprint string, now time.Time) bool
 	// reserve reserves a Canary budget slot for the execution identity, returning the outcome and
 	// the generation the reservation was made under.
 	reserve func(now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64)
@@ -91,8 +93,8 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 		return deny(mcperr.ReasonRolloutOutOfScope)
 	}
 
-	// (3) Runtime live-trust revalidation (§10).
-	if !g.trustOK(in.Tenant, in.ServerID, in.ToolName, in.Now) {
+	// (3) Runtime live-trust revalidation (§10), bound to the DECISION's fingerprint.
+	if !g.trustOK(in.Tenant, in.ServerID, in.ToolName, in.Fingerprint, in.Now) {
 		releaseAdmit()
 		return deny(mcperr.ReasonLiveTrustRevalidationFailed)
 	}
@@ -126,14 +128,35 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 // request-supplied claim) and requires an active, unexpired live_execution approval that binds
 // that EXACT (tenant, server, tool, fingerprint, format) under the full first-Canary governance
 // (canary.SatisfiesLiveExecution). It is fail-closed: an uncomposed coordinator, a missing tool,
-// a tenant mismatch, or no satisfying approval all deny. It NEVER consults a shadow approval
-// (SatisfiesLiveExecution rejects a non-live purpose) and NEVER materializes a credential.
-func mcpLiveTrustRevalidate(tenant, serverID, toolName string, now time.Time) bool {
+// a tenant mismatch, an unusable server, a fingerprint that no longer matches the decision, or no
+// satisfying approval all deny. It NEVER consults a shadow approval (SatisfiesLiveExecution rejects
+// a non-live purpose) and NEVER materializes a credential.
+//
+// decisionFP is the DECISION's composite fingerprint (hex) — the fingerprint the request was
+// actually decided against. Two boundary bindings close the F1→F2→F1 catalog-flap and stale-server
+// gaps (Codex P1, PR #1290):
+//   - the reviewed SERVER must still be USABLE now (a disable / lost identity verification after the
+//     decision snapshot fails closed here, even if a stale approval exists), and
+//   - the CURRENT target fingerprint must still EQUAL the decision fingerprint, so an approval issued
+//     for a DIFFERENT fingerprint (e.g. an F2 approval when this request was decided under F1) can
+//     never authorize this side effect. The approval is then validated against that same fingerprint.
+func mcpLiveTrustRevalidate(tenant, serverID, toolName, decisionFP string, now time.Time) bool {
 	if mcpToolTrust == nil {
 		return false
 	}
 	ti := mcpToolTrust.loadTarget(serverID, toolName)
 	if !ti.found || ti.target.Tenant == "" || ti.target.Tenant != tenant {
+		return false
+	}
+	// The reviewed server must still be usable at the boundary (P1b): an operator disable or a lost
+	// identity verification after runExecute snapshotted in.Server fails closed here.
+	if !ti.target.ServerUsable {
+		return false
+	}
+	// Bind trust to the DECISION's fingerprint, not merely whichever fingerprint is current (P1a): the
+	// current target must STILL equal the fingerprint this request was decided against, so an
+	// F1→F2→F1 flap cannot let an F2 approval authorize an F1 request.
+	if decisionFP == "" || hex.EncodeToString(ti.target.Fingerprint[:]) != decisionFP {
 		return false
 	}
 	tgt := canary.LiveTarget{

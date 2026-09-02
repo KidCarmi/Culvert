@@ -99,13 +99,15 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 		return errLiveComposeEventsAbsent
 	}
 	// The live tier REQUIRES response DLP: the executor inspects every upstream response BEFORE egress.
-	// A zero-value Profile carries zero inspection limits (MaxOutputBytes==0), so the irreversible
-	// upstream side effect would occur and THEN any non-empty response would be blocked on egress as
-	// oversized — a real side effect reported as a blocked response, which invites retries. A zero
-	// Profile has an empty Capability (DefaultGatewayProfile sets it non-empty), so reject a
-	// missing/uninitialised profile fail-closed at composition, exactly like a missing upstream or events
-	// manager (Codex P2, PR #1290). The response profile installed into the executor MUST be a real one.
-	if comp.ResponseProfile.Capability() == "" {
+	// A profile with zero inspection limits (MaxOutputBytes==0) makes the irreversible upstream side
+	// effect occur and THEN reports every non-empty response oversized — a real side effect reported as
+	// a blocked response, which invites retries. Validate the LIMITS, not merely the capability: a
+	// profile built with a real capability but a zero-value InspectionLimits
+	// (NewProfile(ProfileConfig{Capability:"gateway"})) has a non-empty Capability() yet
+	// MaxOutputBytes()==0, so a capability-only check would let it through (Codex P2, PR #1290). Reject a
+	// missing/limitless profile fail-closed at composition, exactly like a missing upstream or events
+	// manager. The response profile installed into the executor MUST carry usable inspection limits.
+	if comp.ResponseProfile.Capability() == "" || comp.ResponseProfile.MaxOutputBytes() <= 0 {
 		lt.setComposeReason("response_profile_absent")
 		return errLiveComposeResponseProfileAbsent
 	}

@@ -58,7 +58,13 @@ var errRolloutPersistFailed = errors.New("rollout_persist_failed")
 // retries the begin). The transition is therefore REJECTED and the durable rollout state rolled back to
 // the prior mode, so the caller and any replay see a clean prior-mode state a retry re-attempts cleanly
 // (Codex P1, PR #1290). Fail-closed: the runtime stays disarmed throughout.
-var errRolloutCanaryActivationFailed = errors.New("rollout_canary_activation_failed")
+//
+// It carries a BOUNDED mcperr.Reason (not a plain sentinel) so that when this error reaches the CP via
+// AbortApplied's rejected acknowledgement — whose reason derives from mcperr.ReasonOf — a runtime-state
+// persistence failure surfaces as an alertable transition-invalid code, in lock-step with the other
+// rollout gates, rather than an unclassified `none` (Codex P2, PR #1290).
+var errRolloutCanaryActivationFailed = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
+	"rollout.transition", "canary_runtime_activation_failed")
 
 // mcpRollout is the process-wide, DISABLED-BY-DEFAULT PR-11 rollout composition.
 // It owns the two capability-local rollout states (Gateway + Management) and the
