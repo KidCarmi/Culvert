@@ -384,10 +384,16 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 	if !replaced {
 		candidate.Profiles = append(candidate.Profiles, published)
 	}
+	pacLifecycleStage("intent_persisted")
 	if !pacApplyProfilesMutation(w, r, "pac.profile_publish", id, before, candidate) {
 		return
 	}
-	if err := pacLifecycle.Put(lc); err != nil {
+	pacLifecycleStage("active_committed")
+	err := pacLifecyclePersist("finalize")
+	if err == nil {
+		err = pacLifecycle.Put(lc)
+	}
+	if err != nil {
 		// The active spec is already published (traffic is correct), but the
 		// node-local revision history did not persist. Report failure rather
 		// than a false 200 so the operator knows the timeline is inconsistent
@@ -397,6 +403,7 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 		http.Error(w, "profile published but revision-history persistence failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	pacLifecycleStage("finalized")
 	logger.Printf("PAC: published profile %q revision %d (digest %s)", sanitizeLog(id), n, chk.Digest)
 	pacPublishesTotal.Add(1)
 	jsonOK(w, map[string]any{"published": true, "revision": n, "digest": chk.Digest,
@@ -471,16 +478,23 @@ func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, tar
 	if !replaced {
 		candidate.Profiles = append(candidate.Profiles, restored)
 	}
+	pacLifecycleStage("intent_persisted")
 	if !pacApplyProfilesMutation(w, r, "pac.profile_rollback", id, before, candidate) {
 		return
 	}
-	if err := pacLifecycle.Put(lc); err != nil {
+	pacLifecycleStage("active_committed")
+	err := pacLifecyclePersist("finalize")
+	if err == nil {
+		err = pacLifecycle.Put(lc)
+	}
+	if err != nil {
 		logger.Printf("PAC: lifecycle persist after rollback failed for %q: %v", sanitizeLog(id), err)
 		http.Error(w, "profile rolled back but revision-history persistence failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	// targetN is a user-supplied body value; route it through sanitizeLog so
 	// CodeQL sees the sanitiser on the log sink (CWE-117). n is engine-derived.
+	pacLifecycleStage("finalized")
 	logger.Printf("PAC: rolled back profile %q to revision %s (new revision %d)", sanitizeLog(id), sanitizeLog(fmt.Sprintf("%d", targetN)), n)
 	pacRollbacksTotal.Add(1)
 	jsonOK(w, map[string]any{"rolledBack": true, "toRevision": targetN, "newRevision": n,

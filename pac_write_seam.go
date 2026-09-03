@@ -23,3 +23,36 @@ func pacWriteStateDecision(r *http.Request, stage string) {
 		h(r, stage)
 	}
 }
+
+// pacLifecycleStageHook is a TEST-ONLY seam for the publish/rollback path
+// (2F-B). It is invoked at the persistence boundaries of a lifecycle
+// mutation so a test can observe or snapshot the on-disk state at exactly
+// that point (a deterministic "crash here" without sleeps):
+//
+//   - "intent_persisted":  the operation intent is durable, the active
+//     store has NOT been mutated yet;
+//   - "active_committed":  the authoritative active store has been mutated
+//     (durably), history is NOT finalized yet;
+//   - "finalized":         the lifecycle history has been finalized.
+//
+// Production leaves the hook nil.
+var pacLifecycleStageHook func(stage string)
+
+func pacLifecycleStage(stage string) {
+	if h := pacLifecycleStageHook; h != nil {
+		h(stage)
+	}
+}
+
+// pacLifecyclePersistHook is a TEST-ONLY fault-injection seam consulted
+// immediately before each durable lifecycle write on the publish/rollback
+// path ("intent", "finalize"); a non-nil error is treated exactly like the
+// underlying write failing. Production leaves the hook nil.
+var pacLifecyclePersistHook func(stage string) error
+
+func pacLifecyclePersist(stage string) error {
+	if h := pacLifecyclePersistHook; h != nil {
+		return h(stage)
+	}
+	return nil
+}
