@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/catdb"
+	"github.com/KidCarmi/Culvert/internal/feedsched"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
@@ -143,8 +144,68 @@ type Syncer struct {
 	db           *catdb.CommunityDB
 	feedURL      string
 	syncInterval time.Duration
-	lastSync     atomic.Value // stores time.Time
+	lastSync     atomic.Value // stores time.Time — last SUCCESSFUL sync
 	totalDomains atomic.Int64
+
+	// lastAttempt records every round, success or failure. lastSync alone
+	// cannot distinguish "syncing cleanly" from "has not run since boot",
+	// because it only ever advances on success.
+	lastAttempt atomic.Value // stores time.Time
+
+	// consecutiveFailures counts rounds since the last clean one; reset to
+	// zero by the first success. Read by the health snapshot.
+	consecutiveFailures atomic.Int64
+
+	// lastFailure is the BOUNDED reason class for the most recent failed
+	// round ("download", "write", "" when clean) — never a raw error string,
+	// which would carry the feed URL into any surface that consumes it.
+	lastFailure atomic.Value // stores string
+}
+
+// Bounded reason classes for a failed round. The verbose cause goes to the log.
+// "download" covers the whole fetch-and-parse stage (downloadAndParse), which
+// is a single failure mode for the operator: the tarball did not arrive intact.
+const (
+	failDownload = "download"
+	failWrite    = "write"
+)
+
+// Backoff bounds for a failed UT1 round. The steady-state interval is 24h, so
+// a bare ticker meant one transient fetch error froze category coverage for a
+// full DAY. feedsched clamps the ceiling to the interval.
+const (
+	syncRetryMin = 15 * time.Minute
+	syncRetryMax = 2 * time.Hour
+)
+
+// Health is a consistent snapshot of the UT1 syncer's state for the metrics
+// and diagnostics surfaces.
+type Health struct {
+	LastAttempt         time.Time
+	LastSuccess         time.Time
+	ConsecutiveFailures int64
+	TotalFailures       int64
+	LastFailure         string
+	SyncInterval        time.Duration
+	Domains             int64
+}
+
+// Health returns the current snapshot.
+func (fs *Syncer) Health() Health {
+	h := Health{
+		LastSuccess:         fs.lastSync.Load().(time.Time),
+		ConsecutiveFailures: fs.consecutiveFailures.Load(),
+		TotalFailures:       syncFailures.Load(),
+		SyncInterval:        fs.syncInterval,
+		Domains:             fs.totalDomains.Load(),
+	}
+	if v, ok := fs.lastAttempt.Load().(time.Time); ok {
+		h.LastAttempt = v
+	}
+	if v, ok := fs.lastFailure.Load().(string); ok {
+		h.LastFailure = v
+	}
+	return h
 }
 
 // New creates a Syncer for the given DB.
@@ -163,57 +224,98 @@ func New(db *catdb.CommunityDB, feedURL string, syncInterval time.Duration) *Syn
 		syncInterval: syncInterval,
 	}
 	fs.lastSync.Store(time.Time{})
+	fs.lastAttempt.Store(time.Time{})
+	fs.lastFailure.Store("")
 	return fs
 }
 
 // Start launches the background sync goroutine.
 // An immediate sync is performed on first start when the DB is empty.
+//
+// The loop is a feedsched.Scheduler, not a bare 24-hour ticker. Two reasons,
+// both reachable without any infrastructure fault:
+//
+//   - a failed round was not retried for a full DAY. The origin is a
+//     raw.githubusercontent.com mirror of a 50+ MB tarball; a rate-limit, a
+//     GitHub incident, or a proxy restart froze category coverage until the
+//     next day. On a node whose community DB is empty (first boot, or after
+//     the CHAOS-50 quarantine of a damaged store) that means a full day of
+//     Layer-1-only categorisation.
+//   - a fixed ticker keeps a fleet in phase forever, and every Culvert
+//     deployment pulls that same 50+ MB object from that same host. A
+//     synchronised fleet is answered by rate-limiting — which produces exactly
+//     the failure the missing backoff then holds for 24 hours.
 func (fs *Syncer) Start(ctx context.Context) {
-	go func() {
+	go feedsched.New(fs.schedulerConfig()).Run(ctx)
+}
+
+// schedulerConfig builds the syncer's cadence configuration. Split out of Start
+// so the cadence contract is asserted directly rather than by driving a live
+// loop against the third-party mirror.
+func (fs *Syncer) schedulerConfig() feedsched.Config {
+	return feedsched.Config{
+		Name:       "feedsync",
+		Interval:   func() time.Duration { return fs.syncInterval },
+		BackoffMin: syncRetryMin,
+		BackoffMax: syncRetryMax,
+		RunNow:     func() bool { return fs.db.Stats() == 0 },
 		// CHAOS-24: Sync streams and parses a remote gzip tarball (UT1 mirror).
 		// Guard the ROUND so a malformed/hostile archive costs one sync window
 		// rather than terminating an in-line gateway; the last-good BadgerDB
-		// stays readable throughout, so degradation is already graceful.
-		if fs.db.Stats() == 0 {
-			obs.SafeCall("feedsync", fs.Sync)
-		}
-		ticker := time.NewTicker(fs.syncInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				obs.SafeCall("feedsync", fs.Sync)
+		// stays readable throughout, so degradation is already graceful. A
+		// panicked round is charged as a failure, so a systematically hostile
+		// archive backs off rather than being re-fetched at speed.
+		Run: func(context.Context) bool {
+			var ok bool
+			if obs.SafeCall("feedsync", func() { ok = fs.syncRound() }) {
+				return false
 			}
-		}
-	}()
+			return ok
+		},
+	}
 }
 
 // Sync downloads the UT1 tarball, parses all mapped categories, and performs a
 // bulk write into CommunityDB. The previous DB contents remain readable during
 // the import; BadgerDB's WriteBatch overwrites keys as they arrive.
-func (fs *Syncer) Sync() {
+func (fs *Syncer) Sync() { fs.syncRound() }
+
+// syncRound performs one sync and reports success, so the scheduler can pick
+// the retry cadence and the health surfaces can report the failure.
+func (fs *Syncer) syncRound() bool {
 	obs.Printf("FeedSync: starting UT1 sync from %s", fs.feedURL)
 	start := time.Now()
+	fs.lastAttempt.Store(start)
 
 	entries, err := downloadAndParse(fs.feedURL)
 	if err != nil {
-		syncFailures.Add(1)
+		fs.noteFailure(failDownload)
 		obs.Printf("FeedSync: download/parse failed: %v", err)
-		return
+		return false
 	}
 	obs.Printf("FeedSync: parsed %d domain entries, writing to BadgerDB…", len(entries))
 
 	if err := fs.db.BulkWrite(entries); err != nil {
-		syncFailures.Add(1)
+		fs.noteFailure(failWrite)
 		obs.Printf("FeedSync: bulk write failed: %v", err)
-		return
+		return false
 	}
 
 	fs.lastSync.Store(time.Now())
 	fs.totalDomains.Store(int64(len(entries)))
+	fs.consecutiveFailures.Store(0)
+	fs.lastFailure.Store("")
 	obs.Printf("FeedSync: sync complete: %d domains in %s", len(entries), time.Since(start).Round(time.Second))
+	return true
+}
+
+// noteFailure records one failed round: the cumulative counter the metrics
+// surface already exports, the consecutive run the health snapshot reports,
+// and the bounded reason class.
+func (fs *Syncer) noteFailure(reason string) {
+	syncFailures.Add(1)
+	fs.consecutiveFailures.Add(1)
+	fs.lastFailure.Store(reason)
 }
 
 // SeedStats sets the last-sync timestamp and domain count directly. Test

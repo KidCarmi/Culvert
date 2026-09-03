@@ -1157,6 +1157,7 @@ culvert_decrypt_autoexclude_surge_total %d
 	crashByComponent.writePrometheus(&ruleMetBuf)       // culvert_crash_records_* (panic recovery)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
+	threatFeedWritePrometheus(&ruleMetBuf) // culvert_threat_feed_* freshness (WK-5 staleness plane)
 	caWritePrometheus(&ruleMetBuf)
 	certSignHist.WritePrometheus(&ruleMetBuf)
 	clusterWritePrometheus(&ruleMetBuf)
