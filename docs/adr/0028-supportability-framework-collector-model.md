@@ -1,6 +1,6 @@
 # ADR-0028: Supportability Framework — plugin-collector model & the Culvert Support Bundle
 
-- **Status:** Accepted — implemented (appliance track M0–M5 shipped; see `docs/support/SUPPORTABILITY-ROADMAP.md` and the live operator runbook `docs/operator/support-bundles-and-diagnostics.md`)
+- **Status:** Accepted — partially implemented. The bundle/collector engine, API, and GUI front ends shipped as part of appliance track M0–M5 (see `docs/support/SUPPORTABILITY-ROADMAP.md` and the live operator runbook `docs/operator/support-bundles-and-diagnostics.md`). This ADR's third front end — dedicated `support`/`diagnose` CLI verbs — has not shipped; the only CLI surface today is the recovery flag `--support-bundle` (`main.go`).
 - **Date:** 2026-07-12
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (ratified through shipped implementation)
 - **Relates to:** ADR-0002 (internal decomposition — a new engine `internal/support`), ADR-0007 (secret containment — the `NEVER_EXPORT` enforcement), ADR-0029 (redaction), ADR-0030 (privileged host collection), ADR-0031 (export/consent). Full design in `docs/support/`.

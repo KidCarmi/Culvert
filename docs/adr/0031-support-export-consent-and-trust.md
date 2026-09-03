@@ -1,6 +1,6 @@
 # ADR-0031: Support export/upload consent & trust model; remote support deferred
 
-- **Status:** Accepted — implemented (encrypted/sealed export shipped in appliance track M4; secure-upload queue (M6) has since shipped too — see `docs/support/SUPPORTABILITY-ROADMAP.md`; remote support beyond upload remains deferred as this ADR describes)
+- **Status:** Accepted — partially implemented. Encrypted/sealed export shipped in appliance track M4, and the secure-upload queue (M6) has since shipped too (see `docs/support/SUPPORTABILITY-ROADMAP.md`); remote support beyond upload remains deferred as this ADR describes. This ADR's explicit TLS 1.3 requirement is not yet enforced in code — `internal/supportupload/upload.go`'s `http.Transport` sets no `TLSClientConfig`/`MinVersion`, so it accepts Go's default minimum rather than requiring TLS 1.3.
 - **Date:** 2026-07-12
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (ratified through shipped implementation)
 - **Relates to:** ADR-0028 (bundle framework), ADR-0029 (redaction), `internal/backupcrypt`, `internal/ssrf`, the release-catalog trust/origin model. Full design in `docs/support/SECURE-UPLOAD-ARCHITECTURE.md`.

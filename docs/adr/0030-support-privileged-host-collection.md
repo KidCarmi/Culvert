@@ -1,8 +1,8 @@
 # ADR-0030: Privileged host/container collection via the maintenance agent (read-only `/v1/collect`)
 
-- **Status:** Accepted — implemented (shipped as part of appliance track M0–M5; see `docs/support/SUPPORTABILITY-ROADMAP.md`)
+- **Status:** Proposed (design recorded 2026-07-12; no code moved). This ADR's central decision — a read-only `/v1/collect` endpoint on the maintenance agent — does not exist in the maintenance agent's route table (`cmd/culvert-maint/internal/server/server.go`); other appliance-track supportability milestones have shipped (see `docs/support/SUPPORTABILITY-ROADMAP.md`), but not this one.
 - **Date:** 2026-07-12
-- **Deciders:** Principal Supportability Architect (proposed); project maintainer (ratified through shipped implementation)
+- **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
 - **Relates to:** ADR-0028 (bundle framework), the maintenance-agent design (`roadmap/D1.6-maintenance-agent-design.md`), the P1.4 pin-binding sudoers model. Full design in `docs/support/SUPPORTABILITY-ARCHITECTURE.md §6`.
 
 ## Context
