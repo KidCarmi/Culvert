@@ -268,7 +268,13 @@ Every one is a **separately-reviewed activation**, not a config change:
    — a no-`CredentialProfile` rule may itself be DENY, an unmatched request default-denies
    (`engine.go:170-173`), and `resolveEnforcing` blocks every non-allow-class decision; the preflight's
    `PolicyHealthy` fact is only `mcpPolicy.composed()`, which proves a snapshot exists, never that this
-   request resolves to an allow (review §4/§13, blocker 14).
+   request resolves to an allow (review §4/§13, blocker 14); and (m) an **enforced one-NODE distribution
+   bound** — `ScopeSpec` has no node dimension (`internal/mcp/rollout/scope.go:100-119`) and the
+   publication coordinator's `pushAll` delivers the signed envelope to EVERY `Dist.Nodes()` entry
+   (`internal/mcp/cpdp/publication/publication.go:196-203`), so closing (j) with a generic publication
+   entry point could activate every armed/ready DP while the checklist still reads "nodes = 1". Requires
+   an exactly-one intended-node constraint plus an acknowledgement check that exactly that node applied
+   the envelope (review §3/§13, blocker 15).
    **Arming is NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.

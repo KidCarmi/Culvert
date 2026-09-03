@@ -85,7 +85,7 @@ set is empty. This requires the separately-reviewed activation to have:
 
 | Dimension | First-Canary value |
 |---|---|
-| nodes | **1** (the controlled Canary node) |
+| nodes | **1** (the controlled Canary node) — **NOT machine-enforced**: `ScopeSpec` has no node dimension and the publication coordinator's `pushAll` delivers the signed envelope to EVERY `Dist.Nodes()` entry, so a generic publication path would activate every armed/ready DP. An exactly-one intended-node constraint + acknowledgement check is required (review §3/§13, blocker 15) |
 | identity | **1** synthetic/non-production principal |
 | MCP server | **1** controlled server that **independently records every received invocation** |
 | tool | **1** exact tool |

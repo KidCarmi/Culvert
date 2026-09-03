@@ -14,7 +14,7 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **FOURTEEN independent blockers** (exhaustive as a set — together they cover
+cannot be assembled today on **FIFTEEN independent blockers** (exhaustive as a set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable AND usable under the supported
 production trust model (a provisioned HTTPS+SPKI target must ALSO speak a protocol that permits Culvert's sessionless calls — a standard initialization-requiring server is rejected because the client drives no MCP initialize/version/session lifecycle); (2) the production activation preflight cannot return `Ready:true` on a stock
@@ -42,8 +42,11 @@ the policy engine hard-quarantines it BEFORE any user rule and `ApproveLive` del
 `catalog.Promote`, so every exact-tool request is denied even with 1–12 closed (§6/§7); and (14) the
 exact request must resolve to an ALLOW-class decision with satisfiable obligations — a
 no-`CredentialProfile` rule may still be DENY, an unmatched request default-denies, and `PolicyHealthy`
-only proves a snapshot exists (§4/§13). Blockers 1–6 and 9–14 are gaps/prerequisites; 7–8 are defects
-recorded here for dedicated PRs (§21).
+only proves a snapshot exists (§4/§13); and (15) the one-NODE bound is not enforced by anything —
+`ScopeSpec` has no node dimension and the publication coordinator pushes the signed envelope to EVERY
+`Dist.Nodes()` entry, so closing blocker 12 generically could activate every armed DP while the
+checklist still reads "nodes = 1" (§3/§13). Blockers 1–6 and 9–15 are gaps/prerequisites; 7–8 are
+defects recorded here for dedicated PRs (§21).
 The experiment is specified below up to the exact point where it becomes unauthorizable, and the
 precise provisioning that would unblock it is named.
 
@@ -109,7 +112,7 @@ reversible:
 
 | Dimension | Exact value |
 |---|---|
-| nodes | **1** controlled Canary node |
+| nodes | **1** controlled Canary node — but NOT machine-enforced: `ScopeSpec` has no node dimension and the publication coordinator's `pushAll` delivers the signed envelope to EVERY `Dist.Nodes()` entry, so one-node blast radius is a deployment assumption, not a gate (§13, blocker 15) |
 | tenants | **1** synthetic / non-production tenant (`OwnerScope`) |
 | principals | **1** synthetic principal (canonical session `Sub`), no customer identity |
 | MCP servers | **1** controlled server that independently records every received invocation |
@@ -626,6 +629,11 @@ code:
   non-test caller, so `ToolStillCurrent` re-checks only the seeded record. Exact-current fingerprint +
   rug-pull invalidation therefore bind the SEED, not the live peer. Confirmed against `mcp_inventory.go`
   + a repo-wide `Discover` search. Added as blocker 11.
+- **P1 — one-node bound unenforced (§3/§13, blocker 15):** `ScopeSpec` carries no node dimension and
+  `publication.pushAll` delivers the signed envelope to every `Dist.Nodes()` entry, so a generic
+  publication entry point (blocker 12) could activate every armed DP while the checklist still reads
+  "nodes = 1". Confirmed against `rollout/scope.go`, `cpdp/publication/publication.go`. Added as
+  blocker 15.
 - **P1 — seeded tool stays catalog-quarantined (§6/§7, blocker 13):** `seedTools` lands tools
   Quarantined and `engine.go:132-135` hard-overrides a `DispQuarantined` tool to `ActionQuarantine`
   before any user rule; `ApproveLive` deliberately performs no promotion and the only non-test
@@ -655,7 +663,8 @@ BLOCKED-vs-FAILED note in §26).
 
 | Criterion | Status |
 |---|---|
-| Exactly one node / tenant / principal / server / tool / fingerprint, read-only, synthetic | Specifiable — YES |
+| Exactly one tenant / principal / server / tool / fingerprint, read-only, synthetic | Specifiable — YES |
+| Exactly one NODE, enforced at distribution | **NO — `ScopeSpec` has no node dimension and `pushAll` delivers to every `Dist.Nodes()` entry; one-node is an assumption, not a gate (§3/§13, blocker 15)** |
 | Tool requires no production credential | **CONDITIONAL — unverifiable until tool + rule fixed (§4)** |
 | A read-first-admissible one-exact-tool operation exists | **NO — classifier refuses `tools/call`; discovery cannot bind one tool (§6)** |
 | Supported upstream trust model for a controlled server available today | **NO** (§5) |
@@ -690,9 +699,9 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **fourteen independent blockers** — some are intentional capability gaps, some are
+assembled today on **fifteen independent blockers** — some are intentional capability gaps, some are
 prerequisites, and two are genuine product defects the Codex adversarial rounds (§24) surfaced and
-this review verified against the code. The list below is exhaustive AS A SET: together the fourteen cover
+this review verified against the code. The list below is exhaustive AS A SET: together the fifteen cover
 every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
@@ -773,13 +782,22 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    snapshot EXISTS, never that the exact request resolves to an allow. The authorization must therefore
    require the exact (principal, tenant, server, tool, operation) to resolve to an ALLOW-class rule with
    every execution obligation satisfiable.
+15. **The one-NODE bound is not enforced by anything (§3/§13).** `ScopeSpec` has no node dimension at all
+   (`internal/mcp/rollout/scope.go:100-119`: tenants/servers/tools/principals/agents/clients/groups/
+   percent + exclusions — no node selector), and the publication coordinator's `pushAll` delivers the
+   signed envelope to EVERY node the distributor lists ("delivers the signed envelope to every intended
+   DP", `internal/mcp/cpdp/publication/publication.go:196-203`). So if blocker 12 is closed with a
+   GENERIC publication entry point, a single Canary publish activates every armed/ready DP while the
+   documented checklist still reads "nodes = 1". The one-node bound must become a MANDATORY, verified
+   distribution constraint — exactly-one intended node plus an acknowledgement check that exactly that
+   node applied the envelope — not an assumption about how many DPs happen to be enrolled.
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
 execute — nothing is reachable (1), the activation preflight cannot go Ready (2), no operator can arm
 (3), no admissible one-tool operation exists (4), the seeded tool is catalog-quarantined and hard-denied
 before any rule runs (13), and no operator-reachable path even transitions the node into Canary mode
-(12). Blockers 5–12 and 14 are unmet *prerequisites*/defects, not a live
+(12). Blockers 5–12, 14 and 15 are unmet *prerequisites*/defects, not a live
 unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA (blocker 11
 adds that even a reachable+usable target would carry a fingerprint bound to operator-declared JSON, not
 the observed peer). So the
@@ -868,7 +886,13 @@ verdict FAILED.)
   (`ui_mcp_rollout.go:116`) and nothing in non-test code constructs the distribution publication
   coordinator (`publication.New`) or calls `coord.Publish`, so the signed-distribution apply that begins
   the generation is never fed. Wire a governed forward-transition/publication path (the same wiring that
-  closes blocker 10's rollback direction, but for →Canary).
+  closes blocker 10's rollback direction, but for →Canary) — and it MUST target exactly one node, not
+  the whole fleet (blocker 15);
+- make the **one-NODE bound a verified distribution constraint** (blocker 15, §3/§13) — `ScopeSpec` has
+  no node dimension and `publication.pushAll` delivers to EVERY `Dist.Nodes()` entry, so a generic
+  publication path would activate every armed/ready DP while the checklist still reads "nodes = 1".
+  Require an exactly-one intended-node constraint plus an acknowledgement check proving exactly that
+  node applied the envelope (and no other node did).
 
 Then re-run this review against the new exact SHA.
 
