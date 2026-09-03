@@ -29,6 +29,22 @@ type Config struct {
 	// Supports bare domains ("corp.local"), wildcard prefixes ("*.corp.local"),
 	// and IP CIDR ranges ("192.168.0.0/16").
 	Exclusions []string `json:"exclusions"`
+	// Revision is the optimistic-concurrency token of the legacy config
+	// (2F-A): it advances by exactly one on every Set, whatever the caller
+	// supplied (rollback and cluster-apply replay historical configs whose
+	// revision is meaningless here), and reads as 1 before any mutation so a
+	// client always holds a non-zero token. The admin API refuses a mutation
+	// whose token is absent (428) or stale (409); see pac.go apiPACConfig.
+	Revision int64 `json:"revision,omitempty"`
+}
+
+// effectiveRevision is the token a reader observes: never zero, so a config
+// loaded from a pre-2F-A file (no revision key) still hands out a usable token.
+func (c Config) effectiveRevision() int64 {
+	if c.Revision < 1 {
+		return 1
+	}
+	return c.Revision
 }
 
 // Store persists Config to a JSON file.
@@ -91,6 +107,7 @@ func (s *Store) Get() Config {
 	defer s.mu.RUnlock()
 	c := s.cfg
 	c.Exclusions = append([]string(nil), s.cfg.Exclusions...)
+	c.Revision = c.effectiveRevision()
 	return c
 }
 
@@ -101,6 +118,9 @@ func (s *Store) Get() Config {
 func (s *Store) Set(c Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The token is owned by the store, never by the caller: every committed
+	// Set advances it by one from the current effective value.
+	c.Revision = s.cfg.effectiveRevision() + 1
 	s.cfg = c
 	s.modTime = time.Now()
 	if s.path == "" {

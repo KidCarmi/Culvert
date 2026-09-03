@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
@@ -25,6 +26,12 @@ type (
 
 // pacStore is the process-wide PAC store, loaded by the startup slice.
 var pacStore = &PACStore{}
+
+// pacConfigAPIMu serializes the legacy-config fence decision with its Set
+// (2F-A): the revision check and the commit must be one decision, or two
+// admins echoing the same token could both pass and the second silently
+// overwrite the first.
+var pacConfigAPIMu sync.Mutex
 
 // pacProfiles is the process-wide profiles/pools store (initiative PR 2),
 // loaded by the startup slice from <dataDir>/pac_profiles.json. The
@@ -69,6 +76,15 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// 2F-A fence: the caller must echo the revision it loaded. Decided
+		// under pacConfigAPIMu so the check and the Set are one serialized
+		// decision against the authoritative store.
+		token := pacFenceInt(r, "revision", c.Revision)
+		pacConfigAPIMu.Lock()
+		defer pacConfigAPIMu.Unlock()
+		if !pacCheckRevision(w, "revision", token, pacStore.Get().Revision) {
+			return
+		}
 		// Strict validation lives HERE, at the API boundary — never in
 		// Store.Set, whose replay callers (rollback, cluster apply) discard
 		// errors. Invalid input is rejected with actionable per-entry issues.
@@ -92,6 +108,7 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		canonical.Revision = pacStore.Get().Revision // the token the store just minted
 		actor := sessionAdmin(r)
 		auditEvent(r, "pac.update", "pac-config", fmt.Sprintf("host=%s port=%d exclusions=%d",
 			sanitizeLog(canonical.ProxyHost), canonical.ProxyPort, len(canonical.Exclusions)))

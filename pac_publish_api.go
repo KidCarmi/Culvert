@@ -134,6 +134,7 @@ func pacLifecycleGet(w http.ResponseWriter, id string) {
 	// draft diffed against the new active spec, i.e. a spurious dirty/diff).
 	// Both accessors return deep copies, so the lock is released before use.
 	pacProfilesAPIMu.Lock()
+	cfg := pacProfiles.Get()
 	active, activeOK := pacProfiles.ProfileByID(id)
 	lc, _ := pacLifecycle.Get(id)
 	pacProfilesAPIMu.Unlock()
@@ -152,6 +153,12 @@ func pacLifecycleGet(w http.ResponseWriter, id string) {
 		"activeN":      lc.ActiveN,
 		"revisions":    lc.Revisions,
 		"draftDiff":    diff,
+		// 2F-A tokens: save_draft echoes draftRevision; publish/rollback echo
+		// activeRevision (the active profile's revision) when a profile is
+		// active, else collectionEtag (a first publish is a collection create).
+		"draftRevision":  lc.DraftRevision,
+		"activeRevision": active.Revision,
+		"collectionEtag": pac.ConfigETag(cfg),
 	}
 	if hasPrev {
 		resp["previousRevision"] = prev.N
@@ -166,6 +173,10 @@ func pacLifecyclePost(w http.ResponseWriter, r *http.Request, id string) {
 		ConfirmDirect string      `json:"confirmDirect"` // must equal id to publish new DIRECT paths
 		TargetN       int64       `json:"targetN"`       // rollback target
 		Reason        string      `json:"reason"`        // optional change-reason recorded on the revision
+		// 2F-A fence tokens (see pac_fence.go).
+		DraftRevision          int64  `json:"draftRevision"`          // save_draft: the draft token loaded
+		ExpectedActiveRevision int64  `json:"expectedActiveRevision"` // publish/rollback: the active profile's revision loaded
+		CollectionEtag         string `json:"collectionEtag"`         // publish/rollback with NO active profile: the collection token loaded
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -181,17 +192,19 @@ func pacLifecyclePost(w http.ResponseWriter, r *http.Request, id string) {
 	// /api/pac/analyze route instead.
 	switch req.Action {
 	case "save_draft":
-		pacLifecycleSaveDraft(w, r, id, req.Draft)
+		pacLifecycleSaveDraft(w, r, id, req.Draft, pacFenceInt(r, "draftRevision", req.DraftRevision))
 	case "publish":
-		pacLifecyclePublish(w, r, id, req.Draft, req.ConfirmDirect, reason)
+		pacLifecyclePublish(w, r, id, req.Draft, req.ConfirmDirect, reason,
+			pacFenceInt(r, "expectedActiveRevision", req.ExpectedActiveRevision), pacFenceStr(r, "collectionEtag", req.CollectionEtag))
 	case "rollback":
-		pacLifecycleRollback(w, r, id, req.TargetN, req.ConfirmDirect)
+		pacLifecycleRollback(w, r, id, req.TargetN, req.ConfirmDirect,
+			pacFenceInt(r, "expectedActiveRevision", req.ExpectedActiveRevision), pacFenceStr(r, "collectionEtag", req.CollectionEtag))
 	default:
 		http.Error(w, "unknown or non-mutating action: "+sanitizeLog(req.Action)+" (use /api/pac/analyze for diff/impact)", http.StatusBadRequest)
 	}
 }
 
-func pacLifecycleSaveDraft(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile) {
+func pacLifecycleSaveDraft(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile, token int64) {
 	draft.ID = id
 	// Serialize the lifecycle read-modify-write under the same mutex as
 	// publish/rollback. Without it, a save_draft that reads the record before a
@@ -200,7 +213,20 @@ func pacLifecycleSaveDraft(w http.ResponseWriter, r *http.Request, id string, dr
 	// number — breaking the monotonic, never-reused revision invariant.
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
-	lc, _ := pacLifecycle.Get(id)
+	lc, found := pacLifecycle.Get(id)
+	// 2F-A fence: an existing draft must be echoed by the draftRevision it
+	// was loaded at (428 absent, 409 stale). The FIRST save_draft for a
+	// profile creates the record and takes no token; a non-zero token for a
+	// record that no longer exists means the draft vanished (404).
+	switch {
+	case found && lc.DraftRevision > 0:
+		if !pacCheckRevision(w, "draftRevision", token, lc.DraftRevision) {
+			return
+		}
+	case token != 0:
+		http.NotFound(w, r)
+		return
+	}
 	lc.TouchDraft(draft)
 	if err := pacLifecycle.Put(lc); err != nil {
 		http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
@@ -209,7 +235,7 @@ func pacLifecycleSaveDraft(w http.ResponseWriter, r *http.Request, id string, dr
 	// Draft persistence is a (node-local) state change — audit it so the
 	// AuditExpected lifecycle POST route always emits an event (C2c).
 	auditEvent(r, "pac.profile_draft", id, fmt.Sprintf("dirty=%t rules=%d", lc.DraftDirty, len(lc.Draft.Rules)))
-	jsonOK(w, map[string]any{"draftDirty": lc.DraftDirty, "draft": lc.Draft})
+	jsonOK(w, map[string]any{"draftDirty": lc.DraftDirty, "draft": lc.Draft, "draftRevision": lc.DraftRevision})
 }
 
 // apiPACAnalyze handles POST /api/pac/analyze — read-only diff/impact for a
@@ -285,7 +311,7 @@ func pacObservedDestinations() []string {
 	return out
 }
 
-func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile, confirmDirect, reason string) {
+func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile, confirmDirect, reason string, expectedActive int64, collectionEtag string) {
 	draft.ID = id
 
 	// Serialize the guardrail evaluation WITH the write under the profile
@@ -300,6 +326,11 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 
 	pools := pacProfiles.PoolMap()
 	active, hasActive := pacProfiles.ProfileByID(id)
+	// 2F-A fence, before the guardrail: the caller must echo the active
+	// profile's revision (or, for a first publish, the collection token).
+	if !pacLifecycleFence(w, active, hasActive, expectedActive, collectionEtag) {
+		return
+	}
 	chk := pac.EvaluatePublish(draft, pools, active, hasActive)
 	if !chk.OK && !chk.RequiresConfirmation {
 		// Guardrail block is a security-relevant attempt (fail-closed on a bad
@@ -368,10 +399,11 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 	}
 	logger.Printf("PAC: published profile %q revision %d (digest %s)", sanitizeLog(id), n, chk.Digest)
 	pacPublishesTotal.Add(1)
-	jsonOK(w, map[string]any{"published": true, "revision": n, "digest": chk.Digest})
+	jsonOK(w, map[string]any{"published": true, "revision": n, "digest": chk.Digest,
+		"activeRevision": published.Revision, "draftRevision": lc.DraftRevision})
 }
 
-func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, targetN int64, confirmDirect string) {
+func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, targetN int64, confirmDirect string, expectedActive int64, collectionEtag string) {
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
 	lc, ok := pacLifecycle.Get(id)
@@ -380,6 +412,10 @@ func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, tar
 		return
 	}
 	active, hasActive := pacProfiles.ProfileByID(id)
+	// 2F-A fence (same contract as publish), before any lifecycle mutation.
+	if !pacLifecycleFence(w, active, hasActive, expectedActive, collectionEtag) {
+		return
+	}
 	pools := pacProfiles.PoolMap()
 	ts := time.Now().UTC().Format(time.RFC3339)
 	actor := sessionAdmin(r)
@@ -447,5 +483,18 @@ func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, tar
 	// CodeQL sees the sanitiser on the log sink (CWE-117). n is engine-derived.
 	logger.Printf("PAC: rolled back profile %q to revision %s (new revision %d)", sanitizeLog(id), sanitizeLog(fmt.Sprintf("%d", targetN)), n)
 	pacRollbacksTotal.Add(1)
-	jsonOK(w, map[string]any{"rolledBack": true, "toRevision": targetN, "newRevision": n})
+	jsonOK(w, map[string]any{"rolledBack": true, "toRevision": targetN, "newRevision": n,
+		"activeRevision": restored.Revision, "draftRevision": lc.DraftRevision})
+}
+
+// pacLifecycleFence applies the 2F-A precondition to publish and rollback,
+// under pacProfilesAPIMu: with an active profile the caller echoes its
+// revision (key "revision", so the refusal names the same token the profile
+// surfaces carry); without one — a first publish creates the profile — the
+// caller echoes the collection token. Returns false after writing the refusal.
+func pacLifecycleFence(w http.ResponseWriter, active pac.Profile, hasActive bool, expectedActive int64, collectionEtag string) bool {
+	if hasActive {
+		return pacCheckRevision(w, "revision", expectedActive, active.Revision)
+	}
+	return pacCheckEtag(w, "collectionEtag", collectionEtag, pac.ConfigETag(pacProfiles.Get()))
 }

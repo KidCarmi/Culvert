@@ -58,6 +58,17 @@ func (s *LifecycleStore) Load(path string) error {
 	if s.byID == nil {
 		s.byID = map[string]*ProfileLifecycle{}
 	}
+	// Pre-2F-A records carry no draft token; migrate them to 1 so every
+	// stored draft hands out a non-zero optimistic-concurrency token.
+	for id, lc := range s.byID {
+		if lc == nil {
+			delete(s.byID, id)
+			continue
+		}
+		if lc.DraftRevision < 1 {
+			lc.DraftRevision = 1
+		}
+	}
 	s.modTime = time.Now()
 	return nil
 }

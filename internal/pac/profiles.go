@@ -12,6 +12,8 @@ package pac
 // Custom profiles and pools persist in <dataDir>/pac_profiles.json.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -155,8 +157,42 @@ func (s *ProfileStore) Load(path string) error {
 	if err := json.Unmarshal(data, &s.cfg); err != nil {
 		return fmt.Errorf("pac profiles: parse %s: %w", path, err)
 	}
+	normalizeProfileRevisions(&s.cfg)
 	s.modTime = time.Now()
 	return nil
+}
+
+// normalizeProfileRevisions migrates a profile carrying revision 0 (written by
+// a pre-2F-A binary, a tolerant import, or a hand-edited file) to revision 1,
+// so every stored profile hands out a non-zero optimistic-concurrency token
+// and the historical "revision 0 skips the fence" path can never be reached
+// through a stored object. Idempotent; positive revisions are untouched.
+func normalizeProfileRevisions(cfg *ProfilesConfig) {
+	for i := range cfg.Profiles {
+		if cfg.Profiles[i].Revision < 1 {
+			cfg.Profiles[i].Revision = 1
+		}
+	}
+}
+
+// PoolETag is the pool's optimistic-concurrency token (2F-A): a digest of the
+// pool's canonical JSON (id, name, endpoints in order). Pools carry no stored
+// revision, and none is needed — any content change yields a new token, and
+// the token is identical on every node for the same content.
+func PoolETag(p Pool) string {
+	b, _ := json.Marshal(p) //nolint:errcheck // Pool is plain data; Marshal cannot fail
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// ConfigETag is the collection token for profile/pool CREATE operations
+// (2F-A): a digest of the whole canonical ProfilesConfig. Profiles embed their
+// revision, so every profile or pool mutation changes it, and it is computed
+// (never stored), so it is identical on every node holding the same config.
+func ConfigETag(cfg ProfilesConfig) string {
+	b, _ := json.Marshal(cfg) //nolint:errcheck // ProfilesConfig is plain data; Marshal cannot fail
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // Get returns a deep-enough snapshot of the current config (slices copied;
@@ -172,6 +208,7 @@ func (s *ProfileStore) Set(cfg ProfilesConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg = copyProfilesConfig(cfg)
+	normalizeProfileRevisions(&s.cfg)
 	s.modTime = time.Now()
 	if s.path == "" {
 		return nil

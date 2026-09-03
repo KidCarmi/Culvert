@@ -108,6 +108,23 @@ components:
         text/plain:
           schema: { type: string }
           example: "Forbidden: insufficient role"
+    PACPreconditionRequired:
+      description: >-
+        2F-A fence — the mutation carried no precondition token (or a zero one).
+        Nothing was changed. `current` carries the authoritative token to echo
+        (`revision`, `etag`, `collectionEtag` or `draftRevision`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PACFenceRefusal' }
+    PACStale:
+      description: >-
+        2F-A fence — the echoed precondition token is stale: the object (or the
+        collection) changed since it was loaded. Nothing was changed, no audit
+        event was recorded and no config version was created. `current` carries
+        the authoritative token; reload and retry.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PACFenceRefusal' }
     PlainConflict:
       description: Request conflicts with the node's role (e.g. a control-plane-managed setting cannot be edited locally on a data-plane node). Body is plain text.
       content:
@@ -419,6 +436,23 @@ components:
       additionalProperties: false
       properties:
         hours: { type: integer }
+    PACFenceRefusal:
+      type: object
+      description: Structured 2F-A precondition refusal (428 precondition_required / 409 stale).
+      required: [error, code, current]
+      additionalProperties: false
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [precondition_required, stale] }
+        current:
+          type: object
+          description: The authoritative token to echo on retry (exactly one key).
+          additionalProperties: false
+          properties:
+            revision: { type: integer, format: int64 }
+            draftRevision: { type: integer, format: int64 }
+            etag: { type: string }
+            collectionEtag: { type: string }
     PACConfig:
       type: object
       required: [proxyHost, proxyPort]
@@ -427,6 +461,13 @@ components:
         proxyHost: { type: string }
         proxyPort: { type: integer }
         exclusions: { type: array, items: { type: string }, nullable: true }
+        revision:
+          type: integer
+          format: int64
+          description: >-
+            Optimistic-concurrency token (2F-A). Reads always carry a non-zero
+            value; a POST must echo the value it loaded (428 when absent, 409
+            `stale` when it changed). Advances by one per committed save.
     ConnLimitStatus:
       type: object
       required: [enabled, maxPerIP, activeIPs, rejectedTotal]
@@ -766,6 +807,7 @@ components:
     PACPools:
       type: array
       nullable: true
+      description: Each pool carries its 2F-A `etag` token (computed on read, never stored).
       items: { type: object, additionalProperties: true }
     PACProfiles:
       type: object
@@ -775,6 +817,13 @@ components:
         defaultProfile: { type: object, additionalProperties: true, nullable: true }
         profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
         pools: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        collectionEtag:
+          type: string
+          description: 2F-A collection token every profile/pool CREATE must echo.
+        poolEtags:
+          type: object
+          description: 2F-A per-pool tokens (pool id → etag) every pool PUT/DELETE must echo.
+          additionalProperties: { type: string }
     PACPostureInventory:
       type: object
       description: Direct-access PAC posture inventory (shape varies).
@@ -1427,7 +1476,7 @@ components:
     # ── Slice 3 tranche 14: item-route schemas ────────────────────────────────────
     PACPoolItem:
       type: object
-      description: A single PAC pool (open superset).
+      description: A single PAC pool (open superset) plus its 2F-A `etag` token on reads.
       additionalProperties: true
     PACProfileItem:
       type: object
@@ -2053,6 +2102,12 @@ components:
         id: { type: string }
         name: { type: string }
         endpoints: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        collectionEtag:
+          type: string
+          description: 2F-A — required on CREATE (or as the `collectionEtag` query parameter).
+        etag:
+          type: string
+          description: 2F-A — required on PUT (or as the `etag` query parameter).
     PACProfileInput:
       type: object
       required: [name]
@@ -2066,7 +2121,13 @@ components:
         rules: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
         privateNetworks: { type: string }
         availabilityMode: { type: string }
-        revision: { type: integer, format: int64 }
+        collectionEtag:
+          type: string
+          description: 2F-A — required on CREATE (or as the `collectionEtag` query parameter).
+        revision:
+          type: integer
+          format: int64
+          description: 2F-A — required on PUT (or as the `revision` query parameter); must equal the loaded revision.
     IdPProfileInput:
       type: object
       required: [name, type]
@@ -3565,6 +3626,8 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/settings:
@@ -5504,6 +5567,8 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/pac/profiles:
@@ -5556,6 +5621,8 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/pac/posture/inventory:
@@ -7853,6 +7920,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACPoolItem' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
@@ -7874,6 +7943,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: PAC_pool.delete
+      parameters:
+        - name: etag
+          in: query
+          required: true
+          description: 2F-A precondition token the DELETE must echo (the loaded value).
+          schema: { type: string }
       responses:
         '200':
           description: Delete PAC pool.
@@ -7881,6 +7956,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACPoolItem' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
@@ -7922,6 +7999,17 @@ paths:
               additionalProperties: true
               properties:
                 action: { type: string, enum: [save_draft, publish, rollback] }
+                draftRevision:
+                  type: integer
+                  format: int64
+                  description: 2F-A — save_draft on an existing draft must echo the loaded draftRevision.
+                expectedActiveRevision:
+                  type: integer
+                  format: int64
+                  description: 2F-A — publish/rollback must echo the active profile's revision (refusal key `revision`).
+                collectionEtag:
+                  type: string
+                  description: 2F-A — publish/rollback with NO active profile must echo the collection token instead.
       responses:
         '200':
           description: Lifecycle action result (shape varies by action).
@@ -7931,9 +8019,13 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '409':
-          description: Mutation not allowed in the current state. Body is plain text.
+          description: >-
+            Either the 2F-A `stale` refusal (structured, see PACFenceRefusal) or the
+            typed-DIRECT confirmation challenge (`confirmField`/`confirmValue`/`newDirectPaths`).
           content:
-            text/plain: { schema: { type: string } }
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
   /api/pac/profiles/{name}:
     parameters:
       - name: name
@@ -7994,6 +8086,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACProfileItem' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
@@ -8015,6 +8109,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: PAC_profile.delete
+      parameters:
+        - name: revision
+          in: query
+          required: true
+          description: 2F-A precondition token the DELETE must echo (the loaded value).
+          schema: { type: integer }
       responses:
         '200':
           description: Delete PAC profile.
@@ -8022,6 +8122,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACProfileItem' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
@@ -8087,6 +8189,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACExceptionItem' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
@@ -8108,6 +8212,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: PAC_posture_exception.delete
+      parameters:
+        - name: revision
+          in: query
+          required: true
+          description: 2F-A precondition token the DELETE must echo (the loaded value).
+          schema: { type: integer }
       responses:
         '200':
           description: Delete PAC posture exception.
@@ -8115,6 +8225,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACExceptionItem' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '409': { $ref: '#/components/responses/PACStale' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.

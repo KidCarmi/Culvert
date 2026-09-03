@@ -172,19 +172,35 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 			"defaultProfile": pacDefaultView(),
 			"profiles":       cfg.Profiles,
 			"pools":          cfg.Pools,
+			// 2F-A tokens: the collection token every CREATE must echo, and
+			// the per-pool token every pool PUT/DELETE must echo.
+			"collectionEtag": pac.ConfigETag(cfg),
+			"poolEtags":      pacPoolEtags(cfg),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
-		var p pac.Profile
-		if err := decodeJSON(r, &p); err != nil {
+		var in struct {
+			pac.Profile
+			CollectionEtag string `json:"collectionEtag"`
+		}
+		if err := decodeJSON(r, &in); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		p := in.Profile
+		token := pacFenceStr(r, "collectionEtag", in.CollectionEtag)
 		pacWriteStateDecision(r, "resolved")
 		pacProfilesAPIMu.Lock()
 		defer pacProfilesAPIMu.Unlock()
+		// 2F-A fence, decided inside the mutex against the authoritative
+		// collection: a create issued from a stale listing is refused.
+		if !pacCheckEtag(w, "collectionEtag", token, pac.ConfigETag(pacProfiles.Get())) {
+			pacWriteStateDecision(r, "fence")
+			return
+		}
+		pacWriteStateDecision(r, "fence")
 		if _, exists := pacProfiles.ProfileByID(p.ID); exists {
 			http.Error(w, "profile already exists: "+sanitizeLog(p.ID), http.StatusConflict)
 			return
@@ -253,9 +269,19 @@ func apiPACProfileItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
+	token := pacFenceInt(r, "revision", 0)
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
+	existing, ok := pacProfiles.ProfileByID(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	// 2F-A fence: a DELETE must echo the revision it loaded.
+	if !pacCheckRevision(w, "revision", token, existing.Revision) {
+		return
+	}
 	candidate, removed := pacRemoveProfile(pacProfiles.Get(), id)
 	if !removed {
 		http.NotFound(w, r)
@@ -290,6 +316,7 @@ func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	p.ID = id
+	token := pacFenceInt(r, "revision", p.Revision)
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
@@ -300,11 +327,11 @@ func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
 		if candidate.Profiles[i].ID != id {
 			continue
 		}
-		// Optimistic concurrency: a client that echoes the revision it
-		// loaded gets reject-on-stale instead of silent last-writer-wins.
-		// Revision 0 (older clients) skips the check — additive contract.
-		if p.Revision != 0 && p.Revision != candidate.Profiles[i].Revision {
-			http.Error(w, fmt.Sprintf("stale revision %d (current %d) — reload and retry", p.Revision, candidate.Profiles[i].Revision), http.StatusConflict)
+		// 2F-A fence: the client MUST echo the revision it loaded — an
+		// absent/zero token is 428 and a stale one a structured 409, never
+		// silent last-writer-wins (the pre-2F-A "revision 0 skips the
+		// check" path is gone; stored profiles never carry 0 any more).
+		if !pacCheckRevision(w, "revision", token, candidate.Profiles[i].Revision) {
 			return
 		}
 		activeSpec = candidate.Profiles[i] // the spec being replaced, for the DIRECT-delta guardrail
@@ -341,19 +368,29 @@ func pacRemoveProfile(cfg pac.ProfilesConfig, id string) (pac.ProfilesConfig, bo
 func apiPACPools(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		jsonOK(w, pacProfiles.Get().Pools)
+		jsonOK(w, pacPoolViews(pacProfiles.Get().Pools))
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
-		var p pac.Pool
-		if err := decodeJSON(r, &p); err != nil {
+		var in struct {
+			pac.Pool
+			CollectionEtag string `json:"collectionEtag"`
+		}
+		if err := decodeJSON(r, &in); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		p := in.Pool
+		token := pacFenceStr(r, "collectionEtag", in.CollectionEtag)
 		pacWriteStateDecision(r, "resolved")
 		pacProfilesAPIMu.Lock()
 		defer pacProfilesAPIMu.Unlock()
+		if !pacCheckEtag(w, "collectionEtag", token, pac.ConfigETag(pacProfiles.Get())) {
+			pacWriteStateDecision(r, "fence")
+			return
+		}
+		pacWriteStateDecision(r, "fence")
 		if _, exists := pacProfiles.PoolByID(p.ID); exists {
 			http.Error(w, "pool already exists: "+sanitizeLog(p.ID), http.StatusConflict)
 			return
@@ -383,7 +420,7 @@ func apiPACPoolItem(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		jsonOK(w, p)
+		jsonOK(w, pacPoolView{Pool: p, ETag: pac.PoolETag(p)})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
@@ -400,16 +437,21 @@ func apiPACPoolItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func pacPoolPut(w http.ResponseWriter, r *http.Request, id string) {
-	var p pac.Pool
-	if err := decodeJSON(r, &p); err != nil {
+	var in struct {
+		pac.Pool
+		ETag string `json:"etag"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	p := in.Pool
 	if p.ID != "" && p.ID != id {
 		http.Error(w, "pool ID in body must match URL", http.StatusBadRequest)
 		return
 	}
 	p.ID = id
+	token := pacFenceStr(r, "etag", in.ETag)
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
@@ -418,6 +460,10 @@ func pacPoolPut(w http.ResponseWriter, r *http.Request, id string) {
 	for i := range candidate.Pools {
 		if candidate.Pools[i].ID != id {
 			continue
+		}
+		// 2F-A fence: a pool PUT must echo the etag of the pool it loaded.
+		if !pacCheckEtag(w, "etag", token, pac.PoolETag(candidate.Pools[i])) {
+			return
 		}
 		candidate.Pools[i] = p
 		found = true
@@ -433,9 +479,21 @@ func pacPoolPut(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func pacPoolDelete(w http.ResponseWriter, r *http.Request, id string) {
+	token := pacFenceStr(r, "etag", "")
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
+	existing, ok := pacProfiles.PoolByID(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	// 2F-A fence: a DELETE must echo the etag of the pool it loaded. The
+	// vanished (404) and stale/missing-token (409/428) decisions precede the
+	// referenced-by-profile refusal so the caller learns the truthful reason.
+	if !pacCheckEtag(w, "etag", token, pac.PoolETag(existing)) {
+		return
+	}
 	for i := range before.Profiles {
 		if before.Profiles[i].PoolID == id {
 			http.Error(w, "pool is referenced by profile "+sanitizeLog(before.Profiles[i].ID), http.StatusConflict)
@@ -464,4 +522,28 @@ func pacPoolDelete(w http.ResponseWriter, r *http.Request, id string) {
 	if pacApplyProfilesMutation(w, r, "pac.pool_delete", id, before, candidate) {
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// pacPoolView is a pool as read through the API: the stored pool plus its
+// 2F-A optimistic-concurrency token. The token is computed on read and is
+// never part of the persisted or cluster-synced Pool.
+type pacPoolView struct {
+	pac.Pool
+	ETag string `json:"etag"`
+}
+
+func pacPoolViews(pools []pac.Pool) []pacPoolView {
+	out := make([]pacPoolView, 0, len(pools))
+	for i := range pools {
+		out = append(out, pacPoolView{Pool: pools[i], ETag: pac.PoolETag(pools[i])})
+	}
+	return out
+}
+
+func pacPoolEtags(cfg pac.ProfilesConfig) map[string]string {
+	m := make(map[string]string, len(cfg.Pools))
+	for i := range cfg.Pools {
+		m[cfg.Pools[i].ID] = pac.PoolETag(cfg.Pools[i])
+	}
+	return m
 }

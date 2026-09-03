@@ -35,7 +35,7 @@ func TestPEI_HandlerReturns500OnPersistFailure(t *testing.T) {
 
 	// DELETE an in-memory record whose persist will fail → 500.
 	pacExceptions.Restore(pac.ExceptionState{
-		ByID: map[string]pac.ExceptionRecord{"vendor": {ProfileID: "vendor", Owner: "o", Reason: "r"}},
+		ByID: map[string]pac.ExceptionRecord{"vendor": {ProfileID: "vendor", Owner: "o", Reason: "r", Revision: 1}},
 		Path: badPath,
 	})
 	if rec := peiExcItem(t, http.MethodDelete, "vendor", "", RoleAdmin); rec.Code != http.StatusInternalServerError {

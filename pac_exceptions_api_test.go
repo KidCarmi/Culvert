@@ -44,11 +44,12 @@ func pacExcTestSetup(t *testing.T) {
 func pacExcReq(t *testing.T, method, path, body string, role UIRole) *httptest.ResponseRecorder {
 	t.Helper()
 	var r *http.Request
+	fenced := pacTestWithTokens(method, path, body)
 	if body != "" {
-		r = httptest.NewRequest(method, path, strings.NewReader(body))
+		r = httptest.NewRequest(method, fenced, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 	} else {
-		r = httptest.NewRequest(method, path, http.NoBody)
+		r = httptest.NewRequest(method, fenced, http.NoBody)
 	}
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
 	rec := httptest.NewRecorder()

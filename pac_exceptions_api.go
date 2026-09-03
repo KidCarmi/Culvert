@@ -187,11 +187,26 @@ func pacExceptionPut(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
+	token := pacFenceInt(r, "revision", in.Revision)
 	pacExceptionsMu.Lock()
 	defer pacExceptionsMu.Unlock()
 	now := time.Now().UTC().Format(time.RFC3339)
 	actor := sessionAdmin(r)
 	prev, existed := pacExceptions.Get(id)
+	// 2F-A fence: an existing record must be echoed by the revision it was
+	// loaded at (428 absent, 409 stale); the first PUT creates the record and
+	// takes no token; a non-zero token for a record that no longer exists
+	// means the governance record vanished (404). The store stays OFF
+	// config-version rollback and cluster sync — a different property.
+	switch {
+	case existed:
+		if !pacCheckRevision(w, "revision", token, prev.Revision) {
+			return
+		}
+	case token != 0:
+		http.NotFound(w, r)
+		return
+	}
 
 	rec := in
 	rec.ProfileID = id
@@ -199,9 +214,11 @@ func pacExceptionPut(w http.ResponseWriter, r *http.Request, id string) {
 	if existed {
 		rec.CreatedAt = prev.CreatedAt
 		rec.CreatedBy = prev.CreatedBy
+		rec.Revision = prev.Revision + 1
 	} else {
 		rec.CreatedAt = now
 		rec.CreatedBy = actor
+		rec.Revision = 1
 	}
 	if err := pacExceptions.Put(rec); err != nil {
 		http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
@@ -218,10 +235,16 @@ func pacExceptionPut(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func pacExceptionDelete(w http.ResponseWriter, r *http.Request, id string) {
+	token := pacFenceInt(r, "revision", 0)
 	pacExceptionsMu.Lock()
 	defer pacExceptionsMu.Unlock()
-	if _, ok := pacExceptions.Get(id); !ok {
+	prev, ok := pacExceptions.Get(id)
+	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	// 2F-A fence: a DELETE must echo the revision it loaded.
+	if !pacCheckRevision(w, "revision", token, prev.Revision) {
 		return
 	}
 	if err := pacExceptions.Delete(id); err != nil {

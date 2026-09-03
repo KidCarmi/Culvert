@@ -1,6 +1,26 @@
 {
   "components": {
     "responses": {
+      "PACPreconditionRequired": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PACFenceRefusal"
+            }
+          }
+        },
+        "description": "2F-A fence — the mutation carried no precondition token (or a zero one). Nothing was changed. `current` carries the authoritative token to echo (`revision`, `etag`, `collectionEtag` or `draftRevision`)."
+      },
+      "PACStale": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PACFenceRefusal"
+            }
+          }
+        },
+        "description": "2F-A fence — the echoed precondition token is stale: the object (or the collection) changed since it was loaded. Nothing was changed, no audit event was recorded and no config version was created. `current` carries the authoritative token; reload and retry."
+      },
       "PlainBadRequest": {
         "content": {
           "text/plain": {
@@ -2623,6 +2643,11 @@
           },
           "proxyPort": {
             "type": "integer"
+          },
+          "revision": {
+            "description": "Optimistic-concurrency token (2F-A). Reads always carry a non-zero value; a POST must echo the value it loaded (428 when absent, 409 `stale` when it changed). Advances by one per committed save.",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
@@ -2653,9 +2678,56 @@
         ],
         "type": "object"
       },
+      "PACFenceRefusal": {
+        "additionalProperties": false,
+        "description": "Structured 2F-A precondition refusal (428 precondition_required / 409 stale).",
+        "properties": {
+          "code": {
+            "enum": [
+              "precondition_required",
+              "stale"
+            ],
+            "type": "string"
+          },
+          "current": {
+            "additionalProperties": false,
+            "description": "The authoritative token to echo on retry (exactly one key).",
+            "properties": {
+              "collectionEtag": {
+                "type": "string"
+              },
+              "draftRevision": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "etag": {
+                "type": "string"
+              },
+              "revision": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "code",
+          "current"
+        ],
+        "type": "object"
+      },
       "PACPoolInput": {
         "additionalProperties": false,
         "properties": {
+          "collectionEtag": {
+            "description": "2F-A — required on CREATE (or as the `collectionEtag` query parameter).",
+            "type": "string"
+          },
           "endpoints": {
             "items": {
               "additionalProperties": true,
@@ -2663,6 +2735,10 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "etag": {
+            "description": "2F-A — required on PUT (or as the `etag` query parameter).",
+            "type": "string"
           },
           "id": {
             "type": "string"
@@ -2678,10 +2754,11 @@
       },
       "PACPoolItem": {
         "additionalProperties": true,
-        "description": "A single PAC pool (open superset).",
+        "description": "A single PAC pool (open superset) plus its 2F-A `etag` token on reads.",
         "type": "object"
       },
       "PACPools": {
+        "description": "Each pool carries its 2F-A `etag` token (computed on read, never stored).",
         "items": {
           "additionalProperties": true,
           "type": "object"
@@ -2698,6 +2775,10 @@
         "additionalProperties": false,
         "properties": {
           "availabilityMode": {
+            "type": "string"
+          },
+          "collectionEtag": {
+            "description": "2F-A — required on CREATE (or as the `collectionEtag` query parameter).",
             "type": "string"
           },
           "description": {
@@ -2719,6 +2800,7 @@
             "type": "string"
           },
           "revision": {
+            "description": "2F-A — required on PUT (or as the `revision` query parameter); must equal the loaded revision.",
             "format": "int64",
             "type": "integer"
           },
@@ -2744,9 +2826,20 @@
       "PACProfiles": {
         "additionalProperties": true,
         "properties": {
+          "collectionEtag": {
+            "description": "2F-A collection token every profile/pool CREATE must echo.",
+            "type": "string"
+          },
           "defaultProfile": {
             "additionalProperties": true,
             "nullable": true,
+            "type": "object"
+          },
+          "poolEtags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "2F-A per-pool tokens (pool id → etag) every pool PUT/DELETE must echo.",
             "type": "object"
           },
           "pools": {
@@ -16283,6 +16376,12 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -16429,6 +16528,12 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -16457,6 +16562,17 @@
       "delete": {
         "description": "Deletes a PAC pool.",
         "operationId": "deletePACPoolItem",
+        "parameters": [
+          {
+            "description": "2F-A precondition token the DELETE must echo (the loaded value).",
+            "in": "query",
+            "name": "etag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -16483,6 +16599,12 @@
               }
             },
             "description": "Not found. Body is plain text."
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -16605,6 +16727,12 @@
               }
             },
             "description": "Not found. Body is plain text."
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -16726,6 +16854,17 @@
       "delete": {
         "description": "Deletes a PAC posture exception.",
         "operationId": "deletePACExceptionItem",
+        "parameters": [
+          {
+            "description": "2F-A precondition token the DELETE must echo (the loaded value).",
+            "in": "query",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -16752,6 +16891,12 @@
               }
             },
             "description": "Not found. Body is plain text."
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -16874,6 +17019,12 @@
               }
             },
             "description": "Not found. Body is plain text."
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -17005,6 +17156,12 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -17033,6 +17190,17 @@
       "delete": {
         "description": "Deletes a PAC profile.",
         "operationId": "deletePACProfileItem",
+        "parameters": [
+          {
+            "description": "2F-A precondition token the DELETE must echo (the loaded value).",
+            "in": "query",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -17059,6 +17227,12 @@
               }
             },
             "description": "Not found. Body is plain text."
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -17181,6 +17355,12 @@
               }
             },
             "description": "Not found. Body is plain text."
+          },
+          "409": {
+            "$ref": "#/components/responses/PACStale"
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [
@@ -17232,6 +17412,20 @@
                       "rollback"
                     ],
                     "type": "string"
+                  },
+                  "collectionEtag": {
+                    "description": "2F-A — publish/rollback with NO active profile must echo the collection token instead.",
+                    "type": "string"
+                  },
+                  "draftRevision": {
+                    "description": "2F-A — save_draft on an existing draft must echo the loaded draftRevision.",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "expectedActiveRevision": {
+                    "description": "2F-A — publish/rollback must echo the active profile's revision (refusal key `revision`).",
+                    "format": "int64",
+                    "type": "integer"
                   }
                 },
                 "required": [
@@ -17263,13 +17457,17 @@
           },
           "409": {
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "additionalProperties": true,
+                  "type": "object"
                 }
               }
             },
-            "description": "Mutation not allowed in the current state. Body is plain text."
+            "description": "Either the 2F-A `stale` refusal (structured, see PACFenceRefusal) or the typed-DIRECT confirmation challenge (`confirmField`/`confirmValue`/`newDirectPaths`)."
+          },
+          "428": {
+            "$ref": "#/components/responses/PACPreconditionRequired"
           }
         },
         "security": [

@@ -45,11 +45,13 @@ func peiResetGlobals(t *testing.T) {
 func peiExcItem(t *testing.T, method, id, body string, role UIRole) *httptest.ResponseRecorder {
 	t.Helper()
 	var r *http.Request
+	// 2F-A: echo the authoritative record revision like a well-formed client.
+	fenced := pacTestWithTokens(method, "/api/pac/posture/exceptions/"+id, body)
 	if body != "" {
-		r = httptest.NewRequest(method, "/api/pac/posture/exceptions/"+id, strings.NewReader(body))
+		r = httptest.NewRequest(method, fenced, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 	} else {
-		r = httptest.NewRequest(method, "/api/pac/posture/exceptions/"+id, http.NoBody)
+		r = httptest.NewRequest(method, fenced, http.NoBody)
 	}
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
 	rec := httptest.NewRecorder()
@@ -262,7 +264,7 @@ func TestPEI_GovernanceIsAuditedButNotVersioned(t *testing.T) {
 	// DELETE clear → audited, not versioned.
 	baselineTS2 := time.Now().UnixMilli()
 	w = httptest.NewRecorder()
-	r = newAdminRequest(http.MethodDelete, "/api/pac/posture/exceptions/vendor", nil)
+	r = newAdminRequest(http.MethodDelete, pacTestWithTokens(http.MethodDelete, "/api/pac/posture/exceptions/vendor", ""), nil) // 2F-A: echo the loaded revision
 	r.RemoteAddr = actorIP + ":0"
 	apiPACExceptionItem(w, r)
 	if w.Code != http.StatusNoContent {

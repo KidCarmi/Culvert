@@ -153,6 +153,7 @@ func pacFenceEnv(t *testing.T) {
 	pacFencePaths.lifecycle = filepath.Join(dir, "pac_profiles_lifecycle.json")
 	pacFencePaths.exceptions = filepath.Join(dir, "pac_exceptions.json")
 	configVersions = configver.New(filepath.Join(dir, "config_versions"), 0)
+	configVersions.Init()
 	pacWriteStateDecisionHook = nil
 
 	pacProfiles.Restore(pac.ProfileState{Path: pacFencePaths.profiles})

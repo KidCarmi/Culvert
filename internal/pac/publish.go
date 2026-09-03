@@ -48,6 +48,12 @@ type ProfileLifecycle struct {
 	ActiveN int64 `json:"activeN"`
 	// Revisions is the append-only immutable history, oldest first.
 	Revisions []PublishedRevision `json:"revisions"`
+	// DraftRevision is the draft's optimistic-concurrency token (2F-A). It
+	// advances by one whenever the draft is replaced (save_draft, publish,
+	// rollback); a save_draft must echo the value it loaded, so two admins
+	// editing the same draft cannot silently overwrite each other. Records
+	// persisted before 2F-A load as 1 (see LifecycleStore.Load).
+	DraftRevision int64 `json:"draftRevision"`
 }
 
 // ActiveRevision returns the currently-serving revision and true, or false
@@ -247,6 +253,7 @@ func (lc *ProfileLifecycle) Publish(draft Profile, digest, author, reason, ts st
 	})
 	lc.trimRevisions()
 	lc.Draft = draft
+	lc.DraftRevision++
 	lc.ActiveN = n
 	lc.DraftDirty = false
 	return n
@@ -271,6 +278,7 @@ func (lc *ProfileLifecycle) Rollback(targetN int64, author, ts string) (int64, b
 	})
 	lc.trimRevisions()
 	lc.Draft = spec
+	lc.DraftRevision++
 	lc.ActiveN = n
 	lc.DraftDirty = false
 	return n, true
@@ -280,6 +288,7 @@ func (lc *ProfileLifecycle) Rollback(targetN int64, author, ts string) (int64, b
 // Draft separately; this just flags divergence from the active revision.
 func (lc *ProfileLifecycle) TouchDraft(draft Profile) {
 	lc.Draft = draft
+	lc.DraftRevision++
 	active, ok := lc.ActiveRevision()
 	lc.DraftDirty = !ok || !sameProfileSpec(&draft, &active.Spec)
 }

@@ -50,7 +50,7 @@ func seedPublishProfile(t *testing.T) {
 
 func pacPost(t *testing.T, path, body string, role UIRole, ip string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, pacTestWithTokens(http.MethodPost, path, body), bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = ip
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, role))
@@ -376,17 +376,22 @@ func TestAPIPACLifecycle_ConcurrentSaveDraftPublish(t *testing.T) {
 	pools := []string{"main", "alt"}
 	for i := 0; i < publishes; i++ {
 		wg.Add(2)
+		// 2F-A: publish echoes the active revision and save_draft the draft
+		// revision; a concurrent loser is refused with a structured 409 and
+		// retries with the reloaded token (pacPost injects the authoritative
+		// one per attempt). The property under test is unchanged: exactly
+		// `publishes` revisions, none lost, none duplicated.
 		go func(i int) {
 			defer wg.Done()
 			body := `{"action":"publish","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"` +
 				pools[i%2] + `","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"suffix","pattern":"cdn.example","action":"use_pool"}]}}`
-			pacPost(t, "/api/pac/profiles/hq/lifecycle", body, RoleAdmin, "198.51.100.140:0")
+			pacPostFencedRetry(t, body, "198.51.100.140:0")
 		}(i)
 		go func(i int) {
 			defer wg.Done()
 			body := `{"action":"save_draft","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"` +
 				pools[i%2] + `","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"suffix","pattern":"draft.example","action":"use_pool"}]}}`
-			pacPost(t, "/api/pac/profiles/hq/lifecycle", body, RoleAdmin, "198.51.100.141:0")
+			pacPostFencedRetry(t, body, "198.51.100.141:0")
 		}(i)
 	}
 	wg.Wait()
@@ -457,4 +462,19 @@ func TestAPIPACAnalyze_Diff(t *testing.T) {
 			t.Errorf("analyze profileId=%q: %d, want 404", id, rec.Code)
 		}
 	}
+}
+
+// pacPostFencedRetry posts a lifecycle mutation as a well-formed 2F-A client:
+// on a structured 409 "stale" it reloads (pacPost re-injects the current
+// tokens) and retries, bounded.
+func pacPostFencedRetry(t *testing.T, body, ip string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rec *httptest.ResponseRecorder
+	for attempt := 0; attempt < 200; attempt++ {
+		rec = pacPost(t, "/api/pac/profiles/hq/lifecycle", body, RoleAdmin, ip)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"stale"`) {
+			return rec
+		}
+	}
+	return rec
 }

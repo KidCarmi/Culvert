@@ -54,6 +54,12 @@ type ExceptionRecord struct {
 	ExpiresAt         string `json:"expiresAt,omitempty"`         // optional
 	ReviewCadenceDays int    `json:"reviewCadenceDays,omitempty"` // 0 = no cadence
 	LastReviewedAt    string `json:"lastReviewedAt,omitempty"`
+	// Revision is the record's optimistic-concurrency token (2F-A): 1 on
+	// create, +1 on every PUT. The store is node-local and deliberately OFF
+	// config-version rollback and cluster sync, which is a different property
+	// from being unfenced — a PUT/DELETE must echo the revision it loaded.
+	// Records persisted before 2F-A load as 1 (see ExceptionStore.Load).
+	Revision int64 `json:"revision,omitempty"`
 }
 
 // Status classifies the governance posture of a DIRECT-capable profile at
@@ -127,6 +133,12 @@ func (s *ExceptionStore) Load(path string) error {
 	if s.byID == nil {
 		s.byID = map[string]ExceptionRecord{}
 	}
+	for id, rec := range s.byID {
+		if rec.Revision < 1 {
+			rec.Revision = 1
+			s.byID[id] = rec
+		}
+	}
 	s.modTime = time.Now()
 	return nil
 }
@@ -156,6 +168,9 @@ func (s *ExceptionStore) Put(rec ExceptionRecord) error {
 	defer s.mu.Unlock()
 	if s.byID == nil {
 		s.byID = map[string]ExceptionRecord{}
+	}
+	if rec.Revision < 1 {
+		rec.Revision = 1 // every stored record hands out a non-zero token (2F-A)
 	}
 	s.byID[rec.ProfileID] = rec
 	s.modTime = time.Now()

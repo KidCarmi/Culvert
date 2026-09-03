@@ -138,7 +138,7 @@ func TestServePACFile_VersionHeader(t *testing.T) {
 
 func pacAdminPost(t *testing.T, body string, remoteIP string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/pac-config", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, pacTestWithTokens(http.MethodPost, "/api/pac-config", body), bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = remoteIP
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))

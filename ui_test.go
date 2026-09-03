@@ -1051,6 +1051,7 @@ func TestAPIPACConfig_Set(t *testing.T) {
 	apiPACConfig(w, jsonReq(http.MethodPost, "/api/pac-config", PACConfig{
 		ProxyHost: "proxy.corp.com",
 		ProxyPort: 3128,
+		Revision:  pacStore.Get().Revision, // 2F-A: echo the token loaded
 	}))
 	assertStatus(t, w, http.StatusOK)
 	// Reset

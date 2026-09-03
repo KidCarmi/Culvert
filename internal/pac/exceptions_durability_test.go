@@ -114,8 +114,14 @@ func TestDurability_SurvivesRestart(t *testing.T) {
 	if !ok {
 		t.Fatal("record did not survive restart")
 	}
-	if got != rec {
-		t.Errorf("record changed across restart:\n pre=%+v\npost=%+v", rec, got)
+	// Put mints the 2F-A token (revision 1) for a record stored without one;
+	// the persisted record must reload byte-identical to what Put stored.
+	stored, _ := pre.Get("vendor")
+	if stored.Revision != 1 {
+		t.Fatalf("Put must mint revision 1 for a token-less record, got %d", stored.Revision)
+	}
+	if got != stored {
+		t.Errorf("record changed across restart:\n pre=%+v\npost=%+v", stored, got)
 	}
 	if s := got.Status(now, true); s != wantStatus {
 		t.Errorf("status changed across restart: pre=%q post=%q", wantStatus, s)
