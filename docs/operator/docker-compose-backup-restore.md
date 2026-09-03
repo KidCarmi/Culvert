@@ -126,7 +126,9 @@ docker compose --profile cli run --rm cli \
 > **Dev / lab only.** Unencrypted backups must not leave the host. They
 > contain ui_users hashes, TOTP secrets, the cluster CA private key,
 > session HMAC, alert-webhook endpoint URLs (which are themselves
-> bearer credentials for most receivers), and full policy state. For
+> bearer credentials for most receivers), IdP profiles (OIDC client
+> secrets and LDAP bind credentials — reusable credentials against an
+> external SSO system, not just Culvert), and full policy state. For
 > anything outside an ephemeral lab, use § 3 instead.
 
 ---
@@ -523,8 +525,9 @@ shown in § 2.
   `tar`.
 - **Don't off-host copy unencrypted backups.** They contain ui_users
   hashes, TOTP secrets, the cluster CA private key (plaintext unless CA-3
-  encryption is enabled — see § 9.4), and session HMAC. Use `--encrypt` for
-  anything that leaves the host.
+  encryption is enabled — see § 9.4), session HMAC, and IdP profiles (OIDC
+  client secrets and LDAP bind credentials). Use `--encrypt` for anything
+  that leaves the host.
 - **Don't store a CA-3 KEK in the same place as the backup.** The KEK
   (`CULVERT_KEK` or a local `*.kek` file) unwraps the encrypted private keys;
   keeping it beside the archive defeats at-rest encryption. The backup format

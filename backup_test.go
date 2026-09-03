@@ -587,3 +587,38 @@ func TestBackup_SaaSFeedOverrides_IncludedWithContent(t *testing.T) {
 		t.Errorf("saas_feed/overrides.json content mismatch in backup")
 	}
 }
+
+// TestBackup_IdPProfiles_IncludedWithContent guards against the same drift
+// class as the tests above, for a store that is arguably higher-severity
+// than any of them: idp_profiles.json (internal/auth_idp.go's IdPRegistry)
+// holds every configured OIDC/SAML/LDAP SSO provider — including OIDC client
+// secrets and LDAP bind credentials (config_surfaces.go's "idp_profiles" row
+// marks it Sensitive, ClusterSynced — the same first-class-config bar
+// alert_webhooks.json and decryption_profiles.json were added to backup at).
+// It is wired into the shipped docker-compose.yml via "-idp-profiles-file"
+// "/data/idp_profiles.json", and that same file's own header comment lists
+// "/data/idp_profiles.json" as "persisted across restarts" alongside
+// ui_users.json — which IS backed up. A backup taken today silently drops
+// it, so restoring onto a fresh volume/host loses every SSO integration: an
+// admin must re-discover and re-enter every OIDC/SAML/LDAP profile
+// (including secrets that may no longer be on hand), and any deployment
+// that relies on SSO for admin login is locked out until that is done.
+func TestBackup_IdPProfiles_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"profiles":[{"id":"p1","type":"oidc","client_secret":"s3cr3t"}]}`)
+	seedFile(t, dataDir, "idp_profiles.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/idp_profiles.json"]
+	if !ok {
+		t.Fatalf("data/idp_profiles.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("idp_profiles.json content mismatch in backup")
+	}
+}
