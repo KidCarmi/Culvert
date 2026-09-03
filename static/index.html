@@ -18688,6 +18688,11 @@ function resetBlockPage() {
              on its own) or has stopped entirely (the listening socket is gone —
              restart required). Fires once per episode, never per retry. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="socks5_listener_down"> SOCKS5 listener not accepting connections</label>
+        <!-- CHAOS-57: threat intelligence has not synced successfully for over 2x the
+             sync interval, or has never synced on this node. Last-known-good entries
+             keep being enforced throughout — this is degraded freshness, not a dark
+             control. Fires once per episode, cleared by an observed clean sync. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_feed_stale"> Threat feed stale (intelligence not refreshing)</label>
         <!-- RISK-027 / OVN-16: MCP Agent Security Gateway enablement was requested but
              the capability is not serving (port in use, startup failure, or the
              listener stopped on its own). Fires once per episode, evaluated on a

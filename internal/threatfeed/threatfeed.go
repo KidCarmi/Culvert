@@ -36,6 +36,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/feedsched"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -85,6 +86,28 @@ type Feed struct {
 	totalEntries    atomic.Int64
 	maskedHits      atomic.Int64 // domain hits suppressed by the allowlist (security-bypass observability)
 	enabled         bool
+
+	// failedSources is the BOUNDED classification of the most recent failure:
+	// the names of the feeds that did not fetch cleanly, sorted and joined
+	// ("urlhaus", "openphish", "urlhaus+openphish", "" when all fetched).
+	//
+	// It exists because lastSyncErr must NOT reach an alert. Alert dispatch
+	// dedups on event+Detail, and lastSyncErr embeds an error string carrying
+	// the feed URL and, for a transport failure, the ephemeral local port — so
+	// a per-attempt-unique Detail defeats the dedup window by construction and
+	// the fan-out evicts real threat alerts from the retry queue. The verbose
+	// text stays on the role-gated admin API and in the log; the alert and the
+	// metrics carry this three-valued class.
+	failedSources string
+
+	// consecutiveFailures counts sync rounds since the last fully-clean one.
+	// Reset to zero by the first success. Drives the health plane's degraded
+	// determination and is reported to the sync observer.
+	consecutiveFailures int
+
+	// totalFailures is the cumulative count of failed sync rounds since
+	// process start — the MAGNITUDE that the rate-limited log line omits.
+	totalFailures atomic.Int64
 
 	// view is the lock-free read side of the three per-request lookups
 	// (Enabled / CheckDomain / CheckURL). See readView.
@@ -217,64 +240,127 @@ func (tf *Feed) Init(dbPath string, syncInterval time.Duration) {
 	}
 }
 
+// Backoff bounds for a failed sync round. See feedRetryRationale.
+const (
+	// syncRetryMin is the first retry delay after a failed round.
+	syncRetryMin = 5 * time.Minute
+	// syncRetryMax caps it. feedsched additionally clamps this to the
+	// configured interval, so retrying can only tighten the cadence.
+	syncRetryMax = 1 * time.Hour
+)
+
 // Start launches the background sync goroutine.
 // An immediate sync is performed when the cache is empty or has never synced.
+//
+// The loop is a feedsched.Scheduler rather than a bare time.Ticker, and both
+// halves of that change are load-bearing:
+//
+//   - BACKOFF. A ticker retried a failed round only after the FULL interval
+//     (six hours by default). One transient fault on the customer's egress
+//     path — a DNS blip, a 503 from the provider, a restarted upstream proxy —
+//     therefore froze threat intelligence for six hours. The severe shape is
+//     the cold start: needSync is true when the on-disk DB is empty, so a
+//     fresh or re-imaged node whose FIRST sync fails serves with NO threat
+//     intelligence at all (not stale — none) until that tick, while /health,
+//     /ready and every metric report a completely healthy node. Retries are
+//     now 5 min doubling to 1 h, reset on the first success.
+//   - JITTER. A ticker fires at a fixed offset from process start, so nodes
+//     that boot together stay in phase forever. The two feed origins are
+//     public third-party endpoints shared by every Culvert deployment, and a
+//     fleet syncing in lockstep is answered with rate-limiting of the
+//     customer's egress IP — which then causes the very failure the absent
+//     backoff would hold the fleet at for six hours.
 func (tf *Feed) Start(ctx context.Context) {
-	tf.mu.RLock()
-	needSync := tf.lastSync.IsZero() || tf.totalEntries.Load() == 0
-	tf.mu.RUnlock()
+	go feedsched.New(tf.schedulerConfig()).Run(ctx)
+}
 
-	go func() {
+// schedulerConfig builds the feed's cadence configuration. Split out of Start
+// so the cadence contract (backoff bounds below the interval, cold-start
+// arming) is asserted directly instead of by driving a live loop against two
+// third-party origins.
+func (tf *Feed) schedulerConfig() feedsched.Config {
+	return feedsched.Config{
+		Name:       "threatfeed",
+		Interval:   tf.SyncInterval,
+		BackoffMin: syncRetryMin,
+		BackoffMax: syncRetryMax,
+		RunNow: func() bool {
+			tf.mu.RLock()
+			defer tf.mu.RUnlock()
+			return tf.lastSync.IsZero() || tf.totalEntries.Load() == 0
+		},
 		// CHAOS-24: Sync parses third-party feed bodies (URLhaus/OpenPhish), so
 		// its panic surface is attacker-adjacent input this operator does not
 		// control. Guard the ROUND, not the goroutine: a bad feed pass costs
-		// one sync, not the whole gateway, and the ticker keeps running so the
-		// next window can recover on its own.
-		if needSync {
-			obs.SafeCall("threatfeed", tf.Sync)
-		}
-		ticker := time.NewTicker(tf.syncInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				obs.SafeCall("threatfeed", tf.Sync)
+		// one sync, not the whole gateway, and the loop keeps running so the
+		// next window can recover on its own. A panicked round is charged as a
+		// FAILURE by the scheduler, so a systematically panicking body backs
+		// off rather than retrying at speed.
+		Run: func(context.Context) bool {
+			var ok bool
+			if obs.SafeCall("threatfeed", func() { ok = tf.syncRound() }) {
+				return false
 			}
-		}
-	}()
+			return ok
+		},
+	}
+}
+
+// SyncInterval reports the configured cadence between successful syncs.
+func (tf *Feed) SyncInterval() time.Duration {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	return tf.syncInterval
 }
 
 // Sync downloads all configured feeds and atomically replaces the in-memory
 // lookup tables. Safe to call concurrently; calls run sequentially.
-func (tf *Feed) Sync() {
+//
+// Retained as the void-returning entry point for the admin API's manual sync
+// and for callers that do not schedule; syncRound carries the outcome the
+// scheduler and the health plane need.
+func (tf *Feed) Sync() { tf.syncRound() }
+
+// syncRound performs one sync and reports whether EVERY configured feed
+// fetched cleanly. A partial success is a failure for scheduling purposes: the
+// sources that did fetch are installed (see applySync), but the round is
+// retried on the backoff schedule because one source's coverage is now frozen.
+func (tf *Feed) syncRound() bool {
 	obs.Debugf("ThreatFeed: starting sync")
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
 	var failures []string
+	var failedSources []string
 	replacedSources := make(map[string]bool, 2)
 
 	if ok, fail := tf.fetchFeedInto(urlHausTextFeed, sourceURLhaus, "URLhaus", newURLs, newDomains); ok {
 		replacedSources[sourceURLhaus] = true
 	} else {
 		failures = append(failures, fail)
+		failedSources = append(failedSources, sourceURLhaus)
 	}
 	if ok, fail := tf.fetchFeedInto(openPhishFeed, sourceOpenPhish, "OpenPhish", newURLs, newDomains); ok {
 		replacedSources[sourceOpenPhish] = true
 	} else {
 		failures = append(failures, fail)
+		failedSources = append(failedSources, sourceOpenPhish)
 	}
 
-	tf.applySync(newURLs, newDomains, failures, replacedSources, time.Now())
+	outcome := tf.applySync(newURLs, newDomains, failures, replacedSources, time.Now(), failedSources...)
 
 	obs.Printf("ThreatFeed: sync complete — %d unique URLs, %d unique domains", len(newURLs), len(newDomains))
 
-	if tf.dbPath != "" {
+	tf.mu.RLock()
+	dbPath := tf.dbPath
+	tf.mu.RUnlock()
+	if dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save to disk failed: %v", err)
 		}
 	}
+
+	notifySyncObserver(outcome)
+	return outcome.OK
 }
 
 // applySync installs freshly-fetched feed tables. Only entries owned by a
@@ -291,22 +377,56 @@ func (tf *Feed) Sync() {
 // A feed that fetched cleanly is always fully replaced, so its stale entries
 // still age out; cluster-sync entries are refreshed wholesale by
 // ImportFeedData on every snapshot apply.
-func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []string, replacedSources map[string]bool, now time.Time) {
+// The variadic failedSources carries the BOUNDED per-source classification
+// (see Feed.failedSources). It is variadic purely so the package's existing
+// whitebox tests, which call applySync with the original five arguments, keep
+// compiling and keep asserting the carry-forward contract unchanged.
+func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []string, replacedSources map[string]bool, now time.Time, failedSources ...string) SyncOutcome {
 	tf.mu.Lock()
 	carryForward(newURLs, tf.urls, replacedSources)
 	carryForward(newDomains, tf.domains, replacedSources)
+	// AFTER carryForward: the carried-forward entries of a source that failed
+	// this round are part of what the feed now serves, so counting before the
+	// merge would under-report a partially-failed sync as an emptied feed.
+	entries := int64(len(newURLs))
 	tf.urls = newURLs
 	tf.domains = newDomains
 	tf.lastSync = now
 	if len(failures) == 0 {
 		tf.lastSuccess = now
 		tf.lastSyncErr = ""
+		tf.failedSources = ""
+		tf.consecutiveFailures = 0
 	} else {
 		tf.lastSyncErr = strings.Join(failures, "; ")
+		tf.failedSources = classifyFailedSources(failedSources)
+		tf.consecutiveFailures++
+		tf.totalFailures.Add(1)
+	}
+	outcome := SyncOutcome{
+		OK:                  len(failures) == 0,
+		FailedSources:       tf.failedSources,
+		ConsecutiveFailures: tf.consecutiveFailures,
+		LastSuccess:         tf.lastSuccess,
+		SyncInterval:        tf.syncInterval,
+		Entries:             entries,
 	}
 	tf.publishLocked()
 	tf.mu.Unlock()
-	tf.totalEntries.Store(int64(len(newURLs)))
+	tf.totalEntries.Store(entries)
+	return outcome
+}
+
+// classifyFailedSources renders the bounded reason class. Sorted so the value
+// is stable regardless of fetch order — an alert Detail that flipped between
+// "urlhaus+openphish" and "openphish+urlhaus" would defeat its own dedup.
+func classifyFailedSources(sources []string) string {
+	if len(sources) == 0 {
+		return ""
+	}
+	out := append([]string(nil), sources...)
+	sort.Strings(out)
+	return strings.Join(out, "+")
 }
 
 // fetchFeedInto fetches one feed into the fresh maps and reports whether the
@@ -435,6 +555,109 @@ func (tf *Feed) SyncStatus() (ok bool, lastSuccess time.Time, errSummary string)
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 	return tf.lastSyncErr == "", tf.lastSuccess, tf.lastSyncErr
+}
+
+// ── Sync health ───────────────────────────────────────────────────────────────
+
+// SyncOutcome is the result of one sync round, delivered to the observer
+// registered by SetSyncObserver.
+//
+// FailedSources is the BOUNDED reason class — never a raw error string. See
+// Feed.failedSources for why that distinction is load-bearing for the alert
+// plane.
+type SyncOutcome struct {
+	OK                  bool
+	FailedSources       string
+	ConsecutiveFailures int
+	LastSuccess         time.Time
+	SyncInterval        time.Duration
+	Entries             int64
+}
+
+// Health is a consistent snapshot of the feed's sync state, read by package
+// main's health plane at scrape/diagnostics time.
+type Health struct {
+	// Configured is false until Init runs. Every surface reports "not
+	// configured" rather than a zero in that case: a last-success of zero on a
+	// node that never had the feed is indistinguishable from a node whose feed
+	// has never once succeeded, and the two demand opposite operator actions.
+	Configured  bool
+	LastAttempt time.Time
+	LastSuccess time.Time
+
+	// LastRoundOK is the AUTHORITATIVE "is the feed syncing cleanly" signal:
+	// it derives from the persisted lastSyncErr, so it survives a restart. Do
+	// not substitute ConsecutiveFailures == 0 for it — that count is not
+	// persisted, so after a restart from a failed-sync DB it reads zero while
+	// the feed is known to be failing (PR #1305 review). It is the same value
+	// SyncStatus() reports to the admin API, so the two surfaces agree.
+	LastRoundOK bool
+
+	ConsecutiveFailures int
+	TotalFailures       int64
+	FailedSources       string
+	ErrSummary          string
+	SyncInterval        time.Duration
+	Entries             int64
+}
+
+// Health returns the current sync-health snapshot.
+func (tf *Feed) Health() Health {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	return Health{
+		Configured:          tf.enabled,
+		LastAttempt:         tf.lastSync,
+		LastSuccess:         tf.lastSuccess,
+		LastRoundOK:         tf.lastSyncErr == "",
+		ConsecutiveFailures: tf.consecutiveFailures,
+		TotalFailures:       tf.totalFailures.Load(),
+		FailedSources:       tf.failedSources,
+		ErrSummary:          tf.lastSyncErr,
+		SyncInterval:        tf.syncInterval,
+		Entries:             tf.totalEntries.Load(),
+	}
+}
+
+// syncObserver receives every completed sync round. Published once at startup
+// by package main (threatfeed_health.go), which owns the alert/metric plane —
+// internal/* cannot import package main (ADR-0003), so this is the seam.
+//
+// A round is reported whether it succeeded or failed, because the RECOVERY
+// edge matters as much as the failure edge: the health plane clears its
+// degraded state on OBSERVED evidence (a clean round), never on elapsed time.
+var syncObserver atomic.Pointer[func(SyncOutcome)]
+
+// SetSyncObserver publishes the sync observer. A nil fn clears it.
+func SetSyncObserver(fn func(SyncOutcome)) {
+	if fn == nil {
+		syncObserver.Store(nil)
+		return
+	}
+	syncObserver.Store(&fn)
+}
+
+// notifySyncObserver delivers an outcome, panic-contained.
+//
+// Containment here is not decoration: the observer is package main's alert and
+// metric plane, and a panic in it would otherwise be charged to the feed round
+// by the scheduler's own recover — turning an observability bug into a feed
+// that backs off and reports itself unhealthy. The observability plane must
+// never be able to break the thing it observes.
+//
+// The observer MUST NOT call back into Sync (directly or transitively); the
+// production observer only records state and fires an alert.
+func notifySyncObserver(outcome SyncOutcome) {
+	fn := syncObserver.Load()
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if v := recover(); v != nil {
+			obs.Warnf("ThreatFeed: sync observer panicked (recovered): %s", obs.Sanitize(fmt.Sprint(v)))
+		}
+	}()
+	(*fn)(outcome)
 }
 
 // defaultDomainAllowlist seeds the threat-feed domain allowlist with popular
@@ -706,6 +929,16 @@ func (tf *Feed) loadFromDisk(path string) error {
 	tf.domains = domains
 	tf.lastSync = db.LastSync
 	tf.lastSyncErr = db.LastSyncErr
+	// A DB written by a FAILED sync persists lastSyncErr but carries no failure
+	// COUNT (consecutiveFailures is deliberately not persisted — the true run
+	// length across restarts is unknowable). Restoring zero would report the
+	// node as syncing cleanly until the next scheduled round, which on a 6 h
+	// cadence is hours of a green gauge over a feed we know last failed. One is
+	// the honest lower bound: at least one round failed, and that is exactly
+	// what the persisted error says. Caught in review on PR #1305.
+	if db.LastSyncErr != "" {
+		tf.consecutiveFailures = 1
+	}
 	switch {
 	case !db.LastSuccess.IsZero():
 		tf.lastSuccess = db.LastSuccess
@@ -898,6 +1131,31 @@ func (tf *Feed) SeedForTest(urls, domains map[string]string) {
 	tf.publishLocked()
 	tf.mu.Unlock()
 	tf.totalEntries.Store(total)
+}
+
+// SeedSyncSuccessForTest records a clean sync round at t, without performing
+// any fetch. Test support for package main's staleness plane, which reads this
+// feed's Health() snapshot: driving it through a real Sync would require two
+// reachable third-party origins and a 60-second-per-feed timeout budget.
+func (tf *Feed) SeedSyncSuccessForTest(t time.Time) {
+	tf.mu.Lock()
+	tf.lastSync = t
+	tf.lastSuccess = t
+	tf.lastSyncErr = ""
+	tf.failedSources = ""
+	tf.consecutiveFailures = 0
+	tf.mu.Unlock()
+}
+
+// SeedSyncFailureForTest records a failed sync round with the given bounded
+// source class. Counterpart to SeedSyncSuccessForTest.
+func (tf *Feed) SeedSyncFailureForTest(failedSources string) {
+	tf.mu.Lock()
+	tf.lastSyncErr = "seeded test failure"
+	tf.failedSources = failedSources
+	tf.consecutiveFailures++
+	tf.totalFailures.Add(1)
+	tf.mu.Unlock()
 }
 
 // republishForTest re-publishes the read view after a whitebox field poke —
