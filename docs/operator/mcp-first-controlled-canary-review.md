@@ -672,7 +672,7 @@ BLOCKED-vs-FAILED note in §26).
 | Criterion | Status |
 |---|---|
 | Exactly one tenant / principal / server / tool / fingerprint, read-only, synthetic | Specifiable — YES |
-| Exactly one NODE, enforced PREVENTIVELY at DP apply | **NO — `ScopeSpec` has no node dimension, `pushAll` delivers to every `Dist.Nodes()` entry, `mcpPullDistributor.Push` discards its node argument (shared `ConfigSnapshot` reaches every DP), and the apply path has no intended-node check; a post-apply ack is detective, not preventive (§3/§13, blocker 15)** |
+| Exactly one NODE, enforced PREVENTIVELY (before or at DP apply) | **NO — `ScopeSpec` has no node dimension, `pushAll` delivers to every `Dist.Nodes()` entry, `mcpPullDistributor.Push` discards its node argument (shared `ConfigSnapshot` reaches every DP), and the apply path has no intended-node check; a post-apply ack is detective, not preventive (§3/§13, blocker 15)** |
 | Tool requires no production credential | **CONDITIONAL — unverifiable until tool + rule fixed (§4)** |
 | A read-first-admissible one-exact-tool operation exists | **NO — classifier refuses `tools/call`; discovery cannot bind one tool (§6)** |
 | Supported upstream trust model for a controlled server available today | **NO** (§5) |

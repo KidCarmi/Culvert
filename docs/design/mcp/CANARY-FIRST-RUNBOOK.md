@@ -1,7 +1,10 @@
-# MCP First Controlled Canary — Runbook (future; NOT yet executable by default)
+# MCP First Controlled Canary — Runbook (future; NOT yet executable)
 
 **Status:** FUTURE protocol. This runbook is the reviewable procedure the separately-approved
-Canary *activation* phase must follow. It must never involve customer traffic. The precise
+Canary *activation* phase must follow. It must never involve customer traffic. It is **NOT executable
+in ANY supported configuration** — not merely "not by default": `CULVERT_MCP_LIVE_DEPS` only COMPOSES
+dependencies, and there is still no production caller for arming (`armLiveTier`, blocker 3) and no
+Canary activation entry point (blocker 12), so no opt-in makes this a usable path today. The precise
 current posture (do NOT collapse these into "done" or "not done"):
 
 | Layer | State today |
