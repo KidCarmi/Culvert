@@ -57,6 +57,11 @@ func startThreatFeedIfEnabled(cfg scanningStartupConfig, ctx context.Context) {
 		return
 	}
 	globalThreatFeed.Init(cfg.FeedDB, cfg.SyncInterval)
+	// CHAOS-57: the freshness plane is wired BEFORE Start, so the boot
+	// evaluation the loop performs (a stale appliance that skips its boot
+	// fetch, or one that has never synced) actually reaches the alert plane
+	// instead of firing into a nil observer.
+	globalThreatFeed.SetSyncObserver(evaluateThreatFeedAlerts)
 	globalThreatFeed.Start(ctx)
 	logger.Printf("ThreatFeed: sync every %s, db=%q", cfg.SyncInterval, cfg.FeedDB)
 }

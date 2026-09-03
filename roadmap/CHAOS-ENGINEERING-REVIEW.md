@@ -36,6 +36,40 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-30 — CHAOS-57 sweep (the threat-intelligence feed's freshness contract).**
+Every prior sweep asked what happens when a subsystem BREAKS. This one asks what happens when
+one keeps working and stops being **true** — and it found the register's own theme running in
+reverse. `carryForward` (the WK-5 fix) is correct: when a fetch fails, the last-known-good threat
+table keeps serving, because refusing traffic over a third party's outage converts their incident
+into yours. But the same property that makes the degradation graceful makes it **invisible**.
+`culvert_threat_feed_entries` is a count of loaded entries, and carried-forward entries hold that
+count perfectly steady through an outage of any length, so a feed frozen a month ago and one
+synced a minute ago published a byte-identical scrape (**FD-1**). Nothing else existed: no
+`/healthz`, no `/readyz`, no diagnostics row, no alert; the only report of sync health was one key
+inside an admin JSON blob that no alerting rule consumes. That is HA-17's shape — *the fault is
+undetectable on the only surface a Prometheus rule can read* — applied to the most perishable
+security data in the appliance, on a control consulted on **every** proxied request. The
+comparison that settles the severity is in-repo: the signed SaaS feed, the release catalog and
+even the UT1 category feed all already had a freshness plane; the malware/phishing feed had
+strictly less than any of them. **FD-2 is the one that stings**: the boot condition was
+`lastSync.IsZero() || totalEntries == 0`, and `lastSync` is restored from disk — so an appliance
+powered off for three weeks came up holding three-week-old intelligence and skipped its boot fetch
+**precisely because it had data**, then served it for another full interval. Restart is the
+operator's remedy for a stale feed, and it left a recovered node strictly worse off than a fresh
+install; this is the CHAOS-28 `StartCAAutoRotation` finding (first check at +24h skips exactly the
+restart an operator makes to recover) reproduced in a second subsystem. **FD-3**: a failed sync had
+no retry at all — the next attempt was one full interval away, so a thirty-second resolver blip
+landing on the tick cost six hours. Shipped: five `culvert_threat_feed_*` freshness series (all
+absent on a node with no feed — the CHAOS-54 rule), a `threat_feed` operator-contract row, three
+latched alerts, a freshness-gated boot sync floored against a crash loop, a bounded jittered retry
+(5 min → 30 min, clamped to the interval so a short-interval deployment is never slowed), and ±10%
+jitter that closes WK-13 for this loop. Posture is deliberately UNCHANGED: age is reported, never
+enforced, and the row is warn-never-fail and off `/readyz`. **FD-4** (no signature, no SSRF or
+redirect guard, no response-size cap on the fetch, unlike its two sibling feed fetchers) and
+**FD-5** (`internal/feedsync` carries every one of these defects plus an unbounded gzip/tar ingest
+and a restart-lying freshness metric) are recorded, not fixed. See rows WK-13/FD-1…FD-5, §25 and
+`docs/operator/threat-feed-freshness.md`.
+
 **2026-08-24 — CHAOS-55 sweep (the fencing lease's recovery paths).** ADR-0005 built the
 fence to answer *may this node write?* and answers it correctly in every direction. What it never
 built was the way BACK. The lease has three exits from write authority — denied on promotion,
@@ -538,7 +572,12 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-12 | Alert **dedup bookkeeping**: unbounded map on an attacker-controlled key space (key embeds the requested host, same input `topHosts` is capped for), rescanned `O(n)` under a process-wide mutex on every dispatch (230,603 ns/op at the flood steady state, growing). Dedup runs *before* the semaphore and the retry queue, so neither bounds it. | GAP → **CLOSED** (CHAOS-27, 4096 cap + amortised prune + eviction counter) | **H** | was: `internal/alerts/store.go` `dedupSuppressed`; see §15 |
 | WK-11 | SSE slow client: non-blocking `select … default → close+evict`, 256-client cap, runs off the request path. | ✓ | — | `internal/sse/sse.go:66-78,46` |
 | WK-12 | YARA compile failure loads remaining rules (never disables engine); regex timeout + saturation cap with admin-selectable fail-closed/open posture + alerts. Residual: abandoned regex goroutines are counted but never cancelled (memory held until they finish). | ✓ (+leak caveat) | L/M | `internal/yara/yara.go:98-130,584-602,540` |
-| WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s |
+| WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP → **PARTLY CLOSED** (CHAOS-57 closes the threat-feed loop: ±10% jitter, and the boot fetch is now freshness-gated rather than unconditional-when-empty. `internal/feedsync`, `blocklistfeed` and `cdr_health` are still bare tickers — see FD-5) | M | was: `threatfeed.go:132-135`; now `internal/threatfeed` `runSyncLoop`/`nextSyncDelay` — see §25 |
+| FD-1 | **A threat feed that has stopped updating is indistinguishable from a healthy one on every machine-readable surface.** `carryForward` (the WK-5 fix) keeps the last-known-good table serving through an outage, which is the right degradation — but it also holds `culvert_threat_feed_entries` steady, so the ONLY threat-feed series that could move don't. No `/metrics` freshness series, no `/healthz`, no `/readyz`, no diagnostics row, no alert; sync health reached only the `threat_feed_sync_ok` key inside an admin JSON blob no alerting rule consumes. HA-17's shape, on the most perishable security data in the appliance and on a control consulted on EVERY request. The less critical feeds already had this plane (`saas_feed_stale`, `release_catalog_stale`, `culvert_category_feed_last_sync_timestamp_seconds`). | GAP → **CLOSED** (CHAOS-57: five `culvert_threat_feed_*` freshness series, the `threat_feed` operator-contract row, and three latched alerts) | **H** | was: `metrics.go` threat-feed block + `security_scan.go:301`; now `threatfeed_health.go` — see §25 |
+| FD-2 | **A restart did not refresh a stale feed — it skipped the boot sync precisely BECAUSE the feed was stale-but-populated.** `Start`'s condition was `lastSync.IsZero() \|\| totalEntries == 0`, and `lastSync` is restored from the persisted DB, so an appliance powered off for three weeks came up holding three-week-old intelligence and waited a full interval before its first fetch. Restart is the operator's remedy for a stale feed, and it left a recovered node strictly worse off than a fresh install. Identical in shape to the CHAOS-28 `StartCAAutoRotation` finding (first check at +24h skipped exactly the restart an operator makes to recover). | GAP → **CLOSED** (CHAOS-57: `needBootSync` is freshness-gated, floored at `bootResyncFloor` so a crash loop cannot turn it into a request per restart; the new condition is a strict superset of the old) | **H** | was: `internal/threatfeed` `Start`; now `needBootSync` — see §25 |
+| FD-3 | **A failed sync had no retry — the next attempt was one full interval away.** A thirty-second resolver blip landing on the tick froze threat intelligence for six hours at the default cadence. Not a broken backoff: there was no backoff, because there was no retry. | GAP → **CLOSED** (CHAOS-57: `retryDelay` — 5 min doubling to a 30 min ceiling, clamped to the configured interval so a short-interval deployment is never SLOWED, reset on a round that fetched anything; bounded in rate, never in attempts, and never silent) | M | was: `internal/threatfeed` `Start` ticker; now `nextSyncDelay`/`retryDelay` — see §25 |
+| FD-4 | Threat-feed content is fetched over HTTPS from two fixed hostnames with **no signature or provenance check**, and the fetch uses a bare `http.Client` — no `ssrf.SafeDialContext`, no redirect guard, no response-size cap — unlike `internal/blocklistfeed` (full SSRF + redirect guard) and `internal/saasfeed` (`io.LimitReader` 10 MB). A hijacked feed origin or a redirect to an internal address is unguarded, and the only bound on ingest is `maxFeedLines` (500k) AFTER the body is being read. | GAP | M | `internal/threatfeed` `fetchTextFeed`; contrast `internal/blocklistfeed/blocklistfeed.go:267,302-322` |
+| FD-5 | **`internal/feedsync` (the UT1 category feed) carries every defect CHAOS-57 fixed in the threat feed, plus two of its own.** No jitter, no retry (fixed 24h ticker), no alert on failure (a counter only). Its boot condition is `db.Stats() == 0` and its `lastSync` is **not persisted**, so after a restart the freshness signal `culvert_category_feed_last_sync_timestamp_seconds` reads 0 ("never") while the loop simultaneously refuses to sync for 24h because the DB is non-empty — a metric that lies in the alarming direction while the node does nothing about it. Separately, `parseTarball` decompresses an untrusted gzip stream with **no byte ceiling and no global entry cap** (`maxDomainsPerCategory` 2M is per FILE, ~40 mapped directories), and `downloadAndParse` fetches an operator-settable URL with no SSRF or redirect guard. | GAP | M/H | `internal/feedsync/feedsync.go:171-217,235-294`; the WK-6 row is its observability half |
 | WK-15 | **ClamAV's queue wait had its own 5 s deadline, which preempted the orchestrator's 10 s one and INVERTED its posture.** Exceeding the inner limit returned an ordinary error → classified as an engine fault → fail-OPEN, while the outer limit fails CLOSED. Five concurrent scans on a HEALTHY daemon therefore admitted content unscanned, reported as a daemon error. Attacker-inducible, no privilege. | GAP → **CLOSED** (CHAOS-52: `ScanContext` charges the queue wait to the caller's budget; `ErrQueueFull` keeps saturation distinguishable from a fault; `culvert_clam_saturated_total`) | **H** | was: `internal/clamav/clamav.go` `Scan` 5 s `time.After`; now `ScanContext` + `internal/secscan` `recordClamFailure` — see §20 |
 | WK-16 | **`ScanBody` stopped WAITING without stopping the WORK.** The abandoned scan goroutine held a ClamAV slot (1 of 4) and a copy of the body until the client's own 30 s timeout — 3x the budget that had already given up on it — unbounded in count and invisible in every surface. Four abandoned scans occupy every slot, pushing live requests onto WK-15's fail-open path: the failure sustains itself under load. Measured 30.006 s against a 150 ms deadline. | GAP → **CLOSED** (CHAOS-52: the budget is a context; cancellation reaches the dial, the conn deadline and a close-watcher; `culvert_scan_inflight`) | **H** | was: `internal/secscan/secscan.go` `ScanBody` `time.After`; now `context.WithTimeout` + `clamav.effectiveDeadline`/`watchCancel` — see §20 |
 | WK-17 | **The fail-closed scan-timeout refusal was cached with the CONTENT TTL** (1 h default), so seconds of scanner slowness blocked that exact object node-wide, for every user, for an hour after recovery — manual cache flush the only recourse. The ClamAV-error branch two lines above already refuses to cache for exactly this reason. | GAP → **CLOSED** (CHAOS-52: `hashcache.SetTTL` + `scanTimeoutCooldown` 30 s) | M | was: `internal/secscan/secscan.go` `ScanBody` timeout arm; now `SetTTL` — see §20 |
@@ -2768,3 +2807,258 @@ first draft of the fix as its rationale, and it was wrong — the idle case is
 bounded at 6s. Measuring it, rather than shipping the plausible story, is what
 surfaced the active-stream case, which is both unbounded and reachable by
 faults this codebase already has runbooks for.
+
+---
+
+## 25. CHAOS-57 — The threat feed's freshness contract
+
+**Date:** 2026-08-30
+**Scope:** `internal/threatfeed` (URLhaus + OpenPhish), and by comparison
+`internal/feedsync`, `internal/blocklistfeed`, `internal/saasfeed`.
+**Register rows:** FD-1…FD-5, WK-13 (partly closed), WK-5 (context), WK-6 (context).
+
+### 25.1 Why this domain, and why it reads differently
+
+Twenty-four sections of this register ask what happens when a subsystem
+**breaks**. This one asks what happens when a subsystem keeps working and stops
+being **true**.
+
+The threat feed is not an exotic corner: `CheckDomain` runs on every proxied
+request and `CheckURL` additionally on every plain-HTTP one, both off a
+lock-free read view. What makes it a chaos target is the shelf life of its
+contents. URLhaus and OpenPhish entries turn over on a scale of hours. Week-old
+threat intelligence is not "slightly behind" — a large fraction of what it
+holds is already dead, and essentially none of what matters today is in it.
+
+### 25.2 The finding: the graceful degradation hid itself
+
+`carryForward` — the fix for WK-5, and correct — keeps the last-known-good
+tables serving when a fetch fails. Refusing traffic because a third party's
+free feed is down would convert their outage into a full gateway outage, so the
+posture is right and this sweep does not change it.
+
+But the property that makes the degradation graceful is exactly the property
+that made it invisible. `culvert_threat_feed_entries` counts loaded entries,
+and carried-forward entries hold that count **perfectly steady through an
+outage of any length**. Concretely: a feed frozen thirty days ago and a feed
+synced sixty seconds ago produced a byte-identical scrape. That is
+`TestChaos57_StaleFeedIsDistinguishableFromAHealthyOne`, and it is the whole
+finding in one assertion.
+
+Around it there was nothing else. No `/healthz` field, no `/readyz` row, no
+`/api/diagnostics` row, no alert. The only report of sync health anywhere was
+`threat_feed_sync_ok` inside the `/api/security-scan/status` JSON blob — a
+human-polled admin surface that no alerting rule consumes.
+
+This is HA-17's shape (*"an unfenced leader was invisible to Prometheus"*)
+standing in a different subsystem, and the in-repo comparison is what settles
+the severity rather than an argument about it:
+
+| Feed | Stale alert | Freshness series |
+|---|---|---|
+| Signed SaaS feed | `saas_feed_stale` | `culvert_saasfeed_*` |
+| Release catalog | `release_catalog_stale` | `culvert_release_catalog_expires_in_seconds` |
+| UT1 category feed | — | `culvert_category_feed_last_sync_timestamp_seconds` |
+| **Threat feed (per-request, most perishable)** | **—** | **—** |
+
+The subsystem on the request path, holding the data with the shortest half-life,
+had strictly less observability than every feed above it.
+
+### 25.3 FD-2 — the restart made it worse, not better
+
+The boot condition was:
+
+```go
+needSync := tf.lastSync.IsZero() || tf.totalEntries.Load() == 0
+```
+
+`lastSync` is restored from the persisted DB (`loadFromDisk`). So an appliance
+powered off for three weeks came up holding three-week-old intelligence, and
+skipped its boot fetch **precisely because it had data** — then served that
+data for another full interval before its first fetch.
+
+Restart is the operator's remedy for a stale feed. This made it a no-op for one
+interval, and left a recovered node strictly worse off than a fresh install
+(which has no entries, so it fetches immediately). It is the CHAOS-28
+`StartCAAutoRotation` finding — *"the old first-check-at-+24h skipped exactly
+the restart an operator makes to recover"* — reproduced, independently, in a
+second subsystem. Worth recording as a pattern rather than an incident: **a
+boot-time "do we need to do the work?" predicate that keys on the PRESENCE of
+state rather than its AGE will always skip the recovery restart.**
+
+### 25.4 FD-3 — there was no retry to be broken
+
+The register's implementation rules warn about hidden retries, infinite
+retries, and broken backoff. This loop had none of those, because it had no
+retry: `time.NewTicker(tf.syncInterval)`, and a failed round waited the full
+interval. At the 6-hour default, a thirty-second resolver blip landing on the
+tick cost six hours of frozen intelligence.
+
+### 25.5 What shipped
+
+**Engine (`internal/threatfeed`).**
+
+1. `needBootSync` is **freshness-gated**: empty or never-synced (as before), or
+   `lastSuccess` older than one interval. Floored by `bootResyncFloor` (15 min)
+   against the last ATTEMPT, so a crash-looping process cannot turn stale data
+   into one outbound request per restart. The new condition is a strict
+   **superset** of the old one (`lastSync.IsZero()` implies
+   `lastSuccess.IsZero()`, because `loadFromDisk` only back-fills lastSuccess
+   FROM lastSync), so the loop can only ever sync at least as often as before.
+2. `retryDelay`: 5 min doubling to a 30 min ceiling after a round that fetched
+   nothing, reset by any round that fetched something. **Clamped to the
+   configured interval**, so a deployment syncing every minute is never SLOWED
+   by the retry path — the retry exists to recover sooner, never later.
+   Bounded in RATE, never in ATTEMPTS, and never silent (every attempt logs its
+   per-source outcome; the count is on `/metrics`).
+3. `consecutiveFailures` counts rounds that replaced **no source**, not rounds
+   that reported an error. With two feeds, one of them 403ing indefinitely is
+   the ordinary steady state of a free public service; charging that as a
+   failure would hold a whole fleet at the retry floor forever, aimed at a
+   service already refusing it. A round that refreshed one of two sources did
+   its job.
+4. ±10% jitter on every scheduled delay (WK-13 for this loop).
+5. A `syncObserver` seam, invoked with `tf.mu` RELEASED — the observer reads the
+   feed's own accessors, every one of which takes `tf.mu`, so calling it under
+   the lock is the CHAOS-50 cluster-CA self-deadlock exactly.
+   `TestChaos57_ObserverIsCalledWithoutHoldingTheLock` deadlocks against that
+   shape rather than failing softly.
+6. `Freshness()` returns one consistent read. Composing the same view from
+   `Stats` + `SyncStatus` + `ConsecutiveFailures` takes the lock three times and
+   can straddle a concurrent `applySync`, reporting a fresh `lastSuccess`
+   beside the failure count that preceded it.
+
+**Root (`threatfeed_health.go`).** The plane follows `catfeeddb_health.go` /
+`saas_feed_alerts.go` exactly, so no new operator vocabulary is introduced:
+five `culvert_threat_feed_*` series, a `threat_feed` operator-contract row, and
+three latched alerts (`threat_feed_stale`, `threat_feed_sync_failing`,
+`threat_feed_recovered`) fired once per threshold crossing through
+`deferStartupAlert`. Stale is `max(4 × interval, 24h)` — expressed in WINDOWS
+because the interval is configurable, floored because a five-minute interval
+must not page on twenty minutes of a public feed being slow.
+
+### 25.6 What is deliberately NOT done
+
+- **Age is never enforced.** No fail-closed on staleness, at any age. Recorded
+  owner decision: week-old intelligence still blocks a great deal, and refusing
+  traffic over a third party's outage is a self-inflicted gateway outage. This
+  sweep changes what an operator can SEE, not what the proxy does.
+- **No `/readyz` row.** A node serving carried-forward intelligence is fully
+  able to serve; failing readiness would pull a working gateway out of rotation
+  and leave the traffic to egress with no gateway at all. Same judgement, same
+  reasoning, as `catfeeddb_health.go`.
+- **The `threat_feed` row is warn, never fail** — for the same reason.
+- **All five series are omitted when the feed is not running.** A
+  `culvert_threat_feed_stale 0` on a node that never had the feature is
+  indistinguishable from a healthy one and the paging rule is `== 1`; the
+  CHAOS-54 rule.
+- **Thresholds are constants.** Recorded deferral, matching the release-catalog
+  and SaaS-feed planes.
+- **The retry cadence is not persisted.** A restart resets the backoff to the
+  full interval; the boot-freshness check covers the case that matters. The
+  durable record of *"how long since fresh data"* is `lastSuccess`, which IS
+  persisted.
+
+### 25.7 Left open, and named
+
+- **FD-4** — the fetch itself. `fetchTextFeed` uses a bare `http.Client`: no
+  `ssrf.SafeDialContext`, no redirect guard, no response-size cap, and no
+  signature or provenance check on feed content. Its two sibling fetchers do
+  better: `internal/blocklistfeed` has a full SSRF + redirect guard, and
+  `internal/saasfeed` caps the body at 10 MB. The feed URLs here are
+  compile-time constants, which lowers the reachability but does not close it
+  (DNS hijack, a redirect to an internal address, a hostile body). Fixing it is
+  a contained change and belongs in its own PR — a security posture change to
+  the fetch path should not ride inside an observability change.
+- **FD-5** — `internal/feedsync` (the UT1 category feed) carries **every** defect
+  this section closed, plus two of its own. No jitter, no retry, no alert. Its
+  boot gate is `db.Stats() == 0` and its `lastSync` is **not persisted**, so
+  after a restart `culvert_category_feed_last_sync_timestamp_seconds` reads 0
+  ("never") while the loop simultaneously refuses to sync for 24 hours because
+  the DB is non-empty — a metric that lies in the alarming direction while the
+  node does nothing about it. Separately `parseTarball` decompresses an
+  untrusted gzip/tar stream with **no byte ceiling and no global entry cap**
+  (`maxDomainsPerCategory` 2M is per FILE, across ~40 mapped directories), and
+  `downloadAndParse` fetches an operator-settable URL with no SSRF or redirect
+  guard. It is a bigger change than it looks — the restart-lying metric needs a
+  persisted sync record — so it is named rather than half-done here.
+- **WK-13 for the other loops.** `blocklistfeed` (60 s) and `cdr_health` (15 s)
+  remain bare tickers. Both are short-interval and neither targets a free public
+  service, so the herd cost is lower; recorded rather than swept.
+
+### 25.8 Review follow-ups — three defects in the fix itself
+
+Codex review of PR #1264 raised three P2s against the change. All three were
+verified against the code and fixed in the same PR; each carries a gate that
+was confirmed failing against its pre-fix shape.
+
+**FD-6 — the fix contradicted itself.** §25.5 rule 3 defines a failure as a
+round that replaced NO source, on the explicit reasoning that one of two free
+public feeds 403ing indefinitely is an ordinary steady state. Freshness was
+then keyed on `lastSuccess`, which requires EVERY source clean. The two halves
+disagree, and the consequence is not cosmetic: with OpenPhish permanently
+refusing this egress IP, `lastSuccess` never advances at all, so a node whose
+URLhaus feed refreshed on every single window was seen by `needBootSync` as
+"never succeeded" — the branch that returns true UNCONDITIONALLY, bypassing the
+crash-loop floor. **The floor added to stop a crash loop from hammering the
+feeds did not apply in the one steady state that most needs it.** The same
+snapshot would have reported the feed permanently stale and paged about it.
+Fixed by a persisted `lastRefresh` (last round that refreshed ANY source);
+`lastSuccess` keeps its documented all-clean meaning for `SyncStatus()` and
+`sync_ok`. This is worth recording as a pattern: **when a change defines a
+narrow notion of "failure" for one purpose, every other surface in the same
+change has to be checked against that same definition** — the contradiction
+lived in two files that were written minutes apart.
+
+**FD-7 — the floor deferred by a window, not by the floor.** When
+`needBootSync` skipped the boot fetch because of the crash-loop floor, the
+first scheduled attempt used the ordinary cadence, because
+`consecutiveFailures` is process-local and resets to zero on restart — so the
+retry path that would have shortened it was not armed. A floor meant to defer a
+fetch by at most 15 minutes deferred it by a full 6-hour interval, partially
+undoing FD-2. Fixed by `firstDelay`, which uses the floor remainder after a
+`bootFloored` decision; the CONTROL gate pins that a merely-fresh boot still
+waits the full cadence.
+
+**FD-8 — an unknown state rendered as the healthy value.** `sync_ok` was
+`LastErr == ""`, and on a feed that has never synced `LastErr` starts empty —
+so `culvert_threat_feed_sync_ok 1` was published beside a zero last-refresh
+timestamp and a diagnostics row reading "never synced", on every boot, and
+permanently if the first fetch died before recording an error. Fixed to require
+a completed clean round. Same rule as the absent-when-not-running gauges, which
+this change had already applied one function away.
+
+**FD-9 — the floor's own jitter breached the floor.** Found by the FD-7 gate
+flaking, not by reading the code: `firstDelay` jittered the floor remainder by
+the same symmetric ±10% used for the ordinary cadence, so roughly HALF of
+floored boots were scheduled BEFORE the floor expired — quietly defeating the
+crash-loop protection the floor exists to provide. Symmetric jitter is right
+for a cadence and wrong for a bound. `jitterUp` keeps the fleet spread and
+constrains it to add only. The gate now pins the floor from BOTH sides across
+200 draws, because a single draw passes a symmetric-jitter build about half the
+time — the same many-trial reasoning as CHAOS-54's
+`TestChaos54_StopIsPromptDuringAcceptBackoff`. Worth recording: **a flaky gate
+is evidence, not noise.** The first instinct was to loosen the assertion by the
+jitter margin, which would have hidden a real defect behind a wider bound.
+
+### 25.9 Tests
+
+`internal/threatfeed/sync_freshness_test.go` (17) and
+`threatfeed_health_test.go` (13) — including four gates for the FD-6/FD-7/FD-8
+review follow-ups, each verified failing against its pre-fix shape. Provenance is stated per gate in each file's
+header, because "verified failing against the pre-fix tree" is a claim that has
+to be earned: the boot-sync gates WERE run against the reintroduced pre-fix
+condition and fail; the retry and jitter gates pin arming conditions that had
+no pre-fix counterpart to fail against, and say so.
+
+The CONTROLS carry as much weight as the defect gates. An "always sync at boot"
+fix passes the staleness gate while turning every rolling restart of a fleet
+into a synchronised burst against a free public feed
+(`TestChaos57_BootSyncSkippedWhenFresh`, `..._FlooredOnCrashLoop`). A retry with
+no clamp passes the retry gate while slowing a short-interval deployment
+(`..._RetryNeverSlowsAShortInterval`). An alert with no latch passes the
+alerting gate while re-paging every window until the operator mutes the channel
+(`..._StaleAlertFiresOncePerCrossing`). And a freshness plane with no
+not-configured guard passes every gate above while paging every appliance that
+never had a threat feed (`..._NoAlertsWhenFeedNotRunning`,
+`..._MetricsAbsentWhenFeedNotRunning`).

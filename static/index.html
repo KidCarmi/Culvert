@@ -18652,6 +18652,14 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_stale"> Release catalog stale</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_refresh_failing"> Release catalog refresh failing</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_recovered"> Release catalog recovered</label>
+        <!-- CHAOS-57 threat-feed freshness events. Same exact-name filter class:
+             the threat feed is consulted on every request and carries forward
+             its last-known-good table when a fetch fails, so a feed that has
+             stopped updating looks identical to a healthy one on every other
+             surface. These are the paging signal for that. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_feed_stale" title="Threat intelligence has not refreshed for four sync windows (floor 24h); the feed is serving carried-forward entries."> Threat feed stale</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_feed_sync_failing"> Threat feed sync failing</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_feed_recovered"> Threat feed recovered</label>
         <!-- Adaptive decryption-exclusion alerts: the store filters on exact event
              names (or "*"), so these must be listed here for GUI-managed webhooks
              to subscribe (same class as the release-catalog events above). -->
