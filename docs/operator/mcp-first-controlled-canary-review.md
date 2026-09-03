@@ -275,24 +275,44 @@ still distinguish a repeatable success from a one-off, serialized so no two requ
 flight, in a window short enough to bound an unattended experiment. The authorization MUST adopt this
 exact triple or re-review a different one; it may not be left open.
 
-**The witness invariant forces blocker 6's retry-FREE remedy (Codex round 32).** "Exactly 3 logical
-reservations, up to 9 physical POSTs" is NOT reconcilable in either of the other states, so this
-review narrows the accepted remedy for this experiment:
-* **Before blocker 6 is closed** the witness cannot attribute POSTs to reservations at all — the wire
-  identifier is PER-SERVER (`WireID: "u-" + target.ServerID`, `internal/mcp/execution/run.go:112`), so
-  3 reservations with 3 retries each and 1 reservation retried 9 times are indistinguishable to the
-  recording upstream. A missing or duplicated invocation would classify as expected.
-* **Under the "charge each physical attempt to the budget" remedy** retries consume the same 3 slots,
-  so the budget can be exhausted by FEWER than 3 logical reservations (one request retried three times
-  spends the whole experiment). "Exactly 3 logical" is then simply false.
-* **Under the retry-FREE remedy** — make retry-disablement representable and wire a retry-free `Limits`
-  into the Canary client — logical and physical counts COINCIDE: **exactly 3 reservations and exactly 3
-  POSTs**, the only form the independent witness can actually reconcile, and the only one where a 4th
-  POST or a missing 3rd is unambiguously a breach.
+### The witness invariant is over TOOL EXECUTIONS, not HTTP POSTs
 
-The first Canary therefore REQUIRES the retry-free remedy; charging attempts to the budget is
-acceptable for bounding COUNT in general but is NOT acceptable for this experiment, because it
-destroys the witness invariant §14 depends on.
+**The invariant is scoped to the authorized tool invocations, and the classes must be independently
+observable (Codex round 33).** A total-POST count is the wrong unit: when blocker 1 is closed with a
+Culvert-side MCP lifecycle implementation, or blocker 11 with authenticated discovery near each call,
+the recording server ALSO receives `initialize`, `notifications/initialized` and `tools/list` POSTs
+that consume no execution reservation — so a perfectly correct retry-free run would exceed three POSTs
+and be misclassified as a breach. The reconciliation therefore partitions the upstream's log into two
+classes that must each be independently attributable:
+
+| Class | Expected in the First Canary | Consumes a reservation |
+|---|---|---|
+| **Side-effect-bearing tool invocations** (the one authorized `tools/call`) | **EXACTLY 3** | yes |
+| **Auxiliary lifecycle/discovery** (`initialize`, `notifications/initialized`, `tools/list`, …) | unbounded but SEPARATELY counted and attributable | no |
+
+The authorization must make this partition machine-checkable — either the recording server
+distinguishes the classes by method and correlates each side-effect-bearing call to its reservation,
+or ALL initialization/discovery is required to occur OUTSIDE the measured window so the in-window log
+contains nothing but the three authorized invocations. A witness that can only report a total POST
+count cannot satisfy §14.
+
+**The invariant also forces blocker 6's retry-FREE remedy, and admits no alternative.** Within the
+side-effect-bearing class:
+* **Before blocker 6 is closed** the witness cannot attribute invocations to reservations at all — the
+  wire identifier is PER-SERVER (`WireID: "u-" + target.ServerID`,
+  `internal/mcp/execution/run.go:112`), so 3 reservations retried 3× each and 1 reservation retried 9×
+  are indistinguishable. A missing or duplicated invocation would classify as expected.
+* **Under a "charge each physical attempt to the budget" remedy** retries consume the same 3 slots, so
+  the budget can be exhausted by FEWER than 3 logical reservations (one request retried three times
+  spends the whole experiment). "Exactly 3" is then simply false.
+* **Under the retry-FREE remedy** — make retry-disablement representable and wire a retry-free `Limits`
+  into the Canary client — logical and physical counts COINCIDE: **one reservation yields at most one
+  side-effect-bearing invocation**, so the class contains exactly 3, and a 4th or a missing 3rd is
+  unambiguously a breach.
+
+**The first Canary therefore REQUIRES an explicitly retry-free execution path. Charging attempts to
+the budget is NOT an accepted closure for blocker 6 in this experiment — there is no alternate
+charging-based remedy** — because it destroys the invariant §14 depends on.
 
 `canary.Budget` with the exact values above, and per-dimension caps consistent with the scope
 (`MaxTools=1`, `MaxServers=1`, `MaxPrincipals=1`). `ValidateBudget` (`budget.go:64`) rejects any non-positive cap and enforces
@@ -316,12 +336,15 @@ Canary this must be closed, and **every option is a CODE CHANGE — retry-disabl
 representable today** (Codex P1, verified). `newProductionUpstreamClient` hard-codes
 `upstreamclient.DefaultLimits()` (2 retries), and `NewLimits` COERCES `MaxReadRetries == 0` to the
 default `2` and REJECTS negatives (`limits.go:98-99,107`), so no config value disables retries.
-Closing this requires code, and only TWO options actually bound the physical POSTs: make
+Closing this requires code. Two mechanisms could bound the physical invocations in principle — make
 retry-disablement representable (an explicit zero/sentinel or a no-retry flag) and wire a retry-free
-`Limits` into the Canary's production client, OR charge each physical attempt to the budget. A
-per-reservation correlation key is NOT a third bound — it only enables witness correlation and (with
-an upstream dedup protocol) server-side de-duplication of side-effects; it does not stop the retry
-loop, so the server still records up to ~3 POSTs (§14/§26). Not GO until then.
+`Limits` into the Canary's production client, or charge each physical attempt to the budget — **but
+only the RETRY-FREE path is an accepted closure for this first experiment** (see the witness invariant
+below: charging can spend all three slots on one logical reservation and destroys the
+exactly-three-invocations contract). A per-reservation correlation key is not a bound at all — it only
+enables witness correlation and (with an upstream dedup protocol) server-side de-duplication; it does
+not stop the retry loop, so the server still records up to ~3 invocations (§14/§26). Not GO until
+then.
 
 ---
 
@@ -415,9 +438,13 @@ remedy works with today's code — all require a code change (§9/§26): disabli
 representable (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects negatives; the production client
 hard-codes `DefaultLimits()`), and charging each attempt to the budget is likewise code. A
 unique-per-reservation, stable-across-retries key would let the witness be *correlated* to reservations,
-but a key ALONE does NOT bound physical POSTs — it neither stops the retry loop nor charges its
-attempts, so the server still records up to ~3 POSTs per reservation; only disabling retries or
-charging each attempt actually bounds the physical invocations (§26).
+but a key ALONE does NOT bound physical invocations — it neither stops the retry loop nor charges its
+attempts, so the server still records up to ~3 per reservation. **For this experiment the accepted
+closure is the retry-free path only** (§9/§26): charging is rejected because it can spend all three
+slots on one logical reservation. Note also that the witness invariant is scoped to the
+side-effect-bearing tool invocations — auxiliary `initialize`/`notifications/initialized`/`tools/list`
+traffic consumes no reservation and must be counted and attributed SEPARATELY, never folded into the
+three (§9).
 
 **Correction (Codex P1) — reconciliation and its breach are NOT automatic.** `outcome_evidence_loss`
 and `unexpected_upstream_response` are declared abort codes (`abort.go`) but NO production code
@@ -461,6 +488,18 @@ Whole-Canary breaches (a single occurrence stops the Canary): `out_of_scope_exec
 `credential_safety_failure`, `budget_exhausted`, `elevated_error_rate`, `latency_pathology`,
 `unexpected_upstream_response` (`abort.go:54-86`). The controller latches monotonically and
 generation-bound; an unknown code fails closed to `AbortCanary` (`abort_control.go:35-40`).
+
+**Threshold REACHABILITY is part of the prerequisite (Codex round 33).** `elevated_error_rate` and
+`latency_pathology` are defined only in prose (`abort.go:72-74`: "over threshold", "sustained"), so the
+authorization must name the numeric limit, observation window, minimum sample size, and below-floor
+behavior — AND the sample floor must be REACHABLE inside the exact corpus (`MaxTotalExecutions=3`), or
+the below-floor behavior must stop fail-closed. A reviewed floor above three combined with a permitted
+below-floor `no-trip` means neither detector can ever evaluate: elevated errors or pathological latency
+would persist for the entire experiment while the automatic-abort prerequisite was recorded as closed.
+A detector that cannot possibly evaluate within the authorized corpus does not satisfy the
+prerequisite. The same rule governs the witness-reconciliation trip, which is evaluated over the
+side-effect-bearing invocation class only (§9) — auxiliary lifecycle/discovery traffic is counted
+separately and is never itself a mismatch.
 **Correction (Codex P1) — most whole-Canary trips are NOT wired to an automatic tripper.** A
 repository-wide search finds exactly TWO production `aborter.Trip` sites in the execution path, both
 in `reserveCanaryExecution` (`mcp_canary_runtime.go:391,394`): `budget_exhausted` and `scope_escape`.
@@ -586,7 +625,8 @@ Attacks considered and where each is stopped:
   with NO kill/generation re-check between attempts, so a kill engaged AFTER the first POST but before
   a retry does NOT stop the retry POST. The kill is therefore authoritative at admission, NOT across
   the retry window — a real gap folded into blocker 6 (§9/§26): a retry-free client closes it, and
-  merely charging each attempt to the budget does NOT (the POST still fires after the kill).
+  merely charging each attempt to the budget does NOT (the POST still fires after the kill) — and
+  charging is in any case not an accepted closure for this experiment (§9/§26).
 - *Get a no-credential call to leak a header* → `callUpstream("")` sets no `Authorization`.
 
 No "probably safe" path was left open for the attacks that DO resolve to a gate. **The concerns that
@@ -710,7 +750,9 @@ BLOCKED-vs-FAILED note in §26).
 | Tight scope validated (no percentage/group/wildcard; server & tenant capped at 1) | YES (§10) |
 | Machine gate enforces exactly-one tool AND exactly-one principal | **NO — caps are 2; must be an external prerequisite (§10)** |
 | Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
-| Budget bounds PHYSICAL upstream invocations (retries charged/disabled) | **NO — idempotent read retries up to ~3× per reservation (§9)** |
+| Budget bounds PHYSICAL side-effect-bearing invocations via a RETRY-FREE path (charging not accepted) | **NO — idempotent read retries up to ~3× per reservation; retry-disablement is not representable, and charging attempts is rejected because it can spend all 3 slots on one reservation (§9/§26, blocker 6)** |
+| Witness distinguishes side-effect-bearing tool invocations from auxiliary lifecycle/discovery traffic | **NO — no such controlled recording server exists; without the partition a correct run's `initialize`/`tools/list` POSTs misclassify as a breach (§9/§14)** |
+| Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **NO — no numeric limit, window, or sample floor exists; an unreachable floor with below-floor `no-trip` disables both detectors for the whole experiment (§16/§26, blocker 7)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
 | The exact tool is `catalog.Usable` (not Quarantined) at request time | **NO — `seedTools` lands it Quarantined; the engine hard-quarantines before any rule; `ApproveLive` never promotes (§6/§7, blocker 13)** |
 | The exact request resolves to an ALLOW-class rule with satisfiable obligations | **NO — a no-`CredentialProfile` rule may be DENY; an unmatched request default-denies; `PolicyHealthy` only proves a snapshot exists (§4/§13, blocker 14)** |
@@ -902,15 +944,17 @@ verdict FAILED.)
   authoritative across retries — `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries`
   times outside the single budget `Reserve` AND without re-checking kill/generation between attempts
   (`client.go:132-141`), so one budgeted request can hit the server up to ~3 times (§9) and a retry POST
-  can land after an emergency kill (§20). The clean fix is (a) make retry-disablement representable and
-  wire a retry-free `Limits` into the Canary client — it is not representable today (`NewLimits` coerces
-  `MaxReadRetries==0`→`2` and rejects negatives; `newProductionUpstreamClient` hard-codes
-  `DefaultLimits()`) — which closes BOTH the count and the kill gap. Charging each physical attempt to
-  the budget bounds the COUNT but does NOT restore kill authority (the POST still fires after the kill),
-  so it must be paired with per-attempt kill/generation revalidation inside the retry loop. A
-  per-reservation correlation key is NOT a bound at all: it only lets the witness be reconciled and
-  (with an upstream dedup protocol) lets the SERVER ignore duplicate side-effects — it neither stops the
-  retry loop, charges its attempts, nor re-checks the kill (§14/§20);
+  can land after an emergency kill (§20). **For this first Canary the ONLY accepted closure is an
+  explicitly RETRY-FREE execution path**: make retry-disablement representable and wire a retry-free
+  `Limits` into the Canary client — not representable today (`NewLimits` coerces `MaxReadRetries==0`→`2`
+  and rejects negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`) — so that **one
+  logical reservation can produce at most one side-effect-bearing physical tool invocation**. That
+  single change closes the count gap AND the kill gap together. **Charging each attempt to the budget is
+  NOT an accepted alternative here** (with or without per-attempt kill revalidation): it can spend all
+  three slots on one logical reservation and so destroys the exactly-three-invocations witness invariant
+  §9/§14 require. A per-reservation correlation key is not a bound at all: it only lets the witness be
+  reconciled and (with an upstream dedup protocol) lets the SERVER ignore duplicates — it neither stops
+  the retry loop nor re-checks the kill (§14/§20);
 - **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
   `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
   `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
@@ -923,8 +967,15 @@ verdict FAILED.)
   minimum sample size is either trigger-happy (one error reads as 100%) or never reachable. The
   authorization must therefore name, as explicit reviewed inputs: the numeric limit, the observation
   window, the minimum sample size before the rate is evaluated at all, and the defined behavior BELOW
-  that sample floor (fail-closed stop vs. no-trip). The same applies to the witness-reconciliation trip
-  (what counts as a mismatch, and after how many);
+  that sample floor. **The sample floor MUST be REACHABLE inside the exact First-Canary corpus, or the
+  below-floor behavior MUST stop fail-closed (Codex round 33).** With `MaxTotalExecutions=3`, a reviewed
+  floor above three combined with a permitted below-floor `no-trip` means NEITHER detector can ever
+  evaluate during the experiment — elevated errors or pathological latency would persist for its entire
+  duration while the automatic-abort prerequisite was nonetheless recorded as closed. A detector that
+  cannot possibly evaluate within the authorized corpus does not satisfy the prerequisite: either
+  floor ≤ 3, or below-floor is a fail-closed stop. The same reachability rule applies to the
+  witness-reconciliation trip (what counts as a mismatch, and after how many — evaluable within three
+  invocations, or fail-closed);
 - **[dedicated PR]** durable invocation determinability — a complete, non-success-only outcome record
   is necessary but NOT sufficient: a crash AFTER the server receives the POST but BEFORE `Upstream.Call`
   returns can emit no post-call event at all, so the `executing` record stays ambiguous. Closing the

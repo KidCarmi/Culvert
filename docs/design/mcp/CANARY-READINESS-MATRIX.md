@@ -234,15 +234,26 @@ Every one is a **separately-reviewed activation**, not a config change:
    times outside the single budget reservation, so one budgeted request can send the POST ~3×, and a
    retry POST can land after an emergency kill engaged mid-flight (blocker 6). Retry-disablement is NOT
    representable today (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects negatives;
-   `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code. A retry-free
-   client is the ONLY standalone remedy — it closes BOTH the count and the kill-authority gap. Charging
-   each attempt to the budget bounds the COUNT only and does NOT restore kill authority (the POST still
-   fires after the kill), so it must be PAIRED with per-attempt kill/generation revalidation inside the
-   retry loop (review §9/§20/§26). A per-reservation key is not a bound at all (it enables
-   correlation/server-side dedup but does not stop the retry loop — review §9/§14); and (g)
+   `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code. **An
+   explicitly RETRY-FREE execution path is the ONLY accepted closure for the first Canary** — one
+   logical reservation must produce at most one side-effect-bearing physical tool invocation — and it
+   closes BOTH the count and the kill-authority gap. **Charging each attempt to the budget is NOT an
+   accepted alternative** (with or without per-attempt kill revalidation): it can spend all three
+   execution slots on a single logical reservation and so destroys the exactly-three-invocations witness
+   invariant (review §9/§14/§26). A per-reservation key is not a bound at all (it enables
+   correlation/server-side dedup but does not stop the retry loop — review §9/§14). Note the witness
+   invariant counts only the side-effect-bearing tool invocations: auxiliary MCP lifecycle/discovery
+   traffic (`initialize`, `notifications/initialized`, `tools/list`) consumes no reservation and must be
+   separately counted and attributable, never folded into the three; and (g)
    two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
    declared breaches beyond `budget_exhausted`/`scope_escape`, and the durable outcome record is
-   success-only with an unclosable post-send crash window (review §14–§16, §18); and (h) a
+   success-only with an unclosable post-send crash window (review §14–§16, §18). Wiring a tripper is
+   not sufficient for the two RATE-based breaches: for `elevated_error_rate` and `latency_pathology`
+   the reviewed minimum sample floor MUST be REACHABLE within the exact corpus
+   (`MaxTotalExecutions=3`), or the below-floor behavior MUST stop fail-closed — a floor above three
+   with a below-floor `no-trip` leaves both detectors unable to evaluate for the whole experiment while
+   the prerequisite reads as closed (review §16/§26). The same reachability rule governs the
+   witness-reconciliation trip; and (h) a
    **governed operator-reachable graceful rollback** — only the emergency kill is reachable today
    (`quiesceLiveTier` has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`
    for a Canary→Shadow/Observe target), yet the review contract requires rollback AND kill (review §17);

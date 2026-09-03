@@ -90,13 +90,13 @@ set is empty. This requires the separately-reviewed activation to have:
 |---|---|
 | nodes | **1** (the controlled Canary node) — **NOT machine-enforced**: `ScopeSpec` has no node dimension and the publication coordinator's `pushAll` delivers the signed envelope to EVERY `Dist.Nodes()` entry, so a generic publication path would activate every armed/ready DP. Constraining the node list is NOT enough: `mcpPullDistributor.Push` discards its node argument and the shared `ConfigSnapshot` reaches every DP, and the apply path has no intended-node check, so non-target DPs ACTIVATE before any acknowledgement reveals it. A PREVENTIVE control is required — a signed node audience rejected at DP apply, or a per-node delivery channel (review §3/§13, blocker 15) |
 | identity | **1** synthetic/non-production principal |
-| MCP server | **1** controlled server that **independently records every received invocation** |
+| MCP server | **1** controlled server that **independently records every received invocation**, and can **distinguish the authorized `tools/call` invocations from auxiliary lifecycle/discovery traffic** (`initialize`, `notifications/initialized`, `tools/list`) and attribute each side-effect-bearing call to its reservation — otherwise all initialization/discovery MUST occur outside the measured window (review §9/§14) |
 | tool | **1** exact tool |
 | fingerprint | **1** exact reviewed fingerprint (rug-pull invalidates the approval) — but the shipped provisioning (`seedServer`/`seedTools`/`Ingest`) seeds the fingerprint from OPERATOR-DECLARED JSON and verifies the pinned identity against its own register stamp, and nothing re-observes the live peer (`execution.Discovery.Discover` has no non-test caller), so `ToolStillCurrent` re-checks only the seeded record — the peer drifting behind the same identity is NOT caught (review §7, blocker 11) |
 | approval | **1** `live_execution` ToolApproval — four-eyes, ≤24h TTL, exact target |
 | operation class | **read/discovery only** (Culvert's own classification, not `readOnlyHint`) |
 | credential | synthetic/non-production credential **only if the tool requires one** |
-| request count | **EXACTLY: `MaxTotalExecutions=3`, `MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m`** (review §9 — not "tight": `ValidateBudget` would accept up to 1000 executions over 7 days, so a generic "bounded" budget is a materially different experiment). The witness must observe **exactly 3 reservations and exactly 3 POSTs**, which REQUIRES blocker 6's retry-free remedy — the budget bounds RESERVATIONS, not physical POSTs: `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries` times per reservation (~3 physical POSTs). Retry-disablement is **not representable today** (`NewLimits` coerces `MaxReadRetries==0`→2, rejects negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so bounding physical POSTs is a **required CODE-CHANGE prerequisite**, not an operator config (review §9/§14) |
+| request count | **EXACTLY: `MaxTotalExecutions=3`, `MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m`** (review §9 — not "tight": `ValidateBudget` would accept up to 1000 executions over 7 days, so a generic "bounded" budget is a materially different experiment). The witness invariant is over the **side-effect-bearing tool invocations only**: **exactly 3 reservations and exactly 3 authorized `tools/call` invocations**. Auxiliary MCP lifecycle/discovery traffic (`initialize`, `notifications/initialized`, `tools/list`) consumes NO reservation and must be counted and attributed **separately** — never folded into the three, and never counted as a breach (review §9). This REQUIRES blocker 6's **retry-free** remedy — the budget bounds RESERVATIONS, not physical invocations: `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries` times per reservation. Retry-disablement is **not representable today** (`NewLimits` coerces `MaxReadRetries==0`→2, rejects negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so an explicitly retry-free execution path — one reservation ⇒ at most one side-effect-bearing invocation — is a **required CODE-CHANGE prerequisite**, not an operator config. **Charging attempts to the budget is NOT an accepted alternative** (review §9/§14/§26) |
 | controls | immediate kill switch + Canary→Shadow/Observe rollback rehearsed first |
 
 ## Procedure
@@ -134,7 +134,10 @@ set is empty. This requires the separately-reviewed activation to have:
    forward-transition/publication entry point must be wired first (review §13/§17, blocker 12).
 7. **Observe** continuously: Culvert outcome evidence (executed=true/false, upstream
    success/failure, response-inspection result, abort class, duration) reconciled against the
-   recording upstream's independent log. Any mismatch is a whole-Canary breach → auto-stop.
+   recording upstream's independent log — **partitioned by class**: exactly 3 side-effect-bearing
+   `tools/call` invocations, with auxiliary lifecycle/discovery traffic counted separately and never
+   folded into that total (review §9). Any mismatch WITHIN the side-effect-bearing class is a
+   whole-Canary breach → auto-stop.
 8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16) — demote to
    Shadow and/or engage the kill switch. **Window expiry is NOT an automatic transition today:**
    `budget_exhausted` is tripped only from `reserveCanaryExecution` (`mcp_canary_runtime.go:391`) and
@@ -161,6 +164,13 @@ latency_pathology · unexpected_upstream_response.
 > only increments a metric, and `unexpected_upstream_response`/`elevated_error_rate`/`latency_pathology`
 > plus witness reconciliation have no automatic tripper yet. Wiring the rest is a pre-Canary
 > product-defect prerequisite — see `docs/operator/mcp-first-controlled-canary-review.md` §16.
+>
+> **Threshold reachability (review §16/§26).** For `elevated_error_rate` and `latency_pathology` the
+> reviewed minimum sample floor MUST be reachable inside the exact corpus (`MaxTotalExecutions=3`), or
+> the below-floor behavior MUST stop fail-closed. A floor above three combined with a below-floor
+> `no-trip` means neither detector can ever evaluate during the experiment — errors or latency
+> pathology would persist for its whole duration while the automatic-abort prerequisite was recorded as
+> closed. The same reachability rule applies to the witness-reconciliation trip.
 
 ## Explicit non-goals
 
