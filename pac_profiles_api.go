@@ -182,6 +182,7 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		pacWriteStateDecision(r, "resolved")
 		pacProfilesAPIMu.Lock()
 		defer pacProfilesAPIMu.Unlock()
 		if _, exists := pacProfiles.ProfileByID(p.ID); exists {
@@ -350,6 +351,7 @@ func apiPACPools(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		pacWriteStateDecision(r, "resolved")
 		pacProfilesAPIMu.Lock()
 		defer pacProfilesAPIMu.Unlock()
 		if _, exists := pacProfiles.PoolByID(p.ID); exists {
