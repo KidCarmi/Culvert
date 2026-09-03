@@ -17,6 +17,8 @@ current posture (do NOT collapse these into "done" or "not done"):
 | Armed by default | **NO** — a stock build composes nothing and arms nothing (`live_executor_absent`) |
 | Canary active | **NO** — no production path begins a Canary generation or reaches an upstream |
 | A controlled upstream reachable under the supported production trust model | **NOT AVAILABLE TODAY** — see the connectivity blocker below |
+| The exact tool `catalog.Usable` at request time | **NO** — `seedTools` lands every inventory tool `catalog.Quarantined` and the policy engine hard-overrides a quarantined tool to `ActionQuarantine` BEFORE any user rule (`internal/mcp/policy/engine.go:132-135`); `ApproveLive` deliberately never promotes ("live trust never materializes `catalog.Usable`"). A `shadow_evaluation` approval or another governed promotion path is required, else every exact-tool request is denied (review §6/§7, blocker 13) |
+| The exact request resolves to an ALLOW-class policy decision | **NOT ESTABLISHED** — a no-`CredentialProfile` rule may itself be DENY, an unmatched request default-denies (`engine.go:170-173`), and `resolveEnforcing` blocks every non-allow-class decision; the preflight's `PolicyHealthy` fact only proves a snapshot exists (review §4/§13, blocker 14) |
 
 > **What changed (PR #1291):** the production live-tier dependency graph is now composable
 > (`composeProductionGatewayLiveTier`, opt-in via `CULVERT_MCP_LIVE_DEPS`) and the tier is armable

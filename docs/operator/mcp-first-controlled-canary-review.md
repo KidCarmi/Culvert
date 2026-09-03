@@ -14,7 +14,7 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **TWELVE independent blockers** (exhaustive as a set — together they cover
+cannot be assembled today on **FOURTEEN independent blockers** (exhaustive as a set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6): (1) no controlled upstream reachable AND usable under the supported
 production trust model (a provisioned HTTPS+SPKI target must ALSO speak a protocol that permits Culvert's sessionless calls — a standard initialization-requiring server is rejected because the client drives no MCP initialize/version/session lifecycle); (2) the production activation preflight cannot return `Ready:true` on a stock
@@ -37,8 +37,13 @@ peer, so exact-current fingerprint + rug-pull invalidation bind only the seeded 
 no operator-reachable governed Canary ACTIVATION entry point — `apiMCPRolloutTransition` returns
 `distribution_not_configured` and no non-test code constructs/`Publish`es the distribution publication
 coordinator, so even with arming + activation inputs closed nothing transitions the node into Canary
-mode (§13/§17). Blockers 1–6 and 9–12 are gaps/prerequisites; 7–8 are defects recorded here for
-dedicated PRs (§21).
+mode (§13/§17); and (13) the seeded controlled tool is `catalog.Quarantined` and nothing promotes it —
+the policy engine hard-quarantines it BEFORE any user rule and `ApproveLive` deliberately never calls
+`catalog.Promote`, so every exact-tool request is denied even with 1–12 closed (§6/§7); and (14) the
+exact request must resolve to an ALLOW-class decision with satisfiable obligations — a
+no-`CredentialProfile` rule may still be DENY, an unmatched request default-denies, and `PolicyHealthy`
+only proves a snapshot exists (§4/§13). Blockers 1–6 and 9–14 are gaps/prerequisites; 7–8 are defects
+recorded here for dedicated PRs (§21).
 The experiment is specified below up to the exact point where it becomes unauthorizable, and the
 precise provisioning that would unblock it is named.
 
@@ -621,6 +626,15 @@ code:
   non-test caller, so `ToolStillCurrent` re-checks only the seeded record. Exact-current fingerprint +
   rug-pull invalidation therefore bind the SEED, not the live peer. Confirmed against `mcp_inventory.go`
   + a repo-wide `Discover` search. Added as blocker 11.
+- **P1 — seeded tool stays catalog-quarantined (§6/§7, blocker 13):** `seedTools` lands tools
+  Quarantined and `engine.go:132-135` hard-overrides a `DispQuarantined` tool to `ActionQuarantine`
+  before any user rule; `ApproveLive` deliberately performs no promotion and the only non-test
+  `catalog.Promote` callers are the shadow `promoteFor` path. Confirmed against `mcp_inventory.go`,
+  `policy/engine.go`, `mcp_tooltrust.go`. Added as blocker 13.
+- **P1 — allow-class decision not required (§4/§13, blocker 14):** a no-`CredentialProfile` rule may
+  still be DENY, an unmatched request default-denies (`engine.go:170-173`), `resolveEnforcing` blocks
+  non-allow-class decisions, and `PolicyHealthy` is only `mcpPolicy.composed()`. Confirmed against
+  `policy/engine.go`, `rollout/resolve.go`, `mcp_canary_preflight.go:83`. Added as blocker 14.
 - **P1 — no Canary activation entry point (§13/§17, blocker 12):** `apiMCPRolloutTransition` returns
   `distribution_not_configured` for a Canary target (`ui_mcp_rollout.go:116`) and no non-test code
   constructs the distribution publication coordinator (`publication.New`) or calls `coord.Publish`, so
@@ -653,6 +667,8 @@ BLOCKED-vs-FAILED note in §26).
 | Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
 | Budget bounds PHYSICAL upstream invocations (retries charged/disabled) | **NO — idempotent read retries up to ~3× per reservation (§9)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
+| The exact tool is `catalog.Usable` (not Quarantined) at request time | **NO — `seedTools` lands it Quarantined; the engine hard-quarantines before any rule; `ApproveLive` never promotes (§6/§7, blocker 13)** |
+| The exact request resolves to an ALLOW-class rule with satisfiable obligations | **NO — a no-`CredentialProfile` rule may be DENY; an unmatched request default-denies; `PolicyHealthy` only proves a snapshot exists (§4/§13, blocker 14)** |
 | Operator-reachable governed path to TRANSITION the node into Canary mode | **NO — `apiMCPRolloutTransition` returns `distribution_not_configured`; no non-test `publication.New`/`Publish` caller (§13/§17, blocker 12)** |
 | Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
@@ -674,9 +690,9 @@ therefore forbidden.
 
 The Canary core is fail-closed across scope, trust firewall, budget ceiling, per-request kill
 re-read, restart re-arm/allowance, and no-secret evidence. But a safe first experiment cannot be
-assembled today on **twelve independent blockers** — some are intentional capability gaps, some are
+assembled today on **fourteen independent blockers** — some are intentional capability gaps, some are
 prerequisites, and two are genuine product defects the Codex adversarial rounds (§24) surfaced and
-this review verified against the code. The list below is exhaustive AS A SET: together the twelve cover
+this review verified against the code. The list below is exhaustive AS A SET: together the fourteen cover
 every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
@@ -711,6 +727,8 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning a target
    (blocker 1) does NOT by itself establish no-credential status; it must be closed explicitly by
    verifying a no-`CredentialProfile` matched rule OR implementing a working credential provider/path.
+   A no-`CredentialProfile` rule is NOT sufficient on its own — see blocker 14: the matched rule must
+   also be ALLOW-class with satisfiable obligations, or the request is denied anyway.
 10. **No operator-reachable graceful rollback (§17).** §17's contract bar is "no GO unless rollback
    AND kill are available." Only the emergency kill is reachable: `quiesceLiveTier` has no production
    caller, and the operator-facing `apiMCPRolloutTransition` returns `distribution_not_configured` for
@@ -736,12 +754,32 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    twin of blocker 10 (which is the same unwired path in the rollback direction), and it means the
    §25 checklist — wire arming + activation inputs — is NOT sufficient to start the Canary. A governed
    operator-reachable forward-transition/publication entry point must be wired.
+13. **The seeded controlled tool is `catalog.Quarantined` and nothing promotes it (§6/§7).** `seedTools`
+   lands every inventory tool Quarantined (`mcp_inventory.go:15-17`) — the correct record-only Observe
+   disposition — and the policy engine hard-overrides a `DispQuarantined` tool to `ActionQuarantine`
+   BEFORE any user rule is evaluated (`internal/mcp/policy/engine.go:132-135`). `ApproveLive`
+   DELIBERATELY performs no promotion ("live trust never materializes `catalog.Usable`",
+   `mcp_tooltrust.go:413-450`), and the only non-test `catalog.Promote` callers are the shadow
+   `promoteFor` path (`mcp_tooltrust.go:536`, `:629`). So even with blockers 1–12 closed and a finer
+   read-first classifier (blocker 4), every exact-tool request is hard-denied at the quarantine
+   override. Catalog USABILITY must be a mandatory criterion: a `shadow_evaluation` approval (which
+   promotes) or another governed promotion path must make the exact tool `catalog.Usable`.
+14. **The exact request must resolve to an ALLOW-class decision with satisfiable obligations (§4/§13).**
+   Closing the credential condition (blocker 9) by choosing a rule with no `CredentialProfile` does not
+   make the request executable: that rule may itself be DENY-class, and if NO enabled rule matches,
+   `matchRules` falls through to default-deny (`engine.go:170-173`); `resolveEnforcing`
+   (`internal/mcp/rollout/resolve.go:168`) blocks every non-allow-class decision. The preflight's
+   `PolicyHealthy` fact is only `mcpPolicy.composed()` (`mcp_canary_preflight.go:83`) — it proves a
+   snapshot EXISTS, never that the exact request resolves to an allow. The authorization must therefore
+   require the exact (principal, tenant, server, tool, operation) to resolve to an ALLOW-class rule with
+   every execution obligation satisfiable.
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
 execute — nothing is reachable (1), the activation preflight cannot go Ready (2), no operator can arm
-(3), no admissible one-tool operation exists (4), and no operator-reachable path even transitions the
-node into Canary mode (12). Blockers 5–12 are unmet *prerequisites*/defects, not a live
+(3), no admissible one-tool operation exists (4), the seeded tool is catalog-quarantined and hard-denied
+before any rule runs (13), and no operator-reachable path even transitions the node into Canary mode
+(12). Blockers 5–12 and 14 are unmet *prerequisites*/defects, not a live
 unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA (blocker 11
 adds that even a reachable+usable target would carry a fingerprint bound to operator-declared JSON, not
 the observed peer). So the
@@ -769,7 +807,19 @@ verdict FAILED.)
 - resolve the credential path explicitly (§4): either verify the chosen tool's matched policy rule
   attaches NO `CredentialProfile` (so the no-credential branch is proven for this exact request), OR
   implement a working credential provider/path — the production broker composes zero providers, so a
-  credential-requiring rule fails closed;
+  credential-requiring rule fails closed. This is NOT sufficient alone: the same rule must also be
+  ALLOW-class with satisfiable obligations (blocker 14);
+- make the exact tool **`catalog.Usable`** (blocker 13, §6/§7) — `seedTools` lands it Quarantined and
+  the engine hard-overrides a quarantined tool to `ActionQuarantine` before any user rule runs, while
+  `ApproveLive` deliberately never promotes ("live trust never materializes `catalog.Usable`"). Issue a
+  `shadow_evaluation` approval (the promoting path) or wire another governed promotion path, and treat
+  catalog usability as a MANDATORY criterion — without it every exact-tool request is denied even with
+  all other blockers closed;
+- require the exact request to resolve to an **ALLOW-class policy decision with every execution
+  obligation satisfiable** (blocker 14, §4/§13) — verify the exact (principal, tenant, server, tool,
+  operation) matches an enabled ALLOW-class rule; an unmatched request default-denies
+  (`engine.go:170-173`) and `resolveEnforcing` blocks every non-allow-class decision. The preflight's
+  `PolicyHealthy` fact (`mcpPolicy.composed()`) does NOT prove this;
 - impose the exact one-of-everything identity shape as an authorization prerequisite: **exactly one
   `Principals` entry, zero `Clients`/`Agents`/`Groups`, exactly one tool** (or prove the selected
   client/agent maps one-to-one to the synthetic principal). A plain count==1 check is INSUFFICIENT —

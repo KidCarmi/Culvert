@@ -258,7 +258,17 @@ Every one is a **separately-reviewed activation**, not a config change:
    (`ui_mcp_rollout.go:116`) and nothing in non-test code constructs the distribution publication
    coordinator (`publication.New`) or calls `coord.Publish`, so the signed-distribution apply that begins
    the generation is never fed (review §13/§17, blocker 12 — the forward twin of the graceful-rollback
-   gap in (h)).
+   gap in (h)); (k) **catalog USABILITY for the exact tool** — `seedTools` lands every inventory tool
+   `catalog.Quarantined` and the policy engine hard-overrides a quarantined tool to `ActionQuarantine`
+   BEFORE any user rule (`internal/mcp/policy/engine.go:132-135`), while `ApproveLive` deliberately
+   never promotes ("live trust never materializes `catalog.Usable`"); the only non-test
+   `catalog.Promote` callers are the shadow `promoteFor` path. Without a `shadow_evaluation` approval
+   or another governed promotion path, every exact-tool request is denied even with all other blockers
+   closed (review §6/§7, blocker 13); and (l) an **ALLOW-class policy decision for the exact request**
+   — a no-`CredentialProfile` rule may itself be DENY, an unmatched request default-denies
+   (`engine.go:170-173`), and `resolveEnforcing` blocks every non-allow-class decision; the preflight's
+   `PolicyHealthy` fact is only `mcpPolicy.composed()`, which proves a snapshot exists, never that this
+   request resolves to an allow (review §4/§13, blocker 14).
    **Arming is NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.
