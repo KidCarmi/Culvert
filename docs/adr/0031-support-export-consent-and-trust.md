@@ -1,8 +1,8 @@
 # ADR-0031: Support export/upload consent & trust model; remote support deferred
 
-- **Status:** Proposed (design recorded 2026-07-12; no code moved)
+- **Status:** Accepted — implemented (encrypted/sealed export shipped in appliance track M4; secure-upload queue (M6) has since shipped too — see `docs/support/SUPPORTABILITY-ROADMAP.md`; remote support beyond upload remains deferred as this ADR describes)
 - **Date:** 2026-07-12
-- **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
+- **Deciders:** Principal Supportability Architect (proposed); project maintainer (ratified through shipped implementation)
 - **Relates to:** ADR-0028 (bundle framework), ADR-0029 (redaction), `internal/backupcrypt`, `internal/ssrf`, the release-catalog trust/origin model. Full design in `docs/support/SECURE-UPLOAD-ARCHITECTURE.md`.
 
 ## Context

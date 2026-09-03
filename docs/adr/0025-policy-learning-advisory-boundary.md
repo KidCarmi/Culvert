@@ -1,6 +1,6 @@
 # ADR-0025: Policy Learning Mode is advisory and never an enforcement authority
 
-- **Status:** Accepted (2026-08-13 — Foundation Round) — not yet implemented
+- **Status:** Accepted (2026-08-13 — Foundation Round) — implemented (slices M1–M5B shipped; see CLAUDE.md's Architecture Notes entry for `internal/policylearn` and `docs/operator/policy-learning-mode.md` for the live operator runbook)
 - **Date:** 2026-08-13
 - **Deciders:** project maintainer (accepted); Claude architecture review (proposed, Policy Learning Foundation Round)
 - **Related:** ADR-0008 (spoofable decryption-exclusion evidence), ADR-0011 (decryption observability), ADR-0026 (single access-policy evaluator core), `docs/design/POLICY-DRAFT-DESIGN.md`, `roadmap/PAC-EXCEPTION-INTELLIGENCE.md` (evidence-class + de-scalarisation doctrine)

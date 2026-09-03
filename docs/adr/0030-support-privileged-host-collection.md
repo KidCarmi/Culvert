@@ -1,8 +1,8 @@
 # ADR-0030: Privileged host/container collection via the maintenance agent (read-only `/v1/collect`)
 
-- **Status:** Proposed (design recorded 2026-07-12; no code moved)
+- **Status:** Accepted — implemented (shipped as part of appliance track M0–M5; see `docs/support/SUPPORTABILITY-ROADMAP.md`)
 - **Date:** 2026-07-12
-- **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
+- **Deciders:** Principal Supportability Architect (proposed); project maintainer (ratified through shipped implementation)
 - **Relates to:** ADR-0028 (bundle framework), the maintenance-agent design (`roadmap/D1.6-maintenance-agent-design.md`), the P1.4 pin-binding sudoers model. Full design in `docs/support/SUPPORTABILITY-ARCHITECTURE.md §6`.
 
 ## Context
