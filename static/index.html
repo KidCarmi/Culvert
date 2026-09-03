@@ -7974,20 +7974,22 @@ async function importConfig(input) {
     });
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
-      if (data.cluster_publish_rejected) {
-        // Local import succeeded, but the config is too big to sync — the fleet
-        // did NOT receive it. Amber, not green: this is the silent-stale-fleet
-        // trap the commit-time validation exists to make visible.
+      const hasWarnings = data.warnings && data.warnings.length;
+      if (data.cluster_publish_rejected || hasWarnings) {
+        // Amber, not red: the local import applied. But two independent
+        // failure modes can both fire on one import (e.g. an oversized
+        // backup that ALSO contains a rejected item) — show both instead of
+        // letting one hide the other, which would recreate the silent
+        // partial-restore problem this banner exists to prevent.
         statusEl.style.cssText = 'display:block;color:var(--warn)';
-        statusEl.textContent = `⚠ Imported locally, but the cluster did NOT receive it (over cap): ${data.cluster_publish_rejected}. Data-plane nodes stay on the last valid config — trim the oversized collection and re-import.`;
-      } else if (data.warnings && data.warnings.length) {
-        // Some sections of the backup were skipped (failed validation, a
-        // rejected pattern, ...) rather than aborting the whole import — the
-        // rest applied, so this is still amber, not red, but "ok:true" alone
-        // would hide exactly what didn't come back.
-        statusEl.style.cssText = 'display:block;color:var(--warn)';
-        statusEl.innerHTML = `⚠ Configuration imported (${escHtml(data.mode || 'merge')} mode) with ${data.warnings.length} item(s) skipped:<ul style="margin:4px 0 0 18px;padding:0">` +
-          data.warnings.map(w => `<li>${escHtml(w)}</li>`).join('') + '</ul>';
+        let html = data.cluster_publish_rejected
+          ? `⚠ Imported locally, but the cluster did NOT receive it (over cap): ${escHtml(data.cluster_publish_rejected)}. Data-plane nodes stay on the last valid config — trim the oversized collection and re-import.`
+          : `⚠ Configuration imported (${escHtml(data.mode || 'merge')} mode)`;
+        if (hasWarnings) {
+          html += `${data.cluster_publish_rejected ? ' Additionally, ' : ' with '}${data.warnings.length} item(s) skipped:<ul style="margin:4px 0 0 18px;padding:0">` +
+            data.warnings.map(w => `<li>${escHtml(w)}</li>`).join('') + '</ul>';
+        }
+        statusEl.innerHTML = html;
       } else {
         statusEl.style.cssText = 'display:block;color:var(--green)';
         statusEl.textContent = `✓ Configuration imported (${data.mode || 'merge'} mode, exported ${data.exportedAt || 'unknown date'})`;

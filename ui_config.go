@@ -1147,8 +1147,13 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Invalid entries stay silently skipped, as the Add loop did — but the
 	// skip reason is now surfaced to the admin instead of only the log.
 	for _, bad := range ipf.AddAll(b.IPList) {
-		logger.Printf("ConfigImport: invalid IP filter entry %q: %v", sanitizeLog(bad.Entry), bad.Err)
-		warnings = append(warnings, fmt.Sprintf("IP filter entry %q skipped: %v", bad.Entry, bad.Err))
+		// bad.Err's message embeds the rejected entry verbatim (e.g.
+		// *net.AddrError), so sanitize the WHOLE error text, not just
+		// bad.Entry — otherwise a crafted backup entry reaches the log/API
+		// response a second time, unsanitized, via %v on the error.
+		reason := sanitizeLog(bad.Err.Error())
+		logger.Printf("ConfigImport: invalid IP filter entry %q: %s", sanitizeLog(bad.Entry), reason)
+		warnings = append(warnings, fmt.Sprintf("IP filter entry %q skipped: %s", bad.Entry, reason))
 	}
 	if b.RateLimitRPM > 0 {
 		rl.Configure(b.RateLimitRPM, time.Minute)
