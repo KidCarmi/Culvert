@@ -188,8 +188,8 @@ func TestAPIPACLifecycle_NewDirectRequiresConfirmation(t *testing.T) {
 		t.Error("unconfirmed publish must not mutate the active profile")
 	}
 
-	// With the typed confirmation → publishes.
-	confirmed := `{"action":"publish","confirmDirect":"hq","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"main","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"domain","pattern":"x.example","action":"direct"}]}}`
+	// With the typed confirmation (the server's bound challenge, echoed) → publishes.
+	confirmed := pacTestWithConfirm(draft, pacTestConfirmFragment(t, rec))
 	rec = pacPost(t, "/api/pac/profiles/hq/lifecycle", confirmed, RoleAdmin, "198.51.100.124:0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("confirmed publish: %d (%s)", rec.Code, rec.Body.String())
@@ -269,9 +269,10 @@ func TestAPIPACLifecycle_RollbackNewDirectRequiresConfirmation(t *testing.T) {
 	seedPublishProfile(t)
 	ip := "198.51.100.150:0"
 
-	// v1: a DIRECT rule (confirmed) → active now has DIRECT.
-	v1 := `{"action":"publish","confirmDirect":"hq","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"main","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"domain","pattern":"x.example","action":"direct"}]}}`
-	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", v1, RoleAdmin, ip); rec.Code != http.StatusOK {
+	// v1: a DIRECT rule (confirmed via the bound challenge) → active now has DIRECT.
+	v1 := `{"action":"publish","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"main","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"domain","pattern":"x.example","action":"direct"}]}}`
+	v1c := pacTestWithConfirm(v1, pacTestConfirmFragment(t, pacPost(t, "/api/pac/profiles/hq/lifecycle", v1, RoleAdmin, ip)))
+	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", v1c, RoleAdmin, ip); rec.Code != http.StatusOK {
 		t.Fatalf("publish v1: %d (%s)", rec.Code, rec.Body.String())
 	}
 	// v2: no DIRECT → active no longer has DIRECT.
@@ -291,8 +292,8 @@ func TestAPIPACLifecycle_RollbackNewDirectRequiresConfirmation(t *testing.T) {
 		t.Error("unconfirmed rollback must not mutate the active profile")
 	}
 
-	// With the typed confirmation → proceeds.
-	rbc := `{"action":"rollback","targetN":1,"confirmDirect":"hq"}`
+	// With the typed confirmation (bound to action rollback + targetN) → proceeds.
+	rbc := pacTestWithConfirm(rb, pacTestConfirmFragment(t, rec))
 	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", rbc, RoleAdmin, ip); rec.Code != http.StatusOK {
 		t.Fatalf("confirmed rollback: %d (%s)", rec.Code, rec.Body.String())
 	}

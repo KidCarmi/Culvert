@@ -118,17 +118,19 @@ func TestPACProfilesAPI_CRUDAndAudit(t *testing.T) {
 	// Create profile referencing it. private-networks=direct is a new DIRECT
 	// (full security-path bypass) path, so the unified guardrail requires the
 	// typed ?confirmDirect= confirmation — same gate as the publish lifecycle.
-	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles?confirmDirect=hq",
-		`{"id":"hq","name":"HQ","enabled":true,"poolId":"il-prod","privateNetworks":"direct","availabilityMode":"balanced"}`,
-		RoleAdmin, "198.51.100.72:0")
+	// 2F-B: the typed confirmation is the server's candidate-bound challenge
+	// (issued on the first attempt), echoed with the typed confirmValue.
+	create := `{"id":"hq","name":"HQ","enabled":true,"poolId":"il-prod","privateNetworks":"direct","availabilityMode":"balanced"}`
+	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles", create, RoleAdmin, "198.51.100.72:0")
+	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles", pacTestWithConfirm(create, pacTestConfirmFragment(t, rec)), RoleAdmin, "198.51.100.72:0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("create profile: %d (%s)", rec.Code, rec.Body.String())
 	}
 
 	// Update bumps revision (availability mode also introduces DIRECT → confirm).
-	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/hq?confirmDirect=hq",
-		`{"name":"HQ v2","enabled":true,"poolId":"il-prod","privateNetworks":"direct","availabilityMode":"availability"}`,
-		RoleAdmin, "198.51.100.72:0")
+	update := `{"name":"HQ v2","enabled":true,"poolId":"il-prod","privateNetworks":"direct","availabilityMode":"availability"}`
+	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/hq", update, RoleAdmin, "198.51.100.72:0")
+	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/hq", pacTestWithConfirm(update, pacTestConfirmFragment(t, rec)), RoleAdmin, "198.51.100.72:0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update profile: %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -213,21 +215,27 @@ func TestPACProfilesAPI_DirectGuardrail(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("DIRECT create without confirmation must be 409, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "newDirectPaths") || !strings.Contains(rec.Body.String(), "confirmDirect") {
-		t.Errorf("409 body must carry newDirectPaths + confirmDirect: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "newDirectPaths") || !strings.Contains(rec.Body.String(), `"challenge"`) {
+		t.Errorf("409 body must carry newDirectPaths + the bound challenge: %s", rec.Body.String())
 	}
 	if _, exists := pacProfiles.ProfileByID("byp"); exists {
 		t.Error("unconfirmed DIRECT create must not mutate the store")
 	}
+	confirm := pacTestConfirmFragment(t, rec)
 
-	// A WRONG confirmDirect value does not satisfy the gate.
-	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles?confirmDirect=wrong", body, RoleAdmin, "198.51.100.80:0")
+	// The retired profile-id query parameter does not satisfy the gate, and
+	// neither does a wrong typed value.
+	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles?confirmDirect=byp", body, RoleAdmin, "198.51.100.80:0")
 	if rec.Code != http.StatusConflict {
-		t.Errorf("wrong confirmDirect must still 409, got %d", rec.Code)
+		t.Errorf("legacy confirmDirect must still 409, got %d", rec.Code)
+	}
+	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles", pacTestWithConfirm(body, strings.Replace(confirm, `"value":"byp:`, `"value":"byp:wrong-`, 1)), RoleAdmin, "198.51.100.80:0")
+	if rec.Code != http.StatusConflict {
+		t.Errorf("wrong typed value must still 409, got %d", rec.Code)
 	}
 
 	// The correct typed confirmation publishes.
-	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles?confirmDirect=byp", body, RoleAdmin, "198.51.100.80:0")
+	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles", pacTestWithConfirm(body, confirm), RoleAdmin, "198.51.100.80:0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("confirmed DIRECT create: %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -249,7 +257,7 @@ func TestPACProfilesAPI_DirectGuardrail(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("enabling a dormant DIRECT profile must require confirmation (409), got %d (%s)", rec.Code, rec.Body.String())
 	}
-	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/dorm?confirmDirect=dorm", enable, RoleAdmin, "198.51.100.82:0")
+	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/dorm", pacTestWithConfirm(enable, pacTestConfirmFragment(t, rec)), RoleAdmin, "198.51.100.82:0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("confirmed dormant-enable: %d (%s)", rec.Code, rec.Body.String())
 	}

@@ -58,6 +58,10 @@ func loadPAC(cfg pacStartupConfig) error {
 			logger.Printf("PAC exception governance WARNING: %v", err)
 		}
 	}
+	// 2F-B: settle every publish/rollback intent that was in flight when the
+	// previous process stopped, against the authoritative active store just
+	// loaded (committed → finalize, aborted → record, else ambiguous).
+	pacReconcileAllLifecycles()
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)
 	return nil
 }

@@ -436,6 +436,37 @@ components:
       additionalProperties: false
       properties:
         hours: { type: integer }
+    PACChallengeBinding:
+      type: object
+      description: >-
+        2F-B — everything a typed DIRECT confirmation authorizes. The server
+        recomputes it on retry under the publish lock; any changed field is a
+        409 `challenge_stale` naming the fields.
+      required: [profileId, action, candidateSpecDigest, expectedActiveRevision, poolDigest, artifactDigest, newDirectPaths]
+      additionalProperties: false
+      properties:
+        profileId: { type: string }
+        action: { type: string, enum: [create, update, publish, rollback] }
+        targetN: { type: integer, format: int64 }
+        candidateSpecDigest: { type: string }
+        expectedActiveRevision: { type: integer, format: int64 }
+        expectedActiveSpecDigest: { type: string }
+        poolDigest: { type: string }
+        artifactDigest: { type: string }
+        newDirectPaths: { type: array, items: { type: string } }
+    PACConfirm:
+      type: object
+      description: >-
+        2F-B — the client's echo of a `confirm_required` challenge: the opaque
+        versioned challenge token, the server-selected typed `confirmValue`, and
+        the reviewed binding. The retired `confirmDirect=<profile id>` form never
+        authorizes anything.
+      required: [challenge, value, binding]
+      additionalProperties: false
+      properties:
+        challenge: { type: string }
+        value: { type: string }
+        binding: { $ref: '#/components/schemas/PACChallengeBinding' }
     PACFenceRefusal:
       type: object
       description: Structured 2F-A precondition refusal (428 precondition_required / 409 stale).
@@ -2128,6 +2159,9 @@ components:
           type: integer
           format: int64
           description: 2F-A — required on PUT (or as the `revision` query parameter); must equal the loaded revision.
+        confirm:
+          allOf: [{ $ref: '#/components/schemas/PACConfirm' }]
+          description: 2F-B — echoes the bound challenge when the change introduces new DIRECT paths.
     IdPProfileInput:
       type: object
       required: [name, type]
@@ -7998,7 +8032,21 @@ paths:
               required: [action]
               additionalProperties: true
               properties:
-                action: { type: string, enum: [save_draft, publish, rollback] }
+                action: { type: string, enum: [save_draft, publish, rollback, repair] }
+                operationId:
+                  type: string
+                  format: uuid
+                  description: >-
+                    2F-B — required for publish, rollback and repair. Decisions are
+                    at-most-once: a repeated operationId returns the recorded result
+                    (status and body) without committing again.
+                confirm:
+                  allOf: [{ $ref: '#/components/schemas/PACConfirm' }]
+                  description: 2F-B — echoes the bound challenge when publish/rollback introduces new DIRECT paths.
+                resolution:
+                  type: string
+                  enum: [accept_active]
+                  description: 2F-B repair — records the OBSERVED active profile as a repaired revision; never rewrites the active store.
                 draftRevision:
                   type: integer
                   format: int64
@@ -8012,20 +8060,50 @@ paths:
                   description: 2F-A — publish/rollback with NO active profile must echo the collection token instead.
       responses:
         '200':
-          description: Lifecycle action result (shape varies by action).
+          description: >-
+            Lifecycle action result. publish: `{published:true, operationId, revision,
+            activeRevision, activeSpecDigest, digest, draftRevision, historyState:
+            recorded|pending_reconciliation, scope}`; rollback: `{rolledBack:true,
+            toRevision, newRevision, …}`; repair: `{repaired:true, revision, …}`.
+            `historyState: pending_reconciliation` means the active profile IS
+            committed but the node-local history finalization must be reconciled
+            (next GET, operation or restart) — never "not published".
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Unknown rollback target / no history. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
         '409':
           description: >-
-            Either the 2F-A `stale` refusal (structured, see PACFenceRefusal) or the
-            typed-DIRECT confirmation challenge (`confirmField`/`confirmValue`/`newDirectPaths`).
+            Structured, keyed by `code`: `stale` (2F-A fence, see PACFenceRefusal),
+            `confirm_required` (candidate-bound DIRECT challenge: `challenge`,
+            `confirmValue`, `binding`), `challenge_stale` (the reviewed candidate
+            changed: `changed` names the fields, a fresh challenge is included),
+            `operation_pending` (a previous intent could not be persisted after
+            reconciliation), `not_ambiguous` / `active_absent` (repair).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '500':
+          description: >-
+            `outcome_unknown` (the active write could not be proven; the intent is
+            retained as pending) or `active_write_failed` (proven failure, aborted).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '503':
+          description: >-
+            `lifecycle_ambiguous` — a previous operation's outcome could not be
+            classified from the authoritative active state; publish/rollback are
+            refused until an admin repair with resolution `accept_active`.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
   /api/pac/profiles/{name}:
     parameters:
       - name: name

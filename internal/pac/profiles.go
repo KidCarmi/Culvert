@@ -207,17 +207,25 @@ func (s *ProfileStore) Get() ProfilesConfig {
 func (s *ProfileStore) Set(cfg ProfilesConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cfg = copyProfilesConfig(cfg)
-	normalizeProfileRevisions(&s.cfg)
+	// Persist-before-swap (2F-B, C1): the durable write is the commit point.
+	// Memory is replaced only after the file is durably written, so a failed
+	// write leaves the in-memory (and therefore the cluster-synced) view
+	// exactly where it was — never a torn "memory says candidate, disk says
+	// previous" state.
+	next := copyProfilesConfig(cfg)
+	normalizeProfileRevisions(&next)
+	if s.path != "" {
+		data, err := json.MarshalIndent(next, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := fileutil.AtomicWrite(s.path, data, 0o600); err != nil {
+			return err
+		}
+	}
+	s.cfg = next
 	s.modTime = time.Now()
-	if s.path == "" {
-		return nil
-	}
-	data, err := json.MarshalIndent(s.cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fileutil.AtomicWrite(s.path, data, 0o600)
+	return nil
 }
 
 // ModTime reports when the config last changed (zero before any load/set).

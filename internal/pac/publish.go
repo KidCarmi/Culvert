@@ -29,6 +29,14 @@ type PublishedRevision struct {
 	// TS is the publish timestamp (RFC3339); set by the caller (the engine
 	// takes no wall clock).
 	TS string `json:"ts"`
+	// 2F-B identity + provenance (C8/C1): the configuration digest the
+	// authoritative commit was classified on, the referenced-pool digest at
+	// commit time (poolChangedSince is derived from it), the operation that
+	// produced the revision, and whether it was recorded by an admin repair.
+	OperationID string `json:"operationId,omitempty"`
+	SpecDigest  string `json:"specDigest,omitempty"`
+	PoolDigest  string `json:"poolDigest,omitempty"`
+	Repaired    bool   `json:"repaired,omitempty"`
 }
 
 // ProfileLifecycle carries a profile's draft + immutable published history.
@@ -54,6 +62,11 @@ type ProfileLifecycle struct {
 	// editing the same draft cannot silently overwrite each other. Records
 	// persisted before 2F-A load as 1 (see LifecycleStore.Load).
 	DraftRevision int64 `json:"draftRevision"`
+	// 2F-B operation model (intent.go): the durable in-flight intent, the
+	// unresolved ambiguity (if any) and the bounded decided-operation ring.
+	PendingOp  *PendingOp   `json:"pendingOp,omitempty"`
+	Ambiguous  *AmbiguousOp `json:"ambiguous,omitempty"`
+	Operations []DecidedOp  `json:"operations,omitempty"`
 }
 
 // ActiveRevision returns the currently-serving revision and true, or false

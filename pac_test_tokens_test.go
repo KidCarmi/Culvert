@@ -9,12 +9,17 @@ package main
 // pinned separately, without injection, in pac_fencing_test.go.
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
+	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
+	"github.com/google/uuid"
 )
 
 func pacTestWithTokens(method, path, body string) string {
@@ -26,7 +31,19 @@ func pacTestWithTokens(method, path, body string) string {
 		return path
 	}
 	q := u.Query()
-	has := func(k string) bool { return q.Get(k) != "" || strings.Contains(body, `"`+k+`"`) }
+	// Only TOP-LEVEL body keys count: a 2F-B confirm.binding nests the same
+	// key names and must not suppress the token injection.
+	var top map[string]json.RawMessage
+	if body != "" {
+		_ = json.Unmarshal([]byte(body), &top)
+	}
+	has := func(k string) bool {
+		if q.Get(k) != "" {
+			return true
+		}
+		_, ok := top[k]
+		return ok
+	}
 	set := func(k string, v any) {
 		switch t := v.(type) {
 		case string:
@@ -59,6 +76,10 @@ func pacTestWithTokens(method, path, body string) string {
 				set("draftRevision", lc.DraftRevision)
 			}
 		}
+		// 2F-B: publish/rollback/repair need a fresh UUID operationId.
+		if !has("operationId") {
+			set("operationId", uuid.NewString())
+		}
 	case strings.HasPrefix(p, "/api/pac/profiles/"):
 		if !has("revision") {
 			if a, ok := pacProfiles.ProfileByID(strings.TrimPrefix(p, "/api/pac/profiles/")); ok {
@@ -80,4 +101,27 @@ func pacTestWithTokens(method, path, body string) string {
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// pacTestConfirmFragment turns a 409 confirm_required challenge into the
+// `,"confirm":{…}` body fragment a well-formed client echoes (2F-B, C2): the
+// opaque challenge, the server-selected typed value and the reviewed binding.
+func pacTestConfirmFragment(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var m struct {
+		Code         string          `json:"code"`
+		Challenge    string          `json:"challenge"`
+		ConfirmValue string          `json:"confirmValue"`
+		Binding      json.RawMessage `json:"binding"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil || m.Code != "confirm_required" || m.Challenge == "" {
+		t.Fatalf("expected a confirm_required challenge, got %d %s", rec.Code, rec.Body.String())
+	}
+	return fmt.Sprintf(`,"confirm":{"challenge":%q,"value":%q,"binding":%s}`, m.Challenge, m.ConfirmValue, m.Binding)
+}
+
+// pacTestWithConfirm splices the confirm fragment into a JSON object body.
+func pacTestWithConfirm(body, fragment string) string {
+	i := strings.LastIndex(body, "}")
+	return body[:i] + fragment + body[i:]
 }

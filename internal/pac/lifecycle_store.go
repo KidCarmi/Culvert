@@ -103,9 +103,20 @@ func (s *LifecycleStore) Put(lc *ProfileLifecycle) error {
 	if s.byID == nil {
 		s.byID = map[string]*ProfileLifecycle{}
 	}
-	s.byID[lc.ProfileID] = cloneLifecycle(lc)
+	// Persist-before-swap (2F-B, C1): write the candidate map durably first;
+	// memory is replaced only on success, so a failed write leaves the
+	// in-memory record exactly where it was.
+	next := make(map[string]*ProfileLifecycle, len(s.byID)+1)
+	for id, cur := range s.byID {
+		next[id] = cur
+	}
+	next[lc.ProfileID] = cloneLifecycle(lc)
+	if err := s.persistMap(next); err != nil {
+		return err
+	}
+	s.byID = next
 	s.modTime = time.Now()
-	return s.persistLocked()
+	return nil
 }
 
 // Delete removes a profile's lifecycle record (called when the profile is
@@ -116,16 +127,27 @@ func (s *LifecycleStore) Delete(id string) error {
 	if _, ok := s.byID[id]; !ok {
 		return nil
 	}
-	delete(s.byID, id)
+	next := make(map[string]*ProfileLifecycle, len(s.byID))
+	for k, cur := range s.byID {
+		if k != id {
+			next[k] = cur
+		}
+	}
+	if err := s.persistMap(next); err != nil {
+		return err
+	}
+	s.byID = next
 	s.modTime = time.Now()
-	return s.persistLocked()
+	return nil
 }
 
-func (s *LifecycleStore) persistLocked() error {
+// persistMap durably writes the given map (the candidate of a
+// persist-before-swap mutation) without touching s.byID.
+func (s *LifecycleStore) persistMap(m map[string]*ProfileLifecycle) error {
 	if s.path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(s.byID, "", "  ")
+	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -170,6 +192,20 @@ func cloneLifecycle(lc *ProfileLifecycle) *ProfileLifecycle {
 	copy(out.Revisions, lc.Revisions)
 	for i := range out.Revisions {
 		out.Revisions[i].Spec.Rules = append([]Rule(nil), lc.Revisions[i].Spec.Rules...)
+	}
+	if lc.PendingOp != nil {
+		op := *lc.PendingOp
+		op.CandidateSpec.Rules = append([]Rule(nil), lc.PendingOp.CandidateSpec.Rules...)
+		out.PendingOp = &op
+	}
+	if lc.Ambiguous != nil {
+		amb := *lc.Ambiguous
+		amb.Op.CandidateSpec.Rules = append([]Rule(nil), lc.Ambiguous.Op.CandidateSpec.Rules...)
+		out.Ambiguous = &amb
+	}
+	if lc.Operations != nil {
+		out.Operations = make([]DecidedOp, len(lc.Operations))
+		copy(out.Operations, lc.Operations)
 	}
 	return &out
 }

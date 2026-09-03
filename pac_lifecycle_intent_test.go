@@ -86,7 +86,7 @@ func pacIntentJSON(t *testing.T, rec *httptest.ResponseRecorder) map[string]any 
 
 // pacIntentChallenge asserts a structured confirm_required challenge and
 // returns the `,"confirm":{…}` fragment that echoes it with the typed value.
-func pacIntentChallenge(t *testing.T, rec *httptest.ResponseRecorder, wantAction string, wantTargetN int64) (string, map[string]any) {
+func pacIntentChallenge(t *testing.T, rec *httptest.ResponseRecorder, wantAction string, wantTargetN int64) (confirm string, challenge map[string]any) {
 	t.Helper()
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("want 409 challenge, got %d %s", rec.Code, rec.Body.String())
@@ -411,12 +411,23 @@ func TestPACIntent_R9_CommittedChallengeIsSingleUse(t *testing.T) {
 	if replay.Code != 200 || !reflect.DeepEqual(pacIntentJSON(t, first), pacIntentJSON(t, replay)) {
 		t.Fatalf("replaying the committed operation must return the recorded result: %d %s", replay.Code, replay.Body.String())
 	}
-	fresh := pacIntentPublish(t, uuid.NewString(), 2, pacIntentDraft("Direct", true), confirm)
+	if pacIntentRevisions(t) != 1 {
+		t.Fatalf("exactly one revision after the replay, got %d", pacIntentRevisions(t))
+	}
+	// Withdraw the DIRECT path (a plain publish needs no confirmation), then
+	// try to re-introduce it with a NEW operation that echoes the CONSUMED
+	// challenge: the challenge is single-use, so it must be refused even
+	// though the reviewed candidate is byte-identical.
+	if rec := pacIntentPublish(t, uuid.NewString(), 2, pacIntentDraft("Plain", false), ""); rec.Code != 200 {
+		t.Fatalf("plain publish: %d %s", rec.Code, rec.Body.String())
+	}
+	fresh := pacIntentPublish(t, uuid.NewString(), 3, pacIntentDraft("Direct", true), confirm)
 	if fresh.Code == 200 {
 		t.Fatal("a committed challenge must not authorize a second commit")
 	}
-	if pacIntentRevisions(t) != 1 {
-		t.Fatalf("exactly one revision, got %d", pacIntentRevisions(t))
+	pacIntentStale(t, fresh)
+	if pacIntentRevisions(t) != 2 {
+		t.Fatalf("exactly two revisions, got %d", pacIntentRevisions(t))
 	}
 }
 

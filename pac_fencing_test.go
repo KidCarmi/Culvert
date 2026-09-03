@@ -405,7 +405,7 @@ func TestPACFence_R13_StaleTokens_AreStructured409(t *testing.T) {
 		{"pool-delete", "DELETE", "/api/pac/pools/spare?etag=stale-etag", "", "etag", "pac.pool_delete"},
 		{"legacy-config", "POST", "/api/pac-config", `{"proxyHost":"other.example","proxyPort":3128,"exclusions":[],"revision":77}`, "revision", "pac.update"},
 		{"save-draft", "POST", "/api/pac/profiles/branch-il/lifecycle", `{"action":"save_draft","draftRevision":77,"draft":{"id":"branch-il","name":"Clobber","enabled":true,"poolId":"il","privateNetworks":"proxy","availabilityMode":"secure","rules":[]}}`, "draftRevision", "pac.profile_draft"},
-		{"publish", "POST", "/api/pac/profiles/branch-il/lifecycle", `{"action":"publish","expectedActiveRevision":77,"draft":{"id":"branch-il","name":"Pub","enabled":true,"poolId":"il","privateNetworks":"proxy","availabilityMode":"secure","rules":[]}}`, "revision", "pac.profile_publish"},
+		{"publish", "POST", "/api/pac/profiles/branch-il/lifecycle", `{"action":"publish","operationId":"0f3d2a9e-6b0c-4a5e-9b1d-2f4c6e8a1b3d","expectedActiveRevision":77,"draft":{"id":"branch-il","name":"Pub","enabled":true,"poolId":"il","privateNetworks":"proxy","availabilityMode":"secure","rules":[]}}`, "revision", "pac.profile_publish"},
 		{"exception-put", "PUT", "/api/pac/posture/exceptions/branch-il", `{"owner":"someone-else","reason":"overwrite","revision":77}`, "revision", "pac.exception_set"},
 		{"exception-delete", "DELETE", "/api/pac/posture/exceptions/branch-il?revision=77", "", "revision", "pac.exception_clear"},
 		{"profile-create-stale-collection", "POST", "/api/pac/profiles", `{"id":"new-one","name":"New","enabled":false,"poolId":"il","privateNetworks":"proxy","availabilityMode":"secure","rules":[],"collectionEtag":"stale-etag"}`, "collectionEtag", "pac.profile_create"},
@@ -450,12 +450,12 @@ func TestPACFence_R13_RollbackStaleExpectedActiveRevision_Is409(t *testing.T) {
 	tk := pacFenceReadTokens(t)
 	// Publish once with the correct token so a rollback target exists.
 	rec := pacFenceReq(t, "POST", "/api/pac/profiles/branch-il/lifecycle",
-		fmt.Sprintf(`{"action":"publish","expectedActiveRevision":%d,"draft":{"id":"branch-il","name":"Pub","enabled":true,"poolId":"il","privateNetworks":"proxy","availabilityMode":"secure","rules":[]}}`, tk.profileRevision), pacFenceWinnerIP)
+		fmt.Sprintf(`{"action":"publish","operationId":"7c1e5f2a-3d4b-4c6e-8a9f-0b1c2d3e4f5a","expectedActiveRevision":%d,"draft":{"id":"branch-il","name":"Pub","enabled":true,"poolId":"il","privateNetworks":"proxy","availabilityMode":"secure","rules":[]}}`, tk.profileRevision), pacFenceWinnerIP)
 	if rec.Code != 200 {
 		t.Fatalf("publish: %d %s", rec.Code, rec.Body.String())
 	}
 	before, since := pacFenceCapture(t), time.Now().UnixMilli()
-	rec = pacFenceReq(t, "POST", "/api/pac/profiles/branch-il/lifecycle", `{"action":"rollback","targetN":1,"expectedActiveRevision":77}`, pacFenceLoserIP)
+	rec = pacFenceReq(t, "POST", "/api/pac/profiles/branch-il/lifecycle", `{"action":"rollback","operationId":"9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d","targetN":1,"expectedActiveRevision":77}`, pacFenceLoserIP)
 	if cur := pacFenceRefusal(t, rec, http.StatusConflict, "stale", "revision"); cur != float64(tk.profileRevision+1) {
 		t.Fatalf("current.revision = %v, want %d", cur, tk.profileRevision+1)
 	}

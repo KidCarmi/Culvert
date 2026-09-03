@@ -2628,6 +2628,60 @@
         "description": "Aggregated operator diagnostics contract (health, posture, and remediation hints).",
         "type": "object"
       },
+      "PACChallengeBinding": {
+        "additionalProperties": false,
+        "description": "2F-B — everything a typed DIRECT confirmation authorizes. The server recomputes it on retry under the publish lock; any changed field is a 409 `challenge_stale` naming the fields.",
+        "properties": {
+          "action": {
+            "enum": [
+              "create",
+              "update",
+              "publish",
+              "rollback"
+            ],
+            "type": "string"
+          },
+          "artifactDigest": {
+            "type": "string"
+          },
+          "candidateSpecDigest": {
+            "type": "string"
+          },
+          "expectedActiveRevision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expectedActiveSpecDigest": {
+            "type": "string"
+          },
+          "newDirectPaths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "poolDigest": {
+            "type": "string"
+          },
+          "profileId": {
+            "type": "string"
+          },
+          "targetN": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "profileId",
+          "action",
+          "candidateSpecDigest",
+          "expectedActiveRevision",
+          "poolDigest",
+          "artifactDigest",
+          "newDirectPaths"
+        ],
+        "type": "object"
+      },
       "PACConfig": {
         "additionalProperties": false,
         "properties": {
@@ -2653,6 +2707,27 @@
         "required": [
           "proxyHost",
           "proxyPort"
+        ],
+        "type": "object"
+      },
+      "PACConfirm": {
+        "additionalProperties": false,
+        "description": "2F-B — the client's echo of a `confirm_required` challenge: the opaque versioned challenge token, the server-selected typed `confirmValue`, and the reviewed binding. The retired `confirmDirect=<profile id>` form never authorizes anything.",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PACChallengeBinding"
+          },
+          "challenge": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge",
+          "value",
+          "binding"
         ],
         "type": "object"
       },
@@ -2780,6 +2855,14 @@
           "collectionEtag": {
             "description": "2F-A — required on CREATE (or as the `collectionEtag` query parameter).",
             "type": "string"
+          },
+          "confirm": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PACConfirm"
+              }
+            ],
+            "description": "2F-B — echoes the bound challenge when the change introduces new DIRECT paths."
           },
           "description": {
             "type": "string"
@@ -17409,13 +17492,22 @@
                     "enum": [
                       "save_draft",
                       "publish",
-                      "rollback"
+                      "rollback",
+                      "repair"
                     ],
                     "type": "string"
                   },
                   "collectionEtag": {
                     "description": "2F-A — publish/rollback with NO active profile must echo the collection token instead.",
                     "type": "string"
+                  },
+                  "confirm": {
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/PACConfirm"
+                      }
+                    ],
+                    "description": "2F-B — echoes the bound challenge when publish/rollback introduces new DIRECT paths."
                   },
                   "draftRevision": {
                     "description": "2F-A — save_draft on an existing draft must echo the loaded draftRevision.",
@@ -17426,6 +17518,18 @@
                     "description": "2F-A — publish/rollback must echo the active profile's revision (refusal key `revision`).",
                     "format": "int64",
                     "type": "integer"
+                  },
+                  "operationId": {
+                    "description": "2F-B — required for publish, rollback and repair. Decisions are at-most-once: a repeated operationId returns the recorded result (status and body) without committing again.",
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "resolution": {
+                    "description": "2F-B repair — records the OBSERVED active profile as a repaired revision; never rewrites the active store.",
+                    "enum": [
+                      "accept_active"
+                    ],
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -17447,13 +17551,23 @@
                 }
               }
             },
-            "description": "Lifecycle action result (shape varies by action)."
+            "description": "Lifecycle action result. publish: `{published:true, operationId, revision, activeRevision, activeSpecDigest, digest, draftRevision, historyState: recorded|pending_reconciliation, scope}`; rollback: `{rolledBack:true, toRevision, newRevision, …}`; repair: `{repaired:true, revision, …}`. `historyState: pending_reconciliation` means the active profile IS committed but the node-local history finalization must be reconciled (next GET, operation or restart) — never \"not published\"."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Unknown rollback target / no history. Body is plain text."
           },
           "409": {
             "content": {
@@ -17464,10 +17578,32 @@
                 }
               }
             },
-            "description": "Either the 2F-A `stale` refusal (structured, see PACFenceRefusal) or the typed-DIRECT confirmation challenge (`confirmField`/`confirmValue`/`newDirectPaths`)."
+            "description": "Structured, keyed by `code`: `stale` (2F-A fence, see PACFenceRefusal), `confirm_required` (candidate-bound DIRECT challenge: `challenge`, `confirmValue`, `binding`), `challenge_stale` (the reviewed candidate changed: `changed` names the fields, a fresh challenge is included), `operation_pending` (a previous intent could not be persisted after reconciliation), `not_ambiguous` / `active_absent` (repair)."
           },
           "428": {
             "$ref": "#/components/responses/PACPreconditionRequired"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "`outcome_unknown` (the active write could not be proven; the intent is retained as pending) or `active_write_failed` (proven failure, aborted)."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "`lifecycle_ambiguous` — a previous operation's outcome could not be classified from the authoritative active state; publish/rollback are refused until an admin repair with resolution `accept_active`."
           }
         },
         "security": [

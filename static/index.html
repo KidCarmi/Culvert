@@ -14722,36 +14722,44 @@ async function savePACProfile() {
   else body.collectionEtag = pacProfilesData.collectionEtag || '';
   const basePath = isNew ? '/api/pac/profiles' : '/api/pac/profiles/' + encodeURIComponent(pacEditingProfile);
   const profileId = isNew ? body.id : pacEditingProfile;
-  // doSave optionally carries the typed ?confirmDirect= confirmation that the
-  // unified safe-publish guardrail requires for a new full-security-path
-  // bypass (DIRECT).
-  const doSave = (confirmDirect) => apiFetch(
-    confirmDirect ? basePath + '?confirmDirect=' + encodeURIComponent(confirmDirect) : basePath,
-    {
-      method: isNew ? 'POST' : 'PUT',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body),
-    });
+  // doSave optionally carries the server's candidate-bound DIRECT challenge
+  // (2F-B): {challenge, value, binding} echoed in the body. The server
+  // recomputes the binding on retry and refuses (challenge_stale) if the
+  // reviewed candidate, its pool or the active profile changed meanwhile.
+  const doSave = (confirm) => apiFetch(basePath, {
+    method: isNew ? 'POST' : 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(confirm ? Object.assign({}, body, { confirm }) : body),
+  });
   try {
     let resp = await doSave(null);
     if (await pacFenceRefused(resp, loadPACProfiles)) return;
     if (resp.status === 409) {
       const data = await resp.clone().json().catch(() => null);
-      if (data && data.confirmField === 'confirmDirect') {
-        // New DIRECT path - high-friction typed confirmation (type the profile
-        // ID), mirroring the publish lifecycle. DIRECT is a FULL bypass, not an
-        // SSL-inspection bypass.
-        const paths = (data.newDirectPaths || []).join('  •  ');
+      if (data && data.code === 'confirm_required' && data.challenge && data.binding) {
+        // New DIRECT path - high-friction typed confirmation bound to EXACTLY
+        // the reviewed candidate: the operator types the server-selected
+        // confirmValue and the retry echoes the challenge + binding. DIRECT
+        // is a FULL bypass, not an SSL-inspection bypass.
+        const paths = (data.binding.newDirectPaths || []).join('  •  ');
         const ok = await confirmDanger({
           title: 'New DIRECT bypass - confirm',
-          msg: 'This profile introduces new DIRECT path(s): ' + paths,
+          msg: 'This profile introduces new DIRECT path(s): ' + paths + '. Type ' + data.confirmValue + ' to confirm exactly this change.',
           impact: 'DIRECT is a FULL security-path bypass - matching traffic skips SSL inspection, content scanning (ClamAV/YARA/DPI), CDR, Blocklist/URL Category enforcement, Threat Feed, authentication, policy, and all proxy logging (it never reaches Culvert).',
-          confirmWord: profileId,
+          confirmWord: data.confirmValue,
           okLabel: 'Publish bypass',
         });
         if (!ok) return;
-        resp = await doSave(profileId);
+        resp = await doSave({ challenge: data.challenge, value: data.confirmValue, binding: data.binding });
         if (await pacFenceRefused(resp, loadPACProfiles)) return;
+        if (resp.status === 409) {
+          const stale = await resp.clone().json().catch(() => null);
+          if (stale && stale.code === 'challenge_stale') {
+            toast('Not saved: the reviewed change is no longer current (' + (stale.changed || []).join(', ') + '). Reloaded - review and confirm again.', 'error');
+            loadPACProfiles();
+            return;
+          }
+        }
       } else {
         toast(await resp.text(), 'error'); // other conflict (e.g. duplicate id)
         return;

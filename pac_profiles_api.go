@@ -102,13 +102,20 @@ func pacApplyProfilesMutation(w http.ResponseWriter, r *http.Request, action, ob
 		http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
 		return false
 	}
+	pacAfterActiveCommit(r, action, object, before, candidate)
+	return true
+}
+
+// pacAfterActiveCommit runs the post-commit side effects of a PROVEN active
+// store mutation: audit, config version, cluster republish, alert reset.
+// Nothing here may run before the durable write succeeded (2F-B, C1).
+func pacAfterActiveCommit(r *http.Request, action, object string, before, candidate pac.ProfilesConfig) {
 	auditEventDiff(r, action, object,
 		fmt.Sprintf("profiles=%d pools=%d", len(candidate.Profiles), len(candidate.Pools)),
 		before, candidate)
 	saveConfigVersion(sessionAdmin(r), action)
 	_ = publishCurrentConfigSnapshot()
 	pacResetProfileAlert(object)
-	return true
 }
 
 // pacGuardDirectCRUD enforces the SAME safe-publish guardrail on the direct
@@ -122,7 +129,7 @@ func pacApplyProfilesMutation(w http.ResponseWriter, r *http.Request, action, ob
 // could-emit-DIRECT, compile/digest) block with 400 regardless of confirmation.
 // Returns true if the mutation may proceed. Must be called under
 // pacProfilesAPIMu, on the candidate being committed.
-func pacGuardDirectCRUD(w http.ResponseWriter, r *http.Request, candidate pac.ProfilesConfig, p, active pac.Profile, hasActive bool) bool {
+func pacGuardDirectCRUD(w http.ResponseWriter, candidate pac.ProfilesConfig, p, active pac.Profile, hasActive bool, action string, confirm *pacConfirm) bool {
 	// Structural validation runs first so an invalid candidate (e.g. unknown
 	// pool) returns the canonical validation issues rather than a spurious
 	// DIRECT-confirmation prompt. pacApplyProfilesMutation validates again
@@ -149,18 +156,22 @@ func pacGuardDirectCRUD(w http.ResponseWriter, r *http.Request, candidate pac.Pr
 		pools[candidate.Pools[i].ID] = candidate.Pools[i]
 	}
 	chk := pac.EvaluatePublish(p, pools, active, hasActive)
-	if chk.RequiresConfirmation && r.URL.Query().Get("confirmDirect") != p.ID {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort body
-			"error":          "this change introduces new DIRECT (full security-path bypass) paths; retype the profile ID in the confirmDirect query parameter to proceed",
-			"newDirectPaths": chk.NewDirectPaths,
-			"confirmField":   "confirmDirect",
-			"confirmValue":   p.ID,
-		})
-		return false
+	if !chk.RequiresConfirmation {
+		return true
 	}
-	return true
+	// 2F-B (C2): the SAME candidate-bound challenge as the lifecycle —
+	// the legacy ?confirmDirect=<profile id> query parameter no longer
+	// authorizes anything.
+	expectedSpec := ""
+	if hasActive {
+		expectedSpec = pac.ProfileSpecDigest(active)
+	}
+	binding := pacChallengeBinding{
+		ProfileID: p.ID, Action: action, CandidateSpecDigest: pac.ProfileSpecDigest(p),
+		ExpectedActiveRevision: active.Revision, ExpectedActiveSpecDigest: expectedSpec,
+		PoolDigest: pac.PoolDigest(pac.ReferencedPools(p, pools)), ArtifactDigest: chk.Digest, NewDirectPaths: chk.NewDirectPaths,
+	}
+	return pacVerifyConfirm(w, binding, confirm, nil)
 }
 
 // apiPACProfiles handles GET (list) and POST (create) /api/pac/profiles.
@@ -183,7 +194,8 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 		}
 		var in struct {
 			pac.Profile
-			CollectionEtag string `json:"collectionEtag"`
+			CollectionEtag string      `json:"collectionEtag"`
+			Confirm        *pacConfirm `json:"confirm"`
 		}
 		if err := decodeJSON(r, &in); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -211,7 +223,7 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 		candidate.Profiles = append(candidate.Profiles, p)
 		// A brand-new profile has no active spec, so any DIRECT capability is
 		// "new" and requires the typed confirmation — same gate as publish.
-		if !pacGuardDirectCRUD(w, r, candidate, p, pac.Profile{}, false) {
+		if !pacGuardDirectCRUD(w, candidate, p, pac.Profile{}, false, "create", in.Confirm) {
 			return
 		}
 		if pacApplyProfilesMutation(w, r, "pac.profile_create", p.ID, before, candidate) {
@@ -306,11 +318,15 @@ func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
-	var p pac.Profile
-	if err := decodeJSON(r, &p); err != nil {
+	var in struct {
+		pac.Profile
+		Confirm *pacConfirm `json:"confirm"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	p := in.Profile
 	if p.ID != "" && p.ID != id {
 		http.Error(w, "profile ID in body must match URL", http.StatusBadRequest)
 		return
@@ -346,7 +362,7 @@ func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	// Same guardrail as publish: an update that introduces a new DIRECT path
 	// vs the spec it replaces requires the typed confirmation.
-	if !pacGuardDirectCRUD(w, r, candidate, p, activeSpec, true) {
+	if !pacGuardDirectCRUD(w, candidate, p, activeSpec, true, "update", in.Confirm) {
 		return
 	}
 	if pacApplyProfilesMutation(w, r, "pac.profile_update", id, before, candidate) {
