@@ -96,7 +96,7 @@ set is empty. This requires the separately-reviewed activation to have:
 | approval | **1** `live_execution` ToolApproval — four-eyes, ≤24h TTL, exact target |
 | operation class | **read/discovery only** (Culvert's own classification, not `readOnlyHint`) |
 | credential | synthetic/non-production credential **only if the tool requires one** |
-| request count | bounded by the machine-enforced `canary.Budget` (total/rate/concurrency/window) — but the budget bounds RESERVATIONS, not physical POSTs: `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries` times per reservation (~3 physical POSTs). Retry-disablement is **not representable today** (`NewLimits` coerces `MaxReadRetries==0`→2, rejects negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so bounding physical POSTs is a **required CODE-CHANGE prerequisite**, not an operator config (review §9/§14) |
+| request count | **EXACTLY: `MaxTotalExecutions=3`, `MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m`** (review §9 — not "tight": `ValidateBudget` would accept up to 1000 executions over 7 days, so a generic "bounded" budget is a materially different experiment). The witness must observe **exactly 3 reservations and exactly 3 POSTs**, which REQUIRES blocker 6's retry-free remedy — the budget bounds RESERVATIONS, not physical POSTs: `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries` times per reservation (~3 physical POSTs). Retry-disablement is **not representable today** (`NewLimits` coerces `MaxReadRetries==0`→2, rejects negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so bounding physical POSTs is a **required CODE-CHANGE prerequisite**, not an operator config (review §9/§14) |
 | controls | immediate kill switch + Canary→Shadow/Observe rollback rehearsed first |
 
 ## Procedure
@@ -120,8 +120,11 @@ set is empty. This requires the separately-reviewed activation to have:
    time and fails closed on any drift. Confirm `canary.SatisfiesLiveExecution` accepts it against
    the current observed target. Issuing the grant promotes nothing to `catalog.Usable` and arms no
    executor — it only makes readiness row 16 satisfiable.
-4. **Set the budget**: `canary.Budget` with tight total/rate/concurrency caps and a short window;
-   confirm `ValidateBudget` accepts it.
+4. **Set the budget**: `canary.Budget` with the EXACT reviewed values — `MaxTotalExecutions=3`,
+   `MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m` (review §9). Do NOT substitute
+   a merely "tight" budget: `ValidateBudget` accepts totals up to 1000 and windows up to 7 days, so any
+   other value is a different experiment with a different blast radius and a different expected witness
+   count. Confirm `ValidateBudget` accepts it.
 5. **Preflight**: confirm `evaluateCanaryActivationPreflight` returns `Ready:true` (empty Unmet).
 6. **Activate** Canary for the bounded scope. Drive the bounded request corpus from the synthetic
    identity. **NOT OPERATOR-REACHABLE TODAY:** `apiMCPRolloutTransition` returns
@@ -163,6 +166,9 @@ latency_pathology · unexpected_upstream_response.
 
 - No customer traffic, no production credential, no production upstream.
 - No wildcard/percentage scope, no write/destructive/control operation.
-- No standing Canary — it is a time-boxed experiment that auto-stops.
+- No standing Canary — it is a time-boxed experiment. **The time box is not yet self-enforcing:**
+  window expiry ends the authority to ADMIT but does not stop the experiment (the only
+  `budget_exhausted` trip is request-driven, step 8), so until a deadline-driven stop exists the
+  operator MUST demote/kill explicitly at the window boundary.
 - Graduation (read → bounded write → destructive/control, or wider scope) is a **new** Canary for
   the added delta, under its own review (`ROLLOUT-AND-ROLLBACK.md`).

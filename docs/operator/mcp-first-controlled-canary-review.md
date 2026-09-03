@@ -273,10 +273,26 @@ therefore fixes the exact triple as its specification: **`MaxTotalExecutions=3`,
 `MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m`** — the smallest total that can
 still distinguish a repeatable success from a one-off, serialized so no two requests are ever in
 flight, in a window short enough to bound an unattended experiment. The authorization MUST adopt this
-exact triple or re-review a different one; it may not be left open. Consequences that follow from it
-and are part of the specification: the independent witness must observe **exactly 3** logical
-reservations, and — until blocker 6 is closed — **up to 9 physical POSTs** (3 × `MaxReadRetries`),
-which is the number the witness reconciliation must actually expect.
+exact triple or re-review a different one; it may not be left open.
+
+**The witness invariant forces blocker 6's retry-FREE remedy (Codex round 32).** "Exactly 3 logical
+reservations, up to 9 physical POSTs" is NOT reconcilable in either of the other states, so this
+review narrows the accepted remedy for this experiment:
+* **Before blocker 6 is closed** the witness cannot attribute POSTs to reservations at all — the wire
+  identifier is PER-SERVER (`WireID: "u-" + target.ServerID`, `internal/mcp/execution/run.go:112`), so
+  3 reservations with 3 retries each and 1 reservation retried 9 times are indistinguishable to the
+  recording upstream. A missing or duplicated invocation would classify as expected.
+* **Under the "charge each physical attempt to the budget" remedy** retries consume the same 3 slots,
+  so the budget can be exhausted by FEWER than 3 logical reservations (one request retried three times
+  spends the whole experiment). "Exactly 3 logical" is then simply false.
+* **Under the retry-FREE remedy** — make retry-disablement representable and wire a retry-free `Limits`
+  into the Canary client — logical and physical counts COINCIDE: **exactly 3 reservations and exactly 3
+  POSTs**, the only form the independent witness can actually reconcile, and the only one where a 4th
+  POST or a missing 3rd is unambiguously a breach.
+
+The first Canary therefore REQUIRES the retry-free remedy; charging attempts to the budget is
+acceptable for bounding COUNT in general but is NOT acceptable for this experiment, because it
+destroys the witness invariant §14 depends on.
 
 `canary.Budget` with the exact values above, and per-dimension caps consistent with the scope
 (`MaxTools=1`, `MaxServers=1`, `MaxPrincipals=1`). `ValidateBudget` (`budget.go:64`) rejects any non-positive cap and enforces
