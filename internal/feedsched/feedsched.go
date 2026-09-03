@@ -102,15 +102,23 @@ type Timer interface {
 // RealClock is the production Clock.
 type RealClock struct{}
 
+// realTimer is the production Timer, wrapping *time.Timer.
 type realTimer struct{ t *time.Timer }
 
+// C implements Timer.
 func (r realTimer) C() <-chan time.Time { return r.t.C }
+
+// Reset implements Timer. A negative delay is clamped to zero: time.Timer
+// treats one as "fire immediately" anyway, and clamping keeps a caller that
+// computed a negative duration from depending on that.
 func (r realTimer) Reset(d time.Duration) bool {
 	if d < 0 {
 		d = 0
 	}
 	return r.t.Reset(d)
 }
+
+// Stop implements Timer.
 func (r realTimer) Stop() bool { return r.t.Stop() }
 
 // NewTimer implements Clock.
