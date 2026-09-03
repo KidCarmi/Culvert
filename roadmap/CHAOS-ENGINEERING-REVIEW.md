@@ -2921,10 +2921,19 @@ the `saasFeedScheduler` that already existed rather than invented:
   cadence untestable);
 - delay after a failed round = bounded exponential backoff from `BackoffMin`,
   doubling, clamped at `BackoffMax`, reset by the first success;
-- **`BackoffMax` is clamped down to the interval by `New`.** A ceiling above
-  the interval would mean a failing feed attempts *less* often than a healthy
-  one — the recovery mechanism becoming an extra delay. A caller cannot express
-  that shape.
+- **Both the retry FLOOR and the CEILING are clamped to the live interval.** A
+  ceiling above the interval would mean a failing feed attempts *less* often
+  than a healthy one — the recovery mechanism becoming an extra delay. A caller
+  cannot express that shape. Clamping the ceiling ALONE is not sufficient, and
+  the first version shipped in this PR got it wrong (Codex review): with an
+  interval shorter than `BackoffMin` — an admin running `-feed-sync-interval
+  1m` against the 5 m floor — the ceiling clamped down to 1 m and was then
+  raised straight back to the floor, so a failed round waited **five times
+  longer** than a healthy one. That is the bare-ticker regression this whole
+  section exists to remove, reintroduced inside its own fix, and the original
+  gate missed it because it used an interval comfortably above the floor. The
+  invariant is one sentence and it has to hold at every interval: *a retry is
+  never later than the configured cadence.*
 - the wait is interruptible: ctx cancellation returns from inside a backoff, so
   shutdown never waits one out;
 - a **panicking round is a failed round**, contained at the iteration per
@@ -2951,7 +2960,26 @@ new operator vocabulary:
   indistinguishable from a broken one and the paging rule is `== 0`;
 - the `threat_feed` operator-contract row;
 - a `threat_feed_stale` alert, **fire-once per episode**, cleared only by an
-  OBSERVED clean round.
+  OBSERVED clean round, and **also evaluated once at startup** for the
+  warm-but-already-stale database (a node that was powered off, or one whose
+  feed has been failing across restarts). Without that startup pass the alert
+  waited on a failed round, and the first round is a full jittered interval
+  away — so nothing fired for the window in which the gateway was enforcing
+  against stale intelligence, and nothing fired at all if that round then
+  succeeded. It routes through `deferStartupAlert` because the webhook store is
+  loaded by a LATER startup slice: firing directly would fan out to an empty
+  subscriber list and vanish, which is precisely the failure that queue exists
+  to prevent. The never-synced branch is deliberately excluded from the startup
+  pass — at boot its age is ~0, and a node that has simply not finished its
+  first sync is not a fault.
+
+`culvert_threat_feed_sync_ok` derives from the **persisted** `lastSyncErr`, not
+from the in-memory consecutive-failure count. The count is deliberately not
+persisted (the true run length across restarts is unknowable), so a gauge keyed
+on it reported a green `1` after a restart from a database written by a failed
+sync — for hours, until the next scheduled round (Codex review). Deriving it
+from the persisted error also makes `/metrics` and the admin API's
+`threat_feed_sync_ok` agree by construction rather than by coincidence.
 
 Failures are classified into a **bounded reason class** (`urlhaus`,
 `openphish`, `urlhaus+openphish`, sorted so it is stable). The verbose summary
@@ -2987,8 +3015,8 @@ defeat the dedup window by construction and evict real threat alerts from the
 
 ### 25.8 Gates
 
-`internal/feedsched/feedsched_test.go` (10), `internal/threatfeed/sync_cadence_test.go` (10),
-`internal/feedsync/sync_cadence_test.go` (5), `threatfeed_health_test.go` (10).
+`internal/feedsched/feedsched_test.go` (11), `internal/threatfeed/sync_cadence_test.go` (10),
+`internal/feedsync/sync_cadence_test.go` (5), `threatfeed_health_test.go` (13).
 
 The cadence defect gates fail against the bare-ticker shape **by
 construction**: a `time.NewTicker(interval)` returns the interval after a
@@ -3016,10 +3044,23 @@ way to pass:
   warm feed must NOT re-fetch at boot, or a fleet restart stampedes the origins
   regardless of jitter.
 
-`TestApplySync_CarriedForwardEntriesAreCounted` is a regression gate on a
-defect introduced and caught inside this work: counting entries before the
-carry-forward merge reported a partially-failed sync as a nearly-emptied feed,
-which is precisely the false alarm carry-forward exists to prevent.
+Four gates pin defects **introduced and caught inside this work**, which is
+worth recording as a pattern rather than as embarrassment — three of the four
+are the section's own findings reappearing one level down:
+
+- `TestApplySync_CarriedForwardEntriesAreCounted` — counting entries before the
+  carry-forward merge reported a partially-failed sync as a nearly-emptied
+  feed, precisely the false alarm carry-forward exists to prevent.
+- `TestBackoffNeverExceedsAnIntervalShorterThanTheFloor` — the floor-clamp
+  defect above: §25.3's "a failed round waits longer than a healthy one",
+  rebuilt inside the fix for it.
+- `TestThreatFeedSyncOK_SurvivesARestartFromAFailedSync` — a freshness gauge
+  that reads healthy while the feed is known to be failing: §25.2's "the
+  detector says fine", rebuilt inside the detector.
+- `TestThreatFeedStale_EvaluatedAtStartupForAWarmButStaleDatabase` — an alert
+  that cannot fire in the window it exists for, with a CONTROL (a fresh install
+  and a node that synced ten minutes ago must both stay silent) so an alert
+  firing on every boot cannot pass it.
 
 ### 25.9 Residual risk
 
