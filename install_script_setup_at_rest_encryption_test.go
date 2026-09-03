@@ -407,3 +407,57 @@ export CULVERT_LOG_PASSPHRASE='` + divergentHostLogPass + `'
 			".env content:\n%s", persistedLogPass, envContent)
 	}
 }
+
+// TestInstallScript_SetupAtRestEncryption_ReuseBranchSurvivesMissingEnvEntry
+// proves that the CA-reuse branch does not abort the whole installer under
+// `set -euo pipefail` when secret_already_set() reports the log passphrase
+// as configured but .env genuinely holds no CULVERT_LOG_PASSPHRASE= entry
+// (e.g. the host-env-persistence block just above degraded without writing
+// — env_put warns and returns successfully rather than aborting when
+// INSTALL_DIR/.env is owned by another user and sudo cannot take it, per
+// env_put's own documented "DEGRADE" contract; scripts/install.sh itself
+// runs under `set -euo pipefail`, unlike this test harness's other cases,
+// so it must be enabled here too to reproduce the real failure mode).
+//
+// Regression for a bug introduced while fixing the CA/log-passphrase
+// divergence above: reading .env's CULVERT_LOG_PASSPHRASE via
+// `grep | tail | cut` and assigning the result directly meant a grep that
+// matched nothing (real exit 1, propagated by pipefail) aborted the
+// unconditional command-substitution assignment — and therefore the whole
+// installer — before the host-environment fallback on the next line ever
+// ran. Caught by automated PR review (chatgpt-codex-connector).
+func TestInstallScript_SetupAtRestEncryption_ReuseBranchSurvivesMissingEnvEntry(t *testing.T) {
+	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
+	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	// .env exists (so the `-f "$envfile"` branch is taken and grep actually
+	// runs) but carries no CULVERT_LOG_PASSPHRASE= line at all.
+	if err := os.WriteFile(envFile, []byte("SOME_OTHER_VAR=x\n"), 0o600); err != nil {
+		t.Fatalf("seed .env: %v", err)
+	}
+
+	stubs := `
+set -euo pipefail
+info() { :; }
+warn() { echo "WARN: $*"; }
+error() { echo "ERROR: $*" >&2; exit 7; }
+is_fresh_deployment() { return 0; }
+secret_already_set() { [[ "$1" == "CULVERT_LOG_PASSPHRASE" ]] && return 0; return 1; }
+` + "INSTALL_DIR=" + dir + "\n"
+
+	script := stubs + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n" + `echo "REACHED_END"` + "\n"
+
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("setup_at_rest_encryption aborted the installer instead of degrading gracefully when .env has "+
+			"no CULVERT_LOG_PASSPHRASE entry (grep-no-match propagated through pipefail into an unguarded "+
+			"command-substitution assignment): %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "REACHED_END") {
+		t.Fatalf("script exited 0 but never reached the statement after setup_at_rest_encryption; output:\n%s", out)
+	}
+}
