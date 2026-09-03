@@ -431,11 +431,13 @@ func TestOTLPRuleMetrics_Empty(t *testing.T) {
 	savedOrder := ruleMet.order
 	ruleMet.hits = map[string]*int64{}
 	ruleMet.order = nil
+	ruleMet.publishViewLocked()
 	ruleMet.mu.Unlock()
 	t.Cleanup(func() {
 		ruleMet.mu.Lock()
 		ruleMet.hits = savedHits
 		ruleMet.order = savedOrder
+		ruleMet.publishViewLocked()
 		ruleMet.mu.Unlock()
 	})
 

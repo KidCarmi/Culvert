@@ -80,10 +80,12 @@ func withCleanRuleMet(t *testing.T) {
 	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
 	ruleMet.appliedByName = make(map[string]int64)
 	ruleMet.order = nil
+	ruleMet.publishViewLocked()
 	ruleMet.mu.Unlock()
 	t.Cleanup(func() {
 		ruleMet.mu.Lock()
 		ruleMet.hits, ruleMet.last, ruleMet.byID, ruleMet.loadedByName, ruleMet.appliedByName, ruleMet.order = oh, ol, oi, on, oa, oo
+		ruleMet.publishViewLocked()
 		ruleMet.mu.Unlock()
 	})
 }
@@ -112,6 +114,7 @@ func TestHitCounters_LastHitPersistRoundTrip(t *testing.T) {
 	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
 	ruleMet.appliedByName = make(map[string]int64)
 	ruleMet.order = nil
+	ruleMet.publishViewLocked()
 	ruleMet.mu.Unlock()
 
 	loadHitCounters(path)
@@ -197,6 +200,7 @@ func TestSaveHitCountersTracksRenamedRule(t *testing.T) {
 	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
 	ruleMet.appliedByName = make(map[string]int64)
 	ruleMet.order = nil
+	ruleMet.publishViewLocked()
 	ruleMet.mu.Unlock()
 	current = policyStore.List()[0]
 	policyStore.ReplaceAll([]PolicyRule{current}) // simulate freshly loaded rules with reset live accounting
@@ -245,6 +249,7 @@ func TestHitCountersStableIDSurvivesRenameBeforeCounterResave(t *testing.T) {
 	ruleMet.loadedByName = make(map[string]persistedRuleCounter)
 	ruleMet.appliedByName = make(map[string]int64)
 	ruleMet.order = nil
+	ruleMet.publishViewLocked()
 	ruleMet.mu.Unlock()
 	loadHitCounters(path) // still keyed by old name, joined by stable ID
 	RestoreHitCounts()

@@ -282,6 +282,8 @@ func TestBandwidthConflictDetection(t *testing.T) {
 func cleanupRuleMet(names ...string) {
 	ruleMet.mu.Lock()
 	defer ruleMet.mu.Unlock()
+	// LIFO: republishes the derived read view while the lock is still held.
+	defer ruleMet.publishViewLocked()
 	for _, name := range names {
 		delete(ruleMet.hits, name)
 		delete(ruleMet.last, name)
