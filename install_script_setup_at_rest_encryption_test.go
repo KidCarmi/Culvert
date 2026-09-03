@@ -335,3 +335,75 @@ export CULVERT_CA_PASSPHRASE=$'abcdefgh\nijklmnop'
 			"malformed .env lines, corrupting the passphrase; output:\n%s\n.env content:\n%s", out, envContent)
 	}
 }
+
+// TestInstallScript_SetupAtRestEncryption_ReuseForCAMatchesPersistedLogPassphrase
+// proves that the "fresh deployment, log passphrase already set, no CA
+// passphrase yet" reuse branch derives CULVERT_CA_PASSPHRASE from the log
+// passphrase that is actually PERSISTED IN .ENV — the value docker compose
+// will read at runtime (`sudo docker compose up`, no `-E`, does not forward
+// this shell's environment) — rather than from a same-named variable that
+// happens to be set in the invoking shell's environment.
+//
+// Trigger: .env already carries CULVERT_LOG_PASSPHRASE=X (e.g. left over
+// from an interrupted prior run, or written by a previous installer
+// invocation), and THIS run's host environment separately exports
+// CULVERT_LOG_PASSPHRASE=Y with a different value (e.g. an automation
+// wrapper that (re)generates a passphrase every run without first checking
+// whether .env already has one). Because .env already has a non-empty entry,
+// the earlier host-env-persistence block (scripts/install.sh:1596-1599)
+// leaves .env untouched at X — so the log passphrase actually in effect at
+// runtime is X, not Y. The reuse branch must derive the CA passphrase from
+// that same X so the two encryption keys the info message ("also encrypting
+// the SSL-inspection CA key with the existing CULVERT_LOG_PASSPHRASE")
+// claims are shared actually match.
+func TestInstallScript_SetupAtRestEncryption_ReuseForCAMatchesPersistedLogPassphrase(t *testing.T) {
+	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
+	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	const persistedLogPass = "persisted-in-env-log-passphrase-AAAA"
+	const divergentHostLogPass = "different-host-env-log-passphrase-BB" // #nosec G101 -- synthetic test fixture; never leaves this test
+	if err := os.WriteFile(envFile, []byte("CULVERT_LOG_PASSPHRASE="+persistedLogPass+"\n"), 0o600); err != nil {
+		t.Fatalf("seed .env: %v", err)
+	}
+
+	stubs := `
+info() { :; }
+warn() { :; }
+error() { echo "ERROR: $*" >&2; exit 7; }
+is_fresh_deployment() { return 0; }
+export CULVERT_LOG_PASSPHRASE='` + divergentHostLogPass + `'
+` + "INSTALL_DIR=" + dir + "\n"
+
+	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("setup_at_rest_encryption failed: %v\n%s", err, out)
+	}
+
+	got, rerr := os.ReadFile(envFile)
+	if rerr != nil {
+		t.Fatalf("read %s: %v", envFile, rerr)
+	}
+	envContent := string(got)
+
+	if !strings.Contains(envContent, "CULVERT_LOG_PASSPHRASE="+persistedLogPass) {
+		t.Fatalf("the pre-existing .env CULVERT_LOG_PASSPHRASE was lost/changed; .env content:\n%s", envContent)
+	}
+	if strings.Contains(envContent, "CULVERT_CA_PASSPHRASE="+divergentHostLogPass) {
+		t.Fatalf("CULVERT_CA_PASSPHRASE was derived from the host-environment CULVERT_LOG_PASSPHRASE (%q) "+
+			"instead of the value actually persisted in .env (%q) and used by docker compose at runtime — "+
+			"the SSL-inspection CA key and saved logs would end up encrypted with two DIFFERENT passphrases "+
+			"despite the installer claiming to share one. output:\n%s\n.env content:\n%s",
+			divergentHostLogPass, persistedLogPass, out, envContent)
+	}
+	if !strings.Contains(envContent, "CULVERT_CA_PASSPHRASE="+persistedLogPass) {
+		t.Fatalf("CULVERT_CA_PASSPHRASE was not set to the persisted .env CULVERT_LOG_PASSPHRASE (%q); "+
+			".env content:\n%s", persistedLogPass, envContent)
+	}
+}
