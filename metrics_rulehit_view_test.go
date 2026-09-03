@@ -312,15 +312,17 @@ func TestRuleMetricsRecordHit_SealedViewIgnoresNewNames(t *testing.T) {
 //
 //	go test -run '^$' -bench 'BenchmarkRuleRecordHit' -cpu=1,2,4 .
 
-func benchRuleHitStore(names int) (*ruleMetrics, []string) {
-	rm := newRuleHitTestMetrics()
-	out := make([]string, 0, names)
-	for i := 0; i < names; i++ {
+// benchRuleHitStore returns a store already carrying count rule names, each
+// with its steady-state counter cell established, plus those names.
+func benchRuleHitStore(count int) (rm *ruleMetrics, ruleNames []string) {
+	rm = newRuleHitTestMetrics()
+	ruleNames = make([]string, 0, count)
+	for i := 0; i < count; i++ {
 		n := fmt.Sprintf("corp-egress-rule-%02d", i)
-		out = append(out, n)
+		ruleNames = append(ruleNames, n)
 		rm.RecordHit(n) // establish the steady-state cell
 	}
-	return rm, out
+	return rm, ruleNames
 }
 
 // NOTE ON FAIRNESS: the legacy body takes `now` as a parameter because the
