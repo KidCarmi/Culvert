@@ -36,6 +36,13 @@ package alerts
 //   "socks5_listener_down"  — the SOCKS5 accept loop has been unable to accept connections for a
 //                             sustained period, or has stopped entirely: SOCKS5 clients cannot
 //                             connect (CHAOS-54). Fired once per episode, never per retry.
+//   "threat_feed_stale"     — threat intelligence has not synced successfully for over 2x the sync
+//                             interval, or has NEVER synced on this node (CHAOS-57). The gateway
+//                             keeps enforcing last-known-good entries — nothing is wiped — so this
+//                             is degraded FRESHNESS, not a failing control; the never-synced case
+//                             means no threat-feed coverage at all and says so. Fired once per
+//                             episode, never per failed round; cleared only by an observed clean
+//                             sync. Detail carries a BOUNDED source class, never the fetch error.
 //   "mcp_gateway_down"      — MCP enablement was requested but the capability is not serving:
 //                             activation failed, the listener degraded, or it stopped while still
 //                             configured (RISK-027). Fired once per episode, never per request.
