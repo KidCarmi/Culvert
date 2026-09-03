@@ -14,7 +14,12 @@ catalogues. For configuration knobs see the README; for architecture see
 Culvert ships with a single canonical installer that handles Docker
 Engine + Compose v2 setup across the major Linux distro families
 (Ubuntu, Debian, RHEL/CentOS/Rocky/Alma, Fedora, Amazon Linux, Arch),
-clones the repo, and starts the stack with `docker compose up -d --wait`:
+provisions the install directory **without cloning the source repo** (it
+extracts the compose files and maintenance-agent packaging from the pinned
+proxy image's built-in `/app/deploy` bundle — see the
+[README](../README.md#quick-start) for the full sequence, including the
+git-clone fallback for images that predate the bundle), and starts the
+stack with `docker compose up -d --wait`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
