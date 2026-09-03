@@ -7980,6 +7980,14 @@ async function importConfig(input) {
         // trap the commit-time validation exists to make visible.
         statusEl.style.cssText = 'display:block;color:var(--warn)';
         statusEl.textContent = `⚠ Imported locally, but the cluster did NOT receive it (over cap): ${data.cluster_publish_rejected}. Data-plane nodes stay on the last valid config — trim the oversized collection and re-import.`;
+      } else if (data.warnings && data.warnings.length) {
+        // Some sections of the backup were skipped (failed validation, a
+        // rejected pattern, ...) rather than aborting the whole import — the
+        // rest applied, so this is still amber, not red, but "ok:true" alone
+        // would hide exactly what didn't come back.
+        statusEl.style.cssText = 'display:block;color:var(--warn)';
+        statusEl.innerHTML = `⚠ Configuration imported (${escHtml(data.mode || 'merge')} mode) with ${data.warnings.length} item(s) skipped:<ul style="margin:4px 0 0 18px;padding:0">` +
+          data.warnings.map(w => `<li>${escHtml(w)}</li>`).join('') + '</ul>';
       } else {
         statusEl.style.cssText = 'display:block;color:var(--green)';
         statusEl.textContent = `✓ Configuration imported (${data.mode || 'merge'} mode, exported ${data.exportedAt || 'unknown date'})`;
