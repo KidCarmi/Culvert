@@ -268,17 +268,34 @@ func (s *Scheduler) interval() time.Duration {
 	return d
 }
 
-// backoffCeiling is BackoffMax clamped to the live interval — see New. Read per
-// round because Interval is a function and may be re-resolved by an admin edit.
-func (s *Scheduler) backoffCeiling() time.Duration {
-	ceil := s.cfg.BackoffMax
-	if iv := s.interval(); ceil > iv {
+// backoffBounds returns the effective floor and ceiling for a retry delay,
+// BOTH clamped to the live interval. Read per round because Interval is a
+// function and may be re-resolved by an admin edit.
+//
+// Clamping the FLOOR as well as the ceiling is what actually upholds the
+// package's stated invariant — *retrying only ever tightens the cadence*.
+// Clamping the ceiling alone is not enough and the first shipped version got
+// this wrong (caught in review on PR #1305): with an interval SHORTER than
+// BackoffMin — an admin setting `-feed-sync-interval 1m` against a 5 m floor —
+// the ceiling clamped down to 1 m and was then raised straight back to the
+// 5 m floor, so a failed round waited FIVE TIMES LONGER than a healthy one.
+// That is the exact regression against the bare-ticker behaviour this package
+// exists to fix, hiding inside the fix. The original gate never caught it
+// because it used an interval well above the floor.
+func (s *Scheduler) backoffBounds() (floor, ceil time.Duration) {
+	iv := s.interval()
+	floor = s.cfg.BackoffMin
+	if floor > iv {
+		floor = iv
+	}
+	ceil = s.cfg.BackoffMax
+	if ceil > iv {
 		ceil = iv
 	}
-	if ceil < s.cfg.BackoffMin {
-		ceil = s.cfg.BackoffMin
+	if ceil < floor {
+		ceil = floor
 	}
-	return ceil
+	return floor, ceil
 }
 
 // NextDelay computes the delay after a round with the given outcome and
@@ -306,10 +323,10 @@ func (s *Scheduler) backoffDelay(failures int) time.Duration {
 	if shift > backoffShift {
 		shift = backoffShift
 	}
-	ceil := s.backoffCeiling()
+	floor, ceil := s.backoffBounds()
 	// shift is clamped to [0, backoffShift]; a signed non-negative shift count
 	// is valid Go, so no unsigned conversion (and no G115 suppression) is needed.
-	d := s.cfg.BackoffMin << shift
+	d := floor << shift
 	if d > ceil || d <= 0 {
 		return ceil
 	}

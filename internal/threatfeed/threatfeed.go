@@ -581,9 +581,18 @@ type Health struct {
 	// configured" rather than a zero in that case: a last-success of zero on a
 	// node that never had the feed is indistinguishable from a node whose feed
 	// has never once succeeded, and the two demand opposite operator actions.
-	Configured          bool
-	LastAttempt         time.Time
-	LastSuccess         time.Time
+	Configured  bool
+	LastAttempt time.Time
+	LastSuccess time.Time
+
+	// LastRoundOK is the AUTHORITATIVE "is the feed syncing cleanly" signal:
+	// it derives from the persisted lastSyncErr, so it survives a restart. Do
+	// not substitute ConsecutiveFailures == 0 for it — that count is not
+	// persisted, so after a restart from a failed-sync DB it reads zero while
+	// the feed is known to be failing (PR #1305 review). It is the same value
+	// SyncStatus() reports to the admin API, so the two surfaces agree.
+	LastRoundOK bool
+
 	ConsecutiveFailures int
 	TotalFailures       int64
 	FailedSources       string
@@ -600,6 +609,7 @@ func (tf *Feed) Health() Health {
 		Configured:          tf.enabled,
 		LastAttempt:         tf.lastSync,
 		LastSuccess:         tf.lastSuccess,
+		LastRoundOK:         tf.lastSyncErr == "",
 		ConsecutiveFailures: tf.consecutiveFailures,
 		TotalFailures:       tf.totalFailures.Load(),
 		FailedSources:       tf.failedSources,
@@ -919,6 +929,16 @@ func (tf *Feed) loadFromDisk(path string) error {
 	tf.domains = domains
 	tf.lastSync = db.LastSync
 	tf.lastSyncErr = db.LastSyncErr
+	// A DB written by a FAILED sync persists lastSyncErr but carries no failure
+	// COUNT (consecutiveFailures is deliberately not persisted — the true run
+	// length across restarts is unknowable). Restoring zero would report the
+	// node as syncing cleanly until the next scheduled round, which on a 6 h
+	// cadence is hours of a green gauge over a feed we know last failed. One is
+	// the honest lower bound: at least one round failed, and that is exactly
+	// what the persisted error says. Caught in review on PR #1305.
+	if db.LastSyncErr != "" {
+		tf.consecutiveFailures = 1
+	}
 	switch {
 	case !db.LastSuccess.IsZero():
 		tf.lastSuccess = db.LastSuccess

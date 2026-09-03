@@ -135,6 +135,39 @@ func TestBackoffCeilingIsClampedToInterval(t *testing.T) {
 	}
 }
 
+// TestBackoffNeverExceedsAnIntervalShorterThanTheFloor is the gate the
+// ceiling-clamp test above was too weak to be: it uses an interval BELOW
+// BackoffMin.
+//
+// Codex review of PR #1305 found the original code raised the clamped ceiling
+// back up to the floor, so an admin running `-feed-sync-interval 1m` against a
+// 5 m floor got a failed round retried FIVE TIMES LATER than a healthy sync —
+// the bare-ticker regression this package exists to remove, reintroduced
+// inside the fix. The invariant is one sentence and it must hold at every
+// interval, not just comfortable ones:
+//
+//	a retry is never later than the configured cadence.
+func TestBackoffNeverExceedsAnIntervalShorterThanTheFloor(t *testing.T) {
+	for _, iv := range []time.Duration{time.Minute, 2 * time.Minute, 30 * time.Second, 5 * time.Minute} {
+		s := New(Config{
+			Interval:   func() time.Duration { return iv },
+			BackoffMin: 5 * time.Minute,
+			BackoffMax: time.Hour,
+			Jitter:     noJitter,
+			Clock:      &fakeClock{},
+		})
+		for i := 0; i < 12; i++ {
+			d := s.NextDelay(false)
+			if d > iv {
+				t.Fatalf("interval %s, failure %d: retry delay %s is LATER than the healthy cadence — retrying must only tighten it", iv, i+1, d)
+			}
+			if d <= 0 {
+				t.Fatalf("interval %s, failure %d: non-positive delay %s would hot-loop", iv, i+1, d)
+			}
+		}
+	}
+}
+
 // TestRetryRateIsBounded is the other CONTROL. A scheduler that retried
 // IMMEDIATELY would satisfy "a failure is retried before the next interval"
 // while being far worse than the defect: an unbounded hot loop against a

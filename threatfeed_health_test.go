@@ -13,6 +13,7 @@ package main
 // stays silent and that an unconfigured node exports nothing.
 
 import (
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -368,4 +369,144 @@ func TestCheckThreatFeed_RowIsInTheDiagnosticsReport(t *testing.T) {
 		}
 	}
 	t.Fatal("no threat_feed row in the operator-contract report")
+}
+
+// ── Review-driven gates (PR #1305, Codex) ─────────────────────────────────────
+
+// TestThreatFeedSyncOK_SurvivesARestartFromAFailedSync — the failure count is
+// deliberately not persisted (the true run length across restarts is
+// unknowable), so a gauge derived from it reported a green
+// culvert_threat_feed_sync_ok 1 after a restart from a DB written by a failed
+// sync — for hours, until the next scheduled round. The gauge must derive from
+// the PERSISTED error state instead.
+func TestThreatFeedSyncOK_SurvivesARestartFromAFailedSync(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+
+	// A feed that synced cleanly, then failed, then persisted.
+	writer := threatfeed.New()
+	writer.Init(path, time.Hour)
+	writer.SeedSyncSuccessForTest(time.Now().Add(-30 * time.Minute))
+	writer.SeedSyncFailureForTest("urlhaus")
+	writer.Save()
+
+	// A fresh process loading that DB.
+	prevFeed := globalThreatFeed
+	prevAlert := fireThreatFeedStaleAlert
+	prevDefer := deferThreatFeedStaleAlert
+	resetThreatFeedHealthForTest()
+	reloaded := threatfeed.New()
+	reloaded.Init(path, time.Hour)
+	globalThreatFeed = reloaded
+	fireThreatFeedStaleAlert = func(string) {}
+	deferThreatFeedStaleAlert = func(string) {}
+	noteThreatFeedConfigured()
+	t.Cleanup(func() {
+		resetThreatFeedHealthForTest()
+		globalThreatFeed = prevFeed
+		fireThreatFeedStaleAlert = prevAlert
+		deferThreatFeedStaleAlert = prevDefer
+	})
+
+	if h := reloaded.Health(); h.LastRoundOK {
+		t.Fatal("LastRoundOK = true after loading a DB whose last sync failed")
+	}
+	var b strings.Builder
+	threatFeedWritePrometheus(&b)
+	if !strings.Contains(b.String(), "culvert_threat_feed_sync_ok 0") {
+		t.Fatalf("sync_ok reports healthy after restarting from a failed-sync DB:\n%s", b.String())
+	}
+	if strings.Contains(b.String(), "culvert_threat_feed_consecutive_sync_failures 0") {
+		t.Fatalf("consecutive failure count reads 0 after restarting from a failed-sync DB:\n%s", b.String())
+	}
+}
+
+// TestThreatFeedStale_EvaluatedAtStartupForAWarmButStaleDatabase — a node can
+// boot ALREADY stale: the on-disk DB is warm (so no immediate round is armed)
+// but its last success is days old. Staleness used to be evaluated only after a
+// failed round, and the first round is a full jittered interval away — so no
+// alert fired for that whole window, and none at all if that round succeeded.
+//
+// The alert must go through the startup-alert QUEUE, not fire directly: the
+// webhook store is loaded by a later startup slice, so a direct fire would fan
+// out to an empty subscriber list and vanish.
+func TestThreatFeedStale_EvaluatedAtStartupForAWarmButStaleDatabase(t *testing.T) {
+	var mu sync.Mutex
+	var deferred, direct []string
+
+	prevFeed := globalThreatFeed
+	prevAlert := fireThreatFeedStaleAlert
+	prevDefer := deferThreatFeedStaleAlert
+	resetThreatFeedHealthForTest()
+
+	feed := threatfeed.New()
+	feed.Init("", time.Hour)
+	feed.SeedSyncSuccessForTest(time.Now().Add(-72 * time.Hour)) // three days stale
+	globalThreatFeed = feed
+	fireThreatFeedStaleAlert = func(d string) { mu.Lock(); direct = append(direct, d); mu.Unlock() }
+	deferThreatFeedStaleAlert = func(d string) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
+	t.Cleanup(func() {
+		resetThreatFeedHealthForTest()
+		globalThreatFeed = prevFeed
+		fireThreatFeedStaleAlert = prevAlert
+		deferThreatFeedStaleAlert = prevDefer
+	})
+
+	noteThreatFeedConfigured()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deferred) != 1 {
+		t.Fatalf("startup queued %d stale alerts for a 3-day-stale warm database, want 1", len(deferred))
+	}
+	if !strings.Contains(deferred[0], "stale at startup") {
+		t.Errorf("startup alert detail %q does not identify the boot-time case", deferred[0])
+	}
+	if len(direct) != 0 {
+		t.Errorf("startup fired %d alerts directly instead of through the startup queue — they would fan out to an empty webhook list", len(direct))
+	}
+}
+
+// TestThreatFeedStale_StartupIsSilentForAFreshOrHealthyNode is the CONTROL. An
+// alert that fired at every boot would pass the gate above while paging on
+// every restart of every healthy appliance.
+func TestThreatFeedStale_StartupIsSilentForAFreshOrHealthyNode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(*threatfeed.Feed)
+	}{
+		{"never synced (fresh install)", func(*threatfeed.Feed) {}},
+		{"synced ten minutes ago", func(f *threatfeed.Feed) { f.SeedSyncSuccessForTest(time.Now().Add(-10 * time.Minute)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var deferred []string
+
+			prevFeed := globalThreatFeed
+			prevDefer := deferThreatFeedStaleAlert
+			prevAlert := fireThreatFeedStaleAlert
+			resetThreatFeedHealthForTest()
+
+			feed := threatfeed.New()
+			feed.Init("", time.Hour)
+			tc.seed(feed)
+			globalThreatFeed = feed
+			deferThreatFeedStaleAlert = func(d string) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
+			fireThreatFeedStaleAlert = func(string) {}
+			t.Cleanup(func() {
+				resetThreatFeedHealthForTest()
+				globalThreatFeed = prevFeed
+				deferThreatFeedStaleAlert = prevDefer
+				fireThreatFeedStaleAlert = prevAlert
+			})
+
+			noteThreatFeedConfigured()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(deferred) != 0 {
+				t.Fatalf("startup alerted on a %s node: %v", tc.name, deferred)
+			}
+		})
+	}
 }

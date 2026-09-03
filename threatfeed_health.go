@@ -169,6 +169,55 @@ func noteThreatFeedConfigured() {
 	threatFeedHealth.mu.Unlock()
 
 	threatfeed.SetSyncObserver(noteThreatFeedSync)
+
+	// A node can boot ALREADY stale: the on-disk DB is warm (so no immediate
+	// round is armed) but its last success is days old — a node that was off,
+	// or one whose feed has been failing across restarts. Nothing else would
+	// alert on that, because staleness was only ever evaluated after a failed
+	// round, and the first round is a full jittered interval away; if it then
+	// succeeds, no alert ever fires for the window in which the gateway was
+	// enforcing against stale intelligence (PR #1305 review).
+	//
+	// Routed through deferStartupAlert because the webhook store is loaded by a
+	// LATER startup slice: firing directly here would fan out to an empty
+	// subscriber list and vanish, which is the exact failure that queue exists
+	// to prevent. It degrades to a passthrough if the flush already happened,
+	// so it is safe from any init order.
+	evaluateThreatFeedStalenessAtStartup()
+}
+
+// evaluateThreatFeedStalenessAtStartup fires the stale alert once at boot if
+// the PERSISTED state is already stale. Latches the same fire-once flag as the
+// runtime path, so a subsequent failed round does not double-page.
+func evaluateThreatFeedStalenessAtStartup() {
+	snap := threatFeedState()
+	// The never-synced branch is deliberately NOT evaluated here: at startup
+	// its age is measured from process start and is therefore ~0, which is
+	// correct — a node that has simply not finished its first sync is not a
+	// fault, and the 30-minute grace exists to say so.
+	if !snap.Stale || snap.NeverSynced {
+		return
+	}
+	threatFeedHealth.mu.Lock()
+	alertNow := !threatFeedHealth.alerted
+	threatFeedHealth.alerted = true
+	threatFeedHealth.mu.Unlock()
+	if !alertNow {
+		return
+	}
+	deferThreatFeedStaleAlert(fmt.Sprintf(
+		"threat intelligence was already stale at startup: last successful sync was %s ago (over %dx the %s interval); the gateway is enforcing against stale intelligence until the feed resyncs",
+		snap.Age.Round(time.Minute), threatFeedStaleFactor, snap.SyncInterval))
+}
+
+// deferThreatFeedStaleAlert queues the stale alert through the startup-alert
+// queue. Package-level seam for the same synchronous-observation reason as
+// fireThreatFeedStaleAlert.
+var deferThreatFeedStaleAlert = func(detail string) {
+	deferStartupAlert("threat_feed_stale", AlertPayload{
+		Detail: detail,
+		Source: "threatfeed",
+	})
 }
 
 // noteThreatFeedSync is the sync observer: one call per completed round,
@@ -259,8 +308,11 @@ type threatFeedSnapshot struct {
 	Stale       bool
 	// Age is the time since the last successful sync, or since process start
 	// when there has never been one.
-	Age                 time.Duration
-	LastSuccess         time.Time
+	Age         time.Duration
+	LastSuccess time.Time
+	// LastRoundOK derives from the feed's PERSISTED error state, so it stays
+	// correct across a restart. See Health.LastRoundOK in internal/threatfeed.
+	LastRoundOK         bool
 	SyncInterval        time.Duration
 	ConsecutiveFailures int
 	TotalFailures       int64
@@ -283,6 +335,7 @@ func threatFeedState() threatFeedSnapshot {
 	}
 	h := globalThreatFeed.Health()
 	snap.LastSuccess = h.LastSuccess
+	snap.LastRoundOK = h.LastRoundOK
 	snap.SyncInterval = h.SyncInterval
 	snap.ConsecutiveFailures = h.ConsecutiveFailures
 	snap.TotalFailures = h.TotalFailures
@@ -400,9 +453,14 @@ func threatFeedWritePrometheus(w *strings.Builder) {
 	w.WriteString("# TYPE culvert_threat_feed_stale_seconds gauge\n")
 	fmt.Fprintf(w, "culvert_threat_feed_stale_seconds %d\n", int64(snap.Age.Seconds()))
 
+	// Derived from LastRoundOK (the PERSISTED lastSyncErr), not from
+	// ConsecutiveFailures == 0. The failure count is not persisted, so after a
+	// restart from a DB written by a failed sync it reads zero while the feed
+	// is known to be failing — this gauge would have reported a green 1 for
+	// hours, until the next scheduled round (PR #1305 review).
 	w.WriteString("\n# HELP culvert_threat_feed_sync_ok 1 when the most recent threat feed sync fetched every source cleanly, 0 otherwise\n")
 	w.WriteString("# TYPE culvert_threat_feed_sync_ok gauge\n")
-	fmt.Fprintf(w, "culvert_threat_feed_sync_ok %d\n", boolGauge(snap.ConsecutiveFailures == 0))
+	fmt.Fprintf(w, "culvert_threat_feed_sync_ok %d\n", boolGauge(snap.LastRoundOK))
 
 	w.WriteString("\n# HELP culvert_threat_feed_sync_failures_total Threat feed sync rounds in which at least one source did not fetch cleanly\n")
 	w.WriteString("# TYPE culvert_threat_feed_sync_failures_total counter\n")

@@ -140,9 +140,10 @@ use. The most common causes, in order:
 
 ### 3. Force a retry
 
-The admin Security panel's manual sync (`POST /api/threat-feed/sync`) runs a
-round immediately without waiting for the backoff timer. Use it to confirm a
-fix rather than to work around a persistent failure.
+The admin Security panel's manual sync (`POST /api/security-scan/feeds/sync`,
+admin role) runs a round synchronously without waiting for the backoff timer,
+and returns the updated feed status. Use it to confirm a fix rather than to
+work around a persistent failure.
 
 ---
 
