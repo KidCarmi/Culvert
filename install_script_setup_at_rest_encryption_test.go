@@ -363,7 +363,7 @@ func TestInstallScript_SetupAtRestEncryption_ReuseForCAMatchesPersistedLogPassph
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
-	const persistedLogPass = "persisted-in-env-log-passphrase-AAAA"
+	const persistedLogPass = "persisted-in-env-log-passphrase-AAAA" // #nosec G101 -- synthetic test fixture; never leaves this test
 	const divergentHostLogPass = "different-host-env-log-passphrase-BB" // #nosec G101 -- synthetic test fixture; never leaves this test
 	if err := os.WriteFile(envFile, []byte("CULVERT_LOG_PASSPHRASE="+persistedLogPass+"\n"), 0o600); err != nil {
 		t.Fatalf("seed .env: %v", err)
