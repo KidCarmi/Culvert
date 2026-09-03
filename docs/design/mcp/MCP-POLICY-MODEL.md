@@ -106,7 +106,7 @@ context, remediation and an event classification (MCP-POLICY-003, MCP-POLICY-005
 
 ```
 Draft → Validate → Simulate → Review → Approve
-→ Publish Snapshot → Observe/Shadow → Canary → Active
+→ Publish Snapshot → Observe/Shadow → Canary → Production
 → Monitor → Roll Back / Retire
 ```
 
@@ -115,8 +115,9 @@ Draft → Validate → Simulate → Review → Approve
 - **Review / Approve:** four-eyes (TB-5); RBAC-gated (`requireRole`, `ui_rbac.go:46-53` precedent).
 - **Publish Snapshot:** immutable, signed CP→DP snapshot ([`CP-DP-HA-MODEL.md`](CP-DP-HA-MODEL.md));
   policy_revision increments.
-- **Observe/Shadow → Canary → Active:** staged rollout ([`ROLLOUT-AND-ROLLBACK.md`](ROLLOUT-AND-ROLLBACK.md));
-  hard failures block even in Shadow.
+- **Observe/Shadow → Canary → Production:** staged rollout ([`ROLLOUT-AND-ROLLBACK.md`](ROLLOUT-AND-ROLLBACK.md)),
+  the same `Disabled → Observe → Shadow → Canary → Production` ladder that document defines
+  (`internal/mcp/rollout.Mode`); hard failures block even in Shadow.
 - **Roll Back / Retire:** atomic rollback to the previous snapshot (MCP-HA-002).
 
 ## 5. Reason-code taxonomy
