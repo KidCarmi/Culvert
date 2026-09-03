@@ -132,8 +132,14 @@ set is empty. This requires the separately-reviewed activation to have:
 7. **Observe** continuously: Culvert outcome evidence (executed=true/false, upstream
    success/failure, response-inspection result, abort class, duration) reconciled against the
    recording upstream's independent log. Any mismatch is a whole-Canary breach → auto-stop.
-8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16) — auto-demote
-   to Shadow and/or engage the kill switch.
+8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16) — demote to
+   Shadow and/or engage the kill switch. **Window expiry is NOT an automatic transition today:**
+   `budget_exhausted` is tripped only from `reserveCanaryExecution` (`mcp_canary_runtime.go:391`) and
+   `BudgetDeniedWindow` is produced only by `BudgetEnforcer.Reserve` — both request-driven — so if no
+   further request arrives after the window elapses, nothing trips and the node stays in Canary mode
+   indefinitely. Expiry ends the authority to ADMIT, it does not stop the experiment. Until a
+   deadline-driven stop exists, the operator MUST explicitly demote/kill at the window boundary
+   (review §16, blocker 7).
 9. **Roll back** at the first sign of any whole-Canary breach; the kill generation is authoritative at
    the admission boundary (PREREQ-MCP-KILL-1) — but NOT across the transport retry loop:
    `upstreamclient.Call` retries an idempotent read without re-checking the kill, so a retry POST can

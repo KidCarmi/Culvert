@@ -265,9 +265,21 @@ This axis is GO.
 
 ## §9 A tiny budget
 
-`canary.Budget` with `MaxTotalExecutions` in [3,10], `MaxConcurrentExecutions=1`, a minutes-scale
-`Window`, and per-dimension caps consistent with the scope (`MaxTools=1`, `MaxServers=1`,
-`MaxPrincipals=1`). `ValidateBudget` (`budget.go:64`) rejects any non-positive cap and enforces
+**A RANGE IS NOT AN EXACT EXPERIMENT (Codex round 31).** This section previously specified
+`MaxTotalExecutions` in [3,10], left `MaxExecutionsPerMinute` unstated, and described the `Window`
+only as "minutes-scale" — so two authorizations could both pass §25 with materially different blast
+radii, and §14's witness reconciliation had no expected count to reconcile AGAINST. The review
+therefore fixes the exact triple as its specification: **`MaxTotalExecutions=3`,
+`MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m`** — the smallest total that can
+still distinguish a repeatable success from a one-off, serialized so no two requests are ever in
+flight, in a window short enough to bound an unattended experiment. The authorization MUST adopt this
+exact triple or re-review a different one; it may not be left open. Consequences that follow from it
+and are part of the specification: the independent witness must observe **exactly 3** logical
+reservations, and — until blocker 6 is closed — **up to 9 physical POSTs** (3 × `MaxReadRetries`),
+which is the number the witness reconciliation must actually expect.
+
+`canary.Budget` with the exact values above, and per-dimension caps consistent with the scope
+(`MaxTools=1`, `MaxServers=1`, `MaxPrincipals=1`). `ValidateBudget` (`budget.go:64`) rejects any non-positive cap and enforces
 `FirstCanaryMaxTotalCeiling=1000` / `FirstCanaryMaxWindowCeiling=7d`. Runtime enforcement
 (`BudgetEnforcer.Reserve`, `budget_enforce.go:177`) is atomic, generation-bound, monotonic
 (`total` never rolled back), persist-before-grant, and restart-safe: **exactly N grants, N+1
@@ -737,6 +749,14 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
 7. **Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.** Only
    `budget_exhausted`/`scope_escape` auto-trip; the other eight declared breaches do not, and nothing
    reconciles the independent witness — so a divergence would not auto-stop later requests.
+   **The time-box is not self-enforcing either (Codex round 31).** `budget_exhausted` has exactly ONE
+   production trip site (`mcp_canary_runtime.go:391`), reached from `reserveCanaryExecution`, and
+   `BudgetDeniedWindow` is produced only by `BudgetEnforcer.Reserve` (`budget_enforce.go:197`) — both
+   REQUEST-DRIVEN. So if no further request arrives after the window elapses, nothing trips: the abort
+   controller stays unlatched and the node remains in Canary mode indefinitely. Window expiry is
+   therefore an expiry of AUTHORITY TO ADMIT, not an automatic stop. Closing this needs a
+   deadline-driven stop/rollback (a timer that demotes without needing another request), or the
+   authorization must require explicit operator cleanup and stop describing expiry as automatic.
 8. **Durable outcome evidence is incomplete/success-only, with an unclosable post-send crash window
    (§15/§18) — a product defect.** A pre-crash upstream invocation is not always determinable.
 9. **Credential path unresolved (§4).** Credential selection comes from the tool's matched policy
