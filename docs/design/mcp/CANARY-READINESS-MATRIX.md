@@ -272,9 +272,14 @@ Every one is a **separately-reviewed activation**, not a config change:
    bound** — `ScopeSpec` has no node dimension (`internal/mcp/rollout/scope.go:100-119`) and the
    publication coordinator's `pushAll` delivers the signed envelope to EVERY `Dist.Nodes()` entry
    (`internal/mcp/cpdp/publication/publication.go:196-203`), so closing (j) with a generic publication
-   entry point could activate every armed/ready DP while the checklist still reads "nodes = 1". Requires
-   an exactly-one intended-node constraint plus an acknowledgement check that exactly that node applied
-   the envelope (review §3/§13, blocker 15).
+   entry point could activate every armed/ready DP while the checklist still reads "nodes = 1".
+   Constraining the node LIST is NOT sufficient — the transport is broadcast by construction:
+   `mcpPullDistributor.Push` DISCARDS its node argument and installs the envelope so "the next captured
+   ConfigSnapshot carries it to every DP" (`mcp_distribution_adapters.go:74-88`), and
+   `applyMCPCapabilityEnvelope` has no intended-node check, so a non-target DP applies and ACTIVATES
+   before any acknowledgement could reveal the escape. Requires a PREVENTIVE control: a signed node
+   AUDIENCE the DP apply path REJECTS when it is not the intended node, or a genuinely per-node delivery
+   channel (review §3/§13, blocker 15).
    **Arming is NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.

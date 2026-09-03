@@ -629,6 +629,14 @@ code:
   non-test caller, so `ToolStillCurrent` re-checks only the seeded record. Exact-current fingerprint +
   rug-pull invalidation therefore bind the SEED, not the live peer. Confirmed against `mcp_inventory.go`
   + a repo-wide `Discover` search. Added as blocker 11.
+- **P1 — node targeting must be enforced BEFORE DP apply (§3/§13, blocker 15, round 28):** even with
+  `Dist.Nodes()` limited to one entry, `mcpPullDistributor.Push` discards its node argument and installs
+  the envelope so the shared `ConfigSnapshot` "carries it to every DP"
+  (`mcp_distribution_adapters.go:74-88`), and `applyMCPCapabilityEnvelope` has no intended-node check —
+  so non-target DPs ACTIVATE before acknowledgements could reveal the escape. This review's earlier
+  "intended node + acknowledgement" remedy was INSUFFICIENT and was corrected to require a signed node
+  audience rejected at DP apply (or a per-node delivery channel). Confirmed against
+  `mcp_distribution_adapters.go`, `mcp_distribution.go`.
 - **P1 — one-node bound unenforced (§3/§13, blocker 15):** `ScopeSpec` carries no node dimension and
   `publication.pushAll` delivers the signed envelope to every `Dist.Nodes()` entry, so a generic
   publication entry point (blocker 12) could activate every armed DP while the checklist still reads
@@ -664,7 +672,7 @@ BLOCKED-vs-FAILED note in §26).
 | Criterion | Status |
 |---|---|
 | Exactly one tenant / principal / server / tool / fingerprint, read-only, synthetic | Specifiable — YES |
-| Exactly one NODE, enforced at distribution | **NO — `ScopeSpec` has no node dimension and `pushAll` delivers to every `Dist.Nodes()` entry; one-node is an assumption, not a gate (§3/§13, blocker 15)** |
+| Exactly one NODE, enforced PREVENTIVELY at DP apply | **NO — `ScopeSpec` has no node dimension, `pushAll` delivers to every `Dist.Nodes()` entry, `mcpPullDistributor.Push` discards its node argument (shared `ConfigSnapshot` reaches every DP), and the apply path has no intended-node check; a post-apply ack is detective, not preventive (§3/§13, blocker 15)** |
 | Tool requires no production credential | **CONDITIONAL — unverifiable until tool + rule fixed (§4)** |
 | A read-first-admissible one-exact-tool operation exists | **NO — classifier refuses `tools/call`; discovery cannot bind one tool (§6)** |
 | Supported upstream trust model for a controlled server available today | **NO** (§5) |
@@ -788,9 +796,19 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    signed envelope to EVERY node the distributor lists ("delivers the signed envelope to every intended
    DP", `internal/mcp/cpdp/publication/publication.go:196-203`). So if blocker 12 is closed with a
    GENERIC publication entry point, a single Canary publish activates every armed/ready DP while the
-   documented checklist still reads "nodes = 1". The one-node bound must become a MANDATORY, verified
-   distribution constraint — exactly-one intended node plus an acknowledgement check that exactly that
-   node applied the envelope — not an assumption about how many DPs happen to be enrolled.
+   documented checklist still reads "nodes = 1". **The transport is BROADCAST BY CONSTRUCTION, so
+   constraining `Dist.Nodes()` is not enough**: the production `mcpPullDistributor.Push` DISCARDS its
+   node argument (`func (mcpPullDistributor) Push(_ string, env *cpdp.Envelope)`) and installs the
+   envelope into the CP publication seam "so the next captured ConfigSnapshot carries it to every DP"
+   (its own comment, `mcp_distribution_adapters.go:74-88`) — every DP pulls the SAME shared snapshot.
+   Limiting the node list would only limit which nodes are counted/acked, never which receive it. And
+   `applyMCPCapabilityEnvelope` verifies signature + epoch + revision + bounds with NO intended-node
+   check (`mcp_distribution.go:225-245`), so a non-target DP applies and ACTIVATES. An acknowledgement
+   check is therefore DETECTIVE, not preventive — the escape has already happened by the time acks
+   reveal it. Closing this requires a PREVENTIVE control: a signed node AUDIENCE in the envelope that
+   the DP apply path REJECTS when it is not the intended node, or a genuinely per-node delivery
+   channel. (Corrected in review round 28 — the earlier "intended node + acknowledgement" remedy this
+   review proposed was insufficient for exactly this reason.)
 
 **Why BLOCKED and not FAILED.** The review contract's FAILED verdict is for a specified, assemblable
 experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no experiment can even
@@ -888,11 +906,16 @@ verdict FAILED.)
   the generation is never fed. Wire a governed forward-transition/publication path (the same wiring that
   closes blocker 10's rollback direction, but for →Canary) — and it MUST target exactly one node, not
   the whole fleet (blocker 15);
-- make the **one-NODE bound a verified distribution constraint** (blocker 15, §3/§13) — `ScopeSpec` has
+- make the **one-NODE bound a PREVENTIVE, apply-time control** (blocker 15, §3/§13) — `ScopeSpec` has
   no node dimension and `publication.pushAll` delivers to EVERY `Dist.Nodes()` entry, so a generic
   publication path would activate every armed/ready DP while the checklist still reads "nodes = 1".
-  Require an exactly-one intended-node constraint plus an acknowledgement check proving exactly that
-  node applied the envelope (and no other node did).
+  Constraining the node LIST is not sufficient: `mcpPullDistributor.Push` discards its node argument and
+  installs the envelope so "the next captured ConfigSnapshot carries it to every DP"
+  (`mcp_distribution_adapters.go:74-88`), and `applyMCPCapabilityEnvelope` has no intended-node check,
+  so a non-target DP applies and ACTIVATES before any acknowledgement could reveal the escape. Require a
+  signed node AUDIENCE that the DP apply path REJECTS when it is not the intended node, OR a genuinely
+  per-node delivery channel. A post-apply acknowledgement check is detective, not preventive, and does
+  not close this on its own;
 
 Then re-run this review against the new exact SHA.
 
