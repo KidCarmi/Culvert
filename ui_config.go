@@ -927,8 +927,10 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 // Replace mode swaps the whole set; merge mode UPSERTS by identity — match by
 // stable ULID first (idempotent re-import), then a one-time name fallback for
 // pre-ID / hand-authored backups, else create fresh — so a re-import does not
-// accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1).
-func importPolicyRules(b *configBackup, replaceMode bool) {
+// accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1). Returns one warning
+// string per rule that failed validation and was skipped, so the caller can
+// surface them to the admin instead of leaving them only in the process log.
+func importPolicyRules(b *configBackup, replaceMode bool) []string {
 	// Object-reference IDs are re-derived from the submitted NAMES, exactly like
 	// the interactive write path (stampObjectRefIDs): enforcement is
 	// ID-authoritative (failOpenScopeForRule, MatchesCategoryByID), so a backup
@@ -945,8 +947,9 @@ func importPolicyRules(b *configBackup, replaceMode bool) {
 			stampObjectRefIDs(&rules[i])
 		}
 		policyStore.ReplaceAll(rules)
-		return
+		return nil
 	}
+	var warnings []string
 	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
 	for i := range b.PolicyRules {
 		rule := b.PolicyRules[i]
@@ -964,7 +967,9 @@ func importPolicyRules(b *configBackup, replaceMode bool) {
 			editPriority = existing.Priority
 		}
 		if err := validatePolicyRule(rule, policyStore.List(), editPriority); err != nil {
-			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
+			reason := strings.ReplaceAll(err.Error(), "\n", "")
+			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), reason)
+			warnings = append(warnings, fmt.Sprintf("policy rule %q skipped: %s", rule.Name, reason))
 			continue
 		}
 		if existing == nil {
@@ -979,6 +984,7 @@ func importPolicyRules(b *configBackup, replaceMode bool) {
 			policyStore.Add(rule)
 		}
 	}
+	return warnings
 }
 
 // POST /api/config/import — import configuration from an exported JSON file.
@@ -1067,8 +1073,10 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	importCategoryOverrides(&b, replaceMode)
 
 	// Policy rules — replace or upsert-by-identity (extracted to keep the
-	// handler under the nestif complexity threshold).
-	importPolicyRules(&b, replaceMode)
+	// handler under the nestif complexity threshold). Rules that failed
+	// validation are skipped (not aborted whole); collect why, so "ok:true"
+	// never hides a silently-dropped rule from the admin (see warnings below).
+	warnings := importPolicyRules(&b, replaceMode)
 	policyStore.Save()
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
 		setDefaultPolicyAction(b.DefaultAction)
@@ -1104,7 +1112,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if replaceMode && len(b.ContentScanPatterns) > 0 {
 		if err := dpiScanner.Set(b.ContentScanPatterns); err != nil {
 			patternsOK = false
-			logger.Printf("ConfigImport: content scan patterns rejected: %s — skipping bypass-host import (shared envelope)", strings.ReplaceAll(err.Error(), "\n", ""))
+			reason := strings.ReplaceAll(err.Error(), "\n", "")
+			logger.Printf("ConfigImport: content scan patterns rejected: %s — skipping bypass-host import (shared envelope)", reason)
+			warnings = append(warnings, fmt.Sprintf("content scan patterns rejected, bypass hosts NOT imported: %s", reason))
 		}
 	} else {
 		for _, p := range b.ContentScanPatterns {
@@ -1134,8 +1144,17 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		ipf.ClearAll()
 	}
 	// Bulk load: one pass, one view publish (an Add loop is quadratic).
-	// Invalid entries stay silently skipped, as the Add loop did.
-	_ = ipf.AddAll(b.IPList)
+	// Invalid entries stay silently skipped, as the Add loop did — but the
+	// skip reason is now surfaced to the admin instead of only the log.
+	for _, bad := range ipf.AddAll(b.IPList) {
+		// bad.Err's message embeds the rejected entry verbatim (e.g.
+		// *net.AddrError), so sanitize the WHOLE error text, not just
+		// bad.Entry — otherwise a crafted backup entry reaches the log/API
+		// response a second time, unsanitized, via %v on the error.
+		reason := sanitizeLog(bad.Err.Error())
+		logger.Printf("ConfigImport: invalid IP filter entry %q: %s", sanitizeLog(bad.Entry), reason)
+		warnings = append(warnings, fmt.Sprintf("IP filter entry %q skipped: %s", bad.Entry, reason))
+	}
 	if b.RateLimitRPM > 0 {
 		rl.Configure(b.RateLimitRPM, time.Minute)
 	}
@@ -1188,7 +1207,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Block page template (Finding 10.3).
 	if b.BlockPageHTML != "" {
 		if err := setBlockPageHTML(b.BlockPageHTML); err != nil {
-			logger.Printf("ConfigImport: block page template error: %s", strings.ReplaceAll(err.Error(), "\n", ""))
+			reason := strings.ReplaceAll(err.Error(), "\n", "")
+			logger.Printf("ConfigImport: block page template error: %s", reason)
+			warnings = append(warnings, fmt.Sprintf("block page template rejected, not imported: %s", reason))
 		}
 	}
 
@@ -1232,6 +1253,14 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// did not receive it (the local import still succeeded).
 	pubErr := publishCurrentConfigSnapshot()
 	resp := map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt}
+	// "ok:true" must never be the whole story: everything appended to
+	// warnings above was a section that was silently skipped rather than
+	// aborting the import, previously visible only in the process log — an
+	// admin restoring a backup after an incident needs to know before they
+	// walk away believing every rule/pattern/entry from the backup is live.
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
+	}
 	if pubErr != nil {
 		resp["cluster_publish_rejected"] = pubErr.Error()
 	}
