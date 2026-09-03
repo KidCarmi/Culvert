@@ -2191,6 +2191,11 @@
             "nullable": true,
             "type": "object"
           },
+          "degraded": {
+            "additionalProperties": true,
+            "description": "Keyed by profile ID (\"default\" for the legacy profile); present only for a profile whose most recent PAC serve compiled with warnings (dropped rule, unresolvable pool reference, secure-mode conflict). Empty when every profile last served clean.",
+            "type": "object"
+          },
           "pools": {
             "items": {
               "additionalProperties": true,

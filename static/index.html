@@ -14507,17 +14507,29 @@ function pacProfileURL(id) {
   return 'http://' + window.location.hostname + ':' + proxyPort + '/pac/' + id + '.pac';
 }
 
+// pacDegradedBadge renders a "degraded" badge with the compile warning
+// messages in its tooltip when this profile's most recent serve produced
+// warnings (dropped rule, unresolvable pool reference, secure-mode
+// conflict) - the only GUI signal that a live PAC file is not being served
+// exactly as configured, without checking server logs or a webhook alert.
+function pacDegradedBadge(id) {
+  const dg = (pacProfilesData.degraded || {})[id];
+  if (!dg) return '';
+  const msgs = (dg.warnings || []).map(w => w.message).join('; ') || 'compiled with warnings';
+  return ' <span class="badge warn" title="' + escHtml(msgs) + '">degraded</span>';
+}
+
 function renderPACProfilesList() {
   const box = document.getElementById('pac-profiles-list');
   const d = pacProfilesData.defaultProfile;
   let rows = '';
   if (d) {
-    rows += '<tr><td><code>' + escHtml(d.id) + '</code> <span class="badge">default</span></td>' +
+    rows += '<tr><td><code>' + escHtml(d.id) + '</code> <span class="badge">default</span>' + pacDegradedBadge(d.id) + '</td>' +
       '<td>' + escHtml(d.name) + '</td><td>' + escHtml(d.availabilityMode) + '</td>' +
       '<td><button class="btn ghost sm" data-click="copyPACProfileURL" data-arg="default">Copy URL</button></td></tr>';
   }
   for (const p of (pacProfilesData.profiles || [])) {
-    rows += '<tr><td><code>' + escHtml(p.id) + '</code>' + (p.enabled ? '' : ' <span class="badge">disabled</span>') + '</td>' +
+    rows += '<tr><td><code>' + escHtml(p.id) + '</code>' + (p.enabled ? '' : ' <span class="badge">disabled</span>') + pacDegradedBadge(p.id) + '</td>' +
       '<td>' + escHtml(p.name) + ' <span style="color:var(--muted)">r' + (p.revision || 0) + '</span></td>' +
       '<td>' + escHtml(p.availabilityMode) + '</td>' +
       '<td><div class="row-actions"><button class="btn ghost sm" data-click="copyPACProfileURL" data-arg="' + escHtml(p.id) + '">Copy URL</button>' +

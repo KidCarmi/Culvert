@@ -707,6 +707,14 @@ components:
         defaultProfile: { type: object, additionalProperties: true, nullable: true }
         profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
         pools: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        degraded:
+          type: object
+          description: >-
+            Keyed by profile ID ("default" for the legacy profile); present only for
+            a profile whose most recent PAC serve compiled with warnings (dropped
+            rule, unresolvable pool reference, secure-mode conflict). Empty when
+            every profile last served clean.
+          additionalProperties: true
     PACPostureInventory:
       type: object
       description: Direct-access PAC posture inventory (shape varies).
