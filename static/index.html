@@ -14165,9 +14165,30 @@ function pacHTTPURL() {
   return 'http://' + window.location.hostname + ':' + proxyPort + '/proxy.pac';
 }
 
+// pacConfigRevision is the legacy PAC config's optimistic-concurrency token
+// (2F-A): loaded with the config, echoed on every save, refreshed from the
+// server's response. A missing/stale token is refused server-side (428/409).
+let pacConfigRevision = 0;
+
+// pacFenceRefused renders a 2F-A precondition refusal truthfully: the server
+// answered 428 (token missing) or 409 code "stale" (the object changed since
+// it was loaded). Nothing was saved; the caller must reload and retry. Returns
+// true when the response was such a refusal.
+async function pacFenceRefused(resp, reloadFn) {
+  if (resp.status !== 428 && resp.status !== 409) return false;
+  const data = await resp.clone().json().catch(() => null);
+  if (!data || (data.code !== 'stale' && data.code !== 'precondition_required')) return false;
+  toast(data.code === 'stale'
+    ? 'Not saved: this object changed elsewhere since you loaded it. Reloaded - review and retry.'
+    : 'Not saved: the server requires the current version token. Reloaded - retry.', 'error');
+  if (reloadFn) reloadFn();
+  return true;
+}
+
 async function loadPACConfig() {
   try {
     const c = await api('/api/pac-config');
+    pacConfigRevision = c.revision || 0;
     document.getElementById('pac-host').value = c.proxyHost || '';
     document.getElementById('pac-port').value = c.proxyPort || 8080;
     document.getElementById('pac-exclusions').value = (c.exclusions || []).join('\n');
@@ -14385,6 +14406,10 @@ async function savePacGov() {
     reviewCadenceDays: cadenceRaw ? parseInt(cadenceRaw, 10) : 0,
     lastReviewedAt: _dateToRFC3339(document.getElementById('pac-gov-reviewed').value),
   };
+  // 2F-A fence: an existing record must be echoed by the revision it was
+  // loaded at (a first-time record carries none).
+  const govRec = _pacGovRecords[profileId] || {};
+  if (govRec.revision) payload.revision = govRec.revision;
   if (!payload.owner || !payload.reason) {
     err.textContent = 'Owner and reason are required to govern a DIRECT exception.';
     err.style.display = ''; return;
@@ -14393,6 +14418,7 @@ async function savePacGov() {
     const resp = await apiFetch('/api/pac/posture/exceptions/' + encodeURIComponent(profileId), {
       method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
     });
+    if (await pacFenceRefused(resp, loadPACPosture)) { closePacGovModal(); return; }
     if (!resp.ok) throw new Error(await resp.text());
     closePacGovModal();
     toast('DIRECT exception governed', 'success');
@@ -14408,7 +14434,10 @@ async function clearPacGov(profileId) {
     'Clear');
   if (!ok) return;
   try {
-    const resp = await apiFetch('/api/pac/posture/exceptions/' + encodeURIComponent(profileId), { method: 'DELETE' });
+    const govRev = (_pacGovRecords[profileId] || {}).revision || 0;
+    const resp = await apiFetch('/api/pac/posture/exceptions/' + encodeURIComponent(profileId) +
+      '?revision=' + encodeURIComponent(govRev), { method: 'DELETE' });
+    if (await pacFenceRefused(resp, loadPACPosture)) return;
     if (!resp.ok && resp.status !== 204) throw new Error(await resp.text());
     toast('Governance cleared', 'success');
     loadPACPosture();
@@ -14438,8 +14467,9 @@ async function savePACConfig() {
     const resp = await apiFetch('/api/pac-config', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ proxyHost, proxyPort, exclusions }),
+      body: JSON.stringify({ proxyHost, proxyPort, exclusions, revision: pacConfigRevision }),
     });
+    if (await pacFenceRefused(resp, loadPACConfig)) return;
     if (resp.status === 400) {
       const data = await resp.json().catch(() => null);
       renderPACIssues(data && data.issues);
@@ -14449,6 +14479,7 @@ async function savePACConfig() {
     if (!resp.ok) throw new Error(await resp.text());
     renderPACIssues(null);
     const saved = await resp.json().catch(() => null);
+    if (saved && saved.revision) pacConfigRevision = saved.revision;
     if (saved && Array.isArray(saved.exclusions)) {
       // Reflect the canonical (deduped, punycoded, normalized) form back.
       document.getElementById('pac-exclusions').value = saved.exclusions.join('\n');
@@ -14683,10 +14714,12 @@ async function savePACProfile() {
     rules: collectPACRules(),
   };
   const isNew = pacEditingProfile === '';
-  // Send the loaded revision on edits so the server's optimistic-concurrency
-  // guard rejects a stale overwrite instead of silently clobbering a
-  // concurrent admin's change.
+  // 2F-A fence: an edit echoes the profile revision it loaded; a create
+  // echoes the collection token of the listing it was started from. Both are
+  // mandatory server-side (428 absent, structured 409 when stale), and both
+  // ride unchanged on the typed-DIRECT confirmation retry below.
   if (!isNew) body.revision = pacEditingRevision;
+  else body.collectionEtag = pacProfilesData.collectionEtag || '';
   const basePath = isNew ? '/api/pac/profiles' : '/api/pac/profiles/' + encodeURIComponent(pacEditingProfile);
   const profileId = isNew ? body.id : pacEditingProfile;
   // doSave optionally carries the typed ?confirmDirect= confirmation that the
@@ -14701,6 +14734,7 @@ async function savePACProfile() {
     });
   try {
     let resp = await doSave(null);
+    if (await pacFenceRefused(resp, loadPACProfiles)) return;
     if (resp.status === 409) {
       const data = await resp.clone().json().catch(() => null);
       if (data && data.confirmField === 'confirmDirect') {
@@ -14717,8 +14751,9 @@ async function savePACProfile() {
         });
         if (!ok) return;
         resp = await doSave(profileId);
+        if (await pacFenceRefused(resp, loadPACProfiles)) return;
       } else {
-        toast(await resp.text(), 'error'); // stale revision or other conflict
+        toast(await resp.text(), 'error'); // other conflict (e.g. duplicate id)
         return;
       }
     }
@@ -14738,7 +14773,11 @@ async function savePACProfile() {
 async function deletePACProfile(id) {
   if (!await confirmAction('Delete profile?', 'Delete profile "' + id + '"? Clients using /pac/' + id + '.pac will get 404.')) return;
   try {
-    const resp = await apiFetch('/api/pac/profiles/' + encodeURIComponent(id), { method: 'DELETE' });
+    // 2F-A fence: DELETE echoes the revision of the row as listed.
+    const row = (pacProfilesData.profiles || []).find(x => x.id === id) || {};
+    const resp = await apiFetch('/api/pac/profiles/' + encodeURIComponent(id) +
+      '?revision=' + encodeURIComponent(row.revision || 0), { method: 'DELETE' });
+    if (await pacFenceRefused(resp, loadPACProfiles)) return;
     if (!resp.ok && resp.status !== 204) throw new Error(await resp.text());
     toast('Profile deleted', 'success');
     loadPACProfiles();
@@ -14804,12 +14843,17 @@ async function savePACPool() {
   };
   const isNew = pacEditingPool === '';
   const path = isNew ? '/api/pac/pools' : '/api/pac/pools/' + encodeURIComponent(pacEditingPool);
+  // 2F-A fence: a create echoes the listing's collection token, an edit the
+  // pool's etag as listed.
+  if (isNew) body.collectionEtag = pacProfilesData.collectionEtag || '';
+  else body.etag = (pacProfilesData.poolEtags || {})[pacEditingPool] || '';
   try {
     const resp = await apiFetch(path, {
       method: isNew ? 'POST' : 'PUT',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body),
     });
+    if (await pacFenceRefused(resp, loadPACProfiles)) return;
     if (resp.status === 400) {
       const data = await resp.json().catch(() => null);
       renderPACPanelIssues('pac-pool-errors', data && data.issues);
@@ -14826,7 +14870,11 @@ async function savePACPool() {
 async function deletePACPool(id) {
   if (!await confirmAction('Delete pool?', 'Delete pool "' + id + '"? Profiles referencing it block deletion.')) return;
   try {
-    const resp = await apiFetch('/api/pac/pools/' + encodeURIComponent(id), { method: 'DELETE' });
+    // 2F-A fence: DELETE echoes the pool's etag as listed.
+    const etag = (pacProfilesData.poolEtags || {})[id] || '';
+    const resp = await apiFetch('/api/pac/pools/' + encodeURIComponent(id) +
+      '?etag=' + encodeURIComponent(etag), { method: 'DELETE' });
+    if (await pacFenceRefused(resp, loadPACProfiles)) return;
     if (resp.status === 409) { toast(await resp.text(), 'error'); return; }
     if (!resp.ok && resp.status !== 204) throw new Error(await resp.text());
     toast('Pool deleted', 'success');
