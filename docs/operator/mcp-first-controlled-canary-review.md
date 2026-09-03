@@ -878,7 +878,17 @@ verdict FAILED.)
 - **[dedicated PR]** wire whole-Canary auto-abort for ALL eight remaining declared breaches —
   `out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
   `credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
-  `elevated_error_rate`, `latency_pathology` — plus an automatic witness-reconciliation trip;
+  `elevated_error_rate`, `latency_pathology` — plus an automatic witness-reconciliation trip.
+  **"A tripper exists" is NOT a closure criterion for the two RATE-based breaches.** `abort.go:72-74`
+  defines `elevated_error_rate` and `latency_pathology` only in prose ("over threshold", "sustained")
+  and no numeric limit, observation window, or minimum sample size exists anywhere, so an immediate
+  single-error trip and an effectively unreachable threshold would BOTH satisfy the wording. This
+  matters most at Canary scale: against a tiny budget (single-digit requests) a rate threshold with no
+  minimum sample size is either trigger-happy (one error reads as 100%) or never reachable. The
+  authorization must therefore name, as explicit reviewed inputs: the numeric limit, the observation
+  window, the minimum sample size before the rate is evaluated at all, and the defined behavior BELOW
+  that sample floor (fail-closed stop vs. no-trip). The same applies to the witness-reconciliation trip
+  (what counts as a mismatch, and after how many);
 - **[dedicated PR]** durable invocation determinability — a complete, non-success-only outcome record
   is necessary but NOT sufficient: a crash AFTER the server receives the POST but BEFORE `Upstream.Call`
   returns can emit no post-call event at all, so the `executing` record stays ambiguous. Closing the
@@ -897,7 +907,15 @@ verdict FAILED.)
   caller, so `ToolStillCurrent` re-checks only the seeded record. Add authenticated production
   discovery/freshness verification (a non-test `Discover` caller), OR require an externally-verified
   ingestion procedure proving seeded-fingerprint == the live peer's advertised tool, before treating
-  exact-current fingerprint and rug-pull invalidation as satisfied.
+  exact-current fingerprint and rug-pull invalidation as satisfied. **The ingestion-procedure
+  alternative must ALSO carry a freshness guarantee through the side-effect boundary**: it proves
+  equality only at INGESTION time, and the runtime drift check re-reads the LOCAL catalog only
+  (`runtime.toolHasDrifted` compares the request fingerprint against `Catalog.Current()`,
+  `internal/mcp/runtime/execute.go:201-215`) — so a peer that changes its advertised tool AFTER
+  ingestion but BEFORE the Canary request is not detected, and the seeded fingerprint still validates.
+  Closing blocker 11 by that route therefore additionally requires authenticated re-observation near
+  each call, a bounded freshness window, or an equivalent immutable peer attestation; without one,
+  "rug-pull invalidates the approval" cannot be claimed.
 - wire a **governed operator-reachable Canary ACTIVATION (forward transition) entry point** (blocker 12,
   §13/§17) — arming (blocker 3) and the activation inputs (blocker 2) are NOT sufficient to start the
   Canary: `apiMCPRolloutTransition` returns `distribution_not_configured` for a Canary target
