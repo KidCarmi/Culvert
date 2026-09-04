@@ -390,6 +390,93 @@ func TestSAMLBaseURLPostureFailsOnNonBaseComponents(t *testing.T) {
 	}
 }
 
+func withEnabledOIDCDiagnosticProfile(t *testing.T) {
+	t.Helper()
+	prevRegistry := idpRegistry
+	prevBaseURL := cfg.ProxyBaseURL()
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{{ID: "oidc-diag", Name: "OIDC", Type: IdPTypeOIDC, Enabled: true}},
+		live:     map[string]IdentityProvider{},
+	}
+	t.Cleanup(func() {
+		idpRegistry = prevRegistry
+		SetProxyBaseURL(prevBaseURL)
+	})
+}
+
+func TestOIDCBaseURLPostureOKWhenNoOIDCEnabled(t *testing.T) {
+	prevRegistry := idpRegistry
+	t.Cleanup(func() { idpRegistry = prevRegistry })
+	idpRegistry = &IdPRegistry{profiles: nil, live: map[string]IdentityProvider{}}
+
+	found := checkOIDCBaseURLPosture()
+	if found.Status != diagOK {
+		t.Fatalf("oidc_base_url status = %q, want ok", found.Status)
+	}
+}
+
+func TestOIDCBaseURLPostureWarnsWhenUnset(t *testing.T) {
+	withEnabledOIDCDiagnosticProfile(t)
+	SetProxyBaseURL("")
+
+	found := checkOIDCBaseURLPosture()
+	if found.Status != diagWarn {
+		t.Fatalf("oidc_base_url status = %q, want warn", found.Status)
+	}
+	if !strings.Contains(found.Message, "proxy.base_url is unset") {
+		t.Fatalf("message = %q, want unset base_url guidance", found.Message)
+	}
+	if !strings.Contains(found.OperatorAction, "/auth/oidc/callback") {
+		t.Fatalf("operator_action = %q, want redirect_uri callback guidance", found.OperatorAction)
+	}
+}
+
+func TestOIDCBaseURLPostureWarnsOnLocalhost(t *testing.T) {
+	withEnabledOIDCDiagnosticProfile(t)
+	SetProxyBaseURL("https://localhost:9090")
+
+	found := checkOIDCBaseURLPosture()
+	if found.Status != diagWarn {
+		t.Fatalf("oidc_base_url status = %q, want warn", found.Status)
+	}
+	if !strings.Contains(found.Message, "localhost") {
+		t.Fatalf("message = %q, want localhost guidance", found.Message)
+	}
+}
+
+func TestOIDCBaseURLPostureOKForExternalHTTPS(t *testing.T) {
+	withEnabledOIDCDiagnosticProfile(t)
+	SetProxyBaseURL("https://proxy.example.com/culvert")
+
+	found := checkOIDCBaseURLPosture()
+	if found.Status != diagOK {
+		t.Fatalf("oidc_base_url status = %q, want ok; action=%q", found.Status, found.OperatorAction)
+	}
+}
+
+func TestOIDCBaseURLPostureFailsOnNonBaseComponents(t *testing.T) {
+	withEnabledOIDCDiagnosticProfile(t)
+
+	cases := map[string]string{
+		"query":    "https://proxy.example.com?x=1",
+		"fragment": "https://proxy.example.com#frag",
+		"userinfo": "https://operator@proxy.example.com",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			SetProxyBaseURL(raw)
+
+			found := checkOIDCBaseURLPosture()
+			if found.Status != diagFail {
+				t.Fatalf("oidc_base_url status = %q for %q, want fail", found.Status, raw)
+			}
+			if !strings.Contains(found.Message, "query, fragment, or userinfo") {
+				t.Fatalf("message = %q, want non-base component guidance", found.Message)
+			}
+		})
+	}
+}
+
 func TestApiDiagnostics_RoleGated(t *testing.T) {
 	// Insufficient role → 403.
 	r := noRoleCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
