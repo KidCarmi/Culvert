@@ -249,7 +249,7 @@ run_mutation M20 \
   'an unprovable absence resolves as not_received' \
   'TestReconcile_ZeroWithoutCompletenessStaysRequired|TestReconcile_WitnessUnavailableStaysUnresolved' \
   ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
-  's/\tif obs\.Complete && obs\.CompletenessWatermark != "" && bindingConsistent\(obs, orphan, expectServer, expectMethod\) \{\n\t\treturn model\.ReconNotReceived\n\t\}\n\treturn model\.ReconRequired/\treturn model.ReconNotReceived/'
+  's/\tif obs\.Complete && obs\.CompletenessWatermark != "" && bindingCorroborated\(obs, orphan, expectServer, expectMethod\) \{\n\t\treturn model\.ReconNotReceived\n\t\}\n\treturn model\.ReconRequired/\treturn model.ReconNotReceived/'
 
 # ── (23) no terminal outcome on ANY non-executed path ───────────────────────
 #
@@ -336,7 +336,7 @@ run_mutation M32 \
   'a proven ZERO for a different reservation/server/method resolves as never-happened' \
   'TestReconcile_DefinitiveAbsenceRequiresAMatchingBinding' \
   ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
-  's/\tif obs\.Complete && obs\.CompletenessWatermark != "" && bindingConsistent\(obs, orphan, expectServer, expectMethod\) \{/\tif obs.Complete \&\& obs.CompletenessWatermark != "" {/'
+  's/\tif obs\.Complete && obs\.CompletenessWatermark != "" && bindingCorroborated\(obs, orphan, expectServer, expectMethod\) \{/\tif obs.Complete \&\& obs.CompletenessWatermark != "" {/'
 
 # ── (33) a peer answer discarded on the rejected-redirect path ──────────────
 run_mutation M33 \
