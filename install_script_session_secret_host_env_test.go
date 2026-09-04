@@ -73,6 +73,86 @@ error() { echo "ERROR: $*" >&2; exit 7; }
 	return string(out), exitCode, envContent
 }
 
+// runPersistHostEnvSessionSecretWithStub is runPersistHostEnvSessionSecret
+// plus an extra shell snippet (stubbedBuiltins) inserted AFTER the real
+// function definitions but BEFORE the call, so a test can shadow a builtin
+// like `grep` to simulate a real read failure (EACCES) without needing to
+// actually run as an unprivileged user against a root-owned file.
+func runPersistHostEnvSessionSecretWithStub(t *testing.T, dir, envSetup, stubbedBuiltins string) (output string, exitCode int, envContent string) {
+	t.Helper()
+	fn := extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
+	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+
+	stubs := `
+info() { :; }
+warn() { echo "WARN: $*" >&2; }
+error() { echo "ERROR: $*" >&2; exit 7; }
+sudo() { :; }
+` + "INSTALL_DIR=" + dir + "\n" + envSetup + "\n"
+
+	script := stubs + envPutFn + "\n" + fn + "\n" + stubbedBuiltins + "\n" + "persist_host_env_session_secret\n"
+
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	out, err := cmd.CombinedOutput()
+
+	exitCode = 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		} else {
+			t.Fatalf("shell script failed to run: %v\n%s", err, out)
+		}
+	}
+
+	envContent = ""
+	if b, rerr := os.ReadFile(filepath.Join(dir, ".env")); rerr == nil {
+		envContent = string(b)
+	}
+	return string(out), exitCode, envContent
+}
+
+// TestInstallScript_PersistHostEnvSessionSecret_UnreadableExistingValueIsNeverOverwritten
+// proves the Codex-flagged defect (PR #1310 review): on an unprivileged
+// rerun after a prior root/sudo install left .env owned by root, a read of
+// the existing CULVERT_SESSION_SECRET line can fail with a real error
+// (EACCES, simulated here via a shadowed grep returning exit 2) rather than
+// "pattern not found" (exit 1). Conflating that failure with absence would
+// fall through to env_put, which performs its own ownership self-heal and
+// would then unconditionally overwrite the real existing signing key it
+// never actually saw — silently invalidating cluster sessions. The fix must
+// distinguish "confirmed absent" (grep exit 1) from "could not verify" (any
+// other exit) and leave the file untouched in the latter case.
+func TestInstallScript_PersistHostEnvSessionSecret_UnreadableExistingValueIsNeverOverwritten(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	existing := strings.Repeat("33", 32)
+	if err := os.WriteFile(envFile, []byte("CULVERT_SESSION_SECRET="+existing+"\n"), 0o600); err != nil {
+		t.Fatalf("seed .env: %v", err)
+	}
+
+	hostEnv := strings.Repeat("44", 32)
+	// Simulate a real read failure (e.g. permission denied) on EVERY grep
+	// call, regardless of what the file actually contains — this is exactly
+	// what an unreadable-to-this-user root-owned file looks like from the
+	// script's point of view.
+	out, exitCode, envContent := runPersistHostEnvSessionSecretWithStub(t, dir,
+		`export CULVERT_SESSION_SECRET="`+hostEnv+`"`,
+		`grep() { return 2; }`)
+
+	if exitCode != 0 {
+		t.Fatalf("persist_host_env_session_secret should fail safe (exit 0, warn-and-skip) on an unreadable "+
+			"existing .env, not error out; exit %d, output:\n%s", exitCode, out)
+	}
+	if !strings.Contains(envContent, "CULVERT_SESSION_SECRET="+existing) {
+		t.Fatalf("an existing CULVERT_SESSION_SECRET that could not be VERIFIED present (simulated read "+
+			"failure) was overwritten anyway — a permission-denied read must never be treated as \"not "+
+			"configured\". .env content:\n%s", envContent)
+	}
+	if strings.Contains(envContent, hostEnv) {
+		t.Fatalf("the host-env value was written despite the existing entry being unverifiable; .env content:\n%s", envContent)
+	}
+}
+
 // TestInstallScript_PersistHostEnvSessionSecret_PersistsToEnvFile proves that
 // a CULVERT_SESSION_SECRET supplied only via the host environment gets
 // written into $INSTALL_DIR/.env — the only place a later plain `sudo docker

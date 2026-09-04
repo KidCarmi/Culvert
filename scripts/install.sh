@@ -1589,10 +1589,39 @@ validate_passphrase_for_env_file() {
 # enforces at boot (hex.DecodeString + len(key) < 32 => panic), so a bad
 # value fails the install with a clear message instead of persisting a key
 # that will make the container panic/crash-loop on every node.
+#
+# .env can be root-owned mode 0600 left over from a prior sudo run; an
+# unprivileged re-run can neither read nor write it. Self-heal ownership
+# the same way env_put() does BEFORE checking whether a value is already
+# present — checking first and swallowing the read error (2>/dev/null)
+# would misread "permission denied" as "not configured" and fall through
+# to env_put, which performs this SAME chown recovery and would then
+# unconditionally overwrite the existing signing key it just couldn't see,
+# silently invalidating cluster sessions (Codex review, PR #1310). Even
+# after the self-heal attempt, distinguish a real read failure from a
+# genuine absence by grep's own exit code (1 = pattern not found = safe to
+# add; anything else while the file exists = could not verify = leave it
+# alone) rather than trusting a suppressed error to mean "absent".
 persist_host_env_session_secret() {
   local envfile="$INSTALL_DIR/.env"
   [[ -n "${CULVERT_SESSION_SECRET:-}" ]] || return 0
-  grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null && return 0
+  if [[ -e "$envfile" && ! -r "$envfile" ]]; then
+    sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
+  fi
+  if [[ -f "$envfile" ]]; then
+    grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+      return 0 # already configured — never overwrite
+    elif [[ $rc -ne 1 ]]; then
+      warn "Could not verify whether CULVERT_SESSION_SECRET is already set in $envfile (grep exit $rc) —"
+      warn "leaving it unchanged rather than risk overwriting an existing signing key we can't read. Set"
+      warn "$envfile permissions so it is readable, or set CULVERT_SESSION_SECRET there yourself."
+      return 0
+    fi
+    # rc == 1: the file was read successfully and genuinely has no entry —
+    # fall through and persist.
+  fi
   local trimmed
   trimmed="$(printf '%s' "$CULVERT_SESSION_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   if [[ ! "$trimmed" =~ ^[0-9a-fA-F]{64,}$ || $(( ${#trimmed} % 2 )) -ne 0 ]]; then
