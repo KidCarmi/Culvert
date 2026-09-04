@@ -185,8 +185,9 @@ func pdContains(list []string, want string) bool {
 
 func pdAuditCount(since int64, action string) int {
 	n := 0
-	for _, e := range auditGet() {
-		if e.TS >= since && e.Action == action {
+	entries := auditGet()
+	for i := range entries {
+		if entries[i].TS >= since && entries[i].Action == action {
 			n++
 		}
 	}
