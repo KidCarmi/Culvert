@@ -128,6 +128,21 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// unattributable physical invocation is precisely what this mechanism exists
 		// to prevent, so this fails CLOSED.
 		if upstreamclient.ClassifyMethod(in.Method).SideEffectBearing() {
+			// METERED-EXECUTION IDENTITY GATE. A gate being wired at all means this is a
+			// metered Canary execution, and such an execution MUST be attributable: an
+			// effect with no reservation identity cannot be tied to the slot that paid
+			// for it, and one with no activation generation cannot be recognized as an
+			// orphan of a superseded generation after a restart. Either omission would
+			// silently degrade the physical-effect ledger to the pre-#6/#8 state, so it
+			// fails CLOSED here rather than committing unattributable evidence.
+			//
+			// Zero values remain legitimate ONLY for a nil gate (legacy/non-metered
+			// paths), which never reaches this branch.
+			if e.cfg.LiveGate != nil && (reservationID == "" || activationGen == 0) {
+				gateRefused = true
+				gateReason = mcperr.ReasonEventEvidenceMissing
+				return errLiveGateRefused
+			}
 			rec, ierr := e.commitSendIntent(in, reservationID, activationGen)
 			if ierr != nil {
 				gateRefused = true
