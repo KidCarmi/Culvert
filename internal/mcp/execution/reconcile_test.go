@@ -1341,19 +1341,18 @@ func TestRecovery_PayloadCouplingIsStatedOverTheAllowedSet(t *testing.T) {
 			PhysicalSendState: model.SendPeerResponseReceived, DecisionRef: "evt_x",
 		}
 		err := readPathAttemptRulesOK(&model.Event{Phase: ph, Outcome: outcome})
-		if outcomeAllowed[ph] {
-			// PhaseSendIntent additionally may not CLAIM a send state, so it is expected
-			// to reject this particular payload — for that reason, not the coupling one.
-			if ph == model.PhaseSendIntent {
-				if err == nil {
-					t.Fatalf("%v: a send intent claiming a send state must be refused", ph)
-				}
-				continue
+		switch {
+		case ph == model.PhaseSendIntent:
+			// An intent MAY carry outcome evidence but may not CLAIM a send state, so it
+			// rejects this particular payload for that reason, not the coupling one.
+			if err == nil {
+				t.Fatalf("%v: a send intent claiming a send state must be refused", ph)
 			}
+		case outcomeAllowed[ph]:
 			if err != nil {
 				t.Fatalf("%v may carry outcome evidence, got %v", ph, err)
 			}
-		} else if err == nil {
+		case err == nil:
 			t.Fatalf("%v must not carry outcome evidence", ph)
 		}
 
