@@ -506,6 +506,38 @@ run_mutation M56 \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
   's/\t\tif upstreamclient\.SendNeverStarted\(err\) \{/\t\tif false \&\& upstreamclient.SendNeverStarted(err) {/'
 
+# ── (57) last-leg send facts carried out as whole-call facts ───────────────
+#
+# The dangerous direction: a leg that provably sent nothing OVERWRITES an earlier
+# leg that may have reached the peer, so the caller records definitely_not_sent for
+# an invocation that may already have executed.
+run_mutation M57 \
+  'the last retry leg\'"'"'s never-sent marker becomes the whole-call claim' \
+  'TestCallFacts_ALaterNeverSentLegDoesNotEraseAnEarlierAmbiguousSend' \
+  ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/client.go \
+  's/\t\tlastErr = markLegFacts\(err, call\)/\t\tlastErr = markLegFacts(err, facts)/'
+
+# ── (58) never-sent folded as a disjunction instead of a conjunction ────────
+#
+# Same defect one layer down, at the fold itself: never-sent is the strongest claim
+# in the lattice and requires UNANIMITY across legs. An OR lets one never-sent leg
+# speak for legs that did send.
+run_mutation M58 \
+  'never-sent folds as a disjunction, so one silent leg speaks for the whole call' \
+  'TestFoldLegFacts_DirectionsAreOppositeAndConservative' \
+  ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/observed.go \
+  's/\t\tneverSent:        call\.neverSent \&\& leg\.neverSent,/\t\tneverSent:        call.neverSent || leg.neverSent,/'
+
+# ── (59) receipt folded as a conjunction instead of a disjunction ───────────
+#
+# The mirror direction. Receipt is monotonic knowledge — a later leg that saw no
+# response cannot un-prove that an earlier one was answered.
+run_mutation M59 \
+  'an observed response is erased by a later leg that saw none' \
+  'TestFoldLegFacts_DirectionsAreOppositeAndConservative' \
+  ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/observed.go \
+  's/\t\tresponseObserved: call\.responseObserved || leg\.responseObserved,/\t\tresponseObserved: call.responseObserved \&\& leg.responseObserved,/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

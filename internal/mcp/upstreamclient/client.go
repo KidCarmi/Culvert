@@ -144,18 +144,32 @@ func (c *Client) Call(ctx context.Context, target Target, method string, params 
 	// conditional.
 	retriesDisabled := c.cfg.Limits.RetriesDisabled()
 	var lastErr error
+	// call accumulates what is known about the WHOLE Call, not about its last leg.
+	// Seeded with the vacuous truth "nothing has been sent yet", which the first fold
+	// replaces with real evidence — the loop below always runs at least one leg before
+	// call is read. See foldLegFacts for why the two facts fold in opposite
+	// directions.
+	call := legFacts{neverSent: true}
 	for attempt := 0; ; attempt++ {
 		resp, facts, err := c.attempt(ctx, target, method, params, opts)
 		if err == nil {
 			return resp, nil
 		}
-		// Carry the observed-response fact out with the error. A non-200, a malformed
-		// body or a truncated read are failures of the ANSWER: the peer received the
-		// invocation and any side effect it has already happened. Without this the
-		// executor could only infer receipt from a successfully DECODED response, so a
-		// known-executed attempt was recorded as may_have_been_sent and sent for
-		// witness reconciliation that had nothing left to establish.
-		lastErr = markLegFacts(err, facts)
+		// Fold this leg into what is known about the whole Call, then carry THAT out
+		// with the error — never the bare leg. Two facts ride out here:
+		//
+		// responseObserved: a non-200, a malformed body or a truncated read are
+		// failures of the ANSWER: the peer received the invocation and any side effect
+		// it has already happened. Without it the executor could only infer receipt
+		// from a successfully DECODED response, so a known-executed attempt was
+		// recorded as may_have_been_sent and sent for witness reconciliation that had
+		// nothing left to establish.
+		//
+		// neverSent: the mirror, and the one that must survive a RETRY correctly — see
+		// foldLegFacts. It is a conjunction across legs precisely because the last leg
+		// can be the one that sent nothing while an earlier one reached the peer.
+		call = foldLegFacts(call, facts)
+		lastErr = markLegFacts(err, call)
 		// EXACTLY-ONE-PHYSICAL-SEND (First Controlled Canary, blocker #6).
 		// This test precedes retryable() deliberately: retryable() consults the
 		// method's idempotency and whether the failure arrived before any response,
@@ -168,6 +182,7 @@ func (c *Client) Call(ctx context.Context, target Target, method string, params 
 		if retriesDisabled {
 			return nil, lastErr
 		}
+		// facts, NOT call: retry classification is about the leg that just failed.
 		if !retryable(opts.Idempotent, attempt, budget, facts.preResponse) {
 			return nil, lastErr
 		}

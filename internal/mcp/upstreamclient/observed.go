@@ -65,6 +65,38 @@ func markLegFacts(err error, facts legFacts) error {
 	return err
 }
 
+// foldLegFacts folds ONE leg's facts into the facts known about the WHOLE Call.
+//
+// Call owns a retry loop, so a Call is not a leg. The two evidence facts therefore
+// aggregate in OPPOSITE directions, and in each case that direction is the
+// conservative one:
+//
+//   - responseObserved is a DISJUNCTION. Any leg that saw the peer answer proves the
+//     invocation reached it, and no later leg can un-prove that.
+//   - neverSent is a CONJUNCTION. It is the strongest claim in the send-state lattice
+//     and the one an operator would act on by re-running the invocation, so it
+//     requires UNANIMITY: only if EVERY attempted leg provably put no bytes on a
+//     connection did the Call as a whole send nothing.
+//
+// Carrying out the LAST leg's facts instead is how a false certainty gets
+// manufactured, and the shape is ordinary rather than contrived: an initial leg can
+// be read in full by the peer and then fail before a response (transport.go's
+// preResponse leg), which is exactly the classification that authorizes a re-send;
+// a retry can then fail at resolve, which sets neverSent AND preResponse together.
+// The caller would record definitely_not_sent for an invocation that may already
+// have executed at the peer — uncertainty converted into executed=false, which is
+// the one conversion this whole accounting exists to prevent (Codex round 15).
+//
+// preResponse is deliberately NOT folded. It is a per-leg input to retry
+// CLASSIFICATION, not evidence carried out to the caller, and folding it would make
+// it describe some leg other than the one being classified.
+func foldLegFacts(call, leg legFacts) legFacts {
+	return legFacts{
+		responseObserved: call.responseObserved || leg.responseObserved,
+		neverSent:        call.neverSent && leg.neverSent,
+	}
+}
+
 // markNeverSent wraps a failure that Call itself produced before any leg began —
 // method not admitted, an invalid target, or pool admission refused. No connection
 // exists in any of those cases.
