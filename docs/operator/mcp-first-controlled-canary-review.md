@@ -1322,11 +1322,49 @@ check: the real race mutation scores CAUGHT naming both symbols; a mutation that
 build scores NOT PROVEN; a mutation that fails the test without racing scores NOT PROVEN.
 **Both negatives scored CAUGHT before the change.**
 
+### Round 18: the campaign was measuring the compiler
+
+Round 17 tightened `--race` scoring. Round 18 answered the scope question that change left
+open — one I had put to the review rather than settled myself — and answered it against me.
+
+The header has always said: *"A COMPILE FAILURE IS NOT PROOF unless the mutation targets a
+structural wall whose stated purpose is compile-time prevention. Mutations here are written to
+compile and change behavior, so the failure comes from an assertion."* **The scoring never
+enforced it.** `go test` compiles and vets before running, so a mutation that fails to build
+exits nonzero without any gate having executed, and `run_mutation` counted the bare exit code.
+The stated rule and the implementation disagreed — the same class of defect this review keeps
+finding in the product, sitting in the instrument used to measure the product.
+
+Default is now: a build or vet failure scores **NOT PROVEN**. A mutation whose proof genuinely
+IS the compile failure declares itself with `--compile-wall`, and for it a build failure is
+required while anything else is a SURVIVOR.
+
+**Then the change was measured rather than assumed, and it found two mutations that had never
+proven anything.**
+
+**M59** was added two rounds earlier, by this work. The `||` in its perl pattern is
+ALTERNATION, not a literal, so the pattern carried an empty alternative — which matches at
+offset 0. Perl rewrote the TOP OF THE FILE instead of the struct literal
+(`observed.go:1:3: expected 'package', found responseObserved`), and the mutation scored CAUGHT
+across three campaign runs purely because it corrupted the file. An audit of every mutation
+pattern in the script found this is the **only** instance of that hazard.
+
+**M05** blanked `ReservationID` but left `resID` declared and unused, so the package did not
+compile and `TestMeteredExecution_` / `TestHTTPSE2E_EachPOSTCarriesADistinctAttemptID` /
+`TestConc03_` never ran. It now drops the binding too, so the mutation compiles and the
+assertion is what rejects it.
+
+Both were reported CAUGHT by every earlier campaign run in this PR. The tally was honest for
+58 of 60; for those two it was measuring the compiler. This is the strongest argument in the
+whole review for the rule that a gate must be run against the shape it claims to reject —
+**a mutation campaign measures the gates, and a mutation that does not compile measures
+nothing.**
+
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **60 mutations: 60 caught, 0 survived, 0
-skipped** — and, for the race mutation, caught with an attributed detector report rather than
-a bare nonzero exit. Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
+skipped, 0 not-proven** — every one rejected by a named assertion, the race mutation by an
+attributed detector report, and none by a build failure. Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
 longer matches the source is scored as a FAILURE rather than a pass.
