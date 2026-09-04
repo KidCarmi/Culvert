@@ -80,17 +80,19 @@ func pdcSeedMarked(t *testing.T) {
 }
 
 type pdcSnapshot struct {
-	file    string
-	rev     int64
-	since   int64
-	entries int
-	verDir  string
+	file     string
+	rev      int64
+	since    int64
+	entries  int
+	verDir   string
+	versions int // config versions present at the snapshot (the seed import legitimately wrote one)
 }
 
 func pdcSnap(t *testing.T, verDir string) pdcSnapshot {
 	t.Helper()
 	entries, _ := upGet(t)["entries"].([]any)
-	return pdcSnapshot{file: upSettingsFile(t), rev: upDocRevision(t), since: time.Now().UnixMilli(), entries: len(entries), verDir: verDir}
+	vers, _ := os.ReadDir(verDir)
+	return pdcSnapshot{file: upSettingsFile(t), rev: upDocRevision(t), since: time.Now().UnixMilli(), entries: len(entries), verDir: verDir, versions: len(vers)}
 }
 
 // pdcAssertZeroMutation is the refusal contract: nothing on disk, in the
@@ -110,8 +112,8 @@ func pdcAssertZeroMutation(t *testing.T, label string, s pdcSnapshot) {
 	if pdAuditCount(s.since, "config.import") != 0 {
 		t.Fatalf("%s: a refused import must not audit success", label)
 	}
-	if n, _ := os.ReadDir(s.verDir); len(n) != 0 {
-		t.Fatalf("%s: a refused import must not advance the config version (%d files)", label, len(n))
+	if n, _ := os.ReadDir(s.verDir); len(n) != s.versions {
+		t.Fatalf("%s: a refused import must not advance the config version (%d → %d files)", label, s.versions, len(n))
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, upstream.KeyFileName)); err == nil {
 		t.Fatalf("%s: a refused import must never mint the node-local key", label)
@@ -241,8 +243,8 @@ func TestUpstreamV2DC_CR3_PreserveKeepsRequiresReplacementAcrossReload(t *testin
 	if e := upEntry(t, pdcMarkedID); e["credentialState"] != upstream.CredentialRequiresReplacement {
 		t.Fatalf("marker must survive reload: %v", e)
 	}
-	if n, _ := os.ReadDir(verDir); len(n) == 0 {
-		t.Fatal("an ACCEPTED import must advance the config version (control)")
+	if n, _ := os.ReadDir(verDir); len(n) < 2 {
+		t.Fatalf("ACCEPTED imports must advance the config version (control): %d files", len(n))
 	}
 }
 
