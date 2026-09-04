@@ -357,7 +357,7 @@ Stated plainly, because a security product should be honest about its edges:
 
 ## Roadmap
 
-Development phases, production-readiness items, and the engineering governance model are tracked under [`roadmap/`](roadmap/) and [`docs/engineering/`](docs/engineering/). Near-term focus: CRL support, GUI parity for the remaining startup-scoped HA settings, and completing the catalog-driven release path as the default update mechanism.
+Development phases, production-readiness items, and the engineering governance model are tracked under [`roadmap/`](roadmap/) and [`docs/engineering/`](docs/engineering/). Near-term focus: CRL support and GUI parity for the remaining startup-scoped HA settings. The catalog-driven release path is no longer a near-term item - it shipped (legacy Docker updater sidecar removed, DEBT-008 closed) and is now the sole day-2 update mechanism, dispatched through the maintenance agent; see [`docs/operator/release-management-agent.md`](docs/operator/release-management-agent.md).
 
 ---
 
