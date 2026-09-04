@@ -1010,3 +1010,48 @@ func TestHTTPSE2E_AFailureBeforeTheAnswerStaysUncertain(t *testing.T) {
 		t.Fatal("an unanswered invocation must still require reconciliation")
 	}
 }
+
+// TestHTTPSE2E_ARejectedRedirectIsStillAnAnswer pins Codex round-3 P2 at the wire.
+//
+// net/http returns a NON-NIL response together with an error in exactly one case:
+// CheckRedirect refused. That is the retry-free client rejecting a 3xx — the round-1
+// fix that stops a same-origin 307/308 from replaying the POST body under the same
+// attempt id — and the peer demonstrably ANSWERED, with a redirect. Reading that as
+// "we do not know whether it arrived" sent a known-executed attempt into witness
+// reconciliation that had nothing left to establish.
+//
+// Both facts move together in the fix, and the second one is not cosmetic: leaving
+// preResponse=true told the retry classifier nothing had been received yet, which
+// under the DEFAULT (retrying) limits would authorize re-sending an idempotent
+// request the peer had already answered.
+func TestHTTPSE2E_ARejectedRedirectIsStillAnAnswer(t *testing.T) {
+	p := startControlledPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Same-origin permanent redirect: the shape that would replay the POST body
+		// with the same attempt id if redirects were followed.
+		http.Redirect(w, r, "/redirected", http.StatusPermanentRedirect)
+	})
+	rig := armCanaryWithRealPeer(t, p, 10)
+	out := rig.exec(peerExecInput(p, policy.OpRead))
+
+	// The invariant this test protects first: the redirect is REFUSED, so the peer
+	// sees exactly one POST, not two.
+	if p.count() != 1 {
+		t.Fatalf("a rejected redirect must leave exactly one physical POST, peer saw %d", p.count())
+	}
+	if out.Executed {
+		t.Fatalf("a rejected redirect must not be returned to the client as executed, out=%+v", out)
+	}
+
+	rep := rig.recover(t)
+	rec, found := findAttempt(rep, p.observed()[0].AttemptID)
+	if !found {
+		t.Fatalf("the attempt must be attributable after restart: %+v", rep)
+	}
+	if rec.TerminalSendState != model.SendPeerResponseReceived {
+		t.Fatalf("the peer answered with a redirect, so the send state must be peer_response_received, got %q",
+			rec.TerminalSendState)
+	}
+	if len(rep.Orphans) != 0 {
+		t.Fatalf("a demonstrably answered invocation must leave no orphan, got %+v", rep.Orphans)
+	}
+}

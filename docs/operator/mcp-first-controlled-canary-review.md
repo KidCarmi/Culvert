@@ -893,9 +893,33 @@ precisely the conversion this work exists to prevent. The apparent contradiction
 the PEER's reality. Pinned by `TestOutcomeTruth_*` (with the boundary-refusal control proving the
 flag is not simply hardcoded true) and mutation M28.
 
+### Two more, from the round after that
+
+**Definitive absence needs a binding that matches.** The witness-binding check guarded only the
+"observed exactly once" branch, so a witness reporting a COMPLETE view of a DIFFERENT reservation,
+server or method — containing zero invocations — resolved the attempt to `reconciled_not_received`.
+That is not contradictory evidence but INAPPLICABLE evidence, an answer to a question nobody asked,
+and it was invisible downstream because `ReconcileOrphan` records the orphan's OWN reservation on
+the evidence, so recovery's binding check compared a value against itself. The verdict for a
+mismatch is `reconciliation_required`, deliberately NOT a conflict: a conflict asserts a breach of
+the exactly-once invariant, and zero observations of some other authorization is no evidence of a
+breach — reporting one would manufacture an alarm from inapplicable data, the mirror of
+manufacturing absence, and would be the easier direction for a misdirected witness to trigger.
+Gates: `TestReconcile_DefinitiveAbsenceRequiresAMatchingBinding` (with the matching-binding control)
+and `TestReconcile_MismatchedAbsenceIsNotReportedAsAConflict` (with the observed-once control);
+mutation M32.
+
+**A rejected redirect is still an answer.** `net/http` returns a non-nil response together with an
+error in exactly one case — `CheckRedirect` refused — which is the retry-free client rejecting a 3xx.
+The peer answered, so the send state is `peer_response_received`. Both facts had to move together:
+leaving `preResponse` true told the retry classifier nothing had been received yet, which under the
+DEFAULT (retrying) limits would authorize re-sending an idempotent request the peer had already
+answered. Gate: `TestHTTPSE2E_ARejectedRedirectIsStillAnAnswer`, which also asserts the peer saw
+exactly one POST; mutation M33.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **31 mutations: 31 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **33 mutations: 33 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

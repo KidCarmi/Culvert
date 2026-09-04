@@ -116,6 +116,20 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 
 	resp, err := client.Do(req)
 	if err != nil {
+		// net/http returns a NON-NIL response together with an error in exactly one
+		// case: CheckRedirect refused (its Body is already closed). That is the
+		// retry-free client rejecting a 3xx — and the peer demonstrably ANSWERED, so
+		// this is a failure of the answer, not of delivery (Codex round 3, P2).
+		//
+		// Both facts have to move together. Reporting responseObserved=false forced a
+		// known-executed attempt into witness reconciliation; leaving preResponse=true
+		// told the retry classifier that nothing had been received yet, which under
+		// the DEFAULT (retrying) limits would authorize re-sending an idempotent
+		// request the peer had already answered — a second physical invocation on the
+		// path that still retries.
+		if resp != nil {
+			return nil, legFacts{responseObserved: true}, classifyTransportError(err)
+		}
 		return nil, legFacts{preResponse: true}, classifyTransportError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()

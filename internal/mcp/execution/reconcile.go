@@ -130,8 +130,26 @@ func deriveReconResult(obs WitnessObservation, orphan RecoveredAttempt, expectSe
 		}
 		return model.ReconReceived
 	}
-	// Count == 0. Absence is only meaningful if the witness proved its view complete.
-	if obs.Complete && obs.CompletenessWatermark != "" {
+	// Count == 0. Absence is only meaningful if the witness proved its view complete
+	// AND the view it proved is the one this attempt was authorized under.
+	//
+	// The binding check was originally on the Count==1 branch only (Codex round 3,
+	// P1), which left the more dangerous direction open: a witness reporting a
+	// COMPLETE view of a DIFFERENT reservation, server or method, with zero
+	// invocations in it, resolved this attempt to "never happened". That is not
+	// contradictory evidence, it is INAPPLICABLE evidence — an answer to a question
+	// nobody asked — and turning it into definitive absence is the one direction this
+	// engine must never manufacture. It was invisible downstream too, because
+	// ReconcileOrphan records the orphan's OWN reservation on the evidence, so
+	// recovery's binding check compared a value against itself.
+	//
+	// The verdict is ReconRequired, deliberately NOT ReconConflict: a conflict
+	// asserts a breach of the exactly-once invariant, and zero observations of some
+	// other authorization is no evidence of a breach. Reporting one would manufacture
+	// an alarm from inapplicable data — the mirror of manufacturing absence — and
+	// would be the easier direction for a misdirected or hostile witness to trigger.
+	// Knowledge is simply unchanged, which is what the resting state means.
+	if obs.Complete && obs.CompletenessWatermark != "" && bindingConsistent(obs, orphan, expectServer, expectMethod) {
 		return model.ReconNotReceived
 	}
 	return model.ReconRequired

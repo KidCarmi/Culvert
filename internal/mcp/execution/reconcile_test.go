@@ -369,3 +369,65 @@ func TestRecovery_ReconciliationMustMatchTheIntentBinding(t *testing.T) {
 		t.Fatalf("control: expected a not_received orphan, got %+v", rep.Orphans)
 	}
 }
+
+// TestReconcile_DefinitiveAbsenceRequiresAMatchingBinding pins Codex round-3 P1.
+//
+// The binding check originally guarded only the Count==1 branch, which left the
+// more dangerous direction open: a witness reporting a COMPLETE view of a DIFFERENT
+// reservation, server or method, containing zero invocations, resolved this attempt
+// to "never happened". That is not contradictory evidence — it is an answer to a
+// question nobody asked — and turning it into definitive absence is exactly the
+// conversion this engine exists to prevent.
+//
+// It was invisible downstream as well: ReconcileOrphan records the ORPHAN's own
+// reservation on the evidence, so recovery's binding check compared a value against
+// itself and could never see the mismatch.
+func TestReconcile_DefinitiveAbsenceRequiresAMatchingBinding(t *testing.T) {
+	o := orphanFor(t)
+	cases := map[string]func(*WitnessObservation){
+		"reservation": func(obs *WitnessObservation) { obs.ReservationID = "rsv_other" },
+		"server":      func(obs *WitnessObservation) { obs.ServerID = "s-other" },
+		"method":      func(obs *WitnessObservation) { obs.Method = "tools/other" },
+	}
+	for name, breakIt := range cases {
+		obs := baseObservation(o)
+		obs.Count, obs.Complete, obs.CompletenessWatermark = 0, true, "wm-1"
+		breakIt(&obs)
+		if got := reconcile(t, o, stubWitness{obs: obs}).Result; got != model.ReconRequired {
+			t.Fatalf("a proven zero for a mismatched %s must stay reconciliation_required, got %q", name, got)
+		}
+	}
+	// CONTROL on the same fixture: a matching binding with a proven zero DOES resolve.
+	// Without it, this gate would pass on an implementation that had simply stopped
+	// resolving absence at all — which would be a different bug, not a fix.
+	ok := baseObservation(o)
+	ok.Count, ok.Complete, ok.CompletenessWatermark = 0, true, "wm-1"
+	if got := reconcile(t, o, stubWitness{obs: ok}).Result; got != model.ReconNotReceived {
+		t.Fatalf("control: a proven zero with a matching binding must resolve not_received, got %q", got)
+	}
+}
+
+// TestReconcile_MismatchedAbsenceIsNotReportedAsAConflict pins the CHOICE of verdict,
+// which is a decision rather than an obvious consequence.
+//
+// A conflict asserts a breach of the exactly-once invariant. Zero observations of
+// some OTHER authorization is no evidence of a breach, so reporting one would
+// manufacture an alarm from inapplicable data — the mirror of manufacturing absence,
+// and the easier direction for a misdirected or hostile witness to trigger. Knowledge
+// is simply unchanged.
+func TestReconcile_MismatchedAbsenceIsNotReportedAsAConflict(t *testing.T) {
+	o := orphanFor(t)
+	obs := baseObservation(o)
+	obs.Count, obs.Complete, obs.CompletenessWatermark = 0, true, "wm-1"
+	obs.ReservationID = "rsv_other"
+	if got := reconcile(t, o, stubWitness{obs: obs}).Result; got == model.ReconConflict {
+		t.Fatal("a mismatched ZERO-count observation must not be reported as a conflict")
+	}
+	// CONTROL: a mismatched ONE-count observation IS a conflict — contradictory
+	// evidence about an effect that was actually observed.
+	one := baseObservation(o)
+	one.Count, one.ReservationID = 1, "rsv_other"
+	if got := reconcile(t, o, stubWitness{obs: one}).Result; got != model.ReconConflict {
+		t.Fatalf("control: a mismatched observed invocation must be a conflict, got %q", got)
+	}
+}

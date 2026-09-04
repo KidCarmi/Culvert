@@ -331,6 +331,20 @@ run_mutation M31 \
   . internal/mcp/upstreamclient/observed.go \
   's/\tif err == nil \|\| !facts\.responseObserved \{\n\t\treturn err\n\t\}\n\treturn &observedErr\{err: err\}/\treturn err/'
 
+# ── (32) definitive absence accepted from a mismatched binding ──────────────
+run_mutation M32 \
+  'a proven ZERO for a different reservation/server/method resolves as never-happened' \
+  'TestReconcile_DefinitiveAbsenceRequiresAMatchingBinding' \
+  ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
+  's/\tif obs\.Complete && obs\.CompletenessWatermark != "" && bindingConsistent\(obs, orphan, expectServer, expectMethod\) \{/\tif obs.Complete \&\& obs.CompletenessWatermark != "" {/'
+
+# ── (33) a peer answer discarded on the rejected-redirect path ──────────────
+run_mutation M33 \
+  'a 3xx refused by CheckRedirect is recorded as maybe-sent despite the peer answering' \
+  'TestHTTPSE2E_ARejectedRedirectIsStillAnAnswer' \
+  . internal/mcp/upstreamclient/transport.go \
+  's/\t\tif resp != nil \{\n\t\t\treturn nil, legFacts\{responseObserved: true\}, classifyTransportError\(err\)\n\t\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves
