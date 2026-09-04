@@ -934,7 +934,20 @@ func (e *restartEnv) boot2VerifyRecovery(preRestartID string) {
 	rt2, cat2, act2 := composeShadowNode(t, e.pki, e.invPath, e.polPath, e.telCfg)
 	tel2 := sharedTelemetry()
 	req(t, tel2 != nil, "boot#2: telemetry (evidence spool) must recover")
-	t.Cleanup(func() { _ = rt2.Shutdown(ctxWithTimeout(t)); _ = tel2.Close(context.Background()) })
+	t.Cleanup(func() {
+		_ = rt2.Shutdown(ctxWithTimeout(t))
+		_ = tel2.Close(context.Background())
+		// UN-PUBLISH, not just close. Closing the runtime leaves mcpTelem.rt pointing at
+		// it, so every later test in the process sees telemetry as "ready" and
+		// getMCPAdmin() (a sync.Once singleton) wires its decision source to a CLOSED
+		// spool whose directory is already gone — GET /api/mcp/decisions then answers 400
+		// where the dormant default answers 200. Every other compose site un-publishes;
+		// this one closed and stopped, which is why the leak reached the end of the run.
+		// The singleton reset is the second half: un-publishing cannot un-wire a
+		// singleton that was already built.
+		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
+		resetMCPAdminSingleton()
+	})
 	initMCPToolTrust(nil)
 	_, _, elig := catRec(t, cat2, ctrlServer, toolEcho)
 	req(t, elig == catalog.Usable, "boot#2: approval store must recover and re-derive echo Usable, got %v", elig)
