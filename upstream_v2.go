@@ -467,7 +467,12 @@ func writeUpstreamImportRefusal(w http.ResponseWriter, err error) {
 	}
 	var ie *upstreamImportError
 	if errors.As(err, &ie) {
-		http.Error(w, "invalid upstream proxies: "+ie.Code+" at entry "+strconv.Itoa(ie.Index)+": "+ie.Msg, http.StatusBadRequest)
+		// Structured (2F-D correction): the bounded code and the offending
+		// entry INDEX only — never the offending value.
+		jsonWriteStatus(w, http.StatusBadRequest, map[string]any{
+			"error": "invalid upstream proxies: " + ie.Code + " at entry " + strconv.Itoa(ie.Index) + ": " + ie.Msg,
+			"code":  ie.Code, "index": ie.Index,
+		})
 		return
 	}
 	var dup *upstream.DuplicateAuthorityError

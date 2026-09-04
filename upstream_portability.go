@@ -154,7 +154,7 @@ type upstreamClearRequiredError struct{ Plan *upstreamImportPlan }
 
 func (e *upstreamClearRequiredError) Error() string {
 	return "credential_clear_required: the import would remove, replace or change the authority of " +
-		fmt.Sprintf("%d credentialed entr(y/ies); clear each credential (Tier-3) first", len(e.Plan.CredentialClearRequired))
+		fmt.Sprintf("%d entr(y/ies) that hold or require a credential; set (Tier-2) or clear (Tier-3) each credential first", len(e.Plan.CredentialClearRequired))
 }
 
 // errUpstreamImportStale is the commit-time refusal when the document moved
@@ -167,12 +167,15 @@ var errUpstreamImportStale = errors.New("import_stale: the upstream document cha
 func upstreamPlanImport(b *configBackup, replace bool, cur upstream.Document) (*upstreamImportPlanned, error) {
 	hasV2 := b.UpstreamProxiesV2 != nil
 	hasLegacy := len(b.UpstreamProxies) > 0
-	if !hasV2 && !hasLegacy {
-		return &upstreamImportPlanned{}, nil
-	}
 	if hasV2 && hasLegacy {
 		return nil, &upstreamImportError{Code: "ambiguous_upstream_sections", Index: 0,
 			Msg: "a backup must carry either upstream_proxies_v2 or the legacy upstreamProxies list, not both"}
+	}
+	if err := upstreamValidateImportEnvelope(b, hasV2, hasLegacy); err != nil {
+		return nil, err
+	}
+	if !hasV2 && !hasLegacy {
+		return &upstreamImportPlanned{}, nil
 	}
 	if upstreamRejectedActive() {
 		return nil, errUpstreamDocumentRejected
@@ -204,10 +207,73 @@ func (p *upstreamImportPlan) existing(id, action string) {
 	p.Counts[action]++
 }
 
-// hasMaterial reports whether an entry holds credential material that an
-// import may never silently discard (configured, unusable or mismatch all
-// count — C9 refuses on every one of them).
+// upstreamEntryHasMaterial reports whether an entry holds credential
+// material (configured, unusable or mismatch all count).
 func upstreamEntryHasMaterial(e *upstream.ManagedEntry) bool { return e.Credential != nil }
+
+// upstreamEntryProtected is the C9/C12 refusal predicate: an import may
+// never silently discard credential MATERIAL, and it may never clear or
+// discard the durable requiresReplacement TRUST STATE either — that state
+// is resolved only by an explicit T2 replace or T3 clear on the credential
+// endpoint (2F-D correction, CR1/CR2). Both shapes therefore refuse an
+// authority change and a replace-mode omission with the complete plan.
+func upstreamEntryProtected(e *upstream.ManagedEntry) bool {
+	return e.Credential != nil || e.RequiresReplacement
+}
+
+// upstreamRecognizedCredentialState is the closed vocabulary a versioned
+// export may declare per entry (C4 derived states + the C12 marker state).
+// Anything else — including an absent value — is a schema error, never
+// credential evidence (2F-D correction, CR5/CR6).
+func upstreamRecognizedCredentialState(s string) bool {
+	switch s {
+	case upstream.CredentialNone, upstream.CredentialConfigured, upstream.CredentialUnusable,
+		upstream.CredentialMismatch, upstream.CredentialRequiresReplacement:
+		return true
+	}
+	return false
+}
+
+// upstreamEnvelopeError is the structured 400 for a versioned-schema
+// violation of the import envelope (no entry index applies).
+type upstreamEnvelopeError struct{ Code, Msg string }
+
+func (e *upstreamEnvelopeError) Error() string { return e.Code + ": " + e.Msg }
+
+// upstreamValidateImportEnvelope pins the versioned credential-omission
+// schema BEFORE planning or any mutation (2F-D correction, CR7/CR8): a
+// `upstream_proxies_v2` section is coherent only under version
+// configBackupVersion with the exact `upstream_credentials:"omitted"`
+// marker; the legacy `upstreamProxies` list belongs to version 1 and never
+// carries the marker; a marker without the section is a mismatch. The
+// offending value is never echoed.
+func upstreamValidateImportEnvelope(b *configBackup, hasV2, hasLegacy bool) error {
+	hasMarker := b.UpstreamCredentials != ""
+	switch {
+	case hasV2:
+		if b.Version != configBackupVersion {
+			return &upstreamEnvelopeError{Code: "schema_mismatch",
+				Msg: fmt.Sprintf("upstream_proxies_v2 requires backup version %d (got %d)", configBackupVersion, b.Version)}
+		}
+		if !hasMarker {
+			return &upstreamEnvelopeError{Code: "invalid_upstream_credentials_marker",
+				Msg: "the versioned export must declare upstream_credentials: \"omitted\""}
+		}
+		if b.UpstreamCredentials != upstreamCredentialsOmitted {
+			return &upstreamEnvelopeError{Code: "invalid_upstream_credentials_marker",
+				Msg: "unrecognized upstream_credentials marker; the versioned export declares \"omitted\" only"}
+		}
+	case hasLegacy:
+		if b.Version != 1 || hasMarker {
+			return &upstreamEnvelopeError{Code: "schema_mismatch",
+				Msg: "the legacy upstreamProxies list belongs to backup version 1 and carries no upstream_credentials marker"}
+		}
+	case hasMarker:
+		return &upstreamEnvelopeError{Code: "schema_mismatch",
+			Msg: "upstream_credentials marker without an upstream_proxies_v2 section"}
+	}
+	return nil
+}
 
 // upstreamPlanV2 is the identity-keyed plan (C9).
 func upstreamPlanV2(in []upstreamExportEntry, replace bool, cur upstream.Document) (*upstreamImportPlanned, error) {
@@ -237,11 +303,15 @@ func upstreamPlanV2(in []upstreamExportEntry, replace bool, cur upstream.Documen
 			return nil, &upstreamImportError{Code: "duplicate_id", Index: i, Msg: "the same entry id appears twice in the import"}
 		}
 		seenID[id] = struct{}{}
+		if !upstreamRecognizedCredentialState(ie.CredentialState) {
+			return nil, &upstreamImportError{Code: "invalid_credential_state", Index: i,
+				Msg: "credentialState must be one of none, configured, unusable, mismatch, requiresReplacement"}
+		}
 		spec, err := upstream.Normalize(upstream.Spec{Scheme: ie.Scheme, Host: ie.Host, Port: ie.Port, Username: ie.Username})
 		if err != nil {
 			return nil, &upstreamImportError{Code: "invalid_entry", Index: i, Msg: err.Error()}
 		}
-		declared := ie.CredentialState != "" && ie.CredentialState != upstream.CredentialNone
+		declared := ie.CredentialState != upstream.CredentialNone
 		ctx.classify(id, spec, declared)
 	}
 	// Existing entries the import did not name.
@@ -256,7 +326,7 @@ func upstreamPlanV2(in []upstreamExportEntry, replace bool, cur upstream.Documen
 			continue
 		}
 		plan.existing(e.ID, planRemove)
-		if upstreamEntryHasMaterial(&e) {
+		if upstreamEntryProtected(&e) {
 			plan.CredentialClearRequired = append(plan.CredentialClearRequired, e.ID)
 		}
 	}
@@ -310,7 +380,7 @@ func (c *planV2Ctx) classify(id string, spec upstream.Spec, declared bool) {
 	case exists:
 		old := c.cur.Entries[idx]
 		c.named[id] = struct{}{}
-		if upstreamEntryHasMaterial(&old) {
+		if upstreamEntryProtected(&old) {
 			c.plan.incoming(id, planRequiresReplacement)
 			c.plan.existing(id, planRemove)
 			c.plan.CredentialClearRequired = append(c.plan.CredentialClearRequired, id)
@@ -509,6 +579,11 @@ func writeUpstreamPlanRefusal(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, errUpstreamImportStale) {
 		jsonWriteStatus(w, http.StatusConflict, map[string]any{"error": err.Error(), "code": "import_stale"})
+		return
+	}
+	var env *upstreamEnvelopeError
+	if errors.As(err, &env) {
+		jsonWriteStatus(w, http.StatusBadRequest, map[string]any{"error": "invalid upstream proxies: " + env.Error(), "code": env.Code})
 		return
 	}
 	writeUpstreamImportRefusal(w, err)
