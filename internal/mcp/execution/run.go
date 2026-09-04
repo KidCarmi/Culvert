@@ -677,6 +677,27 @@ func (e *Executor) admitSideEffect(in runtime.ExecInput) (sideEffectAdmission, e
 	if e.cfg.LiveGate == nil {
 		return sideEffectAdmission{}, nil
 	}
+	// AUXILIARY TRAFFIC IS NOT ADMITTED, because it has nothing to admit. Lifecycle
+	// and discovery methods invoke no tool, so §4's contract — stated on openAttempt
+	// and previously enforced only there — is that they must never consume an
+	// execution reservation or inflate the physical-effect count. Running the gate
+	// for them contradicted that contract in both directions: the production gate
+	// validates tool trust against an empty tool binding and REFUSES, so an armed
+	// Canary node could not complete a session handshake or list tools; a gate that
+	// admitted instead would permanently spend a Canary slot on a call that can cause
+	// no side effect, and MaxTotalExecutions would stop measuring physical
+	// invocations — the accounting blocker #6 exists to make true.
+	//
+	// The classifier is the SAME fail-closed one openAttempt uses, and its default is
+	// side-effect-bearing: exemption is granted only to classes positively known to
+	// invoke no tool, so an unclassified method is metered, never exempted. Skipping
+	// the gate does not weaken the boundary — preCallGuard's tool-freshness check and
+	// the FINAL emergency-kill re-read read authoritative state directly
+	// (e.cfg.State.KillGeneration() against the admission generation passed in by the
+	// runtime), not through the gate, so they still run for every method.
+	if !upstreamclient.ClassifyMethod(in.Method).SideEffectBearing() {
+		return sideEffectAdmission{}, nil
+	}
 	d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
 	if !d.Admit {
 		return sideEffectAdmission{reason: d.Reason}, errLiveGateRefused

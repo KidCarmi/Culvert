@@ -329,6 +329,20 @@ func deriveAttempts(idx attemptIndex) (RecoveryReport, error) {
 				"execution.recovery", "terminal outcome without a matching send intent")
 		}
 	}
+	// The SAME rule for reconciliation evidence, for the same reason. The loop above
+	// iterates INTENTS, so a reconciliation record whose AttemptID matches no intent
+	// was never examined by anything: recovery returned a clean, empty report while
+	// the ledger held an authoritative claim about an invocation that no durable
+	// authorization covers. Silence there is the failure mode this whole file exists
+	// to remove — an unmatched witness claim is either a defect in whatever produced
+	// it or evidence of an invocation Culvert never authorized, and both are reasons
+	// to stop, not to report nothing.
+	for id := range idx.recon {
+		if _, ok := idx.intents[id]; !ok {
+			return RecoveryReport{}, mcperr.New(mcperr.ReasonEventInvalid,
+				"execution.recovery", "reconciliation evidence without a matching send intent")
+		}
+	}
 	return rep, nil
 }
 

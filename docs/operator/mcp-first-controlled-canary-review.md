@@ -962,9 +962,49 @@ settled. `MayHaveReachedPeer()` is the predicate that owns the distinction, and 
 always carries a valid state, so its false branch is exactly "proven not reached" rather than
 "unknown". Gate: `TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed`; mutation M38.
 
+### Three more, from the round after that
+
+**Auxiliary traffic was admitted through the side-effect gate.** `openAttempt` refuses to mint an
+attempt identity for lifecycle and discovery methods, and its own comment states the contract — such
+traffic "must never consume an execution reservation or inflate the physical-effect count". The
+composition-layer gate ran ABOVE that check, unconditionally, so the contract held for the durable
+intent and not for the reservation it names. Both directions were wrong: the production gate
+validates tool trust against a tool binding auxiliary traffic does not have and REFUSES, so an armed
+Canary node could not complete a session handshake or list tools; a gate that admitted instead
+permanently spent a Canary slot on a call that can cause no side effect, and `MaxTotalExecutions`
+stopped measuring physical invocations. Admission now consults the SAME fail-closed classifier
+`openAttempt` uses, whose default is side-effect-bearing, so an unclassified method is metered rather
+than exempted. The boundary is unchanged: tool freshness and the FINAL emergency-kill re-read read
+authoritative state directly, not through the gate, so they still run for every method. Gates:
+`TestAuxiliaryTraffic_NeverReachesTheSideEffectGate` and `TestAuxiliaryTraffic_SurvivesARefusingGate`,
+with `tools/call` controls on both fixtures and `TestUnclassifiedMethodIsStillMetered` for the
+fail-closed direction; mutation M39.
+
+**A resolved verdict was committable against facts that deny it.** The durable validator checked only
+enum membership, so a record claiming `reconciled_not_received` while reporting one observation and
+no completeness proof could be persisted — and recovery TRUSTS the stored result rather than
+re-deriving it, so contradictory or incomplete witness data became definitive knowledge. Each
+resolved verdict is now constrained to exactly what `deriveReconResult` requires to reach it: absence
+needs zero observations AND a completeness proof, receipt needs exactly one AND a completeness proof.
+`reconciliation_required` asserts nothing and stays unconstrained; `reconciliation_conflict` stays
+unconstrained deliberately, since it is reachable both from a duplicate and from a single observation
+whose binding contradicts the intent, and refusing to record a breach is a worse failure than
+recording one whose count looks unusual. Gates:
+`TestReconciliation_ResolvedVerdictNeedsACompletenessProof`,
+`TestReconciliation_ResolvedVerdictMustMatchItsCount`, with the well-supported control and the
+explicit conflict-is-unconstrained gate; mutation M40.
+
+**Unmatched reconciliation evidence was never examined.** `deriveAttempts` iterates INTENTS, so a
+reconciliation record whose `AttemptID` matched no intent was read by nothing: recovery returned a
+clean, EMPTY report while the ledger held an authoritative claim about an invocation no durable
+authorization covers. That is the same fault the terminal-outcome rule already refuses, and the same
+silence this path exists to remove. Gate:
+`TestRecovery_ReconciliationWithoutAnIntentFailsClosed`, including the dangerous shape where a
+healthy attempt makes the report look populated, plus a matched-record control; mutation M41.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **38 mutations: 38 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **41 mutations: 41 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

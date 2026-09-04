@@ -658,3 +658,55 @@ func TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed(t *testing.T) 
 		t.Fatalf("control: receipt corroborating a peer response must still settle: %v", err)
 	}
 }
+
+// TestRecovery_ReconciliationWithoutAnIntentFailsClosed pins the unmatched-record
+// rule for reconciliation evidence (Codex round 6, P2).
+//
+// deriveAttempts iterates INTENTS, so a reconciliation record whose AttemptID
+// matches no intent was examined by nothing at all: recovery returned a clean,
+// EMPTY report while the ledger held an authoritative claim about an invocation no
+// durable authorization covers. That is the same fault the terminal-outcome rule
+// already refuses, and the same silence this file exists to remove — an unmatched
+// witness claim is either a defect in whatever produced it or evidence of an
+// invocation Culvert never authorized, and both are reasons to stop.
+func TestRecovery_ReconciliationWithoutAnIntentFailsClosed(t *testing.T) {
+	orphanID, strayID := mustAttemptID(t), mustAttemptID(t)
+	stray := func(id string, res model.ReconciliationResult) model.Event {
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: "rsv_1", ActivationGeneration: 7, Result: res,
+		}}
+	}
+
+	t.Run("alone in the ledger", func(t *testing.T) {
+		rep, err := RecoverAttempts(readerWith(stray(strayID, model.ReconNotReceived)))
+		if err == nil {
+			t.Fatalf("an unattributed reconciliation record must fail closed, got a clean report: %+v", rep)
+		}
+	})
+
+	t.Run("hidden beside a well-formed attempt", func(t *testing.T) {
+		// The dangerous shape: a healthy attempt makes the report look populated, so
+		// nothing draws attention to the record that belongs to no authorization.
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(orphanID, "rsv_1", 7),
+			stray(strayID, model.ReconReceived),
+		)); err == nil {
+			t.Fatal("an unattributed reconciliation record must fail closed even when other attempts are sound")
+		}
+	})
+
+	t.Run("control: a matched record still recovers", func(t *testing.T) {
+		// Without this the gate above would pass on an implementation that had stopped
+		// accepting reconciliation evidence altogether.
+		rep, err := RecoverAttempts(readerWith(
+			intentEvent(orphanID, "rsv_1", 7),
+			stray(orphanID, model.ReconNotReceived),
+		))
+		if err != nil {
+			t.Fatalf("control: a reconciliation record matching its intent must still recover: %v", err)
+		}
+		if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconNotReceived {
+			t.Fatalf("control: expected one not-received orphan, got %+v", rep.Orphans)
+		}
+	})
+}

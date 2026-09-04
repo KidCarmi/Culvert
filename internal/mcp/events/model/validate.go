@@ -547,6 +547,60 @@ func (e Event) validateReconciliationPhase() error {
 	if e.Outcome != nil {
 		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a reconciliation event")
 	}
+	return e.Reconciliation.validateVerdictAgainstFacts()
+}
+
+// validateVerdictAgainstFacts rejects a reconciliation record whose VERDICT is not
+// supported by the FACTS recorded beside it.
+//
+// Until this check existed the validator only tested enum membership, so a record
+// claiming reconciled_not_received while reporting one observation and no
+// completeness proof was durably committable — and recovery trusts the stored result
+// rather than re-deriving it, so contradictory or incomplete witness data became
+// definitive non-receipt. The engine's own derivation already refuses both shapes;
+// this makes the DURABLE boundary refuse them too, so a record written by any other
+// producer (an adapter, an import, a future witness integration) cannot assert
+// knowledge its own evidence contradicts.
+//
+// Only the two RESOLVED verdicts are constrained, and each is constrained to exactly
+// what deriveReconResult requires to reach it:
+//
+//   - reconciled_not_received — absence, so zero observations AND a completeness
+//     proof. Absence from an incomplete view proves nothing.
+//   - reconciled_received — exactly one observation AND a completeness proof. "Exactly
+//     one" is a claim about the whole population, so it needs the same proof absence
+//     does; without it an unseen duplicate hides behind a resolved verdict.
+//
+// reconciliation_required asserts nothing and is deliberately unconstrained.
+// reconciliation_conflict is deliberately unconstrained too: it is reachable from a
+// duplicate (count > 1) AND from a single observation whose binding contradicts the
+// intent, and the binding the witness reported is not carried on this record — so a
+// count rule would reject a truthful conflict. Constraining the alarm direction also
+// has the wrong failure mode: refusing to record a breach is worse than recording one
+// whose count looks unusual.
+//
+// A negative count is malformed input rather than an observation and is rejected for
+// every verdict, including the unconstrained ones.
+func (r *ReconciliationEvidence) validateVerdictAgainstFacts() error {
+	if r.ObservationCount < 0 {
+		return evtErr(mcperr.ReasonEventInvalid, "reconciliation with a negative observation count")
+	}
+	switch r.Result {
+	case ReconNotReceived:
+		if r.ObservationCount != 0 {
+			return evtErr(mcperr.ReasonEventInvalid, "definitive non-receipt with a non-zero observation count")
+		}
+		if r.CompletenessWatermark == "" {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "definitive non-receipt without a completeness proof")
+		}
+	case ReconReceived:
+		if r.ObservationCount != 1 {
+			return evtErr(mcperr.ReasonEventInvalid, "receipt without exactly one observation")
+		}
+		if r.CompletenessWatermark == "" {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "receipt without a completeness proof")
+		}
+	}
 	return nil
 }
 

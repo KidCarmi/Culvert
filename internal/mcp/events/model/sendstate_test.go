@@ -156,3 +156,108 @@ func TestOutcome_BoundsAttemptIdentityStrings(t *testing.T) {
 	e.Outcome = &OutcomeEvidence{AttemptID: "att_0001", ReservationID: over}
 	mustReason(t, e.Validate(), mcperr.ReasonEventTooLarge)
 }
+
+// --- verdict-vs-facts gates (Codex round 6, P2) ------------------------------
+//
+// Until these existed the validator checked only enum membership, so a record
+// claiming a RESOLVED verdict while reporting facts that cannot support it was
+// durably committable — and recovery trusts the stored result rather than
+// re-deriving it, so contradictory or incomplete witness data became definitive
+// knowledge. Each negative gate is paired with a positive control on the same
+// fixture.
+
+// resolvedReconciliation returns a VALID record for one resolved verdict, so each
+// gate below can corrupt exactly one field.
+func resolvedReconciliation(res ReconciliationResult, count int) Event {
+	e := baseReconciliation()
+	e.Reconciliation.Result = res
+	e.Reconciliation.ObservationCount = count
+	e.Reconciliation.CompletenessWatermark = "wm-4711"
+	return e
+}
+
+// TestReconciliation_ResolvedVerdictsAreValidWithTheirFacts is the CONTROL for
+// every gate below. Without it they would all pass on a validator that had simply
+// stopped accepting resolved verdicts at all.
+func TestReconciliation_ResolvedVerdictsAreValidWithTheirFacts(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		res   ReconciliationResult
+		count int
+	}{
+		{"definitive absence", ReconNotReceived, 0},
+		{"exactly one receipt", ReconReceived, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := resolvedReconciliation(tc.res, tc.count).Validate(); err != nil {
+				t.Fatalf("control: a well-supported %q must validate: %v", tc.res, err)
+			}
+		})
+	}
+}
+
+// TestReconciliation_ResolvedVerdictNeedsACompletenessProof pins the half that
+// matters most: absence and "exactly one" are both claims about the WHOLE
+// population, so neither can rest on a view the witness never proved complete.
+func TestReconciliation_ResolvedVerdictNeedsACompletenessProof(t *testing.T) {
+	for _, tc := range []struct {
+		res   ReconciliationResult
+		count int
+	}{
+		{ReconNotReceived, 0},
+		{ReconReceived, 1},
+	} {
+		t.Run(string(tc.res), func(t *testing.T) {
+			e := resolvedReconciliation(tc.res, tc.count)
+			e.Reconciliation.CompletenessWatermark = ""
+			mustReason(t, e.Validate(), mcperr.ReasonEventEvidenceMissing)
+		})
+	}
+}
+
+// TestReconciliation_ResolvedVerdictMustMatchItsCount pins the other half: the
+// verdict names a count, so a record whose own count contradicts it is asserting
+// knowledge its evidence denies.
+func TestReconciliation_ResolvedVerdictMustMatchItsCount(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		res   ReconciliationResult
+		count int
+	}{
+		{"absence with an observation", ReconNotReceived, 1},
+		{"receipt with no observation", ReconReceived, 0},
+		{"receipt with a duplicate", ReconReceived, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mustReason(t, resolvedReconciliation(tc.res, tc.count).Validate(), mcperr.ReasonEventInvalid)
+		})
+	}
+}
+
+// TestReconciliation_RejectsANegativeObservationCount pins that a negative count is
+// malformed input for EVERY verdict, including the unconstrained ones — it is not an
+// observation, and left to fall through it reads as zero.
+func TestReconciliation_RejectsANegativeObservationCount(t *testing.T) {
+	for _, res := range []ReconciliationResult{ReconRequired, ReconConflict, ReconNotReceived, ReconReceived} {
+		t.Run(string(res), func(t *testing.T) {
+			e := resolvedReconciliation(res, -1)
+			mustReason(t, e.Validate(), mcperr.ReasonEventInvalid)
+		})
+	}
+}
+
+// TestReconciliation_ConflictIsDeliberatelyUnconstrained pins a decision rather than
+// an oversight. A conflict is reachable from a duplicate (count > 1) AND from a
+// single observation whose binding contradicts the intent, and the observed binding
+// is not carried on this record — so a count rule would reject a truthful conflict.
+// Refusing to record a breach is a worse failure than recording one whose count
+// looks unusual, so the alarm direction stays permissive.
+func TestReconciliation_ConflictIsDeliberatelyUnconstrained(t *testing.T) {
+	for _, count := range []int{0, 1, 2, 9} {
+		e := resolvedReconciliation(ReconConflict, count)
+		e.Reconciliation.CompletenessWatermark = ""
+		if err := e.Validate(); err != nil {
+			t.Fatalf("a conflict reporting count=%d must still be recordable: %v", count, err)
+		}
+	}
+}

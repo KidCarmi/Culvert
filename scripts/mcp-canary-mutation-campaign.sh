@@ -380,6 +380,27 @@ run_mutation M38 \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\t\tif !out\.PhysicalSendState\.MayHaveReachedPeer\(\) \{\n\t\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid,\n\t\t\t\t"execution\.recovery", "witness reported received against an outcome that proves the peer was not reached"\)\n\t\t\}/\t\tif out.PhysicalSendState == model.SendDefinitelyNotSent {\n\t\t\treturn mcperr.New(mcperr.ReasonEventInvalid,\n\t\t\t\t"execution.recovery", "witness reported received against a provably never-sent outcome")\n\t\t}/'
 
+# ── (39) auxiliary traffic reaches the side-effect gate ────────────────────
+run_mutation M39 \
+  'lifecycle/discovery traffic consumes a Canary execution reservation' \
+  'TestAuxiliaryTraffic_NeverReachesTheSideEffectGate|TestAuxiliaryTraffic_SurvivesARefusingGate' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\tif !upstreamclient\.ClassifyMethod\(in\.Method\)\.SideEffectBearing\(\) \{\n\t\treturn sideEffectAdmission\{\}, nil\n\t\}\n\td := e\.cfg\.LiveGate\.AdmitSideEffect/\td := e.cfg.LiveGate.AdmitSideEffect/'
+
+# ── (40) resolved reconciliation verdicts unchecked against their facts ─────
+run_mutation M40 \
+  'a resolved verdict is committable with facts that cannot support it' \
+  'TestReconciliation_ResolvedVerdictNeedsACompletenessProof|TestReconciliation_ResolvedVerdictMustMatchItsCount' \
+  ./internal/mcp/events/model/ internal/mcp/events/model/validate.go \
+  's/\treturn e\.Reconciliation\.validateVerdictAgainstFacts\(\)/\treturn nil/'
+
+# ── (41) unmatched reconciliation evidence silently ignored ────────────────
+run_mutation M41 \
+  'reconciliation evidence naming no send intent yields a clean, empty report' \
+  'TestRecovery_ReconciliationWithoutAnIntentFailsClosed' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tfor id := range idx\.recon \{\n\t\tif _, ok := idx\.intents\[id\]; !ok \{\n\t\t\treturn RecoveryReport\{\}, mcperr\.New\(mcperr\.ReasonEventInvalid,\n\t\t\t\t"execution\.recovery", "reconciliation evidence without a matching send intent"\)\n\t\t\}\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves
