@@ -216,8 +216,13 @@ test.describe("2F-D — legacy Upstream Proxies panel never receives credential 
         const r = await fetch("/api/config/export?section=upstream");
         return r.text();
       });
-      expect(exportText).toContain('"upstream_credentials": "omitted"');
+      const exported: unknown = JSON.parse(exportText);
+      expect(isRecord(exported) && exported["upstream_credentials"]).toBe(
+        "omitted",
+      );
+      expect(isRecord(exported) && exported["version"]).toBe(2);
       expect(exportText).not.toContain("xxxxx");
+      expect(exportText).not.toContain("ciphertext");
       await page.evaluate(async () => {
         await fetch("/api/audit");
         await fetch("/api/upstream");
