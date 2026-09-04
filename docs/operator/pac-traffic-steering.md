@@ -282,18 +282,45 @@ pool is missing, secure mode could emit DIRECT, compilation/digest fails, or
 rule conflicts violate the documented invariants. Publishing a change that
 introduces **new DIRECT paths** — a new DIRECT rule, switching to availability
 mode, **or flipping private-networks to `direct`** (which sends the entire
-RFC-1918/loopback space DIRECT) — is refused with `409` until the admin
-retypes the profile ID in `confirmDirect` (a high-friction typed
-confirmation). **Rollback is gated the same way:** rolling back to a revision
-whose DIRECT footprint exceeds the currently-active one also requires the
-typed confirmation, so the guardrail cannot be laundered through a rollback.
+RFC-1918/loopback space DIRECT) — is refused with `409 confirm_required`
+until the admin retypes the server-selected `confirmValue` (the profile ID
+plus the first eight hex characters of the candidate's spec digest) and echoes
+the candidate-bound `challenge` + `binding` the refusal issued. The binding
+covers the candidate, the active revision and spec digest, the referenced
+pools and the compiled artifact; if any of them changed by the time the
+retry lands, the server answers `409 challenge_stale` naming the changed
+fields with a fresh challenge. A challenge is single-use for a commit.
+**Rollback is gated the same way:** rolling back to a revision whose DIRECT
+footprint exceeds the currently-active one also requires the typed
+confirmation (bound to the rollback action and target), so the guardrail
+cannot be laundered through a rollback. The pre-2F `confirmDirect=<id>`
+form is no longer accepted.
+
+**Lifecycle truth.** Every publish/rollback/repair carries a UUID
+`operationId` and is at-most-once: a repeated id returns the recorded result.
+The active profile store is the only commit point; the node-local history
+records the outcome afterwards, and `GET …/lifecycle` reports
+`historyState`: `recorded`, `pending_reconciliation` (the active profile IS
+committed; a node-local effect — history revision, config version keyed by
+the operation, cluster publication, success audit — is completed on the next
+read, operation or restart, never duplicated), `ambiguous` (an outcome could
+not be classified from the active state; an admin `repair` with
+`resolution: accept_active` records the observed active spec), or
+`history_reset`. **`history_reset`** means the history file was found corrupt
+at startup and quarantined to `pac_profiles_lifecycle.json.corrupt.<unixnano>`
+(the durable record lives in `pac_profiles_lifecycle.reset.json`); the
+active profile is untouched and still served, but publish/rollback are
+refused with `409 history_reset` until an admin acknowledges the loss for
+that profile with `action: acknowledge_history_reset`, echoing the current
+`expectedActiveRevision` and `expectedActiveSpecDigest` from the GET. The
+acknowledgement never rewrites the active store and survives restarts.
 
 **The direct CRUD path enforces the same gate.** Creating or updating a
 profile through `POST /api/pac/profiles` / `PUT /api/pac/profiles/{id}` (the
 Steering Profiles editor's Save) runs the identical guardrail: a candidate
-that introduces a new DIRECT path is refused with `409` until the caller
-retypes the profile ID in the `?confirmDirect=<id>` query parameter (the
-editor prompts for it). This closes the bypass where the safe-publish
+that introduces a new DIRECT path is refused with `409 confirm_required`
+until the caller echoes the same bound challenge in the body's `confirm`
+object (the editor prompts for the typed `confirmValue`). This closes the bypass where the safe-publish
 confirmation could be sidestepped by saving through the editor/API instead of
 the publish lifecycle — both paths share one guardrail. (A brand-new profile
 has no prior revision, so *any* DIRECT capability counts as new and prompts

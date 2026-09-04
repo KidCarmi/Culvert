@@ -17493,7 +17493,8 @@
                       "save_draft",
                       "publish",
                       "rollback",
-                      "repair"
+                      "repair",
+                      "acknowledge_history_reset"
                     ],
                     "type": "string"
                   },
@@ -17519,8 +17520,12 @@
                     "format": "int64",
                     "type": "integer"
                   },
+                  "expectedActiveSpecDigest": {
+                    "description": "2F-B correction — acknowledge_history_reset binds the admin's acknowledgement of a lost node-local history to the active ProfileSpecDigest reviewed (together with expectedActiveRevision); a mismatch is refused `409 history_reset_stale` with `current`.",
+                    "type": "string"
+                  },
                   "operationId": {
-                    "description": "2F-B — required for publish, rollback and repair. Decisions are at-most-once: a repeated operationId returns the recorded result (status and body) without committing again.",
+                    "description": "2F-B — required for publish, rollback, repair and acknowledge_history_reset. Decisions are at-most-once: a repeated operationId returns the recorded result (status and body) without committing again.",
                     "format": "uuid",
                     "type": "string"
                   },
@@ -17551,7 +17556,7 @@
                 }
               }
             },
-            "description": "Lifecycle action result. publish: `{published:true, operationId, revision, activeRevision, activeSpecDigest, digest, draftRevision, historyState: recorded|pending_reconciliation, scope}`; rollback: `{rolledBack:true, toRevision, newRevision, …}`; repair: `{repaired:true, revision, …}`. `historyState: pending_reconciliation` means the active profile IS committed but the node-local history finalization must be reconciled (next GET, operation or restart) — never \"not published\"."
+            "description": "Lifecycle action result. publish: `{published:true, operationId, revision, activeRevision, activeSpecDigest, digest, draftRevision, historyState: recorded|pending_reconciliation, scope}`; rollback: `{rolledBack:true, toRevision, newRevision, …}`; repair: `{repaired:true, revision, …}`; acknowledge_history_reset: `{acknowledged:true, operationId, activeRevision, activeSpecDigest, historyState: recorded}`. `historyState: pending_reconciliation` means the active profile IS committed but one of its node-local post-commit effects (history revision, config version keyed by operationId, cluster publication, success audit, terminal record) is not yet durable and will be completed — never duplicated — by reconciliation (next GET, operation or restart); it never means \"not published\"."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -17578,7 +17583,7 @@
                 }
               }
             },
-            "description": "Structured, keyed by `code`: `stale` (2F-A fence, see PACFenceRefusal), `confirm_required` (candidate-bound DIRECT challenge: `challenge`, `confirmValue`, `binding`), `challenge_stale` (the reviewed candidate changed: `changed` names the fields, a fresh challenge is included), `operation_pending` (a previous intent could not be persisted after reconciliation), `not_ambiguous` / `active_absent` (repair)."
+            "description": "Structured, keyed by `code`: `stale` (2F-A fence, see PACFenceRefusal), `confirm_required` (candidate-bound DIRECT challenge: `challenge`, `confirmValue`, `binding`), `challenge_stale` (the reviewed candidate changed: `changed` names the fields, a fresh challenge is included), `operation_pending` (a previous intent could not be persisted after reconciliation), `not_ambiguous` / `active_absent` (repair), `history_reset` (the node-local history file was corrupt and quarantined; the ACTIVE profile is untouched but publish/rollback are refused until an admin acknowledges the loss with `acknowledge_history_reset` bound to `current.revision` + `current.activeSpecDigest`), `history_reset_stale` (the acknowledgement named a different active revision/digest; `current` + `changed`), `not_history_reset` (nothing to acknowledge)."
           },
           "428": {
             "$ref": "#/components/responses/PACPreconditionRequired"

@@ -29,11 +29,15 @@ func pacWriteStateDecision(r *http.Request, stage string) {
 // mutation so a test can observe or snapshot the on-disk state at exactly
 // that point (a deterministic "crash here" without sleeps):
 //
-//   - "intent_persisted":  the operation intent is durable, the active
+//   - "intent_persisted":    the operation intent is durable, the active
 //     store has NOT been mutated yet;
-//   - "active_committed":  the authoritative active store has been mutated
-//     (durably), history is NOT finalized yet;
-//   - "finalized":         the lifecycle history has been finalized.
+//   - "active_committed":    the authoritative active store has been mutated
+//     (durably), the committed marker is NOT persisted yet;
+//   - "committed_persisted": the intent is durably committed (no effect yet);
+//   - "history_recorded":    the published revision is durable in history;
+//   - "version_recorded":    the config-version marker is durable;
+//   - "cluster_published":   the cluster-publication marker is durable;
+//   - "finalized":           the operation is durably recorded (audit done).
 //
 // Production leaves the hook nil.
 var pacLifecycleStageHook func(stage string)
@@ -46,8 +50,9 @@ func pacLifecycleStage(stage string) {
 
 // pacLifecyclePersistHook is a TEST-ONLY fault-injection seam consulted
 // immediately before each durable lifecycle write on the publish/rollback
-// path ("intent", "finalize"); a non-nil error is treated exactly like the
-// underlying write failing. Production leaves the hook nil.
+// path ("intent", "committed", "finalize", "progress", "record") and before
+// a history-reset acknowledgement write ("ack"); a non-nil error is treated
+// exactly like the underlying write failing. Production leaves the hook nil.
 var pacLifecyclePersistHook func(stage string) error
 
 func pacLifecyclePersist(stage string) error {

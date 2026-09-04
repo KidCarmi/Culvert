@@ -49,6 +49,20 @@ func loadPAC(cfg pacStartupConfig) error {
 		if err := pacLifecycle.Load(cfg.LifecyclePath); err != nil {
 			logger.Printf("PAC lifecycle history WARNING: %v", err)
 		}
+		// 2F-B correction (C1): a quarantined history is a durable, visible
+		// history_reset. Scope it to the profiles that are active right now
+		// (the ACTIVE store is loaded above and stays the sole authority);
+		// every one of them refuses publish/rollback until an admin
+		// acknowledges the loss. A scope that cannot be persisted stays
+		// unscoped, which is the conservative reading (all active affected).
+		if hr := pacLifecycle.HistoryResetRecord(); hr != nil && !hr.Scoped {
+			ids := pacActiveProfileIDs()
+			if err := pacLifecycle.NoteActiveAtReset(ids); err != nil {
+				logger.Printf("PAC lifecycle history RESET WARNING: scope could not be persisted (%v); every active profile is treated as affected", err)
+			}
+			logger.Printf("PAC lifecycle history RESET: node-local publish history quarantined to %q; publish/rollback refused for %d active profile(s) until acknowledged (action acknowledge_history_reset)",
+				sanitizeLog(hr.QuarantinedTo), len(ids))
+		}
 	}
 	if cfg.ExceptionsPath != "" {
 		// Governance metadata is NODE-LOCAL operator state, not serving-critical
@@ -60,10 +74,25 @@ func loadPAC(cfg pacStartupConfig) error {
 	}
 	// 2F-B: settle every publish/rollback intent that was in flight when the
 	// previous process stopped, against the authoritative active store just
-	// loaded (committed → finalize, aborted → record, else ambiguous).
-	pacReconcileAllLifecycles()
+	// loaded (committed → durable committed + history, aborted → record,
+	// else ambiguous). The post-commit effects that need the WHOLE
+	// configuration (config version, cluster publication, audit, terminal
+	// record) run in main.go's pacReconcileAllLifecycles once every store is
+	// loaded — capturing a config version here would snapshot a partial
+	// configuration that a later rollback would treat as authoritative.
+	pacSettleLifecycleIntents()
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)
 	return nil
+}
+
+// pacActiveProfileIDs lists the IDs of the loaded active profiles.
+func pacActiveProfileIDs() []string {
+	cfg := pacProfiles.Get()
+	ids := make([]string, 0, len(cfg.Profiles))
+	for i := range cfg.Profiles {
+		ids = append(ids, cfg.Profiles[i].ID)
+	}
+	return ids
 }
 
 // warnStaleLegacyPAC reports whether both the active store and the legacy CWD

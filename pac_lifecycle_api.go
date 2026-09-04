@@ -9,20 +9,36 @@ package main
 //
 //   fence (2F-A) → guard → bound DIRECT challenge → persist INTENT (node-local)
 //   → mutate the active store (persist-before-swap) → CLASSIFY the outcome
-//   against the in-memory authoritative snapshot → finalize history →
-//   audit + config version.
+//   against the in-memory authoritative snapshot → persist COMMITTED →
+//   post-commit effects, each behind its own durable marker.
 //
 // Classification uses the active revision plus ProfileSpecDigest only
 // (never the compiled artifact, never a file mtime):
-//   (Expected+1, Candidate)      committed  → finalize idempotently
+//   (Expected+1, Candidate)      committed  → durable progression below
 //   (Expected,   ExpectedSpec)   aborted    → nothing happened
 //   anything else                ambiguous  → refuse until an admin repair
-// A finalization failure after a proven commit is reported as
+//
+// Durable progression of a committed operation (2F-B correction, C1):
+//   pending → committed → [history] → [config version] → [cluster publish]
+//           → success audit → recorded
+// Every bracketed effect advances a persisted OpProgress marker AFTER it
+// landed, so a crash at any boundary is completed — never duplicated — by
+// reconciliation (startup, lifecycle GET, before every operation). The
+// config-version effect is keyed by operationId in the version note (the
+// version store itself is the dedup record); the success audit names the
+// operationId and historyState and is deduplicated against the audit ring.
+// Any lifecycle write failure after the proven commit is reported as
 // published:true / historyState:pending_reconciliation — never as "not
-// published". Pending intents are reconciled at startup, on every lifecycle
-// GET and before every publish/rollback. Every decided operation is kept
-// (bounded) with the exact response it produced, so a repeated operationId is
-// at-most-once and answers with the recorded result.
+// published" — and an aborted or ambiguous operation never emits a success
+// audit or a config version. Every decided operation is kept (bounded) with
+// the exact response it produced, so a repeated operationId is at-most-once
+// and answers with the recorded result.
+//
+// A corrupt lifecycle file is a durable, visible history_reset (see
+// pac.HistoryReset): the active store stays the sole authority, affected
+// profiles report historyState history_reset, and publish/rollback are
+// refused until an admin acknowledges the loss for that profile, bound to
+// the active revision + ProfileSpecDigest reviewed.
 
 import (
 	"encoding/json"
@@ -164,7 +180,7 @@ func pacVerifyConfirm(w http.ResponseWriter, cur pacChallengeBinding, c *pacConf
 // ── Lifecycle request / responses ─────────────────────────────────────────
 
 type pacLifecycleRequest struct {
-	Action        string      `json:"action"` // save_draft | publish | rollback | repair
+	Action        string      `json:"action"` // save_draft | publish | rollback | repair | acknowledge_history_reset
 	OperationID   string      `json:"operationId"`
 	Draft         pac.Profile `json:"draft"`
 	Confirm       *pacConfirm `json:"confirm"`
@@ -176,17 +192,36 @@ type pacLifecycleRequest struct {
 	DraftRevision          int64  `json:"draftRevision"`
 	ExpectedActiveRevision int64  `json:"expectedActiveRevision"`
 	CollectionEtag         string `json:"collectionEtag"`
+	// 2F-B correction: acknowledge_history_reset binds to the active
+	// ProfileSpecDigest reviewed (with expectedActiveRevision).
+	ExpectedActiveSpecDigest string `json:"expectedActiveSpecDigest"`
+}
+
+// pacHistoryState is the node-local history's truth about a profile.
+func pacHistoryState(id string, lc *pac.ProfileLifecycle, activeOK bool) string {
+	switch {
+	case pacLifecycle.ResetAffects(id, activeOK):
+		return pac.HistoryStateReset
+	case lc.Ambiguous != nil:
+		return pac.HistoryStateAmbiguous
+	case lc.PendingOp != nil:
+		return pac.HistoryStatePendingReconciliation
+	default:
+		return pac.HistoryStateRecorded
+	}
 }
 
 func pacLifecycleGet(w http.ResponseWriter, id string) {
 	pacProfilesAPIMu.Lock()
 	lc, _ := pacLifecycle.Get(id)
 	if lc.PendingOp != nil {
-		pacReconcileLocked(lc)
+		pacReconcileLocked(lc, pacEffectsAll)
 		lc, _ = pacLifecycle.Get(id)
 	}
 	cfg := pacProfiles.Get()
 	active, activeOK := pacProfiles.ProfileByID(id)
+	historyState := pacHistoryState(id, lc, activeOK)
+	reset := pacLifecycle.HistoryResetRecord()
 	pacProfilesAPIMu.Unlock()
 
 	var diff *pac.ProfileDiff
@@ -227,6 +262,7 @@ func pacLifecycleGet(w http.ResponseWriter, id string) {
 		"collectionEtag": pac.ConfigETag(cfg),
 		// 2F-B truth: node-local state machine + identity.
 		"state":            lc.State(),
+		"historyState":     historyState,
 		"pendingOp":        lc.PendingOp,
 		"ambiguous":        lc.Ambiguous,
 		"operations":       ops,
@@ -234,10 +270,28 @@ func pacLifecycleGet(w http.ResponseWriter, id string) {
 		"poolChangedSince": poolChanged,
 		"scope":            "node-local",
 	}
+	if reset != nil {
+		resp["historyReset"] = pacHistoryResetView(reset, id)
+	}
 	if prev, hasPrev := lc.PreviousRevision(); hasPrev {
 		resp["previousRevision"] = prev.N
 	}
 	jsonOK(w, resp)
+}
+
+// pacHistoryResetView is the store-level reset record as the API shows it
+// (the acknowledgement for THIS profile, if any, plus the scope).
+func pacHistoryResetView(r *pac.HistoryReset, id string) map[string]any {
+	v := map[string]any{
+		"at": r.At, "quarantinedTo": r.QuarantinedTo, "cause": r.Cause,
+		"scoped": r.Scoped, "activeAtReset": r.ActiveAtReset,
+		"acknowledgedProfiles": len(r.Acknowledged),
+		"ackAction":            "acknowledge_history_reset",
+	}
+	if ack, ok := r.Acknowledged[id]; ok {
+		v["acknowledged"] = ack
+	}
+	return v
 }
 
 func pacLifecyclePost(w http.ResponseWriter, r *http.Request, id string) {
@@ -256,9 +310,13 @@ func pacLifecyclePost(w http.ResponseWriter, r *http.Request, id string) {
 	switch req.Action {
 	case "save_draft":
 		pacLifecycleSaveDraft(w, r, id, req.Draft, req.DraftRevision)
-	case "publish", "rollback", "repair":
+	case "publish", "rollback", "repair", "acknowledge_history_reset":
 		if _, err := uuid.Parse(req.OperationID); err != nil {
-			http.Error(w, "operationId must be a UUID (required for publish, rollback and repair)", http.StatusBadRequest)
+			http.Error(w, "operationId must be a UUID (required for publish, rollback, repair and acknowledge_history_reset)", http.StatusBadRequest)
+			return
+		}
+		if req.Action == "acknowledge_history_reset" {
+			pacAcknowledgeHistoryReset(w, r, id, &req)
 			return
 		}
 		pacLifecycleOperation(w, r, id, &req)
@@ -310,7 +368,7 @@ func pacLifecycleOperation(w http.ResponseWriter, r *http.Request, id string, re
 	defer pacProfilesAPIMu.Unlock()
 	lc, _ := pacLifecycle.Get(id)
 	if lc.PendingOp != nil {
-		if !pacReconcileLocked(lc) {
+		if !pacReconcileLocked(lc, pacEffectsAll) {
 			writePACFenceRefusal(w, http.StatusConflict, "operation_pending",
 				"a previous operation is still pending reconciliation and its record could not be persisted; retry",
 				map[string]any{"operationId": lc.PendingOp.OperationID})
@@ -324,6 +382,11 @@ func pacLifecycleOperation(w http.ResponseWriter, r *http.Request, id string, re
 	}
 	if req.Action == "repair" {
 		pacRepairLocked(w, r, id, lc, req)
+		return
+	}
+	active, hasActive := pacProfiles.ProfileByID(id)
+	if pacLifecycle.ResetAffects(id, hasActive) {
+		pacWriteHistoryResetRefusal(w, id, active)
 		return
 	}
 	if lc.Ambiguous != nil {
@@ -340,6 +403,81 @@ func pacLifecycleOperation(w http.ResponseWriter, r *http.Request, id string, re
 		return
 	}
 	pacRunOperationLocked(w, r, id, lc, req)
+}
+
+// pacWriteHistoryResetRefusal refuses publish/rollback on a profile whose
+// node-local history was reset, naming the acknowledgement binding.
+func pacWriteHistoryResetRefusal(w http.ResponseWriter, id string, active pac.Profile) {
+	body := map[string]any{
+		"error": "the node-local publish history of this profile was found corrupt and quarantined; the ACTIVE profile is untouched and still authoritative, but publish/rollback are refused until an admin acknowledges the lost history (action acknowledge_history_reset bound to the current active revision and activeSpecDigest)",
+		"code":  "history_reset", "historyState": pac.HistoryStateReset, "ackAction": "acknowledge_history_reset",
+		"current": map[string]any{"revision": active.Revision, "activeSpecDigest": pac.ProfileSpecDigest(active)},
+	}
+	if r := pacLifecycle.HistoryResetRecord(); r != nil {
+		body["historyReset"] = pacHistoryResetView(r, id)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	json.NewEncoder(w).Encode(body) //nolint:errcheck // best-effort body
+}
+
+// pacAcknowledgeHistoryReset records the admin's acknowledgement that a
+// profile's node-local history was lost. The acknowledgement authorizes
+// exactly the active (revision, ProfileSpecDigest) the admin reviewed; it
+// never rewrites the active store; a persistence failure leaves the reset
+// active and fails the request.
+func pacAcknowledgeHistoryReset(w http.ResponseWriter, r *http.Request, id string, req *pacLifecycleRequest) {
+	pacProfilesAPIMu.Lock()
+	defer pacProfilesAPIMu.Unlock()
+	active, hasActive := pacProfiles.ProfileByID(id)
+	reset := pacLifecycle.HistoryResetRecord()
+	if reset == nil {
+		writePACFenceRefusal(w, http.StatusConflict, "not_history_reset", "no history reset is recorded; nothing to acknowledge", map[string]any{"historyState": pac.HistoryStateRecorded})
+		return
+	}
+	if ack, ok := reset.Acknowledged[id]; ok {
+		// Idempotent: the loss was already acknowledged for this profile.
+		jsonOK(w, map[string]any{"acknowledged": true, "operationId": ack.OperationID, "historyState": pac.HistoryStateRecorded,
+			"activeRevision": ack.ActiveRevision, "activeSpecDigest": ack.ActiveSpecDigest, "replayed": true})
+		return
+	}
+	if !hasActive {
+		writePACFenceRefusal(w, http.StatusConflict, "active_absent", "no active profile exists; a history reset only affects active profiles", map[string]any{"historyState": pac.HistoryStateRecorded})
+		return
+	}
+	if !pacLifecycle.ResetAffects(id, hasActive) {
+		writePACFenceRefusal(w, http.StatusConflict, "not_history_reset", "this profile is not affected by the recorded history reset", map[string]any{"historyState": pac.HistoryStateRecorded})
+		return
+	}
+	digest := pac.ProfileSpecDigest(active)
+	if req.ExpectedActiveRevision != active.Revision || req.ExpectedActiveSpecDigest != digest {
+		var changed []string
+		if req.ExpectedActiveRevision != active.Revision {
+			changed = append(changed, "expectedActiveRevision")
+		}
+		if req.ExpectedActiveSpecDigest != digest {
+			changed = append(changed, "expectedActiveSpecDigest")
+		}
+		writePACFenceRefusal(w, http.StatusConflict, "history_reset_stale",
+			"the acknowledgement is bound to a different active profile than the one currently active; review the current revision and activeSpecDigest and acknowledge again",
+			map[string]any{"current": map[string]any{"revision": active.Revision, "activeSpecDigest": digest}, "changed": changed})
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	ack := pac.HistoryResetAck{OperationID: req.OperationID, By: sessionAdmin(r), At: now, ActiveRevision: active.Revision, ActiveSpecDigest: digest}
+	err := pacLifecyclePersist("ack")
+	if err == nil {
+		err = pacLifecycle.AcknowledgeReset(id, ack)
+	}
+	if err != nil {
+		logger.Printf("PAC: history-reset acknowledgement for %q could not be persisted: %v", sanitizeLog(id), err)
+		http.Error(w, "the acknowledgement could not be persisted; the history reset stays in effect: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	auditEvent(r, "pac.profile_history_reset_ack", id,
+		fmt.Sprintf("operationId=%s activeRevision=%d activeSpecDigest=%s quarantinedTo=%s", req.OperationID, active.Revision, digest, strings.ReplaceAll(reset.QuarantinedTo, "\n", "")))
+	jsonOK(w, map[string]any{"acknowledged": true, "operationId": req.OperationID, "historyState": pac.HistoryStateRecorded,
+		"activeRevision": active.Revision, "activeSpecDigest": digest})
 }
 
 // pacRunOperationLocked is the shared publish/rollback core (see the file
@@ -382,7 +520,6 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 		challengeToken = req.Confirm.Challenge
 	}
 	// Candidate config, validated BEFORE any durable step.
-	before := pacProfiles.Get()
 	cfg := pacCandidateConfig(id, candidate, active.Revision+1)
 	if issues := pac.ValidateProfilesConfig(cfg); len(issues) > 0 {
 		writePACIssues(w, "validation failed", issues)
@@ -396,7 +533,7 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 		CandidateSpecDigest: binding.CandidateSpecDigest, CandidateSpec: candidate,
 		PoolDigest: binding.PoolDigest, ArtifactDigest: chk.Digest,
 		ChallengePoolDigest: binding.PoolDigest, ChallengeArtifactDigest: chk.Digest, Challenge: challengeToken,
-		TargetN: req.TargetN, Actor: sessionAdmin(r), Reason: reason, TS: now, State: pac.OpPending,
+		TargetN: req.TargetN, Actor: sessionAdmin(r), AuditActor: auditActor(r), Reason: reason, TS: now, State: pac.OpPending,
 	}
 	if !pacPersistIntent(w, lc, &op) {
 		return
@@ -419,8 +556,33 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 		return
 	}
 	pacLifecycleStage("active_committed")
-	pacAfterActiveCommit(r, "pac.profile_"+req.Action, id, before, cfg)
-	pacFinalizeCommitted(w, id, lc, &op, observed, chk.Digest, now)
+	// Durable COMMITTED, then the post-commit effects behind their markers.
+	if !pacPersistCommittedLocked(lc, &op, observed.Revision) {
+		pacWritePendingReconciliation(w, id, &op, observed, lc.DraftRevision)
+		return
+	}
+	pacLifecycleStage("committed_persisted")
+	markAuditEmitted(r) // C2c: the success audit is emitted (now or by reconciliation) for a proven commit
+	state, n := pacCompleteCommittedLocked(lc, &op, pacEffectsAll, false)
+	if state != pac.HistoryStateRecorded {
+		pacWritePendingReconciliation(w, id, &op, observed, lc.DraftRevision)
+		return
+	}
+	if op.Action == "publish" {
+		pacPublishesTotal.Add(1)
+		logger.Printf("PAC: published profile %q revision %d (digest %s)", sanitizeLog(id), n, chk.Digest)
+	} else {
+		pacRollbacksTotal.Add(1)
+		logger.Printf("PAC: rolled back profile %q to revision %s (new revision %d)", sanitizeLog(id), sanitizeLog(fmt.Sprintf("%d", op.TargetN)), n)
+	}
+	jsonOK(w, pacOperationResult(&op, n, observed, lc.DraftRevision, pac.HistoryStateRecorded))
+}
+
+// pacWritePendingReconciliation answers a PROVEN commit whose node-local
+// effects could not all be made durable: published:true, never a failure.
+func pacWritePendingReconciliation(w http.ResponseWriter, id string, op *pac.PendingOp, observed pac.Profile, draftRevision int64) {
+	logger.Printf("PAC: %s of %q committed but its history/effects are pending reconciliation", sanitizeLog(op.Action), sanitizeLog(id))
+	jsonOK(w, pacOperationResult(op, op.HistoryN, observed, draftRevision, pac.HistoryStatePendingReconciliation))
 }
 
 // pacResolveCandidate returns the spec a publish/rollback commits.
@@ -502,36 +664,6 @@ func pacWriteOutcomeUnknown(w http.ResponseWriter, id, action string, op *pac.Pe
 	})
 }
 
-// pacFinalizeCommitted records the proven commit in history and answers. A
-// finalization failure is reported as published:true /
-// pending_reconciliation — the active profile IS committed.
-func pacFinalizeCommitted(w http.ResponseWriter, id string, lc *pac.ProfileLifecycle, op *pac.PendingOp, observed pac.Profile, artifactDigest, now string) {
-	n := lc.FinalizeCommitted(op)
-	result := pacOperationResult(op, n, observed, lc.DraftRevision, "recorded")
-	raw, _ := json.Marshal(result) //nolint:errcheck // plain map
-	lc.PendingOp = nil
-	lc.RecordDecided(pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpRecorded, TS: now, Status: http.StatusOK, Result: raw, Challenge: op.Challenge})
-	err := pacLifecyclePersist("finalize")
-	if err == nil {
-		err = pacLifecycle.Put(lc)
-	}
-	if err != nil {
-		logger.Printf("PAC: %s of %q committed but history finalization failed: %v", sanitizeLog(op.Action), sanitizeLog(id), err)
-		result["historyState"] = "pending_reconciliation"
-		jsonOK(w, result)
-		return
-	}
-	pacLifecycleStage("finalized")
-	if op.Action == "publish" {
-		pacPublishesTotal.Add(1)
-		logger.Printf("PAC: published profile %q revision %d (digest %s)", sanitizeLog(id), n, artifactDigest)
-	} else {
-		pacRollbacksTotal.Add(1)
-		logger.Printf("PAC: rolled back profile %q to revision %s (new revision %d)", sanitizeLog(id), sanitizeLog(fmt.Sprintf("%d", op.TargetN)), n)
-	}
-	jsonOK(w, result)
-}
-
 // pacOperationResult is the response of a committed publish/rollback.
 func pacOperationResult(op *pac.PendingOp, n int64, active pac.Profile, draftRevision int64, historyState string) map[string]any {
 	res := map[string]any{
@@ -554,37 +686,202 @@ func pacOperationResult(op *pac.PendingOp, n int64, active pac.Profile, draftRev
 	return res
 }
 
+// ── Durable committed progression ────────────────────────────────────────
+
+// pacEffectsMode selects which post-commit effects a reconciliation may run.
+type pacEffectsMode int
+
+const (
+	// pacEffectsNodeLocal runs only the node-local steps (committed marker +
+	// history). Used by the startup loader, which runs BEFORE the other
+	// config stores are loaded — capturing a config version or publishing a
+	// cluster snapshot there would record a partial configuration.
+	pacEffectsNodeLocal pacEffectsMode = iota
+	// pacEffectsAll runs every effect (request path, lifecycle GET, pre-op
+	// reconciliation, and the post-load startup pass).
+	pacEffectsAll
+)
+
+// pacPersistCommittedLocked advances a proven intent to durable committed.
+func pacPersistCommittedLocked(lc *pac.ProfileLifecycle, op *pac.PendingOp, observedRevision int64) bool {
+	op.State = pac.OpCommitted
+	op.ObservedRevision = observedRevision
+	op.CommittedAt = time.Now().UTC().Format(time.RFC3339)
+	lc.PendingOp = op
+	err := pacLifecyclePersist("committed")
+	if err == nil {
+		err = pacLifecycle.Put(lc)
+	}
+	if err != nil {
+		logger.Printf("PAC: committed marker for %s of %q could not be persisted: %v", sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), err)
+		return false
+	}
+	return true
+}
+
+// pacCompleteCommittedLocked drives a durably COMMITTED intent through its
+// post-commit effects, each persisted as a marker AFTER it landed, and
+// finally records the operation. It returns the resulting historyState
+// (recorded, or pending_reconciliation when a lifecycle write failed — the
+// remaining effects are completed by the next reconciliation) and the
+// revision number recorded in history (0 when not yet recorded).
+func pacCompleteCommittedLocked(lc *pac.ProfileLifecycle, op *pac.PendingOp, mode pacEffectsMode, reconciled bool) (historyState string, revisionN int64) {
+	lc.PendingOp = op
+	persist := func(stage string) bool {
+		err := pacLifecyclePersist(stage)
+		if err == nil {
+			err = pacLifecycle.Put(lc)
+		}
+		if err != nil {
+			logger.Printf("PAC: %s progress (%s) for %s of %q could not be persisted; pending reconciliation: %v", sanitizeLog(op.Action), stage, sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), err)
+			return false
+		}
+		return true
+	}
+	// 1. Node-local history (idempotent by operationId).
+	if !op.Progress.History {
+		op.HistoryN = lc.FinalizeCommitted(op)
+		op.Progress.History = true
+		if !persist("finalize") {
+			return pac.HistoryStatePendingReconciliation, 0
+		}
+		pacLifecycleStage("history_recorded")
+	}
+	n := op.HistoryN
+	if mode == pacEffectsNodeLocal {
+		return pac.HistoryStatePendingReconciliation, n
+	}
+	// 2. Config version, keyed by operationId (the version store dedups).
+	if !op.Progress.ConfigVersion {
+		pacSaveConfigVersionOnce(op.Actor, "pac.profile_"+op.Action, op.OperationID)
+		op.Progress.ConfigVersion = true
+		if !persist("progress") {
+			return pac.HistoryStatePendingReconciliation, n
+		}
+		pacLifecycleStage("version_recorded")
+	}
+	// 3. Cluster publication (content-idempotent: the active store already
+	// carries the committed profile) + the per-profile alert latch.
+	if !op.Progress.Cluster {
+		_ = publishCurrentConfigSnapshot()
+		pacResetProfileAlert(op.ProfileID)
+		op.Progress.Cluster = true
+		if !persist("progress") {
+			return pac.HistoryStatePendingReconciliation, n
+		}
+		pacLifecycleStage("cluster_published")
+	}
+	// 4. Success audit (names operationId + truthful historyState), then the
+	// terminal record. Both derive from the operation's OWN proven outcome
+	// (candidate spec at the observed revision), never from whatever is
+	// active at reconciliation time, so a recovered record equals the one
+	// the request path would have produced. The audit is deduplicated
+	// against the ring so a terminal write that fails and is retried never
+	// repeats it.
+	committed := op.CandidateSpec
+	committed.Revision = op.ObservedRevision
+	pacAuditCommitted(op, n, committed, reconciled)
+	result := pacOperationResult(op, n, committed, lc.DraftRevision, pac.HistoryStateRecorded)
+	raw, _ := json.Marshal(result) //nolint:errcheck // plain map
+	lc.PendingOp = nil
+	lc.RecordDecided(pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpRecorded, TS: op.TS, Status: http.StatusOK, Result: raw, Challenge: op.Challenge})
+	if !persist("record") {
+		lc.PendingOp = op
+		return pac.HistoryStatePendingReconciliation, n
+	}
+	pacLifecycleStage("finalized")
+	return pac.HistoryStateRecorded, n
+}
+
+// pacSaveConfigVersionOnce captures a config version for the operation
+// unless one keyed by its operationId already exists.
+func pacSaveConfigVersionOnce(actor, action, operationID string) {
+	note := "operationId=" + operationID
+	for _, m := range configVersions.List() {
+		if m.Note == note {
+			return
+		}
+	}
+	saveConfigVersionNote(actor, action, note)
+}
+
+// pacAuditCommitted emits the success audit for a proven commit exactly once
+// per operation (ring-deduplicated by operationId).
+func pacAuditCommitted(op *pac.PendingOp, n int64, active pac.Profile, reconciled bool) {
+	action := "pac.profile_" + op.Action
+	ring := auditGet()
+	for i := range ring {
+		if ring[i].Action == action && strings.Contains(ring[i].Detail, "operationId="+op.OperationID+" ") {
+			return
+		}
+	}
+	detail := fmt.Sprintf("operationId=%s revision=%d activeRevision=%d activeSpecDigest=%s historyState=%s",
+		op.OperationID, n, active.Revision, pac.ProfileSpecDigest(active), pac.HistoryStateRecorded)
+	if op.Action == "rollback" {
+		detail += fmt.Sprintf(" toRevision=%d", op.TargetN)
+	}
+	if reconciled {
+		detail += " reconciled=true"
+	}
+	if op.Reason != "" {
+		detail += " reason=" + strings.ReplaceAll(strings.ReplaceAll(op.Reason, "\n", " "), "\r", " ")
+	}
+	actor := op.AuditActor
+	if actor == "" {
+		actor = op.Actor
+	}
+	now := time.Now()
+	entry := AuditEntry{TS: now.UnixMilli(), Time: now.Format("2006-01-02 15:04:05"), Actor: actor, Action: action, Object: op.ProfileID, Detail: detail}
+	if after, err := json.Marshal(active); err == nil {
+		entry.After = string(after)
+	}
+	auditAdd(entry)
+}
+
 // pacReconcileLocked settles a pending intent against the authoritative
-// active state (under pacProfilesAPIMu). It returns false when the settled
-// record could not be persisted (memory is then unchanged too).
-func pacReconcileLocked(lc *pac.ProfileLifecycle) bool {
+// active state (under pacProfilesAPIMu) and completes a committed one's
+// effects (per mode). It returns false when the settled record could not be
+// persisted (memory is then unchanged too).
+func pacReconcileLocked(lc *pac.ProfileLifecycle, mode pacEffectsMode) bool {
 	op := lc.PendingOp
 	if op == nil {
 		return true
 	}
 	active, ok := pacProfiles.ProfileByID(op.ProfileID)
 	now := time.Now().UTC().Format(time.RFC3339)
-	switch pac.ClassifyOutcome(op, active, ok) {
-	case pac.OpCommitted:
-		n := lc.FinalizeCommitted(op)
-		raw, _ := json.Marshal(pacOperationResult(op, n, active, lc.DraftRevision, "recorded")) //nolint:errcheck // plain map
-		lc.PendingOp = nil
-		lc.RecordDecided(pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpRecorded, TS: now, Status: http.StatusOK, Result: raw, Challenge: op.Challenge})
-		logger.Printf("PAC: reconciled %s %s of %q as COMMITTED (revision %d)", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), n)
-	case pac.OpAborted:
-		raw, _ := json.Marshal(map[string]any{"error": "the operation never reached the active store", "code": "aborted", "operationId": op.OperationID}) //nolint:errcheck // plain map
-		lc.PendingOp = nil
-		lc.RecordDecided(pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpAborted, TS: now, Status: http.StatusInternalServerError, Result: raw})
-		logger.Printf("PAC: reconciled %s %s of %q as ABORTED", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID))
-	default:
-		digest := ""
-		if ok {
-			digest = pac.ProfileSpecDigest(active)
+	if !op.Committed() {
+		switch pac.ClassifyOutcome(op, active, ok) {
+		case pac.OpCommitted:
+			if !pacPersistCommittedLocked(lc, op, active.Revision) {
+				return false
+			}
+			logger.Printf("PAC: reconciled %s %s of %q as COMMITTED", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID))
+		case pac.OpAborted:
+			raw, _ := json.Marshal(map[string]any{"error": "the operation never reached the active store", "code": "aborted", "operationId": op.OperationID}) //nolint:errcheck // plain map
+			lc.PendingOp = nil
+			lc.RecordDecided(pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpAborted, TS: now, Status: http.StatusInternalServerError, Result: raw})
+			logger.Printf("PAC: reconciled %s %s of %q as ABORTED", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID))
+			return pacPutReconciled(lc, op)
+		default:
+			digest := ""
+			if ok {
+				digest = pac.ProfileSpecDigest(active)
+			}
+			lc.Ambiguous = &pac.AmbiguousOp{Op: *op, ObservedRevision: active.Revision, ObservedSpecDigest: digest, ObservedAt: now}
+			lc.PendingOp = nil
+			logger.Printf("PAC: reconciled %s %s of %q as AMBIGUOUS (observed revision %d); publish/rollback refused until repair", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), active.Revision)
+			return pacPutReconciled(lc, op)
 		}
-		lc.Ambiguous = &pac.AmbiguousOp{Op: *op, ObservedRevision: active.Revision, ObservedSpecDigest: digest, ObservedAt: now}
-		lc.PendingOp = nil
-		logger.Printf("PAC: reconciled %s %s of %q as AMBIGUOUS (observed revision %d); publish/rollback refused until repair", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), active.Revision)
 	}
+	state, n := pacCompleteCommittedLocked(lc, op, mode, true)
+	if state == pac.HistoryStateRecorded {
+		logger.Printf("PAC: reconciled %s %s of %q as RECORDED (revision %d)", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), n)
+		return true
+	}
+	return mode == pacEffectsNodeLocal && op.Progress.History
+}
+
+func pacPutReconciled(lc *pac.ProfileLifecycle, op *pac.PendingOp) bool {
 	if err := pacLifecycle.Put(lc); err != nil {
 		logger.Printf("PAC: reconciliation record for %q could not be persisted: %v", sanitizeLog(op.ProfileID), err)
 		return false
@@ -592,14 +889,28 @@ func pacReconcileLocked(lc *pac.ProfileLifecycle) bool {
 	return true
 }
 
-// pacReconcileAllLifecycles settles every pending intent at startup (after
-// the profile and lifecycle stores are loaded).
+// pacSettleLifecycleIntents is the startup loader's pass (BEFORE the other
+// config stores are loaded): classify every in-flight intent against the
+// authoritative active store just loaded and complete the node-local steps
+// only. The post-load pass (pacReconcileAllLifecycles) completes the rest.
+func pacSettleLifecycleIntents() {
+	pacReconcileEvery(pacEffectsNodeLocal)
+}
+
+// pacReconcileAllLifecycles completes every pending or committed intent's
+// effects. main.go runs it once every config store is loaded (a config
+// version captured earlier would record a partial configuration); the
+// lifecycle GET and every operation run the same reconciliation per profile.
 func pacReconcileAllLifecycles() {
+	pacReconcileEvery(pacEffectsAll)
+}
+
+func pacReconcileEvery(mode pacEffectsMode) {
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
 	for _, lc := range pacLifecycle.All() {
 		if lc.PendingOp != nil {
-			pacReconcileLocked(lc)
+			pacReconcileLocked(lc, mode)
 		}
 	}
 }
@@ -625,14 +936,14 @@ func pacRepairLocked(w http.ResponseWriter, r *http.Request, id string, lc *pac.
 	now := time.Now().UTC().Format(time.RFC3339)
 	n := lc.Repair(active, pac.PoolDigest(pac.ReferencedPools(active, pools)), art.Digest, sessionAdmin(r), now, req.OperationID)
 	result := map[string]any{"repaired": true, "operationId": req.OperationID, "revision": n, "activeRevision": active.Revision,
-		"activeSpecDigest": pac.ProfileSpecDigest(active), "historyState": "recorded", "scope": "node-local-history"}
+		"activeSpecDigest": pac.ProfileSpecDigest(active), "historyState": pac.HistoryStateRecorded, "scope": "node-local-history"}
 	raw, _ := json.Marshal(result) //nolint:errcheck // plain map
 	lc.RecordDecided(pac.DecidedOp{OperationID: req.OperationID, Action: "repair", State: pac.OpRecorded, TS: now, Status: http.StatusOK, Result: raw})
 	if err := pacLifecycle.Put(lc); err != nil {
 		http.Error(w, "repair record could not be persisted: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	auditEvent(r, "pac.profile_repair", id, fmt.Sprintf("resolution=accept_active revision=%d activeRevision=%d", n, active.Revision))
+	auditEvent(r, "pac.profile_repair", id, fmt.Sprintf("operationId=%s resolution=accept_active revision=%d activeRevision=%d historyState=%s", req.OperationID, n, active.Revision, pac.HistoryStateRecorded))
 	jsonOK(w, result)
 }
 

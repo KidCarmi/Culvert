@@ -234,6 +234,13 @@ func main() {
 	initMCPRollout(s)      // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
 	initMCPDistribution(s) // PR-12: disabled-by-default DP applier composition (after rollout state is restored)
 	loadReleaseManagement(resolveReleaseStartupConfig())
+	// 2F-B (C1): complete the post-commit effects of any PAC publish/rollback
+	// that was proven committed but not fully recorded when the previous
+	// process stopped (config version, cluster publication, success audit,
+	// terminal record). Position is load-bearing: every store the config
+	// version captures is loaded above; the loader itself (initPAC) only
+	// settled the node-local half.
+	pacReconcileAllLifecycles()
 	startAdminUI(s)
 
 	proxySrv := buildAndStartProxyServer(s)

@@ -9,8 +9,11 @@ package pac
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,9 +28,55 @@ type LifecycleStore struct {
 	byID    map[string]*ProfileLifecycle
 	path    string
 	modTime time.Time
+	reset   *HistoryReset // store-level history reset (see HistoryReset)
 }
 
-// Load reads the store from path; a missing file is a no-op.
+// HistoryReset is the durable, store-level record that the lifecycle file
+// was found corrupt and quarantined (2F-B correction, C1). The ACTIVE profile
+// store stays the sole authority; what was lost is the node-local history
+// (revisions, drafts, pending intents, decided operations). Every active
+// profile that existed at the reset is reported as historyState
+// history_reset and refuses publish/rollback until an admin acknowledges the
+// loss for that profile, bound to the active revision + ProfileSpecDigest it
+// reviewed. The record lives beside the store (<path minus .json>.reset.json)
+// so it survives restarts until acknowledged; it is written BEFORE the
+// corrupt file is moved aside, so a boot that cannot record the reset leaves
+// the corrupt file in place and repeats the attempt next time (fail-closed).
+type HistoryReset struct {
+	At            string `json:"at"`
+	QuarantinedTo string `json:"quarantinedTo"`
+	Cause         string `json:"cause"`
+	// Scoped is true once ActiveAtReset carries the profiles that were active
+	// when the reset was recorded; until then EVERY active profile is treated
+	// as affected (the conservative reading).
+	Scoped        bool                       `json:"scoped"`
+	ActiveAtReset []string                   `json:"activeAtReset"`
+	Acknowledged  map[string]HistoryResetAck `json:"acknowledged"`
+}
+
+// HistoryResetAck is one admin acknowledgement of a lost history.
+type HistoryResetAck struct {
+	OperationID      string `json:"operationId"`
+	By               string `json:"by"`
+	At               string `json:"at"`
+	ActiveRevision   int64  `json:"activeRevision"`
+	ActiveSpecDigest string `json:"activeSpecDigest"`
+}
+
+// ErrHistoryReset wraps the Load error returned when the lifecycle file was
+// quarantined into a history reset.
+var ErrHistoryReset = errors.New("pac lifecycle: history reset")
+
+func resetPathFor(path string) string {
+	if path == "" {
+		return ""
+	}
+	return strings.TrimSuffix(path, ".json") + ".reset.json"
+}
+
+// Load reads the store from path; a missing file is a no-op. A corrupt file
+// is quarantined into a durable HistoryReset (see the type) and the error
+// returned wraps ErrHistoryReset; the store then starts empty.
 func (s *LifecycleStore) Load(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -35,6 +84,7 @@ func (s *LifecycleStore) Load(path string) error {
 	if s.byID == nil {
 		s.byID = map[string]*ProfileLifecycle{}
 	}
+	s.loadResetRecordLocked()
 	data, err := os.ReadFile(path) // #nosec G304 -- operator-configured store path
 	if os.IsNotExist(err) {
 		return nil
@@ -44,15 +94,7 @@ func (s *LifecycleStore) Load(path string) error {
 	}
 	var loaded map[string]*ProfileLifecycle
 	if err := json.Unmarshal(data, &loaded); err != nil {
-		// This is NODE-LOCAL operator history, not serving-critical config (the
-		// active served spec lives in pac_profiles.json). A corrupt/truncated
-		// file must NOT brick the proxy at startup — quarantine it and start
-		// with an empty store so serving comes up fail-open.
-		quarantine := path + ".corrupt"
-		_ = os.Rename(path, quarantine) //nolint:errcheck // best-effort; empty-start is the fallback
-		s.byID = map[string]*ProfileLifecycle{}
-		s.modTime = time.Now()
-		return fmt.Errorf("pac lifecycle: parse %s failed, quarantined to %s and started empty: %w", path, quarantine, err)
+		return s.quarantineLocked(path, err)
 	}
 	s.byID = loaded
 	if s.byID == nil {
@@ -70,6 +112,162 @@ func (s *LifecycleStore) Load(path string) error {
 		}
 	}
 	s.modTime = time.Now()
+	return nil
+}
+
+// loadResetRecordLocked reads the sidecar reset record. An unreadable record
+// means acknowledgements can no longer be verified, which is itself a reset
+// condition: it is replaced by a fresh, unscoped one (conservative).
+func (s *LifecycleStore) loadResetRecordLocked() {
+	rp := resetPathFor(s.path)
+	if rp == "" {
+		return
+	}
+	data, err := os.ReadFile(rp) // #nosec G304 -- derived from the operator-configured store path
+	if os.IsNotExist(err) {
+		s.reset = nil
+		return
+	}
+	var r HistoryReset
+	if err == nil {
+		err = json.Unmarshal(data, &r)
+	}
+	if err != nil {
+		bad := fmt.Sprintf("%s.corrupt.%d", rp, time.Now().UnixNano())
+		_ = os.Rename(rp, bad) //nolint:errcheck // best-effort evidence; the fresh record below supersedes it
+		r = HistoryReset{At: time.Now().UTC().Format(time.RFC3339), Cause: "history reset record unreadable: " + err.Error(), QuarantinedTo: bad}
+		_ = s.persistReset(&r) //nolint:errcheck // an unwritable record still resets in memory; the next boot repeats
+	}
+	if r.Acknowledged == nil {
+		r.Acknowledged = map[string]HistoryResetAck{}
+	}
+	s.reset = &r
+}
+
+// quarantineLocked records the reset durably, THEN moves the corrupt file
+// aside (never deletes it) and starts empty.
+func (s *LifecycleStore) quarantineLocked(path string, cause error) error {
+	quarantine := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+	r := &HistoryReset{
+		At: time.Now().UTC().Format(time.RFC3339), QuarantinedTo: quarantine,
+		Cause: "parse failed: " + cause.Error(), Acknowledged: map[string]HistoryResetAck{},
+	}
+	if err := s.persistReset(r); err != nil {
+		// The reset could not be recorded: leave the corrupt file where it is
+		// so the next boot repeats this exact path, and fail closed in memory.
+		s.reset = r
+		s.byID = map[string]*ProfileLifecycle{}
+		s.modTime = time.Now()
+		return fmt.Errorf("%w: parse %s failed (%v) and the reset record could not be written (%v); file left in place, publish/rollback refused until acknowledged", ErrHistoryReset, path, cause, err)
+	}
+	if err := os.Rename(path, quarantine); err != nil {
+		r.QuarantinedTo = ""
+		_ = s.persistReset(r) //nolint:errcheck // best-effort correction of the recorded location
+		s.reset = r
+		s.byID = map[string]*ProfileLifecycle{}
+		s.modTime = time.Now()
+		return fmt.Errorf("%w: parse %s failed (%v); could not move the file aside (%v); started empty, publish/rollback refused until acknowledged", ErrHistoryReset, path, cause, err)
+	}
+	s.reset = r
+	s.byID = map[string]*ProfileLifecycle{}
+	s.modTime = time.Now()
+	return fmt.Errorf("%w: parse %s failed (%v); quarantined to %s and started empty; publish/rollback refused for the affected profiles until acknowledged", ErrHistoryReset, path, cause, quarantine)
+}
+
+func (s *LifecycleStore) persistReset(r *HistoryReset) error {
+	rp := resetPathFor(s.path)
+	if rp == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fileutil.AtomicWrite(rp, data, 0o600)
+}
+
+func cloneReset(r *HistoryReset) *HistoryReset {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	out.ActiveAtReset = append([]string(nil), r.ActiveAtReset...)
+	out.Acknowledged = make(map[string]HistoryResetAck, len(r.Acknowledged))
+	for k, v := range r.Acknowledged {
+		out.Acknowledged[k] = v
+	}
+	return &out
+}
+
+// HistoryResetRecord returns a copy of the store-level reset record, or nil.
+func (s *LifecycleStore) HistoryResetRecord() *HistoryReset {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneReset(s.reset)
+}
+
+// NoteActiveAtReset scopes a fresh reset to the profiles that were active
+// when it was recorded (persist-before-swap). A no-op when there is no
+// reset or it is already scoped.
+func (s *LifecycleStore) NoteActiveAtReset(activeIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reset == nil || s.reset.Scoped {
+		return nil
+	}
+	next := cloneReset(s.reset)
+	next.Scoped = true
+	next.ActiveAtReset = append([]string{}, activeIDs...)
+	sort.Strings(next.ActiveAtReset)
+	if err := s.persistReset(next); err != nil {
+		return err
+	}
+	s.reset = next
+	return nil
+}
+
+// ResetAffects reports whether profileID (activeExists = an active profile
+// exists for it) is in history_reset: a reset is recorded, the profile is
+// in its scope (or the scope is unknown), and no acknowledgement exists.
+func (s *LifecycleStore) ResetAffects(profileID string, activeExists bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.resetAffectsLocked(profileID, activeExists)
+}
+
+func (s *LifecycleStore) resetAffectsLocked(profileID string, activeExists bool) bool {
+	r := s.reset
+	if r == nil || !activeExists {
+		return false
+	}
+	if _, acked := r.Acknowledged[profileID]; acked {
+		return false
+	}
+	if !r.Scoped {
+		return true
+	}
+	for _, id := range r.ActiveAtReset {
+		if id == profileID {
+			return true
+		}
+	}
+	return false
+}
+
+// AcknowledgeReset records an admin acknowledgement for profileID
+// (persist-before-swap): a failed write leaves the reset exactly as it was.
+func (s *LifecycleStore) AcknowledgeReset(profileID string, ack HistoryResetAck) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reset == nil {
+		return errors.New("pac lifecycle: no history reset to acknowledge")
+	}
+	next := cloneReset(s.reset)
+	next.Acknowledged[profileID] = ack
+	if err := s.persistReset(next); err != nil {
+		return err
+	}
+	s.reset = next
 	return nil
 }
 
@@ -159,6 +357,7 @@ type LifecycleState struct {
 	ByID    map[string]*ProfileLifecycle
 	Path    string
 	ModTime time.Time
+	Reset   *HistoryReset
 }
 
 // Snapshot returns the store state for -shuffle test hermeticity (pair with
@@ -170,7 +369,7 @@ func (s *LifecycleStore) Snapshot() LifecycleState {
 	for id, lc := range s.byID {
 		cp[id] = cloneLifecycle(lc)
 	}
-	return LifecycleState{ByID: cp, Path: s.path, ModTime: s.modTime}
+	return LifecycleState{ByID: cp, Path: s.path, ModTime: s.modTime, Reset: cloneReset(s.reset)}
 }
 
 // Restore resets the store to a captured state (test support).
@@ -183,6 +382,7 @@ func (s *LifecycleStore) Restore(st LifecycleState) {
 	}
 	s.path = st.Path
 	s.modTime = st.ModTime
+	s.reset = cloneReset(st.Reset)
 }
 
 func cloneLifecycle(lc *ProfileLifecycle) *ProfileLifecycle {

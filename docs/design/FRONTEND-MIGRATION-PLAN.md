@@ -1107,6 +1107,60 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >
 > **Decomposition (append-only, no unsafe intermediate shipping state).** 2F-0 this entry gate · 2F-A PAC fencing model (C3) + structured 409/428 + legacy-JS token patch (R11–R14) · 2F-B persist-before-swap stores, intent state machine, reconciliation + repair, `operationId`, three digests, bound challenge + legacy-JS challenge echo (R1–R10, R27–R29) · 2F-C upstream v2 model, sealing, authority binding, uniqueness, v2 endpoints, v1 adapter, boot migration, YAML read-only, tri-state health + classifier, eligibility predicate, effective mode, legacy-UI switch, minimal import preserve rule, credentialed-DELETE refusal, log hygiene (R15–R23, R25–R26, R30–R31, R35–R39, R41–R42) · 2F-D export schema, import plan + dry-run, backup strip + manifest, restore reporting, `prepare-downgrade` + real-binary downgrade proofs, probe audit, full leak sweep (R24, R32–R34, R40) · 2F-E PAC React (`/app/network/pac`) · 2F-F Upstream React (`/app/network/upstream`) · 2F-G Playwright journeys, docs (parity admin-only correction, node-local labels), dist, final qualification. 2F-A/B and 2F-C/D are independent chains; 2F-C freezes as one unit because splitting model, adapter and legacy-UI switch would expose a credential-destroying interval. Deferred and recorded: PX-1 data-plane chaining, refusing the legacy empty-host fail-open PAC, rule-level identity inside profiles, cluster-synced lifecycle/exceptions, breaker/probe-interval GUI settings, YAML adopt transaction, secret-inclusive backups.
 >
+> **2F-B CORRECTION RECORD (this branch, 2026-09-04).** External review of the
+> 2F-B candidate (`ae61ac78`) found two C1 contract failures; RED-before at the
+> exact candidate (`pac_lifecycle_correction_test.go`, C-1..C-8, 8/8 red).
+> **(1) Lifecycle corruption silently erased trust state.** `LifecycleStore.Load`
+> quarantined a corrupt file and started empty, so pending intents and prior
+> history vanished into an ordinary idle lifecycle and the next publish proceeded
+> unacknowledged. Now: the reset is a DURABLE store-level record
+> (`<dataDir>/pac_profiles_lifecycle.reset.json` — written BEFORE the corrupt
+> file is moved aside to a timestamped `.corrupt.<unixnano>`; a boot that cannot
+> record it leaves the file in place and repeats; the sidecar is in the backup
+> inventory), scoped at load to the profiles active at the reset (an unscoped
+> record affects every active profile — the conservative reading). The active
+> store stays the sole authority. Affected profiles report
+> `historyState: history_reset` (GET carries the `historyReset` record), and
+> publish/rollback are refused `409 history_reset` until an admin
+> `acknowledge_history_reset` (UUID `operationId`) bound to the current
+> `expectedActiveRevision` + `expectedActiveSpecDigest` (`409
+> history_reset_stale` with `current` + `changed` otherwise). The
+> acknowledgement is per profile, persist-before-swap (a failed write leaves the
+> reset in effect and answers 500), idempotent on replay, audited
+> (`pac.profile_history_reset_ack`, no config version — nothing configured
+> changed), and never rewrites the active store; it survives restarts until
+> durable. **(2) `committed` was not durable and recovered commits lost
+> audit/version truth.** The intent went from durable `pending` straight to
+> `recorded`, so a crash after the active write left a committed profile with no
+> success audit and no config version that reconciliation never completed. Now
+> the approved progression is durable: `pending → committed → recorded`, with a
+> persisted `OpProgress` marker advanced AFTER each post-commit effect lands —
+> history revision (idempotent by operationId), config version (keyed by
+> `operationId=<uuid>` in the version note; the version store is its own dedup
+> record), cluster publication (content-idempotent), then the success audit
+> (`operationId=… revision=… activeRevision=… activeSpecDigest=…
+> historyState=recorded [reconciled=true]`, ring-deduplicated by operationId)
+> and the terminal decided record. Any lifecycle write failure after the proven
+> commit answers `published:true, historyState: pending_reconciliation`;
+> reconciliation (lifecycle GET, before every operation, and at startup)
+> completes ONLY the missing effects. Startup is two-phase and the split is
+> load-bearing: the PAC loader (`initPAC`, before policy/rewrite/etc. load)
+> settles intents and the node-local history only; `main.go` runs
+> `pacReconcileAllLifecycles` once every store is loaded, because a config
+> version captured earlier would snapshot a partial configuration that a later
+> rollback treats as authoritative. Aborted and ambiguous intents emit no
+> success audit and no config version. Residual, recorded: the success audit is
+> emitted before its terminal marker is persisted, so a real crash inside that
+> window is at-least-once (in-process retries are ring-deduplicated); the
+> alternative (marker first) loses the compliance record on the same crash.
+> Test seams: stage names `committed_persisted`, `history_recorded`,
+> `version_recorded`, `cluster_published`, `finalized`; persist stages
+> `committed`, `finalize`, `progress`, `record`, `ack`. GUI parity: the legacy
+> `static/index.html` has no publish/rollback lifecycle surface (CRUD only), so
+> the acknowledgement ceremony is an API + new-frontend (2F-E) contract —
+> recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
+> bundle + `types.gen.ts`); route count unchanged (241).
+>
 > **2E-B TRUE FINAL RECOVERY-FRESHNESS CLOSURE (this branch, 2026-08-30).**
 > External source review of the lifecycle candidate (3669666e) found two
 > remaining frontend defects; red-before at the exact candidate

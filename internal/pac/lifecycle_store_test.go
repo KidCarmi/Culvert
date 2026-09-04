@@ -5,8 +5,10 @@ package pac
 // Delete, and Snapshot/Restore isolation.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,9 +40,49 @@ func TestLifecycleStore_LoadCorruptQuarantinesAndDegrades(t *testing.T) {
 	if err := s.Put(&ProfileLifecycle{ProfileID: "x"}); err != nil {
 		t.Fatalf("store must be usable after quarantine: %v", err)
 	}
-	// ...and the bad file must be moved aside.
-	if _, statErr := os.Stat(path + ".corrupt"); statErr != nil {
-		t.Errorf("corrupt file should be quarantined to %s.corrupt", path)
+	// ...and the bad file must be moved aside (never deleted), into a
+	// timestamped quarantine named by the DURABLE history-reset record
+	// (2F-B correction, C1) — the loss is visible, not silent.
+	if !errors.Is(err, ErrHistoryReset) {
+		t.Fatalf("a quarantine must be reported as a history reset: %v", err)
+	}
+	r := s.HistoryResetRecord()
+	if r == nil || r.QuarantinedTo == "" || !strings.HasPrefix(r.QuarantinedTo, path+".corrupt.") {
+		t.Fatalf("reset record must name the quarantined file: %+v", r)
+	}
+	if _, statErr := os.Stat(r.QuarantinedTo); statErr != nil {
+		t.Errorf("corrupt file should be quarantined to %s: %v", r.QuarantinedTo, statErr)
+	}
+	if _, statErr := os.Stat(resetPathFor(path)); statErr != nil {
+		t.Errorf("the reset record must be durable beside the store: %v", statErr)
+	}
+	// Until acknowledged, every active profile is affected (unscoped); an
+	// acknowledgement is per profile and persist-before-swap.
+	if !s.ResetAffects("x", true) || s.ResetAffects("x", false) {
+		t.Fatal("an unscoped reset affects every ACTIVE profile")
+	}
+	if err := s.NoteActiveAtReset([]string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	if !s.ResetAffects("x", true) || s.ResetAffects("y", true) {
+		t.Fatal("a scoped reset affects only the profiles active at the reset")
+	}
+	if err := s.AcknowledgeReset("x", HistoryResetAck{OperationID: "op", By: "admin", At: "t", ActiveRevision: 3, ActiveSpecDigest: "sha256:ab"}); err != nil {
+		t.Fatal(err)
+	}
+	if s.ResetAffects("x", true) {
+		t.Fatal("an acknowledged profile is no longer affected")
+	}
+	// The record (with the acknowledgement) survives a reload.
+	var again LifecycleStore
+	if err := again.Load(path); err != nil {
+		t.Fatalf("reload after quarantine: %v", err)
+	}
+	if again.ResetAffects("x", true) {
+		t.Fatal("acknowledgement must be durable across a reload")
+	}
+	if r := again.HistoryResetRecord(); r == nil || !r.Scoped || r.Acknowledged["x"].OperationID != "op" {
+		t.Fatalf("reset record must reload intact: %+v", r)
 	}
 }
 

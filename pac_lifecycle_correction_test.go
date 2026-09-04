@@ -50,8 +50,9 @@ import (
 // delta — see the CLAUDE.md audit-ring pitfall).
 func pacIntentAudits(op, action string) int {
 	n := 0
-	for _, e := range auditGet() {
-		if e.Action == action && strings.Contains(e.Detail, "operationId="+op) {
+	ring := auditGet()
+	for i := range ring {
+		if ring[i].Action == action && strings.Contains(ring[i].Detail, "operationId="+op) {
 			n++
 		}
 	}

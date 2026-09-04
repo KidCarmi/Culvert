@@ -84,6 +84,10 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		{SrcPath: p("pac_config.json"), TarPath: "data/pac_config.json"},
 		{SrcPath: p("pac_profiles.json"), TarPath: "data/pac_profiles.json"},
 		{SrcPath: p("pac_profiles_lifecycle.json"), TarPath: "data/pac_profiles_lifecycle.json"},
+		// 2F-B (C1): the durable history-reset record beside the lifecycle
+		// store (quarantine evidence + per-profile acknowledgements) travels
+		// with it, so a restore never silently drops an unacknowledged reset.
+		{SrcPath: p("pac_profiles_lifecycle.reset.json"), TarPath: "data/pac_profiles_lifecycle.reset.json"},
 		{SrcPath: p("pac_exceptions.json"), TarPath: "data/pac_exceptions.json"},
 		{SrcPath: p("scan_exclusions.json"), TarPath: "data/scan_exclusions.json"},
 		{SrcPath: p("alert_settings.json"), TarPath: "data/alert_settings.json"},

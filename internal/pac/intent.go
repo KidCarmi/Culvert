@@ -34,6 +34,12 @@ const (
 	LifecyclePending   = "pending"
 	LifecycleAmbiguous = "ambiguous"
 
+	// historyState values (the node-local history's truth about a profile).
+	HistoryStateRecorded              = "recorded"
+	HistoryStatePendingReconciliation = "pending_reconciliation"
+	HistoryStateAmbiguous             = "ambiguous"
+	HistoryStateReset                 = "history_reset"
+
 	// MaxDecidedOps bounds the per-profile decided-operation ring.
 	MaxDecidedOps = 64
 )
@@ -54,10 +60,31 @@ type PendingOp struct {
 	Challenge                string  `json:"challenge,omitempty"` // accepted DIRECT challenge token (single-use record)
 	TargetN                  int64   `json:"targetN,omitempty"`   // rollback target
 	Actor                    string  `json:"actor"`
+	AuditActor               string  `json:"auditActor,omitempty"` // the audit-ring actor string captured at intent time
 	Reason                   string  `json:"reason,omitempty"`
 	TS                       string  `json:"ts"`
 	State                    string  `json:"state"`
+	// Durable COMMITTED progression (2F-B correction, C1): once the
+	// authoritative active store proves the commit, State becomes committed
+	// and every post-commit effect advances a durable marker, so a crash at
+	// any boundary is completed — never duplicated — by reconciliation.
+	CommittedAt      string     `json:"committedAt,omitempty"`
+	ObservedRevision int64      `json:"observedRevision,omitempty"`
+	HistoryN         int64      `json:"historyN,omitempty"` // revision number recorded by history finalization
+	Progress         OpProgress `json:"progress"`
 }
+
+// OpProgress records which post-commit effects of a committed operation are
+// already durable. Each flag is persisted only AFTER its effect landed.
+type OpProgress struct {
+	History       bool `json:"history"`       // the published revision is recorded in the lifecycle
+	ConfigVersion bool `json:"configVersion"` // the config-version snapshot exists (keyed by operationId)
+	Cluster       bool `json:"cluster"`       // the CP→DP snapshot was (re)published
+}
+
+// Committed reports whether the intent has durably passed the authoritative
+// commit point.
+func (op *PendingOp) Committed() bool { return op != nil && op.State == OpCommitted }
 
 // DecidedOp is the immutable record of a decided operation and the response
 // it produced.
