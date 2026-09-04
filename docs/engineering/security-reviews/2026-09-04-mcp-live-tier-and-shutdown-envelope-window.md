@@ -299,9 +299,10 @@ user-controlled value reaches the log.
 `go build ./...` clean; `go vet .` clean; `gofmt` clean. All `internal/mcp`
 package tests pass (25 subpackages). `internal/fileblock` passes. The invariant
 gates — execution posture, policy-learn and live-production-deps walls,
-C1/C2/C4/D0 route-metadata parity, config-surface parity — pass (92 assertions,
-zero failures). The full shutdown suite, including all 15 pre-existing CHAOS-56
-gates, passes with the fix in place.
+C1/C2/C4/D0 route-metadata parity, config-surface parity — all pass, with no
+failures. The full root-package suite passes with the fix in place, and every
+CHAOS-56 gate — the 15 pre-existing ones plus the 6 added here — passes under
+`-race -shuffle=on -count=2`.
 
 ---
 
