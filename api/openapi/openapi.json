@@ -5126,16 +5126,44 @@
         "properties": {
           "coverage": {
             "additionalProperties": false,
+            "description": "Backend-derived chaining coverage per client path (PX-1: only the plain-HTTP forward path is chained; CONNECT, WebSocket and SOCKS5 client traffic egress direct).",
             "properties": {
+              "connect": {
+                "enum": [
+                  "direct"
+                ],
+                "type": "string"
+              },
+              "plainHttp": {
+                "enum": [
+                  "chained"
+                ],
+                "type": "string"
+              },
+              "socks5": {
+                "enum": [
+                  "direct"
+                ],
+                "type": "string"
+              },
               "summary": {
-                "description": "Chaining applies to the plain-HTTP forward path only (PX-1: CONNECT/WebSocket/SOCKS5 chaining is not implemented).",
                 "enum": [
                   "plain_http_only"
+                ],
+                "type": "string"
+              },
+              "websocket": {
+                "enum": [
+                  "direct"
                 ],
                 "type": "string"
               }
             },
             "required": [
+              "plainHttp",
+              "connect",
+              "websocket",
+              "socks5",
               "summary"
             ],
             "type": "object"
@@ -5200,6 +5228,24 @@
             "description": "Present on mutation answers.",
             "type": "boolean"
           },
+          "probe": {
+            "additionalProperties": false,
+            "description": "The periodic health-probe configuration armed at startup (config.yaml upstream.health_interval).",
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "interval": {
+                "description": "Go duration; \"0s\" when no periodic probe runs.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "configured",
+              "interval"
+            ],
+            "type": "object"
+          },
           "proxies": {
             "description": "Legacy alias of `entries`.",
             "items": {
@@ -5218,6 +5264,9 @@
             ],
             "type": "string"
           },
+          "yamlDegraded": {
+            "$ref": "#/components/schemas/UpstreamDegraded"
+          },
           "yamlOwned": {
             "description": "v1 adapter — incoming authorities skipped because config.yaml owns them.",
             "type": "integer"
@@ -5231,6 +5280,7 @@
           "mode",
           "effective",
           "coverage",
+          "probe",
           "direct_fallback",
           "migration",
           "key",
@@ -5272,6 +5322,7 @@
       },
       "UpstreamDegraded": {
         "additionalProperties": false,
+        "description": "A bounded validation degradation. `degraded` = the STORED managed document was rejected at load (managed entries unpublished; every managed mutation, import and key creation refused with 409 document_rejected until repair + restart). `yamlDegraded` = the config.yaml seed was refused whole (independent; never cleared by the managed document loading).",
         "properties": {
           "count": {
             "type": "integer"
@@ -5306,13 +5357,18 @@
               "direct_fallback"
             ],
             "type": "string"
+          },
+          "since": {
+            "description": "RFC3339 instant the current mode was first observed (re-stamped only on a transition).",
+            "type": "string"
           }
         },
         "required": [
           "mode",
           "entries",
           "eligible",
-          "fallbackTotal"
+          "fallbackTotal",
+          "since"
         ],
         "type": "object"
       },
@@ -5349,6 +5405,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "health": {
+            "$ref": "#/components/schemas/UpstreamHealth"
+          },
           "healthy": {
             "description": "Legacy — true only when the probe is `healthy`.",
             "type": "boolean"
@@ -5382,8 +5441,7 @@
           "scheme": {
             "enum": [
               "http",
-              "https",
-              "socks5"
+              "https"
             ],
             "type": "string"
           },
@@ -5395,7 +5453,7 @@
             "type": "string"
           },
           "url": {
-            "description": "Legacy field — the credential-free canonical authority.",
+            "description": "Legacy field — `scheme://host:port` with NO userinfo of any kind (the username is its own field).",
             "type": "string"
           },
           "username": {
@@ -5413,6 +5471,7 @@
           "revision",
           "credentialState",
           "probe",
+          "health",
           "healthy",
           "eligible",
           "circuit",
@@ -5489,8 +5548,7 @@
           "scheme": {
             "enum": [
               "http",
-              "https",
-              "socks5"
+              "https"
             ],
             "type": "string"
           },
@@ -5502,6 +5560,47 @@
           "scheme",
           "host",
           "revision"
+        ],
+        "type": "object"
+      },
+      "UpstreamHealth": {
+        "additionalProperties": false,
+        "description": "Per-entry health truth: the last classified probe verdict, when it landed, and whether the periodic loop or an operator produced it.",
+        "properties": {
+          "lastProbeAt": {
+            "description": "RFC3339; absent while unprobed.",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "none",
+              "connect_failed",
+              "timeout",
+              "proxy_auth_failed",
+              "probe_http_error",
+              "credential_ineligible"
+            ],
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "periodic",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "unprobed",
+              "healthy",
+              "unhealthy"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason"
         ],
         "type": "object"
       },
@@ -5562,6 +5661,7 @@
       },
       "UpstreamProbe": {
         "additionalProperties": false,
+        "description": "Compatibility alias of `health` (same verdict, legacy field names).",
         "properties": {
           "checkedAt": {
             "type": "string"
@@ -5574,6 +5674,13 @@
               "proxy_auth_failed",
               "probe_http_error",
               "credential_ineligible"
+            ],
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "periodic",
+              "manual"
             ],
             "type": "string"
           },
@@ -5594,7 +5701,7 @@
       },
       "UpstreamRefusal": {
         "additionalProperties": false,
-        "description": "Structured 2F-C refusal. `code` is bounded: precondition_required (428), stale (409, `current.revision`), vanished (404), yaml_owned (409), credential_bound (409 — authority change while a credential exists; clear it first), credential_present (409 — delete refused), confirm_required (409, `current.confirmValue`), credentialed_entries_present (409 — the v1 bulk adapter while any managed entry holds a credential), duplicate_authority (409, `count`), no_credential (409 — clear on an entry without material), invalid_entry / userinfo_not_allowed / credential_state_not_accepted / invalid_password / invalid_action / invalid_json (400), key_unusable (409), persist_failed / seal_failed (500 — nothing was changed).",
+        "description": "Structured 2F-C refusal. `code` is bounded: precondition_required (428), stale (409, `current.revision`), vanished (404), yaml_owned (409), credential_bound (409 — authority change while a credential exists; clear it first), credential_present (409 — delete refused), confirm_required (409, `current.confirmValue`), credentialed_entries_present (409 — the v1 bulk adapter while any managed entry holds a credential), duplicate_authority (409, `count`), no_credential (409 — clear on an entry without material), invalid_entry / userinfo_not_allowed / credential_state_not_accepted / invalid_password / invalid_action / invalid_json (400), key_unusable (409), document_rejected (409 — the stored document failed validation at load; nothing is accepted until repair), persist_failed / seal_failed (500 — nothing was changed).",
         "properties": {
           "code": {
             "type": "string"

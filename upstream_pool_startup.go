@@ -16,11 +16,15 @@ import "context"
 // (P1.3 / S4.UpstreamHealth — parented to ctx so it exits on shutdown)
 // starts only when a positive interval was resolved.
 func loadUpstreamPool(cfg upstreamPoolStartupConfig, ctx context.Context) {
+	upstreamPool.SetProbeInterval(cfg.HealthInterval)
 	if err := upstreamPool.Configure(cfg.Proxies, cfg.CBThreshold, cfg.CBTimeout); err != nil {
 		// Fail closed: the YAML seed is rejected wholesale (no partial pool)
-		// and the process runs direct until the operator fixes the file.
+		// and the process runs direct until the operator fixes the file. The
+		// degradation stays visible independently of the managed document.
 		logger.Printf("ERROR: upstream: YAML proxies rejected: %v", err)
-		upstreamNoteDegraded(err)
+		upstreamNoteYAMLDegraded(err)
+	} else {
+		upstreamClearYAMLDegraded()
 	}
 	applyUpstreamProxy()
 	logger.Printf("Upstream: %s", formatUpstreamSummary(cfg.Proxies))

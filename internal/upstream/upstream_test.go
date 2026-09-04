@@ -408,14 +408,19 @@ func TestPool_SetProxiesOnZeroPoolUsesCBDefaults(t *testing.T) {
 func TestPool_EntriesAreCredentialFreeAndPasswordURLsRefused(t *testing.T) {
 	const raw = "http://user:sekret-cred@parent.test:3128" // #nosec G101 -- fake userinfo in a reserved .test URL
 	pool := &Pool{}
-	// 2F-C (C4/C10): a password never rides a URL — YAML entries and the
-	// legacy list path refuse it; credentials are sealed through the
-	// credential endpoint, and every listing is credential-free.
-	if err := pool.Configure([]Entry{{URL: raw}}, 5, time.Minute); err == nil {
-		t.Fatal("a YAML URL carrying a password must be refused")
+	// 2F-C correction (review blocker 2): an existing config.yaml parent
+	// with an inline credential stays usable — retained in memory only,
+	// read-only, credential-free on every listing. The MANAGED legacy list
+	// path still refuses a password (credentials are sealed through the
+	// credential endpoint).
+	if err := pool.Configure([]Entry{{URL: raw}}, 5, time.Minute); err != nil {
+		t.Fatalf("a YAML URL carrying an inline credential must be retained: %v", err)
 	}
-	if pool.Enabled() {
-		t.Fatal("a refused YAML set must leave the pool empty")
+	if list := pool.List(); len(list) != 1 || list[0].CredentialState != CredentialConfigured || strings.Contains(list[0].URL, "sekret") {
+		t.Fatalf("yaml inline credential must be configured and never listed: %+v", list)
+	}
+	if err := pool.Configure(nil, 5, time.Minute); err != nil {
+		t.Fatal(err)
 	}
 	if err := pool.SetProxies([]Entry{{URL: raw}}); err == nil {
 		t.Fatal("a legacy URL carrying a password must be refused")
@@ -425,7 +430,10 @@ func TestPool_EntriesAreCredentialFreeAndPasswordURLsRefused(t *testing.T) {
 	}
 	entries := pool.Entries()
 	if len(entries) != 1 || entries[0].URL != "http://user@parent.test:3128" {
-		t.Fatalf("Entries() = %+v, want the credential-free authority", entries)
+		t.Fatalf("Entries() = %+v, want the credential-free legacy authority (username kept for the downgrade-compatible list)", entries)
+	}
+	if list := pool.List(); list[0].URL != "http://parent.test:3128" || list[0].Username != "user" {
+		t.Fatalf("List() url must carry no userinfo (username is its own field): %+v", list[0])
 	}
 	if list := pool.List(); len(list) != 1 || strings.Contains(list[0].URL, "sekret") || list[0].CredentialState != CredentialNone {
 		t.Fatalf("List() must be credential-free with state none: %+v", list)

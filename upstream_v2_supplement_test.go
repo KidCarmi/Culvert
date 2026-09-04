@@ -174,9 +174,16 @@ func TestUpstreamV2_YAMLDuplicateSeedIsRefusedFailClosed(t *testing.T) {
 	if upstreamPool.Enabled() {
 		t.Fatal("a refused seed must publish nothing")
 	}
-	// A YAML password is refused outright (credentials never live in YAML).
-	if err := upstreamPool.Configure([]UpstreamEntry{{URL: "http://u:p@parent-y.test:3128"}}, 5, time.Minute); err == nil {
-		t.Fatal("a YAML URL with a password must be refused")
+	// An existing YAML inline credential is RETAINED (review blocker 2):
+	// usable, read-only, in memory only — and the seed still validates.
+	if err := upstreamPool.Configure([]UpstreamEntry{{URL: "http://u:p@parent-y.test:3128"}}, 5, time.Minute); err != nil {
+		t.Fatalf("a YAML URL with an inline credential must be retained: %v", err)
+	}
+	if l := upstreamPool.List(); len(l) != 1 || l[0].CredentialState != upstream.CredentialConfigured || strings.Contains(l[0].URL, "@") {
+		t.Fatalf("yaml inline credential: %+v", l)
+	}
+	if err := upstreamPool.Configure(nil, 5, time.Minute); err != nil {
+		t.Fatal(err)
 	}
 	// Managed first, then a YAML seed naming the same authority.
 	rec := upReq(t, "POST", "/api/upstream/entries", fmt.Sprintf(`{"scheme":"http","host":"parent-y.test","port":3128,"revision":%d}`, upDocRevision(t)))

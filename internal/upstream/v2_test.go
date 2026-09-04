@@ -23,7 +23,6 @@ func TestV2_NormalizeAndAuthority(t *testing.T) {
 	}{
 		{Spec{Scheme: "HTTP", Host: "Parent.Example.", Port: 0, Username: ""}, "http://parent.example:80"},
 		{Spec{Scheme: "https", Host: "parent.example", Port: 3128, Username: "svc"}, "https://svc@parent.example:3128"},
-		{Spec{Scheme: "socks5", Host: "10.0.0.5", Port: 0}, "socks5://10.0.0.5:1080"},
 		{Spec{Scheme: "http", Host: "2001:db8::1", Port: 3128}, "http://[2001:db8::1]:3128"},
 		{Spec{Scheme: "http", Host: "bücher.example", Port: 8080}, "http://xn--bcher-kva.example:8080"},
 	}
@@ -82,29 +81,44 @@ func TestV2_SealIsBoundToAuthorityAndKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec, _ := Normalize(Spec{Scheme: "http", Host: "parent.example", Port: 3128, Username: "svc"})
-	sealed, err := k.Seal("pw-1", spec.AuthorityHash(), "t", "admin")
+	idA := NewManagedID()
+	sealed, err := k.Seal("pw-1", idA, spec.AuthorityHash(), "t", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(sealed.Ciphertext, "pw-1") || sealed.KeyID != k.KeyID() || sealed.AuthorityHash != spec.AuthorityHash() {
+	if strings.Contains(sealed.Ciphertext, "pw-1") || sealed.KeyID != k.KeyID() || sealed.AuthorityHash != spec.AuthorityHash() || sealed.EntryID != idA {
 		t.Fatalf("sealed record: %+v", sealed)
 	}
-	if pt, err := k.Unseal(sealed, spec.AuthorityHash()); err != nil || pt != "pw-1" {
+	if pt, err := k.Unseal(sealed, idA, spec.AuthorityHash()); err != nil || pt != "pw-1" {
 		t.Fatalf("unseal: %q %v", pt, err)
 	}
 	other, _ := Normalize(Spec{Scheme: "http", Host: "other.example", Port: 3128, Username: "svc"})
-	if _, err := k.Unseal(sealed, other.AuthorityHash()); err == nil {
-		t.Fatal("a credential must not unwrap for another authority")
+	if _, err := k.Unseal(sealed, idA, other.AuthorityHash()); !errors.Is(err, ErrCredentialMismatch) {
+		t.Fatalf("a credential must not unwrap for another authority, got %v", err)
 	}
-	// Even a record edited to CLAIM another authority cannot unwrap: the
-	// hash is AEAD additional data.
+	// The binding includes the immutable entry ID: the same authority on a
+	// DIFFERENT entry (a transplant after A is removed) must not unwrap.
+	idB := NewManagedID()
+	if _, err := k.Unseal(sealed, idB, spec.AuthorityHash()); !errors.Is(err, ErrCredentialMismatch) {
+		t.Fatalf("a credential must not unwrap for another entry id, got %v", err)
+	}
+	// Even a record edited to CLAIM another authority or entry cannot
+	// unwrap: both are AEAD additional data.
 	forged := *sealed
 	forged.AuthorityHash = other.AuthorityHash()
-	if _, err := k.Unseal(&forged, other.AuthorityHash()); err == nil {
+	if _, err := k.Unseal(&forged, idA, other.AuthorityHash()); err == nil {
 		t.Fatal("a re-labelled ciphertext must not unwrap")
 	}
+	forgedID := *sealed
+	forgedID.EntryID = idB
+	if _, err := k.Unseal(&forgedID, idB, spec.AuthorityHash()); err == nil {
+		t.Fatal("a re-identified ciphertext must not unwrap")
+	}
+	if _, err := k.Seal("pw", "", spec.AuthorityHash(), "t", "admin"); err == nil {
+		t.Fatal("sealing without an entry id must be refused")
+	}
 	k2, _ := OpenKey(t.TempDir(), true)
-	if _, err := k2.Unseal(sealed, spec.AuthorityHash()); err == nil {
+	if _, err := k2.Unseal(sealed, idA, spec.AuthorityHash()); err == nil {
 		t.Fatal("another key must not unwrap")
 	}
 	again, err := OpenKey(dir, false)
@@ -117,8 +131,9 @@ func TestV2_CredentialStateAndEligibility(t *testing.T) {
 	dir := t.TempDir()
 	k, _ := OpenKey(dir, true)
 	spec, _ := Normalize(Spec{Scheme: "http", Host: "parent.example", Port: 3128, Username: "svc"})
-	sealed, _ := k.Seal("pw", spec.AuthorityHash(), "t", "admin")
-	entry := ManagedEntry{ID: NewManagedID(), Scheme: spec.Scheme, Host: spec.Host, Port: spec.Port, Username: spec.Username, Revision: 1, Source: SourceManaged, Credential: sealed}
+	id := NewManagedID()
+	sealed, _ := k.Seal("pw", id, spec.AuthorityHash(), "t", "admin")
+	entry := ManagedEntry{ID: id, Scheme: spec.Scheme, Host: spec.Host, Port: spec.Port, Username: spec.Username, Revision: 1, Source: SourceManaged, Credential: sealed}
 	pool := &Pool{}
 	pool.SetKey(k, "")
 	if err := pool.SetDocument(Document{Entries: []ManagedEntry{entry}}); err != nil {
@@ -211,7 +226,7 @@ func TestV2_ProbeClassifierAndModes(t *testing.T) {
 		t.Fatalf("an unprobed entry is eligible: %+v", eff)
 	}
 	ProbeTransport = func(*url.URL) http.RoundTripper { return fakeRT{status: 407} }
-	pool.HealthCheck()
+	pool.HealthCheck(ProbeManual)
 	if st := pool.List()[0]; st.Probe.Status != ProbeUnhealthy || st.Probe.Reason != ReasonProxyAuthFailed || st.Healthy || st.Eligible {
 		t.Fatalf("407: %+v", st)
 	}
@@ -226,7 +241,7 @@ func TestV2_ProbeClassifierAndModes(t *testing.T) {
 		t.Fatalf("want direct_fallback after the first fallback, got %+v", eff)
 	}
 	ProbeTransport = func(*url.URL) http.RoundTripper { return fakeRT{status: 200} }
-	pool.HealthCheck()
+	pool.HealthCheck(ProbeManual)
 	if pool.Next() == nil {
 		t.Fatal("healthy again")
 	}
@@ -273,5 +288,124 @@ func TestV2_EffectivePoolUniqueness(t *testing.T) {
 	}
 	if got := len(pool.List()); got != 2 {
 		t.Fatalf("want yaml + managed = 2, got %d", got)
+	}
+}
+
+// ── 2F-C correction: engine-level invariants ──
+
+// A credential sealed for entry A, attached to entry B with the same
+// authority, is mismatch: never selected, never probed.
+func TestV2C_TransplantedCredentialIsMismatch(t *testing.T) {
+	dir := t.TempDir()
+	k, _ := OpenKey(dir, true)
+	spec, _ := Normalize(Spec{Scheme: "http", Host: "parent.example", Port: 3128, Username: "svc"})
+	idA, idB := NewManagedID(), NewManagedID()
+	sealed, _ := k.Seal("pw", idA, spec.AuthorityHash(), "t", "admin")
+	pool := &Pool{}
+	pool.SetKey(k, "")
+	b := ManagedEntry{ID: idB, Scheme: spec.Scheme, Host: spec.Host, Port: spec.Port, Username: spec.Username, Revision: 1, Source: SourceManaged, Credential: sealed}
+	if err := pool.SetDocument(Document{Entries: []ManagedEntry{b}}); err != nil {
+		t.Fatal(err)
+	}
+	if st := pool.List()[0].CredentialState; st != CredentialMismatch {
+		t.Fatalf("want mismatch, got %s", st)
+	}
+	if pool.Next() != nil {
+		t.Fatal("a mismatched entry must never be selected")
+	}
+	prev := ProbeTransport
+	t.Cleanup(func() { ProbeTransport = prev })
+	probed := 0
+	ProbeTransport = func(*url.URL) http.RoundTripper { probed++; return fakeRT{status: 200} }
+	pool.HealthCheck(ProbeManual)
+	if probed != 0 {
+		t.Fatal("a mismatched entry must never be probed")
+	}
+	if pool.List()[0].Probe.Status != ProbeUnprobed {
+		t.Fatal("probe state must stay unprobed")
+	}
+}
+
+// A YAML inline credential is retained in memory only: configured, selected
+// with the password, never in the document, list, entries or legacy URLs.
+func TestV2C_YAMLInlineCredentialRetainedInMemoryOnly(t *testing.T) {
+	pool := &Pool{}
+	if err := pool.Configure([]Entry{{URL: "http://svc:inline-pw@parent.test:3128"}}, 5, time.Minute); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	list := pool.List()
+	if len(list) != 1 || list[0].Source != string(SourceYAML) || list[0].CredentialState != CredentialConfigured {
+		t.Fatalf("list = %+v", list)
+	}
+	if strings.Contains(list[0].URL, "@") || strings.Contains(list[0].Authority, "inline-pw") {
+		t.Fatalf("display surfaces must be credential-free: %+v", list[0])
+	}
+	u, err := pool.ProxyFunc()(nil)
+	if err != nil || u == nil {
+		t.Fatalf("ProxyFunc: %v %v", u, err)
+	}
+	if pw, _ := u.User.Password(); pw != "inline-pw" {
+		t.Fatalf("selection must present the inline password, got %q", pw)
+	}
+	if len(pool.Document().Entries) != 0 || len(pool.LegacyManagedEntries()) != 0 {
+		t.Fatal("a YAML entry must never enter the managed document")
+	}
+	for _, e := range pool.Entries() {
+		if strings.Contains(e.URL, "inline-pw") {
+			t.Fatal("Entries() must be credential-free")
+		}
+	}
+	for _, e := range pool.YAMLEntries() {
+		if !e.HasInlineSecret() || e.Credential != nil {
+			t.Fatalf("yaml entry must carry the inline secret in memory only: %+v", e)
+		}
+	}
+	// The probe seam sees the credential-free authority only.
+	prev := ProbeTransport
+	t.Cleanup(func() { ProbeTransport = prev })
+	var seen []string
+	ProbeTransport = func(a *url.URL) http.RoundTripper { seen = append(seen, a.String()); return fakeRT{status: 200} }
+	pool.HealthCheck(ProbePeriodic)
+	if len(seen) != 1 || strings.Contains(seen[0], "inline-pw") || strings.Contains(seen[0], "@") {
+		t.Fatalf("probe seam must receive the credential-free authority, got %v", seen)
+	}
+	if h := pool.List()[0].Health; h.Status != ProbeHealthy || h.Source != ProbePeriodic || h.LastProbeAt == "" {
+		t.Fatalf("health = %+v", h)
+	}
+}
+
+// effective.since re-stamps only on a mode transition (injected clock).
+func TestV2C_EffectiveSinceIsTransitionStamped(t *testing.T) {
+	prev := nowRFC3339
+	t.Cleanup(func() { nowRFC3339 = prev })
+	tick := 0
+	nowRFC3339 = func() string { tick++; return time.Date(2026, 9, 4, 0, 0, tick, 0, time.UTC).Format(time.RFC3339) }
+	pool := &Pool{}
+	a := pool.Effective()
+	b := pool.Effective()
+	if a.Mode != ModeNoPool || a.Since == "" || a.Since != b.Since {
+		t.Fatalf("since must hold while the mode holds: %+v %+v", a, b)
+	}
+	if err := pool.Configure([]Entry{{URL: "http://parent.test:3128"}}, 5, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	c := pool.Effective()
+	if c.Mode != ModeChained || c.Since == b.Since {
+		t.Fatalf("since must re-stamp on a transition: %+v → %+v", b, c)
+	}
+	if d := pool.Effective(); d.Since != c.Since {
+		t.Fatalf("since must hold after the transition: %+v %+v", c, d)
+	}
+}
+
+// The scheme grammar is http|https only.
+func TestV2C_SchemeGrammarIsHTTPOnly(t *testing.T) {
+	for _, raw := range []string{"socks5://parent.test:1080", "socks5h://parent.test:1080", "ftp://parent.test:21"} {
+		if _, _, _, err := SpecFromURL(raw); err == nil {
+			t.Fatalf("%s must be refused", raw)
+		}
+	}
+	if _, err := YAMLEntries([]Entry{{URL: "socks5://parent.test:1080"}}); err == nil {
+		t.Fatal("a socks5 YAML seed must be refused")
 	}
 }

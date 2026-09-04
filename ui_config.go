@@ -670,7 +670,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		filename = "culvert-blockpage"
 	case "upstream":
 		for _, us := range upstreamPool.List() {
-			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.URL})
+			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.Authority}) // credential-free authority (username kept so a re-import preserves identity)
 		}
 		filename = "culvert-upstream"
 	case "connlimit":
@@ -705,7 +705,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		}
 		// Upstream proxies.
 		for _, us := range upstreamPool.List() {
-			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.URL})
+			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.Authority}) // credential-free authority (username kept so a re-import preserves identity)
 		}
 		// Connection limits.
 		b.ConnLimitEnabled = connLimiter.Enabled()

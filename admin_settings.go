@@ -917,6 +917,16 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// until the durable write lands.
 	upstreamDoc := upstreamPool.Document()
 	upstreamApply := false
+	// Review blocker 3: while the STORED document is rejected the save
+	// carries the rejected sections forward verbatim (never the empty live
+	// pool) and no managed mutation is accepted.
+	retainedDoc, retainedLegacy, upstreamRetained := upstreamRetainedSections()
+	if upstreamRetained {
+		if ov.upstreamMutate != nil {
+			return errUpstreamDocumentRejected
+		}
+		upstreamDoc = retainedDoc
+	}
 	if ov.upstreamMutate != nil {
 		target, err := ov.upstreamMutate(upstreamDoc)
 		if err != nil {
@@ -1017,7 +1027,11 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	s.UpstreamProxiesSaved = true
 	docCopy := upstreamDoc.Clone()
 	s.UpstreamProxiesV2 = &docCopy
-	s.UpstreamProxies = upstreamLegacyFromDocument(upstreamDoc)
+	if upstreamRetained {
+		s.UpstreamProxies = retainedLegacy
+	} else {
+		s.UpstreamProxies = upstreamLegacyFromDocument(upstreamDoc)
+	}
 
 	// History-store enable state + retention (retention remembered even when off)
 	s.LogStoreEnabledSaved = true

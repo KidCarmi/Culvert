@@ -48,8 +48,12 @@ const (
 // Sealed is a credential at rest: ciphertext under the node-local key,
 // bound to the authority it was set for. It never carries plaintext.
 type Sealed struct {
+	// EntryID is the immutable entry the credential was sealed FOR; it is
+	// bound cryptographically (AAD) and structurally, so ciphertext moved
+	// onto another entry — even one with the same authority — is mismatch.
+	EntryID       string `json:"entryId"`
 	AuthorityHash string `json:"authorityHash"`
-	Ciphertext    string `json:"ciphertext"` // base64(nonce || AES-GCM(pw, aad=authorityHash))
+	Ciphertext    string `json:"ciphertext"` // base64(nonce || AES-GCM(pw, aad=entryID||0||authorityHash))
 	KeyID         string `json:"keyId"`
 	SetAt         string `json:"setAt"`
 	SetBy         string `json:"setBy,omitempty"`
@@ -67,6 +71,12 @@ type ManagedEntry struct {
 	Credential *Sealed `json:"credential,omitempty"`
 	CreatedAt  string  `json:"createdAt,omitempty"`
 	UpdatedAt  string  `json:"updatedAt,omitempty"`
+
+	// yamlSecret is the inline password of a config.yaml parent, retained
+	// IN MEMORY ONLY (never serialized: json:"-", never part of the managed
+	// document, never returned, logged or audited). Empty for managed
+	// entries, whose material is sealed under Credential instead.
+	yamlSecret string `json:"-"`
 }
 
 // Document is the durable v2 representation of the MANAGED entries
@@ -88,10 +98,10 @@ type Spec struct {
 	Username string
 }
 
-var schemeDefaultPort = map[string]int{"http": 80, "https": 443, "socks5": 1080}
+var schemeDefaultPort = map[string]int{"http": 80, "https": 443}
 
 // Normalize validates and canonicalizes an authority specification: scheme
-// lower-cased and restricted to http/https/socks5, host lower-cased,
+// lower-cased and restricted to http/https (the approved C4 grammar), host lower-cased,
 // trailing-dot stripped and IDNA-encoded (bracketed IPv6 literals accepted),
 // effective port defaulted per scheme, username free of ':' / '@' / '/'.
 func Normalize(in Spec) (Spec, error) {
@@ -99,7 +109,7 @@ func Normalize(in Spec) (Spec, error) {
 	out.Scheme = strings.ToLower(strings.TrimSpace(in.Scheme))
 	def, ok := schemeDefaultPort[out.Scheme]
 	if !ok {
-		return out, fmt.Errorf("scheme must be http, https or socks5")
+		return out, fmt.Errorf("scheme must be http or https")
 	}
 	host, err := normalizeHost(in.Host)
 	if err != nil {
@@ -299,24 +309,34 @@ func ValidateEffective(yaml, managed []ManagedEntry) error {
 func YAMLEntries(entries []Entry) ([]ManagedEntry, error) {
 	out := make([]ManagedEntry, 0, len(entries))
 	for i, e := range entries {
-		spec, _, hasPW, err := SpecFromURL(e.URL)
+		spec, pw, _, err := SpecFromURL(e.URL)
 		if err != nil {
 			return nil, &InvalidEntryError{Index: i, Reason: err.Error()}
 		}
-		if hasPW {
-			return nil, &InvalidEntryError{Index: i, Reason: "YAML entries must not carry a password (use the admin credential endpoint)"}
-		}
+		// An existing inline credential stays usable: retained in memory
+		// only, read-only, never persisted into admin_settings.
 		out = append(out, ManagedEntry{
 			ID: spec.YAMLID(), Scheme: spec.Scheme, Host: spec.Host, Port: spec.Port, Username: spec.Username,
-			Revision: 1, Source: SourceYAML,
+			Revision: 1, Source: SourceYAML, yamlSecret: pw,
 		})
 	}
 	return out, nil
 }
 
-// LegacyURL is the credential-free `scheme://[username@]host:port` form used
-// by the legacy list/export surfaces.
+// LegacyURL is the credential-free `scheme://[username@]host:port` form
+// persisted in the downgrade-compatible legacy list (admin_settings
+// upstream_proxies) so a pre-v2 binary still sees the username.
 func (e *ManagedEntry) LegacyURL() string { return e.Authority() }
+
+// DisplayURL is the API/legacy-GET form: `scheme://host:port` with NO
+// userinfo at all (the username is a separate field).
+func (e *ManagedEntry) DisplayURL() string {
+	return e.Scheme + "://" + e.Host + ":" + strconv.Itoa(e.Port)
+}
+
+// HasInlineSecret reports whether a YAML entry carries an in-memory inline
+// credential (never the secret itself).
+func (e *ManagedEntry) HasInlineSecret() bool { return e.yamlSecret != "" }
 
 // cloneEntries deep-copies a slice of entries.
 func cloneEntries(in []ManagedEntry) []ManagedEntry {

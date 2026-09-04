@@ -27,7 +27,14 @@ import (
 type upstreamState struct {
 	Migration upstreamMigrationState `json:"migration"`
 	Key       upstreamKeyState       `json:"key"`
-	Degraded  *upstreamDegraded      `json:"degraded,omitempty"`
+	// Degraded is the MANAGED-document degradation (a stored v2 document
+	// that failed validation: managed entries not published, every managed
+	// mutation and key minting frozen until operator repair).
+	Degraded *upstreamDegraded `json:"degraded,omitempty"`
+	// YAMLDegraded is the config.yaml seed degradation (invalid/duplicate
+	// seed refused whole). Independent of the managed document: loading a
+	// valid managed document never clears it.
+	YAMLDegraded *upstreamDegraded `json:"yamlDegraded,omitempty"`
 }
 
 type upstreamMigrationState struct {
@@ -55,6 +62,62 @@ var (
 	upstreamStateMu  sync.RWMutex
 	upstreamStateCur = upstreamState{Migration: upstreamMigrationState{State: "none"}, Key: upstreamKeyState{State: "unused"}}
 )
+
+// ── Rejected-document latch (review blocker 3) ────────────────────────────
+//
+// A stored upstream_proxies_v2 that fails validation at load is NOT
+// forgotten: the decoded document and the legacy list are retained verbatim
+// so every later save carries them forward unchanged, every managed
+// mutation (v2 create/update/delete/credential, the v1 adapter, import) is
+// refused, and no key can be minted while its ciphertext exists on disk.
+// The latch clears only when a load installs a VALID document.
+
+var (
+	upstreamRejectedMu     sync.RWMutex
+	upstreamRejectedDoc    *upstream.Document
+	upstreamRejectedLegacy []UpstreamEntry
+)
+
+func upstreamSetRejected(doc *upstream.Document, legacy []UpstreamEntry) {
+	upstreamRejectedMu.Lock()
+	defer upstreamRejectedMu.Unlock()
+	if doc != nil {
+		c := doc.Clone()
+		upstreamRejectedDoc = &c
+	} else {
+		upstreamRejectedDoc = nil
+	}
+	upstreamRejectedLegacy = append([]UpstreamEntry(nil), legacy...)
+}
+
+func upstreamClearRejected() {
+	upstreamRejectedMu.Lock()
+	upstreamRejectedDoc, upstreamRejectedLegacy = nil, nil
+	upstreamRejectedMu.Unlock()
+}
+
+// upstreamRejectedActive reports whether the stored document is rejected.
+func upstreamRejectedActive() bool {
+	upstreamRejectedMu.RLock()
+	defer upstreamRejectedMu.RUnlock()
+	return upstreamRejectedDoc != nil
+}
+
+// upstreamRetainedSections returns the sections a save must persist: the
+// rejected document + legacy list verbatim while the latch is set, else
+// the live managed document. ok=false means "use the live pool".
+func upstreamRetainedSections() (doc upstream.Document, legacy []UpstreamEntry, ok bool) {
+	upstreamRejectedMu.RLock()
+	defer upstreamRejectedMu.RUnlock()
+	if upstreamRejectedDoc == nil {
+		return upstream.Document{}, nil, false
+	}
+	return upstreamRejectedDoc.Clone(), append([]UpstreamEntry(nil), upstreamRejectedLegacy...), true
+}
+
+// errUpstreamDocumentRejected is the bounded refusal every managed mutation
+// returns while the stored document is rejected.
+var errUpstreamDocumentRejected = errors.New("document_rejected: the stored upstream document failed validation at load; repair admin_settings.json (or restore a valid one) and restart — no managed mutation, import or key creation is accepted until then")
 
 func setUpstreamState(mut func(st *upstreamState)) {
 	upstreamStateMu.Lock()
@@ -101,10 +164,16 @@ func upstreamOpenKey() *upstream.Keyring {
 // upstreamEnsureKey returns the key, minting one ONLY when none exists AND
 // the pool holds no ciphertext (first credential / migration).
 func upstreamEnsureKey() (*upstream.Keyring, error) {
+	if upstreamRejectedActive() {
+		return nil, errUpstreamDocumentRejected
+	}
 	if k, _ := upstreamPool.Key(); k != nil {
 		return k, nil
 	}
 	eff := upstreamPool.EffectiveEntries()
+	if doc, _, ok := upstreamRetainedSections(); ok {
+		eff = append(eff, doc.Entries...)
+	}
 	for i := range eff {
 		if eff[i].Credential != nil {
 			return nil, errors.New("key_unusable: sealed credentials exist but the credential key is unavailable; restore .upstream_cred_key before adding credentials")
@@ -148,10 +217,14 @@ func applyUpstreamV2(s *AdminSettings) {
 	case s.UpstreamProxiesV2 != nil:
 		doc := s.UpstreamProxiesV2.Clone()
 		if err := upstreamPool.SetDocument(doc); err != nil {
+			// Fail CLOSED and REMEMBER: retain the rejected sections verbatim,
+			// refuse every managed mutation and key mint until repair.
+			upstreamSetRejected(s.UpstreamProxiesV2, s.UpstreamProxies)
 			upstreamNoteDegraded(err)
-			logger.Printf("Upstream: v2 document refused at load (%s); managed entries NOT published, YAML-owned entries only", upstreamBoundedReason(err))
+			logger.Printf("Upstream: v2 document refused at load (%s); managed entries NOT published, managed mutations and key creation FROZEN until admin_settings.json is repaired", upstreamBoundedReason(err))
 			return
 		}
+		upstreamClearRejected()
 		setUpstreamState(func(st *upstreamState) { st.Degraded = nil; st.Migration = upstreamMigrationState{State: "ok"} })
 		applyUpstreamProxy()
 	case s.UpstreamProxiesSaved:
@@ -280,7 +353,8 @@ func upstreamBuildMigratedDocument(items []upstreamLegacyItem, key *upstream.Key
 			Revision: 1, Source: upstream.SourceManaged, CreatedAt: now, UpdatedAt: now,
 		}
 		if it.hasPW {
-			c, serr := key.Seal(it.pw, it.spec.AuthorityHash(), now, "migration")
+			// Sealed for the NEWLY assigned entry ID + authority hash.
+			c, serr := key.Seal(it.pw, e.ID, it.spec.AuthorityHash(), now, "migration")
 			if serr != nil {
 				return upstream.Document{}, 0, 0, serr
 			}
@@ -305,13 +379,31 @@ func upstreamBoundedReason(err error) string {
 	return "invalid_entry"
 }
 
-func upstreamNoteDegraded(err error) {
+func upstreamDegradedOf(err error) *upstreamDegraded {
 	d := &upstreamDegraded{Reason: upstreamBoundedReason(err)}
 	var dup *upstream.DuplicateAuthorityError
 	if errors.As(err, &dup) {
 		d.Count = dup.Count
 	}
+	return d
+}
+
+// upstreamNoteDegraded records a MANAGED-document degradation.
+func upstreamNoteDegraded(err error) {
+	d := upstreamDegradedOf(err)
 	setUpstreamState(func(st *upstreamState) { st.Degraded = d })
+}
+
+// upstreamNoteYAMLDegraded records a config.yaml seed degradation; it stays
+// visible until a later seed load succeeds (never cleared by the managed
+// document loading).
+func upstreamNoteYAMLDegraded(err error) {
+	d := upstreamDegradedOf(err)
+	setUpstreamState(func(st *upstreamState) { st.YAMLDegraded = d })
+}
+
+func upstreamClearYAMLDegraded() {
+	setUpstreamState(func(st *upstreamState) { st.YAMLDegraded = nil })
 }
 
 // upstreamRedactedPasswordMarker is the placeholder net/url renders for a
@@ -345,6 +437,9 @@ func (e *upstreamImportError) Error() string {
 func upstreamImportDocument(in []UpstreamEntry, replace bool) (*upstream.Document, error) {
 	if len(in) == 0 {
 		return nil, nil
+	}
+	if upstreamRejectedActive() {
+		return nil, errUpstreamDocumentRejected
 	}
 	cur := upstreamPool.Document()
 	yaml := upstreamPool.YAMLEntries()
@@ -416,6 +511,10 @@ func upstreamImportSpec(index int, raw string) (upstream.Spec, error) {
 // 400 with a bounded code (a 409 for a duplicate authority against the YAML
 // seed, mirroring the v2 endpoints); the URL is never echoed.
 func writeUpstreamImportRefusal(w http.ResponseWriter, err error) {
+	if errors.Is(err, errUpstreamDocumentRejected) {
+		http.Error(w, "upstream proxies: "+err.Error(), http.StatusConflict)
+		return
+	}
 	var ie *upstreamImportError
 	if errors.As(err, &ie) {
 		http.Error(w, "invalid upstream proxies: "+ie.Code+" at entry "+strconv.Itoa(ie.Index)+": "+ie.Msg, http.StatusBadRequest)

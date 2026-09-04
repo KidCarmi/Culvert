@@ -103,11 +103,19 @@ func upstreamView() map[string]any {
 			ineligible++
 		}
 	}
+	probeConfigured, probeInterval := upstreamPool.ProbeConfig()
 	v := map[string]any{
-		"enabled":               upstreamPool.Enabled(),
-		"mode":                  eff.Mode,
-		"effective":             eff,
-		"coverage":              map[string]any{"summary": "plain_http_only"},
+		"enabled":   upstreamPool.Enabled(),
+		"mode":      eff.Mode,
+		"effective": eff,
+		// Coverage is backend-derived truth per client path: only the
+		// plain-HTTP forward path is chained (PX-1: CONNECT, WebSocket and
+		// SOCKS5 client traffic always egress direct).
+		"coverage": map[string]any{
+			"plainHttp": "chained", "connect": "direct", "websocket": "direct", "socks5": "direct",
+			"summary": "plain_http_only",
+		},
+		"probe":                 map[string]any{"configured": probeConfigured, "interval": probeInterval.String()},
 		"revision":              doc.Revision,
 		"entries":               list,
 		"proxies":               list, // legacy field: same credential-free rows
@@ -119,6 +127,9 @@ func upstreamView() map[string]any {
 	}
 	if st.Degraded != nil {
 		v["degraded"] = st.Degraded
+	}
+	if st.YAMLDegraded != nil {
+		v["yamlDegraded"] = st.YAMLDegraded
 	}
 	return v
 }
@@ -155,7 +166,7 @@ func apiUpstreamHealth(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	upstreamPool.HealthCheck()
+	upstreamPool.HealthCheck(upstream.ProbeManual)
 	v := upstreamView()
 	v["ok"] = true
 	jsonOK(w, v)
@@ -166,6 +177,13 @@ func apiUpstreamHealth(w http.ResponseWriter, r *http.Request) {
 // returns the target document and an outcome (audit + response) or a typed
 // refusal. On success the pool is already re-published.
 func upstreamMutate(w http.ResponseWriter, r *http.Request, fn func(cur upstream.Document) (upstream.Document, *upstreamOutcome, error)) {
+	// Review blocker 3: a rejected stored document freezes every managed
+	// mutation (the save core re-checks under its own lock as well).
+	if upstreamRejectedActive() {
+		writeUpstreamRefusal(w, &upstreamRefusal{Status: http.StatusConflict, Code: "document_rejected",
+			Msg: errUpstreamDocumentRejected.Error(), Current: map[string]any{"degraded": getUpstreamState().Degraded}})
+		return
+	}
 	var out *upstreamOutcome
 	err := saveAdminSettingsWithOverrides(adminSaveOverrides{upstreamMutate: func(cur upstream.Document) (upstream.Document, error) {
 		next, o, err := fn(cur)
@@ -176,6 +194,10 @@ func upstreamMutate(w http.ResponseWriter, r *http.Request, fn func(cur upstream
 		return next, nil
 	}})
 	if err != nil {
+		if errors.Is(err, errUpstreamDocumentRejected) {
+			writeUpstreamRefusal(w, &upstreamRefusal{Status: http.StatusConflict, Code: "document_rejected", Msg: err.Error()})
+			return
+		}
 		var ref *upstreamRefusal
 		if errors.As(err, &ref) {
 			writeUpstreamRefusal(w, ref)
@@ -586,7 +608,7 @@ func apiUpstreamEntryCredential(w http.ResponseWriter, r *http.Request, id strin
 				return cur, nil, &upstreamRefusal{Status: http.StatusConflict, Code: "key_unusable",
 					Msg: "the node-local credential key is unavailable; restore .upstream_cred_key (or clear every sealed credential) before setting a credential", Current: map[string]any{"id": e.ID, "revision": e.Revision}}
 			}
-			sealed, err := key.Seal(body.Password, e.AuthorityHash(), now, actor)
+			sealed, err := key.Seal(body.Password, e.ID, e.AuthorityHash(), now, actor)
 			if err != nil {
 				return cur, nil, &upstreamRefusal{Status: http.StatusInternalServerError, Code: "seal_failed", Msg: "the credential could not be sealed; nothing was changed"}
 			}

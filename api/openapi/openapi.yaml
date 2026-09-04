@@ -996,13 +996,13 @@ components:
         username, `credentialState` is DERIVED server-side (never accepted
         from a client) and the probe/eligibility verdicts are the pool's own.
         `source: yaml` entries are read-only through the API (409 yaml_owned).
-      required: [id, url, authority, scheme, host, port, source, revision, credentialState, probe, healthy, eligible, circuit, failures]
+      required: [id, url, authority, scheme, host, port, source, revision, credentialState, probe, health, healthy, eligible, circuit, failures]
       additionalProperties: false
       properties:
         id: { type: string, description: 'Server-assigned ULID (managed) or `yaml-<digest>` (config.yaml).' }
-        url: { type: string, description: 'Legacy field — the credential-free canonical authority.' }
+        url: { type: string, description: 'Legacy field — `scheme://host:port` with NO userinfo of any kind (the username is its own field).' }
         authority: { type: string, description: 'Canonical `scheme://[username@]host:port`.' }
-        scheme: { type: string, enum: [http, https, socks5] }
+        scheme: { type: string, enum: [http, https] }
         host: { type: string }
         port: { type: integer }
         username: { type: string }
@@ -1010,6 +1010,7 @@ components:
         revision: { type: integer, format: int64, description: 'Per-entry optimistic-concurrency token (echo on PUT/DELETE/credential).' }
         credentialState: { type: string, enum: [none, configured, unusable, mismatch] }
         probe: { $ref: '#/components/schemas/UpstreamProbe' }
+        health: { $ref: '#/components/schemas/UpstreamHealth' }
         healthy: { type: boolean, description: 'Legacy — true only when the probe is `healthy`.' }
         eligible: { type: boolean, description: 'Selectable now (credential usable AND probe unprobed/healthy AND breaker admitting).' }
         circuit: { type: string, enum: [closed, open, half-open] }
@@ -1018,21 +1019,34 @@ components:
         retryAfterMs: { type: integer, format: int64 }
     UpstreamProbe:
       type: object
+      description: Compatibility alias of `health` (same verdict, legacy field names).
       required: [status, reason]
       additionalProperties: false
       properties:
         status: { type: string, enum: [unprobed, healthy, unhealthy] }
         reason: { type: string, enum: [none, connect_failed, timeout, proxy_auth_failed, probe_http_error, credential_ineligible] }
         checkedAt: { type: string }
+        source: { type: string, enum: [periodic, manual] }
+    UpstreamHealth:
+      type: object
+      description: 'Per-entry health truth: the last classified probe verdict, when it landed, and whether the periodic loop or an operator produced it.'
+      required: [status, reason]
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [unprobed, healthy, unhealthy] }
+        reason: { type: string, enum: [none, connect_failed, timeout, proxy_auth_failed, probe_http_error, credential_ineligible] }
+        lastProbeAt: { type: string, description: RFC3339; absent while unprobed. }
+        source: { type: string, enum: [periodic, manual] }
     UpstreamEffective:
       type: object
-      required: [mode, entries, eligible, fallbackTotal]
+      required: [mode, entries, eligible, fallbackTotal, since]
       additionalProperties: false
       properties:
         mode: { type: string, enum: [no_pool, chained, no_eligible_parent, direct_fallback] }
         entries: { type: integer }
         eligible: { type: integer }
         fallbackTotal: { type: integer, format: int64 }
+        since: { type: string, description: 'RFC3339 instant the current mode was first observed (re-stamped only on a transition).' }
     UpstreamMigration:
       type: object
       description: Boot-time legacy→v2 migration outcome (node-local, bounded reason; never a URL or credential).
@@ -1055,6 +1069,7 @@ components:
         keyId: { type: string }
     UpstreamDegraded:
       type: object
+      description: 'A bounded validation degradation. `degraded` = the STORED managed document was rejected at load (managed entries unpublished; every managed mutation, import and key creation refused with 409 document_rejected until repair + restart). `yamlDegraded` = the config.yaml seed was refused whole (independent; never cleared by the managed document loading).'
       required: [reason]
       additionalProperties: false
       properties:
@@ -1068,7 +1083,7 @@ components:
         token every bulk mutation must echo; `migration`/`key`/`degraded` are
         the node-local truth an operator needs to understand an ineligible
         credential. Scope is always node-local (never CP→DP synced).
-      required: [enabled, proxies, entries, revision, mode, effective, coverage, direct_fallback, migration, key, credentialsIneligible, scope]
+      required: [enabled, proxies, entries, revision, mode, effective, coverage, probe, direct_fallback, migration, key, credentialsIneligible, scope]
       additionalProperties: false
       properties:
         enabled: { type: boolean }
@@ -1076,10 +1091,23 @@ components:
         effective: { $ref: '#/components/schemas/UpstreamEffective' }
         coverage:
           type: object
-          required: [summary]
+          description: 'Backend-derived chaining coverage per client path (PX-1: only the plain-HTTP forward path is chained; CONNECT, WebSocket and SOCKS5 client traffic egress direct).'
+          required: [plainHttp, connect, websocket, socks5, summary]
           additionalProperties: false
           properties:
-            summary: { type: string, enum: [plain_http_only], description: 'Chaining applies to the plain-HTTP forward path only (PX-1: CONNECT/WebSocket/SOCKS5 chaining is not implemented).' }
+            plainHttp: { type: string, enum: [chained] }
+            connect: { type: string, enum: [direct] }
+            websocket: { type: string, enum: [direct] }
+            socks5: { type: string, enum: [direct] }
+            summary: { type: string, enum: [plain_http_only] }
+        probe:
+          type: object
+          description: The periodic health-probe configuration armed at startup (config.yaml upstream.health_interval).
+          required: [configured, interval]
+          additionalProperties: false
+          properties:
+            configured: { type: boolean }
+            interval: { type: string, description: 'Go duration; "0s" when no periodic probe runs.' }
         revision: { type: integer, format: int64 }
         entries: { type: array, items: { $ref: '#/components/schemas/UpstreamEntry' }, nullable: true }
         proxies: { type: array, items: { $ref: '#/components/schemas/UpstreamEntry' }, nullable: true, description: 'Legacy alias of `entries`.' }
@@ -1094,6 +1122,7 @@ components:
         migration: { $ref: '#/components/schemas/UpstreamMigration' }
         key: { $ref: '#/components/schemas/UpstreamKeyState' }
         degraded: { $ref: '#/components/schemas/UpstreamDegraded' }
+        yamlDegraded: { $ref: '#/components/schemas/UpstreamDegraded' }
         credentialsIneligible: { type: integer, description: 'Entries whose credential is unusable or mismatched (never selected, never probed).' }
         scope: { type: string, enum: [node-local] }
         ok: { type: boolean, description: 'Present on mutation answers.' }
@@ -1125,7 +1154,7 @@ components:
       required: [scheme, host, revision]
       additionalProperties: false
       properties:
-        scheme: { type: string, enum: [http, https, socks5] }
+        scheme: { type: string, enum: [http, https] }
         host: { type: string }
         port: { type: integer, description: '0 or absent ⇒ the scheme default (80/443/1080).' }
         username: { type: string }
@@ -1158,8 +1187,9 @@ components:
         duplicate_authority (409, `count`), no_credential (409 — clear on an entry
         without material), invalid_entry / userinfo_not_allowed /
         credential_state_not_accepted / invalid_password / invalid_action /
-        invalid_json (400), key_unusable (409), persist_failed / seal_failed
-        (500 — nothing was changed).
+        invalid_json (400), key_unusable (409), document_rejected (409 — the
+        stored document failed validation at load; nothing is accepted until
+        repair), persist_failed / seal_failed (500 — nothing was changed).
       required: [error, code, current]
       additionalProperties: false
       properties:

@@ -469,7 +469,7 @@ func TestUpstreamV2_R35_ProxyAuth407IsUnhealthy(t *testing.T) {
 		t.Fatalf("add: %d %s", rec.Code, rec.Body.String())
 	}
 	upProbe(http.StatusProxyAuthRequired, nil)
-	upstreamPool.HealthCheck()
+	upstreamPool.HealthCheck(upstream.ProbeManual)
 	proxies, _ := upGet(t)["proxies"].([]any)
 	if len(proxies) != 1 || proxies[0].(map[string]any)["healthy"] != false {
 		t.Fatalf("a 407 must classify the parent unhealthy, got %v", proxies)
@@ -520,7 +520,7 @@ func TestUpstreamV2_R38_R39_NoEligibleParentThenDirectFallbackOnce(t *testing.T)
 		t.Fatalf("add: %d %s", rec.Code, rec.Body.String())
 	}
 	upProbe(0, errors.New("dial tcp 192.0.2.1:3128: connect: connection refused"))
-	upstreamPool.HealthCheck()
+	upstreamPool.HealthCheck(upstream.ProbeManual)
 	if mode := upGet(t)["mode"]; mode != "no_eligible_parent" {
 		t.Fatalf("zero eligible parents with no request yet must be no_eligible_parent, got %v", mode)
 	}
@@ -573,7 +573,7 @@ func TestUpstreamV2_R42_PasswordBearingTransportErrorReachesNoSink(t *testing.T)
 	upProbe(0, fmt.Errorf("proxyconnect tcp: dial http://svc:%s@%s:3128: connection refused", upRedPW, upRedHost))
 	since := time.Now().UnixMilli()
 	out := captureLogger(t, func() {
-		upstreamPool.HealthCheck()
+		upstreamPool.HealthCheck(upstream.ProbeManual)
 		_ = upReq(t, "POST", "/api/upstream/health", "")
 	})
 	if strings.Contains(out, upRedPW) {

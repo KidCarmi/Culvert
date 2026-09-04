@@ -224,6 +224,8 @@ type Effective struct {
 	Entries       int    `json:"entries"`
 	Eligible      int    `json:"eligible"`
 	FallbackTotal int64  `json:"fallbackTotal"`
+	// Since is the RFC3339 instant the current mode was first observed.
+	Since string `json:"since"`
 }
 
 // Pool manages the effective set of parent proxies (YAML-owned + managed)
@@ -245,6 +247,33 @@ type Pool struct {
 	// direct-egress fail-open (PX-2 posture) is observable, never silent.
 	fallbackActive atomic.Bool  // pool is currently failing open to direct
 	fallbackTotal  atomic.Int64 // requests that fell back to direct since start
+
+	// probeInterval is the periodic health-check cadence the startup loader
+	// armed (0 ⇒ no periodic probe); surfaced read-only on the read model.
+	probeInterval time.Duration
+
+	// Effective-mode transition tracking: modeLast/modeSince record the last
+	// derived mode and the (injected-clock) instant it was first observed,
+	// so effective.since is deterministic and monotonic per transition.
+	modeMu    sync.Mutex
+	modeLast  string
+	modeSince string
+}
+
+// SetProbeInterval records the periodic probe cadence (0 = none) for the
+// read model's top-level probe block.
+func (p *Pool) SetProbeInterval(d time.Duration) {
+	p.mu.Lock()
+	p.probeInterval = d
+	p.mu.Unlock()
+}
+
+// ProbeConfig reports whether a periodic probe loop is configured and its
+// interval.
+func (p *Pool) ProbeConfig() (configured bool, interval time.Duration) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.probeInterval > 0, p.probeInterval
 }
 
 // Configure sets the YAML-owned entries and the circuit-breaker parameters
@@ -441,16 +470,27 @@ func (p *Pool) rebuildLocked() {
 // mismatch (bound to another authority), unusable (no key / wrong key /
 // cannot unwrap), configured. The unsealed plaintext is discarded at once.
 func (p *Pool) credentialStateLocked(e *ManagedEntry) string {
+	if e.yamlSecret != "" {
+		// A config.yaml inline credential needs no key: it is held in memory
+		// only and is always bound to its own (read-only) entry.
+		return CredentialConfigured
+	}
 	if e.Credential == nil {
 		return CredentialNone
 	}
-	if e.Credential.AuthorityHash != e.AuthorityHash() {
+	// Structural binding first: the ciphertext must have been sealed FOR
+	// this exact entry ID and this exact authority. Ciphertext moved from a
+	// removed entry onto a new one with the same authority is mismatch.
+	if e.Credential.EntryID != e.ID || e.Credential.AuthorityHash != e.AuthorityHash() {
 		return CredentialMismatch
 	}
 	if p.key == nil || p.key.KeyID() != e.Credential.KeyID {
 		return CredentialUnusable
 	}
-	if _, err := p.key.Unseal(e.Credential, e.AuthorityHash()); err != nil {
+	if _, err := p.key.Unseal(e.Credential, e.ID, e.AuthorityHash()); err != nil {
+		if errors.Is(err, ErrCredentialMismatch) {
+			return CredentialMismatch
+		}
 		return CredentialUnusable
 	}
 	return CredentialConfigured
@@ -548,7 +588,20 @@ func (p *Pool) Effective() Effective {
 	default:
 		eff.Mode = ModeNoEligibleParent
 	}
+	eff.Since = p.noteMode(eff.Mode)
 	return eff
+}
+
+// noteMode records the derived mode and returns the instant the CURRENT
+// mode was first observed (unchanged while the mode holds; re-stamped on a
+// transition), from the injectable clock.
+func (p *Pool) noteMode(mode string) string {
+	p.modeMu.Lock()
+	defer p.modeMu.Unlock()
+	if p.modeLast != mode || p.modeSince == "" {
+		p.modeLast, p.modeSince = mode, nowRFC3339()
+	}
+	return p.modeSince
 }
 
 // fireFallbackAlert delivers the upstream_pool_down alert on a fallback
@@ -600,10 +653,10 @@ func (p *Pool) List() []Status {
 	for i, up := range p.proxies {
 		pr := up.Probe()
 		st := Status{
-			ID: up.Entry.ID, URL: up.Entry.LegacyURL(), Authority: up.Entry.Authority(),
+			ID: up.Entry.ID, URL: up.Entry.DisplayURL(), Authority: up.Entry.Authority(),
 			Scheme: up.Entry.Scheme, Host: up.Entry.Host, Port: up.Entry.Port, Username: up.Entry.Username,
 			Source: string(up.Entry.Source), Revision: up.Entry.Revision,
-			CredentialState: up.CredentialState(), Probe: pr,
+			CredentialState: up.CredentialState(), Probe: pr, Health: HealthOf(pr),
 			Healthy:  pr.Status == ProbeHealthy,
 			Eligible: up.eligible(),
 			Circuit:  up.CB.State(),
@@ -628,13 +681,17 @@ func (p *Pool) List() []Status {
 // transport and never stored.
 func (p *Pool) authenticatedURL(up *Proxy) (*url.URL, error) {
 	u := *up.URL
+	if up.Entry.yamlSecret != "" {
+		u.User = url.UserPassword(up.Entry.Username, up.Entry.yamlSecret)
+		return &u, nil
+	}
 	if up.Entry.Credential == nil {
 		return &u, nil
 	}
 	p.mu.RLock()
 	key := p.key
 	p.mu.RUnlock()
-	pw, err := key.Unseal(up.Entry.Credential, up.Entry.AuthorityHash())
+	pw, err := key.Unseal(up.Entry.Credential, up.Entry.ID, up.Entry.AuthorityHash())
 	if err != nil {
 		return nil, err
 	}
@@ -728,36 +785,37 @@ const probeTimeout = 5 * time.Second
 // HealthCheck probes every credential-eligible parent with the shared
 // classifier and stores the bounded outcome. Credential-ineligible entries
 // (unusable, mismatch) are not probed and keep their state.
-func (p *Pool) HealthCheck() {
+func (p *Pool) HealthCheck(source string) {
 	p.mu.RLock()
 	proxies := p.proxies
 	p.mu.RUnlock()
 
+	if source != ProbePeriodic {
+		source = ProbeManual
+	}
 	for _, up := range proxies {
 		if !up.credentialEligible() {
 			continue
 		}
-		target, err := p.authenticatedURL(up)
-		if err != nil {
-			up.setProbe(ProbeState{Status: ProbeUnhealthy, Reason: ReasonProxyAuthFailed, CheckedAt: nowRFC3339()})
-			continue
-		}
-		status, reason := p.probeOnce(target)
+		status, reason := p.probeOnce(up)
 		prev := up.Probe()
-		up.setProbe(ProbeState{Status: status, Reason: reason, CheckedAt: nowRFC3339()})
+		up.setProbe(ProbeState{Status: status, Reason: reason, CheckedAt: nowRFC3339(), Source: source})
 		if prev.Status != status || prev.Reason != reason {
-			obs.Printf("Upstream: %s probe %s (reason=%s)", up.Entry.Authority(), status, reason)
+			obs.Printf("Upstream: %s probe %s (reason=%s, source=%s)", up.Entry.Authority(), status, reason, source)
 		}
 	}
 }
 
-// probeOnce runs one bounded probe through the given proxy URL and returns
-// the classified outcome. The response body is drained (≤1 KiB) and
-// discarded; the transport error is never rendered.
-func (p *Pool) probeOnce(proxyURL *url.URL) (status, reason string) {
+// probeOnce runs one bounded probe through the given parent and returns the
+// classified outcome. The authenticated proxy URL is constructed ONLY inside
+// the transport's proxy selector (probeProxySelector), after the entry's
+// credential eligibility is re-checked, and never leaves the transport: the
+// response body is drained (≤1 KiB) and discarded and the transport error
+// is classified, never rendered.
+func (p *Pool) probeOnce(up *Proxy) (status, reason string) {
 	client := &http.Client{
 		Timeout:   probeTimeout,
-		Transport: probeTransportFor(proxyURL),
+		Transport: p.probeTransportFor(up),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -775,22 +833,41 @@ func (p *Pool) probeOnce(proxyURL *url.URL) (status, reason string) {
 	return ClassifyProbe(resp, err)
 }
 
+// probeProxySelector is the narrowly scoped transport selector for ONE
+// probe: it re-checks credential eligibility and only then builds the
+// authenticated URL, exactly like ProxyFunc does for a real request.
+func (p *Pool) probeProxySelector(up *Proxy) func(*http.Request) (*url.URL, error) {
+	return func(*http.Request) (*url.URL, error) {
+		if !up.credentialEligible() {
+			return nil, errProbeIneligible
+		}
+		return p.authenticatedURL(up)
+	}
+}
+
 // ProbeTransport is a TEST-ONLY seam: when non-nil it supplies the
-// round-tripper the health probe uses for a given parent proxy, so a test
+// round-tripper the health probe uses for a given parent (identified by its
+// CREDENTIAL-FREE authority URL — the seam never sees a password), so a test
 // can inject a deterministic probe outcome without a network. Production
 // leaves it nil.
-var ProbeTransport func(proxyURL *url.URL) http.RoundTripper
+var ProbeTransport func(authority *url.URL) http.RoundTripper
 
 // FallbackAlertHook is a TEST-ONLY seam: when non-nil it receives the
 // direct-fallback transition instead of the asynchronous production alert.
 var FallbackAlertHook func(detail string)
 
-func probeTransportFor(proxyURL *url.URL) http.RoundTripper {
+// probeTransportFor builds the probe transport for one parent. The TEST
+// seam receives the CREDENTIAL-FREE authority URL only; the production
+// transport resolves the authenticated URL inside its proxy selector.
+func (p *Pool) probeTransportFor(up *Proxy) http.RoundTripper {
 	if h := ProbeTransport; h != nil {
-		return h(proxyURL)
+		// The seam identifies the parent by scheme://host:port — no
+		// userinfo of any kind ever reaches it.
+		display, _ := url.Parse(up.Entry.DisplayURL())
+		return h(display)
 	}
 	return &http.Transport{
-		Proxy:             http.ProxyURL(proxyURL),
+		Proxy:             p.probeProxySelector(up),
 		DisableKeepAlives: true,
 	}
 }
@@ -812,7 +889,7 @@ func RunHealthCheckLoop(ctx context.Context, pool *Pool, interval time.Duration)
 			// CHAOS-24: contain the ROUND. This loop is what closes a tripped
 			// breaker, so if it dies the pool can never recover a parent proxy
 			// and egress stays on the direct fail-open path indefinitely.
-			obs.SafeCall("upstream_health", pool.HealthCheck)
+			obs.SafeCall("upstream_health", func() { pool.HealthCheck(ProbePeriodic) })
 		}
 	}
 }
@@ -854,7 +931,7 @@ type Config struct {
 // Status is returned by the admin API (credential-free).
 type Status struct {
 	ID        string `json:"id"`
-	URL       string `json:"url"` // legacy field: credential-free authority
+	URL       string `json:"url"` // legacy field: scheme://host:port, NO userinfo (username is its own field)
 	Authority string `json:"authority"`
 	Scheme    string `json:"scheme"`
 	Host      string `json:"host"`
@@ -864,7 +941,8 @@ type Status struct {
 	Revision  int64  `json:"revision"`
 	// CredentialState is derived (C4): none | configured | unusable | mismatch.
 	CredentialState string     `json:"credentialState"`
-	Probe           ProbeState `json:"probe"`
+	Probe           ProbeState `json:"probe"`   // compatibility alias of health
+	Health          Health     `json:"health"`  // contracted health truth (status/reason/lastProbeAt/source)
 	Healthy         bool       `json:"healthy"` // legacy: probe == healthy
 	Eligible        bool       `json:"eligible"`
 	Circuit         string     `json:"circuit"`

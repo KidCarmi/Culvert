@@ -4529,7 +4529,6 @@ Firefox (all platforms):
             <select class="input" id="upstream-scheme-input" style="width:110px" aria-label="Scheme">
               <option value="http">http</option>
               <option value="https">https</option>
-              <option value="socks5">socks5</option>
             </select>
             <input type="text" class="input" id="upstream-host-input" placeholder="parent-proxy.example.com" style="flex:2;min-width:220px" aria-label="Host">
             <input type="number" class="input" id="upstream-port-input" placeholder="3128" min="1" max="65535" style="width:110px" aria-label="Port">
@@ -17381,6 +17380,7 @@ async function upstreamRefused(resp) {
   const data = await resp.clone().json().catch(() => null);
   const code = data && data.code;
   const msgs = {
+    document_rejected: 'Refused: the stored upstream document failed validation at load. Repair admin_settings.json (or restore a valid one) and restart before making changes.',
     credential_bound: 'Not saved: this entry holds a credential, so its authority cannot change. Clear the credential first, then edit.',
     credential_present: 'Not removed: this entry holds a credential. Clear the credential first (typed confirmation), then remove the entry.',
     credentialed_entries_present: 'Not saved: the pool holds credentialed entries; manage entries individually.',
@@ -17428,9 +17428,13 @@ function upstreamCredentialBadge(state) {
 }
 
 function upstreamProbeBadge(p) {
-  const probe = p.probe || {};
-  if (probe.status === 'healthy') return '<span class="badge ok">Healthy</span>';
-  if (probe.status === 'unhealthy') return '<span class="badge blocked">Down</span><div style="font-size:.72rem;color:var(--muted);margin-top:2px">' + escHtml(probe.reason || '') + '</div>';
+  // 2F-C correction: `health` is the contracted truth (status/reason/
+  // lastProbeAt/source); `probe` stays as a compatibility alias.
+  const h = p.health || p.probe || {};
+  const meta = (h.source ? escHtml(h.source) : '') + (h.lastProbeAt ? (h.source ? ' · ' : '') + escHtml(h.lastProbeAt) : '');
+  const metaHtml = meta ? '<div style="font-size:.72rem;color:var(--muted);margin-top:2px">' + meta + '</div>' : '';
+  if (h.status === 'healthy') return '<span class="badge ok">Healthy</span>' + metaHtml;
+  if (h.status === 'unhealthy') return '<span class="badge blocked">Down</span><div style="font-size:.72rem;color:var(--muted);margin-top:2px">' + escHtml(h.reason || '') + (meta ? ' · ' + meta : '') + '</div>';
   return '<span class="badge auth">Unprobed</span>';
 }
 
@@ -17442,7 +17446,14 @@ function renderUpstream() {
   const v = upstreamViewState || {};
   if (status) {
     const key = v.key || {};
-    status.innerHTML = 'Mode: <strong>' + upstreamModeLabel(v.mode) + '</strong> · coverage: plain HTTP only (CONNECT / WebSocket / SOCKS5 are never chained) · scope: node-local' +
+    const cov = v.coverage || {};
+    const probe = v.probe || {};
+    const eff = v.effective || {};
+    status.innerHTML = 'Mode: <strong>' + upstreamModeLabel(v.mode) + '</strong>' +
+      (eff.since ? ' since ' + escHtml(eff.since) : '') +
+      ' · coverage: plain HTTP ' + escHtml(cov.plainHttp || 'chained') + ', CONNECT ' + escHtml(cov.connect || 'direct') + ', WebSocket ' + escHtml(cov.websocket || 'direct') + ', SOCKS5 ' + escHtml(cov.socks5 || 'direct') +
+      ' · periodic probe: ' + (probe.configured ? 'every ' + escHtml(probe.interval || '') : 'not configured') +
+      ' · scope: node-local' +
       (key.state && key.state !== 'unused' ? ' · credential key: ' + escHtml(key.state) : '') +
       (v.credentialsIneligible ? ' · <span style="color:var(--red)">' + escHtml(String(v.credentialsIneligible)) + ' credential' + (v.credentialsIneligible === 1 ? '' : 's') + ' ineligible</span>' : '');
   }
@@ -17462,7 +17473,8 @@ function renderUpstream() {
   if (degraded) {
     const mig = v.migration || {};
     const parts = [];
-    if (v.degraded && v.degraded.reason) parts.push('Managed entries are NOT published: ' + escHtml(v.degraded.reason) + (v.degraded.count ? ' (' + escHtml(String(v.degraded.count)) + ')' : '') + '.');
+    if (v.degraded && v.degraded.reason) parts.push('The stored upstream document was REJECTED at load (' + escHtml(v.degraded.reason) + (v.degraded.count ? ', ' + escHtml(String(v.degraded.count)) : '') + '): managed entries are not published and every managed change is refused until admin_settings.json is repaired and the node restarted.');
+    if (v.yamlDegraded && v.yamlDegraded.reason) parts.push('The config.yaml upstream seed was refused whole (' + escHtml(v.yamlDegraded.reason) + (v.yamlDegraded.count ? ', ' + escHtml(String(v.yamlDegraded.count)) : '') + '); fix the YAML and reload.');
     if (mig.state === 'degraded') parts.push('Legacy pool migration degraded (' + escHtml(mig.reason || '') + '); the legacy file was left untouched.');
     if (v.key && (v.key.state === 'missing' || v.key.state === 'unreadable')) parts.push('Credential key ' + escHtml(v.key.state) + ': sealed credentials are unusable until .upstream_cred_key is restored (it is never re-minted automatically).');
     degraded.innerHTML = parts.join(' ');

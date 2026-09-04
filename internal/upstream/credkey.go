@@ -86,7 +86,17 @@ func (k *Keyring) gcm() (cipher.AEAD, error) {
 // Seal encrypts a plaintext password bound to authorityHash (as AEAD
 // additional data, so the ciphertext cannot be re-bound to another
 // authority even by editing the stored record).
-func (k *Keyring) Seal(plaintext, authorityHash, setAt, setBy string) (*Sealed, error) {
+// sealAAD is the additional authenticated data binding a credential to the
+// immutable entry ID AND the canonical authority hash (length-framed by
+// the NUL separator neither component can contain).
+func sealAAD(entryID, authorityHash string) []byte {
+	return []byte(entryID + "\x00" + authorityHash)
+}
+
+// Seal encrypts plaintext for exactly one (entryID, authorityHash) pair:
+// both are AEAD additional data AND recorded on the Sealed record, so the
+// ciphertext can never be re-attached to another entry or authority.
+func (k *Keyring) Seal(plaintext, entryID, authorityHash, setAt, setBy string) (*Sealed, error) {
 	if k == nil {
 		return nil, ErrKeyMissing
 	}
@@ -98,16 +108,24 @@ func (k *Keyring) Seal(plaintext, authorityHash, setAt, setBy string) (*Sealed, 
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
-	ct := g.Seal(nonce, nonce, []byte(plaintext), []byte(authorityHash))
+	if entryID == "" {
+		return nil, errors.New("upstream credential: entry id required")
+	}
+	ct := g.Seal(nonce, nonce, []byte(plaintext), sealAAD(entryID, authorityHash))
 	return &Sealed{
-		AuthorityHash: authorityHash, Ciphertext: base64.StdEncoding.EncodeToString(ct),
+		EntryID: entryID, AuthorityHash: authorityHash, Ciphertext: base64.StdEncoding.EncodeToString(ct),
 		KeyID: k.id, SetAt: setAt, SetBy: setBy,
 	}, nil
 }
 
-// Unseal decrypts a sealed credential for exactly the given authority hash.
-// Any failure is reported as a bounded error (never the ciphertext).
-func (k *Keyring) Unseal(s *Sealed, authorityHash string) (string, error) {
+// ErrCredentialMismatch is the bounded reason a sealed credential does not
+// belong to the (entry, authority) it is attached to.
+var ErrCredentialMismatch = errors.New("upstream credential: bound to a different entry or authority")
+
+// Unseal decrypts a sealed credential for exactly the given entry ID and
+// authority hash. Any failure is reported as a bounded error (never the
+// ciphertext).
+func (k *Keyring) Unseal(s *Sealed, entryID, authorityHash string) (string, error) {
 	if k == nil {
 		return "", ErrKeyMissing
 	}
@@ -117,8 +135,8 @@ func (k *Keyring) Unseal(s *Sealed, authorityHash string) (string, error) {
 	if s.KeyID != k.id {
 		return "", errors.New("upstream credential: sealed under a different key")
 	}
-	if s.AuthorityHash != authorityHash {
-		return "", errors.New("upstream credential: authority mismatch")
+	if s.EntryID != entryID || s.AuthorityHash != authorityHash {
+		return "", ErrCredentialMismatch
 	}
 	raw, err := base64.StdEncoding.DecodeString(s.Ciphertext)
 	if err != nil {
@@ -131,7 +149,7 @@ func (k *Keyring) Unseal(s *Sealed, authorityHash string) (string, error) {
 	if len(raw) < g.NonceSize() {
 		return "", errors.New("upstream credential: ciphertext too short")
 	}
-	pt, err := g.Open(nil, raw[:g.NonceSize()], raw[g.NonceSize():], []byte(authorityHash))
+	pt, err := g.Open(nil, raw[:g.NonceSize()], raw[g.NonceSize():], sealAAD(entryID, authorityHash))
 	if err != nil {
 		return "", errors.New("upstream credential: cannot unwrap")
 	}
