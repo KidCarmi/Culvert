@@ -57,6 +57,17 @@ run_mutation() {
   local rc=$?
   revert "$file"
 
+  # A gate that matches NO TESTS exits 0 and reads exactly like a caught mutation
+  # would if you only look at the exit code — except it proves nothing at all. This
+  # silently mis-scored two mutations whose gates lived in a different package than
+  # the one being run. Treat it as a campaign failure, never as a result.
+  if printf '%s' "$out" | grep -q 'no tests to run'; then
+    printf '      BROKEN GATE — the pattern matched no tests in %s; this proves NOTHING\n' "$pkg"
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: BROKEN GATE (no tests matched in $pkg)")
+    [ $KEEP -eq 0 ] && exit 1
+    return
+  fi
+
   if [ $rc -ne 0 ]; then
     printf '      CAUGHT (gate failed as required)\n'
     PASS=$((PASS+1))
@@ -79,11 +90,18 @@ run_mutation M01 \
   's/\tbase\.RetryMode = RetryDisabled\n\tbase\.MaxReadRetries = 0\n/\tbase.RetryMode = RetryDefault\n/'
 
 # ── (2) one reservation causes two physical POSTs ───────────────────────────
+#
+# NOTE ON THE SHAPE OF THIS MUTATION. Clearing the `retriesDisabled` guard in
+# Client.Call ALONE is behaviour-preserving: RetryFreeLimits also pins the retry
+# budget to zero, so `retryable` refuses the second attempt regardless. It survived
+# the campaign for exactly that reason, and scoring it as a hole would have been
+# wrong. The two mechanisms are belt and braces; a real "retries restored" defect
+# has to remove the braces, so the mutation now targets the defaults filler.
 run_mutation M02 \
-  'Client.Call ignores RetriesDisabled and re-sends after an ambiguous drop' \
-  'TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop' \
-  ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/client.go \
-  's/\tretriesDisabled := c\.cfg\.Limits\.RetriesDisabled\(\)/\tretriesDisabled := false/'
+  'the defaults filler restores a retry budget even under RetryDisabled' \
+  'TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop|TestRetryFreeLimits_RejectsContradictoryBudget|TestNewLimits_RejectsUnknownRetryMode' \
+  ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/limits.go \
+  's/\tif out\.RetryMode == RetryDefault && out\.MaxReadRetries == 0 \{\n\t\tout\.MaxReadRetries = defMaxReadRetries\n\t\}/\tif out.MaxReadRetries == 0 {\n\t\tout.MaxReadRetries = defMaxReadRetries\n\t}/'
 
 # ── (3) a physical send with no durable intent ──────────────────────────────
 run_mutation M03 \
@@ -95,7 +113,7 @@ run_mutation M03 \
 # ── (4) intent persistence fails but the send continues ─────────────────────
 run_mutation M04 \
   'a failed send-intent commit no longer blocks the irreversible send' \
-  'TestEvidenceFreeze_CompletedInvocationIsSettledThroughTheRealSpool|TestPhysicalEffect_' \
+  'TestHTTPSE2E_IntentPersistFailureBlocksTheSend' \
   . internal/mcp/execution/run.go \
   's/\t\t\tif ierr != nil \{\n\t\t\t\tgateRefused = true\n\t\t\t\tgateReason = mcperr\.ReasonOf\(ierr\)\n\t\t\t\treturn errLiveGateRefused\n\t\t\t\}\n/\t\t\tif ierr != nil {\n\t\t\t\trec = \&attemptRecord{}\n\t\t\t}\n/'
 
@@ -116,8 +134,8 @@ run_mutation M06 \
 # ── (7) the final emergency-kill re-read is removed ─────────────────────────
 run_mutation M07 \
   'preCallGuard no longer re-reads the emergency-kill generation' \
-  'TestConc04_|TestConc05_|TestKillBoundary_' \
-  . internal/mcp/execution/run.go \
+  'TestKillBoundary_|TestCanaryPrerequisite_' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
   's/\tif e\.cfg\.State\.KillGeneration\(\) != admKillGen \{\n\t\treturn errKilledAtBoundary \/\/ emergency stop is paramount, even if the tool also drifted or demoted\n\t\}\n//'
 
 # ── (8) the final tool-freshness guard is removed ───────────────────────────
@@ -151,8 +169,8 @@ run_mutation M11 \
 # ── (12) an orphan is treated as never-sent, freeing it for resend ──────────
 run_mutation M12 \
   'restart recovery resolves an orphan as settled + definitely_not_sent' \
-  'TestRecovery_|TestHTTPSE2E_CrashAfterPeerReceiptLeavesARecoverableOrphan' \
-  . internal/mcp/execution/recovery.go \
+  'TestRecovery_' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\t\t\t\tState:                AttemptReconciliationRequired,\n/\t\t\t\tState:                AttemptSettled,\n\t\t\t\tTerminalSendState:    model.SendDefinitelyNotSent,\n/'
 
 # ── (13) release refunds the monotonic budget ───────────────────────────────
@@ -173,7 +191,7 @@ run_mutation M14 \
 run_mutation M15 \
   'recovery accepts a malformed attempt identity instead of failing closed' \
   'TestRecovery_' \
-  . internal/mcp/execution/recovery.go \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\tif !validAttemptID\(e\.Outcome\.AttemptID\) \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery", "malformed attempt identity in evidence"\)\n\t\}\n//'
 
 # ── (16) DecisionRef dropped from the terminal outcome ──────────────────────
@@ -186,15 +204,15 @@ run_mutation M16 \
 # ── (18) duplicate send intents silently resolved to the newest ─────────────
 run_mutation M18 \
   'a duplicated send intent overwrites instead of failing closed' \
-  'TestRecovery_|TestConc11_' \
-  . internal/mcp/execution/recovery.go \
+  'TestRecovery_' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\t\tif _, dup := intents\[id\]; dup \{[^}]*?\n\t\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery", "duplicate send intent for one attempt"\)\n\t\t\}\n//s'
 
 # ── (19) duplicate terminal outcomes silently resolved to the newest ────────
 run_mutation M19 \
   'a duplicated terminal outcome overwrites instead of failing closed' \
   'TestRecovery_' \
-  . internal/mcp/execution/recovery.go \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\t\tif _, dup := outcomes\[id\]; dup \{\n\t\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery", "multiple terminal outcomes for one attempt"\)\n\t\t\}\n//'
 
 # ── (20) reconciliation collapses unknown into not_received ─────────────────

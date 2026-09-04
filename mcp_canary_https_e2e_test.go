@@ -24,18 +24,22 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
+	"github.com/KidCarmi/Culvert/internal/mcp/events/spool"
 	"github.com/KidCarmi/Culvert/internal/mcp/execution"
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection/destination"
@@ -238,6 +242,18 @@ func armCanaryWithRealPeerTrust(t *testing.T, p *controlledPeer, budgetTotal int
 // every admission (found while writing the concurrency matrix).
 func armCanaryWithRealPeerGate(t *testing.T, p *controlledPeer, budgetTotal int, trustOK bool, tweak func(*mcpLiveSideEffectGate)) *peerRig {
 	t.Helper()
+	return armCanaryWithRealPeerFull(t, p, budgetTotal, trustOK, tweak, nil)
+}
+
+// armCanaryWithRealPeerBackend is the rig with a caller-supplied spool Backend, so a
+// test can induce a REAL durability fault at the storage layer.
+func armCanaryWithRealPeerBackend(t *testing.T, p *controlledPeer, budgetTotal int, be spool.Backend) *peerRig {
+	t.Helper()
+	return armCanaryWithRealPeerFull(t, p, budgetTotal, true, nil, be)
+}
+
+func armCanaryWithRealPeerFull(t *testing.T, p *controlledPeer, budgetTotal int, trustOK bool, tweak func(*mcpLiveSideEffectGate), be spool.Backend) *peerRig {
+	t.Helper()
 	restore := ssrf.AllowLoopbackForTest()
 	t.Cleanup(restore)
 
@@ -255,7 +271,7 @@ func armCanaryWithRealPeerGate(t *testing.T, p *controlledPeer, budgetTotal int,
 	if tweak != nil {
 		tweak(gate)
 	}
-	ev := liveTestEvents(t)
+	ev := liveTestEventsBackend(t, be)
 	cfg := &mcpruntime.Config{}
 	if err := composeGatewayLiveTierInto(cfg, liveTierComposition{
 		Upstream: realUpstreamFor(t, p), Events: ev,
@@ -363,12 +379,20 @@ func TestHTTPSE2E_AmbiguityIsNeverRecordedAsNotExecuted(t *testing.T) {
 	if !ok {
 		t.Fatalf("the received invocation must be attributable in durable evidence: %+v", rep)
 	}
-	// A transport failure after the peer read the request is NOT proof of absence.
-	if rec.TerminalSendState == model.SendDefinitelyNotSent {
-		t.Fatal("a peer that received the bytes must never be recorded as definitely_not_sent")
+	// A TERMINAL OUTCOME MUST EXIST. Asserting only "not definitely_not_sent" is
+	// vacuous: an attempt with NO outcome recovers as an orphan whose terminal state
+	// is the empty string, which satisfies that check while proving nothing. The
+	// mutation campaign found exactly this — omitting the outcome on an upstream
+	// error survived the gate.
+	if rec.State != execution.AttemptSettled {
+		t.Fatalf("an upstream failure must still record a TERMINAL OUTCOME, got state %q", rec.State)
 	}
-	if !rec.TerminalSendState.MayHaveReachedPeer() && rec.State == execution.AttemptSettled {
-		t.Fatalf("ambiguity must stay possibly-effective, got %q", rec.TerminalSendState)
+	// A transport failure after the peer read the request is NOT proof of absence.
+	if rec.TerminalSendState != model.SendMayHaveBeenSent {
+		t.Fatalf("a peer that received the bytes but did not answer must settle as may_have_been_sent, got %q", rec.TerminalSendState)
+	}
+	if !rec.TerminalSendState.MayHaveReachedPeer() {
+		t.Fatal("ambiguity must stay possibly-effective")
 	}
 }
 
@@ -625,6 +649,11 @@ func TestHTTPSE2E_DLPBlockAfterPeerResponseStaysExecuted(t *testing.T) {
 	if !found {
 		t.Fatalf("a DLP-blocked invocation must still be attributable: %+v", rep)
 	}
+	// The outcome must EXIST, not merely be non-contradictory: an omitted outcome
+	// recovers as an orphan and would pass a state-only check vacuously.
+	if rec.State != execution.AttemptSettled {
+		t.Fatalf("a DLP block must still record a TERMINAL OUTCOME, got state %q", rec.State)
+	}
 	if rec.TerminalSendState != model.SendPeerResponseReceived {
 		t.Fatalf("the peer answered, so the send state must be peer_response_received, got %q", rec.TerminalSendState)
 	}
@@ -739,4 +768,69 @@ func TestHTTPSE2E_EveryTerminalOutcomeIsPersistable(t *testing.T) {
 	if intents != 1 || outcomes != 1 {
 		t.Fatalf("one physical invocation must yield exactly one intent and one outcome, got %d/%d", intents, outcomes)
 	}
+}
+
+// faultyBackend is a real spool Backend whose durable append starts failing once
+// armed. It is the storage layer, not a stubbed CommitDecision: the failure enters
+// the system exactly where a full or read-only volume would.
+type faultyBackend struct {
+	spool.Backend
+	failing atomic.Bool
+}
+
+func (b *faultyBackend) AppendSync(path string, frame []byte, perm os.FileMode) error {
+	if b.failing.Load() {
+		return errors.New("induced durable-append failure")
+	}
+	return b.Backend.AppendSync(path, frame, perm)
+}
+
+// TestHTTPSE2E_IntentPersistFailureBlocksTheSend closes the gap the mutation
+// campaign found: nothing forced the durable send intent to FAIL, so a mutation
+// that continued the send after a failed intent commit survived every gate.
+//
+// The rule it pins is the whole reason the intent is committed before the wire: an
+// invocation with no durable record is unattributable, and after a crash it is
+// indistinguishable from one that never happened. A send intent that cannot be
+// persisted must PREVENT the send, not degrade into sending anyway.
+func TestHTTPSE2E_IntentPersistFailureBlocksTheSend(t *testing.T) {
+	p := startControlledPeer(t, respondOK)
+	fb := &faultyBackend{Backend: spool.NewOSBackend()}
+	rig := armCanaryWithRealPeerBackend(t, p, 10, fb)
+
+	// CONTROL FIRST, on this exact rig: the fixture can reach the peer while the
+	// backend is healthy. Without it, "zero POSTs" after the induced failure would
+	// prove nothing — which is the failure mode that let the original mutation live.
+	if out := rig.exec(peerExecInput(p, policy.OpRead)); !out.Executed || p.count() != 1 {
+		t.Fatalf("control: the fixture must be able to execute, out=%+v count=%d", out, p.count())
+	}
+	before := p.count()
+
+	fb.failing.Store(true) // the volume is now effectively gone
+	out := rig.exec(peerExecInput(p, policy.OpRead))
+
+	if out.Executed {
+		t.Fatalf("an execution whose evidence cannot be persisted must not report executed, out=%+v", out)
+	}
+	if got := p.count(); got != before {
+		t.Fatalf("a send whose durable intent could not be committed reached the peer: %d -> %d", before, got)
+	}
+}
+
+// liveTestEventsBackend builds the durable events manager over a caller-supplied
+// Backend (nil ⇒ the real OS backend).
+func liveTestEventsBackend(t *testing.T, be spool.Backend) *events.Manager {
+	t.Helper()
+	if be == nil {
+		return liveTestEvents(t)
+	}
+	m, err := events.NewManager(events.ManagerConfig{
+		NodeID: "n1", DataDir: t.TempDir(), KEK: liveTestKEK(),
+		GatewayLimits: limits.DefaultGatewayEvent(), ManagementLimits: limits.DefaultManagementEvent(),
+		Backend: be, Clock: func() time.Time { return time.Unix(0, 1) },
+	})
+	if err != nil {
+		t.Fatalf("events.NewManager: %v", err)
+	}
+	return m
 }
