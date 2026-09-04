@@ -133,15 +133,42 @@ func (s *LifecycleStore) loadResetRecordLocked() {
 		err = json.Unmarshal(data, &r)
 	}
 	if err != nil {
-		bad := fmt.Sprintf("%s.corrupt.%d", rp, time.Now().UnixNano())
-		_ = os.Rename(rp, bad) //nolint:errcheck // best-effort evidence; the fresh record below supersedes it
-		r = HistoryReset{At: time.Now().UTC().Format(time.RFC3339), Cause: "history reset record unreadable: " + err.Error(), QuarantinedTo: bad}
-		_ = s.persistReset(&r) //nolint:errcheck // an unwritable record still resets in memory; the next boot repeats
+		r = s.replaceUnreadableResetLocked(rp, data, err)
 	}
 	if r.Acknowledged == nil {
 		r.Acknowledged = map[string]HistoryResetAck{}
 	}
 	s.reset = &r
+}
+
+// replaceUnreadableResetLocked supersedes an unreadable reset record with a
+// fresh, unscoped one WITHOUT ever leaving a window in which no durable
+// reset evidence exists (2F-B correction round 2, blocker 1): the unreadable
+// bytes are first COPIED aside as evidence, then the replacement is written
+// over the record path atomically (temp + rename — the original stays in
+// place until the rename lands). If the copy or the write fails, the
+// original record is left untouched so the next boot repeats this exact
+// path, and the reset stays fail-closed in memory meanwhile.
+func (s *LifecycleStore) replaceUnreadableResetLocked(rp string, data []byte, cause error) HistoryReset {
+	r := HistoryReset{
+		At: time.Now().UTC().Format(time.RFC3339), Cause: "history reset record unreadable: " + cause.Error(),
+		Acknowledged: map[string]HistoryResetAck{},
+	}
+	evidence := fmt.Sprintf("%s.corrupt.%d", rp, time.Now().UnixNano())
+	if data == nil {
+		// Unreadable rather than unparseable: nothing to copy; leave it.
+		return r
+	}
+	if err := fileutil.AtomicWrite(evidence, data, 0o600); err != nil {
+		return r // evidence not preserved → the original stays where it is
+	}
+	r.QuarantinedTo = evidence
+	if err := s.persistReset(&r); err != nil {
+		// The original (unreadable) record is still in place: durable reset
+		// evidence survives, and the next boot repeats this replacement.
+		return r
+	}
+	return r
 }
 
 // quarantineLocked records the reset durably, THEN moves the corrupt file

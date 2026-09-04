@@ -370,8 +370,8 @@ func pacLifecycleOperation(w http.ResponseWriter, r *http.Request, id string, re
 	if lc.PendingOp != nil {
 		if !pacReconcileLocked(lc, pacEffectsAll) {
 			writePACFenceRefusal(w, http.StatusConflict, "operation_pending",
-				"a previous operation is still pending reconciliation and its record could not be persisted; retry",
-				map[string]any{"operationId": lc.PendingOp.OperationID})
+				"a previous operation is still pending reconciliation (its record could not be persisted, or a required post-commit effect — config version / cluster publication — could not be completed yet); retry once it can complete",
+				map[string]any{"operationId": lc.PendingOp.OperationID, "state": lc.PendingOp.State, "progress": lc.PendingOp.Progress})
 			return
 		}
 		lc, _ = pacLifecycle.Get(id)
@@ -759,8 +759,13 @@ func pacCompleteCommittedLocked(lc *pac.ProfileLifecycle, op *pac.PendingOp, mod
 		return pac.HistoryStatePendingReconciliation, n
 	}
 	// 2. Config version, keyed by operationId (the version store dedups).
+	// The marker advances ONLY on proven success; a refused or failed capture
+	// leaves the operation pending and is retried by the next reconciliation.
 	if !op.Progress.ConfigVersion {
-		pacSaveConfigVersionOnce(op.Actor, "pac.profile_"+op.Action, op.OperationID)
+		if err := pacSaveConfigVersionOnce(op.Actor, "pac.profile_"+op.Action, op.OperationID); err != nil {
+			logger.Printf("PAC: config version for %s of %q not captured; pending reconciliation: %v", sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), err)
+			return pac.HistoryStatePendingReconciliation, n
+		}
 		op.Progress.ConfigVersion = true
 		if !persist("progress") {
 			return pac.HistoryStatePendingReconciliation, n
@@ -768,10 +773,16 @@ func pacCompleteCommittedLocked(lc *pac.ProfileLifecycle, op *pac.PendingOp, mod
 		pacLifecycleStage("version_recorded")
 	}
 	// 3. Cluster publication (content-idempotent: the active store already
-	// carries the committed profile) + the per-profile alert latch.
+	// carries the committed profile) + the per-profile alert latch. Same
+	// rule: a rejected publication keeps the operation pending.
 	if !op.Progress.Cluster {
-		if err := pacEffect("cluster"); err == nil {
-			_ = publishCurrentConfigSnapshot()
+		err := pacEffect("cluster")
+		if err == nil {
+			err = publishCurrentConfigSnapshot()
+		}
+		if err != nil {
+			logger.Printf("PAC: cluster publication for %s of %q failed; pending reconciliation: %v", sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID), err)
+			return pac.HistoryStatePendingReconciliation, n
 		}
 		pacResetProfileAlert(op.ProfileID)
 		op.Progress.Cluster = true
@@ -803,15 +814,16 @@ func pacCompleteCommittedLocked(lc *pac.ProfileLifecycle, op *pac.PendingOp, mod
 }
 
 // pacSaveConfigVersionOnce captures a config version for the operation
-// unless one keyed by its operationId already exists.
-func pacSaveConfigVersionOnce(actor, action, operationID string) {
+// unless one keyed by its operationId already exists. It reports whether a
+// version keyed by the operation now durably exists.
+func pacSaveConfigVersionOnce(actor, action, operationID string) error {
 	note := "operationId=" + operationID
 	for _, m := range configVersions.List() {
 		if m.Note == note {
-			return
+			return nil
 		}
 	}
-	saveConfigVersionNote(actor, action, note)
+	return saveConfigVersionNoteResult(actor, action, note)
 }
 
 // pacAuditCommitted emits the success audit for a proven commit exactly once

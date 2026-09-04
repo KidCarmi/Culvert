@@ -174,6 +174,20 @@ func saveConfigVersion(actor, action string) {
 // persist the commit comment into the config-version timeline ("why this
 // change"), so it survives alongside the rollback snapshot.
 func saveConfigVersionNote(actor, action, note string) {
+	_ = saveConfigVersionNoteResult(actor, action, note)
+}
+
+// errConfigVersionRefused marks a capture refused by a documented gate (the
+// rewrite management-identity degradation), as opposed to a failed write.
+var errConfigVersionRefused = errors.New("config version capture refused")
+
+// saveConfigVersionNoteResult is the error-returning core of
+// saveConfigVersionNote (2F-B correction round 2): callers that track the
+// capture as a REQUIRED effect (the PAC lifecycle's post-commit progress)
+// learn whether a version was actually written, instead of assuming it. The
+// logging and every gate are unchanged; the compatibility wrapper above keeps
+// every best-effort caller as it was.
+func saveConfigVersionNoteResult(actor, action, note string) error {
 	saveConfigVersionMu.Lock()
 	defer saveConfigVersionMu.Unlock()
 
@@ -187,18 +201,20 @@ func saveConfigVersionNote(actor, action, note string) {
 	if d := rewriteIdentityDegraded(); d != nil {
 		logger.Printf("ConfigVersion: capture refused — rewrite identity non-durable (%s); actor=%q action=%q",
 			d.reason, sanitizeLog(actor), sanitizeLog(action))
-		return
+		return fmt.Errorf("%w: rewrite identity non-durable (%s)", errConfigVersionRefused, d.reason)
 	}
 
 	snap := captureConfigBackup()
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		logger.Printf("ConfigVersion: marshal error: %v", err)
-		return
+		return fmt.Errorf("config version marshal: %w", err)
 	}
 	if _, err := configVersions.SaveWithNote(actor, action, snap.ExportedAt, note, raw); err != nil {
 		logger.Printf("ConfigVersion: write error: %v", err)
+		return fmt.Errorf("config version write: %w", err)
 	}
+	return nil
 }
 
 // ── API Handlers ───────────────────────────────────────────────────────────
