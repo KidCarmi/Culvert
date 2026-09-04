@@ -357,7 +357,7 @@ Stated plainly, because a security product should be honest about its edges:
 
 ## Roadmap
 
-Development phases, production-readiness items, and the engineering governance model are tracked under [`roadmap/`](roadmap/) and [`docs/engineering/`](docs/engineering/). Near-term focus: CRL support, GUI parity for the remaining startup-scoped HA settings, and completing the catalog-driven release path as the default update mechanism.
+Development phases, production-readiness items, and the engineering governance model are tracked under [`roadmap/`](roadmap/) and [`docs/engineering/`](docs/engineering/). Near-term focus: CRL support and completing the catalog-driven release path as the default update mechanism. GUI parity for the HA fencing lease's startup-scoped settings (`-ha-etcd-*`, `-ha-lease-ttl`) is a deliberate, permanent deferral rather than pending work - the panel already surfaces live lease status/epoch, while the connection endpoints stay boot-time config by design; see [`docs/operator/ha-lease-failover.md`](docs/operator/ha-lease-failover.md).
 
 ---
 
