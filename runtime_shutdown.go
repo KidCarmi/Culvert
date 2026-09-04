@@ -71,11 +71,21 @@ func (r *shutdownRegistry) Register(name string, order int, stop func(context.Co
 // run: at shutdown, leaking one goroutine is free (the process is exiting)
 // and a stalled hook that blocks the flush hooks behind it is not.
 //
-// CHAOS-56. It is charged PER HOOK, but only by a hook that actually overruns,
-// and hookBudget hands the unused remainder of an overrunning hook's slice to
-// the hooks behind it — so a phase in which every hook stalls still finishes
-// within its own deadline plus one grace, and the envelope in main_shutdown.go
-// adds it exactly twice: once for the drain phase, once for the flush phase.
+// CHAOS-56. It is charged ONCE PER PHASE, not per hook: RunAll derives a single
+// phaseAbandonBy = phaseEnd + grace and runShutdownHook clamps every hook's
+// watchdog to it, so a phase in which every hook stalls still finishes within
+// its own deadline plus one grace and the envelope in main_shutdown.go adds it
+// exactly twice: once for the drain phase, once for the flush phase.
+//
+// The clamp is load-bearing, not decoration. It was originally charged per hook
+// on the reasoning that hookBudget hands an overrunning hook's unused SLICE to
+// the hooks behind it — true, but the grace is added ON TOP of each hook's
+// deadline and is never charged against the phase's remaining time, so each
+// stalled hook extended the phase by a further full grace. Measured on the
+// shipped constants with every hook stalled, the sequence took 59.2s against
+// the 51s this envelope claims and a 60s compose stop_grace_period; one more
+// durable closer crossed it. Past that it is SIGKILL, which skips the durable
+// flushes the whole three-phase design exists to guarantee.
 //
 // A var, not a const, so the wedged-hook tests can lower it instead of each
 // spending the full grace — the same seam internal/logsink uses for its own
@@ -120,7 +130,10 @@ var errShutdownHookAbandoned = errors.New("exceeded the shutdown budget and was 
 //
 // Each hook's own budget comes from hookBudget, which reserves a minimum slice
 // for every hook still behind it — see there for why the watchdog deadline is
-// per-hook rather than per-phase.
+// per-hook rather than per-phase. The overrun GRACE on top of that deadline is
+// the phase's, not the hook's: it is derived once here as phaseAbandonBy and
+// clamps every hook, so the phase overruns by at most one grace however many
+// hooks stall (see shutdownHookGrace).
 func (r *shutdownRegistry) RunAll(ctx context.Context) error {
 	r.mu.Lock()
 	if r.ran {
@@ -138,10 +151,19 @@ func (r *shutdownRegistry) RunAll(ctx context.Context) error {
 
 	phaseEnd, bounded := ctx.Deadline()
 
+	// The watchdog grace is SHARED BY THE PHASE, not charged per hook: the
+	// phase may overrun its deadline by at most one shutdownHookGrace no
+	// matter how many hooks stall. Zero when the phase is unbounded, which
+	// keeps the un-budgeted shape waiting indefinitely. See runShutdownHook.
+	var phaseAbandonBy time.Time
+	if bounded {
+		phaseAbandonBy = phaseEnd.Add(shutdownHookGrace)
+	}
+
 	var errs []error
 	for i, h := range snapshot {
 		hookCtx, cancel := hookBudget(ctx, phaseEnd, bounded, len(snapshot)-i-1)
-		err := runShutdownHook(hookCtx, h)
+		err := runShutdownHook(hookCtx, h, phaseAbandonBy)
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", h.name, err))
@@ -209,7 +231,7 @@ func hookBudget(ctx context.Context, phaseEnd time.Time, bounded bool, behind in
 // the process mid-sequence — losing the queued log lines that name it, the
 // durable flushes behind it, and a clean badger close, which CHAOS-50 showed
 // is what manufactures a quarantined category store on the next boot.
-func runShutdownHook(ctx context.Context, h shutdownHook) (err error) {
+func runShutdownHook(ctx context.Context, h shutdownHook, phaseAbandonBy time.Time) (err error) {
 	done := make(chan error, 1) // buffered: the goroutine must never block on an abandoned hook
 	started := time.Now()
 	go func() {
@@ -223,7 +245,26 @@ func runShutdownHook(ctx context.Context, h shutdownHook) (err error) {
 
 	var abandon <-chan time.Time
 	if dl, ok := ctx.Deadline(); ok {
-		t := time.NewTimer(time.Until(dl) + shutdownHookGrace)
+		abandonAt := dl.Add(shutdownHookGrace)
+		// The grace is the PHASE's, not this hook's. Charging a full grace per
+		// stalled hook let a phase overrun by one grace PER HOOK: hookBudget
+		// redistributes an abandoned hook's unused SLICE to the hooks behind
+		// it, but the grace is added on top of each hook's deadline and is
+		// never charged against the phase's remaining time. Measured on the
+		// shipped constants with every hook stalled, the full sequence took
+		// 59.2s against a documented worst case of Total+2*grace = 51s and a
+		// 60s compose stop_grace_period — one further durable closer crossed
+		// it, and crossing it means SIGKILL skips request-log-close,
+		// audit-log-close and log-closer: exactly the durable compliance
+		// record and the flush holding the evidence that the flush reserve
+		// exists to protect. Clamping here restores the invariant this file
+		// already documents ("a phase in which every hook stalls still
+		// finishes within its own deadline plus one grace") and costs nothing
+		// in the healthy case, where the clamp is never reached.
+		if !phaseAbandonBy.IsZero() && abandonAt.After(phaseAbandonBy) {
+			abandonAt = phaseAbandonBy
+		}
+		t := time.NewTimer(time.Until(abandonAt)) // non-positive fires immediately
 		defer t.Stop()
 		abandon = t.C
 	}
@@ -232,6 +273,27 @@ func runShutdownHook(ctx context.Context, h shutdownHook) (err error) {
 	case err = <-done:
 		return err
 	case <-abandon:
+		// Go picks UNIFORMLY among ready select cases, and the phase-grace
+		// clamp above makes an ALREADY-FIRED abandon timer ordinary for a hook
+		// reached after the phase spent its grace. Without this re-check a hook
+		// that had already returned would be reported abandoned about half the
+		// time — a false "did not return" line about the very hook that did,
+		// and a spurious error folded into the phase aggregate. Prefer the
+		// completion whenever one is already in hand; this can only turn a
+		// wrong abandonment into a truthful result, never the reverse.
+		//
+		// The guarantee is exactly that and no more: a hook whose goroutine has
+		// not yet been SCHEDULED has nothing in `done` to prefer, so it can
+		// still be recorded abandoned on a phase that is already past its
+		// grace. That is not worth closing with a scheduling floor — a floor is
+		// how the per-hook grace grew unbounded in the first place — and the
+		// record errs toward reporting less durability than was achieved, which
+		// is the safe direction for an operator reading a shutdown log.
+		select {
+		case err = <-done:
+			return err
+		default:
+		}
 	}
 
 	// Log HERE, not from the aggregated error at the end of the phase: the
