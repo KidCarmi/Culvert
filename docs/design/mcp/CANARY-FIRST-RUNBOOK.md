@@ -96,7 +96,7 @@ set is empty. This requires the separately-reviewed activation to have:
 | approval | **1** `live_execution` ToolApproval — four-eyes, ≤24h TTL, exact target |
 | operation class | **read/discovery only** (Culvert's own classification, not `readOnlyHint`) |
 | credential | synthetic/non-production credential **only if the tool requires one** |
-| request count | **EXACTLY: `MaxTotalExecutions=3`, `MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m`** (review §9 — not "tight": `ValidateBudget` would accept up to 1000 executions over 7 days, so a generic "bounded" budget is a materially different experiment). The witness invariant is over the **side-effect-bearing tool invocations only**: **exactly 3 reservations and exactly 3 authorized `tools/call` invocations**. Auxiliary MCP lifecycle/discovery traffic (`initialize`, `notifications/initialized`, `tools/list`) consumes NO reservation and must be counted and attributed **separately** — never folded into the three, and never counted as a breach (review §9). This REQUIRES blocker 6's **retry-free** remedy — the budget bounds RESERVATIONS, not physical invocations: `upstreamclient.Call` retries an idempotent read up to `MaxReadRetries` times per reservation. Retry-disablement is **not representable today** (`NewLimits` coerces `MaxReadRetries==0`→2, rejects negatives; `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so an explicitly retry-free execution path — one reservation ⇒ at most one side-effect-bearing invocation — is a **required CODE-CHANGE prerequisite**, not an operator config. **Charging attempts to the budget is NOT an accepted alternative** (review §9/§14/§26) |
+| request count | **EXACTLY: `MaxTotalExecutions=3`, `MaxExecutionsPerMinute=1`, `MaxConcurrentExecutions=1`, `Window=15m`** (review §9 — not "tight": `ValidateBudget` would accept up to 1000 executions over 7 days, so a generic "bounded" budget is a materially different experiment). The witness invariant is over the **side-effect-bearing tool invocations only**: **exactly 3 reservations and exactly 3 authorized `tools/call` invocations**. Auxiliary MCP lifecycle/discovery traffic (`initialize`, `notifications/initialized`, `tools/list`) consumes NO reservation and must be counted and attributed **separately** — never folded into the three, and never counted as a breach (review §9). Blocker 6's **retry-free** remedy is now in place (review §25a): retry-disablement is representable (`upstreamclient.RetryMode`/`RetryDisabled`) and `newProductionUpstreamClient` builds from `RetryFreeLimits`, so one reservation ⇒ at most one side-effect-bearing physical invocation, proven at the wire under concurrency and ambiguous transport failure. **Charging attempts to the budget is NOT an accepted alternative** (review §9/§14/§26) |
 | controls | immediate kill switch + Canary→Shadow/Observe rollback rehearsed first |
 
 ## Procedure
@@ -150,7 +150,8 @@ set is empty. This requires the separately-reviewed activation to have:
    the admission boundary (PREREQ-MCP-KILL-1) — but NOT across the transport retry loop:
    `upstreamclient.Call` retries an idempotent read without re-checking the kill, so a retry POST can
    land after a kill engaged mid-flight. Until the retry loop is made retry-free or kill-revalidating
-   (review §9/§20, blocker 6), an admitted request's retries are outside the kill's authority.
+   (review §9/§20, blocker 6 — now CLOSED: the retry-free path removes the window entirely, so an
+   admitted request has no retry that could land outside the kill's authority).
 
 ## Automatic-abort conditions (whole-Canary; §16)
 

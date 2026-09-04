@@ -232,12 +232,15 @@ Every one is a **separately-reviewed activation**, not a config change:
    (f) a
    **per-physical-invocation budget (CODE CHANGE)** — an idempotent read retries up to `MaxReadRetries`
    times outside the single budget reservation, so one budgeted request can send the POST ~3×, and a
-   retry POST can land after an emergency kill engaged mid-flight (blocker 6). Retry-disablement is NOT
-   representable today (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects negatives;
-   `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code. **An
-   explicitly RETRY-FREE execution path is the ONLY accepted closure for the first Canary** — one
-   logical reservation must produce at most one side-effect-bearing physical tool invocation — and it
-   closes BOTH the count and the kill-authority gap. **Charging each attempt to the budget is NOT an
+   retry POST can land after an emergency kill engaged mid-flight (blocker 6). **CLOSED.**
+   Retry-disablement is now representable (`upstreamclient.RetryMode`/`RetryDisabled`; `NewLimits`
+   rejects a retry budget combined with `RetryDisabled` instead of coercing it) and
+   `newProductionUpstreamClient` builds from `RetryFreeLimits`, so the ONLY production upstream client
+   — the one serving the live tier — performs exactly one physical send per Call. **An explicitly
+   RETRY-FREE execution path is the ONLY accepted closure for the first Canary** — one logical
+   reservation must produce at most one side-effect-bearing physical tool invocation — and it closes
+   BOTH the count and the kill-authority gap. The bound is proven AT THE WIRE against a controlled
+   local HTTPS peer (see review §25a). **Charging each attempt to the budget is NOT an
    accepted alternative** (with or without per-attempt kill revalidation): it can spend all three
    execution slots on a single logical reservation and so destroys the exactly-three-invocations witness
    invariant (review §9/§14/§26). A per-reservation key is not a bound at all (it enables

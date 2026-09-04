@@ -750,7 +750,7 @@ BLOCKED-vs-FAILED note in §26).
 | Tight scope validated (no percentage/group/wildcard; server & tenant capped at 1) | YES (§10) |
 | Machine gate enforces exactly-one tool AND exactly-one principal | **NO — caps are 2; must be an external prerequisite (§10)** |
 | Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
-| Budget bounds PHYSICAL side-effect-bearing invocations via a RETRY-FREE path (charging not accepted) | **NO — idempotent read retries up to ~3× per reservation; retry-disablement is not representable, and charging attempts is rejected because it can spend all 3 slots on one reservation (§9/§26, blocker 6)** |
+| Budget bounds PHYSICAL side-effect-bearing invocations via a RETRY-FREE path (charging not accepted) | **YES — `RetryMode`/`RetryDisabled` is representable and wired into the ONLY production upstream client; N reservations ⇒ ≤ N physical POSTs measured AT THE WIRE under concurrency and ambiguous transport failure (blocker 6 CLOSED)** |
 | Witness distinguishes side-effect-bearing tool invocations from auxiliary lifecycle/discovery traffic | **NO — no such controlled recording server exists; without the partition a correct run's `initialize`/`tools/list` POSTs misclassify as a breach (§9/§14)** |
 | Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **NO — no numeric limit, window, or sample floor exists; an unreachable floor with below-floor `no-trip` disables both detectors for the whole experiment (§16/§26, blocker 7)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
@@ -760,14 +760,84 @@ BLOCKED-vs-FAILED note in §26).
 | Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
-| Durable record determines whether a pre-crash upstream invocation occurred | **NO — success-only outcome evidence + unclosable post-send crash window (§15/§18)** |
+| Durable record determines whether a pre-crash upstream invocation occurred | **NO — narrowed. Internal durable truth/recovery/reconciliation COMPLETE (terminal outcome on every exit path, durable pre-send intent, orphan derivation, typed witness contract); the authoritative production witness adapter REMAINS unwired, so the answer is `reconciliation_required`, not determinate (§15/§18, blocker 8)** |
 | Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **NO — only budget/scope auto-trip (§16)** |
 | Operator-reachable graceful rollback (quiesce or Canary→Shadow/Observe demotion) — §17's "rollback AND kill" bar | **NO — quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured` (§17)** |
 | Crash/restart does not silently re-arm/resume | YES (§18) |
-| Unresolved P0/P1 finding | **YES — two product-defect prerequisites (auto-abort wiring, durable outcome evidence), each a dedicated PR (§21/§24)** |
+| Unresolved P0/P1 finding | **YES — the auto-abort wiring prerequisite remains; the durable-outcome-evidence prerequisite is narrowed to the authoritative production witness adapter (§21/§24/§25a)** |
 
-Multiple mandatory criteria are NO and two P1 product-defect prerequisites are open. A GO is
-therefore forbidden.
+Multiple mandatory criteria are NO and P1 product-defect work remains open. A GO is therefore
+forbidden. (§25a records the only two post-adoption status changes: blocker 6 CLOSED, blocker 8
+narrowed but still OPEN. The other thirteen are untouched and the §26 verdict is unchanged.)
+
+---
+
+## §25a Blocker 6 closure and blocker 8 status (post-review evidence)
+
+This section records the ONLY two status changes made to the frozen ledger since it was adopted.
+The other thirteen blockers are untouched. Nothing here changes the §26 verdict.
+
+### Blocker 6 — CLOSED
+
+The closure bar was: on the real Canary-shaped path, N authorized reservations must imply at most N
+physical side-effect-bearing tool POSTs; N+1 must be denied with zero N+1 POST; no transparent
+retry; a unique attempt identity per authorized tool effect; auxiliary traffic excluded from the
+effect count — all under concurrency and ambiguous transport failure. Each clause is now mechanically
+proven:
+
+| Clause | Evidence |
+|---|---|
+| No transparent retry | `RetryMode`/`RetryDisabled` in `internal/mcp/upstreamclient`; `newProductionUpstreamClient` builds from `RetryFreeLimits`; `TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop`, with `TestRetryDefault_ControlMultipleSendsOnAmbiguousDrop` proving the same peer shape DOES re-send under the historical defaults |
+| N reservations ⇒ ≤ N physical POSTs | `TestConc01` (equality at capacity), `TestConc02` (over-subscribed), `TestHTTPSE2E_BudgetBoundsPhysicalPOSTs` — all counted AT THE CONTROLLED PEER, not at a Go seam |
+| N+1 ⇒ zero N+1 POST | `TestHTTPSE2E_BudgetBoundsPhysicalPOSTs`, `TestHTTPSE2E_GateDenialSendsNoBytes` |
+| Unique attempt identity per effect | `TestHTTPSE2E_EachPOSTCarriesADistinctAttemptID`, `TestConc03`; a reservation bound to two attempts is now NAMED as a breach (`RecoveryReport.ReservationBreaches`, `TestRedTeam08`) |
+| Auxiliary traffic excluded | `upstreamclient.ClassifyMethod`; `TestHTTPSE2E_AuxiliaryTrafficIsNotMetered`, `TestRedTeam13`, with an unknown method failing CLOSED as side-effect-bearing |
+| Under ambiguous transport failure | `TestHTTPSE2E_AmbiguousDropIsStillExactlyOnePOST`, `TestRedTeam01`, `TestRedTeam14` |
+
+The measurement is at the WIRE deliberately. Every pre-existing live-tier E2E counted invocations at
+the `UpstreamCaller` interface, which measures what the executor INTENDED to send; the retry loop
+lives below that seam, so an interface-level counter reads 1 while the peer is POSTed twice.
+
+**Charging each attempt to the budget remains REJECTED** as a closure route, unchanged from the
+frozen review: it bounds the count but lets three retries of one logical reservation consume the
+whole experiment, destroying the exactly-N-invocations witness invariant.
+
+### Blocker 8 — OPEN (narrowed)
+
+    internal durable truth / recovery / reconciliation: COMPLETE
+    production authoritative witness integration:        REMAINS
+
+Complete: a terminal `PhaseOutcome` on every one of `runExecute`'s exit paths (previously one — the
+success path); a durable `PhaseSendIntent` committed before the irreversible send and after the
+budget reservation; orphan derivation from the durable stream alone with no second ledger; a typed
+witness contract that takes FACTS and derives the verdict, never a caller-supplied boolean; and
+append-only reconciliation evidence in the same event stream.
+
+Not complete, and the reason this stays OPEN: **the authoritative production witness adapter is
+intentionally unwired.** It belongs to the controlled-upstream work (blocker 1). Until it exists, a
+post-send crash resolves to `reconciliation_required` — the correct conservative answer, but not a
+determinate one, which is what the closure bar asks for.
+
+Note that "every normal path emits `PhaseOutcome`", "orphan recovery exists", and "the local
+controlled witness reconciles correctly" are ALL true here and are explicitly NOT sufficient for
+closure.
+
+### One defect found and fixed while proving the above
+
+The terminal outcome event carried no `DecisionRef`. `model.Event.Validate` requires one, so the
+event was rejected — and because the outcome commit is deliberately best-effort (it must never block
+a response for work that already happened), the record simply vanished. Every unit test passed
+throughout, because they commit through a sink that does not validate.
+
+The consequence was blocker 8's failure mode reintroduced by the mechanism meant to close it: on
+restart, EVERY completed execution looked exactly like a crash, so the one signal that means "a
+physical invocation's fate is unknown" was also produced by the success path.
+
+This is now a permanent proof rule for this program:
+
+> Any security-critical evidence test used to close blocker 8 must exercise the REAL validator
+> and/or read the committed record back from the REAL spool. A permissive fake sink is useful for
+> unit isolation; it is NOT proof of durable evidence truth.
 
 ---
 
@@ -783,6 +853,11 @@ this review verified against the code. The list below is exhaustive AS A SET: to
 every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
+
+**Post-adoption status (see §25a).** The baseline remains **fifteen**; the list below is preserved
+as adopted. Exactly two entries have changed status since: **blocker 6 is CLOSED**, and **blocker 8
+is narrowed but still OPEN**. Thirteen are untouched, and the verdict above is unchanged — closing
+blocker 6 removes one of fifteen reasons a GO is forbidden, not the prohibition.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -802,8 +877,9 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    finer classifier or a designed discovery-trust path is required.
 5. **The machine gate does not enforce exactly-one tool/principal (§10).** `MaxCanaryTools`/
    `MaxCanaryPrincipals` are 2, so the one-of-everything shape is an external prerequisite.
-6. **The budget does not bound physical upstream invocations (§9).** Idempotent read retries can
-   send the POST ~3× per single budget reservation.
+6. ~~**The budget does not bound physical upstream invocations (§9).**~~ **CLOSED** — see
+   "Blocker 6 closure" below. Idempotent read retries could send the POST ~3× per single budget
+   reservation; the Canary path is now retry-free and the bound is proven at the wire.
 7. **Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.** Only
    `budget_exhausted`/`scope_escape` auto-trip; the other eight declared breaches do not, and nothing
    reconciles the independent witness — so a divergence would not auto-stop later requests.
@@ -816,7 +892,11 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    deadline-driven stop/rollback (a timer that demotes without needing another request), or the
    authorization must require explicit operator cleanup and stop describing expiry as automatic.
 8. **Durable outcome evidence is incomplete/success-only, with an unclosable post-send crash window
-   (§15/§18) — a product defect.** A pre-crash upstream invocation is not always determinable.
+   (§15/§18) — a product defect.** **STILL OPEN, narrowed** — see "Blocker 8 status" below. The
+   internal half (terminal outcome on every exit path, durable send intent, orphan recovery,
+   typed witness reconciliation) is complete and proven against the real spool; the AUTHORITATIVE
+   PRODUCTION WITNESS ADAPTER remains unwired, and until it is, a post-send crash resolves to
+   `reconciliation_required` rather than to a determinate answer.
 9. **Credential path unresolved (§4).** Credential selection comes from the tool's matched policy
    RULE, not from provisioning a server/tool, and the production broker has ZERO providers, so a
    `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning a target
