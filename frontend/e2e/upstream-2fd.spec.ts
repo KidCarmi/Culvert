@@ -109,19 +109,27 @@ async function storageDump(page: Page): Promise<string> {
 }
 
 test.describe("2F-D — legacy Upstream Proxies panel never receives credential material", () => {
-  test("canary password + sealed ciphertext are absent from every browser sink", async ({ page }) => {
+  test("canary password + sealed ciphertext are absent from every browser sink", async ({
+    page,
+  }) => {
     const api = await newAdminClient();
     // Stale fixture from an aborted run — remove it first so the spec is idempotent.
     const stale = await findEntry(api, HOST);
     if (stale) {
       if (stale.credentialState !== "none") {
         await api.post(`/api/upstream/entries/${stale.id}/credential`, {
-          data: { action: "clear", confirm: stale.id, revision: stale.revision },
+          data: {
+            action: "clear",
+            confirm: stale.id,
+            revision: stale.revision,
+          },
         });
       }
       const again = await findEntry(api, HOST);
       if (again) {
-        await api.delete(`/api/upstream/entries/${again.id}?revision=${again.revision}`);
+        await api.delete(
+          `/api/upstream/entries/${again.id}?revision=${again.revision}`,
+        );
       }
     }
 
@@ -149,7 +157,13 @@ test.describe("2F-D — legacy Upstream Proxies panel never receives credential 
           const r = await fetch("/api/upstream/entries", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ scheme: "http", host, port, username: "svc", revision }),
+            body: JSON.stringify({
+              scheme: "http",
+              host,
+              port,
+              username: "svc",
+              revision,
+            }),
           });
           const body: unknown = await r.json();
           return { status: r.status, body };
@@ -157,7 +171,10 @@ test.describe("2F-D — legacy Upstream Proxies panel never receives credential 
         [HOST, PORT, rev] as const,
       );
       expect(isRecord(created) && created["status"]).toBe(201);
-      const entry = isRecord(created) && isRecord(created["body"]) ? created["body"]["entry"] : null;
+      const entry =
+        isRecord(created) && isRecord(created["body"])
+          ? created["body"]["entry"]
+          : null;
       if (!isRecord(entry)) throw new Error("no entry in create response");
       id = String(entry["id"]);
       const sealed: unknown = await page.evaluate(
@@ -188,7 +205,9 @@ test.describe("2F-D — legacy Upstream Proxies panel never receives credential 
       await expect(row).toBeVisible();
       await expect(row).toContainText("configured");
       const healthResp = page.waitForResponse(
-        (r) => r.url().includes("/api/upstream/health") && r.request().method() === "POST",
+        (r) =>
+          r.url().includes("/api/upstream/health") &&
+          r.request().method() === "POST",
       );
       await page.click('[data-click="upstreamHealthCheck"]');
       const health = await healthResp;
@@ -215,7 +234,8 @@ test.describe("2F-D — legacy Upstream Proxies panel never receives credential 
       const leaks: string[] = [];
       for (const n of needles) {
         for (const b of bodies) {
-          if (b.body.includes(n.value)) leaks.push(`${n.label} in response body of ${b.url}`);
+          if (b.body.includes(n.value))
+            leaks.push(`${n.label} in response body of ${b.url}`);
         }
         for (const u of urls) {
           if (u.includes(n.value)) leaks.push(`${n.label} in request URL ${u}`);
@@ -226,17 +246,26 @@ test.describe("2F-D — legacy Upstream Proxies panel never receives credential 
       }
       expect(leaks).toEqual([]);
       // The sweep must have actually looked at the sinks that carry the entry.
-      expect(bodies.some((b) => b.url.includes("/api/upstream") && b.body.includes(HOST))).toBe(true);
-      expect(bodies.some((b) => b.url.includes("/api/config/export"))).toBe(true);
+      expect(
+        bodies.some(
+          (b) => b.url.includes("/api/upstream") && b.body.includes(HOST),
+        ),
+      ).toBe(true);
+      expect(bodies.some((b) => b.url.includes("/api/config/export"))).toBe(
+        true,
+      );
       // The credential write itself was a same-origin browser request whose
       // RESPONSE carries no material either (the request body is the only
       // legitimate carrier and is not a sink).
-      const credResp = bodies.find((b) => b.url.includes(`/entries/${id}/credential`));
+      const credResp = bodies.find((b) =>
+        b.url.includes(`/entries/${id}/credential`),
+      );
       expect(credResp?.body ?? "").not.toContain(CANARY_PW);
       if (cts === null) {
         test.info().annotations.push({
           type: "note",
-          description: "ciphertext needle skipped: /data/admin_settings.json not reachable from the runner",
+          description:
+            "ciphertext needle skipped: /data/admin_settings.json not reachable from the runner",
         });
       }
     } finally {
@@ -244,14 +273,23 @@ test.describe("2F-D — legacy Upstream Proxies panel never receives credential 
       const cur = await findEntry(api, HOST);
       if (cur) {
         if (cur.credentialState !== "none") {
-          const clr = await api.post(`/api/upstream/entries/${cur.id}/credential`, {
-            data: { action: "clear", confirm: cur.id, revision: cur.revision },
-          });
+          const clr = await api.post(
+            `/api/upstream/entries/${cur.id}/credential`,
+            {
+              data: {
+                action: "clear",
+                confirm: cur.id,
+                revision: cur.revision,
+              },
+            },
+          );
           expect(clr.status()).toBe(200);
         }
         const fresh = await findEntry(api, HOST);
         if (fresh) {
-          const del = await api.delete(`/api/upstream/entries/${fresh.id}?revision=${fresh.revision}`);
+          const del = await api.delete(
+            `/api/upstream/entries/${fresh.id}?revision=${fresh.revision}`,
+          );
           expect(del.status()).toBe(200);
         }
       }
