@@ -80,10 +80,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// concurrent catalog ingest during that time would otherwise let the upstream
 	// call run under a decision made about a tool that no longer exists or has been
 	// redefined. Re-checking here makes the refusal precede the side effect.
-	staleAtCall := false
-	killedAtCall := false
-	gateRefused := false
-	var gateReason mcperr.Reason
+	bf := &boundaryRefusal{}
 	// decisionRef is the committed decision's EventID, captured from CommitThenAct's
 	// receipt and required on the terminal outcome event.
 	var decisionRef string
@@ -96,8 +93,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// leaked even if the freshness/kill guard below then aborts (§11). nil gate ⇒ unchanged.
 		adm, admErr := e.admitSideEffect(in)
 		if admErr != nil {
-			gateRefused = true
-			gateReason = adm.reason
+			bf.gateRefused, bf.gateReason = true, adm.reason
 			return admErr
 		}
 		release, revalidate := adm.release, adm.revalidate
@@ -121,8 +117,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			decisionRef:   decisionRef,
 		})
 		if ierr != nil {
-			gateRefused = true
-			gateReason = mcperr.ReasonOf(ierr)
+			bf.gateRefused, bf.gateReason = true, mcperr.ReasonOf(ierr)
 			return errLiveGateRefused
 		}
 		attempt = rec
@@ -135,10 +130,9 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			// definitely_not_sent is mechanically provable rather than inferred.
 			sendState = model.SendDefinitelyNotSent
 			cls := classifyBoundaryError(gerr)
-			staleAtCall, killedAtCall = cls.stale, cls.killed
+			bf.stale, bf.killed = cls.stale, cls.killed
 			if cls.demoted {
-				gateRefused = true
-				gateReason = mcperr.ReasonRolloutModeInvalid
+				bf.gateRefused, bf.gateReason = true, mcperr.ReasonRolloutModeInvalid
 			}
 			return gerr
 		}
@@ -172,9 +166,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// pre-materialization gate still adds its own commit before any provider or
 	// cache is touched (defense in depth, not a substitute).
 	profileRef := in.Decision.Obligations.CredentialProfile
-	if out, done := e.commitThenCall(ctx, in, profileRef, callUpstream, &decisionRef, boundaryFlags{
-		killed: &killedAtCall, stale: &staleAtCall, gateRefused: &gateRefused, gateReason: &gateReason,
-	}); done {
+	if out, done := e.commitThenCall(ctx, in, profileRef, callUpstream, &decisionRef, bf); done {
 		return out
 	}
 	return e.finishUpstreamLeg(ctx, in, upResp, upErr, res)
@@ -582,6 +574,10 @@ type boundaryRefusal struct {
 	stale   bool
 	killed  bool
 	demoted bool
+	// gateRefused/gateReason carry a composition-layer gate denial, which reaches the
+	// same classification path as a boundary guard refusal but names its own reason.
+	gateRefused bool
+	gateReason  mcperr.Reason
 }
 
 // classifyBoundaryError decodes a preCallGuard refusal. The three causes are
@@ -593,16 +589,6 @@ func classifyBoundaryError(err error) boundaryRefusal {
 		killed:  errors.Is(err, errKilledAtBoundary),
 		demoted: errors.Is(err, errLiveGenerationDemotedAtBoundary),
 	}
-}
-
-// boundaryFlags carries the pointers callUpstream writes its refusal classification
-// into, so the commit-and-act step can reclassify on BOTH the credential and
-// no-credential paths without runExecute re-reading four locals inline.
-type boundaryFlags struct {
-	killed      *bool
-	stale       *bool
-	gateRefused *bool
-	gateReason  *mcperr.Reason
 }
 
 // commitThenCall performs the durable decision commit and the guarded upstream leg,
@@ -620,7 +606,7 @@ type boundaryFlags struct {
 // adds its own commit before any provider or cache is touched (defense in depth, not
 // a substitute).
 func (e *Executor) commitThenCall(ctx context.Context, in runtime.ExecInput, profileRef string,
-	callUpstream func(string) error, decisionRef *string, bf boundaryFlags,
+	callUpstream func(string) error, decisionRef *string, bf *boundaryRefusal,
 ) (runtime.ExecOutput, bool) {
 	useBroker := e.cfg.Broker != nil && profileRef != ""
 	var blockedOut runtime.ExecOutput
@@ -638,7 +624,7 @@ func (e *Executor) commitThenCall(ctx context.Context, in runtime.ExecInput, pro
 		// must read as its own reason, never as a transport/durability fault. This
 		// branch carries the NO-credential path, whose callUpstream error escapes
 		// CommitThenAct verbatim.
-		if out, ok := e.classifyBoundaryRefusal(in, *bf.killed, *bf.stale, *bf.gateRefused, *bf.gateReason); ok {
+		if out, ok := e.classifyBoundaryRefusal(in, bf.killed, bf.stale, bf.gateRefused, bf.gateReason); ok {
 			return out, true
 		}
 		return e.blocked(in, mcperr.ReasonOf(err), false), true
@@ -651,7 +637,7 @@ func (e *Executor) commitThenCall(ctx context.Context, in runtime.ExecInput, pro
 		// emergency-kill refusal detected inside the broker callback must therefore be
 		// reclassified HERE too, or clients and block telemetry would read `none` where
 		// the no-credential path reads the correct reason.
-		if out, ok := e.classifyBoundaryRefusal(in, *bf.killed, *bf.stale, *bf.gateRefused, *bf.gateReason); ok {
+		if out, ok := e.classifyBoundaryRefusal(in, bf.killed, bf.stale, bf.gateRefused, bf.gateReason); ok {
 			return out, true
 		}
 		return blockedOut, true
