@@ -320,7 +320,12 @@ func (p *Pool) noteDirectFallback() {
 	p.fallbackTotal.Add(1)
 	if !p.fallbackActive.Swap(true) {
 		obs.Printf("Upstream: ALL parent proxies down — failing open to DIRECT egress (parent-proxy chain bypassed)")
-		fireFallbackAlert("all parent proxies unhealthy or circuit-open; egress is DIRECT (parent-proxy chain bypassed)")
+		const detail = "all parent proxies unhealthy or circuit-open; egress is DIRECT (parent-proxy chain bypassed)"
+		if h := FallbackAlertHook; h != nil {
+			h(detail)
+		} else {
+			fireFallbackAlert(detail)
+		}
 	}
 }
 
@@ -450,6 +455,27 @@ func (a *Attribution) Record(err error) {
 // reachable THROUGH the parent proxy under test.
 const healthCheckURL = "http://detectportal.firefox.com/success.txt"
 
+// ProbeTransport is a TEST-ONLY seam: when non-nil it supplies the
+// round-tripper the health probe uses for a given parent proxy, so a test
+// can inject a deterministic probe outcome (a 407, a dial error carrying a
+// secret, a timeout) without a network. Production leaves it nil.
+var ProbeTransport func(proxyURL *url.URL) http.RoundTripper
+
+// FallbackAlertHook is a TEST-ONLY seam: when non-nil it receives the
+// direct-fallback transition instead of the asynchronous production alert,
+// so a test can count transitions deterministically. Production leaves it nil.
+var FallbackAlertHook func(detail string)
+
+func probeTransportFor(proxyURL *url.URL) http.RoundTripper {
+	if h := ProbeTransport; h != nil {
+		return h(proxyURL)
+	}
+	return &http.Transport{
+		Proxy:             http.ProxyURL(proxyURL),
+		DisableKeepAlives: true,
+	}
+}
+
 // HealthCheck runs a connectivity check against each upstream proxy.
 // Called periodically from a background goroutine.
 func (p *Pool) HealthCheck() {
@@ -459,11 +485,8 @@ func (p *Pool) HealthCheck() {
 
 	for _, up := range proxies {
 		client := &http.Client{
-			Timeout: 5 * time.Second,
-			Transport: &http.Transport{
-				Proxy:             http.ProxyURL(up.URL),
-				DisableKeepAlives: true,
-			},
+			Timeout:   5 * time.Second,
+			Transport: probeTransportFor(up.URL),
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodHead, healthCheckURL, http.NoBody)
