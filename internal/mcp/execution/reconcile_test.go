@@ -1315,3 +1315,85 @@ func TestRecovery_ReadPathCouplingIsSymmetricAndStructural(t *testing.T) {
 		}
 	})
 }
+
+// TestRecovery_PayloadCouplingIsStatedOverTheAllowedSet pins round 13, and it is
+// deliberately written as an ENUMERATION OVER ALL PHASES rather than as the two
+// shapes that were reported.
+//
+// Enumerating the FORBIDDEN side is what let this leak three rounds running:
+// outcome-on-reconciliation was closed (round 11), then the inverse (round 12), then
+// the marker phases (round 13). A rule stated over the ALLOWED set holds for phases
+// nobody has written yet, and this test fails if a new phase is added without
+// deciding which payloads it may carry.
+func TestRecovery_PayloadCouplingIsStatedOverTheAllowedSet(t *testing.T) {
+	allPhases := []model.Phase{
+		model.PhaseDecision, model.PhaseOutcome, model.PhaseDenialAggregate,
+		model.PhaseRecoveryMarker, model.PhaseHealth, model.PhaseSendIntent,
+		model.PhaseReconciliation,
+	}
+	outcomeAllowed := map[model.Phase]bool{model.PhaseOutcome: true, model.PhaseSendIntent: true}
+	reconAllowed := map[model.Phase]bool{model.PhaseReconciliation: true}
+
+	for _, ph := range allPhases {
+		id := mustAttemptID(t)
+		outcome := &model.OutcomeEvidence{
+			AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+			PhysicalSendState: model.SendPeerResponseReceived, DecisionRef: "evt_x",
+		}
+		err := readPathAttemptRulesOK(&model.Event{Phase: ph, Outcome: outcome})
+		if outcomeAllowed[ph] {
+			// PhaseSendIntent additionally may not CLAIM a send state, so it is expected
+			// to reject this particular payload — for that reason, not the coupling one.
+			if ph == model.PhaseSendIntent {
+				if err == nil {
+					t.Fatalf("%v: a send intent claiming a send state must be refused", ph)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("%v may carry outcome evidence, got %v", ph, err)
+			}
+		} else if err == nil {
+			t.Fatalf("%v must not carry outcome evidence", ph)
+		}
+
+		recon := &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7, Result: model.ReconRequired,
+		}
+		err = readPathAttemptRulesOK(&model.Event{Phase: ph, Reconciliation: recon})
+		if reconAllowed[ph] {
+			if err != nil {
+				t.Fatalf("%v may carry reconciliation evidence, got %v", ph, err)
+			}
+		} else if err == nil {
+			t.Fatalf("%v must not carry reconciliation evidence", ph)
+		}
+	}
+
+	t.Run("a terminal outcome riding on a health event does not settle its intent", func(t *testing.T) {
+		// The reachable consequence: recovery dispatches on Phase, so an unindexed
+		// outcome leaves the intent an orphan while the ledger records a peer response.
+		id := mustAttemptID(t)
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			model.Event{
+				Phase:  model.PhaseHealth,
+				Marker: &model.MarkerEvidence{State: "ok"},
+				Outcome: &model.OutcomeEvidence{
+					AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+					PhysicalSendState: model.SendPeerResponseReceived, DecisionRef: "evt_x",
+				},
+			},
+		)); err == nil {
+			t.Fatal("a terminal outcome on a marker record must fail closed, not be discarded")
+		}
+	})
+
+	t.Run("control: a send intent with no send state still indexes", func(t *testing.T) {
+		id := mustAttemptID(t)
+		rep, err := RecoverAttempts(readerWith(intentEvent(id, "rsv_a", 7)))
+		if err != nil || len(rep.Orphans) != 1 {
+			t.Fatalf("control: expected one orphan, got %+v err=%v", rep.Orphans, err)
+		}
+	})
+}

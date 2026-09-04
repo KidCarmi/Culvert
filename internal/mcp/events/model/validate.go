@@ -508,6 +508,21 @@ func (e Event) validatePhase() error {
 	if e.Reconciliation != nil && e.Phase != PhaseReconciliation {
 		return evtErr(mcperr.ReasonEventInvalid, "reconciliation evidence on a non-reconciliation event")
 	}
+	// THE SYMMETRIC RULE FOR OUTCOME EVIDENCE, stated GLOBALLY rather than per phase
+	// (Codex round 13). Reconciliation evidence has had a global coupling check since
+	// it was introduced; outcome evidence was policed only by the phases that happened
+	// to look for it — the decision/outcome path and the reconciliation path — so the
+	// MARKER and DENIAL phases accepted an attempt-bearing outcome without comment.
+	// Recovery dispatches on Phase, so such a record is read and returned WITHOUT
+	// indexing the outcome: a terminal peer_response_received could ride on a health
+	// event while its send intent was still reported as an unresolved orphan.
+	//
+	// Stating it once, over the ALLOWED set, is what makes it hold for phases nobody
+	// has written yet. Two phases legitimately carry it: an outcome IS the evidence,
+	// and a send intent uses it to name its attempt.
+	if e.Outcome != nil && e.Phase != PhaseOutcome && e.Phase != PhaseSendIntent {
+		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a phase that cannot carry it")
+	}
 	switch e.Phase {
 	case PhaseDecision, PhaseOutcome:
 		return e.validateDecisionPhase()

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -430,6 +431,38 @@ func TestValidDecisionRef_IsTheSameRuleValidateApplies(t *testing.T) {
 		}
 		if got, want := e.Validate() == nil, ValidDecisionRef(ref); got != want {
 			t.Fatalf("ref %q: Validate-accepts=%v but ValidDecisionRef=%v", ref, got, want)
+		}
+	}
+}
+
+// TestValidate_OutcomeEvidenceCouplingIsStatedOverTheAllowedSet is the WRITER half of
+// round 13, and it is an enumeration over all phases for the same reason its recovery
+// counterpart is: reconciliation evidence has had a GLOBAL coupling check since it was
+// introduced, while outcome evidence was policed only by the phases that happened to
+// look for it — so the marker and denial phases accepted an attempt-bearing outcome
+// without comment, and recovery would then discard it.
+func TestValidate_OutcomeEvidenceCouplingIsStatedOverTheAllowedSet(t *testing.T) {
+	allowed := map[Phase]bool{PhaseOutcome: true, PhaseSendIntent: true}
+	for _, ph := range []Phase{
+		PhaseDecision, PhaseOutcome, PhaseDenialAggregate, PhaseRecoveryMarker,
+		PhaseHealth, PhaseSendIntent, PhaseReconciliation,
+	} {
+		e := baseDecision()
+		e.Phase = ph
+		e.SchemaVersion = SchemaVersionV3
+		e.Outcome = &OutcomeEvidence{AttemptID: "att_0001"}
+		err := e.Validate()
+		if allowed[ph] {
+			// Allowed phases may still reject for their OWN reasons (an outcome needs a
+			// decision ref and a send state; an intent may not claim one) — what must not
+			// happen is a COUPLING rejection.
+			if err != nil && strings.Contains(err.Error(), "cannot carry it") {
+				t.Fatalf("%v may carry outcome evidence, got coupling error %v", ph, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "cannot carry it") {
+			t.Fatalf("%v must reject outcome evidence on coupling grounds, got %v", ph, err)
 		}
 	}
 }

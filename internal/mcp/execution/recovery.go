@@ -201,18 +201,32 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 // one whose absence makes the derived answer WRONG, and adding a rule to Validate that
 // meets that bar means adding it here too.
 func readPathAttemptRulesOK(e *model.Event) error {
-	if e.Phase == model.PhaseReconciliation && e.Outcome != nil {
+	// BOTH PAYLOAD COUPLINGS, each stated ONCE over its ALLOWED set rather than as a
+	// list of forbidden phases (Codex rounds 11-13). Enumerating the forbidden side is
+	// what let this leak three times: outcome-on-reconciliation was closed, then the
+	// inverse, then marker phases. A rule written over the allowed set holds for phases
+	// nobody has written yet.
+	//
+	// Two phases may carry outcome evidence: an outcome IS the evidence, and a send
+	// intent uses it to name its attempt. Exactly one may carry reconciliation evidence.
+	if e.Outcome != nil && e.Phase != model.PhaseOutcome && e.Phase != model.PhaseSendIntent {
 		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
-			"outcome evidence on a reconciliation record")
+			"outcome evidence on a record that cannot carry it")
 	}
-	// THE INVERSE COUPLING, which the first rule alone does not cover (Codex round 12).
-	// Validate rejects reconciliation evidence on EVERY non-reconciliation phase, and
-	// the asymmetry mattered: a PhaseOutcome carrying an embedded reconciliation_conflict
-	// was indexed as an outcome with the conflict dropped, so a duplicate physical
-	// invocation was reported as a cleanly settled attempt.
-	if e.Phase != model.PhaseReconciliation && e.Reconciliation != nil {
+	if e.Reconciliation != nil && e.Phase != model.PhaseReconciliation {
 		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
 			"reconciliation evidence on a non-reconciliation record")
+	}
+	// A SEND INTENT MAY NOT CLAIM A PHYSICAL SEND STATE. The writer refuses this shape
+	// (round 12), and the read path must refuse it too for the same reason every other
+	// mirror exists: the spool read path does not run Validate. Left through, the record
+	// indexes as an intent and orphanFrom ignores the state, degrading a durable receipt
+	// claim to reconciliation_required — an assertion about a physical effect that
+	// nothing reads and nothing contradicts.
+	if e.Phase == model.PhaseSendIntent && e.Outcome != nil &&
+		e.Outcome.PhysicalSendState != model.SendStateUnset {
+		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
+			"send intent claiming a physical send state")
 	}
 	if e.Phase == model.PhaseOutcome && e.Outcome != nil && e.Outcome.AttemptID != "" &&
 		!model.ValidDecisionRef(e.Outcome.DecisionRef) {

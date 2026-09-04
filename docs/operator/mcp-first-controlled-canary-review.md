@@ -1175,9 +1175,37 @@ Round 12 answered the questions the round-11 request put, and all three answers 
   commit but much later inside recovery, on an attempt whose physical effect is already
   done. Both directions are now enforced at the writer. Mutations M50-M52.
 
+### And the rule that should have been written that way three rounds ago
+
+Round 13 found the SAME coupling leaking a third time — a `PhaseRecoveryMarker` or
+`PhaseHealth` record carrying an attempt-bearing outcome, which recovery dispatches past
+without indexing, leaving a send intent reported as an unresolved orphan while the ledger
+holds its `peer_response_received` terminal outcome — plus the round-12 send-intent
+send-state rule, added at the writer and not mirrored on the read path.
+
+**The lesson is the shape of the rule, not the two shapes reported.** Reconciliation
+evidence has had a GLOBAL coupling check since it was introduced; outcome evidence was
+policed only by the phases that happened to look for it, so each round closed one more
+forbidden phase. Both couplings are now stated ONCE over their **allowed set** — outcome
+evidence on `PhaseOutcome` or `PhaseSendIntent`, reconciliation evidence on
+`PhaseReconciliation` — at the writer AND on the read path. A rule written that way holds
+for phases nobody has written yet.
+
+The gates are enumerations over ALL phases rather than the reported shapes
+(`TestRecovery_PayloadCouplingIsStatedOverTheAllowedSet`,
+`TestValidate_OutcomeEvidenceCouplingIsStatedOverTheAllowedSet`), so adding a phase
+without deciding which payloads it may carry now fails a test. Mutations M53-M55.
+
+**Convergence note, recorded honestly.** Rounds 9-13 are one class: the spool read path
+validates less than the commit path, so a record NO PRODUCTION PRODUCER EMITS could be read
+back and trusted. They are real and worth closing, and round 12-13 moved part of the rule
+to the writer where it belongs — but they are defense-in-depth for the future witness
+integration rather than defects in the shipped path. Nothing commits a `PhaseReconciliation`
+event today and `RecoverAttempts` has no production caller.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **52 mutations: 52 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **55 mutations: 55 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

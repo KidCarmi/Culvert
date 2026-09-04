@@ -478,6 +478,27 @@ run_mutation M52 \
   ./internal/mcp/events/model/ internal/mcp/events/model/validate.go \
   's/\tif e\.Outcome\.PhysicalSendState != SendStateUnset \{\n\t\treturn evtErr\(mcperr\.ReasonEventInvalid, "send intent claiming a physical send state"\)\n\t\}\n//'
 
+# ── (53) outcome evidence uncoupled from its allowed phases (writer) ───────
+run_mutation M53 \
+  'an attempt outcome rides on a marker or denial record and recovery discards it' \
+  'TestValidate_OutcomeEvidenceCouplingIsStatedOverTheAllowedSet' \
+  ./internal/mcp/events/model/ internal/mcp/events/model/validate.go \
+  's/\tif e\.Outcome != nil && e\.Phase != PhaseOutcome && e\.Phase != PhaseSendIntent \{\n\t\treturn evtErr\(mcperr\.ReasonEventInvalid, "outcome evidence on a phase that cannot carry it"\)\n\t\}\n//'
+
+# ── (54) same coupling unmirrored on the read path ─────────────────────────
+run_mutation M54 \
+  'the read path indexes a record whose payload its phase cannot carry' \
+  'TestRecovery_PayloadCouplingIsStatedOverTheAllowedSet' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif e\.Outcome != nil && e\.Phase != model\.PhaseOutcome && e\.Phase != model\.PhaseSendIntent \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery",\n\t\t\t"outcome evidence on a record that cannot carry it"\)\n\t\}\n//'
+
+# ── (55) send-intent state rule unmirrored on the read path ────────────────
+run_mutation M55 \
+  'a send intent claiming a receipt is indexed and the claim silently dropped' \
+  'TestRecovery_PayloadCouplingIsStatedOverTheAllowedSet' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif e\.Phase == model\.PhaseSendIntent && e\.Outcome != nil &&\n\t\te\.Outcome\.PhysicalSendState != model\.SendStateUnset \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery",\n\t\t\t"send intent claiming a physical send state"\)\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves
