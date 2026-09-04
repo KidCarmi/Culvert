@@ -512,7 +512,7 @@ run_mutation M56 \
 # leg that may have reached the peer, so the caller records definitely_not_sent for
 # an invocation that may already have executed.
 run_mutation M57 \
-  'the last retry leg\'"'"'s never-sent marker becomes the whole-call claim' \
+  'the never-sent marker of the last retry leg becomes the whole-call claim' \
   'TestCallFacts_ALaterNeverSentLegDoesNotEraseAnEarlierAmbiguousSend' \
   ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/client.go \
   's/\t\tlastErr = markLegFacts\(err, call\)/\t\tlastErr = markLegFacts(err, facts)/'
