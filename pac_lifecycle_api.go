@@ -526,16 +526,23 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 		return
 	}
 	// Durable INTENT (node-local) before the authoritative mutation.
-	now := time.Now().UTC().Format(time.RFC3339)
 	op := pac.PendingOp{
 		OperationID: req.OperationID, Action: req.Action, ProfileID: id,
 		ExpectedActiveRevision: active.Revision, ExpectedActiveSpecDigest: expectedSpec,
 		CandidateSpecDigest: binding.CandidateSpecDigest, CandidateSpec: candidate,
 		PoolDigest: binding.PoolDigest, ArtifactDigest: chk.Digest,
 		ChallengePoolDigest: binding.PoolDigest, ChallengeArtifactDigest: chk.Digest, Challenge: challengeToken,
-		TargetN: req.TargetN, Actor: sessionAdmin(r), AuditActor: auditActor(r), Reason: reason, TS: now, State: pac.OpPending,
+		TargetN: req.TargetN, Actor: sessionAdmin(r), AuditActor: auditActor(r), Reason: reason,
+		TS: time.Now().UTC().Format(time.RFC3339), State: pac.OpPending,
 	}
-	if !pacPersistIntent(w, lc, &op) {
+	pacCommitOperationLocked(w, r, id, lc, &op, cfg)
+}
+
+// pacCommitOperationLocked is the durable half of a publish/rollback: intent
+// → authoritative commit → classification → durable committed → post-commit
+// effects (see the file header).
+func pacCommitOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc *pac.ProfileLifecycle, op *pac.PendingOp, cfg pac.ProfilesConfig) {
+	if !pacPersistIntent(w, lc, op) {
 		return
 	}
 	pacLifecycleStage("intent_persisted")
@@ -543,39 +550,39 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 	// The authoritative commit, classified against the in-memory snapshot.
 	setErr := pacProfiles.Set(cfg)
 	observed, observedOK := pacProfiles.ProfileByID(id)
-	class := pac.ClassifyOutcome(&op, observed, observedOK)
+	class := pac.ClassifyOutcome(op, observed, observedOK)
 	if setErr == nil && class != pac.OpCommitted {
 		class = pac.OpAmbiguous // "success" that the authoritative snapshot does not show is unknown, never a success
 	}
 	switch class {
 	case pac.OpAborted:
-		pacWriteAborted(w, id, lc, &op, setErr, now)
+		pacWriteAborted(w, id, lc, op, setErr, op.TS)
 		return
 	case pac.OpAmbiguous:
-		pacWriteOutcomeUnknown(w, id, req.Action, &op, setErr)
+		pacWriteOutcomeUnknown(w, id, op.Action, op, setErr)
 		return
 	}
 	pacLifecycleStage("active_committed")
 	// Durable COMMITTED, then the post-commit effects behind their markers.
-	if !pacPersistCommittedLocked(lc, &op, observed.Revision) {
-		pacWritePendingReconciliation(w, id, &op, observed, lc.DraftRevision)
+	if !pacPersistCommittedLocked(lc, op, observed.Revision) {
+		pacWritePendingReconciliation(w, id, op, observed, lc.DraftRevision)
 		return
 	}
 	pacLifecycleStage("committed_persisted")
 	markAuditEmitted(r) // C2c: the success audit is emitted (now or by reconciliation) for a proven commit
-	state, n := pacCompleteCommittedLocked(lc, &op, pacEffectsAll, false)
+	state, n := pacCompleteCommittedLocked(lc, op, pacEffectsAll, false)
 	if state != pac.HistoryStateRecorded {
-		pacWritePendingReconciliation(w, id, &op, observed, lc.DraftRevision)
+		pacWritePendingReconciliation(w, id, op, observed, lc.DraftRevision)
 		return
 	}
 	if op.Action == "publish" {
 		pacPublishesTotal.Add(1)
-		logger.Printf("PAC: published profile %q revision %d (digest %s)", sanitizeLog(id), n, chk.Digest)
+		logger.Printf("PAC: published profile %q revision %d (digest %s)", sanitizeLog(id), n, op.ArtifactDigest)
 	} else {
 		pacRollbacksTotal.Add(1)
 		logger.Printf("PAC: rolled back profile %q to revision %s (new revision %d)", sanitizeLog(id), sanitizeLog(fmt.Sprintf("%d", op.TargetN)), n)
 	}
-	jsonOK(w, pacOperationResult(&op, n, observed, lc.DraftRevision, pac.HistoryStateRecorded))
+	jsonOK(w, pacOperationResult(op, n, observed, lc.DraftRevision, pac.HistoryStateRecorded))
 }
 
 // pacWritePendingReconciliation answers a PROVEN commit whose node-local

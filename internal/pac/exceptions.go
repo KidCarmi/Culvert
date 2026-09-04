@@ -133,8 +133,9 @@ func (s *ExceptionStore) Load(path string) error {
 	if s.byID == nil {
 		s.byID = map[string]ExceptionRecord{}
 	}
-	for id, rec := range s.byID {
-		if rec.Revision < 1 {
+	for id := range s.byID {
+		if s.byID[id].Revision < 1 {
+			rec := s.byID[id]
 			rec.Revision = 1
 			s.byID[id] = rec
 		}

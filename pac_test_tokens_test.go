@@ -52,7 +52,14 @@ func pacTestWithTokens(method, path, body string) string {
 			q.Set(k, strconv.FormatInt(t, 10))
 		}
 	}
-	p := u.Path
+	pacTestInjectTokens(u.Path, has, set)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// pacTestInjectTokens sets the authoritative fence token(s) a request to
+// path needs, unless the caller already supplied them (has).
+func pacTestInjectTokens(p string, has func(string) bool, set func(string, any)) {
 	switch {
 	case p == "/api/pac-config":
 		if !has("revision") {
@@ -63,44 +70,39 @@ func pacTestWithTokens(method, path, body string) string {
 			set("collectionEtag", pac.ConfigETag(pacProfiles.Get()))
 		}
 	case strings.HasSuffix(p, "/lifecycle"):
-		id := strings.TrimSuffix(strings.TrimPrefix(p, "/api/pac/profiles/"), "/lifecycle")
-		if !has("expectedActiveRevision") && !has("collectionEtag") {
-			if a, ok := pacProfiles.ProfileByID(id); ok {
-				set("expectedActiveRevision", a.Revision)
-			} else {
-				set("collectionEtag", pac.ConfigETag(pacProfiles.Get()))
-			}
-		}
-		if !has("draftRevision") {
-			if lc, ok := pacLifecycle.Get(id); ok && lc.DraftRevision > 0 {
-				set("draftRevision", lc.DraftRevision)
-			}
-		}
-		// 2F-B: publish/rollback/repair need a fresh UUID operationId.
-		if !has("operationId") {
-			set("operationId", uuid.NewString())
-		}
+		pacTestInjectLifecycleTokens(strings.TrimSuffix(strings.TrimPrefix(p, "/api/pac/profiles/"), "/lifecycle"), has, set)
 	case strings.HasPrefix(p, "/api/pac/profiles/"):
-		if !has("revision") {
-			if a, ok := pacProfiles.ProfileByID(strings.TrimPrefix(p, "/api/pac/profiles/")); ok {
-				set("revision", a.Revision)
-			}
+		if a, ok := pacProfiles.ProfileByID(strings.TrimPrefix(p, "/api/pac/profiles/")); ok && !has("revision") {
+			set("revision", a.Revision)
 		}
 	case strings.HasPrefix(p, "/api/pac/pools/"):
-		if !has("etag") {
-			if pl, ok := pacProfiles.PoolByID(strings.TrimPrefix(p, "/api/pac/pools/")); ok {
-				set("etag", pac.PoolETag(pl))
-			}
+		if pl, ok := pacProfiles.PoolByID(strings.TrimPrefix(p, "/api/pac/pools/")); ok && !has("etag") {
+			set("etag", pac.PoolETag(pl))
 		}
 	case strings.HasPrefix(p, "/api/pac/posture/exceptions/"):
-		if !has("revision") {
-			if rec, ok := pacExceptions.Get(strings.TrimPrefix(p, "/api/pac/posture/exceptions/")); ok {
-				set("revision", rec.Revision)
-			}
+		if rec, ok := pacExceptions.Get(strings.TrimPrefix(p, "/api/pac/posture/exceptions/")); ok && !has("revision") {
+			set("revision", rec.Revision)
 		}
 	}
-	u.RawQuery = q.Encode()
-	return u.String()
+}
+
+// pacTestInjectLifecycleTokens is the lifecycle sub-resource's token set: the
+// active revision (or the collection token for a first publish), the draft
+// token, and a fresh UUID operationId (2F-B: publish/rollback/repair).
+func pacTestInjectLifecycleTokens(id string, has func(string) bool, set func(string, any)) {
+	if !has("expectedActiveRevision") && !has("collectionEtag") {
+		if a, ok := pacProfiles.ProfileByID(id); ok {
+			set("expectedActiveRevision", a.Revision)
+		} else {
+			set("collectionEtag", pac.ConfigETag(pacProfiles.Get()))
+		}
+	}
+	if lc, ok := pacLifecycle.Get(id); ok && lc.DraftRevision > 0 && !has("draftRevision") {
+		set("draftRevision", lc.DraftRevision)
+	}
+	if !has("operationId") {
+		set("operationId", uuid.NewString())
+	}
 }
 
 // pacTestConfirmFragment turns a 409 confirm_required challenge into the
