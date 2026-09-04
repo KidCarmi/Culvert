@@ -16,6 +16,11 @@ type attemptRecord struct {
 	id            string
 	reservationID string
 	generation    uint64
+	// decisionRef is the EventID of the committed decision this attempt belongs to.
+	// model.Event.Validate REQUIRES a terminal outcome to reference one, so an
+	// attempt that does not carry it produces an outcome that cannot be persisted —
+	// and because the outcome commit is best-effort, the loss would be silent.
+	decisionRef string
 }
 
 // attemptIDOf returns the attempt identity to put on the wire, or "" when this
@@ -35,7 +40,7 @@ func attemptIDOf(a *attemptRecord) string {
 // persisted, the caller must not send: a physical invocation with no durable record
 // is unattributable, and after a crash it would be indistinguishable from an
 // invocation that never happened.
-func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, activationGen uint64) (*attemptRecord, error) {
+func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, activationGen uint64, decisionRef string) (*attemptRecord, error) {
 	id, err := newAttemptID()
 	if err != nil {
 		return nil, err
@@ -44,6 +49,7 @@ func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, 
 		id:            id,
 		reservationID: reservationID,
 		generation:    activationGen,
+		decisionRef:   decisionRef,
 	}
 	f := decisionFacts(in)
 	f.Criticality, f.ActionClass = model.CritOrdinary, model.ActionClassRead
@@ -79,6 +85,12 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 		ReservationID:        rec.reservationID,
 		ActivationGeneration: rec.generation,
 		PhysicalSendState:    state,
+		// REQUIRED by model.Event.Validate for a PhaseOutcome event. Omitting it made
+		// every terminal outcome fail validation, and since this commit is
+		// best-effort the record simply vanished — leaving every completed execution
+		// indistinguishable from a crashed one on restart (caught by the controlled
+		// HTTPS E2E, which reads the real spool rather than a test sink).
+		DecisionRef: rec.decisionRef,
 		// Executed reports Culvert's control flow; PhysicalSendState reports what the
 		// PEER may have seen. They are recorded side by side precisely because they
 		// can legitimately disagree: a response blocked by DLP is

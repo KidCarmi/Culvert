@@ -91,6 +91,9 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	killedAtCall := false
 	gateRefused := false
 	var gateReason mcperr.Reason
+	// decisionRef is the committed decision's EventID, captured from CommitThenAct's
+	// receipt and required on the terminal outcome event.
+	var decisionRef string
 	callUpstream := func(authHeader string) error {
 		// (1) Composition-layer LIVE side-effect gate — budget reservation, runtime live-trust
 		// revalidation, read-first — runs BEFORE preCallGuard so the emergency-kill re-read
@@ -143,7 +146,16 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 				gateReason = mcperr.ReasonEventEvidenceMissing
 				return errLiveGateRefused
 			}
-			rec, ierr := e.commitSendIntent(in, reservationID, activationGen)
+			// The decision ref must already exist: callUpstream runs INSIDE
+			// CommitThenAct's callback, after the decision commit. A missing ref means
+			// the outcome could never be persisted, so it fails closed here rather than
+			// sending and losing the record.
+			if decisionRef == "" {
+				gateRefused = true
+				gateReason = mcperr.ReasonEventEvidenceMissing
+				return errLiveGateRefused
+			}
+			rec, ierr := e.commitSendIntent(in, reservationID, activationGen, decisionRef)
 			if ierr != nil {
 				gateRefused = true
 				gateReason = mcperr.ReasonOf(ierr)
@@ -208,7 +220,8 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	useBroker := e.cfg.Broker != nil && profileRef != ""
 	var blockedOut runtime.ExecOutput
 	var didBlock bool
-	if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(spool.CommitReceipt) error {
+	if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(rcpt spool.CommitReceipt) error {
+		decisionRef = rcpt.EventID()
 		if !useBroker {
 			return callUpstream("")
 		}
