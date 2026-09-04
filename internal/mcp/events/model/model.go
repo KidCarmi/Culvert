@@ -417,9 +417,76 @@ type CredentialEvidence struct {
 	CacheState   string `json:"cache_state,omitempty"` // hit / miss metadata, never a value
 }
 
-// OutcomeEvidence records a post-execution outcome. A later execution slice sets
-// it; it does not replace the pre-execution decision commit. An outcome event
-// MUST reference a committed decision via DecisionRef.
+// PhysicalSendState is the TRUTH about whether request bytes for one physical tool
+// invocation could have reached the peer. It is deliberately NOT a boolean.
+//
+// "Executed" is a statement about Culvert's own control flow; it cannot answer the
+// question that matters after a transport fault or a crash, which is whether the
+// PEER may already have acted. Collapsing that into a bool forces every ambiguous
+// case to be recorded as one of two lies. This enum keeps uncertainty explicit and
+// conservative: an unknown outcome is never downgraded to "not sent".
+type PhysicalSendState string
+
+const (
+	// SendStateUnset is the zero value and is INVALID on a committed outcome.
+	SendStateUnset PhysicalSendState = ""
+	// SendDefinitelyNotSent may be used ONLY when it is mechanically provable that
+	// no request byte could have reached the peer — in practice, when a guard denied
+	// BEFORE the physical call began. It must never be inferred from a missing
+	// record or from an error observed after the call started.
+	SendDefinitelyNotSent PhysicalSendState = "definitely_not_sent"
+	// SendMayHaveBeenSent is the conservative state for every ambiguous transport
+	// outcome once the physical call has begun: connection reset, timeout, context
+	// cancellation, or a crash with no terminal record. Reconciliation against an
+	// independent witness is required to resolve it.
+	SendMayHaveBeenSent PhysicalSendState = "may_have_been_sent"
+	// SendPeerResponseReceived means the peer returned a response, so the invocation
+	// demonstrably reached it. This says nothing about whether the response was
+	// later blocked by inspection.
+	SendPeerResponseReceived PhysicalSendState = "peer_response_received"
+	// SendReconciledReceived resolves an ambiguous attempt against an authoritative
+	// independent witness that HAS the attempt.
+	SendReconciledReceived PhysicalSendState = "reconciled_received"
+	// SendReconciledNotReceived resolves an ambiguous attempt against an
+	// authoritative independent witness that definitively does NOT have it.
+	SendReconciledNotReceived PhysicalSendState = "reconciled_not_received"
+)
+
+// Valid reports whether the state is one of the defined non-zero states.
+func (s PhysicalSendState) Valid() bool {
+	switch s {
+	case SendDefinitelyNotSent, SendMayHaveBeenSent, SendPeerResponseReceived,
+		SendReconciledReceived, SendReconciledNotReceived:
+		return true
+	default:
+		return false
+	}
+}
+
+// MayHaveReachedPeer is the CONSERVATIVE predicate: it answers false only for the
+// two states that positively prove the peer did not act. Everything else — including
+// an unset/unknown state — answers true, so budget accounting and reconciliation
+// can never treat uncertainty as a non-event.
+func (s PhysicalSendState) MayHaveReachedPeer() bool {
+	return s != SendDefinitelyNotSent && s != SendReconciledNotReceived
+}
+
+// ReconciliationRequired reports whether this attempt still needs an authoritative
+// independent witness to reach a final answer.
+func (s PhysicalSendState) ReconciliationRequired() bool {
+	return s == SendMayHaveBeenSent || s == SendStateUnset
+}
+
+// OutcomeEvidence records a post-execution outcome. It does not replace the
+// pre-execution decision commit. An outcome event MUST reference a committed
+// decision via DecisionRef.
+//
+// The attempt-identity and physical-send fields exist so the record can answer the
+// First-Canary question — "did Culvert cause exactly the tool effects it
+// authorized, and does it know what happened to each one?" — WITHOUT consulting
+// anything mutable. They are an immutable snapshot at outcome time, bound to the
+// activation generation and reservation that authorized the effect, so an orphan
+// from a superseded generation can be recognized as such after a restart.
 type OutcomeEvidence struct {
 	DecisionRef           string `json:"decision_ref"`
 	Executed              bool   `json:"executed"`
@@ -428,6 +495,21 @@ type OutcomeEvidence struct {
 	UpstreamResponseClass string `json:"upstream_response_class,omitempty"`
 	InspectionResult      string `json:"inspection_result,omitempty"`
 	FailureReason         string `json:"failure_reason,omitempty"`
+
+	// AttemptID names ONE potential physical tool invocation. It is not an
+	// execution id, a server id, or a JSON-RPC wire id: exactly one AttemptID
+	// corresponds to at most one side-effect-bearing tool send, which is what makes
+	// independent witness correlation possible.
+	AttemptID string `json:"attempt_id,omitempty"`
+	// ReservationID binds the attempt to the budget slot that authorized it, so a
+	// physical effect can never be attributed to an unauthorized reservation.
+	ReservationID string `json:"reservation_id,omitempty"`
+	// ActivationGeneration is the Canary generation in force when the attempt was
+	// authorized. An orphan carrying generation G must remain visible under G+1 and
+	// must never become fresh execution allowance.
+	ActivationGeneration uint64 `json:"activation_generation,omitempty"`
+	// PhysicalSendState is the conservative truth about peer reachability.
+	PhysicalSendState PhysicalSendState `json:"physical_send_state,omitempty"`
 }
 
 // DenialEvidence records a coalesced denial aggregate (P-DEN). It retains count,
