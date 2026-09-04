@@ -344,6 +344,95 @@ func TestChaos57_StaleServesDoNotStackRefreshes(t *testing.T) {
 	}
 }
 
+// TestChaos57_ExpiredNegativeEntryIsNotStaleServed pins that stale serving is
+// for POSITIVE entries only (Codex review, PR #1312).
+//
+// A negative entry's stale value is nil, so serving it stale buys nothing and
+// costs exactly what this change exists to prevent: a host that failed to
+// resolve once would keep returning nil on the synchronous path for up to
+// hostIPCacheStaleMax, leaving a country-scoped DENY rule dark for an hour after
+// DNS recovered rather than the 30 s the negative TTL promises — and the repair
+// would depend on the async refresh, which SHEDS under a saturated pool.
+//
+// The gate is written so it fails on the pre-fix shape: the resolver is healthy
+// by the time the negative expires, so a correct implementation returns the
+// address SYNCHRONOUSLY on the very next call.
+func TestChaos57_ExpiredNegativeEntryIsNotStaleServed(t *testing.T) {
+	calls, restore := stubResolver(nil, &net.DNSError{Err: "server misbehaving", Name: "neg-stale.chaos57.invalid"})
+	defer restore()
+
+	if ip := resolveHost("neg-stale.chaos57.invalid"); ip != nil {
+		t.Fatalf("setup: failed resolution returned %v, want nil", ip)
+	}
+	waitForResolverCalls(t, calls, 1)
+	drainInflightResolutions()
+
+	// DNS recovers, and the negative entry lapses.
+	origFn := lookupHostFn
+	lookupHostFn = func(_ context.Context, _ string) ([]string, error) {
+		return []string{"203.0.113.99"}, nil
+	}
+	defer func() {
+		drainInflightResolutions()
+		lookupHostFn = origFn
+	}()
+	expireEntry("neg-stale.chaos57.invalid", time.Second)
+
+	got := resolveHost("neg-stale.chaos57.invalid")
+	if got == nil {
+		t.Fatal("an EXPIRED NEGATIVE entry was served stale: resolveHost returned nil against a healthy resolver, so a country-scoped deny rule stays dark for up to the staleness ceiling instead of the negative TTL")
+	}
+	if !got.Equal(net.ParseIP("203.0.113.99")) {
+		t.Fatalf("resolveHost = %v, want the freshly resolved 203.0.113.99", got)
+	}
+	// And it must NOT have been counted as a stale serve.
+	if snap := dnsResolveState(); snap.StaleServed != 0 {
+		t.Fatalf("StaleServed=%d after an expired NEGATIVE entry, want 0 — negatives are never stale-servable", snap.StaleServed)
+	}
+}
+
+// TestChaos57_ExpiredNegativeStillReResolvesWhenTheResolverPoolIsSaturated is
+// the load half of the same finding: the repair must not depend on the async
+// refresh, which sheds when the pool is full.
+func TestChaos57_ExpiredNegativeStillReResolvesWhenTheResolverPoolIsSaturated(t *testing.T) {
+	calls, restore := stubResolver(nil, &net.DNSError{Err: "server misbehaving", Name: "neg-shed.chaos57.invalid"})
+	defer restore()
+
+	if ip := resolveHost("neg-shed.chaos57.invalid"); ip != nil {
+		t.Fatalf("setup: failed resolution returned %v, want nil", ip)
+	}
+	waitForResolverCalls(t, calls, 1)
+	drainInflightResolutions()
+	expireEntry("neg-shed.chaos57.invalid", time.Second)
+
+	// Saturate the pool. A stale-served negative would be repaired only by a
+	// refresh, and a refresh cannot run here — so the pre-fix shape returns nil
+	// forever. The blocking path sheds too, but it sheds WITHOUT caching, so the
+	// moment a slot frees the next request resolves.
+	restorePool := shrinkResolverPool(t, 0)
+	if ip := resolveHost("neg-shed.chaos57.invalid"); ip != nil {
+		t.Fatalf("saturated pool returned %v, want nil (shed)", ip)
+	}
+	if snap := dnsResolveState(); snap.Shed == 0 {
+		t.Fatal("an expired negative under a saturated pool was not routed through the shedding blocking path — it was served stale instead")
+	}
+	restorePool()
+
+	// Pool free again: the very next request must resolve, with no cached nil in
+	// the way.
+	origFn := lookupHostFn
+	lookupHostFn = func(_ context.Context, _ string) ([]string, error) {
+		return []string{"203.0.113.98"}, nil
+	}
+	defer func() {
+		drainInflightResolutions()
+		lookupHostFn = origFn
+	}()
+	if got := resolveHost("neg-shed.chaos57.invalid"); got == nil || !got.Equal(net.ParseIP("203.0.113.98")) {
+		t.Fatalf("resolveHost = %v after the pool freed, want 203.0.113.98 — a shed resolution must not have been cached", got)
+	}
+}
+
 // ─── The resolver pool is BOUNDED ────────────────────────────────────────────
 
 // driveResolverDegraded records a run of failures that SPANS the degradation

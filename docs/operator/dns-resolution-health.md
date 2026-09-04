@@ -42,17 +42,21 @@ Nothing on this path counted, logged or alerted a resolution failure.
 ## 3. What happens now
 
 ```
-                 ┌─ fresh cache entry ────────────► returned immediately
-resolveHost(h) ──┼─ stale (< 1h past TTL) ────────► returned immediately,
-                 │                                   refresh runs behind it
-                 └─ miss / beyond 1h ─────────────► one bounded, single-flighted
-                                                     resolution (2 s), shed when
-                                                     the resolver pool is full
+                 ┌─ fresh cache entry ─────────────► returned immediately
+                 │
+resolveHost(h) ──┼─ stale ADDRESS (< 1h past TTL) ─► returned immediately,
+                 │                                    refresh runs behind it
+                 │
+                 └─ miss / expired failure / >1h ──► one bounded, single-flighted
+                                                      resolution (2 s), shed when
+                                                      the resolver pool is full
 ```
 
 - **A host resolved within the last hour never blocks a request**, whatever the
   resolver is doing. That is the whole recovery story for an outage: your
-  working set keeps matching geo rules.
+  working set keeps matching geo rules. This applies to hosts that resolved
+  **successfully**: a host whose lookup FAILED is retried on the normal negative
+  TTL (30 s), never held at "no answer" for the stale window.
 - **One resolution per host at a time.** Concurrent callers wait on the leader
   and inherit its answer and its deadline. Your resolver sees one query per
   host per refresh, not one per request.

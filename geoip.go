@@ -207,7 +207,27 @@ func (c *hostIPCache) lookup(host string, now time.Time) (ip net.IP, state hostI
 		return nil, hostIPMiss, refreshing
 	case now.Before(e.expiry):
 		return e.ip, hostIPFresh, refreshing
-	case now.Before(e.expiry.Add(hostIPCacheStaleMax)):
+	case e.ip != nil && now.Before(e.expiry.Add(hostIPCacheStaleMax)):
+		// ONLY a positive entry is stale-servable (Codex review, PR #1312).
+		//
+		// The rationale for stale-serving is that "the alternative to a stale
+		// answer is not a fresher one, it is NO answer" — which is true of an
+		// address and false of a negative entry, whose stale value IS nil.
+		// Stale-serving a negative therefore buys nothing and costs the thing
+		// this whole change exists to prevent: a host that failed to resolve
+		// ONCE would keep returning nil on the synchronous path for up to
+		// hostIPCacheStaleMax, so a country-scoped DENY rule would stay dark for
+		// an hour after DNS recovered, instead of the 30 s the negative TTL
+		// promises. Worse, the repair would depend entirely on the asynchronous
+		// refresh, which SHEDS when the resolver pool is saturated — so under
+		// sustained load the bypass could persist for the full hour. That is the
+		// pre-CHAOS-57 dark window, reintroduced by the mechanism meant to close
+		// it, and it is a REGRESSION against the old behaviour, which re-resolved
+		// synchronously the moment the negative TTL lapsed.
+		//
+		// An expired negative is a MISS: it takes the bounded, single-flighted
+		// blocking path and picks up a recovered resolver on the very next
+		// request.
 		return e.ip, hostIPStale, refreshing
 	}
 	return nil, hostIPMiss, refreshing

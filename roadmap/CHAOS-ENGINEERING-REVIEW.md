@@ -72,7 +72,7 @@ fall-through posture itself (making an unknown country match a block rule would 
 destination this node cannot resolve — a bounded security gap traded for an unbounded availability
 one), and the cgo resolver's uncancellable `getaddrinfo` (the deadline releases the request
 goroutine; the OS thread is bounded by Go's own 500-thread cap). Gates:
-`dns_resolve_chaos_test.go` (21, incl. two CONTROLS — a resolver that simply stopped resolving
+`dns_resolve_chaos_test.go` (23, incl. two CONTROLS — a resolver that simply stopped resolving
 would pass every defect gate while being far worse than the defect). See §25 and
 `docs/operator/dns-resolution-health.md`.
 
@@ -2928,7 +2928,7 @@ logged at each of the four dial sites, so nothing is lost.
 
 ### 25.5 Gates
 
-`dns_resolve_chaos_test.go` (21). D1/D2/D3 were each reproduced against the
+`dns_resolve_chaos_test.go` (23). D1/D2/D3 were each reproduced against the
 pre-fix tree with the equivalent assertion before the fix was written. Two
 **CONTROLS** are included for the CHAOS-56 reason: a resolver that always shed,
 or always served stale, or never refreshed, would pass every defect gate above
@@ -2940,6 +2940,39 @@ a genuinely unresolvable host (`Control_UnresolvableHostStillFailsAndIsCounted`)
 pinned the synchronous-re-resolve-on-expiry behaviour, which is the defect. It
 now pins stale-serving, with `TestResolveHost_StaleCeilingForcesResolution`
 pinning the other end of the window.
+
+### 25.5a Review finding — stale serving is for POSITIVE entries only
+
+Codex review of PR #1312 (P1), verified and fixed before merge.
+
+The first implementation classified ANY entry past its TTL as stale-servable,
+negative entries included. A negative entry's stale value is `nil`, so the
+`resolveHost` stale branch returned nil immediately and left the repair entirely
+to the asynchronous refresh.
+
+That inverts the stated rationale for stale serving. Serving stale is justified
+because *"the alternative to a stale answer is not a fresher one, it is NO
+answer"* — true of an address, false of a negative, whose stale value **is** no
+answer. So it bought nothing and cost the exact thing the change exists to
+prevent: a host that failed to resolve ONCE kept returning nil on the
+synchronous path for up to `hostIPCacheStaleMax`, leaving a country-scoped DENY
+rule dark for an **hour** after DNS recovered instead of the 30 s the negative
+TTL promises. Worse, `refreshAsync` SHEDS when the resolver pool is saturated,
+so under sustained load the bypass could persist for the full window. And it was
+a REGRESSION against the pre-CHAOS-57 behaviour, which re-resolved synchronously
+the moment the negative TTL lapsed.
+
+Fixed by restricting the stale state to `e.ip != nil`. An expired negative is a
+MISS and takes the bounded, single-flighted blocking path, picking up a
+recovered resolver on the very next request. Pinned by
+`TestChaos57_ExpiredNegativeEntryIsNotStaleServed` and
+`TestChaos57_ExpiredNegativeStillReResolvesWhenTheResolverPoolIsSaturated`, both
+verified failing against the reintroduced pre-fix shape.
+
+**The lesson worth keeping:** a mechanism justified by one case (a usable
+address) was applied to every case, and the sibling case turned it into the
+defect it was built to remove. A degradation path needs its rationale checked
+against each state it can be in, not only the one that motivated it.
 
 ### 25.6 Residual risk (owner decisions, recorded not fixed)
 
