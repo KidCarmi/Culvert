@@ -29,7 +29,7 @@ func TestAPIConfigImport_BadJSON(t *testing.T) {
 func TestAPIConfigImport_WrongVersion(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/config/import", map[string]any{
-		"version": 2,
+		"version": configBackupVersion + 1, // newer than this binary writes
 	})
 	r = adminCtx(r)
 	apiConfigImport(w, r)

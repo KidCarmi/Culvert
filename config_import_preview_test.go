@@ -215,7 +215,8 @@ func TestImportPreview_ModeIndependentSections(t *testing.T) {
 	snapshotPolicyStoreForTest(t)
 	snapshotConfigVersionsDir(t)
 
-	// Merge mode: upstream import still REPLACES the pool, not appends.
+	// Merge mode: the upstream row is derived from the 2F-D whole-file plan
+	// (counts only) — a legacy list entry unknown to this node is a create.
 	respMerge := importPreview(t, "/api/config/import?dryRun=true", map[string]any{
 		"version":         1,
 		"exportedAt":      "2026-02-02T00:00:00Z",
@@ -226,11 +227,11 @@ func TestImportPreview_ModeIndependentSections(t *testing.T) {
 	if !ok {
 		t.Fatalf("merge preview missing Upstream Proxies section: %+v", respMerge.Sections)
 	}
-	if !strings.HasPrefix(up.Effect, "replace ") {
-		t.Errorf("upstream merge effect = %q; want a 'replace ...' effect (import always replaces the pool)", up.Effect)
+	if !strings.Contains(up.Effect, "create 1") {
+		t.Errorf("upstream merge effect = %q; want the plan counts (create 1)", up.Effect)
 	}
 	if up.Note == "" {
-		t.Errorf("upstream section should carry a mode-independent note")
+		t.Errorf("upstream section should carry the plan note")
 	}
 
 	// Replace mode: rate-limit exemptions still APPEND, not replace.

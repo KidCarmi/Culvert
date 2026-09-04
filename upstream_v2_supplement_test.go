@@ -222,8 +222,11 @@ func TestUpstreamV2_ExportIsCredentialFreeAndRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
 		t.Fatal(err)
 	}
-	if len(b.UpstreamProxies) != 1 || strings.Contains(b.UpstreamProxies[0].URL, ":"+upRedPW) {
-		t.Fatalf("export upstream = %+v", b.UpstreamProxies)
+	// 2F-D (C5): the export carries the versioned v2 representation with
+	// credentials omitted — never the legacy list.
+	if len(b.UpstreamProxies) != 0 || b.UpstreamProxiesV2 == nil || len(b.UpstreamProxiesV2.Entries) != 1 ||
+		b.UpstreamProxiesV2.Entries[0].Host != upRedHost || b.UpstreamCredentials != upstreamCredentialsOmitted {
+		t.Fatalf("export upstream = %+v / %+v", b.UpstreamProxies, b.UpstreamProxiesV2)
 	}
 	rec = upImport(t, rec.Body.String(), "")
 	if rec.Code != 200 {

@@ -142,8 +142,8 @@ func TestCaptureConfigBackup(t *testing.T) {
 	if snap == nil {
 		t.Fatal("captureConfigBackup returned nil")
 	}
-	if snap.Version != 1 {
-		t.Errorf("version = %d, want 1", snap.Version)
+	if snap.Version != configBackupVersion {
+		t.Errorf("version = %d, want %d", snap.Version, configBackupVersion)
 	}
 	if snap.ExportedAt == "" {
 		t.Error("exportedAt should not be empty")
