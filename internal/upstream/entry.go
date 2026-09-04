@@ -6,11 +6,16 @@ package upstream
 // A parent proxy is a ManagedEntry with a server-generated, immutable ULID
 // identity (YAML-owned entries carry a deterministic authority-derived id
 // and are read-only), a NORMALIZED scheme/host/port/username, a per-entry
-// revision fence, and an optional SEALED credential. The canonical
-// authority `scheme://username@host:port` is the ONLY thing a credential is
-// bound to (by authority hash): a credential is never matched by name,
-// position, URL similarity or a client-supplied id, and a credential whose
-// authority hash differs from its entry's is `mismatch` — never sent.
+// revision fence, and an optional SEALED credential. A credential is bound
+// to exactly two things — the IMMUTABLE ENTRY ID and the canonical
+// authority `scheme://username@host:port` (by authority hash) — and both
+// are AEAD additional data: a credential is never matched by name,
+// position, URL similarity or a client-supplied id, and ciphertext whose
+// entry id OR authority hash differs from the entry it is attached to
+// (transplanted, or re-created under the same authority) is `mismatch` —
+// never unsealed, never sent. An inline credential from config.yaml
+// (`http://user:pw@host:port`) is RETAINED in memory only (`yamlSecret`),
+// never persisted or returned, and its entry is read-only through the API.
 
 import (
 	"crypto/rand"
@@ -46,7 +51,8 @@ const (
 )
 
 // Sealed is a credential at rest: ciphertext under the node-local key,
-// bound to the authority it was set for. It never carries plaintext.
+// bound to the entry id AND the authority it was set for. It never carries
+// plaintext.
 type Sealed struct {
 	// EntryID is the immutable entry the credential was sealed FOR; it is
 	// bound cryptographically (AAD) and structurally, so ciphertext moved
@@ -304,8 +310,9 @@ func ValidateEffective(yaml, managed []ManagedEntry) error {
 }
 
 // YAMLEntries converts YAML-seeded legacy URLs into read-only YAML-owned
-// entries. Credential material in a YAML URL is refused (YAML entries are
-// credential-free by contract); an unparseable URL is an InvalidEntryError.
+// entries. An inline password in a YAML URL is RETAINED in memory only
+// (yamlSecret — never persisted, returned or audited); an unparseable URL
+// is an InvalidEntryError.
 func YAMLEntries(entries []Entry) ([]ManagedEntry, error) {
 	out := make([]ManagedEntry, 0, len(entries))
 	for i, e := range entries {

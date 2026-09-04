@@ -23,7 +23,7 @@ The authority is `scheme://[username@]host:port`, normalized before it is
 compared or hashed: scheme lower-cased (`http` or `https` only — the
 approved C4 grammar; `socks5` is refused on every input path), host
 lower-cased, trailing dot stripped, IDNA-encoded, bracketed IPv6 literals
-accepted, the effective port defaulted per scheme (80/443/1080). Two
+accepted, the effective port defaulted per scheme (80/443). Two
 spellings of one authority are the same authority.
 
 **Existing `config.yaml` inline credentials keep working.** A YAML URL such

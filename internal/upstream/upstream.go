@@ -156,15 +156,22 @@ func (cb *CircuitBreaker) State() string {
 // Proxy represents one parent proxy in the chain: its entry (never a
 // credential-bearing URL), probe state and circuit breaker.
 type Proxy struct {
+	// Entry, URL and credState are IMMUTABLE after publication: rebuildLocked
+	// constructs a fresh Proxy per entry on every publication and never
+	// writes a published one, so a selected proxy is a complete, coherent
+	// generation for the whole in-flight operation (request, probe,
+	// attribution) that holds it.
 	Entry ManagedEntry
 	// URL is the credential-FREE authority URL (display, legacy status). The
 	// authenticated URL is built only by authenticatedURL, per selection.
 	URL *url.URL
-	CB  *CircuitBreaker
+	// CB is shared by pointer across generations of the same (id, authority)
+	// — the breaker carries its own mutex, so continuity is race-safe.
+	CB *CircuitBreaker
 
-	mu        sync.RWMutex
+	mu        sync.RWMutex // guards probe only (the sole post-publication write)
 	probe     ProbeState
-	credState string
+	credState string // fixed at construction
 }
 
 // Probe returns the entry's last probe outcome.
@@ -182,8 +189,7 @@ func (up *Proxy) setProbe(st ProbeState) {
 
 // CredentialState returns the derived credential state.
 func (up *Proxy) CredentialState() string {
-	up.mu.RLock()
-	defer up.mu.RUnlock()
+	// Fixed at construction (immutable generation) — no lock needed.
 	return up.credState
 }
 
@@ -437,25 +443,35 @@ func (p *Pool) rebuildLocked() {
 	p.fallbackActive.Store(false)
 	var out []*Proxy
 	add := func(e ManagedEntry) {
-		key := e.ID + "|" + e.AuthorityHash()
-		up, ok := prev[key]
-		if !ok {
-			u, err := url.Parse(e.Authority())
-			if err != nil {
-				return
-			}
-			up = &Proxy{URL: u, CB: newCircuitBreaker(p.cbThreshold, p.cbTimeout)}
-			up.probe = ProbeState{Status: ProbeUnprobed, Reason: ReasonNone}
+		u, err := url.Parse(e.Authority())
+		if err != nil {
+			return
 		}
-		up.Entry = e
-		if up.Entry.Credential != nil {
+		// PUBLICATION LINEARIZATION RULE (2F-C correction round 2): every
+		// publication constructs a NEW *Proxy for every entry. A Proxy that
+		// has been published is never written again — its Entry, URL and
+		// credential verdict are fixed at construction — so an in-flight
+		// request, probe or attribution slot that selected it keeps the
+		// COMPLETE old generation, and a fresh selection observes the
+		// complete new one. Continuity is carried only through
+		// independently synchronized state: the circuit breaker (its own
+		// mutex; shared by pointer so real request outcomes keep trimming
+		// the same breaker across publications) and a snapshot of the probe
+		// verdict taken under the old proxy's own mutex.
+		next := &Proxy{URL: u, Entry: e}
+		if e.Credential != nil {
 			c := *e.Credential
-			up.Entry.Credential = &c
+			next.Entry.Credential = &c
 		}
-		up.mu.Lock()
-		up.credState = p.credentialStateLocked(&up.Entry)
-		up.mu.Unlock()
-		out = append(out, up)
+		if old, ok := prev[e.ID+"|"+e.AuthorityHash()]; ok {
+			next.CB = old.CB
+			next.probe = old.Probe()
+		} else {
+			next.CB = newCircuitBreaker(p.cbThreshold, p.cbTimeout)
+			next.probe = ProbeState{Status: ProbeUnprobed, Reason: ReasonNone}
+		}
+		next.credState = p.credentialStateLocked(&next.Entry)
+		out = append(out, next)
 	}
 	for i := range p.yaml {
 		add(p.yaml[i])

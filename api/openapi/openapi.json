@@ -5538,7 +5538,7 @@
             "type": "string"
           },
           "port": {
-            "description": "0 or absent ⇒ the scheme default (80/443/1080).",
+            "description": "0 or absent ⇒ the scheme default (80/443).",
             "type": "integer"
           },
           "revision": {

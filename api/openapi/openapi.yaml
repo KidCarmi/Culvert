@@ -1156,7 +1156,7 @@ components:
       properties:
         scheme: { type: string, enum: [http, https] }
         host: { type: string }
-        port: { type: integer, description: '0 or absent ⇒ the scheme default (80/443/1080).' }
+        port: { type: integer, description: '0 or absent ⇒ the scheme default (80/443).' }
         username: { type: string }
         revision: { type: integer, format: int64 }
     UpstreamCredentialRequest:

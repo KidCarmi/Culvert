@@ -17,11 +17,11 @@ package main
 // save lock against the current document, and is durable BEFORE it answers:
 // a failed write is a non-2xx with zero visible mutation. YAML-owned
 // entries answer 409 yaml_owned to every mutation. A credential is bound to
-// its entry's canonical authority: an authority change while material
-// exists is 409 credential_bound, a delete while material exists is 409
-// credential_present. Derived state (credentialState) is never accepted
-// from a client (the strict decoder answers 400). Audit carries the entry
-// id, the credential-free authority and the action — never a password.
+// its entry's immutable id AND canonical authority: an authority change
+// while material exists is 409 credential_bound, a delete while material
+// exists is 409 credential_present. Derived state (credentialState) is never
+// accepted from a client (the strict decoder answers 400). Audit carries the
+// entry id, the credential-free authority and the action — never a password.
 
 import (
 	"encoding/json"

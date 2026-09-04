@@ -2,7 +2,8 @@ package upstream
 
 // credkey.go — the node-local credential key (`.upstream_cred_key`, 0600,
 // never archived) and the AES-GCM sealing of parent-proxy passwords bound to
-// their authority hash (2F contract C4/C10; RISK-003 webhook pattern).
+// their immutable entry id AND authority hash (2F contract C4/C10; RISK-003
+// webhook pattern).
 //
 // Rules: a failed key READ never mints a key; a key is created only when the
 // caller proves no v2 state and no ciphertext exist anywhere (the boot
@@ -83,9 +84,6 @@ func (k *Keyring) gcm() (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// Seal encrypts a plaintext password bound to authorityHash (as AEAD
-// additional data, so the ciphertext cannot be re-bound to another
-// authority even by editing the stored record).
 // sealAAD is the additional authenticated data binding a credential to the
 // immutable entry ID AND the canonical authority hash (length-framed by
 // the NUL separator neither component can contain).
