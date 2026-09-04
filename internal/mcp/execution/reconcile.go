@@ -110,6 +110,14 @@ func ReconcileOrphan(ctx context.Context, w Witness, orphan RecoveredAttempt, ex
 // and reporting it as "received" would hide the very thing blocker #6 exists to
 // prevent.
 func deriveReconResult(obs WitnessObservation, orphan RecoveredAttempt, expectServer, expectMethod string) model.ReconciliationResult {
+	// A NEGATIVE count is impossible for a well-formed witness, so it is malformed
+	// data, not an observation. Left to fall through it would miss both the >1 and
+	// ==1 branches and be read as zero — turning garbage into a definitive "never
+	// happened", the one direction this engine must never manufacture (Codex round 1,
+	// P1). It resolves nothing and rests at reconciliation_required.
+	if obs.Count < 0 {
+		return model.ReconRequired
+	}
 	if obs.Count > 1 {
 		return model.ReconConflict
 	}

@@ -80,6 +80,15 @@ func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, 
 func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, out runtime.ExecOutput) {
 	f := outcomeFacts(in)
 	f.Phase = model.PhaseOutcome
+	// outcomeFacts stamps Decision.ExecutionState = "executed" for the success path.
+	// A boundary refusal (freshness, generation, kill) is definitely_not_sent and its
+	// ExecutionState is "blocked", so taking the stamp unconditionally persisted an
+	// internally contradictory record — and the admin decision search READS that
+	// field, so never-sent attempts would be reported and filtered as executions
+	// (Codex round 1, P2). The terminal disposition is the authority here.
+	if out.ExecutionState != "" {
+		f.Decision.ExecutionState = out.ExecutionState
+	}
 	f.Outcome = &model.OutcomeEvidence{
 		AttemptID:            rec.id,
 		ReservationID:        rec.reservationID,

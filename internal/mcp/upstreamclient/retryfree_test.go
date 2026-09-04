@@ -177,3 +177,30 @@ func TestRetryDefault_PreservesHistoricalZeroSemantics(t *testing.T) {
 		t.Fatalf("zero MaxReadRetries under RetryDefault must fill to %d, got %d", defMaxReadRetries, got)
 	}
 }
+
+// TestRetryFree_RejectsRedirects pins Codex round-1 P1: a redirect is a retry by
+// another name. A same-origin 307/308 makes net/http replay the POST body, and the
+// replay carries the SAME AttemptID — so one accepted reservation would produce two
+// physical side-effect-bearing invocations that the retry loop never sees and no
+// witness could tell apart from a single one.
+func TestRetryFree_RejectsRedirects(t *testing.T) {
+	if _, err := NewLimits(LimitConfig{RetryMode: RetryDisabled, MaxRedirects: 1}); err == nil {
+		t.Fatal("retry-disabled mode must not permit redirects")
+	}
+	// RetryFreeLimits FORCES the budget to zero rather than erroring, so a caller
+	// passing a redirect budget gets a retry-free client instead of an error it might
+	// be tempted to resolve by keeping the redirects.
+	lim, err := RetryFreeLimits(LimitConfig{MaxRedirects: 3})
+	if err != nil {
+		t.Fatalf("RetryFreeLimits must normalize a redirect budget, not fail: %v", err)
+	}
+	if got := lim.MaxRedirects(); got != 0 {
+		t.Fatalf("retry-free limits must reject redirects outright, got %d", got)
+	}
+	// CONTROL: the historical default still permits its own configured redirect
+	// budget, so this change stays scoped to the Canary path.
+	def, err := NewLimits(LimitConfig{MaxRedirects: 2})
+	if err != nil || def.MaxRedirects() != 2 {
+		t.Fatalf("control: default mode must keep its redirect budget, err=%v got=%d", err, def.MaxRedirects())
+	}
+}

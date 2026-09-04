@@ -98,6 +98,15 @@ func NewLimits(c LimitConfig) (Limits, error) {
 	if c.RetryMode == RetryDisabled && c.MaxReadRetries != 0 {
 		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "retry-disabled mode must not set a retry budget")
 	}
+	// REDIRECTS ARE A RETRY BY ANOTHER NAME (Codex round 1, P1). Disabling the
+	// explicit retry loop is not sufficient to bound physical invocations: a
+	// same-origin 307/308 makes net/http replay the POST body, and the replay carries
+	// the SAME AttemptID, so one accepted reservation would produce two physical
+	// side-effect-bearing invocations that the retry loop never sees and no witness
+	// could tell apart. A retry-free client must therefore refuse redirects outright.
+	if c.RetryMode == RetryDisabled && c.MaxRedirects != 0 {
+		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "retry-disabled mode must not permit redirects")
+	}
 	out := fillLimitDefaults(c)
 	if limitConfigHasNegative(out) {
 		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "negative limit")
@@ -111,6 +120,11 @@ func NewLimits(c LimitConfig) (Limits, error) {
 func RetryFreeLimits(base LimitConfig) (Limits, error) {
 	base.RetryMode = RetryDisabled
 	base.MaxReadRetries = 0
+	// Forced, not merely validated: a caller passing a base with a redirect budget
+	// gets a retry-free client, never an error it might be tempted to resolve by
+	// keeping the redirects. See NewLimits for why a redirect is a second physical
+	// invocation.
+	base.MaxRedirects = 0
 	return NewLimits(base)
 }
 

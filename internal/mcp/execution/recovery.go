@@ -120,7 +120,11 @@ const recoveryPageSize = 512
 type attemptIndex struct {
 	intents  map[string]*model.OutcomeEvidence
 	outcomes map[string]*model.OutcomeEvidence
-	recon    map[string]model.ReconciliationResult
+	// recon retains the FULL evidence, not just the derived result, because the
+	// reservation and generation it names must be checked against the intent — a
+	// record can be perfectly well-formed and still describe a different
+	// authorization (Codex round 1, P1).
+	recon map[string]*model.ReconciliationEvidence
 }
 
 func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
@@ -144,7 +148,7 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 
 // indexAttemptEvent folds one event into the intent/outcome indexes, failing closed
 // on duplicates and on malformed attempt evidence.
-func indexAttemptEvent(e *model.Event, intents, outcomes map[string]*model.OutcomeEvidence, recon map[string]model.ReconciliationResult) error {
+func indexAttemptEvent(e *model.Event, intents, outcomes map[string]*model.OutcomeEvidence, recon map[string]*model.ReconciliationEvidence) error {
 	if e.Phase == model.PhaseReconciliation {
 		return indexReconciliationEvent(e, recon)
 	}
@@ -192,7 +196,7 @@ func indexAttemptEvent(e *model.Event, intents, outcomes map[string]*model.Outco
 // different matter entirely: a ledger that first proves an attempt was not received
 // and later proves it was is broken, and silently preferring either record would
 // hide a real physical effect. That fails closed, loudly.
-func indexReconciliationEvent(e *model.Event, recon map[string]model.ReconciliationResult) error {
+func indexReconciliationEvent(e *model.Event, recon map[string]*model.ReconciliationEvidence) error {
 	if e.Reconciliation == nil || e.Reconciliation.AttemptID == "" {
 		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery", "reconciliation without attempt identity")
 	}
@@ -205,16 +209,18 @@ func indexReconciliationEvent(e *model.Event, recon map[string]model.Reconciliat
 	id := e.Reconciliation.AttemptID
 	prev, seen := recon[id]
 	if !seen {
-		recon[id] = e.Reconciliation.Result
+		ev := *e.Reconciliation
+		recon[id] = &ev
 		return nil
 	}
-	if prev == e.Reconciliation.Result {
+	if prev.Result == e.Reconciliation.Result {
 		return nil // idempotent re-run of the same authoritative observation
 	}
 	// An unresolved earlier record may be superseded by a resolving one; anything
 	// else is a contradiction between two authoritative claims.
-	if prev == model.ReconRequired {
-		recon[id] = e.Reconciliation.Result
+	if prev.Result == model.ReconRequired {
+		ev := *e.Reconciliation
+		recon[id] = &ev
 		return nil
 	}
 	return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
@@ -258,7 +264,7 @@ func scanAttemptEvidence(r EvidenceReader) (attemptIndex, error) {
 	idx := attemptIndex{
 		intents:  map[string]*model.OutcomeEvidence{},
 		outcomes: map[string]*model.OutcomeEvidence{},
-		recon:    map[string]model.ReconciliationResult{},
+		recon:    map[string]*model.ReconciliationEvidence{},
 	}
 	for _, part := range recoveryScanPartitions {
 		var after uint64
@@ -291,7 +297,11 @@ func deriveAttempts(idx attemptIndex) (RecoveryReport, error) {
 	for id, intent := range idx.intents {
 		out, settled := idx.outcomes[id]
 		if !settled {
-			rep.Orphans = append(rep.Orphans, orphanFrom(intent, idx.recon[id]))
+			orphan, err := orphanFrom(intent, idx.recon[id])
+			if err != nil {
+				return RecoveryReport{}, err
+			}
+			rep.Orphans = append(rep.Orphans, orphan)
 			continue
 		}
 		rec, err := settledFrom(intent, out)
@@ -314,10 +324,29 @@ func deriveAttempts(idx attemptIndex) (RecoveryReport, error) {
 // orphanFrom builds the record for an intent with no terminal outcome.
 //
 // An orphan's KNOWLEDGE state comes from append-only reconciliation evidence when
-// any exists (the zero value of the map lookup is ReconRequired, the correct resting
-// state). Its EXECUTION state is unchanged either way: reconciliation changes
-// knowledge, never authority.
-func orphanFrom(intent *model.OutcomeEvidence, known model.ReconciliationResult) RecoveredAttempt {
+// any exists; with none it rests at ReconRequired. Its EXECUTION state is unchanged
+// either way: reconciliation changes knowledge, never authority.
+//
+// The evidence must describe the SAME AUTHORIZATION as the intent. An attempt id
+// alone is not enough — a well-formed `reconciled_not_received` record naming a
+// different reservation or generation would DOWNGRADE this orphan's uncertainty on
+// the strength of a claim about some other execution. That is the same binding rule
+// already enforced for terminal outcomes, and its absence here was a real gap
+// (Codex round 1, P1). A mismatch fails CLOSED rather than being ignored: silently
+// discarding it would leave an unexplained record in the ledger.
+func orphanFrom(intent *model.OutcomeEvidence, ev *model.ReconciliationEvidence) (RecoveredAttempt, error) {
+	known := model.ReconRequired
+	if ev != nil {
+		if ev.ReservationID != intent.ReservationID {
+			return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
+				"execution.recovery", "reconciliation reservation mismatch against the send intent")
+		}
+		if ev.ActivationGeneration != intent.ActivationGeneration {
+			return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
+				"execution.recovery", "reconciliation generation mismatch against the send intent")
+		}
+		known = ev.Result
+	}
 	if known == "" {
 		known = model.ReconRequired
 	}
@@ -327,7 +356,7 @@ func orphanFrom(intent *model.OutcomeEvidence, known model.ReconciliationResult)
 		ActivationGeneration: intent.ActivationGeneration,
 		State:                AttemptReconciliationRequired,
 		Reconciliation:       known,
-	}
+	}, nil
 }
 
 // settledFrom builds the record for an intent that reached a terminal outcome.

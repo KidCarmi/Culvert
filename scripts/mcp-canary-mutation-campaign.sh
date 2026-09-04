@@ -275,6 +275,34 @@ run_mutation M22 \
   . internal/mcp/execution/recovery.go \
   's/\t\t\tif a\.ReservationID != "" \{\n\t\t\t\tbyRes\[a\.ReservationID\] = append\(byRes\[a\.ReservationID\], a\.AttemptID\)\n\t\t\t\}\n/\t\t\tbyRes[a.ReservationID] = append(byRes[a.ReservationID], a.AttemptID)\n/'
 
+# ── (24) redirects re-permitted under retry-disabled ────────────────────────
+run_mutation M24 \
+  'a retry-free client is allowed to follow redirects (a replayed POST body)' \
+  'TestRetryFree_RejectsRedirects' \
+  ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/limits.go \
+  's/\tif c\.RetryMode == RetryDisabled && c\.MaxRedirects != 0 \{\n\t\treturn Limits\{\}, mcperr\.New\(mcperr\.ReasonListenerConfigInvalid, "upstreamclient\.limits", "retry-disabled mode must not permit redirects"\)\n\t\}\n//'
+
+# ── (25) a negative witness count resolves as definitive absence ────────────
+run_mutation M25 \
+  'a negative observation count falls through and reads as proven-absent' \
+  'TestReconcile_NegativeCountNeverResolvesAbsence' \
+  ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
+  's/\tif obs\.Count < 0 \{\n\t\treturn model\.ReconRequired\n\t\}\n//'
+
+# ── (26) reconciliation applied without checking its binding ────────────────
+run_mutation M26 \
+  'reconciliation evidence for a different reservation is applied anyway' \
+  'TestRecovery_ReconciliationMustMatchTheIntentBinding' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\t\tif ev\.ReservationID != intent\.ReservationID \{\n\t\t\treturn RecoveredAttempt\{\}, mcperr\.New\(mcperr\.ReasonEventInvalid,\n\t\t\t\t"execution\.recovery", "reconciliation reservation mismatch against the send intent"\)\n\t\t\}\n//'
+
+# ── (27) a never-sent attempt persisted as executed ─────────────────────────
+run_mutation M27 \
+  'the terminal outcome keeps the success-path execution state on a refusal' \
+  'TestHTTPSE2E_BoundaryRefusalIsNotRecordedAsExecuted' \
+  . internal/mcp/execution/attempt_evidence.go \
+  's/\tif out\.ExecutionState != "" \{\n\t\tf\.Decision\.ExecutionState = out\.ExecutionState\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

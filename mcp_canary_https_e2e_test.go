@@ -856,3 +856,47 @@ func liveTestEventsBackend(t *testing.T, be spool.Backend) *events.Manager {
 	}
 	return m
 }
+
+// TestHTTPSE2E_BoundaryRefusalIsNotRecordedAsExecuted pins Codex round-1 P2. When a
+// final guard refuses after the durable intent is committed, the attempt is
+// definitely_not_sent and the output is blocked — but outcomeFacts stamps
+// Decision.ExecutionState = "executed" for the success path, and taking that stamp
+// unconditionally persisted an internally contradictory record.
+//
+// It is not cosmetic: the admin decision search READS Decision.ExecutionState, so a
+// never-sent attempt would be reported and filtered as an execution — evidence
+// claiming an effect that provably did not happen, which is the exact inverse of the
+// defect this PR exists to fix.
+func TestHTTPSE2E_BoundaryRefusalIsNotRecordedAsExecuted(t *testing.T) {
+	p := startControlledPeer(t, respondOK)
+	rig := armCanaryWithRealPeerGate(t, p, 10, true, demoteAtBoundary)
+
+	out := rig.exec(peerExecInput(p, policy.OpRead))
+	if out.Executed {
+		t.Fatalf("setup: a demoted generation must not execute, out=%+v", out)
+	}
+	if p.count() != 0 {
+		t.Fatalf("setup: a boundary refusal must send no bytes, peer saw %d", p.count())
+	}
+
+	evs, _ := rig.spoolEventsAll(t)
+	var seen int
+	for i := range evs {
+		if evs[i].Phase != model.PhaseOutcome || evs[i].Outcome == nil {
+			continue
+		}
+		seen++
+		if evs[i].Outcome.PhysicalSendState != model.SendDefinitelyNotSent {
+			t.Fatalf("a pre-send refusal must record definitely_not_sent, got %q", evs[i].Outcome.PhysicalSendState)
+		}
+		if evs[i].Outcome.Executed {
+			t.Fatal("a never-sent attempt must not be recorded as executed")
+		}
+		if got := evs[i].Decision.ExecutionState; got == "executed" {
+			t.Fatal("the persisted decision state must not claim executed for a never-sent attempt")
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("a boundary refusal must still leave exactly one terminal outcome, got %d", seen)
+	}
+}

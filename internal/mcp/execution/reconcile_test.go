@@ -302,3 +302,70 @@ func TestRecovery_ReconcilingOldGenerationDoesNotAffectNewer(t *testing.T) {
 		t.Fatalf("generation-8 authority must be unchanged, got %+v", rep.Settled)
 	}
 }
+
+// --- Codex round 1 findings -------------------------------------------------
+
+// TestReconcile_NegativeCountNeverResolvesAbsence pins Codex round-1 P1. A negative
+// observation count is impossible for a well-formed witness, so it is malformed
+// data, not an observation. Falling through to the zero-count branch would turn
+// garbage into a definitive "never happened" — the one direction this engine must
+// never manufacture.
+func TestReconcile_NegativeCountNeverResolvesAbsence(t *testing.T) {
+	o := orphanFor(t)
+	for _, n := range []int{-1, -1000} {
+		obs := baseObservation(o)
+		obs.Count = n
+		obs.Complete, obs.CompletenessWatermark = true, "wm-1"
+		if got := reconcile(t, o, stubWitness{obs: obs}).Result; got != model.ReconRequired {
+			t.Fatalf("count=%d must stay reconciliation_required, got %q", n, got)
+		}
+	}
+	// CONTROL on the same fixture: a real zero WITH a completeness proof does resolve,
+	// so the gate above is measuring the negative count and not a broken fixture.
+	zero := baseObservation(o)
+	zero.Count, zero.Complete, zero.CompletenessWatermark = 0, true, "wm-1"
+	if got := reconcile(t, o, stubWitness{obs: zero}).Result; got != model.ReconNotReceived {
+		t.Fatalf("control: a proven zero must resolve not_received, got %q", got)
+	}
+}
+
+// TestRecovery_ReconciliationMustMatchTheIntentBinding pins Codex round-1 P1. An
+// attempt id alone is not enough: a well-formed `reconciled_not_received` naming a
+// different reservation or generation would downgrade this orphan's uncertainty on
+// the strength of a claim about some other execution.
+func TestRecovery_ReconciliationMustMatchTheIntentBinding(t *testing.T) {
+	id := mustAttemptID(t)
+	reconEvent := func(res string, gen uint64) model.Event {
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: res, ActivationGeneration: gen, Result: model.ReconNotReceived,
+		}}
+	}
+
+	t.Run("wrong reservation fails closed", func(t *testing.T) {
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_authorized", 7), reconEvent("rsv_other", 7),
+		)); err == nil {
+			t.Fatal("reconciliation naming a different reservation must fail closed")
+		}
+	})
+
+	t.Run("wrong generation fails closed", func(t *testing.T) {
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_authorized", 7), reconEvent("rsv_authorized", 8),
+		)); err == nil {
+			t.Fatal("reconciliation naming a different generation must fail closed")
+		}
+	})
+
+	// CONTROL: the matching binding IS applied, so the two gates above are measuring
+	// the mismatch rather than reconciliation being inert.
+	rep, err := RecoverAttempts(readerWith(
+		intentEvent(id, "rsv_authorized", 7), reconEvent("rsv_authorized", 7),
+	))
+	if err != nil {
+		t.Fatalf("control: a matching reconciliation must apply: %v", err)
+	}
+	if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconNotReceived {
+		t.Fatalf("control: expected a not_received orphan, got %+v", rep.Orphans)
+	}
+}
