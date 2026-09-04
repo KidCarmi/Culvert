@@ -345,6 +345,27 @@ run_mutation M33 \
   . internal/mcp/upstreamclient/transport.go \
   's/\t\tif resp != nil \{\n\t\t\treturn nil, legFacts\{responseObserved: true\}, classifyTransportError\(err\)\n\t\t\}\n//'
 
+# ── (34) "exactly one" accepted from an unproven view ───────────────────────
+run_mutation M34 \
+  'one observed invocation resolves as received without a completeness proof' \
+  'TestReconcile_ExactlyOneNeedsTheSameCompletenessProofAsAbsence' \
+  ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
+  's/\t\tif !obs\.Complete \|\| obs\.CompletenessWatermark == "" \{\n\t\t\treturn model\.ReconRequired\n\t\t\}\n//'
+
+# ── (35) corroboration weakened to mere non-contradiction ───────────────────
+run_mutation M35 \
+  'an unbound orphan is resolved by a view scoped to another authorization' \
+  'TestReconcile_AnUnboundOrphanCannotBeResolvedByAnotherAuthorization' \
+  ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
+  's/func corroborates\(observed, expected string\) bool \{\n\tif observed == "" \{\n\t\treturn true\n\t\}\n\treturn expected != "" && observed == expected\n\}/func corroborates(observed, expected string) bool {\n\treturn !disagrees(observed, expected)\n}/'
+
+# ── (36) contradictory reconciliation discarded on a settled attempt ────────
+run_mutation M36 \
+  'the settled branch ignores reconciliation evidence for the same attempt' \
+  'TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif err := settledReconOK\(intent, out, recon\); err != nil \{\n\t\treturn RecoveredAttempt\{\}, err\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

@@ -917,9 +917,36 @@ DEFAULT (retrying) limits would authorize re-sending an idempotent request the p
 answered. Gate: `TestHTTPSE2E_ARejectedRedirectIsStillAnAnswer`, which also asserts the peer saw
 exactly one POST; mutation M33.
 
+### Three more, from the round after that
+
+**"Exactly one" needs the same completeness proof "never happened" does.** Requiring it for absence
+but not for receipt was an asymmetry with a real consequence: `reconciled_received` is DEFINED as
+exactly one and is treated as RESOLVED, so a partial view containing one invocation settled an
+attempt whose duplicate simply lay outside the observed set — hiding the precise thing blocker #6
+exists to detect. A duplicate is still a conflict at any completeness (a duplicate seen is a
+duplicate, and a wider view could only find more), which is pinned separately so completeness can
+never become a way to downgrade an observed breach. Gate:
+`TestReconcile_ExactlyOneNeedsTheSameCompletenessProofAsAbsence`; mutation M34.
+
+**Not contradicting is weaker than applying to this attempt.** The binding check treated an EMPTY
+LOCAL value as agreement, so a legacy or nil-gate orphan carrying no durable `ReservationID` could be
+resolved by a witness view scoped to some other authorization: nothing contradicted, but nothing
+corroborated either. The two tests are now distinct — `bindingContradicts` (both sides name it,
+differently ⇒ conflict) and `bindingCorroborated` (every dimension the witness names is confirmed by
+a matching non-empty local value ⇒ required for ANY resolved verdict, in either direction). Gate:
+`TestReconcile_AnUnboundOrphanCannotBeResolvedByAnotherAuthorization`; mutation M35.
+
+**Reconciliation evidence for a settled attempt was discarded.** Only the orphan branch consulted the
+index, so a witness saying "never received" beside an outcome recording that the peer ANSWERED was
+reported as a clean settled attempt — one of two authoritative claims about the same physical effect
+silently dropped, reachable whenever a late terminal outcome races an orphan reconciliation. It now
+fails closed on a binding mismatch, on a witness-observed duplicate, and on either direction of
+contradiction; `reconciliation_required` asserts nothing and agreement is just corroboration. Gate:
+`TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded`; mutation M36.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **33 mutations: 33 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **36 mutations: 36 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

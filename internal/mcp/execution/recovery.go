@@ -304,7 +304,7 @@ func deriveAttempts(idx attemptIndex) (RecoveryReport, error) {
 			rep.Orphans = append(rep.Orphans, orphan)
 			continue
 		}
-		rec, err := settledFrom(intent, out)
+		rec, err := settledFrom(intent, out, idx.recon[id])
 		if err != nil {
 			return RecoveryReport{}, err
 		}
@@ -364,7 +364,15 @@ func orphanFrom(intent *model.OutcomeEvidence, ev *model.ReconciliationEvidence)
 // The outcome must describe the SAME authorization as the intent. A mismatch means
 // the ledger binds one physical effect to two different grants or generations, which
 // no later reasoning can safely repair.
-func settledFrom(intent, out *model.OutcomeEvidence) (RecoveredAttempt, error) {
+//
+// Reconciliation evidence for a settled attempt is UNUSUAL but reachable — a late
+// terminal outcome racing an orphan reconciliation leaves both in the stream — and
+// it was previously ignored entirely, because only the orphan branch consulted the
+// index (Codex round 4, P2). Ignoring it discards one of two authoritative claims
+// about the same physical effect and reports the attempt as cleanly settled, so a
+// witness saying "never received" alongside an outcome saying the peer ANSWERED
+// would vanish from the report. Both claims are checked here instead.
+func settledFrom(intent, out *model.OutcomeEvidence, recon *model.ReconciliationEvidence) (RecoveredAttempt, error) {
 	if out.ReservationID != intent.ReservationID {
 		return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
 			"execution.recovery", "attempt reservation mismatch between intent and outcome")
@@ -377,6 +385,9 @@ func settledFrom(intent, out *model.OutcomeEvidence) (RecoveredAttempt, error) {
 		return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
 			"execution.recovery", "terminal outcome with unknown physical send state")
 	}
+	if err := settledReconOK(intent, out, recon); err != nil {
+		return RecoveredAttempt{}, err
+	}
 	return RecoveredAttempt{
 		AttemptID:            intent.AttemptID,
 		ReservationID:        intent.ReservationID,
@@ -384,4 +395,48 @@ func settledFrom(intent, out *model.OutcomeEvidence) (RecoveredAttempt, error) {
 		State:                AttemptSettled,
 		TerminalSendState:    out.PhysicalSendState,
 	}, nil
+}
+
+// settledReconOK fails CLOSED when reconciliation evidence cannot stand beside the
+// terminal outcome for the same attempt.
+//
+// Three ways it cannot. The binding rule is the same one the orphan path enforces:
+// evidence naming a different reservation or generation describes some other
+// execution. A witness-observed DUPLICATE is the blocker-#6 invariant breach itself
+// and must never be reported as a clean settled attempt. And a witness asserting the
+// invocation was never received, against an outcome recording that the peer may have
+// or demonstrably did receive it, is a direct contradiction about one physical
+// effect — exactly the case where picking a winner would be manufacturing certainty.
+//
+// ReconRequired asserts nothing and is therefore never a contradiction, and
+// ReconReceived agreeing with a send state that reached the peer is simply
+// corroboration.
+func settledReconOK(intent, out *model.OutcomeEvidence, recon *model.ReconciliationEvidence) error {
+	if recon == nil {
+		return nil
+	}
+	if recon.ReservationID != intent.ReservationID {
+		return mcperr.New(mcperr.ReasonEventInvalid,
+			"execution.recovery", "reconciliation reservation mismatch against a settled attempt")
+	}
+	if recon.ActivationGeneration != intent.ActivationGeneration {
+		return mcperr.New(mcperr.ReasonEventInvalid,
+			"execution.recovery", "reconciliation generation mismatch against a settled attempt")
+	}
+	switch recon.Result {
+	case model.ReconConflict:
+		return mcperr.New(mcperr.ReasonEventInvalid,
+			"execution.recovery", "witness reported a duplicate invocation for a settled attempt")
+	case model.ReconNotReceived:
+		if out.PhysicalSendState.MayHaveReachedPeer() {
+			return mcperr.New(mcperr.ReasonEventInvalid,
+				"execution.recovery", "witness reported not-received against an outcome that reached the peer")
+		}
+	case model.ReconReceived:
+		if out.PhysicalSendState == model.SendDefinitelyNotSent {
+			return mcperr.New(mcperr.ReasonEventInvalid,
+				"execution.recovery", "witness reported received against a provably never-sent outcome")
+		}
+	}
+	return nil
 }

@@ -431,3 +431,140 @@ func TestReconcile_MismatchedAbsenceIsNotReportedAsAConflict(t *testing.T) {
 		t.Fatalf("control: a mismatched observed invocation must be a conflict, got %q", got)
 	}
 }
+
+// TestReconcile_ExactlyOneNeedsTheSameCompletenessProofAsAbsence pins Codex round-4
+// P1. "Exactly one" is a claim about the whole population, so it needs the same
+// completeness proof "never happened" does. Requiring it for absence but not for
+// receipt was an asymmetry with a real consequence: ReconReceived is defined as
+// exactly one and is treated as RESOLVED, so a partial view containing one
+// invocation settled an attempt whose duplicate simply lay outside the observed set
+// — hiding the precise thing blocker #6 exists to detect.
+func TestReconcile_ExactlyOneNeedsTheSameCompletenessProofAsAbsence(t *testing.T) {
+	o := orphanFor(t)
+	for name, breakIt := range map[string]func(*WitnessObservation){
+		"not_complete":              func(obs *WitnessObservation) { obs.Complete = false },
+		"complete_but_no_watermark": func(obs *WitnessObservation) { obs.CompletenessWatermark = "" },
+	} {
+		obs := baseObservation(o)
+		obs.Count = 1
+		breakIt(&obs)
+		if got := reconcile(t, o, stubWitness{obs: obs}).Result; got != model.ReconRequired {
+			t.Fatalf("%s: one invocation in an unproven view must stay reconciliation_required, got %q", name, got)
+		}
+	}
+	// CONTROL on the same fixture: one invocation in a PROVEN view does resolve, so
+	// the gate is measuring the completeness proof and not a fixture that can never
+	// resolve at all.
+	ok := baseObservation(o)
+	ok.Count, ok.Complete, ok.CompletenessWatermark = 1, true, "wm-1"
+	if got := reconcile(t, o, stubWitness{obs: ok}).Result; got != model.ReconReceived {
+		t.Fatalf("control: a proven single observation must resolve received, got %q", got)
+	}
+	// And a DUPLICATE is still a conflict even in a partial view: a duplicate seen is
+	// a duplicate, and a wider view could only find more. Completeness must never
+	// become a way to downgrade an observed breach.
+	dup := baseObservation(o)
+	dup.Count, dup.Complete, dup.CompletenessWatermark = 2, false, ""
+	if got := reconcile(t, o, stubWitness{obs: dup}).Result; got != model.ReconConflict {
+		t.Fatalf("a duplicate must be a conflict regardless of completeness, got %q", got)
+	}
+}
+
+// TestReconcile_AnUnboundOrphanCannotBeResolvedByAnotherAuthorization pins Codex
+// round-4 P2. When the local intent leaves a dimension empty — a legacy or nil-gate
+// orphan with no durable ReservationID — "not reported" was read as "agrees", so a
+// witness could present a complete view SCOPED TO SOME OTHER AUTHORIZATION and have
+// it resolve this orphan. Nothing contradicted, but nothing corroborated either.
+func TestReconcile_AnUnboundOrphanCannotBeResolvedByAnotherAuthorization(t *testing.T) {
+	unbound := orphanFor(t)
+	unbound.ReservationID = "" // no durable binding to corroborate against
+
+	absent := baseObservation(unbound)
+	absent.Count, absent.Complete, absent.CompletenessWatermark = 0, true, "wm-1"
+	absent.ReservationID = "rsv_someone_else"
+	if got := reconcile(t, unbound, stubWitness{obs: absent}).Result; got != model.ReconRequired {
+		t.Fatalf("an unbound orphan must not be resolved absent by another authorization's view, got %q", got)
+	}
+
+	present := baseObservation(unbound)
+	present.Count, present.Complete, present.CompletenessWatermark = 1, true, "wm-1"
+	present.ReservationID = "rsv_someone_else"
+	if got := reconcile(t, unbound, stubWitness{obs: present}).Result; got != model.ReconRequired {
+		t.Fatalf("an unbound orphan must not be resolved received by another authorization's view, got %q", got)
+	}
+
+	// CONTROL: the same unbound orphan IS resolvable when the witness reports only
+	// dimensions the intent can corroborate. Without this the gate would pass on an
+	// implementation that had simply stopped resolving unbound orphans at all.
+	ok := baseObservation(unbound)
+	ok.Count, ok.Complete, ok.CompletenessWatermark = 0, true, "wm-1"
+	ok.ReservationID = ""
+	if got := reconcile(t, unbound, stubWitness{obs: ok}).Result; got != model.ReconNotReceived {
+		t.Fatalf("control: a corroborated complete zero must resolve not_received, got %q", got)
+	}
+}
+
+// TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded pins Codex round-4
+// P2. Reconciliation evidence for a SETTLED attempt is unusual but reachable — a
+// late terminal outcome racing an orphan reconciliation leaves both in the stream —
+// and only the orphan branch consulted the index, so it was ignored entirely.
+//
+// Ignoring it discards one of two authoritative claims about the same physical
+// effect and reports the attempt as cleanly settled. A witness saying "never
+// received" beside an outcome saying the peer ANSWERED is a direct contradiction,
+// and picking a winner would be manufacturing certainty.
+func TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded(t *testing.T) {
+	id := mustAttemptID(t)
+	recon := func(res string, gen uint64, r model.ReconciliationResult) model.Event {
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: res, ActivationGeneration: gen, Result: r,
+		}}
+	}
+	settled := func(st model.PhysicalSendState) []model.Event {
+		return []model.Event{intentEvent(id, "rsv_a", 7), outcomeEvent(id, "rsv_a", 7, st)}
+	}
+	withRecon := func(st model.PhysicalSendState, ev model.Event) *fixtureReader {
+		return readerWith(append(settled(st), ev)...)
+	}
+
+	for name, tc := range map[string]struct {
+		state model.PhysicalSendState
+		ev    model.Event
+	}{
+		"not_received against a peer that answered": {
+			model.SendPeerResponseReceived, recon("rsv_a", 7, model.ReconNotReceived)},
+		"not_received against an ambiguous send": {
+			model.SendMayHaveBeenSent, recon("rsv_a", 7, model.ReconNotReceived)},
+		"received against a provably never-sent outcome": {
+			model.SendDefinitelyNotSent, recon("rsv_a", 7, model.ReconReceived)},
+		"witness-observed duplicate": {
+			model.SendPeerResponseReceived, recon("rsv_a", 7, model.ReconConflict)},
+		"wrong reservation": {
+			model.SendPeerResponseReceived, recon("rsv_other", 7, model.ReconReceived)},
+		"wrong generation": {
+			model.SendPeerResponseReceived, recon("rsv_a", 8, model.ReconReceived)},
+	} {
+		if _, err := RecoverAttempts(withRecon(tc.state, tc.ev)); err == nil {
+			t.Fatalf("%s: must fail closed rather than report a clean settled attempt", name)
+		}
+	}
+
+	// CONTROLS on the same fixture. A settled attempt with NO reconciliation, and one
+	// whose reconciliation AGREES, must both still settle — otherwise the gates above
+	// would pass on an implementation that had simply stopped settling anything.
+	for name, evs := range map[string][]model.Event{
+		"no reconciliation": settled(model.SendPeerResponseReceived),
+		"corroborating received": append(settled(model.SendPeerResponseReceived),
+			recon("rsv_a", 7, model.ReconReceived)),
+		"reconciliation_required asserts nothing": append(settled(model.SendPeerResponseReceived),
+			recon("rsv_a", 7, model.ReconRequired)),
+	} {
+		rep, err := RecoverAttempts(readerWith(evs...))
+		if err != nil {
+			t.Fatalf("control %q: must still settle: %v", name, err)
+		}
+		if len(rep.Settled) != 1 || len(rep.Orphans) != 0 {
+			t.Fatalf("control %q: expected exactly one settled attempt, got %+v", name, rep)
+		}
+	}
+}
