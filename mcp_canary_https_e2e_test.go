@@ -224,6 +224,20 @@ func armCanaryWithRealPeer(t *testing.T, p *controlledPeer, budgetTotal int) *pe
 // under test control, so a gate denial can be driven without changing anything else.
 func armCanaryWithRealPeerTrust(t *testing.T, p *controlledPeer, budgetTotal int, trustOK bool) *peerRig {
 	t.Helper()
+	return armCanaryWithRealPeerGate(t, p, budgetTotal, trustOK, nil)
+}
+
+// armCanaryWithRealPeerGate is the full rig with ONE composition-layer gate seam
+// optionally forced by the caller, so a concurrency case can drive (say) generation
+// revalidation without changing anything else about the production path.
+//
+// tweak is applied to a gate built AFTER the global reset, and that ordering is
+// load-bearing: liveRealGate binds `admit` as a METHOD VALUE on the live-tier
+// singleton, so a gate constructed before resetLiveTierGlobals points at the
+// pre-reset tier — which is never armed. Building it in the caller silently denied
+// every admission (found while writing the concurrency matrix).
+func armCanaryWithRealPeerGate(t *testing.T, p *controlledPeer, budgetTotal int, trustOK bool, tweak func(*mcpLiveSideEffectGate)) *peerRig {
+	t.Helper()
 	restore := ssrf.AllowLoopbackForTest()
 	t.Cleanup(restore)
 
@@ -237,13 +251,17 @@ func armCanaryWithRealPeerTrust(t *testing.T, p *controlledPeer, budgetTotal int
 	}
 	t.Cleanup(func() { _ = gw.SetConfig(prevCfg, "test-restore", time.Unix(0, 2).UnixNano()) })
 
+	gate := liveRealGate(rollout.CapabilityGateway, trustOK)
+	if tweak != nil {
+		tweak(gate)
+	}
 	ev := liveTestEvents(t)
 	cfg := &mcpruntime.Config{}
 	if err := composeGatewayLiveTierInto(cfg, liveTierComposition{
 		Upstream: realUpstreamFor(t, p), Events: ev,
 		ResponseProfile: inspection.DefaultGatewayProfile(1),
 		Clock:           func() time.Time { return time.Unix(0, 1) },
-		LiveGate:        liveRealGate(rollout.CapabilityGateway, trustOK),
+		LiveGate:        gate,
 	}); err != nil {
 		t.Fatalf("compose live tier: %v", err)
 	}
