@@ -219,13 +219,24 @@ Importing a version-2 document is planned before anything is touched:
 | `retain` | kept |
 | `remove` | replace mode only, and only for the identity-bearing v2 document |
 
-A plan that would destroy a credential (authority change or removal of a
-credentialed entry) is refused with **409 `credential_clear_required`** and
-the complete plan (`credentialClearRequired: [ids]`) before any store is
-touched. Clear those credentials deliberately (Tier-3) first, then import
-again — the import confirmation word is Tier-2 and never substitutes for
-the clear. A real password in the document is refused (400
+A plan that would destroy a credential (authority change or removal of an
+entry that holds a credential **or is in the `requiresReplacement`
+state**) is refused with **409 `credential_clear_required`** and the
+complete plan (`credentialClearRequired: [ids]`) before any store is
+touched. Set (Tier-2) or clear (Tier-3) those credentials deliberately
+first, then import again — the import confirmation word is Tier-2 and
+never substitutes for the clear, and no import can resolve
+`requiresReplacement`. A real password in the document is refused (400
 `credentials_not_importable`); duplicate ids are refused (400).
+
+The versioned schema is validated before anything is planned: every
+`upstream_proxies_v2` entry must carry one of `none`, `configured`,
+`unusable`, `mismatch`, `requiresReplacement` (400
+`invalid_credential_state`, naming only the offending entry index), the
+section requires `version: 2` and `upstream_credentials: "omitted"` (400
+`invalid_upstream_credentials_marker` / `schema_mismatch`), and a
+version-1 legacy list must not carry the marker. A refused import mints
+no key, writes no audit success and creates no config version.
 
 Recommended ceremony:
 

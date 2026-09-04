@@ -1161,6 +1161,46 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-D CORRECTION RECORD (this branch, 2026-09-04).** External freeze
+> review of the 2F-D candidate (`4b60d810`) found two source-level
+> contract blockers; each is red-before against the untouched `4b60d810`
+> (`upstream_v2_portability_red2_test.go`, CR1–CR8: six defect gates
+> FAIL on the baseline, CR3/CR4 are controls) and corrected append-only.
+> **(1) `requiresReplacement` could be cleared without T2/T3.** The C12
+> rule — and the candidate's own `ManagedEntry` comment — say the durable
+> marker is resolved only by an explicit Tier-2 replace or Tier-3 clear on
+> the credential endpoint, yet `upstreamPlanV2` guarded on
+> `Credential != nil` alone: a same-id import with a changed authority and
+> `credentialState:"none"` ran the ordinary update path and assigned
+> `RequiresReplacement=false`, and a replace-mode omission classified the
+> entry as `remove` and dropped it. The refusal predicate is now
+> `upstreamEntryProtected` (material OR marker): both shapes refuse 409
+> `credential_clear_required` with the complete plan (`incoming:
+> requiresReplacement`, `existing: remove`, `credentialClearRequired`
+> naming the id) and zero disk/runtime/audit/config-version mutation;
+> identity-keyed preserve (v2) and exact-authority preserve (legacy
+> `xxxxx`) keep the marker verbatim, and it survives a restart-shaped
+> reload. Only the T2/T3 credential endpoint resolves it (CR4 control).
+> **(2) The versioned credential-omission schema was not validated.**
+> `declared := state != "" && state != "none"` read ANY unknown value as
+> credential evidence and an absent value as `none`, and nothing required
+> the `upstream_credentials` marker or a coherent version. Validation now
+> runs BEFORE planning or any mutation: every v2 entry must carry one
+> recognized `credentialState` (`none|configured|unusable|mismatch|
+> requiresReplacement`; otherwise 400 `invalid_credential_state` naming
+> the offending INDEX only — the value is never echoed); a
+> `upstream_proxies_v2` section requires backup version 2 and the exact
+> `upstream_credentials:"omitted"` marker (400
+> `invalid_upstream_credentials_marker` when missing or any other value);
+> a v2 section under another version, a legacy `upstreamProxies` list
+> outside version 1 or carrying the marker, or a marker without a section
+> is 400 `schema_mismatch`. A refusal mints no key, audits no success and
+> advances no config version. Entry-level 400s are now structured JSON
+> `{error, code, index}` (OpenAPI `UpstreamImportRefusal` extended;
+> bundle + `types.gen.ts` regenerated). Everything else reviewed in that
+> round — backup sanitization, node-local-key exclusion, downgrade
+> binding, the manual-probe contract — is unchanged.
+>
 > **2F-D IMPLEMENTATION RECORD (this branch, 2026-09-04).** Portability,
 > recovery and complete secret containment for the Upstream v2 sealed
 > credentials, appended to the frozen 2F-C head `ef9cb045` (RED matrix
