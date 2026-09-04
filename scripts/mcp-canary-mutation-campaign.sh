@@ -427,7 +427,7 @@ run_mutation M45 \
   'recovery trusts a stated verdict that understates its own duplicate facts' \
   'TestRecovery_ADuplicateIsNotSilencedByAWeakerVerdict' \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
-  's/\tif r\.ObservationCount > 1 \{\n\t\treturn model\.ReconConflict\n\t\}\n\treturn r\.Result/\treturn r.Result/'
+  's/\tif r\.ObservationCount > 1 \{\n\t\treturn model\.ReconConflict\n\t\}\n//'
 
 # ── (46) the durable validator permits a non-conflict duplicate ────────────
 run_mutation M46 \
