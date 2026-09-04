@@ -60,6 +60,20 @@ type RecoveredAttempt struct {
 	Reconciliation model.ReconciliationResult
 }
 
+// ReservationBreach names one budget slot that authorized MORE THAN ONE physical
+// attempt. It is the review-blocker-#6 invariant breach expressed in the ledger:
+//
+//	one accepted execution reservation  =>  at most one physical tool invocation
+//
+// It is REPORTED rather than raised as an error, deliberately. Failing the whole
+// derivation closed would leave the operator with no report at all — including no
+// account of the very attempts that need reconciling — so the breach is named,
+// carried alongside a usable report, and impossible to overlook.
+type ReservationBreach struct {
+	ReservationID string
+	AttemptIDs    []string
+}
+
 // RecoveryReport is the result of one derivation over the durable stream.
 type RecoveryReport struct {
 	// Orphans require reconciliation. They consume their original allowance
@@ -67,7 +81,18 @@ type RecoveryReport struct {
 	Orphans []RecoveredAttempt
 	// Settled attempts reached a valid terminal outcome.
 	Settled []RecoveredAttempt
+	// ReservationBreaches names every slot bound to more than one attempt. A
+	// non-empty slice means N accepted reservations produced more than N potential
+	// physical invocations.
+	//
+	// Surfacing this was a red-team finding. Recovery previously listed such
+	// attempts individually — VISIBLE, but not the same as DETECTED: nothing
+	// distinguished "two attempts" from "two attempts that one slot paid for".
+	ReservationBreaches []ReservationBreach
 }
+
+// HasReservationBreach reports whether any slot authorized more than one attempt.
+func (r RecoveryReport) HasReservationBreach() bool { return len(r.ReservationBreaches) > 0 }
 
 // EvidenceReader is the narrow read seam over the authoritative committed event
 // stream. *spool.Spool satisfies it; tests supply deterministic fixtures.
@@ -175,6 +200,7 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 	// Deterministic order so repeated recovery is byte-stable and idempotent.
 	sort.Slice(rep.Orphans, func(i, j int) bool { return rep.Orphans[i].AttemptID < rep.Orphans[j].AttemptID })
 	sort.Slice(rep.Settled, func(i, j int) bool { return rep.Settled[i].AttemptID < rep.Settled[j].AttemptID })
+	rep.ReservationBreaches = deriveReservationBreaches(rep)
 	return rep, nil
 }
 
@@ -255,4 +281,35 @@ func indexReconciliationEvent(e *model.Event, recon map[string]model.Reconciliat
 	}
 	return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
 		"contradictory reconciliation results for one attempt")
+}
+
+// deriveReservationBreaches groups every recovered attempt by the reservation that
+// authorized it and names each slot bound to more than one.
+//
+// An EMPTY reservation id is excluded: it identifies no slot, so grouping by it
+// would fabricate a breach out of legacy or non-metered evidence. That is the one
+// direction this report must not err in — a false breach would discredit the signal
+// that exists to catch the real one.
+func deriveReservationBreaches(rep RecoveryReport) []ReservationBreach {
+	byRes := map[string][]string{}
+	collect := func(as []RecoveredAttempt) {
+		for _, a := range as {
+			if a.ReservationID != "" {
+				byRes[a.ReservationID] = append(byRes[a.ReservationID], a.AttemptID)
+			}
+		}
+	}
+	collect(rep.Orphans)
+	collect(rep.Settled)
+
+	var out []ReservationBreach
+	for res, ids := range byRes {
+		if len(ids) < 2 {
+			continue
+		}
+		sort.Strings(ids)
+		out = append(out, ReservationBreach{ReservationID: res, AttemptIDs: ids})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ReservationID < out[j].ReservationID })
+	return out
 }
