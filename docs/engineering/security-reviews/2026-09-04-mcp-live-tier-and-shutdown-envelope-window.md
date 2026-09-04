@@ -45,9 +45,11 @@ down — and leaves the community category store unclean, which is the torn
 `MANIFEST` case CHAOS-50's boot-path quarantine exists to survive. That is the
 precise loss the three-phase split and the flush reserve were built to prevent.
 
-Fixed by clamping every hook's watchdog to a single per-phase ceiling. The
-envelope is now flat in hook count (**51.0 s**, unchanged when a hook is added),
-restoring ~9 s of margin.
+Fixed by folding the grace into a single per-phase HORIZON that `hookBudget`
+measures every slice against. The envelope is now flat in hook count (**51.0 s**,
+unchanged when a hook is added), restoring ~9 s of margin, and every hook still
+gets its own non-zero slice — merely clamping the abandon instant bounded the
+total while starving the durable closers, which is recorded in §3.
 
 ## 2. Finding ledger
 
@@ -204,11 +206,8 @@ and every future hook would re-open it.
 
 | Test | Kind | Pins |
 |---|---|---|
-| `TestChaos56_PhaseGraceIsSharedNotPerHook` | Regression / boundary | A phase where every hook stalls finishes within deadline + one grace at 1/2/3/6/9/10 hooks |
-| `TestChaos56_PhaseOverrunIsFlatInHookCount` | Regression (ratio) | Ten stalled hooks cost no more than 1.5× two — machine-independent, so it holds under `-race` on a shared runner |
-| `TestChaos56_FullSequenceFitsTheStopGraceInHookCount` | Regression (end-to-end) | The real `runShutdownSequence` at shipped phase proportions stays inside `Total + 2×grace`, **and does not move when a durable closer is added** |
+| `TestChaos56_BudgetArithmeticHoldsBothInvariants` | Regression (**structural**) | Replays each real phase's budget at the shipped constants with every hook consuming its whole slice, and asserts BOTH properties: the phase never passes `phaseEnd + one grace` (fails against the per-hook grace) and every hook is granted a strictly positive slice (fails against the clamp-only shape). Runs in 0.00s and touches no timer or goroutine |
 | `TestChaos56_SharedGraceStillRunsEveryHook` | **Control** | Every durable closer has **completed by the time `RunAll` returns**, with three stalled hooks ahead of it — a bound achieved by not running the closers would pass every gate above while being worse than the defect |
-| `TestChaos56_EveryHookGetsANonZeroSlice` | **Control** (numeric) | Each late hook's actual execution window is at least `shutdownHookMinSlice/4`, not merely positive |
 | `TestChaos56_HealthyPhaseIsUnaffected` | **Control** / positive | No stall ⇒ no error, all hooks run, no added cost |
 | `TestChaos56_UnboundedPhaseStillWaitsIndefinitely` | Negative / boundary | A zero `phaseAbandonBy` must not be read as "abandon immediately" — that would be a fail-open on durability dressed as a bound |
 
