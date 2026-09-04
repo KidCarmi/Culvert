@@ -198,10 +198,100 @@ Every one is a **separately-reviewed activation**, not a config change:
    phase).** The real live executor is composable (`composeGatewayLiveTierInto`, `mcp_live_startup.go`)
    and the tier is explicitly ARMABLE through the single authoritative, node-readiness-gated path
    (`armLiveTier`, `mcp_live_arming.go`), with a quiesce/disarm inverse and the CANARY-ROLLBACK-LIVE-
-   QUIESCE-REHEARSAL closed. **COMPOSED != ARMED != Canary ACTIVE** is pinned. What REMAINS for a real
-   deployment: the production KEK / destination-resolver / profile-store dependency wiring (a documented,
-   separately-reviewed prerequisite — no production caller composes the tier this slice), and the
-   operational decision to actually arm on a real node. Composed-but-unarmed still reports
+   QUIESCE-REHEARSAL closed. **COMPOSED != ARMED != Canary ACTIVE** is pinned. **Production dependency
+   composition now EXISTS (PR #1291):** `composeProductionGatewayLiveTier` (`mcp_live_production_deps.go`)
+   is the single production caller, opt-in behind `CULVERT_MCP_LIVE_DEPS` (default OFF), wiring the real
+   KEK / destination-resolver / profile-store / registry / catalog. What REMAINS for a real deployment:
+   (a) a **credential-selection resolution** — credential need comes from the tool's matched policy
+   RULE, not from provisioning, so the prerequisite is to either verify the chosen rule attaches NO
+   `CredentialProfile` (the no-credential code path bypasses the broker entirely — a provider adapter
+   is then NOT required) OR implement a production credential Provider adapter, which is needed ONLY
+   for a profile-bearing rule (the broker is composed with ZERO providers, `broker_composed_no_provider`,
+   so a credential-REQUIRING tool fails closed at the broker — see the review §4); (b) **upstream connectivity provisioning**
+   — the production client uses `DefaultGatewayPolicy` (https-only, no-private) + the default SPKI
+   verifier, so a controlled server needs a plain `https://` endpoint on a PUBLIC host with a base64
+   SHA-256 SPKI pin; the documented `mcp+https://` scheme, `*.qual.svc` private host, and SPIFFE-format
+   identity are all rejected fail-closed, and no public-HTTPS controlled MCP server is provisioned today.
+   Reachable is not enough — the target must also be USABLE: the client drives no MCP `initialize` /
+   version-negotiation / protocol+session headers (review §5), so a spec-compliant server rejects the
+   sessionless `tools/list`/`tools/call` unless the target permits sessionless calls or Culvert adds an
+   upstream lifecycle implementation;
+   (c) a **governed production arming entry point** — `armLiveTier` (the sole caller of
+   `markGatewayExecDepsReady`) has NO production caller today (only tests invoke it), so an operator
+   cannot actually arm the tier in the shipped process; a startup path or admin API must wire it,
+   plus the operational decision to arm on a real node; (d) a **read-first-executable
+   operation** — `policyOperation` classifies every `tools/call` as `OpWrite` (refused read-first)
+   and `tools/list` binds no exact tool for the live-approval revalidation, so arming does NOT by
+   itself make a one-exact-tool call executable; a finer operation classifier or a designed
+   discovery-trust path is required (review §6); (e) an **exactly-one-tool/principal constraint** —
+   `ValidateScope` caps tools/principals at 2, not 1, so the one-of-everything shape must be imposed
+   as an authorization prerequisite: **exactly one `Principals` entry, zero `Clients`/`Agents`/`Groups`,
+   and exactly one tool** (or a proven 1:1 client/agent→principal mapping). A plain `count==1` check is
+   INSUFFICIENT — `principalCount` sums `Principals`+`Clients`+`Agents`, so one shared client/agent with
+   no `Principals` would satisfy it while leaving the principal dimension unrestricted (review §10);
+   (f) a
+   **per-physical-invocation budget (CODE CHANGE)** — an idempotent read retries up to `MaxReadRetries`
+   times outside the single budget reservation, so one budgeted request can send the POST ~3×, and a
+   retry POST can land after an emergency kill engaged mid-flight (blocker 6). Retry-disablement is NOT
+   representable today (`NewLimits` coerces `MaxReadRetries==0`→2 and rejects negatives;
+   `newProductionUpstreamClient` hard-codes `DefaultLimits()`), so closing this needs code. **An
+   explicitly RETRY-FREE execution path is the ONLY accepted closure for the first Canary** — one
+   logical reservation must produce at most one side-effect-bearing physical tool invocation — and it
+   closes BOTH the count and the kill-authority gap. **Charging each attempt to the budget is NOT an
+   accepted alternative** (with or without per-attempt kill revalidation): it can spend all three
+   execution slots on a single logical reservation and so destroys the exactly-three-invocations witness
+   invariant (review §9/§14/§26). A per-reservation key is not a bound at all (it enables
+   correlation/server-side dedup but does not stop the retry loop — review §9/§14). Note the witness
+   invariant counts only the side-effect-bearing tool invocations: auxiliary MCP lifecycle/discovery
+   traffic (`initialize`, `notifications/initialized`, `tools/list`) consumes no reservation and must be
+   separately counted and attributable, never folded into the three; and (g)
+   two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
+   declared breaches beyond `budget_exhausted`/`scope_escape`, and the durable outcome record is
+   success-only with an unclosable post-send crash window (review §14–§16, §18). Wiring a tripper is
+   not sufficient for the two RATE-based breaches: for `elevated_error_rate` and `latency_pathology`
+   the reviewed minimum sample floor MUST be REACHABLE within the exact corpus
+   (`MaxTotalExecutions=3`), or the below-floor behavior MUST stop fail-closed — a floor above three
+   with a below-floor `no-trip` leaves both detectors unable to evaluate for the whole experiment while
+   the prerequisite reads as closed (review §16/§26). The same reachability rule governs the
+   witness-reconciliation trip; and (h) a
+   **governed operator-reachable graceful rollback** — only the emergency kill is reachable today
+   (`quiesceLiveTier` has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`
+   for a Canary→Shadow/Observe target), yet the review contract requires rollback AND kill (review §17);
+   and (i) a **peer-observed fingerprint** — the shipped provisioning (`seedServer`/`seedTools`/`Ingest`)
+   computes the fingerprint from operator-declared JSON and verifies the pinned identity against its own
+   register stamp, and `execution.Discovery.Discover` has no non-test caller, so `ToolStillCurrent`
+   re-checks only the seeded record; exact-current fingerprint + rug-pull invalidation bind the SEED, not
+   the live peer. Closing this needs authenticated production discovery/freshness verification OR an
+   externally-verified ingestion procedure proving seeded-fingerprint == the peer's advertised tool
+   (review §7); and (j) an **operator-reachable governed Canary ACTIVATION (forward transition) entry
+   point** — arming and the activation inputs are NOT sufficient to start the Canary: the admin
+   `apiMCPRolloutTransition` returns `distribution_not_configured` for a Canary target
+   (`ui_mcp_rollout.go:116`) and nothing in non-test code constructs the distribution publication
+   coordinator (`publication.New`) or calls `coord.Publish`, so the signed-distribution apply that begins
+   the generation is never fed (review §13/§17, blocker 12 — the forward twin of the graceful-rollback
+   gap in (h)); (k) **catalog USABILITY for the exact tool** — `seedTools` lands every inventory tool
+   `catalog.Quarantined` and the policy engine hard-overrides a quarantined tool to `ActionQuarantine`
+   BEFORE any user rule (`internal/mcp/policy/engine.go:132-135`), while `ApproveLive` deliberately
+   never promotes ("live trust never materializes `catalog.Usable`"); the only non-test
+   `catalog.Promote` callers are the shadow `promoteFor` path. Without a `shadow_evaluation` approval
+   or another governed promotion path, every exact-tool request is denied even with all other blockers
+   closed (review §6/§7, blocker 13); and (l) an **ALLOW-class policy decision for the exact request**
+   — a no-`CredentialProfile` rule may itself be DENY, an unmatched request default-denies
+   (`engine.go:170-173`), and `resolveEnforcing` blocks every non-allow-class decision; the preflight's
+   `PolicyHealthy` fact is only `mcpPolicy.composed()`, which proves a snapshot exists, never that this
+   request resolves to an allow (review §4/§13, blocker 14); and (m) an **enforced one-NODE distribution
+   bound** — `ScopeSpec` has no node dimension (`internal/mcp/rollout/scope.go:100-119`) and the
+   publication coordinator's `pushAll` delivers the signed envelope to EVERY `Dist.Nodes()` entry
+   (`internal/mcp/cpdp/publication/publication.go:196-203`), so closing (j) with a generic publication
+   entry point could activate every armed/ready DP while the checklist still reads "nodes = 1".
+   Constraining the node LIST is NOT sufficient — the transport is broadcast by construction:
+   `mcpPullDistributor.Push` DISCARDS its node argument and installs the envelope so "the next captured
+   ConfigSnapshot carries it to every DP" (`mcp_distribution_adapters.go:74-88`), and
+   `applyMCPCapabilityEnvelope` has no intended-node check, so a non-target DP applies and ACTIVATES
+   before any acknowledgement could reveal the escape. Requires a PREVENTIVE control: a signed node
+   AUDIENCE the DP apply path REJECTS when it is not the intended node, or a genuinely per-node delivery
+   channel (review §3/§13, blocker 15).
+   **Arming is NOT a promise of execution.** Composed-but-unarmed still reports
    `live_executor_absent` for the Canary facts (armed feeds them), so this does NOT by itself clear row
    5 on a stock node. The execution-posture wall was edited (evolved + strengthened) as required.
 2. ~~Make `live_execution` issuable under stronger governance (four-eyes, short TTL).~~ **DONE
