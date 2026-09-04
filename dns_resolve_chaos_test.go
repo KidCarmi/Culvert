@@ -224,7 +224,8 @@ func TestChaos57_ResolverOutageDoesNotTakeGeoRulesDark(t *testing.T) {
 	}
 }
 
-// TestChaos57_FailedRefreshDoesNotDestroyTheStaleAnswer.
+// TestChaos57_FailedRefreshDoesNotDestroyTheStaleAnswer proves the background
+// refresh cannot make an outage worse than it already is.
 //
 // The background refresh must not be able to make things worse. A failed
 // refresh writes a NEGATIVE result, and a negative entry is served as FRESH for
@@ -273,7 +274,8 @@ func TestChaos57_FailedRefreshDoesNotDestroyTheStaleAnswer(t *testing.T) {
 	}
 }
 
-// TestChaos57_StaleServesDoNotStackRefreshes.
+// TestChaos57_StaleServesDoNotStackRefreshes pins at most ONE refresh per host,
+// however many requests are served stale behind it.
 //
 // At most ONE refresh per host may be in flight, however many requests are
 // served stale behind it. During a resolver outage the stale window is not a
@@ -368,7 +370,8 @@ func shrinkResolverPool(t *testing.T, n int) (restore func()) {
 	}
 }
 
-// TestChaos57_DistinctHostFloodIsShedNotQueued.
+// TestChaos57_DistinctHostFloodIsShedNotQueued proves a herd spread across many
+// hosts is shed rather than queued.
 //
 // Single-flight collapses a herd on ONE host and does nothing about a herd
 // across MANY hosts — and the hostname is attacker-controlled, so a scanning
@@ -450,7 +453,8 @@ func TestChaos57_ShedResultIsNotCached(t *testing.T) {
 
 // ─── Observability contracts ─────────────────────────────────────────────────
 
-// TestChaos57_NXDOMAINNeverDrivesDegradation.
+// TestChaos57_NXDOMAINNeverDrivesDegradation keeps an authoritative "no such
+// host" out of the degradation run.
 //
 // An authoritative "this name does not exist" is a resolver working perfectly,
 // and a gateway sees a steady stream of them from typos and malware beaconing to
@@ -475,7 +479,8 @@ func TestChaos57_NXDOMAINNeverDrivesDegradation(t *testing.T) {
 	}
 }
 
-// TestChaos57_DegradationIsADurationAndAlertsOnce.
+// TestChaos57_DegradationIsADurationAndAlertsOnce pins the threshold as a
+// DURATION and the page as fire-once per episode.
 func TestChaos57_DegradationIsADurationAndAlertsOnce(t *testing.T) {
 	resetDNSResolveHealthForTest()
 	defer resetDNSResolveHealthForTest()
@@ -509,7 +514,8 @@ func TestChaos57_DegradationIsADurationAndAlertsOnce(t *testing.T) {
 	}
 }
 
-// TestChaos57_RecoveryIsOnObservedEvidence.
+// TestChaos57_RecoveryIsOnObservedEvidence requires an observed successful
+// resolution to clear the degraded state.
 //
 // Elapsed time never clears the degraded state. A gateway whose resolution
 // failures stop because traffic stopped has not recovered, and reporting that
@@ -537,7 +543,8 @@ func TestChaos57_RecoveryIsOnObservedEvidence(t *testing.T) {
 	}
 }
 
-// TestChaos57_PrivateOnlyAnswerIsNotAResolverFault.
+// TestChaos57_PrivateOnlyAnswerIsNotAResolverFault treats an answer carrying only
+// private addresses as a HEALTHY resolver.
 //
 // On a split-horizon estate this is the common case. The resolver ANSWERED, so
 // it must clear a failure episode exactly like a public answer does — otherwise
@@ -574,14 +581,14 @@ func TestChaos57_AlertDetailIsBounded(t *testing.T) {
 			Server:     "10.0.0." + itoaSmall(i%250),
 			IsNotFound: true,
 		}
-		seen["detail:"+classifyDNSFailure(nil, err)] = struct{}{}
+		seen["detail:"+classifyDNSFailure(err)] = struct{}{}
 	}
 	if len(seen) != 1 {
 		t.Fatalf("200 failures for 200 distinct client-chosen hostnames produced %d distinct dedup keys, want 1 — the alert Detail is unbounded again", len(seen))
 	}
 	// And the reason must not leak the hostname.
 	err := &net.DNSError{Err: "no such host", Name: "secret-internal-host.corp.invalid", IsNotFound: true}
-	if reason := classifyDNSFailure(nil, err); strings.Contains(reason, "secret-internal-host") {
+	if reason := classifyDNSFailure(err); strings.Contains(reason, "secret-internal-host") {
 		t.Fatalf("classifyDNSFailure leaked the queried hostname: %q", reason)
 	}
 }
@@ -601,13 +608,14 @@ func TestChaos57_ClassifyDNSFailureClasses(t *testing.T) {
 		{"nil", nil, "unknown"},
 	}
 	for _, tc := range cases {
-		if got := classifyDNSFailure(nil, tc.err); got != tc.want {
+		if got := classifyDNSFailure(tc.err); got != tc.want {
 			t.Errorf("%s: classifyDNSFailure = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
 
-// TestChaos57_NXDOMAINAtTheDeadlineBoundaryStaysNXDOMAIN.
+// TestChaos57_NXDOMAINAtTheDeadlineBoundaryStaysNXDOMAIN keeps an authoritative
+// verdict authoritative even when the resolution's deadline has already passed.
 //
 // An authoritative NXDOMAIN that lands microseconds before the deadline leaves
 // the context expired by the time the error is classified. A ctx-first reading
@@ -622,22 +630,45 @@ func TestChaos57_NXDOMAINAtTheDeadlineBoundaryStaysNXDOMAIN(t *testing.T) {
 	if expired.Err() == nil {
 		t.Fatal("setup: context is not expired")
 	}
-	err := &net.DNSError{Err: "no such host", Name: "typo.example.invalid", IsNotFound: true}
-	if got := classifyDNSFailure(expired, err); got != "nxdomain" {
-		t.Fatalf("classifyDNSFailure with an expired ctx = %q, want \"nxdomain\" — an expired context must not relabel an authoritative answer as a resolver fault", got)
+	nx := &net.DNSError{Err: "no such host", Name: "typo.example.invalid", IsNotFound: true}
+
+	// The deadline refinement must not touch an AUTHORITATIVE verdict, however
+	// long the resolution actually took.
+	if got := refineDNSFailureWithDeadline(expired, classifyDNSFailure(nx)); got != "nxdomain" {
+		t.Fatalf("an NXDOMAIN classified against an expired deadline = %q, want \"nxdomain\" — the clock must never relabel an authoritative answer", got)
 	}
-	// And the escalation consequence is what actually matters.
+	for _, authoritative := range []string{"nxdomain", "temporary", "timeout"} {
+		if got := refineDNSFailureWithDeadline(expired, authoritative); got != authoritative {
+			t.Fatalf("refineDNSFailureWithDeadline(%q) = %q, want it unchanged", authoritative, got)
+		}
+	}
+
+	// It DOES upgrade an unclassified failure — that is the case it exists for.
+	if got := refineDNSFailureWithDeadline(expired, "resolver_error"); got != "timeout" {
+		t.Fatalf("an unclassified failure at an expired deadline = %q, want \"timeout\"", got)
+	}
+	live, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	if got := refineDNSFailureWithDeadline(live, "resolver_error"); got != "resolver_error" {
+		t.Fatalf("an unclassified failure with a LIVE context = %q, want it unchanged", got)
+	}
+
+	// And the escalation consequence is what actually matters: the hostname is
+	// client-chosen, so if a typo under mild resolver latency could read as a
+	// timeout, any client could fabricate the degradation page on demand.
 	resetDNSResolveHealthForTest()
 	defer resetDNSResolveHealthForTest()
 	start := time.Now()
-	noteDNSResolveFailure(classifyDNSFailure(expired, err), start)
-	noteDNSResolveFailure(classifyDNSFailure(expired, err), start.Add(dnsResolveDegradedAfter+time.Second))
+	reason := refineDNSFailureWithDeadline(expired, classifyDNSFailure(nx))
+	noteDNSResolveFailure(reason, start)
+	noteDNSResolveFailure(reason, start.Add(dnsResolveDegradedAfter+time.Second))
 	if snap := dnsResolveState(); snap.Degraded {
 		t.Fatal("NXDOMAIN answers classified at an expired deadline drove the resolver to degraded")
 	}
 }
 
-// TestChaos57_ContractRowReportsWarnNotFail.
+// TestChaos57_ContractRowReportsWarnNotFail pins the degraded contract row at
+// warn rather than fail.
 //
 // A resolver outage is fleet-wide by construction — every node shares the
 // customer's DNS. The gateway is still proxying every request; what has stopped

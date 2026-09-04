@@ -196,24 +196,32 @@ var fireDNSResolveAlert = func(detail string) {
 // pipeline. And the operator-contract row is a viewer-role surface carrying a
 // standing no-sensitive-values guardrail. The full error goes to the
 // rate-limited log line and nowhere else.
-func classifyDNSFailure(ctx context.Context, err error) string {
+// It is a PURE function of the error and takes no context. The first draft
+// accepted one as a fallback ("the ctx expired, so call it a timeout"), which
+// forced every caller without a context — fireDNSFailureAlert, and every
+// classification test — to pass nil, and staticcheck rightly rejects that
+// (SA1012). Threading a context.TODO() through would have kept the smell and
+// bought nothing: the deadline refinement needs a REAL context, and there is
+// exactly one caller that has one. That caller (lookupPublicHostIP) now applies
+// the refinement itself, against its own live context. See the note below on
+// why the refinement can only ever upgrade `resolver_error`.
+func classifyDNSFailure(err error) string {
 	if err == nil {
 		return "unknown"
 	}
 
-	// The RESOLVER's own classification is consulted FIRST, before the context.
+	// The RESOLVER's own classification is authoritative and is consulted FIRST.
 	//
 	// Order matters, in the one direction that must never be wrong. An
 	// authoritative NXDOMAIN that lands microseconds before the deadline leaves
-	// ctx.Err() non-nil by the time this runs, so a ctx-first reading would
-	// stamp it "timeout" — and "timeout" escalates toward the degradation page
-	// while "nxdomain" deliberately does not. Since the hostname is
-	// client-chosen, that inversion would hand any client a way to fabricate
-	// the page by requesting nonexistent hosts under mild resolver latency:
-	// exactly the failure mode the NXDOMAIN exclusion exists to prevent.
-	// Nothing is lost by the reorder — net.Resolver surfaces a cancelled
-	// context as a *net.DNSError with IsTimeout set, so a genuine deadline
-	// overrun is still caught here.
+	// the caller's ctx.Err() non-nil, so a deadline-first reading would stamp it
+	// "timeout" — and "timeout" escalates toward the degradation page while
+	// "nxdomain" deliberately does not. Since the hostname is client-chosen,
+	// that inversion would hand any client a way to fabricate the page by
+	// requesting nonexistent hosts under mild resolver latency: exactly the
+	// failure mode the NXDOMAIN exclusion exists to prevent. Nothing is lost —
+	// net.Resolver surfaces a cancelled context as a *net.DNSError with
+	// IsTimeout set, so a genuine deadline overrun is caught right here.
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
 		switch {
@@ -227,14 +235,30 @@ func classifyDNSFailure(ctx context.Context, err error) string {
 		return "resolver_error"
 	}
 
-	// Only an error the resolver did not classify falls back to the context.
+	// Only an error the resolver did not classify can still be a deadline, and
+	// only when it says so itself.
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
-	if ctx != nil && ctx.Err() != nil {
+	return "resolver_error"
+}
+
+// refineDNSFailureWithDeadline upgrades an UNCLASSIFIED failure to "timeout"
+// when the resolution's own context had in fact expired.
+//
+// It can only ever act on "resolver_error", and that restriction is the whole
+// point: an authoritative verdict from the resolver — above all "nxdomain" —
+// must never be relabelled by the clock, or a client could fabricate the
+// degradation page by requesting nonexistent hosts under mild resolver latency.
+// In production this is unreachable (net.Resolver always returns a
+// *net.DNSError, which classifyDNSFailure has already decided); it exists so an
+// injected seam that reports a bare error at its deadline is still counted as
+// the timeout it was, rather than as a resolver fault.
+func refineDNSFailureWithDeadline(ctx context.Context, reason string) string {
+	if reason == "resolver_error" && ctx.Err() != nil {
 		return "timeout"
 	}
-	return "resolver_error"
+	return reason
 }
 
 // noteDNSResolveFailure records one failed resolution and returns whether the

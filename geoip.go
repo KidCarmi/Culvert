@@ -408,7 +408,7 @@ func lookupPublicHostIP(host string) net.IP {
 
 	addrs, err := lookupHostFn(ctx, host)
 	if err != nil {
-		reason := classifyDNSFailure(ctx, err)
+		reason := refineDNSFailureWithDeadline(ctx, classifyDNSFailure(err))
 		if noteDNSResolveFailure(reason, time.Now()) {
 			// The full error goes here and nowhere else — it embeds the queried
 			// hostname, which is attacker-chosen, so it must not reach the alert

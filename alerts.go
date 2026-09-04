@@ -90,7 +90,7 @@ func fireDNSFailureAlert(host string, err error) {
 	}
 	go fireAlert("dns_failure", AlertPayload{
 		Host:   host,
-		Detail: "destination lookup failed: " + classifyDNSFailure(nil, err),
+		Detail: "destination lookup failed: " + classifyDNSFailure(err),
 		Source: "proxy",
 	})
 }
