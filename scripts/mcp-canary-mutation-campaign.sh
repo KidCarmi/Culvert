@@ -457,6 +457,27 @@ run_mutation M49 \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\tif err := readPathAttemptRulesOK\(e\); err != nil \{\n\t\treturn err\n\t\}\n//'
 
+# ── (50) inverse coupling: reconciliation evidence on an outcome ───────────
+run_mutation M50 \
+  'a duplicate embedded in a terminal outcome is dropped and the attempt settles' \
+  'TestRecovery_ReadPathCouplingIsSymmetricAndStructural' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif e\.Phase != model\.PhaseReconciliation && e\.Reconciliation != nil \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery",\n\t\t\t"reconciliation evidence on a non-reconciliation record"\)\n\t\}\n//'
+
+# ── (51) decision ref checked for emptiness only ───────────────────────────
+run_mutation M51 \
+  'a malformed nonempty decision ref settles an attempt' \
+  'TestRecovery_ReadPathCouplingIsSymmetricAndStructural' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/!model\.ValidDecisionRef\(e\.Outcome\.DecisionRef\)/e.Outcome.DecisionRef == ""/'
+
+# ── (52) send state uncoupled from the phase ───────────────────────────────
+run_mutation M52 \
+  'a send intent may claim a physical send state recovery will silently drop' \
+  'TestPhysicalSendState_IsCoupledToThePhase' \
+  ./internal/mcp/events/model/ internal/mcp/events/model/validate.go \
+  's/\tif e\.Outcome\.PhysicalSendState != SendStateUnset \{\n\t\treturn evtErr\(mcperr\.ReasonEventInvalid, "send intent claiming a physical send state"\)\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

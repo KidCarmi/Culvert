@@ -1257,3 +1257,61 @@ func TestRecovery_ReadPathMirrorsTheStructuralCouplingRules(t *testing.T) {
 		}
 	})
 }
+
+// TestRecovery_ReadPathCouplingIsSymmetricAndStructural pins round 12's read-path half.
+func TestRecovery_ReadPathCouplingIsSymmetricAndStructural(t *testing.T) {
+	t.Run("reconciliation evidence smuggled onto an outcome", func(t *testing.T) {
+		// The INVERSE of round 11's rule, which the first rule alone did not cover: a
+		// PhaseOutcome carrying an embedded conflict was indexed as an outcome with the
+		// conflict dropped, so a duplicate physical invocation was reported as a cleanly
+		// settled attempt.
+		id := mustAttemptID(t)
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			model.Event{
+				Phase: model.PhaseOutcome,
+				Outcome: &model.OutcomeEvidence{
+					AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+					PhysicalSendState: model.SendPeerResponseReceived, DecisionRef: "evt_x",
+				},
+				Reconciliation: &model.ReconciliationEvidence{
+					AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+					Result: model.ReconConflict, ObservationCount: 2,
+				},
+			},
+		)); err == nil {
+			t.Fatal("an outcome carrying reconciliation evidence must fail closed, not lose the conflict")
+		}
+	})
+
+	t.Run("malformed decision ref", func(t *testing.T) {
+		// Emptiness was not the rule. "decision_1" names no committed decision any more
+		// than "" does, and settledFrom would close the attempt on the strength of it.
+		for _, ref := range []string{"decision_1", "evt_", "xevt_abc", " evt_abc"} {
+			id := mustAttemptID(t)
+			if _, err := RecoverAttempts(readerWith(
+				intentEvent(id, "rsv_a", 7),
+				model.Event{Phase: model.PhaseOutcome, Outcome: &model.OutcomeEvidence{
+					AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+					PhysicalSendState: model.SendPeerResponseReceived, DecisionRef: ref,
+				}},
+			)); err == nil {
+				t.Fatalf("decision ref %q must fail closed", ref)
+			}
+		}
+	})
+
+	t.Run("control: a well-formed ref still settles", func(t *testing.T) {
+		id := mustAttemptID(t)
+		rep, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			outcomeEvent(id, "rsv_a", 7, model.SendPeerResponseReceived),
+		))
+		if err != nil {
+			t.Fatalf("control: %v", err)
+		}
+		if len(rep.Settled) != 1 {
+			t.Fatalf("control: expected one settled attempt, got %+v", rep.Settled)
+		}
+	})
+}

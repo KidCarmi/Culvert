@@ -360,3 +360,76 @@ func TestReconciliation_ADuplicateMustSayConflict(t *testing.T) {
 		}
 	}
 }
+
+// TestPhysicalSendState_IsCoupledToThePhase pins round 12's validator half.
+//
+// A send intent is committed BEFORE the call begins, so it cannot know a send state:
+// "in flight or interrupted" is precisely the absence of a terminal outcome. And an
+// attempt-bearing outcome must state what happened — the zero value is the "unknown"
+// this ledger exists to eliminate, and it would not fail here but much later, inside
+// recovery, on an attempt whose physical effect is already done.
+func TestPhysicalSendState_IsCoupledToThePhase(t *testing.T) {
+	intent := func() Event {
+		e := baseDecision()
+		e.Phase = PhaseSendIntent
+		e.SchemaVersion = SchemaVersionV3
+		e.Outcome = &OutcomeEvidence{AttemptID: "att_0001"}
+		return e
+	}
+
+	t.Run("control: an intent with no send state is valid", func(t *testing.T) {
+		if err := intent().Validate(); err != nil {
+			t.Fatalf("control: %v", err)
+		}
+	})
+
+	t.Run("an intent may not claim a send state", func(t *testing.T) {
+		for _, st := range []PhysicalSendState{
+			SendPeerResponseReceived, SendMayHaveBeenSent, SendDefinitelyNotSent,
+		} {
+			e := intent()
+			e.Outcome.PhysicalSendState = st
+			mustReason(t, e.Validate(), mcperr.ReasonEventInvalid)
+		}
+	})
+
+	t.Run("an attempt outcome must carry a valid send state", func(t *testing.T) {
+		for _, st := range []PhysicalSendState{SendStateUnset, PhysicalSendState("made_up")} {
+			e := baseDecision()
+			e.Phase = PhaseOutcome
+			e.SchemaVersion = SchemaVersionV3
+			e.Outcome = &OutcomeEvidence{
+				AttemptID: "att_0001", DecisionRef: "evt_abc", PhysicalSendState: st,
+			}
+			mustReason(t, e.Validate(), mcperr.ReasonEventEvidenceMissing)
+		}
+	})
+}
+
+// TestValidDecisionRef_IsTheSameRuleValidateApplies pins that the exported predicate
+// the recovery read path mirrors cannot drift from the writer's own rule.
+func TestValidDecisionRef_IsTheSameRuleValidateApplies(t *testing.T) {
+	for _, ref := range []string{"evt_abc", "evt_0123456789"} {
+		if !ValidDecisionRef(ref) {
+			t.Fatalf("%q must be accepted", ref)
+		}
+	}
+	for _, ref := range []string{"", "evt_", "decision_1", "xevt_abc", " evt_abc"} {
+		if ValidDecisionRef(ref) {
+			t.Fatalf("%q must be rejected", ref)
+		}
+	}
+	// The predicate and Validate must agree on the same input, so a future change to
+	// checkID cannot leave the read-path mirror enforcing a different rule.
+	e := baseDecision()
+	e.Phase = PhaseOutcome
+	e.SchemaVersion = SchemaVersionV3
+	for _, ref := range []string{"evt_abc", "decision_1", ""} {
+		e.Outcome = &OutcomeEvidence{
+			AttemptID: "att_0001", DecisionRef: ref, PhysicalSendState: SendPeerResponseReceived,
+		}
+		if got, want := e.Validate() == nil, ValidDecisionRef(ref); got != want {
+			t.Fatalf("ref %q: Validate-accepts=%v but ValidDecisionRef=%v", ref, got, want)
+		}
+	}
+}

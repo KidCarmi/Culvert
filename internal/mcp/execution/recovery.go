@@ -205,10 +205,24 @@ func readPathAttemptRulesOK(e *model.Event) error {
 		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
 			"outcome evidence on a reconciliation record")
 	}
+	// THE INVERSE COUPLING, which the first rule alone does not cover (Codex round 12).
+	// Validate rejects reconciliation evidence on EVERY non-reconciliation phase, and
+	// the asymmetry mattered: a PhaseOutcome carrying an embedded reconciliation_conflict
+	// was indexed as an outcome with the conflict dropped, so a duplicate physical
+	// invocation was reported as a cleanly settled attempt.
+	if e.Phase != model.PhaseReconciliation && e.Reconciliation != nil {
+		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
+			"reconciliation evidence on a non-reconciliation record")
+	}
 	if e.Phase == model.PhaseOutcome && e.Outcome != nil && e.Outcome.AttemptID != "" &&
-		e.Outcome.DecisionRef == "" {
+		!model.ValidDecisionRef(e.Outcome.DecisionRef) {
+		// Testing only for EMPTINESS left every malformed nonempty reference through —
+		// "decision_1" names no committed decision any more than "" does, and
+		// settledFrom would close the attempt on the strength of it. The rule is
+		// mirrored through the model's own exported predicate rather than copied, so it
+		// cannot drift from the writer.
 		return mcperr.New(mcperr.ReasonEventEvidenceMissing, "execution.recovery",
-			"terminal outcome without a committed decision ref")
+			"terminal outcome without a valid committed decision ref")
 	}
 	return nil
 }

@@ -1151,9 +1151,33 @@ controls — well-formed records of both shapes still recover, and a SEND INTENT
 carry outcome evidence (the coupling rule is phase-specific; a blanket "outcome evidence
 only on PhaseOutcome" rule would break every intent). Mutation M49.
 
+### Three more, closing the coupling rules symmetrically
+
+Round 12 answered the questions the round-11 request put, and all three answers were yes:
+
+- **The coupling was one-directional.** Round 11 rejected outcome evidence on a
+  reconciliation record; `Event.Validate` rejects reconciliation evidence on EVERY
+  non-reconciliation phase. A `PhaseOutcome` carrying an embedded
+  `reconciliation_conflict` was indexed as an outcome with the conflict dropped — a
+  duplicate physical invocation reported as a cleanly settled attempt.
+- **`DecisionRef` was checked for EMPTINESS, not validity.** `"decision_1"` names no
+  committed decision any more than `""` does, and `settledFrom` would close the attempt on
+  the strength of it. The rule is now mirrored through `model.ValidDecisionRef`, an
+  EXPORTED predicate over the writer's own `checkID`, rather than a second copy of the
+  prefix/body/charset/length checks — a drifting mirror is worse than no mirror, because
+  it looks enforced. `TestValidDecisionRef_IsTheSameRuleValidateApplies` asserts the
+  predicate and `Validate` agree on the same input.
+- **`PhysicalSendState` was uncoupled from the phase.** A send intent is committed BEFORE
+  the call begins and cannot know a send state — "in flight or interrupted" is precisely
+  the absence of a terminal outcome — yet a v3 intent claiming `peer_response_received`
+  validated, and recovery then dropped the claim on the floor. The inverse was also open:
+  an attempt-bearing outcome could carry an unset or unknown state, which does not fail at
+  commit but much later inside recovery, on an attempt whose physical effect is already
+  done. Both directions are now enforced at the writer. Mutations M50-M52.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **49 mutations: 49 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **52 mutations: 52 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

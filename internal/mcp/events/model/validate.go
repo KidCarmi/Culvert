@@ -629,6 +629,16 @@ func (e Event) validateSendIntentPhase() error {
 	if e.Outcome == nil || e.Outcome.AttemptID == "" {
 		return evtErr(mcperr.ReasonEventEvidenceMissing, "send intent without attempt identity")
 	}
+	// A SEND INTENT MAY NOT CLAIM A PHYSICAL SEND STATE (Codex round 12). The intent is
+	// committed BEFORE the call begins, so it cannot know one — "in flight or
+	// interrupted" is precisely the absence of a terminal outcome, and that is what
+	// makes an orphan an orphan. A record claiming peer_response_received on the intent
+	// is not merely odd: recovery treats it as an intent and orphanFrom drops the claim
+	// on the floor, so the ledger would carry an assertion about a physical effect that
+	// nothing reads and nothing contradicts.
+	if e.Outcome.PhysicalSendState != SendStateUnset {
+		return evtErr(mcperr.ReasonEventInvalid, "send intent claiming a physical send state")
+	}
 	return nil
 }
 
@@ -662,6 +672,14 @@ func (e Event) validateDecisionPhase() error {
 		// the pre-execution decision commit.
 		if err := checkID("decision_ref", "evt_", e.Outcome.DecisionRef); err != nil {
 			return evtErr(mcperr.ReasonEventEvidenceMissing, "outcome event without a committed decision ref")
+		}
+		// An ATTEMPT-BEARING outcome must state what happened to the invocation. The
+		// zero value is the "unknown" this ledger exists to eliminate, and an unknown
+		// state does not fail here — it fails much later, inside recovery, where it
+		// poisons the derivation of an attempt whose physical effect is already done.
+		// Outcomes with no AttemptID predate attempt accounting and are left alone.
+		if e.Outcome.AttemptID != "" && !e.Outcome.PhysicalSendState.Valid() {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "attempt outcome without a valid physical send state")
 		}
 	} else if e.Outcome != nil {
 		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a non-outcome event")
@@ -757,6 +775,15 @@ func (e Event) validateFieldBounds() error {
 // checkID validates a prefixed, bounded, safe-charset identifier. IDs are safe
 // correlation handles, never security tokens, and must be non-empty, carry the
 // expected prefix, and contain only [0-9A-Za-z_-].
+// ValidDecisionRef reports whether s is a structurally valid committed-decision
+// reference, by the SAME rule Validate applies to an outcome's DecisionRef.
+//
+// It is exported so the recovery read path — which deliberately does not call the
+// full Validate — can mirror this rule rather than reimplement it. A second copy of
+// the prefix, body, charset and length checks would be free to drift from the writer,
+// and a drifting mirror is worse than no mirror: it looks enforced (Codex round 12).
+func ValidDecisionRef(s string) bool { return checkID("decision_ref", "evt_", s) == nil }
+
 func checkID(field, prefix, s string) error {
 	if s == "" {
 		return evtErr(mcperr.ReasonEventCorrelationMalformed, field+" missing")
