@@ -200,7 +200,7 @@ run_mutation M12 \
   'restart recovery resolves an orphan as settled + definitely_not_sent' \
   'TestRecovery_' \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
-  's/\t\t\t\tState:                AttemptReconciliationRequired,\n/\t\t\t\tState:                AttemptSettled,\n\t\t\t\tTerminalSendState:    model.SendDefinitelyNotSent,\n/'
+  's/\t\tState:                AttemptReconciliationRequired,\n\t\tReconciliation:       known,\n/\t\tState:                AttemptSettled,\n\t\tTerminalSendState:    model.SendDefinitelyNotSent,\n\t\tReconciliation:       known,\n/'
 
 # ── (13) release refunds the monotonic budget ───────────────────────────────
 run_mutation M13 \
