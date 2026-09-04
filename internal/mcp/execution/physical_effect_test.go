@@ -4,12 +4,15 @@ package execution
 // (review blockers #6/#8).
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
 
 // identityGate admits with caller-chosen reservation identity so a test can drive
@@ -118,5 +121,92 @@ func TestPhysicalSendState_DlpBlockStillRecordsPeerReceipt(t *testing.T) {
 	// The conservative direction: an interrupted attempt is never 'not sent'.
 	if !model.SendMayHaveBeenSent.MayHaveReachedPeer() {
 		t.Fatal("an ambiguous attempt must be treated as possibly effective")
+	}
+}
+
+// neverStartedUpstream fails the way the production client fails when a call is
+// refused before any leg begins, carrying the never-started fact on the error.
+type neverStartedUpstream struct{ calls int }
+
+func (u *neverStartedUpstream) Call(context.Context, upstreamclient.Target, string, json.RawMessage, upstreamclient.CallOptions) (*upstreamclient.Response, error) {
+	u.calls++
+	return nil, upstreamclient.MarkNeverSentForTest(
+		mcperr.New(mcperr.ReasonUpstreamTransportRejected, "test", "refused before any leg began"))
+}
+
+// TestPhysicalSendState_ALocalRefusalIsNotAnAmbiguousSend pins round 14's P2.
+//
+// A call refused before any request bytes exist — method not admitted, invalid
+// target, pool admission refused, an endpoint that will not canonicalize, a resolve
+// failure, a request that will not build — is not ambiguous. Recording
+// may_have_been_sent there was conservative but FALSE, and it cost twice: the outcome
+// claimed Executed for an invocation that never happened, and the attempt was sent to
+// witness reconciliation with nothing to establish.
+func TestPhysicalSendState_ALocalRefusalIsNotAnAmbiguousSend(t *testing.T) {
+	up := &neverStartedUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.LiveGate = identityGate{reservationID: "rsv_local", generation: 3}
+
+	e.Execute(t.Context(), execInput(policy.ActionAllow, false), rollout.Resolution{Disposition: rollout.EffectExecute})
+
+	if up.calls != 1 {
+		t.Fatalf("the call must be attempted exactly once, got %d", up.calls)
+	}
+	// The DURABLE record is the claim under test, not the ExecOutput. ExecOutput.Executed
+	// is Culvert's disposition (what the client got); Outcome.PhysicalSendState and
+	// Outcome.Executed are the peer's reality, and they are what recovery and any witness
+	// reconciliation read.
+	st, executed := durableSendState(t, e)
+	if st != model.SendDefinitelyNotSent {
+		t.Fatalf("a call refused before any leg began must record definitely_not_sent, got %q", st)
+	}
+	if executed {
+		t.Fatal("a provably never-sent attempt must not record executed")
+	}
+}
+
+// durableSendState reads the terminal outcome this executor committed and returns the
+// physical send state and the executed flag it durably recorded.
+func durableSendState(t *testing.T, e *Executor) (model.PhysicalSendState, bool) {
+	t.Helper()
+	sp := e.cfg.Events.Spool(model.CapGateway)
+	if sp == nil {
+		t.Fatal("no gateway spool")
+	}
+	for _, part := range []model.Partition{model.PartCrit, model.PartOrd} {
+		evs, _, _, err := sp.CommittedForExport(part, 0, 256)
+		if err != nil {
+			t.Fatalf("CommittedForExport(%v): %v", part, err)
+		}
+		for i := range evs {
+			if evs[i].Phase == model.PhaseOutcome && evs[i].Outcome != nil && evs[i].Outcome.AttemptID != "" {
+				return evs[i].Outcome.PhysicalSendState, evs[i].Outcome.Executed
+			}
+		}
+	}
+	t.Fatal("no terminal attempt outcome was committed")
+	return "", false
+}
+
+// TestPhysicalSendState_AnUnmarkedFailureStaysAmbiguous is the CONTROL, and it is the
+// one that matters: the never-started fact is ABSENT BY DEFAULT. A failure from a path
+// nobody classified — or from a test double that returns a bare error — must keep the
+// conservative may_have_been_sent, never be downgraded by omission.
+func TestPhysicalSendState_AnUnmarkedFailureStaysAmbiguous(t *testing.T) {
+	up := &fakeUpstream{err: mcperr.New(mcperr.ReasonUpstreamCallFailed, "test", "connection reset mid-flight")}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.LiveGate = identityGate{reservationID: "rsv_amb", generation: 3}
+
+	e.Execute(t.Context(), execInput(policy.ActionAllow, false), rollout.Resolution{Disposition: rollout.EffectExecute})
+
+	// An ambiguous transport failure keeps may_have_been_sent, and therefore executed:
+	// the peer may have acted, and this PR's central rule is that uncertainty is never
+	// converted into "not executed".
+	st, executed := durableSendState(t, e)
+	if st != model.SendMayHaveBeenSent {
+		t.Fatalf("an unmarked transport failure must stay ambiguous, got %q", st)
+	}
+	if !executed {
+		t.Fatal("an ambiguous send must not be downgraded to not-executed by omission")
 	}
 }

@@ -58,7 +58,7 @@ func (p *serverPool) acquire(ctx context.Context) (func(), error) {
 func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string, attemptID string) (respBody []byte, facts legFacts, err error) {
 	canon, class, err := destination.Canonicalize(target.Endpoint, c.cfg.Policy, c.cfg.InspectionLimits)
 	if err != nil {
-		return nil, legFacts{}, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
+		return nil, legFacts{neverSent: true}, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
 	}
 	// Reject only structurally-forbidden endpoint classes here; the authoritative
 	// SSRF classification (private/loopback/metadata handling) happens in Resolve +
@@ -75,12 +75,12 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	// genuinely internal MCP server needs a per-target policy that does not exist
 	// yet — adding one is a design change, not a flag flip.
 	if class == destination.ClassMalformed || class == destination.ClassBlockedScheme {
-		return nil, legFacts{}, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
+		return nil, legFacts{neverSent: true}, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
 	}
 	now := c.cfg.Clock()
 	pin, _, err := destination.Resolve(ctx, canon, c.cfg.Policy, c.cfg.Resolver, c.cfg.InspectionLimits, now, c.cfg.Limits.PinTTL())
 	if err != nil {
-		return nil, legFacts{preResponse: true}, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
+		return nil, legFacts{preResponse: true, neverSent: true}, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
 	}
 
 	client, transport := c.httpClientFor(target, canon, pin)
@@ -98,7 +98,7 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	// the bare origin root.
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, canon.RequestURL(), bytesReader(body))
 	if err != nil {
-		return nil, legFacts{}, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "build request", err)
+		return nil, legFacts{neverSent: true}, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "build request", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")

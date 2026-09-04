@@ -141,11 +141,29 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// from here on is recorded as may_have_been_sent rather than silently
 		// defaulting to "not sent" (§6). NOTHING blocking is introduced between the
 		// final kill re-read above and this call.
+		//
+		// The two adjustments below only ever move this state on POSITIVE evidence,
+		// one in each direction: proof the peer answered, or proof no bytes were ever
+		// sent. Absent either, the conservative assumption stands.
 		sendState = model.SendMayHaveBeenSent
 		r, err := e.cfg.Upstream.Call(ctx, target, in.Method, json.RawMessage(in.RawParams), upstreamclient.CallOptions{
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
 			AttemptID: attemptIDOf(attempt),
 		})
+		if upstreamclient.SendNeverStarted(err) {
+			// The call was refused before any request bytes existed — method not
+			// admitted, an invalid target, pool admission refused, an endpoint that
+			// would not canonicalize, a resolve failure, a request that would not
+			// build. Recording may_have_been_sent there is conservative but FALSE, and
+			// it costs twice: the outcome claims Executed for an invocation that never
+			// happened, and the attempt is sent to witness reconciliation with nothing
+			// to establish (Codex round 14).
+			//
+			// This is the only way definitely_not_sent becomes reachable from inside
+			// the call, and the fact is absent by default: an unmarked error — from a
+			// path nobody classified, or a test double — keeps the conservative state.
+			sendState = model.SendDefinitelyNotSent
+		}
 		if r != nil || upstreamclient.ResponseObserved(err) {
 			// The peer answered, so the invocation demonstrably reached it. This says
 			// nothing about whether the response is USABLE — a non-200, an unreadable
@@ -157,7 +175,10 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			// that as may_have_been_sent sent a known-executed attempt to witness
 			// reconciliation with nothing left to establish. This only ever moves
 			// uncertainty DOWN a step that real evidence supports; it can never reach
-			// definitely_not_sent, which stays provable only before the call begins.
+			// definitely_not_sent, which is reachable only from POSITIVE evidence that
+			// no request bytes ever existed — the boundary refusal above, or the
+			// never-started fact the client marks on a leg that failed before
+			// client.Do.
 			sendState = model.SendPeerResponseReceived
 		}
 		upResp, upErr = r, err

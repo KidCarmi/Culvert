@@ -121,16 +121,20 @@ func Admitted(method string) bool { return admittedMethods[method] }
 // decoded response. It fails closed with a classified, sanitized error; it never
 // leaks a raw network error or forwards a client token.
 func (c *Client) Call(ctx context.Context, target Target, method string, params json.RawMessage, opts CallOptions) (*Response, error) {
+	// Each of these three refusals happens before any leg begins, so no request bytes
+	// exist on any connection. Marking them lets the executor record
+	// definitely_not_sent instead of sending a provably-undelivered attempt to witness
+	// reconciliation that has nothing to establish (Codex round 14).
 	if !Admitted(method) {
-		return nil, mcperr.New(mcperr.ReasonUpstreamTransportRejected, "upstreamclient", "method not admitted upstream")
+		return nil, markNeverSent(mcperr.New(mcperr.ReasonUpstreamTransportRejected, "upstreamclient", "method not admitted upstream"))
 	}
 	if target.Endpoint == "" || target.ServerID == "" {
-		return nil, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint must come from the registered record")
+		return nil, markNeverSent(mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint must come from the registered record"))
 	}
 	pool := c.poolFor(target.ServerID)
 	release, err := pool.acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, markNeverSent(err)
 	}
 	defer release()
 
@@ -151,7 +155,7 @@ func (c *Client) Call(ctx context.Context, target Target, method string, params 
 		// executor could only infer receipt from a successfully DECODED response, so a
 		// known-executed attempt was recorded as may_have_been_sent and sent for
 		// witness reconciliation that had nothing left to establish.
-		lastErr = markResponseObserved(err, facts)
+		lastErr = markLegFacts(err, facts)
 		// EXACTLY-ONE-PHYSICAL-SEND (First Controlled Canary, blocker #6).
 		// This test precedes retryable() deliberately: retryable() consults the
 		// method's idempotency and whether the failure arrived before any response,

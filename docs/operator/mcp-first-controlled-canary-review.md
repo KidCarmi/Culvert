@@ -1203,9 +1203,39 @@ to the writer where it belongs — but they are defense-in-depth for the future 
 integration rather than defects in the shipped path. Nothing commits a `PhaseReconciliation`
 event today and `RecoverAttempts` has no production caller.
 
+### Round 14: back on the live path, and one deployment prerequisite
+
+**A local refusal is not an ambiguous send.** `sendState` is set to `may_have_been_sent`
+immediately before `Upstream.Call`, which is right for anything that can put bytes on a
+wire — but `Call` refuses some invocations before any leg begins: method not admitted, an
+invalid target, pool admission refused, an endpoint that will not canonicalize, a resolve
+failure, a request that will not build. Recording those as ambiguous was conservative but
+FALSE, and it cost twice: the durable outcome claimed `executed` for an invocation that
+never happened, and the attempt was routed to witness reconciliation with nothing to
+establish.
+
+`preResponse` could not serve as the signal and that is the subtle part — a DNS resolve
+failure sets it and sent nothing, while a peer that reads the whole request and hangs up
+also sets it and demonstrably did. The client now carries a distinct `neverSent` fact out
+on the error (`SendNeverStarted`), the mirror of `ResponseObserved`, and like it the fact
+is **absent by default**: an unmarked error — from a path nobody classified, or a test
+double — keeps the conservative state. That is the CONTROL
+(`TestPhysicalSendState_AnUnmarkedFailureStaysAmbiguous`), and both gates read the
+DURABLE record rather than the ExecOutput, because `ExecOutput.Executed` is Culvert's
+disposition while `Outcome.PhysicalSendState` is the peer's reality. Mutation M56.
+
+**A deployment prerequisite, promoted from a recorded residual.** §25a already recorded
+that a binary built BEFORE the v3 change reports `event_spool_corrupt` when it meets a v3
+record, because its strict decoder rejects unknown fields before any version check. What
+was recorded as a residual is really an **ordering requirement**: a forward-compatible
+(peek-first) reader must be deployed to every node that could perform recovery BEFORE any
+release starts writing v3 records. Rolling back past that reader turns a schema fault into
+a corruption alarm on a healthy ledger. No code change can reach already-shipped readers —
+the only lever is ordering, and it now says so where an operator will read it.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **55 mutations: 55 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **56 mutations: 56 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

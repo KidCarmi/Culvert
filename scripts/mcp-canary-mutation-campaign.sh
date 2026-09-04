@@ -499,6 +499,13 @@ run_mutation M55 \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\tif e\.Phase == model\.PhaseSendIntent && e\.Outcome != nil &&\n\t\te\.Outcome\.PhysicalSendState != model\.SendStateUnset \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery",\n\t\t\t"send intent claiming a physical send state"\)\n\t\}\n//'
 
+# ── (56) a local refusal recorded as an ambiguous send ─────────────────────
+run_mutation M56 \
+  'a call refused before any leg began is recorded may_have_been_sent' \
+  'TestPhysicalSendState_ALocalRefusalIsNotAnAmbiguousSend' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\tif upstreamclient\.SendNeverStarted\(err\) \{/\t\tif false \&\& upstreamclient.SendNeverStarted(err) {/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves
