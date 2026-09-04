@@ -842,6 +842,16 @@ func (r *soakRun) approveWithExpiry(server, tool string, expiresAt time.Time) st
 	return rq.ApprovalID
 }
 
+// soakSwapToolTrustClock installs an injected tool-trust clock for the soak's
+// expiry proofs and returns the restore. It is the single harness owner of
+// the coordinator clock swap (the regression test in
+// mcp_tooltrust_harness_test.go exercises exactly this helper).
+func soakSwapToolTrustClock(fn func() time.Time) (restore func()) {
+	prev := mcpToolTrust.nowFn
+	mcpToolTrust.nowFn = fn
+	return func() { mcpToolTrust.nowFn = prev }
+}
+
 // toolTrustExpire proves an EXPIRED approval cannot govern (§11). Using an injected clock, a
 // short-lived approval on confirmtool is minted (Usable -> would_require_confirmation); the
 // clock is advanced past expiry and reconcile demotes it; a fresh Shadow request then
@@ -852,9 +862,8 @@ func (r *soakRun) toolTrustExpire() {
 	base := time.Now()
 	var nowNanos atomic.Int64
 	nowNanos.Store(base.UnixNano())
-	prev := mcpToolTrust.nowFn
-	mcpToolTrust.nowFn = func() time.Time { return time.Unix(0, nowNanos.Load()) }
-	defer func() { mcpToolTrust.nowFn = prev }()
+	restoreClock := soakSwapToolTrustClock(func() time.Time { return time.Unix(0, nowNanos.Load()) })
+	defer restoreClock()
 
 	// Replace confirmtool's standing approval with a short-lived one.
 	r.revokeTool(ctrlServer, toolConfirm)
@@ -1433,9 +1442,8 @@ func TestShadowSoakMutationCampaign(t *testing.T) {
 		base := time.Now()
 		var nn atomic.Int64
 		nn.Store(base.UnixNano())
-		prev := mcpToolTrust.nowFn
-		mcpToolTrust.nowFn = func() time.Time { return time.Unix(0, nn.Load()) }
-		defer func() { mcpToolTrust.nowFn = prev }()
+		restoreClock := soakSwapToolTrustClock(func() time.Time { return time.Unix(0, nn.Load()) })
+		defer restoreClock()
 		r.revokeTool(ctrlServer, toolConfirm)
 		r.approvals[toolConfirm] = r.approveWithExpiry(ctrlServer, toolConfirm, base.Add(5*time.Second))
 		nn.Store(base.Add(time.Hour).UnixNano())

@@ -61,3 +61,16 @@ func pacLifecyclePersist(stage string) error {
 	}
 	return nil
 }
+
+// pacEffectHook is a TEST-ONLY fault-injection seam consulted immediately
+// before a post-commit effect that reaches outside the lifecycle store
+// ("cluster" — the CP→DP snapshot publication); a non-nil error is treated
+// exactly like the effect itself failing. Production leaves the hook nil.
+var pacEffectHook func(effect string) error
+
+func pacEffect(effect string) error {
+	if h := pacEffectHook; h != nil {
+		return h(effect)
+	}
+	return nil
+}

@@ -161,6 +161,30 @@ func initMCPToolTrust(_ *startupState) {
 	startToolTrustReconcileLoop(resolveLifecycleCtx())
 }
 
+// mcpToolTrustLoop tracks the most recently started reconcile loop so a test
+// can observe (toolTrustReconcileLoopRunning) whether it has exited.
+var mcpToolTrustLoop struct {
+	mu   sync.Mutex
+	done chan struct{} // closed when the loop goroutine returns
+}
+
+// toolTrustReconcileLoopRunning reports whether the most recently started
+// reconcile loop is still running (false when none was started).
+func toolTrustReconcileLoopRunning() bool {
+	mcpToolTrustLoop.mu.Lock()
+	done := mcpToolTrustLoop.done
+	mcpToolTrustLoop.mu.Unlock()
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return false
+	default:
+		return true
+	}
+}
+
 // mcpToolTrustReconcileInterval bounds how long an expired grant can keep a tool
 // Usable during an active Shadow experiment (no inventory read is guaranteed then).
 // A package var so a test can shorten it.
@@ -174,7 +198,12 @@ func startToolTrustReconcileLoop(ctx context.Context) bool {
 		return false
 	}
 	interval := mcpToolTrustReconcileInterval // read in the caller goroutine (ordered with tests)
+	done := make(chan struct{})
+	mcpToolTrustLoop.mu.Lock()
+	mcpToolTrustLoop.done = done
+	mcpToolTrustLoop.mu.Unlock()
 	go func() {
+		defer close(done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {

@@ -770,7 +770,9 @@ func pacCompleteCommittedLocked(lc *pac.ProfileLifecycle, op *pac.PendingOp, mod
 	// 3. Cluster publication (content-idempotent: the active store already
 	// carries the committed profile) + the per-profile alert latch.
 	if !op.Progress.Cluster {
-		_ = publishCurrentConfigSnapshot()
+		if err := pacEffect("cluster"); err == nil {
+			_ = publishCurrentConfigSnapshot()
+		}
 		pacResetProfileAlert(op.ProfileID)
 		op.Progress.Cluster = true
 		if !persist("progress") {

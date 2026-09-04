@@ -174,10 +174,20 @@ func (s *LifecycleStore) quarantineLocked(path string, cause error) error {
 	return fmt.Errorf("%w: parse %s failed (%v); quarantined to %s and started empty; publish/rollback refused for the affected profiles until acknowledged", ErrHistoryReset, path, cause, quarantine)
 }
 
+// ResetWriteHook is a TEST-ONLY fault-injection seam consulted immediately
+// before every durable write of the history-reset record; a non-nil error is
+// treated exactly like the underlying write failing. Production leaves it nil.
+var ResetWriteHook func(path string) error
+
 func (s *LifecycleStore) persistReset(r *HistoryReset) error {
 	rp := resetPathFor(s.path)
 	if rp == "" {
 		return nil
+	}
+	if h := ResetWriteHook; h != nil {
+		if err := h(rp); err != nil {
+			return err
+		}
 	}
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
