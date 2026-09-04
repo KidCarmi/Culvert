@@ -195,3 +195,112 @@ password. Culvert never logs, persists, audits or returns a raw transport
 error on this path: logs carry a bounded reason class plus the redacted
 authority and the safe entry id; the read model and the health/diagnose
 surfaces carry the classified probe state only.
+
+## 7. Export and import (schema 2)
+
+`GET /api/config/export` (full or `?section=upstream`) is `version: 2` and
+carries the managed entries as
+`upstream_proxies_v2: {entries: [{id, scheme, host, port, username,
+credentialState}]}` plus `upstream_credentials: "omitted"`. An export never
+carries a password, the sealed record, ciphertext, a key id, the legacy
+`xxxxx` echo or a legacy URL, so it can be attached to a ticket.
+
+Importing a version-2 document is planned before anything is touched:
+
+| incoming entry | meaning |
+| --- | --- |
+| `preserve` | same id and unchanged authority — the sealed credential stays |
+| `create` | new managed entry (state `none`) |
+| `update` | authority change on an entry without a credential |
+| `requiresReplacement` | the entry declared a credential (`credentialState` ≠ `none`) but is not a `preserve`: it lands as a new or updated entry in the `requiresReplacement` state (an existing entry that still holds material is refused instead, see below) |
+
+| existing entry | meaning |
+| --- | --- |
+| `retain` | kept |
+| `remove` | replace mode only, and only for the identity-bearing v2 document |
+
+A plan that would destroy a credential (authority change or removal of a
+credentialed entry) is refused with **409 `credential_clear_required`** and
+the complete plan (`credentialClearRequired: [ids]`) before any store is
+touched. Clear those credentials deliberately (Tier-3) first, then import
+again — the import confirmation word is Tier-2 and never substitutes for
+the clear. A real password in the document is refused (400
+`credentials_not_importable`); duplicate ids are refused (400).
+
+Recommended ceremony:
+
+```
+POST /api/config/import?dryRun=1            → plan + importDigest, nothing applied
+POST /api/config/import?importDigest=sha256:… → applies exactly that plan
+```
+
+The digest is recomputed under the save lock; if the document moved in
+between the commit answers 409 `import_stale` (re-run the dry-run). The
+result carries counts only: `upstream: {preserved, omitted, cleared,
+requiresReplacement}`.
+
+A pre-v2 legacy list (`upstream_proxies` with `xxxxx` passwords) is still
+accepted: omission never removes, and `xxxxx` preserves only an exact,
+unique authority match.
+
+## 8. Backups never carry parent-proxy credentials
+
+Both backup modes (plain and encrypted) archive a sanitized
+`admin_settings.json`: every sealed credential is removed and the entry
+is marked `requiresReplacement: true`; the manifest records
+`credentialsOmitted: true`; `.upstream_cred_key` is never archived. The
+live file and the running pool are not touched by a backup.
+
+**Restore** boots every formerly credentialed entry into the distinct
+state `requiresReplacement`: ineligible, never probed, never sent
+unauthenticated. Until you act, the effective mode is
+`no_eligible_parent` (or `direct_fallback` once a plain-HTTP request has
+fallen back — parents are never contacted). The restore dry-run prints
+`credentials requiring replacement: N`; the commit keeps the usual
+`--confirm`; an archive carrying a node-local key file is refused; an
+existing `.upstream_cred_key` on the target is preserved in every mode.
+Surfaces: `credentialsRequiringReplacement` on `GET /api/upstream`, the
+`upstream_credentials` operator-contract row (count only) and the
+Upstream Proxies panel badge + banner. Set each credential again
+(Replace, Tier-2) or clear it (Clear, Tier-3).
+
+## 9. Preparing a downgrade to the previous release
+
+The previous release (admin-settings schema 1) reads credentials from
+the legacy `upstream_proxies` URLs and cannot unseal the v2 record. Before
+booting it on this data directory:
+
+```
+culvert --prepare-downgrade --target-schema 1                 # dry-run (mandatory)
+culvert --prepare-downgrade --target-schema 1 --confirm <word> # commit
+```
+
+The word is `<data-dir basename>-schema1` (for `/data`: `data-schema1`)
+and the dry-run prints it. The commit unseals every credential in memory
+only and atomically rewrites `admin_settings.json` (0600, fsync, rename)
+with full legacy URLs, removing `upstream_proxies_v2`; it refuses when
+the key is missing or unusable, when any credential is `mismatch`,
+`unusable` or `requiresReplacement` (fix those first), and when the file is
+already prepared. Output, log and audit carry counts only. The prepared
+file contains the passwords in cleartext by construction — that is the
+predecessor's format, and the reason the command is explicit and offline.
+
+Booting the CURRENT binary on a prepared file re-migrates it once
+(`migration.reason: re-migrated_after_prepare`, credentials re-sealed).
+
+If a prepared credential is wrong, the previous release does NOT fall
+back to direct egress: the parent's 407 is forwarded to the client on
+every request (its breaker counts transport errors, and a 407 is a
+well-formed response). Requests fail loudly; nothing reaches the parent
+unauthenticated.
+
+## 10. Manual health check
+
+`POST /api/upstream/health` (admin) probes every eligible entry with a
+5-second deadline each, one run at a time, at most one accepted run per
+10 seconds (429 `probe_rate_limited` / `probe_in_flight` with
+`Retry-After`). An accepted run is audited as `upstream.probe.manual`
+with counts (`probed/healthy/unhealthy/skipped`) and `scope=node-local`;
+a refused run leaves no success audit. `requiresReplacement` and other
+credential-ineligible entries are skipped. The periodic loop is never
+gated and the classifier is unchanged.

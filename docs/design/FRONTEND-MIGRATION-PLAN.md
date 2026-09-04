@@ -1161,6 +1161,132 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-D IMPLEMENTATION RECORD (this branch, 2026-09-04).** Portability,
+> recovery and complete secret containment for the Upstream v2 sealed
+> credentials, appended to the frozen 2F-C head `ef9cb045` (RED matrix
+> `upstream_v2_portability_red_test.go` — R24, R24b, R32–R34, R40, the
+> versioned export shape and the complete R15 sink matrix — committed at
+> `c7073753` and executed on the untouched baseline: 8/8 FAIL; a
+> lint-only range-form touch to its `pdAuditCount` helper at `e40e3fce`
+> was re-executed on the baseline with the same 8/8 FAIL before the
+> product commit `d254ede8`; no RED assertion was changed).
+> **(1) Export contract, schema 2.** `configBackup.version` is now
+> `configBackupVersion = 2` (config-version snapshots carry the same
+> number; import accepts 1..2). The export carries
+> `upstream_proxies_v2: {entries:[{id, scheme, host, port, username,
+> credentialState}]}` (managed entries only, stable server IDs, bounded by
+> the document cap) plus `upstream_credentials: "omitted"`; it NEVER carries
+> a password, the sealed `credential` record, ciphertext, key id, the
+> legacy `xxxxx` echo or a legacy URL. The credential-free legacy
+> `upstream_proxies` list left the export surface (it stays an
+> import-only input: `configSurfaces` rows `upstream_proxies` Import-only,
+> `upstream_proxies_v2` Export+Import, Redacted).
+> **(2) Atomic import plan + dry-run.** `upstreamPlanImport` classifies
+> every incoming entry as `preserve` (same ID AND unchanged authority
+> hash — the only shape that keeps a sealed credential), `create`,
+> `update` (authority change on an uncredentialed entry) or
+> `requiresReplacement`, and every existing managed entry as `retain` or
+> `remove` (replace mode only, for the identity-bearing v2 document; the
+> identity-free legacy list can never remove — the 2F-C rule — and its
+> `xxxxx` echo preserves an exact unique authority match only). Duplicate
+> incoming IDs → 400; a real password → 400 `credentials_not_importable`;
+> both sections present → 400 `ambiguous_upstream_sections`; YAML-owned
+> authorities are skipped and counted. Any plan that would destroy a
+> credential (authority change or removal of a credentialed entry) is
+> refused 409 `credential_clear_required` carrying the COMPLETE plan and
+> `credentialClearRequired: [ids]` BEFORE any store is touched — the
+> import confirm word stays Tier-2 and never substitutes for the Tier-3
+> clear. `?dryRun=1` (`1`/`true`/`yes`) answers the plan plus a
+> deterministic `importDigest` (`sha256:` over the plan JSON and the
+> current document's `{revision, rows{id, authorityHash, material,
+> flag}}`) with zero mutation; the commit carries `?importDigest=` and
+> revalidates it under the authoritative save lock
+> (`saveAdminSettingsWithOverrides{upstreamMutate}` — validate → persist →
+> publish), answering 409 `import_stale` if the document moved. Upstream
+> is applied FIRST in the apply region; the commit summary carries counts
+> only: `upstream: {preserved, omitted, cleared, requiresReplacement}`.
+> **(3) Backup secret stripping, both modes.** `packOne` sanitizes
+> `data/admin_settings.json` on the bytes it packs
+> (`stripUpstreamCredentialsFromSettings`: every `credential` record
+> removed, `requiresReplacement: true` set, and the output verified free
+> of `ciphertext`/`keyId`/`authorityHash` keys); the manifest records
+> `credentialsOmitted: true` unconditionally; `.upstream_cred_key` joins
+> the never-archived node-local key set. The live file and pool are
+> untouched; there is no secret-inclusive mode.
+> **(4) Restore semantics.** A restore boots each formerly credentialed
+> entry into the DISTINCT durable state `requiresReplacement`
+> (`ManagedEntry.RequiresReplacement`, meaningful only with no
+> `credential`; cleared by T2 replace or T3 clear) — ineligible, never
+> probed, never sent unauthenticated, so the effective mode is
+> `no_eligible_parent` before any traffic and `direct_fallback` only after
+> a real fallback. The dry-run prints the exact count (`credentials
+> requiring replacement: N`, both plain and encrypted archives); the
+> commit keeps the existing `--confirm`; an archive that carries a
+> node-local key file is refused; an existing `.upstream_cred_key` is
+> preserved byte-for-byte in every restore mode. Surfaces:
+> `credentialsRequiringReplacement` on `GET /api/upstream` (also folded
+> into `credentialsIneligible`), the `upstream_credentials`
+> operator-contract row (count only) and the legacy panel badge + banner.
+> **(5) `culvert --prepare-downgrade --target-schema <n> [--confirm
+> <word>]`.** Target = the frozen 2F-B predecessor's admin-settings
+> schema 1 (`adminSettingsSchemaPredecessor`), bound in code to its SHA
+> `1e3578d93021563df61685f5c669f6742fc72081`
+> (`downgradePredecessorSHA`); the current file carries
+> `admin_settings_schema: 2`. Dry-run is mandatory and prints counts plus
+> the confirmation word (`<data-dir basename>-schema<n>`, e.g.
+> `data-schema1`); the commit refuses on an unsupported target, an
+> unreadable/invalid file, an already-prepared file, nothing to prepare,
+> a missing/unusable key, and any `requiresReplacement`/`mismatch`/
+> `unusable` credential. Credentials are unsealed in memory only and the
+> predecessor-compatible file (full legacy URLs, `upstream_proxies_v2`
+> and the schema stamp removed, `upstream_prepared_downgrade` marker with
+> counts) is written atomically 0600 + fsync + rename; output, log and
+> audit carry counts only. The next boot of the CURRENT binary consumes
+> the marker and re-migrates, reporting `migration.reason:
+> re-migrated_after_prepare` once. **Real-binary proofs**
+> (`portability.py`, 38/38 on the candidate): current binary → two
+> credentialed parents on 127.0.0.1 requiring Proxy-Authorization →
+> export/import plan/dry-run/commit/stale/refusals → manual probe →
+> plain + encrypted backup → restore dry-run + commit → boot into
+> `requiresReplacement`/`no_eligible_parent` → direct egress with parents
+> silent → T2 replace → chained again → prepare-downgrade dry-run/refusals/
+> commit → **the frozen predecessor `1e3578d9` boots the prepared file
+> and chains through both parents WITH the correct Proxy-Authorization** →
+> current binary re-migrates (`re-migrated_after_prepare`, 2 sealed,
+> plaintext gone) → next boot silent. **Corrupted-credential variant,
+> recorded as observed and not laundered:** with a wrong password in the
+> prepared file the predecessor forwards the parent's 407 to the client on
+> every request (8/8 attempts, the parent saw all 8, no direct egress) —
+> the 2F-B breaker trips on transport ERRORS only, a 407 is a well-formed
+> response, so the predecessor never falls back to DIRECT and never
+> reaches the parent unauthenticated; the failure is loud (407) rather
+> than silent. Nothing in 2F-D changes the predecessor.
+> **(6) Manual probe lifecycle.** `POST /api/upstream/health` is
+> admin-only, bounded at 5 s per entry (the existing probe deadline),
+> single-flight (`probe_in_flight`) and rate-limited to one accepted run
+> per 10 s (`ManualProbeWindow`, `probe_rate_limited`, 429 with
+> `Retry-After` + `retryAfterSeconds`); an accepted run is audited as
+> `upstream.probe.manual` with `probed=/healthy=/unhealthy=/skipped=` and
+> `scope=node-local`, a refused run leaves no success audit, raw errors
+> never reach the response; the classifier and the periodic loop are
+> unchanged (the periodic loop is never gated). Route metadata
+> `AuditExpected: true`; route count unchanged (243).
+> **(7) Leak sweep.** RED `R15_CompleteSinkMatrix` (canary password +
+> ciphertext across API bodies, audit, logs, export/import reports,
+> `diagnose upstream`, support bundle, config-version files, cluster
+> snapshot, both backup archives, restore/downgrade dry-run output) is
+> green; `portability.py` L1 sweeps the same needles over the real
+> binary's artifacts; the browser half is `frontend/e2e/upstream-2fd.spec.ts`
+> (legacy panel — the new SPA has no upstream route until 2F-E): every
+> same-origin response body, every request URL, the DOM, localStorage,
+> sessionStorage and the page URL are swept for the canary and the
+> on-disk ciphertext after create → seal → list → Health Check → export.
+> **(8) Scope exclusions honoured:** no 2F-E/2F-F/2F-G, no PX-1, no YAML
+> adoption, no secret-inclusive backups, no alert-store cleanup.
+> Contract artifacts regenerated (`openapi.yaml` → bundle + `types.gen.ts`
+> + `route-classification.yaml`). Operator runbook:
+> `docs/operator/upstream-proxies.md` §7–§10.
+>
 > **2F-C CORRECTION ROUND 2 RECORD (this branch, 2026-09-04).** External
 > review of the corrected candidate (`42336a8e`) found one remaining blocker:
 > **a mutable published `Proxy` raced live traffic.** `rebuildLocked` reused
