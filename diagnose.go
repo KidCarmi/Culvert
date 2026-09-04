@@ -624,6 +624,7 @@ type clusterDiagnosis struct {
 	NodesTotal     int    `json:"nodes_total"`
 	NodesConnected int    `json:"nodes_connected"`
 	SyncFailCount  int    `json:"sync_fail_count,omitempty"`
+	SyncPanics     int    `json:"sync_panics,omitempty"` // standby-side: sync rounds contained by the panic guard (CHAOS-25) — see HAStatus.SyncPanics
 	LastSyncOK     string `json:"last_sync_ok,omitempty"`
 	Detail         string `json:"detail,omitempty"`
 }
@@ -734,6 +735,7 @@ func diagnoseClusterFrom(in clusterInputs, now time.Time) clusterDiagnosis {
 	}
 	if in.haStatus.Role == "standby" {
 		d.SyncFailCount = in.haStatus.SyncFailCount
+		d.SyncPanics = in.haStatus.SyncPanics
 		d.LastSyncOK = in.haStatus.LastSyncOK
 	}
 	return d
