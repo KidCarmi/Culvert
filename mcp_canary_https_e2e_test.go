@@ -44,6 +44,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection/destination"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -770,16 +771,30 @@ func TestHTTPSE2E_EveryTerminalOutcomeIsPersistable(t *testing.T) {
 	}
 }
 
-// faultyBackend is a real spool Backend whose durable append starts failing once
-// armed. It is the storage layer, not a stubbed CommitDecision: the failure enters
-// the system exactly where a full or read-only volume would.
+// faultyBackend is a real spool Backend whose durable append fails from a chosen
+// ORDINAL onwards. It is the storage layer, not a stubbed CommitDecision: the
+// failure enters the system exactly where a full or read-only volume would.
+//
+// The ordinal matters and is the whole reason this is not a simple on/off switch.
+// One guarded execution performs three durable appends in order:
+//
+//	#1  the DECISION commit   (CommitThenAct, before anything can have an effect)
+//	#2  the durable SEND INTENT
+//	#3  the terminal OUTCOME  (after the wire)
+//
+// A backend that fails EVERYTHING kills #1, so the request is refused before the
+// intent commit is ever reached — and a gate built on it passes for the wrong
+// reason. That is exactly why the first version of this test failed to catch the
+// mutation it was written for.
 type faultyBackend struct {
 	spool.Backend
-	failing atomic.Bool
+	appends  atomic.Int64
+	failFrom atomic.Int64 // 0 = never fail; else fail from this append ordinal on
 }
 
 func (b *faultyBackend) AppendSync(path string, frame []byte, perm os.FileMode) error {
-	if b.failing.Load() {
+	n := b.appends.Add(1)
+	if f := b.failFrom.Load(); f != 0 && n >= f {
 		return errors.New("induced durable-append failure")
 	}
 	return b.Backend.AppendSync(path, frame, perm)
@@ -798,19 +813,27 @@ func TestHTTPSE2E_IntentPersistFailureBlocksTheSend(t *testing.T) {
 	fb := &faultyBackend{Backend: spool.NewOSBackend()}
 	rig := armCanaryWithRealPeerBackend(t, p, 10, fb)
 
-	// CONTROL FIRST, on this exact rig: the fixture can reach the peer while the
+	// CONTROL FIRST, on this exact rig: the fixture reaches the peer while the
 	// backend is healthy. Without it, "zero POSTs" after the induced failure would
-	// prove nothing — which is the failure mode that let the original mutation live.
+	// prove nothing — the failure mode that let the original mutation live.
 	if out := rig.exec(peerExecInput(p, policy.OpRead)); !out.Executed || p.count() != 1 {
 		t.Fatalf("control: the fixture must be able to execute, out=%+v count=%d", out, p.count())
 	}
 	before := p.count()
 
-	fb.failing.Store(true) // the volume is now effectively gone
-	out := rig.exec(peerExecInput(p, policy.OpRead))
+	// Fail the SECOND append of the next request: its decision commit succeeds, so
+	// execution reaches the intent commit, and THAT is what fails. Targeting the
+	// stage precisely is what makes this gate measure the intent contract rather
+	// than the (separately gated) decision-commit contract.
+	fb.failFrom.Store(fb.appends.Load() + 2)
 
+	out := rig.exec(peerExecInput(p, policy.OpRead))
 	if out.Executed {
-		t.Fatalf("an execution whose evidence cannot be persisted must not report executed, out=%+v", out)
+		t.Fatalf("an execution whose send intent cannot be persisted must not report executed, out=%+v", out)
+	}
+	if out.Reason != mcperr.ReasonEventDurabilityDegraded {
+		t.Fatalf("the refusal must name the durability fault (proving the INTENT commit failed, "+
+			"not the decision commit), got %v", out.Reason)
 	}
 	if got := p.count(); got != before {
 		t.Fatalf("a send whose durable intent could not be committed reached the peer: %d -> %d", before, got)
@@ -818,7 +841,7 @@ func TestHTTPSE2E_IntentPersistFailureBlocksTheSend(t *testing.T) {
 }
 
 // liveTestEventsBackend builds the durable events manager over a caller-supplied
-// Backend (nil ⇒ the real OS backend).
+// spool Backend (nil ⇒ the real OS backend).
 func liveTestEventsBackend(t *testing.T, be spool.Backend) *events.Manager {
 	t.Helper()
 	if be == nil {

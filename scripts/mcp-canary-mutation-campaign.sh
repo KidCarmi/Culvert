@@ -91,17 +91,46 @@ run_mutation M01 \
 
 # ── (2) one reservation causes two physical POSTs ───────────────────────────
 #
-# NOTE ON THE SHAPE OF THIS MUTATION. Clearing the `retriesDisabled` guard in
-# Client.Call ALONE is behaviour-preserving: RetryFreeLimits also pins the retry
-# budget to zero, so `retryable` refuses the second attempt regardless. It survived
-# the campaign for exactly that reason, and scoring it as a hole would have been
-# wrong. The two mechanisms are belt and braces; a real "retries restored" defect
-# has to remove the braces, so the mutation now targets the defaults filler.
-run_mutation M02 \
-  'the defaults filler restores a retry budget even under RetryDisabled' \
-  'TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop|TestRetryFreeLimits_RejectsContradictoryBudget|TestNewLimits_RejectsUnknownRetryMode' \
-  ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/limits.go \
-  's/\tif out\.RetryMode == RetryDefault && out\.MaxReadRetries == 0 \{\n\t\tout\.MaxReadRetries = defMaxReadRetries\n\t\}/\tif out.MaxReadRetries == 0 {\n\t\tout.MaxReadRetries = defMaxReadRetries\n\t}/'
+# RETRY-FREEDOM IS ENFORCED AT TWO INDEPENDENT POINTS, and this mutation had to be
+# rewritten twice before it proved anything:
+#
+#   (a) RetryFreeLimits pins the retry BUDGET to zero, so `retryable` refuses a
+#       second attempt on budget alone;
+#   (b) Client.Call short-circuits on `Limits.RetriesDisabled()` before consulting
+#       `retryable` at all.
+#
+# Removing either ALONE is behaviour-preserving, so both single-point mutations
+# survive — correctly. That is a property of the design, not a hole in the gates,
+# and scoring it as a hole would have pushed toward deleting one of the two
+# mechanisms to make a mutation "work".
+#
+# Note also that NewLimits validates BEFORE fillLimitDefaults, so a filler that
+# restores the budget under RetryDisabled slips past the contradiction check — which
+# is precisely why (b) exists as a second line.
+#
+# The honest mutation removes BOTH, which is what "transparent Canary retries
+# restored" actually is.
+printf '\n[M02] transparent retries restored (BOTH enforcement points removed)\n'
+printf '      gate: TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop  (./internal/mcp/upstreamclient/)\n'
+perl -0pi -e 's/\tif out\.RetryMode == RetryDefault && out\.MaxReadRetries == 0 \{\n\t\tout\.MaxReadRetries = defMaxReadRetries\n\t\}/\tif out.MaxReadRetries == 0 {\n\t\tout.MaxReadRetries = defMaxReadRetries\n\t}/' internal/mcp/upstreamclient/limits.go
+perl -0pi -e 's/\tretriesDisabled := c\.cfg\.Limits\.RetriesDisabled\(\)/\tretriesDisabled := false/' internal/mcp/upstreamclient/client.go
+if git diff --quiet internal/mcp/upstreamclient/limits.go || git diff --quiet internal/mcp/upstreamclient/client.go; then
+  printf '      SKIPPED — a pattern drifted; this proves NOTHING\n'
+  SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M02: pattern drifted")
+  revert internal/mcp/upstreamclient/limits.go internal/mcp/upstreamclient/client.go
+else
+  m02_out=$(go test -count=1 -run 'TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop' ./internal/mcp/upstreamclient/ 2>&1); m02_rc=$?
+  revert internal/mcp/upstreamclient/limits.go internal/mcp/upstreamclient/client.go
+  if printf '%s' "$m02_out" | grep -q 'no tests to run'; then
+    printf '      BROKEN GATE — no tests matched\n'; SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M02: BROKEN GATE")
+    [ $KEEP -eq 0 ] && exit 1
+  elif [ $m02_rc -ne 0 ]; then
+    printf '      CAUGHT (gate failed as required)\n'; PASS=$((PASS+1))
+  else
+    printf '      *** SURVIVED ***\n'; SURVIVED=$((SURVIVED+1)); SURVIVORS+=("M02: transparent retries restored")
+    [ $KEEP -eq 0 ] && exit 1
+  fi
+fi
 
 # ── (3) a physical send with no durable intent ──────────────────────────────
 run_mutation M03 \
@@ -150,14 +179,14 @@ run_mutation M09 \
   'no terminal outcome is recorded when the upstream call fails' \
   'TestHTTPSE2E_AmbiguityIsNeverRecordedAsNotExecuted' \
   . internal/mcp/execution/attempt_evidence.go \
-  's/\tf := outcomeFacts\(in\)\n\tf\.Phase = model\.PhaseOutcome\n/\tif out.Reason == mcperr.ReasonUpstreamCallFailed {\n\t\treturn\n\t}\n\tf := outcomeFacts(in)\n\tf.Phase = model.PhaseOutcome\n/'
+  's/\tf := outcomeFacts\(in\)\n\tf\.Phase = model\.PhaseOutcome\n/\tif out.Reason == mcperr.ReasonUpstreamConnectFailed {\n\t\treturn\n\t}\n\tf := outcomeFacts(in)\n\tf.Phase = model.PhaseOutcome\n/'
 
 # ── (10) terminal outcome omitted on a DLP block ────────────────────────────
 run_mutation M10 \
   'no terminal outcome is recorded when response DLP blocks egress' \
   'TestHTTPSE2E_DLPBlockAfterPeerResponseStaysExecuted' \
   . internal/mcp/execution/attempt_evidence.go \
-  's/\tf := outcomeFacts\(in\)\n\tf\.Phase = model\.PhaseOutcome\n/\tif out.Reason == mcperr.ReasonRedactionFailed {\n\t\treturn\n\t}\n\tf := outcomeFacts(in)\n\tf.Phase = model.PhaseOutcome\n/'
+  's/\tf := outcomeFacts\(in\)\n\tf\.Phase = model\.PhaseOutcome\n/\tif out.Reason == mcperr.ReasonSecretDetected {\n\t\treturn\n\t}\n\tf := outcomeFacts(in)\n\tf.Phase = model.PhaseOutcome\n/'
 
 # ── (11) an ambiguous send recorded as definitely_not_sent ──────────────────
 run_mutation M11 \
@@ -221,6 +250,16 @@ run_mutation M20 \
   'TestReconcile_ZeroWithoutCompletenessStaysRequired|TestReconcile_WitnessUnavailableStaysUnresolved' \
   ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
   's/\tif obs\.Complete && obs\.CompletenessWatermark != "" \{\n\t\treturn model\.ReconNotReceived\n\t\}\n\treturn model\.ReconRequired/\treturn model.ReconNotReceived/'
+
+# ── (23) no terminal outcome on ANY non-executed path ───────────────────────
+#
+# The reason-independent form of M09/M10. Those two name specific reasons, so a
+# reason-code rename would silently defang them; this one cannot be dodged that way.
+run_mutation M23 \
+  'no terminal outcome is recorded on any path that did not execute' \
+  'TestHTTPSE2E_AmbiguityIsNeverRecordedAsNotExecuted|TestHTTPSE2E_DLPBlockAfterPeerResponseStaysExecuted' \
+  . internal/mcp/execution/attempt_evidence.go \
+  's/\tf := outcomeFacts\(in\)\n\tf\.Phase = model\.PhaseOutcome\n/\tif !out.Executed {\n\t\treturn\n\t}\n\tf := outcomeFacts(in)\n\tf.Phase = model.PhaseOutcome\n/'
 
 # ── (21) the reservation-breach detector silenced ───────────────────────────
 run_mutation M21 \
