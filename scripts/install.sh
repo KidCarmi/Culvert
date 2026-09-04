@@ -1645,10 +1645,27 @@ setup_at_rest_encryption() {
   # CA key rather than silently leaving the SSL-inspection CA private key
   # unencrypted with no warning at all.
   if [[ "$log_set" == 1 && "$ca_set" != 1 ]]; then
-    local existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
-    if [[ -z "$existing_pass" && -f "$envfile" ]]; then
-      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)"
+    # Read the PERSISTED .env value first, not the host environment: the
+    # earlier host-env-persistence block above only writes CULVERT_LOG_PASSPHRASE
+    # into .env when .env doesn't already carry a non-empty value, so whenever
+    # log_set==1 here .env already holds the passphrase that will actually be
+    # used at runtime (docker compose reads .env directly; `sudo docker
+    # compose up` below does not forward this shell's environment). Preferring
+    # a same-named host-env value that happens to differ (e.g. an automation
+    # wrapper re-exporting a freshly generated secret without checking .env
+    # first) would derive the CA passphrase from a value that is NOT what
+    # actually encrypts the logs, silently splitting one intended shared key
+    # into two different ones.
+    # (grep finding no match — e.g. the persistence block above degraded
+    # without writing, such as an unwritable INSTALL_DIR/.env — must not
+    # abort the install under set -euo pipefail; `|| true` on the whole
+    # substitution catches pipefail's propagated non-zero status so the
+    # host-env fallback below still runs.)
+    local existing_pass=""
+    if [[ -f "$envfile" ]]; then
+      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)" || true
     fi
+    [[ -z "$existing_pass" ]] && existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
     # .env values round-trip through docker compose's own interpolation (it
     # expands $-references when resolving .env, same as the interactive
     # choice=2 path guards against below) — writing a value containing those
