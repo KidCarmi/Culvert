@@ -115,88 +115,26 @@ const recoveryPageSize = 512
 // that describes one attempt two different ways is not a ledger to pick a winner
 // from — the ambiguity is itself unsafe evidence, and silently resolving it is how
 // a duplicate physical effect would disappear from the record.
+// attemptIndex is the folded view of the durable stream: what was intended, what
+// settled, and what an independent witness has since reported.
+type attemptIndex struct {
+	intents  map[string]*model.OutcomeEvidence
+	outcomes map[string]*model.OutcomeEvidence
+	recon    map[string]model.ReconciliationResult
+}
+
 func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 	if r == nil {
 		return RecoveryReport{}, mcperr.New(mcperr.ReasonEventEvidenceMissing, "execution.recovery", "no evidence reader")
 	}
-	intents := map[string]*model.OutcomeEvidence{}
-	outcomes := map[string]*model.OutcomeEvidence{}
-	recon := map[string]model.ReconciliationResult{}
-
-	for _, part := range recoveryScanPartitions {
-		var after uint64
-		for {
-			evs, _, cursor, err := r.CommittedForExport(part, after, recoveryPageSize)
-			if err != nil {
-				// Unreadable evidence is NOT an empty ledger. Reporting no orphans here
-				// would silently convert corruption into "nothing to reconcile".
-				return RecoveryReport{}, mcperr.New(mcperr.ReasonEventEvidenceMissing,
-					"execution.recovery", "durable evidence unreadable")
-			}
-			for i := range evs {
-				if err := indexAttemptEvent(&evs[i], intents, outcomes, recon); err != nil {
-					return RecoveryReport{}, err
-				}
-			}
-			if len(evs) == 0 || cursor <= after {
-				break
-			}
-			after = cursor
-		}
+	idx, err := scanAttemptEvidence(r)
+	if err != nil {
+		return RecoveryReport{}, err
 	}
-
-	var rep RecoveryReport
-	for id, intent := range intents {
-		out, settled := outcomes[id]
-		if !settled {
-			// An orphan's knowledge state comes from append-only reconciliation
-			// evidence when any exists. Its EXECUTION state is unchanged either way:
-			// reconciliation changes knowledge, never authority.
-			known := model.ReconRequired
-			if r, ok := recon[id]; ok {
-				known = r
-			}
-			rep.Orphans = append(rep.Orphans, RecoveredAttempt{
-				AttemptID:            intent.AttemptID,
-				ReservationID:        intent.ReservationID,
-				ActivationGeneration: intent.ActivationGeneration,
-				State:                AttemptReconciliationRequired,
-				Reconciliation:       known,
-			})
-			continue
-		}
-		// The terminal outcome must describe the SAME authorization as the intent.
-		// A mismatch means the ledger binds one physical effect to two different
-		// grants or generations, which no later reasoning can safely repair.
-		if out.ReservationID != intent.ReservationID {
-			return RecoveryReport{}, mcperr.New(mcperr.ReasonEventInvalid,
-				"execution.recovery", "attempt reservation mismatch between intent and outcome")
-		}
-		if out.ActivationGeneration != intent.ActivationGeneration {
-			return RecoveryReport{}, mcperr.New(mcperr.ReasonEventInvalid,
-				"execution.recovery", "attempt generation mismatch between intent and outcome")
-		}
-		if !out.PhysicalSendState.Valid() {
-			return RecoveryReport{}, mcperr.New(mcperr.ReasonEventInvalid,
-				"execution.recovery", "terminal outcome with unknown physical send state")
-		}
-		rep.Settled = append(rep.Settled, RecoveredAttempt{
-			AttemptID:            intent.AttemptID,
-			ReservationID:        intent.ReservationID,
-			ActivationGeneration: intent.ActivationGeneration,
-			State:                AttemptSettled,
-			TerminalSendState:    out.PhysicalSendState,
-		})
+	rep, err := deriveAttempts(idx)
+	if err != nil {
+		return RecoveryReport{}, err
 	}
-	// A terminal outcome with no intent means a physical effect was recorded that no
-	// durable authorization covers. That is the most serious ledger fault of all.
-	for id := range outcomes {
-		if _, ok := intents[id]; !ok {
-			return RecoveryReport{}, mcperr.New(mcperr.ReasonEventInvalid,
-				"execution.recovery", "terminal outcome without a matching send intent")
-		}
-	}
-
 	// Deterministic order so repeated recovery is byte-stable and idempotent.
 	sort.Slice(rep.Orphans, func(i, j int) bool { return rep.Orphans[i].AttemptID < rep.Orphans[j].AttemptID })
 	sort.Slice(rep.Settled, func(i, j int) bool { return rep.Settled[i].AttemptID < rep.Settled[j].AttemptID })
@@ -312,4 +250,109 @@ func deriveReservationBreaches(rep RecoveryReport) []ReservationBreach {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ReservationID < out[j].ReservationID })
 	return out
+}
+
+// scanAttemptEvidence folds every attempt-bearing event in the durable stream into
+// one index, paging through each partition.
+func scanAttemptEvidence(r EvidenceReader) (attemptIndex, error) {
+	idx := attemptIndex{
+		intents:  map[string]*model.OutcomeEvidence{},
+		outcomes: map[string]*model.OutcomeEvidence{},
+		recon:    map[string]model.ReconciliationResult{},
+	}
+	for _, part := range recoveryScanPartitions {
+		var after uint64
+		for {
+			evs, _, cursor, err := r.CommittedForExport(part, after, recoveryPageSize)
+			if err != nil {
+				// Unreadable evidence is NOT an empty ledger. Reporting no orphans here
+				// would silently convert corruption into "nothing to reconcile".
+				return attemptIndex{}, mcperr.New(mcperr.ReasonEventEvidenceMissing,
+					"execution.recovery", "durable evidence unreadable")
+			}
+			for i := range evs {
+				if err := indexAttemptEvent(&evs[i], idx.intents, idx.outcomes, idx.recon); err != nil {
+					return attemptIndex{}, err
+				}
+			}
+			if len(evs) == 0 || cursor <= after {
+				break
+			}
+			after = cursor
+		}
+	}
+	return idx, nil
+}
+
+// deriveAttempts turns the folded index into the report, classifying each attempt
+// as an orphan or a settled one and failing closed on any contradiction.
+func deriveAttempts(idx attemptIndex) (RecoveryReport, error) {
+	var rep RecoveryReport
+	for id, intent := range idx.intents {
+		out, settled := idx.outcomes[id]
+		if !settled {
+			rep.Orphans = append(rep.Orphans, orphanFrom(intent, idx.recon[id]))
+			continue
+		}
+		rec, err := settledFrom(intent, out)
+		if err != nil {
+			return RecoveryReport{}, err
+		}
+		rep.Settled = append(rep.Settled, rec)
+	}
+	// A terminal outcome with no intent means a physical effect was recorded that no
+	// durable authorization covers. That is the most serious ledger fault of all.
+	for id := range idx.outcomes {
+		if _, ok := idx.intents[id]; !ok {
+			return RecoveryReport{}, mcperr.New(mcperr.ReasonEventInvalid,
+				"execution.recovery", "terminal outcome without a matching send intent")
+		}
+	}
+	return rep, nil
+}
+
+// orphanFrom builds the record for an intent with no terminal outcome.
+//
+// An orphan's KNOWLEDGE state comes from append-only reconciliation evidence when
+// any exists (the zero value of the map lookup is ReconRequired, the correct resting
+// state). Its EXECUTION state is unchanged either way: reconciliation changes
+// knowledge, never authority.
+func orphanFrom(intent *model.OutcomeEvidence, known model.ReconciliationResult) RecoveredAttempt {
+	if known == "" {
+		known = model.ReconRequired
+	}
+	return RecoveredAttempt{
+		AttemptID:            intent.AttemptID,
+		ReservationID:        intent.ReservationID,
+		ActivationGeneration: intent.ActivationGeneration,
+		State:                AttemptReconciliationRequired,
+		Reconciliation:       known,
+	}
+}
+
+// settledFrom builds the record for an intent that reached a terminal outcome.
+//
+// The outcome must describe the SAME authorization as the intent. A mismatch means
+// the ledger binds one physical effect to two different grants or generations, which
+// no later reasoning can safely repair.
+func settledFrom(intent, out *model.OutcomeEvidence) (RecoveredAttempt, error) {
+	if out.ReservationID != intent.ReservationID {
+		return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
+			"execution.recovery", "attempt reservation mismatch between intent and outcome")
+	}
+	if out.ActivationGeneration != intent.ActivationGeneration {
+		return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
+			"execution.recovery", "attempt generation mismatch between intent and outcome")
+	}
+	if !out.PhysicalSendState.Valid() {
+		return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
+			"execution.recovery", "terminal outcome with unknown physical send state")
+	}
+	return RecoveredAttempt{
+		AttemptID:            intent.AttemptID,
+		ReservationID:        intent.ReservationID,
+		ActivationGeneration: intent.ActivationGeneration,
+		State:                AttemptSettled,
+		TerminalSendState:    out.PhysicalSendState,
+	}, nil
 }

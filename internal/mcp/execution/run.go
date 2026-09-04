@@ -40,15 +40,8 @@ var errKilledAtBoundary = errors.New("mcp: emergency kill engaged before upstrea
 // callback, then response inspection + DLP, then the result. A failure at any step
 // leaves NO downstream side effect.
 func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollout.Subject, res rollout.Resolution, admKillGen uint64) (out runtime.ExecOutput) {
-	if e.cfg.Events == nil {
-		// No durability seam ⇒ fail closed (commit-before-side-effect is mandatory).
-		return e.blocked(in, mcperr.ReasonEventDurabilityDegraded, false)
-	}
-	if in.Server == nil {
-		return e.blocked(in, mcperr.ReasonUpstreamServerUnusable, false)
-	}
-	if !in.Server.Usable() {
-		return e.blocked(in, mcperr.ReasonUpstreamServerUnusable, false)
+	if reason, ok := executePreconditionFailure(e, in); !ok {
+		return e.blocked(in, reason, false)
 	}
 	target := upstreamclient.Target{
 		ServerID:       string(in.Server.ID),
@@ -130,39 +123,17 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// Failing to persist the intent means the send MUST NOT happen: an
 		// unattributable physical invocation is precisely what this mechanism exists
 		// to prevent, so this fails CLOSED.
-		if upstreamclient.ClassifyMethod(in.Method).SideEffectBearing() {
-			// METERED-EXECUTION IDENTITY GATE. A gate being wired at all means this is a
-			// metered Canary execution, and such an execution MUST be attributable: an
-			// effect with no reservation identity cannot be tied to the slot that paid
-			// for it, and one with no activation generation cannot be recognized as an
-			// orphan of a superseded generation after a restart. Either omission would
-			// silently degrade the physical-effect ledger to the pre-#6/#8 state, so it
-			// fails CLOSED here rather than committing unattributable evidence.
-			//
-			// Zero values remain legitimate ONLY for a nil gate (legacy/non-metered
-			// paths), which never reaches this branch.
-			if e.cfg.LiveGate != nil && (reservationID == "" || activationGen == 0) {
-				gateRefused = true
-				gateReason = mcperr.ReasonEventEvidenceMissing
-				return errLiveGateRefused
-			}
-			// The decision ref must already exist: callUpstream runs INSIDE
-			// CommitThenAct's callback, after the decision commit. A missing ref means
-			// the outcome could never be persisted, so it fails closed here rather than
-			// sending and losing the record.
-			if decisionRef == "" {
-				gateRefused = true
-				gateReason = mcperr.ReasonEventEvidenceMissing
-				return errLiveGateRefused
-			}
-			rec, ierr := e.commitSendIntent(in, reservationID, activationGen, decisionRef)
-			if ierr != nil {
-				gateRefused = true
-				gateReason = mcperr.ReasonOf(ierr)
-				return errLiveGateRefused
-			}
-			attempt = rec
+		rec, ierr := e.openAttempt(in, attemptBinding{
+			reservationID: reservationID,
+			activationGen: activationGen,
+			decisionRef:   decisionRef,
+		})
+		if ierr != nil {
+			gateRefused = true
+			gateReason = mcperr.ReasonOf(ierr)
+			return errLiveGateRefused
 		}
+		attempt = rec
 		// (2) Last-moment boundary re-checks (tool drift, then the composition-layer live-generation
 		// revalidation, then the emergency kill) run inside preCallGuard so nothing sits between them and
 		// Upstream.Call. The kill re-read stays LAST (PREREQ-MCP-KILL-1). A demoted-generation refusal is
@@ -171,9 +142,9 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			// The physical call never began, so this is the ONE case where
 			// definitely_not_sent is mechanically provable rather than inferred.
 			sendState = model.SendDefinitelyNotSent
-			staleAtCall = errors.Is(gerr, errToolDriftedBeforeCall)
-			killedAtCall = errors.Is(gerr, errKilledAtBoundary)
-			if errors.Is(gerr, errLiveGenerationDemotedAtBoundary) {
+			cls := classifyBoundaryError(gerr)
+			staleAtCall, killedAtCall = cls.stale, cls.killed
+			if cls.demoted {
 				gateRefused = true
 				gateReason = mcperr.ReasonRolloutModeInvalid
 			}
@@ -209,14 +180,6 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// pre-materialization gate still adds its own commit before any provider or
 	// cache is touched (defense in depth, not a substitute).
 	profileRef := in.Decision.Obligations.CredentialProfile
-	if profileRef != "" && e.cfg.Broker == nil {
-		// A credential is REQUIRED (the decision carries a CredentialProfile obligation) but no broker is
-		// composed to plan/materialize it. Fail CLOSED: reaching the upstream with an empty Authorization
-		// header would let a credential-required operation hit an upstream that accepts ambient/
-		// unauthenticated access, bypassing the required credential planning (Codex P2 round-6, PR #1290).
-		// The nil-broker composition is valid ONLY for tools that need no credential.
-		return e.blocked(in, mcperr.ReasonCredentialProfileMissing, false)
-	}
 	useBroker := e.cfg.Broker != nil && profileRef != ""
 	var blockedOut runtime.ExecOutput
 	var didBlock bool
@@ -250,6 +213,15 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		return blockedOut
 	}
 
+	return e.finishUpstreamLeg(ctx, in, upResp, upErr, res)
+}
+
+// finishUpstreamLeg maps the upstream leg's result to the terminal output.
+//
+// A nil response with a nil error is treated as a FAILURE, not a success: the
+// guarded path has no meaning for "the call returned nothing", and reading it as
+// success would let an unexecuted request report as executed.
+func (e *Executor) finishUpstreamLeg(ctx context.Context, in runtime.ExecInput, upResp *upstreamclient.Response, upErr error, res rollout.Resolution) runtime.ExecOutput {
 	if upErr != nil {
 		e.cfg.Metrics.ObserveUpstream(in.Capability.String(), "error")
 		return e.blocked(in, mcperr.ReasonOf(upErr), false)
@@ -563,5 +535,98 @@ func criticalityFor(c policy.OperationClass) (model.Criticality, model.ActionCla
 		return model.CritCritical, model.ActionClassDestructive
 	default:
 		return model.CritOrdinary, model.ActionClassRead
+	}
+}
+
+// attemptBinding is the authorization identity a physical attempt must carry. It is
+// a struct rather than three parameters so a future field cannot be silently dropped
+// at one call site.
+type attemptBinding struct {
+	reservationID string
+	activationGen uint64
+	decisionRef   string
+}
+
+// openAttempt commits the DURABLE SEND INTENT for a side-effect-bearing invocation,
+// or returns (nil, nil) when this method invokes no tool.
+//
+// It is committed AFTER the budget reservation (so it can name the slot) and BEFORE
+// the final boundary guards, because its purpose is to survive a crash that happens
+// after the peer receives bytes. Only a side-effect-bearing method gets one:
+// lifecycle/discovery traffic invokes no tool and must never consume an execution
+// reservation or inflate the physical-effect count (§4).
+//
+// Every failure here is FAIL-CLOSED — the caller must not send. An unattributable
+// physical invocation is precisely what this mechanism exists to prevent.
+func (e *Executor) openAttempt(in runtime.ExecInput, b attemptBinding) (*attemptRecord, error) {
+	if !upstreamclient.ClassifyMethod(in.Method).SideEffectBearing() {
+		return nil, nil
+	}
+	// METERED-EXECUTION IDENTITY GATE. A gate being wired at all means this is a
+	// metered Canary execution, and such an execution MUST be attributable: an effect
+	// with no reservation identity cannot be tied to the slot that paid for it, and
+	// one with no activation generation cannot be recognized as an orphan of a
+	// superseded generation after a restart. Either omission would silently degrade
+	// the physical-effect ledger to the pre-#6/#8 state.
+	//
+	// Zero values remain legitimate ONLY for a nil gate (legacy/non-metered paths),
+	// which never reaches this branch.
+	if e.cfg.LiveGate != nil && (b.reservationID == "" || b.activationGen == 0) {
+		return nil, mcperr.New(mcperr.ReasonEventEvidenceMissing, "execution.attempt",
+			"metered execution without reservation identity")
+	}
+	// The decision ref must already exist: this runs INSIDE CommitThenAct's callback,
+	// after the decision commit. A missing ref means the terminal outcome could never
+	// be persisted, so it fails closed here rather than sending and losing the record.
+	if b.decisionRef == "" {
+		return nil, mcperr.New(mcperr.ReasonEventEvidenceMissing, "execution.attempt",
+			"no committed decision to reference")
+	}
+	return e.commitSendIntent(in, b.reservationID, b.activationGen, b.decisionRef)
+}
+
+// executePreconditionFailure reports the block reason when the guarded path cannot
+// run at all, and ok=true when every precondition holds.
+//
+// A nil Events seam fails closed because commit-before-side-effect is mandatory; an
+// absent or unusable server record means there is no approved destination to reach;
+// and a credential-required decision with no broker has no way to satisfy its own
+// obligation. Every case is checked BEFORE any attempt accounting is armed, so a
+// refusal here can never leave a half-formed physical-effect record.
+func executePreconditionFailure(e *Executor, in runtime.ExecInput) (mcperr.Reason, bool) {
+	switch {
+	case e.cfg.Events == nil:
+		return mcperr.ReasonEventDurabilityDegraded, false
+	case in.Server == nil, !in.Server.Usable():
+		return mcperr.ReasonUpstreamServerUnusable, false
+	case in.Decision.Obligations.CredentialProfile != "" && e.cfg.Broker == nil:
+		// A credential is REQUIRED (the decision carries a CredentialProfile
+		// obligation) but no broker is composed to plan/materialize it. Fail CLOSED:
+		// reaching the upstream with an empty Authorization header would let a
+		// credential-required operation hit an upstream that accepts ambient or
+		// unauthenticated access, bypassing the required credential planning (Codex P2
+		// round-6, PR #1290). The nil-broker composition is valid ONLY for tools that
+		// need no credential.
+		return mcperr.ReasonCredentialProfileMissing, false
+	}
+	return mcperr.ReasonNone, true
+}
+
+// boundaryRefusal names which final guard refused, so the caller can map it to a
+// bounded reason without repeating the errors.Is chain.
+type boundaryRefusal struct {
+	stale   bool
+	killed  bool
+	demoted bool
+}
+
+// classifyBoundaryError decodes a preCallGuard refusal. The three causes are
+// mutually exclusive by construction (preCallGuard returns on the first), so this
+// only fixes which named reason each refusal carries.
+func classifyBoundaryError(err error) boundaryRefusal {
+	return boundaryRefusal{
+		stale:   errors.Is(err, errToolDriftedBeforeCall),
+		killed:  errors.Is(err, errKilledAtBoundary),
+		demoted: errors.Is(err, errLiveGenerationDemotedAtBoundary),
 	}
 }

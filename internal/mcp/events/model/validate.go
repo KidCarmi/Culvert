@@ -471,28 +471,50 @@ func (e Event) validatePhase() error {
 	case PhaseDenialAggregate:
 		return e.validateDenialPhase()
 	case PhaseRecoveryMarker, PhaseHealth:
-		if e.Marker == nil || e.Marker.State == "" {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "marker event without marker state")
-		}
+		return e.validateMarkerPhase()
 	case PhaseReconciliation:
-		// Reconciliation evidence that cannot name its attempt or its result is not
-		// evidence; committing it would put an unusable record in the ledger.
-		if e.Reconciliation == nil || e.Reconciliation.AttemptID == "" {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "reconciliation without attempt identity")
-		}
-		if !e.Reconciliation.Result.Valid() {
-			return evtErr(mcperr.ReasonEventInvalid, "reconciliation with unknown result")
-		}
-		if e.Outcome != nil {
-			return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a reconciliation event")
-		}
+		return e.validateReconciliationPhase()
 	case PhaseSendIntent:
-		// A send intent that cannot name its attempt is useless for reconciliation:
-		// an orphan with no AttemptID can never be matched against an independent
-		// witness, so it fails closed rather than committing unusable evidence.
-		if e.Outcome == nil || e.Outcome.AttemptID == "" {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "send intent without attempt identity")
-		}
+		return e.validateSendIntentPhase()
+	}
+	return nil
+}
+
+// validateMarkerPhase validates a recovery-marker or health event.
+func (e Event) validateMarkerPhase() error {
+	if e.Marker == nil || e.Marker.State == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "marker event without marker state")
+	}
+	return nil
+}
+
+// validateReconciliationPhase validates append-only witness evidence.
+//
+// Evidence that cannot name its attempt or its result is not evidence; committing
+// it would put an unusable record in the ledger. And a reconciliation event may not
+// carry a terminal outcome: the ABSENCE of one is precisely what defines the orphan
+// this event exists to resolve.
+func (e Event) validateReconciliationPhase() error {
+	if e.Reconciliation == nil || e.Reconciliation.AttemptID == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "reconciliation without attempt identity")
+	}
+	if !e.Reconciliation.Result.Valid() {
+		return evtErr(mcperr.ReasonEventInvalid, "reconciliation with unknown result")
+	}
+	if e.Outcome != nil {
+		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a reconciliation event")
+	}
+	return nil
+}
+
+// validateSendIntentPhase validates a durable pre-send intent.
+//
+// An intent that cannot name its attempt is useless for reconciliation: an orphan
+// with no AttemptID can never be matched against an independent witness, so it fails
+// closed rather than committing unusable evidence.
+func (e Event) validateSendIntentPhase() error {
+	if e.Outcome == nil || e.Outcome.AttemptID == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "send intent without attempt identity")
 	}
 	return nil
 }

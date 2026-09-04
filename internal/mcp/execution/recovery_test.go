@@ -19,24 +19,30 @@ type fixtureReader struct {
 	hasErr bool
 }
 
-func (f *fixtureReader) CommittedForExport(part model.Partition, after uint64, max int) ([]model.Event, []uint64, uint64, error) {
+func (f *fixtureReader) CommittedForExport(part model.Partition, after uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
 	if f.hasErr && part == f.failOn {
 		return nil, nil, after, errUnreadableFixture
 	}
 	all := f.byPart[part]
-	if int(after) >= len(all) {
+	// Paginate in uint64 space throughout: narrowing the cursor to int to compare it
+	// against len() is the conversion gosec flags, and it is avoidable here rather
+	// than worth suppressing.
+	total := uint64(len(all))
+	if after >= total {
 		return nil, nil, after, nil
 	}
-	end := int(after) + max
-	if end > len(all) {
-		end = len(all)
+	end := total
+	if maxRecords > 0 {
+		if n := after + uint64(maxRecords); n < end {
+			end = n
+		}
 	}
 	out := all[after:end]
 	seqs := make([]uint64, 0, len(out))
 	for i := range out {
 		seqs = append(seqs, after+uint64(i)+1)
 	}
-	return out, seqs, uint64(end), nil
+	return out, seqs, end, nil
 }
 
 var errUnreadableFixture = &fixtureErr{}

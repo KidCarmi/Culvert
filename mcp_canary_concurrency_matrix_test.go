@@ -570,19 +570,24 @@ func mainReaderWith(evs ...model.Event) *staticEvidenceReader {
 func (r *staticEvidenceReader) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
 	// All fixture events live in the ordinary partition, matching where the executor
 	// actually commits intents and outcomes.
-	if part != model.PartOrd || afterSeq >= uint64(len(r.evs)) {
+	total := uint64(len(r.evs))
+	if part != model.PartOrd || afterSeq >= total {
 		return nil, nil, afterSeq, nil
 	}
-	end := len(r.evs)
-	if n := int(afterSeq) + maxRecords; n < end {
-		end = n
+	// Paginate in uint64 space: narrowing the cursor to int is the conversion gosec
+	// flags, and it is avoidable rather than worth suppressing.
+	end := total
+	if maxRecords > 0 {
+		if n := afterSeq + uint64(maxRecords); n < end {
+			end = n
+		}
 	}
 	evs := r.evs[afterSeq:end]
 	seqs := make([]uint64, len(evs))
 	for i := range seqs {
 		seqs[i] = afterSeq + uint64(i) + 1
 	}
-	return evs, seqs, uint64(end), nil
+	return evs, seqs, end, nil
 }
 
 // engageKillForTest engages the emergency kill on the process-global gateway state
