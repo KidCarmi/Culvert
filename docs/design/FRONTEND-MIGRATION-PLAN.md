@@ -1161,6 +1161,41 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-C CORRECTION ROUND 2 RECORD (this branch, 2026-09-04).** External
+> review of the corrected candidate (`42336a8e`) found one remaining blocker:
+> **a mutable published `Proxy` raced live traffic.** `rebuildLocked` reused
+> the existing `*Proxy` whenever its `id|authorityHash` was unchanged and
+> wrote `up.Entry = e` under `Pool.mu`, while `ProxyFunc`/`authenticatedURL`,
+> `probeProxySelector` and `Attribution.Record` read `up.Entry` with no lock —
+> a data race across every credential replace/clear and same-authority PUT,
+> able to hand an in-flight request a MIXED binding (old eligibility verdict,
+> new credential). RED-before at exactly `42336a8e`
+> (`internal/upstream/publication_race_red_test.go`, PR1–PR6, committed before
+> the fix): channel-controlled seams park a request AFTER selection and
+> BEFORE URL construction while a credential replace (PR1), clear (PR2),
+> same-authority revision bump (PR3) or probe-selector interleaving (PR4)
+> publishes; PR5 spins unsynchronized readers under `-race`; PR6 is the
+> control (no direct fallback, mode `chained`, no password on any read
+> surface). PR1–PR4 failed and PR5 reported a data race on the rejected head;
+> all six pass ×20 under `-race` after the fix. **Publication linearization
+> rule (now the contract):** every publication constructs a NEW `*Proxy` for
+> every entry under `Pool.mu` and swaps the slice; a published `Proxy` is
+> never written again — `Entry`, `URL` and the credential verdict are fixed
+> at construction — so an in-flight request/probe/attribution holds the
+> COMPLETE old generation or observes the COMPLETE new one, never a mix.
+> Continuity across generations flows only through independently
+> synchronized state: the circuit breaker is shared by pointer (own mutex) so
+> real request outcomes keep driving the same breaker, and the probe verdict
+> is copied via the old proxy's own mutex (`Probe()`); a probe landing on a
+> superseded generation is not carried forward. Persist-before-publish and
+> every round-1 semantic are unchanged. **Contract-artifact cleanup in the
+> same fix:** the OpenAPI port default and the operator runbook said
+> `80/443/1080` (1080 is the socks5 default; socks5 is outside the
+> `http|https` grammar) — now `80/443`; stale source comments that bound a
+> credential only to its authority hash, or said YAML inline credentials are
+> refused, are rewritten (entry id + authority hash; retained in memory).
+> Scheme grammar unchanged; no previously accepted RED assertion changed.
+>
 > **2F-C CORRECTION RECORD (this branch, 2026-09-04).** External freeze
 > review of the 2F-C candidate (`02b97716`) found six source-level contract
 > breaks; RED-before at the exact candidate (`upstream_v2_correction_red_test.go`
