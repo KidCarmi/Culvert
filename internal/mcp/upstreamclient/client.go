@@ -128,6 +128,10 @@ func (c *Client) Call(ctx context.Context, target Target, method string, params 
 	defer release()
 
 	budget := c.cfg.Limits.MaxReadRetries()
+	// Retry-free mode is decided ONCE, outside the loop, from immutable validated
+	// limits — not re-derived per attempt where a later edit could make it
+	// conditional.
+	retriesDisabled := c.cfg.Limits.RetriesDisabled()
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		resp, preResponse, err := c.attempt(ctx, target, method, params, opts)
@@ -135,6 +139,18 @@ func (c *Client) Call(ctx context.Context, target Target, method string, params 
 			return resp, nil
 		}
 		lastErr = err
+		// EXACTLY-ONE-PHYSICAL-SEND (First Controlled Canary, blocker #6).
+		// This test precedes retryable() deliberately: retryable() consults the
+		// method's idempotency and whether the failure arrived before any response,
+		// and BOTH are attacker- or peer-influenced. A peer that reads the full
+		// request and then drops the connection produces exactly the
+		// idempotent+preResponse shape that authorizes a re-send — which would turn
+		// one accepted budget reservation into a second side-effect-bearing tool
+		// invocation, with no emergency-kill re-read between them. In retry-free
+		// mode there is no classification that can reach a second attempt.
+		if retriesDisabled {
+			return nil, lastErr
+		}
 		if !retryable(opts.Idempotent, attempt, budget, preResponse) {
 			return nil, lastErr
 		}
