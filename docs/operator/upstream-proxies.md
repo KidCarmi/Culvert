@@ -20,10 +20,20 @@ Every effective entry has a stable **id** and a canonical **authority**:
 | `yaml` (`upstream_proxies:` in `config.yaml`) | `yaml-<128-bit authority digest>` | **no** — 409 `yaml_owned`; edit the YAML and reload |
 
 The authority is `scheme://[username@]host:port`, normalized before it is
-compared or hashed: scheme lower-cased (`http`, `https`, `socks5` only), host
+compared or hashed: scheme lower-cased (`http` or `https` only — the
+approved C4 grammar; `socks5` is refused on every input path), host
 lower-cased, trailing dot stripped, IDNA-encoded, bracketed IPv6 literals
 accepted, the effective port defaulted per scheme (80/443/1080). Two
 spellings of one authority are the same authority.
+
+**Existing `config.yaml` inline credentials keep working.** A YAML URL such
+as `http://svc:secret@parent:3128` becomes a read-only `yaml-<digest>` entry
+whose credential is retained **in memory only**: it is never written to
+`admin_settings.json` (plaintext or sealed), never returned by the API,
+never audited or logged, and cannot be edited, cleared or replaced through
+the API (409 `yaml_owned`). It reports `credentialState: configured`, is
+probed and selected like any other configured parent, and disappears when
+you remove it from the YAML and reload.
 
 **The effective pool never carries an authority twice** — YAML vs YAML,
 managed vs managed, or YAML vs managed. A mutation that would create a
@@ -39,8 +49,10 @@ A parent that requires `Proxy-Authorization` gets its password through
 
 - `{"action":"replace","password":"…","revision":<entry revision>}` (Tier 2)
   seals the password with AES-GCM under the node-local key file
-  `<dataDir>/.upstream_cred_key` (0600), bound to the entry id **and** the
-  authority hash.
+  `<dataDir>/.upstream_cred_key` (0600), bound cryptographically (AEAD) and
+  structurally to the entry's **immutable id and** its authority hash.
+  Ciphertext moved onto another entry — even one recreated with the very
+  same authority — is `mismatch` and is never unsealed, probed or sent.
 - `{"action":"clear","confirm":"<entry id>","revision":<entry revision>}`
   (Tier 3) removes it; the typed confirmation must equal the exact entry id.
 
@@ -72,6 +84,20 @@ credential.
 edit the entry, then set the credential again. Deleting an entry whose
 credential is `configured`, `unusable` or `mismatch` is refused too (409
 `credential_present`) — clearing is always an explicit, confirmed step.
+
+### When the stored document is rejected
+
+If `upstream_proxies_v2` in `admin_settings.json` fails validation at load
+(for example a duplicate authority, or an entry that no longer parses),
+the node fails **closed and remembers**: the managed entries are not
+published, `GET /api/upstream` shows `degraded {reason, count}`, and until
+the file is repaired and the node restarted every managed mutation — v2
+create/update/delete/credential, the v1 adapter, and config import — is
+refused with 409 `document_rejected`, no key is minted, and every unrelated
+settings save carries the rejected upstream sections forward verbatim so
+the only copy of any sealed credential is never overwritten. A refused
+`config.yaml` seed is reported separately as `yamlDegraded` and stays
+visible even when a valid managed document loads.
 
 ## 3. Endpoints and fencing
 
@@ -120,12 +146,23 @@ Probes are tri-state and classified by a bounded reason:
 A credential-ineligible entry (`unusable` / `mismatch`) is **not probed**.
 Probe bodies are bounded, drained and discarded.
 
+Each entry carries `health {status, reason, lastProbeAt, source}` where
+`source` is `periodic` (the health loop, cadence shown top-level as
+`probe {configured, interval}`) or `manual` (`POST /api/upstream/health`);
+`probe` is kept as a compatibility alias of the same verdict.
+
 A parent is **eligible** when
-`(credential none OR configured with a matching hash) AND (probe unprobed OR healthy) AND circuit.Allow()`.
-The authenticated URL is built only inside the proxy selector, after
-eligibility, and nowhere else.
+`(credential none OR configured with a matching id + hash) AND (probe unprobed OR healthy) AND circuit.Allow()`.
+The authenticated URL is built only inside the two transport selectors —
+the request proxy selector and the per-probe proxy selector — after that
+eligibility check, and nowhere else; the probe transport never receives a
+URL carrying userinfo.
 
 `mode` on the read model:
+
+`effective.since` is the instant the current mode was first observed and
+re-stamps only on a transition. `coverage` reports the truth per client
+path: `{plainHttp: chained, connect: direct, websocket: direct, socks5: direct, summary: plain_http_only}`.
 
 | mode | meaning |
 |---|---|

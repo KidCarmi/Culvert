@@ -1161,6 +1161,51 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-C CORRECTION RECORD (this branch, 2026-09-04).** External freeze
+> review of the 2F-C candidate (`02b97716`) found six source-level contract
+> breaks; RED-before at the exact candidate (`upstream_v2_correction_red_test.go`
+> C-R1..C-R6, 7/7 red). **(1) Credential binding omitted the entry ID**: the
+> AEAD bound only the authority hash, so ciphertext from a removed entry A
+> transplanted onto a new entry B with the same authority reported
+> `configured` and was selected. `Sealed` now carries the immutable
+> `entryId`; `Seal`/`Unseal` bind `entryID || 0 || authorityHash` as AAD;
+> `credentialStateLocked` checks both structurally before any unseal; a
+> transplant is `mismatch` — never unsealed, probed or sent; migration seals
+> with the newly assigned ID. **(2) YAML inline credentials were refused
+> wholesale**: an existing `config.yaml` parent with userinfo now becomes a
+> read-only `yaml-<digest>` entry whose credential is retained in memory
+> only (`ManagedEntry.yamlSecret`, never serialized, never in the managed
+> document, API, audit, diagnostics or logs), `configured`, probed and
+> selected normally, still 409 `yaml_owned` on every API mutation. **(3) The
+> stored-document failure path was not fail-closed**: a rejected
+> `upstream_proxies_v2` left mutations enabled and let a later save (or
+> key mint) overwrite it. The rejected document + legacy list are now
+> RETAINED (`upstreamSetRejected`): every managed mutation, the v1 adapter,
+> config import and key creation are refused (409 `document_rejected`),
+> every unrelated save persists the retained sections verbatim, the pool
+> stays untouched and `degraded` stays visible until repair + restart; a
+> refused YAML seed is a separate `yamlDegraded` that a loading managed
+> document never clears. **(4) The grammar had been widened to `socks5`**:
+> restored to the approved C4 `http|https` on normalization, v2, v1, YAML,
+> import, migration, OpenAPI, generated types, the legacy panel and the
+> operator doc. **(5) The read model was incomplete**: added
+> `coverage {plainHttp: chained, connect: direct, websocket: direct,
+> socks5: direct, summary}`, top-level `probe {configured, interval}`,
+> per-entry `health {status, reason, lastProbeAt, source: periodic|manual}`
+> (`probe` kept as a compatibility alias) and `effective.since`
+> (re-stamped only on a mode transition, injected clock). **(6)
+> Authenticated URL construction was broader than claimed**: `HealthCheck`
+> built it directly. The probe path now resolves the authenticated URL only
+> inside a per-probe transport proxy selector (`probeProxySelector`) after
+> the eligibility re-check, exactly like `ProxyFunc`; the test seam receives
+> `scheme://host:port` only; the AST wall
+> `TestWall_AuthenticatedURLIsConstructedOnlyInsideSelectors` pins exactly
+> two call sites; GET `url` carries no userinfo (username is its own field)
+> while the persisted legacy list keeps `user@host:port` for downgrade
+> compatibility and export carries the username-bearing authority so a
+> re-import preserves identity. The C4 text above is unchanged and is the
+> contract the implementation now matches.
+>
 > **2F-C IMPLEMENTATION RECORD (this branch, 2026-09-04).** Upstream v2
 > backend + safe legacy transition, append-only on the frozen 2F-B baseline
 > (`1e3578d9`); RED matrix R15–R23, R25–R26, R30–R31, R35–R39, R41–R42
