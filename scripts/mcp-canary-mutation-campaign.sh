@@ -137,14 +137,14 @@ run_mutation M03 \
   'the upstream call proceeds without committing a send intent' \
   'TestEvidenceFreeze_CompletedInvocationIsSettledThroughTheRealSpool|TestHTTPSE2E_SuccessfulExecutionIsSettledNotOrphaned' \
   . internal/mcp/execution/run.go \
-  's/\t\t\tattempt = rec\n/\t\t\t_ = rec\n/'
+  's/\t\tattempt = rec\n/\t\t_ = rec\n/'
 
 # ── (4) intent persistence fails but the send continues ─────────────────────
 run_mutation M04 \
   'a failed send-intent commit no longer blocks the irreversible send' \
   'TestHTTPSE2E_IntentPersistFailureBlocksTheSend' \
   . internal/mcp/execution/run.go \
-  's/\t\t\tif ierr != nil \{\n\t\t\t\tgateRefused = true\n\t\t\t\tgateReason = mcperr\.ReasonOf\(ierr\)\n\t\t\t\treturn errLiveGateRefused\n\t\t\t\}\n/\t\t\tif ierr != nil {\n\t\t\t\trec = \&attemptRecord{}\n\t\t\t}\n/'
+  's/\t\tif ierr != nil \{\n\t\t\tbf\.gateRefused, bf\.gateReason = true, mcperr\.ReasonOf\(ierr\)\n\t\t\treturn errLiveGateRefused\n\t\t\}\n/\t\tif ierr != nil {\n\t\t\trec = \&attemptRecord{}\n\t\t}\n/'
 
 # ── (5) reservation identity omitted from the grant ─────────────────────────
 run_mutation M05 \
