@@ -772,9 +772,6 @@ func (e Event) validateFieldBounds() error {
 	return nil
 }
 
-// checkID validates a prefixed, bounded, safe-charset identifier. IDs are safe
-// correlation handles, never security tokens, and must be non-empty, carry the
-// expected prefix, and contain only [0-9A-Za-z_-].
 // ValidDecisionRef reports whether s is a structurally valid committed-decision
 // reference, by the SAME rule Validate applies to an outcome's DecisionRef.
 //
@@ -784,6 +781,9 @@ func (e Event) validateFieldBounds() error {
 // and a drifting mirror is worse than no mirror: it looks enforced (Codex round 12).
 func ValidDecisionRef(s string) bool { return checkID("decision_ref", "evt_", s) == nil }
 
+// checkID validates a prefixed, bounded, safe-charset identifier. IDs are safe
+// correlation handles, never security tokens, and must be non-empty, carry the
+// expected prefix, and contain only [0-9A-Za-z_-].
 func checkID(field, prefix, s string) error {
 	if s == "" {
 		return evtErr(mcperr.ReasonEventCorrelationMalformed, field+" missing")
