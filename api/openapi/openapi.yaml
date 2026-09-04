@@ -1143,11 +1143,20 @@ components:
         action: { type: string, enum: [preserve, create, update, requiresReplacement, retain, remove] }
     UpstreamImportRefusal:
       type: object
+      description: >-
+        Structured refusal of the upstream section of an import. 409 codes
+        carry the complete `plan`; 400 schema codes carry the offending entry
+        `index` when one applies (never the offending value).
       required: [error, code]
       additionalProperties: true
       properties:
         error: { type: string }
-        code: { type: string, enum: [credential_clear_required, import_stale, document_rejected] }
+        code:
+          type: string
+          enum: [credential_clear_required, import_stale, document_rejected,
+                 invalid_credential_state, invalid_upstream_credentials_marker, schema_mismatch,
+                 invalid_entry, duplicate_id, ambiguous_upstream_sections, credentials_not_importable]
+        index: { type: integer, description: 'Zero-based index of the offending upstream entry (entry-level 400s only).' }
         plan: { $ref: '#/components/schemas/UpstreamImportPlan' }
     UpstreamProbeSummary:
       type: object
@@ -3202,16 +3211,39 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ConfigImportResult' }
               example: { ok: true, mode: merge, upstream: { preserved: 1, omitted: 1, cleared: 0, requiresReplacement: 0 } }
-        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '400':
+          description: >-
+            Malformed request. Upstream-section schema violations are
+            STRUCTURED JSON (`UpstreamImportRefusal`, validated before any
+            store is touched): `invalid_credential_state` — a v2 entry carries
+            a missing or unrecognized `credentialState` (the offending entry
+            `index` is named; the value is never echoed);
+            `invalid_upstream_credentials_marker` — a `upstream_proxies_v2`
+            section without the exact `upstream_credentials: "omitted"`
+            marker; `schema_mismatch` — a v2 section under a backup version
+            other than 2, a legacy `upstreamProxies` list outside version 1 or
+            carrying the marker, or a marker without the section;
+            `invalid_entry`, `duplicate_id`, `ambiguous_upstream_sections`,
+            `credentials_not_importable`. Other malformed input (invalid JSON,
+            unsupported version) stays plain text.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamImportRefusal' }
+              example: { error: 'invalid upstream proxies: invalid_credential_state at entry 1: credentialState must be one of none, configured, unusable, mismatch, requiresReplacement', code: invalid_credential_state, index: 1 }
+            text/plain:
+              schema: { type: string }
+              example: "unsupported backup version"
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '409':
           description: >-
             `credential_clear_required` — the import would remove, replace or
-            change the authority of a credentialed parent proxy; the complete
-            plan is attached and NOTHING was mutated (clear each credential,
-            Tier-3, first). `import_stale` — the echoed importDigest no longer
-            matches the document. `document_rejected` — the stored upstream
-            document is rejected.
+            change the authority of a parent proxy that HOLDS a credential or
+            is in the durable `requiresReplacement` state (the marker is
+            resolved only by the Tier-2 replace / Tier-3 clear credential
+            endpoint, never by an import); the complete plan is attached and
+            NOTHING was mutated. `import_stale` — the echoed importDigest no
+            longer matches the document. `document_rejected` — the stored
+            upstream document is rejected.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UpstreamImportRefusal' }
