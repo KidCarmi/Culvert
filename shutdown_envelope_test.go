@@ -103,32 +103,39 @@ func TestChaos56_PhaseOverrunIsFlatInHookCount(t *testing.T) {
 	}
 }
 
-// TestChaos56_SharedGraceStillRunsEveryHook is the CONTROL. A bound that simply
-// stopped running the hooks behind a stalled one would pass both gates above
-// while being far worse than the defect: the flush hooks are the durable
-// closers. Every hook must still be STARTED, and the clamp must not convert the
-// phase into an early return.
+// TestChaos56_SharedGraceStillRunsEveryHook is the CONTROL, and it is the one
+// that stops the bound from being "achieved" by simply not running the durable
+// closers. A phase-wide clamp that merely capped the abandon INSTANT passed
+// every gate above while handing each late hook an already-expired watchdog:
+// the hook could be abandoned before its goroutine entered h.stop, and since
+// main exits as soon as the sequence returns, request-log-close,
+// audit-log-close and log-closer would never run at all (Codex P1, PR #1311).
+//
+// So this asserts COMPLETION, and asserts it SYNCHRONOUSLY — everything must
+// have finished by the time RunAll returns. An earlier draft collected the set
+// afterwards with a two-second wait, which is exactly the masking Codex called
+// out: production waits for nothing after the sequence returns.
 func TestChaos56_SharedGraceStillRunsEveryHook(t *testing.T) {
 	phaseGraceTestConstants(t, 100*time.Millisecond, 10*time.Millisecond)
 
 	closers := []string{"syslog", "community-db", "request-log", "audit-log", "log-closer"}
 
-	// A hook the watchdog abandons still RUNS — RunAll stops waiting for it, it
-	// does not unschedule it — so a hook reached on an already-spent phase may
-	// record itself after RunAll has returned. Collect under a mutex and wait
-	// for the set to fill rather than closing a channel the hook goroutines may
-	// still be about to send on (which would be a send-on-closed panic, not a
-	// flake).
 	var mu sync.Mutex
-	seen := map[string]bool{}
+	completed := map[string]bool{}
 
 	reg := &shutdownRegistry{}
-	// A stalled hook first, then five that must still be reached.
-	reg.Register("stalled", 10, func(context.Context) error { select {} })
+	// THREE stalled hooks ahead of them, enough to spend the phase deadline and
+	// its whole grace, which is the state in which the defect appeared.
+	for i := 0; i < 3; i++ {
+		reg.Register("stalled", 10+i, func(context.Context) error { select {} })
+	}
 	for _, name := range closers {
 		reg.Register(name, 20, func(context.Context) error {
+			// Do a little real work, so this pins "the body ran to completion",
+			// not merely "the goroutine was scheduled".
+			time.Sleep(2 * time.Millisecond)
 			mu.Lock()
-			seen[name] = true
+			completed[name] = true
 			mu.Unlock()
 			return nil
 		})
@@ -137,24 +144,60 @@ func TestChaos56_SharedGraceStillRunsEveryHook(t *testing.T) {
 	defer cancel()
 	_ = reg.RunAll(ctx)
 
-	missing := func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		var out []string
-		for _, name := range closers {
-			if !seen[name] {
-				out = append(out, name)
-			}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, name := range closers {
+		if !completed[name] {
+			t.Errorf("durable closer %q had not completed when RunAll returned — stalled hooks ahead "+
+				"of it consumed the phase horizon, so it was abandoned before (or as) it began. "+
+				"main exits immediately after the sequence, so in production its body never runs", name)
 		}
-		return out
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for len(missing()) > 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+}
+
+// TestChaos56_EveryHookGetsANonZeroSlice states the same guarantee directly and
+// numerically: however many hooks ahead of it stall, a hook is never handed an
+// already-expired budget. It measures the wall-clock window each late hook
+// actually gets between being entered and its own ctx expiring.
+//
+// The floor is a real fraction of shutdownHookMinSlice, not merely "> 0". A
+// first draft asserted non-zero and PASSED against the defect: with the
+// clamp-only shape a late hook's ctx is already expired when it starts, so
+// <-c.Done() returns after a few microseconds — positive, but useless to a
+// durable closer that has an fsync to perform. Post-fix the window is
+// slice-slack, i.e. about half of minSlice for a hook running on its reserve.
+func TestChaos56_EveryHookGetsANonZeroSlice(t *testing.T) {
+	phaseGraceTestConstants(t, 100*time.Millisecond, 10*time.Millisecond)
+
+	var mu sync.Mutex
+	windows := map[int]time.Duration{}
+
+	reg := &shutdownRegistry{}
+	for i := 0; i < 5; i++ { // spend the deadline and the grace many times over
+		reg.Register("stalled", i, func(context.Context) error { select {} })
 	}
-	if left := missing(); len(left) > 0 {
-		t.Errorf("hooks %v were never started — a stalled hook ahead of them must not skip the "+
-			"durable closers behind it", left)
+	for i := 0; i < 5; i++ {
+		reg.Register("late", 100+i, func(c context.Context) error {
+			start := time.Now()
+			<-c.Done() // run until this hook's OWN budget expires
+			mu.Lock()
+			windows[i] = time.Since(start)
+			mu.Unlock()
+			return nil
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = reg.RunAll(ctx)
+
+	floor := shutdownHookMinSlice / 4
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 0; i < 5; i++ {
+		if windows[i] < floor {
+			t.Errorf("late hook %d got only a %v execution window (floor %v) — its budget was already "+
+				"spent when it started, so for a durable closer the flush never happens", i, windows[i], floor)
+		}
 	}
 }
 

@@ -137,9 +137,39 @@ End to end on the shipped constants, every hook stalled:
 
 ### Fix
 
-`RunAll` derives a single `phaseAbandonBy = phaseEnd + shutdownHookGrace` and
-passes it to `runShutdownHook`, which clamps each hook's abandon instant to it.
-The grace becomes what it is documented to be — the phase's, not the hook's.
+`RunAll` folds the grace into a phase **horizon** (`phaseEnd + shutdownHookGrace`)
+and `hookBudget` measures every hook's slice against that horizon rather than
+against `phaseEnd`. Because a slice is always ≤ the time remaining to the
+horizon, the phase can never cross it; because the reservation arithmetic runs
+against the horizon, every hook still receives its own non-zero slice. The grace
+becomes what it is documented to be — the phase's, not the hook's — without
+being taken away from the hooks behind.
+
+**This is the second design; the first was wrong, and the way it was wrong is
+worth recording.** The first attempt kept the per-hook grace and merely
+*clamped* the abandon instant at `phaseEnd + grace`. That bounded the total
+correctly and passed every gate above — but once the clamp was reached, a later
+hook was handed an **already-expired watchdog**, so it could be abandoned before
+its goroutine even entered `h.stop`. Since `main` exits as soon as the sequence
+returns, those bodies would never run: `request-log-close`, `audit-log-close`
+and `log-closer`. Measured on the shipped flush constants, hooks 4–6 received a
+**zero-length** execution window. The bound was achieved by not doing the work —
+starving precisely the durable closers the flush reserve exists to protect,
+which is the same defect one level along. Caught in review by Codex (P1) on
+PR #1311, who also correctly observed that the control test masked it by waiting
+two seconds after `RunAll`, which production does not do.
+
+Two consequences for the tests, both applied: the control test now asserts
+**completion synchronously**, before `RunAll` returns, and a new gate measures
+the actual execution window each late hook receives against a real floor
+(`shutdownHookMinSlice/4`) rather than merely "> 0" — a non-zero assertion
+passed against the defect, because an already-expired context returns from
+`<-ctx.Done()` in tens of nanoseconds.
+
+`runShutdownHook` additionally waits for the hook goroutine to signal entry
+before arming the watchdog, so a watchdog that is already due can never race the
+runtime's scheduling of the goroutine. It costs a scheduling hop, never a grace,
+and cannot deadlock (the signal is the goroutine's first statement).
 
 Deliberately narrow, and in the safe direction:
 
@@ -177,14 +207,19 @@ and every future hook would re-open it.
 | `TestChaos56_PhaseGraceIsSharedNotPerHook` | Regression / boundary | A phase where every hook stalls finishes within deadline + one grace at 1/2/3/6/9/10 hooks |
 | `TestChaos56_PhaseOverrunIsFlatInHookCount` | Regression (ratio) | Ten stalled hooks cost no more than 1.5× two — machine-independent, so it holds under `-race` on a shared runner |
 | `TestChaos56_FullSequenceFitsTheStopGraceInHookCount` | Regression (end-to-end) | The real `runShutdownSequence` at shipped phase proportions stays inside `Total + 2×grace`, **and does not move when a durable closer is added** |
-| `TestChaos56_SharedGraceStillRunsEveryHook` | **Control** | A degenerate "abandon everything" bound would pass the gates above while being worse than the defect; every durable closer must still be started |
+| `TestChaos56_SharedGraceStillRunsEveryHook` | **Control** | Every durable closer has **completed by the time `RunAll` returns**, with three stalled hooks ahead of it — a bound achieved by not running the closers would pass every gate above while being worse than the defect |
+| `TestChaos56_EveryHookGetsANonZeroSlice` | **Control** (numeric) | Each late hook's actual execution window is at least `shutdownHookMinSlice/4`, not merely positive |
 | `TestChaos56_HealthyPhaseIsUnaffected` | **Control** / positive | No stall ⇒ no error, all hooks run, no added cost |
 | `TestChaos56_UnboundedPhaseStillWaitsIndefinitely` | Negative / boundary | A zero `phaseAbandonBy` must not be read as "abandon immediately" — that would be a fail-open on durability dressed as a bound |
 
-**Mutation-verified.** With the clamp reverted, the three regression gates fail
-(6 hooks: 338 ms vs a 250 ms ceiling; ratio 2.35×; full sequence 1.188 s and
-1.205 s vs a 1.05 s ceiling) while both controls still pass — so the gates
-detect this defect specifically, not merely "something changed".
+**Mutation-verified in both directions.** Against the *original* per-hook grace,
+the three regression gates fail (6/9/10 hooks: 338/437/472 ms vs a 300 ms
+ceiling; ratio 2.45×; full sequence 1.297 s and 1.323 s vs a 1.11 s ceiling)
+while both controls pass. Against the *clamp-only* first attempt, the two
+controls fail — all five durable closers incomplete when `RunAll` returned, and
+late-hook execution windows of 49–898 ns against a 2.5 ms floor — while the
+regression gates pass. Neither shape satisfies both sets, which is the point:
+the bound and the work are separate properties and each has its own gate.
 
 The pre-existing `TestChaos56_EnvelopeFitsTheContainerStopGrace` is left as it
 is: its `Total + 2×grace` arithmetic is now a true statement about the
