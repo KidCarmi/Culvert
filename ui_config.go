@@ -1073,6 +1073,21 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Upstream pre-validation (2F-C, before ANY store mutation): every
+	// incoming URL must parse to a canonical authority and must not carry a
+	// real password (an export never contains one; a URL with a password is
+	// refused whole as credentials_not_importable — credentials are set
+	// only through the write-only credential endpoint). The redaction marker
+	// a client may echo back is accepted and PRESERVES the live credential.
+	// The merged document (live credentialed entries kept, YAML-owned
+	// authorities skipped, authority uniqueness enforced) is built here so the
+	// apply below cannot fail after other sections have already mutated.
+	upstreamImport, err := upstreamImportDocument(b.UpstreamProxies, replaceMode)
+	if err != nil {
+		writeUpstreamImportRefusal(w, err)
+		return
+	}
+
 	// Blocker B (exclusive side): from here down the import both REMOVES
 	// shared objects (replace mode) and INSTALLS references wholesale, so the
 	// whole apply region holds the reference-integrity gate exclusively —
@@ -1287,9 +1302,15 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 
 	// Upstream proxies (Finding 10.3). SetProxies keeps the YAML-configured
 	// circuit-breaker parameters (previously hardcoded to 5/60s here).
-	if len(b.UpstreamProxies) > 0 {
-		upstreamPool.SetProxies(b.UpstreamProxies)
-		applyUpstreamProxy()
+	// The merged v2 document was pre-validated above; a credentialed live
+	// entry is never removed or replaced by an import (omission or
+	// redacted echo both keep it), and adminSettingsSave below persists it.
+	if upstreamImport != nil {
+		if err := upstreamPool.SetDocument(*upstreamImport); err != nil {
+			logger.Printf("ConfigImport: upstream document rejected: %s", upstreamBoundedReason(err))
+		} else {
+			applyUpstreamProxy()
+		}
 	}
 
 	// Connection limits (Finding 10.3).
@@ -2085,62 +2106,6 @@ func apiBlockPage(w http.ResponseWriter, r *http.Request) {
 func upstreamDirectFallbackStatus() map[string]any {
 	active, total := upstreamPool.DirectFallback()
 	return map[string]any{"active": active, "total": total}
-}
-
-func apiUpstream(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		jsonOK(w, map[string]any{
-			"enabled":         upstreamPool.Enabled(),
-			"proxies":         upstreamPool.List(),
-			"direct_fallback": upstreamDirectFallbackStatus(),
-		})
-	case http.MethodPost:
-		if !requireRole(w, r, RoleAdmin) {
-			return
-		}
-		var body struct {
-			Proxies []UpstreamEntry `json:"proxies"`
-		}
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		// SetProxies keeps the YAML-configured circuit-breaker parameters;
-		// adminSettingsSave makes the change survive a restart (the pool is
-		// otherwise runtime-only — Finding 10.3 out-of-scope observation).
-		upstreamPool.SetProxies(body.Proxies)
-		applyUpstreamProxy()
-		auditEvent(r, "upstream.update", fmt.Sprintf("%d proxies", len(body.Proxies)), "")
-		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "proxies": upstreamPool.List()})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func apiUpstreamSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	jsonOK(w, map[string]any{
-		"enabled":         upstreamPool.Enabled(),
-		"proxies":         upstreamPool.List(),
-		"direct_fallback": upstreamDirectFallbackStatus(),
-	})
-}
-
-func apiUpstreamHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !requireRole(w, r, RoleAdmin) {
-		return
-	}
-	upstreamPool.HealthCheck()
-	jsonOK(w, map[string]any{"ok": true, "proxies": upstreamPool.List()})
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

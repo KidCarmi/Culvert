@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/upstream"
 )
 
 // AdminSettings holds every admin-configurable value that needs to survive
@@ -180,6 +181,15 @@ type AdminSettings struct {
 	// slice before this file loads.
 	UpstreamProxiesSaved bool            `json:"upstream_proxies_saved"`
 	UpstreamProxies      []UpstreamEntry `json:"upstream_proxies,omitempty"`
+	// UpstreamProxiesV2 is the authoritative MANAGED parent-proxy document
+	// (2F-C, contract C4/C10): server-generated ULID identities, per-entry
+	// revisions and SEALED credentials (ciphertext under the node-local
+	// .upstream_cred_key — never plaintext). When present it wins and the
+	// legacy upstream_proxies key above is rewritten CREDENTIAL-FREE as the
+	// downgrade-compatible representation. When absent and the legacy
+	// sentinel is set, the boot migration (upstream_v2.go) builds it
+	// durable-or-nothing from the legacy URLs.
+	UpstreamProxiesV2 *upstream.Document `json:"upstream_proxies_v2,omitempty"`
 
 	// YARA engine runtime configuration.
 	// YARASettingsSaved is a sentinel: when false the YARA fields below are not
@@ -647,12 +657,11 @@ func applyAdminNetwork(s *AdminSettings) {
 			logger.Printf("AdminSettings: invalid trusted_proxy_cidrs (%v) — X-Forwarded-For will NOT be trusted", err)
 		}
 	}
-	if s.UpstreamProxiesSaved {
-		// Authoritative replace (empty list wipes the YAML seed). SetProxies
-		// keeps the circuit-breaker parameters the startup slice configured.
-		upstreamPool.SetProxies(s.UpstreamProxies)
-		applyUpstreamProxy()
-	}
+	// 2F-C: the managed parent-proxy set is loaded from the v2 document
+	// (sealed credentials, node-local key) or migrated durable-or-nothing
+	// from the legacy credential-bearing key. YAML-owned entries seeded by
+	// the startup slice stay in place (read-only, C10).
+	applyUpstreamV2(s)
 }
 
 // applyAdminYARA restores YARA engine settings saved via the Admin GUI.
@@ -832,6 +841,14 @@ type adminSaveOverrides struct {
 	// values while the live holder still carries the old ones; applyOnSuccess
 	// then publishes them to the holder only after the write landed.
 	saasFeed *saasFeedDurable
+	// upstreamMutate, when set, builds the TARGET managed parent-proxy
+	// document INSIDE adminSettingsMu from the CURRENT document (2F-C, C4):
+	// the revision fence, authority binding and effective-pool validation
+	// run in the same critical section as the durable write, the file
+	// records the target (sealed credentials + credential-free legacy key)
+	// while the live pool still runs the old one, and applyOnSuccess
+	// publishes it only after the write landed — durable-before-respond.
+	upstreamMutate func(cur upstream.Document) (upstream.Document, error)
 	// rewriteMutate, when set, builds the TARGET rewrite rule set INSIDE
 	// adminSettingsMu from the CURRENT committed set (2D-C §24/§27): the
 	// optimistic-revision comparison, the target construction, the durable
@@ -895,6 +912,21 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		}
 		rewriteTarget, rewriteApply = target, true
 	}
+	// Upstream target construction (2F-C): fence + build + validate INSIDE
+	// the lock against the CURRENT managed document; the pool is untouched
+	// until the durable write lands.
+	upstreamDoc := upstreamPool.Document()
+	upstreamApply := false
+	if ov.upstreamMutate != nil {
+		target, err := ov.upstreamMutate(upstreamDoc)
+		if err != nil {
+			return err
+		}
+		if err := upstream.ValidateEffective(upstreamPool.YAMLEntries(), target.Entries); err != nil {
+			return err
+		}
+		upstreamDoc, upstreamApply = target, true
+	}
 	path := adminSettingsPath
 	if path == "" {
 		// No persistence configured: the (empty) write trivially succeeds, so a
@@ -902,6 +934,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		// "returns nil ⇒ the target is live".
 		if rewriteApply {
 			rewriter.SetRules(rewriteTarget)
+		}
+		if upstreamApply {
+			if err := upstreamPool.SetDocument(upstreamDoc); err != nil {
+				return err
+			}
+			applyUpstreamProxy()
 		}
 		if ov.applyOnSuccess != nil {
 			ov.applyOnSuccess()
@@ -974,9 +1012,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		snapshotSaaSFeedDurable(&s)
 	}
 
-	// Upstream proxy pool (raw entries — see field comment)
+	// Upstream proxy pool (2F-C): the managed v2 document (sealed
+	// credentials only) plus the credential-FREE legacy representation.
 	s.UpstreamProxiesSaved = true
-	s.UpstreamProxies = upstreamPool.Entries()
+	docCopy := upstreamDoc.Clone()
+	s.UpstreamProxiesV2 = &docCopy
+	s.UpstreamProxies = upstreamLegacyFromDocument(upstreamDoc)
 
 	// History-store enable state + retention (retention remembered even when off)
 	s.LogStoreEnabledSaved = true
@@ -1043,6 +1084,14 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// moves atomically w.r.t. every other save.
 	if rewriteApply {
 		rewriter.SetRules(rewriteTarget)
+	}
+	if upstreamApply {
+		if err := upstreamPool.SetDocument(upstreamDoc); err != nil {
+			// Validated above under the same lock; unreachable in practice.
+			logger.Printf("AdminSettings: upstream document publication refused after a durable write: %v", err)
+			return err
+		}
+		applyUpstreamProxy()
 	}
 	if ov.applyOnSuccess != nil {
 		ov.applyOnSuccess()

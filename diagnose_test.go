@@ -186,10 +186,15 @@ func TestUpstreamCounts_OpenCircuitNotUsable(t *testing.T) {
 		list            []UpstreamStatus
 		healthy, usable int
 	}{
+		// 2F-C: Eligible is the pool's own selection verdict (credential
+		// usable AND probe unprobed/healthy AND breaker admitting), so the
+		// fixtures carry it exactly as List() derives it for each shape.
 		{"all-open", []UpstreamStatus{{Healthy: true, Circuit: "open"}, {Healthy: true, Circuit: "open"}}, 2, 0},
-		{"mixed", []UpstreamStatus{{Healthy: true, Circuit: "open"}, {Healthy: true, Circuit: "closed"}}, 2, 1},
-		{"half-open-usable", []UpstreamStatus{{Healthy: true, Circuit: "half-open"}}, 1, 1},
+		{"mixed", []UpstreamStatus{{Healthy: true, Circuit: "open"}, {Healthy: true, Circuit: "closed", Eligible: true}}, 2, 1},
+		{"half-open-usable", []UpstreamStatus{{Healthy: true, Circuit: "half-open", Eligible: true}}, 1, 1},
 		{"unhealthy", []UpstreamStatus{{Healthy: false, Circuit: "closed"}}, 0, 0},
+		{"unprobed-new-entry", []UpstreamStatus{{Healthy: false, Circuit: "closed", Eligible: true}}, 0, 1},
+		{"credential-unusable", []UpstreamStatus{{Healthy: true, Circuit: "closed", Eligible: false}}, 1, 0},
 	}
 	for _, c := range cases {
 		h, u := upstreamCounts(c.list)

@@ -667,6 +667,16 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
 	{Path: "/api/upstream/health", Handler: "apiUpstreamHealth", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "force health check; no audit"}}},
+	{Path: "/api/upstream/entries", Handler: "apiUpstreamEntries", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "2F-C: create a managed entry (server ULID; credential-free; document-revision fenced)"},
+		}},
+	{Path: "/api/upstream/entries/", Handler: "apiUpstreamEntryRouter", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "2F-C: update {id} (entry-revision fenced; 409 credential_bound on authority change; 409 yaml_owned)"},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "2F-C: delete {id} (?revision=; 409 credential_present)"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "2F-C: {id}/credential replace (T2) / clear (T3, confirm=id); password write-only, sealed, never returned"},
+		}},
 
 	// ── Cluster: multi-node ───────────────────────────────────────────────
 	{Path: "/api/cluster/status", Handler: "apiClusterStatus", Domain: "cluster", Public: false,

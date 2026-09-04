@@ -3005,6 +3005,49 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/upstream/entries"
+    method: "POST"
+    handler: "apiUpstreamEntries"
+    domain: "cluster"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/upstream/entries/"
+    method: "PUT"
+    handler: "apiUpstreamEntryRouter"
+    openapi_path: "/api/upstream/entries/{id}"
+    domain: "cluster"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/upstream/entries/"
+    method: "DELETE"
+    handler: "apiUpstreamEntryRouter"
+    openapi_path: "/api/upstream/entries/{id}"
+    domain: "cluster"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/upstream/entries/"
+    method: "POST"
+    handler: "apiUpstreamEntryRouter"
+    openapi_path: "/api/upstream/entries/{id}/credential"
+    domain: "cluster"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
   - route: "/api/upstream/health"
     method: "POST"
     handler: "apiUpstreamHealth"

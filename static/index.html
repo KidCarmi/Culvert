@@ -4507,26 +4507,46 @@ Firefox (all platforms):
         <div class="panel-header">
           <span class="panel-title">Upstream Proxies</span>
           <div style="display:flex;gap:8px">
-            <button class="btn sm ghost" data-click="upstreamHealthCheck">Health Check</button>
-            <button class="btn sm" data-click="showUpstreamAdd">+ Add Proxy</button>
+            <button class="btn sm ghost" data-click="upstreamHealthCheck" data-min-role="admin">Health Check</button>
+            <button class="btn sm" data-click="showUpstreamAdd" data-min-role="admin">+ Add Entry</button>
           </div>
         </div>
+        <div id="upstream-status" style="padding:10px 16px 0;font-size:.82rem;color:var(--muted)"></div>
         <div id="upstream-empty" style="padding:32px;text-align:center;color:var(--muted);font-size:.85rem">
           No upstream proxies configured. Traffic goes directly to the internet.
         </div>
         <div id="upstream-fallback-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border:1px solid var(--red);border-radius:6px;background:rgba(239,68,68,.12);font-size:.84rem"></div>
+        <div id="upstream-degraded-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border:1px solid var(--yellow,#d97706);border-radius:6px;background:rgba(217,119,6,.12);font-size:.84rem"></div>
         <div class="tbl-wrap">
           <table id="upstream-table" style="display:none">
-            <thead><tr><th>URL</th><th>Health</th><th>Circuit</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Authority</th><th>Source</th><th>Credential</th><th>Health</th><th>Circuit</th><th>Actions</th></tr></thead>
             <tbody id="upstream-tbody"></tbody>
           </table>
         </div>
         <div id="upstream-add-form" style="display:none;padding:16px;border-top:1px solid var(--border)">
-          <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" class="input" id="upstream-url-input" placeholder="http://parent-proxy:3128" style="flex:1">
-            <button class="btn sm" data-click="addUpstreamProxy">Add</button>
+          <div id="upstream-form-title" style="font-weight:600;font-size:.85rem;margin-bottom:8px">Add upstream entry</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select class="input" id="upstream-scheme-input" style="width:110px" aria-label="Scheme">
+              <option value="http">http</option>
+              <option value="https">https</option>
+              <option value="socks5">socks5</option>
+            </select>
+            <input type="text" class="input" id="upstream-host-input" placeholder="parent-proxy.example.com" style="flex:2;min-width:220px" aria-label="Host">
+            <input type="number" class="input" id="upstream-port-input" placeholder="3128" min="1" max="65535" style="width:110px" aria-label="Port">
+            <input type="text" class="input" id="upstream-username-input" placeholder="username (optional)" autocomplete="off" style="flex:1;min-width:160px" aria-label="Username">
+            <button class="btn sm" data-click="saveUpstreamEntry">Save</button>
             <button class="btn sm ghost" data-click="hideUpstreamAdd">Cancel</button>
           </div>
+          <div class="hint" style="margin-top:6px">The password is never entered here: save the entry first, then use <em>Set credential</em>. Changing the authority of a credentialed entry is refused until its credential is cleared.</div>
+        </div>
+        <div id="upstream-credential-form" style="display:none;padding:16px;border-top:1px solid var(--border)">
+          <div id="upstream-credential-title" style="font-weight:600;font-size:.85rem;margin-bottom:8px">Set credential</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="password" class="input" id="upstream-password-input" placeholder="password (write-only, sealed at rest)" autocomplete="new-password" style="flex:1;min-width:240px" aria-label="Password">
+            <button class="btn sm" data-click="setUpstreamCredential">Seal &amp; save</button>
+            <button class="btn sm ghost" data-click="hideUpstreamCredential">Cancel</button>
+          </div>
+          <div class="hint" style="margin-top:6px">The password is sealed under this node's local key and is never shown, logged, exported or synced. Replacing it overwrites the previous credential.</div>
         </div>
       </div>
     </div><!-- /view-upstream -->
@@ -5673,12 +5693,17 @@ document.addEventListener('click', e => {
     case 'diffConfigVersions': diffConfigVersions(+arg, +arg2); break;
     case 'rollbackConfigVersion': rollbackConfigVersion(+arg); break;
 
-    // ── Upstream ──
+    // ── Upstream (2F-C v2 per-entry endpoints) ──
     case 'upstreamHealthCheck': upstreamHealthCheck(); break;
     case 'showUpstreamAdd':   showUpstreamAdd(); break;
-    case 'addUpstreamProxy':  addUpstreamProxy(); break;
-    case 'hideUpstreamAdd':   document.getElementById('upstream-add-form').style.display='none'; break;
+    case 'editUpstreamEntry': showUpstreamAdd(+arg); break;
+    case 'saveUpstreamEntry': saveUpstreamEntry(); break;
+    case 'hideUpstreamAdd':   hideUpstreamAdd(); break;
     case 'removeUpstreamProxy': removeUpstreamProxy(+arg); break;
+    case 'showUpstreamCredential': showUpstreamCredential(+arg); break;
+    case 'setUpstreamCredential': setUpstreamCredential(); break;
+    case 'hideUpstreamCredential': hideUpstreamCredential(); break;
+    case 'clearUpstreamCredential': clearUpstreamCredential(+arg); break;
 
     // ── Cluster ──
     case 'loadCluster':       loadCluster(); break;
@@ -17331,29 +17356,117 @@ async function toggleOCSP(enabled) {
 // ═══════════════════════════════════════════════════════════════════════════
 let upstreamData = [];
 let upstreamFallback = null; // CHAOS-11: {active, total} direct-fallback status
+let upstreamViewState = null; // 2F-C: the whole read model (mode, revision, key, migration, degraded)
+let upstreamRevision = 0;     // document revision echoed by create + the v1 adapter
+let upstreamEditIdx = -1;     // index into upstreamData while editing, -1 while adding
+let upstreamCredIdx = -1;     // index into upstreamData for the credential form
+
 async function loadUpstream() {
   const r = await api('/api/upstream');
   if (!r) return;
-  upstreamData = r.proxies || [];
+  upstreamViewState = r;
+  upstreamData = r.entries || r.proxies || [];
   upstreamFallback = r.direct_fallback || null;
+  upstreamRevision = r.revision || 0;
   renderUpstream();
+}
+
+// upstreamRefused renders a structured 2F-C refusal truthfully (nothing was
+// saved; the caller reloads). Fence refusals (428/409 stale) reuse the 2F-A
+// PAC helper; every other bounded code gets an actionable message. Returns
+// true when the response was a refusal the user has been told about.
+async function upstreamRefused(resp) {
+  if (resp.ok) return false;
+  if (await pacFenceRefused(resp, loadUpstream)) return true;
+  const data = await resp.clone().json().catch(() => null);
+  const code = data && data.code;
+  const msgs = {
+    credential_bound: 'Not saved: this entry holds a credential, so its authority cannot change. Clear the credential first, then edit.',
+    credential_present: 'Not removed: this entry holds a credential. Clear the credential first (typed confirmation), then remove the entry.',
+    credentialed_entries_present: 'Not saved: the pool holds credentialed entries; manage entries individually.',
+    duplicate_authority: 'Not saved: that authority already exists in the effective pool (config.yaml or managed).',
+    yaml_owned: 'This entry is owned by config.yaml and is read-only here. Edit the YAML and reload.',
+    vanished: 'This entry no longer exists. Reloaded.',
+    key_unusable: 'Not saved: the node-local credential key is missing or unreadable. Restore .upstream_cred_key or clear the affected credentials.',
+    confirm_required: 'Not cleared: the typed confirmation did not match the entry id.',
+    no_credential: 'This entry holds no credential.',
+    invalid_entry: 'Not saved: the entry is invalid (' + escHtml(String((data && data.error) || '')) + ').',
+    userinfo_not_allowed: 'Not saved: a proxy URL must not carry a username or password here.',
+    credential_state_not_accepted: 'Not saved: credential state is derived by the server.',
+    invalid_password: 'Not saved: the password is required and must be at most 1024 bytes.',
+    persist_failed: 'Not saved: the change could not be made durable. Nothing was changed.',
+    seal_failed: 'Not saved: the credential could not be sealed. Nothing was changed.',
+  };
+  const text = msgs[code] || ('Request failed (' + resp.status + '): ' + ((data && data.error) || await resp.clone().text().catch(() => '')));
+  toast(text, 'error');
+  loadUpstream();
+  return true;
+}
+
+async function upstreamCall(path, opts) {
+  const o = {...opts};
+  if (o.body && typeof o.body === 'object') {
+    o.body = JSON.stringify(o.body);
+    o.headers = {'Content-Type': 'application/json', ...(o.headers || {})};
+  }
+  const resp = await apiFetch(path, o);
+  if (resp.status === 401) throw new Error('Unauthorized');
+  if (await upstreamRefused(resp)) return null;
+  return resp.json();
+}
+
+function upstreamModeLabel(mode) {
+  return ({no_pool: 'DIRECT (no pool)', chained: 'CHAINED', no_eligible_parent: 'NO ELIGIBLE PARENT',
+           direct_fallback: 'DIRECT FALLBACK'})[mode] || escHtml(String(mode || ''));
+}
+
+function upstreamCredentialBadge(state) {
+  const m = {none: ['neutral', 'none'], configured: ['ok', 'configured'],
+             unusable: ['blocked', 'unusable'], mismatch: ['blocked', 'mismatch']};
+  const [cls, label] = m[state] || ['neutral', escHtml(String(state || ''))];
+  return '<span class="badge ' + cls + '">' + label + '</span>';
+}
+
+function upstreamProbeBadge(p) {
+  const probe = p.probe || {};
+  if (probe.status === 'healthy') return '<span class="badge ok">Healthy</span>';
+  if (probe.status === 'unhealthy') return '<span class="badge blocked">Down</span><div style="font-size:.72rem;color:var(--muted);margin-top:2px">' + escHtml(probe.reason || '') + '</div>';
+  return '<span class="badge auth">Unprobed</span>';
 }
 
 function renderUpstream() {
   const empty = document.getElementById('upstream-empty');
   const table = document.getElementById('upstream-table');
   const tbody = document.getElementById('upstream-tbody');
+  const status = document.getElementById('upstream-status');
+  const v = upstreamViewState || {};
+  if (status) {
+    const key = v.key || {};
+    status.innerHTML = 'Mode: <strong>' + upstreamModeLabel(v.mode) + '</strong> · coverage: plain HTTP only (CONNECT / WebSocket / SOCKS5 are never chained) · scope: node-local' +
+      (key.state && key.state !== 'unused' ? ' · credential key: ' + escHtml(key.state) : '') +
+      (v.credentialsIneligible ? ' · <span style="color:var(--red)">' + escHtml(String(v.credentialsIneligible)) + ' credential' + (v.credentialsIneligible === 1 ? '' : 's') + ' ineligible</span>' : '');
+  }
   // CHAOS-11: surface the fail-open bypass — a configured chain with every
   // parent down silently egresses DIRECT; make that state impossible to miss.
   const banner = document.getElementById('upstream-fallback-banner');
   if (banner) {
     if (upstreamData.length && upstreamFallback && upstreamFallback.active) {
-      banner.innerHTML = '<strong style="color:var(--red)">DIRECT FALLBACK ACTIVE</strong> — all parent proxies are down (unhealthy or circuit-open). Egress traffic is bypassing the parent-proxy chain. ' +
+      banner.innerHTML = '<strong style="color:var(--red)">DIRECT FALLBACK ACTIVE</strong> — no parent proxy is eligible (down, circuit-open, or its credential is unusable). Egress traffic is bypassing the parent-proxy chain. ' +
         (upstreamFallback.total ? escHtml(String(upstreamFallback.total)) + ' request' + (upstreamFallback.total === 1 ? '' : 's') + ' egressed direct since startup.' : '');
       banner.style.display = '';
     } else {
       banner.style.display = 'none';
     }
+  }
+  const degraded = document.getElementById('upstream-degraded-banner');
+  if (degraded) {
+    const mig = v.migration || {};
+    const parts = [];
+    if (v.degraded && v.degraded.reason) parts.push('Managed entries are NOT published: ' + escHtml(v.degraded.reason) + (v.degraded.count ? ' (' + escHtml(String(v.degraded.count)) + ')' : '') + '.');
+    if (mig.state === 'degraded') parts.push('Legacy pool migration degraded (' + escHtml(mig.reason || '') + '); the legacy file was left untouched.');
+    if (v.key && (v.key.state === 'missing' || v.key.state === 'unreadable')) parts.push('Credential key ' + escHtml(v.key.state) + ': sealed credentials are unusable until .upstream_cred_key is restored (it is never re-minted automatically).');
+    degraded.innerHTML = parts.join(' ');
+    degraded.style.display = parts.length ? '' : 'none';
   }
   if (!upstreamData.length) {
     empty.style.display = '';
@@ -17362,58 +17475,159 @@ function renderUpstream() {
   }
   empty.style.display = 'none';
   table.style.display = '';
-  tbody.innerHTML = upstreamData.map((p,i) => `<tr>
-    <td style="font-family:monospace;font-size:.82rem">${escHtml(p.url)}</td>
-    <td><span class="badge ${p.healthy?'ok':'blocked'}">${p.healthy?'Healthy':'Down'}</span></td>
+  tbody.innerHTML = upstreamData.map((p,i) => {
+    const yaml = p.source === 'yaml';
+    const hasCred = p.credentialState && p.credentialState !== 'none';
+    const actions = yaml
+      ? '<span class="hint">read-only (config.yaml)</span>'
+      : `<button class="btn ghost sm" data-click="editUpstreamEntry" data-arg="${i}" data-min-role="admin">Edit</button>
+         <button class="btn ghost sm" data-click="showUpstreamCredential" data-arg="${i}" data-min-role="admin">${hasCred ? 'Replace credential' : 'Set credential'}</button>
+         ${hasCred ? `<button class="btn danger-quiet sm" data-click="clearUpstreamCredential" data-arg="${i}" data-min-role="admin">Clear credential</button>` : ''}
+         <button class="btn danger-quiet sm" data-click="removeUpstreamProxy" data-arg="${i}" data-min-role="admin"${hasCred ? ' disabled title="Clear the credential first"' : ''}>Remove</button>`;
+    return `<tr>
+    <td style="font-family:monospace;font-size:.82rem">${escHtml(p.authority || p.url)}</td>
+    <td><span class="badge ${yaml ? 'auth' : 'neutral'}">${yaml ? 'config.yaml' : 'managed'}</span></td>
+    <td>${upstreamCredentialBadge(p.credentialState)}</td>
+    <td>${upstreamProbeBadge(p)}</td>
     <td><span class="badge ${p.circuit==='closed'?'ok':p.circuit==='open'?'blocked':'auth'}">${escHtml(p.circuit)}</span>${p.circuit==='closed'?'':`<div style="font-size:.72rem;color:var(--muted);margin-top:2px">${p.failures||0} failure${p.failures===1?'':'s'}${p.retryAfterMs?`, retry in ${Math.ceil(p.retryAfterMs/1000)}s`:''}</div>`}</td>
-    <td><button class="btn danger-quiet sm" data-click="removeUpstreamProxy" data-arg="${i}">Remove</button></td>
-  </tr>`).join('');
+    <td style="white-space:nowrap">${actions}</td>
+  </tr>`;
+  }).join('');
+  applySessionRoleVisibilityScope('#upstream-tbody');
 }
 
-function showUpstreamAdd() {
+function showUpstreamAdd(idx = -1) {
+  upstreamEditIdx = idx;
+  const e = idx >= 0 ? upstreamData[idx] : null;
+  document.getElementById('upstream-form-title').textContent = e ? 'Edit upstream entry ' + e.id : 'Add upstream entry';
+  document.getElementById('upstream-scheme-input').value = e ? e.scheme : 'http';
+  document.getElementById('upstream-host-input').value = e ? e.host : '';
+  document.getElementById('upstream-port-input').value = e ? e.port : '';
+  document.getElementById('upstream-username-input').value = e ? (e.username || '') : '';
+  hideUpstreamCredential();
   document.getElementById('upstream-add-form').style.display = '';
-  document.getElementById('upstream-url-input').focus();
+  document.getElementById('upstream-host-input').focus();
 }
 
-async function addUpstreamProxy() {
-  const url = document.getElementById('upstream-url-input').value.trim();
-  if (!url) return;
-  // Tier 2: the upstream chain carries all egress traffic.
-  const ok = await confirmAction('Add upstream proxy',
-    'Egress traffic will be forwarded through the parent proxy chain including ' + url + '.',
-    'Add proxy',
-    {impact: 'Applies to all proxied traffic immediately. An unreachable parent proxy degrades or breaks egress until the circuit breaker reacts.',
-     rollback: 'Remove the entry here; the previous chain is restored immediately.',
+function hideUpstreamAdd() {
+  upstreamEditIdx = -1;
+  document.getElementById('upstream-add-form').style.display = 'none';
+}
+
+async function saveUpstreamEntry() {
+  const scheme = document.getElementById('upstream-scheme-input').value;
+  const host = document.getElementById('upstream-host-input').value.trim();
+  const port = parseInt(document.getElementById('upstream-port-input').value, 10) || 0;
+  const username = document.getElementById('upstream-username-input').value.trim();
+  if (!host) { toast('Host is required', 'error'); return; }
+  const authority = scheme + '://' + (username ? username + '@' : '') + host + (port ? ':' + port : '');
+  const editing = upstreamEditIdx >= 0 ? upstreamData[upstreamEditIdx] : null;
+  // Tier 2: the upstream chain carries all plain-HTTP egress traffic.
+  const ok = await confirmAction(editing ? 'Update upstream entry' : 'Add upstream entry',
+    (editing ? 'Change ' + editing.authority + ' to ' : 'Egress traffic will be forwarded through the parent proxy chain including ') + authority + '.',
+    editing ? 'Save' : 'Add entry',
+    {impact: 'Applies to all proxied plain-HTTP traffic immediately. A new entry starts UNPROBED and is eligible until its first failed probe; an unreachable parent degrades egress until the circuit breaker reacts.',
+     rollback: editing ? 'Edit the entry back; the previous authority is restored immediately.' : 'Remove the entry here; the previous chain is restored immediately.',
      okStyle: 'primary'});
   if (!ok) return;
-  const newList = [...upstreamData.map(p=>({url:p.url})), {url}];
+  const body = {scheme, host, port, username, revision: editing ? editing.revision : upstreamRevision};
   try {
-    await api('/api/upstream', {method:'POST', body:{proxies: newList}});
-    document.getElementById('upstream-url-input').value = '';
-    document.getElementById('upstream-add-form').style.display = 'none';
-    toast('Upstream proxy added','success');
+    const r = editing
+      ? await upstreamCall('/api/upstream/entries/' + encodeURIComponent(editing.id), {method: 'PUT', body})
+      : await upstreamCall('/api/upstream/entries', {method: 'POST', body});
+    if (!r) return;
+    hideUpstreamAdd();
+    toast(editing ? 'Upstream entry updated' : 'Upstream entry added', 'success');
     loadUpstream();
-  } catch(e) { toast('Failed to add upstream proxy: ' + e.message, 'error'); }
+  } catch(e) { toast('Failed to save upstream entry: ' + e.message, 'error'); }
 }
 
 async function removeUpstreamProxy(idx) {
-  const removed = upstreamData[idx] ? upstreamData[idx].url : '(unknown)';
+  const e = upstreamData[idx];
+  if (!e) return;
   const remaining = upstreamData.length - 1;
   // Tier 2: changing the chain affects all egress immediately.
-  const ok = await confirmAction('Remove upstream proxy',
-    'Remove ' + removed + ' from the parent proxy chain.',
+  const ok = await confirmAction('Remove upstream entry',
+    'Remove ' + e.authority + ' from the parent proxy chain.',
     'Remove',
     {impact: remaining > 0
         ? 'Traffic shifts to the ' + remaining + ' remaining parent prox' + (remaining === 1 ? 'y' : 'ies') + ' immediately.'
         : 'This is the LAST parent proxy - traffic egresses DIRECTLY from this node afterwards.',
-     rollback: 'Re-add the proxy URL here to restore the previous chain.'});
+     rollback: 'Re-add the entry here to restore the previous chain.'});
   if (!ok) return;
-  const newList = upstreamData.filter((_,i) => i !== idx).map(p=>({url:p.url}));
   try {
-    await api('/api/upstream', {method:'POST', body:{proxies: newList}});
-    toast('Upstream proxy removed','success');
+    const r = await upstreamCall('/api/upstream/entries/' + encodeURIComponent(e.id) + '?revision=' + encodeURIComponent(e.revision), {method: 'DELETE'});
+    if (!r) return;
+    toast('Upstream entry removed', 'success');
     loadUpstream();
-  } catch(e) { toast('Failed to remove upstream proxy: ' + e.message, 'error'); }
+  } catch(err) { toast('Failed to remove upstream entry: ' + err.message, 'error'); }
+}
+
+function showUpstreamCredential(idx) {
+  const e = upstreamData[idx];
+  if (!e) return;
+  upstreamCredIdx = idx;
+  hideUpstreamAdd();
+  document.getElementById('upstream-credential-title').textContent =
+    (e.credentialState && e.credentialState !== 'none' ? 'Replace credential for ' : 'Set credential for ') + e.authority;
+  document.getElementById('upstream-password-input').value = '';
+  document.getElementById('upstream-credential-form').style.display = '';
+  document.getElementById('upstream-password-input').focus();
+}
+
+function hideUpstreamCredential() {
+  upstreamCredIdx = -1;
+  const pw = document.getElementById('upstream-password-input');
+  if (pw) pw.value = '';
+  document.getElementById('upstream-credential-form').style.display = 'none';
+}
+
+async function setUpstreamCredential() {
+  const e = upstreamData[upstreamCredIdx];
+  if (!e) return;
+  const pwEl = document.getElementById('upstream-password-input');
+  const password = pwEl.value;
+  if (!password) { toast('Password is required', 'error'); return; }
+  const replacing = e.credentialState && e.credentialState !== 'none';
+  // Tier 2: a credential change alters what this node presents to the parent.
+  const ok = await confirmAction(replacing ? 'Replace credential' : 'Set credential',
+    (replacing ? 'Replace the sealed credential of ' : 'Seal a credential for ') + e.authority + '.',
+    replacing ? 'Replace' : 'Seal & save',
+    {impact: 'The password is sealed under this node\'s local key before it is stored and is never shown again. It is presented to the parent proxy on every chained request.',
+     rollback: replacing ? 'Enter the previous password again; the old sealed value is overwritten.' : 'Clear the credential (typed confirmation).',
+     okStyle: 'primary'});
+  if (!ok) { pwEl.value = ''; return; }
+  try {
+    const r = await upstreamCall('/api/upstream/entries/' + encodeURIComponent(e.id) + '/credential',
+      {method: 'POST', body: {action: 'replace', password, revision: e.revision}});
+    pwEl.value = '';
+    if (!r) return;
+    hideUpstreamCredential();
+    toast('Credential sealed', 'success');
+    loadUpstream();
+  } catch(err) { pwEl.value = ''; toast('Failed to set credential: ' + err.message, 'error'); }
+}
+
+async function clearUpstreamCredential(idx) {
+  const e = upstreamData[idx];
+  if (!e) return;
+  // Tier 3: clearing is destructive (the sealed material cannot be recovered)
+  // and is the gate that unlocks authority edits and removal.
+  const ok = await confirmDanger({
+    title: 'Clear credential',
+    msg: 'Permanently remove the sealed credential of ' + e.authority + '. Type the entry id to confirm.',
+    impact: 'Chained requests to this parent continue WITHOUT Proxy-Authorization; a parent that requires it answers 407 and the entry becomes unhealthy (never selected).',
+    rollback: 'Set the credential again from the original password. The sealed value itself cannot be recovered.',
+    confirmWord: e.id,
+    okLabel: 'Clear credential'});
+  if (!ok) return;
+  try {
+    const r = await upstreamCall('/api/upstream/entries/' + encodeURIComponent(e.id) + '/credential',
+      {method: 'POST', body: {action: 'clear', confirm: e.id, revision: e.revision}});
+    if (!r) return;
+    toast('Credential cleared', 'success');
+    loadUpstream();
+  } catch(err) { toast('Failed to clear credential: ' + err.message, 'error'); }
 }
 
 async function upstreamHealthCheck() {

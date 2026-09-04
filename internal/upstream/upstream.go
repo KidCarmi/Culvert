@@ -281,7 +281,7 @@ func (p *Pool) SetKey(k *Keyring, reason string) {
 }
 
 // Key returns the loaded key (nil when unavailable) and the bounded reason.
-func (p *Pool) Key() (*Keyring, string) {
+func (p *Pool) Key() (key *Keyring, reason string) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.key, p.keyErr
@@ -318,7 +318,14 @@ func (p *Pool) SetDocument(doc Document) error {
 func (p *Pool) Document() Document {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.doc.Clone()
+	d := p.doc.Clone()
+	if d.Revision == 0 {
+		// A never-persisted (or pre-v2) document is revision 1, so a
+		// client can always echo a non-zero fence token (the 2F-A
+		// revision-0 migration convention).
+		d.Revision = 1
+	}
+	return d
 }
 
 // YAMLEntries returns copies of the YAML-owned entries.
@@ -886,4 +893,38 @@ func FormatSummary(entries []Entry) string {
 		}
 	}
 	return fmt.Sprintf("%d proxies (%s)", len(entries), strings.Join(hosts, ", "))
+}
+
+// ─── Test isolation ──────────────────────────────────────────────────────────
+
+// PoolState is a full Pool snapshot for test hermeticity (pair Snapshot with
+// Restore around a test that mutates the process-global pool).
+type PoolState struct {
+	YAML        []ManagedEntry
+	Doc         Document
+	Key         *Keyring
+	KeyErr      string
+	CBThreshold int
+	CBTimeout   time.Duration
+}
+
+// Snapshot captures the pool's configuration (not its probe/breaker state).
+func (p *Pool) Snapshot() PoolState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return PoolState{YAML: cloneEntries(p.yaml), Doc: p.doc.Clone(), Key: p.key, KeyErr: p.keyErr, CBThreshold: p.cbThreshold, CBTimeout: p.cbTimeout}
+}
+
+// Restore resets the pool to a captured state and rebuilds the effective
+// pool from it (probe/breaker state starts fresh).
+func (p *Pool) Restore(st PoolState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.yaml = cloneEntries(st.YAML)
+	p.doc = st.Doc.Clone()
+	p.key, p.keyErr = st.Key, st.KeyErr
+	p.cbThreshold, p.cbTimeout = st.CBThreshold, st.CBTimeout
+	p.proxies = nil
+	p.fallbackTotal.Store(0)
+	p.rebuildLocked()
 }

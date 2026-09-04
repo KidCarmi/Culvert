@@ -101,29 +101,9 @@ func Normalize(in Spec) (Spec, error) {
 	if !ok {
 		return out, fmt.Errorf("scheme must be http, https or socks5")
 	}
-	host := strings.TrimSpace(in.Host)
-	if host == "" {
-		return out, errors.New("host is required")
-	}
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	switch {
-	case strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]"):
-		if ip := net.ParseIP(strings.Trim(host, "[]")); ip == nil || ip.To4() != nil {
-			return out, errors.New("bracketed host must be an IPv6 literal")
-		}
-	case net.ParseIP(host) != nil:
-		if ip := net.ParseIP(host); ip.To4() == nil {
-			host = "[" + host + "]"
-		}
-	default:
-		if strings.ContainsAny(host, " /?#@:\\") {
-			return out, errors.New("host contains an invalid character")
-		}
-		ascii, err := idna.Lookup.ToASCII(host)
-		if err != nil {
-			return out, fmt.Errorf("host is not a valid IDNA host name")
-		}
-		host = ascii
+	host, err := normalizeHost(in.Host)
+	if err != nil {
+		return out, err
 	}
 	out.Host = host
 	port := in.Port
@@ -140,6 +120,36 @@ func Normalize(in Spec) (Spec, error) {
 	}
 	out.Username = user
 	return out, nil
+}
+
+// normalizeHost lower-cases, strips a trailing dot and IDNA-encodes a host
+// name; bracketed IPv6 literals are accepted and bare IPv6 literals bracketed.
+func normalizeHost(raw string) (string, error) {
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		return "", errors.New("host is required")
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	switch {
+	case strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]"):
+		if ip := net.ParseIP(strings.Trim(host, "[]")); ip == nil || ip.To4() != nil {
+			return "", errors.New("bracketed host must be an IPv6 literal")
+		}
+	case net.ParseIP(host) != nil:
+		if ip := net.ParseIP(host); ip.To4() == nil {
+			host = "[" + host + "]"
+		}
+	default:
+		if strings.ContainsAny(host, " /?#@:\\") {
+			return "", errors.New("host contains an invalid character")
+		}
+		ascii, err := idna.Lookup.ToASCII(host)
+		if err != nil {
+			return "", fmt.Errorf("host is not a valid IDNA host name")
+		}
+		host = ascii
+	}
+	return host, nil
 }
 
 // SpecFromURL parses a legacy `scheme://[user[:pass]@]host[:port]` URL into

@@ -571,9 +571,11 @@ func apiClusterMetrics(w http.ResponseWriter, r *http.Request) {
 // elsewhere); per-handler RBAC is the handler's responsibility.
 func registerClusterRoutes(mux *http.ServeMux) {
 	// ── Upstream proxy chaining ──────────────────────────────────────────
-	mux.HandleFunc("/api/upstream", apiUpstream)                  // GET list / POST add
-	mux.HandleFunc("/api/upstream/settings", apiUpstreamSettings) // GET/PUT circuit breaker
-	mux.HandleFunc("/api/upstream/health", apiUpstreamHealth)     // POST force health check
+	mux.HandleFunc("/api/upstream", apiUpstream)                     // GET view / POST credential-free v1 bulk adapter
+	mux.HandleFunc("/api/upstream/settings", apiUpstreamSettings)    // GET view (legacy alias)
+	mux.HandleFunc("/api/upstream/health", apiUpstreamHealth)        // POST force health check
+	mux.HandleFunc("/api/upstream/entries", apiUpstreamEntries)      // POST create managed entry (2F-C)
+	mux.HandleFunc("/api/upstream/entries/", apiUpstreamEntryRouter) // PUT/DELETE {id}, POST {id}/credential (2F-C)
 
 	// ── Cluster / multi-node ─────────────────────────────────────────────
 	mux.HandleFunc("/api/cluster/status", apiClusterStatus)                       // GET this node + connected nodes

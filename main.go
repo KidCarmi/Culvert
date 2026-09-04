@@ -1374,7 +1374,9 @@ func applyHotReload(fc *FileConfig) {
 	// shared with the startup slice (resolveUpstreamPoolStartupConfig).
 	if len(fc.Upstream.Proxies) > 0 {
 		ucfg := resolveUpstreamPoolStartupConfig(fc)
-		upstreamPool.Configure(ucfg.Proxies, ucfg.CBThreshold, ucfg.CBTimeout)
+		if err := upstreamPool.Configure(ucfg.Proxies, ucfg.CBThreshold, ucfg.CBTimeout); err != nil {
+			logger.Printf("ERROR: Reload: upstream YAML proxies rejected (pool unchanged): %v", err)
+		}
 		applyUpstreamProxy()
 		logger.Printf("Reload: upstream %s", formatUpstreamSummary(ucfg.Proxies))
 	}

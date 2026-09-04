@@ -193,9 +193,13 @@ func upstreamCounts(list []UpstreamStatus) (healthy, usable int) {
 	for i := range list {
 		if list[i].Healthy {
 			healthy++
-			if list[i].Circuit != "open" {
-				usable++
-			}
+		}
+		// 2F-C: usable is the pool's own eligibility verdict (credential
+		// usable AND probe unprobed/healthy AND breaker admitting), so an
+		// unprobed new entry counts as usable and an unusable/mismatched
+		// credential never does.
+		if list[i].Eligible {
+			usable++
 		}
 	}
 	return healthy, usable

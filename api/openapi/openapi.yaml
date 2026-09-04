@@ -988,13 +988,101 @@ components:
         `available:false` means the agent could not be reached or is not
         configured; `backups` is newest-first when available.
       additionalProperties: true
+    UpstreamEntry:
+      type: object
+      description: >-
+        One effective parent-proxy entry (2F-C Upstream v2). Credential-FREE by
+        construction: `url`/`authority` never carry userinfo beyond the
+        username, `credentialState` is DERIVED server-side (never accepted
+        from a client) and the probe/eligibility verdicts are the pool's own.
+        `source: yaml` entries are read-only through the API (409 yaml_owned).
+      required: [id, url, authority, scheme, host, port, source, revision, credentialState, probe, healthy, eligible, circuit, failures]
+      additionalProperties: false
+      properties:
+        id: { type: string, description: 'Server-assigned ULID (managed) or `yaml-<digest>` (config.yaml).' }
+        url: { type: string, description: 'Legacy field — the credential-free canonical authority.' }
+        authority: { type: string, description: 'Canonical `scheme://[username@]host:port`.' }
+        scheme: { type: string, enum: [http, https, socks5] }
+        host: { type: string }
+        port: { type: integer }
+        username: { type: string }
+        source: { type: string, enum: [managed, yaml] }
+        revision: { type: integer, format: int64, description: 'Per-entry optimistic-concurrency token (echo on PUT/DELETE/credential).' }
+        credentialState: { type: string, enum: [none, configured, unusable, mismatch] }
+        probe: { $ref: '#/components/schemas/UpstreamProbe' }
+        healthy: { type: boolean, description: 'Legacy — true only when the probe is `healthy`.' }
+        eligible: { type: boolean, description: 'Selectable now (credential usable AND probe unprobed/healthy AND breaker admitting).' }
+        circuit: { type: string, enum: [closed, open, half-open] }
+        failures: { type: integer, format: int64 }
+        openedAtMs: { type: integer, format: int64 }
+        retryAfterMs: { type: integer, format: int64 }
+    UpstreamProbe:
+      type: object
+      required: [status, reason]
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [unprobed, healthy, unhealthy] }
+        reason: { type: string, enum: [none, connect_failed, timeout, proxy_auth_failed, probe_http_error, credential_ineligible] }
+        checkedAt: { type: string }
+    UpstreamEffective:
+      type: object
+      required: [mode, entries, eligible, fallbackTotal]
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [no_pool, chained, no_eligible_parent, direct_fallback] }
+        entries: { type: integer }
+        eligible: { type: integer }
+        fallbackTotal: { type: integer, format: int64 }
+    UpstreamMigration:
+      type: object
+      description: Boot-time legacy→v2 migration outcome (node-local, bounded reason; never a URL or credential).
+      required: [state]
+      additionalProperties: false
+      properties:
+        state: { type: string, enum: [none, ok, degraded] }
+        reason: { type: string }
+        at: { type: string }
+        migrated: { type: integer }
+        sealed: { type: integer }
+        yamlOwned: { type: integer }
+    UpstreamKeyState:
+      type: object
+      description: Node-local credential-key availability (`.upstream_cred_key`); `keyId` is a public fingerprint, never key material.
+      required: [state]
+      additionalProperties: false
+      properties:
+        state: { type: string, enum: [present, missing, unreadable, unused] }
+        keyId: { type: string }
+    UpstreamDegraded:
+      type: object
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason: { type: string }
+        count: { type: integer }
     UpstreamConfig:
       type: object
-      required: [enabled, proxies]
+      description: >-
+        The Upstream v2 read model (2F-C). `entries` and the legacy `proxies`
+        carry the same credential-free rows; `revision` is the managed-document
+        token every bulk mutation must echo; `migration`/`key`/`degraded` are
+        the node-local truth an operator needs to understand an ineligible
+        credential. Scope is always node-local (never CP→DP synced).
+      required: [enabled, proxies, entries, revision, mode, effective, coverage, direct_fallback, migration, key, credentialsIneligible, scope]
       additionalProperties: false
       properties:
         enabled: { type: boolean }
-        proxies: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        mode: { type: string, enum: [no_pool, chained, no_eligible_parent, direct_fallback] }
+        effective: { $ref: '#/components/schemas/UpstreamEffective' }
+        coverage:
+          type: object
+          required: [summary]
+          additionalProperties: false
+          properties:
+            summary: { type: string, enum: [plain_http_only], description: 'Chaining applies to the plain-HTTP forward path only (PX-1: CONNECT/WebSocket/SOCKS5 chaining is not implemented).' }
+        revision: { type: integer, format: int64 }
+        entries: { type: array, items: { $ref: '#/components/schemas/UpstreamEntry' }, nullable: true }
+        proxies: { type: array, items: { $ref: '#/components/schemas/UpstreamEntry' }, nullable: true, description: 'Legacy alias of `entries`.' }
         direct_fallback:
           type: object
           description: CHAOS-11 fail-open visibility — whether the pool is currently bypassed to DIRECT egress (all parents unhealthy or circuit-open) and how many requests have fallen back since startup.
@@ -1003,6 +1091,82 @@ components:
           properties:
             active: { type: boolean }
             total: { type: integer, format: int64 }
+        migration: { $ref: '#/components/schemas/UpstreamMigration' }
+        key: { $ref: '#/components/schemas/UpstreamKeyState' }
+        degraded: { $ref: '#/components/schemas/UpstreamDegraded' }
+        credentialsIneligible: { type: integer, description: 'Entries whose credential is unusable or mismatched (never selected, never probed).' }
+        scope: { type: string, enum: [node-local] }
+        ok: { type: boolean, description: 'Present on mutation answers.' }
+        yamlOwned: { type: integer, description: 'v1 adapter — incoming authorities skipped because config.yaml owns them.' }
+        entry: { $ref: '#/components/schemas/UpstreamEntryDTO' }
+    UpstreamEntryDTO:
+      type: object
+      description: The entry a create/update/credential mutation just produced.
+      required: [id, scheme, host, port, authority, source, revision, credentialState]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        scheme: { type: string }
+        host: { type: string }
+        port: { type: integer }
+        username: { type: string }
+        authority: { type: string }
+        source: { type: string }
+        revision: { type: integer, format: int64 }
+        credentialState: { type: string, enum: [none, configured, unusable, mismatch] }
+    UpstreamEntrySpec:
+      type: object
+      description: >-
+        Create/update body for a managed entry (2F-C). The password is NEVER
+        part of this body — it is set write-only through the credential
+        endpoint. A body carrying `credentialState` or `credential_configured`
+        is refused (400). `revision` is the DOCUMENT revision on create and the
+        ENTRY revision on update (428 missing, 409 stale, 404 vanished).
+      required: [scheme, host, revision]
+      additionalProperties: false
+      properties:
+        scheme: { type: string, enum: [http, https, socks5] }
+        host: { type: string }
+        port: { type: integer, description: '0 or absent ⇒ the scheme default (80/443/1080).' }
+        username: { type: string }
+        revision: { type: integer, format: int64 }
+    UpstreamCredentialRequest:
+      type: object
+      x-culvert-sensitive: true
+      description: >-
+        Write-only credential operation. `replace` seals the password under
+        the node-local key (T2; 409 key_unusable when no key can be used);
+        `clear` removes it (T3 — `confirm` must equal the entry id; 409
+        confirm_required otherwise). The password is never returned, logged,
+        audited or persisted in cleartext.
+      required: [action, revision]
+      additionalProperties: false
+      properties:
+        action: { type: string, enum: [replace, clear] }
+        password: { type: string, writeOnly: true }
+        confirm: { type: string }
+        revision: { type: integer, format: int64, description: 'The ENTRY revision.' }
+    UpstreamRefusal:
+      type: object
+      description: >-
+        Structured 2F-C refusal. `code` is bounded: precondition_required (428),
+        stale (409, `current.revision`), vanished (404), yaml_owned (409),
+        credential_bound (409 — authority change while a credential exists;
+        clear it first), credential_present (409 — delete refused), confirm_required
+        (409, `current.confirmValue`), credentialed_entries_present (409 — the v1
+        bulk adapter while any managed entry holds a credential),
+        duplicate_authority (409, `count`), no_credential (409 — clear on an entry
+        without material), invalid_entry / userinfo_not_allowed /
+        credential_state_not_accepted / invalid_password / invalid_action /
+        invalid_json (400), key_unusable (409), persist_failed / seal_failed
+        (500 — nothing was changed).
+      required: [error, code, current]
+      additionalProperties: false
+      properties:
+        error: { type: string }
+        code: { type: string }
+        current: { type: object, additionalProperties: true }
+        count: { type: integer }
 
     # ── Slice 3 tranche 6: cluster/support/diagnostics read-model schemas ──────────
     ClusterCAInfo:
@@ -1357,10 +1521,19 @@ components:
         rateLimitExemptDel: { type: string }
     UpstreamUpdate:
       type: object
+      description: >-
+        Credential-free v1 bulk replacement of the MANAGED entries (2F-C
+        compatibility adapter). Any URL carrying userinfo is refused (400
+        userinfo_not_allowed); any invalid entry refuses the whole list; the
+        call is refused 409 credentialed_entries_present while a managed entry
+        holds a credential (a credentialed entry is never replaced or removed by
+        omission); YAML-owned authorities are skipped; `revision` must echo the
+        document revision (428/409).
       required: [proxies]
       additionalProperties: false
       properties:
-        proxies: { type: array, items: { type: object, additionalProperties: true } }
+        proxies: { type: array, items: { type: object, additionalProperties: false, required: [url], properties: { url: { type: string } } } }
+        revision: { type: integer, format: int64 }
     AddFileblock:
       type: object
       description: Provide a single extension or a list.
@@ -6084,7 +6257,7 @@ paths:
       operationId: getUpstream
       tags: [cluster]
       summary: Upstream proxy pool
-      description: Returns the upstream proxy pool configuration.
+      description: Returns the Upstream v2 read model (credential-free entries, effective mode, coverage, document revision, node-local migration/key/degraded state).
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -6104,8 +6277,13 @@ paths:
     post:
       operationId: setUpstream
       tags: [cluster]
-      summary: Set upstream proxies
-      description: Replaces the upstream proxy pool.
+      summary: Set upstream proxies (credential-free v1 adapter)
+      description: >-
+        Replaces the MANAGED entries from a credential-free URL list (2F-C v1
+        adapter). Refused 400 on any userinfo or invalid entry (nothing dropped),
+        409 credentialed_entries_present while any managed entry holds a
+        credential, 428/409 on the document revision fence; YAML-owned
+        authorities are skipped. Persisted before the 200 is written.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -6116,7 +6294,7 @@ paths:
       x-culvert-idempotency: idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
-      x-culvert-audit-event: upstream.set
+      x-culvert-audit-event: upstream.update
       requestBody:
         required: true
         content:
@@ -6124,12 +6302,248 @@ paths:
             schema: { $ref: '#/components/schemas/UpstreamUpdate' }
       responses:
         '200':
-          description: Updated.
+          description: Updated (the full read model plus `ok` and `yamlOwned`).
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
-        '400': { $ref: '#/components/responses/PlainBadRequest' }
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '400':
+          description: Invalid JSON, invalid entry, or userinfo in a URL (`code` invalid_json / invalid_entry / userinfo_not_allowed).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: stale / credentialed_entries_present / duplicate_authority (`count`). Nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '500':
+          description: persist_failed — the change could not be made durable; nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+  /api/upstream/entries:
+    post:
+      operationId: createUpstreamEntry
+      tags: [cluster]
+      summary: Create a managed upstream entry
+      description: >-
+        Creates one managed entry (2F-C): server-assigned ULID, canonical
+        authority, no credential (set it afterwards through the credential
+        endpoint). Fenced on the document `revision` (428/409); 409
+        duplicate_authority when the effective pool (YAML + managed) would
+        carry the authority twice. Persisted before the 201 is written.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: upstream.entry.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpstreamEntrySpec' }
+      responses:
+        '201':
+          description: Created (the full read model plus `entry`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '400':
+          description: invalid_json / invalid_entry / credential_state_not_accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: stale / duplicate_authority (`count`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '500':
+          description: persist_failed — nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+  /api/upstream/entries/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: updateUpstreamEntry
+      tags: [cluster]
+      summary: Update a managed upstream entry
+      description: >-
+        Updates scheme/host/port/username (2F-C). Fenced on the ENTRY
+        `revision` (428/409/404 vanished). 409 credential_bound when the
+        canonical authority would change while a credential exists (clear the
+        credential first — there is no combined rebind); 409 yaml_owned for a
+        config.yaml entry; 409 duplicate_authority. Persisted before the 200.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: upstream.entry.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpstreamEntrySpec' }
+      responses:
+        '200':
+          description: Updated (the full read model plus `entry`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '400':
+          description: invalid_json / invalid_entry / credential_state_not_accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: vanished — the entry no longer exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '409':
+          description: stale / credential_bound / yaml_owned / duplicate_authority.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '500':
+          description: persist_failed — nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+    delete:
+      operationId: deleteUpstreamEntry
+      tags: [cluster]
+      summary: Delete a managed upstream entry
+      description: >-
+        Deletes a credential-free managed entry (2F-C). `?revision=` must echo
+        the ENTRY revision (428/409/404). 409 credential_present while the
+        entry holds a configured, unusable or mismatched credential (clear it
+        first, T3); 409 yaml_owned for a config.yaml entry. Persisted before
+        the 200.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: upstream.entry.delete
+      parameters:
+        - name: revision
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Deleted (the full read model).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: vanished.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '409':
+          description: stale / credential_present / yaml_owned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '500':
+          description: persist_failed — nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+  /api/upstream/entries/{id}/credential:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: setUpstreamCredential
+      tags: [cluster]
+      summary: Replace or clear an entry's credential (write-only)
+      description: >-
+        `replace` (T2) seals the password under the node-local
+        `.upstream_cred_key` bound to the entry id + authority hash — the
+        password is never returned, logged, audited or persisted in cleartext;
+        `clear` (T3) requires `confirm` equal to the entry id. Fenced on the
+        ENTRY revision (428/409/404); 409 key_unusable when no key can be used
+        (never minted while ciphertext exists or after a failed read); 409
+        yaml_owned. Persisted before the 200.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: upstream.credential.replace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpstreamCredentialRequest' }
+      responses:
+        '200':
+          description: Applied (the full read model plus `entry`; `credentialState` reflects the new state).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '400':
+          description: invalid_json / invalid_action / invalid_password (missing or over 1024 bytes) / credential_state_not_accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: vanished.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '409':
+          description: stale / key_unusable / confirm_required (`current.confirmValue`) / no_credential / yaml_owned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
+        '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '500':
+          description: persist_failed / seal_failed — nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
 
   /api/cluster/ca:
     get:
