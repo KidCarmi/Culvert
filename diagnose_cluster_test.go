@@ -119,6 +119,33 @@ func TestDiagnoseCluster_Roles(t *testing.T) {
 	}
 }
 
+// TestDiagnoseCluster_SyncPanicsSurfaced pins that a CHAOS-25-contained standby
+// sync panic reaches `diagnose cluster` even though it deliberately does NOT
+// advance SyncFailCount (so sync_fail_count alone reads healthy) — without this
+// field an operator has no signal that replication has stalled short of reading
+// logs or the culvert_crash_records_total metric. See HAState.notePanicRound.
+func TestDiagnoseCluster_SyncPanicsSurfaced(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	in := clusterInputs{
+		haStatus:  HAStatus{Enabled: true, Role: "standby", SyncFailCount: 0, SyncPanics: 3},
+		nodeRole:  "control-plane",
+		leaseMode: "none",
+	}
+	d := diagnoseClusterFrom(in, now)
+	if d.SyncPanics != 3 {
+		t.Fatalf("sync_panics=%d want 3", d.SyncPanics)
+	}
+	// A leader's diagnosis must never carry the standby-only field.
+	leaderIn := clusterInputs{
+		haStatus:  HAStatus{Enabled: true, Role: "leader", SyncPanics: 3},
+		nodeRole:  "control-plane",
+		leaseMode: "none", writeAllowed: true,
+	}
+	if got := diagnoseClusterFrom(leaderIn, now).SyncPanics; got != 0 {
+		t.Fatalf("leader sync_panics=%d want 0 (standby-only field)", got)
+	}
+}
+
 // TestDiagnoseCluster_NoSecrets proves the diagnosis never surfaces the
 // peer/standby CP addresses even when the HA snapshot carries them — the verb is
 // a health summary, not an infrastructure map.

@@ -377,6 +377,16 @@ const decodeCluster: Decoder<DiagnoseView> = (v, path = "$") => {
       value: String(syncFail),
       status: "warn",
     });
+  // Sync rounds contained by the CHAOS-25 panic guard deliberately do NOT
+  // advance sync_fail_count (a panicking standby must not auto-promote on
+  // its own fault), so this is the only signal that replication has stalled.
+  const syncPanics = field(o, "sync_panics", optNum, path) ?? 0;
+  if (syncPanics > 0)
+    summary.push({
+      label: "Sync faults (contained)",
+      value: `${String(syncPanics)} — replication stalled, auto-failover suppressed`,
+      status: "warn",
+    });
   const lastSync = field(o, "last_sync_ok", optStr, path) ?? "";
   if (lastSync !== "") summary.push({ label: "Last sync OK", value: lastSync });
   const detail = field(o, "detail", optStr, path) ?? "";
