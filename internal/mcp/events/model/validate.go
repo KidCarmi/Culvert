@@ -459,6 +459,12 @@ func validateShadowOutcomeOverride(sh *ShadowEvidence) error {
 // validatePhase enforces per-phase evidence requirements and the
 // criticality/action-class coupling by delegating to a per-phase helper.
 func (e Event) validatePhase() error {
+	// Witness evidence belongs to exactly one phase. Allowing it to ride on any
+	// other event would let a reconciliation claim reach the ledger attached to a
+	// record the reconciliation state machine never inspects.
+	if e.Reconciliation != nil && e.Phase != PhaseReconciliation {
+		return evtErr(mcperr.ReasonEventInvalid, "reconciliation evidence on a non-reconciliation event")
+	}
 	switch e.Phase {
 	case PhaseDecision, PhaseOutcome:
 		return e.validateDecisionPhase()
@@ -467,6 +473,18 @@ func (e Event) validatePhase() error {
 	case PhaseRecoveryMarker, PhaseHealth:
 		if e.Marker == nil || e.Marker.State == "" {
 			return evtErr(mcperr.ReasonEventEvidenceMissing, "marker event without marker state")
+		}
+	case PhaseReconciliation:
+		// Reconciliation evidence that cannot name its attempt or its result is not
+		// evidence; committing it would put an unusable record in the ledger.
+		if e.Reconciliation == nil || e.Reconciliation.AttemptID == "" {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "reconciliation without attempt identity")
+		}
+		if !e.Reconciliation.Result.Valid() {
+			return evtErr(mcperr.ReasonEventInvalid, "reconciliation with unknown result")
+		}
+		if e.Outcome != nil {
+			return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a reconciliation event")
 		}
 	case PhaseSendIntent:
 		// A send intent that cannot name its attempt is useless for reconciliation:
@@ -561,6 +579,29 @@ func (e Event) validateFieldBounds() error {
 	} {
 		if len(s) > maxFieldBytes {
 			return evtErr(mcperr.ReasonEventTooLarge, "a safe field exceeds its structural bound")
+		}
+	}
+	if o := e.Outcome; o != nil {
+		// Attempt/reservation identity and the send state are structural, but they
+		// are still strings on a durable record and must not be able to blow the
+		// per-event bound.
+		for _, s := range []string{o.AttemptID, o.ReservationID, string(o.PhysicalSendState)} {
+			if len(s) > maxFieldBytes {
+				return evtErr(mcperr.ReasonEventTooLarge, "an outcome field exceeds its structural bound")
+			}
+		}
+	}
+	if rc := e.Reconciliation; rc != nil {
+		// These come from an INDEPENDENT WITNESS — i.e. outside this process. An
+		// unbounded witness string is the one way external input could grow a durable
+		// ledger record without limit, so it is bounded here, structurally.
+		for _, s := range []string{
+			rc.AttemptID, rc.ReservationID, string(rc.Result), rc.WitnessSource,
+			rc.CompletenessWatermark, rc.EvidenceDigest,
+		} {
+			if len(s) > maxFieldBytes {
+				return evtErr(mcperr.ReasonEventTooLarge, "a reconciliation field exceeds its structural bound")
+			}
 		}
 	}
 	if sh := e.Shadow; sh != nil {

@@ -87,6 +87,11 @@ const (
 	// indistinguishable from "never sent" — which is the one inference that must
 	// never be made (see PhysicalSendState).
 	PhaseSendIntent
+	// PhaseReconciliation — APPEND-ONLY authoritative evidence resolving (or failing
+	// to resolve) an orphaned attempt against an independent witness. It never
+	// rewrites the original send intent: the intent records what Culvert authorized,
+	// this records what an independent observer saw. Both stay in the ledger.
+	PhaseReconciliation
 )
 
 // String returns the stable machine string for the phase.
@@ -104,13 +109,15 @@ func (p Phase) String() string {
 		return "health"
 	case PhaseSendIntent:
 		return "send_intent"
+	case PhaseReconciliation:
+		return "reconciliation"
 	default:
 		return "none"
 	}
 }
 
 // Valid reports whether the phase is a real phase.
-func (p Phase) Valid() bool { return p >= PhaseDecision && p <= PhaseSendIntent }
+func (p Phase) Valid() bool { return p >= PhaseDecision && p <= PhaseReconciliation }
 
 // Criticality is the durability class of an event. It selects the partition and
 // governs the fail-closed / degraded posture. The zero value is invalid.
@@ -522,6 +529,76 @@ type OutcomeEvidence struct {
 	PhysicalSendState PhysicalSendState `json:"physical_send_state,omitempty"`
 }
 
+// ReconciliationResult is the DERIVED knowledge about one attempt after consulting
+// an independent witness. It is derived from observed FACTS (count + completeness +
+// binding), never asserted directly by a caller: an API that accepted a verdict
+// would turn an operator or client claim into execution truth.
+type ReconciliationResult string
+
+const (
+	// ReconRequired — knowledge is still insufficient. This is the resting state and
+	// the only safe answer when the witness is unavailable, incomplete, malformed or
+	// silent. `unknown` is NEVER collapsed into "not received".
+	ReconRequired ReconciliationResult = "reconciliation_required"
+	// ReconReceived — the witness observed EXACTLY ONE matching physical invocation.
+	ReconReceived ReconciliationResult = "reconciled_received"
+	// ReconNotReceived — the witness observed ZERO matching invocations AND proved
+	// its observation set complete for the relevant interval. Absence alone is never
+	// enough.
+	ReconNotReceived ReconciliationResult = "reconciled_not_received"
+	// ReconConflict — the evidence contradicts itself or the durable intent: more
+	// than one physical invocation for one attempt (a blocker-#6 invariant breach),
+	// a binding mismatch, or a later observation contradicting a settled one.
+	ReconConflict ReconciliationResult = "reconciliation_conflict"
+)
+
+// Valid reports whether r is a defined result.
+func (r ReconciliationResult) Valid() bool {
+	switch r {
+	case ReconRequired, ReconReceived, ReconNotReceived, ReconConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+// Resolved reports whether this result is a terminal knowledge state. Note that
+// ReconConflict IS resolved as knowledge (we know the evidence is broken) while
+// ReconRequired is not.
+func (r ReconciliationResult) Resolved() bool {
+	return r == ReconReceived || r == ReconNotReceived || r == ReconConflict
+}
+
+// ReconciliationEvidence is the durable, append-only record of one reconciliation
+// attempt against an independent witness. It carries identifiers, counts,
+// timestamps and bounded digests ONLY — never request bodies, credentials or
+// Authorization material.
+type ReconciliationEvidence struct {
+	AttemptID            string               `json:"attempt_id"`
+	ReservationID        string               `json:"reservation_id,omitempty"`
+	ActivationGeneration uint64               `json:"activation_generation,omitempty"`
+	Result               ReconciliationResult `json:"result"`
+	// WitnessSource identifies the independent observer that produced the
+	// observation, so a later audit can tell WHOSE evidence this was.
+	WitnessSource string `json:"witness_source,omitempty"`
+	// ObservationCount is the number of matching physical invocations the witness
+	// reports. It is retained verbatim: >1 is a physical-effect breach and must not
+	// be normalized away to "received".
+	ObservationCount int `json:"observation_count"`
+	// WindowStartUnixNano / WindowEndUnixNano bound the interval the witness claims
+	// to have observed.
+	WindowStartUnixNano int64 `json:"window_start_unix_nano,omitempty"`
+	WindowEndUnixNano   int64 `json:"window_end_unix_nano,omitempty"`
+	// CompletenessWatermark is the witness's proof that its observation set is
+	// complete for that interval (a durable monotonic watermark, sequence boundary or
+	// equivalent). Empty means completeness was NOT proven.
+	CompletenessWatermark string `json:"completeness_watermark,omitempty"`
+	// EvidenceDigest is a bounded, non-reversible reference to the witness record.
+	EvidenceDigest       string `json:"evidence_digest,omitempty"`
+	ObservedAtUnixNano   int64  `json:"observed_at_unix_nano,omitempty"`
+	ReconciledAtUnixNano int64  `json:"reconciled_at_unix_nano"`
+}
+
 // DenialEvidence records a coalesced denial aggregate (P-DEN). It retains count,
 // first-seen and last-seen so evidence is preserved while volume is not. Tenant
 // and principal appear ONLY where verified identity existed; before identity
@@ -572,8 +649,10 @@ type Event struct {
 	Inspection InspectionEvidence `json:"inspection"`
 	Credential CredentialEvidence `json:"credential"`
 	Outcome    *OutcomeEvidence   `json:"outcome,omitempty"`
-	Denial     *DenialEvidence    `json:"denial,omitempty"`
-	Marker     *MarkerEvidence    `json:"marker,omitempty"`
+	// Reconciliation is present ONLY on a PhaseReconciliation event.
+	Reconciliation *ReconciliationEvidence `json:"reconciliation,omitempty"`
+	Denial         *DenialEvidence         `json:"denial,omitempty"`
+	Marker         *MarkerEvidence         `json:"marker,omitempty"`
 	// Shadow is the durable Shadow enforcement prediction, present ONLY on a
 	// SchemaVersionV2 Shadow decision event and nil otherwise. Because it is a nil
 	// pointer with omitempty on every non-shadow (v1) event, it is OMITTED from the

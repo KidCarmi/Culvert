@@ -32,6 +32,9 @@ type DecisionFacts struct {
 	// (attempt identity, reservation binding, activation generation, physical send
 	// state). It is set for PhaseSendIntent and PhaseOutcome events.
 	Outcome *model.OutcomeEvidence
+	// Reconciliation, when non-nil, carries append-only witness-reconciliation
+	// evidence. Set only for PhaseReconciliation events.
+	Reconciliation *model.ReconciliationEvidence
 	// Phase selects the event phase. The zero value is PhaseDecision, so every
 	// existing caller is byte-identical; PhaseSendIntent and PhaseOutcome are set
 	// explicitly by the execution path.
@@ -102,25 +105,26 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 		phase = model.PhaseDecision
 	}
 	return &model.Event{
-		SchemaVersion: schema,
-		EventID:       randID("evt_"),
-		Phase:         phase,
-		Criticality:   f.Criticality,
-		Partition:     part,
-		Capability:    f.Capability,
-		ActionClass:   f.ActionClass,
-		NodeID:        m.nodeID,
-		DomainID:      d.spool.DomainID(part),
-		TimeUnixNano:  m.clock().UnixNano(),
-		ReplayID:      randID("rpl_"),
-		CorrelationID: corr,
-		SnapshotHash:  f.SnapshotHash,
-		Identity:      f.Identity,
-		Decision:      f.Decision,
-		Inspection:    f.Inspection,
-		Credential:    f.Credential,
-		Outcome:       f.Outcome,
-		Shadow:        f.Shadow,
+		SchemaVersion:  schema,
+		EventID:        randID("evt_"),
+		Phase:          phase,
+		Criticality:    f.Criticality,
+		Partition:      part,
+		Capability:     f.Capability,
+		ActionClass:    f.ActionClass,
+		NodeID:         m.nodeID,
+		DomainID:       d.spool.DomainID(part),
+		TimeUnixNano:   m.clock().UnixNano(),
+		ReplayID:       randID("rpl_"),
+		CorrelationID:  corr,
+		SnapshotHash:   f.SnapshotHash,
+		Identity:       f.Identity,
+		Decision:       f.Decision,
+		Inspection:     f.Inspection,
+		Credential:     f.Credential,
+		Outcome:        f.Outcome,
+		Reconciliation: f.Reconciliation,
+		Shadow:         f.Shadow,
 	}
 }
 

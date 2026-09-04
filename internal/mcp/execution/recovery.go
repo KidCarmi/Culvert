@@ -54,6 +54,10 @@ type RecoveredAttempt struct {
 	// AttemptSettled, and the zero value otherwise. It is never synthesized for an
 	// orphan.
 	TerminalSendState model.PhysicalSendState
+	// Reconciliation is the DERIVED knowledge from append-only witness evidence. It
+	// is ReconRequired for an unreconciled orphan and empty for a settled attempt.
+	// It never changes execution authority — only what is known.
+	Reconciliation model.ReconciliationResult
 }
 
 // RecoveryReport is the result of one derivation over the durable stream.
@@ -92,6 +96,7 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 	}
 	intents := map[string]*model.OutcomeEvidence{}
 	outcomes := map[string]*model.OutcomeEvidence{}
+	recon := map[string]model.ReconciliationResult{}
 
 	for _, part := range recoveryScanPartitions {
 		var after uint64
@@ -104,7 +109,7 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 					"execution.recovery", "durable evidence unreadable")
 			}
 			for i := range evs {
-				if err := indexAttemptEvent(&evs[i], intents, outcomes); err != nil {
+				if err := indexAttemptEvent(&evs[i], intents, outcomes, recon); err != nil {
 					return RecoveryReport{}, err
 				}
 			}
@@ -119,11 +124,19 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 	for id, intent := range intents {
 		out, settled := outcomes[id]
 		if !settled {
+			// An orphan's knowledge state comes from append-only reconciliation
+			// evidence when any exists. Its EXECUTION state is unchanged either way:
+			// reconciliation changes knowledge, never authority.
+			known := model.ReconRequired
+			if r, ok := recon[id]; ok {
+				known = r
+			}
 			rep.Orphans = append(rep.Orphans, RecoveredAttempt{
 				AttemptID:            intent.AttemptID,
 				ReservationID:        intent.ReservationID,
 				ActivationGeneration: intent.ActivationGeneration,
 				State:                AttemptReconciliationRequired,
+				Reconciliation:       known,
 			})
 			continue
 		}
@@ -167,7 +180,10 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 
 // indexAttemptEvent folds one event into the intent/outcome indexes, failing closed
 // on duplicates and on malformed attempt evidence.
-func indexAttemptEvent(e *model.Event, intents, outcomes map[string]*model.OutcomeEvidence) error {
+func indexAttemptEvent(e *model.Event, intents, outcomes map[string]*model.OutcomeEvidence, recon map[string]model.ReconciliationResult) error {
+	if e.Phase == model.PhaseReconciliation {
+		return indexReconciliationEvent(e, recon)
+	}
 	if e.Phase != model.PhaseSendIntent && e.Phase != model.PhaseOutcome {
 		return nil
 	}
@@ -201,4 +217,42 @@ func indexAttemptEvent(e *model.Event, intents, outcomes map[string]*model.Outco
 		outcomes[id] = &ev
 	}
 	return nil
+}
+
+// indexReconciliationEvent folds append-only witness evidence into the knowledge
+// index.
+//
+// Repeating the SAME result is idempotent — re-running reconciliation with the same
+// authoritative observation must not be an error, and must not produce a second
+// authoritative record's worth of meaning. A LATER CONTRADICTORY result is a
+// different matter entirely: a ledger that first proves an attempt was not received
+// and later proves it was is broken, and silently preferring either record would
+// hide a real physical effect. That fails closed, loudly.
+func indexReconciliationEvent(e *model.Event, recon map[string]model.ReconciliationResult) error {
+	if e.Reconciliation == nil || e.Reconciliation.AttemptID == "" {
+		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery", "reconciliation without attempt identity")
+	}
+	if !validAttemptID(e.Reconciliation.AttemptID) {
+		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery", "malformed attempt identity in reconciliation")
+	}
+	if !e.Reconciliation.Result.Valid() {
+		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery", "reconciliation with unknown result")
+	}
+	id := e.Reconciliation.AttemptID
+	prev, seen := recon[id]
+	if !seen {
+		recon[id] = e.Reconciliation.Result
+		return nil
+	}
+	if prev == e.Reconciliation.Result {
+		return nil // idempotent re-run of the same authoritative observation
+	}
+	// An unresolved earlier record may be superseded by a resolving one; anything
+	// else is a contradiction between two authoritative claims.
+	if prev == model.ReconRequired {
+		recon[id] = e.Reconciliation.Result
+		return nil
+	}
+	return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
+		"contradictory reconciliation results for one attempt")
 }
