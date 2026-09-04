@@ -1002,6 +1002,34 @@ silence this path exists to remove. Gate:
 `TestRecovery_ReconciliationWithoutAnIntentFailsClosed`, including the dangerous shape where a
 healthy attempt makes the report look populated, plus a matched-record control; mutation M41.
 
+### One from the round after that, recorded rather than fixed
+
+**The unmatched-record rules assume an unreclaimed ledger.** Both sweeps in
+`deriveAttempts` — the terminal-outcome one and the reconciliation one added above — read an
+unmatched record as a ledger fault. That is sound only for a COMPLETE ledger, and the spool does not
+guarantee one: send intents, terminal outcomes and reconciliation records are all `CritOrdinary` and
+therefore all land in P-ORD, and reclamation deletes whole sealed P-ORD segments oldest-first with no
+relational retention. A legitimately retained SUFFIX can hold a record whose intent was reclaimed,
+and these rules would call that corruption.
+
+The two are not equally exposed, and the one Codex flagged is the safer: nothing in production
+commits a `PhaseReconciliation` event while the authoritative witness adapter stays unwired, whereas
+outcomes have a producer on every executed attempt — so the OUTCOME sweep is the reachable one, and
+it was not flagged.
+
+**Deliberately not resolved here.** Distinguishing "reclaimed" from "unauthorized" needs information
+the read seam does not carry — a retention floor or a tombstone — and no in-band ordering argument
+recovers it, because reclamation removes a PREFIX: if an intent was reclaimed then every surviving
+record is newer than it, which is consistent with both explanations. Adding that capability is spool
+work belonging to the witness integration, and weakening the rules to a report would trade a
+detection that catches an invocation with no durable authorization for an availability property no
+caller needs yet — `RecoverAttempts` has NO production caller.
+
+**This is now a named precondition of blocker #8's remaining work:** wiring `RecoverAttempts` into
+production requires closing it first, by relational retention (never reclaim an intent while later
+records for its attempt survive) or a retention floor on `EvidenceReader`. Pinned by
+`TestRecovery_UnmatchedRecordRulesAssumeAnUnreclaimedLedger`, whose failure message says so.
+
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **41 mutations: 41 caught, 0 survived, 0

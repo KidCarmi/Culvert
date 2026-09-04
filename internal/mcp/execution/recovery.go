@@ -321,6 +321,40 @@ func deriveAttempts(idx attemptIndex) (RecoveryReport, error) {
 		}
 		rep.Settled = append(rep.Settled, rec)
 	}
+	// RETENTION PRECONDITION for both sweeps below (Codex round 7, P2).
+	//
+	// Both rules read an unmatched record as a ledger fault. That is sound only for a
+	// COMPLETE ledger, and the spool does not guarantee one: send intents, terminal
+	// outcomes and reconciliation records are all CritOrdinary, so all three land in
+	// P-ORD, and reclamation (internal/mcp/events/spool/reclaim.go) deletes whole
+	// SEALED P-ORD segments oldest-first with no relational retention — it does not
+	// co-retain later records belonging to an attempt whose intent it is dropping. A
+	// legitimately retained SUFFIX can therefore hold an outcome or a reconciliation
+	// record whose intent was reclaimed, and these sweeps would call that corruption.
+	//
+	// The two cases are NOT equally exposed, and the reconciliation one is the safer
+	// of the pair today: nothing in production commits a PhaseReconciliation event
+	// (the authoritative witness adapter is unwired — blocker #8), whereas outcomes
+	// have a producer on every executed attempt. The outcome sweep is the reachable
+	// one.
+	//
+	// This is DELIBERATELY not resolved here. Distinguishing "reclaimed" from
+	// "unauthorized" needs information the read seam does not carry — a retention
+	// floor or a tombstone — and reclamation removes a PREFIX, so no in-band ordering
+	// argument recovers it: if an intent was reclaimed then every surviving record is
+	// newer than it, which is consistent with both explanations. Adding that capability
+	// is spool work belonging to the witness integration (blockers #1/#8), and
+	// weakening these rules to a report would trade a detection that catches an
+	// invocation with no durable authorization for an availability property no caller
+	// needs yet: RecoverAttempts has NO production caller. So the fail-closed rules
+	// stand, and the precondition is recorded rather than assumed.
+	//
+	// WIRING RecoverAttempts INTO PRODUCTION REQUIRES CLOSING THIS FIRST: either
+	// relational retention (never reclaim an intent while later records for its
+	// attempt survive) or a retention floor on EvidenceReader that lets these sweeps
+	// tell a reclaimed prefix from a missing authorization. Pinned by
+	// TestRecovery_UnmatchedRecordRulesAssumeAnUnreclaimedLedger.
+	//
 	// A terminal outcome with no intent means a physical effect was recorded that no
 	// durable authorization covers. That is the most serious ledger fault of all.
 	for id := range idx.outcomes {

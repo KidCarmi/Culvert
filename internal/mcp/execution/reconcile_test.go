@@ -710,3 +710,65 @@ func TestRecovery_ReconciliationWithoutAnIntentFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// TestRecovery_UnmatchedRecordRulesAssumeAnUnreclaimedLedger pins the retention
+// PRECONDITION of both unmatched-record rules (Codex round 7, P2), so the future
+// witness integration has to confront it rather than discover it.
+//
+// Send intents, terminal outcomes and reconciliation records are all CritOrdinary
+// and therefore all land in P-ORD, and reclamation deletes whole sealed P-ORD
+// segments oldest-first with no relational retention. A legitimately retained
+// SUFFIX can hold a record whose intent was reclaimed — and these rules call that a
+// ledger fault, because the read seam carries nothing that distinguishes the two.
+//
+// The behaviour asserted here is DELIBERATE, not accidental: fail closed, on both
+// record kinds, with no production caller yet to be harmed by it. This test exists
+// so that changing it is a decision. Wiring RecoverAttempts into production means
+// closing the gap first — relational retention, or a retention floor on the reader.
+func TestRecovery_UnmatchedRecordRulesAssumeAnUnreclaimedLedger(t *testing.T) {
+	reclaimedID := mustAttemptID(t)
+
+	// Both shapes model the SAME ledger: a retained suffix whose oldest record's
+	// send intent is gone. Neither is distinguishable, from the reader alone, from a
+	// record describing an invocation Culvert never authorized.
+	t.Run("outcome outliving a reclaimed intent", func(t *testing.T) {
+		// The REACHABLE one: outcomes have a production producer on every executed
+		// attempt, so this is the shape that would bite first.
+		if _, err := RecoverAttempts(readerWith(
+			outcomeEvent(reclaimedID, "rsv_1", 7, model.SendPeerResponseReceived),
+		)); err == nil {
+			t.Fatal("PRECONDITION CHANGED: an outcome with no intent no longer fails closed — " +
+				"if this is intentional, the retention gap in deriveAttempts must be closed first")
+		}
+	})
+
+	t.Run("reconciliation outliving a reclaimed intent", func(t *testing.T) {
+		// Currently unreachable in production: nothing commits a PhaseReconciliation
+		// event while the authoritative witness adapter stays unwired (blocker #8).
+		if _, err := RecoverAttempts(readerWith(
+			model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+				AttemptID: reclaimedID, ReservationID: "rsv_1", ActivationGeneration: 7,
+				Result: model.ReconNotReceived,
+			}},
+		)); err == nil {
+			t.Fatal("PRECONDITION CHANGED: reconciliation evidence with no intent no longer fails closed — " +
+				"if this is intentional, the retention gap in deriveAttempts must be closed first")
+		}
+	})
+
+	t.Run("control: a complete ledger recovers cleanly", func(t *testing.T) {
+		// Establishes that the two gates above measure the MISSING INTENT and not some
+		// unrelated defect in the fixture.
+		rep, err := RecoverAttempts(readerWith(
+			intentEvent(reclaimedID, "rsv_1", 7),
+			outcomeEvent(reclaimedID, "rsv_1", 7, model.SendPeerResponseReceived),
+		))
+		if err != nil {
+			t.Fatalf("control: a complete ledger must recover: %v", err)
+		}
+		if len(rep.Settled) != 1 || len(rep.Orphans) != 0 {
+			t.Fatalf("control: expected one settled attempt, got %d settled / %d orphans",
+				len(rep.Settled), len(rep.Orphans))
+		}
+	})
+}
