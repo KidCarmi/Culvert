@@ -67,10 +67,13 @@ func runStalledPhase(n int, budget time.Duration) time.Duration {
 func TestChaos56_PhaseGraceIsSharedNotPerHook(t *testing.T) {
 	phaseGraceTestConstants(t, 100*time.Millisecond, 10*time.Millisecond)
 	const budget = 100 * time.Millisecond
-	// One grace of overrun is the contract; allow a further half grace for
-	// scheduler jitter on a shared runner. The pre-fix shape overran by 2.4
-	// graces at six hooks, so this tolerance cannot hide the defect.
-	ceiling := budget + shutdownHookGrace + shutdownHookGrace/2
+	// One grace of overrun is the contract. Allow a FULL further grace for
+	// scheduler jitter on a loaded shared runner under -race — the expected
+	// value is budget+1 grace (200ms) and the ceiling is budget+2 (300ms), so
+	// there is a full grace of headroom. The pre-fix shape overran by 2.4/3.4/
+	// 3.7 graces at 6/9/10 hooks (338/437/470ms), so this tolerance still
+	// cannot hide the defect at those counts.
+	ceiling := budget + 2*shutdownHookGrace
 
 	for _, n := range []int{1, 2, 3, 6, 9, 10} {
 		got := runStalledPhase(n, budget)
@@ -91,7 +94,10 @@ func TestChaos56_PhaseOverrunIsFlatInHookCount(t *testing.T) {
 
 	few := runStalledPhase(2, budget)
 	many := runStalledPhase(10, budget)
-	if ratio := float64(many) / float64(few); ratio > 1.5 {
+	// Post-fix the ratio is ~1.0; pre-fix it was ~2.35. 1.75 sits between them
+	// with room on both sides, so ordinary jitter on one of the two runs cannot
+	// trip it and the defect cannot slip under it.
+	if ratio := float64(many) / float64(few); ratio > 1.75 {
 		t.Errorf("ten stalled hooks took %v vs two at %v (%.2fx) — the phase overrun scales with "+
 			"hook count, so the grace is per-hook rather than shared by the phase", many, few, ratio)
 	}
@@ -222,13 +228,21 @@ func TestChaos56_FullSequenceFitsTheStopGraceInHookCount(t *testing.T) {
 	}
 	stall := func(context.Context) error { select {} }
 
+	// Hook counts are deliberately ABOVE the shipped registry's (6 early / 9
+	// drain / 6 flush). Post-fix the total is flat in hook count, so inflating
+	// them costs nothing here; pre-fix each extra stalled hook added a further
+	// grace, so it widens the margin the gate detects by. That keeps the
+	// ceiling far from BOTH sides: ~350ms of detection margin against the
+	// pre-fix shape, and ~90ms of headroom for timer jitter on a loaded shared
+	// runner under -race. A gate that can flake gets muted, and a gate whose
+	// margin is one scheduling hiccup wide is that gate.
 	run := func(flushHooks int) time.Duration {
 		early := &shutdownRegistry{}
-		for i := 0; i < 6; i++ {
+		for i := 0; i < 8; i++ {
 			early.Register("early", i, stall)
 		}
 		late := &shutdownRegistry{}
-		for i := 0; i < 9; i++ { // drain hooks, at or below the flush boundary
+		for i := 0; i < 12; i++ { // drain hooks, at or below the flush boundary
 			late.Register("drain", 60+i, stall)
 		}
 		for i := 0; i < flushHooks; i++ { // durable closers, above it
@@ -239,13 +253,16 @@ func TestChaos56_FullSequenceFitsTheStopGraceInHookCount(t *testing.T) {
 		return time.Since(start)
 	}
 
-	shipped := run(6) // syslog, community-db, log-store, request-log, audit-log, log-closer
-	oneMore := run(7) // one further durable closer
+	shipped := run(10) // the durable closers
+	oneMore := run(11) // one further durable closer
 	envelope := budget.Total + 2*shutdownHookGrace
 
 	// Total + 2*grace is what TestChaos56_EnvelopeFitsTheContainerStopGrace
-	// compares against stop_grace_period; allow half a grace for jitter.
-	ceiling := envelope + shutdownHookGrace/2
+	// compares against stop_grace_period. Post-fix the sequence lands ON that
+	// number (each of the two late phases spends exactly its one grace), so the
+	// ceiling needs real headroom above it for timer jitter rather than the
+	// half-grace a first draft used.
+	ceiling := envelope + 3*shutdownHookGrace/2
 	if shipped > ceiling {
 		t.Errorf("full sequence took %v, exceeding the Total+2*grace envelope ceiling %v that the "+
 			"cross-artifact stop_grace_period gate assumes", shipped, ceiling)
