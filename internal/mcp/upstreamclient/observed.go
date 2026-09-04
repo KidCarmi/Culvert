@@ -56,7 +56,7 @@ func (e *notSentErr) Unwrap() error { return e.err }
 func markLegFacts(err error, facts legFacts) error {
 	switch {
 	case err == nil:
-		return err
+		return nil
 	case facts.responseObserved:
 		return &observedErr{err: err}
 	case facts.neverSent:
@@ -70,7 +70,7 @@ func markLegFacts(err error, facts legFacts) error {
 // exists in any of those cases.
 func markNeverSent(err error) error {
 	if err == nil {
-		return err
+		return nil
 	}
 	return &notSentErr{err: err}
 }
