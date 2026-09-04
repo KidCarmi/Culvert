@@ -172,9 +172,54 @@ func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 	return rep, nil
 }
 
+// readPathAttemptRulesOK mirrors, at READ time, the STRUCTURAL COUPLING rules
+// Event.Validate enforces at COMMIT time for attempt-bearing records.
+//
+// It exists for the reason effectiveReconResult exists, applied to the record shape
+// rather than to a verdict: the spool's read path runs the schema and shadow checks,
+// NOT the full Event.Validate, so a digest-valid record from an importer, an
+// alternate producer or an older binary is read back and TRUSTED (Codex round 11).
+// The two rules below are the ones whose violation silently CORRUPTS attempt
+// derivation rather than merely looking odd:
+//
+//   - Outcome evidence on a reconciliation record. Validate rejects the combination
+//     outright; the indexer dispatched on phase and dropped the outcome on the floor,
+//     so a supported "never received" carrying an embedded peer_response_received
+//     outcome was reported as definitive non-receipt with the contradictory receipt
+//     discarded — one of two authoritative claims about one physical effect, silently
+//     dropped.
+//   - A terminal outcome with no DecisionRef. Validate requires one on every outcome,
+//     because an outcome never replaces the pre-execution decision commit. Without it
+//     settledFrom still settles the attempt and suppresses reconciliation, so a
+//     physical effect is closed out with no link to the decision that authorized it.
+//
+// SCOPE, stated rather than implied: this is a MIRROR of specific coupling rules, not
+// a call to Event.Validate. Running the full validator here would reject records for
+// reasons that have nothing to do with attempt derivation (capability, criticality,
+// decision fields) and turn recovery — the thing an operator runs to find out what
+// happened — into a hard failure over an unrelated field. Each rule mirrored here is
+// one whose absence makes the derived answer WRONG, and adding a rule to Validate that
+// meets that bar means adding it here too.
+func readPathAttemptRulesOK(e *model.Event) error {
+	if e.Phase == model.PhaseReconciliation && e.Outcome != nil {
+		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
+			"outcome evidence on a reconciliation record")
+	}
+	if e.Phase == model.PhaseOutcome && e.Outcome != nil && e.Outcome.AttemptID != "" &&
+		e.Outcome.DecisionRef == "" {
+		return mcperr.New(mcperr.ReasonEventEvidenceMissing, "execution.recovery",
+			"terminal outcome without a committed decision ref")
+	}
+	return nil
+}
+
 // indexAttemptEvent folds one event into the intent/outcome indexes, failing closed
-// on duplicates and on malformed attempt evidence.
+// on duplicates, on malformed attempt evidence, and on a record shape the durable
+// validator would have refused.
 func indexAttemptEvent(e *model.Event, intents, outcomes map[string]*model.OutcomeEvidence, recon map[string]*model.ReconciliationEvidence) error {
+	if err := readPathAttemptRulesOK(e); err != nil {
+		return err
+	}
 	if e.Phase == model.PhaseReconciliation {
 		return indexReconciliationEvent(e, recon)
 	}

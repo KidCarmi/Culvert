@@ -450,6 +450,13 @@ run_mutation M48 \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\tprevEff, curEff := effectiveReconResult\(prev\), effectiveReconResult\(e\.Reconciliation\)\n\tif prevEff == curEff \{/\tprevEff, curEff := prev.Result, e.Reconciliation.Result\n\tif prevEff == curEff {/'
 
+# ── (49) read path ignores the structural coupling rules ───────────────────
+run_mutation M49 \
+  'a record shape the durable validator would refuse is indexed anyway' \
+  'TestRecovery_ReadPathMirrorsTheStructuralCouplingRules' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif err := readPathAttemptRulesOK\(e\); err != nil \{\n\t\treturn err\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

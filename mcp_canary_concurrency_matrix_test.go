@@ -553,9 +553,14 @@ func intentEventMain(id, resID string, gen uint64) model.Event {
 }
 
 // outcomeEventMain builds a durable PhaseOutcome record for recovery fixtures.
+//
+// DecisionRef is REQUIRED on a terminal outcome by the durable validator, and the
+// recovery read path now mirrors that rule, so a fixture without one would build a
+// record that could never have been committed.
 func outcomeEventMain(id, resID string, gen uint64, st model.PhysicalSendState) model.Event {
 	return model.Event{Phase: model.PhaseOutcome, Outcome: &model.OutcomeEvidence{
 		AttemptID: id, ReservationID: resID, ActivationGeneration: gen, PhysicalSendState: st,
+		DecisionRef: "evt_fixturedecision",
 	}}
 }
 

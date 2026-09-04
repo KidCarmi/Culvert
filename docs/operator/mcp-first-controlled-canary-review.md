@@ -1124,9 +1124,36 @@ carrying no supporting facts — records that could never have been committed �
 correctly degrades them. `reconFacts` now fills the facts that support a verdict, so those
 tests measure the rule under test rather than the fold.
 
+### And two more of the same class, on the record SHAPE
+
+Rounds 9 and 10 mirrored the durable validator's VERDICT rules on the read path. Round 11
+is the same asymmetry applied to the record SHAPE, and both findings corrupt attempt
+derivation rather than merely looking odd:
+
+- **Outcome evidence smuggled onto a reconciliation record.** `Event.Validate` rejects the
+  combination outright, but the indexer dispatched on phase and dropped the outcome on the
+  floor — so a SUPPORTED `reconciled_not_received` carrying an embedded
+  `peer_response_received` outcome was reported as definitive non-receipt with the
+  contradictory receipt silently discarded.
+- **A terminal outcome with no `DecisionRef`.** The validator requires one on every
+  outcome, because an outcome never replaces the pre-execution decision commit. Without
+  it `settledFrom` still settles the attempt and suppresses reconciliation, closing out a
+  physical effect with no link to the decision that authorized it.
+
+`readPathAttemptRulesOK` mirrors both at the indexer's entry. **Its scope is stated rather
+than implied**: it is a mirror of specific COUPLING rules, not a call to `Event.Validate`.
+Running the full validator there would reject records for reasons unrelated to attempt
+derivation (capability, criticality, decision fields) and turn recovery — the thing an
+operator runs to find out what happened — into a hard failure over an unrelated field. The
+bar for mirroring a rule is that its absence makes the derived answer WRONG. Gate:
+`TestRecovery_ReadPathMirrorsTheStructuralCouplingRules`, both violations plus two
+controls — well-formed records of both shapes still recover, and a SEND INTENT may still
+carry outcome evidence (the coupling rule is phase-specific; a blanket "outcome evidence
+only on PhaseOutcome" rule would break every intent). Mutation M49.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **48 mutations: 48 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **49 mutations: 49 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

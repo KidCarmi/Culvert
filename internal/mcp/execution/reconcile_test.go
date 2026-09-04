@@ -1174,3 +1174,86 @@ func TestRecovery_IdempotenceComparesKnowledgeNotTheStatedString(t *testing.T) {
 		}
 	})
 }
+
+// TestRecovery_ReadPathMirrorsTheStructuralCouplingRules pins round 11.
+//
+// This is the same class as rounds 9 and 10 applied to the record SHAPE rather than
+// to a verdict: the spool's read path runs the schema and shadow checks, not the full
+// Event.Validate, so a digest-valid record from an importer, an alternate producer or
+// an older binary is read back and trusted. The two rules below are the ones whose
+// violation silently CORRUPTS attempt derivation.
+func TestRecovery_ReadPathMirrorsTheStructuralCouplingRules(t *testing.T) {
+	t.Run("outcome evidence smuggled onto a reconciliation record", func(t *testing.T) {
+		// The dangerous shape: a SUPPORTED not-received verdict carrying an embedded
+		// peer_response_received outcome. The indexer dispatched on phase and dropped the
+		// outcome, so the contradictory receipt vanished and the attempt was reported as
+		// definitively not received.
+		id := mustAttemptID(t)
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			model.Event{
+				Phase: model.PhaseReconciliation,
+				Reconciliation: &model.ReconciliationEvidence{
+					AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+					Result: model.ReconNotReceived, ObservationCount: 0, CompletenessWatermark: "wm-1",
+				},
+				Outcome: &model.OutcomeEvidence{
+					AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+					PhysicalSendState: model.SendPeerResponseReceived, DecisionRef: "evt_x",
+				},
+			},
+		)); err == nil {
+			t.Fatal("a reconciliation record carrying a terminal outcome must fail closed, not lose the outcome")
+		}
+	})
+
+	t.Run("terminal outcome with no decision ref", func(t *testing.T) {
+		// Without this rule settledFrom still settles the attempt and suppresses
+		// reconciliation, closing out a physical effect with no link to the decision
+		// that authorized it.
+		id := mustAttemptID(t)
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			model.Event{Phase: model.PhaseOutcome, Outcome: &model.OutcomeEvidence{
+				AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+				PhysicalSendState: model.SendPeerResponseReceived,
+			}},
+		)); err == nil {
+			t.Fatal("a terminal outcome with no committed decision ref must fail closed")
+		}
+	})
+
+	t.Run("control: well-formed records of both shapes still recover", func(t *testing.T) {
+		// Without this the gates above would pass on an implementation that had stopped
+		// indexing outcomes or reconciliation records at all.
+		id := mustAttemptID(t)
+		rep, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			outcomeEvent(id, "rsv_a", 7, model.SendPeerResponseReceived),
+			model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+				AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+				Result: model.ReconReceived, ObservationCount: 1, CompletenessWatermark: "wm-1",
+			}},
+		))
+		if err != nil {
+			t.Fatalf("control: %v", err)
+		}
+		if len(rep.Settled) != 1 || rep.Settled[0].Reconciliation != model.ReconReceived {
+			t.Fatalf("control: expected one settled attempt with corroborating receipt, got %+v", rep.Settled)
+		}
+	})
+
+	t.Run("control: a send intent may carry outcome evidence", func(t *testing.T) {
+		// The coupling rule is phase-SPECIFIC. A send intent legitimately carries an
+		// OutcomeEvidence payload — that is how it names its attempt — so a blanket
+		// "outcome evidence only on PhaseOutcome" rule would break every intent.
+		id := mustAttemptID(t)
+		rep, err := RecoverAttempts(readerWith(intentEvent(id, "rsv_a", 7)))
+		if err != nil {
+			t.Fatalf("control: a send intent must still index: %v", err)
+		}
+		if len(rep.Orphans) != 1 {
+			t.Fatalf("control: expected one orphan, got %+v", rep.Orphans)
+		}
+	})
+}

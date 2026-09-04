@@ -68,7 +68,11 @@ func intentEvent(id, resID string, gen uint64) model.Event {
 
 func outcomeEvent(id, resID string, gen uint64, st model.PhysicalSendState) model.Event {
 	return model.Event{Phase: model.PhaseOutcome, Outcome: &model.OutcomeEvidence{
+		// DecisionRef is REQUIRED on a terminal outcome by the durable validator and now
+		// by the read path too, so a fixture without one would build a record that could
+		// never have been committed.
 		AttemptID: id, ReservationID: resID, ActivationGeneration: gen, PhysicalSendState: st,
+		DecisionRef: "evt_fixturedecision",
 	}}
 }
 
