@@ -40,8 +40,13 @@ revert() { git checkout -- "$@" 2>/dev/null || true; }
 # the run to FAIL. Anything else is a surviving mutation.
 run_mutation() {
   local id="$1" desc="$2" gate="$3" pkg="$4" file="$5"; shift 5
+  # A gate whose defect is a DATA RACE is invisible without the detector: the mutated
+  # build passes and scores as a survivor. Such a mutation passes --race here, and the
+  # flag is consumed before the perl scripts.
+  local raceflag=()
+  if [ "${1:-}" = "--race" ]; then raceflag=(-race); shift; fi
   printf '\n[%s] %s\n' "$id" "$desc"
-  printf '      gate: %s  (%s)\n' "$gate" "$pkg"
+  printf '      gate: %s  (%s)%s\n' "$gate" "$pkg" "${raceflag[0]:+ [race]}"
 
   local before; before="$(git rev-parse HEAD:"$file" 2>/dev/null || echo none)"
   for script in "$@"; do
@@ -53,7 +58,7 @@ run_mutation() {
     SKIPPED=$((SKIPPED+1)); revert "$file"; return
   fi
 
-  local out; out="$(go test -count=1 -run "$gate" "$pkg" 2>&1)"
+  local out; out="$(go test "${raceflag[@]}" -count=1 -run "$gate" "$pkg" 2>&1)"
   local rc=$?
   revert "$file"
 
@@ -537,6 +542,17 @@ run_mutation M59 \
   'TestFoldLegFacts_DirectionsAreOppositeAndConservative' \
   ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/observed.go \
   's/\t\tresponseObserved: call\.responseObserved || leg\.responseObserved,/\t\tresponseObserved: call.responseObserved \&\& leg.responseObserved,/'
+
+# ── (60) the coordinator clock swapped without the coordinator lock ────────
+#
+# mcpToolTrustCoordinator.now() reads nowFn under mu.RLock because a background
+# reconcile loop calls it concurrently. A test writer that skips the lock is a real
+# data race — it is what turned the Fast gate red on 2c35dc4.
+run_mutation M60 \
+  'the tool-trust clock is swapped without the coordinator lock' \
+  'TestToolTrustClock_SwapIsSynchronisedWithConcurrentReaders' \
+  . mcp_tooltrust_clock_test.go --race \
+  's/\tmcpToolTrust\.mu\.Lock\(\)\n\tprev := mcpToolTrust\.nowFn\n\tmcpToolTrust\.nowFn = fn\n\tmcpToolTrust\.mu\.Unlock\(\)\n/\tprev := mcpToolTrust.nowFn\n\tmcpToolTrust.nowFn = fn\n/'
 
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
