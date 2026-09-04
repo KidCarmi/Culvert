@@ -19,6 +19,7 @@ package main
 //   go test -tags benchgate -run 'TestBenchGate_' -v .
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -240,7 +241,7 @@ func TestBenchGate_AuthScheduleTZAllocs(t *testing.T) {
 func TestBenchGate_ResolveHostCached(t *testing.T) {
 	origFn := lookupHostFn
 	var resolverCalls int64
-	lookupHostFn = func(host string) ([]string, error) {
+	lookupHostFn = func(_ context.Context, host string) ([]string, error) {
 		resolverCalls++
 		return []string{"203.0.113.99"}, nil
 	}

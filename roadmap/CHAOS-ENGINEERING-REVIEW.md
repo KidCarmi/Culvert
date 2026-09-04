@@ -36,6 +36,46 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-09-04 — CHAOS-57 sweep (destination-host DNS resolution on the policy path).** The
+sweep took the one failure domain the register had never entered: **DNS**, listed in the original
+scope and never swept, because it looks like somebody else's dependency. It is not — a
+`DestCountry` policy rule puts the customer's resolver on the critical path of every request that
+misses one process-wide cache, on the REQUEST goroutine, inside the policy scan. `policy.go`'s own
+comment names the hazard ("the scan can block → `geo.LookupCached` → DNS on an uncached
+DestCountry host") and the code drops the evaluation lock because of it, which is the right fix for
+the *lock* and no fix at all for the *request*. Behind that call sat `net.LookupHost` with **no
+deadline, no single-flight, no concurrency bound and no counter**. Three defects, each reproduced
+against the pre-fix tree: a wedged resolver held the request goroutine for the OS budget (5 s ×
+attempts × nameservers) while it owned a client connection and a per-IP connection-limiter slot;
+**200 concurrent requests for ONE host produced 200 resolver invocations**, so a brownout amplified
+by request rate straight back at the resolver that was already failing (the WK-13 herd, aimed at
+the customer's own DNS); and an expired entry was DISCARDED, so the first expiry during an outage
+took every popular host cold inside the same five-minute window. That third one is the security
+half and it is the register's §1 theme reached through a new door: a `DestCountry` rule that cannot
+determine a country does not match, a rule that does not match is SKIPPED, and evaluation continues
+to lower-priority rules — so **a "block sanctioned countries" rule silently stops enforcing while a
+broad allow rule beneath it takes over.** Geo blocking goes dark because DNS is slow, and nothing
+on this path counted, logged or alerted it. Shipped: a 2 s deadline via a context-aware seam;
+single-flight (concurrent callers inherit the leader's answer AND its deadline, never start a
+second lookup); a bounded resolver pool that SHEDS a distinct-host flood instead of queueing it,
+without caching the shed result; stale-while-revalidate with a one-hour ceiling, so **a host
+resolved in the last hour never blocks a request and never goes dark**, plus the guard that keeps a
+failed refresh from overwriting the servable answer it was supposed to renew; and the missing
+health plane — six `culvert_dns_resolve_*` series, a `dns_resolution` contract row, and a
+fire-once page on the EXISTING `dns_failure` event. NXDOMAIN is counted but excluded from
+degradation: the hostname is client-chosen, so counting it would let any client fabricate the page.
+The same sweep bounded `fireDNSFailureAlert`'s Detail, which was a raw `err.Error()` — a
+`*net.DNSError` embeds the queried hostname, so every failure minted a distinct dedup key the 30 s
+window could not suppress, and the fan-out evicted real threat alerts from the 500-entry retry
+queue (WK-12/RS-5, remotely triggerable). Deliberately NOT changed and recorded as residual: the
+fall-through posture itself (making an unknown country match a block rule would deny every
+destination this node cannot resolve — a bounded security gap traded for an unbounded availability
+one), and the cgo resolver's uncancellable `getaddrinfo` (the deadline releases the request
+goroutine; the OS thread is bounded by Go's own 500-thread cap). Gates:
+`dns_resolve_chaos_test.go` (20, incl. two CONTROLS — a resolver that simply stopped resolving
+would pass every defect gate while being far worse than the defect). See §25 and
+`docs/operator/dns-resolution-health.md`.
+
 **2026-08-24 — CHAOS-55 sweep (the fencing lease's recovery paths).** ADR-0005 built the
 fence to answer *may this node write?* and answers it correctly in every direction. What it never
 built was the way BACK. The lease has three exits from write authority — denied on promotion,
@@ -2768,3 +2808,158 @@ first draft of the fix as its rationale, and it was wrong — the idle case is
 bounded at 6s. Measuring it, rather than shipping the plausible story, is what
 surfaced the active-stream case, which is both unbounded and reachable by
 faults this codebase already has runbooks for.
+
+---
+
+## 25. CHAOS-57 — Destination-host DNS resolution on the policy path
+
+**Date:** 2026-09-04 · **Domain:** DNS (never previously swept) · **Code:**
+`geoip.go`, `dns_health.go`, `alerts.go` · **Runbook:**
+`docs/operator/dns-resolution-health.md`
+
+### 25.1 Reachability
+
+Two conditions, both ordinary in an enterprise deployment:
+
+1. A MaxMind database is loaded (`geoip.Enabled()`).
+2. At least one enabled access rule carries a `DestCountry`.
+
+Geo-scoped policy is a headline SWG feature, so this is a normal posture, not an
+exotic one. Under it, `matchDestNorm` (policy.go:1608) calls
+`geo.LookupCached(host)` once per such rule per request, on the **request
+goroutine**, and that needs an IP address before it can ask for a country.
+
+`policy.go:1221` already names the hazard:
+
+> the scan can block (matchDestNorm → geo.LookupCached → DNS on an uncached
+> DestCountry host) … so the lock must NOT be held across it
+
+That comment is correct and the mitigation it describes — releasing the
+evaluation lock before the scan — is the right fix for the *lock*. It is not a
+fix for the *request*, which still blocks.
+
+### 25.2 The three defects
+
+Each was reproduced against the pre-fix tree before any code was written.
+
+**D1 — no deadline.** `lookupHostFn` was `net.LookupHost`: no context, no
+timeout. The only bound was the operating system's, and `resolv.conf` ships
+`timeout:5 attempts:2` per nameserver. Measured: `resolveHost` had not returned
+after 1.5 s against a wedged resolver and would not until the resolver did. That
+goroutine holds a client connection, a per-IP `internal/connlimit` slot, and its
+place in the policy scan.
+
+**D2 — no single-flight.** The pre-fix comment stated the position explicitly —
+*"Concurrent misses for the same host may resolve in parallel; last write wins,
+which is benign (both hold live answers)"* — and it is benign for correctness
+and not for load. Measured: **200 resolver invocations for 200 concurrent
+requests to one host.** During a resolver brownout that is one blocked goroutine
+per request AND one query per request, fired at the resolver that is already
+failing. It is also what made the negative cache useless as a shock absorber: a
+negative entry is written only when a resolution *completes*, so during an
+outage every request kept missing for the full length of the outage.
+
+**D3 — no stale serving, and the security consequence.** An expired entry was
+discarded outright. Because the TTL is uniform (5 min) and entries are created
+by traffic, the whole working set expires within one window — so the first
+expiry during a resolver outage takes every popular host cold at the same
+moment. `LookupCached` then returns `("", false)`, and:
+
+```go
+if countrySet {
+    code, cached := geo.LookupCached(host)
+    if !cached || !matchCountry(rule.DestCountry, code) {
+        return false          // rule does not match
+    }
+}
+```
+
+A rule that does not match is **skipped**, and `evalAccessRules` continues to
+lower-priority rules. The in-code comment calls this fail-closed, and for an
+*allow* rule it is. For a *block* rule it is the exact opposite: a "block
+sanctioned countries" rule stops matching and a broad allow rule beneath it
+takes over. **Geo blocking silently stops enforcing because DNS is slow.**
+
+And none of it was visible. No counter, no log line, no alert, no health row on
+this path — every probe stayed green.
+
+### 25.3 What shipped
+
+| Property | Mechanism | Why this shape |
+|---|---|---|
+| Bounded in time | `dnsResolveTimeout` 2 s on a context-aware seam | The budget is what a client pays for a cache miss. A resolver that has not answered in 2 s is not about to make the request fast. |
+| Bounded per host | single-flight; followers inherit the leader's answer **and its deadline** | A timer on the follower would be worse than useless — it would release it to start a *second* lookup, which is the herd being collapsed. |
+| Bounded in total | 64-slot pool; saturation SHEDS, never queues | Single-flight collapses a herd on one host and does nothing across many, and the hostname is attacker-controlled. A queue would only relocate the pileup. |
+| Never blocks for a known host | stale-while-revalidate, ceiling `hostIPCacheStaleMax` 1 h | The address is used only for country attribution — the real connection is dialled through the transport's own resolution — and an IP's country changes on a timescale of months. The alternative to a stale answer here is not a fresher one, it is **no** answer. |
+| The refresh cannot make it worse | a negative result never overwrites a still-servable positive | A failed refresh writes a negative, and a negative is served as FRESH for its TTL — so without this guard the refresh introduced by the fix would itself take geo dark for exactly the window the stale answer existed to cover. |
+| Shed is not a fact about the host | shed results are not cached | Saturation is a statement about this node's load; caching it would suppress a legitimate destination for a full TTL. |
+| Followers can never hang | `finishFlight` is DEFERRED on every leader path | Otherwise a panic inside the resolution leaves followers blocked forever on a flight nobody completes — a bounded resolver fault converted into a permanent request-plane hang no upstream `recover()` can undo. |
+
+Observability, all reusing existing operator vocabulary: six
+`culvert_dns_resolve_*` series, the `dns_resolution` operator-contract row, and
+a fire-once-per-episode page on the **existing** `dns_failure` event (a new
+event name would be silently unsubscribed on every already-configured webhook —
+the cluster-CA `cert_expiry` precedent).
+
+Two discipline points carried from the earlier sweeps:
+
+- **Degradation is a DURATION (60 s), and NXDOMAIN never counts toward it.** An
+  authoritative "this name does not exist" is a resolver working perfectly, and
+  a gateway sees a steady stream of them from typos and malware beaconing to
+  sinkholed C2. Any count-based threshold pages on healthy traffic — and
+  because the hostname is **client-chosen**, it would let any client fabricate
+  the page on demand.
+- **Recovery is on OBSERVED evidence only.** One successful resolution clears
+  the episode; elapsed time never does. A gateway whose resolution failures stop
+  because traffic stopped has not recovered.
+
+### 25.4 The alert-plane defect found alongside
+
+`fireDNSFailureAlert` passed the raw `err.Error()` as the alert Detail.
+`Store.Dispatch` dedups on `event + ":" + Detail`, and a `*net.DNSError`'s text
+embeds the **queried hostname** and the resolver address — so every failure
+minted a distinct dedup key that the 30 s window could not suppress by
+construction, and the fan-out landed in the 500-entry retry queue where it
+evicts real threat alerts. That is WK-12/RS-5, and here it is remotely
+triggerable: the hostname is chosen by the client, so any client could both
+fabricate unbounded alert volume and write arbitrary strings into an operator's
+alert pipeline. Detail is now a bounded reason class; the full error was already
+logged at each of the four dial sites, so nothing is lost.
+
+### 25.5 Gates
+
+`dns_resolve_chaos_test.go` (20). D1/D2/D3 were each reproduced against the
+pre-fix tree with the equivalent assertion before the fix was written. Two
+**CONTROLS** are included for the CHAOS-56 reason: a resolver that always shed,
+or always served stale, or never refreshed, would pass every defect gate above
+while being far worse than the defect — so the suite proves the mechanism still
+resolves (`Control_HealthyResolutionStillWorks`) and still tells the truth about
+a genuinely unresolvable host (`Control_UnresolvableHostStillFailsAndIsCounted`).
+
+`geoip_hostcache_test.go`'s `TestResolveHost_TTLExpiry` was **inverted**: it
+pinned the synchronous-re-resolve-on-expiry behaviour, which is the defect. It
+now pins stale-serving, with `TestResolveHost_StaleCeilingForcesResolution`
+pinning the other end of the window.
+
+### 25.6 Residual risk (owner decisions, recorded not fixed)
+
+- **DNS-1 — the fall-through posture is unchanged.** An unresolvable destination
+  still cannot match a geo rule in either direction. Making an unknown country
+  match a *block* rule would deny every destination this node cannot resolve —
+  a bounded security gap traded for an unbounded availability one. The
+  mitigation is the one-hour stale window (which removes the gap entirely for
+  any recently-seen destination), the alert and the metric. Operators needing
+  hard geo enforcement during a DNS outage should express it as an explicit deny
+  rule rather than relying on fall-through. **An admin-selectable
+  `geo_on_unresolvable: skip | deny` toggle is the natural next step** and is the
+  same shape the register already recommends for WK-1/PX-2.
+- **DNS-2 — the cgo resolver's `getaddrinfo` is uncancellable.** The deadline
+  reliably releases the request goroutine; the OS thread behind it is bounded
+  only by the Go runtime's own 500-thread cap on cgo lookups. The pure-Go
+  resolver honours the deadline fully.
+- **DNS-3 — the four dial sites still resolve without a Culvert-side bound.**
+  They run under a 10 s `net.Dialer` timeout, which bounds the dial including
+  resolution, so the unbounded case does not exist there; but they have no
+  single-flight either, so a brownout still produces one resolver query per
+  request on the dial path. That is inherent to dialling (each request really
+  does need its own connection) and is recorded rather than changed.
