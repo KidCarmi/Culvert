@@ -108,13 +108,6 @@ var recoveryScanPartitions = []model.Partition{model.PartCrit, model.PartOrd}
 // allocation by a large spool.
 const recoveryPageSize = 512
 
-// RecoverAttempts derives every attempt's disposition from the durable event
-// stream.
-//
-// It FAILS CLOSED on any ambiguity rather than choosing the newest record. A ledger
-// that describes one attempt two different ways is not a ledger to pick a winner
-// from — the ambiguity is itself unsafe evidence, and silently resolving it is how
-// a duplicate physical effect would disappear from the record.
 // attemptIndex is the folded view of the durable stream: what was intended, what
 // settled, and what an independent witness has since reported.
 type attemptIndex struct {
@@ -127,6 +120,13 @@ type attemptIndex struct {
 	recon map[string]*model.ReconciliationEvidence
 }
 
+// RecoverAttempts derives every attempt's disposition from the durable event
+// stream.
+//
+// It FAILS CLOSED on any ambiguity rather than choosing the newest record. A ledger
+// that describes one attempt two different ways is not a ledger to pick a winner
+// from — the ambiguity is itself unsafe evidence, and silently resolving it is how
+// a duplicate physical effect would disappear from the record.
 func RecoverAttempts(r EvidenceReader) (RecoveryReport, error) {
 	if r == nil {
 		return RecoveryReport{}, mcperr.New(mcperr.ReasonEventEvidenceMissing, "execution.recovery", "no evidence reader")

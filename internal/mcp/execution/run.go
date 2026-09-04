@@ -94,22 +94,14 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// fails closed with the gate's bounded reason and Upstream.Call is never reached. On an
 		// admit, Release runs after the upstream leg (deferred) so a reserved slot is never
 		// leaked even if the freshness/kill guard below then aborts (§11). nil gate ⇒ unchanged.
-		var release func()
-		var revalidate func() bool
-		var reservationID string
-		var activationGen uint64
-		if e.cfg.LiveGate != nil {
-			d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
-			if !d.Admit {
-				gateRefused = true
-				gateReason = d.Reason
-				return errLiveGateRefused
-			}
-			release = d.Release
-			revalidate = d.Revalidate
-			reservationID = d.ReservationID
-			activationGen = d.ActivationGeneration
+		adm, admErr := e.admitSideEffect(in)
+		if admErr != nil {
+			gateRefused = true
+			gateReason = adm.reason
+			return admErr
 		}
+		release, revalidate := adm.release, adm.revalidate
+		reservationID, activationGen := adm.reservationID, adm.activationGen
 		if release != nil {
 			defer release()
 		}
@@ -180,39 +172,11 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// pre-materialization gate still adds its own commit before any provider or
 	// cache is touched (defense in depth, not a substitute).
 	profileRef := in.Decision.Obligations.CredentialProfile
-	useBroker := e.cfg.Broker != nil && profileRef != ""
-	var blockedOut runtime.ExecOutput
-	var didBlock bool
-	if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(rcpt spool.CommitReceipt) error {
-		decisionRef = rcpt.EventID()
-		if !useBroker {
-			return callUpstream("")
-		}
-		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
-		return nil
-	}); err != nil {
-		// A boundary drift/kill/gate refusal outranks the generic error mapping and must read as
-		// its own reason, never as a transport/durability fault. This branch carries the
-		// NO-credential path, whose callUpstream error escapes CommitThenAct verbatim.
-		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall, gateRefused, gateReason); ok {
-			return out
-		}
-		return e.blocked(in, mcperr.ReasonOf(err), false)
+	if out, done := e.commitThenCall(ctx, in, profileRef, callUpstream, &decisionRef, boundaryFlags{
+		killed: &killedAtCall, stale: &staleAtCall, gateRefused: &gateRefused, gateReason: &gateReason,
+	}); done {
+		return out
 	}
-	if didBlock {
-		// The CREDENTIAL path never lets callUpstream's error escape CommitThenAct:
-		// materializeAndCall swallows it into a blocked ExecOutput whose reason is
-		// ReasonOf(errToolDriftedBeforeCall)/ReasonOf(errKilledAtBoundary) == ReasonNone (both
-		// sentinels are package-private and unregistered). A drift or emergency-kill refusal
-		// detected inside the broker callback must therefore be reclassified HERE too, or
-		// clients and block telemetry would read `none` where the no-credential path reads the
-		// correct reason.
-		if out, ok := e.classifyBoundaryRefusal(in, killedAtCall, staleAtCall, gateRefused, gateReason); ok {
-			return out
-		}
-		return blockedOut
-	}
-
 	return e.finishUpstreamLeg(ctx, in, upResp, upErr, res)
 }
 
@@ -629,4 +593,103 @@ func classifyBoundaryError(err error) boundaryRefusal {
 		killed:  errors.Is(err, errKilledAtBoundary),
 		demoted: errors.Is(err, errLiveGenerationDemotedAtBoundary),
 	}
+}
+
+// boundaryFlags carries the pointers callUpstream writes its refusal classification
+// into, so the commit-and-act step can reclassify on BOTH the credential and
+// no-credential paths without runExecute re-reading four locals inline.
+type boundaryFlags struct {
+	killed      *bool
+	stale       *bool
+	gateRefused *bool
+	gateReason  *mcperr.Reason
+}
+
+// commitThenCall performs the durable decision commit and the guarded upstream leg,
+// returning (out, true) when the request is terminal here and (zero, false) when the
+// caller should go on to map the upstream result.
+//
+// SEC-MCP-09. The DECISION event commits durably BEFORE anything that can have a
+// side effect, on BOTH paths and through the SAME primitive. Previously only the
+// no-credential branch went through CommitThenAct; the credential branch relied
+// solely on the broker's own CREDENTIAL_SELECT gate, so an executed
+// write/destructive tools/call with a credential profile — the ordinary enterprise
+// shape — left NO critical decision event on record naming the policy action,
+// matched rule, snapshot hash or action class. A commit failure blocks the side
+// effect identically on both paths, and the broker's pre-materialization gate still
+// adds its own commit before any provider or cache is touched (defense in depth, not
+// a substitute).
+func (e *Executor) commitThenCall(ctx context.Context, in runtime.ExecInput, profileRef string,
+	callUpstream func(string) error, decisionRef *string, bf boundaryFlags,
+) (runtime.ExecOutput, bool) {
+	useBroker := e.cfg.Broker != nil && profileRef != ""
+	var blockedOut runtime.ExecOutput
+	var didBlock bool
+	err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(rcpt spool.CommitReceipt) error {
+		*decisionRef = rcpt.EventID()
+		if !useBroker {
+			return callUpstream("")
+		}
+		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
+		return nil
+	})
+	if err != nil {
+		// A boundary drift/kill/gate refusal outranks the generic error mapping and
+		// must read as its own reason, never as a transport/durability fault. This
+		// branch carries the NO-credential path, whose callUpstream error escapes
+		// CommitThenAct verbatim.
+		if out, ok := e.classifyBoundaryRefusal(in, *bf.killed, *bf.stale, *bf.gateRefused, *bf.gateReason); ok {
+			return out, true
+		}
+		return e.blocked(in, mcperr.ReasonOf(err), false), true
+	}
+	if didBlock {
+		// The CREDENTIAL path never lets callUpstream's error escape CommitThenAct:
+		// materializeAndCall swallows it into a blocked ExecOutput whose reason is
+		// ReasonOf(errToolDriftedBeforeCall)/ReasonOf(errKilledAtBoundary) ==
+		// ReasonNone (both sentinels are package-private and unregistered). A drift or
+		// emergency-kill refusal detected inside the broker callback must therefore be
+		// reclassified HERE too, or clients and block telemetry would read `none` where
+		// the no-credential path reads the correct reason.
+		if out, ok := e.classifyBoundaryRefusal(in, *bf.killed, *bf.stale, *bf.gateRefused, *bf.gateReason); ok {
+			return out, true
+		}
+		return blockedOut, true
+	}
+	return runtime.ExecOutput{}, false
+}
+
+// sideEffectAdmission is the composition-layer gate's grant: what to release, how to
+// revalidate at the boundary, and the identity the physical effect is charged to.
+type sideEffectAdmission struct {
+	release       func()
+	revalidate    func() bool
+	reservationID string
+	activationGen uint64
+	reason        mcperr.Reason
+}
+
+// admitSideEffect runs the composition-layer LIVE side-effect gate — budget
+// reservation, runtime live-trust revalidation, read-first.
+//
+// It runs BEFORE preCallGuard so the emergency-kill re-read stays the LAST
+// authoritative check before Upstream.Call (PREREQ-MCP-KILL-1). A denial fails
+// closed with the gate's bounded reason and Upstream.Call is never reached. On an
+// admit the caller defers Release after the upstream leg, so a reserved slot is
+// never leaked even if the freshness/kill guard then aborts (§11). A nil gate leaves
+// this byte-identical to the pre-gate boundary.
+func (e *Executor) admitSideEffect(in runtime.ExecInput) (sideEffectAdmission, error) {
+	if e.cfg.LiveGate == nil {
+		return sideEffectAdmission{}, nil
+	}
+	d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
+	if !d.Admit {
+		return sideEffectAdmission{reason: d.Reason}, errLiveGateRefused
+	}
+	return sideEffectAdmission{
+		release:       d.Release,
+		revalidate:    d.Revalidate,
+		reservationID: d.ReservationID,
+		activationGen: d.ActivationGeneration,
+	}, nil
 }
