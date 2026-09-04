@@ -1295,10 +1295,38 @@ vacuously. `run_mutation` also gained a `--race` flag: a mutation whose defect i
 is invisible without the detector, so the mutated build passes and scores as a survivor —
 the campaign's worst failure mode. Mutation M60.
 
+### Round 17: a mutation must be caught for the RIGHT reason
+
+Round 16 was clean. Round 17 then found the weakness in the `--race` scoring added the round
+before — and it answers a question that had been put to the review rather than checked
+first, which is the wrong way round.
+
+`run_mutation` scored any nonzero exit as CAUGHT. For an ordinary mutation that is
+defensible; for a `--race` mutation it is not, because the entire proof is *the detector
+reported it*. `go test` compiles and vets before running, so a build break, a vet failure, a
+panic, a timeout, or an **unrelated** race all exit nonzero — and every one of them would
+have scored M60 as caught while proving nothing about the lock that was removed.
+
+Scoring for `--race` mutations is now **evidence-based rather than exit-code-based**: the
+output must carry a race report, and that report must name the mutated access. Attribution
+requires **both** sides of the intended pair — the mutated writer and the guarded reader —
+because a single-sided pattern would still admit an unrelated race that happened to touch the
+same function.
+
+The attribution pattern had to be discovered rather than guessed: a first attempt matched on
+the field name `nowFn`, which never appears in a race report at all. Reports name functions
+and addresses, not struct fields, so that check rejected the *real* race as unattributable.
+
+Verified three ways, because a scoring change that cannot reject anything is worse than no
+check: the real race mutation scores CAUGHT naming both symbols; a mutation that breaks the
+build scores NOT PROVEN; a mutation that fails the test without racing scores NOT PROVEN.
+**Both negatives scored CAUGHT before the change.**
+
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **60 mutations: 60 caught, 0 survived, 0
-skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
+skipped** — and, for the race mutation, caught with an attributed detector report rather than
+a bare nonzero exit. Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
 longer matches the source is scored as a FAILURE rather than a pass.
