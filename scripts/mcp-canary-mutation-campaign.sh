@@ -462,7 +462,7 @@ run_mutation M50 \
   'a duplicate embedded in a terminal outcome is dropped and the attempt settles' \
   'TestRecovery_ReadPathCouplingIsSymmetricAndStructural' \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
-  's/\tif e\.Phase != model\.PhaseReconciliation && e\.Reconciliation != nil \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery",\n\t\t\t"reconciliation evidence on a non-reconciliation record"\)\n\t\}\n//'
+  's/\tif e\.Reconciliation != nil && e\.Phase != model\.PhaseReconciliation \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery",\n\t\t\t"reconciliation evidence on a non-reconciliation record"\)\n\t\}\n//'
 
 # ── (51) decision ref checked for emptiness only ───────────────────────────
 run_mutation M51 \
