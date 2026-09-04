@@ -1233,20 +1233,58 @@ release starts writing v3 records. Rolling back past that reader turns a schema 
 a corruption alarm on a healthy ledger. No code change can reach already-shipped readers —
 the only lever is ordering, and it now says so where an operator will read it.
 
+### Round 15: a Call is not a leg
+
+**`neverSent` is a whole-Call fact, and it was being reported per leg.** Round 14 added the
+never-sent fact so `definitely_not_sent` becomes reachable only from positive evidence. Round
+15 found the fact escaping at the wrong granularity: `Client.Call` owns a retry loop, and
+`lastErr` was overwritten each iteration, so whichever leg failed LAST spoke for the whole
+Call.
+
+The reachable sequence is ordinary rather than contrived, and both halves of it already
+existed in the code. Leg 1 is read in full by the peer and then fails before a response —
+transport.go's `preResponse` leg, which is exactly the `(idempotent, preResponse)`
+classification that AUTHORIZES a re-send. A later leg fails at resolve, and transport.go
+marks that leg `{preResponse: true, neverSent: true}`: retry-classified AND
+certainty-claiming at the same time. `SendNeverStarted` then reported true for a Call whose
+first leg demonstrably put an invocation on the wire, and `run.go` turned that into
+`definitely_not_sent` — `MayHaveReachedPeer()` false, `Outcome.Executed` false. Uncertainty
+converted into `executed=false`, which is the one conversion this accounting exists to
+prevent.
+
+`foldLegFacts` aggregates across legs, and the two facts fold in OPPOSITE directions because
+each direction is the conservative one. `responseObserved` is a **disjunction** — any leg
+that saw the peer answer proves receipt, and no later leg can un-prove it. `neverSent` is a
+**conjunction** — it is the strongest claim in the send-state lattice, the one an operator
+acts on by re-running the invocation, so it requires unanimity across every attempted leg.
+`preResponse` is deliberately NOT folded: it is a per-leg input to retry classification, not
+evidence carried to the caller, and the `retryable()` call site still reads the per-leg
+value.
+
+**On the shipped live path this was not reachable**, and that is stated here rather than used
+to dismiss it: `RetryFreeLimits` pins the budget to zero and `Call` short-circuits on
+`RetriesDisabled`, so a live execution has exactly one leg. It is fixed anyway, because a
+per-leg fact escaping as a whole-Call claim manufactures certainty, and that safety must not
+rest on one caller's choice of limits. Mutations M57–M59.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **56 mutations: 56 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **59 mutations: 59 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
 longer matches the source is scored as a FAILURE rather than a pass.
 
-That last rule earned its keep FOUR times: M03, M04 and M12 had drifted silently against refactors
-made *inside this work* — the `runExecute` decomposition done to satisfy the complexity linters, and
-the `RecoverAttempts` split — and M20 drifted against the binding fix above, in the very same file
-the new mutation M32 targets. A campaign that scored a skip as a pass would have reported a clean run
-over four dead gates. The rule is not defensive tidiness: a mutation campaign measures the GATES, and
-a pattern that no longer matches measures nothing at all.
+That last rule earned its keep SEVEN times, every one of them against a fix made *inside this work*.
+M03, M04 and M12 drifted against refactors done here — the `runExecute` decomposition made to satisfy
+the complexity linters, and the `RecoverAttempts` split. M20 drifted against the binding fix above,
+in the very same file the mutation M32 targets. M45 drifted when round 11's checks were folded into
+one helper, M50 when round 13 restated a coupling over the allowed set and flipped the operand, and
+M31 when round 14 renamed `markResponseObserved` to `markLegFacts`. A campaign that scored a skip as
+a pass would have reported a clean run over seven dead gates — and the last three would have gone
+dead in exactly the rounds that were hardening the code they measured. The rule is not defensive
+tidiness: a mutation campaign measures the GATES, and a pattern that no longer matches measures
+nothing at all.
 
 ---
 
