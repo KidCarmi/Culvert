@@ -273,6 +273,75 @@ func TestChaos57_FailedRefreshDoesNotDestroyTheStaleAnswer(t *testing.T) {
 	}
 }
 
+// TestChaos57_StaleServesDoNotStackRefreshes.
+//
+// At most ONE refresh per host may be in flight, however many requests are
+// served stale behind it. During a resolver outage the stale window is not a
+// rare edge — it is every request for every host in the working set, for the
+// length of the outage — so a per-request refresh would put a resolution
+// attempt and an exclusive cache-lock acquisition on the policy path precisely
+// when the gateway is already degraded.
+func TestChaos57_StaleServesDoNotStackRefreshes(t *testing.T) {
+	// The refresh is held OPEN for the whole burst, which is the case that
+	// matters: a completed refresh makes the entry fresh again, so only a
+	// resolver that is NOT answering keeps every request in the stale window —
+	// exactly the outage this mechanism exists for.
+	release := make(chan struct{})
+	warm := make(chan struct{})
+	calls := blockingResolver(t, release, []string{"203.0.113.66"}, nil)
+
+	close(warm)
+	go func() { <-warm; time.Sleep(20 * time.Millisecond); close(release) }()
+	if resolveHost("stale-stack.chaos57.invalid") == nil {
+		t.Fatal("warm-up failed")
+	}
+	drainInflightResolutions()
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("warm-up used %d resolver calls, want 1", n)
+	}
+
+	// Now wedge the resolver for the rest of the test and expire the entry.
+	wedge := make(chan struct{})
+	defer close(wedge)
+	origFn := lookupHostFn
+	lookupHostFn = func(ctx context.Context, host string) ([]string, error) {
+		calls.Add(1)
+		select {
+		case <-wedge:
+			return nil, &net.DNSError{Err: "server misbehaving", Name: host}
+		case <-ctx.Done():
+			return nil, &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}
+		}
+	}
+	defer func() {
+		drainInflightResolutions()
+		lookupHostFn = origFn
+	}()
+	expireEntry("stale-stack.chaos57.invalid", time.Second)
+
+	// A burst of stale serves. The first becomes the refresh leader; every
+	// other one must ride behind it and be served immediately.
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ip := resolveHost("stale-stack.chaos57.invalid"); ip == nil {
+				t.Error("a stale serve returned nil while a refresh was in flight")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Exactly one refresh, not one per request.
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("100 stale serves against a wedged resolver used %d resolver calls, want 2 (warm-up + ONE refresh) — refreshes are stacking per request", n)
+	}
+	if snap := dnsResolveState(); snap.StaleServed != 100 {
+		t.Fatalf("StaleServed=%d, want 100 — every stale serve must be counted", snap.StaleServed)
+	}
+}
+
 // ─── The resolver pool is BOUNDED ────────────────────────────────────────────
 
 // driveResolverDegraded records a run of failures that SPANS the degradation

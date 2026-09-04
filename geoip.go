@@ -184,19 +184,33 @@ const (
 	hostIPStale                    // expired but inside hostIPCacheStaleMax
 )
 
-func (c *hostIPCache) lookup(host string, now time.Time) (net.IP, hostIPState) {
+// lookup probes the cache and, in the same critical section, reports whether a
+// resolution for this host is already in flight.
+//
+// Reporting `refreshing` from HERE rather than from refreshAsync is a hot-path
+// decision, not tidiness. Every stale serve would otherwise take the cache's
+// WRITE lock just to discover that a refresh is already running — and the stale
+// window is not a rare edge: during a resolver outage it is every request for
+// every host in the working set, for the length of the outage. Serializing the
+// policy path on an exclusive lock precisely when the gateway is already
+// degraded is the shape internal/threatfeed, internal/connlimit and the IP
+// filter were each fixed for. joinFlight stays authoritative — this is an
+// advisory read, and a caller that races past it is resolved by the recheck
+// under the write lock.
+func (c *hostIPCache) lookup(host string, now time.Time) (ip net.IP, state hostIPState, refreshing bool) {
 	c.mu.RLock()
 	e, ok := c.entries[host]
+	_, refreshing = c.inflight[host]
 	c.mu.RUnlock()
 	switch {
 	case !ok:
-		return nil, hostIPMiss
+		return nil, hostIPMiss, refreshing
 	case now.Before(e.expiry):
-		return e.ip, hostIPFresh
+		return e.ip, hostIPFresh, refreshing
 	case now.Before(e.expiry.Add(hostIPCacheStaleMax)):
-		return e.ip, hostIPStale
+		return e.ip, hostIPStale, refreshing
 	}
-	return nil, hostIPMiss
+	return nil, hostIPMiss, refreshing
 }
 
 func (c *hostIPCache) put(host string, ip net.IP) {
@@ -299,12 +313,14 @@ func resolveHost(host string) net.IP {
 		return ip
 	}
 
-	cached, state := resolvedHostCache.lookup(host, time.Now())
+	cached, state, refreshing := resolvedHostCache.lookup(host, time.Now())
 	switch state {
 	case hostIPFresh:
 		return cached
 	case hostIPStale:
-		resolvedHostCache.refreshAsync(host)
+		if !refreshing {
+			resolvedHostCache.refreshAsync(host)
+		}
 		noteDNSStaleServed()
 		return cached
 	}
