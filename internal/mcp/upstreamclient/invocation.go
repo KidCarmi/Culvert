@@ -76,3 +76,9 @@ func ClassifyMethod(method string) MethodClass {
 		return ClassUnknown
 	}
 }
+
+// AttemptHeader carries the Culvert-minted attempt identity to the upstream so an
+// independent recording witness can attribute each received invocation to exactly
+// one authorized attempt. It is non-secret by construction: it names an attempt, it
+// does not authorize one.
+const AttemptHeader = "Mcp-Culvert-Attempt-Id"

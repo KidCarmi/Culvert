@@ -69,6 +69,13 @@ type CallOptions struct {
 	// set only from inside the broker materialization callback and lives only for the
 	// duration of the request.
 	AuthHeader string
+	// AttemptID names the ONE potential physical tool invocation this call carries
+	// (review §5). It is emitted as a request header so the controlled recording
+	// upstream can attribute each received invocation to exactly one authorized
+	// attempt — the correlation an independent witness needs to answer "did Culvert
+	// cause exactly the effects it authorized?". It is non-secret, and empty for
+	// lifecycle/discovery traffic, which carries no attempt.
+	AttemptID string
 }
 
 // Response is the decoded, admitted upstream JSON-RPC response.
@@ -183,7 +190,7 @@ func (c *Client) attempt(ctx context.Context, target Target, method string, para
 	if err != nil {
 		return nil, false, err
 	}
-	raw, preResponse, err := c.roundTrip(ctx, target, body, opts.AuthHeader)
+	raw, preResponse, err := c.roundTrip(ctx, target, body, opts.AuthHeader, opts.AttemptID)
 	if err != nil {
 		return nil, preResponse, err
 	}

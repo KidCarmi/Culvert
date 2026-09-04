@@ -55,7 +55,7 @@ func (p *serverPool) acquire(ctx context.Context) (func(), error) {
 // returns (rawBody, preResponse, error): preResponse is true when the failure
 // happened before any response headers were received (dial/TLS/timeout) so an
 // idempotent read may retry.
-func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string) (respBody []byte, preResponse bool, err error) {
+func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string, attemptID string) (respBody []byte, preResponse bool, err error) {
 	canon, class, err := destination.Canonicalize(target.Endpoint, c.cfg.Policy, c.cfg.InspectionLimits)
 	if err != nil {
 		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
@@ -107,6 +107,11 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	// The client's own token is never forwarded.
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
+	}
+	// Attempt identity for independent witness correlation (§5/§11). Non-secret and
+	// Culvert-minted; empty for lifecycle/discovery traffic, which carries no attempt.
+	if attemptID != "" {
+		req.Header.Set(AttemptHeader, attemptID)
 	}
 
 	resp, err := client.Do(req)

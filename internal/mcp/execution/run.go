@@ -39,7 +39,7 @@ var errKilledAtBoundary = errors.New("mcp: emergency kill engaged before upstrea
 // gate or CommitThenAct), then the upstream call inside the materialization
 // callback, then response inspection + DLP, then the result. A failure at any step
 // leaves NO downstream side effect.
-func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollout.Subject, res rollout.Resolution, admKillGen uint64) runtime.ExecOutput {
+func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollout.Subject, res rollout.Resolution, admKillGen uint64) (out runtime.ExecOutput) {
 	if e.cfg.Events == nil {
 		// No durability seam ⇒ fail closed (commit-before-side-effect is mandatory).
 		return e.blocked(in, mcperr.ReasonEventDurabilityDegraded, false)
@@ -56,6 +56,24 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		PinnedIdentity: string(in.Server.PinnedIdentity),
 	}
 	idempotent := in.Input.Operation.Class == policy.OpRead || in.Input.Operation.Class == policy.OpDiscovery
+
+	// PHYSICAL-EFFECT ACCOUNTING (review blockers #6/#8).
+	//
+	// attempt is non-nil once a durable send intent has been committed for a
+	// side-effect-bearing invocation; sendState is the conservative truth about
+	// whether the peer could have acted. The terminal outcome is emitted from ONE
+	// deferred commit rather than at each return, because this function has seven
+	// exit paths and the previous code recorded an outcome on exactly one of them
+	// (the success path) — upstream errors, DLP blocks and boundary refusals left no
+	// post-call evidence at all.
+	var attempt *attemptRecord
+	sendState := model.SendStateUnset
+	defer func() {
+		if attempt == nil {
+			return // no durable intent ⇒ no physical attempt to account for
+		}
+		e.commitAttemptOutcome(in, attempt, sendState, out)
+	}()
 
 	var upResp *upstreamclient.Response
 	var upErr error
@@ -82,6 +100,8 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// leaked even if the freshness/kill guard below then aborts (§11). nil gate ⇒ unchanged.
 		var release func()
 		var revalidate func() bool
+		var reservationID string
+		var activationGen uint64
 		if e.cfg.LiveGate != nil {
 			d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
 			if !d.Admit {
@@ -91,15 +111,39 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			}
 			release = d.Release
 			revalidate = d.Revalidate
+			reservationID = d.ReservationID
+			activationGen = d.ActivationGeneration
 		}
 		if release != nil {
 			defer release()
+		}
+		// DURABLE SEND INTENT (§6) — committed AFTER the budget reservation (so it can
+		// name the slot) and BEFORE the final boundary guards, because its purpose is
+		// to survive a crash that happens after the peer receives bytes. Only a
+		// side-effect-bearing method gets one: lifecycle/discovery traffic invokes no
+		// tool and must never consume an execution reservation or inflate the
+		// physical-effect count (§4).
+		//
+		// Failing to persist the intent means the send MUST NOT happen: an
+		// unattributable physical invocation is precisely what this mechanism exists
+		// to prevent, so this fails CLOSED.
+		if upstreamclient.ClassifyMethod(in.Method).SideEffectBearing() {
+			rec, ierr := e.commitSendIntent(in, reservationID, activationGen)
+			if ierr != nil {
+				gateRefused = true
+				gateReason = mcperr.ReasonOf(ierr)
+				return errLiveGateRefused
+			}
+			attempt = rec
 		}
 		// (2) Last-moment boundary re-checks (tool drift, then the composition-layer live-generation
 		// revalidation, then the emergency kill) run inside preCallGuard so nothing sits between them and
 		// Upstream.Call. The kill re-read stays LAST (PREREQ-MCP-KILL-1). A demoted-generation refusal is
 		// mapped to the gate-refusal classification path with a bounded rollout reason.
 		if gerr := e.preCallGuard(in, admKillGen, revalidate); gerr != nil {
+			// The physical call never began, so this is the ONE case where
+			// definitely_not_sent is mechanically provable rather than inferred.
+			sendState = model.SendDefinitelyNotSent
 			staleAtCall = errors.Is(gerr, errToolDriftedBeforeCall)
 			killedAtCall = errors.Is(gerr, errKilledAtBoundary)
 			if errors.Is(gerr, errLiveGenerationDemotedAtBoundary) {
@@ -108,9 +152,21 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			}
 			return gerr
 		}
+		// Once the call BEGINS, request bytes may already be on the wire. Assume the
+		// conservative state up front so any panic, cancellation or transport fault
+		// from here on is recorded as may_have_been_sent rather than silently
+		// defaulting to "not sent" (§6). NOTHING blocking is introduced between the
+		// final kill re-read above and this call.
+		sendState = model.SendMayHaveBeenSent
 		r, err := e.cfg.Upstream.Call(ctx, target, in.Method, json.RawMessage(in.RawParams), upstreamclient.CallOptions{
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
+			AttemptID: attemptIDOf(attempt),
 		})
+		if r != nil {
+			// The peer answered, so the invocation demonstrably reached it. This says
+			// nothing about whether the response is later blocked by inspection.
+			sendState = model.SendPeerResponseReceived
+		}
 		upResp, upErr = r, err
 		return err
 	}
@@ -273,14 +329,10 @@ func (e *Executor) finishUpstream(ctx context.Context, in runtime.ExecInput, upR
 		return e.blocked(in, mcperr.ReasonRedactionFailed, false)
 	}
 
-	// Best-effort outcome event (ordinary criticality; never blocks the response).
-	// Best-effort means the RESPONSE is not blocked — it does not mean the loss is
-	// invisible. Discarding this error is how an outcome event that failed validation
-	// went unnoticed for every mutating execution; a rejected commit here is a defect
-	// in the facts, not a transient, so it must be able to reach a human.
-	if _, cerr := e.cfg.Events.CommitDecision(outcomeFacts(in)); cerr != nil {
-		e.cfg.Metrics.ObserveOutcomeEvidenceLoss(in.Capability.String())
-	}
+	// The terminal outcome event is emitted by runExecute's single deferred commit,
+	// which covers EVERY exit path (success, upstream error, DLP block, boundary
+	// refusal) rather than this one. Committing here too would double-record the
+	// success path and still leave the others silent.
 	e.cfg.Metrics.ObserveExecution(in.Capability.String(), true)
 
 	effective := "execute"

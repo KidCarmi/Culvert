@@ -73,6 +73,17 @@ type LiveGateDecision struct {
 	// when the gate (or Revalidate) is nil.
 	Revalidate func() bool
 	Release    func()
+	// ReservationID (set only when Admit) names the budget slot this side effect was
+	// authorized against. It binds a physical attempt to the reservation that paid
+	// for it, so an effect can never be attributed to an unauthorized slot and an
+	// orphan can be traced back to the exact grant. An empty value is tolerated:
+	// gates that do not meter (nil/legacy) keep the executor byte-identical.
+	ReservationID string
+	// ActivationGeneration (set only when Admit) is the Canary activation generation
+	// in force at admission. It is recorded on the attempt so an orphan from a
+	// superseded generation stays recognizable after a restart and can never be
+	// mistaken for fresh execution allowance. Zero when the gate does not meter.
+	ActivationGeneration uint64
 }
 
 // errLiveGateRefused aborts callUpstream when the composition-layer gate denied the side effect.
