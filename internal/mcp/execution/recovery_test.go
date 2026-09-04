@@ -19,7 +19,7 @@ type fixtureReader struct {
 	hasErr bool
 }
 
-func (f *fixtureReader) CommittedForExport(part model.Partition, after uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
+func (f *fixtureReader) CommittedForExport(part model.Partition, after uint64, maxRecords int) (evs []model.Event, seqs []uint64, cursor uint64, err error) {
 	if f.hasErr && part == f.failOn {
 		return nil, nil, after, errUnreadableFixture
 	}
@@ -38,7 +38,7 @@ func (f *fixtureReader) CommittedForExport(part model.Partition, after uint64, m
 		}
 	}
 	out := all[after:end]
-	seqs := make([]uint64, 0, len(out))
+	seqs = make([]uint64, 0, len(out))
 	for s := after; s < end; s++ {
 		seqs = append(seqs, s+1)
 	}
