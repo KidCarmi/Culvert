@@ -528,6 +528,25 @@ func (s PhysicalSendState) MayHaveReachedPeer() bool {
 	return s != SendDefinitelyNotSent && s != SendReconciledNotReceived
 }
 
+// ProvesReceipt is the POSITIVE counterpart, and it is NOT the negation of
+// MayHaveReachedPeer.
+//
+// Only two states are affirmative evidence that the peer acted: the peer answered,
+// or an authoritative witness resolved it as received. Everything else — including
+// may_have_been_sent — proves nothing, and may_have_been_sent is precisely the
+// uncertainty a witness exists to resolve (ReconciliationRequired answers true for
+// it).
+//
+// The two predicates are deliberately separate because the middle ground is real:
+// a state can be neither proven-received nor proven-not-received. Reusing
+// MayHaveReachedPeer as a stand-in for "the peer received it" reads that middle
+// ground as receipt, which turns the canonical reconciliation case — an ambiguous
+// send that a complete witness view says never arrived — into a contradiction and
+// makes it unresolvable (Codex round 8, P1).
+func (s PhysicalSendState) ProvesReceipt() bool {
+	return s == SendPeerResponseReceived || s == SendReconciledReceived
+}
+
 // ReconciliationRequired reports whether this attempt still needs an authoritative
 // independent witness to reach a final answer.
 func (s PhysicalSendState) ReconciliationRequired() bool {

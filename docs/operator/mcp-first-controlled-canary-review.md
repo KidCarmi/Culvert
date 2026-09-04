@@ -1030,9 +1030,48 @@ production requires closing it first, by relational retention (never reclaim an 
 records for its attempt survive) or a retention floor on `EvidenceReader`. Pinned by
 `TestRecovery_UnmatchedRecordRulesAssumeAnUnreclaimedLedger`, whose failure message says so.
 
+### Three from the round after that, two of which hid each other
+
+**An unanswered POST could never be reconciled, and two independent defects caused it.**
+`settledReconOK` rejected `reconciled_not_received` whenever `MayHaveReachedPeer()` was true — but that
+is the CONSERVATIVE predicate and answers true for `may_have_been_sent`, which is uncertainty, not
+receipt. Separately, `ReconcileOrphan` gated on `State != AttemptReconciliationRequired`, which reads
+"settled" as "known" — two different questions, since an upstream POST that ends without a response
+settles as `may_have_been_sent` whose own `ReconciliationRequired()` answers true. So the single most
+important case a witness exists for was both un-askable and, had it been asked, un-recordable. Fixing
+either alone leaves it unresolvable, which is why the gate is end-to-end
+(`TestReconcile_AnUnansweredPostIsResolvableEndToEnd`).
+
+`PhysicalSendState.ProvesReceipt()` is now the positive predicate and is deliberately **NOT** the
+negation of `MayHaveReachedPeer()`: the middle ground — neither proven-received nor
+proven-not-received — is real and is exactly what a witness resolves. Collapsing the two would
+silently re-break this case, so the distinction is pinned structurally
+(`TestPhysicalSendState_ProvesReceiptIsNotTheNegationOfMayHaveReachedPeer`). The gate is now
+`RecoveredAttempt.NeedsReconciliation()`, which also refuses in the OTHER direction: once a witness
+has RESOLVED an attempt, asking again can only move knowledge backwards — an outage answers
+`reconciliation_required`, the append-only ledger rightly refuses that downgrade, and the query would
+turn a healthy resolved attempt into a recovery failure. Mutations M42 and M43.
+
+**A rule made its own correct answer unrecordable.** `deriveReconResult` deliberately answers
+`ReconRequired` for a malformed (negative) witness count, but the producer copied that count onto the
+evidence and the round-6 validator rejects a negative count for EVERY verdict — so the documented
+fail-closed record could not reach the append-only ledger at all. The count is now omitted rather
+than recorded as a falsehood; the record still names the witness and still resolves nothing, which is
+exactly what is true. Pinned from both sides — producer
+(`TestReconcile_AMalformedCountYieldsACommittableRecord`) and the real validator
+(`TestReconciliation_TheFailClosedRecordIsCommittable`, with the negative count still refused as its
+control). Mutation M44.
+
+**Two tests that pinned these defects were rewritten, not deleted.** The fail-closed table in
+`TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded` listed "not_received against an
+ambiguous send" as a contradiction; it is now a RESOLUTION control on the same fixture.
+`TestReconcile_SettledAttemptIsRejected` asserted that any settled attempt is refused; it is now
+`TestReconcile_GateIsUnresolvedKnowledgeNotSettledness`, which pins both directions of the corrected
+gate plus an unreconciled-orphan control.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **41 mutations: 41 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **44 mutations: 44 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

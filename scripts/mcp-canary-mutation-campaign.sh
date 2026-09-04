@@ -401,6 +401,27 @@ run_mutation M41 \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\tfor id := range idx\.recon \{\n\t\tif _, ok := idx\.intents\[id\]; !ok \{\n\t\t\treturn RecoveryReport\{\}, mcperr\.New\(mcperr\.ReasonEventInvalid,\n\t\t\t\t"execution\.recovery", "reconciliation evidence without a matching send intent"\)\n\t\t\}\n\t\}\n//'
 
+# ── (42) not-received rejected against an AMBIGUOUS send ───────────────────
+run_mutation M42 \
+  'an unanswered POST can never be resolved by the witness that exists to resolve it' \
+  'TestReconcile_AnUnansweredPostIsResolvableEndToEnd' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\t\tif out\.PhysicalSendState\.ProvesReceipt\(\) \{/\t\tif out.PhysicalSendState.MayHaveReachedPeer() {/'
+
+# ── (43) reconciliation gated on settledness, not on knowledge ─────────────
+run_mutation M43 \
+  'a settled-but-ambiguous attempt is refused reconciliation' \
+  'TestReconcile_GateIsUnresolvedKnowledgeNotSettledness|TestReconcile_AnUnansweredPostIsResolvableEndToEnd' \
+  ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
+  's/\tif !orphan\.NeedsReconciliation\(\) \{/\tif orphan.State != AttemptReconciliationRequired {/'
+
+# ── (44) a malformed count is copied onto the durable record ───────────────
+run_mutation M44 \
+  'the fail-closed record a malformed witness produces cannot be committed' \
+  'TestReconcile_AMalformedCountYieldsACommittableRecord' \
+  ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
+  's/\tif obs\.Count > 0 \{\n\t\tev\.ObservationCount = obs\.Count\n\t\}/\tev.ObservationCount = obs.Count/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

@@ -55,9 +55,35 @@ type RecoveredAttempt struct {
 	// orphan.
 	TerminalSendState model.PhysicalSendState
 	// Reconciliation is the DERIVED knowledge from append-only witness evidence. It
-	// is ReconRequired for an unreconciled orphan and empty for a settled attempt.
-	// It never changes execution authority — only what is known.
+	// is ReconRequired when no witness has answered — for an orphan AND for a settled
+	// attempt, since a settled attempt whose send state is may_have_been_sent still
+	// has an open question. It never changes execution authority — only what is known.
 	Reconciliation model.ReconciliationResult
+}
+
+// NeedsReconciliation reports whether an independent witness could still change what
+// is known about this attempt.
+//
+// It is deliberately NOT "State == AttemptReconciliationRequired". A terminal outcome
+// makes an attempt SETTLED as to execution authority, but says nothing about whether
+// its physical fate is known: an upstream POST that ended without a response settles
+// as may_have_been_sent, which is the single most important case a witness exists to
+// resolve, and gating on State alone made it permanently unreconcilable (Codex round
+// 8, P1).
+//
+// The converse matters just as much. Once a witness has RESOLVED an attempt, asking
+// again can only move knowledge backwards: a witness outage would answer
+// reconciliation_required, and the append-only ledger correctly refuses that
+// downgrade — so the query itself would turn a healthy resolved attempt into a
+// recovery failure. Resolved knowledge is therefore final here.
+func (a RecoveredAttempt) NeedsReconciliation() bool {
+	if a.Reconciliation.Resolved() {
+		return false
+	}
+	if a.State == AttemptReconciliationRequired {
+		return true
+	}
+	return a.TerminalSendState.ReconciliationRequired()
 }
 
 // ReservationBreach names one budget slot that authorized MORE THAN ONE physical
@@ -447,12 +473,21 @@ func settledFrom(intent, out *model.OutcomeEvidence, recon *model.Reconciliation
 	if err := settledReconOK(intent, out, recon); err != nil {
 		return RecoveredAttempt{}, err
 	}
+	// The reconciliation knowledge is CARRIED, not discarded. A settled attempt whose
+	// terminal state is may_have_been_sent still needs a witness, so whether one has
+	// already answered is part of this attempt's state — and NeedsReconciliation
+	// depends on it.
+	known := model.ReconRequired
+	if recon != nil {
+		known = recon.Result
+	}
 	return RecoveredAttempt{
 		AttemptID:            intent.AttemptID,
 		ReservationID:        intent.ReservationID,
 		ActivationGeneration: intent.ActivationGeneration,
 		State:                AttemptSettled,
 		TerminalSendState:    out.PhysicalSendState,
+		Reconciliation:       known,
 	}, nil
 }
 
@@ -487,9 +522,18 @@ func settledReconOK(intent, out *model.OutcomeEvidence, recon *model.Reconciliat
 		return mcperr.New(mcperr.ReasonEventInvalid,
 			"execution.recovery", "witness reported a duplicate invocation for a settled attempt")
 	case model.ReconNotReceived:
-		if out.PhysicalSendState.MayHaveReachedPeer() {
+		// Only a state that POSITIVELY PROVES receipt contradicts a witness saying the
+		// invocation never arrived. This used to test MayHaveReachedPeer, which is the
+		// conservative predicate and answers TRUE for may_have_been_sent — so the
+		// canonical reconciliation case (an ambiguous send that a complete witness view
+		// says never arrived) was rejected as contradictory, and an unanswered POST
+		// could never be settled by the very evidence that exists to settle it
+		// (Codex round 8, P1). The two predicates are not negations of each other: a
+		// state can be neither proven-received nor proven-not-received, and that middle
+		// ground is exactly what the witness resolves.
+		if out.PhysicalSendState.ProvesReceipt() {
 			return mcperr.New(mcperr.ReasonEventInvalid,
-				"execution.recovery", "witness reported not-received against an outcome that reached the peer")
+				"execution.recovery", "witness reported not-received against an outcome that proves the peer received it")
 		}
 	case model.ReconReceived:
 		// TWO states positively prove the peer was not reached, not one (Codex round

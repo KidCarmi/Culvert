@@ -261,3 +261,68 @@ func TestReconciliation_ConflictIsDeliberatelyUnconstrained(t *testing.T) {
 		}
 	}
 }
+
+// TestReconciliation_TheFailClosedRecordIsCommittable is the durable half of round-8
+// P2, paired with the producer-side gate in internal/mcp/execution.
+//
+// deriveReconResult answers ReconRequired for a malformed (negative) witness count.
+// If the validator then rejects the record that answer produces, the documented
+// fail-closed outcome cannot reach the append-only ledger at all — a rule that makes
+// its own correct answer unrecordable. This pins that the record the producer now
+// emits is committable, and that the negative count itself is still refused.
+func TestReconciliation_TheFailClosedRecordIsCommittable(t *testing.T) {
+	e := baseReconciliation()
+	e.Reconciliation.Result = ReconRequired
+	e.Reconciliation.WitnessSource = "controlled-recorder"
+	e.Reconciliation.ObservationCount = 0 // the producer omits a malformed count
+	if err := e.Validate(); err != nil {
+		t.Fatalf("the fail-closed record must be committable: %v", err)
+	}
+
+	// CONTROL: the count itself is still refused, so this does not simply relax the
+	// rule — it proves the producer must not emit one.
+	e.Reconciliation.ObservationCount = -3
+	mustReason(t, e.Validate(), mcperr.ReasonEventInvalid)
+}
+
+// TestPhysicalSendState_ProvesReceiptIsNotTheNegationOfMayHaveReachedPeer pins the
+// distinction round-8 P1 turned on. The two predicates leave a deliberate MIDDLE
+// GROUND — states that are neither proven-received nor proven-not-received — and
+// may_have_been_sent is the whole reason reconciliation exists. A change that made
+// one the negation of the other would collapse that middle ground and silently
+// re-break the unanswered-POST case.
+func TestPhysicalSendState_ProvesReceiptIsNotTheNegationOfMayHaveReachedPeer(t *testing.T) {
+	for _, tc := range []struct {
+		state          PhysicalSendState
+		provesReceipt  bool
+		mayHaveReached bool
+	}{
+		{SendPeerResponseReceived, true, true},
+		{SendReconciledReceived, true, true},
+		{SendMayHaveBeenSent, false, true}, // the middle ground
+		{SendStateUnset, false, true},      // also the middle ground
+		{SendDefinitelyNotSent, false, false},
+		{SendReconciledNotReceived, false, false},
+	} {
+		if got := tc.state.ProvesReceipt(); got != tc.provesReceipt {
+			t.Fatalf("%q ProvesReceipt = %v, want %v", tc.state, got, tc.provesReceipt)
+		}
+		if got := tc.state.MayHaveReachedPeer(); got != tc.mayHaveReached {
+			t.Fatalf("%q MayHaveReachedPeer = %v, want %v", tc.state, got, tc.mayHaveReached)
+		}
+	}
+	// The structural claim: at least one state is neither, so the predicates cannot be
+	// collapsed into one.
+	middle := 0
+	for _, s := range []PhysicalSendState{
+		SendStateUnset, SendDefinitelyNotSent, SendMayHaveBeenSent,
+		SendPeerResponseReceived, SendReconciledReceived, SendReconciledNotReceived,
+	} {
+		if !s.ProvesReceipt() && s.MayHaveReachedPeer() {
+			middle++
+		}
+	}
+	if middle == 0 {
+		t.Fatal("the predicates collapsed: no state is neither proven-received nor proven-not-received")
+	}
+}

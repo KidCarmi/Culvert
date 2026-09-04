@@ -180,13 +180,68 @@ func TestReconcile_WitnessUnavailableStaysUnresolved(t *testing.T) {
 	}
 }
 
-// (11) a settled attempt is not an orphan and must not enter reconciliation.
-func TestReconcile_SettledAttemptIsRejected(t *testing.T) {
-	o := orphanFor(t)
-	o.State = AttemptSettled
-	if _, err := ReconcileOrphan(context.Background(), stubWitness{obs: baseObservation(o)}, o, "s1", "tools/call", 1); err == nil {
-		t.Fatal("a settled attempt must not be reconciled as an orphan")
+// (11) reconciliation is gated on UNRESOLVED KNOWLEDGE, not on the absence of a
+// terminal outcome (Codex round 8, P1).
+//
+// The original form of this test asserted that any settled attempt is refused, which
+// reads "settled" as "known" — two different questions. An upstream POST that ended
+// without a response is settled as to execution AUTHORITY and records
+// may_have_been_sent, whose own ReconciliationRequired() answers true: it is the
+// single most important case a witness exists for, and the old gate made it
+// permanently unreconcilable.
+func TestReconcile_GateIsUnresolvedKnowledgeNotSettledness(t *testing.T) {
+	call := func(o RecoveredAttempt) error {
+		_, err := ReconcileOrphan(context.Background(), stubWitness{obs: baseObservation(o)}, o, "s1", "tools/call", 1)
+		return err
 	}
+
+	t.Run("a settled but ambiguous send is reconcilable", func(t *testing.T) {
+		o := orphanFor(t)
+		o.State, o.TerminalSendState = AttemptSettled, model.SendMayHaveBeenSent
+		if err := call(o); err != nil {
+			t.Fatalf("an unanswered POST must be reconcilable, got %v", err)
+		}
+	})
+
+	for name, o := range map[string]func(RecoveredAttempt) RecoveredAttempt{
+		// Its fate is already known from the outcome itself.
+		"peer answered": func(o RecoveredAttempt) RecoveredAttempt {
+			o.State, o.TerminalSendState = AttemptSettled, model.SendPeerResponseReceived
+			return o
+		},
+		"provably never sent": func(o RecoveredAttempt) RecoveredAttempt {
+			o.State, o.TerminalSendState = AttemptSettled, model.SendDefinitelyNotSent
+			return o
+		},
+		// Already RESOLVED by a witness. Asking again can only move knowledge
+		// backwards: an outage answers reconciliation_required, and the append-only
+		// ledger refuses that downgrade — so the query would turn a healthy resolved
+		// attempt into a recovery failure.
+		"already resolved received": func(o RecoveredAttempt) RecoveredAttempt {
+			o.Reconciliation = model.ReconReceived
+			return o
+		},
+		"already resolved not received": func(o RecoveredAttempt) RecoveredAttempt {
+			o.Reconciliation = model.ReconNotReceived
+			return o
+		},
+		"already resolved conflict": func(o RecoveredAttempt) RecoveredAttempt {
+			o.Reconciliation = model.ReconConflict
+			return o
+		},
+	} {
+		t.Run(name+" is refused", func(t *testing.T) {
+			if err := call(o(orphanFor(t))); err == nil {
+				t.Fatalf("%s: reconciliation must be refused when it can learn nothing", name)
+			}
+		})
+	}
+
+	t.Run("control: an unreconciled orphan is still accepted", func(t *testing.T) {
+		if err := call(orphanFor(t)); err != nil {
+			t.Fatalf("control: an unreconciled orphan must be reconcilable, got %v", err)
+		}
+	})
 }
 
 // (7) reconciliation never changes authorization — it produces evidence only, and
@@ -533,8 +588,6 @@ func TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded(t *testing.
 	}{
 		"not_received against a peer that answered": {
 			model.SendPeerResponseReceived, recon("rsv_a", 7, model.ReconNotReceived)},
-		"not_received against an ambiguous send": {
-			model.SendMayHaveBeenSent, recon("rsv_a", 7, model.ReconNotReceived)},
 		"received against a provably never-sent outcome": {
 			model.SendDefinitelyNotSent, recon("rsv_a", 7, model.ReconReceived)},
 		"witness-observed duplicate": {
@@ -558,6 +611,14 @@ func TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded(t *testing.
 			recon("rsv_a", 7, model.ReconReceived)),
 		"reconciliation_required asserts nothing": append(settled(model.SendPeerResponseReceived),
 			recon("rsv_a", 7, model.ReconRequired)),
+		// THE CANONICAL RESOLUTION, and it used to sit in the fail-closed table above
+		// (Codex round 8, P1). An ambiguous send is not receipt — may_have_been_sent is
+		// the uncertainty a witness exists to resolve — so a complete zero-count view
+		// beside it RESOLVES the attempt rather than contradicting it. Treating it as a
+		// contradiction made an unanswered POST permanently unsettleable by the only
+		// evidence that could settle it.
+		"not_received resolves an ambiguous send": append(settled(model.SendMayHaveBeenSent),
+			recon("rsv_a", 7, model.ReconNotReceived)),
 	} {
 		rep, err := RecoverAttempts(readerWith(evs...))
 		if err != nil {
@@ -771,4 +832,121 @@ func TestRecovery_UnmatchedRecordRulesAssumeAnUnreclaimedLedger(t *testing.T) {
 				len(rep.Settled), len(rep.Orphans))
 		}
 	})
+}
+
+// TestReconcile_AnUnansweredPostIsResolvableEndToEnd is the round-8 P1 pair proved
+// together, because the two defects hid each other: the GATE refused to reconcile a
+// settled-but-ambiguous attempt, and even if it had, RECOVERY would have rejected the
+// resulting record as contradictory. Fixing either alone leaves the case unresolvable,
+// so the gate that matters is the end-to-end one.
+//
+// The case is the whole point of the mechanism: an upstream POST that ended without a
+// response. Culvert cannot know its fate; an independent witness can.
+func TestReconcile_AnUnansweredPostIsResolvableEndToEnd(t *testing.T) {
+	id := mustAttemptID(t)
+	ambiguous := []model.Event{
+		intentEvent(id, "rsv_a", 7),
+		outcomeEvent(id, "rsv_a", 7, model.SendMayHaveBeenSent),
+	}
+
+	// Step 1 — recovery reports the attempt as still needing a witness, even though a
+	// terminal outcome exists.
+	rep, err := RecoverAttempts(readerWith(ambiguous...))
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if len(rep.Settled) != 1 {
+		t.Fatalf("expected one settled attempt, got %d", len(rep.Settled))
+	}
+	att := rep.Settled[0]
+	if !att.NeedsReconciliation() {
+		t.Fatal("an unanswered POST must still need reconciliation despite being settled")
+	}
+
+	// Step 2 — the witness is allowed to answer, and a complete zero-count view
+	// RESOLVES it rather than contradicting it.
+	obs := baseObservation(att)
+	obs.Count, obs.Complete, obs.CompletenessWatermark = 0, true, "wm-1"
+	ev, err := ReconcileOrphan(context.Background(), stubWitness{obs: obs}, att, "s1", "tools/call", 1)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if ev.Result != model.ReconNotReceived {
+		t.Fatalf("a complete zero-count view must resolve not_received, got %q", ev.Result)
+	}
+
+	// Step 3 — the resulting record stands beside the ambiguous outcome in the durable
+	// ledger, and recovery now reports RESOLVED knowledge.
+	rep2, err := RecoverAttempts(readerWith(append(ambiguous, model.Event{
+		Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+			Result: model.ReconNotReceived, ObservationCount: 0, CompletenessWatermark: "wm-1",
+		},
+	})...))
+	if err != nil {
+		t.Fatalf("recover with reconciliation: %v", err)
+	}
+	if len(rep2.Settled) != 1 || rep2.Settled[0].Reconciliation != model.ReconNotReceived {
+		t.Fatalf("the resolution must be carried on the recovered attempt, got %+v", rep2.Settled)
+	}
+	if rep2.Settled[0].NeedsReconciliation() {
+		t.Fatal("a resolved attempt must not be re-reconciled — asking again can only downgrade")
+	}
+}
+
+// TestReconcile_ProvenReceiptStillContradictsNotReceived is the CONTROL for the
+// predicate split. Loosening ReconNotReceived must not loosen it all the way: a
+// witness saying "never arrived" against an outcome that PROVES the peer answered is
+// still a direct contradiction about one physical effect.
+func TestReconcile_ProvenReceiptStillContradictsNotReceived(t *testing.T) {
+	for _, st := range []model.PhysicalSendState{
+		model.SendPeerResponseReceived, model.SendReconciledReceived,
+	} {
+		id := mustAttemptID(t)
+		_, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			outcomeEvent(id, "rsv_a", 7, st),
+			model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+				AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+				Result: model.ReconNotReceived, CompletenessWatermark: "wm-1",
+			}},
+		))
+		if err == nil {
+			t.Fatalf("not_received against %q must still fail closed", st)
+		}
+	}
+}
+
+// TestReconcile_AMalformedCountYieldsACOMMITTABLERecord pins round-8 P2: the
+// fail-closed record a malformed witness produces must be persistable.
+//
+// deriveReconResult deliberately answers ReconRequired for a negative count, but the
+// producer copied that count onto the evidence and the durable validator rejects a
+// negative count for EVERY verdict — so the documented fail-closed outcome could not
+// be committed to the append-only ledger at all. A rule that makes its own correct
+// answer unrecordable is not a rule, it is a deadlock.
+func TestReconcile_AMalformedCountYieldsACommittableRecord(t *testing.T) {
+	o := orphanFor(t)
+	obs := baseObservation(o)
+	obs.Count = -3
+
+	ev, err := ReconcileOrphan(context.Background(), stubWitness{obs: obs}, o, "s1", "tools/call", 1)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if ev.Result != model.ReconRequired {
+		t.Fatalf("a malformed count must resolve nothing, got %q", ev.Result)
+	}
+	if ev.ObservationCount < 0 {
+		t.Fatalf("a malformed count must not be recorded as an observation, got %d", ev.ObservationCount)
+	}
+	// The producer half of the contract. The durable half — that a ReconRequired
+	// record carrying this count actually passes the REAL validator — is pinned in the
+	// model package, where the validator lives, by
+	// TestReconciliation_TheFailClosedRecordIsCommittable.
+	//
+	// And the witness is still named, so an operator can see who answered uselessly.
+	if ev.WitnessSource == "" {
+		t.Fatal("the record must still name the witness it consulted")
+	}
 }

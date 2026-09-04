@@ -66,12 +66,23 @@ type Witness interface {
 // reconciliation_required — the resting state — rather than producing a verdict the
 // evidence does not support.
 func ReconcileOrphan(ctx context.Context, w Witness, orphan RecoveredAttempt, expectServer, expectMethod string, now int64) (model.ReconciliationEvidence, error) {
-	if orphan.State != AttemptReconciliationRequired {
-		// Only an orphan enters reconciliation. A settled attempt already has a
-		// terminal outcome; re-deriving it here would be an evidence audit, not
-		// execution recovery, and must be requested explicitly.
+	if !orphan.NeedsReconciliation() {
+		// The gate is UNRESOLVED KNOWLEDGE, not the absence of a terminal outcome
+		// (Codex round 8, P1). It used to be `State != AttemptReconciliationRequired`,
+		// which reads "settled" as "known" — and those are different questions. An
+		// upstream POST that ended without a response is SETTLED as to execution
+		// authority and records may_have_been_sent, whose own ReconciliationRequired()
+		// answers true; gating on State made the single most important case a witness
+		// exists for permanently unreconcilable.
+		//
+		// It refuses in the other direction too, and that direction is a safety
+		// property rather than a convenience: once a witness has RESOLVED an attempt,
+		// asking again can only move knowledge backwards — a witness outage answers
+		// reconciliation_required, and the append-only ledger rightly refuses that
+		// downgrade, so the query would turn a healthy resolved attempt into a recovery
+		// failure.
 		return model.ReconciliationEvidence{}, mcperr.New(mcperr.ReasonEventInvalid,
-			"execution.reconcile", "only an orphaned attempt may be reconciled")
+			"execution.reconcile", "attempt does not require reconciliation")
 	}
 	ev := model.ReconciliationEvidence{
 		AttemptID:            orphan.AttemptID,
@@ -91,7 +102,15 @@ func ReconcileOrphan(ctx context.Context, w Witness, orphan RecoveredAttempt, ex
 		return ev, nil
 	}
 	ev.WitnessSource = obs.Source
-	ev.ObservationCount = obs.Count
+	// A NEGATIVE count is not an observation, it is malformed input — and the durable
+	// validator rejects it for every verdict, so copying it verbatim produced a
+	// fail-closed record that could not be committed to the append-only ledger at all
+	// (Codex round 8, P2). The count is omitted rather than recorded as a falsehood;
+	// what the record still says is exactly what is true — a witness was consulted
+	// (WitnessSource, EvidenceDigest) and resolved nothing (ReconRequired).
+	if obs.Count > 0 {
+		ev.ObservationCount = obs.Count
+	}
 	ev.WindowStartUnixNano, ev.WindowEndUnixNano = obs.WindowStartUnixNano, obs.WindowEndUnixNano
 	ev.ObservedAtUnixNano = obs.ObservedAtUnixNano
 	ev.EvidenceDigest = obs.EvidenceDigest
