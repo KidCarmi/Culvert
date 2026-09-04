@@ -329,7 +329,7 @@ run_mutation M31 \
   'the observed-response fact is dropped, so a peer that answered badly reads as maybe-sent' \
   'TestHTTPSE2E_AnUnusableAnswerIsStillAnAnswer' \
   . internal/mcp/upstreamclient/observed.go \
-  's/\tif err == nil \|\| !facts\.responseObserved \{\n\t\treturn err\n\t\}\n\treturn &observedErr\{err: err\}/\treturn err/'
+  's/\tcase facts\.responseObserved:\n\t\treturn &observedErr\{err: err\}\n//'
 
 # ── (32) definitive absence accepted from a mismatched binding ──────────────
 run_mutation M32 \
