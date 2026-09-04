@@ -23,7 +23,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -56,7 +55,12 @@ type Entry struct {
 // lookup cost is O(labels) ≈ O(1) for real-world domain names, regardless of
 // how many wildcard rules are loaded. All methods are safe for concurrent use.
 type Store struct {
-	mu         sync.RWMutex
+	// mu is a sharded RWMutex: readers on the per-request path take one of 64
+	// cache-line-isolated shards, writers take all of them. Mutual exclusion is
+	// identical to the sync.RWMutex it replaces — see hotread.go for why the
+	// contention had to go and why an atomic.Pointer read view was the wrong
+	// instrument for THIS store.
+	mu         hotRW
 	exact      map[string]bool   // exact hostnames
 	wildcards  map[string]bool   // dot-prefixes: ".example.com"
 	manual     map[string]bool   // subset added by an admin (not the feed)
@@ -451,8 +455,11 @@ func looksLikeHostname(s string) bool {
 // Exceptions always pass through regardless of mode or list membership.
 func (b *Store) IsBlocked(host string) bool {
 	host = hostutil.NormalizeHost(host)
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	// The per-request hot path: one sharded read lock instead of the single
+	// process-wide one every proxied destination used to serialise on. The
+	// probe sequence below is unchanged, verdict for verdict. See hotread.go.
+	sh := b.mu.rlockHot()
+	defer sh.RUnlock()
 	if b.isExcepted(host) {
 		return false
 	}
