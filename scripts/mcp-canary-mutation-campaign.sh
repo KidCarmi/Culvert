@@ -422,6 +422,20 @@ run_mutation M44 \
   ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
   's/\tif obs\.Count > 0 \{\n\t\tev\.ObservationCount = obs\.Count\n\t\}/\tev.ObservationCount = obs.Count/'
 
+# ── (45) a duplicate silenced by a weaker stated verdict ───────────────────
+run_mutation M45 \
+  'recovery trusts a stated verdict that understates its own duplicate facts' \
+  'TestRecovery_ADuplicateIsNotSilencedByAWeakerVerdict' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif r\.ObservationCount > 1 \{\n\t\treturn model\.ReconConflict\n\t\}\n\treturn r\.Result/\treturn r.Result/'
+
+# ── (46) the durable validator permits a non-conflict duplicate ────────────
+run_mutation M46 \
+  'a duplicate observation is committable under a non-conflict verdict' \
+  'TestReconciliation_ADuplicateMustSayConflict' \
+  ./internal/mcp/events/model/ internal/mcp/events/model/validate.go \
+  's/\tif r\.ObservationCount > 1 && r\.Result != ReconConflict \{\n\t\treturn evtErr\(mcperr\.ReasonEventInvalid, "duplicate observations recorded under a non-conflict verdict"\)\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

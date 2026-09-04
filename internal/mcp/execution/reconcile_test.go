@@ -950,3 +950,63 @@ func TestReconcile_AMalformedCountYieldsACommittableRecord(t *testing.T) {
 		t.Fatal("the record must still name the witness it consulted")
 	}
 }
+
+// TestRecovery_ADuplicateIsNotSilencedByAWeakerVerdict is the READ-side half of
+// round 9, and it is the half that matters more.
+//
+// The durable validator now refuses to commit a non-conflict verdict carrying
+// count > 1 — but recovery must not depend on that. The spool's read path runs the
+// schema and shadow checks, NOT the full Event.Validate, so a record written by an
+// importer, an alternate producer or an older binary is read back and TRUSTED. A
+// stated verdict must never be allowed to understate its own facts.
+func TestRecovery_ADuplicateIsNotSilencedByAWeakerVerdict(t *testing.T) {
+	dup := func(id string, res model.ReconciliationResult) model.Event {
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+			Result: res, ObservationCount: 2,
+		}}
+	}
+
+	t.Run("settled attempt", func(t *testing.T) {
+		// The dangerous shape: reconciliation_required is the ONE verdict settledReconOK
+		// ignores, so the attempt would be reported cleanly settled.
+		id := mustAttemptID(t)
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			outcomeEvent(id, "rsv_a", 7, model.SendPeerResponseReceived),
+			dup(id, model.ReconRequired),
+		)); err == nil {
+			t.Fatal("a duplicate recorded under reconciliation_required must not settle cleanly")
+		}
+	})
+
+	t.Run("orphan", func(t *testing.T) {
+		id := mustAttemptID(t)
+		rep, err := RecoverAttempts(readerWith(intentEvent(id, "rsv_a", 7), dup(id, model.ReconRequired)))
+		if err != nil {
+			t.Fatalf("recover: %v", err)
+		}
+		if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconConflict {
+			t.Fatalf("an orphan whose facts prove a duplicate must report conflict, got %+v", rep.Orphans)
+		}
+	})
+
+	t.Run("control: a single observation keeps its stated verdict", func(t *testing.T) {
+		// Without this the gates above would pass on an implementation that had started
+		// calling everything a conflict.
+		id := mustAttemptID(t)
+		rep, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+				AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+				Result: model.ReconReceived, ObservationCount: 1, CompletenessWatermark: "wm-1",
+			}},
+		))
+		if err != nil {
+			t.Fatalf("control: %v", err)
+		}
+		if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconReceived {
+			t.Fatalf("control: a proven single observation must stay received, got %+v", rep.Orphans)
+		}
+	})
+}

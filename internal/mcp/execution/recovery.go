@@ -430,7 +430,7 @@ func orphanFrom(intent *model.OutcomeEvidence, ev *model.ReconciliationEvidence)
 			return RecoveredAttempt{}, mcperr.New(mcperr.ReasonEventInvalid,
 				"execution.recovery", "reconciliation generation mismatch against the send intent")
 		}
-		known = ev.Result
+		known = effectiveReconResult(ev)
 	}
 	if known == "" {
 		known = model.ReconRequired
@@ -479,7 +479,7 @@ func settledFrom(intent, out *model.OutcomeEvidence, recon *model.Reconciliation
 	// depends on it.
 	known := model.ReconRequired
 	if recon != nil {
-		known = recon.Result
+		known = effectiveReconResult(recon)
 	}
 	return RecoveredAttempt{
 		AttemptID:            intent.AttemptID,
@@ -505,6 +505,24 @@ func settledFrom(intent, out *model.OutcomeEvidence, recon *model.Reconciliation
 // ReconRequired asserts nothing and is therefore never a contradiction, and
 // ReconReceived agreeing with a send state that reached the peer is simply
 // corroboration.
+// effectiveReconResult refuses to let a record's stated verdict UNDERSTATE its own
+// facts.
+//
+// Observing more than one matching invocation is a definitive exactly-once breach at
+// any completeness, so a record reporting count > 1 is a CONFLICT whatever verdict it
+// carries. The durable validator now refuses to commit that shape, but this path must
+// not depend on that: the spool's read path runs the schema and shadow checks, NOT the
+// full Event.Validate, so a record written by an importer, an alternate producer or an
+// older binary is read back and TRUSTED here. Recovery deriving "asserts nothing" from
+// facts that prove a duplicate is exactly the silence blocker #6 exists to remove
+// (Codex round 9).
+func effectiveReconResult(r *model.ReconciliationEvidence) model.ReconciliationResult {
+	if r.ObservationCount > 1 {
+		return model.ReconConflict
+	}
+	return r.Result
+}
+
 func settledReconOK(intent, out *model.OutcomeEvidence, recon *model.ReconciliationEvidence) error {
 	if recon == nil {
 		return nil
@@ -517,7 +535,7 @@ func settledReconOK(intent, out *model.OutcomeEvidence, recon *model.Reconciliat
 		return mcperr.New(mcperr.ReasonEventInvalid,
 			"execution.recovery", "reconciliation generation mismatch against a settled attempt")
 	}
-	switch recon.Result {
+	switch effectiveReconResult(recon) {
 	case model.ReconConflict:
 		return mcperr.New(mcperr.ReasonEventInvalid,
 			"execution.recovery", "witness reported a duplicate invocation for a settled attempt")

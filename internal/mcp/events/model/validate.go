@@ -585,6 +585,22 @@ func (r *ReconciliationEvidence) validateVerdictAgainstFacts() error {
 	if r.ObservationCount < 0 {
 		return evtErr(mcperr.ReasonEventInvalid, "reconciliation with a negative observation count")
 	}
+	// A DUPLICATE OUTRANKS EVERY OTHER VERDICT. Observing more than one matching
+	// invocation is a definitive breach of the exactly-once invariant at ANY
+	// completeness — a duplicate seen is a duplicate, and a wider view could only find
+	// more — so a record reporting count > 1 must SAY conflict. Leaving
+	// reconciliation_required unconstrained let such a record be committed as
+	// "asserts nothing", and recovery trusts Result: settledReconOK's switch ignores
+	// reconciliation_required entirely, so the attempt was reported cleanly settled
+	// while its own facts recorded the duplicate physical effect this whole mechanism
+	// exists to detect (Codex round 9).
+	//
+	// This does not re-constrain the conflict direction. ReconConflict still accepts
+	// ANY count, because it is also reachable from a single observation whose binding
+	// contradicts the intent.
+	if r.ObservationCount > 1 && r.Result != ReconConflict {
+		return evtErr(mcperr.ReasonEventInvalid, "duplicate observations recorded under a non-conflict verdict")
+	}
 	switch r.Result {
 	case ReconNotReceived:
 		if r.ObservationCount != 0 {

@@ -1069,9 +1069,34 @@ ambiguous send" as a contradiction; it is now a RESOLUTION control on the same f
 `TestReconcile_GateIsUnresolvedKnowledgeNotSettledness`, which pins both directions of the corrected
 gate plus an unreconciled-orphan control.
 
+### One from the round after that: a verdict may not understate its own facts
+
+**A duplicate could be recorded as "asserts nothing".** Round 6 constrained the two
+RESOLVED verdicts against their facts and deliberately left `reconciliation_required`
+unconstrained, because it asserts nothing. But observing more than one matching invocation
+is a definitive exactly-once breach at ANY completeness — a rule this review already
+states — so a record reporting `count > 1` under `reconciliation_required` is not
+"asserts nothing", it is a breach wearing a shrug. And `reconciliation_required` is the one
+verdict `settledReconOK`'s switch ignores entirely, so recovery reported the attempt
+cleanly settled while its own facts recorded the duplicate physical effect the whole
+mechanism exists to detect.
+
+Fixed in BOTH directions, because the read side is the one that matters more: the durable
+validator refuses to commit `count > 1` under any non-conflict verdict, and
+`effectiveReconResult` refuses at READ time to let a stated verdict understate its own
+facts. The read-side guard is not redundant — the spool's read path runs the schema and
+shadow checks, **not** the full `Event.Validate` — so a record from an importer, an
+alternate producer or an older binary is read back and trusted. The conflict direction is
+NOT re-constrained: it still accepts any count, since it is also reachable from a single
+observation whose binding contradicts the intent. Gates:
+`TestReconciliation_ADuplicateMustSayConflict` and
+`TestRecovery_ADuplicateIsNotSilencedByAWeakerVerdict` (settled and orphan shapes, with a
+single-observation control proving the fix did not start calling everything a conflict).
+Mutations M45 and M46.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **44 mutations: 44 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **46 mutations: 46 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

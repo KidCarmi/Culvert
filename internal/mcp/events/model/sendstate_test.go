@@ -326,3 +326,37 @@ func TestPhysicalSendState_ProvesReceiptIsNotTheNegationOfMayHaveReachedPeer(t *
 		t.Fatal("the predicates collapsed: no state is neither proven-received nor proven-not-received")
 	}
 }
+
+// TestReconciliation_ADuplicateMustSayConflict pins round 9. Observing more than one
+// matching invocation is a definitive exactly-once breach at ANY completeness, so a
+// record reporting count > 1 must SAY conflict.
+//
+// Leaving reconciliation_required unconstrained let such a record be committed as
+// "asserts nothing", and recovery trusts Result — settledReconOK's switch ignores
+// reconciliation_required entirely — so the attempt was reported cleanly settled
+// while its own facts recorded the duplicate physical effect this mechanism exists to
+// detect.
+func TestReconciliation_ADuplicateMustSayConflict(t *testing.T) {
+	for _, res := range []ReconciliationResult{ReconRequired, ReconReceived, ReconNotReceived} {
+		t.Run(string(res), func(t *testing.T) {
+			e := baseReconciliation()
+			e.Reconciliation.Result = res
+			e.Reconciliation.ObservationCount = 2
+			e.Reconciliation.CompletenessWatermark = "wm-1"
+			mustReason(t, e.Validate(), mcperr.ReasonEventInvalid)
+		})
+	}
+
+	// CONTROL: the conflict direction is NOT re-constrained. It stays reachable at any
+	// count, because a conflict also arises from a single observation whose binding
+	// contradicts the intent — and refusing to record a breach is the worst failure
+	// available here.
+	for _, count := range []int{0, 1, 2, 9} {
+		e := baseReconciliation()
+		e.Reconciliation.Result = ReconConflict
+		e.Reconciliation.ObservationCount = count
+		if err := e.Validate(); err != nil {
+			t.Fatalf("a conflict reporting count=%d must still be recordable: %v", count, err)
+		}
+	}
+}
