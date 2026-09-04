@@ -93,8 +93,10 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 		corr = randID("cor_")
 	}
 	// A Shadow decision event (carrying ShadowEvidence) is stamped SchemaVersionV2 — the
-	// only events that are v2. Every other event stays the default v1, so its canonical
-	// digest is unchanged (SHADOW-EVIDENCE-ROUTING-1 §5, smallest compatibility-safe model).
+	// only events that are v2 — and an attempt-evidence event SchemaVersionV3 (below,
+	// derived from the assembled event). Every other event stays the default v1, so its
+	// canonical digest is unchanged (SHADOW-EVIDENCE-ROUTING-1 §5, smallest
+	// compatibility-safe model).
 	schema := model.SchemaVersion
 	if f.Shadow != nil {
 		schema = model.SchemaVersionV2
@@ -104,7 +106,7 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 	if phase == model.PhaseNone {
 		phase = model.PhaseDecision
 	}
-	return &model.Event{
+	ev := &model.Event{
 		SchemaVersion:  schema,
 		EventID:        randID("evt_"),
 		Phase:          phase,
@@ -126,6 +128,15 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 		Reconciliation: f.Reconciliation,
 		Shadow:         f.Shadow,
 	}
+	// The attempt-evidence stamp is derived from the EVENT, not from the facts, so
+	// the version can never disagree with the shape that is actually about to be
+	// canonicalized and digested. A record carrying v3 fields under a v1 stamp reads
+	// back on an older build as spool corruption rather than as an unsupported
+	// schema — see model.CarriesAttemptEvidence.
+	if ev.CarriesAttemptEvidence() {
+		ev.SchemaVersion = model.SchemaVersionV3
+	}
+	return ev
 }
 
 // onCommitFailure classifies a commit failure by criticality and drives the state

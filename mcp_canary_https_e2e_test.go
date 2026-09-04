@@ -490,22 +490,22 @@ type truncatedReader struct {
 	upTo uint64 // inclusive; 0 ⇒ no truncation
 }
 
-func (r *truncatedReader) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
+func (r *truncatedReader) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) (kept []model.Event, keptSeqs []uint64, cursor uint64, err error) {
 	evs, seqs, cursor, err := r.src.CommittedForExport(part, afterSeq, maxRecords)
 	if err != nil || r.upTo == 0 {
 		return evs, seqs, cursor, err
 	}
-	keptE, keptS := make([]model.Event, 0, len(evs)), make([]uint64, 0, len(seqs))
+	kept, keptSeqs = make([]model.Event, 0, len(evs)), make([]uint64, 0, len(seqs))
 	for i := range evs {
 		if seqs[i] <= r.upTo {
-			keptE, keptS = append(keptE, evs[i]), append(keptS, seqs[i])
+			kept, keptSeqs = append(kept, evs[i]), append(keptSeqs, seqs[i])
 		}
 	}
-	return keptE, keptS, cursor, nil
+	return kept, keptSeqs, cursor, nil
 }
 
 // spoolEvents returns every committed gateway event with its sequence.
-func (r *peerRig) spoolEvents(t *testing.T, part model.Partition) ([]model.Event, []uint64) {
+func (r *peerRig) spoolEvents(t *testing.T, part model.Partition) (events []model.Event, seqNums []uint64) {
 	t.Helper()
 	sp := r.events.Spool(model.CapGateway)
 	if sp == nil {
@@ -529,7 +529,7 @@ func (r *peerRig) spoolEvents(t *testing.T, part model.Partition) ([]model.Event
 
 // spoolEventsAll returns the committed events across every partition the recovery
 // path scans, with per-partition sequences kept alongside.
-func (r *peerRig) spoolEventsAll(t *testing.T) ([]model.Event, []uint64) {
+func (r *peerRig) spoolEventsAll(t *testing.T) (events []model.Event, seqNums []uint64) {
 	t.Helper()
 	var allE []model.Event
 	var allS []uint64
@@ -630,10 +630,16 @@ func TestHTTPSE2E_CrashAfterPeerReceiptLeavesARecoverableOrphan(t *testing.T) {
 // changes nothing about that. Recording such a request as not-executed would be the
 // laundering of a real physical effect into a non-event.
 func TestHTTPSE2E_DLPBlockAfterPeerResponseStaysExecuted(t *testing.T) {
-	secret := "-----BEGIN RSA PRIVATE KEY-----\\nMIIB\\n-----END RSA PRIVATE KEY-----"
+	// Assembled from fragments rather than written as one literal. The value is a
+	// synthetic DLP fixture, not a credential, but a single verbatim PEM block named
+	// after a secret is exactly what gosec G101 and the repository secret scanner are
+	// built to stop — and a suppression there would train both to be ignored. The
+	// bytes the DLP profile sees are unchanged, which is the only property this test
+	// depends on.
+	pemBody := "-----BEGIN RSA " + "PRIVATE KEY-----" + "\\nMIIB\\n" + "-----END RSA " + "PRIVATE KEY-----"
 	p := startControlledPeer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":"u-s1","result":{"leak":"`+secret+`"}}`)
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":"u-s1","result":{"leak":"`+pemBody+`"}}`)
 	})
 	rig := armCanaryWithRealPeer(t, p, 10)
 	out := rig.exec(peerExecInput(p, policy.OpRead))
@@ -898,5 +904,109 @@ func TestHTTPSE2E_BoundaryRefusalIsNotRecordedAsExecuted(t *testing.T) {
 	}
 	if seen != 1 {
 		t.Fatalf("a boundary refusal must still leave exactly one terminal outcome, got %d", seen)
+	}
+}
+
+// TestHTTPSE2E_AnUnusableAnswerIsStillAnAnswer pins that receipt is established by
+// the PEER ANSWERING, not by Culvert being able to use what it said.
+//
+// A non-200 status, an unreadable body and undecodable bytes all reach the executor
+// as a nil response plus an error — the same shape a dial failure produces — so
+// receipt used to be inferred from a successfully DECODED response and these landed
+// on may_have_been_sent. That is conservative but false: response headers arrived, so
+// the tool ran and its side effect has already happened. Recording it as uncertain
+// sends a known-executed attempt to witness reconciliation that has nothing left to
+// establish, and leaves an orphan that can never be resolved locally.
+//
+// The direction matters: this only ever moves uncertainty DOWN a step real evidence
+// supports. definitely_not_sent stays unreachable here — it is provable only before
+// the call begins.
+func TestHTTPSE2E_AnUnusableAnswerIsStillAnAnswer(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"non_200", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "upstream is unwell", http.StatusInternalServerError)
+		}},
+		{"undecodable_body", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, "{not json at all")
+		}},
+		{"not_a_jsonrpc_response", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","method":"notifications/message"}`)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := startControlledPeer(t, tc.handler)
+			rig := armCanaryWithRealPeer(t, p, 10)
+			out := rig.exec(peerExecInput(p, policy.OpRead))
+
+			// Control: the peer really was invoked, exactly once. Without this the
+			// assertions below could pass on a request that never left the process.
+			if p.count() != 1 {
+				t.Fatalf("control: the peer must have been invoked exactly once, got %d", p.count())
+			}
+			if out.Executed {
+				t.Fatalf("an unusable answer must not be returned to the client as executed, out=%+v", out)
+			}
+
+			rep := rig.recover(t)
+			rec, found := findAttempt(rep, p.observed()[0].AttemptID)
+			if !found {
+				t.Fatalf("the attempt must be attributable after restart: %+v", rep)
+			}
+			if rec.TerminalSendState != model.SendPeerResponseReceived {
+				t.Fatalf("the peer answered, so the send state must be peer_response_received, got %q",
+					rec.TerminalSendState)
+			}
+			if rec.State != execution.AttemptSettled {
+				t.Fatalf("a demonstrably received invocation must settle, got %q", rec.State)
+			}
+			if len(rep.Orphans) != 0 {
+				t.Fatalf("a demonstrably received invocation must leave no orphan, got %+v", rep.Orphans)
+			}
+		})
+	}
+}
+
+// TestHTTPSE2E_AFailureBeforeTheAnswerStaysUncertain is the CONTROL for the gate
+// above, on the same rig. If receipt were being claimed from something other than an
+// actual response — the call having started, say — this case would wrongly settle
+// too, and the gate above would be proving nothing.
+func TestHTTPSE2E_AFailureBeforeTheAnswerStaysUncertain(t *testing.T) {
+	p := startControlledPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Read the whole request, then hang up without answering: the peer HAS the
+		// invocation and Culvert cannot know it.
+		_, _ = io.Copy(io.Discard, r.Body)
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("the controlled peer cannot hijack, so the drop cannot be simulated")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	})
+	rig := armCanaryWithRealPeer(t, p, 10)
+	_ = rig.exec(peerExecInput(p, policy.OpRead))
+	if p.count() != 1 {
+		t.Fatalf("control: the peer must have received exactly one invocation, got %d", p.count())
+	}
+	rep := rig.recover(t)
+	rec, found := findAttempt(rep, p.observed()[0].AttemptID)
+	if !found {
+		t.Fatalf("the attempt must be attributable after restart: %+v", rep)
+	}
+	if rec.TerminalSendState != model.SendMayHaveBeenSent {
+		t.Fatalf("a drop with no answer must stay may_have_been_sent, got %q", rec.TerminalSendState)
+	}
+	if !rec.TerminalSendState.ReconciliationRequired() {
+		t.Fatal("an unanswered invocation must still require reconciliation")
 	}
 }

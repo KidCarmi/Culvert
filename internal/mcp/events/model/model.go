@@ -35,26 +35,66 @@ package model
 // sub-facts (ShadowEvidence) and is stamped ONLY on a Shadow decision event — the
 // only event that carries ShadowEvidence. Every non-shadow event stays v1, so its
 // canonical digest is byte-identical across this change (SHADOW-EVIDENCE-ROUTING-1).
+//
+// v3 is ADDITIVE in the same way for the First-Canary attempt evidence: the
+// attempt-identity / physical-send fields on OutcomeEvidence and the
+// ReconciliationEvidence sub-fact. It is stamped ONLY on an event that actually
+// carries one of them, so an outcome event without them stays v1 and keeps its
+// pre-v3 digest byte-for-byte.
+//
+// Stamping is not bookkeeping. CanonicalBytes covers these fields, so a record that
+// carries them while claiming v1 is UNREADABLE by a build that predates them: the
+// reader drops what it does not know, recomputes a different digest, and reports the
+// record as SPOOL CORRUPTION. A version rollback would then raise the alarm reserved
+// for tampering and disk damage, and abort recovery, instead of the documented clean
+// "unsupported schema" refusal. The version field is what lets a reader say "this
+// record is newer than me" rather than "this ledger is broken".
 const (
 	// SchemaVersionV1 is the original envelope (no Shadow sub-facts).
 	SchemaVersionV1 = 1
 	// SchemaVersionV2 adds durable ShadowEvidence; stamped only on Shadow events.
 	SchemaVersionV2 = 2
+	// SchemaVersionV3 adds the First-Canary attempt evidence (attempt identity,
+	// reservation/generation binding, physical-send state, and the reconciliation
+	// sub-fact); stamped only on an event that carries it.
+	SchemaVersionV3 = 3
 	// SchemaVersion is the DEFAULT version stamped on an event that carries no Shadow
-	// sub-facts. It is deliberately kept at v1 so every non-shadow writer's events, and
-	// their digests, are unchanged. A Shadow decision event is stamped SchemaVersionV2
-	// by the adapter when it carries ShadowEvidence.
+	// sub-facts and no attempt evidence. It is deliberately kept at v1 so every
+	// pre-existing writer's events, and their digests, are unchanged. A Shadow
+	// decision event is stamped SchemaVersionV2 and an attempt-evidence event
+	// SchemaVersionV3 by the adapter, from the evidence itself.
 	SchemaVersion = SchemaVersionV1
 )
 
 // SupportedSchemaVersion reports whether THIS build can interpret an event carrying
-// schema version v. A Shadow-capable (v2) build supports v1 AND v2; any other version
-// is rejected as an unknown schema (fail closed) at validation and at recovery. A
-// pre-v2 build supports only v1, so it rejects a v2 event — the documented downgrade
-// posture (SHADOW-EVIDENCE-ROUTING-1): a v1 binary must refuse v2 evidence, never
-// partially interpret it as v1.
+// schema version v. A build supports every version up to its own; any other version
+// is rejected as an unknown schema (fail closed) at validation and at recovery. An
+// older build rejects a newer event — the documented downgrade posture
+// (SHADOW-EVIDENCE-ROUTING-1): it must refuse newer evidence, never partially
+// interpret it as its own version.
 func SupportedSchemaVersion(v int) bool {
-	return v == SchemaVersionV1 || v == SchemaVersionV2
+	return v == SchemaVersionV1 || v == SchemaVersionV2 || v == SchemaVersionV3
+}
+
+// CarriesAttemptEvidence reports whether this event carries any of the v3-only
+// evidence shapes. It is the SINGLE predicate behind both the stamp (events/decide.go)
+// and the validation pairing, so the two can never drift into a record that carries
+// v3 fields under a v1 stamp — the exact shape that reads back as corruption.
+//
+// DecisionRef, Executed, StatusClass, DurationMs, UpstreamResponseClass,
+// InspectionResult and FailureReason are deliberately NOT in this set: they are the
+// original v1 OutcomeEvidence fields, and including them would re-stamp every
+// pre-existing outcome event as v3, changing digests that must not change.
+func (e Event) CarriesAttemptEvidence() bool {
+	if e.Reconciliation != nil {
+		return true
+	}
+	o := e.Outcome
+	if o == nil {
+		return false
+	}
+	return o.AttemptID != "" || o.ReservationID != "" ||
+		o.ActivationGeneration != 0 || o.PhysicalSendState != SendStateUnset
 }
 
 // Phase is the lifecycle phase of an event. The zero value is invalid.

@@ -567,7 +567,7 @@ func mainReaderWith(evs ...model.Event) *staticEvidenceReader {
 	return &staticEvidenceReader{evs: evs}
 }
 
-func (r *staticEvidenceReader) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
+func (r *staticEvidenceReader) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) (evs []model.Event, seqs []uint64, cursor uint64, err error) {
 	// All fixture events live in the ordinary partition, matching where the executor
 	// actually commits intents and outcomes.
 	total := uint64(len(r.evs))
@@ -582,10 +582,10 @@ func (r *staticEvidenceReader) CommittedForExport(part model.Partition, afterSeq
 			end = n
 		}
 	}
-	evs := r.evs[afterSeq:end]
-	seqs := make([]uint64, len(evs))
-	for i := range seqs {
-		seqs[i] = afterSeq + uint64(i) + 1
+	evs = r.evs[afterSeq:end]
+	seqs = make([]uint64, 0, len(evs))
+	for s := afterSeq; s < end; s++ {
+		seqs = append(seqs, s+1)
 	}
 	return evs, seqs, end, nil
 }

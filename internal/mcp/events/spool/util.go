@@ -24,6 +24,30 @@ func unmarshalEvent(b []byte, e *model.Event) error {
 	return dec.Decode(e)
 }
 
+// peekSchemaVersion reads ONLY the envelope's schema version from an AUTHENTICATED
+// record plaintext, leniently — no DisallowUnknownFields, no full-struct decode.
+//
+// That leniency is the entire point. The strict decode and the intrinsic digest both
+// depend on knowing every field, so a record written by a NEWER build fails both
+// before anything can observe that it is simply newer, and recovery reports SPOOL
+// CORRUPTION — the alarm reserved for tampering and disk damage — on an ordinary
+// version rollback. Reading one integer first is what lets the reader say "this
+// record is newer than me". It is safe because the plaintext has already been
+// authenticated by verifyRecord (AEAD open with the record's AAD); the intrinsic
+// digest is a producer-bug backstop, not the tamper seal.
+//
+// ok is false when the plaintext is not even JSON, which is genuine corruption and
+// is left to the strict decode to report as such.
+func peekSchemaVersion(b []byte) (version int, ok bool) {
+	var hdr struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(b, &hdr); err != nil {
+		return 0, false
+	}
+	return hdr.SchemaVersion, true
+}
+
 // hexChain hex-encodes a 32-byte chain digest for durable metadata.
 func hexChain(c [32]byte) string { return hex.EncodeToString(c[:]) }
 

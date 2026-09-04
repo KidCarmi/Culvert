@@ -839,6 +839,60 @@ This is now a permanent proof rule for this program:
 > and/or read the committed record back from the REAL spool. A permissive fake sink is useful for
 > unit isolation; it is NOT proof of durable evidence truth.
 
+### Durability of the new evidence across a version rollback
+
+The attempt-identity and physical-send fields, and the reconciliation sub-fact, are covered by the
+canonical digest. Writing them under the pre-existing schema stamp made every such record
+**unreadable to a build that predates them**: that build drops the fields it does not know,
+recomputes a different digest, and reports the record as SPOOL CORRUPTION — the condition that means
+tampering or disk damage — aborting recovery. An ordinary version rollback would have raised the
+wrong alarm and stopped the node reading its own ledger.
+
+Two changes, following the existing v2 (Shadow) precedent exactly:
+
+* the shapes are stamped `SchemaVersionV3`, derived from the assembled event so the version can
+  never disagree with what is about to be digested, and paired in BOTH directions by validation
+  (attempt evidence requires v3; a v3 stamp requires attempt evidence). Records carrying none of the
+  new fields stay v1, so no pre-existing digest moves;
+* recovery reads the version from the ALREADY-AUTHENTICATED plaintext **before** the strict decode
+  and the digest check, both of which structurally cannot pass on a newer record. The posture is
+  unchanged — the partition is still held degraded, and a node must not serve from a ledger it
+  cannot read — but the reason an operator acts on changes from "record event invalid" to
+  "unsupported schema version": roll the binary forward, rather than suspect the disk.
+
+Proven end to end by forging a record that is cryptographically intact, chain-consistent, and of an
+unknown version (`TestAttemptV3_ARollbackReportsASchemaFaultNotCorruption`), with a control proving
+the forge itself is sound when the version IS supported, and mutation M30 restoring the old ordering.
+
+**Residual, stated plainly:** a binary built BEFORE this change still reports corruption when it
+meets a v3 record, because its strict decoder rejects unknown fields before any version check. That
+is not fixable from here — already-shipped readers cannot be changed — and it is inherent to strict
+decoding plus an intrinsic digest; the v2 Shadow change carries the identical property. What is
+fixed is every rollback from this build forward.
+
+### Two further evidence-truth corrections
+
+**A peer that answers badly has still run the tool.** Receipt was inferred from a successfully
+DECODED response, so a non-200, an unreadable body or undecodable bytes — all of which arrive as a
+nil response plus an error, the same shape a dial failure produces — were recorded as
+`may_have_been_sent`. Conservative, but false: response headers arrived, so the side effect has
+already happened, and the attempt was being sent for witness reconciliation with nothing left to
+establish. The transport now carries the observed-response fact out with the error
+(`upstreamclient.ResponseObserved`). This only ever moves uncertainty DOWN a step real evidence
+supports; `definitely_not_sent` stays reachable only before the call begins.
+Gates: `TestHTTPSE2E_AnUnusableAnswerIsStillAnAnswer` with
+`TestHTTPSE2E_AFailureBeforeTheAnswerStaysUncertain` as its control; mutation M31.
+
+**`Outcome.Executed` stays derived from the send state — a proposed change was REJECTED.** Deriving
+it from the terminal disposition instead reads better locally (`executed=true` beside a "blocked"
+execution state looks contradictory), but it writes `executed=false` into the durable record for
+invocations that demonstrably reached the peer — an ambiguous transport failure, and a DLP block
+after the peer answered, are both dispositionally not-executed and in both the tool HAS run. That is
+precisely the conversion this work exists to prevent. The apparent contradiction is the design:
+`Decision.ExecutionState` is CULVERT's disposition, `Outcome.Executed` and `PhysicalSendState` are
+the PEER's reality. Pinned by `TestOutcomeTruth_*` (with the boundary-refusal control proving the
+flag is not simply hardcoded true) and mutation M28.
+
 ---
 
 ## §26 Final verdict

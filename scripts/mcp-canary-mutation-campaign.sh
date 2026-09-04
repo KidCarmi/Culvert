@@ -303,6 +303,34 @@ run_mutation M27 \
   . internal/mcp/execution/attempt_evidence.go \
   's/\tif out\.ExecutionState != "" \{\n\t\tf\.Decision\.ExecutionState = out\.ExecutionState\n\t\}\n//'
 
+# ── (28) uncertainty laundered into executed=false on the durable record ────
+run_mutation M28 \
+  'Outcome.Executed is derived from the terminal disposition instead of the send state' \
+  'TestOutcomeTruth_' \
+  . internal/mcp/execution/attempt_evidence.go \
+  's/\t\tExecuted:      state\.MayHaveReachedPeer\(\),/\t\tExecuted:      out.Executed,/'
+
+# ── (29) attempt evidence written under the pre-v3 stamp ────────────────────
+run_mutation M29 \
+  'the v3 stamp is dropped, so attempt evidence is written claiming v1' \
+  'TestEvidenceFreeze_AttemptEvidenceIsStampedV3OnTheRealSpool' \
+  . internal/mcp/events/decide.go \
+  's/\tif ev\.CarriesAttemptEvidence\(\) \{\n\t\tev\.SchemaVersion = model\.SchemaVersionV3\n\t\}\n//'
+
+# ── (30) a version rollback reported as spool corruption ────────────────────
+run_mutation M30 \
+  'the schema version is read only AFTER the strict decode and the digest' \
+  'TestAttemptV3_ARollbackReportsASchemaFaultNotCorruption' \
+  ./internal/mcp/events/spool/ internal/mcp/events/spool/recovery.go \
+  's/\t\tif v, ok := peekSchemaVersion\(pt\); ok && !model\.SupportedSchemaVersion\(v\) \{\n\t\t\treturn nil, chain, spErr\(mcperr\.ReasonEventSchemaVersion, "record unknown schema version"\)\n\t\t\}\n//'
+
+# ── (31) a demonstrable peer answer discarded as uncertainty ────────────────
+run_mutation M31 \
+  'the observed-response fact is dropped, so a peer that answered badly reads as maybe-sent' \
+  'TestHTTPSE2E_AnUnusableAnswerIsStillAnAnswer' \
+  . internal/mcp/upstreamclient/observed.go \
+  's/\tif err == nil \|\| !facts\.responseObserved \{\n\t\treturn err\n\t\}\n\treturn &observedErr\{err: err\}/\treturn err/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

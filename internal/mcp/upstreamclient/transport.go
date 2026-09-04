@@ -52,13 +52,13 @@ func (p *serverPool) acquire(ctx context.Context) (func(), error) {
 }
 
 // roundTrip performs one bounded, pinned HTTPS POST of body to target.Endpoint. It
-// returns (rawBody, preResponse, error): preResponse is true when the failure
+// returns (rawBody, legFacts, error): preResponse is true when the failure
 // happened before any response headers were received (dial/TLS/timeout) so an
 // idempotent read may retry.
-func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string, attemptID string) (respBody []byte, preResponse bool, err error) {
+func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string, attemptID string) (respBody []byte, facts legFacts, err error) {
 	canon, class, err := destination.Canonicalize(target.Endpoint, c.cfg.Policy, c.cfg.InspectionLimits)
 	if err != nil {
-		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
+		return nil, legFacts{}, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
 	}
 	// Reject only structurally-forbidden endpoint classes here; the authoritative
 	// SSRF classification (private/loopback/metadata handling) happens in Resolve +
@@ -75,12 +75,12 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	// genuinely internal MCP server needs a per-target policy that does not exist
 	// yet — adding one is a design change, not a flag flip.
 	if class == destination.ClassMalformed || class == destination.ClassBlockedScheme {
-		return nil, false, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
+		return nil, legFacts{}, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
 	}
 	now := c.cfg.Clock()
 	pin, _, err := destination.Resolve(ctx, canon, c.cfg.Policy, c.cfg.Resolver, c.cfg.InspectionLimits, now, c.cfg.Limits.PinTTL())
 	if err != nil {
-		return nil, true, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
+		return nil, legFacts{preResponse: true}, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
 	}
 
 	client, transport := c.httpClientFor(target, canon, pin)
@@ -98,7 +98,7 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	// the bare origin root.
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, canon.RequestURL(), bytesReader(body))
 	if err != nil {
-		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "build request", err)
+		return nil, legFacts{}, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "build request", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -116,18 +116,24 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, true, classifyTransportError(err)
+		return nil, legFacts{preResponse: true}, classifyTransportError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// client.Do returned without error, so the peer answered: response headers are
+	// in hand. Everything below is a failure of the ANSWER, never of delivery — the
+	// invocation demonstrably reached the peer and any side effect it has already
+	// happened. That fact is recorded here and carried out through the error, so the
+	// executor does not have to infer receipt from a successfully decoded response.
+	observed := legFacts{responseObserved: true}
 	raw, err := readBounded(resp.Body, c.cfg.Limits.MaxResponseBytes())
 	if err != nil {
-		return nil, false, err
+		return nil, observed, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, false, mcperr.New(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "upstream non-200 status")
+		return nil, observed, mcperr.New(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "upstream non-200 status")
 	}
-	return raw, false, nil
+	return raw, observed, nil
 }
 
 // httpClientFor builds a per-call http.Client whose transport dials ONLY the

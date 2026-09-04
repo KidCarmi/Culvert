@@ -73,6 +73,9 @@ func TestPhysicalSendState_UnsetIsInvalidOnACommittedOutcome(t *testing.T) {
 func baseReconciliation() Event {
 	e := baseDecision()
 	e.Phase = PhaseReconciliation
+	// Attempt evidence is a v3 shape: an event carrying it under a v1 stamp is
+	// unreadable to a build that predates the fields, so the pairing is enforced.
+	e.SchemaVersion = SchemaVersionV3
 	e.Reconciliation = &ReconciliationEvidence{
 		AttemptID:            "att_0001",
 		Result:               ReconRequired,

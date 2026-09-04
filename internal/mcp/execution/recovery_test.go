@@ -39,8 +39,8 @@ func (f *fixtureReader) CommittedForExport(part model.Partition, after uint64, m
 	}
 	out := all[after:end]
 	seqs := make([]uint64, 0, len(out))
-	for i := range out {
-		seqs = append(seqs, after+uint64(i)+1)
+	for s := after; s < end; s++ {
+		seqs = append(seqs, s+1)
 	}
 	return out, seqs, end, nil
 }

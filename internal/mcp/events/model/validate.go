@@ -80,8 +80,44 @@ func (e Event) Validate() error { //nolint:gocyclo,cyclop // a flat set of indep
 	if err := e.validateShadowWriteOnly(); err != nil {
 		return err
 	}
+	if err := e.validateAttemptSchema(); err != nil {
+		return err
+	}
 	return nil
 }
+
+// validateAttemptSchema enforces the v3 attempt-evidence pairing in BOTH directions:
+// an event carrying attempt evidence must be stamped v3, and a v3 event must carry
+// it. The forward direction is the load-bearing one — a record whose canonical bytes
+// include fields its stamped version does not describe reads back on an older build
+// as SPOOL CORRUPTION rather than as an unsupported schema, so a version rollback
+// would raise the tampering alarm and abort recovery. The reverse direction keeps the
+// version honest: a v3 stamp on an event with nothing v3 in it would silently make an
+// ordinary record unreadable to a build that could otherwise have read it.
+//
+// Shadow (v2) and attempt evidence (v3) are mutually exclusive by construction: a
+// Shadow evaluation never sends anything, so it has no attempt to identify. That is
+// asserted rather than assumed — the two stamps are single-valued, so an event
+// carrying both shapes could only be recorded under one of them.
+func (e Event) validateAttemptSchema() error {
+	carries := e.CarriesAttemptEvidence()
+	if carries && e.Shadow != nil {
+		return evtErr(mcperr.ReasonEventInvalid, "shadow evidence on an attempt-evidence event")
+	}
+	switch {
+	case carries && e.SchemaVersion != SchemaVersionV3:
+		return evtErr(mcperr.ReasonEventInvalid, "attempt evidence requires schema v3")
+	case !carries && e.SchemaVersion == SchemaVersionV3:
+		return evtErr(mcperr.ReasonEventInvalid, "schema v3 requires attempt evidence")
+	}
+	return nil
+}
+
+// ValidateEvidenceSchema is the NARROW, recovery-scoped version pairing check, the
+// attempt-evidence sibling of ValidateShadowEvidence. The spool applies it to a
+// digest-verified record so a stamp/shape disagreement is reported as the schema
+// fault it is, instead of being silently accepted into recovery.
+func (e Event) ValidateEvidenceSchema() error { return e.validateAttemptSchema() }
 
 // validateShadowWriteOnly rejects shapes that must never be PRODUCED, even though a legacy
 // instance of them may still be READ. Validate runs only on the write/commit path
@@ -215,6 +251,13 @@ func (e Event) validateShadow() error {
 		return nil
 	case SchemaVersionV2:
 		return e.validateShadowV2()
+	case SchemaVersionV3:
+		// v3 is the attempt-evidence envelope. It never carries Shadow — the two are
+		// mutually exclusive (validateAttemptSchema) — so the v1 rule applies verbatim.
+		if e.Shadow != nil {
+			return evtErr(mcperr.ReasonEventInvalid, "shadow evidence on a v3 event")
+		}
+		return nil
 	default:
 		// Unreachable: SupportedSchemaVersion already gated the version.
 		return evtErr(mcperr.ReasonEventSchemaVersion, "unknown schema version")

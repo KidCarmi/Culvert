@@ -100,10 +100,22 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 		// indistinguishable from a crashed one on restart (caught by the controlled
 		// HTTPS E2E, which reads the real spool rather than a test sink).
 		DecisionRef: rec.decisionRef,
-		// Executed reports Culvert's control flow; PhysicalSendState reports what the
-		// PEER may have seen. They are recorded side by side precisely because they
-		// can legitimately disagree: a response blocked by DLP is
-		// peer_response_received with end-to-end failure.
+		// Executed answers "may a physical effect have happened?" — NOT "did Culvert
+		// return a result?". That is the whole reason it is derived from the send
+		// state and not from out.Executed, and the two disagree on every interesting
+		// path: an ambiguous transport failure and a DLP block after the peer answered
+		// are both out.Executed==false, and in both the tool HAS run.
+		//
+		// Deriving it from the terminal disposition instead was proposed and REJECTED
+		// (Codex round 2, P2). It reads better locally — Executed=true beside
+		// ExecutionState "blocked" looks contradictory — but it is the laundering this
+		// whole change exists to prevent: it writes executed=false into the durable
+		// record for invocations that demonstrably reached the peer, which is exactly
+		// "uncertainty converted into executed=false". The apparent contradiction is
+		// the design: Decision.ExecutionState is CULVERT's disposition (what the client
+		// got), Outcome.Executed and PhysicalSendState are the PEER's reality. A
+		// consumer that needs Culvert's disposition reads StatusClass, right below.
+		// Pinned by TestOutcomeTruth_* and mutation M28.
 		Executed:      state.MayHaveReachedPeer(),
 		StatusClass:   out.ExecutionState,
 		FailureReason: out.Reason.String(),

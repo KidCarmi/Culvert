@@ -146,9 +146,18 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
 			AttemptID: attemptIDOf(attempt),
 		})
-		if r != nil {
+		if r != nil || upstreamclient.ResponseObserved(err) {
 			// The peer answered, so the invocation demonstrably reached it. This says
-			// nothing about whether the response is later blocked by inspection.
+			// nothing about whether the response is USABLE — a non-200, an unreadable
+			// body or undecodable bytes all land here with a nil response and an error —
+			// and nothing about whether the response is later blocked by inspection.
+			//
+			// Inferring receipt from a successfully DECODED response alone was too
+			// narrow: a peer that answers badly has still run the tool, and recording
+			// that as may_have_been_sent sent a known-executed attempt to witness
+			// reconciliation with nothing left to establish. This only ever moves
+			// uncertainty DOWN a step that real evidence supports; it can never reach
+			// definitely_not_sent, which stays provable only before the call begins.
 			sendState = model.SendPeerResponseReceived
 		}
 		upResp, upErr = r, err
