@@ -1161,6 +1161,73 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-C IMPLEMENTATION RECORD (this branch, 2026-09-04).** Upstream v2
+> backend + safe legacy transition, append-only on the frozen 2F-B baseline
+> (`1e3578d9`); RED matrix R15–R23, R25–R26, R30–R31, R35–R39, R41–R42
+> committed and executed red on that baseline BEFORE the engine
+> (`upstream_v2_red_test.go`). **Model** (`internal/upstream/entry.go`,
+> `credkey.go`, `probe.go`, `upstream.go`): server ULID identity, canonical
+> normalized authority `scheme://[username@]host:port` (scheme/host
+> lower-case, trailing dot, IDNA, bracketed IPv6, effective port), YAML
+> entries as `yaml-<128-bit authority digest>` read-only with a boot
+> collision check, effective-pool authority uniqueness validated before any
+> publish (`duplicate_authority` + count only). **Credentials**: write-only
+> `POST /api/upstream/entries/{id}/credential` (replace T2 / clear T3 with
+> `confirm == id`), AES-GCM sealed under the node-local `.upstream_cred_key`
+> keyed by entry id + authority hash, never plaintext in
+> `admin_settings.json`, never minted after a failed read or while
+> ciphertext exists (missing/unreadable ⇒ `unusable`, hash mismatch ⇒
+> `mismatch`, neither unsealed/selected/probed/sent), `credentialState`
+> derived (a body asserting it ⇒ 400), authority change while bound ⇒ 409
+> `credential_bound`, credentialed delete ⇒ 409 `credential_present`. The
+> authenticated URL is built only in `authenticatedURL` inside `ProxyFunc`
+> after eligibility. **Endpoints** (`ui_upstream.go`): GET read model
+> (`mode`, `effective`, `coverage: plain_http_only`, `revision`, entries,
+> migration/key/degraded, `credentialsIneligible`, `scope: node-local`),
+> POST create, PUT/DELETE `{id}`, credential POST, `/health` with the shared
+> classifier; every managed mutation runs inside
+> `saveAdminSettingsWithOverrides{upstreamMutate}` (validate → persist →
+> publish; save failure ⇒ non-2xx, zero mutation) and is revision-fenced
+> (428 missing / 409 stale + current / 404 vanished); audit carries entry id +
+> redacted authority + action only. **v1 adapter**: `POST /api/upstream` is
+> credential-free — 409 `credentialed_entries_present` (state gate, first),
+> 400 `userinfo_not_allowed` / `invalid_entry` (whole list refused, nothing
+> dropped), YAML-owned authorities skipped, omission can never remove a
+> credentialed entry; GET URLs never carry userinfo; the legacy
+> `static/index.html` panel was switched to the per-entry endpoints in the
+> SAME commit (write-only credential form, T3 clear typed against the entry
+> id, fence refusals rendered via the 2F-A helper). **Boot migration**
+> (`upstream_v2.go`): durable-or-nothing — v2 document wins; else parse ALL
+> legacy URLs first (parse failure ⇒ `degraded/parse_failed`, file
+> untouched, runtime unchanged), key only when a password exists, seal in
+> memory, atomic write of the complete v2 doc + credential-free legacy list,
+> swap after durable success, bounded degraded reason on the read model.
+> **Behaviour change recorded**: YAML entries now coexist read-only with the
+> managed set (a saved empty managed list no longer wipes the YAML seed).
+> **Import** keeps the minimal preserve rule (merge by authority,
+> credentialed entries retained on omission or a redacted echo, a real
+> password refused 400 `credentials_not_importable`, pre-validated before any
+> store mutation). **Health/eligibility/modes**: tri-state probe with the
+> bounded classifier (dial/TLS ⇒ `connect_failed`, deadline ⇒ `timeout`, 407
+> ⇒ `proxy_auth_failed`, 2xx/3xx ⇒ healthy, other ⇒ `probe_http_error`; new
+> entries `unprobed`; credential-ineligible entries never probed; bodies
+> bounded/drained/discarded); eligibility `(none OR configured+matching hash)
+> AND (unprobed OR healthy) AND circuit.Allow()`; modes
+> `no_pool|chained|no_eligible_parent|direct_fallback` with the first real
+> fallback firing the existing alert once. **Log hygiene**: raw transport
+> errors are never logged/persisted/audited/returned (R42 injects a
+> password-bearing error and proves its absence from logs, GET, health,
+> diagnose and audit). Route count 241 → 243 (`/api/upstream/entries`,
+> `/api/upstream/entries/`); OpenAPI `UpstreamEntry`/`UpstreamConfig`/
+> `UpstreamEntrySpec`/`UpstreamCredentialRequest`/`UpstreamRefusal` +
+> three new paths, bundle + inventory + generated types regenerated;
+> `upstream_proxies_v2` added to `configSurfaces` (AdminDurable, Sensitive,
+> off export/rollback/CP→DP). Exclusions honoured: no 2F-D import
+> planning/dry-run/export schema/backup strip/restore reporting/
+> prepare-downgrade/manual-probe audit, no PAC/Upstream React, no PX-1
+> chaining, no YAML adoption, no secret-inclusive backups. Operator doc:
+> `docs/operator/upstream-proxies.md`.
+>
 > **2F-B CORRECTION ROUND 2 RECORD (this branch, 2026-09-04).** External review
 > of the corrected candidate (`16858885`) named three blockers; RED-before at
 > the exact candidate (`pac_lifecycle_round2_test.go` R2-1..R2-6 and
