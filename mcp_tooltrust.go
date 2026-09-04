@@ -161,11 +161,32 @@ func initMCPToolTrust(_ *startupState) {
 	startToolTrustReconcileLoop(resolveLifecycleCtx())
 }
 
-// mcpToolTrustLoop tracks the most recently started reconcile loop so a test
-// can observe (toolTrustReconcileLoopRunning) whether it has exited.
+// mcpToolTrustLoop tracks the most recently started reconcile loop: its
+// cancel (so the owner of the coordinator can stop it) and a done channel
+// closed when the goroutine returns (so the stop can JOIN it). Production
+// starts the loop once at init and stops it only through the process
+// lifecycle context; the explicit stop exists so a test environment that
+// composes its own coordinator never leaves a previous environment's loop
+// ticking against it (the harness race found by the root -race gate).
 var mcpToolTrustLoop struct {
-	mu   sync.Mutex
-	done chan struct{} // closed when the loop goroutine returns
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{} // closed when the loop goroutine returns
+}
+
+// stopToolTrustReconcileLoop cancels the most recently started reconcile loop
+// and waits for its goroutine to return. Idempotent; a no-op when none runs.
+func stopToolTrustReconcileLoop() {
+	mcpToolTrustLoop.mu.Lock()
+	cancel, done := mcpToolTrustLoop.cancel, mcpToolTrustLoop.done
+	mcpToolTrustLoop.cancel = nil
+	mcpToolTrustLoop.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 // toolTrustReconcileLoopRunning reports whether the most recently started
@@ -198,9 +219,13 @@ func startToolTrustReconcileLoop(ctx context.Context) bool {
 		return false
 	}
 	interval := mcpToolTrustReconcileInterval // read in the caller goroutine (ordered with tests)
+	// Exactly one loop per composition: a previous loop (a re-composition in
+	// tests) is stopped and joined before the new one starts.
+	stopToolTrustReconcileLoop()
+	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	mcpToolTrustLoop.mu.Lock()
-	mcpToolTrustLoop.done = done
+	mcpToolTrustLoop.cancel, mcpToolTrustLoop.done = cancel, done
 	mcpToolTrustLoop.mu.Unlock()
 	go func() {
 		defer close(done)
@@ -804,9 +829,27 @@ func parseFingerprintHex(s string) (tooltrust.FingerprintDigest, error) {
 	return d, nil
 }
 
+// swapClockForTest installs an injected coordinator clock under the
+// coordinator's own mutex (the reconcile loop reads it under RLock) and
+// returns the restore. Test harness use only.
+func (c *mcpToolTrustCoordinator) swapClockForTest(fn func() time.Time) (restore func()) {
+	c.mu.Lock()
+	prev := c.nowFn
+	c.nowFn = fn
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		c.nowFn = prev
+		c.mu.Unlock()
+	}
+}
+
 // resetMCPToolTrustForTest restores the coordinator + reconcile hook to their
-// uncomposed defaults so a test can isolate the process-global singleton.
+// uncomposed defaults so a test can isolate the process-global singleton. It
+// first stops AND joins the reconcile loop of the previous composition, so
+// no goroutine of one test environment outlives it.
 func resetMCPToolTrustForTest() {
+	stopToolTrustReconcileLoop()
 	mcpToolTrust.mu.Lock()
 	mcpToolTrust.store = nil
 	mcpToolTrust.composed = false

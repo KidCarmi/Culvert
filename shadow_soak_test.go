@@ -847,9 +847,7 @@ func (r *soakRun) approveWithExpiry(server, tool string, expiresAt time.Time) st
 // the coordinator clock swap (the regression test in
 // mcp_tooltrust_harness_test.go exercises exactly this helper).
 func soakSwapToolTrustClock(fn func() time.Time) (restore func()) {
-	prev := mcpToolTrust.nowFn
-	mcpToolTrust.nowFn = fn
-	return func() { mcpToolTrust.nowFn = prev }
+	return mcpToolTrust.swapClockForTest(fn)
 }
 
 // toolTrustExpire proves an EXPIRED approval cannot govern (§11). Using an injected clock, a
