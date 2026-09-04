@@ -1094,9 +1094,39 @@ observation whose binding contradicts the intent. Gates:
 single-observation control proving the fix did not start calling everything a conflict).
 Mutations M45 and M46.
 
+### Two from the round after that: the read path had to mirror the whole validator
+
+Round 9 documented the read-path asymmetry — the spool's read path runs the schema and
+shadow checks, **not** the full `Event.Validate` — and then defended exactly ONE rule
+against it. Both round-10 findings are the rest of that bill.
+
+**An unsupported RESOLVED verdict was trusted on the read path.** A record claiming
+definitive absence with an observation in it, or receipt without exactly one, or either
+without a completeness proof, bypasses commit-time validation and was returned unchanged;
+`orphanFrom` then converted it into definitive non-receipt — manufacturing certainty, the
+one thing this engine must never do. `effectiveReconResult` is now the read path's mirror
+of `validateVerdictAgainstFacts`, folding in ONE direction per rule: a duplicate is
+UPGRADED to conflict, an unsupported resolved verdict is DOWNGRADED to
+`reconciliation_required`. Gate: `TestRecovery_ReadPathMirrorsTheDurableValidator`, five
+unsupported shapes with supported controls in both directions. Mutation M47.
+
+**Idempotence compared the stated string, not the knowledge.** Two records can share an
+attempt, an authorization and a verdict while carrying materially different FACTS — a
+`reconciliation_required` reporting zero observations, then another reporting TWO. The
+second was dropped as a harmless repeat *before* the fold could upgrade it, so a duplicate
+physical invocation was silenced one layer above the guard that exists to catch it. Both
+sides are folded before comparison now, so a record is dropped only when it adds nothing,
+and an observed duplicate cannot be walked back by a later weaker record. Gate:
+`TestRecovery_IdempotenceComparesKnowledgeNotTheStatedString`. Mutation M48.
+
+**Test fixtures were corrected, not the rule.** Several fixtures built resolved verdicts
+carrying no supporting facts — records that could never have been committed — and the fold
+correctly degrades them. `reconFacts` now fills the facts that support a verdict, so those
+tests measure the rule under test rather than the fold.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **46 mutations: 46 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **48 mutations: 48 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

@@ -436,6 +436,20 @@ run_mutation M46 \
   ./internal/mcp/events/model/ internal/mcp/events/model/validate.go \
   's/\tif r\.ObservationCount > 1 && r\.Result != ReconConflict \{\n\t\treturn evtErr\(mcperr\.ReasonEventInvalid, "duplicate observations recorded under a non-conflict verdict"\)\n\t\}\n//'
 
+# ── (47) read path enforces only the duplicate rule ────────────────────────
+run_mutation M47 \
+  'an unsupported resolved verdict is trusted on the less-validated read path' \
+  'TestRecovery_ReadPathMirrorsTheDurableValidator' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif r\.ObservationCount < 0 \{\n\t\treturn model\.ReconRequired\n\t\}\n\tswitch r\.Result \{\n\tcase model\.ReconNotReceived:\n\t\tif r\.ObservationCount != 0 \|\| r\.CompletenessWatermark == "" \{\n\t\t\treturn model\.ReconRequired\n\t\t\}\n\tcase model\.ReconReceived:\n\t\tif r\.ObservationCount != 1 \|\| r\.CompletenessWatermark == "" \{\n\t\t\treturn model\.ReconRequired\n\t\t\}\n\t\}\n//'
+
+# ── (48) idempotence compares the stated string, not knowledge ─────────────
+run_mutation M48 \
+  'a duplicate hidden behind a repeated verdict is dropped as a harmless repeat' \
+  'TestRecovery_IdempotenceComparesKnowledgeNotTheStatedString' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tprevEff, curEff := effectiveReconResult\(prev\), effectiveReconResult\(e\.Reconciliation\)\n\tif prevEff == curEff \{/\tprevEff, curEff := prev.Result, e.Reconciliation.Result\n\tif prevEff == curEff {/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

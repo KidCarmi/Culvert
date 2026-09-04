@@ -250,12 +250,21 @@ func indexReconciliationEvent(e *model.Event, recon map[string]*model.Reconcilia
 		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
 			"reconciliation records for one attempt name different authorizations")
 	}
-	if prev.Result == e.Reconciliation.Result {
+	// IDEMPOTENCE COMPARES KNOWLEDGE, NOT THE STATED STRING (Codex round 10). Two
+	// records can share an attempt, an authorization and a verdict while carrying
+	// materially different FACTS — a reconciliation_required reporting zero
+	// observations, then another reporting TWO. Comparing Result alone discarded the
+	// second as a harmless repeat, before effectiveReconResult could upgrade it to a
+	// conflict, so the duplicate physical invocation was silenced one layer above the
+	// guard that exists to catch it. Folding both sides first means a record can only
+	// be dropped as a repeat when it adds nothing.
+	prevEff, curEff := effectiveReconResult(prev), effectiveReconResult(e.Reconciliation)
+	if prevEff == curEff {
 		return nil // idempotent re-run of the same authoritative observation
 	}
 	// An unresolved earlier record may be superseded by a resolving one; anything
 	// else is a contradiction between two authoritative claims.
-	if prev.Result == model.ReconRequired {
+	if prevEff == model.ReconRequired {
 		ev := *e.Reconciliation
 		recon[id] = &ev
 		return nil
@@ -502,27 +511,60 @@ func settledFrom(intent, out *model.OutcomeEvidence, recon *model.Reconciliation
 // or demonstrably did receive it, is a direct contradiction about one physical
 // effect — exactly the case where picking a winner would be manufacturing certainty.
 //
-// ReconRequired asserts nothing and is therefore never a contradiction, and
-// ReconReceived agreeing with a send state that reached the peer is simply
-// corroboration.
-// effectiveReconResult refuses to let a record's stated verdict UNDERSTATE its own
-// facts.
+// effectiveReconResult is the STRONGEST VERDICT THIS RECORD'S OWN FACTS SUPPORT, and
+// it is the read path's mirror of the durable validator.
 //
-// Observing more than one matching invocation is a definitive exactly-once breach at
-// any completeness, so a record reporting count > 1 is a CONFLICT whatever verdict it
-// carries. The durable validator now refuses to commit that shape, but this path must
-// not depend on that: the spool's read path runs the schema and shadow checks, NOT the
-// full Event.Validate, so a record written by an importer, an alternate producer or an
-// older binary is read back and TRUSTED here. Recovery deriving "asserts nothing" from
-// facts that prove a duplicate is exactly the silence blocker #6 exists to remove
-// (Codex round 9).
+// It exists because the two paths do not validate the same amount. The spool's read
+// path runs the schema and shadow checks, NOT the full Event.Validate, so a record
+// written by an importer, an alternate producer or an older binary is read back and
+// TRUSTED. Every rule validateVerdictAgainstFacts enforces at commit time therefore
+// has to be enforced again here, or it is enforced only against producers that did not
+// need enforcing (Codex rounds 9 and 10).
+//
+// The fold moves in ONE direction per rule, and which direction is the whole point:
+//
+//   - count > 1 is UPGRADED to a conflict, whatever the record says. A duplicate seen
+//     is a duplicate at any completeness, and a wider view could only find more, so
+//     under-reporting it is the silence blocker #6 exists to remove.
+//   - an unsupported RESOLVED verdict is DOWNGRADED to reconciliation_required. A
+//     record claiming definitive absence with an observation in it, or receipt without
+//     exactly one, or either without a completeness proof, is asserting knowledge its
+//     own evidence denies — and orphanFrom would otherwise turn that into definitive
+//     non-receipt, which is manufacturing certainty, the one thing this engine must
+//     never do.
+//   - a negative count resolves nothing: it is malformed input, not an observation.
+//
+// ReconConflict is returned unchanged at any count, for the same reason the validator
+// leaves it unconstrained: it is also reachable from a single observation whose binding
+// contradicts the intent, and refusing to surface a breach is the worst failure here.
 func effectiveReconResult(r *model.ReconciliationEvidence) model.ReconciliationResult {
 	if r.ObservationCount > 1 {
 		return model.ReconConflict
 	}
+	if r.ObservationCount < 0 {
+		return model.ReconRequired
+	}
+	switch r.Result {
+	case model.ReconNotReceived:
+		if r.ObservationCount != 0 || r.CompletenessWatermark == "" {
+			return model.ReconRequired
+		}
+	case model.ReconReceived:
+		if r.ObservationCount != 1 || r.CompletenessWatermark == "" {
+			return model.ReconRequired
+		}
+	}
 	return r.Result
 }
 
+// settledReconOK fails CLOSED when reconciliation evidence cannot stand beside the
+// terminal outcome for the same attempt. It reads the record through
+// effectiveReconResult, so a verdict its own facts do not support can neither settle
+// an attempt nor hide a duplicate.
+//
+// ReconRequired asserts nothing and is therefore never a contradiction, and
+// ReconReceived agreeing with a send state that reached the peer is simply
+// corroboration.
 func settledReconOK(intent, out *model.OutcomeEvidence, recon *model.ReconciliationEvidence) error {
 	if recon == nil {
 		return nil

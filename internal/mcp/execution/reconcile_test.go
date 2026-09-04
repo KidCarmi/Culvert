@@ -37,6 +37,27 @@ func orphanFor(t *testing.T) RecoveredAttempt {
 	}
 }
 
+// reconFacts fills the observation facts that SUPPORT a verdict, so a fixture builds a
+// record that could actually have been committed.
+//
+// Recovery folds a verdict its own facts do not support down to
+// reconciliation_required (the read path's mirror of the durable validator), so a
+// fact-less fixture would measure that fold rather than the rule under test. Verdicts
+// with no fact requirement are left alone, and a caller that sets its own count — a
+// duplicate, say — is not overridden.
+func reconFacts(r *model.ReconciliationEvidence) *model.ReconciliationEvidence {
+	if r.ObservationCount != 0 || r.CompletenessWatermark != "" {
+		return r
+	}
+	switch r.Result {
+	case model.ReconNotReceived:
+		r.CompletenessWatermark = "wm-fixture"
+	case model.ReconReceived:
+		r.ObservationCount, r.CompletenessWatermark = 1, "wm-fixture"
+	}
+	return r
+}
+
 // baseObservation is the shape that DOES reconcile to received. Negative gates
 // mutate exactly one field so the control is meaningful.
 func baseObservation(o RecoveredAttempt) WitnessObservation {
@@ -286,9 +307,9 @@ func TestReconcile_TransitionRules(t *testing.T) {
 func TestRecovery_ReconciliationLedgerSemantics(t *testing.T) {
 	id := mustAttemptID(t)
 	reconEvent := func(res model.ReconciliationResult) model.Event {
-		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: reconFacts(&model.ReconciliationEvidence{
 			AttemptID: id, ReservationID: "rsv_1", ActivationGeneration: 7, Result: res,
-		}}
+		})}
 	}
 
 	t.Run("idempotent repeat", func(t *testing.T) {
@@ -336,9 +357,9 @@ func TestRecovery_ReconcilingOldGenerationDoesNotAffectNewer(t *testing.T) {
 	oldID, newID := mustAttemptID(t), mustAttemptID(t)
 	rep, err := RecoverAttempts(readerWith(
 		intentEvent(oldID, "rsv_old", 7),
-		model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+		model.Event{Phase: model.PhaseReconciliation, Reconciliation: reconFacts(&model.ReconciliationEvidence{
 			AttemptID: oldID, ReservationID: "rsv_old", ActivationGeneration: 7, Result: model.ReconNotReceived,
-		}},
+		})},
 		intentEvent(newID, "rsv_new", 8),
 		outcomeEvent(newID, "rsv_new", 8, model.SendPeerResponseReceived),
 	))
@@ -391,9 +412,9 @@ func TestReconcile_NegativeCountNeverResolvesAbsence(t *testing.T) {
 func TestRecovery_ReconciliationMustMatchTheIntentBinding(t *testing.T) {
 	id := mustAttemptID(t)
 	reconEvent := func(res string, gen uint64) model.Event {
-		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: reconFacts(&model.ReconciliationEvidence{
 			AttemptID: id, ReservationID: res, ActivationGeneration: gen, Result: model.ReconNotReceived,
-		}}
+		})}
 	}
 
 	t.Run("wrong reservation fails closed", func(t *testing.T) {
@@ -571,9 +592,9 @@ func TestReconcile_AnUnboundOrphanCannotBeResolvedByAnotherAuthorization(t *test
 func TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded(t *testing.T) {
 	id := mustAttemptID(t)
 	recon := func(res string, gen uint64, r model.ReconciliationResult) model.Event {
-		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: reconFacts(&model.ReconciliationEvidence{
 			AttemptID: id, ReservationID: res, ActivationGeneration: gen, Result: r,
-		}}
+		})}
 	}
 	settled := func(st model.PhysicalSendState) []model.Event {
 		return []model.Event{intentEvent(id, "rsv_a", 7), outcomeEvent(id, "rsv_a", 7, st)}
@@ -640,9 +661,9 @@ func TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded(t *testing.
 func TestRecovery_RepeatedReconciliationMustAgreeOnIdentityNotJustVerdict(t *testing.T) {
 	id := mustAttemptID(t)
 	recon := func(res string, gen uint64, r model.ReconciliationResult) model.Event {
-		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: reconFacts(&model.ReconciliationEvidence{
 			AttemptID: id, ReservationID: res, ActivationGeneration: gen, Result: r,
-		}}
+		})}
 	}
 	for name, second := range map[string]model.Event{
 		"same verdict, different reservation":       recon("rsv_other", 7, model.ReconReceived),
@@ -697,9 +718,9 @@ func TestRecovery_RepeatedReconciliationMustAgreeOnIdentityNotJustVerdict(t *tes
 // non-receipt passed as cleanly settled.
 func TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed(t *testing.T) {
 	id := mustAttemptID(t)
-	received := model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+	received := model.Event{Phase: model.PhaseReconciliation, Reconciliation: reconFacts(&model.ReconciliationEvidence{
 		AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7, Result: model.ReconReceived,
-	}}
+	})}
 	for _, st := range []model.PhysicalSendState{
 		model.SendDefinitelyNotSent,
 		model.SendReconciledNotReceived,
@@ -733,9 +754,9 @@ func TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed(t *testing.T) 
 func TestRecovery_ReconciliationWithoutAnIntentFailsClosed(t *testing.T) {
 	orphanID, strayID := mustAttemptID(t), mustAttemptID(t)
 	stray := func(id string, res model.ReconciliationResult) model.Event {
-		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: reconFacts(&model.ReconciliationEvidence{
 			AttemptID: id, ReservationID: "rsv_1", ActivationGeneration: 7, Result: res,
-		}}
+		})}
 	}
 
 	t.Run("alone in the ledger", func(t *testing.T) {
@@ -1007,6 +1028,149 @@ func TestRecovery_ADuplicateIsNotSilencedByAWeakerVerdict(t *testing.T) {
 		}
 		if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconReceived {
 			t.Fatalf("control: a proven single observation must stay received, got %+v", rep.Orphans)
+		}
+	})
+}
+
+// TestRecovery_ReadPathMirrorsTheDurableValidator pins round 10.
+//
+// I documented the read-path asymmetry in round 9 — the spool's read path runs the
+// schema and shadow checks, NOT the full Event.Validate — and then defended only ONE
+// rule against it. Every rule validateVerdictAgainstFacts enforces at commit time has
+// to be enforced again here, or it is enforced only against producers that did not
+// need enforcing.
+//
+// The dangerous direction is manufacturing certainty: orphanFrom would otherwise turn
+// an unsupported "definitive absence" into exactly that.
+func TestRecovery_ReadPathMirrorsTheDurableValidator(t *testing.T) {
+	unsupported := func(r model.ReconciliationEvidence) model.ReconciliationEvidence { return r }
+	base := func(id string) model.ReconciliationEvidence {
+		return model.ReconciliationEvidence{AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7}
+	}
+
+	for name, mut := range map[string]func(model.ReconciliationEvidence) model.ReconciliationEvidence{
+		"absence with an observation in it": func(r model.ReconciliationEvidence) model.ReconciliationEvidence {
+			r.Result, r.ObservationCount, r.CompletenessWatermark = model.ReconNotReceived, 1, "wm-1"
+			return r
+		},
+		"absence with no completeness proof": func(r model.ReconciliationEvidence) model.ReconciliationEvidence {
+			r.Result = model.ReconNotReceived
+			return r
+		},
+		"receipt with no observation": func(r model.ReconciliationEvidence) model.ReconciliationEvidence {
+			r.Result, r.ObservationCount, r.CompletenessWatermark = model.ReconReceived, 0, "wm-1"
+			return r
+		},
+		"receipt with no completeness proof": func(r model.ReconciliationEvidence) model.ReconciliationEvidence {
+			r.Result, r.ObservationCount = model.ReconReceived, 1
+			return r
+		},
+		"negative count": func(r model.ReconciliationEvidence) model.ReconciliationEvidence {
+			r.Result, r.ObservationCount, r.CompletenessWatermark = model.ReconNotReceived, -1, "wm-1"
+			return r
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			id := mustAttemptID(t)
+			ev := mut(base(id))
+			rep, err := RecoverAttempts(readerWith(
+				intentEvent(id, "rsv_a", 7),
+				model.Event{Phase: model.PhaseReconciliation, Reconciliation: &ev},
+			))
+			if err != nil {
+				t.Fatalf("recover: %v", err)
+			}
+			if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconRequired {
+				t.Fatalf("a verdict its own facts do not support must resolve nothing, got %+v", rep.Orphans)
+			}
+		})
+	}
+
+	// CONTROLS on the same fixture: a fully SUPPORTED verdict is still honoured in both
+	// directions. Without these the gates above would pass on an implementation that
+	// had stopped accepting reconciliation evidence at all.
+	for name, mut := range map[string]struct {
+		mut  func(model.ReconciliationEvidence) model.ReconciliationEvidence
+		want model.ReconciliationResult
+	}{
+		"supported absence": {func(r model.ReconciliationEvidence) model.ReconciliationEvidence {
+			r.Result, r.ObservationCount, r.CompletenessWatermark = model.ReconNotReceived, 0, "wm-1"
+			return r
+		}, model.ReconNotReceived},
+		"supported receipt": {func(r model.ReconciliationEvidence) model.ReconciliationEvidence {
+			r.Result, r.ObservationCount, r.CompletenessWatermark = model.ReconReceived, 1, "wm-1"
+			return r
+		}, model.ReconReceived},
+	} {
+		t.Run("control: "+name, func(t *testing.T) {
+			id := mustAttemptID(t)
+			ev := unsupported(mut.mut(base(id)))
+			rep, err := RecoverAttempts(readerWith(
+				intentEvent(id, "rsv_a", 7),
+				model.Event{Phase: model.PhaseReconciliation, Reconciliation: &ev},
+			))
+			if err != nil {
+				t.Fatalf("control: %v", err)
+			}
+			if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != mut.want {
+				t.Fatalf("control: expected %q, got %+v", mut.want, rep.Orphans)
+			}
+		})
+	}
+}
+
+// TestRecovery_IdempotenceComparesKnowledgeNotTheStatedString pins the second half of
+// round 10, one layer above the fold.
+//
+// Two records can share an attempt, an authorization AND a verdict while carrying
+// materially different facts. Comparing Result alone dropped the second as a harmless
+// repeat — before effectiveReconResult could upgrade it — so a duplicate physical
+// invocation was silenced by the idempotence check rather than by the guard that
+// exists to catch it.
+func TestRecovery_IdempotenceComparesKnowledgeNotTheStatedString(t *testing.T) {
+	id := mustAttemptID(t)
+	rec := func(res model.ReconciliationResult, count int) model.Event {
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7,
+			Result: res, ObservationCount: count,
+		}}
+	}
+
+	t.Run("a duplicate hidden behind a repeated verdict still surfaces", func(t *testing.T) {
+		rep, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			rec(model.ReconRequired, 0),
+			rec(model.ReconRequired, 2),
+		))
+		if err != nil {
+			t.Fatalf("recover: %v", err)
+		}
+		if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconConflict {
+			t.Fatalf("the later duplicate must not be dropped as a repeat, got %+v", rep.Orphans)
+		}
+	})
+
+	t.Run("a duplicate cannot be walked back", func(t *testing.T) {
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			rec(model.ReconRequired, 2),
+			rec(model.ReconRequired, 0),
+		)); err == nil {
+			t.Fatal("an observed duplicate must not be retracted by a later weaker record")
+		}
+	})
+
+	t.Run("control: a genuinely identical repeat is still idempotent", func(t *testing.T) {
+		rep, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7),
+			rec(model.ReconRequired, 0),
+			rec(model.ReconRequired, 0),
+		))
+		if err != nil {
+			t.Fatalf("control: an identical repeat must stay idempotent: %v", err)
+		}
+		if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconRequired {
+			t.Fatalf("control: expected one unresolved orphan, got %+v", rep.Orphans)
 		}
 	})
 }
