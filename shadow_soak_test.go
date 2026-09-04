@@ -1168,15 +1168,18 @@ func TestShadowSoakEvidenceStress(t *testing.T) {
 
 	// §20 no hidden auto-repair: an unknown schema version fails closed; a tampered event
 	// fails its digest verification rather than being silently repaired.
-	req(t, !evmodel.SupportedSchemaVersion(3), "schema v3 must be unsupported (fail closed)")
+	// A version this build does not know. It was 3 until the First-Canary attempt
+	// evidence made v3 real; the property being pinned is "unknown ⇒ fail closed", so
+	// the number must stay ABOVE the newest supported version, not be a specific one.
+	req(t, !evmodel.SupportedSchemaVersion(unknownSchemaVersion), "an unknown schema version must be unsupported (fail closed)")
 	bad := evs[0]
-	bad.SchemaVersion = 3
+	bad.SchemaVersion = unknownSchemaVersion
 	req(t, bad.Validate() != nil, "an unknown schema version must fail validation (fail closed)")
 	tampered := evs[0]
 	tampered.Shadow = &evmodel.ShadowEvidence{Outcome: "would_block", Override: true, CredentialPlan: "no_credential_profile", MaterializationReadiness: "not_evaluated", RequestInspection: "not_evaluated", ResponseInspection: "not_evaluated"}
 	req(t, !tampered.VerifyDigest(), "a tampered event must FAIL digest verification (corruption detected, never repaired)")
 	req(t, evs[0].VerifyDigest(), "the original untampered event still verifies")
-	ev("no-hidden-repair (in-memory digest primitive): schema v3 fails closed; tampered event fails VerifyDigest; original still verifies. The DURABLE recovery path is proven separately by TestShadowSoakEvidencePersistedCorruptionFailsClosed")
+	ev("no-hidden-repair (in-memory digest primitive): an unknown schema version fails closed; tampered event fails VerifyDigest; original still verifies. The DURABLE recovery path is proven separately by TestShadowSoakEvidencePersistedCorruptionFailsClosed")
 }
 
 // TestShadowSoakEvidencePersistedCorruptionFailsClosed proves the no-hidden-auto-repair
@@ -1420,8 +1423,8 @@ func TestShadowSoakMutationCampaign(t *testing.T) {
 		req(t, len(evs) > 0, "need a committed event")
 		de := evs[0] // any committed shadow event serves as the tamper sample
 		bad := de
-		bad.SchemaVersion = 3
-		req(t, !evmodel.SupportedSchemaVersion(3) && bad.Validate() != nil, "GATE schema: an unknown v3 event must fail closed")
+		bad.SchemaVersion = unknownSchemaVersion
+		req(t, !evmodel.SupportedSchemaVersion(unknownSchemaVersion) && bad.Validate() != nil, "GATE schema: an event of an unknown schema version must fail closed")
 		tampered := de
 		tampered.Decision.PolicyRevision = de.Decision.PolicyRevision + 999
 		req(t, !tampered.VerifyDigest(), "GATE digest: a tampered event must fail VerifyDigest")
@@ -1469,3 +1472,14 @@ func shadowMetricsDelta(before, after shadowMetricsView) shadowMetricsView {
 		EvaluationErrors:         after.EvaluationErrors - before.EvaluationErrors,
 	}
 }
+
+// unknownSchemaVersion is a version NO build of this binary supports, used wherever a
+// gate pins "an unrecognised schema version fails closed".
+//
+// It is deliberately far above the newest real version rather than "the next one".
+// These gates hardcoded 3, which silently stopped testing anything the moment the
+// First-Canary attempt evidence made v3 a supported version — the assertion inverted
+// from "unknown is rejected" to "a known version is rejected", and failed. A number
+// that can never become real keeps the property under test stable across every future
+// schema addition.
+const unknownSchemaVersion = 9999

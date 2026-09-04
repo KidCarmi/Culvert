@@ -236,7 +236,9 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			e.Shadow.Outcome = "would_block"
 			e.Shadow.CredentialPlan = "no_credential_profile"
 		},
-		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
+		// Above the newest supported version, not a specific number: 3 became real
+		// when the First-Canary attempt evidence landed.
+		"unsupported schema version": func(e *Event) { e.SchemaVersion = SchemaVersionV3 + 1 },
 	}
 	for name, mut := range cases {
 		e := validV2ShadowEvent()
