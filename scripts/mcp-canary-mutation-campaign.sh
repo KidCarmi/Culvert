@@ -366,6 +366,20 @@ run_mutation M36 \
   ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
   's/\tif err := settledReconOK\(intent, out, recon\); err != nil \{\n\t\treturn RecoveredAttempt\{\}, err\n\t\}\n//'
 
+# ── (37) repeated reconciliation deduped on verdict, not identity ───────────
+run_mutation M37 \
+  'a second reconciliation record naming another authorization is dropped as idempotent' \
+  'TestRecovery_RepeatedReconciliationMustAgreeOnIdentityNotJustVerdict' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\tif prev\.ReservationID != e\.Reconciliation\.ReservationID \|\|\n\t\tprev\.ActivationGeneration != e\.Reconciliation\.ActivationGeneration \{\n\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid, "execution\.recovery",\n\t\t\t"reconciliation records for one attempt name different authorizations"\)\n\t\}\n//'
+
+# ── (38) only one of the two proven-non-receipt states is checked ───────────
+run_mutation M38 \
+  'receipt against reconciled_not_received passes as a clean settled attempt' \
+  'TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed' \
+  ./internal/mcp/execution/ internal/mcp/execution/recovery.go \
+  's/\t\tif !out\.PhysicalSendState\.MayHaveReachedPeer\(\) \{\n\t\t\treturn mcperr\.New\(mcperr\.ReasonEventInvalid,\n\t\t\t\t"execution\.recovery", "witness reported received against an outcome that proves the peer was not reached"\)\n\t\t\}/\t\tif out.PhysicalSendState == model.SendDefinitelyNotSent {\n\t\t\treturn mcperr.New(mcperr.ReasonEventInvalid,\n\t\t\t\t"execution.recovery", "witness reported received against a provably never-sent outcome")\n\t\t}/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

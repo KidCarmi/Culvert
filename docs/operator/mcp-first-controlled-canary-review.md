@@ -944,9 +944,27 @@ fails closed on a binding mismatch, on a witness-observed duplicate, and on eith
 contradiction; `reconciliation_required` asserts nothing and agreement is just corroboration. Gate:
 `TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded`; mutation M36.
 
+### Two more, from the round after that
+
+**Idempotence must key on identity, not just verdict.** A repeated reconciliation record was
+deduped on `Result` alone, so a second record agreeing on the verdict but naming a DIFFERENT
+reservation or generation was discarded at index time — before the binding rule downstream could
+ever see it. Two records under one attempt id describing two authorizations is the ledger fault
+whatever verdict they share. Gate:
+`TestRecovery_RepeatedReconciliationMustAgreeOnIdentityNotJustVerdict`, with controls proving a
+genuinely identical repeat is still idempotent and an unresolved record is still superseded;
+mutation M37.
+
+**Two states prove non-receipt, not one.** The contradiction check tested
+`== definitely_not_sent`, but `reconciled_not_received` is equally a positive proof that the peer
+was not reached — so a ledger asserting BOTH receipt and definitive non-receipt passed as cleanly
+settled. `MayHaveReachedPeer()` is the predicate that owns the distinction, and a settled outcome
+always carries a valid state, so its false branch is exactly "proven not reached" rather than
+"unknown". Gate: `TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed`; mutation M38.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **36 mutations: 36 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **38 mutations: 38 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no

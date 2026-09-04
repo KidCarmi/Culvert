@@ -568,3 +568,93 @@ func TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded(t *testing.
 		}
 	}
 }
+
+// TestRecovery_RepeatedReconciliationMustAgreeOnIdentityNotJustVerdict pins Codex
+// round-5 P2. Idempotence was keyed on Result ALONE, so a second record agreeing on
+// the verdict but naming a DIFFERENT reservation or generation was discarded at
+// index time — before orphanFrom or settledReconOK could ever apply the binding
+// rule. Two records under one attempt id describing two authorizations is the ledger
+// fault whatever verdict they share, and dropping the second is exactly how it would
+// go unnoticed.
+func TestRecovery_RepeatedReconciliationMustAgreeOnIdentityNotJustVerdict(t *testing.T) {
+	id := mustAttemptID(t)
+	recon := func(res string, gen uint64, r model.ReconciliationResult) model.Event {
+		return model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+			AttemptID: id, ReservationID: res, ActivationGeneration: gen, Result: r,
+		}}
+	}
+	for name, second := range map[string]model.Event{
+		"same verdict, different reservation":       recon("rsv_other", 7, model.ReconReceived),
+		"same verdict, different generation":        recon("rsv_a", 8, model.ReconReceived),
+		"superseding record, different reservation": recon("rsv_other", 7, model.ReconNotReceived),
+	} {
+		evs := []model.Event{
+			intentEvent(id, "rsv_a", 7),
+			recon("rsv_a", 7, model.ReconReceived),
+			second,
+		}
+		if name == "superseding record, different reservation" {
+			evs[1] = recon("rsv_a", 7, model.ReconRequired)
+		}
+		if _, err := RecoverAttempts(readerWith(evs...)); err == nil {
+			t.Fatalf("%s: must fail closed rather than be discarded as idempotent", name)
+		}
+	}
+
+	// CONTROLS. A genuinely identical repeat is still idempotent, and an unresolved
+	// record is still superseded by a resolving one that agrees on identity —
+	// otherwise the gates above would pass on an implementation that had simply
+	// stopped accepting repeated reconciliation at all.
+	rep, err := RecoverAttempts(readerWith(
+		intentEvent(id, "rsv_a", 7),
+		recon("rsv_a", 7, model.ReconNotReceived),
+		recon("rsv_a", 7, model.ReconNotReceived),
+	))
+	if err != nil {
+		t.Fatalf("control: an identical repeat must stay idempotent: %v", err)
+	}
+	if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconNotReceived {
+		t.Fatalf("control: expected one not_received orphan, got %+v", rep.Orphans)
+	}
+	rep, err = RecoverAttempts(readerWith(
+		intentEvent(id, "rsv_a", 7),
+		recon("rsv_a", 7, model.ReconRequired),
+		recon("rsv_a", 7, model.ReconNotReceived),
+	))
+	if err != nil {
+		t.Fatalf("control: a resolving record must still supersede an unresolved one: %v", err)
+	}
+	if len(rep.Orphans) != 1 || rep.Orphans[0].Reconciliation != model.ReconNotReceived {
+		t.Fatalf("control: expected the superseding verdict, got %+v", rep.Orphans)
+	}
+}
+
+// TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed pins Codex round-5 P2.
+// TWO physical-send states positively prove the peer was not reached —
+// definitely_not_sent and reconciled_not_received — and the contradiction check
+// tested only the first, so a ledger asserting BOTH receipt and definitive
+// non-receipt passed as cleanly settled.
+func TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed(t *testing.T) {
+	id := mustAttemptID(t)
+	received := model.Event{Phase: model.PhaseReconciliation, Reconciliation: &model.ReconciliationEvidence{
+		AttemptID: id, ReservationID: "rsv_a", ActivationGeneration: 7, Result: model.ReconReceived,
+	}}
+	for _, st := range []model.PhysicalSendState{
+		model.SendDefinitelyNotSent,
+		model.SendReconciledNotReceived,
+	} {
+		if _, err := RecoverAttempts(readerWith(
+			intentEvent(id, "rsv_a", 7), outcomeEvent(id, "rsv_a", 7, st), received,
+		)); err == nil {
+			t.Fatalf("received against %q must fail closed", st)
+		}
+	}
+	// CONTROL: against a state that DID reach the peer, receipt is corroboration and
+	// must still settle.
+	if _, err := RecoverAttempts(readerWith(
+		intentEvent(id, "rsv_a", 7),
+		outcomeEvent(id, "rsv_a", 7, model.SendPeerResponseReceived), received,
+	)); err != nil {
+		t.Fatalf("control: receipt corroborating a peer response must still settle: %v", err)
+	}
+}

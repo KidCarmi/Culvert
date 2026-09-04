@@ -213,6 +213,17 @@ func indexReconciliationEvent(e *model.Event, recon map[string]*model.Reconcilia
 		recon[id] = &ev
 		return nil
 	}
+	// IDENTITY BEFORE RESULT (Codex round 5, P2). Idempotence was keyed on Result
+	// ALONE, so a second record agreeing on the verdict but naming a DIFFERENT
+	// reservation or generation was discarded here — before orphanFrom or
+	// settledReconOK could ever see it. Two records under one attempt id describing
+	// two authorizations is the ledger fault, whatever verdict they happen to share,
+	// and dropping the second one is precisely how it would go unnoticed.
+	if prev.ReservationID != e.Reconciliation.ReservationID ||
+		prev.ActivationGeneration != e.Reconciliation.ActivationGeneration {
+		return mcperr.New(mcperr.ReasonEventInvalid, "execution.recovery",
+			"reconciliation records for one attempt name different authorizations")
+	}
 	if prev.Result == e.Reconciliation.Result {
 		return nil // idempotent re-run of the same authoritative observation
 	}
@@ -433,9 +444,16 @@ func settledReconOK(intent, out *model.OutcomeEvidence, recon *model.Reconciliat
 				"execution.recovery", "witness reported not-received against an outcome that reached the peer")
 		}
 	case model.ReconReceived:
-		if out.PhysicalSendState == model.SendDefinitelyNotSent {
+		// TWO states positively prove the peer was not reached, not one (Codex round
+		// 5, P2): definitely_not_sent and reconciled_not_received. Testing only the
+		// former let a ledger asserting BOTH receipt and definitive non-receipt pass
+		// as cleanly settled. MayHaveReachedPeer is the predicate that owns this
+		// distinction, and a settled outcome always carries a valid state — an
+		// invalid one is rejected above — so its false branch is exactly "proven not
+		// reached" rather than "unknown".
+		if !out.PhysicalSendState.MayHaveReachedPeer() {
 			return mcperr.New(mcperr.ReasonEventInvalid,
-				"execution.recovery", "witness reported received against a provably never-sent outcome")
+				"execution.recovery", "witness reported received against an outcome that proves the peer was not reached")
 		}
 	}
 	return nil
