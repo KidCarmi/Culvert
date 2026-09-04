@@ -1569,6 +1569,39 @@ validate_passphrase_for_env_file() {
   fi
 }
 
+# persist_host_env_session_secret — docs/OPERATIONS.md §3 tells an operator
+# setting up a multi-node deployment to "set CULVERT_SESSION_SECRET ... on
+# every node" before bringing the stack up, and exporting it as a host
+# environment variable is the natural way to do that non-interactively. That
+# hits the exact same failure shape setup_at_rest_encryption() below already
+# guards against for CULVERT_LOG_PASSPHRASE/CULVERT_CA_PASSPHRASE: §7 starts
+# the stack with plain `sudo docker compose up` (no `-E`), which does NOT
+# forward this shell's environment to the child process, and
+# docker-compose.yml resolves CULVERT_SESSION_SECRET only via compose's own
+# process env or $INSTALL_DIR/.env. A host-env-only value therefore never
+# reaches the container: every node falls back to its own random per-process
+# signing key (session.InitRandomKey, session.go) instead of the shared
+# cluster key the operator asked for, and admin sessions silently stop being
+# valid across nodes — no error, no log line, just cluster-wide logouts.
+# Never overwrite an existing .env value (same "never overwrite" contract as
+# env_put/setup_at_rest_encryption), and validate before persisting — the
+# same 64-hex-char / >=32-byte contract session.go's initSessionSecret()
+# enforces at boot (hex.DecodeString + len(key) < 32 => panic), so a bad
+# value fails the install with a clear message instead of persisting a key
+# that will make the container panic/crash-loop on every node.
+persist_host_env_session_secret() {
+  local envfile="$INSTALL_DIR/.env"
+  [[ -n "${CULVERT_SESSION_SECRET:-}" ]] || return 0
+  grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null && return 0
+  local trimmed
+  trimmed="$(printf '%s' "$CULVERT_SESSION_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [[ ! "$trimmed" =~ ^[0-9a-fA-F]{64,}$ || $(( ${#trimmed} % 2 )) -ne 0 ]]; then
+    error "CULVERT_SESSION_SECRET (host environment) must be at least 64 hex characters (32 bytes) — got ${#trimmed}. Fix it before the stack starts, or every node will fall back to its own random signing key."
+  fi
+  env_put CULVERT_SESSION_SECRET "$trimmed" "$envfile"
+  info "Persisted CULVERT_SESSION_SECRET from the host environment into $envfile so the running container can use it."
+}
+
 # Encrypts data at rest (AES-256), value(s) stored in $INSTALL_DIR/.env which
 # docker-compose.yml reads as ${CULVERT_*_PASSPHRASE:-}. We never overwrite an
 # existing value. On a FRESH deployment (no data volume yet) we can safely also
@@ -1742,6 +1775,7 @@ setup_at_rest_encryption() {
 
 step "Encryption at rest"
 setup_at_rest_encryption
+persist_host_env_session_secret
 
 # Persist the catalog config so the appliance's OWN runtime auto-seed (and every
 # later `docker compose up`, reboot, or agent-driven recreate) uses the SAME origin
