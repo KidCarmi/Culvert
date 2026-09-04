@@ -43,8 +43,10 @@ run_mutation() {
   # A gate whose defect is a DATA RACE is invisible without the detector: the mutated
   # build passes and scores as a survivor. Such a mutation passes --race here, and the
   # flag is consumed before the perl scripts.
-  local raceflag=()
-  if [ "${1:-}" = "--race" ]; then raceflag=(-race); shift; fi
+  local raceflag=() race_attr=""
+  if [ "${1:-}" = "--race" ] || [[ "${1:-}" == --race=* ]]; then
+    raceflag=(-race); race_attr="${1#--race}"; race_attr="${race_attr#=}"; shift
+  fi
   printf '\n[%s] %s\n' "$id" "$desc"
   printf '      gate: %s  (%s)%s\n' "$gate" "$pkg" "${raceflag[0]:+ [race]}"
 
@@ -74,6 +76,44 @@ run_mutation() {
   fi
 
   if [ $rc -ne 0 ]; then
+    # A --race mutation must be caught BY THE DETECTOR, and a bare nonzero exit does not
+    # establish that. `go test` compiles and vets before running, so a build break, a
+    # vet failure, a panic, a timeout or an UNRELATED race all land here too — and each
+    # would score the mutation as caught while proving nothing about the lock that was
+    # removed (Codex round 17). The scoring is therefore evidence-based for these, not
+    # exit-code-based: the output must carry a race report, and that report must name
+    # the mutated access.
+    if [ ${#raceflag[@]} -ne 0 ]; then
+      if ! printf '%s' "$out" | grep -q 'WARNING: DATA RACE'; then
+        printf '      NOT PROVEN — the gate failed but NO race was reported; this proves NOTHING\n'
+        printf '%s\n' "$out" | tail -8 | sed 's/^/        /'
+        SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (gate failed without a race report)")
+        [ $KEEP -eq 0 ] && exit 1
+        return
+      fi
+      # race_attr is a comma-separated list of symbols that must ALL appear in the
+      # report. Requiring both sides of the intended pair — the mutated writer and the
+      # guarded reader — is what makes this attribution rather than "a race happened
+      # somewhere in this package while the mutation was applied".
+      local _attr_missing=""
+      if [ -n "$race_attr" ]; then
+        local _oldifs="$IFS"; IFS=','
+        for pat in $race_attr; do
+          printf '%s' "$out" | grep -q -- "$pat" || _attr_missing="$pat"
+        done
+        IFS="$_oldifs"
+      fi
+      if [ -n "$_attr_missing" ]; then
+        printf '      NOT PROVEN — a race was reported but it does not name %s; this proves NOTHING\n' "$_attr_missing"
+        printf '%s\n' "$out" | tail -8 | sed 's/^/        /'
+        SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (race not attributable to $_attr_missing)")
+        [ $KEEP -eq 0 ] && exit 1
+        return
+      fi
+      printf '      CAUGHT (race detector reported a race naming %s, as required)\n' "${race_attr:-the mutated access}"
+      PASS=$((PASS+1))
+      return
+    fi
     printf '      CAUGHT (gate failed as required)\n'
     PASS=$((PASS+1))
   else
@@ -551,7 +591,7 @@ run_mutation M59 \
 run_mutation M60 \
   'the tool-trust clock is swapped without the coordinator lock' \
   'TestToolTrustClock_SwapIsSynchronisedWithConcurrentReaders' \
-  . mcp_tooltrust_clock_test.go --race \
+  . mcp_tooltrust_clock_test.go '--race=swapToolTrustNowFn,mcpToolTrustCoordinator).now' \
   's/\tmcpToolTrust\.mu\.Lock\(\)\n\tprev := mcpToolTrust\.nowFn\n\tmcpToolTrust\.nowFn = fn\n\tmcpToolTrust\.mu\.Unlock\(\)\n/\tprev := mcpToolTrust.nowFn\n\tmcpToolTrust.nowFn = fn\n/'
 
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
