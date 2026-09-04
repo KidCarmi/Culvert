@@ -90,6 +90,22 @@ func TestPrepareDowngrade_DryRunThenCommitRewritesForPredecessor(t *testing.T) {
 	if strings.Contains(out, pdCanaryPW) || strings.Contains(out, ciphertext) {
 		t.Fatal("commit output must carry counts only")
 	}
+	dgAssertPreparedFile(t, dir, ciphertext)
+	// A second run finds nothing to prepare.
+	if _, err := dgRun(t, dir, adminSettingsSchemaPredecessor, ""); dgCode(err) != "already_prepared" {
+		t.Fatalf("want already_prepared, got %v", err)
+	}
+
+	_ = id // a legacy list carries no identity: the re-migrated entries are re-identified
+	dgAssertReMigration(t, dir)
+}
+
+// dgAssertPreparedFile pins the predecessor-compatible shape of the
+// rewritten file: 0600, legacy list with full authenticated URLs, no v2
+// document, no schema marker, no ciphertext, operation marker with counts,
+// node-local key untouched.
+func dgAssertPreparedFile(t *testing.T, dir, ciphertext string) {
+	t.Helper()
 	st, err := os.Stat(filepath.Join(dir, "admin_settings.json"))
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("rewritten file must be 0600 (err=%v mode=%v)", err, st.Mode())
@@ -115,7 +131,7 @@ func TestPrepareDowngrade_DryRunThenCommitRewritesForPredecessor(t *testing.T) {
 	var withPW int
 	for _, l := range legacy {
 		u, _ := l.(map[string]any)["url"].(string)
-		if strings.Contains(u, ":"+pdCanaryPW+"@"+pdCanaryHost+":3128") || strings.Contains(u, ":second-pw-Zx9@parent-two.test:3128") {
+		if strings.Contains(u, ":"+pdCanaryPW+"@"+pdCanaryHost+":3128") || strings.Contains(u, ":"+dgSecondPW+"@parent-two.test:3128") {
 			withPW++
 		}
 	}
@@ -132,12 +148,13 @@ func TestPrepareDowngrade_DryRunThenCommitRewritesForPredecessor(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, upstream.KeyFileName)); err != nil {
 		t.Fatal("the node-local key must be untouched")
 	}
-	// A second run finds nothing to prepare.
-	if _, err := dgRun(t, dir, adminSettingsSchemaPredecessor, ""); dgCode(err) != "already_prepared" {
-		t.Fatalf("want already_prepared, got %v", err)
-	}
+}
 
-	// The next boot of THIS binary re-migrates and says why.
+// dgAssertReMigration boots THIS binary on a prepared file and proves the
+// re-migration: state ok + re-migrated_after_prepare, both credentials
+// re-sealed and usable, plaintext gone, marker consumed.
+func dgAssertReMigration(t *testing.T, dir string) {
+	t.Helper()
 	snapshotUpstreamPool(t)
 	upstreamPool.Configure(nil, 5, 60*time.Second)
 	LoadAdminSettings(filepath.Join(dir, "admin_settings.json"))
@@ -146,7 +163,6 @@ func TestPrepareDowngrade_DryRunThenCommitRewritesForPredecessor(t *testing.T) {
 	if mig["state"] != "ok" || mig["reason"] != upstreamMigrationReasonAfterPrepare {
 		t.Fatalf("re-migration must report %s, got %v", upstreamMigrationReasonAfterPrepare, mig)
 	}
-	_ = id // a legacy list carries no identity: the re-migrated entries are re-identified
 	var reSealed int
 	entries, _ := v["entries"].([]any)
 	for _, raw := range entries {

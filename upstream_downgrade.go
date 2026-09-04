@@ -102,40 +102,15 @@ func runPrepareDowngrade(dir string, target int, confirm string, out io.Writer) 
 				adminSettingsSchemaPredecessor, downgradePredecessorSHA[:8], adminSettingsSchemaCurrent)}
 	}
 	path := filepath.Join(dir, "admin_settings.json")
-	raw, err := os.ReadFile(path) // #nosec G304 -- operator-configured data dir
+	root, doc, err := downgradeLoadSettings(path)
 	if err != nil {
-		return &downgradeRefusal{Code: "settings_unreadable", Msg: "admin_settings.json could not be read from the data directory"}
+		return err
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var root map[string]any
-	if err := dec.Decode(&root); err != nil {
-		return &downgradeRefusal{Code: "settings_invalid", Msg: "admin_settings.json is not a JSON object"}
-	}
-	var typed AdminSettings
-	if err := json.Unmarshal(raw, &typed); err != nil {
-		return &downgradeRefusal{Code: "settings_invalid", Msg: "admin_settings.json does not decode"}
-	}
-	if typed.UpstreamProxiesV2 == nil {
-		if typed.UpstreamPreparedDowngrade != nil {
-			return &downgradeRefusal{Code: "already_prepared", Msg: "this data directory was already prepared for the predecessor; boot the predecessor (or boot this binary to re-migrate)"}
-		}
-		return &downgradeRefusal{Code: "nothing_to_prepare", Msg: "no upstream_proxies_v2 document is present; the file is already predecessor-compatible"}
-	}
-	doc := typed.UpstreamProxiesV2.Clone()
-
 	// The key is opened READ-ONLY (never minted here).
 	key, kerr := upstream.OpenKey(dir, false)
-	needKey := false
-	for i := range doc.Entries {
-		if doc.Entries[i].Credential != nil {
-			needKey = true
-		}
-	}
-	if needKey && (kerr != nil || key == nil) {
+	if downgradeNeedsKey(doc) && (kerr != nil || key == nil) {
 		return &downgradeRefusal{Code: "key_unusable", Msg: "the node-local credential key is missing or unreadable; a downgrade cannot unseal the credentials it must carry"}
 	}
-
 	// Every entry must be cleanly resolvable: unusable/mismatch/
 	// requiresReplacement would silently hand the predecessor an
 	// unauthenticated parent.
@@ -145,15 +120,16 @@ func runPrepareDowngrade(dir string, target int, confirm string, out io.Writer) 
 	}
 
 	word := downgradeConfirmWord(dir, target)
-	fmt.Fprintf(out, "Prepare downgrade (admin-settings schema %d → %d, predecessor %s)\n", adminSettingsSchemaCurrent, target, downgradePredecessorSHA[:8])
-	fmt.Fprintf(out, "  data directory:            %s\n", dir)
-	fmt.Fprintf(out, "  managed parent proxies:    %d\n", plan.Entries)
-	fmt.Fprintf(out, "  credentials to unseal:     %d (in memory only; written into the legacy list for the predecessor)\n", plan.Credentials)
-	fmt.Fprintf(out, "  upstream_proxies_v2:       removed in the same atomic write\n")
-	fmt.Fprintf(out, "  node-local key:            untouched (never deleted); the next boot of this binary re-migrates (%s)\n", upstreamMigrationReasonAfterPrepare)
+	p := func(format string, a ...any) { _, _ = fmt.Fprintf(out, format, a...) }
+	p("Prepare downgrade (admin-settings schema %d → %d, predecessor %s)\n", adminSettingsSchemaCurrent, target, downgradePredecessorSHA[:8])
+	p("  data directory:            %s\n", dir)
+	p("  managed parent proxies:    %d\n", plan.Entries)
+	p("  credentials to unseal:     %d (in memory only; written into the legacy list for the predecessor)\n", plan.Credentials)
+	p("  upstream_proxies_v2:       removed in the same atomic write\n")
+	p("  node-local key:            untouched (never deleted); the next boot of this binary re-migrates (%s)\n", upstreamMigrationReasonAfterPrepare)
 	if confirm == "" {
-		fmt.Fprintf(out, "\nThis was a dry-run. No files were written.\n")
-		fmt.Fprintf(out, "To commit: culvert --prepare-downgrade --target-schema %d --confirm %s\n", target, word)
+		p("\nThis was a dry-run. No files were written.\n")
+		p("To commit: culvert --prepare-downgrade --target-schema %d --confirm %s\n", target, word)
 		return nil
 	}
 	if confirm != word {
@@ -183,9 +159,44 @@ func runPrepareDowngrade(dir string, target int, confirm string, out io.Writer) 
 	// Headless audit line (counts only) into the durable audit log beside
 	// the settings file; best-effort — a CLI one-shot has no request actor.
 	auditPrepareDowngrade(dir, plan)
-	fmt.Fprintf(out, "\nPrepared: admin_settings.json rewritten for the predecessor (%d entr(y/ies), %d credential(s)).\n", plan.Entries, plan.Credentials)
-	fmt.Fprintf(out, "Boot the predecessor binary (%s) now, or boot this binary to re-migrate.\n", downgradePredecessorSHA[:8])
+	p("\nPrepared: admin_settings.json rewritten for the predecessor (%d entr(y/ies), %d credential(s)).\n", plan.Entries, plan.Credentials)
+	p("Boot the predecessor binary (%s) now, or boot this binary to re-migrate.\n", downgradePredecessorSHA[:8])
 	return nil
+}
+
+// downgradeLoadSettings reads admin_settings.json both generically (every
+// unrelated section is carried verbatim) and typed (the v2 document); a
+// missing document is a bounded refusal.
+func downgradeLoadSettings(path string) (root map[string]any, doc upstream.Document, err error) {
+	raw, rerr := os.ReadFile(path) // #nosec G304 -- operator-configured data dir
+	if rerr != nil {
+		return nil, doc, &downgradeRefusal{Code: "settings_unreadable", Msg: "admin_settings.json could not be read from the data directory"}
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if derr := dec.Decode(&root); derr != nil {
+		return nil, doc, &downgradeRefusal{Code: "settings_invalid", Msg: "admin_settings.json is not a JSON object"}
+	}
+	var typed AdminSettings
+	if uerr := json.Unmarshal(raw, &typed); uerr != nil {
+		return nil, doc, &downgradeRefusal{Code: "settings_invalid", Msg: "admin_settings.json does not decode"}
+	}
+	if typed.UpstreamProxiesV2 == nil {
+		if typed.UpstreamPreparedDowngrade != nil {
+			return nil, doc, &downgradeRefusal{Code: "already_prepared", Msg: "this data directory was already prepared for the predecessor; boot the predecessor (or boot this binary to re-migrate)"}
+		}
+		return nil, doc, &downgradeRefusal{Code: "nothing_to_prepare", Msg: "no upstream_proxies_v2 document is present; the file is already predecessor-compatible"}
+	}
+	return root, typed.UpstreamProxiesV2.Clone(), nil
+}
+
+func downgradeNeedsKey(doc upstream.Document) bool {
+	for i := range doc.Entries {
+		if doc.Entries[i].Credential != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // downgradeResolveEntries unseals every managed credential IN MEMORY and
