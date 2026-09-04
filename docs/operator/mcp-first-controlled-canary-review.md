@@ -1267,9 +1267,37 @@ to dismiss it: `RetryFreeLimits` pins the budget to zero and `Call` short-circui
 per-leg fact escaping as a whole-Call claim manufactures certainty, and that safety must not
 rest on one caller's choice of limits. Mutations M57–M59.
 
+### A red race gate that was not this PR's, fixed here anyway
+
+The Fast gate's `-race` job went red with a data race in `TestShadowSoak`. It is **not this
+PR's defect** — both racing lines are byte-identical on `origin/main`, and this PR's only
+edit to `shadow_soak_test.go` is an unrelated schema-version constant — but it made a
+required check red, there was no fix elsewhere to port, and the fix is small, local and
+test-only.
+
+`mcpToolTrustCoordinator.now()` reads `nowFn` under `mu.RLock`, and its own comment says
+why: *"the background reconcile loop may call it concurrently with a test swapping the
+coordinator"*. Two soak helpers assigned the field directly, upholding one half of that
+contract. Every other writer in the tree already locks, which is what makes this an
+oversight rather than a design question.
+
+The other side is a **goroutine leak**: `newGapEnv` starts a reconcile loop bound to the
+process-lifecycle ctx and nothing cancels it when the test ends, so it ticks for the rest
+of the binary's life — over a 1365s race run a 30s ticker gets ~45 chances to land inside a
+later test's clock swap. **Recorded, not fixed**: giving `newGapEnv` a cancellable lifecycle
+is a separate change, and locking the writers closes the race regardless.
+
+**The first draft of the gate passed against the unsynchronised shape**, and was therefore
+worthless. It observed ZERO concurrent reads — the main goroutine finished every swap before
+the scheduler started the reader. The gate now waits for the reader before swapping and
+asserts a non-zero read count, so an overlap-free variant fails loudly instead of passing
+vacuously. `run_mutation` also gained a `--race` flag: a mutation whose defect is a data race
+is invisible without the detector, so the mutated build passes and scores as a survivor —
+the campaign's worst failure mode. Mutation M60.
+
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **59 mutations: 59 caught, 0 survived, 0
+`scripts/mcp-canary-mutation-campaign.sh` now carries **60 mutations: 60 caught, 0 survived, 0
 skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
