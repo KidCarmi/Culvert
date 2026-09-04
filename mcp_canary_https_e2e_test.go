@@ -486,9 +486,8 @@ func TestHTTPSE2E_AuxiliaryTrafficIsNotMetered(t *testing.T) {
 // before the process died and nothing after. It reads the REAL spool, so the events
 // are the ones the executor actually wrote.
 type truncatedReader struct {
-	src   execution.EvidenceReader
-	upTo  uint64 // inclusive; 0 ⇒ no truncation
-	pages int
+	src  execution.EvidenceReader
+	upTo uint64 // inclusive; 0 ⇒ no truncation
 }
 
 func (r *truncatedReader) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
