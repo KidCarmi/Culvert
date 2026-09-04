@@ -334,6 +334,12 @@ func keepAlive(v bool) {
 	}
 }
 
+// keepAliveIntSink is the same guard for a counted loop: written once, after the
+// loop, so the compiler cannot discard the work but no iteration pays for it.
+var keepAliveIntSink atomic.Int64
+
+func keepAliveInt(v int) { keepAliveIntSink.Store(int64(v)) }
+
 var scalingPostures = []struct {
 	name       string
 	exceptions []string
@@ -345,21 +351,34 @@ var scalingPostures = []struct {
 // BenchmarkHotRWWriteLock prices the other side of the trade: a writer now takes
 // readShardCount locks instead of one. Both shapes are measured so the multiple
 // is a number in the tree rather than an assertion in a comment.
+//
+// Each critical section increments a guarded counter rather than being empty.
+// That is not decoration: a lock around nothing is an "empty critical section"
+// (staticcheck SA2001), and it is also not what a writer does — every real
+// caller mutates something under the lock. The increment costs about a
+// nanosecond against a 22 ns floor, far too little to move the comparison, and
+// it keeps the benchmark free of any linter directive.
 func BenchmarkHotRWWriteLock(b *testing.B) {
 	b.Run("Sharded", func(b *testing.B) {
 		var h hotRW
+		guarded := 0
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			h.Lock()
+			guarded++
 			h.Unlock()
 		}
+		keepAliveInt(guarded)
 	})
 	b.Run("SingleRWMutex", func(b *testing.B) {
 		var mu sync.RWMutex
+		guarded := 0
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			mu.Lock()
-			mu.Unlock() //nolint:staticcheck // SA2001 intentional: pricing the lock pair itself
+			guarded++
+			mu.Unlock()
 		}
+		keepAliveInt(guarded)
 	})
 }

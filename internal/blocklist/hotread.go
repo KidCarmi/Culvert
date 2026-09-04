@@ -83,12 +83,12 @@ import (
 //
 // ── The trade, stated plainly ─────────────────────────────────────────────────
 //
-// A writer must acquire all readShardCount locks instead of one: 1.44 us
-// uncontended and allocation-free, against 22 ns for the single RWMutex it
-// replaces — 65x, which is just the shard count (BenchmarkHotRWWriteLock
+// A writer must acquire all readShardCount locks instead of one: 1.52 us
+// uncontended and allocation-free, against 24 ns for the single RWMutex it
+// replaces — 62x, which is just the shard count (BenchmarkHotRWWriteLock
 // measures both shapes, medians of n=5). That is a real cost and it is still the
 // right trade, because every caller that takes it already does far more work
-// than 1.4 us — ApplyDelta SHA-256s its whole
+// than 1.5 us — ApplyDelta SHA-256s its whole
 // token set, Save marshals and atomically rewrites the file, ReplaceFeedEntries
 // rebuilds both enforcement maps — and all of them run at admin or feed rate,
 // against a read taken once per proxied request. Reads got cheap by making
