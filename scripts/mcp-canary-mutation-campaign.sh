@@ -43,10 +43,19 @@ run_mutation() {
   # A gate whose defect is a DATA RACE is invisible without the detector: the mutated
   # build passes and scores as a survivor. Such a mutation passes --race here, and the
   # flag is consumed before the perl scripts.
-  local raceflag=() race_attr=""
-  if [ "${1:-}" = "--race" ] || [[ "${1:-}" == --race=* ]]; then
-    raceflag=(-race); race_attr="${1#--race}"; race_attr="${race_attr#=}"; shift
-  fi
+  local raceflag=() race_attr="" compile_wall=0
+  while :; do
+    case "${1:-}" in
+      --race|--race=*)
+        raceflag=(-race); race_attr="${1#--race}"; race_attr="${race_attr#=}"; shift ;;
+      # The header rule says a compile failure is not proof UNLESS the mutation
+      # targets a structural wall whose purpose is compile-time prevention. Such a
+      # mutation declares itself here, and for it the build failure IS the proof.
+      --compile-wall)
+        compile_wall=1; shift ;;
+      *) break ;;
+    esac
+  done
   printf '\n[%s] %s\n' "$id" "$desc"
   printf '      gate: %s  (%s)%s\n' "$gate" "$pkg" "${raceflag[0]:+ [race]}"
 
@@ -71,6 +80,33 @@ run_mutation() {
   if printf '%s' "$out" | grep -q 'no tests to run'; then
     printf '      BROKEN GATE — the pattern matched no tests in %s; this proves NOTHING\n' "$pkg"
     SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: BROKEN GATE (no tests matched in $pkg)")
+    [ $KEEP -eq 0 ] && exit 1
+    return
+  fi
+
+  # A BUILD OR VET failure is not an assertion. `go test` compiles and vets before
+  # running, so a mutation that fails to build exits nonzero without any gate ever
+  # having executed — the campaign header has always said this is not proof, but the
+  # scoring never enforced it and counted the bare exit code (Codex round 18).
+  local build_broke=0
+  printf '%s' "$out" | grep -qE '\[build failed\]|\[setup failed\]|^vet: |^# github\.com/KidCarmi' && build_broke=1
+
+  if [ $compile_wall -eq 1 ]; then
+    if [ $build_broke -eq 1 ]; then
+      printf '      CAUGHT (structural wall: the mutation does not compile, as required)\n'
+      PASS=$((PASS+1))
+    else
+      printf '      *** SURVIVED *** a compile-time wall must REJECT this at build time\n'
+      SURVIVED=$((SURVIVED+1)); SURVIVORS+=("$id: $desc")
+      [ $KEEP -eq 0 ] && { printf '\nstopping at first survivor (pass -k to continue)\n'; exit 1; }
+    fi
+    return
+  fi
+
+  if [ $build_broke -eq 1 ]; then
+    printf '      NOT PROVEN — the mutation does not BUILD, so no gate ran; this proves NOTHING\n'
+    printf '%s\n' "$out" | tail -8 | sed 's/^/        /'
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (build/vet failure, not an assertion)")
     [ $KEEP -eq 0 ] && exit 1
     return
   fi
@@ -196,7 +232,8 @@ run_mutation M05 \
   'the live gate grants without a reservation identity' \
   'TestMeteredExecution_|TestHTTPSE2E_EachPOSTCarriesADistinctAttemptID|TestConc03_' \
   . mcp_live_gate.go \
-  's/\t\tReservationID:        resID,/\t\tReservationID:        "",/'
+  's/\t\tReservationID:        resID,/\t\tReservationID:        "",/' \
+  's/\tresID, rerr := newCanaryReservationID\(\)/\t_, rerr := newCanaryReservationID()/'
 
 # ── (6) activation generation omitted from the grant ────────────────────────
 run_mutation M06 \
@@ -581,7 +618,7 @@ run_mutation M59 \
   'an observed response is erased by a later leg that saw none' \
   'TestFoldLegFacts_DirectionsAreOppositeAndConservative' \
   ./internal/mcp/upstreamclient/ internal/mcp/upstreamclient/observed.go \
-  's/\t\tresponseObserved: call\.responseObserved || leg\.responseObserved,/\t\tresponseObserved: call.responseObserved \&\& leg.responseObserved,/'
+  's/\t\tresponseObserved: call\.responseObserved \|\| leg\.responseObserved,/\t\tresponseObserved: call.responseObserved \&\& leg.responseObserved,/'
 
 # ── (60) the coordinator clock swapped without the coordinator lock ────────
 #
