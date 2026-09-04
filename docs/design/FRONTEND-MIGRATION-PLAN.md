@@ -1161,6 +1161,38 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-B CORRECTION ROUND 2 RECORD (this branch, 2026-09-04).** External review
+> of the corrected candidate (`16858885`) named three blockers; RED-before at
+> the exact candidate (`pac_lifecycle_round2_test.go` R2-1..R2-6 and
+> `mcp_tooltrust_harness_test.go`, 5/5 red — the clock-swap test reproduces
+> the root-gate DATA RACE itself under `-race`). **(1) An unreadable reset
+> sidecar could lose the reset permanently**: the loader renamed the only
+> durable evidence aside BEFORE its replacement was proven and ignored the
+> replacement write error, so a later boot found no reset and reopened
+> publish. Now the unreadable bytes are COPIED aside as evidence and the
+> replacement is written over the record path atomically (temp + rename); if
+> the copy or the write fails the original stays in place, the reset stays
+> fail-closed in memory, and the next boot repeats — there is no instant
+> without durable reset evidence. **(2) Progress markers could claim effects
+> that failed**: `saveConfigVersionNote` was best-effort and
+> `publishCurrentConfigSnapshot`'s error was discarded, yet both markers were
+> persisted as done. Now `saveConfigVersionNoteResult` is the error-returning
+> core (refusal by the rewrite-identity gate, marshal failure, write failure;
+> the wrapper keeps every best-effort caller unchanged) and each marker
+> advances ONLY on proven success; a failed or refused effect leaves the
+> operation committed + `pending_reconciliation`, and reconciliation retries
+> exactly that effect (idempotent by `operationId` in the version note and by
+> snapshot content), never repeating a completed one; `operation_pending` now
+> names the pending state and progress. **(3) The root `-race` gate**: the
+> MCP tool-trust harness leaked a reconcile loop across gap environments and
+> swapped the coordinator clock without its mutex. Repaired in an isolated
+> harness-correctness commit: the loop carries a per-composition cancel +
+> done channel, `resetMCPToolTrustForTest` (every gap/soak environment's
+> cleanup) stops AND joins it, `startToolTrustReconcileLoop` stops a previous
+> loop first, and the soak's clock swap goes through `swapClockForTest` under
+> the coordinator mutex. MCP production behavior is unchanged (one loop,
+> started at init, stopped by the lifecycle context).
+>
 > **2E-B TRUE FINAL RECOVERY-FRESHNESS CLOSURE (this branch, 2026-08-30).**
 > External source review of the lifecycle candidate (3669666e) found two
 > remaining frontend defects; red-before at the exact candidate
