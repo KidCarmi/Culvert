@@ -954,6 +954,57 @@ culvert_socks5_accept_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-57: destination-host DNS resolution health. Emitted ONLY once this
+	// node has actually resolved something — resolution runs on the policy path
+	// only for a DestCountry rule on a node with a GeoIP database, and a block
+	// of zeros on an appliance that has no geo rules is indistinguishable from a
+	// resolver that has answered nothing (the socks5/cluster_ca rule, applied
+	// here). Every value is a plain total or a 0/1 gauge: /metrics is
+	// unauthenticated on the proxy port, so no hostname, resolver address or
+	// error text may appear, and nothing here is a label.
+	//
+	// The paging signal is `culvert_dns_resolve_degraded == 1`, not a failure
+	// RATE: a gateway sees a steady background of NXDOMAIN from typos and
+	// beaconing malware, and those are excluded from the degradation run
+	// precisely so they cannot fabricate a page.
+	if dns := dnsResolveState(); dns.Total > 0 {
+		dnsDegraded := 0
+		if dns.Degraded {
+			dnsDegraded = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_dns_resolve_total Destination-host DNS resolutions attempted on the policy path since startup
+# TYPE culvert_dns_resolve_total counter
+culvert_dns_resolve_total %d
+
+# HELP culvert_dns_resolve_failures_total Destination-host DNS resolutions that returned no answer from the resolver
+# TYPE culvert_dns_resolve_failures_total counter
+culvert_dns_resolve_failures_total %d
+
+# HELP culvert_dns_resolve_timeouts_total Destination-host DNS resolutions abandoned at the resolution deadline
+# TYPE culvert_dns_resolve_timeouts_total counter
+culvert_dns_resolve_timeouts_total %d
+
+# HELP culvert_dns_resolve_shed_total Destination-host DNS resolutions refused because the bounded resolver pool was saturated
+# TYPE culvert_dns_resolve_shed_total counter
+culvert_dns_resolve_shed_total %d
+
+# HELP culvert_dns_resolve_stale_served_total Expired-but-servable cached addresses returned while a refresh ran behind them
+# TYPE culvert_dns_resolve_stale_served_total counter
+culvert_dns_resolve_stale_served_total %d
+
+# HELP culvert_dns_resolve_degraded 1 while destination-host DNS resolution has been failing for longer than the degradation threshold; geo-scoped policy rules are not matching
+# TYPE culvert_dns_resolve_degraded gauge
+culvert_dns_resolve_degraded %d
+`,
+			dns.Total,
+			dns.Failures,
+			dns.Timeouts,
+			dns.Shed,
+			dns.StaleServed,
+			dnsDegraded,
+		)
+	}
+
 	// RISK-027: MCP Agent Security Gateway capability health. Emitted ONLY on a
 	// node that requested MCP — `culvert_mcp_gateway_up 0` on a node that never had
 	// MCP is indistinguishable from a dead listener, and the paging rule is `== 0`

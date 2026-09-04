@@ -71,11 +71,28 @@ func init() {
 // webhooks configured. Gating keeps a DNS brownout from turning into goroutine
 // churn on top of the outage. When a subscriber exists the dispatch is
 // byte-identical to the previous inline call.
+//
+// CHAOS-57 bounded the Detail. It used to be the raw err.Error(), and
+// Store.Dispatch dedups on `event + ":" + Detail`: a *net.DNSError's text
+// embeds the QUERIED HOSTNAME and the resolver address, so every failure
+// produced a DISTINCT dedup key that the 30 s window could not suppress by
+// construction, and the fan-out landed in the 500-entry retry queue where it
+// evicts REAL threat alerts. That is the WK-12/RS-5 defect, and here it is
+// remotely triggerable: the hostname is chosen by the client, so any client
+// could both fabricate unbounded alert volume and write arbitrary strings into
+// an operator's alert pipeline. Detail now carries a bounded reason class; the
+// full error is already logged at each of the four dial sites, so nothing is
+// lost. Host stays as-is — it is a separate field and does not enter the dedup
+// key, and knowing which destination failed is the point of the alert.
 func fireDNSFailureAlert(host string, err error) {
 	if !globalAlertStore.HasSubscriber("dns_failure") {
 		return
 	}
-	go fireAlert("dns_failure", AlertPayload{Host: host, Detail: err.Error(), Source: "proxy"})
+	go fireAlert("dns_failure", AlertPayload{
+		Host:   host,
+		Detail: "destination lookup failed: " + classifyDNSFailure(err),
+		Source: "proxy",
+	})
 }
 
 // validateWebhookURL is re-exposed for the admin API handlers (config-time
