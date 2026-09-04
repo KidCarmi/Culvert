@@ -24,10 +24,33 @@ var (
 )
 
 // InitGeoDB opens the GeoLite2-Country .mmdb file.
-// Call once at startup. Subsequent calls replace the open reader atomically.
-// A failure is recorded for LoadError and left for the caller to log; it is
-// cleared by a subsequent successful call so a fixed path stops reporting a
-// stale error.
+//
+// **Call once at startup, and only at startup.** A failure is recorded for
+// LoadError and left for the caller to log; it is cleared by a subsequent
+// successful call so a fixed path stops reporting a stale error.
+//
+// GEO-1 (CHAOS-57). This function used to claim that "subsequent calls replace
+// the open reader atomically". The POINTER swap is atomic; the CLOSE is not
+// safe, and the difference is a process kill rather than an error. geoCache.lookup
+// copies `db := geoDB` under the read lock, RELEASES it, and only then calls
+// db.Country(ip) — while the swap here calls old.Close() immediately after
+// releasing the write lock. geoip2's Close reaches maxminddb's, which
+// **munmaps the backing buffer** (reader_mmap.go), so an in-flight lookup
+// holding the old reader reads unmapped memory: a SIGSEGV/SIGBUS that Go's
+// recover() cannot catch, that crashguard.go never sees, and that leaves no log
+// line — a total gateway outage with no evidence.
+//
+// It is NOT reachable today: loadGeoIP (geoip_startup.go) is the only
+// production caller and runs during startup, before the proxy listener serves.
+// The hazard is that a reload path is a natural next feature — CLAUDE.md
+// mandates a GUI surface for every config option — and the old comment told
+// whoever adds it that the swap was already safe. It is not. Before adding any
+// runtime reload, the reader lifetime must be made safe first: hold the read
+// lock across db.Country, or reference-count the reader, or simply never close
+// the old one (a leaked mapping is strictly cheaper than a crash). Recorded in
+// roadmap/CHAOS-ENGINEERING-REVIEW.md §25.7 rather than fixed here, because
+// building unreachable lifetime machinery for a path with no caller is the
+// wrong trade — the trap was the claim, and the claim is what is corrected.
 func InitGeoDB(path string) error {
 	r, err := geoip2.Open(path)
 	if err != nil {

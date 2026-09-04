@@ -72,7 +72,7 @@ fall-through posture itself (making an unknown country match a block rule would 
 destination this node cannot resolve — a bounded security gap traded for an unbounded availability
 one), and the cgo resolver's uncancellable `getaddrinfo` (the deadline releases the request
 goroutine; the OS thread is bounded by Go's own 500-thread cap). Gates:
-`dns_resolve_chaos_test.go` (20, incl. two CONTROLS — a resolver that simply stopped resolving
+`dns_resolve_chaos_test.go` (21, incl. two CONTROLS — a resolver that simply stopped resolving
 would pass every defect gate while being far worse than the defect). See §25 and
 `docs/operator/dns-resolution-health.md`.
 
@@ -2928,7 +2928,7 @@ logged at each of the four dial sites, so nothing is lost.
 
 ### 25.5 Gates
 
-`dns_resolve_chaos_test.go` (20). D1/D2/D3 were each reproduced against the
+`dns_resolve_chaos_test.go` (21). D1/D2/D3 were each reproduced against the
 pre-fix tree with the equivalent assertion before the fix was written. Two
 **CONTROLS** are included for the CHAOS-56 reason: a resolver that always shed,
 or always served stale, or never refreshed, would pass every defect gate above
@@ -2963,3 +2963,58 @@ pinning the other end of the window.
   single-flight either, so a brownout still produces one resolver query per
   request on the dial path. That is inherent to dialling (each request really
   does need its own connection) and is recorded rather than changed.
+
+### 25.7 GEO-1 — a latent process-kill armed by a comment (recorded, not fixed)
+
+Found while sweeping the domain adjacent to CHAOS-57 and **not reachable in the
+current tree**, but recorded because of how it is armed.
+
+`internal/geoip.InitGeoDB` claimed:
+
+> Call once at startup. **Subsequent calls replace the open reader atomically.**
+
+The pointer swap is atomic. The *close* is not safe, and the difference between
+those two is an error versus a process kill:
+
+```go
+// geoCache.lookup
+geoDBMu.RLock()
+db := geoDB
+geoDBMu.RUnlock()      // ← lock released
+...
+record, err := db.Country(ip)   // ← reader used here, unprotected
+```
+
+```go
+// InitGeoDB
+geoDB = r
+geoDBMu.Unlock()
+if old != nil { _ = old.Close() }   // ← immediately
+```
+
+`geoip2.Reader.Close` delegates to maxminddb's, which **`munmap`s the backing
+buffer** (`reader_mmap.go:55`). An in-flight lookup holding the old reader
+therefore reads unmapped memory: a **SIGSEGV/SIGBUS, which `recover()` cannot
+catch**, which `crashguard.go` never sees, and which leaves no log line. A total
+gateway outage with no evidence — the worst failure shape in the register,
+strictly worse than the panics CHAOS-24 was built to contain, because
+containment is not available at all.
+
+**Reachability today: none.** `loadGeoIP` (`geoip_startup.go`) is the only
+production caller and runs from `initGeoIP` (`main.go:198`) during startup,
+before the proxy listener serves. There is no SIGHUP path, no admin reload, and
+no CP→DP snapshot field for the GeoIP database.
+
+**Why it is recorded rather than fixed.** The danger is not the code, it is the
+comment: a runtime GeoIP reload is a natural next feature (CLAUDE.md mandates a
+GUI surface for every config option, and the register's WK-4 already asks for
+GeoIP staleness surfacing, which invites "so let me reload it"), and the comment
+told whoever adds it that the swap was already safe. Building reference counting
+for a path with no caller is the wrong trade. What shipped is the correction: the
+doc comment now states the hazard, names the three acceptable remedies (hold the
+read lock across `db.Country`, reference-count the reader, or never close the old
+one — a leaked mapping is strictly cheaper than a crash), and requires one of
+them **before** any reload path is added.
+
+**Owner action:** treat "add a GeoIP reload" as blocked on the reader-lifetime
+fix, not as a standalone feature.
