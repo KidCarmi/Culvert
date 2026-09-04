@@ -302,9 +302,15 @@ components:
     ConfigBackup:
       type: object
       description: |
-        Opaque configuration backup envelope. May embed sensitive material
-        (session HMAC, IdP secrets, upstream credentials) — treat as a secret at
-        rest and in transit.
+        Opaque configuration backup envelope (`version` 2 since 2F-D; imports
+        accept 1 and 2). Upstream parent proxies travel ONLY as the versioned
+        `upstream_proxies_v2` representation — `{entries: [{id, scheme, host,
+        port, username, credentialState}]}` — beside the constant marker
+        `upstream_credentials: "omitted"`: no password, sealed record,
+        ciphertext, key id, redaction marker or legacy URL list is ever
+        exported (the legacy `upstreamProxies` key is accepted on import only).
+        Other sections may still embed sensitive material (session HMAC, IdP
+        secrets) — treat as a secret at rest and in transit.
       additionalProperties: true
       x-culvert-sensitive: true
       x-culvert-open-justification: >-
@@ -1008,7 +1014,7 @@ components:
         username: { type: string }
         source: { type: string, enum: [managed, yaml] }
         revision: { type: integer, format: int64, description: 'Per-entry optimistic-concurrency token (echo on PUT/DELETE/credential).' }
-        credentialState: { type: string, enum: [none, configured, unusable, mismatch] }
+        credentialState: { type: string, enum: [none, configured, unusable, mismatch, requiresReplacement] }
         probe: { $ref: '#/components/schemas/UpstreamProbe' }
         health: { $ref: '#/components/schemas/UpstreamHealth' }
         healthy: { type: boolean, description: 'Legacy — true only when the probe is `healthy`.' }
@@ -1075,6 +1081,84 @@ components:
       properties:
         reason: { type: string }
         count: { type: integer }
+    ConfigImportResult:
+      type: object
+      description: >-
+        Import answer. `dryRun:true` answers add `sections`, `settings`, the
+        upstream `plan` and `importDigest`; commits add `cluster_publish_rejected`
+        when the fleet publish was refused. Upstream is reported as COUNTS only.
+      required: [ok]
+      additionalProperties: true
+      properties:
+        ok: { type: boolean }
+        dryRun: { type: boolean }
+        mode: { type: string, enum: [merge, replace] }
+        exportedAt: { type: string }
+        upstream: { $ref: '#/components/schemas/UpstreamImportSummary' }
+        plan: { $ref: '#/components/schemas/UpstreamImportPlan' }
+        importDigest: { type: string, description: 'Deterministic identity of the plan against the current document (`sha256:…`).' }
+        cluster_publish_rejected: { type: string }
+    UpstreamImportSummary:
+      type: object
+      description: 'Counts-only upstream import summary (C5): never an id, authority or credential.'
+      required: [preserved, omitted, cleared, requiresReplacement]
+      additionalProperties: false
+      properties:
+        preserved: { type: integer, description: 'Existing credentials kept (id resolved uniquely, authority unchanged).' }
+        omitted: { type: integer, description: 'Incoming entries whose export declared a credential the export omitted by construction.' }
+        cleared: { type: integer, description: 'Credentials cleared by the import — always 0 (an import never clears; it refuses).' }
+        requiresReplacement: { type: integer, description: 'Entries landing in the requiresReplacement state (declared credential that could not be inherited).' }
+    UpstreamImportPlan:
+      type: object
+      description: >-
+        The whole-file upstream import plan (C9), computed before any store is
+        touched. Identities and actions only — never an authority, username or
+        credential. Incoming: preserve | create | update | requiresReplacement;
+        existing: retain | remove. Any removal/replacement/authority change of a
+        credentialed entry lists it under credentialClearRequired.
+      required: [mode, incoming, existing, credentialClearRequired, counts, yamlOwnedSkipped]
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [merge, replace] }
+        incoming:
+          type: array
+          items: { $ref: '#/components/schemas/UpstreamPlanItem' }
+        existing:
+          type: array
+          items: { $ref: '#/components/schemas/UpstreamPlanItem' }
+        credentialClearRequired:
+          type: array
+          items: { type: string }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+        yamlOwnedSkipped: { type: integer, description: 'Incoming entries whose authority config.yaml owns on this node (read-only, never adopted).' }
+        legacy: { type: boolean, description: 'The payload carried only the pre-2F-D upstreamProxies list (authority-keyed compatibility rule).' }
+    UpstreamPlanItem:
+      type: object
+      required: [id, action]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        action: { type: string, enum: [preserve, create, update, requiresReplacement, retain, remove] }
+    UpstreamImportRefusal:
+      type: object
+      required: [error, code]
+      additionalProperties: true
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [credential_clear_required, import_stale, document_rejected] }
+        plan: { $ref: '#/components/schemas/UpstreamImportPlan' }
+    UpstreamProbeSummary:
+      type: object
+      description: 'Counts-only outcome of one manual probe run (what the audit line carries).'
+      required: [probed, healthy, unhealthy, skipped]
+      additionalProperties: false
+      properties:
+        probed: { type: integer }
+        healthy: { type: integer }
+        unhealthy: { type: integer }
+        skipped: { type: integer, description: 'Credential-ineligible entries, not probed.' }
     UpstreamConfig:
       type: object
       description: >-
@@ -1083,7 +1167,7 @@ components:
         token every bulk mutation must echo; `migration`/`key`/`degraded` are
         the node-local truth an operator needs to understand an ineligible
         credential. Scope is always node-local (never CP→DP synced).
-      required: [enabled, proxies, entries, revision, mode, effective, coverage, probe, direct_fallback, migration, key, credentialsIneligible, scope]
+      required: [enabled, proxies, entries, revision, mode, effective, coverage, probe, direct_fallback, migration, key, credentialsIneligible, credentialsRequiringReplacement, scope]
       additionalProperties: false
       properties:
         enabled: { type: boolean }
@@ -1123,9 +1207,11 @@ components:
         key: { $ref: '#/components/schemas/UpstreamKeyState' }
         degraded: { $ref: '#/components/schemas/UpstreamDegraded' }
         yamlDegraded: { $ref: '#/components/schemas/UpstreamDegraded' }
-        credentialsIneligible: { type: integer, description: 'Entries whose credential is unusable or mismatched (never selected, never probed).' }
+        credentialsIneligible: { type: integer, description: 'Entries whose credential is unusable, mismatched or requires replacement (never selected, never probed).' }
+        credentialsRequiringReplacement: { type: integer, description: '2F-D (C12): entries in the distinct requiresReplacement state — restored from a backup (which omits credentials by design) or imported with a declared credential this node never held; ineligible until each is replaced (T2) or cleared (T3).' }
         scope: { type: string, enum: [node-local] }
         ok: { type: boolean, description: 'Present on mutation answers.' }
+        summary: { $ref: '#/components/schemas/UpstreamProbeSummary' }
         yamlOwned: { type: integer, description: 'v1 adapter — incoming authorities skipped because config.yaml owns them.' }
         entry: { $ref: '#/components/schemas/UpstreamEntryDTO' }
     UpstreamEntryDTO:
@@ -1142,7 +1228,7 @@ components:
         authority: { type: string }
         source: { type: string }
         revision: { type: integer, format: int64 }
-        credentialState: { type: string, enum: [none, configured, unusable, mismatch] }
+        credentialState: { type: string, enum: [none, configured, unusable, mismatch, requiresReplacement] }
     UpstreamEntrySpec:
       type: object
       description: >-
@@ -3084,13 +3170,24 @@ paths:
         - name: dryRun
           in: query
           required: false
-          description: When set, validate and diff without applying.
-          schema: { type: boolean }
+          description: >-
+            `1` or `true`: validate, plan and diff without applying anything.
+            The answer carries the whole-file upstream `plan` (C9), a
+            deterministic `importDigest` and the counts-only `upstream` summary.
+          schema: { type: string, enum: ['1', 'true'] }
         - name: mode
           in: query
           required: false
           description: "`replace` wipes stores before applying; default is merge."
           schema: { type: string, enum: [merge, replace] }
+        - name: importDigest
+          in: query
+          required: false
+          description: >-
+            The digest a dry-run returned. A commit re-plans under the
+            authoritative lock and answers 409 `import_stale` when the upstream
+            document changed since the plan was computed.
+          schema: { type: string }
       requestBody:
         required: true
         content:
@@ -3098,13 +3195,26 @@ paths:
             schema: { $ref: '#/components/schemas/ConfigBackup' }
       responses:
         '200':
-          description: Configuration imported.
+          description: >-
+            Configuration imported (or, with dryRun, planned). The upstream
+            section is reported as counts only.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/OkResponse' }
-              example: { ok: true }
+              schema: { $ref: '#/components/schemas/ConfigImportResult' }
+              example: { ok: true, mode: merge, upstream: { preserved: 1, omitted: 1, cleared: 0, requiresReplacement: 0 } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: >-
+            `credential_clear_required` — the import would remove, replace or
+            change the authority of a credentialed parent proxy; the complete
+            plan is attached and NOTHING was mutated (clear each credential,
+            Tier-3, first). `import_stale` — the echoed importDigest no longer
+            matches the document. `document_rejected` — the stored upstream
+            document is rejected.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamImportRefusal' }
 
   /api/policy:
     get:
@@ -9991,8 +10101,16 @@ paths:
     post:
       operationId: checkUpstreamHealth
       tags: [cluster]
-      summary: Force upstream health check
-      description: Force upstream health check.
+      summary: Run a manual upstream probe
+      description: >-
+        Runs the shared probe classifier now (2F-D, R24 lifecycle): admin-only;
+        at most one manual run in flight and at most one accepted run per 10 s
+        window (a repeat answers 429 `probe_in_flight` / `probe_rate_limited`
+        with `retryAfterSeconds` and leaves NO success audit); every probe is
+        bounded at 5 s per entry; an accepted run is audited as
+        `upstream.probe.manual` with counts + `scope=node-local`. Bounded
+        reasons only — never a raw transport or proxy error. The periodic probe
+        loop is unaffected.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -10003,13 +10121,21 @@ paths:
       x-culvert-idempotency: non-idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: low
-      x-culvert-audit-event: upstream.health.check
+      x-culvert-audit-event: upstream.probe.manual
       responses:
         '200':
-          description: Force upstream health check.
+          description: The run completed; the read model plus a counts-only `summary`.
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '429':
+          description: A manual run is in flight or one was accepted less than 10 s ago (no success audit).
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamRefusal' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/logs/purge:
