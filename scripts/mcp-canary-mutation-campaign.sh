@@ -249,7 +249,7 @@ run_mutation M20 \
   'an unprovable absence resolves as not_received' \
   'TestReconcile_ZeroWithoutCompletenessStaysRequired|TestReconcile_WitnessUnavailableStaysUnresolved' \
   ./internal/mcp/execution/ internal/mcp/execution/reconcile.go \
-  's/\tif obs\.Complete && obs\.CompletenessWatermark != "" \{\n\t\treturn model\.ReconNotReceived\n\t\}\n\treturn model\.ReconRequired/\treturn model.ReconNotReceived/'
+  's/\tif obs\.Complete && obs\.CompletenessWatermark != "" && bindingConsistent\(obs, orphan, expectServer, expectMethod\) \{\n\t\treturn model\.ReconNotReceived\n\t\}\n\treturn model\.ReconRequired/\treturn model.ReconNotReceived/'
 
 # ── (23) no terminal outcome on ANY non-executed path ───────────────────────
 #

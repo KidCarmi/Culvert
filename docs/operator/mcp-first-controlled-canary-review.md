@@ -925,10 +925,12 @@ not counted as proof unless the mutation targets a structural wall whose purpose
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
 longer matches the source is scored as a FAILURE rather than a pass.
 
-That last rule earned its keep: three patterns (M03, M04, M12) had drifted silently against
-refactors made *inside this work* — the `runExecute` decomposition done to satisfy the complexity
-linters, and the `RecoverAttempts` split — and were proving nothing until repaired. A campaign that
-scored a skip as a pass would have reported a clean run over three dead gates.
+That last rule earned its keep FOUR times: M03, M04 and M12 had drifted silently against refactors
+made *inside this work* — the `runExecute` decomposition done to satisfy the complexity linters, and
+the `RecoverAttempts` split — and M20 drifted against the binding fix above, in the very same file
+the new mutation M32 targets. A campaign that scored a skip as a pass would have reported a clean run
+over four dead gates. The rule is not defensive tidiness: a mutation campaign measures the GATES, and
+a pattern that no longer matches measures nothing at all.
 
 ---
 
