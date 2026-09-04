@@ -46,7 +46,7 @@ func captureConfigBackup() *configBackup {
 	pc := pacStore.Get()
 	profCfg := pacProfiles.Get() // single Get: a torn two-call capture could carry dangling pool refs
 	return &configBackup{
-		Version:             1,
+		Version:             configBackupVersion,
 		ExportedAt:          time.Now().UTC().Format(time.RFC3339),
 		BlocklistMode:       bl.Mode(),
 		Blocklist:           bl.List(),

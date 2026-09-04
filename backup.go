@@ -27,10 +27,17 @@ const backupSchemaVersion = 1
 // each tarball. Fields are documented in
 // roadmap/D1.3-backup-restore-design.md.
 type backupManifest struct {
-	SchemaVersion  int                  `json:"schema_version"`
-	CreatedAt      string               `json:"created_at"`
-	CulvertVersion string               `json:"culvert_version"`
-	Files          []backupManifestFile `json:"files"`
+	SchemaVersion  int    `json:"schema_version"`
+	CreatedAt      string `json:"created_at"`
+	CulvertVersion string `json:"culvert_version"`
+	// CredentialsOmitted (2F-D, C5) records that the archived
+	// admin_settings.json carries NO upstream credential material (every
+	// sealed record was stripped and its entry marked requiresReplacement,
+	// upstream_backup_strip.go). Always true — there is no secret-inclusive
+	// backup mode. A restore that sees it reports the exact count of entries
+	// that will need a credential set again.
+	CredentialsOmitted bool                 `json:"credentialsOmitted"`
+	Files              []backupManifestFile `json:"files"`
 }
 
 type backupManifestFile struct {
@@ -121,9 +128,15 @@ func isKEKArtifactPath(tarOrSrcPath string) bool {
 // exclusion must not depend on an import that a future refactor could drop.
 const webhookSigningKeyFileName = ".alert_webhook_key"
 
+// upstreamSealingKeyFileName is the node-local AES key sealing the
+// Upstream v2 parent-proxy credentials (internal/upstream KeyFileName);
+// duplicated as a literal for the same reason as the webhook key above.
+const upstreamSealingKeyFileName = ".upstream_cred_key"
+
 // isNodeLocalKeyArtifactPath reports whether a path refers to node-local key
 // material that must never share an archive with the ciphertext it unwraps —
-// today a CA-3 KEK or the alert-webhook signing key.
+// today a CA-3 KEK, the alert-webhook signing key or the upstream credential
+// key (2F-D).
 //
 // alert_webhooks.json joined the artifact list, and its secrets are AES-GCM
 // blobs whose key lives beside it as .alert_webhook_key. Packing both would
@@ -133,8 +146,11 @@ const webhookSigningKeyFileName = ".alert_webhook_key"
 // defense-in-depth for the config_versions/ walk and any future dataDir glob.
 func isNodeLocalKeyArtifactPath(tarOrSrcPath string) bool {
 	base := filepath.Base(filepath.ToSlash(tarOrSrcPath))
-	return isKEKArtifactPath(tarOrSrcPath) || base == webhookSigningKeyFileName
+	return isKEKArtifactPath(tarOrSrcPath) || base == webhookSigningKeyFileName || base == upstreamSealingKeyFileName
 }
+
+// adminSettingsTarPath is the archived settings file the sanitizer rewrites.
+const adminSettingsTarPath = "data/admin_settings.json"
 
 // runBackup is the CLI entrypoint. Packs the default Tier-1+2 artifact
 // list rooted at dataDir into outPath, atomically (writes to outPath+".tmp"
@@ -193,10 +209,11 @@ func runBackupWith(outPath string, artifacts []backupArtifact, passphrase string
 	sort.Slice(manifestFiles, func(i, j int) bool { return manifestFiles[i].Path < manifestFiles[j].Path })
 
 	manifest := backupManifest{
-		SchemaVersion:  backupSchemaVersion,
-		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-		CulvertVersion: version,
-		Files:          manifestFiles,
+		SchemaVersion:      backupSchemaVersion,
+		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
+		CulvertVersion:     version,
+		CredentialsOmitted: true, // 2F-D: the archive never carries upstream credential material
+		Files:              manifestFiles,
 	}
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -309,6 +326,21 @@ func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestF
 	body, err := os.ReadFile(srcPath) // #nosec G304 -- operator-controlled path; symlinks rejected above
 	if err != nil {
 		return fmt.Errorf("backup: read %q: %w", srcPath, err)
+	}
+	// 2F-D (C5): the archived admin_settings.json is the SANITIZED
+	// representation — every sealed upstream credential removed and its
+	// entry marked requiresReplacement — in BOTH backup modes. The live file
+	// on disk is untouched; only the bytes being packed are rewritten, and
+	// the manifest checksum/size describe what the archive actually holds.
+	if tarPath == adminSettingsTarPath {
+		sanitized, stripped, serr := stripUpstreamCredentialsFromSettings(body)
+		if serr != nil {
+			return fmt.Errorf("backup: sanitize %q: %w", tarPath, serr)
+		}
+		if stripped > 0 {
+			fmt.Fprintf(os.Stderr, "Backup: omitted %d upstream credential(s) from %q (restore marks them requiresReplacement)\n", stripped, tarPath)
+		}
+		body = sanitized
 	}
 	sum := sha256.Sum256(body)
 	perm := info.Mode().Perm()

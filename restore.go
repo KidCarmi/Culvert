@@ -51,6 +51,11 @@ type restoreSummary struct {
 	EnrolledDPCount   int    // from cluster.json (len(state.Nodes))
 	CAFingerprint     string // sha256 of cluster-ca.crt's parsed cert.Raw
 	CABundleEncrypted bool   // true if ca.bundle starts with caMagic
+	// 2F-D (C12): the manifest's credentialsOmitted marker and the exact
+	// number of upstream entries the restored node will boot into the
+	// requiresReplacement state (counted from the archived settings file).
+	CredentialsOmitted              bool
+	CredentialsRequiringReplacement int
 }
 
 // restoreMode selects which artifacts come from the tarball vs. are
@@ -204,6 +209,17 @@ func validateBackup(tarPath, _ /*dataDir*/, passphrase, backupPassphrase string)
 			summary.Tier1Files++
 		} else {
 			summary.Tier2Files++
+		}
+	}
+	summary.CredentialsOmitted = manifest.CredentialsOmitted
+	if settings, ok := files[adminSettingsTarPath]; ok {
+		summary.CredentialsRequiringReplacement = countUpstreamCredentialsRequiringReplacement(settings)
+	}
+	// A node-local key must never be restored from an archive (it is never
+	// packed either; a hand-built tarball is refused rather than trusted).
+	for path := range files {
+		if isNodeLocalKeyArtifactPath(path) {
+			return nil, nil, nil, fmt.Errorf("restore: tarball carries node-local key material %q; refusing (keys are never archived or restored)", path)
 		}
 	}
 
@@ -774,6 +790,8 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 		fmt.Fprintf(w, "  none.\n")
 	}
 
+	printRestoreUpstreamCredentials(w, s)
+
 	fmt.Fprintf(w, "\nValidation: PASS\n")
 	if s.AdminCount > 0 {
 		fmt.Fprintf(w, "  ui_users.json:                %d admin account(s) in restored manifest\n", s.AdminCount)
@@ -790,6 +808,25 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 
 	fmt.Fprintf(w, "\nThis was a dry-run. No files were written. /data unchanged.\n")
 	fmt.Fprintf(w, "D1.3b.2b will add --confirm to commit a restore.\n")
+}
+
+// printRestoreUpstreamCredentials is the 2F-D (C12) section of the dry-run
+// report: the manifest marker and the exact count of entries the restored
+// node will boot into requiresReplacement. Counts only.
+func printRestoreUpstreamCredentials(w io.Writer, s *restoreSummary) {
+	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+	p("\nUpstream credentials:\n")
+	if s.CredentialsOmitted {
+		p("  archive: credentials omitted (never archived)\n")
+	} else {
+		p("  archive: pre-2F-D backup (no credentialsOmitted marker)\n")
+	}
+	p("  credentials requiring replacement: %d\n", s.CredentialsRequiringReplacement)
+	if s.CredentialsRequiringReplacement > 0 {
+		p("  ⓘ Each affected parent proxy boots ineligible (requiresReplacement) until its credential is set again\n")
+		p("    through POST /api/upstream/entries/{id}/credential (replace) or cleared (clear). No parent is ever sent unauthenticated.\n")
+	}
+	p("  node-local credential key: never restored, deleted or overwritten\n")
 }
 
 // ─── D1.3b.2b: destructive commit path ──────────────────────────────────────
@@ -1075,9 +1112,12 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 			return relErr
 		}
 		tarballPath := "data/" + filepath.ToSlash(rel)
-		if mode.fromTarball(tarballPath) {
+		if mode.fromTarball(tarballPath) && !isNodeLocalKeyArtifactPath(tarballPath) {
 			// Tarball-source — pass 1 handled it (or it's a tarball
-			// path that simply isn't in current /data).
+			// path that simply isn't in current /data). Node-local key
+			// files are the exception in EVERY mode (2F-D, C12): they are
+			// never archived, so the node keeps its own — a restore must
+			// never delete or overwrite .upstream_cred_key (or a KEK).
 			return nil
 		}
 		if written[tarballPath] {

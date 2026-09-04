@@ -626,7 +626,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := configBackup{
-		Version:    1,
+		Version:    configBackupVersion,
 		ExportedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	filename := "culvert-config-export"
@@ -669,9 +669,10 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.BlockPageHTML = getBlockPageHTML()
 		filename = "culvert-blockpage"
 	case "upstream":
-		for _, us := range upstreamPool.List() {
-			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.Authority}) // credential-free authority (username kept so a re-import preserves identity)
-		}
+		// 2F-D (C5): the versioned v2 representation; credentials omitted
+		// by construction (no legacy list, no marker, no material).
+		b.UpstreamProxiesV2 = upstreamExportNow()
+		b.UpstreamCredentials = upstreamCredentialsOmitted
 		filename = "culvert-upstream"
 	case "connlimit":
 		b.ConnLimitEnabled = connLimiter.Enabled()
@@ -703,10 +704,9 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		if html := getBlockPageHTML(); html != "" {
 			b.BlockPageHTML = html
 		}
-		// Upstream proxies.
-		for _, us := range upstreamPool.List() {
-			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.Authority}) // credential-free authority (username kept so a re-import preserves identity)
-		}
+		// Upstream proxies (2F-D, C5): versioned v2 representation, credentials omitted.
+		b.UpstreamProxiesV2 = upstreamExportNow()
+		b.UpstreamCredentials = upstreamCredentialsOmitted
 		// Connection limits.
 		b.ConnLimitEnabled = connLimiter.Enabled()
 		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
@@ -774,7 +774,7 @@ func importSectionEffect(replaceMode bool, incoming, current int) string {
 // (replace clears then loads; merge appends/upserts) but mutates nothing —
 // every count is read from the live store, every incoming count from the
 // parsed backup.
-func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSection, []importPreviewSetting) {
+func buildImportPreview(b *configBackup, replaceMode bool, planned *upstreamImportPlanned) ([]importPreviewSection, []importPreviewSetting) {
 	var sections []importPreviewSection
 	add := func(name string, incoming, current int, note string) {
 		if incoming == 0 {
@@ -855,12 +855,16 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 		"import always appends exemptions (mode-independent)")
 	add("PAC Exclusions", len(b.PACExclusions), len(pacStore.Get().Exclusions), "")
 	add("Alert Webhooks", len(b.AlertWebhooks), len(globalAlertStore.List()), "")
-	// Upstream proxies: apiConfigImport always REPLACES the pool via SetProxies
-	// when the backup carries any — the effect is a full replace regardless of mode.
-	upstreamCur := len(upstreamPool.List())
-	addFixed("Upstream Proxies", len(b.UpstreamProxies), upstreamCur,
-		fmt.Sprintf("replace %d existing with %d incoming", upstreamCur, len(b.UpstreamProxies)),
-		"import always replaces the upstream pool (mode-independent)")
+	// Upstream proxies (2F-D): the row is derived from the whole-file plan
+	// (counts only); the plan itself travels beside the sections.
+	if planned != nil && planned.Plan != nil {
+		c := planned.Plan.Counts
+		incoming := len(planned.Plan.Incoming) + planned.Plan.YAMLOwnedSkipped
+		addFixed("Upstream Proxies", incoming, len(upstreamPool.Document().Entries),
+			fmt.Sprintf("preserve %d, create %d, update %d, requiresReplacement %d; retain %d, remove %d",
+				c[planPreserve], c[planCreate], c[planUpdate], c[planRequiresReplacement], c[planRetain], c[planRemove]),
+			"identity-keyed plan; credentials are never imported (see plan)")
+	}
 
 	return sections, buildImportSettingsPreview(b)
 }
@@ -928,20 +932,28 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 // per-section change summary and the scalar settings that would be applied. It
 // mutates nothing (the audit-ring append mirrors the also-read-only
 // config.export path and satisfies the route's AuditExpected metadata).
-func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup, replaceMode bool) {
-	sections, settings := buildImportPreview(b, replaceMode)
+func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup, replaceMode bool, planned *upstreamImportPlanned) {
+	sections, settings := buildImportPreview(b, replaceMode, planned)
 	mode := "merge"
 	if replaceMode {
 		mode = "replace"
 	}
 	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from config exported %s", b.ExportedAt))
-	jsonOK(w, map[string]any{
+	resp := map[string]any{
 		"dryRun":     true,
 		"mode":       mode,
 		"exportedAt": b.ExportedAt,
 		"sections":   sections,
 		"settings":   settings,
-	})
+	}
+	if planned != nil && planned.Plan != nil {
+		// 2F-D (C9): the complete upstream plan + the deterministic digest a
+		// commit may echo (?importDigest=) to be refused if the document moved.
+		resp["plan"] = planned.Plan
+		resp["importDigest"] = planned.Digest
+		resp["upstream"] = planned.Result
+	}
+	jsonOK(w, resp)
 }
 
 // importPolicyRules applies the backup's policy rules under the given mode.
@@ -1018,7 +1030,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if b.Version != 1 {
+	if b.Version < 1 || b.Version > configBackupVersion {
 		http.Error(w, "unsupported backup version", http.StatusBadRequest)
 		return
 	}
@@ -1032,8 +1044,18 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// version, no admin-settings write. This is the safety gate the import UI
 	// shows before an admin commits a (potentially destructive replace-mode)
 	// import (P2 import-preview, POLICY-ARCHITECTURE-FUTURE §6).
-	if r.URL.Query().Get("dryRun") == "true" {
-		writeImportPreview(w, r, &b, replaceMode)
+	// 2F-D: the upstream section is PLANNED over the whole file before any
+	// store is touched (C9). A dry-run returns the plan + digest and applies
+	// nothing; a commit refuses 409 credential_clear_required (with the
+	// complete plan) here, before routing, PAC, upstream or any other store
+	// is mutated, and re-plans under the authoritative lock at apply time.
+	upstreamPlanned, err := upstreamPlanImport(&b, replaceMode, upstreamPool.Document())
+	if err != nil {
+		writeUpstreamPlanRefusal(w, err)
+		return
+	}
+	if importDryRunRequested(r) {
+		writeImportPreview(w, r, &b, replaceMode, upstreamPlanned)
 		return
 	}
 
@@ -1073,21 +1095,6 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Upstream pre-validation (2F-C, before ANY store mutation): every
-	// incoming URL must parse to a canonical authority and must not carry a
-	// real password (an export never contains one; a URL with a password is
-	// refused whole as credentials_not_importable — credentials are set
-	// only through the write-only credential endpoint). The redaction marker
-	// a client may echo back is accepted and PRESERVES the live credential.
-	// The merged document (live credentialed entries kept, YAML-owned
-	// authorities skipped, authority uniqueness enforced) is built here so the
-	// apply below cannot fail after other sections have already mutated.
-	upstreamImport, err := upstreamImportDocument(b.UpstreamProxies, replaceMode)
-	if err != nil {
-		writeUpstreamImportRefusal(w, err)
-		return
-	}
-
 	// Blocker B (exclusive side): from here down the import both REMOVES
 	// shared objects (replace mode) and INSTALLS references wholesale, so the
 	// whole apply region holds the reference-integrity gate exclusively —
@@ -1116,6 +1123,24 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if err := validateRewriteStableIDs(b.RewriteRules); err != nil {
 		http.Error(w, "import refused: "+sanitizeLog(err.Error()), http.StatusBadRequest)
 		return
+	}
+
+	// Upstream apply (2F-D): FIRST among the mutations and durable-before-
+	// anything-else — the plan is recomputed under the admin-settings lock
+	// against the document as it is NOW, the dry-run digest (when the client
+	// echoed one) is revalidated, and a stale/refused plan answers 409 with
+	// zero mutation of any section.
+	var upstreamResult *upstreamImportResult
+	if upstreamPlanned != nil && upstreamPlanned.Plan != nil {
+		applied, err := upstreamImportApply(&b, replaceMode, strings.TrimSpace(r.URL.Query().Get("importDigest")))
+		if err != nil {
+			writeUpstreamPlanRefusal(w, err)
+			return
+		}
+		if applied != nil && applied.Plan != nil {
+			res := applied.Result
+			upstreamResult = &res
+		}
 	}
 
 	// Blocklist. Feed attribution is carried across a replace-mode
@@ -1300,18 +1325,8 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Upstream proxies (Finding 10.3). SetProxies keeps the YAML-configured
-	// circuit-breaker parameters (previously hardcoded to 5/60s here).
-	// The merged v2 document was pre-validated above; a credentialed live
-	// entry is never removed or replaced by an import (omission or
-	// redacted echo both keep it), and adminSettingsSave below persists it.
-	if upstreamImport != nil {
-		if err := upstreamPool.SetDocument(*upstreamImport); err != nil {
-			logger.Printf("ConfigImport: upstream document rejected: %s", upstreamBoundedReason(err))
-		} else {
-			applyUpstreamProxy()
-		}
-	}
+	// Upstream proxies: applied FIRST (above) under the authoritative lock;
+	// the durable v2 document already carries the planned state.
 
 	// Connection limits (Finding 10.3).
 	if b.ConnLimitMaxPerIP > 0 {
@@ -1346,6 +1361,10 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// did not receive it (the local import still succeeded).
 	pubErr := publishCurrentConfigSnapshot()
 	resp := map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt}
+	if upstreamResult != nil {
+		// 2F-D (C5): counts only — never an id, authority or credential.
+		resp["upstream"] = *upstreamResult
+	}
 	if pubErr != nil {
 		resp["cluster_publish_rejected"] = pubErr.Error()
 	}

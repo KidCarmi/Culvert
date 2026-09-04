@@ -666,7 +666,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/upstream/settings", Handler: "apiUpstreamSettings", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
 	{Path: "/api/upstream/health", Handler: "apiUpstreamHealth", Domain: "cluster", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "force health check; no audit"}}},
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "2F-D: manual probe run — single-flight, 10s window (429 probe_in_flight|probe_rate_limited, no success audit), ≤5s per entry, audited upstream.probe.manual with counts + scope=node-local"}}},
 	{Path: "/api/upstream/entries", Handler: "apiUpstreamEntries", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "2F-C: create a managed entry (server ULID; credential-free; document-revision fenced)"},

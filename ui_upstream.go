@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,10 +98,16 @@ func upstreamView() map[string]any {
 	eff := upstreamPool.Effective()
 	doc := upstreamPool.Document()
 	st := getUpstreamState()
-	ineligible := 0
+	ineligible, requiresReplacement := 0, 0
 	for i := range list {
-		if cs := list[i].CredentialState; cs == upstream.CredentialUnusable || cs == upstream.CredentialMismatch {
+		switch list[i].CredentialState {
+		case upstream.CredentialUnusable, upstream.CredentialMismatch:
 			ineligible++
+		case upstream.CredentialRequiresReplacement:
+			// 2F-D (C12): a sanitized restore/import left this entry without
+			// the credential it is known to need — ineligible until T2/T3.
+			ineligible++
+			requiresReplacement++
 		}
 	}
 	probeConfigured, probeInterval := upstreamPool.ProbeConfig()
@@ -123,7 +130,11 @@ func upstreamView() map[string]any {
 		"migration":             st.Migration,
 		"key":                   st.Key,
 		"credentialsIneligible": ineligible,
-		"scope":                 "node-local",
+		// credentialsRequiringReplacement (2F-D, C12) counts the entries in
+		// the distinct requiresReplacement state; the warning it drives
+		// stays until each one is replaced (T2) or cleared (T3).
+		"credentialsRequiringReplacement": requiresReplacement,
+		"scope":                           "node-local",
 	}
 	if st.Degraded != nil {
 		v["degraded"] = st.Degraded
@@ -156,8 +167,14 @@ func apiUpstreamSettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, upstreamView())
 }
 
-// apiUpstreamHealth runs the shared probe classifier now (admin). The
-// response carries bounded reasons only.
+// apiUpstreamHealth runs the shared probe classifier now (admin only).
+// 2F-D (R24) lifecycle: at most one manual run in flight and at most one
+// accepted run per upstream.ManualProbeWindow (a repeat answers 429 with a
+// bounded code + retryAfterSeconds and leaves NO success audit); every
+// probe is bounded at 5 s per entry by the engine; an ACCEPTED run is
+// audited with counts only + scope=node-local. The response carries
+// bounded reasons only — never a raw transport or proxy error. The shared
+// classifier and the periodic loop are untouched.
 func apiUpstreamHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -166,9 +183,22 @@ func apiUpstreamHealth(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	upstreamPool.HealthCheck(upstream.ProbeManual)
+	ok, code, retryAfter := upstreamPool.BeginManualProbe(time.Now())
+	if !ok {
+		secs := int(retryAfter/time.Second) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeUpstreamRefusal(w, &upstreamRefusal{Status: http.StatusTooManyRequests, Code: code,
+			Msg:     "a manual probe run is already in flight or was accepted less than " + upstream.ManualProbeWindow.String() + " ago",
+			Current: map[string]any{"retryAfterSeconds": secs, "scope": "node-local"}})
+		return
+	}
+	sum := upstreamPool.HealthCheck(upstream.ProbeManual)
+	upstreamPool.EndManualProbe()
+	auditEvent(r, "upstream.probe.manual", "upstream",
+		fmt.Sprintf("probed=%d healthy=%d unhealthy=%d skipped=%d scope=node-local", sum.Probed, sum.Healthy, sum.Unhealthy, sum.Skipped))
 	v := upstreamView()
 	v["ok"] = true
+	v["summary"] = sum
 	jsonOK(w, v)
 }
 
@@ -613,20 +643,18 @@ func apiUpstreamEntryCredential(w http.ResponseWriter, r *http.Request, id strin
 				return cur, nil, &upstreamRefusal{Status: http.StatusInternalServerError, Code: "seal_failed", Msg: "the credential could not be sealed; nothing was changed"}
 			}
 			e.Credential = sealed
+			e.RequiresReplacement = false // T2 resolves a sanitized-restore/import marker
 			e.Revision++
 			e.UpdatedAt = now
 			next.Revision++
 			return next, &upstreamOutcome{status: http.StatusOK, action: "upstream.credential.replace", object: e.ID,
 				detail: "authority=" + e.Authority(), result: map[string]any{"entry": upstreamEntryDTOFrom(*e, upstream.CredentialConfigured)}}, nil
 		default: // clear (T3): the exact entry id must be typed
-			if e.Credential == nil {
-				return cur, nil, &upstreamRefusal{Status: http.StatusConflict, Code: "no_credential", Msg: "this entry holds no credential material", Current: map[string]any{"id": e.ID, "revision": e.Revision}}
-			}
-			if body.Confirm != e.ID {
-				return cur, nil, &upstreamRefusal{Status: http.StatusConflict, Code: "confirm_required",
-					Msg: "clearing a credential is a Tier-3 action: retype the exact entry id into confirm", Current: map[string]any{"id": e.ID, "revision": e.Revision, "confirmField": "confirm", "confirmValue": e.ID}}
+			if ref := upstreamClearPrecondition(e, body.Confirm); ref != nil {
+				return cur, nil, ref
 			}
 			e.Credential = nil
+			e.RequiresReplacement = false // T3 resolves the marker too (the entry is knowingly credential-free)
 			e.Revision++
 			e.UpdatedAt = now
 			next.Revision++
@@ -634,6 +662,20 @@ func apiUpstreamEntryCredential(w http.ResponseWriter, r *http.Request, id strin
 				detail: "authority=" + e.Authority(), result: map[string]any{"entry": upstreamEntryDTOFrom(*e, upstream.CredentialNone)}}, nil
 		}
 	})
+}
+
+// upstreamClearPrecondition is the T3 gate of a credential clear: there must
+// be something to clear (sealed material, or a requiresReplacement marker)
+// and the exact entry id must have been retyped.
+func upstreamClearPrecondition(e *upstream.ManagedEntry, confirm string) *upstreamRefusal {
+	if e.Credential == nil && !e.RequiresReplacement {
+		return &upstreamRefusal{Status: http.StatusConflict, Code: "no_credential", Msg: "this entry holds no credential material", Current: map[string]any{"id": e.ID, "revision": e.Revision}}
+	}
+	if confirm != e.ID {
+		return &upstreamRefusal{Status: http.StatusConflict, Code: "confirm_required",
+			Msg: "clearing a credential is a Tier-3 action: retype the exact entry id into confirm", Current: map[string]any{"id": e.ID, "revision": e.Revision, "confirmField": "confirm", "confirmValue": e.ID}}
+	}
+	return nil
 }
 
 // upstreamEntryDTOFrom renders an entry with the state the mutation just

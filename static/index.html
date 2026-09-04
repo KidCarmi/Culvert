@@ -17422,7 +17422,8 @@ function upstreamModeLabel(mode) {
 
 function upstreamCredentialBadge(state) {
   const m = {none: ['neutral', 'none'], configured: ['ok', 'configured'],
-             unusable: ['blocked', 'unusable'], mismatch: ['blocked', 'mismatch']};
+             unusable: ['blocked', 'unusable'], mismatch: ['blocked', 'mismatch'],
+             requiresReplacement: ['blocked', 'requires replacement']};
   const [cls, label] = m[state] || ['neutral', escHtml(String(state || ''))];
   return '<span class="badge ' + cls + '">' + label + '</span>';
 }
@@ -17455,7 +17456,8 @@ function renderUpstream() {
       ' · periodic probe: ' + (probe.configured ? 'every ' + escHtml(probe.interval || '') : 'not configured') +
       ' · scope: node-local' +
       (key.state && key.state !== 'unused' ? ' · credential key: ' + escHtml(key.state) : '') +
-      (v.credentialsIneligible ? ' · <span style="color:var(--red)">' + escHtml(String(v.credentialsIneligible)) + ' credential' + (v.credentialsIneligible === 1 ? '' : 's') + ' ineligible</span>' : '');
+      (v.credentialsIneligible ? ' · <span style="color:var(--red)">' + escHtml(String(v.credentialsIneligible)) + ' credential' + (v.credentialsIneligible === 1 ? '' : 's') + ' ineligible</span>' : '') +
+      (v.credentialsRequiringReplacement ? ' · <span style="color:var(--red)">' + escHtml(String(v.credentialsRequiringReplacement)) + ' require' + (v.credentialsRequiringReplacement === 1 ? 's' : '') + ' replacement</span>' : '');
   }
   // CHAOS-11: surface the fail-open bypass — a configured chain with every
   // parent down silently egresses DIRECT; make that state impossible to miss.
@@ -17477,6 +17479,10 @@ function renderUpstream() {
     if (v.yamlDegraded && v.yamlDegraded.reason) parts.push('The config.yaml upstream seed was refused whole (' + escHtml(v.yamlDegraded.reason) + (v.yamlDegraded.count ? ', ' + escHtml(String(v.yamlDegraded.count)) : '') + '); fix the YAML and reload.');
     if (mig.state === 'degraded') parts.push('Legacy pool migration degraded (' + escHtml(mig.reason || '') + '); the legacy file was left untouched.');
     if (v.key && (v.key.state === 'missing' || v.key.state === 'unreadable')) parts.push('Credential key ' + escHtml(v.key.state) + ': sealed credentials are unusable until .upstream_cred_key is restored (it is never re-minted automatically).');
+    // 2F-D (C12): a restore from a backup (which omits credentials by design)
+    // leaves formerly credentialed parents in requiresReplacement — ineligible,
+    // never sent unauthenticated — until each is replaced (T2) or cleared (T3).
+    if (v.credentialsRequiringReplacement) parts.push(escHtml(String(v.credentialsRequiringReplacement)) + ' parent prox' + (v.credentialsRequiringReplacement === 1 ? 'y requires' : 'ies require') + ' a credential to be set again (restored from a backup, which never carries credentials). Each stays ineligible until you set its credential again (Replace credential) or clear it deliberately (Clear credential); plain-HTTP egress is not chained through it meanwhile.');
     degraded.innerHTML = parts.join(' ');
     degraded.style.display = parts.length ? '' : 'none';
   }

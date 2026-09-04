@@ -190,6 +190,16 @@ type AdminSettings struct {
 	// sentinel is set, the boot migration (upstream_v2.go) builds it
 	// durable-or-nothing from the legacy URLs.
 	UpstreamProxiesV2 *upstream.Document `json:"upstream_proxies_v2,omitempty"`
+	// AdminSettingsSchema (2F-D) records the schema this binary writes
+	// (adminSettingsSchemaCurrent); absent ⇒ 1 (pre-2F-D files and every
+	// file the frozen predecessor writes). prepare-downgrade removes it
+	// together with upstream_proxies_v2.
+	AdminSettingsSchema int `json:"admin_settings_schema,omitempty"`
+	// UpstreamPreparedDowngrade (2F-D) is the marker prepare-downgrade
+	// leaves beside the credential-bearing legacy list so the next boot of
+	// THIS binary reports re-migrated_after_prepare; consumed (removed) by
+	// that migration; ignored and dropped by the predecessor.
+	UpstreamPreparedDowngrade *upstreamDowngradeMarker `json:"upstream_prepared_downgrade,omitempty"`
 
 	// YARA engine runtime configuration.
 	// YARASettingsSaved is a sentinel: when false the YARA fields below are not
@@ -1024,6 +1034,8 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	// Upstream proxy pool (2F-C): the managed v2 document (sealed
 	// credentials only) plus the credential-FREE legacy representation.
+	// 2F-D: the file records the schema it is written under.
+	s.AdminSettingsSchema = adminSettingsSchemaCurrent
 	s.UpstreamProxiesSaved = true
 	docCopy := upstreamDoc.Clone()
 	s.UpstreamProxiesV2 = &docCopy

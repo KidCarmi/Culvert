@@ -120,7 +120,9 @@ type startupState struct {
 	backupEncrypt           *bool
 	restoreIn               *string
 	restoreMode             *string
-	restoreConfirm          *bool
+	restoreConfirm          *confirmFlag
+	prepareDowngrade        *bool
+	downgradeTargetSchema   *int
 	restoreAcceptDPReenroll *bool
 	restoreAllowCounterRB   *bool
 	listLeftovers           *bool
@@ -320,7 +322,10 @@ func parseFlags(s *startupState) {
 	s.backupEncrypt = flag.Bool("encrypt", false, "Encrypt the --backup tarball with AES-256-GCM (D1.4); requires "+backupPassphraseEnv+" env var. Lose the passphrase, lose the backup.")
 	s.restoreIn = flag.String("restore", "", "Validate a backup tarball and print restore plan (dry-run; D1.3b.1)")
 	s.restoreMode = flag.String("mode", "", "Restore mode: full | trust-root-only | state-only (D1.3b.2a; default: full)")
-	s.restoreConfirm = flag.Bool("confirm", false, "Commit the restore destructively (D1.3b.2b). Without --confirm, --restore is a dry-run.")
+	s.restoreConfirm = &confirmFlag{}
+	flag.Var(s.restoreConfirm, "confirm", "Commit the restore destructively (D1.3b.2b) or the leftover cleanup; for --prepare-downgrade, --confirm <word> carries the Tier-3 confirmation word printed by the dry-run. Without --confirm every one of these is a dry-run.")
+	s.prepareDowngrade = flag.Bool("prepare-downgrade", false, "Rewrite admin_settings.json for the frozen predecessor binary (unseals parent-proxy credentials into the legacy list, removes upstream_proxies_v2) and exit; dry-run unless --confirm <word> (2F-D)")
+	s.downgradeTargetSchema = flag.Int("target-schema", 0, "Target admin-settings schema for --prepare-downgrade (only the frozen predecessor's schema is supported) (2F-D)")
 	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a/b)")
 	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a/b)")
 	s.listLeftovers = flag.Bool("list-restore-leftovers", false, "List restore leftover .bak/.staging dirs (siblings of dataDir) and exit (D1.3c)")
@@ -366,6 +371,19 @@ func handleOneShotCommands(s *startupState) {
 		}
 		os.Exit(0)
 	}
+	// ── One-shot: prepare-downgrade (2F-D, C10) — dry-run unless --confirm <word> ──
+	if *s.prepareDowngrade {
+		word, err := prepareDowngradeConfirmWord(s.restoreConfirm, flag.Args())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Prepare-downgrade error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := runPrepareDowngrade(dataDir, *s.downgradeTargetSchema, word, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "Prepare-downgrade error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	// ── One-shot: restore (D1.3b.1 dry-run + D1.3b.2a analyzer + D1.3b.2b commit) ─
 	//nolint:nestif // Same one-shot dispatch shape as --reset-password
 	// and --backup; flattening into helpers would scatter the dry-run
@@ -383,7 +401,7 @@ func handleOneShotCommands(s *startupState) {
 			AllowCounterRollback: *s.restoreAllowCounterRB,
 			BackupPassphrase:     os.Getenv(backupPassphraseEnv),
 		}
-		if *s.restoreConfirm {
+		if s.restoreConfirm.Bool() {
 			if err := runRestoreCommit(*s.restoreIn, dataDir, passphrase, opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Restore commit error: %v\n", err)
 				os.Exit(1)
@@ -492,7 +510,7 @@ func runCleanupCommand(s *startupState) error {
 		return fmt.Errorf("--keep-last must be >= 0")
 	}
 	return runCleanupLeftovers(dataDir, cleanupOpts{
-		Confirm:   *s.restoreConfirm,
+		Confirm:   s.restoreConfirm.Bool(),
 		OlderThan: older,
 		KeepLast:  *s.cleanupKeepLast,
 	})

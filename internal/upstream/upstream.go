@@ -264,6 +264,64 @@ type Pool struct {
 	modeMu    sync.Mutex
 	modeLast  string
 	modeSince string
+
+	// Manual-probe lifecycle (2F-D, R24): one manual run at a time and at
+	// most one accepted run per ManualProbeWindow, judged under manualMu so
+	// two concurrent POSTs cannot both be admitted. Reset by Configure /
+	// Restore (test isolation); the periodic loop is not subject to it.
+	manualMu       sync.Mutex
+	manualInflight bool
+	manualLast     time.Time
+}
+
+// ManualProbeWindow is the minimum spacing between two ACCEPTED manual
+// probe runs (a repeat inside it is refused with 429).
+const ManualProbeWindow = 10 * time.Second
+
+// Manual-probe refusal codes (bounded; surfaced as the 429 body's code).
+const (
+	ManualProbeInFlight    = "probe_in_flight"
+	ManualProbeRateLimited = "probe_rate_limited"
+)
+
+// BeginManualProbe admits or refuses a manual probe run at instant now.
+// When refused, code names the reason and retryAfter bounds the wait. An
+// admitted run MUST be closed with EndManualProbe.
+func (p *Pool) BeginManualProbe(now time.Time) (ok bool, code string, retryAfter time.Duration) {
+	p.manualMu.Lock()
+	defer p.manualMu.Unlock()
+	if p.manualInflight {
+		return false, ManualProbeInFlight, ManualProbeWindow
+	}
+	if !p.manualLast.IsZero() && now.Sub(p.manualLast) < ManualProbeWindow {
+		return false, ManualProbeRateLimited, ManualProbeWindow - now.Sub(p.manualLast)
+	}
+	p.manualInflight = true
+	p.manualLast = now
+	return true, "", 0
+}
+
+// EndManualProbe releases the single-flight slot of an admitted run.
+func (p *Pool) EndManualProbe() {
+	p.manualMu.Lock()
+	p.manualInflight = false
+	p.manualMu.Unlock()
+}
+
+func (p *Pool) resetManualProbe() {
+	p.manualMu.Lock()
+	p.manualInflight, p.manualLast = false, time.Time{}
+	p.manualMu.Unlock()
+}
+
+// ProbeSummary is the bounded, count-only outcome of one HealthCheck run
+// (what the manual-probe audit line carries — never an authority, URL or
+// transport error).
+type ProbeSummary struct {
+	Probed    int `json:"probed"`
+	Healthy   int `json:"healthy"`
+	Unhealthy int `json:"unhealthy"`
+	Skipped   int `json:"skipped"` // credential-ineligible, not probed
 }
 
 // SetProbeInterval records the periodic probe cadence (0 = none) for the
@@ -303,6 +361,7 @@ func (p *Pool) Configure(entries []Entry, cbThreshold int, cbTimeout time.Durati
 	}
 	p.yaml = yaml
 	p.rebuildLocked()
+	p.resetManualProbe()
 	return nil
 }
 
@@ -492,6 +551,11 @@ func (p *Pool) credentialStateLocked(e *ManagedEntry) string {
 		return CredentialConfigured
 	}
 	if e.Credential == nil {
+		if e.RequiresReplacement {
+			// A sanitized restore/import knows a credential belonged here and
+			// none has been set since: ineligible, never sent unauthenticated.
+			return CredentialRequiresReplacement
+		}
 		return CredentialNone
 	}
 	// Structural binding first: the ciphertext must have been sealed FOR
@@ -800,8 +864,10 @@ const probeTimeout = 5 * time.Second
 
 // HealthCheck probes every credential-eligible parent with the shared
 // classifier and stores the bounded outcome. Credential-ineligible entries
-// (unusable, mismatch) are not probed and keep their state.
-func (p *Pool) HealthCheck(source string) {
+// (unusable, mismatch, requiresReplacement) are not probed and keep their
+// state. Every probe is bounded by probeTimeout (5 s per entry). The
+// count-only summary is what a manual run audits.
+func (p *Pool) HealthCheck(source string) ProbeSummary {
 	p.mu.RLock()
 	proxies := p.proxies
 	p.mu.RUnlock()
@@ -809,17 +875,26 @@ func (p *Pool) HealthCheck(source string) {
 	if source != ProbePeriodic {
 		source = ProbeManual
 	}
+	var sum ProbeSummary
 	for _, up := range proxies {
 		if !up.credentialEligible() {
+			sum.Skipped++
 			continue
 		}
 		status, reason := p.probeOnce(up)
 		prev := up.Probe()
 		up.setProbe(ProbeState{Status: status, Reason: reason, CheckedAt: nowRFC3339(), Source: source})
+		sum.Probed++
+		if status == ProbeHealthy {
+			sum.Healthy++
+		} else {
+			sum.Unhealthy++
+		}
 		if prev.Status != status || prev.Reason != reason {
 			obs.Printf("Upstream: %s probe %s (reason=%s, source=%s)", up.Entry.Authority(), status, reason, source)
 		}
 	}
+	return sum
 }
 
 // probeOnce runs one bounded probe through the given parent and returns the
@@ -1021,4 +1096,5 @@ func (p *Pool) Restore(st PoolState) {
 	p.proxies = nil
 	p.fallbackTotal.Store(0)
 	p.rebuildLocked()
+	p.resetManualProbe()
 }

@@ -1516,11 +1516,21 @@ type configBackup struct {
 	// calls saveConfigVersion; sibling RateLimitRPM was already covered. It is
 	// NOT one of the five export/import-only fields below. See
 	// roadmap/CATEGORY-B-PRIME-FINDING-10.3-SPEC.md.
-	AlertWebhooks     []AlertWebhook  `json:"alertWebhooks,omitempty"`
-	BlockPageHTML     string          `json:"blockPageHTML,omitempty"`
-	UpstreamProxies   []UpstreamEntry `json:"upstreamProxies,omitempty"`
-	ConnLimitEnabled  bool            `json:"connLimitEnabled,omitempty"`
-	ConnLimitMaxPerIP int             `json:"connLimitMaxPerIP,omitempty"`
+	AlertWebhooks []AlertWebhook `json:"alertWebhooks,omitempty"`
+	BlockPageHTML string         `json:"blockPageHTML,omitempty"`
+	// UpstreamProxies is the pre-2F-D legacy list: IMPORT-ONLY compatibility
+	// (authority-keyed, versioned `xxxxx` rule — upstream_portability.go).
+	// Never written by an export since schema version 2.
+	UpstreamProxies []UpstreamEntry `json:"upstreamProxies,omitempty"`
+	// UpstreamProxiesV2 + UpstreamCredentials are the 2F-D export contract
+	// (C5): the versioned managed-entry representation {id, scheme, host,
+	// port, username, credentialState} and the constant marker "omitted" —
+	// no password, sealed record, ciphertext, key id or redaction marker
+	// ever leaves the node. Import plans them identity-first (C9).
+	UpstreamProxiesV2   *upstreamExportDocument `json:"upstream_proxies_v2,omitempty"`
+	UpstreamCredentials string                  `json:"upstream_credentials,omitempty"`
+	ConnLimitEnabled    bool                    `json:"connLimitEnabled,omitempty"`
+	ConnLimitMaxPerIP   int                     `json:"connLimitMaxPerIP,omitempty"`
 
 	// CategoryGroups extends the rollback surface to cover the
 	// PolicyRules → CategoryGroup reference. Per

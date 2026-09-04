@@ -48,6 +48,13 @@ const (
 	CredentialConfigured = "configured" // sealed material, unwrappable, authority matches
 	CredentialUnusable   = "unusable"   // ciphertext present, node-local key cannot unwrap it
 	CredentialMismatch   = "mismatch"   // credential authority ≠ entry authority
+	// CredentialRequiresReplacement (2F-D, C12) is the DISTINCT durable state
+	// of an entry whose credential was OMITTED by a sanitized artifact (a
+	// backup archive or an export) and has not been set again on this node:
+	// no material exists (unlike unusable/mismatch) but the entry is known
+	// to need one, so it is ineligible and never sent unauthenticated. Only
+	// an explicit T2 replace or T3 clear resolves it.
+	CredentialRequiresReplacement = "requiresReplacement"
 )
 
 // Sealed is a credential at rest: ciphertext under the node-local key,
@@ -75,8 +82,16 @@ type ManagedEntry struct {
 	Revision   int64   `json:"revision"`
 	Source     Source  `json:"source"`
 	Credential *Sealed `json:"credential,omitempty"`
-	CreatedAt  string  `json:"createdAt,omitempty"`
-	UpdatedAt  string  `json:"updatedAt,omitempty"`
+	// RequiresReplacement is the durable marker behind the
+	// CredentialRequiresReplacement state (2F-D, C12): set by the backup
+	// sanitizer (a restored entry that used to hold a credential) and by an
+	// import whose export declared a credential that could not be
+	// inherited; meaningful only while Credential is nil; cleared by a T2
+	// replace or a T3 clear. Ignored by the frozen predecessor (lenient
+	// decoder) and never carried by the credential-free legacy list.
+	RequiresReplacement bool   `json:"requiresReplacement,omitempty"`
+	CreatedAt           string `json:"createdAt,omitempty"`
+	UpdatedAt           string `json:"updatedAt,omitempty"`
 
 	// yamlSecret is the inline password of a config.yaml parent, retained
 	// IN MEMORY ONLY (never serialized: json:"-", never part of the managed

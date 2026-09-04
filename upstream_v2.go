@@ -282,6 +282,11 @@ func upstreamMigrateLegacy(s *AdminSettings) {
 	docCopy := doc.Clone()
 	target.UpstreamProxiesV2 = &docCopy
 	target.UpstreamProxies = upstreamLegacyFromDocument(doc)
+	// 2F-D: a file produced by prepare-downgrade is re-sealed and reported
+	// as such (the marker is consumed by this same atomic write).
+	afterPrepare := s.UpstreamPreparedDowngrade != nil
+	target.UpstreamPreparedDowngrade = nil
+	target.AdminSettingsSchema = adminSettingsSchemaCurrent
 	data, err := json.MarshalIndent(target, "", "  ")
 	if err != nil {
 		degrade("persist_failed")
@@ -302,12 +307,27 @@ func upstreamMigrateLegacy(s *AdminSettings) {
 		return
 	}
 	*s = target
+	upstreamFinishMigration(now, len(doc.Entries), sealed, yamlOwned, afterPrepare)
+}
+
+// upstreamFinishMigration records the successful migration state, republishes
+// the transport and logs counts only; afterPrepare names the
+// re-migrated_after_prepare reason (2F-D).
+func upstreamFinishMigration(now string, migrated, sealed, yamlOwned int, afterPrepare bool) {
+	reason := ""
+	if afterPrepare {
+		reason = upstreamMigrationReasonAfterPrepare
+	}
 	setUpstreamState(func(st *upstreamState) {
 		st.Degraded = nil
-		st.Migration = upstreamMigrationState{State: "ok", At: now, Migrated: len(doc.Entries), Sealed: sealed, YAMLOwned: yamlOwned}
+		st.Migration = upstreamMigrationState{State: "ok", Reason: reason, At: now, Migrated: migrated, Sealed: sealed, YAMLOwned: yamlOwned}
 	})
 	applyUpstreamProxy()
-	logger.Printf("Upstream: migrated %d legacy parent-proxy entries to the v2 document (%d credential(s) sealed, %d YAML-owned skipped)", len(doc.Entries), sealed, yamlOwned)
+	if afterPrepare {
+		logger.Printf("Upstream: re-migrated %d parent-proxy entries after a prepare-downgrade (%d credential(s) re-sealed, %d YAML-owned skipped) — %s", migrated, sealed, yamlOwned, upstreamMigrationReasonAfterPrepare)
+		return
+	}
+	logger.Printf("Upstream: migrated %d legacy parent-proxy entries to the v2 document (%d credential(s) sealed, %d YAML-owned skipped)", migrated, sealed, yamlOwned)
 }
 
 // upstreamLegacyItem is one parsed legacy URL awaiting migration.
@@ -420,76 +440,6 @@ type upstreamImportError struct {
 
 func (e *upstreamImportError) Error() string {
 	return fmt.Sprintf("%s (upstream entry %d): %s", e.Code, e.Index, e.Msg)
-}
-
-// upstreamImportDocument builds the managed document a config import would
-// install, judging ONLY the incoming payload before any store mutation:
-//   - parse failure / real password ⇒ error (invalid_entry / credentials_not_importable)
-//   - a YAML-owned authority is skipped (read-only, never adopted)
-//   - an authority already managed keeps its identity AND its sealed credential
-//   - merge mode keeps every live managed entry; replace mode keeps only the
-//     credentialed ones that the import omitted (a credential is never removed
-//     by omission — clearing is an explicit T3 operation)
-//   - effective-pool authority uniqueness is validated against the YAML seed.
-//
-// A nil document with a nil error means the payload carries no upstream
-// section (nothing to apply).
-func upstreamImportDocument(in []UpstreamEntry, replace bool) (*upstream.Document, error) {
-	if len(in) == 0 {
-		return nil, nil
-	}
-	if upstreamRejectedActive() {
-		return nil, errUpstreamDocumentRejected
-	}
-	cur := upstreamPool.Document()
-	yaml := upstreamPool.YAMLEntries()
-	yamlAuth := map[string]struct{}{}
-	for i := range yaml {
-		yamlAuth[yaml[i].AuthorityHash()] = struct{}{}
-	}
-	byAuth := map[string]int{}
-	for i := range cur.Entries {
-		byAuth[cur.Entries[i].AuthorityHash()] = i
-	}
-	next := upstream.Document{Schema: upstream.DocumentSchema, Revision: cur.Revision + 1}
-	now := time.Now().UTC().Format(time.RFC3339)
-	seen := map[string]struct{}{}
-	for i := range in {
-		spec, err := upstreamImportSpec(i, in[i].URL)
-		if err != nil {
-			return nil, err
-		}
-		h := spec.AuthorityHash()
-		if _, owned := yamlAuth[h]; owned {
-			continue
-		}
-		if _, dup := seen[h]; dup {
-			return nil, &upstreamImportError{Code: "duplicate_authority", Index: i, Msg: "the same authority appears twice in the import"}
-		}
-		seen[h] = struct{}{}
-		if idx, ok := byAuth[h]; ok {
-			next.Entries = append(next.Entries, cur.Entries[idx])
-			continue
-		}
-		next.Entries = append(next.Entries, upstream.ManagedEntry{
-			ID: upstreamNewID(cur), Scheme: spec.Scheme, Host: spec.Host, Port: spec.Port, Username: spec.Username,
-			Revision: 1, Source: upstream.SourceManaged, CreatedAt: now, UpdatedAt: now,
-		})
-	}
-	// Live entries the import did not name.
-	for i := range cur.Entries {
-		h := cur.Entries[i].AuthorityHash()
-		if _, named := seen[h]; named {
-			continue
-		}
-		if !replace || cur.Entries[i].Credential != nil {
-			next.Entries = append(next.Entries, cur.Entries[i])
-		}
-	}
-	if err := upstream.ValidateEffective(yaml, next.Entries); err != nil {
-		return nil, err
-	}
-	return &next, nil
 }
 
 // upstreamImportSpec parses one imported URL: unparseable ⇒ invalid_entry;

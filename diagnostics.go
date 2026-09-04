@@ -14,6 +14,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/session"
+	"github.com/KidCarmi/Culvert/internal/upstream"
 )
 
 // OperatorContract is the aggregated, operator-visible health verdict for
@@ -166,6 +167,7 @@ func buildOperatorContract() OperatorContract {
 		checkIdentityBackend(),
 		checkInteractiveLoginState(),
 		checkAlertWebhookSigning(),
+		checkUpstreamCredentials(),
 		checkOIDCJWKSTrust(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
@@ -689,6 +691,37 @@ func checkAlertWebhookSigning() OperatorContractCheck {
 		Message: fmt.Sprintf("%d alert webhook(s) were configured with an HMAC signing secret this node cannot decrypt — their deliveries are going out UNSIGNED",
 			degraded),
 		OperatorAction: "Two remedies, and the ORDER matters. If you still have this node's original .alert_webhook_key (never included in a backup, by design), restore it and restart FIRST — the stored ciphertext is preserved, so every affected webhook recovers with no re-entry. Only if that key is gone, re-enter each affected signing secret in Security → Alert Webhooks. Do not restore the key file AFTER re-entering secrets: the re-entered ones are sealed under this node's new key and putting the old key back would make them unusable in turn. Until one remedy is applied, a receiver that verifies X-Culvert-Signature will reject this node's alerts.",
+	}
+}
+
+// checkUpstreamCredentials (2F-D, C12) reports parent-proxy entries whose
+// credential must be set again: a sanitized backup restore (or an import
+// whose export declared a credential this node never held) boots such an
+// entry into the DISTINCT requiresReplacement state — ineligible, never sent
+// unauthenticated — and the warning stays until each one is replaced (T2)
+// or cleared (T3). Counts only on this viewer-role surface: no id,
+// authority, username or credential. Contributes an ok row otherwise.
+func checkUpstreamCredentials() OperatorContractCheck {
+	requiring := 0
+	list := upstreamPool.List()
+	for i := range list {
+		if list[i].CredentialState == upstream.CredentialRequiresReplacement {
+			requiring++
+		}
+	}
+	if requiring == 0 {
+		return OperatorContractCheck{
+			Code:    "upstream_credentials",
+			Status:  diagOK,
+			Message: "no parent proxy is waiting for a credential to be set again",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "upstream_credentials",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d parent prox(y/ies) require a credential to be set again (requiresReplacement) — restored from a backup that omits credentials by design; each stays ineligible and is never sent unauthenticated",
+			requiring),
+		OperatorAction: "For each affected entry in Network → Upstream Proxies, set the credential again (Replace credential, Tier-2) or clear it deliberately (Clear credential, Tier-3). Until then the effective mode is no_eligible_parent when no other parent is eligible — plain-HTTP egress is NOT chained. Backups never carry parent-proxy credentials and the node-local .upstream_cred_key is never restored.",
 	}
 }
 
