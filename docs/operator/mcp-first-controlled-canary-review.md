@@ -893,6 +893,19 @@ precisely the conversion this work exists to prevent. The apparent contradiction
 the PEER's reality. Pinned by `TestOutcomeTruth_*` (with the boundary-refusal control proving the
 flag is not simply hardcoded true) and mutation M28.
 
+### Campaign state
+
+`scripts/mcp-canary-mutation-campaign.sh` now carries **31 mutations: 31 caught, 0 survived, 0
+skipped.** Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
+not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
+prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
+longer matches the source is scored as a FAILURE rather than a pass.
+
+That last rule earned its keep: three patterns (M03, M04, M12) had drifted silently against
+refactors made *inside this work* — the `runExecute` decomposition done to satisfy the complexity
+linters, and the `RecoverAttempts` split — and were proving nothing until repaired. A campaign that
+scored a skip as a pass would have reported a clean run over three dead gates.
+
 ---
 
 ## §26 Final verdict
