@@ -79,6 +79,14 @@ const (
 	PhaseRecoveryMarker
 	// PhaseHealth — a health/degradation-transition marker.
 	PhaseHealth
+	// PhaseSendIntent — a DURABLE SEND INTENT committed immediately before the
+	// final boundary guards and the irreversible upstream call. It names the exact
+	// physical attempt (AttemptID) and the reservation and activation generation
+	// that authorized it, so a process that dies after the peer received the bytes
+	// still leaves proof that the attempt EXISTED. Without it, a post-send crash is
+	// indistinguishable from "never sent" — which is the one inference that must
+	// never be made (see PhysicalSendState).
+	PhaseSendIntent
 )
 
 // String returns the stable machine string for the phase.
@@ -94,13 +102,15 @@ func (p Phase) String() string {
 		return "recovery_marker"
 	case PhaseHealth:
 		return "health"
+	case PhaseSendIntent:
+		return "send_intent"
 	default:
 		return "none"
 	}
 }
 
 // Valid reports whether the phase is a real phase.
-func (p Phase) Valid() bool { return p >= PhaseDecision && p <= PhaseHealth }
+func (p Phase) Valid() bool { return p >= PhaseDecision && p <= PhaseSendIntent }
 
 // Criticality is the durability class of an event. It selects the partition and
 // governs the fail-closed / degraded posture. The zero value is invalid.

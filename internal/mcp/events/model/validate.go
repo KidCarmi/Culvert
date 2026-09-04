@@ -468,6 +468,13 @@ func (e Event) validatePhase() error {
 		if e.Marker == nil || e.Marker.State == "" {
 			return evtErr(mcperr.ReasonEventEvidenceMissing, "marker event without marker state")
 		}
+	case PhaseSendIntent:
+		// A send intent that cannot name its attempt is useless for reconciliation:
+		// an orphan with no AttemptID can never be matched against an independent
+		// witness, so it fails closed rather than committing unusable evidence.
+		if e.Outcome == nil || e.Outcome.AttemptID == "" {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "send intent without attempt identity")
+		}
 	}
 	return nil
 }

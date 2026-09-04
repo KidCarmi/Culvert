@@ -28,6 +28,15 @@ type DecisionFacts struct {
 	// shadowDecisionFacts, from the SAME ShadowDecision returned to the client.
 	Shadow *model.ShadowEvidence
 
+	// Outcome, when non-nil, carries the post-execution / send-intent evidence
+	// (attempt identity, reservation binding, activation generation, physical send
+	// state). It is set for PhaseSendIntent and PhaseOutcome events.
+	Outcome *model.OutcomeEvidence
+	// Phase selects the event phase. The zero value is PhaseDecision, so every
+	// existing caller is byte-identical; PhaseSendIntent and PhaseOutcome are set
+	// explicitly by the execution path.
+	Phase model.Phase
+
 	SnapshotHash  string
 	CorrelationID string // optional; generated when empty
 }
@@ -87,10 +96,15 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 	if f.Shadow != nil {
 		schema = model.SchemaVersionV2
 	}
+	// The zero Phase means PhaseDecision, preserving every pre-existing caller.
+	phase := f.Phase
+	if phase == model.PhaseNone {
+		phase = model.PhaseDecision
+	}
 	return &model.Event{
 		SchemaVersion: schema,
 		EventID:       randID("evt_"),
-		Phase:         model.PhaseDecision,
+		Phase:         phase,
 		Criticality:   f.Criticality,
 		Partition:     part,
 		Capability:    f.Capability,
@@ -105,6 +119,7 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 		Decision:      f.Decision,
 		Inspection:    f.Inspection,
 		Credential:    f.Credential,
+		Outcome:       f.Outcome,
 		Shadow:        f.Shadow,
 	}
 }
