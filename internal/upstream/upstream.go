@@ -153,117 +153,344 @@ func (cb *CircuitBreaker) State() string {
 
 // ─── Upstream proxy entry ────────────────────────────────────────────────────
 
-// Proxy represents one parent proxy in the chain.
+// Proxy represents one parent proxy in the chain: its entry (never a
+// credential-bearing URL), probe state and circuit breaker.
 type Proxy struct {
-	URL     *url.URL
-	Healthy atomic.Bool
-	CB      *CircuitBreaker
+	Entry ManagedEntry
+	// URL is the credential-FREE authority URL (display, legacy status). The
+	// authenticated URL is built only by authenticatedURL, per selection.
+	URL *url.URL
+	CB  *CircuitBreaker
+
+	mu        sync.RWMutex
+	probe     ProbeState
+	credState string
 }
 
-// Pool manages a set of parent proxies with failover. The zero value is a
-// usable empty pool.
+// Probe returns the entry's last probe outcome.
+func (up *Proxy) Probe() ProbeState {
+	up.mu.RLock()
+	defer up.mu.RUnlock()
+	return up.probe
+}
+
+func (up *Proxy) setProbe(st ProbeState) {
+	up.mu.Lock()
+	up.probe = st
+	up.mu.Unlock()
+}
+
+// CredentialState returns the derived credential state.
+func (up *Proxy) CredentialState() string {
+	up.mu.RLock()
+	defer up.mu.RUnlock()
+	return up.credState
+}
+
+// credentialEligible reports whether the entry may be selected or probed on
+// the credential axis: no credential, or a configured one bound to this
+// authority. unusable and mismatch are never eligible.
+func (up *Proxy) credentialEligible() bool {
+	switch up.CredentialState() {
+	case CredentialNone, CredentialConfigured:
+		return true
+	}
+	return false
+}
+
+// eligible is the C11 predicate: credential-eligible AND (unprobed OR
+// healthy) AND the breaker allows.
+func (up *Proxy) eligible() bool {
+	if !up.credentialEligible() {
+		return false
+	}
+	if st := up.Probe().Status; st != ProbeUnprobed && st != ProbeHealthy {
+		return false
+	}
+	return up.CB.Allow()
+}
+
+// Effective modes (C11).
+const (
+	ModeNoPool           = "no_pool"
+	ModeChained          = "chained"
+	ModeNoEligibleParent = "no_eligible_parent"
+	ModeDirectFallback   = "direct_fallback"
+)
+
+// Effective is the backend-derived data-plane truth.
+type Effective struct {
+	Mode          string `json:"mode"`
+	Entries       int    `json:"entries"`
+	Eligible      int    `json:"eligible"`
+	FallbackTotal int64  `json:"fallbackTotal"`
+}
+
+// Pool manages the effective set of parent proxies (YAML-owned + managed)
+// with failover. The zero value is a usable empty pool.
 type Pool struct {
 	mu      sync.RWMutex
-	proxies []*Proxy
-	// entries mirrors proxies as the raw accepted Entry values (a proxy URL
-	// may embed inline credentials, which *url.URL redacts for display).
-	// Kept so the admin-settings snapshot can round-trip the pool faithfully
-	// across restarts.
-	entries []Entry
+	yaml    []ManagedEntry // read-only, from config.yaml
+	doc     Document       // managed entries (the durable v2 document)
+	proxies []*Proxy       // effective pool, YAML first then managed
+	key     *Keyring       // node-local credential key (nil ⇒ every credential unusable)
+	keyErr  string         // bounded reason the key is unavailable
 	// cbThreshold/cbTimeout are remembered from the last Configure so API
-	// mutations (SetProxies) inherit the operator-configured circuit-breaker
-	// parameters instead of hardcoded defaults.
+	// mutations inherit the operator-configured circuit-breaker parameters.
 	cbThreshold int
 	cbTimeout   time.Duration
 	idx         atomic.Int64 // round-robin counter
 
-	// Direct-fallback visibility (CHAOS-11): before this existed the
-	// all-upstreams-down → direct-egress fail-open (PX-2 posture) was
-	// completely silent — no log, no alert, no counter. The posture itself
-	// is unchanged; these only make it observable.
+	// Direct-fallback visibility (CHAOS-11): the all-eligible-parents-gone →
+	// direct-egress fail-open (PX-2 posture) is observable, never silent.
 	fallbackActive atomic.Bool  // pool is currently failing open to direct
 	fallbackTotal  atomic.Int64 // requests that fell back to direct since start
 }
 
-// Configure sets the list of upstream proxies and the circuit-breaker
-// parameters (startup / YAML-reload / import path).
-func (p *Pool) Configure(entries []Entry, cbThreshold int, cbTimeout time.Duration) {
+// Configure sets the YAML-owned entries and the circuit-breaker parameters
+// (startup / YAML-reload path). Managed entries are untouched. An invalid
+// or duplicate YAML set fails closed: the previous effective pool stays.
+func (p *Pool) Configure(entries []Entry, cbThreshold int, cbTimeout time.Duration) error {
+	yaml, err := YAMLEntries(entries)
+	if err != nil {
+		p.mu.Lock()
+		p.cbThreshold, p.cbTimeout = cbThreshold, cbTimeout
+		p.mu.Unlock()
+		obs.Printf("Upstream: YAML upstream entries refused (%s); effective pool unchanged", boundedReason(err))
+		return err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.cbThreshold = cbThreshold
-	p.cbTimeout = cbTimeout
-	p.setProxiesLocked(entries)
+	p.cbThreshold, p.cbTimeout = cbThreshold, cbTimeout
+	if err := ValidateEffective(yaml, p.doc.Entries); err != nil {
+		obs.Printf("Upstream: YAML upstream entries refused (%s); effective pool unchanged", boundedReason(err))
+		return err
+	}
+	p.yaml = yaml
+	p.rebuildLocked()
+	return nil
 }
 
-// SetProxies replaces the proxy list while keeping the circuit-breaker
-// parameters from the last Configure (admin API / persisted-settings path).
-func (p *Pool) SetProxies(entries []Entry) {
+// SetKey installs the node-local credential key (nil with a bounded reason
+// when it is unavailable) and re-derives every credential state.
+func (p *Pool) SetKey(k *Keyring, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.setProxiesLocked(entries)
+	p.key, p.keyErr = k, reason
+	p.rebuildLocked()
 }
 
-func (p *Pool) setProxiesLocked(entries []Entry) {
+// Key returns the loaded key (nil when unavailable) and the bounded reason.
+func (p *Pool) Key() (*Keyring, string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.key, p.keyErr
+}
+
+// SetDocument publishes a new MANAGED document after validating the whole
+// effective pool (YAML + managed): duplicate authorities or invalid entries
+// are refused with a typed error and the running pool stays unchanged.
+func (p *Pool) SetDocument(doc Document) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ValidateEffective(p.yaml, doc.Entries); err != nil {
+		return err
+	}
+	p.doc = doc.Clone()
+	if p.doc.Schema == 0 {
+		p.doc.Schema = DocumentSchema
+	}
+	// Store entries in their canonical spelling (ValidateEffective proved
+	// every one normalizes).
+	for i := range p.doc.Entries {
+		spec, _ := Normalize(p.doc.Entries[i].Spec())
+		e := &p.doc.Entries[i]
+		e.Scheme, e.Host, e.Port, e.Username = spec.Scheme, spec.Host, spec.Port, spec.Username
+		if e.Source == "" {
+			e.Source = SourceManaged
+		}
+	}
+	p.rebuildLocked()
+	return nil
+}
+
+// Document returns a deep copy of the managed document.
+func (p *Pool) Document() Document {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.doc.Clone()
+}
+
+// YAMLEntries returns copies of the YAML-owned entries.
+func (p *Pool) YAMLEntries() []ManagedEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return cloneEntries(p.yaml)
+}
+
+// EffectiveEntries returns copies of every effective entry (YAML first).
+func (p *Pool) EffectiveEntries() []ManagedEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := cloneEntries(p.yaml)
+	return append(out, cloneEntries(p.doc.Entries)...)
+}
+
+// SetProxies is the LEGACY credential-free replacement of the managed set
+// from URLs (import / compatibility paths). A URL carrying a password is
+// refused; YAML-owned authorities are skipped (YAML owns them).
+func (p *Pool) SetProxies(entries []Entry) error {
+	doc, err := p.legacyDocument(entries)
+	if err != nil {
+		return err
+	}
+	return p.SetDocument(doc)
+}
+
+// legacyDocument builds a managed document from credential-free URLs,
+// preserving the identity and credential of an existing managed entry with
+// the same canonical authority.
+func (p *Pool) legacyDocument(entries []Entry) (Document, error) {
+	cur := p.Document()
+	yaml := p.YAMLEntries()
+	byAuth := map[string]ManagedEntry{}
+	for i := range cur.Entries {
+		byAuth[cur.Entries[i].AuthorityHash()] = cur.Entries[i]
+	}
+	yamlAuth := map[string]struct{}{}
+	for i := range yaml {
+		yamlAuth[yaml[i].AuthorityHash()] = struct{}{}
+	}
+	next := Document{Schema: DocumentSchema, Revision: cur.Revision + 1}
+	now := nowRFC3339()
+	for i, e := range entries {
+		spec, _, hasPW, err := SpecFromURL(e.URL)
+		if err != nil {
+			return Document{}, &InvalidEntryError{Index: i, Reason: err.Error()}
+		}
+		if hasPW {
+			return Document{}, &InvalidEntryError{Index: i, Reason: "URL carries a password; credentials are set through the credential endpoint"}
+		}
+		h := spec.AuthorityHash()
+		if _, owned := yamlAuth[h]; owned {
+			continue
+		}
+		if prev, ok := byAuth[h]; ok {
+			next.Entries = append(next.Entries, prev)
+			continue
+		}
+		next.Entries = append(next.Entries, ManagedEntry{
+			ID: NewManagedID(), Scheme: spec.Scheme, Host: spec.Host, Port: spec.Port, Username: spec.Username,
+			Revision: 1, Source: SourceManaged, CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	return next, nil
+}
+
+// rebuildLocked derives the effective proxy list from yaml + doc, keeping
+// probe/breaker state for entries whose id AND authority are unchanged.
+func (p *Pool) rebuildLocked() {
+	prev := map[string]*Proxy{}
+	for _, up := range p.proxies {
+		prev[up.Entry.ID+"|"+up.Entry.AuthorityHash()] = up
+	}
 	// Replacing the pool resets the direct-fallback transition state (Codex
 	// P2): a wiped pool makes direct egress the intentional operating mode
-	// again (the flag would otherwise report an active failed-chain bypass
-	// forever), and a repopulated pool re-derives — and re-alerts — on the
-	// next request if the new parents are also down.
+	// again, and a repopulated pool re-derives — and re-alerts — on the next
+	// request if the new parents are also down.
 	p.fallbackActive.Store(false)
-	p.proxies = nil
-	p.entries = nil
-	for _, e := range entries {
-		u, err := url.Parse(e.URL)
-		if err != nil {
-			obs.Printf("Upstream: invalid URL %q: %v", obs.Sanitize(e.URL), err)
-			continue
+	var out []*Proxy
+	add := func(e ManagedEntry) {
+		key := e.ID + "|" + e.AuthorityHash()
+		up, ok := prev[key]
+		if !ok {
+			u, err := url.Parse(e.Authority())
+			if err != nil {
+				return
+			}
+			up = &Proxy{URL: u, CB: newCircuitBreaker(p.cbThreshold, p.cbTimeout)}
+			up.probe = ProbeState{Status: ProbeUnprobed, Reason: ReasonNone}
 		}
-		if u.Host == "" {
-			// "host:port" without a scheme parses as opaque (no Host) and can
-			// never be dialed by the transport — reject instead of persisting.
-			obs.Printf("Upstream: skipping URL %q: missing host (need scheme://host:port)", obs.Sanitize(e.URL))
-			continue
+		up.Entry = e
+		if up.Entry.Credential != nil {
+			c := *e.Credential
+			up.Entry.Credential = &c
 		}
-		up := &Proxy{
-			URL: u,
-			CB:  newCircuitBreaker(p.cbThreshold, p.cbTimeout),
-		}
-		up.Healthy.Store(true)
-		p.proxies = append(p.proxies, up)
-		p.entries = append(p.entries, e)
-		obs.Printf("Upstream: added parent proxy %s", u.Redacted())
+		up.mu.Lock()
+		up.credState = p.credentialStateLocked(&up.Entry)
+		up.mu.Unlock()
+		out = append(out, up)
 	}
+	for i := range p.yaml {
+		add(p.yaml[i])
+	}
+	for i := range p.doc.Entries {
+		add(p.doc.Entries[i])
+	}
+	p.proxies = out
+}
+
+// credentialStateLocked derives an entry's credential state: none,
+// mismatch (bound to another authority), unusable (no key / wrong key /
+// cannot unwrap), configured. The unsealed plaintext is discarded at once.
+func (p *Pool) credentialStateLocked(e *ManagedEntry) string {
+	if e.Credential == nil {
+		return CredentialNone
+	}
+	if e.Credential.AuthorityHash != e.AuthorityHash() {
+		return CredentialMismatch
+	}
+	if p.key == nil || p.key.KeyID() != e.Credential.KeyID {
+		return CredentialUnusable
+	}
+	if _, err := p.key.Unseal(e.Credential, e.AuthorityHash()); err != nil {
+		return CredentialUnusable
+	}
+	return CredentialConfigured
 }
 
 // CBParams returns the circuit-breaker parameters remembered from the last
-// Configure. Exported for the main-side snapshot/restore test helper and for
-// diagnostics; not used on the request path.
+// Configure.
 func (p *Pool) CBParams() (threshold int, timeout time.Duration) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.cbThreshold, p.cbTimeout
 }
 
-// Entries returns a copy of the raw accepted entries. URLs may embed inline
-// credentials — this is for persistence (admin_settings.json, mode 0600)
-// only; use List() for anything user-facing.
+// Entries returns the effective pool as credential-FREE legacy entries
+// (YAML first). It never carries a password.
 func (p *Pool) Entries() []Entry {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	out := make([]Entry, len(p.entries))
-	copy(out, p.entries)
+	out := make([]Entry, 0, len(p.proxies))
+	for _, up := range p.proxies {
+		out = append(out, Entry{URL: up.Entry.LegacyURL()})
+	}
 	return out
 }
 
-// Enabled returns true if any upstream proxies are configured.
+// LegacyManagedEntries returns the MANAGED entries as credential-free legacy
+// URLs (the downgrade-compatible representation persisted beside the v2
+// document).
+func (p *Pool) LegacyManagedEntries() []Entry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]Entry, 0, len(p.doc.Entries))
+	for i := range p.doc.Entries {
+		out = append(out, Entry{URL: p.doc.Entries[i].LegacyURL()})
+	}
+	return out
+}
+
+// Enabled returns true if any parent proxy is in the effective pool.
 func (p *Pool) Enabled() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.proxies) > 0
 }
 
-// Next returns the next healthy upstream proxy using round-robin selection.
-// Returns nil if no healthy proxy is available (caller should fall back to direct).
+// Next returns the next ELIGIBLE upstream proxy using round-robin selection
+// (C11). Returns nil if none is eligible (caller falls back to direct).
 func (p *Pool) Next() *Proxy {
 	p.mu.RLock()
 	proxies := p.proxies
@@ -271,11 +498,6 @@ func (p *Pool) Next() *Proxy {
 
 	n := len(proxies)
 	if n == 0 {
-		// Pool not configured — direct egress is the normal mode, never a
-		// fallback. Also clear any stale fallback flag: the shared transport
-		// can still hold this pool's ProxyFunc after an admin wiped the last
-		// parent (applyUpstreamProxy early-returns for a disabled pool).
-		// Load-before-Store keeps this hot path read-only in the common case.
 		if p.fallbackActive.Load() {
 			p.fallbackActive.Store(false)
 		}
@@ -284,27 +506,47 @@ func (p *Pool) Next() *Proxy {
 	start := int(p.idx.Add(1)) % n
 	for i := 0; i < n; i++ {
 		up := proxies[(start+i)%n]
-		if up.Healthy.Load() && up.CB.Allow() {
+		if up.eligible() {
 			p.noteUpstreamAvailable()
 			return up
 		}
 	}
-	// All upstreams down — fall back to direct (PX-2 fail-open posture,
+	// No eligible parent — fall back to direct (PX-2 fail-open posture,
 	// unchanged). CHAOS-11: count every fallback and alert once per
 	// transition so the bypassed parent-proxy chain is never silent.
 	p.noteDirectFallback()
 	return nil
 }
 
+// Effective computes the backend-derived mode: no_pool (empty), chained
+// (≥1 eligible), no_eligible_parent (0 eligible, no request fell back yet),
+// direct_fallback (0 eligible and a request fell back).
+func (p *Pool) Effective() Effective {
+	p.mu.RLock()
+	proxies := p.proxies
+	p.mu.RUnlock()
+	eff := Effective{Entries: len(proxies), FallbackTotal: p.fallbackTotal.Load()}
+	for _, up := range proxies {
+		if up.eligible() {
+			eff.Eligible++
+		}
+	}
+	switch {
+	case len(proxies) == 0:
+		eff.Mode = ModeNoPool
+	case eff.Eligible > 0:
+		eff.Mode = ModeChained
+	case p.fallbackActive.Load():
+		eff.Mode = ModeDirectFallback
+	default:
+		eff.Mode = ModeNoEligibleParent
+	}
+	return eff
+}
+
 // fireFallbackAlert delivers the upstream_pool_down alert on a fallback
 // transition. Package-level seam so tests can capture transitions
-// SYNCHRONOUSLY instead of listening on the process-global alerts sink —
-// any pool-exhausting test spawns the async production goroutine, and a
-// straggler landing in a later test's sink is exactly the -count/-shuffle
-// determinism failure the CI gate caught. The production value fires async
-// because the transition edge sits on the request path and alerts Dispatch
-// can hit a synchronous retry-queue disk write when the webhook semaphore
-// is full (same rationale as secscan's clamScanError).
+// SYNCHRONOUSLY instead of listening on the process-global alerts sink.
 var fireFallbackAlert = func(detail string) {
 	go alerts.Fire("upstream_pool_down", alerts.Payload{
 		Detail: detail,
@@ -313,14 +555,13 @@ var fireFallbackAlert = func(detail string) {
 }
 
 // noteDirectFallback records that a request needed a parent proxy but none
-// was available (all unhealthy or circuit-open). The counter increments per
-// request; the log line + webhook alert fire once per transition INTO the
-// fallback state (noteUpstreamAvailable logs the recovery transition).
+// was eligible. The counter increments per request; the log line + webhook
+// alert fire once per transition INTO the fallback state.
 func (p *Pool) noteDirectFallback() {
 	p.fallbackTotal.Add(1)
 	if !p.fallbackActive.Swap(true) {
-		obs.Printf("Upstream: ALL parent proxies down — failing open to DIRECT egress (parent-proxy chain bypassed)")
-		const detail = "all parent proxies unhealthy or circuit-open; egress is DIRECT (parent-proxy chain bypassed)"
+		obs.Printf("Upstream: NO eligible parent proxy — failing open to DIRECT egress (parent-proxy chain bypassed)")
+		const detail = "no eligible parent proxy (unhealthy, credential-ineligible or circuit-open); egress is DIRECT (parent-proxy chain bypassed)"
 		if h := FallbackAlertHook; h != nil {
 			h(detail)
 		} else {
@@ -329,32 +570,35 @@ func (p *Pool) noteDirectFallback() {
 	}
 }
 
-// noteUpstreamAvailable clears the direct-fallback state when a usable proxy
-// reappears. The Load-before-Swap keeps the common path (fallback inactive)
-// read-only — no cache-line write per request.
+// noteUpstreamAvailable clears the direct-fallback state when an eligible
+// proxy reappears.
 func (p *Pool) noteUpstreamAvailable() {
 	if p.fallbackActive.Load() && p.fallbackActive.Swap(false) {
-		obs.Printf("Upstream: parent proxy available again — direct-egress fallback ended")
+		obs.Printf("Upstream: eligible parent proxy available again — direct-egress fallback ended")
 	}
 }
 
 // DirectFallback reports whether the pool is currently failing open to
-// direct egress (all parents down) and how many requests have done so since
-// startup. Exported for the admin API and /metrics.
+// direct egress and how many requests have done so since startup.
 func (p *Pool) DirectFallback() (active bool, total int64) {
 	return p.fallbackActive.Load(), p.fallbackTotal.Load()
 }
 
-// List returns the current upstream proxy statuses for the UI/API.
-// URLs are redacted (inline credentials stripped).
+// List returns the effective pool statuses for the UI/API. URLs are
+// credential-free authorities.
 func (p *Pool) List() []Status {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	out := make([]Status, len(p.proxies))
 	for i, up := range p.proxies {
+		pr := up.Probe()
 		st := Status{
-			URL:      up.URL.Redacted(),
-			Healthy:  up.Healthy.Load(),
+			ID: up.Entry.ID, URL: up.Entry.LegacyURL(), Authority: up.Entry.Authority(),
+			Scheme: up.Entry.Scheme, Host: up.Entry.Host, Port: up.Entry.Port, Username: up.Entry.Username,
+			Source: string(up.Entry.Source), Revision: up.Entry.Revision,
+			CredentialState: up.CredentialState(), Probe: pr,
+			Healthy:  pr.Status == ProbeHealthy,
+			Eligible: up.eligible(),
 			Circuit:  up.CB.State(),
 			Failures: up.CB.Failures(),
 		}
@@ -370,9 +614,30 @@ func (p *Pool) List() []Status {
 	return out
 }
 
-// ProxyFunc returns an http.Transport-compatible proxy selector.
-// When upstreams are configured, it returns the next healthy proxy URL.
-// Falls back to nil (direct connection) when no upstream is available.
+// authenticatedURL is the ONLY constructor of a credential-bearing proxy
+// URL. It runs after eligibility: a configured credential whose authority
+// hash matches is unsealed and placed in the URL userinfo; a credential-free
+// entry yields its plain authority. The returned URL is handed to the
+// transport and never stored.
+func (p *Pool) authenticatedURL(up *Proxy) (*url.URL, error) {
+	u := *up.URL
+	if up.Entry.Credential == nil {
+		return &u, nil
+	}
+	p.mu.RLock()
+	key := p.key
+	p.mu.RUnlock()
+	pw, err := key.Unseal(up.Entry.Credential, up.Entry.AuthorityHash())
+	if err != nil {
+		return nil, err
+	}
+	u.User = url.UserPassword(up.Entry.Username, pw)
+	return &u, nil
+}
+
+// ProxyFunc returns an http.Transport-compatible proxy selector. When an
+// eligible parent exists, it returns that parent's authenticated URL (built
+// here and nowhere else); it returns nil (direct connection) otherwise.
 //
 // If the request context carries an Attribution slot (WithAttribution), the
 // selected proxy is recorded there so the caller can feed the request's
@@ -385,21 +650,22 @@ func (p *Pool) ProxyFunc() func(*http.Request) (*url.URL, error) {
 				a.proxy.Store(up) // nil when falling back to direct — Record then no-ops
 			}
 		}
-		if up != nil {
-			return up.URL, nil
+		if up == nil {
+			return nil, nil // direct connection
 		}
-		return nil, nil // direct connection
+		u, err := p.authenticatedURL(up)
+		if err != nil {
+			// Eligibility said configured but the unwrap failed now (key
+			// swapped underneath): never send unauthenticated, fall back.
+			obs.Printf("Upstream: %s credential could not be unwrapped at selection; request falls back to DIRECT", up.Entry.Authority())
+			p.noteDirectFallback()
+			return nil, nil
+		}
+		return u, nil
 	}
 }
 
 // ─── Request-outcome attribution (CHAOS-11) ──────────────────────────────────
-//
-// Before this existed the circuit breaker was dead code on the request path:
-// nothing production ever called RecordFailure/RecordSuccess, so a broken
-// parent proxy kept receiving (and failing) live traffic until the next
-// health-check tick — and the breaker state shown in the admin UI never
-// moved. Attribution threads the transport's per-request proxy selection
-// back to the caller so real request outcomes drive the breaker.
 
 // attributionKey is the context key carrying the per-request attribution slot.
 type attributionKey struct{}
@@ -411,24 +677,18 @@ type Attribution struct {
 }
 
 // WithAttribution returns a child context carrying a fresh attribution slot,
-// plus the slot itself. Attach it to the request before it enters the
-// transport; after the request completes, call Record with the outcome.
+// plus the slot itself.
 func WithAttribution(ctx context.Context) (context.Context, *Attribution) {
 	a := &Attribution{}
 	return context.WithValue(ctx, attributionKey{}, a), a
 }
 
 // Record feeds a completed request's outcome into the selected proxy's
-// circuit breaker. Nil-safe on both the receiver (pool disabled — no slot
-// was created) and the slot's proxy (the transport fell back to direct).
+// circuit breaker. Nil-safe on both the receiver and the slot's proxy.
 //
-// A context.Canceled error is deliberately NOT charged to the proxy: it
-// means OUR client went away mid-request, which says nothing about the
-// parent's health — charging it would let a flaky client population trip
-// breakers on a healthy chain. Timeouts (context.DeadlineExceeded) DO count:
-// a parent that cannot complete requests within the client budget is failing
-// for our purposes; misattribution of a slow origin is bounded by the
-// consecutive-failure threshold and healed by the half-open probe.
+// A context.Canceled error is deliberately NOT charged to the proxy (our
+// client went away). Timeouts DO count. The error is never rendered — only
+// its bounded reason class (a transport error can embed the proxy URL).
 func (a *Attribution) Record(err error) {
 	if a == nil {
 		return
@@ -445,8 +705,8 @@ func (a *Attribution) Record(err error) {
 	default:
 		if up.CB.RecordFailure() {
 			threshold, timeout := up.CB.Params()
-			obs.Printf("Upstream: circuit OPEN for %s after %d consecutive request failures (retry in %s; last error: %v)",
-				up.URL.Redacted(), threshold, timeout, err)
+			obs.Printf("Upstream: circuit OPEN for %s after %d consecutive request failures (retry in %s; reason=%s)",
+				up.Entry.Authority(), threshold, timeout, classifyTransportError(err))
 		}
 	}
 }
@@ -455,15 +715,67 @@ func (a *Attribution) Record(err error) {
 // reachable THROUGH the parent proxy under test.
 const healthCheckURL = "http://detectportal.firefox.com/success.txt"
 
+// probeTimeout bounds one probe.
+const probeTimeout = 5 * time.Second
+
+// HealthCheck probes every credential-eligible parent with the shared
+// classifier and stores the bounded outcome. Credential-ineligible entries
+// (unusable, mismatch) are not probed and keep their state.
+func (p *Pool) HealthCheck() {
+	p.mu.RLock()
+	proxies := p.proxies
+	p.mu.RUnlock()
+
+	for _, up := range proxies {
+		if !up.credentialEligible() {
+			continue
+		}
+		target, err := p.authenticatedURL(up)
+		if err != nil {
+			up.setProbe(ProbeState{Status: ProbeUnhealthy, Reason: ReasonProxyAuthFailed, CheckedAt: nowRFC3339()})
+			continue
+		}
+		status, reason := p.probeOnce(target)
+		prev := up.Probe()
+		up.setProbe(ProbeState{Status: status, Reason: reason, CheckedAt: nowRFC3339()})
+		if prev.Status != status || prev.Reason != reason {
+			obs.Printf("Upstream: %s probe %s (reason=%s)", up.Entry.Authority(), status, reason)
+		}
+	}
+}
+
+// probeOnce runs one bounded probe through the given proxy URL and returns
+// the classified outcome. The response body is drained (≤1 KiB) and
+// discarded; the transport error is never rendered.
+func (p *Pool) probeOnce(proxyURL *url.URL) (status, reason string) {
+	client := &http.Client{
+		Timeout:   probeTimeout,
+		Transport: probeTransportFor(proxyURL),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, healthCheckURL, http.NoBody)
+	if err != nil {
+		return ProbeUnhealthy, ReasonConnectFailed
+	}
+	resp, err := client.Do(req)
+	if resp != nil {
+		defer drainAndClose(resp)
+	}
+	return ClassifyProbe(resp, err)
+}
+
 // ProbeTransport is a TEST-ONLY seam: when non-nil it supplies the
 // round-tripper the health probe uses for a given parent proxy, so a test
-// can inject a deterministic probe outcome (a 407, a dial error carrying a
-// secret, a timeout) without a network. Production leaves it nil.
+// can inject a deterministic probe outcome without a network. Production
+// leaves it nil.
 var ProbeTransport func(proxyURL *url.URL) http.RoundTripper
 
 // FallbackAlertHook is a TEST-ONLY seam: when non-nil it receives the
-// direct-fallback transition instead of the asynchronous production alert,
-// so a test can count transitions deterministically. Production leaves it nil.
+// direct-fallback transition instead of the asynchronous production alert.
 var FallbackAlertHook func(detail string)
 
 func probeTransportFor(proxyURL *url.URL) http.RoundTripper {
@@ -476,51 +788,9 @@ func probeTransportFor(proxyURL *url.URL) http.RoundTripper {
 	}
 }
 
-// HealthCheck runs a connectivity check against each upstream proxy.
-// Called periodically from a background goroutine.
-func (p *Pool) HealthCheck() {
-	p.mu.RLock()
-	proxies := p.proxies
-	p.mu.RUnlock()
-
-	for _, up := range proxies {
-		client := &http.Client{
-			Timeout:   5 * time.Second,
-			Transport: probeTransportFor(up.URL),
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodHead, healthCheckURL, http.NoBody)
-		if err != nil {
-			cancel()
-			up.Healthy.Store(false)
-			continue
-		}
-		resp, err := client.Do(req)
-		cancel()
-		if err != nil {
-			was := up.Healthy.Swap(false)
-			if was {
-				obs.Printf("Upstream: %s marked unhealthy: %v", up.URL.Redacted(), err)
-			}
-			continue
-		}
-		resp.Body.Close()
-		was := up.Healthy.Swap(true)
-		if !was {
-			obs.Printf("Upstream: %s recovered (healthy)", up.URL.Redacted())
-		}
-	}
-}
-
 // RunHealthCheckLoop runs pool.HealthCheck at the given interval until ctx is
-// cancelled, stopping the underlying ticker on exit. Extracted so the
-// shutdown invariant — "the loop must exit on context cancellation" — is
-// unit-testable without spinning up the rest of initUpstreamPool.
-//
-// Defensive contract: returns immediately for a nil pool or a non-positive
-// interval. The production caller (initUpstreamPool) already validates these,
-// but the standalone helper guards itself so future callers cannot panic
-// (nil-deref) or wedge on a zero-interval ticker. P1.3 / S4.UpstreamHealth.
+// cancelled, stopping the underlying ticker on exit. Returns immediately for
+// a nil pool or a non-positive interval. P1.3 / S4.UpstreamHealth.
 func RunHealthCheckLoop(ctx context.Context, pool *Pool, interval time.Duration) {
 	if pool == nil || interval <= 0 {
 		return
@@ -540,9 +810,26 @@ func RunHealthCheckLoop(ctx context.Context, pool *Pool, interval time.Duration)
 	}
 }
 
+// boundedReason renders a typed pool error as a bounded reason string
+// (never an authority, URL or credential).
+func boundedReason(err error) string {
+	var dup *DuplicateAuthorityError
+	if errors.As(err, &dup) {
+		return fmt.Sprintf("duplicate_authority count=%d", dup.Count)
+	}
+	var inv *InvalidEntryError
+	if errors.As(err, &inv) {
+		if inv.ID != "" {
+			return "invalid_entry id=" + inv.ID
+		}
+		return fmt.Sprintf("invalid_entry index=%d", inv.Index)
+	}
+	return "invalid_entry"
+}
+
 // ─── Config types ────────────────────────────────────────────────────────────
 
-// Entry is one parent proxy from config.yaml.
+// Entry is one parent proxy from config.yaml (credential-free URL).
 type Entry struct {
 	URL string `yaml:"url" json:"url"`
 }
@@ -557,11 +844,23 @@ type Config struct {
 	} `yaml:"circuit_breaker" json:"circuitBreaker"`
 }
 
-// Status is returned by the admin API.
+// Status is returned by the admin API (credential-free).
 type Status struct {
-	URL     string `json:"url"`
-	Healthy bool   `json:"healthy"`
-	Circuit string `json:"circuit"`
+	ID        string `json:"id"`
+	URL       string `json:"url"` // legacy field: credential-free authority
+	Authority string `json:"authority"`
+	Scheme    string `json:"scheme"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Username  string `json:"username,omitempty"`
+	Source    string `json:"source"`
+	Revision  int64  `json:"revision"`
+	// CredentialState is derived (C4): none | configured | unusable | mismatch.
+	CredentialState string     `json:"credentialState"`
+	Probe           ProbeState `json:"probe"`
+	Healthy         bool       `json:"healthy"` // legacy: probe == healthy
+	Eligible        bool       `json:"eligible"`
+	Circuit         string     `json:"circuit"`
 	// Failures is the current consecutive-failure count tracked by the
 	// circuit breaker (resets to 0 on RecordSuccess).
 	Failures int64 `json:"failures"`
@@ -583,7 +882,7 @@ func FormatSummary(entries []Entry) string {
 		if u, err := url.Parse(e.URL); err == nil {
 			hosts[i] = u.Host
 		} else {
-			hosts[i] = e.URL
+			hosts[i] = "invalid"
 		}
 	}
 	return fmt.Sprintf("%d proxies (%s)", len(entries), strings.Join(hosts, ", "))

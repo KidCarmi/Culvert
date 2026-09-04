@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -150,8 +151,10 @@ func TestPool_Configure(t *testing.T) {
 		t.Fatalf("list length = %d, want 2", len(list))
 	}
 	for _, s := range list {
-		if !s.Healthy {
-			t.Fatalf("proxy %s should start healthy", s.URL)
+		// 2F-C (C11): a new entry is UNPROBED — eligible for selection, but
+		// never reported healthy by assumption.
+		if s.Healthy || s.Probe.Status != ProbeUnprobed || !s.Eligible {
+			t.Fatalf("proxy %s should start unprobed and eligible, got %+v", s.URL, s.Probe)
 		}
 		if s.Circuit != "closed" {
 			t.Fatalf("circuit = %q, want closed", s.Circuit)
@@ -234,7 +237,7 @@ func TestPool_SkipsUnhealthy(t *testing.T) {
 
 	// Mark first as unhealthy.
 	pool.mu.RLock()
-	pool.proxies[0].Healthy.Store(false)
+	pool.proxies[0].setProbe(ProbeState{Status: ProbeUnhealthy, Reason: ReasonConnectFailed})
 	pool.mu.RUnlock()
 
 	for i := 0; i < 5; i++ {
@@ -254,7 +257,7 @@ func TestPool_AllDownReturnsNil(t *testing.T) {
 		{URL: "http://a.test:3128"},
 	}, 5, time.Minute)
 	pool.mu.RLock()
-	pool.proxies[0].Healthy.Store(false)
+	pool.proxies[0].setProbe(ProbeState{Status: ProbeUnhealthy, Reason: ReasonConnectFailed})
 	pool.mu.RUnlock()
 
 	if pool.Next() != nil {
@@ -278,7 +281,7 @@ func TestPool_ProxyFunc(t *testing.T) {
 
 	// When all down, returns nil (direct).
 	pool.mu.RLock()
-	pool.proxies[0].Healthy.Store(false)
+	pool.proxies[0].setProbe(ProbeState{Status: ProbeUnhealthy, Reason: ReasonConnectFailed})
 	pool.mu.RUnlock()
 	u, err = pf(nil)
 	if err != nil {
@@ -364,14 +367,18 @@ func TestPool_SetProxiesPreservesCBParams(t *testing.T) {
 	pool := &Pool{}
 	pool.Configure([]Entry{{URL: "http://seed.test:3128"}}, 7, 90*time.Second)
 
-	pool.SetProxies([]Entry{{URL: "http://replaced.test:3128"}})
+	if err := pool.SetProxies([]Entry{{URL: "http://replaced.test:3128"}}); err != nil {
+		t.Fatal(err)
+	}
 
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
-	if len(pool.proxies) != 1 {
-		t.Fatalf("proxies = %d, want 1", len(pool.proxies))
+	// 2F-C (C10): the YAML-owned seed stays (read-only); SetProxies replaces
+	// the MANAGED set beside it.
+	if len(pool.proxies) != 2 {
+		t.Fatalf("proxies = %d, want 2 (YAML seed + managed)", len(pool.proxies))
 	}
-	cb := pool.proxies[0].CB
+	cb := pool.proxies[1].CB
 	if cb.threshold != 7 {
 		t.Errorf("threshold = %d, want 7 (SetProxies must keep Configure's CB params)", cb.threshold)
 	}
@@ -398,37 +405,45 @@ func TestPool_SetProxiesOnZeroPoolUsesCBDefaults(t *testing.T) {
 	}
 }
 
-func TestPool_EntriesReturnsRawCredentialedURL(t *testing.T) {
-	const raw = "http://user:sekret-cred@parent.test:3128" // #nosec G101 -- fake userinfo in a reserved .test URL; fixture verifies raw credential round-trip (List() redacts)
+func TestPool_EntriesAreCredentialFreeAndPasswordURLsRefused(t *testing.T) {
+	const raw = "http://user:sekret-cred@parent.test:3128" // #nosec G101 -- fake userinfo in a reserved .test URL
 	pool := &Pool{}
-	pool.Configure([]Entry{{URL: raw}}, 5, time.Minute)
-
+	// 2F-C (C4/C10): a password never rides a URL — YAML entries and the
+	// legacy list path refuse it; credentials are sealed through the
+	// credential endpoint, and every listing is credential-free.
+	if err := pool.Configure([]Entry{{URL: raw}}, 5, time.Minute); err == nil {
+		t.Fatal("a YAML URL carrying a password must be refused")
+	}
+	if pool.Enabled() {
+		t.Fatal("a refused YAML set must leave the pool empty")
+	}
+	if err := pool.SetProxies([]Entry{{URL: raw}}); err == nil {
+		t.Fatal("a legacy URL carrying a password must be refused")
+	}
+	if err := pool.SetProxies([]Entry{{URL: "http://user@parent.test:3128"}}); err != nil {
+		t.Fatal(err)
+	}
 	entries := pool.Entries()
-	if len(entries) != 1 || entries[0].URL != raw {
-		t.Fatalf("Entries() = %+v, want raw URL %q (persistence must round-trip credentials)", entries, raw)
+	if len(entries) != 1 || entries[0].URL != "http://user@parent.test:3128" {
+		t.Fatalf("Entries() = %+v, want the credential-free authority", entries)
 	}
-	list := pool.List()
-	if len(list) != 1 {
-		t.Fatalf("List() = %d entries, want 1", len(list))
-	}
-	if strings.Contains(list[0].URL, "sekret-cred") {
-		t.Errorf("List() leaked the credential: %q (must stay redacted)", list[0].URL)
+	if list := pool.List(); len(list) != 1 || strings.Contains(list[0].URL, "sekret") || list[0].CredentialState != CredentialNone {
+		t.Fatalf("List() must be credential-free with state none: %+v", list)
 	}
 }
 
-func TestPool_SkipsHostlessURL(t *testing.T) {
+func TestPool_RefusesInvalidURLInsteadOfDropping(t *testing.T) {
 	pool := &Pool{}
-	pool.SetProxies([]Entry{
-		{URL: "parent1.corp.com:3128"}, // no scheme — parses opaque, undialable
-		{URL: ""},
+	err := pool.SetProxies([]Entry{
 		{URL: "http://ok.test:3128"},
+		{URL: "parent1.corp.com:3128"}, // no scheme — parses opaque, undialable
 	})
-	entries := pool.Entries()
-	if len(entries) != 1 || entries[0].URL != "http://ok.test:3128" {
-		t.Fatalf("Entries() = %+v, want only the valid scheme://host URL", entries)
+	var inv *InvalidEntryError
+	if !errors.As(err, &inv) || inv.Index != 1 {
+		t.Fatalf("an invalid entry must fail the whole set naming its index, got %v", err)
 	}
-	if got := len(pool.List()); got != 1 {
-		t.Fatalf("List() = %d proxies, want 1", got)
+	if pool.Enabled() || len(pool.List()) != 0 {
+		t.Fatal("a refused set must leave the pool unchanged")
 	}
 }
 

@@ -214,9 +214,15 @@ func TestFallbackState_ClearedWhenPoolReplacedOrWiped(t *testing.T) {
 		t.Fatal("fallback should be active before the wipe")
 	}
 
-	pool.SetProxies(nil)
+	// Wipe both halves of the effective pool (YAML-owned seed + managed).
+	if err := pool.Configure(nil, 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.SetProxies(nil); err != nil {
+		t.Fatal(err)
+	}
 	if active, _ := pool.DirectFallback(); active {
-		t.Fatal("SetProxies(nil) must clear the direct-fallback flag")
+		t.Fatal("wiping the pool must clear the direct-fallback flag")
 	}
 
 	// The empty-pool Next() branch also self-clears: the shared transport
