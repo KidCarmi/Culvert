@@ -505,7 +505,7 @@ func (r *truncatedReader) CommittedForExport(part model.Partition, afterSeq uint
 }
 
 // spoolEvents returns every committed gateway event with its sequence.
-func (r *peerRig) spoolEvents(t *testing.T, part model.Partition) (events []model.Event, seqNums []uint64) {
+func (r *peerRig) spoolEvents(t *testing.T, part model.Partition) (evs []model.Event, seqNums []uint64) {
 	t.Helper()
 	sp := r.events.Spool(model.CapGateway)
 	if sp == nil {
@@ -529,7 +529,7 @@ func (r *peerRig) spoolEvents(t *testing.T, part model.Partition) (events []mode
 
 // spoolEventsAll returns the committed events across every partition the recovery
 // path scans, with per-partition sequences kept alongside.
-func (r *peerRig) spoolEventsAll(t *testing.T) (events []model.Event, seqNums []uint64) {
+func (r *peerRig) spoolEventsAll(t *testing.T) (evs []model.Event, seqNums []uint64) {
 	t.Helper()
 	var allE []model.Event
 	var allS []uint64
