@@ -860,6 +860,35 @@ culvert_h2_inspect_drain_forced_total %d
 		atomic.LoadInt64(&statH2InspectForced),
 	)
 
+	// CHAOS-57 — per-class hijacked-tunnel visibility. Until this landed, four of the
+	// seven tunnel classes (both non-TLS inspect fallbacks, WebSocket, SOCKS5) touched
+	// NO counter at all: they were absent from activeConns, from the dashboard's
+	// activeConns field and from /metrics entirely, so an operator sizing FD or
+	// connection budgets was reading a number that excluded SOCKS5 and WebSocket. The
+	// class label matters on shutdown: when the drain times out, WHICH kind of session
+	// is holding the node decides the remedy. forced_total counts tunnels ended by the
+	// drain-deadline backstop — a persistently non-zero rate across a fleet upgrade
+	// says the 15 s window is too short for this deployment's session mix, not that
+	// anything failed.
+	for i := tunnelClass(0); i < tunnelClassCount; i++ {
+		if i == 0 {
+			_, _ = fmt.Fprint(w, `# HELP culvert_tunnels_active Currently active hijacked tunnels by class
+# TYPE culvert_tunnels_active gauge
+`)
+		}
+		_, _ = fmt.Fprintf(w, "culvert_tunnels_active{class=%q} %d\n", tunnelClassNames[i], atomic.LoadInt64(&tunnelClassActive[i]))
+	}
+	_, _ = fmt.Fprintf(w, `
+# HELP culvert_tunnel_drain_forced_total Hijacked tunnels force-closed by the shutdown drain-deadline backstop
+# TYPE culvert_tunnel_drain_forced_total counter
+culvert_tunnel_drain_forced_total %d
+
+# HELP culvert_tunnel_fence_refused_total Sessions refused because the node was already draining
+# TYPE culvert_tunnel_fence_refused_total counter
+culvert_tunnel_fence_refused_total %d
+
+`, atomic.LoadInt64(&statTunnelForced), atomic.LoadInt64(&statTunnelFenceRefused))
+
 	// CHAOS-11: parent-proxy chain fail-open visibility. fallback_active=1
 	// means the pool is CURRENTLY bypassed (all parents unhealthy or
 	// circuit-open) and egress is direct; the counter tracks how many

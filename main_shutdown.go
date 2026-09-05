@@ -194,6 +194,11 @@ const (
 	// PR3d: after the CONNECT listener is closed (no new inspected-H2 tunnels can
 	// begin) and before the tunnel drain waits, fence new tunnels and send the first
 	// GOAWAY wave to every active inspected-H2 tunnel.
+	// CHAOS-57: refuse NEW long-lived tunnels before the drain looks. After the
+	// listeners stop (80/90) so nothing that could still be drained is refused,
+	// and before the drain (100) so nothing establishes behind its back.
+	shutdownOrderTunnelEstablishFence = 94
+
 	shutdownOrderH2InspectGOAWAY = 95
 	shutdownOrderTunnelDrain     = 100
 
@@ -255,7 +260,9 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 // CONNECT/WebSocket conns to finish. It is a CEILING, not a budget: CHAOS-56
 // made the drain honour the phase deadline too, so the effective window is
 // min(tunnelDrainWindow, time left in the drain phase).
-const tunnelDrainWindow = 15 * time.Second
+// Var (not const) so a test can shorten it, matching tunnelIdleTimeout's
+// convention; production never mutates it.
+var tunnelDrainWindow = 15 * time.Second
 
 // drainActiveTunnels drains in-flight CONNECT/WebSocket tunnels after the
 // proxy server's HTTP listener has shut down. proxySrv.Shutdown only closes
@@ -293,9 +300,17 @@ func drainActiveTunnels(ctx context.Context) error {
 			// force-close backstop rather than returning quietly: a tunnel
 			// abandoned here would otherwise survive until process exit, and
 			// the flush hooks are waiting behind this one.
-			forced := forceCloseH2InspectTunnels()
-			logger.Printf("Drain budget exhausted: %d tunnel(s) still active (force-closed %d inspected H2)",
-				atomic.LoadInt64(&activeConns), forced)
+			//
+			// CHAOS-57: no settle here. The settle exists to let severed relays
+			// hand their TUNNEL_CLOSED entries to the request-log queue before the
+			// flush hooks run, and it is clamped to the phase budget — which, on
+			// this branch, is already spent. Lingering anyway would borrow time
+			// from the hooks behind us; losing the accounting for those tunnels is
+			// exactly the pre-change behaviour, never worse.
+			forcedH2 := forceCloseH2InspectTunnels()
+			forcedRaw, breakdown := forceCloseDrainableTunnels()
+			logger.Printf("Drain budget exhausted: %d tunnel(s) still active (force-closed %d inspected H2, %d hijacked [%s])",
+				atomic.LoadInt64(&activeConns), forcedH2, forcedRaw, breakdown)
 			return nil
 		case <-drainDeadline:
 			// PR3d backstop: force-close inspected-H2 tunnels whose in-flight streams
@@ -303,8 +318,21 @@ func drainActiveTunnels(ctx context.Context) error {
 			// streams keep the conn — and activeConns — open under a graceful GOAWAY),
 			// so laggards get a deterministic teardown instead of relying on process
 			// exit / the container SIGKILL grace.
-			forced := forceCloseH2InspectTunnels()
-			logger.Printf("Drain timeout: %d tunnel(s) still active (force-closed %d inspected H2)", atomic.LoadInt64(&activeConns), forced)
+			//
+			// CHAOS-57 extends the same backstop to every OTHER hijacked-tunnel class
+			// (CONNECT bypass/inspect, both non-TLS fallbacks, WebSocket, SOCKS5).
+			// Those classes are long-lived BY DESIGN, so making the drain wait on them
+			// without a way to end the wait would have bought the operator a guaranteed
+			// 15 s shutdown and severed them anyway. Closing them here unblocks each
+			// relay's io.Copy, so its parent runs recordTunnelClose* and the byte
+			// accounting reaches the request-log queue while the flush hooks are still
+			// ahead of us — which is what the bounded settle below guarantees rather
+			// than leaves to luck.
+			forcedH2 := forceCloseH2InspectTunnels()
+			forcedRaw, breakdown := forceCloseDrainableTunnels()
+			remaining := settleAfterForceClose(ctx)
+			logger.Printf("Drain timeout: %d tunnel(s) still active (force-closed %d inspected H2, %d hijacked [%s])",
+				remaining, forcedH2, forcedRaw, breakdown)
 			return nil
 		case <-ticker.C:
 			// PR3d: re-fire the GOAWAY so any inspected-H2 tunnel that registered after
@@ -404,6 +432,11 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		}
 		return nil
 	})
+	// CHAOS-57: stop minting new long-lived tunnels before the drain runs. SOCKS5
+	// needs this because its Stop waits only for the accept loop, so an
+	// already-accepted session can still establish ~40s later — after the drain,
+	// the backstop and the flush hooks have all finished.
+	reg.Register("tunnel-establish-fence", shutdownOrderTunnelEstablishFence, fenceTunnelEstablishment)
 	// PR3d: send the first GOAWAY wave to active inspected-H2 tunnels (and fence new
 	// ones) before the drain waits on them. No-op when native H2 was never used.
 	reg.Register("h2-inspect-goaway", shutdownOrderH2InspectGOAWAY, beginH2InspectDrain)

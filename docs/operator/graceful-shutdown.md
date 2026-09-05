@@ -50,8 +50,8 @@ Other lines worth knowing:
 | Line | Meaning |
 |---|---|
 | `ControlPlane: gRPC drain exceeded 8s — force-closed connections` | A Data Plane held a stream open past the graceful budget. Harmless: DPs re-sync on reconnect. Repeated occurrences point at a wedged DP, or at a stalled volume on the CP blocking an `Enroll`/`RenewCert`/`PushAuditEvents` handler. The listeners are shut at this point; the force-close of any remaining transport is asynchronous and completes as the process exits. |
-| `Drain budget exhausted: N tunnel(s) still active (force-closed M inspected H2)` | The drain phase ran out before the tunnels finished. N clients saw a cut connection. |
-| `Drain timeout: N tunnel(s) still active …` | The tunnel drain's own 15s ceiling was reached first. Same customer impact. |
+| `Drain budget exhausted: N tunnel(s) still active (force-closed M inspected H2, K hijacked [class=n, …])` | The drain phase ran out before the tunnels finished. The K hijacked tunnels are still force-closed, but the brief settle that lets their `TUNNEL_CLOSED` accounting reach the request log is skipped — investigate the slow hook ahead of the drain, not the tunnels. |
+| `Drain timeout: N tunnel(s) still active (force-closed M inspected H2, K hijacked [class=n, …])` | The tunnel drain's own 15s ceiling was reached first. The per-class breakdown says which kind of session held the node (`socks5` is usually somebody's SSH or database tunnel; `websocket` is an application). See `tunnel-drain-on-shutdown.md`. |
 | `Shutdown: drained; flushing durable state…` | The last line guaranteed to reach the log. Anything after it races the log sink's own close. |
 
 ## 3. Stopping a shutdown that is taking too long
@@ -115,4 +115,6 @@ If you run Culvert under something other than the shipped compose file
   one was killed — the one signal a SIGKILL cannot destroy. Recorded as a
   follow-up (SD-5); not shipped here.
 - **In-flight tunnel handoff.** Long-lived tunnels are cut, not migrated.
-  Draining a node before a restart is the operator's job.
+  Draining a node before a restart is the operator's job. CHAOS-57 made the cut
+  deterministic, accounted and observable across every hijacked-tunnel class
+  (`tunnel-drain-on-shutdown.md`) — it did not make it avoidable.

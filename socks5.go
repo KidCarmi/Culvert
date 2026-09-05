@@ -520,6 +520,24 @@ func handleSOCKS5(conn net.Conn) {
 	}
 	defer destConn.Close()
 
+	// CHAOS-57: refuse to MINT a new long-lived tunnel on a node that is already
+	// past the point where the drain can account for it. Checked here — after the
+	// dial, immediately before the success reply — so the check-to-register window
+	// is microseconds instead of spanning the 30s negotiation deadline and the 10s
+	// dial above. Without it, a session accepted just before Stop could establish
+	// after the drain, the force-close backstop AND the flush hooks had all run, and
+	// be reset at process exit with no TUNNEL_CLOSED entry: PX-8 surviving inside
+	// its own fix. Reply 0x01 (general SOCKS server failure) is protocol-correct and
+	// is what lets the client retry elsewhere instead of being handed a success and
+	// a tunnel that dies seconds later.
+	if tunnelEstablishmentFenced() {
+		noteTunnelFenceRefusal()
+		socks5Reply(conn, 0x01)
+		recordRequest(clientIP, "SOCKS5", host, "SHUTTING_DOWN", "", "", "", "")
+		logger.Printf("SOCKS5 SHUTTING_DOWN %s -> %s (refused: node is draining)", clientIP, sanitizeLog(host))
+		return
+	}
+
 	socks5Reply(conn, 0x00)       // success
 	conn.SetDeadline(time.Time{}) //nolint:errcheck // remove deadline for streaming
 
@@ -538,6 +556,12 @@ func handleSOCKS5(conn net.Conn) {
 // entry (byte counts + lifetime); log-only — the OK request-log entry already
 // ran the stats fan-out for this connection.
 func socks5Relay(client, dest net.Conn, clientIP, host string) {
+	// CHAOS-57: SOCKS5 sessions were the drain's largest blind spot. `Stop` waits
+	// only for the ACCEPT LOOP — every session runs in a detached
+	// `go handleSOCKS5(conn)` — so nothing in the shutdown sequence waited for or
+	// closed them, and a long-lived SSH-over-SOCKS5 session was reset by process
+	// exit without its TUNNEL_CLOSED accounting ever being written.
+	defer registerDrainableTunnel(tunnelClassSOCKS5, client, dest)()
 	start := time.Now()
 	// Byte counts: each direction is written by exactly one goroutine before
 	// its done-send and read only after both receives (channel happens-before).
