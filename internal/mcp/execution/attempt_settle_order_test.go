@@ -537,3 +537,57 @@ func TestAttemptSettled_CallerCancellationIsNotASampleAtAll(t *testing.T) {
 		})
 	}
 }
+
+// TestBreach_BoundaryToolDriftTripsFingerprintDrift pins the POST-ADMISSION half of the drift
+// funnel.
+//
+// Tool drift is detectable at three points — before the executor, at admission, and at the final
+// boundary — and only the middle one reported anything. A rug-pull landing AFTER admission was
+// refused here as an ordinary stale decision, so the experiment kept its execution authority and
+// every later request merely failed approval validation, which reads as routine denial rather than
+// proof the reviewed target is gone (Codex round 14).
+//
+// The breach carries the ATTEMPT's generation, not whatever is current: this request was admitted
+// under that activation, and a demote-and-reactivate must not charge a stale observation to a fresh
+// experiment.
+func TestBreach_BoundaryToolDriftTripsFingerprintDrift(t *testing.T) {
+	var releases int32
+	sfy := &breachOrderSafety{releases: &releases}
+	up := &fakeUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_drift", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	// Drifted only at the FINAL boundary: the request is admitted, the attempt is opened, and the
+	// catalog moves under it.
+	in.ToolStillCurrent = func() bool { return false }
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	if up.calls != 0 {
+		t.Fatalf("premise: the boundary must refuse before any upstream call, got %d", up.calls)
+	}
+	codes, _ := sfy.seen()
+	if len(codes) != 1 || codes[0] != "tool_fingerprint_drift" {
+		t.Fatalf("SECURITY: a rug-pull caught at the final boundary must stop the whole Canary, "+
+			"not merely refuse the request; breaches=%v", codes)
+	}
+}
+
+// THE CONTROL: an ordinary execution whose tool has NOT drifted raises no drift breach. Without it
+// the fix is satisfiable by reporting drift on every boundary refusal.
+func TestBreach_UndriftedBoundaryRaisesNoDriftBreach(t *testing.T) {
+	var releases int32
+	sfy := &breachOrderSafety{releases: &releases}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), &fakeUpstream{}, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_ok2", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	in.ToolStillCurrent = func() bool { return true }
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	if codes, _ := sfy.seen(); len(codes) != 0 {
+		t.Fatalf("an undrifted execution must raise no whole-Canary breach, got %v", codes)
+	}
+}

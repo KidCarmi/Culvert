@@ -179,6 +179,20 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			// definitely_not_sent is mechanically provable rather than inferred.
 			sendState = model.SendDefinitelyNotSent
 			cls := classifyBoundaryError(gerr)
+			// A DRIFT REFUSAL AT THE BOUNDARY IS THE SAME BREACH THE ADMISSION GATE REPORTS.
+			//
+			// Tool drift is detectable at three points — before the executor, at admission, and
+			// here — and only the middle one used to route anywhere. A rug-pull landing AFTER
+			// admission was refused as an ordinary stale decision, so the experiment kept its
+			// authority and every later request merely failed approval validation, which reads as
+			// routine denial rather than proof the reviewed target is gone (Codex round 14).
+			//
+			// It is reported with the ATTEMPT's generation, not the current one: this request was
+			// admitted under that activation, and a demote-and-reactivate in between must not
+			// charge a stale observation to a fresh experiment.
+			if cls.stale && attempt != nil {
+				e.cfg.Safety.Breach(in.Capability.String(), attempt.generation, "tool_fingerprint_drift")
+			}
 			bf.stale, bf.killed = cls.stale, cls.killed
 			if cls.demoted {
 				bf.gateRefused, bf.gateReason = true, mcperr.ReasonRolloutModeInvalid

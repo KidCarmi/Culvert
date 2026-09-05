@@ -56,8 +56,32 @@ type Deps struct {
 	// tools/call (credential broker + PR-8 commit-before-materialization + upstream
 	// client + response DLP). A nil executor is the disabled-by-default posture.
 	Executor ExecutionProvider
+	// CanaryBreach is the OPTIONAL narrow seam for reporting an authoritative WHOLE-CANARY breach
+	// that this pipeline detects BEFORE the executor is reached. Nil ⇒ nothing composed and nothing
+	// reported, which is the disabled-by-default posture.
+	//
+	// It exists because tool drift is detectable at three points and only one of them used to route
+	// anywhere: the composition-layer admission gate. This pipeline refuses a drifted decision
+	// BEFORE the executor (refuseOnToolDrift), so a rug-pull landing in that window failed the
+	// request and left the Canary running — every later request against the new fingerprint then
+	// merely failed approval validation, which looks like ordinary denial rather than proof the
+	// experiment's premise no longer holds (Codex round 14).
+	//
+	// The signature carries no activation generation ON PURPOSE. This package cannot import the
+	// composition layer (the dependency runs the other way), and at this point no reservation has
+	// been made, so there is no generation this request was admitted under. The adapter resolves
+	// "the activation admitting right now", exactly as the admission gate's own drift path does.
+	CanaryBreach func(capability, code string)
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
+}
+
+// reportCanaryBreach forwards an authoritative whole-Canary breach when a reporter is composed.
+// Nil-safe so call sites stay free of branching.
+func (d Deps) reportCanaryBreach(capability, code string) {
+	if d.CanaryBreach != nil {
+		d.CanaryBreach(capability, code)
+	}
 }
 
 func (d Deps) now() time.Time {

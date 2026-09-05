@@ -1015,6 +1015,21 @@ run_mutation M105 \
   ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
   's/\tif upstreamBreachCode\(err\) != "" \{\n\t\treturn\n\t\}\n//'
 
+# M106/M107 are Codex round 14: tool drift is detectable at THREE points and only the middle one
+# (the admission gate) reported anything. Each of the two silent detections gets its own mutation,
+# because they are separate windows in separate packages and either can be deleted unnoticed.
+run_mutation M106 \
+  'a rug-pull refused before the executor stops nothing' \
+  'TestCanaryBreach_PreExecutorToolDriftIsReported|TestCanaryBreach_CurrentFingerprintReportsNothing' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), "tool_fingerprint_drift"\)\n//'
+
+run_mutation M107 \
+  'a rug-pull caught at the final boundary stops nothing' \
+  'TestBreach_BoundaryToolDriftTripsFingerprintDrift|TestBreach_UndriftedBoundaryRaisesNoDriftBreach' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\t\tif cls\.stale && attempt != nil \{\n\t\t\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), attempt\.generation, "tool_fingerprint_drift"\)\n\t\t\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

@@ -516,7 +516,7 @@ explained in the honesty note below. Read the column as "where a report of this 
 | `budget_exhausted` | `reserveCanaryExecution` on `BudgetDeniedTotal`, AND — traffic-independently — `observeAttemptSettled` once the allowance is spent and nothing is still in flight, AND `reconcileWindowDeadlineLocked` at restore |
 | `scope_escape` | `reserveCanaryExecution` on `BudgetDeniedScope` |
 | `window_expired` | `reconcileWindowDeadlineLocked` — a watchdog armed for the REMAINING time at begin and at restore, plus a synchronous latch when the deadline has already passed |
-| `tool_fingerprint_drift` | `mcpLiveTrustRevalidate` classifies a fingerprint mismatch as authoritative drift; `mcpLiveSideEffectGate.AdmitSideEffect` routes it to `tripBreach` |
+| `tool_fingerprint_drift` | THREE detection points, all routed: the runtime's pre-executor `refuseOnToolDrift` (through the optional `Deps.CanaryBreach` seam, resolving the activation admitting now), `mcpLiveTrustRevalidate` at admission (through `tripBreach`), and the executor's final-boundary `ToolStillCurrent` refusal (through `CanarySafety`, carrying the attempt's generation) |
 | `server_identity_drift` | the same path, on loss of the approved server identity |
 | `outcome_evidence_loss` | `execution`'s outcome-commit failure branch, through the `CanarySafety` seam (the metric remains in parallel, for observability) |
 | `independent_witness_mismatch` | `Executor.ReconcileAndReport` on `ReconConflict` — an authoritative reconciliation contradicting Culvert's own record |
@@ -929,9 +929,9 @@ reported, it denies AND stops. What is NOT claimed is that this node can current
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
-**Thirteen adversarial rounds hardened this closure, and what they found is the useful record.** Each
+**Fourteen adversarial rounds hardened this closure, and what they found is the useful record.** Each
 round's fix exposed the next layer inward, which is convergence rather than churn — but every one of
-the twenty-eight findings was a way the latch could be right and the surrounding machinery still wrong.
+the twenty-nine findings was a way the latch could be right and the surrounding machinery still wrong.
 Rounds 4 through 6 found defects that rounds 3, 4 and 5 had themselves introduced, which is the
 honest shape of this kind of work: a fix that tightens one predicate is a new opportunity to get the
 adjacent one wrong. Both round-6 findings are of that kind, and both are the SAME predicate one
@@ -991,6 +991,7 @@ ONE of the two shapes a cancellation arrives in.
 | 12 | The watchdog callback read the clock four times | Openness, "is the deadline ahead", the re-arm duration and the trip timestamp were separate samples. A wall-clock step between any two lets the callback pick contradictory branches and re-arm the only traffic-independent stop for a duration measured from an instant it had already rejected |
 | 12 | The §16 trip-path table still gave `out_of_scope_execution` a producer | It mapped the code to the identity-cap breach, which the enforcer actually reports as `scope_escape`. An operator auditing producer coverage there would have reached the conclusion the previous commit existed to remove |
 | 13 | A directly classified breach was ALSO counted as a health sample | Round 8 added the identity breach and left the settle unconditional, so a pinned-identity mismatch was both a whole-Canary stop and an ordinary target failure in the rate population — the laundering `HealthMonitor`'s own contract forbids in as many words. One event feeding two different stop decisions, and an identity breach shown as a target failure on the persisted counters |
+| 14 | Two of the THREE tool-drift detections reported nothing | Drift is caught before the executor (`refuseOnToolDrift`), at admission (the gate's classifier) and at the final boundary (`ToolStillCurrent`), and only the middle one routed anywhere. A rug-pull landing in either other window refused the request and left the Canary holding execution authority — and every later request against the new fingerprint then merely failed approval validation, which reads as routine denial rather than proof the reviewed target is gone |
 
 Two of these deserve to be remembered past this PR. The generation finding and the health-latch
 finding were both **gaps my own comments described and my own code did not implement** — the header
@@ -1041,7 +1042,7 @@ sides, and "the latch wins" is only true if it is true at every interleaving.
 
 ### Blocker 7 — red team
 
-Twenty-nine adversarial scenarios, each answered by a named gate rather than by argument.
+Thirty-one adversarial scenarios, each answered by a named gate rather than by argument.
 
 | Scenario | Outcome | Gate |
 |---|---|---|
@@ -1073,6 +1074,8 @@ Twenty-nine adversarial scenarios, each answered by a named gate rather than by 
 | The evidence volume dies and the terminal outcome cannot be written | `outcome_evidence_loss` latches, and the slot is still held while it does — the next request cannot reach the upstream while that breach is being recorded | `TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased` |
 | The connected peer's TLS identity no longer matches its pin | `server_identity_drift` latches on the FIRST occurrence, before the slot goes back — not after a second sample | `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift` (control: `TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift`) |
 | That same identity breach reaches the rate detector too | it does not: a condition with its own immediate classification is excluded from the population, so one event cannot feed two stop decisions | `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift` (control: `TestBreach_OrdinaryUpstreamFailureIsStillASample` — an ordinary failure IS still a sample) |
+| The reviewed tool is redefined BEFORE the request reaches the executor | the pre-executor refusal reports `tool_fingerprint_drift` through the runtime's narrow seam; the request fails AND the experiment stops | `TestCanaryBreach_PreExecutorToolDriftIsReported` (controls: `TestCanaryBreach_CurrentFingerprintReportsNothing`, and `TestCanaryBreach_NoSeamComposedIsAPlainRefusal` for the disabled-by-default posture) |
+| The reviewed tool is redefined AFTER admission, at the final boundary | the same code, carried with the ATTEMPT's generation so a demote-and-reactivate cannot charge it to a fresh experiment | `TestBreach_BoundaryToolDriftTripsFingerprintDrift` (control: `TestBreach_UndriftedBoundaryRaisesNoDriftBreach`), and end to end against the real peer in `TestConc07_ToolDriftAfterIntentRefusesTheSend` |
 | The client hangs up mid-call, twice | nothing stops, AND nothing is recorded: a cancellation is not evidence about the target in either direction, so it never enters the population to dilute it. A deadline overrun still is a charged sample | `TestAttemptSettled_CallerCancellationIsNotASampleAtAll` (a five-row table covering BOTH cancellation shapes — reason-classified and wrapped-during-body-read — each ⇒ 0 samples, against a deadline wrapped the SAME way, a plain deadline and a connect failure ⇒ 1 charged sample each) |
 
 The three controls that keep this from being a proof of "abort on everything": a healthy population
@@ -1674,11 +1677,11 @@ demonstration still scores CAUGHT.
 
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **105 mutations** (M61–M78 are the blocker-7
-auto-abort set; M79–M105 were added by the thirteen adversarial rounds above — 102 driven through
+`scripts/mcp-canary-mutation-campaign.sh` now carries **107 mutations** (M61–M78 are the blocker-7
+auto-abort set; M79–M107 were added by the fourteen adversarial rounds above — 104 driven through
 `run_mutation`, plus M02, M17 and M80, which stay hand-written because they mutate more than one
 site; M91 stopped needing a helper when round 8 collapsed the three orderings into one block). The 78-mutation state recorded below was clean on its second run;
-M79–M105 were each verified failing against their own reintroduced defect as they were written. The
+M79–M107 were each verified failing against their own reintroduced defect as they were written. The
 first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
 which is the campaign doing its job, so it is recorded rather than quietly re-run:
 

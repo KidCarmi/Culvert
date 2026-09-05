@@ -232,6 +232,17 @@ func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id
 	if !p.toolHasDrifted(in) {
 		return Outcome{}, false
 	}
+	// AUTHORITATIVE DRIFT, and refusing the request is only half the answer.
+	//
+	// The reviewed tool is no longer the one the decision was computed against. For an ordinary
+	// gateway that is a stale decision and nothing more; for a CANARY it is proof the experiment's
+	// premise — a pinned, reviewed target — no longer holds, and the experiment must stop rather
+	// than merely decline this request. Detected here and left unreported, a rug-pull landing
+	// before this check stopped nothing, and every later request against the new fingerprint failed
+	// approval validation instead, which reads as ordinary denial (Codex round 14).
+	//
+	// The seam is nil in every non-Canary composition, so this is a no-op there.
+	p.deps.reportCanaryBreach(p.capability.String(), "tool_fingerprint_drift")
 	p.ctr.requestsRejected.Add(1)
 	rb.rec.PolicyAction = "BLOCKED_BY_DECISION_STALE"
 	rb.rec.PolicyReason = mcperr.ReasonDecisionSnapshotStale.Code()

@@ -246,6 +246,20 @@ func (f *canarySafetyFunnel) Breach(capability string, gen uint64, code string) 
 	f.rt.tripCanaryAbortForGeneration(f.capb, gen, code, canaryNow())
 }
 
+// BreachAtCurrentActivation routes a breach detected BEFORE any reservation exists — the runtime
+// pipeline's pre-executor drift refusal — to the abort authority.
+//
+// It resolves "the activation admitting right now" rather than taking a generation, because there
+// is none to take: no slot was reserved, so this request was not admitted under any activation. The
+// admission gate's own drift path already resolves it exactly this way. A zero generation means no
+// activation is running, and the trip discards it.
+func (f *canarySafetyFunnel) BreachAtCurrentActivation(capability, code string) {
+	if f == nil || f.rt == nil || capability != f.capb.String() {
+		return
+	}
+	f.Breach(capability, f.rt.currentGeneration(f.capb), code)
+}
+
 // AttemptSettled feeds one settled attempt to the generation-bound health detectors and trips the
 // abort if the population now proves a breach. The classification lives here rather than in the
 // engine because only the composition layer knows the activation generation — a settle reported by

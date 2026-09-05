@@ -272,6 +272,12 @@ func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCf
 		// authorization — with no executor an ALLOW returns execution_state=not_implemented
 		// and no credential/upstream/broker/side-effect runs. Still Observe-only.
 		Policy: pol,
+		// Blocker 7: the pipeline refuses a drifted decision BEFORE the executor is reached, and
+		// that refusal is an authoritative whole-Canary breach as much as the one the admission
+		// gate reports. The funnel is generation-strict and capability-scoped, and it trips nothing
+		// when no activation is running — so on an Observe-only node (the default posture) this
+		// wire is inert (Codex round 14).
+		CanaryBreach: newCanarySafetyFunnel(rollout.CapabilityGateway).BreachAtCurrentActivation,
 	}
 	if modes.senderProfile.RequiresDPoP() {
 		deps.Replay = senderconstraint.NewReplayCache(limits.DefaultAuth(), nil)
