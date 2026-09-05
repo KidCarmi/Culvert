@@ -925,6 +925,26 @@ run_mutation M93 \
   . mcp_canary_autostop.go \
   's/globalCanaryRuntime\.windowDeadlineIfOpen\(capb\)/globalCanaryRuntime.windowDeadline(capb)/'
 
+# ============================================================================
+# CODEX ROUND 5 ON #1314
+# ============================================================================
+
+# M94's gate needs a fixture whose error carries the OBSERVED-RESPONSE fact. A bare
+# error leaves the send state at may_have_been_sent, where the defective predicate
+# ALSO reports failure — the first draft of this gate passed against both shapes and
+# proved nothing (recorded in the review artifact).
+run_mutation M94 \
+  'an upstream error response counts as a successful attempt' \
+  'TestAttemptSettled_PeerErrorResponseCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
+  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
+  's/rec\.generation, upstreamFailed, e\.cfg\.Clock/rec.generation, !state.ProvesReceipt(), e.cfg.Clock/'
+
+run_mutation M95 \
+  'a window denial at admission is recorded as budget_exhausted' \
+  'TestAutoStop_WindowDenialAtAdmissionRecordsWindowExpired|TestAutoStop_TotalExhaustionStillRecordsBudgetExhausted' \
+  . mcp_canary_runtime.go \
+  's/\tcase outcome == canary\.BudgetDeniedWindow:/\tcase false:/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

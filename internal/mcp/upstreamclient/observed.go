@@ -138,3 +138,14 @@ func ResponseObserved(err error) bool {
 // produces when a call is refused before any leg begins. It is a test seam only:
 // production marking happens inside Call and roundTrip, where the evidence lives.
 func MarkNeverSentForTest(err error) error { return markNeverSent(err) }
+
+// MarkResponseObservedForTest is the mirror seam: it produces the exact error shape the production
+// client returns when the PEER ANSWERED but the answer was unusable — a non-200, an unreadable body,
+// undecodable bytes. Without it an executor-side double cannot reproduce the case at all, because a
+// bare error stays at the conservative may_have_been_sent and every predicate that distinguishes
+// "the peer failed" from "we never heard back" reads the same on both. That gap let a health-detector
+// defect ship: a gate written with a bare error passed against the defective predicate AND the fixed
+// one, proving nothing (Codex round 5). Test seam only; production marking happens in markLegFacts.
+func MarkResponseObservedForTest(err error) error {
+	return markLegFacts(err, legFacts{responseObserved: true})
+}

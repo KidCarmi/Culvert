@@ -1361,3 +1361,54 @@ func TestAutoStop_ClockInsideTheWindowStillArmsNormally(t *testing.T) {
 		t.Fatalf("a healthy restored activation still holds authority, got %q", st.ExecutionAuthority)
 	}
 }
+
+// A reservation that arrives after the deadline must record window_expired, not budget_exhausted.
+// Both are whole-Canary stops, but the first cause is IMMUTABLE, so folding them together made the
+// operator-visible reason depend on a race: whoever noticed first — this admission or the watchdog —
+// decided what the same underlying fact was called.
+func TestAutoStop_WindowDenialAtAdmissionRecordsWindowExpired(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	// The watchdog is captured and never fired: this gate is about the ADMISSION path naming the
+	// cause, and firing the timer would let the watchdog name it instead.
+	_, _, _ = swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(9), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// Plenty of allowance remains — only the time box has closed.
+	past := canaryRuntimeTestNow.Add(2 * time.Hour)
+	nowP = past
+	if o, _ := rt.reserveCanaryExecution(capb, past, rtIdent); o != canary.BudgetDeniedWindow {
+		t.Fatalf("premise: a reserve past the window must be denied on window, got %v", o)
+	}
+	if !rt.abortedNow(capb) {
+		t.Fatal("a window denial is a whole-Canary stop")
+	}
+	if code := rt.abortCodeNow(capb); code != "window_expired" {
+		t.Fatalf("the time box closing must be recorded as window_expired, not %q — "+
+			"the cause must not depend on whether admission or the watchdog noticed first", code)
+	}
+}
+
+// THE CONTROL: a genuine allowance exhaustion still records budget_exhausted, so the split cannot
+// be satisfied by renaming everything.
+func TestAutoStop_TotalExhaustionStillRecordsBudgetExhausted(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(1), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetGranted {
+		t.Fatalf("premise: the single reservation must be granted, got %v", o)
+	}
+	// The slot is held in flight so the release-site latch cannot fire first.
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedTotal {
+		t.Fatalf("premise: the N+1 must be denied on total, got %v", o)
+	}
+	if code := rt.abortCodeNow(capb); code != "budget_exhausted" {
+		t.Fatalf("a spent allowance must still be budget_exhausted, got %q", code)
+	}
+}

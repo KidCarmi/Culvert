@@ -61,15 +61,21 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// post-call evidence at all.
 	var attempt *attemptRecord
 	sendState := model.SendStateUnset
+	// Declared BEFORE the deferred commit so that commit can read the upstream leg's own verdict.
+	var upResp *upstreamclient.Response
+	var upErr error
 	defer func() {
 		if attempt == nil {
 			return // no durable intent ⇒ no physical attempt to account for
 		}
-		e.commitAttemptOutcome(in, attempt, sendState, out)
+		// The UPSTREAM LEG's own verdict, computed here because this is where it is
+		// known. "Did the peer give us a usable answer?" is a different question from
+		// "did Culvert return a result?", and a different question again from "did the
+		// invocation reach the peer?" — the health detector needs the first, and only
+		// this scope has it (Codex round 5 P1).
+		e.commitAttemptOutcome(in, attempt, sendState, out, upErr != nil || upResp == nil)
 	}()
 
-	var upResp *upstreamclient.Response
-	var upErr error
 	// OVN-09 (residual window). callUpstream is the ONE place either branch performs
 	// the irreversible side effect, so the last-moment drift re-check belongs here
 	// rather than at each call site: a later branch added above this line inherits it.

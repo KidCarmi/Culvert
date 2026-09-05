@@ -429,6 +429,13 @@ func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now tim
 	}
 	outcome = cr.enforcer.Reserve(generation, now, ident)
 	switch {
+	case outcome == canary.BudgetDeniedWindow:
+		// The TIME BOX closed, not the allowance. Both are whole-Canary stops, but the first cause
+		// is IMMUTABLE, so folding them together made the recorded reason depend on a race: whoever
+		// noticed first — this admission or the watchdog — decided whether the operator was told
+		// "budget_exhausted" or "window_expired", for the same underlying fact (Codex round 5 P2).
+		// Naming it here means the two paths agree whichever wins.
+		cr.aborter.Trip("window_expired", generation, now)
 	case outcome.WholeCanaryExhaustion():
 		// The blast-radius budget is spent — a whole-Canary breach. Latch the abort.
 		cr.aborter.Trip("budget_exhausted", generation, now)

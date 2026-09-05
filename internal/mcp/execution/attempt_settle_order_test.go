@@ -5,6 +5,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/events/spool"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
 
 // countingBackend wraps the real OS backend and counts durable appends, so a test can ask "how many
@@ -99,5 +101,76 @@ func TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit(t *testing.T) {
 	if sfy.appendsThen >= total {
 		t.Fatalf("SECURITY: the health sample must be reported BEFORE the terminal outcome is durable; "+
 			"appends at settle=%d, total=%d (the outcome was already written)", sfy.appendsThen, total)
+	}
+}
+
+// failSafety records the failure flags AttemptSettled reported.
+type failSafety struct {
+	mu     sync.Mutex
+	failed []bool
+}
+
+func (s *failSafety) Breach(string, uint64, string) {}
+func (s *failSafety) AttemptSettled(_ string, _ uint64, failed bool, _ time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failed = append(s.failed, failed)
+}
+
+func (s *failSafety) flags() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]bool(nil), s.failed...)
+}
+
+// TestAttemptSettled_PeerErrorResponseCountsAsAFailure is the gate for the failure predicate.
+//
+// run.go records SendPeerResponseReceived for a non-200, an unreadable body and an undecodable one,
+// because a peer that answers badly has still RUN the tool. Deriving "failed" from receipt therefore
+// counted an HTTP 500 as a SUCCESS: two consecutive upstream errors produced zero failures, never
+// reached the 1-of-2 elevated_error_rate threshold, and a third execution was admitted against a
+// demonstrably unhealthy target (Codex round 5 P1).
+func TestAttemptSettled_PeerErrorResponseCountsAsAFailure(t *testing.T) {
+	sfy := &failSafety{}
+	// The error must carry the OBSERVED-RESPONSE fact, or the fixture does not reproduce the
+	// defect: a bare error leaves the send state at may_have_been_sent, where the old
+	// receipt-derived predicate ALSO reports failure and the gate proves nothing. This is the shape
+	// the production client returns for a non-200.
+	up := &fakeUpstream{err: upstreamclient.MarkResponseObservedForTest(errors.New("upstream returned HTTP 500"))}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = identityGate{reservationID: "rsv_err", generation: 7}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	got := sfy.flags()
+	if len(got) != 1 {
+		t.Fatalf("exactly one settled attempt expected, got %d", len(got))
+	}
+	if !got[0] {
+		t.Fatal("SECURITY: an upstream error response must count as a FAILED attempt — " +
+			"the detector cannot see an unhealthy peer otherwise")
+	}
+}
+
+// THE CONTROL: an ordinary successful execution must still report failed=false, or the detector
+// would trip on healthy traffic and the fix would be satisfiable by counting everything.
+func TestAttemptSettled_SuccessfulExecutionIsNotAFailure(t *testing.T) {
+	sfy := &failSafety{}
+	up := &fakeUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = identityGate{reservationID: "rsv_ok", generation: 7}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	got := sfy.flags()
+	if len(got) != 1 {
+		t.Fatalf("exactly one settled attempt expected, got %d", len(got))
+	}
+	if got[0] {
+		t.Fatal("a successful execution must not count as a failure")
 	}
 }

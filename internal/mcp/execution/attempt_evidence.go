@@ -86,7 +86,7 @@ func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, 
 // the (separately-scoped) whole-Canary abort wiring consumes. This function
 // deliberately does not stop the Canary itself — that is blocker #7's job, and a
 // second abort path here would be a parallel framework.
-func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, out runtime.ExecOutput) {
+func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, out runtime.ExecOutput, upstreamFailed bool) {
 	f := outcomeFacts(in)
 	f.Phase = model.PhaseOutcome
 	// outcomeFacts stamps Decision.ExecutionState = "executed" for the success path.
@@ -155,11 +155,22 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 	//     judge. Counting those would make an operator's own kill switch look like an error rate
 	//     and latch elevated_error_rate for the stop working exactly as designed.
 	//
-	// Among attempts that WERE made, failure is "no proof the peer answered" — that is the
-	// upstream leg failing, and it is deliberately NOT out.Executed: a DLP block after a
-	// successful peer response is Culvert's policy working, not the target being unhealthy.
+	// FAILURE IS THE UPSTREAM LEG'S VERDICT, not the send state.
+	//
+	// This read "no proof the peer answered" (!state.ProvesReceipt()) and was wrong in the most
+	// ordinary direction there is: run.go records SendPeerResponseReceived for a non-200, an
+	// unreadable body and an undecodable one, because a peer that answers badly has still RUN the
+	// tool. Receipt was therefore proven and the attempt counted as a success — so two consecutive
+	// HTTP 500s from the target produced ZERO failures, never reached the 1-of-2 threshold, and the
+	// third execution was admitted against a demonstrably unhealthy peer (Codex round 5 P1). The
+	// detector could not see the failure mode it exists to catch.
+	//
+	// upstreamFailed is computed at the call site, where the leg's own result is in scope. It is
+	// still deliberately NOT out.Executed: a DLP block AFTER a successful peer response leaves
+	// upstreamFailed false, because that is Culvert's policy working rather than the target being
+	// unhealthy — the exclusion the original comment was right about and the predicate was not.
 	if state != model.SendStateUnset && state != model.SendDefinitelyNotSent {
-		e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, !state.ProvesReceipt(), e.cfg.Clock().Sub(rec.startedAt))
+		e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, upstreamFailed, e.cfg.Clock().Sub(rec.startedAt))
 	}
 
 	if _, cerr := e.cfg.Events.CommitDecision(f); cerr != nil {
