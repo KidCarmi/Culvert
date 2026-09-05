@@ -11,7 +11,7 @@ current posture (do NOT collapse these into "done" or "not done"):
 |---|---|
 | Canary architecture — preflight, budget ceiling, trust firewall | **IMPLEMENTED** |
 | Canary architecture — scope gate (`ValidateScope`) | **PARTIAL** — forbids percentage/group/wildcard and caps server & tenant at 1, but `MaxCanaryTools`/`MaxCanaryPrincipals` are **2** and `principalCount` sums Principals+Clients+Agents, so the machine gate does NOT enforce the one-tool/one-synthetic-principal experiment; that must be imposed as an external authorization prerequisite (review §10) |
-| Canary architecture — whole-Canary AUTOMATIC abort | **IMPLEMENTED** (review blocker 7 CLOSED) — every declared `AbortCanary` code has a production trip path onto the ONE `canary.AbortController`; the two rate detectors are reachable inside the 3-execution corpus, and the time box stops the experiment with NO further request arriving. The latch revokes EXECUTION AUTHORITY, not the node's mode: demotion stays governed by blockers 10 and 12, so `ModeCanary + ABORTED` is the truthful state. Two codes have wired funnels but no production PRODUCER yet — `credential_safety_failure` (blocker 9) and `unexpected_upstream_response` (blocker 8). See §16 below and the review §16/§25a |
+| Canary architecture — whole-Canary AUTOMATIC abort | **IMPLEMENTED** (review blocker 7 CLOSED) — every declared `AbortCanary` code has a wired trip path onto the ONE `canary.AbortController`; the two rate detectors are reachable inside the 3-execution corpus, and the time box stops the experiment with NO further request arriving. The latch revokes EXECUTION AUTHORITY, not the node's mode: demotion stays governed by blockers 10 and 12, so `ModeCanary + ABORTED` is the truthful state. THREE codes have wired funnels but no production PRODUCER yet — `out_of_scope_execution` (the scope gate refuses before execution, so this is prevented by construction; an independent witness would produce it), `credential_safety_failure` (blocker 9) and `unexpected_upstream_response` (blocker 8). See §16 below and the review §16/§25a |
 | Canary architecture — durable invocation evidence | **PARTIAL** (review blocker 8 STILL OPEN, narrowed) — the internal half is complete and proven against the REAL spool: events carry `OutcomeEvidence`, the terminal outcome is committed on every exit path (not just success), the send intent is durable before the irreversible call, and orphan recovery plus typed witness reconciliation exist. What is still missing is the AUTHORITATIVE PRODUCTION WITNESS ADAPTER, so a post-send crash resolves to `reconciliation_required` rather than to a determinate answer, and the procedure below cannot fully close the executed/status/duration reconciliation on its own (review §15/§18) |
 | Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
 | Live tier arming | **NOT OPERATOR-PERFORMABLE YET** — the governed, node-readiness-gated `armLiveTier` function exists and is correct, but has NO production caller (no startup path, admin API, or other non-test code invokes it); arming is reachable only from tests today |
@@ -144,7 +144,7 @@ set is empty. This requires the separately-reviewed activation to have:
    *Automatic (blocker 7, CLOSED).* Execution AUTHORITY is revoked by the node itself. A watchdog
    armed from the persisted activation instant latches `window_expired` with NO further request
    arriving, exhaustion latches when the final authorized attempt settles, and every other
-   `AbortCanary` code has a production trip path onto the one `canary.AbortController`. After the
+   `AbortCanary` code has a wired trip path onto the one `canary.AbortController`. After the
    latch no new reservation is granted and a request already admitted fails the final live
    revalidation before `Upstream.Call`. The operator does not have to be watching for this.
 
@@ -170,14 +170,16 @@ out_of_scope_execution · scope_escape · tool_fingerprint_drift · server_ident
 outcome_evidence_loss · credential_safety_failure · budget_exhausted · elevated_error_rate ·
 latency_pathology · unexpected_upstream_response · independent_witness_mismatch · window_expired.
 
-> **Wiring (review blocker 7 CLOSED).** Every code above now has a production trip path, and they all
+> **Wiring (review blocker 7 CLOSED).** Every code above now has a wired trip path, and they all
 > converge on the ONE `canary.AbortController` — there is no second latch. Drift denies the request AND
 > stops the experiment; outcome-evidence loss stops it (the metric remains in parallel); a
 > reconciliation conflict stops it. What the latch revokes is EXECUTION AUTHORITY: no new reservation,
 > and a request already admitted fails the final live revalidation before `Upstream.Call`.
 > It does NOT demote the node — demotion stays governed by review blockers 10 and 12, so the truthful
 > state is `ModeCanary + ABORTED` and `activation_runtime.auto_stop` reports `execution_authority`
-> separately from mode. Two codes have no production PRODUCER yet:
+> separately from mode. THREE codes have no production PRODUCER yet — `out_of_scope_execution`
+> (prevented by the scope gate before execution rather than detected; an independent witness would
+> produce it), plus:
 > `credential_safety_failure` (blocker 9) and `unexpected_upstream_response` (blocker 8); their funnels
 > are wired and gated. See `docs/operator/mcp-first-controlled-canary-review.md` §16.
 >

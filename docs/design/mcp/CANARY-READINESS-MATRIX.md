@@ -124,7 +124,7 @@ scope_escape, tool_fingerprint_drift, server_identity_drift, outcome_evidence_lo
 credential_safety_failure, budget_exhausted, elevated_error_rate, latency_pathology,
 unexpected_upstream_response, independent_witness_mismatch, window_expired.
 
-**AUTOMATIC (review §16, blocker 7 CLOSED).** Every code above has a production trip path onto the
+**AUTOMATIC (review §16, blocker 7 CLOSED).** Every code above has a wired trip path onto the
 ONE `canary.AbortController`; the latch revokes EXECUTION AUTHORITY (no new reservation, and an
 already-admitted request fails the final live revalidation before `Upstream.Call`). Two of them —
 `window_expired` and `budget_exhausted` — stop the experiment with NO further request arriving:

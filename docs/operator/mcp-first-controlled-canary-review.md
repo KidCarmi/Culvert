@@ -505,7 +505,7 @@ found exactly TWO production `aborter.Trip` sites, both in `reserveCanaryExecuti
 (`budget_exhausted`, `scope_escape`), and the generic `tripCanaryAbort` wrapper had NO production
 caller — so eight of the ten declared `AbortCanary` codes were declared but never tripped, and after
 any of them LATER requests could still reach the upstream. **That gap is now closed (blocker 7).**
-The taxonomy is twelve `AbortCanary` codes and every one has a production trip path that converges on
+The taxonomy is twelve `AbortCanary` codes and every one has a wired trip path that converges on
 the SAME `AbortController` — there is no second latch, no parallel registry, no per-breach stop:
 
 | Whole-Canary code | Automatic trip path |
@@ -798,7 +798,7 @@ BLOCKED-vs-FAILED note in §26).
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
 | Durable record determines whether a pre-crash upstream invocation occurred | **NO — narrowed. Internal durable truth/recovery/reconciliation COMPLETE (terminal outcome on every exit path, durable pre-send intent, orphan derivation, typed witness contract); the authoritative production witness adapter REMAINS unwired, so the answer is `reconciliation_required`, not determinate (§15/§18, blocker 8)** |
-| Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **YES — every declared `AbortCanary` code has a production trip path onto the ONE `AbortController`; the latch revokes execution authority (no new reservation, and an already-admitted request fails the final revalidation before `Upstream.Call`) and the time-box stops with no request arriving. `unexpected_upstream_response` awaits blocker 8's authoritative witness adapter and `credential_safety_failure` has no production producer (blocker 9) — both funnels are wired and gated (§16, blocker 7 CLOSED)** |
+| Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **YES — every declared `AbortCanary` code has a wired trip path onto the ONE `AbortController`; the latch revokes execution authority (no new reservation, and an already-admitted request fails the final revalidation before `Upstream.Call`) and the time-box stops with no request arriving. Three codes have no production PRODUCER: `unexpected_upstream_response` (awaits blocker 8's authoritative witness adapter), `credential_safety_failure` (blocker 9), and `out_of_scope_execution` (prevented by the scope gate before execution rather than detected) — all three funnels are wired and gated (§16, blocker 7 CLOSED)** |
 | Operator-reachable graceful rollback (quiesce or Canary→Shadow/Observe demotion) — §17's "rollback AND kill" bar | **NO — quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured` (§17)** |
 | Crash/restart does not silently re-arm/resume | YES (§18) |
 | Unresolved P0/P1 finding | **YES — the durable-outcome-evidence prerequisite remains, narrowed to the authoritative production witness adapter (blocker 8). The auto-abort wiring prerequisite is CLOSED (blocker 7, §25a) (§21/§24/§25a)** |
@@ -907,11 +907,22 @@ the latch revokes is EXECUTION AUTHORITY, and `ModeCanary + ABORTED` is the trut
 governed transition exists — which is why the status surface reports `execution_authority` separately
 from mode rather than letting `Mode: Canary` imply a running experiment.
 
-Two declared codes have no production PRODUCER yet and this is stated rather than papered over:
-`credential_safety_failure` (the broker prevents client-token passthrough by construction rather than
-detecting it — blocker 9) and `unexpected_upstream_response` (awaiting blocker 8's authoritative
-witness adapter). Both funnels are wired and gated, so what is proven is the in-scope half: when such
-a signal is reported, it denies AND stops. `independent_witness_mismatch` is wired to the
+THREE declared codes have no production PRODUCER yet, and this is stated rather than papered over —
+it was two until an audit of the taxonomy against the code found the third, which is exactly the
+class of drift the rest of this section exists to prevent:
+
+* `out_of_scope_execution` — an out-of-scope request is refused by the scope gate BEFORE execution,
+  so a real side effect outside the enumerated scope is prevented by construction rather than
+  detected. The code stays declared because that is the one thing a node cannot prove about itself:
+  an independent witness (blocker 8) reporting an effect we never authorized is what would produce
+  it. `scope_escape` — the neighbouring code — DOES have a producer, because an identity beyond the
+  enumerated blast radius is something this node can observe at its own admission gate.
+* `credential_safety_failure` — the broker prevents client-token passthrough by construction rather
+  than detecting it (blocker 9).
+* `unexpected_upstream_response` — awaiting blocker 8's authoritative witness adapter.
+
+All three funnels are wired and gated, so what is proven is the in-scope half: when such a signal is
+reported, it denies AND stops. What is NOT claimed is that this node can currently generate them. `independent_witness_mismatch` is wired to the
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
@@ -1745,7 +1756,7 @@ fifteen reasons a GO is forbidden, not the prohibition.
    "Blocker 7 closure" in §25a. Only `budget_exhausted`/`scope_escape` auto-tripped, the other eight
    declared breaches did not, nothing reconciled the independent witness, and the time-box was
    request-driven (Codex round 31), so an elapsed window stopped nothing if no further request
-   arrived. Every declared `AbortCanary` code now has a production trip path onto the one
+   arrived. Every declared `AbortCanary` code now has a wired trip path onto the one
    `AbortController`, the two rate detectors are reachable inside the 3-execution corpus, and the
    deadline is absolute and self-enforcing. The latch revokes EXECUTION AUTHORITY; it does not demote
    the node, which stays governed by blockers 10 and 12.
