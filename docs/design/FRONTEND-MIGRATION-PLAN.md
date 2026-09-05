@@ -1161,6 +1161,59 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD, ROUND 7 (this branch, 2026-09-05).** External
+> freeze review of the round-6 candidate (`b1495ea8`) accepted X1/Y1/Y2 (a
+> commit's provenance survives unrelated-profile and pool-only writes) and
+> found the remaining target-profile case; it was red-before on the untouched
+> candidate (`352ef3cb`: `pac_lifecycle_target_provenance_red_test.go`
+> Z1/Z2/Z3 failing — channel/fault controlled through the production
+> handlers, restart from the durable files) and corrected append-only
+> (`d7fafd0a`). **Per-profile provenance is still last-writer provenance.**
+> Publish X persisted its intent, committed for real (target stamped X), and
+> its committed lifecycle write failed (the truthful `published: true` /
+> `pending_reconciliation` answer, the durable record still pending). A later
+> legitimate write of the SAME target replaced X's identity: with the target
+> on the later content, `ClassifyOutcome` was ambiguous and X was settled as
+> AMBIGUOUS (Z1); a replace-import (Z2) or config rollback (Z3) returning the
+> target to X's exact revision/spec under another identity settled X as
+> `concurrent_write`. Either way the historical fact already proven to the
+> client — X performed the authoritative commit — was lost, with X's history
+> revision, success audit and operation-keyed config version never
+> completed. Corrected contract: **an unresolved lifecycle intent is settled
+> durably BEFORE anyone changes its profile — historical authorship is never
+> inferred from current content or the current profile's last writer.**
+> `pacSettlePendingBeforeWrite` (`pac_profiles_api.go`) runs in every writer
+> of the active profile store, under `pacProfilesAPIMu`, immediately before
+> its own write: for every profile whose content the writer CHANGES or
+> removes (`pac.ProfileContentEqual`, the store's own change test), a pending
+> lifecycle intent is reconciled in node-local mode — a genuine commit becomes
+> a durable COMMITTED record with its history revision, an intent that never
+> wrote becomes a durable aborted / refused / ambiguous decision — and the
+> durable truth is re-read: an intent still pending and not committed was not
+> settled, and the writer is REFUSED or DEFERRED with nothing written (CRUD
+> `503 lifecycle_unsettled`; config import applies the rest and reports
+> `pac_profiles_not_applied`; config-version rollback skips the PAC slice and
+> returns the error through the persist-error surface, the boundary mutex
+> released before the SaaS slice; the CP→DP snapshot defers the slice to the
+> next sync). Untouched profiles and pools are never settled, so an unrelated
+> write is never blocked; config version, cluster publication and the success
+> audit complete at the next full reconciliation from the durable markers (no
+> config-version capture or cluster publish inside another writer's
+> transaction; lock order unchanged). Z1/Z2/Z3 now reconcile X as COMMITTED
+> exactly once across a restart, a repeated GET and a second restart (Z1 with
+> the later target authoritative and X committed-but-not-currently-active —
+> `storeRevision` 2 / its spec digest against a different active identity);
+> W3/W4 (`pac_lifecycle_settle_before_write_test.go`) pin the refusal and the
+> deferral while the history cannot be written (nothing changed, X's
+> provenance intact, unrelated write unblocked) and the same write succeeding
+> once it can, with X still committed exactly once. X1 stays the
+> false-attribution control, Y1/Y2 the unrelated-write controls. OpenAPI
+> documents the 503 on the profile PUT/DELETE and the import field (bundle +
+> types regenerated). The shared writer boundary, generation CAS,
+> terminal-only-when-durable refusal, create/delete transitions,
+> history-incarnation fencing, marker semantics and every accepted RED
+> assertion are untouched.
+>
 > **2F-E CORRECTION RECORD, ROUND 6 (this branch, 2026-09-05).** External
 > freeze review of the round-5 candidate (`51ee2549`) accepted the X1
 > correction (a refused compare-and-swap is never attributed as committed
