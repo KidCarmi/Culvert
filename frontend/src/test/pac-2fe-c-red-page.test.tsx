@@ -335,13 +335,6 @@ function clickButton(match: (t: string) => boolean): void {
   });
 }
 
-async function openTab(name: string, readyText: string): Promise<void> {
-  clickButton((t) => t === name);
-  await flushUntil(() => {
-    expect(container.textContent).toContain(readyText);
-  });
-}
-
 async function openProfile(): Promise<void> {
   clickButton((t) => t === "Open");
   await flushUntil(() => {
@@ -368,20 +361,6 @@ function typeInto(label: string, value: string): void {
 function nonGets(): string[] {
   return requested.filter((r) => !r.startsWith("GET "));
 }
-
-const MUTATION_WORDS = [
-  "Publish",
-  "Save draft",
-  "New profile",
-  "New pool",
-  "Delete",
-  "Roll back",
-  "Acknowledge",
-  "Repair",
-  "Save",
-  "Clear",
-  "Recover",
-];
 
 const OTHER_ID = "2d7c0f5e-9b1a-4c3d-8e2f-6a5b4c3d2e1f";
 
@@ -434,7 +413,9 @@ it("P7 admin: a tab switch with unsaved draft edits asks first; Cancel keeps the
   await flushUntil(() => {
     expect(container.textContent).toContain("Discard unsaved changes?");
   });
-  expect(container.textContent).not.toContain("Pool One");
+  // the Pools tab is NOT mounted yet ("Pool One" alone is not a
+  // discriminator — the draft editor's pool selector lists it too)
+  expect(container.textContent).not.toContain("Pools (1)");
   clickButton((t) => t === "Cancel");
   await flushUntil(() => {
     expect(container.textContent).not.toContain("Discard unsaved changes?");
@@ -449,7 +430,7 @@ it("P7 admin: a tab switch with unsaved draft edits asks first; Cancel keeps the
   });
   clickButton((t) => t === "Discard and leave");
   await flushUntil(() => {
-    expect(container.textContent).toContain("Pool One");
+    expect(container.textContent).toContain("Pools (1)");
   });
   expect(nonGets()).toEqual([]);
 });
@@ -693,7 +674,7 @@ it("P14 admin: a 2xx naming another operation, or without the positive commit fl
   await flushUntil(() => {
     expect(container.textContent).toContain("unknown");
   });
-  expect(container.textContent).not.toContain("Published");
+  expect(container.textContent).not.toContain("Scope: node-local history");
   expect(markerRaw()).not.toBeNull();
   const pub = publishButton();
   expect(pub === undefined || pub.disabled).toBe(true);
@@ -718,7 +699,7 @@ it("P14b admin: published:false on a 200 is not a commit", async () => {
   await flushUntil(() => {
     expect(container.textContent).toContain("unknown");
   });
-  expect(container.textContent).not.toContain("Published");
+  expect(container.textContent).not.toContain("Scope: node-local history");
   expect(markerRaw()).not.toBeNull();
 });
 

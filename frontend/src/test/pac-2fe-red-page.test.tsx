@@ -178,7 +178,10 @@ beforeEach(() => {
         return onMutate(method, url, body);
       }
       if (url === "/api/pac/profiles") return okJSON(LISTING);
-      if (url === "/api/pac/profiles/hq/lifecycle") return okJSON(lifecycle);
+      // Fixture completion (harness, not an assertion): Recover reads the
+      // lifecycle WITH `?operationId=` (2F-E correction) — same fixture.
+      if (url.startsWith("/api/pac/profiles/hq/lifecycle"))
+        return okJSON(lifecycle);
       if (url === "/api/pac/pools")
         return okJSON([{ ...POOL, etag: "sha256:pool1" }]);
       if (url === "/api/pac/posture/exceptions")

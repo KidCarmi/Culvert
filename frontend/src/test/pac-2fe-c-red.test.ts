@@ -539,7 +539,9 @@ describe("C5 recovery-evidence contract", () => {
     });
   });
   it("C5b the client asks the appliance for ONE operation by id", async () => {
-    const fetchSpy = vi.fn(() =>
+    const fetchSpy = vi.fn<
+      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    >(() =>
       Promise.resolve(
         new Response(
           JSON.stringify(
@@ -557,7 +559,8 @@ describe("C5 recovery-evidence contract", () => {
     vi.stubGlobal("fetch", fetchSpy);
     try {
       const lc = await getPacLifecycle("hq", undefined, { operationId: OP_ID });
-      expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(
+      const calledWith = fetchSpy.mock.calls[0]?.[0];
+      expect(typeof calledWith === "string" ? calledWith : "").toBe(
         `/api/pac/profiles/hq/lifecycle?operationId=${OP_ID}`,
       );
       expect(lc.operation?.found).toBe(false);

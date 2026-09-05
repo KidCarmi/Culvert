@@ -373,10 +373,21 @@ describe("A6 recovery classifier", () => {
         },
       ],
     });
+    // CORRECTED ASSERTION (2F-E correction round): the landed resolution now
+    // also states whether the candidate reached the store (committed), the
+    // history revision it produced (revisionN — 0 here: the fixture's
+    // revisions carry other operation ids) and whether that revision is the
+    // one served right now (currentlyActive) — "committed historically" is
+    // distinguished from "currently active". The original expectation was
+    // exactly {kind:"landed", state:"recorded", status:200}; those three
+    // values are unchanged.
     expect(classifyRecovery(marker, lc)).toEqual({
       kind: "landed",
       state: "recorded",
       status: 200,
+      committed: true,
+      revisionN: 0,
+      currentlyActive: false,
     });
   });
   it("pending when the pending op is ours; ambiguous when the ambiguity names us", () => {
@@ -449,7 +460,9 @@ describe("A7 recovery marker", () => {
     expect(writePacRecovery("admin", m)).toBe(true);
     expect(readPacRecovery("admin")).toEqual({ kind: "valid", marker: m });
     expect(readPacRecovery("someone-else")).toEqual({ kind: "none" });
-    clearPacRecovery();
+    // 2F-E correction (finding 2): the clear is ownership-matched — it names
+    // the operation it resolves. The expected outcome is unchanged.
+    clearPacRecovery(m.operationId);
     expect(readPacRecovery("admin")).toEqual({ kind: "none" });
   });
   it("a corrupting storage fails the write (no marker ⇒ no dispatch)", () => {
