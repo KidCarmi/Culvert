@@ -265,6 +265,17 @@ func armCanaryWithRealPeerFull(t *testing.T, p *controlledPeer, budgetTotal int,
 
 	resetLiveTierGlobals(t)
 	setDataDirForTest(t, t.TempDir())
+	// ISOLATE THE CANARY RUNTIME, for the same reason every other global here is reset.
+	//
+	// This rig latches real abort state on the process-global runtime — and since Codex round 14 it
+	// does so on paths that merely refuse a request (a boundary rug-pull now stops the experiment).
+	// Left shared, a latch set by one test is visible to whatever the shuffle runs next: any test
+	// that reads abort state without beginning its own activation sees a Canary someone else
+	// stopped. That is an order-dependent failure the ordinary run never shows and the determinism
+	// gate does — which is exactly what the determinism gate is for.
+	prevRt := globalCanaryRuntime
+	globalCanaryRuntime = &canaryRuntime{}
+	t.Cleanup(func() { globalCanaryRuntime = prevRt })
 
 	gw := getMCPRollout().gateway
 	prevCfg := gw.CurrentConfig()
