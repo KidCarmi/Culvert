@@ -148,6 +148,9 @@ function baseLifecycle(): Record<string, unknown> {
     operationsCap: 64,
     poolChangedSince: false,
     scope: "node-local",
+    // fixture completion (2F-E correction round 2): the appliance's history
+    // epoch identity — every case here runs within one epoch
+    historyIncarnation: "a1a1a1a1-0000-4000-8000-000000000001",
     previousRevision: 1,
   };
 }

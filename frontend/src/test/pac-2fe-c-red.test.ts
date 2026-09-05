@@ -45,6 +45,11 @@ import {
 
 const OP_ID = "8c1f2b9e-6f3a-4c1d-9b0e-3a2f1d4c5b6a";
 const OTHER_ID = "2d7c0f5e-9b1a-4c3d-8e2f-6a5b4c3d2e1f";
+// Fixture completion (2F-E correction round 2): the lifecycle now carries
+// the durable history-epoch identity and the marker records the one it was
+// dispatched in; every case below runs within ONE epoch unless it says so.
+const INC = "a1a1a1a1-0000-4000-8000-000000000001";
+const INC_AFTER_RESET = "b2b2b2b2-0000-4000-8000-000000000002";
 const ACTIVE = {
   id: "hq",
   name: "HQ",
@@ -105,6 +110,7 @@ function base(over: Record<string, unknown> = {}): Record<string, unknown> {
     activeSpecDigest: "sha256:bbbb",
     poolChangedSince: false,
     scope: "node-local",
+    historyIncarnation: INC,
     ...over,
   };
 }
@@ -117,6 +123,8 @@ const MARKER = {
   candidateSpecDigest: "sha256:cand",
   targetN: 0,
   startedAt: Date.parse("2026-09-05T12:00:00Z"),
+  collectionEtag: "sha256:coll",
+  historyIncarnation: INC,
 };
 function twentyForeignOps(): unknown[] {
   return Array.from({ length: 20 }, (_, i) =>
@@ -168,17 +176,29 @@ describe("C1 recovery evidence", () => {
       acknowledgedProfiles: 1,
       ackAction: "acknowledge_history_reset",
     };
+    // ASSERTION CORRECTED in the 2F-E correction round 2 (transparently; the
+    // original commit is preserved in history). The original expectation for
+    // an ACKNOWLEDGED reset was {kind:"unresolved", reason:"history_reset"},
+    // reached by comparing the server-stamped reset time with the
+    // browser-stamped dispatch (a 15-minute skew allowance). The external
+    // review showed that rule is unsound: a server clock sufficiently behind
+    // the browser stamps a reset that happened AFTER the dispatch as older
+    // than it, and the candidate then answered not_landed. A reset starts a
+    // NEW history epoch (the record is quarantined), so the durable epoch
+    // identity — never a clock — is what the classifier consults: the
+    // acknowledged reset reads as broken continuity.
     const acknowledged = decodePacLifecycle(
       base({
         historyReset: reset,
         activeRevision: 9,
         activeSpecDigest: "sha256:zz",
         operations: [],
+        historyIncarnation: INC_AFTER_RESET,
       }),
     );
     expect(classifyRecovery(MARKER, acknowledged)).toEqual({
       kind: "unresolved",
-      reason: "history_reset",
+      reason: "history_discontinuity",
     });
     const unacked = decodePacLifecycle(
       base({
@@ -322,6 +342,9 @@ describe("C1 recovery evidence", () => {
         operations: [],
         activeRevision: 0,
         activeSpecDigest: "",
+        // fixture completion: with neither a profile nor a record the
+        // appliance reports no history epoch at all
+        historyIncarnation: "",
       }),
     );
     expect(classifyRecovery(MARKER, lc)).toEqual({
@@ -536,6 +559,10 @@ describe("C5 recovery-evidence contract", () => {
       status: 200,
       ts: "t",
       revisionN: 3,
+      // fixture completion (2F-E correction round 2): the lookup now also
+      // carries the committed identity (absent here ⇒ "" / 0)
+      specDigest: "",
+      storeRevision: 0,
     });
   });
   it("C5b the client asks the appliance for ONE operation by id", async () => {

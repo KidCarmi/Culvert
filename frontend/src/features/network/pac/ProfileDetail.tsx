@@ -65,6 +65,7 @@ import {
   classifyDispatchFailure,
   classifyRecovery,
   failureKeepsMarker,
+  resendContinuityRefusal,
   shortDigest,
   verifyOperationResult,
 } from "./pacLifecycle";
@@ -94,7 +95,22 @@ interface OpArgs {
   expectedActiveRevision: number;
   expectedActiveSpecDigest: string;
   collectionEtag: string;
+  /** the history epoch the candidate was reviewed in (2F-E correction
+   * round 2; "" on an appliance that predates the identity) */
+  historyIncarnation: string;
   reason: string;
+}
+
+/** The run context that MUST survive every continuation of one attempt
+ * (the DIRECT challenge ceremony above all — 2F-E correction round 2):
+ * `marker` is the attempt's ORIGINAL recovery marker, carried verbatim, so
+ * its bindings and dispatch time are never restamped (the store refuses a
+ * rebinding anyway); `resend` says the attempt re-sends an earlier,
+ * still-unresolved operation, whose marker a refusal must never erase —
+ * only the authoritative read that follows may. */
+interface RunOpts {
+  marker?: PacRecoveryMarker;
+  resend?: boolean;
 }
 
 type Ceremony =
@@ -115,6 +131,8 @@ type Ceremony =
   | {
       kind: "challenge";
       args: OpArgs;
+      /** the attempt's run context, carried through the ceremony */
+      opts: RunOpts;
       challenge: PacChallenge;
       result: ConfirmResult;
       errorText: string;
@@ -261,10 +279,15 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
   const runOperation = async (
     args: OpArgs,
     confirm: PacConfirmEcho | undefined,
-    opts: { resend?: boolean; startedAt?: number } = {},
+    opts: RunOpts = {},
   ): Promise<void> => {
     if (lc === undefined) return;
-    const marker: PacRecoveryMarker = {
+    // A continuation (the challenge confirmation) or a re-send is the SAME
+    // attempt: the original marker, verbatim (its write below is then an
+    // identical no-op — the store refuses any rebinding). A fresh dispatch
+    // binds the candidate, the fences and the history epoch it was
+    // reviewed in.
+    const marker: PacRecoveryMarker = opts.marker ?? {
       operationId: args.operationId,
       action: args.action,
       profileId: p.id,
@@ -272,7 +295,9 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
       expectedActiveSpecDigest: args.expectedActiveSpecDigest,
       candidateSpecDigest: candidateDigest(args.action, args.targetN),
       targetN: args.targetN,
-      startedAt: opts.startedAt ?? Date.now(),
+      startedAt: Date.now(),
+      collectionEtag: args.collectionEtag,
+      historyIncarnation: args.historyIncarnation,
     };
     // NO DURABLE MARKER ⇒ NO DISPATCH — and never over another operation's
     // marker or an unreadable store (single outstanding operation).
@@ -309,6 +334,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                 expectedActiveRevision: args.expectedActiveRevision,
                 collectionEtag: args.collectionEtag,
                 reason: args.reason,
+                historyIncarnation: args.historyIncarnation,
                 ...(confirm !== undefined ? { confirm } : {}),
               },
               signal,
@@ -321,6 +347,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                 expectedActiveRevision: args.expectedActiveRevision,
                 collectionEtag: args.collectionEtag,
                 reason: args.reason,
+                historyIncarnation: args.historyIncarnation,
                 ...(confirm !== undefined ? { confirm } : {}),
               },
               signal,
@@ -394,6 +421,12 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
             setCeremony({
               kind: "challenge",
               args,
+              // the confirmation continues THIS attempt: same marker, same
+              // re-send posture
+              opts: {
+                marker,
+                ...(opts.resend === true ? { resend: true } : {}),
+              },
               challenge: f.challenge,
               result: "idle",
               errorText: "",
@@ -471,8 +504,10 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
   // replayed, a stale one is refused, otherwise it lands now. ──────────────
   const resendBlocked = (): string | null => {
     if (unresolved === null || lc === undefined) return "nothing to re-send";
-    if (basis === "history_reset")
-      return "the node-local history was reset — acknowledge it first";
+    // replay safety first (2F-E correction round 2): at-most-once holds only
+    // within the history epoch the operation was dispatched in
+    const continuity = resendContinuityRefusal(unresolved, lc);
+    if (continuity !== null) return continuity;
     const digest = candidateDigest(unresolved.action, unresolved.targetN);
     if (digest !== unresolved.candidateSpecDigest)
       return unresolved.action === "publish"
@@ -494,11 +529,13 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
         targetN: unresolved.targetN,
         expectedActiveRevision: unresolved.expectedActiveRevision,
         expectedActiveSpecDigest: unresolved.expectedActiveSpecDigest,
-        collectionEtag: lc.collectionEtag,
+        // the ORIGINAL fences and epoch — never the freshest tokens
+        collectionEtag: unresolved.collectionEtag,
+        historyIncarnation: unresolved.historyIncarnation,
         reason: "",
       },
       undefined,
-      { resend: true, startedAt: unresolved.startedAt },
+      { marker: unresolved, resend: true },
     );
   };
 
@@ -514,6 +551,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
         expectedActiveRevision: lc.activeRevision,
         expectedActiveSpecDigest: lc.activeSpecDigest,
         collectionEtag: lc.collectionEtag,
+        historyIncarnation: lc.historyIncarnation ?? "",
         reason,
       },
       undefined,
@@ -538,6 +576,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
         expectedActiveRevision: lc.activeRevision,
         expectedActiveSpecDigest: lc.activeSpecDigest,
         collectionEtag: lc.collectionEtag,
+        historyIncarnation: lc.historyIncarnation ?? "",
         reason,
       },
       undefined,
@@ -610,15 +649,19 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                   ? `Operation ${id} — history evidence is bounded`
                   : r.reason === "history_reset"
                     ? `Operation ${id} — the history was reset`
-                    : `Operation ${id} — the history is missing`,
+                    : r.reason === "history_discontinuity"
+                      ? `Operation ${id} — history continuity is broken`
+                      : `Operation ${id} — the history is missing`,
             text:
               r.reason === "not_observed"
                 ? "The appliance holds no record of it and the reviewed base is unchanged, so the request may still be in flight or may never have arrived. Nothing is proven. Re-send the SAME operation (at most once on the appliance: a landed one is replayed, a stale one is refused, otherwise it lands now) or abandon it deliberately."
                 : r.reason === "history_bounded"
                   ? `The appliance retains only the last ${String(fresh.operationsCap ?? 64)} decisions for this profile and this operation is not among them; older decisions were evicted, so absence proves nothing. Re-send the SAME operation (a still-retained landed one is replayed; a stale one is refused) or review the publish history and abandon deliberately.`
                   : r.reason === "history_reset"
-                    ? "The node-local history was quarantined after this operation was dispatched, so its record may be lost. Acknowledge the reset first; then re-send the SAME operation or abandon it deliberately."
-                    : "No active spec or history exists for this profile on this node any more, so nothing can prove or disprove the commit. Re-send the SAME operation or abandon it deliberately.",
+                    ? "The node-local history was quarantined after this operation was dispatched, so its record may be lost. Acknowledge the reset first; the operation then stays unresolved (the reset started a new history epoch) — review the current lifecycle and abandon it deliberately, or dispatch a NEW operation."
+                    : r.reason === "history_discontinuity"
+                      ? "The appliance's history epoch is not the one this operation was dispatched in (the profile was deleted and recreated, or its history was reset — or the epoch is unknown on one side), so its decision record may simply be gone: absence proves nothing, and a re-send would run it AGAIN as a new operation, so it is withheld. Review the current active profile and history; abandon the marker deliberately once you have."
+                      : "No active spec or history exists for this profile on this node any more, so nothing can prove or disprove the commit. Abandon it deliberately once you have reviewed the profile.",
           });
           break;
       }
@@ -844,23 +887,26 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
               >
                 Recover
               </Button>
-              {basis !== null && basis !== "history_reset" && (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={recovering || resendBlocked() !== null}
-                  title={resendBlocked() ?? undefined}
-                  onClick={() => {
-                    setCeremony({
-                      kind: "resend",
-                      result: "idle",
-                      errorText: "",
-                    });
-                  }}
-                >
-                  Re-send same operation
-                </Button>
-              )}
+              {basis !== null &&
+                basis !== "history_reset" &&
+                basis !== "history_discontinuity" &&
+                basis !== "history_missing" && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={recovering || resendBlocked() !== null}
+                    title={resendBlocked() ?? undefined}
+                    onClick={() => {
+                      setCeremony({
+                        kind: "resend",
+                        result: "idle",
+                        errorText: "",
+                      });
+                    }}
+                  >
+                    Re-send same operation
+                  </Button>
+                )}
               <Button
                 size="sm"
                 variant="danger-quiet"
@@ -1415,11 +1461,15 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           onConfirm={(typed) => {
             if (ceremony.result === "pending") return;
             setCeremony({ ...ceremony, result: "pending" });
-            void runOperation(ceremony.args, {
-              challenge: ceremony.challenge.challenge,
-              value: typed,
-              binding: ceremony.challenge.binding,
-            });
+            void runOperation(
+              ceremony.args,
+              {
+                challenge: ceremony.challenge.challenge,
+                value: typed,
+                binding: ceremony.challenge.binding,
+              },
+              ceremony.opts,
+            );
           }}
           onCancel={() => {
             setCeremony({ kind: "none" });

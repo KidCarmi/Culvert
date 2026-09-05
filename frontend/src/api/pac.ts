@@ -265,6 +265,9 @@ export interface PacRevision {
   specDigest: string;
   poolDigest: string;
   repaired: boolean;
+  /** 2F-E correction round 2 — the authoritative active-store revision the
+   * commit produced (0 on revisions recorded before the field existed). */
+  storeRevision: number;
 }
 
 export interface PacProfileDiff {
@@ -316,6 +319,12 @@ export interface PacOperationLookup {
   ts: string;
   /** the history revision the operation produced (0 when none / unknown) */
   revisionN: number;
+  /** 2F-E correction round 2 — the COMMITTED identity: what the commit put
+   * into the active store ("" / 0 when no revision records the operation, or
+   * on an appliance that predates the field). Compared with
+   * activeSpecDigest / activeRevision for current-active truth. */
+  specDigest: string;
+  storeRevision: number;
 }
 
 const decodeOperationLookup: Decoder<PacOperationLookup> = (v, path = "$") => {
@@ -327,6 +336,8 @@ const decodeOperationLookup: Decoder<PacOperationLookup> = (v, path = "$") => {
     status: opt(o, "status", readNumber, path),
     ts: opt(o, "ts", readString, path) ?? "",
     revisionN: opt(o, "revisionN", readNumber, path) ?? 0,
+    specDigest: opt(o, "specDigest", readString, path) ?? "",
+    storeRevision: opt(o, "storeRevision", readNumber, path) ?? 0,
   };
 };
 
@@ -390,6 +401,11 @@ export interface PacLifecycle {
   /** The answer to `?operationId=` — one operation looked up in the FULL
    * retained ring and the revision history. */
   operation: PacOperationLookup | undefined;
+  /** 2F-E correction round 2 — the durable identity of this profile's
+   * node-local history EPOCH (rotates on delete/recreate and on a history
+   * reset). "" when the history is missing altogether; absent on an
+   * appliance that predates the field (continuity then cannot be proven). */
+  historyIncarnation: string | undefined;
   poolChangedSince: boolean;
   scope: string;
   historyReset: PacHistoryReset | undefined;
@@ -409,6 +425,7 @@ const decodeRevision: Decoder<PacRevision> = (v, path = "$") => {
     specDigest: opt(o, "specDigest", readString, path) ?? "",
     poolDigest: opt(o, "poolDigest", readString, path) ?? "",
     repaired: opt(o, "repaired", readBoolean, path) ?? false,
+    storeRevision: opt(o, "storeRevision", readNumber, path) ?? 0,
   };
 };
 
@@ -539,6 +556,7 @@ export const decodePacLifecycle: Decoder<PacLifecycle> = (v, path = "$") => {
     operationsRetained: opt(o, "operationsRetained", readNumber, path),
     operationsCap: opt(o, "operationsCap", readNumber, path),
     operation: opt(o, "operation", decodeOperationLookup, path),
+    historyIncarnation: opt(o, "historyIncarnation", readString, path),
     poolChangedSince: opt(o, "poolChangedSince", readBoolean, path) ?? false,
     scope: opt(o, "scope", readString, path) ?? "",
     historyReset: opt(o, "historyReset", decodePacHistoryReset, path),
@@ -1307,6 +1325,10 @@ export interface PacPublishArgs {
   expectedActiveRevision: number;
   collectionEtag: string;
   reason: string;
+  /** 2F-E correction round 2 — the history epoch the candidate was reviewed
+   * in; the appliance refuses (409 history_incarnation_mismatch) a dispatch
+   * — a re-send above all — against another epoch. */
+  historyIncarnation: string;
   confirm?: PacConfirmEcho;
 }
 
@@ -1324,6 +1346,7 @@ export function publishPacProfile(
       expectedActiveRevision: a.expectedActiveRevision,
       collectionEtag: a.collectionEtag,
       reason: a.reason,
+      expectedHistoryIncarnation: a.historyIncarnation,
       ...confirmWire(a.confirm),
     },
     ...sig(signal),
@@ -1336,6 +1359,8 @@ export interface PacRollbackArgs {
   expectedActiveRevision: number;
   collectionEtag: string;
   reason: string;
+  /** see PacPublishArgs.historyIncarnation */
+  historyIncarnation: string;
   confirm?: PacConfirmEcho;
 }
 
@@ -1353,6 +1378,7 @@ export function rollbackPacProfile(
       expectedActiveRevision: a.expectedActiveRevision,
       collectionEtag: a.collectionEtag,
       reason: a.reason,
+      expectedHistoryIncarnation: a.historyIncarnation,
       ...confirmWire(a.confirm),
     },
     ...sig(signal),

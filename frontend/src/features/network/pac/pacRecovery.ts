@@ -14,8 +14,15 @@
 // 2E-C enrollment markers). Contents are strictly NON-SECRET: {version,
 // operationId, action, profileId, expectedActiveRevision,
 // expectedActiveSpecDigest, candidateSpecDigest, targetN, startedAt,
-// subject}. NEVER a draft body, NEVER a challenge token (pinned by
-// pac-2fe-red.test.ts).
+// collectionEtag, historyIncarnation, subject}. NEVER a draft body, NEVER a
+// challenge token (pinned by pac-2fe-red.test.ts).
+//
+// Version 2 (2F-E correction round 2) adds the two CONTINUITY bindings: the
+// collection fence the candidate was reviewed against and the identity of
+// the appliance's history EPOCH it was reviewed in (the lifecycle GET's
+// historyIncarnation). A version-1 marker still reads (it names a real
+// unresolved operation) with both empty — an unknown epoch, which the
+// classifier never resolves to "not landed" and the page never re-sends.
 //
 // Lifecycle rules (load-bearing):
 //  - WRITE happens BEFORE the network dispatch and is VERIFIED by read-back;
@@ -24,7 +31,11 @@
 //    finding 2): a write NEVER overwrites a marker of a different operation,
 //    and NEVER succeeds over storage that cannot be read (unreadable /
 //    unavailable) — an unreadable marker may be somebody's unresolved
-//    operation. Only the same operation may be re-persisted (a re-send).
+//    operation. Only the same operation may be re-persisted (a re-send),
+//    and ONLY with IDENTICAL bindings (round 2): a marker's operation
+//    identity, candidate digest, fences, epoch and dispatch time are
+//    immutable evidence about the earlier attempt; a later attempt under
+//    the same operationId can never rebind or restamp them.
 //  - CLEAR is OWNERSHIP-MATCHED: it removes the marker only when it carries
 //    the operation the caller resolved, so a late completion of one
 //    operation can never erase another's marker. It happens only on a
@@ -52,7 +63,14 @@ export interface PacRecoveryMarker {
   candidateSpecDigest: string;
   targetN: number;
   startedAt: number;
+  /** the collection fence reviewed (the first-publish fence) */
+  collectionEtag: string;
+  /** the history epoch the candidate was reviewed in ("" = unknown) */
+  historyIncarnation: string;
 }
+
+/** The persisted marker version this build writes. */
+export const PAC_RECOVERY_VERSION = 2;
 
 export type PacRecoveryRead =
   | { kind: "none" }
@@ -81,7 +99,9 @@ function sameMarker(a: PacRecoveryMarker, b: PacRecoveryMarker): boolean {
     a.expectedActiveSpecDigest === b.expectedActiveSpecDigest &&
     a.candidateSpecDigest === b.candidateSpecDigest &&
     a.targetN === b.targetN &&
-    a.startedAt === b.startedAt
+    a.startedAt === b.startedAt &&
+    a.collectionEtag === b.collectionEtag &&
+    a.historyIncarnation === b.historyIncarnation
   );
 }
 
@@ -97,17 +117,18 @@ export function writePacRecovery(
   const existing = readPacRecovery(subject);
   if (existing.kind === "unavailable" || existing.kind === "unreadable")
     return false;
-  if (
-    existing.kind === "valid" &&
-    existing.marker.operationId !== m.operationId
-  )
-    return false;
+  if (existing.kind === "valid") {
+    if (existing.marker.operationId !== m.operationId) return false;
+    // Same operation: its bindings are immutable evidence of the earlier
+    // attempt — an identical re-persist is a no-op, anything else is refused.
+    return sameMarker(existing.marker, m);
+  }
   try {
     // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2F-E lifecycle recovery): the single NON-SECRET PAC operation-identity marker; field allowlist pinned by pac-2fe-red.test.ts.
     sessionStorage.setItem(
       PAC_RECOVERY_KEY,
       JSON.stringify({
-        version: 1,
+        version: PAC_RECOVERY_VERSION,
         operationId: m.operationId,
         action: m.action,
         profileId: m.profileId,
@@ -116,6 +137,8 @@ export function writePacRecovery(
         candidateSpecDigest: m.candidateSpecDigest,
         targetN: m.targetN,
         startedAt: m.startedAt,
+        collectionEtag: m.collectionEtag,
+        historyIncarnation: m.historyIncarnation,
         subject,
       }),
     );
@@ -150,9 +173,10 @@ export function readPacRecovery(subject: string): PacRecoveryRead {
   } catch {
     return { kind: "unreadable" };
   }
+  const version = isRecord(v) ? v["version"] : undefined;
   if (
     !isRecord(v) ||
-    v["version"] !== 1 ||
+    (version !== 1 && version !== PAC_RECOVERY_VERSION) ||
     typeof v["operationId"] !== "string" ||
     (v["action"] !== "publish" && v["action"] !== "rollback") ||
     typeof v["profileId"] !== "string" ||
@@ -161,10 +185,15 @@ export function readPacRecovery(subject: string): PacRecoveryRead {
     typeof v["candidateSpecDigest"] !== "string" ||
     typeof v["targetN"] !== "number" ||
     typeof v["startedAt"] !== "number" ||
-    typeof v["subject"] !== "string"
+    typeof v["subject"] !== "string" ||
+    (version === PAC_RECOVERY_VERSION &&
+      (typeof v["collectionEtag"] !== "string" ||
+        typeof v["historyIncarnation"] !== "string"))
   ) {
     return { kind: "unreadable" };
   }
+  const collectionEtag = v["collectionEtag"];
+  const historyIncarnation = v["historyIncarnation"];
   const marker: PacRecoveryMarker = {
     operationId: v["operationId"],
     action: v["action"],
@@ -174,6 +203,10 @@ export function readPacRecovery(subject: string): PacRecoveryRead {
     candidateSpecDigest: v["candidateSpecDigest"],
     targetN: v["targetN"],
     startedAt: v["startedAt"],
+    // a version-1 marker carries neither: an UNKNOWN epoch
+    collectionEtag: typeof collectionEtag === "string" ? collectionEtag : "",
+    historyIncarnation:
+      typeof historyIncarnation === "string" ? historyIncarnation : "",
   };
   if (!grammarValid(marker, v["subject"])) return { kind: "unreadable" };
   if (v["subject"] !== subject) {

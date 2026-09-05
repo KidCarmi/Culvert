@@ -116,6 +116,7 @@ const LC = {
   activeSpecDigest: "sha256:bbbb",
   poolChangedSince: false,
   scope: "node-local",
+  historyIncarnation: "a1a1a1a1-0000-4000-8000-000000000001",
   previousRevision: 1,
 };
 
@@ -290,6 +291,7 @@ describe("A4/A5 request shapes", () => {
       draft: DRAFT,
       expectedActiveRevision: 3,
       collectionEtag: "sha256:coll",
+      historyIncarnation: "a1a1a1a1-0000-4000-8000-000000000001",
       reason: "rollout",
       confirm: {
         challenge: "v1:deadbeef",
@@ -356,6 +358,9 @@ describe("A6 recovery classifier", () => {
     candidateSpecDigest: "sha256:1a2b3c4d5e6f",
     targetN: 0,
     startedAt: 1,
+    // fixture completion (2F-E correction round 2): the continuity bindings
+    collectionEtag: "sha256:coll",
+    historyIncarnation: "a1a1a1a1-0000-4000-8000-000000000001",
   };
   it("landed when a decided operation carries our id", () => {
     const lc = decodePacLifecycle({
@@ -451,6 +456,9 @@ describe("A7 recovery marker", () => {
     candidateSpecDigest: "sha256:1a2b3c4d5e6f",
     targetN: 0,
     startedAt: 1700000000000,
+    // fixture completion (2F-E correction round 2): the continuity bindings
+    collectionEtag: "sha256:coll",
+    historyIncarnation: "a1a1a1a1-0000-4000-8000-000000000001",
   };
   beforeEach(() => {
     sessionStorage.clear();

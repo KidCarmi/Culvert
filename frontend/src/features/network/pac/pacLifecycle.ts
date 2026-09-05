@@ -3,29 +3,41 @@
 // the dispatched operation, and how an UNRESOLVED operation is resolved
 // AUTHORITATIVELY from the lifecycle GET. No I/O, no React.
 //
-// Recovery truth (2F-B, C1/C8, corrected in the 2F-E correction round):
+// Recovery truth (2F-B, C1/C8; corrected in the 2F-E correction rounds 1–2):
 // the appliance persists the operation INTENT before the authoritative
 // commit and records every decided operationId in the profile's decided
 // ring. But the lifecycle GET LISTS only the 20 most recent decisions, the
 // appliance RETAINS only `operationsCap` (64), a history reset EMPTIES the
-// ring, and a request the appliance has not received yet is absent while
-// it can still commit. Absence is therefore evidence of nothing on its
-// own. The classifier below:
+// ring, a profile DELETE discards it (and a recreate under the same id
+// restarts revision numbers at 1), and a request the appliance has not
+// received yet is absent while it can still commit. Absence is therefore
+// evidence of nothing on its own. The classifier below:
 //   - takes the appliance's word when it has it — the `?operationId=`
 //     lookup over the FULL retained ring, the decided ring, the revision
 //     history (revisions carry the operationId that produced them), the
 //     pending intent and the ambiguity record;
-//   - declares NON-COMMIT only with authoritative evidence: the retained
-//     ring is COMPLETE (nothing evicted), no reset touched it, the
-//     operation is absent, AND the reviewed fence moved (the appliance can
-//     no longer commit it — active revisions are monotonic);
+//   - requires HISTORY CONTINUITY before reading anything into absence
+//     (round 2): the appliance's durable history-epoch identity
+//     (`historyIncarnation`) must be the one the operation was dispatched
+//     in — it rotates on delete/recreate and on a reset, so a different
+//     epoch (or an unknown one) means the decision record may simply be
+//     gone. Never a clock comparison, never a revision-number comparison:
+//     clocks skew and revision numbers restart;
+//   - declares NON-COMMIT only with authoritative evidence: same epoch, no
+//     unacknowledged reset, the retained ring COMPLETE (nothing evicted),
+//     the operation absent, AND the reviewed fence moved (the appliance can
+//     no longer commit it — active revisions are monotonic within an epoch);
 //   - keeps everything else UNRESOLVED, naming why (not observed yet,
-//     history bounded, history reset, history missing), so the operation
-//     identity is retained and the operator resolves it deliberately
-//     (re-send of the SAME operation, or a typed abandon).
-// It never guesses from timestamps or artifact digests (§8.D13); "committed
-// historically" (a history revision exists) is distinguished from
-// "currently active" (that revision is activeN).
+//     history bounded, history reset, history missing, history
+//     discontinuity), so the operation identity is retained and the
+//     operator resolves it deliberately (re-send of the SAME operation —
+//     only within the same epoch — or a typed abandon);
+//   - distinguishes "committed historically" (a history revision exists)
+//     from "currently active" by the COMMITTED IDENTITY (the spec digest +
+//     store revision the commit produced) against the AUTHORITATIVE active
+//     store (activeSpecDigest / activeRevision) — never by the history
+//     pointer `activeN` alone, which a direct profile PUT does not move.
+// It never guesses from timestamps or artifact digests (§8.D13).
 import type {
   PacLifecycle,
   PacOperationResult,
@@ -55,13 +67,13 @@ import type { PacRecoveryMarker } from "./pacRecovery";
 
 /** The lifecycle GET lists at most this many decided operations. */
 export const PAC_OPERATIONS_SHOWN = 20;
-/** Clock-skew tolerance when ordering a server-stamped history reset
- * against the browser-stamped dispatch: a reset that might have happened
- * after the dispatch counts as touching it (errs toward UNRESOLVED). */
-export const PAC_RESET_SKEW_MS = 15 * 60 * 1000;
 
 export type PacUnresolvedReason =
-  "not_observed" | "history_bounded" | "history_reset" | "history_missing";
+  | "not_observed"
+  | "history_bounded"
+  | "history_reset"
+  | "history_missing"
+  | "history_discontinuity";
 
 export type PacRecoveryResolution =
   | {
@@ -72,7 +84,8 @@ export type PacRecoveryResolution =
       committed: boolean;
       /** the history revision the operation produced (0 when none) */
       revisionN: number;
-      /** that revision is the one served right now (activeN) */
+      /** the authoritative active store still serves exactly what this
+       * commit produced (its spec digest AND store revision) */
       currentlyActive: boolean;
     }
   | { kind: "pending" }
@@ -85,14 +98,41 @@ type Marker = Pick<
   | "operationId"
   | "expectedActiveRevision"
   | "expectedActiveSpecDigest"
-  | "startedAt"
+  | "historyIncarnation"
 >;
+
+/** The COMMITTED identity of a history revision: what its commit put into
+ * the authoritative active store. */
+interface CommittedIdentity {
+  specDigest: string;
+  storeRevision: number;
+}
+
+/** Is the committed revision `revisionN` (identity `id`) what the active
+ * store serves RIGHT NOW? The spec digest must match the authoritative
+ * active digest; the store revision must match the authoritative active
+ * revision (a direct profile PUT re-saving an IDENTICAL spec still moves
+ * it). A revision recorded before the store revision existed (0) falls back
+ * to the history pointer for the revision half only. */
+function currentlyActiveFrom(
+  lc: PacLifecycle,
+  revisionN: number,
+  id: CommittedIdentity,
+): boolean {
+  if (revisionN === 0 || !lc.activeExists) return false;
+  if (id.specDigest === "" || lc.activeSpecDigest !== id.specDigest)
+    return false;
+  return id.storeRevision !== 0
+    ? lc.activeRevision === id.storeRevision
+    : lc.activeN === revisionN;
+}
 
 function landedFrom(
   lc: PacLifecycle,
   state: PacOpState,
   status: number,
   revisionN: number,
+  id: CommittedIdentity,
 ): PacRecoveryResolution {
   const committed = landedStateCommitted(state);
   return {
@@ -101,20 +141,20 @@ function landedFrom(
     status,
     committed,
     revisionN: committed ? revisionN : 0,
-    currentlyActive: committed && revisionN !== 0 && lc.activeN === revisionN,
+    currentlyActive: committed && currentlyActiveFrom(lc, revisionN, id),
   };
 }
 
-/** Did a history reset touch the window this operation could have been
- * decided in? Unacknowledged ⇒ yes; otherwise only when the reset is not
- * provably OLDER than the dispatch (skew-tolerant; unparseable ⇒ yes). */
-function resetTouches(lc: PacLifecycle, marker: Marker): boolean {
-  if (lc.historyState === "history_reset") return true;
-  const reset = lc.historyReset;
-  if (reset === undefined) return false;
-  const at = Date.parse(reset.at);
-  if (Number.isNaN(at)) return true;
-  return at >= marker.startedAt - PAC_RESET_SKEW_MS;
+/** Does the appliance's history still have CONTINUITY with the epoch the
+ * operation was dispatched in? Only an exact, known identity on both sides
+ * does — an unknown epoch on either side proves nothing. */
+export function historyContinuous(marker: Marker, lc: PacLifecycle): boolean {
+  return (
+    marker.historyIncarnation !== "" &&
+    lc.historyIncarnation !== undefined &&
+    lc.historyIncarnation !== "" &&
+    lc.historyIncarnation === marker.historyIncarnation
+  );
 }
 
 /** classifyRecovery: total over the lifecycle GET (with or without the
@@ -126,38 +166,51 @@ export function classifyRecovery(
   const id = marker.operationId;
   const revision = lc.revisions.find((r) => r.operationId === id);
   const revisionN = revision?.n ?? 0;
+  const revisionIdentity: CommittedIdentity = {
+    specDigest: revision?.specDigest ?? "",
+    storeRevision: revision?.storeRevision ?? 0,
+  };
   // 1. the appliance's own answer for THIS id (full retained ring)
   const lookup = lc.operation;
   if (lookup !== undefined && lookup.operationId === id && lookup.found) {
+    const identity: CommittedIdentity =
+      lookup.specDigest !== ""
+        ? { specDigest: lookup.specDigest, storeRevision: lookup.storeRevision }
+        : revisionIdentity;
     return landedFrom(
       lc,
       lookup.state ?? "recorded",
       lookup.status ?? 200,
       lookup.revisionN !== 0 ? lookup.revisionN : revisionN,
+      identity,
     );
   }
   // 2. the listed decisions / the revision history
   const decided = lc.operations.find((o) => o.operationId === id);
   if (decided !== undefined)
-    return landedFrom(lc, decided.state, decided.status, revisionN);
-  if (revision !== undefined) return landedFrom(lc, "recorded", 200, revisionN);
+    return landedFrom(
+      lc,
+      decided.state,
+      decided.status,
+      revisionN,
+      revisionIdentity,
+    );
+  if (revision !== undefined)
+    return landedFrom(lc, "recorded", 200, revisionN, revisionIdentity);
   // 3. still on the appliance's books
   if (lc.pendingOp?.operationId === id) return { kind: "pending" };
   if (lc.ambiguous?.op.operationId === id) return { kind: "ambiguous" };
-  // 4. absence — evidence only when the history is intact and complete
-  if (resetTouches(lc, marker))
+  // 4. absence — evidence only when the history is CONTINUOUS, intact and
+  //    complete
+  if (lc.historyState === "history_reset")
     return { kind: "unresolved", reason: "history_reset" };
+  if (!historyContinuous(marker, lc)) {
+    // no history at all for this profile any more (deleted, never recreated)
+    if (!lc.activeExists && (lc.historyIncarnation ?? "") === "")
+      return { kind: "unresolved", reason: "history_missing" };
+    return { kind: "unresolved", reason: "history_discontinuity" };
+  }
   const retained = lc.operationsRetained ?? lc.operations.length;
-  // The profile the operation was reviewed against is gone or was recreated
-  // (active revisions are monotonic — one BELOW the reviewed revision means
-  // a delete + recreate took the history with it). A never-published
-  // profile (activeN 0, empty history) is NOT missing — that is the normal
-  // state before a first publish.
-  if (
-    marker.expectedActiveRevision > 0 &&
-    (!lc.activeExists || lc.activeRevision < marker.expectedActiveRevision)
-  )
-    return { kind: "unresolved", reason: "history_missing" };
   const complete =
     lookup !== undefined && lookup.operationId === id
       ? lc.operationsCap !== undefined && retained < lc.operationsCap
@@ -168,6 +221,25 @@ export function classifyRecovery(
     lc.activeSpecDigest !== marker.expectedActiveSpecDigest;
   if (baseMoved) return { kind: "not_landed", proof: "fence_moved" };
   return { kind: "unresolved", reason: "not_observed" };
+}
+
+/** Why a re-send of the SAME operation is not replay-safe against this
+ * lifecycle (null when it is): the appliance decides an operationId at most
+ * once ONLY within one history epoch — in another epoch the decision record
+ * is gone and the operation would run AGAIN. */
+export function resendContinuityRefusal(
+  marker: Marker,
+  lc: PacLifecycle,
+): string | null {
+  if (lc.historyState === "history_reset")
+    return "the node-local history was reset — acknowledge it first";
+  if (marker.historyIncarnation === "")
+    return "the history epoch this operation was dispatched in is unknown (a marker from an earlier build); at-most-once cannot be established";
+  if (lc.historyIncarnation === undefined || lc.historyIncarnation === "")
+    return "the appliance reports no history epoch identity; at-most-once cannot be established";
+  if (lc.historyIncarnation !== marker.historyIncarnation)
+    return "the appliance's history epoch changed since the dispatch (the profile was deleted and recreated, or its history was reset); the operation would run again as a new one";
+  return null;
 }
 
 /** The decided operation states that mean the candidate REACHED the
