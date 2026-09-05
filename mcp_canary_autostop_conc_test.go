@@ -116,7 +116,7 @@ func TestAutoStopConc04_DeadlineVersusReservation(t *testing.T) {
 	start := canaryRuntimeTestNow
 	nowP := start
 	swapCanaryClockVar(t, &nowP)
-	fireIndex, _ := swapCanaryTimer(t)
+	fireIndex, _, _ := swapCanaryTimer(t)
 	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(9), start); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestAutoStopConc06to08_BreachVersusNextRequest(t *testing.T) {
 			gate := make(chan struct{})
 			var wg sync.WaitGroup
 			wg.Add(2)
-			go func() { defer wg.Done(); <-gate; f.Breach(capb.String(), tc.code) }()
+			go func() { defer wg.Done(); <-gate; f.Breach(capb.String(), rt.currentGeneration(capb), tc.code) }()
 			go func() { defer wg.Done(); <-gate; rt.reserveCanaryExecution(capb, now, rtIdent) }()
 			close(gate)
 			wg.Wait()

@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"testing"
 	"time"
-
-	"os"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
@@ -113,7 +114,7 @@ func TestAutoStop_WindowExpiresWithNoTrafficAtAll(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
 	nowP := start
 	swapCanaryClockVar(t, &nowP)
-	fireIndex, armedFor := swapCanaryTimer(t)
+	fireIndex, armedFor, _ := swapCanaryTimer(t)
 
 	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), start); err != nil {
 		t.Fatalf("begin: %v", err)
@@ -144,7 +145,7 @@ func TestAutoStop_StaleWatchdogCannotAbortALaterActivation(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
 	nowP := start
 	swapCanaryClockVar(t, &nowP)
-	fireIndex, _ := swapCanaryTimer(t)
+	fireIndex, _, _ := swapCanaryTimer(t)
 
 	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), start); err != nil {
 		t.Fatalf("begin gen1: %v", err)
@@ -339,11 +340,11 @@ func TestAutoStop_ElevatedErrorRateAbortsWithinTheCorpus(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	f := &canarySafetyFunnel{rt: rt, capb: capb}
-	f.AttemptSettled(capb.String(), true, time.Second) // 1 failure — below the floor
+	f.AttemptSettled(capb.String(), rt.currentGeneration(capb), true, time.Second) // 1 failure — below the floor
 	if rt.abortedNow(capb) {
 		t.Fatal("one failure is below the sample floor and must not stop the Canary")
 	}
-	f.AttemptSettled(capb.String(), false, time.Second) // 1 of 2 = 50%
+	f.AttemptSettled(capb.String(), rt.currentGeneration(capb), false, time.Second) // 1 of 2 = 50%
 	if !rt.abortedNow(capb) {
 		t.Fatal("SECURITY: 50% failure at the sample floor must abort within the 3-execution corpus")
 	}
@@ -362,7 +363,7 @@ func TestAutoStop_LatencyPathologyAbortsWithinTheCorpus(t *testing.T) {
 	}
 	f := &canarySafetyFunnel{rt: rt, capb: capb}
 	// One attempt at the hard limit: no floor needed.
-	f.AttemptSettled(capb.String(), false, canary.HealthLatencyHardLimit)
+	f.AttemptSettled(capb.String(), rt.currentGeneration(capb), false, canary.HealthLatencyHardLimit)
 	if !rt.abortedNow(capb) {
 		t.Fatal("SECURITY: a single attempt at the hard latency limit must abort the Canary")
 	}
@@ -381,7 +382,7 @@ func TestAutoStop_HealthyPopulationNeverStopsTheCanary(t *testing.T) {
 	}
 	f := &canarySafetyFunnel{rt: rt, capb: capb}
 	for i := 0; i < 5; i++ {
-		f.AttemptSettled(capb.String(), false, 100*time.Millisecond)
+		f.AttemptSettled(capb.String(), rt.currentGeneration(capb), false, 100*time.Millisecond)
 		if rt.abortedNow(capb) {
 			t.Fatalf("a healthy attempt must not stop the Canary (i=%d)", i)
 		}
@@ -396,7 +397,7 @@ func TestAutoStop_BreachIsCapabilityIsolated(t *testing.T) {
 		t.Fatalf("begin gateway: %v", err)
 	}
 	f := &canarySafetyFunnel{rt: rt, capb: rollout.CapabilityGateway}
-	f.Breach(rollout.CapabilityManagement.String(), "scope_escape")
+	f.Breach(rollout.CapabilityManagement.String(), rt.currentGeneration(rollout.CapabilityGateway), "scope_escape")
 	if rt.abortedNow(rollout.CapabilityGateway) {
 		t.Fatal("a breach reported for Management must never abort Gateway")
 	}
@@ -412,7 +413,7 @@ func TestAutoStop_UnknownBreachCodeFailsClosed(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	f := &canarySafetyFunnel{rt: rt, capb: capb}
-	f.Breach(capb.String(), "a_code_no_taxonomy_knows")
+	f.Breach(capb.String(), rt.currentGeneration(capb), "a_code_no_taxonomy_knows")
 	if !rt.abortedNow(capb) {
 		t.Fatal("SECURITY: an unrecognised breach code must fail closed to a whole-Canary latch")
 	}
@@ -766,7 +767,7 @@ func TestAutoStop_CredentialSafetyFailureAbortsTheWholeCanary(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	f := &canarySafetyFunnel{rt: rt, capb: capb}
-	f.Breach(capb.String(), "credential_safety_failure")
+	f.Breach(capb.String(), rt.currentGeneration(capb), "credential_safety_failure")
 	if !rt.abortedNow(capb) {
 		t.Fatal("SECURITY: a credential-safety failure must stop the whole Canary")
 	}
@@ -809,5 +810,262 @@ func TestCanaryRuntime_ScopeEscapeTripsWholeCanaryAbort(t *testing.T) {
 	}
 	if code := rt.abortCodeNow(capb); code != "scope_escape" {
 		t.Fatalf("first cause must be scope_escape, got %q", code)
+	}
+}
+
+// ── Codex round 1: every report is bound to the activation that produced it ───────────────────
+
+// A breach reported by a request that outlived its activation must NOT stop the activation that
+// replaced it. The engine releases lifecycle admission before its deferred outcome commit, so a
+// demote-and-reactivate can complete while an in-flight request still holds an attempt record.
+func TestAutoStop_StaleBreachNeverStopsTheNextActivation(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	oldGen, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := rt.demoteCanary(capb); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+	newGen, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now)
+	if err != nil {
+		t.Fatalf("re-begin: %v", err)
+	}
+	if newGen == oldGen {
+		t.Fatal("premise: the re-activation must be a new generation")
+	}
+	f := &canarySafetyFunnel{rt: rt, capb: capb}
+
+	// The old request finally reports. It names the activation it belonged to.
+	f.Breach(capb.String(), oldGen, "outcome_evidence_loss")
+	if rt.abortedNow(capb) {
+		t.Fatal("SECURITY: a breach from a superseded activation must not stop the one that replaced it")
+	}
+	// THE CONTROL: the same breach naming the CURRENT activation still stops it, so the guard is a
+	// generation check and not a way to lose breaches.
+	f.Breach(capb.String(), newGen, "outcome_evidence_loss")
+	if !rt.abortedNow(capb) {
+		t.Fatal("a breach naming the current activation must stop it")
+	}
+}
+
+// Same rule for the population detectors: a settled attempt from a superseded activation must not
+// enter the new activation's sample set, or one experiment's failures judge another.
+func TestAutoStop_StaleSettledAttemptNeverCountsAgainstTheNextActivation(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	oldGen, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := rt.demoteCanary(capb); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now); err != nil {
+		t.Fatalf("re-begin: %v", err)
+	}
+	f := &canarySafetyFunnel{rt: rt, capb: capb}
+
+	// Two failures from the OLD activation would be an elevated error rate if they landed.
+	f.AttemptSettled(capb.String(), oldGen, true, time.Second)
+	f.AttemptSettled(capb.String(), oldGen, true, time.Second)
+	if rt.abortedNow(capb) {
+		t.Fatal("SECURITY: a superseded activation's failures must not stop the current one")
+	}
+	if s, fl, _ := rt.capRuntime(capb).health.Stats(); s != 0 || fl != 0 {
+		t.Fatalf("a stale sample must not enter the new population, samples=%d failures=%d", s, fl)
+	}
+}
+
+// A watchdog that fires EARLY — the wall clock moved backwards after activation, so the duration
+// elapsed but the absolute deadline has not — must RE-ARM. A one-shot timer that simply returns
+// leaves the activation with no watchdog and back to waiting for a request.
+func TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	fireIndex, _, armedCount := swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if armedCount() != 1 {
+		t.Fatalf("begin must arm exactly one watchdog, got %d", armedCount())
+	}
+	// The clock moves BACKWARD: the timer's duration has elapsed but the deadline has not.
+	nowP = canaryRuntimeTestNow.Add(-time.Minute)
+	fireIndex(0)
+	if rt.abortedNow(capb) {
+		t.Fatal("an early fire must not latch — the deadline has not passed")
+	}
+	if armedCount() != 2 {
+		t.Fatalf("SECURITY: an early fire must RE-ARM the watchdog, armed=%d", armedCount())
+	}
+	// The replacement watchdog still stops the experiment once the deadline genuinely passes.
+	nowP = canaryRuntimeTestNow.Add(2 * time.Hour)
+	fireIndex(1)
+	if !rt.abortedNow(capb) {
+		t.Fatal("the re-armed watchdog must stop the experiment at the real deadline")
+	}
+	if code := rt.abortCodeNow(capb); code != "window_expired" {
+		t.Fatalf("first cause must be window_expired, got %q", code)
+	}
+}
+
+// The final reservation may be refused at the boundary and never send. The slot is still released,
+// so the allowance is spent with nothing in flight — and the experiment must stop THERE, not wait
+// for an N+1 request to discover it. Before the fix the exhaustion latch hung off the settled-
+// attempt path, which deliberately excludes definitely-not-sent.
+func TestAutoStop_ExhaustionLatchesWhenTheFinalSlotNeverSends(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(1), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gen := rt.currentGeneration(capb)
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetGranted {
+		t.Fatalf("the single authorized reservation must be granted, got %v", o)
+	}
+	// The boundary refuses it — an emergency kill, a tool drift. Nothing was sent, so NO attempt
+	// settles; only the slot comes back.
+	rt.releaseCanaryExecution(capb, gen)
+	if !rt.abortedNow(capb) {
+		t.Fatal("SECURITY: the allowance is spent and nothing is in flight — the experiment must stop")
+	}
+	if code := rt.abortCodeNow(capb); code != "budget_exhausted" {
+		t.Fatalf("first cause must be budget_exhausted, got %q", code)
+	}
+	if st := canaryAbortStatusFor(capb); st.ExecutionAuthority != "revoked" {
+		t.Fatalf("the status must not keep reporting granted authority, got %q", st.ExecutionAuthority)
+	}
+}
+
+// A crash between persisting the detector counters and latching the abort leaves a record whose
+// numbers already prove a breach and whose controller says the activation is healthy. Restore must
+// RE-DERIVE the verdict, not trust that the previous process got as far as latching.
+func TestAutoStop_RestoreReDerivesABreachTheCountersAlreadyProve(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gen := rt.currentGeneration(capb)
+
+	// Hand-build the crash shape: counters that prove an elevated error rate, abort NOT latched.
+	st := canaryRuntimeState{
+		SchemaVersion:  canaryRuntimeSchemaVersion,
+		Capability:     capb.String(),
+		Generation:     gen,
+		Active:         true,
+		BuildVersion:   currentRuntimeIdentity().BuildVersion,
+		Budget:         runtimeTestBudget(3),
+		BudgetSnapshot: canary.BudgetSnapshot{Generation: gen, StartUnixNano: now.UnixNano()},
+		AbortSnapshot:  canary.AbortSnapshot{Generation: gen},
+		HealthSnapshot: canary.HealthSnapshot{Generation: gen, Samples: 2, Failures: 2, LatencySumNs: int64(2 * time.Second)},
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(canaryRuntimeStatePath(capb), raw, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+
+	if !fresh.abortedNow(capb) {
+		t.Fatal("SECURITY: a restored population that already proves a breach must latch, not resume")
+	}
+	if code := fresh.abortCodeNow(capb); code != "elevated_error_rate" {
+		t.Fatalf("the re-derived first cause must name the breach the counters prove, got %q", code)
+	}
+	if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o == canary.BudgetGranted {
+		t.Fatal("SECURITY: such an activation must not grant execution")
+	}
+}
+
+// A health snapshot that is absent, foreign-generation or damaged must refuse the whole restore.
+// Restoring with a CLEARED detector is execution authority with the evidence wiped.
+func TestAutoStop_DamagedHealthSnapshotNeverRestoresAsExecutable(t *testing.T) {
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	for name, snap := range map[string]canary.HealthSnapshot{
+		"absent":             {},
+		"foreign generation": {Generation: 99, Samples: 1},
+		"damaged counters":   {Generation: 1, Samples: 1, Failures: 5},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+			st := canaryRuntimeState{
+				SchemaVersion:  canaryRuntimeSchemaVersion,
+				Capability:     capb.String(),
+				Generation:     1,
+				Active:         true,
+				BuildVersion:   currentRuntimeIdentity().BuildVersion,
+				Budget:         runtimeTestBudget(3),
+				BudgetSnapshot: canary.BudgetSnapshot{Generation: 1, StartUnixNano: now.UnixNano()},
+				AbortSnapshot:  canary.AbortSnapshot{Generation: 1},
+				HealthSnapshot: snap,
+			}
+			raw, err := json.Marshal(st)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := os.WriteFile(canaryRuntimeStatePath(capb), raw, 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			fresh := &canaryRuntime{}
+			globalCanaryRuntime = fresh
+			fresh.restore()
+			if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o == canary.BudgetGranted {
+				t.Fatalf("SECURITY: a %s health snapshot must not restore into an executable activation", name)
+			}
+			if s := canaryAbortStatusFor(capb); s.ExecutionAuthority == "granted" {
+				t.Fatalf("SECURITY: a %s health snapshot must not report granted authority", name)
+			}
+			_ = rt
+		})
+	}
+}
+
+// Failing to persist a below-threshold observation is not a logging matter: the counters are
+// declared restart-durable safety state, and a restart that loses them lets the detector treat the
+// next bad attempt as the first sample. The durable record is removed so a restart restores nothing.
+func TestAutoStop_HealthPersistFailureFailsClosed(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gen := rt.currentGeneration(capb)
+	if _, err := os.Stat(canaryRuntimeStatePath(capb)); err != nil {
+		t.Fatalf("premise: begin must have written a durable record: %v", err)
+	}
+	prev := canaryRuntimePersist
+	canaryRuntimePersist = func(_ *canaryRuntime, _ rollout.Capability, _ *canaryCapRuntime) error {
+		return errors.New("injected health persist failure")
+	}
+	t.Cleanup(func() { canaryRuntimePersist = prev })
+
+	// ONE failure — below the floor, so nothing trips and the old code would only have logged.
+	f := &canarySafetyFunnel{rt: rt, capb: capb}
+	f.AttemptSettled(capb.String(), gen, true, time.Second)
+
+	if _, err := os.Stat(canaryRuntimeStatePath(capb)); !os.IsNotExist(err) {
+		t.Fatal("SECURITY: a failed health persist must remove the durable record so a restart cannot resume with stale evidence")
+	}
+	canaryRuntimePersist = prev
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+	if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o == canary.BudgetGranted {
+		t.Fatal("SECURITY: a restart after a failed health persist must not revive an executable activation")
 	}
 }

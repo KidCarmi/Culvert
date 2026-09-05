@@ -136,7 +136,7 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 		// breach seam — before blocker #7 this condition incremented a counter whose production
 		// implementation was an empty method body, so evidence loss stopped nothing at all.
 		e.cfg.Metrics.ObserveOutcomeEvidenceLoss(in.Capability.String())
-		e.cfg.Safety.Breach(in.Capability.String(), "outcome_evidence_loss")
+		e.cfg.Safety.Breach(in.Capability.String(), rec.generation, "outcome_evidence_loss")
 	}
 	// One SETTLED post-admission attempt, for the population detectors.
 	//
@@ -154,6 +154,6 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 	// upstream leg failing, and it is deliberately NOT out.Executed: a DLP block after a
 	// successful peer response is Culvert's policy working, not the target being unhealthy.
 	if state != model.SendStateUnset && state != model.SendDefinitelyNotSent {
-		e.cfg.Safety.AttemptSettled(in.Capability.String(), !state.ProvesReceipt(), e.cfg.Clock().Sub(rec.startedAt))
+		e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, !state.ProvesReceipt(), e.cfg.Clock().Sub(rec.startedAt))
 	}
 }

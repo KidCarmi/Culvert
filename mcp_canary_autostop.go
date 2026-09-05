@@ -69,6 +69,16 @@ func reconcileWindowDeadlineLocked(rt *canaryRuntime, capb rollout.Capability, c
 		tripAutoStopLocked(rt, capb, cr, "budget_exhausted", canaryNow())
 		return
 	}
+	// RE-DERIVE the population verdict before arming anything. Observe returns the breach code and
+	// the CALLER latches it, so the counters and the latch are two separate durable writes: a crash
+	// between them leaves a record whose numbers already prove a breach and whose abort controller
+	// says the activation is healthy. Restore must therefore re-ask the question rather than trust
+	// that the previous process got as far as latching (Codex P1). Checked after the allowance and
+	// before the window so a first cause reflects the most specific fact available.
+	if code := cr.health.Verdict(); code != "" {
+		tripAutoStopLocked(rt, capb, cr, code, canaryNow())
+		return
+	}
 	deadline := cr.enforcer.WindowDeadline()
 	if deadline.IsZero() {
 		return // no window configured — nothing to time out (ValidateBudget already refuses this)
@@ -81,7 +91,15 @@ func reconcileWindowDeadlineLocked(rt *canaryRuntime, capb rollout.Capability, c
 		return
 	}
 	gen := cr.generation
-	cr.windowStop = canaryAfterFunc(deadline.Sub(now), func() {
+	armWindowWatchdogLocked(rt, capb, cr, gen, deadline.Sub(now))
+}
+
+// armWindowWatchdogLocked schedules the one-shot expiry timer. Caller holds cr.mu.
+func armWindowWatchdogLocked(rt *canaryRuntime, capb rollout.Capability, cr *canaryCapRuntime, gen uint64, in time.Duration) {
+	if in < 0 {
+		in = 0
+	}
+	cr.windowStop = canaryAfterFunc(in, func() {
 		// Runs WITHOUT cr.mu — tripCanaryAbort takes it.
 		//
 		// Two guards, and both are load-bearing. GENERATION: a timer that outlives its activation
@@ -94,10 +112,33 @@ func reconcileWindowDeadlineLocked(rt *canaryRuntime, capb rollout.Capability, c
 			return
 		}
 		if d, ok := globalCanaryRuntime.windowDeadline(capb); ok && canaryNow().Before(d) {
+			// FIRED EARLY, and this must RE-ARM rather than return. time.AfterFunc measures a
+			// duration; the deadline is absolute wall-clock. If the clock moves backwards after
+			// activation the timer still fires on schedule while the deadline is genuinely still in
+			// the future — and a one-shot timer that simply returns leaves the activation with NO
+			// watchdog at all, back to waiting for a request to notice (Codex P1). Re-arming for
+			// the remaining time keeps the traffic-independence claim true.
+			rt.rearmWindowWatchdog(capb, gen, d.Sub(canaryNow()))
 			return
 		}
-		rt.tripCanaryAbort(capb, "window_expired", canaryNow())
+		// The generation travels with the trip and is verified under the same lock that latches:
+		// this callback cannot be cancelled once it is running, so a demote-and-reactivate between
+		// the check above and the trip must not abort the replacement.
+		rt.tripCanaryAbortForGeneration(capb, gen, "window_expired", canaryNow())
 	})
+}
+
+// rearmWindowWatchdog re-schedules the watchdog for an activation that is still current. It takes
+// cr.mu itself because it runs from the timer callback, which holds no lock.
+func (rt *canaryRuntime) rearmWindowWatchdog(capb rollout.Capability, gen uint64, in time.Duration) {
+	cr := rt.capRuntime(capb)
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if !cr.active || cr.generation != gen {
+		return
+	}
+	stopWindowWatchdogLocked(cr)
+	armWindowWatchdogLocked(rt, capb, cr, gen, in)
 }
 
 // tripAutoStopLocked latches an automatic-stop code on an armed activation. Caller holds cr.mu, so
@@ -157,24 +198,27 @@ func newCanarySafetyFunnel(capb rollout.Capability) *canarySafetyFunnel {
 // Breach routes an authoritative whole-Canary breach code straight to the abort authority. The
 // capability string is checked against THIS funnel's capability: the two capabilities are
 // physically isolated, and a breach reported for one must never stop the other.
-func (f *canarySafetyFunnel) Breach(capability, code string) {
+func (f *canarySafetyFunnel) Breach(capability string, gen uint64, code string) {
 	if f == nil || f.rt == nil || capability != f.capb.String() {
 		return
 	}
-	f.rt.tripCanaryAbort(f.capb, code, canaryNow())
+	// gen is the ATTEMPT's activation, not the current one. The trip verifies it under the same
+	// lock that latches, so a breach reported by a request that outlived its activation is
+	// discarded rather than charged to whatever activation replaced it.
+	f.rt.tripCanaryAbortForGeneration(f.capb, gen, code, canaryNow())
 }
 
 // AttemptSettled feeds one settled attempt to the generation-bound health detectors and trips the
 // abort if the population now proves a breach. The classification lives here rather than in the
 // engine because only the composition layer knows the activation generation — a settle reported by
 // an engine that outlived its activation must not count against the next one.
-func (f *canarySafetyFunnel) AttemptSettled(capability string, failed bool, latency time.Duration) {
+func (f *canarySafetyFunnel) AttemptSettled(capability string, gen uint64, failed bool, latency time.Duration) {
 	if f == nil || f.rt == nil || capability != f.capb.String() {
 		return
 	}
-	code, ok := f.rt.observeAttemptSettled(f.capb, failed, latency)
+	code, ok := f.rt.observeAttemptSettled(f.capb, gen, failed, latency)
 	if ok && code != "" {
-		f.rt.tripCanaryAbort(f.capb, code, canaryNow())
+		f.rt.tripCanaryAbortForGeneration(f.capb, gen, code, canaryNow())
 	}
 }
 
@@ -183,37 +227,28 @@ func (f *canarySafetyFunnel) AttemptSettled(capability string, failed bool, late
 // the updated counters so a restart cannot wipe accumulated failure evidence.
 //
 // It does NOT trip: the trip is the caller's, on the ONE authority, without this lock held.
-func (rt *canaryRuntime) observeAttemptSettled(capb rollout.Capability, failed bool, latency time.Duration) (string, bool) {
+func (rt *canaryRuntime) observeAttemptSettled(capb rollout.Capability, gen uint64, failed bool, latency time.Duration) (string, bool) {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
-	if !cr.active || cr.health == nil {
+	if !cr.active || cr.health == nil || cr.generation != gen {
 		return "", false
 	}
-	code := cr.health.Observe(cr.generation, failed, latency)
-	// AUTHORITY CONSUMED (blocker #7 §7). Latch only when the allowance is spent AND nothing is
-	// still in flight, i.e. the FINAL AUTHORIZED ATTEMPT HAS SETTLED.
-	//
-	// Both halves are required and the second is the subtle one. Remaining()==0 alone is true the
-	// moment the last slot is RESERVED, which with N concurrent requests for N slots is while
-	// N-1 of them are still mid-flight — latching there revokes authority the experiment had
-	// already granted, and those requests fail the final revalidation instead of making the
-	// invocation they were authorized to make. That is precisely the "do not abort the Nth request
-	// before its authorized side effect" rule, and the concurrency gate
-	// (TestLiveRace_RacersEqualToBudgetAllCross) fails loudly when it is broken.
-	//
-	// Inflight()==0 is meaningful here because the gate's Release is deferred inside callUpstream
-	// and therefore runs BEFORE runExecute's outcome-commit defer: by the time a settle is
-	// reported, that attempt's own slot is already returned.
-	if code == "" && cr.enforcer != nil && cr.enforcer.Remaining() <= 0 && cr.enforcer.Inflight() == 0 {
-		code = "budget_exhausted"
-	}
+	code := cr.health.Observe(gen, failed, latency)
 	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
-		// Failure evidence that did not persist is evidence a restart would forget. The abort (if
-		// any) is still returned and latched by the caller — the safe direction — and the persist
-		// failure is logged rather than swallowed.
-		logger.Printf("MCP canary runtime: persist after health observation for %s failed: %q",
+		// FAIL CLOSED. These counters are declared restart-durable safety state, and the reason is
+		// the whole point of persisting them: a detector that resets on restart is one a crash can
+		// silently disarm. Logging a persist failure and carrying on would leave the process one
+		// restart away from treating the next bad attempt as the FIRST sample — the detector
+		// admitting work it had already seen enough to stop (Codex P1).
+		//
+		// So the same doctrine as a failed abort persist applies: the durable record is removed, so
+		// a restart restores nothing rather than restoring an activation whose evidence is stale.
+		// The in-memory counters remain, so this process keeps judging correctly; what is refused is
+		// the claim that the evidence would survive.
+		logger.Printf("MCP canary runtime: persist after health observation for %s failed: %q; disarming durable state (fail-closed)",
 			capb.String(), sanitizeLog(err.Error()))
+		_ = rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "health", err)
 	}
 	return code, true
 }

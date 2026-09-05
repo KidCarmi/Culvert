@@ -268,7 +268,10 @@ func (e *Executor) ReconcileAndReport(ctx context.Context, w Witness, orphan Rec
 		return ev, err
 	}
 	if ev.Result == model.ReconConflict {
-		e.cfg.Safety.Breach(capability, "independent_witness_mismatch")
+		// The orphan names the activation that made the physical attempt. Reconciliation runs at
+		// RECOVERY — potentially long after that activation ended — so reporting it against
+		// whatever generation is current would let an old contradiction stop a new experiment.
+		e.cfg.Safety.Breach(capability, orphan.ActivationGeneration, "independent_witness_mismatch")
 	}
 	return ev, nil
 }

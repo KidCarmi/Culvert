@@ -104,7 +104,10 @@ func TestHealth_GenerationStrict(t *testing.T) {
 func TestHealth_RestartPreservesFailureEvidence(t *testing.T) {
 	h := NewHealthMonitor(3)
 	h.Observe(3, true, time.Second) // one failure banked, below the floor
-	restored := RestoreHealthMonitor(3, h.Snapshot())
+	restored, ok := RestoreHealthMonitor(3, h.Snapshot())
+	if !ok {
+		t.Fatal("a matching, valid snapshot must restore")
+	}
 	if s, f, _ := restored.Stats(); s != 1 || f != 1 {
 		t.Fatalf("restore must carry the counters forward, samples=%d failures=%d", s, f)
 	}
@@ -115,12 +118,85 @@ func TestHealth_RestartPreservesFailureEvidence(t *testing.T) {
 	}
 }
 
-// A snapshot from a DIFFERENT generation must not transfer.
+// A snapshot from a DIFFERENT generation must not transfer — and must not quietly become a fresh,
+// empty monitor either. A cleared detector on a restored activation is execution authority with the
+// evidence wiped, so the caller is told to refuse the restore outright.
 func TestHealth_RestoreIsGenerationStrict(t *testing.T) {
 	h := NewHealthMonitor(3)
 	h.Observe(3, true, time.Second)
-	fresh := RestoreHealthMonitor(4, h.Snapshot())
-	if s, f, _ := fresh.Stats(); s != 0 || f != 0 {
-		t.Fatalf("a foreign-generation snapshot must not transfer, samples=%d failures=%d", s, f)
+	if _, ok := RestoreHealthMonitor(4, h.Snapshot()); ok {
+		t.Fatal("SECURITY: a foreign-generation snapshot must REFUSE the restore, not clear the detector")
+	}
+}
+
+// An ABSENT snapshot against a live generation is the shape a record written before the detectors
+// existed has. "No evidence" is not "no failures": it must refuse too.
+func TestHealth_RestoreRefusesAnAbsentSnapshot(t *testing.T) {
+	if _, ok := RestoreHealthMonitor(3, HealthSnapshot{}); ok {
+		t.Fatal("SECURITY: a missing health snapshot must refuse the restore")
+	}
+	if _, ok := RestoreHealthMonitor(0, HealthSnapshot{}); !ok {
+		t.Fatal("no activation (generation 0) is not a restore failure")
+	}
+}
+
+// A semantically damaged snapshot must refuse, whatever the JSON said. Each case is an invariant
+// the writer maintains and a reader therefore must be able to assume.
+func TestHealth_RestoreRefusesDamagedCounters(t *testing.T) {
+	for name, snap := range map[string]HealthSnapshot{
+		"negative samples":      {Generation: 3, Samples: -1},
+		"negative failures":     {Generation: 3, Samples: 2, Failures: -1},
+		"negative latency":      {Generation: 3, Samples: 2, LatencySumNs: -1},
+		"more failures":         {Generation: 3, Samples: 1, Failures: 2},
+		"more hard latencies":   {Generation: 3, Samples: 1, HardLatencies: 2},
+		"latency without work":  {Generation: 3, Samples: 0, LatencySumNs: 5},
+		"failures without work": {Generation: 3, Samples: 0, Failures: 1},
+	} {
+		if _, ok := RestoreHealthMonitor(3, snap); ok {
+			t.Fatalf("SECURITY: %s must refuse the restore", name)
+		}
+	}
+}
+
+// Verdict re-derives what the population proves WITHOUT observing, and agrees with Observe. It is
+// what closes the crash window between persisting the counters and latching the abort.
+func TestHealth_VerdictReDerivesTheBreachWithoutObserving(t *testing.T) {
+	h := NewHealthMonitor(3)
+	if v := h.Verdict(); v != "" {
+		t.Fatalf("an empty population proves nothing, got %q", v)
+	}
+	h.Observe(3, true, time.Second)
+	if v := h.Verdict(); v != "" {
+		t.Fatalf("one failure is below the floor, got %q", v)
+	}
+	h.Observe(3, false, time.Second) // 1 of 2 = 50%
+	if v := h.Verdict(); v != "elevated_error_rate" {
+		t.Fatalf("Verdict must re-derive the breach Observe reported, got %q", v)
+	}
+	if s, f, _ := h.Stats(); s != 2 || f != 1 {
+		t.Fatalf("Verdict must not record an observation, samples=%d failures=%d", s, f)
+	}
+	// And it survives the restore, which is the whole point: the counters are durable, the latch is
+	// a separate write, and a crash between them must not lose the verdict.
+	restored, ok := RestoreHealthMonitor(3, h.Snapshot())
+	if !ok {
+		t.Fatal("a valid snapshot must restore")
+	}
+	if v := restored.Verdict(); v != "elevated_error_rate" {
+		t.Fatalf("a restored population must prove the same breach, got %q", v)
+	}
+}
+
+// A hard-latency attempt is proven by its own counter, so Verdict finds it after a restart even
+// though the mean is nowhere near the limit.
+func TestHealth_VerdictRemembersAHardLatency(t *testing.T) {
+	h := NewHealthMonitor(3)
+	h.Observe(3, false, HealthLatencyHardLimit)
+	restored, ok := RestoreHealthMonitor(3, h.Snapshot())
+	if !ok {
+		t.Fatal("a valid snapshot must restore")
+	}
+	if v := restored.Verdict(); v != "latency_pathology" {
+		t.Fatalf("a banked hard latency must survive the restart, got %q", v)
 	}
 }

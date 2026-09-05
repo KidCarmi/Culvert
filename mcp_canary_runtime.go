@@ -447,8 +447,29 @@ func (rt *canaryRuntime) releaseCanaryExecution(capb rollout.Capability, gen uin
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
-	if cr.enforcer != nil && cr.generation == gen {
-		cr.enforcer.Release()
+	if cr.enforcer == nil || cr.generation != gen {
+		return
+	}
+	cr.enforcer.Release()
+	// AUTHORITY CONSUMED (blocker #7 §7). This is the ONE place the exhaustion latch belongs,
+	// because it is the one place every authorized reservation ends up — including the ones that
+	// never sent anything.
+	//
+	// It was previously driven from the settled-attempt path, which excludes definitely-not-sent by
+	// design: an emergency kill or a tool-drift refusal at the final boundary releases the slot
+	// without settling an attempt. If that refusal took the LAST slot, the allowance was spent,
+	// nothing could execute again, and yet nothing latched — so the status surface kept reporting
+	// granted authority until an N+1 request arrived to discover it (Codex P2). Execution was
+	// already denied by the spent budget, so this is a truthfulness fix, not a containment one, and
+	// the traffic-independence claim is only true from here.
+	//
+	// BOTH conditions are required. Remaining()==0 is true the moment the last slot is RESERVED,
+	// which with N concurrent requests for N slots is while N-1 are still in flight; latching there
+	// would revoke authority the experiment had already granted. Inflight()==0 says the final
+	// authorized attempt has finished — and because this runs INSIDE the release, the check sees
+	// the post-release count.
+	if cr.enforcer.Remaining() <= 0 && cr.enforcer.Inflight() == 0 {
+		tripAutoStopLocked(rt, capb, cr, "budget_exhausted", canaryNow())
 	}
 }
 
@@ -463,10 +484,30 @@ func (rt *canaryRuntime) releaseCanaryExecution(capb rollout.Capability, gen uin
 // durable file is best-effort REMOVED on a persist failure — a missing file restores to the dormant
 // default (no execution), the safe direction. The in-memory abort is in effect regardless.
 func (rt *canaryRuntime) tripCanaryAbort(capb rollout.Capability, code string, now time.Time) canary.TripResult {
+	return rt.tripCanaryAbortForGeneration(capb, 0, code, now)
+}
+
+// tripCanaryAbortForGeneration is tripCanaryAbort bound to the activation the caller OBSERVED.
+// A wantGen of 0 means "whatever is current" and is reserved for callers with no originating
+// activation to name.
+//
+// The generation is checked under the SAME cr.mu acquisition that latches. Checking it separately
+// first is not equivalent and was the defect: a watchdog callback, or an in-flight request's
+// deferred report, can pass a check and then be descheduled while the activation is demoted and
+// replaced — and the trip that follows would latch the REPLACEMENT for something the previous
+// activation did. Stop() cannot help, because a callback already running cannot be cancelled. So
+// the expectation travels with the trip and is verified where the decision is made.
+func (rt *canaryRuntime) tripCanaryAbortForGeneration(capb rollout.Capability, wantGen uint64, code string, now time.Time) canary.TripResult {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if !cr.active || cr.aborter == nil {
+		return canary.TripCanaryLatched
+	}
+	if wantGen != 0 && cr.generation != wantGen {
+		// The observation belongs to an activation that is gone. Discarding it is the fail-closed
+		// direction: that activation already has no execution authority, and the current one has
+		// done nothing to lose its own.
 		return canary.TripCanaryLatched
 	}
 	res := cr.aborter.Trip(code, cr.generation, now)
@@ -597,13 +638,23 @@ func (rt *canaryRuntime) restoreCapability(capb rollout.Capability) {
 	cr.budget = st.Budget
 	cr.enforcer = canary.RestoreBudgetEnforcer(st.Budget, st.Generation, st.BudgetSnapshot)
 	cr.aborter = canary.RestoreAbortController(st.Generation, st.AbortSnapshot)
-	cr.health = canary.RestoreHealthMonitor(st.Generation, st.HealthSnapshot)
-	if cr.enforcer == nil || cr.aborter == nil {
+	// The health snapshot is held to the SAME standard as the budget and abort snapshots, and for
+	// the same reason: it is safety state, not telemetry. A snapshot that is semantically damaged
+	// (more failures than samples, a negative counter), names a different activation, or is simply
+	// ABSENT against a non-zero generation would restore an activation whose detector reads clean —
+	// execution authority with the evidence wiped. "No evidence" is not "no failures", so the
+	// activation does not come back at all (Codex P1).
+	healthOK := false
+	cr.health, healthOK = canary.RestoreHealthMonitor(st.Generation, st.HealthSnapshot)
+	if cr.enforcer == nil || cr.aborter == nil || !healthOK {
 		cr.active = false
 		cr.enforcer = nil
 		cr.aborter = nil
 		cr.health = nil
 		cr.budget = canary.Budget{}
+		if !healthOK {
+			logger.Printf("MCP canary runtime restore for %s: health snapshot missing, foreign-generation or damaged; disarmed (fail-closed)", capb.String())
+		}
 		return
 	}
 	cr.active = true

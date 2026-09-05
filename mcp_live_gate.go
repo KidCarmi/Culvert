@@ -60,7 +60,10 @@ type mcpLiveSideEffectGate struct {
 	note func(reason mcperr.Reason)
 	// tripBreach routes an authoritative whole-Canary breach detected at admission to the ONE
 	// abort authority (rt.tripCanaryAbort). nil in tests that do not exercise the abort path.
-	tripBreach func(code string)
+	tripBreach func(gen uint64, code string)
+	// currentGeneration reports the activation generation admitting right now, so a breach observed
+	// during admission can be charged to it rather than to a later one.
+	currentGeneration func() uint64
 }
 
 var _ execution.LiveExecutionGate = (*mcpLiveSideEffectGate)(nil)
@@ -80,9 +83,10 @@ func newMCPLiveSideEffectGate(capb rollout.Capability) *mcpLiveSideEffectGate {
 		releaseBudget:     func(gen uint64) { globalCanaryRuntime.releaseCanaryExecution(capb, gen) },
 		generationCurrent: func(gen uint64) bool { return globalCanaryRuntime.generationActive(capb, gen) },
 		note:              noteMCPLiveGateDenied,
-		tripBreach: func(code string) {
-			globalCanaryRuntime.tripCanaryAbort(capb, code, canaryNow())
+		tripBreach: func(gen uint64, code string) {
+			globalCanaryRuntime.tripCanaryAbortForGeneration(capb, gen, code, canaryNow())
 		},
+		currentGeneration: func() uint64 { return globalCanaryRuntime.currentGeneration(capb) },
 	}
 }
 
@@ -110,6 +114,17 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 	}
 
 	// (3) Runtime live-trust revalidation (§10), bound to the DECISION's fingerprint.
+	//
+	// The activation is captured BEFORE the check so an authoritative drift is charged to the
+	// activation that was admitting this request, not to whatever is current by the time the trip
+	// runs. A demote-and-reactivate in between makes the observation stale, and a stale observation
+	// must not stop a fresh experiment.
+	// Optional seam: a gate built without it (the injected doubles) reports 0, which the trip reads
+	// as "no activation named" and treats as the current one — the pre-existing behaviour.
+	var admittingGen uint64
+	if g.currentGeneration != nil {
+		admittingGen = g.currentGeneration()
+	}
 	trustedNow, driftCode := g.trustOK(in.Tenant, in.ServerID, in.ToolName, in.Fingerprint, in.Now)
 	if driftCode != "" {
 		// AUTHORITATIVE DRIFT (blocker #7 §17). The reviewed tool/server is no longer the one the
@@ -118,7 +133,7 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 		// request fails closed AND the whole Canary latches. The trip goes through the one abort
 		// authority; it never latches anything locally.
 		if g.tripBreach != nil {
-			g.tripBreach(driftCode)
+			g.tripBreach(admittingGen, driftCode)
 		}
 	}
 	if !trustedNow {

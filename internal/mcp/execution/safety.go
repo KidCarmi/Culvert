@@ -13,8 +13,17 @@ package execution
 //
 // WHAT IT IS NOT. It is not a second abort authority. It reports FACTS; the composition layer
 // classifies them and calls the one trip function, which reaches the one AbortController. The
-// engine deliberately cannot latch anything itself: it does not know the activation generation, and
-// a breach reported by an engine that outlived its activation must not stop a later one.
+// engine deliberately cannot latch anything itself.
+//
+// EVERY REPORT CARRIES ITS ACTIVATION GENERATION, and that is not bookkeeping. The gate releases
+// lifecycle admission before the executor's deferred terminal-outcome commit runs, so a demotion
+// and a re-activation can both complete while an in-flight request still holds an attempt record.
+// Without the generation, that request's outcome would be attributed to whichever activation
+// happens to be current when it finally reports: an old failure counted into a new detector's
+// population, or worse, an old breach latching a new experiment that has done nothing wrong. The
+// generation is the attempt's own (execution.LiveGateDecision.ActivationGeneration, carried on the
+// attempt record), so a report from an engine that outlived its activation is discarded rather than
+// misattributed.
 //
 // A nil seam means "no Canary is composed" — not "discard". Shadow and the default disabled posture
 // pass nil and are byte-identical to having no seam at all.
@@ -27,7 +36,7 @@ type CanarySafety interface {
 	// canary.AbortConditions() taxonomy code; an unrecognised code fails closed to a
 	// whole-Canary latch at the controller, so a typo can only ever stop the experiment, never
 	// silently continue it.
-	Breach(capability string, code string)
+	Breach(capability string, gen uint64, code string)
 
 	// AttemptSettled reports ONE settled post-admission attempt so the composition layer's
 	// population detectors (elevated error rate, latency pathology) can judge. failed is an
@@ -38,15 +47,15 @@ type CanarySafety interface {
 	// what a healthy Canary does all day, and counting them would let a Canary abort itself for
 	// correctly refusing requests. Conditions carrying their own immediate whole-Canary
 	// classification are likewise not laundered through a rate: they trip directly.
-	AttemptSettled(capability string, failed bool, latency time.Duration)
+	AttemptSettled(capability string, gen uint64, failed bool, latency time.Duration)
 }
 
 // noopCanarySafety is the nil-seam stand-in. It exists so call sites never branch on nil.
 type noopCanarySafety struct{}
 
 // Breach discards the report: with no funnel composed there is no activation to stop.
-func (noopCanarySafety) Breach(string, string) {}
+func (noopCanarySafety) Breach(string, uint64, string) {}
 
 // AttemptSettled discards the sample: the detectors are generation-bound and live in the
 // composition layer, so with nothing composed there is no population to accumulate into.
-func (noopCanarySafety) AttemptSettled(string, bool, time.Duration) {}
+func (noopCanarySafety) AttemptSettled(string, uint64, bool, time.Duration) {}

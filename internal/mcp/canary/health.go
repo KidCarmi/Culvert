@@ -54,6 +54,25 @@ type HealthSnapshot struct {
 	HardLatencies int    `json:"hard_latencies,omitempty"`
 }
 
+// Valid reports whether the snapshot is SEMANTICALLY consistent — not merely well-formed JSON.
+//
+// A strict decode proves the bytes parse; it cannot prove the numbers mean anything. A record with
+// more failures than samples, a negative counter, or latency accumulated against zero samples is
+// damaged, and a damaged detector is worse than an absent one: it restores an activation that looks
+// measured and is not. Every counter is monotonically accumulated from zero, so these are the exact
+// invariants the writer maintains and the reader must therefore be able to assume.
+func (s HealthSnapshot) Valid() bool {
+	switch {
+	case s.Samples < 0, s.Failures < 0, s.LatencySumNs < 0, s.HardLatencies < 0:
+		return false
+	case s.Failures > s.Samples, s.HardLatencies > s.Samples:
+		return false
+	case s.Samples == 0 && (s.LatencySumNs != 0 || s.Failures != 0 || s.HardLatencies != 0):
+		return false
+	}
+	return true
+}
+
 // HealthMonitor accumulates settled post-admission attempt outcomes for ONE activation generation
 // and reports the whole-Canary breach code, if any, that the population now proves. Safe for
 // concurrent use.
@@ -119,6 +138,33 @@ func (h *HealthMonitor) Observe(gen uint64, failed bool, latency time.Duration) 
 	return ""
 }
 
+// Verdict re-derives the whole-Canary breach the CURRENT population proves, WITHOUT recording an
+// observation. It returns "" when the population is within threshold.
+//
+// It exists because Observe's return value is the only place the thresholds were evaluated, and
+// that value is transient: the counters are persisted, but the LATCH is a separate durable write.
+// A crash between those two writes leaves a record whose numbers already prove a breach and whose
+// abort controller says the activation is healthy — so restore must re-ask the question rather than
+// trust that the last process got as far as latching. The evaluation ORDER matches Observe's so a
+// re-derived first cause names the same code the live path would have.
+func (h *HealthMonitor) Verdict() string {
+	if h == nil {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.hardLatencies > 0 {
+		return "latency_pathology"
+	}
+	if h.samples >= HealthSampleFloor && healthErrorRateNumerator*h.failures >= healthErrorRateDenominator*h.samples {
+		return "elevated_error_rate"
+	}
+	if h.samples >= HealthSampleFloor && h.latencySumNs/int64(h.samples) >= int64(HealthLatencyMeanLimit) {
+		return "latency_pathology"
+	}
+	return ""
+}
+
 // Stats returns the current counters (samples, failures, mean latency) for the status surface.
 func (h *HealthMonitor) Stats() (samples, failures int, mean time.Duration) {
 	if h == nil {
@@ -148,17 +194,29 @@ func (h *HealthMonitor) Snapshot() HealthSnapshot {
 	}
 }
 
-// RestoreHealthMonitor rebuilds a monitor for activation generation gen from a durable snapshot. It
-// is generation-strict in the same direction as RestoreAbortController: a snapshot for a DIFFERENT
-// generation does not transfer (one activation's failures never count against another), so a
-// mismatch yields a FRESH monitor. A matching snapshot restores the counters exactly, so a restart
-// cannot wipe accumulated failure evidence and hand the Canary a clean slate.
-func RestoreHealthMonitor(gen uint64, snap HealthSnapshot) *HealthMonitor {
+// RestoreHealthMonitor rebuilds a monitor for activation generation gen from a durable snapshot.
+// ok is false when the snapshot cannot be trusted to describe THIS activation, and the caller must
+// then refuse to restore the activation at all rather than continue with a cleared detector.
+//
+// Three refusals, and none of them is "be careful": each is a way an activation could come back
+// holding execution authority while its detector says nothing happened.
+//
+//   - A snapshot for a DIFFERENT generation. The budget, abort and health snapshots are written
+//     together in one atomic record, so they cannot legitimately disagree about which activation
+//     they describe; a disagreement is a damaged or hand-edited record.
+//   - A ZERO snapshot against a non-zero generation. This is the shape a record written before the
+//     detectors existed has, and an activation that cannot prove it is within threshold must not
+//     resume — "no evidence" is not "no failures".
+//   - A semantically invalid snapshot (see Valid).
+//
+// A matching, valid snapshot restores the counters exactly, so a restart cannot wipe accumulated
+// failure evidence and hand the Canary a clean slate.
+func RestoreHealthMonitor(gen uint64, snap HealthSnapshot) (h *HealthMonitor, ok bool) {
 	if gen == 0 {
-		return nil
+		return nil, true // no activation to restore; not a failure
 	}
-	if snap.Generation != gen {
-		return &HealthMonitor{generation: gen}
+	if snap.Generation != gen || !snap.Valid() {
+		return nil, false
 	}
 	return &HealthMonitor{
 		generation:    gen,
@@ -166,5 +224,5 @@ func RestoreHealthMonitor(gen uint64, snap HealthSnapshot) *HealthMonitor {
 		failures:      snap.Failures,
 		latencySumNs:  snap.LatencySumNs,
 		hardLatencies: snap.HardLatencies,
-	}
+	}, true
 }

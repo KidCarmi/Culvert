@@ -89,9 +89,17 @@ func TestCanaryRuntime_BudgetExhaustionTripsWholeCanaryAbort(t *testing.T) {
 		}
 		rt.releaseCanaryExecution(capb, rt.currentGeneration(capb))
 	}
-	// The N+1th exhausts the budget → whole-Canary abort.
-	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedTotal {
-		t.Fatalf("the N+1th reserve must be denied on total, got %s", o)
+	// The allowance is now spent AND nothing is in flight, so the release of the final slot has
+	// already latched the whole-Canary abort — the experiment does not wait for an N+1 request to
+	// discover it is over. The N+1 is therefore refused as INVALID (the Canary stopped), which is
+	// strictly earlier than being refused for a spent budget. The reserve-site total-exhaustion
+	// trip still exists for the case where the final slot is still in flight, and
+	// TestAutoStop_DeniedReservationItselfTripsBudgetExhausted is its dedicated gate.
+	if !rt.abortedNow(capb) {
+		t.Fatal("releasing the final authorized slot must stop the experiment without an N+1 request")
+	}
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedInvalid {
+		t.Fatalf("the N+1th reserve must be denied because the Canary stopped, got %s", o)
 	}
 	if rt.executionEligible(capb, now) {
 		t.Fatal("budget exhaustion must trip the whole-Canary abort — no longer eligible")
@@ -513,7 +521,10 @@ func TestCanaryRuntime_ReserveAbortPersistFailureRemovesState(t *testing.T) {
 	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetGranted {
 		t.Fatalf("the first reserve must be granted, got %s", o)
 	}
-	rt.releaseCanaryExecution(capb, rt.currentGeneration(capb))
+	// The slot is deliberately NOT released. Releasing the final slot now latches exhaustion at the
+	// RELEASE (the traffic-independent path), which would latch before the injected persist failure
+	// below is installed and leave this test proving nothing about its own subject. Holding the slot
+	// in flight keeps the RESERVE the trigger, which is what this test is named for.
 	// Sanity: a durable active record exists that a naive restart would revive.
 	if _, err := os.Stat(canaryRuntimeStatePath(capb)); err != nil {
 		t.Fatalf("begin/reserve must have written a durable active record: %v", err)
@@ -817,6 +828,9 @@ func TestCanaryRuntime_RestoreReconcileDisarmsWithoutLiveMode(t *testing.T) {
 		Budget:         runtimeTestBudget(5),
 		BudgetSnapshot: canary.BudgetSnapshot{Generation: 1, StartUnixNano: 1, RateWindowStartNano: 1},
 		AbortSnapshot:  canary.AbortSnapshot{Generation: 1},
+		// The real persist path always writes this, and restore now REFUSES a record without it
+		// (an activation that cannot prove it is within threshold does not resume).
+		HealthSnapshot: canary.HealthSnapshot{Generation: 1},
 	}
 	raw, err := json.Marshal(st)
 	if err != nil {

@@ -31,7 +31,7 @@ func swapCanaryClock(t *testing.T, at func() time.Time) {
 // Every arm is retained, including ones that were later stopped, because a real time.Timer can fire
 // concurrently with its own Stop — so "fire a callback whose activation has been superseded" is a
 // case the guards must survive, not an impossible one.
-func swapCanaryTimer(t *testing.T) (fireIndex func(int), armedFor func() time.Duration) {
+func swapCanaryTimer(t *testing.T) (fireIndex func(int), armedFor func() time.Duration, armedCount func() int) {
 	t.Helper()
 	prev := canaryAfterFunc
 	type armed struct {
@@ -64,6 +64,10 @@ func swapCanaryTimer(t *testing.T) (fireIndex func(int), armedFor func() time.Du
 				return 0
 			}
 			return all[len(all)-1].d
+		}, func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(all)
 		}
 }
 
