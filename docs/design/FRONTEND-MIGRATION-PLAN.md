@@ -1161,6 +1161,51 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD, ROUND 6 (this branch, 2026-09-05).** External
+> freeze review of the round-5 candidate (`51ee2549`) accepted the X1
+> correction (a refused compare-and-swap is never attributed as committed
+> from identical content; the terminal refusal is withheld until durable) and
+> found the INVERSE attribution failure; it was red-before on the untouched
+> candidate (`18c3c8eb`: `pac_lifecycle_commit_provenance_red_test.go` Y1 + Y2
+> failing — channel/fault controlled through the production admin handlers,
+> restart from the durable files) and corrected append-only (`5c1bfb06`).
+> **Round 5's writer identity belonged to the whole profiles document.**
+> Publish X persisted its intent, committed for real (`active_committed`,
+> `lastWriteId = X`), and its committed lifecycle write failed — the truthful
+> `published: true` / `historyState: pending_reconciliation` answer, with the
+> durable lifecycle record still carrying the pre-commit pending intent. A
+> legitimate later write of an UNRELATED profile (Y1) or of a POOL only (Y2)
+> preserved X's active profile byte-for-byte but replaced the document-level
+> identity with a random one, so the restart reconciliation saw "target
+> content present, written by someone else" and recorded the proven commit as
+> `aborted` / `concurrent_write` (status 409) — contradicting the response and
+> losing X's history revision, success audit and operation-keyed config
+> version. Corrected contract: **commit provenance is PER PROFILE and is
+> co-written atomically with the authoritative content.** The profiles file
+> carries `profileWriteIds` (profile id → identity of the writer that last
+> CHANGED that profile; `internal/pac/profiles.go` `nextProvenance`): the
+> lifecycle commit (`CommitIfGeneration`, now naming its target profile)
+> stamps its operationId on its target; any writer stamps a fresh random
+> identity on each profile whose content it changed (canonical-JSON
+> comparison) and PRESERVES the provenance of every profile it left untouched
+> — a pool-only or unrelated-profile write never erases a commit's provenance;
+> a removed profile drops its entry; an older file, or a profile without an
+> entry, is unknown and an identity is never invented for content nobody
+> changed. `pacClassifyReconcile` attributes a content-level "committed"
+> verdict by the TARGET PROFILE's provenance (`ProfileWriteID`); the round-5
+> verdicts are unchanged (another writer's identical content ⇒ the durable
+> `concurrent_write` refusal, unknown ⇒ ambiguous, never guessed), and the
+> round-5 document-level `lastWriteId` key is retired (a file carrying only it
+> loads as unknown provenance). Y1/Y2 now reconcile X as COMMITTED exactly
+> once across restarts (one history revision, one success audit, one
+> operation-keyed config version, operation found as a commit, `recorded`)
+> with the unrelated mutation intact; X1 stays green as the opposite control;
+> the store rule is pinned by `internal/pac/profiles_provenance_test.go`. No
+> wire change (no OpenAPI/types regeneration); the shared writer mutex,
+> generation CAS, terminal-only-when-durable refusal, create/delete
+> transitions, history-incarnation fencing, marker semantics and every
+> accepted RED assertion are untouched.
+>
 > **2F-E CORRECTION RECORD, ROUND 5 (this branch, 2026-09-05).** External
 > freeze review of the round-4 candidate (`3f9877fe`) accepted the writer
 > transaction boundary and the recoverable create transition and found one
