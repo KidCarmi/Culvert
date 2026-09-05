@@ -28,6 +28,7 @@ export const KNOWN_ROUTES: readonly KnownRoute[] = [
   { path: "/security/content-security", minRole: "viewer" },
   { path: "/security/decryption", minRole: "viewer" },
   { path: "/security/cdr", minRole: "viewer" },
+  { path: "/network/pac", minRole: "viewer" },
   { path: "/diagnostics", minRole: "viewer" },
   { path: "/governance", minRole: "admin" }, // uiRoutes: /api/governance/control-plane GET=admin
   { path: "/design-system", minRole: "viewer" },

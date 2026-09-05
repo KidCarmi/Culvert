@@ -144,6 +144,7 @@ function baseLifecycle(): Record<string, unknown> {
 }
 
 beforeEach(() => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   Element.prototype.scrollIntoView = vi.fn();
@@ -193,6 +194,27 @@ beforeEach(() => {
             },
           ],
         });
+      // Fixture completion (harness, not an assertion): the DIRECT Exceptions
+      // tab renders the posture inventory beside the exception records.
+      if (url === "/api/pac/posture/inventory")
+        return okJSON({
+          evidenceClass: "config",
+          profiles: [
+            {
+              profileId: "hq",
+              name: "HQ",
+              serving: true,
+              availabilityMode: "served",
+              directCapable: true,
+              directPaths: [],
+            },
+          ],
+          totalProfiles: 1,
+          directCapableProfiles: 1,
+          servingDirectProfiles: 1,
+          totalDirectPaths: 0,
+          broadDirectPaths: 0,
+        });
       if (url === "/api/pac-config")
         return okJSON({
           proxyHost: "proxy.example",
@@ -209,6 +231,7 @@ afterEach(() => {
   act(() => {
     root.unmount();
   });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = undefined;
   container.remove();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -314,11 +337,11 @@ function typeInto(label: string, value: string): void {
   });
   if (el === undefined) throw new Error("input not found: " + label);
   act(() => {
-    const setter = Object.getOwnPropertyDescriptor(
+    const desc = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       "value",
-    )?.set;
-    setter?.call(el, value);
+    );
+    desc?.set?.call(el, value);
     el.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
