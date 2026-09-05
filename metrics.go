@@ -31,6 +31,87 @@ type ruleMetrics struct {
 	loadedByName  map[string]persistedRuleCounter // immutable legacy persistence baseline
 	appliedByName map[string]int64                // greatest persisted hit baseline merged into telemetry
 	order         []string                        // insertion order for cap enforcement
+
+	// view is the lock-free READ path for RecordHit — see the block comment on
+	// ruleCounter. It is DERIVED state: the mu-guarded maps above stay
+	// authoritative, and every mutator republishes before releasing mu.
+	view atomic.Pointer[map[string]ruleCounter]
+}
+
+// ruleCounter pairs one rule's two counter cells so the hot path resolves both
+// with a SINGLE map lookup.
+//
+// ── Why RecordHit does not take rm.mu ────────────────────────────────────────
+//
+// RecordHit runs on EVERY proxied request that matched a policy rule
+// (applyPolicyDecision, proxy.go) — i.e. on all ordinary allowed traffic. It
+// used to take rm.mu.RLock to reach two maps that, in steady state, never
+// change: rules are registered at most maxRuleMetrics (200) times per process,
+// and every request after that is a pure read.
+//
+// sync.RWMutex.RLock is an atomic read-modify-write on ONE shared word, so this
+// was not a constant cost but a THROUGHPUT CEILING — the same shape already
+// recorded for internal/threatfeed, internal/connlimit and the IP filter. It
+// also hashed the rule name TWICE, once for each of the two parallel maps.
+//
+// Measured on this machine (Go 1.26, 4-core, 50 registered rules, medians of
+// n=11). The pre-view shape is kept in-tree as BenchmarkRecordHit_*_Legacy and
+// both variants run in the SAME process, because the absolute numbers on a
+// shared box are load-sensitive — quote the SHAPE, not the constant:
+//
+//	                 │ 1 core │ 2 cores │ 4 cores │ 1→4 throughput
+//	─────────────────┼────────┼─────────┼─────────┼───────────────
+//	50 rules, before │ 107 ns │  140 ns │  209 ns │  0.51x
+//	50 rules, after  │  91 ns │   65 ns │   57 ns │  1.60x
+//	hot rule, before │  98 ns │  163 ns │  229 ns │  0.43x
+//	hot rule, after  │  77 ns │   79 ns │  119 ns │  0.65x
+//
+// The 50-rule row is the diagnostic one: those requests hit 50 DISTINCT
+// counters, so no two share a counter cache line — yet throughput still FELL as
+// cores were added (0.51x: four cores delivered half of one core). That isolates
+// the lock, not the counters, as the ceiling. At 4 cores it is now 3.7x faster
+// and scales up instead of down.
+//
+// The hot-rule row keeps a genuine residual: when all traffic matches ONE rule,
+// every core still contends on that rule's single counter cache line, so it
+// gains 1.9x but does not scale. That is inherent to a per-rule counter and is
+// NOT worth sharding — 200 rules x N shards costs memory and a summing read for
+// a value scraped once per interval. Recorded, not fixed.
+//
+// The read path is now one atomic pointer load plus one map lookup. Two
+// invariants make that safe, and they are the whole contract:
+//
+//  1. A map reachable from a PUBLISHED view is never mutated in place. Writers
+//     build a replacement and swap it (publishViewLocked). Registration is
+//     bounded at 200 per process, so copy-on-write is free in practice.
+//  2. Every mutator of hits/last republishes before releasing mu. Adding one
+//     that does not is a silent CORRECTNESS failure — a restored counter that
+//     never increments, or a rule whose hits vanish from /metrics — not merely a
+//     performance one. Pinned per mutator by
+//     TestRuleMetricsView_EveryMutatorRepublishes.
+//
+// The counters themselves are still shared int64s mutated atomically THROUGH
+// the view; only the map structure is immutable. That is deliberate and matches
+// the pre-existing contract: restoreRecordLocked increments a pointer it obtained
+// under the write lock while RecordHit may hold the same pointer, and both are
+// atomic operations on the same cell.
+//
+// last may be nil: the ruleMetrics literals used by tests construct `hits`
+// without `last`, and the pre-view code guarded that case explicitly. The guard
+// is preserved rather than tidied away.
+type ruleCounter struct {
+	hits *int64
+	last *int64
+}
+
+// publishViewLocked rebuilds the lock-free read view from the authoritative
+// maps. Callers MUST hold rm.mu for writing.
+func (rm *ruleMetrics) publishViewLocked() {
+	next := make(map[string]ruleCounter, len(rm.hits))
+	for name, ptr := range rm.hits {
+		next[name] = ruleCounter{hits: ptr, last: rm.last[name]}
+	}
+	rm.view.Store(&next)
 }
 
 var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64), byID: make(map[string]persistedRuleCounter), loadedByName: make(map[string]persistedRuleCounter), appliedByName: make(map[string]int64)}
@@ -42,25 +123,27 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ruleName == "" {
 		return
 	}
-	now := time.Now().Unix()
-	rm.mu.RLock()
-	ctr, ok := rm.hits[ruleName]
-	lastPtr := rm.last[ruleName]
-	rm.mu.RUnlock()
-	if ok {
-		atomic.AddInt64(ctr, 1)
-		if lastPtr != nil {
-			atomicStoreMax(lastPtr, now)
+	// ── Lock-free steady-state path ──────────────────────────────────────────
+	// One atomic load + one map lookup. A nil view means nothing has been
+	// registered yet (or this is a bare test literal), which falls through to the
+	// locked registration path below exactly as an unknown rule name does.
+	if v := rm.view.Load(); v != nil {
+		if c, ok := (*v)[ruleName]; ok {
+			atomic.AddInt64(c.hits, 1)
+			if c.last != nil {
+				atomicStoreMax(c.last, time.Now().Unix())
+			}
+			return
 		}
-		return
 	}
+	now := time.Now().Unix()
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	if rm.last == nil { // defensive: literals built with only `hits` set
 		rm.last = make(map[string]*int64)
 	}
 	// Double-check after acquiring write lock.
-	if ctr, ok = rm.hits[ruleName]; ok {
+	if ctr, ok := rm.hits[ruleName]; ok {
 		atomic.AddInt64(ctr, 1)
 		if lp := rm.last[ruleName]; lp != nil {
 			atomicStoreMax(lp, now)
@@ -75,6 +158,7 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	lv := now
 	rm.last[ruleName] = &lv
 	rm.order = append(rm.order, ruleName)
+	rm.publishViewLocked()
 }
 
 // persistedRuleCounter is the on-disk shape of one rule's persisted counters
@@ -165,6 +249,10 @@ func loadHitCounters(path string) {
 func (rm *ruleMetrics) restoreRecords(recs map[string]persistedRuleCounter) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
+	// Republish once, after the whole batch: restoreRecordLocked both inserts new
+	// names and back-fills a missing `last` cell for an existing one, and the view
+	// must reflect either. Deferred so it runs before mu is released.
+	defer rm.publishViewLocked()
 	if rm.last == nil {
 		rm.last = make(map[string]*int64)
 	}
