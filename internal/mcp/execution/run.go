@@ -394,6 +394,24 @@ func releaseReservation(release func()) {
 	}
 }
 
+// upstreamBreachCode returns the whole-Canary breach code an upstream-leg error carries IN ITS OWN
+// RIGHT, or "" when the error is an ordinary failure for the population detectors to judge.
+//
+// It is the single source of truth for that question, and it has two readers by design: the breach
+// reporter below raises the code, and reportAttemptSettled uses the same answer to keep the attempt
+// OUT of the rate population. Splitting them let the two disagree — round 8 added the breach and
+// left the settle unconditional, so an identity mismatch was reported as a whole-Canary breach AND
+// counted as an ordinary target failure, which is exactly the laundering HealthMonitor's own
+// contract forbids: a condition with its own immediate classification must not also arrive through
+// a rate (Codex round 13). One function means a code added here is excluded from the population by
+// construction rather than by remembering.
+func upstreamBreachCode(err error) string {
+	if err != nil && mcperr.ReasonOf(err) == mcperr.ReasonUpstreamTLSIdentity {
+		return "server_identity_drift"
+	}
+	return ""
+}
+
 // reportUpstreamTrustBreach latches server_identity_drift when the connected peer's TLS/workload
 // identity did not match the pin.
 //
@@ -403,10 +421,11 @@ func releaseReservation(release func()) {
 // first mismatch stopped nothing and a further invocation could be admitted against a server we can
 // no longer identify.
 func (e *Executor) reportUpstreamTrustBreach(in runtime.ExecInput, rec *attemptRecord, err error) {
-	if rec == nil || err == nil || mcperr.ReasonOf(err) != mcperr.ReasonUpstreamTLSIdentity {
+	code := upstreamBreachCode(err)
+	if rec == nil || code == "" {
 		return
 	}
-	e.cfg.Safety.Breach(in.Capability.String(), rec.generation, "server_identity_drift")
+	e.cfg.Safety.Breach(in.Capability.String(), rec.generation, code)
 }
 
 // finishUpstream processes a successful upstream response: it forwards a sanitized

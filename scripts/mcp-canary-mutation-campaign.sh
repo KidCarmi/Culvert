@@ -1006,6 +1006,15 @@ run_mutation M104 \
   's/windowDeadlineIfOpen\(capb, now\); ok && now\.Before\(d\)/windowDeadlineIfOpen(capb, canaryNow()); ok \&\& canaryNow().Before(d)/' \
   's/rt\.rearmWindowWatchdog\(capb, gen, d\.Sub\(now\)\)/rt.rearmWindowWatchdog(capb, gen, d.Sub(canaryNow()))/'
 
+# M105 is Codex round 13: a condition that carries its own whole-Canary classification is ALSO
+# counted as an ordinary health sample — the laundering HealthMonitor's contract forbids, and the
+# defect round 8 introduced by adding the breach and leaving the settle unconditional.
+run_mutation M105 \
+  'a directly classified breach is also fed to the rate detector' \
+  'TestBreach_TLSIdentityMismatchTripsServerIdentityDrift|TestBreach_OrdinaryUpstreamFailureIsStillASample' \
+  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
+  's/\tif upstreamBreachCode\(err\) != "" \{\n\t\treturn\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

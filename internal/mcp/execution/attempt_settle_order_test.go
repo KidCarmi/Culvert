@@ -328,6 +328,7 @@ func (b *outcomeFailingBackend) AppendSync(path string, frame []byte, perm os.Fi
 type breachOrderSafety struct {
 	releases    *int32
 	armOnSettle *outcomeFailingBackend
+	settled     int
 	mu          sync.Mutex
 	codes       []string
 	releasesAt  map[string]int32
@@ -344,9 +345,18 @@ func (s *breachOrderSafety) Breach(_ string, _ uint64, code string) {
 }
 
 func (s *breachOrderSafety) AttemptSettled(string, uint64, bool, time.Duration) {
+	s.mu.Lock()
+	s.settled++
+	s.mu.Unlock()
 	if s.armOnSettle != nil {
 		s.armOnSettle.fail.Store(true)
 	}
+}
+
+func (s *breachOrderSafety) settleCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.settled
 }
 
 func (s *breachOrderSafety) seen() (codes []string, releasesAtCode map[string]int32) {
@@ -426,6 +436,33 @@ func TestBreach_TLSIdentityMismatchTripsServerIdentityDrift(t *testing.T) {
 	}
 	if at["server_identity_drift"] != 0 {
 		t.Fatal("the breach must be reported before the slot goes back")
+	}
+	// AND IT MUST NOT ALSO BE A SAMPLE. A condition that carries its own immediate whole-Canary
+	// classification has already stopped the experiment on its own terms; counting it in the rate
+	// population as well reports an identity breach as an ordinary target failure on the persisted
+	// counters and the operator surface, and lets one event feed two different stop decisions —
+	// exactly the laundering HealthMonitor's contract forbids (Codex round 13).
+	if n := sfy.settleCount(); n != 0 {
+		t.Fatalf("SECURITY: an identity breach was also recorded as %d ordinary health sample(s) — "+
+			"a directly classified breach must never arrive through the rate detector too", n)
+	}
+}
+
+// THE CONTROL for that exclusion: an ordinary upstream failure DOES enter the population. Without
+// it the fix is satisfiable by excluding everything, which would silence the rate detector.
+func TestBreach_OrdinaryUpstreamFailureIsStillASample(t *testing.T) {
+	var releases int32
+	sfy := &breachOrderSafety{releases: &releases}
+	up := &fakeUpstream{err: mcperr.New(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "dial")}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_sample", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	if n := sfy.settleCount(); n != 1 {
+		t.Fatalf("an ordinary upstream failure must still be one health sample, got %d", n)
 	}
 }
 

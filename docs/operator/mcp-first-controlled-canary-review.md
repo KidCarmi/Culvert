@@ -929,9 +929,9 @@ reported, it denies AND stops. What is NOT claimed is that this node can current
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
-**Twelve adversarial rounds hardened this closure, and what they found is the useful record.** Each
+**Thirteen adversarial rounds hardened this closure, and what they found is the useful record.** Each
 round's fix exposed the next layer inward, which is convergence rather than churn — but every one of
-the twenty-seven findings was a way the latch could be right and the surrounding machinery still wrong.
+the twenty-eight findings was a way the latch could be right and the surrounding machinery still wrong.
 Rounds 4 through 6 found defects that rounds 3, 4 and 5 had themselves introduced, which is the
 honest shape of this kind of work: a fix that tightens one predicate is a new opportunity to get the
 adjacent one wrong. Both round-6 findings are of that kind, and both are the SAME predicate one
@@ -990,6 +990,7 @@ ONE of the two shapes a cancellation arrives in.
 | 11 | The runbook's PROCEDURE step still described request-driven expiry | The status table and §16 were updated when the blocker closed; step 8 — the one an operator follows at the window boundary — was not, so the same file gave two mutually exclusive accounts of the same behaviour |
 | 12 | The watchdog callback read the clock four times | Openness, "is the deadline ahead", the re-arm duration and the trip timestamp were separate samples. A wall-clock step between any two lets the callback pick contradictory branches and re-arm the only traffic-independent stop for a duration measured from an instant it had already rejected |
 | 12 | The §16 trip-path table still gave `out_of_scope_execution` a producer | It mapped the code to the identity-cap breach, which the enforcer actually reports as `scope_escape`. An operator auditing producer coverage there would have reached the conclusion the previous commit existed to remove |
+| 13 | A directly classified breach was ALSO counted as a health sample | Round 8 added the identity breach and left the settle unconditional, so a pinned-identity mismatch was both a whole-Canary stop and an ordinary target failure in the rate population — the laundering `HealthMonitor`'s own contract forbids in as many words. One event feeding two different stop decisions, and an identity breach shown as a target failure on the persisted counters |
 
 Two of these deserve to be remembered past this PR. The generation finding and the health-latch
 finding were both **gaps my own comments described and my own code did not implement** — the header
@@ -1040,7 +1041,7 @@ sides, and "the latch wins" is only true if it is true at every interleaving.
 
 ### Blocker 7 — red team
 
-Twenty-eight adversarial scenarios, each answered by a named gate rather than by argument.
+Twenty-nine adversarial scenarios, each answered by a named gate rather than by argument.
 
 | Scenario | Outcome | Gate |
 |---|---|---|
@@ -1071,6 +1072,7 @@ Twenty-eight adversarial scenarios, each answered by a named gate rather than by
 | A third request is waiting while the second attempt fails | it cannot reserve: the sample is counted and the latch decided BEFORE the slot goes back, so the 1-of-2 threshold actually prevents the next invocation rather than merely recording it | `TestAttemptSettled_IsReportedBeforeTheReservationIsReleased` (in-test control: the slot is still released exactly once — an ordering fix that leaked the reservation would otherwise pass) |
 | The evidence volume dies and the terminal outcome cannot be written | `outcome_evidence_loss` latches, and the slot is still held while it does — the next request cannot reach the upstream while that breach is being recorded | `TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased` |
 | The connected peer's TLS identity no longer matches its pin | `server_identity_drift` latches on the FIRST occurrence, before the slot goes back — not after a second sample | `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift` (control: `TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift`) |
+| That same identity breach reaches the rate detector too | it does not: a condition with its own immediate classification is excluded from the population, so one event cannot feed two stop decisions | `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift` (control: `TestBreach_OrdinaryUpstreamFailureIsStillASample` — an ordinary failure IS still a sample) |
 | The client hangs up mid-call, twice | nothing stops, AND nothing is recorded: a cancellation is not evidence about the target in either direction, so it never enters the population to dilute it. A deadline overrun still is a charged sample | `TestAttemptSettled_CallerCancellationIsNotASampleAtAll` (a five-row table covering BOTH cancellation shapes — reason-classified and wrapped-during-body-read — each ⇒ 0 samples, against a deadline wrapped the SAME way, a plain deadline and a connect failure ⇒ 1 charged sample each) |
 
 The three controls that keep this from being a proof of "abort on everything": a healthy population
@@ -1672,11 +1674,11 @@ demonstration still scores CAUGHT.
 
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **104 mutations** (M61–M78 are the blocker-7
-auto-abort set; M79–M104 were added by the twelve adversarial rounds above — 101 driven through
+`scripts/mcp-canary-mutation-campaign.sh` now carries **105 mutations** (M61–M78 are the blocker-7
+auto-abort set; M79–M105 were added by the thirteen adversarial rounds above — 102 driven through
 `run_mutation`, plus M02, M17 and M80, which stay hand-written because they mutate more than one
 site; M91 stopped needing a helper when round 8 collapsed the three orderings into one block). The 78-mutation state recorded below was clean on its second run;
-M79–M104 were each verified failing against their own reintroduced defect as they were written. The
+M79–M105 were each verified failing against their own reintroduced defect as they were written. The
 first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
 which is the campaign doing its job, so it is recorded rather than quietly re-run:
 

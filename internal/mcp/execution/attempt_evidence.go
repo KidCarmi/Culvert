@@ -167,8 +167,10 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 //     Counting those would make an operator's own kill switch look like an error rate and latch
 //     elevated_error_rate for the stop working exactly as designed.
 //
-// A THIRD exclusion lives here rather than in the caller: a CALLER CANCELLATION is not evidence
-// about the target in either direction, so it is not a sample at all (see callerCancelled).
+// TWO further exclusions live here rather than in the caller: a CALLER CANCELLATION is not evidence
+// about the target in either direction (see callerCancelled), and an error that carries its own
+// whole-Canary classification is judged directly rather than through a rate (see
+// upstreamBreachCode).
 //
 // The verdict is the UPSTREAM LEG's (see upstreamLegFailed), never Culvert's disposition: a
 // response-DLP block after a successful peer answer is this gateway's policy working rather than
@@ -178,6 +180,14 @@ func (e *Executor) reportAttemptSettled(in runtime.ExecInput, rec *attemptRecord
 		return
 	}
 	if callerCancelled(err) {
+		return
+	}
+	// A condition that carries its OWN immediate whole-Canary classification has already stopped
+	// the experiment on its own terms, and must not also arrive through a rate — HealthMonitor's
+	// contract says so in as many words. Counting it would report an identity breach as an ordinary
+	// target failure on the persisted counters and the operator surface, and would let one event
+	// contribute to two different stop decisions (Codex round 13).
+	if upstreamBreachCode(err) != "" {
 		return
 	}
 	e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, upstreamLegFailed(resp, err), e.cfg.Clock().Sub(rec.startedAt))
