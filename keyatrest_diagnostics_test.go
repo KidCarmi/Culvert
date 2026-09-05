@@ -8,6 +8,7 @@ package main
 // sleeps/retries.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -192,4 +193,112 @@ func TestCheckKeyAtRest_InOperatorContract(t *testing.T) {
 	if !found {
 		t.Fatal("key_at_rest check missing from operator contract")
 	}
+}
+
+// resetPlaintextKeyBackupGlobals isolates the three package globals
+// plaintextKeyBackupCandidates() reads (globalClusterCA, activeDPClient,
+// cdrInstances) for the duration of the calling test, restoring the prior
+// values on cleanup — the same swap pattern already used by
+// cluster_audit_test.go / dp_last_good_config_test.go / cdrstore_test.go.
+func resetPlaintextKeyBackupGlobals(t *testing.T) {
+	t.Helper()
+	origCA := globalClusterCA
+	origDP := activeDPClient.Load()
+	origCDR := cdrInstances
+	globalClusterCA = &clusterCA{}
+	activeDPClient.Store(nil)
+	cdrInstances = &CDRInstanceRegistry{}
+	t.Cleanup(func() {
+		globalClusterCA = origCA
+		activeDPClient.Store(origDP)
+		cdrInstances = origCDR
+	})
+}
+
+// TestCheckPlaintextKeyBackups_NoneBootstrappedIsOK: with no cluster CA, no
+// active DP client, and no enrolled CDR instances, there is nothing to scan
+// and the check reports OK.
+func TestCheckPlaintextKeyBackups_NoneBootstrappedIsOK(t *testing.T) {
+	resetPlaintextKeyBackupGlobals(t)
+	c := checkPlaintextKeyBackups()
+	if c.Code != "plaintext_key_backup" || c.Status != diagOK {
+		t.Fatalf("unexpected check: %+v", c)
+	}
+}
+
+// TestCheckPlaintextKeyBackups_ClusterCA: a lingering cluster-ca.key.plaintext.bak
+// is reported as a warning naming the cluster-ca subsystem, with an operator
+// action, and never the file path.
+func TestCheckPlaintextKeyBackups_ClusterCA(t *testing.T) {
+	resetPlaintextKeyBackupGlobals(t)
+	dir := t.TempDir()
+	globalClusterCA = &clusterCA{dir: dir}
+	if err := os.WriteFile(filepath.Join(dir, "cluster-ca.key.plaintext.bak"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	c := checkPlaintextKeyBackups()
+	if c.Status != diagWarn {
+		t.Fatalf("status = %q, want warn", c.Status)
+	}
+	if !strings.Contains(c.Message, keyAtRestObjClusterCA) {
+		t.Fatalf("expected cluster-ca in message: %q", c.Message)
+	}
+	if c.OperatorAction == "" {
+		t.Fatal("expected an operator action")
+	}
+	if strings.Contains(c.Message, dir) {
+		t.Fatalf("path leaked into diagnostics message: %q", c.Message)
+	}
+}
+
+// TestCheckPlaintextKeyBackups_DPNodeAndCDR: lingering backups for the DP
+// node key and an enrolled CDR client key are both reported together.
+func TestCheckPlaintextKeyBackups_DPNodeAndCDR(t *testing.T) {
+	resetPlaintextKeyBackupGlobals(t)
+	dir := t.TempDir()
+
+	dpKey := filepath.Join(dir, "dp-node.key")
+	if err := os.WriteFile(dpKey+".plaintext.bak", []byte("x"), 0o600); err != nil {
+		t.Fatalf("write dp backup: %v", err)
+	}
+	activeDPClient.Store(&DataPlaneClient{keyFile: dpKey})
+
+	cdrKey := filepath.Join(dir, "cdr-client.key")
+	if err := os.WriteFile(cdrKey+".plaintext.bak", []byte("x"), 0o600); err != nil {
+		t.Fatalf("write cdr backup: %v", err)
+	}
+	if _, err := cdrInstances.Add(CDREnrolledInstance{
+		Name:              "sluice-1",
+		Endpoint:          "sluice.example.internal:443",
+		ServerFingerprint: strings.Repeat("ab", 32),
+		CACertPath:        filepath.Join(dir, "ca.crt"),
+		ClientCertPath:    filepath.Join(dir, "cdr-client.crt"),
+		ClientKeyPath:     cdrKey,
+	}); err != nil {
+		t.Fatalf("add cdr instance: %v", err)
+	}
+
+	c := checkPlaintextKeyBackups()
+	if c.Status != diagWarn {
+		t.Fatalf("status = %q, want warn", c.Status)
+	}
+	if !strings.Contains(c.Message, keyAtRestObjDPNode) {
+		t.Fatalf("expected dp-node in message: %q", c.Message)
+	}
+	if !strings.Contains(c.Message, keyAtRestObjCDRClient) {
+		t.Fatalf("expected cdr-client in message: %q", c.Message)
+	}
+}
+
+// TestCheckPlaintextKeyBackups_InOperatorContract: the check is wired into
+// the aggregated operator contract returned by /api/diagnostics.
+func TestCheckPlaintextKeyBackups_InOperatorContract(t *testing.T) {
+	oc := buildOperatorContract()
+	for _, c := range oc.Checks {
+		if c.Code == "plaintext_key_backup" {
+			return
+		}
+	}
+	t.Fatal("plaintext_key_backup check missing from operator contract")
 }
