@@ -1,6 +1,6 @@
 {
   "index.html": {
-    "file": "assets/index-CEX2Nwy0.js",
+    "file": "assets/index-DtjQrEnO.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
@@ -12,7 +12,7 @@
     ]
   },
   "src/features/gallery/GalleryPage.tsx": {
-    "file": "assets/GalleryPage-BqYvebko.js",
+    "file": "assets/GalleryPage-CRggA40F.js",
     "name": "GalleryPage",
     "src": "src/features/gallery/GalleryPage.tsx",
     "isDynamicEntry": true,
