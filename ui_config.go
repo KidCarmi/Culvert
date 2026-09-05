@@ -1305,9 +1305,21 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// PAC writer transaction boundary (pacProfilesWriterLock — lock order
 	// gate → pacProfilesAPIMu), so a lifecycle publish parked between its
 	// intent and its commit can neither interleave with nor overwrite it.
+	// 2F-E correction round 7: a pending lifecycle intent of every profile
+	// the import CHANGES is settled durably before the write
+	// (pacSettlePendingBeforeWrite); if that cannot be persisted the PAC
+	// profiles slice is not applied and the response says so.
+	var pacProfilesNotApplied string
 	if len(b.PACProfiles) > 0 || len(b.PACPools) > 0 {
 		unlock := pacProfilesWriterLock()
-		_ = pacProfiles.Set(importPACProfilesCandidate(pacProfiles.Get(), &b, replaceMode))
+		cur := pacProfiles.Get()
+		cand := importPACProfilesCandidate(cur, &b, replaceMode)
+		if err := pacSettlePendingBeforeWrite(cur, cand); err != nil {
+			logger.Printf("ConfigImport: PAC profiles slice not applied: %v", err)
+			pacProfilesNotApplied = err.Error()
+		} else {
+			_ = pacProfiles.Set(cand)
+		}
 		unlock()
 	}
 
@@ -1373,6 +1385,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if pubErr != nil {
 		resp["cluster_publish_rejected"] = pubErr.Error()
+	}
+	if pacProfilesNotApplied != "" {
+		resp["pac_profiles_not_applied"] = pacProfilesNotApplied
 	}
 	jsonOK(w, resp)
 }

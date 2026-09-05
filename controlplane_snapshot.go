@@ -1008,8 +1008,14 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 	// replace — [] is an explicit wipe. Tolerant Set (never rejects).
 	// 2F-E correction round 4: inside the shared PAC writer transaction
 	// boundary (pacProfilesWriterLock — lock order gate → pacProfilesAPIMu).
+	// 2F-E correction round 7: a pending lifecycle intent of every profile
+	// the snapshot CHANGES is settled durably before the write
+	// (pacSettlePendingBeforeWrite); if that cannot be persisted the PAC
+	// profiles slice is deferred to the next sync (the rest of the snapshot
+	// still applies).
 	if snap.PACProfiles != nil || snap.PACPools != nil {
 		unlock := pacProfilesWriterLock()
+		before := pacProfiles.Get()
 		cur := pacProfiles.Get()
 		if snap.PACProfiles != nil {
 			cur.Profiles = snap.PACProfiles
@@ -1017,7 +1023,9 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 		if snap.PACPools != nil {
 			cur.Pools = snap.PACPools
 		}
-		if err := pacProfiles.Set(cur); err != nil {
+		if err := pacSettlePendingBeforeWrite(before, cur); err != nil {
+			logger.Printf("DataPlane: PAC profiles not applied this sync (deferred): %v", err)
+		} else if err := pacProfiles.Set(cur); err != nil {
 			logger.Printf("DataPlane: PAC profiles: %v", err)
 		}
 		unlock()

@@ -667,7 +667,7 @@ func applyConfigBackup(b *configBackup) error {
 		rl.ReplaceExemptions(b.RateLimitExempt)
 	}
 
-	applyPACFromBackup(b)
+	pacErr := applyPACFromBackup(b)
 
 	// Close the scope here (not only via the defer) so its result is available
 	// to the caller. finishScope is once-guarded; the deferred call above is
@@ -675,7 +675,11 @@ func applyConfigBackup(b *configBackup) error {
 	if failed := finishScope(); len(failed) > 0 {
 		return &configPersistError{Files: failed}
 	}
-	return nil
+	// 2F-E correction round 7: a PAC profiles slice that was NOT applied
+	// because a pending lifecycle intent of a profile it changes could not
+	// be settled durably is reported to the caller (audit + response), the
+	// same way a persistence failure is — the rollback is otherwise applied.
+	return pacErr
 }
 
 // configPersistError reports the durable writes that failed while a config
@@ -766,7 +770,7 @@ func applyScanStoresFromBackup(b *configBackup) {
 // applyPACFromBackup restores PAC configuration and the PAC profile/pool set
 // from a snapshot. Split out of applyConfigBackup for cyclop only — behaviour
 // and ordering are unchanged.
-func applyPACFromBackup(b *configBackup) {
+func applyPACFromBackup(b *configBackup) error {
 	// PAC configuration: replace entirely from snapshot.
 	_ = pacStore.Set(PACConfig{
 		ProxyHost:  b.PACProxyHost,
@@ -781,17 +785,13 @@ func applyPACFromBackup(b *configBackup) {
 	// boundary (pacProfilesWriterLock — lock order gate → configRollbackMu →
 	// pacProfilesAPIMu), so a lifecycle publish parked between its intent and
 	// its commit can neither interleave with nor overwrite the restore.
+	// 2F-E correction round 7: a pending lifecycle intent of every profile
+	// the rollback CHANGES is settled durably before the write
+	// (pacSettlePendingBeforeWrite); if that cannot be persisted the PAC
+	// profiles slice is deferred (not applied) and reported.
+	var pacErr error
 	if b.PACProfiles != nil || b.PACPools != nil {
-		unlock := pacProfilesWriterLock()
-		cur := pacProfiles.Get()
-		if b.PACProfiles != nil {
-			cur.Profiles = b.PACProfiles
-		}
-		if b.PACPools != nil {
-			cur.Pools = b.PACPools
-		}
-		_ = pacProfiles.Set(cur)
-		unlock()
+		pacErr = applyPACProfilesFromBackup(b)
 	}
 
 	// SaaS feed config (F3a-2): applied only when the snapshot carries it
@@ -818,6 +818,30 @@ func applyPACFromBackup(b *configBackup) {
 			logger.Printf("ConfigRollback: saas feed settings persist failed, target never applied: %v", err)
 		}
 	}
+	return pacErr
+}
+
+// applyPACProfilesFromBackup is the rollback's PAC profiles/pools write
+// inside the shared writer boundary (the mutex is released before the
+// SaaS-feed slice — lock order configRollbackMu → pacProfilesAPIMu, and
+// adminSettingsMu is never taken under it).
+func applyPACProfilesFromBackup(b *configBackup) error {
+	unlock := pacProfilesWriterLock()
+	defer unlock()
+	before := pacProfiles.Get()
+	cur := pacProfiles.Get()
+	if b.PACProfiles != nil {
+		cur.Profiles = b.PACProfiles
+	}
+	if b.PACPools != nil {
+		cur.Pools = b.PACPools
+	}
+	if err := pacSettlePendingBeforeWrite(before, cur); err != nil {
+		logger.Printf("ConfigRollback: PAC profiles slice not applied: %v", err)
+		return fmt.Errorf("PAC profiles not applied: %w", err)
+	}
+	_ = pacProfiles.Set(cur)
+	return nil
 }
 
 // configChange is a single field-level difference between two config versions.

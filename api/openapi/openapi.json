@@ -1308,6 +1308,10 @@
           "ok": {
             "type": "boolean"
           },
+          "pac_profiles_not_applied": {
+            "description": "2F-E correction round 7: present when the PAC profiles/pools slice was NOT applied because a pending lifecycle operation of a profile the import changes could not be settled durably (every writer settles a profile's pending intent before changing it). The rest of the import applied; retry the PAC slice once the node-local history is writable.",
+            "type": "string"
+          },
           "plan": {
             "$ref": "#/components/schemas/UpstreamImportPlan"
           },
@@ -18346,6 +18350,17 @@
           },
           "428": {
             "$ref": "#/components/responses/PACPreconditionRequired"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "`lifecycle_unsettled` (2F-E correction round 7): the profile has an unresolved lifecycle operation whose outcome could not be recorded durably in the node-local history, so a write that would change this profile is refused with nothing changed — every writer settles a profile's pending lifecycle intent durably BEFORE changing it, so a proven commit is never reclassified from replaced content. Retry once the history is writable. Unrelated profiles and pools are never blocked."
           }
         },
         "security": [
@@ -18474,6 +18489,17 @@
           },
           "428": {
             "$ref": "#/components/responses/PACPreconditionRequired"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "`lifecycle_unsettled` (2F-E correction round 7): the profile has an unresolved lifecycle operation whose outcome could not be recorded durably in the node-local history, so a write that would change this profile is refused with nothing changed — every writer settles a profile's pending lifecycle intent durably BEFORE changing it, so a proven commit is never reclassified from replaced content. Retry once the history is writable. Unrelated profiles and pools are never blocked."
           }
         },
         "security": [

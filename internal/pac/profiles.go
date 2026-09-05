@@ -377,7 +377,7 @@ func nextProvenance(prev ProfilesConfig, prevProv map[string]string, next Profil
 		switch old, existed := before[id]; {
 		case commitWriteID != "" && id == commitProfileID:
 			out[id] = commitWriteID
-		case existed && profileContentEqual(old, next.Profiles[i]):
+		case existed && ProfileContentEqual(old, next.Profiles[i]):
 			if w := prevProv[id]; w != "" {
 				out[id] = w
 			}
@@ -388,9 +388,11 @@ func nextProvenance(prev ProfilesConfig, prevProv map[string]string, next Profil
 	return out
 }
 
-// profileContentEqual compares two profiles by their canonical JSON (so a
-// nil and an empty rule list are the same content).
-func profileContentEqual(a, b Profile) bool {
+// ProfileContentEqual compares two profiles by their canonical JSON (so a
+// nil and an empty rule list are the same content). It is the store's own
+// "did this writer change this profile" test, shared with the writer
+// boundary's pre-write settlement (round 7).
+func ProfileContentEqual(a, b Profile) bool {
 	ja, errA := json.Marshal(a)
 	jb, errB := json.Marshal(b)
 	return errA == nil && errB == nil && bytes.Equal(ja, jb)

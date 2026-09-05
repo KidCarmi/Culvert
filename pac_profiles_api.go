@@ -15,6 +15,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -129,12 +130,75 @@ func pacApplyProfilesMutation(w http.ResponseWriter, r *http.Request, action, ob
 		writePACIssues(w, "validation failed", issues)
 		return false
 	}
+	if err := pacSettlePendingBeforeWrite(before, candidate); err != nil {
+		logger.Printf("PAC: %s of %q refused: %v", sanitizeLog(action), sanitizeLog(object), err)
+		writePACFenceRefusal(w, http.StatusServiceUnavailable, "lifecycle_unsettled",
+			"the profile has an unresolved lifecycle operation whose outcome could not be recorded durably; nothing was changed — retry once the node-local history is writable",
+			map[string]any{"detail": err.Error()})
+		return false
+	}
 	if err := pacProfiles.Set(candidate); err != nil {
 		http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
 		return false
 	}
 	pacAfterActiveCommit(r, action, object, before, candidate)
 	return true
+}
+
+// errPACLifecycleUnsettled is the pre-write settlement refusal (round 7).
+var errPACLifecycleUnsettled = errors.New("pac lifecycle: unresolved operation could not be settled durably")
+
+// pacSettlePendingBeforeWrite is the writer boundary's HISTORICAL-EVIDENCE
+// rule (2F-E correction round 7). Every writer of the active profile store
+// calls it under pacProfilesAPIMu, immediately before its own write, with
+// the content it is replacing and the content it is about to install: for
+// every profile whose content it CHANGES or removes, a pending lifecycle
+// intent of that profile is settled DURABLY first — a genuine commit whose
+// committed marker could not be persisted (the truthful published:true /
+// pending_reconciliation answer) becomes a durable COMMITTED record with its
+// history revision, an intent that never wrote becomes a durable aborted /
+// refused / ambiguous decision — so the outcome of that intent is never
+// inferred later from content or provenance the writer is about to replace.
+// If the settled record cannot be persisted, the writer is REFUSED (CRUD) or
+// DEFERRED (import / rollback / CP→DP snapshot: the section is skipped and
+// reported, retried by the next attempt) with nothing written. Profiles the
+// writer leaves untouched, and pools, are never settled here — an unrelated
+// write is never blocked. The node-local effects only (committed marker +
+// history) run inside the writer's transaction; config version, cluster
+// publication and the success audit complete at the next full
+// reconciliation from the durable markers, as for any recovered commit.
+func pacSettlePendingBeforeWrite(before, candidate pac.ProfilesConfig) error {
+	for _, id := range pacChangedProfileIDs(before, candidate) {
+		lc, ok := pacLifecycle.Get(id)
+		if !ok || lc.PendingOp == nil {
+			continue
+		}
+		pacReconcileLocked(lc, pacEffectsNodeLocal)
+		// The durable truth decides, never the reconciler's return value: an
+		// intent that is still pending and not committed in the store was
+		// not settled (its record could not be persisted).
+		if lc, _ = pacLifecycle.Get(id); lc.PendingOp != nil && !lc.PendingOp.Committed() {
+			return fmt.Errorf("%w: profile %q, operation %s", errPACLifecycleUnsettled, id, lc.PendingOp.OperationID)
+		}
+	}
+	return nil
+}
+
+// pacChangedProfileIDs lists the profiles of before whose content candidate
+// changes or drops (pac.ProfileContentEqual — the store's own change test).
+func pacChangedProfileIDs(before, candidate pac.ProfilesConfig) []string {
+	next := make(map[string]pac.Profile, len(candidate.Profiles))
+	for i := range candidate.Profiles {
+		next[candidate.Profiles[i].ID] = candidate.Profiles[i]
+	}
+	var changed []string
+	for i := range before.Profiles {
+		id := before.Profiles[i].ID
+		if n, ok := next[id]; !ok || !pac.ProfileContentEqual(before.Profiles[i], n) {
+			changed = append(changed, id)
+		}
+	}
+	return changed
 }
 
 // pacAfterActiveCommit runs the post-commit side effects of a PROVEN active

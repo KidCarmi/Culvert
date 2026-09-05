@@ -1217,6 +1217,15 @@ components:
         plan: { $ref: '#/components/schemas/UpstreamImportPlan' }
         importDigest: { type: string, description: 'Deterministic identity of the plan against the current document (`sha256:…`).' }
         cluster_publish_rejected: { type: string }
+        pac_profiles_not_applied:
+          type: string
+          description: >-
+            2F-E correction round 7: present when the PAC profiles/pools slice
+            was NOT applied because a pending lifecycle operation of a profile
+            the import changes could not be settled durably (every writer
+            settles a profile's pending intent before changing it). The rest
+            of the import applied; retry the PAC slice once the node-local
+            history is writable.
     UpstreamImportSummary:
       type: object
       description: 'Counts-only upstream import summary (C5): never an id, authority or credential.'
@@ -9001,6 +9010,19 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '409': { $ref: '#/components/responses/PACStale' }
         '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '503':
+          description: >-
+            `lifecycle_unsettled` (2F-E correction round 7): the profile has an
+            unresolved lifecycle operation whose outcome could not be recorded
+            durably in the node-local history, so a write that would change
+            this profile is refused with nothing changed — every writer settles
+            a profile's pending lifecycle intent durably BEFORE changing it,
+            so a proven commit is never reclassified from replaced content.
+            Retry once the history is writable. Unrelated profiles and pools
+            are never blocked.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
@@ -9037,6 +9059,19 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '409': { $ref: '#/components/responses/PACStale' }
         '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '503':
+          description: >-
+            `lifecycle_unsettled` (2F-E correction round 7): the profile has an
+            unresolved lifecycle operation whose outcome could not be recorded
+            durably in the node-local history, so a write that would change
+            this profile is refused with nothing changed — every writer settles
+            a profile's pending lifecycle intent durably BEFORE changing it,
+            so a proven commit is never reclassified from replaced content.
+            Retry once the history is writable. Unrelated profiles and pools
+            are never blocked.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
