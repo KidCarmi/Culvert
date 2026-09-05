@@ -1161,6 +1161,95 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD, ROUND 2 (this branch, 2026-09-05).** External
+> freeze review of the corrected candidate (`db6f4d35`) executed the pure
+> recovery functions and found three residual blockers; each was red-before
+> on the untouched candidate (`3f74eaa0`: `pac-2fe-c2-red.test.ts` D1–D8
+> 11/14 failing with 3 controls, `pac-2fe-c2-red-page.test.tsx` P17–P21 4/5
+> with 1 control, `pac_lifecycle_continuity_red_test.go` E5–E8 3/4 with 1
+> control, real-binary `e2e/pac-2fe-c2.spec.ts` R9–R11 3/3) and corrected
+> append-only. **(1) Non-commit was declared without proven history
+> continuity.** The round-1 rule ordered a server-stamped history reset
+> against the browser-stamped dispatch (15-minute skew), so a server clock
+> sufficiently behind the browser dismissed an acknowledged reset that
+> happened AFTER the dispatch; and a profile DELETE discards the lifecycle
+> record while a recreate under the same id restarts revision numbers at 1,
+> so a recreated profile that climbed to or past the reviewed revision
+> bypassed `history_missing` and its EMPTY new ring read as complete evidence
+> — both answered `not_landed`. Worse, a recreate reproducing the original
+> base revision and spec (same draft restored) read as `not_observed` and
+> OFFERED the re-send: the original operationId has no decision record in
+> the new history, so the appliance would have run it AGAIN. Corrected
+> contract: the appliance now carries a **durable history-epoch identity**
+> (`ProfileLifecycle.HistoryIncarnation`, a UUID minted when a record is
+> created — existing records are minted one at load and persisted — stable
+> across draft saves, publishes and restarts, ROTATED by a profile delete (+
+> recreate) and by a history reset; exposed as the lifecycle GET's
+> `historyIncarnation`, "" when neither a profile nor a record exists). The
+> recovery marker (version 2) records the epoch it was dispatched in plus the
+> collection fence; `classifyRecovery` reads anything into absence ONLY with
+> continuity — the same known epoch on both sides — and otherwise keeps the
+> operation UNRESOLVED as `history_discontinuity` (a deleted, never-recreated
+> profile is `history_missing`; an unacknowledged reset stays
+> `history_reset`). Clocks and revision-number comparisons are gone from the
+> classifier. Re-send is **refused** without continuity (`resendContinuityRefusal`;
+> the button is withheld with the reason), and the appliance enforces it too:
+> publish/rollback/repair carry `expectedHistoryIncarnation` and are refused
+> `409 history_incarnation_mismatch` (current identity named) BEFORE the
+> at-most-once replay is consulted, committing nothing. The field is optional
+> for an API caller that omits it (it reviewed no epoch and has no re-send
+> semantics; the legacy panel never calls the lifecycle publish); the admin
+> frontend always sends it. **(2) "Currently active" followed the history
+> pointer.** `activeN === revisionN` said "It is the active revision" after a
+> direct profile PUT had replaced the spec — the PUT advances the
+> authoritative active store without touching the lifecycle. Every revision
+> now records the store revision its commit produced (`storeRevision`;
+> `FinalizeCommitted`/`Repair`), the operation lookup carries the committed
+> identity (`specDigest`, `storeRevision`), and `currentlyActive` is derived
+> from that identity against `activeSpecDigest` + `activeRevision` (an
+> identical-spec re-PUT still moves the store revision and reads as no longer
+> active; a pre-field revision falls back to the pointer for the revision
+> half only). Historical commitment stays separate and is reported first
+> ("committed as history revision N"). Real-handler proof E7 and real-binary
+> R9 cover publish → lost response → direct PUT → Recover. **(3) The DIRECT
+> challenge continuation dropped the re-send context and the marker could
+> be rebound.** The confirmation callback re-ran the operation without the
+> re-send options, so it restamped the dispatch time and treated a later
+> refusal as a fresh attempt (clearing the earlier, still-unresolved
+> marker); and `writePacRecovery` accepted a same-id rewrite of every
+> binding field. The run context is now an explicit `RunOpts { marker,
+> resend }` carried through the challenge ceremony — the attempt's ORIGINAL
+> marker verbatim (dispatch time, candidate digest, fences, epoch) and its
+> re-send posture — so a refused or lost confirmation keeps the marker and,
+> on a re-send, is followed by the authoritative read; the store refuses any
+> same-id write whose bindings differ (an identical re-persist is the only
+> allowed one). Page proofs P17–P21 cover unresolved → re-send → challenge →
+> confirmation → stale-refused / transport-lost / reload; the round-1 P3/P4
+> challenge journeys still pass with the carried context. **Assertion
+> corrections (transparent; original commits preserved):** the accepted C1c
+> acknowledged-reset case expected `history_reset` from the timestamp rule
+> and now expects `history_discontinuity` with the post-reset epoch (the
+> case comment records the original and why it was wrong). **Fixture
+> completions** (no assertion change): the round-1 fixtures gained the epoch
+> identity and the marker's two continuity bindings (C1i's deleted profile
+> reports "" as the appliance does; C5a's lookup expectation gained the two
+> new identity fields at their absent values; the publish request fixture
+> names its epoch). **Harness repair:** the extra-path coverage test's
+> positive fixture used `/api/thing` as both the primary and the extra path;
+> it now documents a second path only the extra mapping can cover and proves
+> the mapping is necessary (passes on the baseline — the implementation was
+> right, the fixture was not). **Limitations recorded.** A version-1 marker
+> (from the previous build) reads with an unknown epoch: it is never resolved
+> to "not landed" and is never re-sent — only Recover (a positive appliance
+> record still lands it) or the typed Abandon. Revisions recorded before
+> `storeRevision` existed fall back to the history pointer for the
+> revision half of current-active truth (their spec digest is still
+> compared). The lifecycle GET mints and persists the epoch identity for a
+> pre-existing profile the first time it is read (the same GET already
+> reconciles pending intents durably); when that write fails the GET reports
+> "" and every client verdict is unresolved. The 2E-C enrollment marker
+> remains outside this round (recorded for 2F-G). 2F-F/2F-G untouched.
+
 > **2F-E CORRECTION RECORD (this branch, 2026-09-05).** External freeze
 > review of the 2F-E candidate (`39e2cfdb`) found five blockers; each was
 > red-before on the untouched candidate (`d6214d98`: `pac-2fe-c-red.test.ts`
