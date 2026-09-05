@@ -1952,6 +1952,7 @@ routes:
     method: "GET"
     handler: "apiPACProfileItem"
     openapi_path: "/api/pac/profiles/{name}"
+    openapi_extra_paths: ["/api/pac/profiles/{name}/lifecycle"]
     domain: "pac"
     visibility: admin-supported
     min_role: "viewer"

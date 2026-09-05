@@ -113,7 +113,7 @@ func apiPACProfileLifecycle(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		pacLifecycleGet(w, id)
+		pacLifecycleGet(w, r, id)
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return

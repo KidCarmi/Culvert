@@ -167,18 +167,24 @@ type Exemption struct {
 
 // ClassRow is one classification manifest entry.
 type ClassRow struct {
-	Route         string     `yaml:"route"`
-	Method        string     `yaml:"method"`
-	Handler       string     `yaml:"handler"`
-	Domain        string     `yaml:"domain"`
-	Visibility    string     `yaml:"visibility"`
-	MinRole       string     `yaml:"min_role"`
-	Mutating      bool       `yaml:"mutating"`
-	AuditExpected bool       `yaml:"audit_expected"`
-	DangerLevel   string     `yaml:"danger_level"`
-	Documented    bool       `yaml:"documented"`
-	OpenAPIPath   string     `yaml:"openapi_path"` // optional; defaults to Route
-	Exemption     *Exemption `yaml:"exemption"`
+	Route         string `yaml:"route"`
+	Method        string `yaml:"method"`
+	Handler       string `yaml:"handler"`
+	Domain        string `yaml:"domain"`
+	Visibility    string `yaml:"visibility"`
+	MinRole       string `yaml:"min_role"`
+	Mutating      bool   `yaml:"mutating"`
+	AuditExpected bool   `yaml:"audit_expected"`
+	DangerLevel   string `yaml:"danger_level"`
+	Documented    bool   `yaml:"documented"`
+	OpenAPIPath   string `yaml:"openapi_path"` // optional; defaults to Route
+	// ExtraOpenAPIPaths lists FURTHER contract paths served by the SAME
+	// registered route + method (a prefix route whose handler dispatches on a
+	// path suffix — e.g. GET /api/pac/profiles/ serves both
+	// /api/pac/profiles/{name} and /api/pac/profiles/{name}/lifecycle). Each
+	// must exist in the contract; each counts as documented by this row.
+	ExtraOpenAPIPaths []string   `yaml:"openapi_extra_paths"`
+	Exemption         *Exemption `yaml:"exemption"`
 }
 
 // specPath returns the path used to match this row against the OpenAPI contract.
@@ -359,6 +365,11 @@ func coverageSpecChecks(spec *Spec, c *Classification) []string {
 		if !specHasOp(spec, r.specPath(), r.Method) {
 			v = append(v, fmt.Sprintf("DOCUMENTED-BUT-MISSING: %s %s is marked documented but has no matching OpenAPI operation", r.Method, r.specPath()))
 		}
+		for _, extra := range r.ExtraOpenAPIPaths {
+			if !specHasOp(spec, extra, r.Method) {
+				v = append(v, fmt.Sprintf("DOCUMENTED-BUT-MISSING: %s %s (openapi_extra_paths of %s) is marked documented but has no matching OpenAPI operation", r.Method, extra, r.Route))
+			}
+		}
 	}
 	for _, op := range spec.Ops {
 		if !documentedRowFor(c, op.Path, op.Method) {
@@ -384,8 +395,16 @@ func specHasOp(spec *Spec, path, rowMethod string) bool {
 func documentedRowFor(c *Classification, specPath, specMethod string) bool {
 	for i := range c.Rows {
 		r := &c.Rows[i]
-		if r.Documented && specPath == r.specPath() && methodMatch(r.Method, specMethod) {
+		if !r.Documented || !methodMatch(r.Method, specMethod) {
+			continue
+		}
+		if specPath == r.specPath() {
 			return true
+		}
+		for _, extra := range r.ExtraOpenAPIPaths {
+			if specPath == extra {
+				return true
+			}
 		}
 	}
 	return false

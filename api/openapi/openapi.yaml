@@ -490,6 +490,89 @@ components:
             draftRevision: { type: integer, format: int64 }
             etag: { type: string }
             collectionEtag: { type: string }
+    PACOperationLookup:
+      type: object
+      description: >-
+        2F-E correction — the answer to `GET …/lifecycle?operationId=`: ONE
+        operation looked up in the FULL retained decided ring (operationsCap)
+        and in the revision history, never only the 20 listed. `found:false`
+        means the appliance holds no record of that operationId; it is proof of
+        non-commit only when the retained ring is complete and the reviewed
+        active revision moved.
+      required: [operationId, found, revisionN]
+      additionalProperties: false
+      properties:
+        operationId: { type: string, format: uuid }
+        found: { type: boolean }
+        state:
+          type: string
+          enum: [recorded, aborted]
+          description: the decided state (present when found)
+        status: { type: integer, description: the HTTP status the decision produced (present when found) }
+        ts: { type: string, description: "decision time (RFC 3339; present when decided)" }
+        revisionN:
+          type: integer
+          format: int64
+          description: the history revision the operation produced; 0 when none (aborted or unknown)
+    PACLifecycle:
+      type: object
+      description: >-
+        The node-local lifecycle of one PAC profile (see GET
+        /api/pac/profiles/{name}/lifecycle). Scope is node-local — never
+        cluster-synced, never on config-version rollback.
+      required:
+        - profileId
+        - activeExists
+        - active
+        - draft
+        - draftDirty
+        - activeN
+        - revisions
+        - draftRevision
+        - activeRevision
+        - collectionEtag
+        - state
+        - historyState
+        - operations
+        - activeSpecDigest
+        - draftSpecDigest
+        - operationsRetained
+        - operationsCap
+        - poolChangedSince
+        - scope
+      additionalProperties: true
+      properties:
+        profileId: { type: string }
+        activeExists: { type: boolean, description: false ⇒ `active` is a zero profile }
+        active: { type: object, additionalProperties: true, description: the active spec (a zero Profile when activeExists is false) }
+        draft: { type: object, additionalProperties: true, description: the saved draft (a zero Profile until one is saved — draftRevision 0) }
+        draftDirty: { type: boolean }
+        activeN: { type: integer, format: int64, description: the currently-serving history revision number (0 = none published) }
+        revisions:
+          type: array
+          description: the immutable publish history, oldest first (bounded to the last 50); each carries the operationId that produced it
+          items: { type: object, additionalProperties: true }
+        draftDiff: { type: object, additionalProperties: true, nullable: true, description: the reviewed difference draft vs active (null when not dirty) }
+        draftRevision: { type: integer, format: int64, description: 2F-A fence for save_draft (0 = no draft yet) }
+        activeRevision: { type: integer, format: int64, description: 2F-A fence for publish/rollback }
+        collectionEtag: { type: string, description: 2F-A fence when no active profile exists }
+        state: { type: string, enum: [idle, pending, ambiguous] }
+        historyState: { type: string, enum: [recorded, pending_reconciliation, ambiguous, history_reset] }
+        pendingOp: { type: object, additionalProperties: true, nullable: true }
+        ambiguous: { type: object, additionalProperties: true, nullable: true }
+        operations:
+          type: array
+          description: the 20 most recent decided operations (recorded bodies omitted — replayed by operationId); NOT the whole retained ring
+          items: { type: object, additionalProperties: true }
+        activeSpecDigest: { type: string, description: "ProfileSpecDigest of the active spec (empty when none)" }
+        draftSpecDigest: { type: string, description: "2F-E correction — ProfileSpecDigest of the saved draft (empty when none); the identity a publish binds its recovery marker to" }
+        operationsRetained: { type: integer, description: 2F-E correction — decided operations the appliance currently retains for this profile }
+        operationsCap: { type: integer, description: "2F-E correction — the retained ring's cap (64); once reached older decisions are evicted and absence proves nothing" }
+        operation: { $ref: '#/components/schemas/PACOperationLookup' }
+        poolChangedSince: { type: boolean }
+        scope: { type: string, enum: [node-local] }
+        historyReset: { type: object, additionalProperties: true, description: the store-level reset record when the node-local history file was quarantined }
+        previousRevision: { type: integer, format: int64 }
     PACConfig:
       type: object
       required: [proxyHost, proxyPort]
@@ -8570,11 +8653,11 @@ paths:
           description: 2F-A precondition token the DELETE must echo (the loaded value).
           schema: { type: string }
       responses:
-        '200':
-          description: Delete PAC pool.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PACPoolItem' }
+        '204':
+          description: >-
+            Delete PAC pool — deleted; no body (2F-E correction: the handler has
+            always answered 204, the earlier 200 + item body was a contract
+            drift).
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '409': { $ref: '#/components/responses/PACStale' }
         '428': { $ref: '#/components/responses/PACPreconditionRequired' }
@@ -8584,15 +8667,89 @@ paths:
           content:
             text/plain: { schema: { type: string } }
   /api/pac/profiles/{name}/lifecycle:
+    get:
+      operationId: getPACProfileLifecycle
+      tags: [pac]
+      summary: PAC profile lifecycle (node-local truth)
+      description: >-
+        The node-local lifecycle of one PAC profile: the active spec and its
+        revision/digest, the saved draft (+ draftSpecDigest, draftRevision,
+        draftDirty, draftDiff), the immutable publish history (revisions carry
+        the operationId that produced them), the state machine (state,
+        historyState, pendingOp, ambiguous, historyReset) and the decided
+        operations. RECOVERY EVIDENCE LIMITS (2F-E correction): `operations`
+        lists at most the 20 most recent decisions while the appliance retains
+        `operationsRetained` of a cap of `operationsCap`; absence from the
+        listed operations therefore proves nothing on its own. A client
+        resolving a lost response passes `?operationId=<uuid>` and reads the
+        `operation` lookup (the FULL retained ring plus the revision history).
+        Non-commit is provable only when the retained ring is complete
+        (operationsRetained < operationsCap), no history reset touched it, the
+        operation is absent, and the reviewed active revision moved (the
+        appliance can no longer commit it). Everything is scope node-local
+        (never cluster-synced, never on config-version rollback).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+        - name: operationId
+          in: query
+          required: false
+          description: >-
+            Look ONE operation up in the full retained decided ring and the
+            revision history; answered in `operation`. Must be a UUID (400
+            otherwise).
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The node-local lifecycle of the profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACLifecycle' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Unknown profile (or the legacy `default`). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
     post:
       operationId: pacProfileLifecycle
       tags: [pac]
       summary: PAC profile lifecycle action
       description: >-
-        Admin lifecycle action on a PAC profile — save_draft, publish, or rollback
-        (the safe-publishing flow). The `action` field selects the operation; the
-        remaining payload varies per action, so the request/response bodies are
-        open.
+        Admin lifecycle action on a PAC profile. `action` selects the operation
+        and the remaining payload varies per action:
+        `save_draft` {draft, draftRevision (echo the loaded value; 0 for the
+        first draft)} — replaces the node-local draft, never the active
+        profile;
+        `publish` {operationId (client-minted UUID), draft (the REVIEWED
+        candidate, sent verbatim), expectedActiveRevision (or collectionEtag
+        when no active profile exists), reason, confirm (when the challenge
+        requires it)} — commits the candidate as the next active revision and
+        records history revision `revision`;
+        `rollback` {operationId, targetN, expectedActiveRevision|collectionEtag,
+        reason, confirm} — re-publishes the recorded spec of history revision
+        targetN as a NEW revision;
+        `repair` {operationId, resolution: accept_active} — records the
+        observed active profile after an ambiguous outcome;
+        `acknowledge_history_reset` {operationId, expectedActiveRevision,
+        expectedActiveSpecDigest}.
+        Decisions are AT-MOST-ONCE by operationId: a repeated publish/rollback/
+        repair with an operationId the appliance still retains replays the
+        recorded status + body byte-for-byte (no second commit); the fence
+        (expectedActiveRevision) refuses a repeat whose base moved. The
+        `draft`/`confirm` request fields are documented on the GET/PACConfirm
+        schemas; responses per action are described under 200.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -8800,11 +8957,11 @@ paths:
           description: 2F-A precondition token the DELETE must echo (the loaded value).
           schema: { type: integer }
       responses:
-        '200':
-          description: Delete PAC profile.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PACProfileItem' }
+        '204':
+          description: >-
+            Delete PAC profile — deleted; no body (2F-E correction: the handler has
+            always answered 204, the earlier 200 + item body was a contract
+            drift).
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '409': { $ref: '#/components/responses/PACStale' }
         '428': { $ref: '#/components/responses/PACPreconditionRequired' }
@@ -8903,11 +9060,11 @@ paths:
           description: 2F-A precondition token the DELETE must echo (the loaded value).
           schema: { type: integer }
       responses:
-        '200':
-          description: Delete PAC posture exception.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PACExceptionItem' }
+        '204':
+          description: >-
+            Delete PAC posture exception — deleted; no body (2F-E correction: the handler has
+            always answered 204, the earlier 200 + item body was a contract
+            drift).
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '409': { $ref: '#/components/responses/PACStale' }
         '428': { $ref: '#/components/responses/PACPreconditionRequired' }

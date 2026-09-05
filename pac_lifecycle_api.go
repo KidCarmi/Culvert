@@ -211,7 +211,47 @@ func pacHistoryState(id string, lc *pac.ProfileLifecycle, activeOK bool) string 
 	}
 }
 
-func pacLifecycleGet(w http.ResponseWriter, id string) {
+// pacLifecycleOperationLookup answers `?operationId=<uuid>` — one operation
+// looked up in the FULL retained decided ring (pac.MaxDecidedOps, not the
+// 20 the GET lists) and in the revision history (revisions carry the
+// operationId that produced them). A pure read: it is the recovery
+// evidence a client with a lost response resolves against (2F-E
+// correction, finding 1).
+func pacLifecycleOperationLookup(lc *pac.ProfileLifecycle, operationID string) map[string]any {
+	out := map[string]any{"operationId": operationID, "found": false, "revisionN": int64(0)}
+	var revisionN int64
+	for i := range lc.Revisions {
+		if lc.Revisions[i].OperationID == operationID {
+			revisionN = lc.Revisions[i].N
+			break
+		}
+	}
+	if d, ok := lc.Decided(operationID); ok {
+		out["found"] = true
+		out["state"] = d.State
+		out["status"] = d.Status
+		out["ts"] = d.TS
+		out["revisionN"] = revisionN
+		return out
+	}
+	if revisionN != 0 {
+		// evicted from the decided ring but its revision is still recorded
+		out["found"] = true
+		out["state"] = pac.OpRecorded
+		out["status"] = http.StatusOK
+		out["revisionN"] = revisionN
+	}
+	return out
+}
+
+func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
+	lookupID := r.URL.Query().Get("operationId")
+	if lookupID != "" {
+		if _, err := uuid.Parse(lookupID); err != nil {
+			http.Error(w, "operationId must be a UUID", http.StatusBadRequest)
+			return
+		}
+	}
 	pacProfilesAPIMu.Lock()
 	lc, _ := pacLifecycle.Get(id)
 	if lc.PendingOp != nil {
@@ -247,15 +287,26 @@ func pacLifecycleGet(w http.ResponseWriter, id string) {
 		o.Result = nil // the recorded body is replayed by operationId, not listed
 		ops = append(ops, o)
 	}
+	draftSpecDigest := ""
+	if lc.DraftRevision > 0 {
+		draftSpecDigest = pac.ProfileSpecDigest(lc.Draft)
+	}
 	resp := map[string]any{
 		"profileId":    id,
 		"activeExists": activeOK,
 		"active":       active,
 		"draft":        lc.Draft,
 		"draftDirty":   lc.DraftDirty,
-		"activeN":      lc.ActiveN,
-		"revisions":    lc.Revisions,
-		"draftDiff":    diff,
+		// 2F-E correction — recovery-evidence limits: the digest of the
+		// saved draft (the identity a publish binds to), how many decided
+		// operations are RETAINED against the cap (the list below shows at
+		// most 20), and the optional one-operation lookup.
+		"draftSpecDigest":    draftSpecDigest,
+		"operationsRetained": len(lc.Operations),
+		"operationsCap":      pac.MaxDecidedOps,
+		"activeN":            lc.ActiveN,
+		"revisions":          lc.Revisions,
+		"draftDiff":          diff,
 		// 2F-A tokens.
 		"draftRevision":  lc.DraftRevision,
 		"activeRevision": active.Revision,
@@ -275,6 +326,9 @@ func pacLifecycleGet(w http.ResponseWriter, id string) {
 	}
 	if prev, hasPrev := lc.PreviousRevision(); hasPrev {
 		resp["previousRevision"] = prev.N
+	}
+	if lookupID != "" {
+		resp["operation"] = pacLifecycleOperationLookup(lc, lookupID)
 	}
 	jsonOK(w, resp)
 }

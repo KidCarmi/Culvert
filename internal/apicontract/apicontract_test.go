@@ -296,3 +296,27 @@ func containsSub(list []string, sub string) bool {
 	}
 	return false
 }
+
+// 2F-E correction — openapi_extra_paths: a prefix route whose handler
+// dispatches on a path suffix may serve several contract paths under ONE
+// registered route + method. Each extra path counts as documented by the row
+// (no PHANTOM OPERATION) and must exist in the contract (else
+// DOCUMENTED-BUT-MISSING).
+func TestCoverage_ExtraOpenAPIPathsCoverAndMustExist(t *testing.T) {
+	spec := loadGood(t) // documents GET /api/thing
+	routes := []Route{{Path: "/api/other", Method: "GET", Handler: "apiOther"}}
+	covered := &Classification{Rows: []ClassRow{
+		{Route: "/api/other", Method: "GET", Visibility: "admin-supported", Documented: true,
+			OpenAPIPath: "/api/thing", ExtraOpenAPIPaths: []string{"/api/thing"}},
+	}}
+	if v := CheckCoverage(routes, spec, covered); containsSub(v, "PHANTOM OPERATION") {
+		t.Fatalf("an operation named by openapi_extra_paths must count as documented: %v", v)
+	}
+	missing := &Classification{Rows: []ClassRow{
+		{Route: "/api/other", Method: "GET", Visibility: "admin-supported", Documented: true,
+			OpenAPIPath: "/api/thing", ExtraOpenAPIPaths: []string{"/api/thing/absent"}},
+	}}
+	if v := CheckCoverage(routes, spec, missing); !containsSub(v, "DOCUMENTED-BUT-MISSING") {
+		t.Fatalf("an openapi_extra_paths entry absent from the contract must be reported: %v", v)
+	}
+}

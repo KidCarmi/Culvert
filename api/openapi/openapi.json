@@ -2835,6 +2835,199 @@
         ],
         "type": "object"
       },
+      "PACLifecycle": {
+        "additionalProperties": true,
+        "description": "The node-local lifecycle of one PAC profile (see GET /api/pac/profiles/{name}/lifecycle). Scope is node-local — never cluster-synced, never on config-version rollback.",
+        "properties": {
+          "active": {
+            "additionalProperties": true,
+            "description": "the active spec (a zero Profile when activeExists is false)",
+            "type": "object"
+          },
+          "activeExists": {
+            "description": "false ⇒ `active` is a zero profile",
+            "type": "boolean"
+          },
+          "activeN": {
+            "description": "the currently-serving history revision number (0 = none published)",
+            "format": "int64",
+            "type": "integer"
+          },
+          "activeRevision": {
+            "description": "2F-A fence for publish/rollback",
+            "format": "int64",
+            "type": "integer"
+          },
+          "activeSpecDigest": {
+            "description": "ProfileSpecDigest of the active spec (empty when none)",
+            "type": "string"
+          },
+          "ambiguous": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "collectionEtag": {
+            "description": "2F-A fence when no active profile exists",
+            "type": "string"
+          },
+          "draft": {
+            "additionalProperties": true,
+            "description": "the saved draft (a zero Profile until one is saved — draftRevision 0)",
+            "type": "object"
+          },
+          "draftDiff": {
+            "additionalProperties": true,
+            "description": "the reviewed difference draft vs active (null when not dirty)",
+            "nullable": true,
+            "type": "object"
+          },
+          "draftDirty": {
+            "type": "boolean"
+          },
+          "draftRevision": {
+            "description": "2F-A fence for save_draft (0 = no draft yet)",
+            "format": "int64",
+            "type": "integer"
+          },
+          "draftSpecDigest": {
+            "description": "2F-E correction — ProfileSpecDigest of the saved draft (empty when none); the identity a publish binds its recovery marker to",
+            "type": "string"
+          },
+          "historyReset": {
+            "additionalProperties": true,
+            "description": "the store-level reset record when the node-local history file was quarantined",
+            "type": "object"
+          },
+          "historyState": {
+            "enum": [
+              "recorded",
+              "pending_reconciliation",
+              "ambiguous",
+              "history_reset"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/PACOperationLookup"
+          },
+          "operations": {
+            "description": "the 20 most recent decided operations (recorded bodies omitted — replayed by operationId); NOT the whole retained ring",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "operationsCap": {
+            "description": "2F-E correction — the retained ring's cap (64); once reached older decisions are evicted and absence proves nothing",
+            "type": "integer"
+          },
+          "operationsRetained": {
+            "description": "2F-E correction — decided operations the appliance currently retains for this profile",
+            "type": "integer"
+          },
+          "pendingOp": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "poolChangedSince": {
+            "type": "boolean"
+          },
+          "previousRevision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "profileId": {
+            "type": "string"
+          },
+          "revisions": {
+            "description": "the immutable publish history, oldest first (bounded to the last 50); each carries the operationId that produced it",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "enum": [
+              "node-local"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "pending",
+              "ambiguous"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "profileId",
+          "activeExists",
+          "active",
+          "draft",
+          "draftDirty",
+          "activeN",
+          "revisions",
+          "draftRevision",
+          "activeRevision",
+          "collectionEtag",
+          "state",
+          "historyState",
+          "operations",
+          "activeSpecDigest",
+          "draftSpecDigest",
+          "operationsRetained",
+          "operationsCap",
+          "poolChangedSince",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "PACOperationLookup": {
+        "additionalProperties": false,
+        "description": "2F-E correction — the answer to `GET …/lifecycle?operationId=`: ONE operation looked up in the FULL retained decided ring (operationsCap) and in the revision history, never only the 20 listed. `found:false` means the appliance holds no record of that operationId; it is proof of non-commit only when the retained ring is complete and the reviewed active revision moved.",
+        "properties": {
+          "found": {
+            "type": "boolean"
+          },
+          "operationId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "revisionN": {
+            "description": "the history revision the operation produced; 0 when none (aborted or unknown)",
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "description": "the decided state (present when found)",
+            "enum": [
+              "recorded",
+              "aborted"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "description": "the HTTP status the decision produced (present when found)",
+            "type": "integer"
+          },
+          "ts": {
+            "description": "decision time (RFC 3339; present when decided)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operationId",
+          "found",
+          "revisionN"
+        ],
+        "type": "object"
+      },
       "PACPoolInput": {
         "additionalProperties": false,
         "properties": {
@@ -17501,15 +17694,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PACPoolItem"
-                }
-              }
-            },
-            "description": "Delete PAC pool."
+          "204": {
+            "description": "Delete PAC pool — deleted; no body (2F-E correction: the handler has always answered 204, the earlier 200 + item body was a contract drift)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -17793,15 +17979,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PACExceptionItem"
-                }
-              }
-            },
-            "description": "Delete PAC posture exception."
+          "204": {
+            "description": "Delete PAC posture exception — deleted; no body (2F-E correction: the handler has always answered 204, the earlier 200 + item body was a contract drift)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -18129,15 +18308,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PACProfileItem"
-                }
-              }
-            },
-            "description": "Delete PAC profile."
+          "204": {
+            "description": "Delete PAC profile — deleted; no body (2F-E correction: the handler has always answered 204, the earlier 200 + item body was a contract drift)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -18313,8 +18485,78 @@
       }
     },
     "/api/pac/profiles/{name}/lifecycle": {
+      "get": {
+        "description": "The node-local lifecycle of one PAC profile: the active spec and its revision/digest, the saved draft (+ draftSpecDigest, draftRevision, draftDirty, draftDiff), the immutable publish history (revisions carry the operationId that produced them), the state machine (state, historyState, pendingOp, ambiguous, historyReset) and the decided operations. RECOVERY EVIDENCE LIMITS (2F-E correction): `operations` lists at most the 20 most recent decisions while the appliance retains `operationsRetained` of a cap of `operationsCap`; absence from the listed operations therefore proves nothing on its own. A client resolving a lost response passes `?operationId=<uuid>` and reads the `operation` lookup (the FULL retained ring plus the revision history). Non-commit is provable only when the retained ring is complete (operationsRetained < operationsCap), no history reset touched it, the operation is absent, and the reviewed active revision moved (the appliance can no longer commit it). Everything is scope node-local (never cluster-synced, never on config-version rollback).",
+        "operationId": "getPACProfileLifecycle",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Look ONE operation up in the full retained decided ring and the revision history; answered in `operation`. Must be a UUID (400 otherwise).",
+            "in": "query",
+            "name": "operationId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PACLifecycle"
+                }
+              }
+            },
+            "description": "The node-local lifecycle of the profile."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Unknown profile (or the legacy `default`). Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "PAC profile lifecycle (node-local truth)",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
       "post": {
-        "description": "Admin lifecycle action on a PAC profile — save_draft, publish, or rollback (the safe-publishing flow). The `action` field selects the operation; the remaining payload varies per action, so the request/response bodies are open.",
+        "description": "Admin lifecycle action on a PAC profile. `action` selects the operation and the remaining payload varies per action: `save_draft` {draft, draftRevision (echo the loaded value; 0 for the first draft)} — replaces the node-local draft, never the active profile; `publish` {operationId (client-minted UUID), draft (the REVIEWED candidate, sent verbatim), expectedActiveRevision (or collectionEtag when no active profile exists), reason, confirm (when the challenge requires it)} — commits the candidate as the next active revision and records history revision `revision`; `rollback` {operationId, targetN, expectedActiveRevision|collectionEtag, reason, confirm} — re-publishes the recorded spec of history revision targetN as a NEW revision; `repair` {operationId, resolution: accept_active} — records the observed active profile after an ambiguous outcome; `acknowledge_history_reset` {operationId, expectedActiveRevision, expectedActiveSpecDigest}. Decisions are AT-MOST-ONCE by operationId: a repeated publish/rollback/ repair with an operationId the appliance still retains replays the recorded status + body byte-for-byte (no second commit); the fence (expectedActiveRevision) refuses a repeat whose base moved. The `draft`/`confirm` request fields are documented on the GET/PACConfirm schemas; responses per action are described under 200.",
         "operationId": "pacProfileLifecycle",
         "parameters": [
           {
