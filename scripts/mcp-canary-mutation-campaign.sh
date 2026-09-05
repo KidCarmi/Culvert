@@ -933,11 +933,14 @@ run_mutation M93 \
 # error leaves the send state at may_have_been_sent, where the defective predicate
 # ALSO reports failure — the first draft of this gate passed against both shapes and
 # proved nothing (recorded in the review artifact).
+# M94 derives failure from the SEND STATE instead of the upstream leg — the round-5 defect. It
+# moved to run.go with the settle call in round 7; the predicate's own body is M96's target, so
+# this one mutates the ARGUMENT and the two stay independent.
 run_mutation M94 \
   'an upstream error response counts as a successful attempt' \
   'TestAttemptSettled_PeerErrorResponseCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
-  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
-  's/rec\.generation, upstreamFailed, e\.cfg\.Clock/rec.generation, !state.ProvesReceipt(), e.cfg.Clock/'
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/e\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\t\tif release/e.reportAttemptSettled(in, attempt, sendState, !sendState.ProvesReceipt())\n\t\t\tif release/'
 
 run_mutation M95 \
   'a window denial at admission is recorded as budget_exhausted' \
