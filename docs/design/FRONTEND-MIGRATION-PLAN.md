@@ -1161,6 +1161,76 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E IMPLEMENTATION RECORD (this branch, 2026-09-05).** PAC React at
+> `/app/network/pac` under the approved C1–C12 contract; frontend-only
+> (no Go, no OpenAPI change). **Entry gate.** `origin/main` had advanced
+> from the 2F-D freeze (`d6bdd622`) to `290e3768` (MCP canary work); the
+> approved evidence-preserving merge `e8ae527a` carried one textual
+> conflict in `shadow_soak_test.go` (both sides introduced a locked clock
+> swap for the tool-trust coordinator — resolved to `soakSwapToolTrustClock`
+> at both soak sites, main's `swapToolTrustNowFn` retained in
+> `mcp_tooltrust_clock_test.go`); the merge commit's message was amended
+> with the trailers BEFORE it was ever pushed (disclosed; frozen history
+> untouched). Reconciliation gates on the merged head: route pin 243, lint
+> 0, contract tests, full non-race sweep PASS. **RED-before.**
+> `b976566c` commits the coverage on the merged head and the baseline
+> evidence was executed there: `src/test/pac-2fe-red.test.ts` (A1–A7:
+> decoder, fence/challenge/history-reset classifiers, request shapes with
+> no `confirmDirect`, recovery classification, marker grammar/subject/
+> corruption), `src/test/pac-2fe-red-page.test.tsx` (P1–P6: viewer
+> posture, stale write, challenge + stale challenge, lost response →
+> marker → Recover, history_reset ack body, admin controls) and
+> `e2e/pac-2fe.spec.ts` (five real-binary journeys) — all red on the
+> baseline (the page/e2e matrices fail on the missing module/route).
+> **Surface.** `src/api/pac.ts` (decoders + requests for profiles, pools,
+> lifecycle, exceptions, posture inventory, legacy config, simulate; every
+> fence token explicit — `revision`, `draftRevision`, `etag`,
+> `collectionEtag`, `expectedActiveRevision`/`expectedActiveSpecDigest`;
+> UUID `operationId`; refusal classifiers for 428/409 fences, the bound
+> DIRECT challenge (`confirm:{challenge,value,binding}` echoed verbatim,
+> `challenge_stale` renders the `changed` bindings), `history_reset`,
+> `operation_pending`, `lifecycle_ambiguous`, `outcome_unknown`/
+> `active_write_failed`, validation issues), `pacRecovery.ts` (NON-SECRET
+> sessionStorage marker `culvert.pac.lifecycle-recovery.v1` — operation
+> identity + bound expectations, subject-bound, read-back verified,
+> written BEFORE dispatch, cleared only on a terminal outcome or the auth
+> boundary), `pacLifecycle.ts` (recovery classification against the
+> authoritative lifecycle GET: `landed` — the operation appears decided with
+> its state, `pending`, `ambiguous`, `not_landed` + whether the base moved;
+> only an unknown outcome keeps the marker), and the tabs Profiles / Pools
+> / DIRECT Exceptions / Legacy PAC. **Lifecycle guarantees in the
+> browser.** The reviewed CANDIDATE is the saved node-local draft, else the
+> current active spec (an initial publish records the profile as served;
+> the backend keeps no draft until one is saved); publish/rollback carry
+> the reviewed candidate + `expectedActiveRevision` so a concurrent publish
+> is a rendered 409 with the current token and never an auto-retry; the T3
+> DIRECT ceremony is typed against the server's `confirmValue` and re-sent
+> with the SAME `operationId` + candidate; a stale challenge lists the
+> changed bindings and requires a fresh review; proven commit
+> (`historyState: recorded`), pending reconciliation, ambiguity (Repair —
+> accept active) and history reset (acknowledge with
+> `expectedActiveRevision` + `expectedActiveSpecDigest`) are rendered as
+> distinct states; an unknown outcome latches on the persisted operation
+> identity and the page offers only Recover (authoritative lifecycle read)
+> or the typed Abandon ceremony before any fresh dispatch. RBAC C7: every
+> mutation control is admin-only; the viewer sees read-only facts.
+> Node-local ownership/scope, the CP-managed data-plane refusal and the
+> evidence class are rendered verbatim. **Found only against the real
+> binary** (corrected in `c05f0fc8`, fixtures corrected to the wire
+> contract with no expected value changed): `draftDiff.rulesAdded/
+> rulesRemoved` are description strings; the lifecycle GET serialises a
+> zero Profile for a never-saved draft and for a missing active (now
+> decoded as absent); `Profile.rules` is `omitempty`. **Harness
+> completions** (disclosed, not assertion changes): the page fixture serves
+> `/api/pac/posture/inventory`; the legacy default-profile card title no
+> longer contains "PAC" (ambiguous heading locator). **Deferred /
+> limitations.** The lifecycle GET/POST body is not in the OpenAPI document
+> (the typed client is hand-written against the handler; documenting it is
+> a backend artifact change outside this frontend-only slice); profile/
+> pool/exception DELETEs answer 204 while OpenAPI says 200 (the client
+> treats both as success); the "Upstream Proxies" nav entry is a planned
+> placeholder (2F-F); 2F-F/2F-G untouched.
+
 > **2F-D CORRECTION RECORD (this branch, 2026-09-04).** External freeze
 > review of the 2F-D candidate (`4b60d810`) found two source-level
 > contract blockers; each is red-before against the untouched `4b60d810`
