@@ -880,30 +880,14 @@ run_mutation M90 \
   . mcp_canary_runtime.go \
   's/\tif cr\.enforcer != nil && !cr\.enforcer\.WindowOpen\(canaryNow\(\)\) \{\n\t\treturn false\n\t\}/\tif cr.enforcer != nil {\n\t\tif d := cr.enforcer.WindowDeadline(); !d.IsZero() \&\& !canaryNow().Before(d) {\n\t\t\treturn false\n\t\t}\n\t}/'
 
-# M91 REORDERS two blocks rather than editing one, so its mutation lives in a helper
-# script (scripts/mutations/m91_settle_after_outcome.py) instead of a sed expression.
-# The swap is written to COMPILE: a compile failure would prove nothing, per the
-# header rule, so the helper exits 1 when its pattern no longer matches and the
-# mutation is scored SKIPPED rather than as a pass.
-printf '\n[M91] the terminal outcome is made durable before the health sample\n'
-printf '      gate: TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit  (./internal/mcp/execution/)\n'
-if ! python3 scripts/mutations/m91_settle_after_outcome.py || git diff --quiet internal/mcp/execution/run.go; then
-  printf '      SKIPPED — pattern drifted\n'; SKIPPED=$((SKIPPED+1))
-  revert internal/mcp/execution/run.go
-else
-  gofmt -w internal/mcp/execution/run.go
-  m91_out=$(go test -count=1 -run 'TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit' ./internal/mcp/execution/ 2>&1); m91_rc=$?
-  revert internal/mcp/execution/run.go
-  if ! gate_ran M91 "the settle-order gate" "$m91_out"; then
-    [ $KEEP -eq 0 ] && exit 1
-  elif [ $m91_rc -ne 0 ]; then
-    printf '      CAUGHT (gate failed as required)\n'; PASS=$((PASS+1))
-  else
-    printf '      *** SURVIVED *** the gate passed with the outcome written first\n'
-    SURVIVED=$((SURVIVED+1)); SURVIVORS+=("M91: the health sample may lag the terminal outcome")
-    [ $KEEP -eq 0 ] && exit 1
-  fi
-fi
+# M91 owns settle-before-OUTCOME; M99 owns settle-before-RELEASE and M100 owns
+# outcome-before-RELEASE. Round 8 collapsed all three into one ordered block in the outer defer,
+# so what used to need a helper script is now a two-line swap — the helper was retired with it.
+run_mutation M91 \
+  'the terminal outcome is made durable before the health sample' \
+  'TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)/\t\te.commitAttemptOutcome(in, attempt, sendState, out)\n\t\te.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))/'
 
 # ============================================================================
 # CODEX ROUND 4 ON #1314
@@ -940,7 +924,7 @@ run_mutation M94 \
   'an upstream error response counts as a successful attempt' \
   'TestAttemptSettled_PeerErrorResponseCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/e\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\t\tif release/e.reportAttemptSettled(in, attempt, sendState, !sendState.ProvesReceipt())\n\t\t\tif release/'
+  's/e\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)/e.reportAttemptSettled(in, attempt, sendState, !sendState.ProvesReceipt())/'
 
 run_mutation M95 \
   'a window denial at admission is recorded as budget_exhausted' \
@@ -979,7 +963,7 @@ run_mutation M99 \
   'the reservation is released before the health sample is counted' \
   'TestAttemptSettled_IsReportedBeforeTheReservationIsReleased' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/\t\t\te\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\t\tif release != nil \{\n\t\t\t\trelease\(\)\n\t\t\t\}\n/\t\t\tif release != nil {\n\t\t\t\trelease()\n\t\t\t}\n\t\t\te.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))\n/'
+  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)\n\t\treleaseReservation\(releaseSlot\)/\t\treleaseReservation(releaseSlot)\n\t\te.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))\n\t\te.commitAttemptOutcome(in, attempt, sendState, out)/'
 
 # M100-M102 are Codex round 8. The release ordering has to hold for EVERY step that decides
 # authority, not only the health sample (M99) — the terminal outcome commit is itself the
