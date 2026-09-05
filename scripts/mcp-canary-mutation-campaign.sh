@@ -35,6 +35,27 @@ declare -a SURVIVORS=()
 # revert restores the working tree to HEAD for the files a mutation touched.
 revert() { git checkout -- "$@" 2>/dev/null || true; }
 
+# has_re / has_fixed search captured output WITHOUT a producer pipe.
+#
+# `printf '%s' "$out" | grep -q PATTERN` is WRONG under `set -o pipefail`, which this
+# script sets: grep exits as soon as it matches, printf then dies of SIGPIPE (141),
+# and pipefail reports the PIPELINE as failed even though the pattern matched. Every
+# use of that idiom here was mis-scoring, each in a different direction — a matched
+# build failure not setting build_broke, a matched "no tests to run" not raising
+# BROKEN GATE, a matched race report read as "no race reported", and a matched
+# attribution symbol read as missing (Codex round 19). A herestring has no producer
+# to kill, so the exit status is grep's alone.
+has_re()    { grep -qE -- "$1" <<<"$2"; }
+has_fixed() { grep -qF -- "$1" <<<"$2"; }
+
+# build_or_vet_failed reports that `go test` never reached an assertion. It is shared
+# by run_mutation and by the two mutations that must drive `go test` themselves, so
+# the header's "a compile failure is not proof" rule cannot hold in one place and not
+# the other.
+build_or_vet_failed() {
+  has_re '\[build failed\]|\[setup failed\]|^vet: |^# github\.com/KidCarmi' "$1"
+}
+
 # mutate <id> <description> <gate-regex> <package> <file> <sed-script...>
 # Applies the sed script(s) to <file>, runs <gate-regex> in <package>, and requires
 # the run to FAIL. Anything else is a surviving mutation.
@@ -77,7 +98,7 @@ run_mutation() {
   # would if you only look at the exit code — except it proves nothing at all. This
   # silently mis-scored two mutations whose gates lived in a different package than
   # the one being run. Treat it as a campaign failure, never as a result.
-  if printf '%s' "$out" | grep -q 'no tests to run'; then
+  if has_fixed 'no tests to run' "$out"; then
     printf '      BROKEN GATE — the pattern matched no tests in %s; this proves NOTHING\n' "$pkg"
     SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: BROKEN GATE (no tests matched in $pkg)")
     [ $KEEP -eq 0 ] && exit 1
@@ -89,7 +110,7 @@ run_mutation() {
   # having executed — the campaign header has always said this is not proof, but the
   # scoring never enforced it and counted the bare exit code (Codex round 18).
   local build_broke=0
-  printf '%s' "$out" | grep -qE '\[build failed\]|\[setup failed\]|^vet: |^# github\.com/KidCarmi' && build_broke=1
+  build_or_vet_failed "$out" && build_broke=1
 
   if [ $compile_wall -eq 1 ]; then
     if [ $build_broke -eq 1 ]; then
@@ -120,7 +141,7 @@ run_mutation() {
     # exit-code-based: the output must carry a race report, and that report must name
     # the mutated access.
     if [ ${#raceflag[@]} -ne 0 ]; then
-      if ! printf '%s' "$out" | grep -q 'WARNING: DATA RACE'; then
+      if ! has_fixed 'WARNING: DATA RACE' "$out"; then
         printf '      NOT PROVEN — the gate failed but NO race was reported; this proves NOTHING\n'
         printf '%s\n' "$out" | tail -8 | sed 's/^/        /'
         SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (gate failed without a race report)")
@@ -135,7 +156,7 @@ run_mutation() {
       if [ -n "$race_attr" ]; then
         local _oldifs="$IFS"; IFS=','
         for pat in $race_attr; do
-          printf '%s' "$out" | grep -q -- "$pat" || _attr_missing="$pat"
+          has_fixed "$pat" "$out" || _attr_missing="$pat"
         done
         IFS="$_oldifs"
       fi
@@ -202,8 +223,12 @@ if git diff --quiet internal/mcp/upstreamclient/limits.go || git diff --quiet in
 else
   m02_out=$(go test -count=1 -run 'TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop' ./internal/mcp/upstreamclient/ 2>&1); m02_rc=$?
   revert internal/mcp/upstreamclient/limits.go internal/mcp/upstreamclient/client.go
-  if printf '%s' "$m02_out" | grep -q 'no tests to run'; then
+  if has_fixed 'no tests to run' "$m02_out"; then
     printf '      BROKEN GATE — no tests matched\n'; SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M02: BROKEN GATE")
+    [ $KEEP -eq 0 ] && exit 1
+  elif build_or_vet_failed "$m02_out"; then
+    printf '      NOT PROVEN — the mutation does not BUILD, so no gate ran; this proves NOTHING\n'
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M02: NOT PROVEN (build/vet failure, not an assertion)")
     [ $KEEP -eq 0 ] && exit 1
   elif [ $m02_rc -ne 0 ]; then
     printf '      CAUGHT (gate failed as required)\n'; PASS=$((PASS+1))
@@ -647,7 +672,11 @@ if ! git diff --quiet internal/mcp/execution/attempt_evidence.go; then
   sink_out=$(go test -count=1 -run 'TestEvidence_|TestPhysicalEffect_' ./internal/mcp/execution/ 2>&1); sink_rc=$?
   spool_out=$(go test -count=1 -run 'TestEvidenceFreeze_CompletedInvocationIsSettledThroughTheRealSpool' . 2>&1); spool_rc=$?
   revert internal/mcp/execution/attempt_evidence.go
-  if [ $sink_rc -eq 0 ] && [ $spool_rc -ne 0 ]; then
+  if build_or_vet_failed "$sink_out" || build_or_vet_failed "$spool_out"; then
+    printf '      NOT PROVEN — a side did not BUILD, so its gate never ran; this proves NOTHING\n'
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M17: NOT PROVEN (build/vet failure, not an assertion)")
+    [ $KEEP -eq 0 ] && exit 1
+  elif [ $sink_rc -eq 0 ] && [ $spool_rc -ne 0 ]; then
     printf '      CAUGHT (sink passed the defect through; the real-spool gate rejected it)\n'
     PASS=$((PASS+1))
   else

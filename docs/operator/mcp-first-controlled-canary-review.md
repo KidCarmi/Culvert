@@ -1360,6 +1360,33 @@ whole review for the rule that a gate must be run against the shape it claims to
 **a mutation campaign measures the gates, and a mutation that does not compile measures
 nothing.**
 
+### Round 19: the fix for round 18 had two holes of its own
+
+**The build-failure check could not fire on a large build failure.** `set -o pipefail` is on,
+and every search of captured output used `printf '%s' "$out" | grep -q`. `grep -q` exits at the
+first match, `printf` then dies of SIGPIPE (141), and pipefail reports the PIPELINE as failed
+even though the pattern matched. All four uses were mis-scoring, each in a different direction:
+a matched build failure did not set `build_broke` (so it scored CAUGHT), a matched
+"no tests to run" did not raise BROKEN GATE, a matched race report read as "no race reported",
+and a matched attribution symbol read as missing.
+
+Compiler output begins with the `# github.com/KidCarmi/...` header, so the match is at the
+FRONT — the worst case for this bug. Demonstrated rather than argued: a 460 KB output of exactly
+that shape gives `build_broke=0` through the pipe and `1` through a herestring. `has_re` /
+`has_fixed` now feed grep from a herestring, which has no producer to kill, so the exit status
+is grep's alone.
+
+**The rule was enforced in one place and not the other.** M02 and M17 must drive `go test`
+themselves (M02 removes two independent enforcement points; M17 is the two-sided proof-rule
+demonstration), and both scored a nonzero exit as CAUGHT with no build check — the exact defect
+round 18 had just fixed inside `run_mutation`, still live one function away. `build_or_vet_failed`
+is now a shared helper used by all three, and M17 applies it to BOTH sides it drives.
+
+This is the second consecutive round in which the instrument, not the product, was wrong — and
+the second in which a fix introduced the shape it was fixing. That is worth recording plainly:
+the campaign is the evidence this review rests on, so a defect in it is not a lesser class of
+defect.
+
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **60 mutations: 60 caught, 0 survived, 0
