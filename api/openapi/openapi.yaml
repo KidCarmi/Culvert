@@ -514,6 +514,13 @@ components:
           type: integer
           format: int64
           description: the history revision the operation produced; 0 when none (aborted or unknown)
+        specDigest:
+          type: string
+          description: "2F-E correction round 2 — the ProfileSpecDigest the commit put into the active store (present when a revision records the operation); compare with activeSpecDigest for current-active truth"
+        storeRevision:
+          type: integer
+          format: int64
+          description: "2F-E correction round 2 — the authoritative active-store revision the commit produced (present when a revision records the operation; 0 on revisions recorded before the field existed); compare with activeRevision for current-active truth — never activeN alone, a direct profile PUT moves the store without moving activeN"
     PACLifecycle:
       type: object
       description: >-
@@ -538,6 +545,7 @@ components:
         - draftSpecDigest
         - operationsRetained
         - operationsCap
+        - historyIncarnation
         - poolChangedSince
         - scope
       additionalProperties: true
@@ -550,7 +558,7 @@ components:
         activeN: { type: integer, format: int64, description: the currently-serving history revision number (0 = none published) }
         revisions:
           type: array
-          description: the immutable publish history, oldest first (bounded to the last 50); each carries the operationId that produced it
+          description: "the immutable publish history, oldest first (bounded to the last 50); each carries the operationId that produced it and (2F-E correction round 2) `storeRevision`, the authoritative active-store revision the commit produced (0 on revisions recorded before the field existed)"
           items: { type: object, additionalProperties: true }
         draftDiff: { type: object, additionalProperties: true, nullable: true, description: the reviewed difference draft vs active (null when not dirty) }
         draftRevision: { type: integer, format: int64, description: 2F-A fence for save_draft (0 = no draft yet) }
@@ -568,6 +576,19 @@ components:
         draftSpecDigest: { type: string, description: "2F-E correction — ProfileSpecDigest of the saved draft (empty when none); the identity a publish binds its recovery marker to" }
         operationsRetained: { type: integer, description: 2F-E correction — decided operations the appliance currently retains for this profile }
         operationsCap: { type: integer, description: "2F-E correction — the retained ring's cap (64); once reached older decisions are evicted and absence proves nothing" }
+        historyIncarnation:
+          type: string
+          description: >-
+            2F-E correction round 2 — the durable identity (UUID) of this
+            profile's node-local history EPOCH. Stable across draft saves,
+            publishes and restarts; ROTATES when the history is discarded: a
+            profile delete (+ recreate under the same id, whose revisions
+            restart at 1) or a history reset. A client resolving a lost
+            response compares it with the epoch it dispatched in: a different
+            epoch means the operation's decision record may be gone, so
+            absence proves nothing and a re-send would run the operation
+            again. Empty when the history is missing altogether (neither an
+            active profile nor a record exists).
         operation: { $ref: '#/components/schemas/PACOperationLookup' }
         poolChangedSince: { type: boolean }
         scope: { type: string, enum: [node-local] }
@@ -8809,6 +8830,18 @@ paths:
                 collectionEtag:
                   type: string
                   description: 2F-A — publish/rollback with NO active profile must echo the collection token instead.
+                expectedHistoryIncarnation:
+                  type: string
+                  description: >-
+                    2F-E correction round 2 — publish/rollback/repair may name the
+                    history epoch they were reviewed in (the lifecycle GET's
+                    `historyIncarnation`). A mismatch is refused `409
+                    history_incarnation_mismatch` with `current.historyIncarnation`
+                    BEFORE the at-most-once replay is consulted: the old epoch's
+                    decision records are gone, so a re-sent operationId would
+                    otherwise run again. Optional (a caller that omits it reviewed
+                    no epoch and has no re-send semantics); the admin frontend
+                    always sends it.
       responses:
         '200':
           description: >-
@@ -8847,7 +8880,10 @@ paths:
             `acknowledge_history_reset` bound to `current.revision` +
             `current.activeSpecDigest`), `history_reset_stale` (the acknowledgement
             named a different active revision/digest; `current` + `changed`),
-            `not_history_reset` (nothing to acknowledge).
+            `not_history_reset` (nothing to acknowledge),
+            `history_incarnation_mismatch` (2F-E correction round 2: the request
+            named a history epoch other than the current one —
+            `current.historyIncarnation`; nothing is committed or replayed).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

@@ -227,6 +227,12 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if pacApplyProfilesMutation(w, r, "pac.profile_create", p.ID, before, candidate) {
+			// 2F-E correction round 2: a (re)created profile starts a NEW
+			// node-local history epoch — minted now so a recreate under a
+			// deleted profile's id never reuses the old epoch identity.
+			if _, err := pacLifecycle.EnsureIncarnation(p.ID); err != nil {
+				logger.Printf("PAC: history epoch identity for %q could not be persisted at create: %v", sanitizeLog(p.ID), err)
+			}
 			jsonOK(w, p)
 		}
 	default:

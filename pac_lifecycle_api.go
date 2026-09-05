@@ -195,6 +195,49 @@ type pacLifecycleRequest struct {
 	// 2F-B correction: acknowledge_history_reset binds to the active
 	// ProfileSpecDigest reviewed (with expectedActiveRevision).
 	ExpectedActiveSpecDigest string `json:"expectedActiveSpecDigest"`
+	// 2F-E correction round 2: publish/rollback (and repair) may name the
+	// history EPOCH they were reviewed in (the lifecycle GET's
+	// historyIncarnation). A mismatch is refused 409
+	// history_incarnation_mismatch BEFORE the decided-operation replay: the
+	// old epoch's decision records are gone, so a re-sent operationId would
+	// otherwise run again. Optional (an API caller that omits it reviewed no
+	// epoch and has no re-send semantics); the new admin frontend always
+	// sends it.
+	ExpectedHistoryIncarnation string `json:"expectedHistoryIncarnation"`
+}
+
+// pacHistoryIncarnationLocked returns the identity of profileID's current
+// history epoch, minting (durably) one for a profile that exists but whose
+// record carries none yet; "" when neither the profile nor a record exists
+// (the history is missing altogether) or the identity could not be persisted
+// (fail closed: a client can then prove nothing against it). Caller holds
+// pacProfilesAPIMu.
+func pacHistoryIncarnationLocked(id string, lc *pac.ProfileLifecycle, activeOK, found bool) string {
+	if lc.HistoryIncarnation != "" {
+		return lc.HistoryIncarnation
+	}
+	if !activeOK && !found {
+		return ""
+	}
+	inc, err := pacLifecycle.EnsureIncarnation(id)
+	if err != nil {
+		logger.Printf("PAC: history epoch identity for %q could not be persisted: %v", sanitizeLog(id), err)
+		return ""
+	}
+	lc.HistoryIncarnation = inc
+	return inc
+}
+
+// pacCheckHistoryIncarnation enforces the optional epoch fence of a
+// lifecycle operation; false means the 409 was written.
+func pacCheckHistoryIncarnation(w http.ResponseWriter, expected, current string) bool {
+	if expected == "" || expected == current {
+		return true
+	}
+	writePACFenceRefusal(w, http.StatusConflict, "history_incarnation_mismatch",
+		"this operation was reviewed against a different node-local history epoch (the profile was deleted and recreated, or its history was reset since); its earlier attempts cannot be resolved against this history and a re-send would run it again — recover the earlier attempt deliberately, review the current lifecycle and dispatch a NEW operation",
+		map[string]any{"historyIncarnation": current})
+	return false
 }
 
 // pacHistoryState is the node-local history's truth about a profile.
@@ -223,6 +266,12 @@ func pacLifecycleOperationLookup(lc *pac.ProfileLifecycle, operationID string) m
 	for i := range lc.Revisions {
 		if lc.Revisions[i].OperationID == operationID {
 			revisionN = lc.Revisions[i].N
+			// the COMMITTED identity (2F-E correction round 2): what the
+			// commit put into the authoritative store, so a client can tell
+			// "committed" from "currently active" against activeRevision +
+			// activeSpecDigest instead of the history pointer
+			out["specDigest"] = lc.Revisions[i].SpecDigest
+			out["storeRevision"] = lc.Revisions[i].StoreRevision
 			break
 		}
 	}
@@ -303,14 +352,15 @@ func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	pacProfilesAPIMu.Lock()
-	lc, _ := pacLifecycle.Get(id)
+	lc, found := pacLifecycle.Get(id)
 	if lc.PendingOp != nil {
 		pacReconcileLocked(lc, pacEffectsAll)
-		lc, _ = pacLifecycle.Get(id)
+		lc, found = pacLifecycle.Get(id)
 	}
 	cfg := pacProfiles.Get()
 	active, activeOK := pacProfiles.ProfileByID(id)
 	historyState := pacHistoryState(id, lc, activeOK)
+	incarnation := pacHistoryIncarnationLocked(id, lc, activeOK, found)
 	reset := pacLifecycle.HistoryResetRecord()
 	pacProfilesAPIMu.Unlock()
 
@@ -328,6 +378,10 @@ func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
 		"draftSpecDigest":    d.draftSpecDigest,
 		"operationsRetained": len(lc.Operations),
 		"operationsCap":      pac.MaxDecidedOps,
+		// 2F-E correction round 2 — the identity of this history EPOCH
+		// (rotates on delete/recreate and on a history reset); "" when the
+		// history is missing altogether.
+		"historyIncarnation": incarnation,
 		"activeN":            lc.ActiveN,
 		"revisions":          lc.Revisions,
 		"draftDiff":          d.diff,
@@ -444,7 +498,7 @@ func pacReplayDecided(w http.ResponseWriter, d pac.DecidedOp) {
 func pacLifecycleOperation(w http.ResponseWriter, r *http.Request, id string, req *pacLifecycleRequest) {
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
-	lc, _ := pacLifecycle.Get(id)
+	lc, found := pacLifecycle.Get(id)
 	if lc.PendingOp != nil {
 		if !pacReconcileLocked(lc, pacEffectsAll) {
 			writePACFenceRefusal(w, http.StatusConflict, "operation_pending",
@@ -452,7 +506,14 @@ func pacLifecycleOperation(w http.ResponseWriter, r *http.Request, id string, re
 				map[string]any{"operationId": lc.PendingOp.OperationID, "state": lc.PendingOp.State, "progress": lc.PendingOp.Progress})
 			return
 		}
-		lc, _ = pacLifecycle.Get(id)
+		lc, found = pacLifecycle.Get(id)
+	}
+	active, hasActive := pacProfiles.ProfileByID(id)
+	// 2F-E correction round 2: the epoch fence is decided BEFORE the replay —
+	// a decision recorded in THIS epoch is replayed only for a caller that
+	// reviewed this epoch; a caller that reviewed another one is refused.
+	if !pacCheckHistoryIncarnation(w, req.ExpectedHistoryIncarnation, pacHistoryIncarnationLocked(id, lc, hasActive, found)) {
+		return
 	}
 	if d, ok := lc.Decided(req.OperationID); ok {
 		pacReplayDecided(w, d)
@@ -462,7 +523,6 @@ func pacLifecycleOperation(w http.ResponseWriter, r *http.Request, id string, re
 		pacRepairLocked(w, r, id, lc, req)
 		return
 	}
-	active, hasActive := pacProfiles.ProfileByID(id)
 	if pacLifecycle.ResetAffects(id, hasActive) {
 		pacWriteHistoryResetRefusal(w, id, active)
 		return

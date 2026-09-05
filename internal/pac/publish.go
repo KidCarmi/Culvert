@@ -37,6 +37,13 @@ type PublishedRevision struct {
 	SpecDigest  string `json:"specDigest,omitempty"`
 	PoolDigest  string `json:"poolDigest,omitempty"`
 	Repaired    bool   `json:"repaired,omitempty"`
+	// StoreRevision is the AUTHORITATIVE active-store revision the commit
+	// produced (2F-E correction round 2). "Committed historically" (this
+	// revision exists) is distinguished from "currently active" by comparing
+	// StoreRevision + SpecDigest against the active store — never by ActiveN
+	// alone: a direct profile PUT advances the store without moving the
+	// history pointer. 0 on revisions recorded before the field existed.
+	StoreRevision int64 `json:"storeRevision,omitempty"`
 }
 
 // ProfileLifecycle carries a profile's draft + immutable published history.
@@ -67,6 +74,19 @@ type ProfileLifecycle struct {
 	PendingOp  *PendingOp   `json:"pendingOp,omitempty"`
 	Ambiguous  *AmbiguousOp `json:"ambiguous,omitempty"`
 	Operations []DecidedOp  `json:"operations,omitempty"`
+	// HistoryIncarnation is the durable identity of this profile's history
+	// EPOCH (2F-E correction round 2): a UUID minted when the record is
+	// created and never reused. It is stable across draft saves, publishes
+	// and restarts, and ROTATES whenever the history is discarded — a profile
+	// delete (+ recreate under the same id, whose revisions restart at 1) or
+	// a history reset (quarantined file). It is what lets a client with a
+	// lost response tell "this history could still carry my decision" from
+	// "this is a different history": absence of an operationId from a
+	// different epoch proves nothing, and a re-send into a different epoch
+	// would run the operation AGAIN (the old decision record is gone), so
+	// publish/rollback may name the epoch they were reviewed in
+	// (expectedHistoryIncarnation) and are refused on a mismatch.
+	HistoryIncarnation string `json:"historyIncarnation,omitempty"`
 }
 
 // ActiveRevision returns the currently-serving revision and true, or false

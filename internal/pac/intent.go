@@ -196,6 +196,7 @@ func (lc *ProfileLifecycle) FinalizeCommitted(op *PendingOp) int64 {
 	lc.Revisions = append(lc.Revisions, PublishedRevision{
 		N: n, Spec: spec, Digest: op.ArtifactDigest, SpecDigest: op.CandidateSpecDigest, PoolDigest: op.PoolDigest,
 		Author: op.Actor, Reason: op.Reason, TS: op.TS, OperationID: op.OperationID,
+		StoreRevision: op.ObservedRevision,
 	})
 	lc.trimRevisions()
 	lc.Draft = spec
@@ -214,6 +215,7 @@ func (lc *ProfileLifecycle) Repair(observed Profile, poolDigest, artifactDigest,
 	lc.Revisions = append(lc.Revisions, PublishedRevision{
 		N: n, Spec: spec, Digest: artifactDigest, SpecDigest: ProfileSpecDigest(observed), PoolDigest: poolDigest,
 		Author: author, Reason: "repair: accept_active", TS: ts, OperationID: operationID, Repaired: true,
+		StoreRevision: observed.Revision,
 	})
 	lc.trimRevisions()
 	lc.Draft = spec

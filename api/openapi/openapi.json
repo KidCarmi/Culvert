@@ -2894,6 +2894,10 @@
             "description": "2F-E correction — ProfileSpecDigest of the saved draft (empty when none); the identity a publish binds its recovery marker to",
             "type": "string"
           },
+          "historyIncarnation": {
+            "description": "2F-E correction round 2 — the durable identity (UUID) of this profile's node-local history EPOCH. Stable across draft saves, publishes and restarts; ROTATES when the history is discarded: a profile delete (+ recreate under the same id, whose revisions restart at 1) or a history reset. A client resolving a lost response compares it with the epoch it dispatched in: a different epoch means the operation's decision record may be gone, so absence proves nothing and a re-send would run the operation again. Empty when the history is missing altogether (neither an active profile nor a record exists).",
+            "type": "string"
+          },
           "historyReset": {
             "additionalProperties": true,
             "description": "the store-level reset record when the node-local history file was quarantined",
@@ -2943,7 +2947,7 @@
             "type": "string"
           },
           "revisions": {
-            "description": "the immutable publish history, oldest first (bounded to the last 50); each carries the operationId that produced it",
+            "description": "the immutable publish history, oldest first (bounded to the last 50); each carries the operationId that produced it and (2F-E correction round 2) `storeRevision`, the authoritative active-store revision the commit produced (0 on revisions recorded before the field existed)",
             "items": {
               "additionalProperties": true,
               "type": "object"
@@ -2983,6 +2987,7 @@
           "draftSpecDigest",
           "operationsRetained",
           "operationsCap",
+          "historyIncarnation",
           "poolChangedSince",
           "scope"
         ],
@@ -3004,6 +3009,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "specDigest": {
+            "description": "2F-E correction round 2 — the ProfileSpecDigest the commit put into the active store (present when a revision records the operation); compare with activeSpecDigest for current-active truth",
+            "type": "string"
+          },
           "state": {
             "description": "the decided state (present when found)",
             "enum": [
@@ -3014,6 +3023,11 @@
           },
           "status": {
             "description": "the HTTP status the decision produced (present when found)",
+            "type": "integer"
+          },
+          "storeRevision": {
+            "description": "2F-E correction round 2 — the authoritative active-store revision the commit produced (present when a revision records the operation; 0 on revisions recorded before the field existed); compare with activeRevision for current-active truth — never activeN alone, a direct profile PUT moves the store without moving activeN",
+            "format": "int64",
             "type": "integer"
           },
           "ts": {
@@ -18610,6 +18624,10 @@
                     "description": "2F-B correction — acknowledge_history_reset binds the admin's acknowledgement of a lost node-local history to the active ProfileSpecDigest reviewed (together with expectedActiveRevision); a mismatch is refused `409 history_reset_stale` with `current`.",
                     "type": "string"
                   },
+                  "expectedHistoryIncarnation": {
+                    "description": "2F-E correction round 2 — publish/rollback/repair may name the history epoch they were reviewed in (the lifecycle GET's `historyIncarnation`). A mismatch is refused `409 history_incarnation_mismatch` with `current.historyIncarnation` BEFORE the at-most-once replay is consulted: the old epoch's decision records are gone, so a re-sent operationId would otherwise run again. Optional (a caller that omits it reviewed no epoch and has no re-send semantics); the admin frontend always sends it.",
+                    "type": "string"
+                  },
                   "operationId": {
                     "description": "2F-B — required for publish, rollback, repair and acknowledge_history_reset. Decisions are at-most-once: a repeated operationId returns the recorded result (status and body) without committing again.",
                     "format": "uuid",
@@ -18669,7 +18687,7 @@
                 }
               }
             },
-            "description": "Structured, keyed by `code`: `stale` (2F-A fence, see PACFenceRefusal), `confirm_required` (candidate-bound DIRECT challenge: `challenge`, `confirmValue`, `binding`), `challenge_stale` (the reviewed candidate changed: `changed` names the fields, a fresh challenge is included), `operation_pending` (a previous intent could not be persisted after reconciliation), `not_ambiguous` / `active_absent` (repair), `history_reset` (the node-local history file was corrupt and quarantined; the ACTIVE profile is untouched but publish/rollback are refused until an admin acknowledges the loss with `acknowledge_history_reset` bound to `current.revision` + `current.activeSpecDigest`), `history_reset_stale` (the acknowledgement named a different active revision/digest; `current` + `changed`), `not_history_reset` (nothing to acknowledge)."
+            "description": "Structured, keyed by `code`: `stale` (2F-A fence, see PACFenceRefusal), `confirm_required` (candidate-bound DIRECT challenge: `challenge`, `confirmValue`, `binding`), `challenge_stale` (the reviewed candidate changed: `changed` names the fields, a fresh challenge is included), `operation_pending` (a previous intent could not be persisted after reconciliation), `not_ambiguous` / `active_absent` (repair), `history_reset` (the node-local history file was corrupt and quarantined; the ACTIVE profile is untouched but publish/rollback are refused until an admin acknowledges the loss with `acknowledge_history_reset` bound to `current.revision` + `current.activeSpecDigest`), `history_reset_stale` (the acknowledgement named a different active revision/digest; `current` + `changed`), `not_history_reset` (nothing to acknowledge), `history_incarnation_mismatch` (2F-E correction round 2: the request named a history epoch other than the current one — `current.historyIncarnation`; nothing is committed or replayed)."
           },
           "428": {
             "$ref": "#/components/responses/PACPreconditionRequired"

@@ -18,7 +18,20 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/google/uuid"
 )
+
+// newHistoryIncarnation mints the identity of a fresh history epoch (see
+// ProfileLifecycle.HistoryIncarnation).
+func newHistoryIncarnation() string { return uuid.NewString() }
+
+// hasHistoryContent reports whether a record carries operator history (a
+// saved draft, revisions, an intent) as opposed to being an epoch-identity
+// placeholder minted by EnsureIncarnation for a profile nobody has drafted
+// against yet.
+func hasHistoryContent(lc *ProfileLifecycle) bool {
+	return lc.Draft.ID != "" || len(lc.Revisions) > 0 || lc.PendingOp != nil || lc.Ambiguous != nil || len(lc.Operations) > 0
+}
 
 // LifecycleStore persists per-profile ProfileLifecycle records keyed by
 // profile ID. Like the other stores, Set is tolerant; the zero value is a
@@ -101,18 +114,63 @@ func (s *LifecycleStore) Load(path string) error {
 		s.byID = map[string]*ProfileLifecycle{}
 	}
 	// Pre-2F-A records carry no draft token; migrate them to 1 so every
-	// stored draft hands out a non-zero optimistic-concurrency token.
+	// stored draft hands out a non-zero optimistic-concurrency token (an
+	// epoch-identity placeholder holds no draft and keeps 0). Records that
+	// predate the history epoch identity (2F-E correction round 2) are
+	// minted one and persisted, so the identity is durable from this boot on.
+	minted := false
 	for id, lc := range s.byID {
 		if lc == nil {
 			delete(s.byID, id)
 			continue
 		}
-		if lc.DraftRevision < 1 {
+		if lc.DraftRevision < 1 && hasHistoryContent(lc) {
 			lc.DraftRevision = 1
+		}
+		if lc.HistoryIncarnation == "" {
+			lc.HistoryIncarnation = newHistoryIncarnation()
+			minted = true
 		}
 	}
 	s.modTime = time.Now()
+	if minted {
+		if err := s.persistMap(s.byID); err != nil {
+			return fmt.Errorf("pac lifecycle: history epoch identities could not be persisted (%w); they are held in memory and re-minted at the next boot", err)
+		}
+	}
 	return nil
+}
+
+// EnsureIncarnation returns the identity of profileID's current history
+// epoch, minting and durably recording one when the record has none (or does
+// not exist yet). Persist-before-swap: a failed write mints nothing.
+func (s *LifecycleStore) EnsureIncarnation(profileID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byID == nil {
+		s.byID = map[string]*ProfileLifecycle{}
+	}
+	if cur, ok := s.byID[profileID]; ok && cur.HistoryIncarnation != "" {
+		return cur.HistoryIncarnation, nil
+	}
+	var rec *ProfileLifecycle
+	if cur, ok := s.byID[profileID]; ok {
+		rec = cloneLifecycle(cur)
+	} else {
+		rec = &ProfileLifecycle{ProfileID: profileID}
+	}
+	rec.HistoryIncarnation = newHistoryIncarnation()
+	next := make(map[string]*ProfileLifecycle, len(s.byID)+1)
+	for id, cur := range s.byID {
+		next[id] = cur
+	}
+	next[profileID] = rec
+	if err := s.persistMap(next); err != nil {
+		return "", err
+	}
+	s.byID = next
+	s.modTime = time.Now()
+	return rec.HistoryIncarnation, nil
 }
 
 // loadResetRecordLocked reads the sidecar reset record. An unreadable record
@@ -337,6 +395,16 @@ func (s *LifecycleStore) Put(lc *ProfileLifecycle) error {
 	defer s.mu.Unlock()
 	if s.byID == nil {
 		s.byID = map[string]*ProfileLifecycle{}
+	}
+	// The history epoch identity is never dropped by a write: a record
+	// written from a clone that predates the identity inherits the stored
+	// one; a brand-new record is minted its own.
+	if lc.HistoryIncarnation == "" {
+		if cur, ok := s.byID[lc.ProfileID]; ok && cur.HistoryIncarnation != "" {
+			lc.HistoryIncarnation = cur.HistoryIncarnation
+		} else {
+			lc.HistoryIncarnation = newHistoryIncarnation()
+		}
 	}
 	// Persist-before-swap (2F-B, C1): write the candidate map durably first;
 	// memory is replaced only on success, so a failed write leaves the
