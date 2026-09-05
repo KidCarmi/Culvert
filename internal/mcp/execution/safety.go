@@ -44,5 +44,9 @@ type CanarySafety interface {
 // noopCanarySafety is the nil-seam stand-in. It exists so call sites never branch on nil.
 type noopCanarySafety struct{}
 
-func (noopCanarySafety) Breach(string, string)                      {}
+// Breach discards the report: with no funnel composed there is no activation to stop.
+func (noopCanarySafety) Breach(string, string) {}
+
+// AttemptSettled discards the sample: the detectors are generation-bound and live in the
+// composition layer, so with nothing composed there is no population to accumulate into.
 func (noopCanarySafety) AttemptSettled(string, bool, time.Duration) {}

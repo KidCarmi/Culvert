@@ -193,7 +193,7 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 //   - the CURRENT target fingerprint must still EQUAL the decision fingerprint, so an approval issued
 //     for a DIFFERENT fingerprint (e.g. an F2 approval when this request was decided under F1) can
 //     never authorize this side effect. The approval is then validated against that same fingerprint.
-func mcpLiveTrustRevalidate(tenant, serverID, toolName, decisionFP string, now time.Time) (bool, string) {
+func mcpLiveTrustRevalidate(tenant, serverID, toolName, decisionFP string, now time.Time) (trusted bool, driftCode string) {
 	if mcpToolTrust == nil {
 		return false, ""
 	}
