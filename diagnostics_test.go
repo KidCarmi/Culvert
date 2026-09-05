@@ -147,6 +147,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"config_versions_readable":   false,
 		"config_rollback_validation": false,
 		"key_at_rest":                false,
+		"plaintext_key_backup":       false,
 		"identity_backend":           false,
 		"interactive_login_state":    false,
 		"alert_webhook_signing":      false,

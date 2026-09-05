@@ -1081,6 +1081,15 @@ func (ca *clusterCA) Ready() bool {
 	return ca.cert != nil && ca.key != nil
 }
 
+// KeyDir reports the directory the cluster CA key pair persists to, or ""
+// before InitOrLoad has run. Read-only accessor for diagnostics
+// (keyatrest_diagnostics.go) — never exposes key material.
+func (ca *clusterCA) KeyDir() string {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	return ca.dir
+}
+
 // ImportCA validates and replaces the cluster CA with user-provided PEM cert+key.
 //
 // Dual-CA overlap: the old CA is preserved as a secondary so that existing

@@ -159,6 +159,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigVersionsIntegrity(),
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
+		checkPlaintextKeyBackups(),
 		checkAuditPersistence(),
 		checkCategoryFeedDB(),
 		checkSOCKS5Listener(),
