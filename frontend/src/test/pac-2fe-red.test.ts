@@ -17,6 +17,7 @@
 //       what the server issued; the retired `confirmDirect` is never sent.
 //   A5  DELETEs carry the token in the QUERY only (no body).
 //   A6  the recovery classifier is total over the lifecycle GET: landed
+//       (CORRECTED in the 2F-E correction round — see the case comment)
 //       (decided op with our id), pending (pendingOp is ours), ambiguous
 //       (ambiguous.op is ours), not_landed (absent) with baseMoved when the
 //       expected active tokens no longer hold.
@@ -399,10 +400,22 @@ describe("A6 recovery classifier", () => {
     });
     expect(classifyRecovery(marker, amb).kind).toBe("ambiguous");
   });
-  it("not_landed when absent, baseMoved only when the expected active tokens no longer hold", () => {
+  // CORRECTED ASSERTION (2F-E correction round). As committed in b976566c
+  // this case endorsed "absent from the lifecycle GET ⇒ not_landed" in both
+  // branches. That rule was WRONG: the GET lists only the 20 most recent
+  // decided operations (the appliance retains 64), a history reset empties
+  // the ring, and a request that has not yet reached intent persistence is
+  // absent while it can still commit. Absence is therefore evidence of
+  // nothing on its own. The corrected contract: with the base UNCHANGED an
+  // absent operation stays UNRESOLVED (not_observed); only a COMPLETE ring
+  // plus a MOVED fence (the appliance can no longer commit it) proves
+  // non-commit. The original expected values are recorded here verbatim so
+  // the change is transparent: {kind:"not_landed", baseMoved:false} and
+  // {kind:"not_landed", baseMoved:true}.
+  it("absent + base unchanged is UNRESOLVED; absent + complete ring + moved fence is the only proven non-commit", () => {
     expect(classifyRecovery(marker, decodePacLifecycle(LC))).toEqual({
-      kind: "not_landed",
-      baseMoved: false,
+      kind: "unresolved",
+      reason: "not_observed",
     });
     expect(
       classifyRecovery(
@@ -413,7 +426,7 @@ describe("A6 recovery classifier", () => {
           activeSpecDigest: "sha256:other",
         }),
       ),
-    ).toEqual({ kind: "not_landed", baseMoved: true });
+    ).toEqual({ kind: "not_landed", proof: "fence_moved" });
   });
 });
 
