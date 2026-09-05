@@ -768,7 +768,7 @@ run_mutation M77 \
   'the window watchdog fires but trips nothing' \
   'TestAutoStop_WindowExpiresWithNoTrafficAtAll' \
   . mcp_canary_autostop.go \
-  's/\t\trt\.tripCanaryAbortForGeneration\(capb, gen, "window_expired", canaryNow\(\)\)/\t\t_ = capb/'
+  's/\t\trt\.tripCanaryAbortForGeneration\(capb, gen, "window_expired", now\)/\t\t_ = capb/'
 
 run_mutation M78 \
   'an expired window restores as a healthy, executable activation' \
@@ -816,7 +816,7 @@ run_mutation M81 \
   'an early watchdog fire disarms the activation instead of re-arming' \
   'TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming' \
   . mcp_canary_autostop.go \
-  's/\t\t\trt\.rearmWindowWatchdog\(capb, gen, d\.Sub\(canaryNow\(\)\)\)\n//'
+  's/\t\t\trt\.rearmWindowWatchdog\(capb, gen, d\.Sub\(now\)\)\n//'
 
 run_mutation M82 \
   'exhaustion never latches when the final slot is refused at the boundary' \
@@ -907,7 +907,7 @@ run_mutation M93 \
   'the watchdog callback re-arms forever on a rolled-back clock' \
   'TestAutoStop_WatchdogFiringUnderRollbackLatchesInsteadOfReArming|TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming' \
   . mcp_canary_autostop.go \
-  's/globalCanaryRuntime\.windowDeadlineIfOpen\(capb\)/globalCanaryRuntime.windowDeadline(capb)/'
+  's/globalCanaryRuntime\.windowDeadlineIfOpen\(capb, now\)/globalCanaryRuntime.windowDeadline(capb)/'
 
 # ============================================================================
 # CODEX ROUND 5 ON #1314
