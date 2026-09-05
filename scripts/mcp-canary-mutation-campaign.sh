@@ -48,6 +48,34 @@ revert() { git checkout -- "$@" 2>/dev/null || true; }
 has_re()    { grep -qE -- "$1" <<<"$2"; }
 has_fixed() { grep -qF -- "$1" <<<"$2"; }
 
+# gate_ran reports whether a `go test` invocation actually REACHED an assertion.
+#
+# There are exactly two ways it does not, and both exit in a way that a bare status
+# check misreads: the -run pattern matched no tests (exit 0 — indistinguishable from a
+# pass), or the package did not build (nonzero — indistinguishable from a caught
+# mutation). Every result decision in this script must go through this function.
+#
+# It exists because THREE CONSECUTIVE REVIEW ROUNDS found a hole in a hand-rolled
+# copy of this logic (Codex 18/19/20): the build check was missing from run_mutation,
+# then from M02 and M17, then the no-tests check was still missing from M17 — where
+# `sink_rc == 0` is the CAUGHT condition, so a drifted sink pattern made the required
+# control vacuous. Three holes in three rounds is a structural signal, not three
+# coincidences: duplicated classification is what kept producing them.
+gate_ran() {
+  local id="$1" label="$2" out="$3"
+  if has_fixed 'no tests to run' "$out"; then
+    printf '      BROKEN GATE — %s matched no tests; this proves NOTHING\n' "$label"
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: BROKEN GATE ($label matched no tests)")
+    return 1
+  fi
+  if build_or_vet_failed "$out"; then
+    printf '      NOT PROVEN — %s did not BUILD, so no gate ran; this proves NOTHING\n' "$label"
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN ($label build/vet failure, not an assertion)")
+    return 1
+  fi
+  return 0
+}
+
 # build_or_vet_failed reports that `go test` never reached an assertion. It is shared
 # by run_mutation and by the two mutations that must drive `go test` themselves, so
 # the header's "a compile failure is not proof" rule cannot hold in one place and not
@@ -94,26 +122,10 @@ run_mutation() {
   local rc=$?
   revert "$file"
 
-  # A gate that matches NO TESTS exits 0 and reads exactly like a caught mutation
-  # would if you only look at the exit code — except it proves nothing at all. This
-  # silently mis-scored two mutations whose gates lived in a different package than
-  # the one being run. Treat it as a campaign failure, never as a result.
-  if has_fixed 'no tests to run' "$out"; then
-    printf '      BROKEN GATE — the pattern matched no tests in %s; this proves NOTHING\n' "$pkg"
-    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: BROKEN GATE (no tests matched in $pkg)")
-    [ $KEEP -eq 0 ] && exit 1
-    return
-  fi
-
-  # A BUILD OR VET failure is not an assertion. `go test` compiles and vets before
-  # running, so a mutation that fails to build exits nonzero without any gate ever
-  # having executed — the campaign header has always said this is not proof, but the
-  # scoring never enforced it and counted the bare exit code (Codex round 18).
-  local build_broke=0
-  build_or_vet_failed "$out" && build_broke=1
-
+  # A compile-time wall is the ONE case where a build failure IS the proof, so it is
+  # decided before gate_ran (which treats that same failure as "no gate ran").
   if [ $compile_wall -eq 1 ]; then
-    if [ $build_broke -eq 1 ]; then
+    if build_or_vet_failed "$out"; then
       printf '      CAUGHT (structural wall: the mutation does not compile, as required)\n'
       PASS=$((PASS+1))
     else
@@ -124,10 +136,8 @@ run_mutation() {
     return
   fi
 
-  if [ $build_broke -eq 1 ]; then
-    printf '      NOT PROVEN — the mutation does not BUILD, so no gate ran; this proves NOTHING\n'
+  if ! gate_ran "$id" "the gate in $pkg" "$out"; then
     printf '%s\n' "$out" | tail -8 | sed 's/^/        /'
-    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (build/vet failure, not an assertion)")
     [ $KEEP -eq 0 ] && exit 1
     return
   fi
@@ -223,12 +233,7 @@ if git diff --quiet internal/mcp/upstreamclient/limits.go || git diff --quiet in
 else
   m02_out=$(go test -count=1 -run 'TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop' ./internal/mcp/upstreamclient/ 2>&1); m02_rc=$?
   revert internal/mcp/upstreamclient/limits.go internal/mcp/upstreamclient/client.go
-  if has_fixed 'no tests to run' "$m02_out"; then
-    printf '      BROKEN GATE — no tests matched\n'; SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M02: BROKEN GATE")
-    [ $KEEP -eq 0 ] && exit 1
-  elif build_or_vet_failed "$m02_out"; then
-    printf '      NOT PROVEN — the mutation does not BUILD, so no gate ran; this proves NOTHING\n'
-    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M02: NOT PROVEN (build/vet failure, not an assertion)")
+  if ! gate_ran M02 "the gate" "$m02_out"; then
     [ $KEEP -eq 0 ] && exit 1
   elif [ $m02_rc -ne 0 ]; then
     printf '      CAUGHT (gate failed as required)\n'; PASS=$((PASS+1))
@@ -672,9 +677,7 @@ if ! git diff --quiet internal/mcp/execution/attempt_evidence.go; then
   sink_out=$(go test -count=1 -run 'TestEvidence_|TestPhysicalEffect_' ./internal/mcp/execution/ 2>&1); sink_rc=$?
   spool_out=$(go test -count=1 -run 'TestEvidenceFreeze_CompletedInvocationIsSettledThroughTheRealSpool' . 2>&1); spool_rc=$?
   revert internal/mcp/execution/attempt_evidence.go
-  if build_or_vet_failed "$sink_out" || build_or_vet_failed "$spool_out"; then
-    printf '      NOT PROVEN — a side did not BUILD, so its gate never ran; this proves NOTHING\n'
-    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("M17: NOT PROVEN (build/vet failure, not an assertion)")
+  if ! gate_ran M17 "the sink side" "$sink_out" || ! gate_ran M17 "the real-spool side" "$spool_out"; then
     [ $KEEP -eq 0 ] && exit 1
   elif [ $sink_rc -eq 0 ] && [ $spool_rc -ne 0 ]; then
     printf '      CAUGHT (sink passed the defect through; the real-spool gate rejected it)\n'

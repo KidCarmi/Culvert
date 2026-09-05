@@ -1387,6 +1387,32 @@ the second in which a fix introduced the shape it was fixing. That is worth reco
 the campaign is the evidence this review rests on, so a defect in it is not a lesser class of
 defect.
 
+### Round 20: three holes in three rounds is a structural signal
+
+M17's CAUGHT condition is `sink_rc == 0 && spool_rc != 0` — the sink side must PASS while the
+real-spool side FAILS. But an unmatched `-run` pattern also exits 0, so if M17's sink gate ever
+drifted, a genuinely failing spool side would score the mutation CAUGHT **while its required
+control never ran**. Round 19 had added the build check to both of M17's sides and left the
+no-tests check off.
+
+That is the third consecutive round finding a hole in a hand-rolled copy of the same
+classification: round 18 found the build check missing from `run_mutation`, round 19 found it
+missing from M02 and M17, round 20 found the no-tests check still missing from M17. **Three
+holes in three rounds is a structural signal, not three coincidences** — duplicated
+classification is what kept producing them — so this round replaces the duplication rather than
+patching it again.
+
+`gate_ran` is now the single answer to *"did this invocation actually reach an assertion?"*.
+There are exactly two ways it does not, and each is misread by a bare status check: the pattern
+matched no tests (exit 0, indistinguishable from a pass) or the package did not build (nonzero,
+indistinguishable from a caught mutation). `run_mutation`, M02 and M17 all route through it, and
+M17 applies it to both sides it drives. The one deliberate exception is `--compile-wall`, decided
+before `gate_ran` because a build failure is that case's proof rather than its absence.
+
+Demonstrated in all three directions rather than asserted: the defect shape (drifted sink
+pattern + failing spool) scored CAUGHT before and is rejected now, and a genuine two-sided
+demonstration still scores CAUGHT.
+
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **60 mutations: 60 caught, 0 survived, 0
