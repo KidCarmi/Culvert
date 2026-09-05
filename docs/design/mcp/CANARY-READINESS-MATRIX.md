@@ -146,8 +146,10 @@ is trust-breach → settle → terminal outcome → release, because a threshold
 does not stop anything if the next request can take the freed slot first. Two entries in the
 classifier are deliberate and go in opposite directions: a pinned-identity mismatch
 (`ReasonUpstreamTLSIdentity`) is the single-occurrence `server_identity_drift` breach rather than a
-sample, and a caller cancellation (`context.Canceled`) is not evidence about the target at all — a
-DEADLINE overrun is, and is still charged.
+sample, and a caller cancellation (`context.Canceled`) is not evidence about the target at all, so it is
+excluded from the POPULATION rather than counted as a success — recording it would pad the
+denominator and dilute a real failure below the threshold. A DEADLINE overrun is evidence, and is
+still a charged sample.
 
 **Per-request fail-closed (Canary survives):** policy_deny, stale_decision,
 credential_not_ready, response_inspection_block, emergency_kill_for_request, allowance_consumed.

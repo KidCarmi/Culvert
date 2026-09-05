@@ -891,7 +891,7 @@ with the additional requirement that **the abort must not depend on another requ
 | The settled sample is durable BEFORE the terminal outcome | A crash between the two writes must over-count an outcome record rather than erase failure evidence, because restore legitimately accepts fewer samples than reservations; `TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit`; mutation M91 caught |
 | The settled sample is counted BEFORE the reservation is released | The settle may latch `elevated_error_rate`; the release is what admits the next request. They are one decision, so they are one defer with an explicit order — not two defers relying on LIFO; `TestAttemptSettled_IsReportedBeforeTheReservationIsReleased`; mutation M99 caught |
 | The slot is held through EVERY authority decision | The ordered defer runs trust-breach → settle → terminal outcome → release, so no step that can stop the Canary races the step that admits the next request; `TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased`; mutation M100 caught |
-| A pinned-identity mismatch is a breach, a caller cancellation is not a failure | `server_identity_drift` trips on the first occurrence and is reported before the settle so it wins the immutable first cause; `context.Canceled` is excluded from the failure verdict while `DeadlineExceeded` is not; `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift`, `TestAttemptSettled_CallerCancellationIsNotATargetFailure`, with `TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift` as the control; mutations M101, M102 caught |
+| A pinned-identity mismatch is a breach, a caller cancellation is not a failure | `server_identity_drift` trips on the first occurrence and is reported before the settle so it wins the immutable first cause; `context.Canceled` is excluded from the POPULATION entirely (not merely from the numerator — a padded denominator dilutes a real failure below the threshold) while `DeadlineExceeded` stays a charged sample; `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift`, `TestAttemptSettled_CallerCancellationIsNotASampleAtAll`, with `TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift` as the control; mutations M101, M102 caught |
 | The rate detectors can evaluate inside the authorized corpus | `HealthSampleFloor = 2`; error rate trips iff `2 × failures ≥ samples`; hard latency ≥ 15s trips with no floor; mean ≥ 10s trips at the floor. `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` is the anti-drift gate; mutations M73, M74 caught |
 | Request-scoped refusals do NOT stop the experiment | `TestAutoStop_RequestScopedRefusalsNeverStopTheCanary` and `TestAutoStop_MerelyUnauthorizedRequestDoesNotStopTheCanary` are the controls that keep the closure from being achieved by aborting on everything |
 | Breaches are capability-isolated | `TestAutoStop_BreachIsCapabilityIsolated`; the funnel refuses a capability that is not its own |
@@ -915,9 +915,9 @@ a signal is reported, it denies AND stops. `independent_witness_mismatch` is wir
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
-**Eight adversarial rounds hardened this closure, and what they found is the useful record.** Each
+**Nine adversarial rounds hardened this closure, and what they found is the useful record.** Each
 round's fix exposed the next layer inward, which is convergence rather than churn — but every one of
-the twenty-two findings was a way the latch could be right and the surrounding machinery still wrong.
+the twenty-three findings was a way the latch could be right and the surrounding machinery still wrong.
 Rounds 4 through 6 found defects that rounds 3, 4 and 5 had themselves introduced, which is the
 honest shape of this kind of work: a fix that tightens one predicate is a new opportunity to get the
 adjacent one wrong. Both round-6 findings are of that kind, and both are the SAME predicate one
@@ -937,6 +937,13 @@ left the same window open for `outcome_evidence_loss`. The lesson is worth stati
 than an anecdote — **the slot must be held through every step that decides whether the Canary keeps
 its authority, not through the one step that happened to be under discussion.** The ordered sequence
 is now written out at the defer, and each of its four steps names the round that put it there.
+
+Round 9 then did the same to round 8's OTHER fix, and the pattern is worth naming because it caught
+me three times in a row. Round 8 established that a caller cancellation is not the target's fault
+and marked it non-failing — but still RECORDED it, so it padded the DENOMINATOR: a cancellation plus
+one good response plus one real failure is 1-of-3, under the 1-of-2 threshold. **"Not a failure" and
+"not a sample" are different statements**, and each of rounds 7, 8 and 9 was a case of fixing the
+statement I had in mind rather than the one the control actually needed.
 
 | Round | Finding | Why it mattered |
 |---|---|---|
@@ -962,6 +969,7 @@ is now written out at the defer, and each of its four steps names the round that
 | 8 | The release still preceded the terminal outcome commit | Round 7's fix was one step too narrow. A failed outcome commit IS the `outcome_evidence_loss` breach, and it runs after the settle, so the same window stayed open for it |
 | 8 | A pinned-identity mismatch was reduced to one failed sample | The request-scoped live-trust check reads the CATALOG before the dial, so the ACTUAL peer's identity is judged only at the transport. `server_identity_drift` is single-occurrence, but as a sample the FIRST mismatch stopped nothing and another invocation could be admitted against a server we can no longer identify |
 | 8 | A caller cancellation was charged against the target | `context.Canceled` means the CLIENT went away. Two of them reached the 1-of-2 threshold and would have stopped a Canary that had nothing wrong with it — the direction a safety threshold must never err in for the opposite reason to all the others |
+| 9 | The cancellation was excluded from the NUMERATOR but not the population | Round 8's own fix, one notch short. Recorded as a non-failing sample it padded the denominator, so a cancellation plus a success plus a real failure was 1-of-3 and the Canary stayed active. "Not a failure" and "not a sample" are different statements |
 
 Two of these deserve to be remembered past this PR. The generation finding and the health-latch
 finding were both **gaps my own comments described and my own code did not implement** — the header
@@ -1042,7 +1050,7 @@ Twenty-seven adversarial scenarios, each answered by a named gate rather than by
 | A third request is waiting while the second attempt fails | it cannot reserve: the sample is counted and the latch decided BEFORE the slot goes back, so the 1-of-2 threshold actually prevents the next invocation rather than merely recording it | `TestAttemptSettled_IsReportedBeforeTheReservationIsReleased` (in-test control: the slot is still released exactly once — an ordering fix that leaked the reservation would otherwise pass) |
 | The evidence volume dies and the terminal outcome cannot be written | `outcome_evidence_loss` latches, and the slot is still held while it does — the next request cannot reach the upstream while that breach is being recorded | `TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased` |
 | The connected peer's TLS identity no longer matches its pin | `server_identity_drift` latches on the FIRST occurrence, before the slot goes back — not after a second sample | `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift` (control: `TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift`) |
-| The client hangs up mid-call, twice | nothing stops: a caller cancellation is not evidence about the target. A deadline overrun still is | `TestAttemptSettled_CallerCancellationIsNotATargetFailure` (a three-reason table: cancelled, deadline, connect-failed) |
+| The client hangs up mid-call, twice | nothing stops, AND nothing is recorded: a cancellation is not evidence about the target in either direction, so it never enters the population to dilute it. A deadline overrun still is a charged sample | `TestAttemptSettled_CallerCancellationIsNotASampleAtAll` (a three-row table: cancelled ⇒ 0 samples, deadline and connect-failed ⇒ 1 charged sample each) |
 
 The three controls that keep this from being a proof of "abort on everything": a healthy population
 never stops the Canary (`TestAutoStop_HealthyPopulationNeverStopsTheCanary`), request-scoped refusals

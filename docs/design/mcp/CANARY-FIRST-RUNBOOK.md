@@ -191,7 +191,8 @@ latency_pathology · unexpected_upstream_response · independent_witness_mismatc
 > terminal outcome → release, and the terminal outcome commit is itself the `outcome_evidence_loss`
 > producer. Two classifier entries go in opposite directions on purpose — a pinned-identity mismatch
 > is the single-occurrence `server_identity_drift` breach rather than a sample, and a caller
-> cancellation is not evidence about the target (a deadline overrun still is).
+> cancellation is not evidence about the target in EITHER direction, so it is excluded from the
+> population rather than counted as a success (a deadline overrun still is a charged sample).
 >
 > **The operator surface is never more optimistic than admission.** `activation_runtime.auto_stop`
 > derives `window_expired` and `execution_authority` from the same two-ended `WindowOpen` predicate
