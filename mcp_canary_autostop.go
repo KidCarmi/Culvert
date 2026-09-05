@@ -329,16 +329,31 @@ func canaryAbortStatusFor(capb rollout.Capability) canaryAbortStatus {
 			atUnix = snap.AtUnixNano / int64(time.Second)
 		}
 	}
+	// The window is read with the SAME two-ended predicate admission uses, under the same lock.
+	// Reporting `!now.Before(deadline)` tested only the upper end, so a clock rolled BEHIND the
+	// activation instant — where WindowOpen is false and every reservation is already denied —
+	// still rendered window_expired:false and execution_authority:"granted". With a long window
+	// that misleading state persists until the one-shot watchdog fires, which is exactly the
+	// interval an operator would be reading this surface to decide whether to intervene
+	// (Codex round 6 P2). The operator view must not be more optimistic than the admission gate.
 	var deadline time.Time
+	windowClosed := false
 	if cr.enforcer != nil {
 		deadline = cr.enforcer.WindowDeadline()
+		windowClosed = !cr.enforcer.WindowOpen(canaryNow())
 	}
 	samples, failures, mean := cr.health.Stats()
 	cr.mu.Unlock()
 
+	// "granted" must mean the node can still change the world, and a closed window makes that
+	// false whether or not the latch has caught up yet: every reservation is already denied. The
+	// window is therefore folded into the REPORT — and only into the report. Nothing in the
+	// admission path reads this value, so this is not a second abort authority (that stays
+	// AbortController alone); it is the surface refusing to be more optimistic than the gate it
+	// describes, during exactly the interval an operator would consult it (Codex round 6 P2).
 	authority := "none"
 	switch {
-	case active && aborted:
+	case active && (aborted || windowClosed):
 		authority = "revoked"
 	case active:
 		authority = "granted"
@@ -355,7 +370,7 @@ func canaryAbortStatusFor(capb rollout.Capability) canaryAbortStatus {
 	}
 	if !deadline.IsZero() {
 		st.WindowDeadlineUnix = deadline.Unix()
-		st.WindowExpired = !canaryNow().Before(deadline)
+		st.WindowExpired = windowClosed
 	}
 	return st
 }

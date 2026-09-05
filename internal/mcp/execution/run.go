@@ -73,7 +73,17 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// "did Culvert return a result?", and a different question again from "did the
 		// invocation reach the peer?" — the health detector needs the first, and only
 		// this scope has it (Codex round 5 P1).
-		e.commitAttemptOutcome(in, attempt, sendState, out, upErr != nil || upResp == nil)
+		//
+		// A JSON-RPC `error` object is the THIRD shape a failure arrives in, and it is the
+		// most ordinary one: the transport succeeded, the body decoded, and the peer is
+		// telling us the tool did not work. Client.Call returns it as a non-nil Response with
+		// a nil Go error, so a transport-only predicate read it as a SUCCESS — while
+		// finishUpstream, two hundred lines down, already classifies exactly that response as
+		// ReasonUpstreamCallFailed. The detector disagreed with the code beside it, and two
+		// such tool failures produced zero failures, never reached the 1-of-2 threshold, and
+		// admitted a third execution against a target that had just failed twice (Codex round
+		// 6 P1 — the same defect class as round 5, one shape further in).
+		e.commitAttemptOutcome(in, attempt, sendState, out, upstreamLegFailed(upResp, upErr))
 	}()
 
 	// OVN-09 (residual window). callUpstream is the ONE place either branch performs
@@ -291,6 +301,23 @@ func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, s
 	default:
 		return runtime.ExecOutput{}, false
 	}
+}
+
+// upstreamLegFailed is the health detector's failure predicate: did the UPSTREAM LEG fail?
+//
+// Three shapes, and all three are the TARGET failing rather than Culvert refusing:
+//
+//   - a transport or protocol error (err) — no answer, or an unusable one;
+//   - a nil response with no error, a defensive impossibility treated as a failure because
+//     "no answer and no reason" is not evidence of health;
+//   - a decoded JSON-RPC error object — the peer answered and said the tool failed.
+//
+// It is deliberately NOT out.Executed. A response-DLP block AFTER a successful peer answer is
+// Culvert's own policy working, not the target misbehaving, and counting it would let a healthy
+// Canary abort itself for its own controls firing. The question this predicate answers is "is the
+// target misbehaving", never "did the client get a result".
+func upstreamLegFailed(resp *upstreamclient.Response, err error) bool {
+	return err != nil || resp == nil || resp.Error != nil
 }
 
 // finishUpstream processes a successful upstream response: it forwards a sanitized

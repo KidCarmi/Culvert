@@ -1412,3 +1412,70 @@ func TestAutoStop_TotalExhaustionStillRecordsBudgetExhausted(t *testing.T) {
 		t.Fatalf("a spent allowance must still be budget_exhausted, got %q", code)
 	}
 }
+
+// TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission is the gate for the operator surface's own
+// window predicate.
+//
+// The rollback fixes taught the boundary, the arm path and the watchdog callback to use the
+// enforcer's two-ended WindowOpen. The STATUS builder kept testing only the upper deadline, so in
+// the interval between a clock rolling behind the activation instant and the one-shot watchdog
+// firing — which with a long window is the whole remaining timer duration — every reservation was
+// already denied while the surface rendered window_expired:false and execution_authority:"granted"
+// (Codex round 6 P2). That interval is exactly when an operator reads this to decide whether to
+// intervene, and it was the one moment the surface lied.
+//
+// The timer is swapped and deliberately NEVER fired, so nothing can latch: this pins what the
+// status reports on its own, from the same predicate admission uses.
+func TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	_, _, armedCount := swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if armedCount() != 1 {
+		t.Fatalf("premise: a healthy activation arms one watchdog, got %d", armedCount())
+	}
+	// THE CONTROL, in the same test so a fix cannot satisfy it by reporting expiry always: inside
+	// the window the surface reports a live experiment.
+	if st := canaryAbortStatusFor(capb); st.WindowExpired || st.ExecutionAuthority != "granted" {
+		t.Fatalf("premise: an open window must report a live experiment, got expired=%v authority=%q",
+			st.WindowExpired, st.ExecutionAuthority)
+	}
+
+	// The clock rolls BEHIND the activation instant. The watchdog is never fired, so the abort
+	// latch is untouched — this is purely what the surface says on its own.
+	nowP = canaryRuntimeTestNow.Add(-time.Hour)
+	if rt.abortedNow(capb) {
+		t.Fatal("premise: nothing may have latched — the watchdog was never fired")
+	}
+
+	// THE STATUS IS READ FIRST, BEFORE ANY REQUEST, and that ordering is the whole gate.
+	//
+	// A reservation attempt would itself latch window_expired, after which the surface reports
+	// revoked authority for the ORDINARY reason and this test would pass against a status builder
+	// that never learned the window at all. That is the round-5 lesson repeating one test later: a
+	// fixture that reaches the right answer through the wrong path proves nothing. The interval
+	// Codex named is precisely the one where NOTHING has arrived to latch — no traffic, no timer —
+	// and the operator is reading the surface to decide whether to intervene.
+	st := canaryAbortStatusFor(capb)
+	if !st.WindowExpired {
+		t.Fatal("SECURITY: admission is closed and the surface reports the window open — " +
+			"an operator reading this sees a running experiment that cannot run")
+	}
+	if st.ExecutionAuthority == "granted" {
+		t.Fatalf("SECURITY: no reservation can be granted, so authority is not granted, got %q",
+			st.ExecutionAuthority)
+	}
+	if rt.abortedNow(capb) {
+		t.Fatal("the surface must report the closed window WITHOUT latching — reporting is not " +
+			"deciding, and the abort controller stays the one authority")
+	}
+
+	// Only now confirm the surface was describing something real: admission is in fact closed.
+	if o, _ := rt.reserveCanaryExecution(capb, nowP, rtIdent); o == canary.BudgetGranted {
+		t.Fatal("the surface reported a closed window; a reservation must actually be denied")
+	}
+}

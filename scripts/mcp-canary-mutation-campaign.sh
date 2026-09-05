@@ -945,6 +945,29 @@ run_mutation M95 \
   . mcp_canary_runtime.go \
   's/\tcase outcome == canary\.BudgetDeniedWindow:/\tcase false:/'
 
+# M96/M97 are Codex round 6: the error-rate detector's third failure shape, and the operator
+# surface's own window predicate.
+
+run_mutation M96 \
+  'a JSON-RPC error response counts as a successful attempt' \
+  'TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/return err != nil || resp == nil || resp\.Error != nil/return err != nil || resp == nil/'
+
+run_mutation M97 \
+  'the operator status tests only the upper end of the window' \
+  'TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission' \
+  . mcp_canary_autostop.go \
+  's/st\.WindowExpired = windowClosed/st.WindowExpired = !canaryNow().Before(deadline)/'
+
+# The reported AUTHORITY is a SECOND line, so it needs its own mutation — the M70 lesson: two
+# paths to the same claim can each be deleted unnoticed while the other keeps the gate green.
+run_mutation M98 \
+  'a closed window still reports granted execution authority' \
+  'TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission' \
+  . mcp_canary_autostop.go \
+  's/\tcase active \&\& (aborted || windowClosed):/\tcase active \&\& aborted:/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

@@ -5,6 +5,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events/spool"
+	"github.com/KidCarmi/Culvert/internal/mcp/jsonrpc"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
@@ -172,5 +174,55 @@ func TestAttemptSettled_SuccessfulExecutionIsNotAFailure(t *testing.T) {
 	}
 	if got[0] {
 		t.Fatal("a successful execution must not count as a failure")
+	}
+}
+
+// jsonrpcErrorUpstream answers with a decoded JSON-RPC `error` object: a NON-NIL response and a NIL
+// Go error. That is the shape upstreamclient.Client.Call returns when the peer answers correctly at
+// the transport level and reports that the TOOL failed, and it is the most ordinary tool failure
+// there is. The shared fakeUpstream cannot produce it — its error field short-circuits to a nil
+// response — so reproducing the defect needs its own double.
+type jsonrpcErrorUpstream struct{ calls int }
+
+func (u *jsonrpcErrorUpstream) Call(_ context.Context, _ upstreamclient.Target, _ string, _ json.RawMessage, _ upstreamclient.CallOptions) (*upstreamclient.Response, error) {
+	u.calls++
+	return &upstreamclient.Response{
+		ID:       jsonrpc.ID{Kind: jsonrpc.IDString, Str: "u"},
+		Error:    &jsonrpc.ErrorObject{Code: -32000, Message: "tool execution failed"},
+		RawBytes: []byte(`{"error":{"code":-32000}}`),
+	}, nil
+}
+
+// TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure is the gate for the third failure shape.
+//
+// The peer answered, the body decoded, and it said the tool did not work. finishUpstream already
+// classifies exactly this response as ReasonUpstreamCallFailed — but a transport-only predicate
+// (err != nil || resp == nil) reports failed=false, so two such tool failures produced ZERO
+// failures, never reached the 1-of-2 elevated_error_rate threshold, and a third execution was
+// admitted against a target that had just failed twice (Codex round 6 P1).
+//
+// This is the round-5 defect one shape further in, which is why it gets its own gate rather than a
+// widened assertion on the existing one: each shape can regress independently.
+func TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure(t *testing.T) {
+	sfy := &failSafety{}
+	up := &jsonrpcErrorUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = identityGate{reservationID: "rsv_rpcerr", generation: 7}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	if up.calls != 1 {
+		t.Fatalf("the upstream must have been called exactly once, got %d", up.calls)
+	}
+	got := sfy.flags()
+	if len(got) != 1 {
+		t.Fatalf("exactly one settled attempt expected, got %d", len(got))
+	}
+	if !got[0] {
+		t.Fatal("SECURITY: a JSON-RPC error response is the peer saying the tool failed — " +
+			"counting it as a success blinds the error-rate detector to the most ordinary " +
+			"failure mode there is")
 	}
 }
