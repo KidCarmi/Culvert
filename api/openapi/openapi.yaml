@@ -588,7 +588,22 @@ components:
             epoch means the operation's decision record may be gone, so
             absence proves nothing and a re-send would run the operation
             again. Empty when the history is missing altogether (neither an
-            active profile nor a record exists).
+            active profile nor a record exists). 2F-E correction round 3 —
+            the identity is consulted against the AUTHORITATIVE active
+            identity on every read and operation: an observed REWIND of the
+            active revision, or a DIFFERENT spec at the SAME revision (a
+            replace-mode import, a config rollback, a CP→DP snapshot — any
+            writer), ROTATES it durably while every piece of evidence
+            (revisions, decided operations, the draft) is kept; a profile
+            delete records its transition durably BEFORE the active profile
+            is removed, so a crash or a failed record removal is finished
+            (or the epoch rotated) at the next access/boot and a recreated
+            profile never exposes the old epoch; and the identity is ALSO
+            empty when it could not be made durable (a failed write at
+            migration or mint) — an unpersisted identity is never
+            advertised, publish/rollback naming any epoch are refused
+            (`409 history_incarnation_mismatch`) and the admin frontend
+            withholds dispatch until a durable identity exists.
         operation: { $ref: '#/components/schemas/PACOperationLookup' }
         poolChangedSince: { type: boolean }
         scope: { type: string, enum: [node-local] }
@@ -8812,6 +8827,13 @@ paths:
                     acknowledgement of a lost node-local history to the active
                     ProfileSpecDigest reviewed (together with expectedActiveRevision);
                     a mismatch is refused `409 history_reset_stale` with `current`.
+                    2F-E correction round 3 — publish/rollback may name it too, as an
+                    INDEPENDENT fence beside expectedActiveRevision: a replace-mode
+                    config import or a config rollback can install a DIFFERENT spec at
+                    the SAME active revision, which the revision fence cannot see; a
+                    mismatch is refused `409 stale` with `current.expectedActiveSpecDigest`
+                    (+ `current.revision`). Optional (a caller that omits it reviewed no
+                    digest); the admin frontend always sends it.
                 confirm:
                   allOf: [{ $ref: '#/components/schemas/PACConfirm' }]
                   description: 2F-B — echoes the bound challenge when publish/rollback introduces new DIRECT paths.
@@ -8884,6 +8906,9 @@ paths:
             `history_incarnation_mismatch` (2F-E correction round 2: the request
             named a history epoch other than the current one —
             `current.historyIncarnation`; nothing is committed or replayed).
+            `stale` is also the refusal of a mismatched `expectedActiveSpecDigest`
+            (2F-E correction round 3; `current.expectedActiveSpecDigest` +
+            `current.revision`).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

@@ -27,8 +27,8 @@ func newHistoryIncarnation() string { return uuid.NewString() }
 
 // hasHistoryContent reports whether a record carries operator history (a
 // saved draft, revisions, an intent) as opposed to being an epoch-identity
-// placeholder minted by EnsureIncarnation for a profile nobody has drafted
-// against yet.
+// placeholder minted by ObserveActive/Recreate for a profile nobody has
+// drafted against yet.
 func hasHistoryContent(lc *ProfileLifecycle) bool {
 	return lc.Draft.ID != "" || len(lc.Revisions) > 0 || lc.PendingOp != nil || lc.Ambiguous != nil || len(lc.Operations) > 0
 }
@@ -115,10 +115,7 @@ func (s *LifecycleStore) Load(path string) error {
 	}
 	// Pre-2F-A records carry no draft token; migrate them to 1 so every
 	// stored draft hands out a non-zero optimistic-concurrency token (an
-	// epoch-identity placeholder holds no draft and keeps 0). Records that
-	// predate the history epoch identity (2F-E correction round 2) are
-	// minted one and persisted, so the identity is durable from this boot on.
-	minted := false
+	// epoch-identity placeholder holds no draft and keeps 0).
 	for id, lc := range s.byID {
 		if lc == nil {
 			delete(s.byID, id)
@@ -127,50 +124,235 @@ func (s *LifecycleStore) Load(path string) error {
 		if lc.DraftRevision < 1 && hasHistoryContent(lc) {
 			lc.DraftRevision = 1
 		}
-		if lc.HistoryIncarnation == "" {
-			lc.HistoryIncarnation = newHistoryIncarnation()
-			minted = true
-		}
 	}
 	s.modTime = time.Now()
-	if minted {
-		if err := s.persistMap(s.byID); err != nil {
-			return fmt.Errorf("pac lifecycle: history epoch identities could not be persisted (%w); they are held in memory and re-minted at the next boot", err)
-		}
+	// Records that predate the history epoch identity (2F-E correction
+	// round 2) are minted one — PERSIST-BEFORE-SWAP (round 3): the minted
+	// identities are written into a candidate map and become visible ONLY
+	// once that write landed. An identity that is not durable is never
+	// advertised: the records keep an empty identity in memory, the
+	// lifecycle surfaces report it as unknown, and the next access retries
+	// the durable mint (ObserveActive).
+	next, minted := s.mintMissingIncarnations()
+	if !minted {
+		return nil
 	}
+	if err := s.persistMap(next); err != nil {
+		return fmt.Errorf("pac lifecycle: history epoch identities could not be persisted (%w); they stay UNKNOWN (not advertised) until a durable mint succeeds", err)
+	}
+	s.byID = next
 	return nil
 }
 
-// EnsureIncarnation returns the identity of profileID's current history
-// epoch, minting and durably recording one when the record has none (or does
-// not exist yet). Persist-before-swap: a failed write mints nothing.
-func (s *LifecycleStore) EnsureIncarnation(profileID string) (string, error) {
+// mintMissingIncarnations returns a candidate map in which every record
+// lacking an epoch identity carries a freshly minted one (clones — s.byID is
+// untouched) and whether any was minted.
+func (s *LifecycleStore) mintMissingIncarnations() (map[string]*ProfileLifecycle, bool) {
+	minted := false
+	next := make(map[string]*ProfileLifecycle, len(s.byID))
+	for id, lc := range s.byID {
+		if lc.HistoryIncarnation == "" {
+			cp := cloneLifecycle(lc)
+			cp.HistoryIncarnation = newHistoryIncarnation()
+			next[id] = cp
+			minted = true
+			continue
+		}
+		next[id] = lc
+	}
+	return next, minted
+}
+
+// ObserveActive consults profileID's history epoch against the AUTHORITATIVE
+// active identity (revision + ProfileSpecDigest; activeExists=false when no
+// active profile exists) and returns the epoch identity that is valid NOW —
+// "" when nothing durable can be said (no record and no profile, a finished
+// delete, or a write that failed). It is the single place an epoch is
+// minted, rotated or retired (2F-E correction round 3), always
+// persist-before-swap:
+//
+//   - no record, no profile        → "" (the history is missing altogether)
+//   - no record, profile present   → mint a record (identity + observation)
+//   - DeletePending, absent        → finish the delete: remove the record, ""
+//   - DeletePending, present       → rotate (the transition began; discard)
+//   - identity empty               → mint (a failed migration retries here)
+//   - profile absent               → the identity as recorded (no write)
+//   - no observation yet           → record the current identity (no verdict)
+//   - revision REWOUND, or the same revision with a DIFFERENT spec → rotate
+//   - moved forward / unchanged    → record when changed
+//
+// A rotation keeps every piece of evidence (revisions, decided operations,
+// the draft, intents); only the identity changes, so a client that reviewed
+// the earlier state is refused and one that reads the current state can
+// still resolve a retained operation. The returned rotated flag reports a
+// rotation performed by THIS call.
+func (s *LifecycleStore) ObserveActive(profileID string, activeRevision int64, activeSpecDigest string, activeExists bool) (incarnation string, rotated bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.byID == nil {
 		s.byID = map[string]*ProfileLifecycle{}
 	}
-	if cur, ok := s.byID[profileID]; ok && cur.HistoryIncarnation != "" {
-		return cur.HistoryIncarnation, nil
+	cur, found := s.byID[profileID]
+	if !found {
+		if !activeExists {
+			return "", false, nil
+		}
+		inc, err := s.mintRecordLocked(&ProfileLifecycle{ProfileID: profileID}, activeRevision, activeSpecDigest, true)
+		return inc, false, err
+	}
+	if cur.DeletePending {
+		if !activeExists {
+			return "", false, s.removeRecordLocked(profileID)
+		}
+		rec := cloneLifecycle(cur)
+		rec.DeletePending = false
+		return s.rotateRecordLocked(rec, activeRevision, activeSpecDigest)
+	}
+	if cur.HistoryIncarnation == "" {
+		inc, err := s.mintRecordLocked(cloneLifecycle(cur), activeRevision, activeSpecDigest, activeExists)
+		return inc, false, err
+	}
+	if !activeExists {
+		return cur.HistoryIncarnation, false, nil
+	}
+	return s.observeLocked(cur, activeRevision, activeSpecDigest)
+}
+
+// observeLocked compares the recorded observation with the active identity
+// and records / rotates accordingly (see ObserveActive). Caller holds s.mu.
+func (s *LifecycleStore) observeLocked(cur *ProfileLifecycle, activeRevision int64, activeSpecDigest string) (incarnation string, rotated bool, err error) {
+	observed := cur.ObservedActiveRevision != 0 || cur.ObservedActiveSpecDigest != ""
+	if observed && cur.ObservedActiveRevision == activeRevision && cur.ObservedActiveSpecDigest == activeSpecDigest {
+		return cur.HistoryIncarnation, false, nil
+	}
+	rec := cloneLifecycle(cur)
+	rewound := observed && (activeRevision < cur.ObservedActiveRevision ||
+		(activeRevision == cur.ObservedActiveRevision && activeSpecDigest != cur.ObservedActiveSpecDigest))
+	if rewound {
+		return s.rotateRecordLocked(rec, activeRevision, activeSpecDigest)
+	}
+	rec.ObservedActiveRevision, rec.ObservedActiveSpecDigest = activeRevision, activeSpecDigest
+	if err := s.swapRecordLocked(rec); err != nil {
+		return "", false, err
+	}
+	return rec.HistoryIncarnation, false, nil
+}
+
+// mintRecordLocked gives rec (a private copy) a fresh epoch identity, records
+// the active observation when a profile exists, and persists it. Caller
+// holds s.mu.
+func (s *LifecycleStore) mintRecordLocked(rec *ProfileLifecycle, activeRevision int64, activeSpecDigest string, activeExists bool) (string, error) {
+	rec.HistoryIncarnation = newHistoryIncarnation()
+	if activeExists {
+		rec.ObservedActiveRevision, rec.ObservedActiveSpecDigest = activeRevision, activeSpecDigest
+	}
+	if err := s.swapRecordLocked(rec); err != nil {
+		return "", err
+	}
+	return rec.HistoryIncarnation, nil
+}
+
+// rotateRecordLocked discards rec's epoch identity for a fresh one (every
+// piece of evidence kept), records the active observation and persists it.
+// Caller holds s.mu.
+func (s *LifecycleStore) rotateRecordLocked(rec *ProfileLifecycle, activeRevision int64, activeSpecDigest string) (incarnation string, rotated bool, err error) {
+	rec.HistoryIncarnation = newHistoryIncarnation()
+	rec.ObservedActiveRevision, rec.ObservedActiveSpecDigest = activeRevision, activeSpecDigest
+	if err := s.swapRecordLocked(rec); err != nil {
+		return "", false, err
+	}
+	return rec.HistoryIncarnation, true, nil
+}
+
+// MarkDeletePending durably records that profileID's delete transition has
+// begun (see ProfileLifecycle.DeletePending). It is the FIRST write of a
+// profile delete and must succeed before the active profile is removed; a
+// record is created for a profile that has none. Persist-before-swap.
+func (s *LifecycleStore) MarkDeletePending(profileID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byID == nil {
+		s.byID = map[string]*ProfileLifecycle{}
 	}
 	var rec *ProfileLifecycle
 	if cur, ok := s.byID[profileID]; ok {
+		if cur.DeletePending {
+			return nil
+		}
 		rec = cloneLifecycle(cur)
 	} else {
-		rec = &ProfileLifecycle{ProfileID: profileID}
+		rec = &ProfileLifecycle{ProfileID: profileID, HistoryIncarnation: newHistoryIncarnation()}
 	}
-	rec.HistoryIncarnation = newHistoryIncarnation()
+	rec.DeletePending = true
+	return s.swapRecordLocked(rec)
+}
+
+// Recreate starts a NEW history epoch for profileID — a fresh record with a
+// freshly minted identity observing the given active identity — replacing
+// whatever record (finished, half-deleted or stale) may survive under that
+// id. Called BEFORE the active create is committed, so the old epoch can
+// never be exposed beside a recreated profile even when a later write
+// fails. Persist-before-swap: a failed write changes nothing.
+func (s *LifecycleStore) Recreate(profileID string, activeRevision int64, activeSpecDigest string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byID == nil {
+		s.byID = map[string]*ProfileLifecycle{}
+	}
+	rec := &ProfileLifecycle{ProfileID: profileID, HistoryIncarnation: newHistoryIncarnation(),
+		ObservedActiveRevision: activeRevision, ObservedActiveSpecDigest: activeSpecDigest}
+	if err := s.swapRecordLocked(rec); err != nil {
+		return "", err
+	}
+	return rec.HistoryIncarnation, nil
+}
+
+// PendingDeletes lists the profile ids whose delete transition is recorded
+// as begun (for the startup reconciliation).
+func (s *LifecycleStore) PendingDeletes() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var ids []string
+	for id, lc := range s.byID {
+		if lc.DeletePending {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// swapRecordLocked persists a candidate map carrying rec (already a private
+// copy) and swaps it in on success. Caller holds s.mu.
+func (s *LifecycleStore) swapRecordLocked(rec *ProfileLifecycle) error {
 	next := make(map[string]*ProfileLifecycle, len(s.byID)+1)
 	for id, cur := range s.byID {
 		next[id] = cur
 	}
-	next[profileID] = rec
+	next[rec.ProfileID] = rec
 	if err := s.persistMap(next); err != nil {
-		return "", err
+		return err
 	}
 	s.byID = next
 	s.modTime = time.Now()
-	return rec.HistoryIncarnation, nil
+	return nil
+}
+
+// removeRecordLocked persists a candidate map without id and swaps it in on
+// success. Caller holds s.mu.
+func (s *LifecycleStore) removeRecordLocked(id string) error {
+	next := make(map[string]*ProfileLifecycle, len(s.byID))
+	for k, cur := range s.byID {
+		if k != id {
+			next[k] = cur
+		}
+	}
+	if err := s.persistMap(next); err != nil {
+		return err
+	}
+	s.byID = next
+	s.modTime = time.Now()
+	return nil
 }
 
 // loadResetRecordLocked reads the sidecar reset record. An unreadable record
@@ -406,6 +588,11 @@ func (s *LifecycleStore) Put(lc *ProfileLifecycle) error {
 			lc.HistoryIncarnation = newHistoryIncarnation()
 		}
 	}
+	// The delete-transition flag is owned by the delete path and the
+	// observer (ObserveActive); an ordinary write never clears it.
+	if cur, ok := s.byID[lc.ProfileID]; ok && cur.DeletePending {
+		lc.DeletePending = true
+	}
 	// Persist-before-swap (2F-B, C1): write the candidate map durably first;
 	// memory is replaced only on success, so a failed write leaves the
 	// in-memory record exactly where it was.
@@ -430,18 +617,7 @@ func (s *LifecycleStore) Delete(id string) error {
 	if _, ok := s.byID[id]; !ok {
 		return nil
 	}
-	next := make(map[string]*ProfileLifecycle, len(s.byID))
-	for k, cur := range s.byID {
-		if k != id {
-			next[k] = cur
-		}
-	}
-	if err := s.persistMap(next); err != nil {
-		return err
-	}
-	s.byID = next
-	s.modTime = time.Now()
-	return nil
+	return s.removeRecordLocked(id)
 }
 
 // LifecycleWriteHook is a TEST-ONLY fault-injection seam consulted

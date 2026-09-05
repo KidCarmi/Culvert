@@ -226,13 +226,19 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 		if !pacGuardDirectCRUD(w, candidate, p, pac.Profile{}, false, "create", in.Confirm) {
 			return
 		}
+		// 2F-E correction round 2/3: a (re)created profile starts a NEW
+		// node-local history epoch. The fresh record is made durable BEFORE
+		// the active create (persist-before-swap on both sides): whatever
+		// record may survive under this id — a delete whose record removal
+		// failed or crashed, a stale epoch — is replaced first, so a
+		// recreated profile can never be exposed beside the old epoch; a
+		// failed epoch write refuses the create with nothing changed.
+		if _, err := pacLifecycle.Recreate(p.ID, p.Revision, pac.ProfileSpecDigest(p)); err != nil {
+			logger.Printf("PAC: history epoch for %q could not be recorded at create: %v", sanitizeLog(p.ID), err)
+			http.Error(w, "the profile's history epoch could not be recorded; nothing was changed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if pacApplyProfilesMutation(w, r, "pac.profile_create", p.ID, before, candidate) {
-			// 2F-E correction round 2: a (re)created profile starts a NEW
-			// node-local history epoch — minted now so a recreate under a
-			// deleted profile's id never reuses the old epoch identity.
-			if _, err := pacLifecycle.EnsureIncarnation(p.ID); err != nil {
-				logger.Printf("PAC: history epoch identity for %q could not be persisted at create: %v", sanitizeLog(p.ID), err)
-			}
 			jsonOK(w, p)
 		}
 	default:
@@ -305,10 +311,23 @@ func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
 		http.NotFound(w, r)
 		return
 	}
+	// 2F-E correction round 3: the delete transition is recorded DURABLY
+	// before the active profile is removed. A crash or a failed record
+	// removal after the active delete then leaves a record that the next
+	// access (or boot) finishes — never one whose old epoch looks valid for
+	// a profile recreated under the same id. A failed first write refuses
+	// the delete with nothing changed.
+	if err := pacLifecycle.MarkDeletePending(id); err != nil {
+		logger.Printf("PAC: delete transition for %s could not be recorded: %v", sanitizeLog(id), err)
+		http.Error(w, "the delete could not be recorded in the node-local history; nothing was changed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if pacApplyProfilesMutation(w, r, "pac.profile_delete", id, before, candidate) {
-		// Drop the node-local lifecycle history for the deleted profile.
+		// Drop the node-local lifecycle history for the deleted profile. A
+		// failure here is finished by the next access/boot (the flag above);
+		// the active mutation is committed and is reported as such.
 		if err := pacLifecycle.Delete(id); err != nil {
-			logger.Printf("PAC: lifecycle delete for %s: %v", sanitizeLog(id), err)
+			logger.Printf("PAC: lifecycle delete for %s: %v (finished at the next access)", sanitizeLog(id), err)
 		}
 		// Drop the node-local DIRECT-exception governance too, so a later
 		// profile recreated under the SAME id cannot silently inherit the old

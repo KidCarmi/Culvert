@@ -546,6 +546,12 @@ func TestPACIntent_IntentPersistFailure_ChangesNothing(t *testing.T) {
 		}
 		return nil
 	}
+	// 2F-E correction round 3 (transparent fixture completion; the assertion
+	// is unchanged): the FIRST lifecycle access records the history epoch's
+	// observation of the active identity — epoch bookkeeping performed by
+	// every read and operation, not part of the refused mutation — so the
+	// baseline is captured after one read has done it.
+	pacIntentGet(t)
 	before, since := pacFenceCapture(t), time.Now().UnixMilli()
 	rec := pacIntentPublish(t, uuid.NewString(), 1, pacIntentDraft("Never", false), "")
 	if rec.Code != http.StatusInternalServerError {

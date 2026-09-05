@@ -87,6 +87,30 @@ type ProfileLifecycle struct {
 	// publish/rollback may name the epoch they were reviewed in
 	// (expectedHistoryIncarnation) and are refused on a mismatch.
 	HistoryIncarnation string `json:"historyIncarnation,omitempty"`
+	// ObservedActiveRevision / ObservedActiveSpecDigest (2F-E correction
+	// round 3) record the AUTHORITATIVE active identity this history epoch
+	// was last consulted against (every lifecycle read/operation and every
+	// commit observes it). The epoch is not only discarded by an explicit
+	// delete or reset: a replace-mode import, a config rollback or a CP→DP
+	// snapshot can REPLACE the active spec at the same revision or REWIND it
+	// to an earlier one without touching this record, and a request reviewed
+	// against the earlier state would then pass the revision fence. Any such
+	// observed replacement/rewind ROTATES HistoryIncarnation (the evidence —
+	// revisions, decided operations, the draft — is kept), so a dispatch or
+	// re-send reviewed in the earlier epoch is refused. A zero observation is
+	// a record that predates the field (nothing can be concluded; the current
+	// identity is recorded on first access).
+	ObservedActiveRevision   int64  `json:"observedActiveRevision,omitempty"`
+	ObservedActiveSpecDigest string `json:"observedActiveSpecDigest,omitempty"`
+	// DeletePending (2F-E correction round 3) is the durable first write of a
+	// profile delete: it is set BEFORE the active profile is removed, so a
+	// crash or a failed record removal after the active delete can never
+	// leave this epoch looking valid for a profile recreated under the same
+	// id — a flagged record is finished (removed) once the profile is
+	// observed absent, and its epoch is ROTATED if the profile is observed
+	// still present (the transition began; whether the active delete ran is
+	// unknowable from here, so the epoch is conservatively discarded).
+	DeletePending bool `json:"deletePending,omitempty"`
 }
 
 // ActiveRevision returns the currently-serving revision and true, or false
