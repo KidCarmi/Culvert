@@ -776,6 +776,72 @@ run_mutation M78 \
   . mcp_canary_autostop.go \
   's/\t\ttripAutoStopLocked\(rt, capb, cr, "window_expired", now\)\n\t\treturn/\t\treturn/'
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CODEX ROUND 1 ON #1314 — every safety report is bound to its own activation
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_mutation M79 \
+  'a breach from a superseded activation stops the one that replaced it' \
+  'TestAutoStop_StaleBreachNeverStopsTheNextActivation' \
+  . mcp_canary_runtime.go \
+  's/\tif wantGen != 0 && cr\.generation != wantGen \{/\tif false {/'
+
+# The generation guard on the settled-attempt path is DELIBERATELY redundant with
+# HealthMonitor.Observe's own strictness, so removing either one alone is caught by
+# nothing — the other still holds, which is the point of defense in depth. The
+# mutation therefore removes BOTH; a campaign entry that removed one and passed
+# would be measuring the redundancy, not the property.
+printf '\n[M80] a settled attempt from a superseded activation counts against the next one\n'
+printf '      gate: TestAutoStop_StaleSettledAttemptNeverCountsAgainstTheNextActivation  (both guards removed)\n'
+perl -0pi -e 's/cr\.generation != gen \{\n\t\treturn "", false/cr.generation != gen && false {\n\t\treturn "", false/' mcp_canary_autostop.go
+perl -0pi -e 's/\tif h == nil \|\| gen != h\.generation \{\n\t\treturn ""\n\t\}/\tif h == nil {\n\t\treturn ""\n\t}/' internal/mcp/canary/health.go
+if git diff --quiet mcp_canary_autostop.go || git diff --quiet internal/mcp/canary/health.go; then
+  printf '      SKIPPED — pattern drifted\n'; SKIPPED=$((SKIPPED+1))
+  revert mcp_canary_autostop.go internal/mcp/canary/health.go
+else
+  m80_out=$(go test -count=1 -run 'TestAutoStop_StaleSettledAttemptNeverCountsAgainstTheNextActivation' . 2>&1); m80_rc=$?
+  revert mcp_canary_autostop.go internal/mcp/canary/health.go
+  if ! gate_ran M80 "the stale-sample gate" "$m80_out"; then
+    [ $KEEP -eq 0 ] && exit 1
+  elif [ $m80_rc -ne 0 ]; then
+    printf '      CAUGHT (gate failed as required)\n'; PASS=$((PASS+1))
+  else
+    printf '      *** SURVIVED *** the gate passed with both guards removed\n'
+    SURVIVED=$((SURVIVED+1)); SURVIVORS+=("M80: stale samples enter the new population")
+    [ $KEEP -eq 0 ] && exit 1
+  fi
+fi
+
+run_mutation M81 \
+  'an early watchdog fire disarms the activation instead of re-arming' \
+  'TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming' \
+  . mcp_canary_autostop.go \
+  's/\t\t\trt\.rearmWindowWatchdog\(capb, gen, d\.Sub\(canaryNow\(\)\)\)\n//'
+
+run_mutation M82 \
+  'exhaustion never latches when the final slot is refused at the boundary' \
+  'TestAutoStop_ExhaustionLatchesWhenTheFinalSlotNeverSends' \
+  . mcp_canary_runtime.go \
+  's/\tif cr\.enforcer\.Remaining\(\) <= 0 && cr\.enforcer\.Inflight\(\) == 0 \{\n\t\ttripAutoStopLocked\(rt, capb, cr, "budget_exhausted", canaryNow\(\)\)\n\t\}\n//'
+
+run_mutation M83 \
+  'restore trusts the abort latch instead of re-deriving what the counters prove' \
+  'TestAutoStop_RestoreReDerivesABreachTheCountersAlreadyProve' \
+  . mcp_canary_autostop.go \
+  's/\tif code := cr\.health\.Verdict\(\); code != "" \{\n\t\ttripAutoStopLocked\(rt, capb, cr, code, canaryNow\(\)\)\n\t\treturn\n\t\}\n//'
+
+run_mutation M84 \
+  'a failed health persist is logged and the Canary carries on' \
+  'TestAutoStop_HealthPersistFailureFailsClosed' \
+  . mcp_canary_autostop.go \
+  's/\t\t_ = rt\.removeRuntimeStateAfterSafetyPersistFailure\(capb, "health", err\)\n//'
+
+run_mutation M85 \
+  'a damaged health snapshot restores as a cleared detector' \
+  'TestAutoStop_DamagedHealthSnapshotNeverRestoresAsExecutable|TestHealth_RestoreRefusesDamagedCounters' \
+  . internal/mcp/canary/health.go \
+  's/\tif snap\.Generation != gen \|\| !snap\.Valid\(\) \{\n\t\treturn nil, false\n\t\}/\tif snap.Generation != gen || !snap.Valid() {\n\t\treturn \&HealthMonitor{generation: gen}, true\n\t}/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves
