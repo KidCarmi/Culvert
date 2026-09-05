@@ -22,6 +22,7 @@
 | DEBT-011 | 🟡 PARTIAL | MCP has no anti-drift wall: designed-and-documented controls that the request path never invokes | Two walls landed 2026-08-24/25 — `internal/mcp/runtime/limits_ownership_test.go` (every Limits bound must DECLARE an enforcement owner; type-aware via go/types, so a same-named accessor on a different type cannot satisfy a row) and `mcp_execution_posture_test.go` (the disabled-execution posture is three ABSENCES no unit test observes; now executable facts). `internal/mcpacceptance/criterion_ids_test.go` applies the same idea to acceptance criterion ids in both directions. The class is NOT fully walled: policy fields, event fields and inspection controls have no equivalent ownership registry yet. |
 | DEBT-012 | ✅ CLOSED | Five `runtime.Limits` knobs remain validated-but-unenforced at the MCP runtime layer | RESOLVED 2026-08-24: every bound now carries a declared enforcement status — `enforcedHere`, `delegated` (with the owning control named) or `reserved` (with a linked decision). `AdmissionBudget`, `MaxObservations` and `CleanupPerOp` are recorded as `reserved`, and the wall fails the build if a reserved bound is ever silently read, so none can quietly become load-bearing. `AdmissionBudget` remains tied to the still-open RISK-026. |
 | DEBT-013 | 🟡 PARTIAL | MCP registry existence still leaks to an authenticated-shaped caller; upstream `MaxConnsPerServer` is per-call | Enumeration half CLOSED 2026-08-24 (OVN-08): `resolveServer` no longer consults the registry, so server identity is resolved only AFTER authentication and an invalid credential can no longer distinguish a known from an unknown server id. The per-call transport half stands and is now a recorded trade-off rather than an oversight — a per-call `http.Transport` is what makes cross-server connection, TLS-identity and credential inheritance structurally impossible, at the cost of a TLS handshake per call. Revisit only with a per-server transport whose isolation is proven. |
+| DEBT-014 | MEDIUM | Documentation-governance program produces correct, low-risk, CI-green fixes that pile up unmerged — later runs then independently rediscover and re-fix the same defect | 11 days (2026-08-25 → 2026-09-05), 10 open `docs(governance)`/`docs:` PRs; one finding (T-48, ADR-0034 numbering collision) fixed independently 5 times across #1253/#1284/#1294/#1302/#1309 |
 
 ---
 
@@ -558,3 +559,51 @@
   §§3–4 and §6 residual risk; `docs/design/mcp/SHADOW-ARCHITECTURE.md` §4 (the stage list
   that already named "server eligibility" as requiring proof); DEBT-011 is the same class
   one layer up.
+
+## DEBT-014 — Documentation-governance PR backlog: fixes pile up unmerged, defects get re-fixed · MEDIUM (2026-09-05)
+
+- **Principal:** The scheduled Language & Terminology / Documentation Governance routine correctly
+  finds real drift, writes correct fixes, and opens PRs — but essentially none of them merge. The
+  last governance PR that landed on `main` is `TERMINOLOGY-GOVERNANCE-REVIEW-2026-08-25.md`
+  (T-47, the third ADR-numbering-collision recurrence). Every dated report since then
+  (`2026-08-28` through `2026-09-04`, 8 reports) exists only inside still-open PR branches. As of
+  this entry, **10 open `docs`/`docs(governance)` PRs carry verified, CI-green, non-conflicting
+  fixes with zero requested changes**: #1239 (T-31 ClamAV metric dual-emit, open 8 days), #1250
+  (`internal/mcp` subpackage count 25→27, open 7 days), #1253/#1284/#1294/#1302/#1309 (T-48, the
+  fourth ADR-0034-numbering-collision recurrence — **the identical fix, independently
+  rediscovered and rewritten 5 separate times** because each run correctly observes `main` is
+  still broken and has no way to see a sibling PR's already-written fix without deliberately
+  querying open PRs first), #1293 (`internal/` package count 63→65), #1300 (stale/overstated
+  ADR status on 5 shipped features), #1308 (stale README release-catalog-path claim).
+- **Interest paid per change:** every day this backlog stays unmerged, `main` keeps the stale
+  doc, so the *next* scheduled run either (a) burns a full pass re-finding and re-fixing a defect
+  someone already fixed (the T-48/ADR-0034 case — 5x duplicated analysis + diff effort for one
+  one-line rename), or (b) has to spend part of its pass on PR-backlog archaeology instead of new
+  drift (as this entry itself did). The failure mode compounds: PR #1260 (2026-08-30) already
+  flagged this exact problem as a "process note" and named #1239/#1253 as ready to merge — that
+  PR is itself still unmerged 6 days later, so even the meta-finding about the backlog joined the
+  backlog.
+- **Why this is a process gap, not a documentation-content gap:** every PR checked in this pass
+  has passing CI (`security/snyk` green, no failing required check), no reviewer-requested
+  changes, and a clean, small, single-concern diff. Nothing in the review pipeline is blocking
+  these — they are simply not being merged. A governance program whose output is never consumed
+  is equivalent to not running it, at a lower confidence: it manufactures the additional
+  duplicate-work cost above without the compensating benefit of ever fixing `main`.
+- **Recommended remediation (docs-process, not code):**
+  1. Merge #1309 for T-48 (it supersedes #1253/#1284/#1294/#1302 — same rename, plus a
+     `TestADRNumbering_NoDuplicateAcrossADRAndRFCTracks` CI gate the other four lack); close the
+     other four as superseded duplicates.
+  2. Merge #1239, #1250, #1293, #1300, #1308 — five independent, non-overlapping, low-risk fixes.
+  3. Merge #1260 (the T-52 Incident-row fix + the original process note) or fold its one
+     remaining content fix into a future pass if it has since drifted from `main`.
+  4. Going forward, each scheduled run should check `list_pull_requests`/`search_pull_requests`
+     for open `docs(governance)`/terminology-review PRs *before* re-auditing a backlog item,
+     the way #1260 and this entry did — and should prefer commenting "still valid, please merge"
+     over re-deriving an identical diff.
+- **Status:** OPEN. This is a merge/triage action item for the repository owner, not something a
+  future automated pass can resolve by writing more documentation — the fixes already exist.
+- **Evidence:** GitHub PR list for `KidCarmi/Culvert` as of 2026-09-05 (PR numbers above, each
+  independently diff-verified against `origin/main` tip `290e376` — all still show the described
+  drift on `main`, all target files are unedited by any other pending PR in the set except the
+  T-48 quintet which are mutually exclusive by design); `docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-05.md`
+  (this pass's dated report) for the full audit trail.
