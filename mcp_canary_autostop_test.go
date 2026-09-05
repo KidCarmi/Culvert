@@ -958,13 +958,14 @@ func TestAutoStop_RestoreReDerivesABreachTheCountersAlreadyProve(t *testing.T) {
 
 	// Hand-build the crash shape: counters that prove an elevated error rate, abort NOT latched.
 	st := canaryRuntimeState{
-		SchemaVersion:  canaryRuntimeSchemaVersion,
-		Capability:     capb.String(),
-		Generation:     gen,
-		Active:         true,
-		BuildVersion:   currentRuntimeIdentity().BuildVersion,
-		Budget:         runtimeTestBudget(3),
-		BudgetSnapshot: canary.BudgetSnapshot{Generation: gen, StartUnixNano: now.UnixNano()},
+		SchemaVersion: canaryRuntimeSchemaVersion,
+		Capability:    capb.String(),
+		Generation:    gen,
+		Active:        true,
+		BuildVersion:  currentRuntimeIdentity().BuildVersion,
+		Budget:        runtimeTestBudget(3),
+		BudgetSnapshot: canary.BudgetSnapshot{Generation: gen, StartUnixNano: now.UnixNano(), TotalReserved: 2,
+			Principals: []string{"p1"}, Tools: []string{"t1"}, Servers: []string{"s1"}},
 		AbortSnapshot:  canary.AbortSnapshot{Generation: gen},
 		HealthSnapshot: canary.HealthSnapshot{Generation: gen, Samples: 2, Failures: 2, LatencySumNs: int64(2 * time.Second)},
 	}
@@ -1067,5 +1068,135 @@ func TestAutoStop_HealthPersistFailureFailsClosed(t *testing.T) {
 	fresh.restore()
 	if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o == canary.BudgetGranted {
 		t.Fatal("SECURITY: a restart after a failed health persist must not revive an executable activation")
+	}
+}
+
+// ── Codex round 2 ─────────────────────────────────────────────────────────────────────────────
+
+// A request admitted just before the deadline must NOT reach the upstream after it. The watchdog is
+// asynchronous and time.AfterFunc gives no ordering guarantee against the request goroutine, so the
+// final boundary evaluates the absolute deadline itself rather than trusting the latch to have
+// already happened.
+func TestAutoStop_ExpiredWindowStopsAnAlreadyAdmittedRequestAtTheBoundary(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	// The watchdog is captured and never fired: this gate is about the BOUNDARY, and firing the
+	// timer would prove the watchdog instead.
+	_, _, armedCount := swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gen := rt.currentGeneration(capb)
+	if o, _ := rt.reserveCanaryExecution(capb, canaryRuntimeTestNow, rtIdent); o != canary.BudgetGranted {
+		t.Fatalf("premise: a reservation inside the window must be granted, got %v", o)
+	}
+	if !rt.generationActive(capb, gen) {
+		t.Fatal("premise: the admitted request must pass the boundary while the window is open")
+	}
+	if armedCount() != 1 {
+		t.Fatalf("premise: exactly one watchdog armed, got %d", armedCount())
+	}
+
+	// The window elapses while the request sits between admission and preCallGuard. The watchdog
+	// has NOT run — that is the whole point.
+	nowP = canaryRuntimeTestNow.Add(2 * time.Hour)
+	if rt.generationActive(capb, gen) {
+		t.Fatal("SECURITY: an already-admitted request must not cross the boundary after the window expired")
+	}
+	if rt.abortedNow(capb) {
+		t.Fatal("premise check: the watchdog was never fired, so this gate is proving the boundary, not the latch")
+	}
+}
+
+// A health snapshot claiming more samples than the activation ever reserved is damaged in the one
+// direction that makes the detector LESS likely to fire: fabricated clean samples dilute a real
+// failure rate below the threshold. Valid() cannot see it — the invariant is across two snapshots.
+func TestAutoStop_InflatedSampleCountNeverRestoresAsExecutable(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gen := rt.currentGeneration(capb)
+	st := canaryRuntimeState{
+		SchemaVersion: canaryRuntimeSchemaVersion,
+		Capability:    capb.String(),
+		BuildVersion:  currentRuntimeIdentity().BuildVersion,
+		Generation:    gen,
+		Active:        true,
+		Budget:        runtimeTestBudget(3),
+		// ONE reservation was actually made…
+		BudgetSnapshot: canary.BudgetSnapshot{Generation: gen, StartUnixNano: now.UnixNano(), TotalReserved: 1,
+			Principals: []string{"p1"}, Tools: []string{"t1"}, Servers: []string{"s1"}},
+		AbortSnapshot: canary.AbortSnapshot{Generation: gen},
+		// …but the detector claims a hundred clean samples, which would dilute the next two
+		// failures to 2/102 instead of the 1/2 that must stop the experiment.
+		HealthSnapshot: canary.HealthSnapshot{Generation: gen, Samples: 100},
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(canaryRuntimeStatePath(capb), raw, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+
+	if o, _ := fresh.reserveCanaryExecution(capb, now, rtIdent); o == canary.BudgetGranted {
+		t.Fatal("SECURITY: a health snapshot claiming more samples than reservations must not restore into an executable activation")
+	}
+	if s := canaryAbortStatusFor(capb); s.ExecutionAuthority == "granted" {
+		t.Fatalf("such a record must not report granted authority, got %q", s.ExecutionAuthority)
+	}
+}
+
+// THE CONTROL: samples EQUAL to the reservations is the ordinary healthy shape (every reservation
+// settled), and fewer is normal too (a reservation refused at the boundary settles nothing). Neither
+// may be refused, or an ordinary restart would disarm a healthy experiment.
+func TestAutoStop_HonestSampleCountsStillRestore(t *testing.T) {
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	for name, sn := range map[string]struct{ reserved, samples int }{
+		"every reservation settled": {reserved: 2, samples: 2},
+		"one never settled":         {reserved: 2, samples: 1},
+		"nothing settled yet":       {reserved: 1, samples: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+			if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(9), now); err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			gen := rt.currentGeneration(capb)
+			st := canaryRuntimeState{
+				SchemaVersion: canaryRuntimeSchemaVersion,
+				Capability:    capb.String(),
+				BuildVersion:  currentRuntimeIdentity().BuildVersion,
+				Generation:    gen,
+				Active:        true,
+				Budget:        runtimeTestBudget(9),
+				BudgetSnapshot: canary.BudgetSnapshot{Generation: gen, StartUnixNano: now.UnixNano(), TotalReserved: sn.reserved,
+					Principals: []string{"p1"}, Tools: []string{"t1"}, Servers: []string{"s1"}},
+				AbortSnapshot:  canary.AbortSnapshot{Generation: gen},
+				HealthSnapshot: canary.HealthSnapshot{Generation: gen, Samples: sn.samples},
+			}
+			raw, err := json.Marshal(st)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := os.WriteFile(canaryRuntimeStatePath(capb), raw, 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			fresh := &canaryRuntime{}
+			globalCanaryRuntime = fresh
+			fresh.restore()
+			if !fresh.armed(capb) {
+				t.Fatalf("an honest record (%s) must still restore — refusing it would disarm a healthy experiment", name)
+			}
+		})
 	}
 }

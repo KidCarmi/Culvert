@@ -842,6 +842,22 @@ run_mutation M85 \
   . internal/mcp/canary/health.go \
   's/\tif snap\.Generation != gen \|\| !snap\.Valid\(\) \{\n\t\treturn nil, false\n\t\}/\tif snap.Generation != gen || !snap.Valid() {\n\t\treturn \&HealthMonitor{generation: gen}, true\n\t}/'
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CODEX ROUND 2 ON #1314
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_mutation M86 \
+  'the final boundary trusts the async watchdog instead of re-checking the deadline' \
+  'TestAutoStop_ExpiredWindowStopsAnAlreadyAdmittedRequestAtTheBoundary' \
+  . mcp_canary_runtime.go \
+  's/\tif cr\.enforcer != nil \{\n\t\tif d := cr\.enforcer\.WindowDeadline\(\); !d\.IsZero\(\) && !canaryNow\(\)\.Before\(d\) \{\n\t\t\treturn false\n\t\t\}\n\t\}\n//'
+
+run_mutation M87 \
+  'a health snapshot may claim more samples than the activation ever reserved' \
+  'TestAutoStop_InflatedSampleCountNeverRestoresAsExecutable|TestAutoStop_HonestSampleCountsStillRestore' \
+  . mcp_canary_runtime.go \
+  's/\tif healthOK && st\.HealthSnapshot\.Samples > st\.BudgetSnapshot\.TotalReserved \{\n\t\thealthOK = false\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

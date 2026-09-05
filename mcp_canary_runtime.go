@@ -344,7 +344,28 @@ func (rt *canaryRuntime) generationActive(capb rollout.Capability, gen uint64) b
 	if !cr.active || cr.aborter == nil || cr.generation != gen {
 		return false
 	}
-	return cr.aborter.ExecutionEligible(gen)
+	if !cr.aborter.ExecutionEligible(gen) {
+		return false
+	}
+	// THE WINDOW IS RE-CHECKED HERE, not merely at admission and not left to the watchdog.
+	//
+	// Reserve refuses a request that arrives past the deadline, but a request admitted one
+	// millisecond BEFORE it can sit between admission and preCallGuard for arbitrarily long — a
+	// scheduler pause, a slow credential path — and by the time it reaches the boundary the window
+	// may be over. The watchdog is asynchronous and time.AfterFunc offers no ordering guarantee
+	// against that goroutine, so relying on the latch having already happened is relying on a race
+	// (Codex round 2 P1). The deadline is absolute and cheap to evaluate, so the boundary evaluates
+	// it under the same lock rather than trusting that something else got there first.
+	//
+	// This makes the watchdog what it was always described as — a convenience that stops an IDLE
+	// experiment — rather than the only thing standing between an expired window and an upstream
+	// call.
+	if cr.enforcer != nil {
+		if d := cr.enforcer.WindowDeadline(); !d.IsZero() && !canaryNow().Before(d) {
+			return false
+		}
+	}
+	return true
 }
 
 // armed reports whether the capability's runtime is currently armed (an activation record was
@@ -646,6 +667,16 @@ func (rt *canaryRuntime) restoreCapability(capb rollout.Capability) {
 	// activation does not come back at all (Codex P1).
 	healthOK := false
 	cr.health, healthOK = canary.RestoreHealthMonitor(st.Generation, st.HealthSnapshot)
+	// CROSS-RECORD invariant, which HealthSnapshot.Valid cannot see: every health sample comes from
+	// an attempt that consumed a reservation, so the sample count can never exceed the reservations
+	// this activation actually made. Inflating Samples is the one damaged shape that makes the
+	// detector LESS likely to fire rather than more — 100 fabricated clean samples turn a real 1-of-2
+	// failure rate into 1-of-102 and hand the experiment back the execution the detector should have
+	// stopped (Codex round 2 P1). The two snapshots are written together atomically, so they cannot
+	// legitimately disagree.
+	if healthOK && st.HealthSnapshot.Samples > st.BudgetSnapshot.TotalReserved {
+		healthOK = false
+	}
 	if cr.enforcer == nil || cr.aborter == nil || !healthOK {
 		cr.active = false
 		cr.enforcer = nil
@@ -653,7 +684,7 @@ func (rt *canaryRuntime) restoreCapability(capb rollout.Capability) {
 		cr.health = nil
 		cr.budget = canary.Budget{}
 		if !healthOK {
-			logger.Printf("MCP canary runtime restore for %s: health snapshot missing, foreign-generation or damaged; disarmed (fail-closed)", capb.String())
+			logger.Printf("MCP canary runtime restore for %s: health snapshot missing, foreign-generation, damaged, or claiming more samples than reservations; disarmed (fail-closed)", capb.String())
 		}
 		return
 	}
