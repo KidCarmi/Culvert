@@ -78,10 +78,13 @@ func TestBoundUsername_IsInjective(t *testing.T) {
 	if boundUsername(atBound) == boundUsername(prefix) {
 		t.Error("a name at the bound shares a key with a longer name sharing its prefix")
 	}
-	// Determinism: the same name must always produce the same key, or Check and
-	// RecordFailure would disagree.
-	if boundUsername(prefix) != boundUsername(prefix) {
-		t.Error("boundUsername is not deterministic")
+	// Determinism, on EQUAL CONTENT rather than the same expression: Check and
+	// RecordFailure receive separately-built strings for what is one username,
+	// so the key must depend on the bytes and nothing else (no salt, no
+	// address, no call counter).
+	same := strings.Repeat("P", MaxUsernameKeyLen*2)
+	if boundUsername(prefix) != boundUsername(same) {
+		t.Error("two equal usernames produced different keys — Check and RecordFailure would disagree")
 	}
 }
 
