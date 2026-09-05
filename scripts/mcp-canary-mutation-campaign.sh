@@ -689,7 +689,7 @@ run_mutation M64 \
   'outcome evidence loss goes back to being metric-only' \
   'TestAutoStop_OutcomeEvidenceLossAbortsTheWholeCanary' \
   . internal/mcp/execution/attempt_evidence.go \
-  's/\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), "outcome_evidence_loss"\)\n//'
+  's/\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), rec\.generation, "outcome_evidence_loss"\)\n//'
 
 run_mutation M65 \
   'tool fingerprint drift denies the request but does not abort' \
@@ -707,13 +707,13 @@ run_mutation M67 \
   'the breach funnel silently drops credential_safety_failure' \
   'TestAutoStop_CredentialSafetyFailureAbortsTheWholeCanary' \
   . mcp_canary_autostop.go \
-  's/\tf\.rt\.tripCanaryAbort\(f\.capb, code, canaryNow\(\)\)/\tif code == "credential_safety_failure" {\n\t\treturn\n\t}\n\tf.rt.tripCanaryAbort(f.capb, code, canaryNow())/'
+  's/\tf\.rt\.tripCanaryAbortForGeneration\(f\.capb, gen, code, canaryNow\(\)\)/\tif code == "credential_safety_failure" {\n\t\treturn\n\t}\n\tf.rt.tripCanaryAbortForGeneration(f.capb, gen, code, canaryNow())/'
 
 run_mutation M68 \
   'a reconciliation conflict is recorded but reaches no abort' \
   'TestAutoStop_WitnessConflictAbortsTheWholeCanary' \
   . internal/mcp/execution/reconcile.go \
-  's/\t\te\.cfg\.Safety\.Breach\(capability, "independent_witness_mismatch"\)/\t\t_ = capability/'
+  's/\t\te\.cfg\.Safety\.Breach\(capability, orphan\.ActivationGeneration, "independent_witness_mismatch"\)/\t\t_ = capability/'
 
 run_mutation M69 \
   'a scope escape denies the request but does not abort' \
@@ -762,13 +762,13 @@ run_mutation M76 \
   'the final live revalidation stops consulting the abort latch' \
   'TestAutoStop_LatchedAbortStopsAnAlreadyAdmittedRequestBeforeTheCall|TestAutoStopConc11_LatchDuringInflightAdmissionSendsNothingMore' \
   . mcp_canary_runtime.go \
-  's/\treturn cr\.aborter\.ExecutionEligible\(gen\)/\treturn true/'
+  's/\tif !cr\.aborter\.ExecutionEligible\(gen\) \{\n\t\treturn false\n\t\}\n//'
 
 run_mutation M77 \
   'the window watchdog fires but trips nothing' \
   'TestAutoStop_WindowExpiresWithNoTrafficAtAll' \
   . mcp_canary_autostop.go \
-  's/\t\trt\.tripCanaryAbort\(capb, "window_expired", canaryNow\(\)\)/\t\t_ = capb/'
+  's/\t\trt\.tripCanaryAbortForGeneration\(capb, gen, "window_expired", canaryNow\(\)\)/\t\t_ = capb/'
 
 run_mutation M78 \
   'an expired window restores as a healthy, executable activation' \
@@ -793,7 +793,7 @@ run_mutation M79 \
 # would be measuring the redundancy, not the property.
 printf '\n[M80] a settled attempt from a superseded activation counts against the next one\n'
 printf '      gate: TestAutoStop_StaleSettledAttemptNeverCountsAgainstTheNextActivation  (both guards removed)\n'
-perl -0pi -e 's/cr\.generation != gen \{\n\t\treturn "", false/cr.generation != gen && false {\n\t\treturn "", false/' mcp_canary_autostop.go
+perl -0pi -e 's/cr\.health == nil \|\| cr\.generation != gen \{\n\t\treturn\n\t\}/cr.health == nil {\n\t\treturn\n\t}/' mcp_canary_autostop.go
 perl -0pi -e 's/\tif h == nil \|\| gen != h\.generation \{\n\t\treturn ""\n\t\}/\tif h == nil {\n\t\treturn ""\n\t}/' internal/mcp/canary/health.go
 if git diff --quiet mcp_canary_autostop.go || git diff --quiet internal/mcp/canary/health.go; then
   printf '      SKIPPED — pattern drifted\n'; SKIPPED=$((SKIPPED+1))
@@ -850,7 +850,7 @@ run_mutation M86 \
   'the final boundary trusts the async watchdog instead of re-checking the deadline' \
   'TestAutoStop_ExpiredWindowStopsAnAlreadyAdmittedRequestAtTheBoundary' \
   . mcp_canary_runtime.go \
-  's/\tif cr\.enforcer != nil \{\n\t\tif d := cr\.enforcer\.WindowDeadline\(\); !d\.IsZero\(\) && !canaryNow\(\)\.Before\(d\) \{\n\t\t\treturn false\n\t\t\}\n\t\}\n//'
+  's/\tif cr\.enforcer != nil && !cr\.enforcer\.WindowOpen\(canaryNow\(\)\) \{\n\t\treturn false\n\t\}\n//'
 
 run_mutation M87 \
   'a health snapshot may claim more samples than the activation ever reserved' \
@@ -952,7 +952,7 @@ run_mutation M96 \
   'a JSON-RPC error response counts as a successful attempt' \
   'TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/return err != nil || resp == nil || resp\.Error != nil/return err != nil || resp == nil/'
+  's/return err != nil \|\| resp == nil \|\| resp\.Error != nil/return err != nil || resp == nil/'
 
 run_mutation M97 \
   'the operator status tests only the upper end of the window' \
@@ -966,7 +966,7 @@ run_mutation M98 \
   'a closed window still reports granted execution authority' \
   'TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission' \
   . mcp_canary_autostop.go \
-  's/\tcase active \&\& (aborted || windowClosed):/\tcase active \&\& aborted:/'
+  's/\tcase active \&\& \(aborted \|\| windowClosed\):/\tcase active \&\& aborted:/'
 
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #

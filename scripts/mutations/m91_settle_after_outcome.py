@@ -19,7 +19,7 @@ SETTLED_HEAD = "\t// One SETTLED post-admission attempt, for the population dete
 SETTLED_TAIL = (
     "\tif state != model.SendStateUnset && state != model.SendDefinitelyNotSent {\n"
     "\t\te.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, "
-    "!state.ProvesReceipt(), e.cfg.Clock().Sub(rec.startedAt))\n"
+    "upstreamFailed, e.cfg.Clock().Sub(rec.startedAt))\n"
     "\t}\n"
 )
 COMMIT_HEAD = (
