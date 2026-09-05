@@ -297,8 +297,26 @@ func acquireProductionKEK(path string) (*secret.Provider, error) {
 // means NO connection, never an unauthenticated one.
 func newProductionUpstreamClient() (*upstreamclient.Client, error) {
 	resolver := prodDestinationResolver{r: &net.Resolver{}}
+	// RETRY-FREE (review blocker #6). This is the ONLY production upstream client,
+	// and it serves the live-execution tier — i.e. the Canary path. The First-Canary
+	// contract is that one accepted execution reservation implies AT MOST ONE
+	// physical side-effect-bearing tool invocation, and the default limits break it:
+	// a peer that reads the whole request and then drops the connection produces
+	// exactly the (idempotent, pre-response) shape that authorizes a re-send, with no
+	// emergency-kill re-read between attempts. Charging each attempt to the budget was
+	// considered and REJECTED — it bounds the count but lets three retries of one
+	// logical reservation consume the whole experiment, destroying the
+	// exactly-N-invocations witness invariant.
+	//
+	// Non-Canary behavior is untouched: nothing else constructs this client, and
+	// upstreamclient's RetryDefault mode still fills the historical retry budget for
+	// every other caller.
+	lim, lerr := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	if lerr != nil {
+		return nil, lerr
+	}
 	return upstreamclient.New(upstreamclient.Config{
-		Limits:           upstreamclient.DefaultLimits(),
+		Limits:           lim,
 		Resolver:         resolver,
 		Policy:           destination.DefaultGatewayPolicy(),
 		InspectionLimits: limits.DefaultGatewayInspection(),

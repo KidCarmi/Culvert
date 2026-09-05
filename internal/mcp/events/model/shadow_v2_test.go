@@ -236,7 +236,9 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			e.Shadow.Outcome = "would_block"
 			e.Shadow.CredentialPlan = "no_credential_profile"
 		},
-		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
+		// Above the newest supported version, not a specific number: 3 became real
+		// when the First-Canary attempt evidence landed.
+		"unsupported schema version": func(e *Event) { e.SchemaVersion = SchemaVersionV3 + 1 },
 	}
 	for name, mut := range cases {
 		e := validV2ShadowEvent()
@@ -354,13 +356,16 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 	}
 }
 
-// TestV2_SupportedSchemaVersion pins the version acceptance set (v1+v2 supported; others
-// rejected) — the load-bearing v1/v2 reader contract gate.
+// TestV2_SupportedSchemaVersion pins the version acceptance set (v1+v2+v3 supported;
+// others rejected) — the load-bearing reader contract gate. v3 moved from the
+// rejected set to the supported set when the First-Canary attempt evidence was
+// introduced; every version ABOVE this build's own stays rejected, which is the half
+// that must never weaken.
 func TestV2_SupportedSchemaVersion(t *testing.T) {
-	if !SupportedSchemaVersion(1) || !SupportedSchemaVersion(2) {
-		t.Fatal("a v2 build must support both v1 and v2")
+	if !SupportedSchemaVersion(1) || !SupportedSchemaVersion(2) || !SupportedSchemaVersion(3) {
+		t.Fatal("this build must support v1, v2 and v3")
 	}
-	for _, v := range []int{0, 3, 99, -1} {
+	for _, v := range []int{0, 4, 99, -1} {
 		if SupportedSchemaVersion(v) {
 			t.Fatalf("schema version %d must be unsupported (fail closed)", v)
 		}

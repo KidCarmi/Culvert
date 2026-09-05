@@ -80,8 +80,44 @@ func (e Event) Validate() error { //nolint:gocyclo,cyclop // a flat set of indep
 	if err := e.validateShadowWriteOnly(); err != nil {
 		return err
 	}
+	if err := e.validateAttemptSchema(); err != nil {
+		return err
+	}
 	return nil
 }
+
+// validateAttemptSchema enforces the v3 attempt-evidence pairing in BOTH directions:
+// an event carrying attempt evidence must be stamped v3, and a v3 event must carry
+// it. The forward direction is the load-bearing one — a record whose canonical bytes
+// include fields its stamped version does not describe reads back on an older build
+// as SPOOL CORRUPTION rather than as an unsupported schema, so a version rollback
+// would raise the tampering alarm and abort recovery. The reverse direction keeps the
+// version honest: a v3 stamp on an event with nothing v3 in it would silently make an
+// ordinary record unreadable to a build that could otherwise have read it.
+//
+// Shadow (v2) and attempt evidence (v3) are mutually exclusive by construction: a
+// Shadow evaluation never sends anything, so it has no attempt to identify. That is
+// asserted rather than assumed — the two stamps are single-valued, so an event
+// carrying both shapes could only be recorded under one of them.
+func (e Event) validateAttemptSchema() error {
+	carries := e.CarriesAttemptEvidence()
+	if carries && e.Shadow != nil {
+		return evtErr(mcperr.ReasonEventInvalid, "shadow evidence on an attempt-evidence event")
+	}
+	switch {
+	case carries && e.SchemaVersion != SchemaVersionV3:
+		return evtErr(mcperr.ReasonEventInvalid, "attempt evidence requires schema v3")
+	case !carries && e.SchemaVersion == SchemaVersionV3:
+		return evtErr(mcperr.ReasonEventInvalid, "schema v3 requires attempt evidence")
+	}
+	return nil
+}
+
+// ValidateEvidenceSchema is the NARROW, recovery-scoped version pairing check, the
+// attempt-evidence sibling of ValidateShadowEvidence. The spool applies it to a
+// digest-verified record so a stamp/shape disagreement is reported as the schema
+// fault it is, instead of being silently accepted into recovery.
+func (e Event) ValidateEvidenceSchema() error { return e.validateAttemptSchema() }
 
 // validateShadowWriteOnly rejects shapes that must never be PRODUCED, even though a legacy
 // instance of them may still be READ. Validate runs only on the write/commit path
@@ -215,6 +251,13 @@ func (e Event) validateShadow() error {
 		return nil
 	case SchemaVersionV2:
 		return e.validateShadowV2()
+	case SchemaVersionV3:
+		// v3 is the attempt-evidence envelope. It never carries Shadow — the two are
+		// mutually exclusive (validateAttemptSchema) — so the v1 rule applies verbatim.
+		if e.Shadow != nil {
+			return evtErr(mcperr.ReasonEventInvalid, "shadow evidence on a v3 event")
+		}
+		return nil
 	default:
 		// Unreachable: SupportedSchemaVersion already gated the version.
 		return evtErr(mcperr.ReasonEventSchemaVersion, "unknown schema version")
@@ -459,15 +502,157 @@ func validateShadowOutcomeOverride(sh *ShadowEvidence) error {
 // validatePhase enforces per-phase evidence requirements and the
 // criticality/action-class coupling by delegating to a per-phase helper.
 func (e Event) validatePhase() error {
+	// Witness evidence belongs to exactly one phase. Allowing it to ride on any
+	// other event would let a reconciliation claim reach the ledger attached to a
+	// record the reconciliation state machine never inspects.
+	if e.Reconciliation != nil && e.Phase != PhaseReconciliation {
+		return evtErr(mcperr.ReasonEventInvalid, "reconciliation evidence on a non-reconciliation event")
+	}
+	// THE SYMMETRIC RULE FOR OUTCOME EVIDENCE, stated GLOBALLY rather than per phase
+	// (Codex round 13). Reconciliation evidence has had a global coupling check since
+	// it was introduced; outcome evidence was policed only by the phases that happened
+	// to look for it — the decision/outcome path and the reconciliation path — so the
+	// MARKER and DENIAL phases accepted an attempt-bearing outcome without comment.
+	// Recovery dispatches on Phase, so such a record is read and returned WITHOUT
+	// indexing the outcome: a terminal peer_response_received could ride on a health
+	// event while its send intent was still reported as an unresolved orphan.
+	//
+	// Stating it once, over the ALLOWED set, is what makes it hold for phases nobody
+	// has written yet. Two phases legitimately carry it: an outcome IS the evidence,
+	// and a send intent uses it to name its attempt.
+	if e.Outcome != nil && e.Phase != PhaseOutcome && e.Phase != PhaseSendIntent {
+		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a phase that cannot carry it")
+	}
 	switch e.Phase {
 	case PhaseDecision, PhaseOutcome:
 		return e.validateDecisionPhase()
 	case PhaseDenialAggregate:
 		return e.validateDenialPhase()
 	case PhaseRecoveryMarker, PhaseHealth:
-		if e.Marker == nil || e.Marker.State == "" {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "marker event without marker state")
+		return e.validateMarkerPhase()
+	case PhaseReconciliation:
+		return e.validateReconciliationPhase()
+	case PhaseSendIntent:
+		return e.validateSendIntentPhase()
+	}
+	return nil
+}
+
+// validateMarkerPhase validates a recovery-marker or health event.
+func (e Event) validateMarkerPhase() error {
+	if e.Marker == nil || e.Marker.State == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "marker event without marker state")
+	}
+	return nil
+}
+
+// validateReconciliationPhase validates append-only witness evidence.
+//
+// Evidence that cannot name its attempt or its result is not evidence; committing
+// it would put an unusable record in the ledger. And a reconciliation event may not
+// carry a terminal outcome: the ABSENCE of one is precisely what defines the orphan
+// this event exists to resolve.
+func (e Event) validateReconciliationPhase() error {
+	if e.Reconciliation == nil || e.Reconciliation.AttemptID == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "reconciliation without attempt identity")
+	}
+	if !e.Reconciliation.Result.Valid() {
+		return evtErr(mcperr.ReasonEventInvalid, "reconciliation with unknown result")
+	}
+	if e.Outcome != nil {
+		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a reconciliation event")
+	}
+	return e.Reconciliation.validateVerdictAgainstFacts()
+}
+
+// validateVerdictAgainstFacts rejects a reconciliation record whose VERDICT is not
+// supported by the FACTS recorded beside it.
+//
+// Until this check existed the validator only tested enum membership, so a record
+// claiming reconciled_not_received while reporting one observation and no
+// completeness proof was durably committable — and recovery trusts the stored result
+// rather than re-deriving it, so contradictory or incomplete witness data became
+// definitive non-receipt. The engine's own derivation already refuses both shapes;
+// this makes the DURABLE boundary refuse them too, so a record written by any other
+// producer (an adapter, an import, a future witness integration) cannot assert
+// knowledge its own evidence contradicts.
+//
+// Only the two RESOLVED verdicts are constrained, and each is constrained to exactly
+// what deriveReconResult requires to reach it:
+//
+//   - reconciled_not_received — absence, so zero observations AND a completeness
+//     proof. Absence from an incomplete view proves nothing.
+//   - reconciled_received — exactly one observation AND a completeness proof. "Exactly
+//     one" is a claim about the whole population, so it needs the same proof absence
+//     does; without it an unseen duplicate hides behind a resolved verdict.
+//
+// reconciliation_required asserts nothing and is deliberately unconstrained.
+// reconciliation_conflict is deliberately unconstrained too: it is reachable from a
+// duplicate (count > 1) AND from a single observation whose binding contradicts the
+// intent, and the binding the witness reported is not carried on this record — so a
+// count rule would reject a truthful conflict. Constraining the alarm direction also
+// has the wrong failure mode: refusing to record a breach is worse than recording one
+// whose count looks unusual.
+//
+// A negative count is malformed input rather than an observation and is rejected for
+// every verdict, including the unconstrained ones.
+func (r *ReconciliationEvidence) validateVerdictAgainstFacts() error {
+	if r.ObservationCount < 0 {
+		return evtErr(mcperr.ReasonEventInvalid, "reconciliation with a negative observation count")
+	}
+	// A DUPLICATE OUTRANKS EVERY OTHER VERDICT. Observing more than one matching
+	// invocation is a definitive breach of the exactly-once invariant at ANY
+	// completeness — a duplicate seen is a duplicate, and a wider view could only find
+	// more — so a record reporting count > 1 must SAY conflict. Leaving
+	// reconciliation_required unconstrained let such a record be committed as
+	// "asserts nothing", and recovery trusts Result: settledReconOK's switch ignores
+	// reconciliation_required entirely, so the attempt was reported cleanly settled
+	// while its own facts recorded the duplicate physical effect this whole mechanism
+	// exists to detect (Codex round 9).
+	//
+	// This does not re-constrain the conflict direction. ReconConflict still accepts
+	// ANY count, because it is also reachable from a single observation whose binding
+	// contradicts the intent.
+	if r.ObservationCount > 1 && r.Result != ReconConflict {
+		return evtErr(mcperr.ReasonEventInvalid, "duplicate observations recorded under a non-conflict verdict")
+	}
+	switch r.Result {
+	case ReconNotReceived:
+		if r.ObservationCount != 0 {
+			return evtErr(mcperr.ReasonEventInvalid, "definitive non-receipt with a non-zero observation count")
 		}
+		if r.CompletenessWatermark == "" {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "definitive non-receipt without a completeness proof")
+		}
+	case ReconReceived:
+		if r.ObservationCount != 1 {
+			return evtErr(mcperr.ReasonEventInvalid, "receipt without exactly one observation")
+		}
+		if r.CompletenessWatermark == "" {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "receipt without a completeness proof")
+		}
+	}
+	return nil
+}
+
+// validateSendIntentPhase validates a durable pre-send intent.
+//
+// An intent that cannot name its attempt is useless for reconciliation: an orphan
+// with no AttemptID can never be matched against an independent witness, so it fails
+// closed rather than committing unusable evidence.
+func (e Event) validateSendIntentPhase() error {
+	if e.Outcome == nil || e.Outcome.AttemptID == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "send intent without attempt identity")
+	}
+	// A SEND INTENT MAY NOT CLAIM A PHYSICAL SEND STATE (Codex round 12). The intent is
+	// committed BEFORE the call begins, so it cannot know one — "in flight or
+	// interrupted" is precisely the absence of a terminal outcome, and that is what
+	// makes an orphan an orphan. A record claiming peer_response_received on the intent
+	// is not merely odd: recovery treats it as an intent and orphanFrom drops the claim
+	// on the floor, so the ledger would carry an assertion about a physical effect that
+	// nothing reads and nothing contradicts.
+	if e.Outcome.PhysicalSendState != SendStateUnset {
+		return evtErr(mcperr.ReasonEventInvalid, "send intent claiming a physical send state")
 	}
 	return nil
 }
@@ -502,6 +687,14 @@ func (e Event) validateDecisionPhase() error {
 		// the pre-execution decision commit.
 		if err := checkID("decision_ref", "evt_", e.Outcome.DecisionRef); err != nil {
 			return evtErr(mcperr.ReasonEventEvidenceMissing, "outcome event without a committed decision ref")
+		}
+		// An ATTEMPT-BEARING outcome must state what happened to the invocation. The
+		// zero value is the "unknown" this ledger exists to eliminate, and an unknown
+		// state does not fail here — it fails much later, inside recovery, where it
+		// poisons the derivation of an attempt whose physical effect is already done.
+		// Outcomes with no AttemptID predate attempt accounting and are left alone.
+		if e.Outcome.AttemptID != "" && !e.Outcome.PhysicalSendState.Valid() {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "attempt outcome without a valid physical send state")
 		}
 	} else if e.Outcome != nil {
 		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a non-outcome event")
@@ -556,6 +749,29 @@ func (e Event) validateFieldBounds() error {
 			return evtErr(mcperr.ReasonEventTooLarge, "a safe field exceeds its structural bound")
 		}
 	}
+	if o := e.Outcome; o != nil {
+		// Attempt/reservation identity and the send state are structural, but they
+		// are still strings on a durable record and must not be able to blow the
+		// per-event bound.
+		for _, s := range []string{o.AttemptID, o.ReservationID, string(o.PhysicalSendState)} {
+			if len(s) > maxFieldBytes {
+				return evtErr(mcperr.ReasonEventTooLarge, "an outcome field exceeds its structural bound")
+			}
+		}
+	}
+	if rc := e.Reconciliation; rc != nil {
+		// These come from an INDEPENDENT WITNESS — i.e. outside this process. An
+		// unbounded witness string is the one way external input could grow a durable
+		// ledger record without limit, so it is bounded here, structurally.
+		for _, s := range []string{
+			rc.AttemptID, rc.ReservationID, string(rc.Result), rc.WitnessSource,
+			rc.CompletenessWatermark, rc.EvidenceDigest,
+		} {
+			if len(s) > maxFieldBytes {
+				return evtErr(mcperr.ReasonEventTooLarge, "a reconciliation field exceeds its structural bound")
+			}
+		}
+	}
 	if sh := e.Shadow; sh != nil {
 		for _, s := range []string{sh.Outcome, sh.CredentialPlan, sh.MaterializationReadiness, sh.RequestInspection, sh.ResponseInspection} {
 			if len(s) > maxFieldBytes {
@@ -570,6 +786,15 @@ func (e Event) validateFieldBounds() error {
 	}
 	return nil
 }
+
+// ValidDecisionRef reports whether s is a structurally valid committed-decision
+// reference, by the SAME rule Validate applies to an outcome's DecisionRef.
+//
+// It is exported so the recovery read path — which deliberately does not call the
+// full Validate — can mirror this rule rather than reimplement it. A second copy of
+// the prefix, body, charset and length checks would be free to drift from the writer,
+// and a drifting mirror is worse than no mirror: it looks enforced (Codex round 12).
+func ValidDecisionRef(s string) bool { return checkID("decision_ref", "evt_", s) == nil }
 
 // checkID validates a prefixed, bounded, safe-charset identifier. IDs are safe
 // correlation handles, never security tokens, and must be non-empty, carry the

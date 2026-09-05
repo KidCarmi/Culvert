@@ -28,6 +28,18 @@ type DecisionFacts struct {
 	// shadowDecisionFacts, from the SAME ShadowDecision returned to the client.
 	Shadow *model.ShadowEvidence
 
+	// Outcome, when non-nil, carries the post-execution / send-intent evidence
+	// (attempt identity, reservation binding, activation generation, physical send
+	// state). It is set for PhaseSendIntent and PhaseOutcome events.
+	Outcome *model.OutcomeEvidence
+	// Reconciliation, when non-nil, carries append-only witness-reconciliation
+	// evidence. Set only for PhaseReconciliation events.
+	Reconciliation *model.ReconciliationEvidence
+	// Phase selects the event phase. The zero value is PhaseDecision, so every
+	// existing caller is byte-identical; PhaseSendIntent and PhaseOutcome are set
+	// explicitly by the execution path.
+	Phase model.Phase
+
 	SnapshotHash  string
 	CorrelationID string // optional; generated when empty
 }
@@ -81,32 +93,50 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 		corr = randID("cor_")
 	}
 	// A Shadow decision event (carrying ShadowEvidence) is stamped SchemaVersionV2 — the
-	// only events that are v2. Every other event stays the default v1, so its canonical
-	// digest is unchanged (SHADOW-EVIDENCE-ROUTING-1 §5, smallest compatibility-safe model).
+	// only events that are v2 — and an attempt-evidence event SchemaVersionV3 (below,
+	// derived from the assembled event). Every other event stays the default v1, so its
+	// canonical digest is unchanged (SHADOW-EVIDENCE-ROUTING-1 §5, smallest
+	// compatibility-safe model).
 	schema := model.SchemaVersion
 	if f.Shadow != nil {
 		schema = model.SchemaVersionV2
 	}
-	return &model.Event{
-		SchemaVersion: schema,
-		EventID:       randID("evt_"),
-		Phase:         model.PhaseDecision,
-		Criticality:   f.Criticality,
-		Partition:     part,
-		Capability:    f.Capability,
-		ActionClass:   f.ActionClass,
-		NodeID:        m.nodeID,
-		DomainID:      d.spool.DomainID(part),
-		TimeUnixNano:  m.clock().UnixNano(),
-		ReplayID:      randID("rpl_"),
-		CorrelationID: corr,
-		SnapshotHash:  f.SnapshotHash,
-		Identity:      f.Identity,
-		Decision:      f.Decision,
-		Inspection:    f.Inspection,
-		Credential:    f.Credential,
-		Shadow:        f.Shadow,
+	// The zero Phase means PhaseDecision, preserving every pre-existing caller.
+	phase := f.Phase
+	if phase == model.PhaseNone {
+		phase = model.PhaseDecision
 	}
+	ev := &model.Event{
+		SchemaVersion:  schema,
+		EventID:        randID("evt_"),
+		Phase:          phase,
+		Criticality:    f.Criticality,
+		Partition:      part,
+		Capability:     f.Capability,
+		ActionClass:    f.ActionClass,
+		NodeID:         m.nodeID,
+		DomainID:       d.spool.DomainID(part),
+		TimeUnixNano:   m.clock().UnixNano(),
+		ReplayID:       randID("rpl_"),
+		CorrelationID:  corr,
+		SnapshotHash:   f.SnapshotHash,
+		Identity:       f.Identity,
+		Decision:       f.Decision,
+		Inspection:     f.Inspection,
+		Credential:     f.Credential,
+		Outcome:        f.Outcome,
+		Reconciliation: f.Reconciliation,
+		Shadow:         f.Shadow,
+	}
+	// The attempt-evidence stamp is derived from the EVENT, not from the facts, so
+	// the version can never disagree with the shape that is actually about to be
+	// canonicalized and digested. A record carrying v3 fields under a v1 stamp reads
+	// back on an older build as spool corruption rather than as an unsupported
+	// schema — see model.CarriesAttemptEvidence.
+	if ev.CarriesAttemptEvidence() {
+		ev.SchemaVersion = model.SchemaVersionV3
+	}
+	return ev
 }
 
 // onCommitFailure classifies a commit failure by criticality and drives the state
