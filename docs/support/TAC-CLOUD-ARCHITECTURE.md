@@ -50,7 +50,7 @@ Two physically separate stores with different trust, access, and retention:
 | **Raw evidence store** | uploaded `csb` bundles exactly as received (already redacted + E2E encrypted by the appliance) | encrypted at rest under a per-case data key; appliance-side E2E envelope on top | **no standing human access**; only sandboxed extract workers (per-job, audited) and audited **exceptional access** (break-glass, dual-control, logged) | **short** (e.g. 30 days default, contractually adjustable), then hard-deleted |
 | **Normalized findings store** | analyzer outputs: typed findings, timeline, correlations, known-issue matches, redacted excerpts approved for reuse | encrypted at rest | TAC engineers per entitlement/case scope; AI (normalized input) | longer (case lifetime + contractual audit window) |
 
-The raw plane is **write-once, read-by-sandbox-only**. Findings are derived in isolated workers and written to the findings plane; TAC and AI work from findings, not raw bundles, by default (§6, ADR-0034).
+The raw plane is **write-once, read-by-sandbox-only**. Findings are derived in isolated workers and written to the findings plane; TAC and AI work from findings, not raw bundles, by default (§6, ADR-0036).
 
 ---
 
@@ -72,7 +72,7 @@ upload → [1 gateway: authn + entitlement + size/format gate]
 5. **Normalize** — analyzer outputs become typed `Finding` records with stable codes, severity, evidence references (pointers into the bundle, not raw dumps), and remediation.
 6. **Correlate** — timeline construction from the appliance's raw event records; CP/DP + cluster correlation across all node bundles in the case (split-brain, drift, version-skew — the cross-node analysis a single appliance can't do); release linkage.
 7. **Known-issue / runbook match** — findings matched against the vendor knowledge base and prior incidents (cross-fleet learning).
-8. **AI-assisted diagnosis** — receives **normalized findings + approved evidence excerpts by default**, not raw bundle contents (ADR-0034); drafts diagnosis and customer response for TAC review.
+8. **AI-assisted diagnosis** — receives **normalized findings + approved evidence excerpts by default**, not raw bundle contents (ADR-0036); drafts diagnosis and customer response for TAC review.
 9. **TAC workflow** — approval, customer comms, escalation, GitHub linkage, SLA/queue.
 
 ---
@@ -91,7 +91,7 @@ Hard caps: decompression ≤ 500 MB per bundle; extraction file-count/path-depth
 
 ---
 
-## 6. AI boundary (ADR-0034)
+## 6. AI boundary (ADR-0036)
 
 - **Default input:** normalized `Finding` records + evidence *excerpts explicitly approved* for AI reuse (already redacted by the appliance and re-checked in normalization). AI never receives the raw bundle by default.
 - **Exceptional raw access:** only via audited, dual-control break-glass on the raw plane, never through the AI path.
