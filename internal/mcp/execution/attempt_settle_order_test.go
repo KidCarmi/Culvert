@@ -468,6 +468,14 @@ func TestAttemptSettled_CallerCancellationIsNotASampleAtAll(t *testing.T) {
 		failed  bool
 	}{
 		{"caller cancelled", mcperr.New(mcperr.ReasonUpstreamCancelled, "upstreamclient", "cancelled"), 0, false},
+		// The SECOND shape: the caller went away during the BODY read, after headers arrived. The
+		// transport treats everything past the headers as a failure of the ANSWER, so it wraps the
+		// cancellation as ReasonUpstreamCallFailed — and a reason-only test reads that as the
+		// target failing (Codex round 10).
+		{"cancelled during the body read", mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "read response", context.Canceled), 0, false},
+		// The CONTROL for that: a deadline overrun wrapped exactly the same way is still charged.
+		// context.DeadlineExceeded is a different sentinel, and the exclusion must not widen to it.
+		{"deadline during the body read", mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "read response", context.DeadlineExceeded), 1, true},
 		{"deadline exceeded", mcperr.New(mcperr.ReasonUpstreamTimeout, "upstreamclient", "deadline exceeded"), 1, true},
 		{"connect failed", mcperr.New(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "dial"), 1, true},
 	} {

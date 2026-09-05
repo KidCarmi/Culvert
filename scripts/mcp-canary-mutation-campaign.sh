@@ -988,6 +988,14 @@ run_mutation M102 \
   ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
   's/\tif callerCancelled\(err\) \{\n\t\treturn\n\t\}\n//'
 
+# M103 is Codex round 10: cancellation arrives in TWO shapes, and the reason-only test misses the
+# one that happens after response headers — which the transport wraps as ReasonUpstreamCallFailed.
+run_mutation M103 \
+  'a cancellation during the body read is charged against the target' \
+  'TestAttemptSettled_CallerCancellationIsNotASampleAtAll' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/ \|\| errors\.Is\(err, context\.Canceled\)//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

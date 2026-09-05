@@ -146,7 +146,9 @@ is trust-breach → settle → terminal outcome → release, because a threshold
 does not stop anything if the next request can take the freed slot first. Two entries in the
 classifier are deliberate and go in opposite directions: a pinned-identity mismatch
 (`ReasonUpstreamTLSIdentity`) is the single-occurrence `server_identity_drift` breach rather than a
-sample, and a caller cancellation (`context.Canceled`) is not evidence about the target at all, so it is
+sample, and a caller cancellation (`context.Canceled`, matched by REASON before the answer and by wrapped
+CAUSE during the body read — the transport reclassifies everything past the headers) is not evidence
+about the target at all, so it is
 excluded from the POPULATION rather than counted as a success — recording it would pad the
 denominator and dilute a real failure below the threshold. A DEADLINE overrun is evidence, and is
 still a charged sample.

@@ -368,7 +368,22 @@ func upstreamLegFailed(resp *upstreamclient.Response, err error) bool {
 // DEADLINE overrun is ReasonUpstreamTimeout, not this reason, and it IS charged — a target too slow
 // to answer inside the budget is a target misbehaving.
 func callerCancelled(err error) bool {
-	return err != nil && mcperr.ReasonOf(err) == mcperr.ReasonUpstreamCancelled
+	if err == nil {
+		return false
+	}
+	// TWO SHAPES, because cancellation arrives differently depending on WHEN the caller goes away.
+	//
+	// Before or during client.Do, the transport classifies it and the REASON says so. But once
+	// response headers are in hand, the transport's own comment is emphatic that everything after
+	// is "a failure of the ANSWER, never of delivery" — so a cancellation during the BODY read is
+	// wrapped as ReasonUpstreamCallFailed, and a reason-only test reads it as the target failing.
+	// Two such client hang-ups would trip elevated_error_rate on a peer that answered both times
+	// (Codex round 10).
+	//
+	// errors.Is reaches the cause because mcperr.Error implements Unwrap. It is exact rather than
+	// broad: context.DeadlineExceeded is a DIFFERENT sentinel and does not match here, so a target
+	// too slow to answer inside the budget is still a charged sample.
+	return mcperr.ReasonOf(err) == mcperr.ReasonUpstreamCancelled || errors.Is(err, context.Canceled)
 }
 
 // releaseReservation returns the budget slot, nil-safe so the ordered defer above reads as one
