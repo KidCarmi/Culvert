@@ -5,6 +5,7 @@ package runtime
 // Codex round 14).
 
 import (
+	"encoding/hex"
 	"sync"
 	"testing"
 
@@ -75,7 +76,7 @@ func TestCanaryBreach_PreExecutorToolDriftIsReported(t *testing.T) {
 	p, stale, _ := driftFixture(t, rec)
 
 	rb := p.newRecord(Request{}, fixedClock())
-	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}); !refused {
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true); !refused {
 		t.Fatal("premise: a stale fingerprint must be refused here")
 	}
 
@@ -93,7 +94,7 @@ func TestCanaryBreach_CurrentFingerprintReportsNothing(t *testing.T) {
 	p, _, fresh := driftFixture(t, rec)
 
 	rb := p.newRecord(Request{}, fixedClock())
-	if _, refused := p.refuseOnToolDrift(rb, fresh, jsonrpc.ID{}); refused {
+	if _, refused := p.refuseOnToolDrift(rb, fresh, jsonrpc.ID{}, true); refused {
 		t.Fatal("premise: a current fingerprint must not be refused")
 	}
 	if got := rec.codes(); len(got) != 0 {
@@ -108,7 +109,91 @@ func TestCanaryBreach_NoSeamComposedIsAPlainRefusal(t *testing.T) {
 	p, stale, _ := driftFixture(t, nil)
 
 	rb := p.newRecord(Request{}, fixedClock())
-	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}); !refused {
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true); !refused {
 		t.Fatal("a stale fingerprint must still be refused with no seam composed")
+	}
+}
+
+// TestCanaryBreach_ShadowEvaluationDoesNotStopTheCanary pins the SCOPE binding, and it guards the
+// direction a safety control must never err in.
+//
+// With Shadow fallback enabled, an OUT-OF-SCOPE request under Canary mode resolves to a shadow
+// evaluation and still reaches this refusal. Reported unconditionally, a catalog change for a tool
+// the experiment never reviewed would abort the whole Canary — and to an operator, a healthy
+// experiment stopped for something outside its own blast radius is indistinguishable from the
+// control being broken (Codex round 15).
+func TestCanaryBreach_ShadowEvaluationDoesNotStopTheCanary(t *testing.T) {
+	rec := &breachRecorder{}
+	p, stale, _ := driftFixture(t, rec)
+
+	rb := p.newRecord(Request{}, fixedClock())
+	// canaryScoped=false is what dispatchExecute passes for a shadow evaluation.
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, false); !refused {
+		t.Fatal("premise: the request must still be REFUSED — only the whole-Canary stop is scoped")
+	}
+	if got := rec.codes(); len(got) != 0 {
+		t.Fatalf("SECURITY: drift on traffic outside the Canary's reviewed scope stopped the whole "+
+			"experiment, reported=%v", got)
+	}
+}
+
+// TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift pins the drift CLASS.
+//
+// toolHasDrifted is true for two different facts: the fingerprint moved, and the eligibility moved
+// with the fingerprint unchanged (catalog.DisableServer, a quarantine, a review requirement).
+// Hard-coding tool_fingerprint_drift told an operator the tool's SHAPE changed when what happened
+// was their own DisableServer — and because the admission-time classifier calls that same condition
+// server_identity_drift, the immutable first cause depended on which detection window won the race
+// (Codex round 15). Two windows must not disagree about what one fact is called.
+func TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift(t *testing.T) {
+	rec := &breachRecorder{}
+	k := newESKey(t, "k1")
+	deps := testDeps(t, k, nil)
+	live := ingestTool(t, deps.Registry, deps.Catalog, testServerID, "x", `{"type":"object"}`)
+	deps.CanaryBreach = rec.report
+	p := newGatewayPipeline(t, deps)
+
+	liveRec, ok := deps.Catalog.Current().Get(catalog.ToolKey{
+		Server: registry.ServerID(testServerID), Name: "x",
+	})
+	if !ok {
+		t.Fatal("the ingested tool is not in the catalog")
+	}
+	disp, drift := policyDisposition(liveRec.Eligibility)
+
+	// The decision carries the CURRENT fingerprint; only the eligibility axis will move.
+	in := policy.DecisionInput{
+		Capability: policy.CapGateway,
+		Tool: &policy.Tool{
+			Name: "x", ServerID: testServerID, FingerprintHash: live,
+			Disposition: disp, Drift: drift,
+		},
+	}
+	rb := p.newRecord(Request{}, fixedClock())
+	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true); refused {
+		t.Fatal("premise: nothing has drifted yet")
+	}
+
+	// The operator disables the server. The fingerprint is deliberately preserved by the catalog.
+	deps.Catalog.DisableServer(registry.ServerID(testServerID))
+	after, ok := deps.Catalog.Current().Get(catalog.ToolKey{
+		Server: registry.ServerID(testServerID), Name: "x",
+	})
+	if !ok {
+		t.Fatal("premise: the record must still exist, only its eligibility changes")
+	}
+	sum := after.Fingerprint.Sum()
+	if hex.EncodeToString(sum[:]) != live {
+		t.Fatal("premise: DisableServer must preserve the fingerprint, or this test proves nothing")
+	}
+
+	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true); !refused {
+		t.Fatal("an eligibility change must still be refused")
+	}
+	got := rec.codes()
+	if len(got) != 1 || got[0] != "server_identity_drift" {
+		t.Fatalf("SECURITY: an eligibility change must be reported as server_identity_drift — the "+
+			"fingerprint did not move, and the admission-time classifier calls this same condition "+
+			"by that name; reported=%v", got)
 	}
 }

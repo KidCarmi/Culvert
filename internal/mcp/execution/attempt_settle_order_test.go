@@ -591,3 +591,45 @@ func TestBreach_UndriftedBoundaryRaisesNoDriftBreach(t *testing.T) {
 		t.Fatalf("an undrifted execution must raise no whole-Canary breach, got %v", codes)
 	}
 }
+
+// TestBreach_DriftIsReportedEvenWhenTheKillWinsTheRefusal pins that the two questions the boundary
+// answers are answered separately.
+//
+// The refusal REASON belongs to the client, and there the emergency kill deliberately wins — an
+// operator's stop is why the call did not happen, and metering it as staleness would undercount
+// emergency blocks. But the drift is a fact about the WORLD: the reviewed tool is gone whether or
+// not a kill also fired in the same pass. Keyed on which refusal won, the breach was seen and then
+// dropped, and since a kill can later be CLEARED the activation would resume unlatched against the
+// new fingerprint (Codex round 15).
+func TestBreach_DriftIsReportedEvenWhenTheKillWinsTheRefusal(t *testing.T) {
+	var releases int32
+	sfy := &breachOrderSafety{releases: &releases}
+	up := &fakeUpstream{}
+	st := stateForMode(t, rollout.ModeCanary)
+	e := newExec(t, st, up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_kill", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	// The tool drifts AND the kill engages, in the same boundary pass. ToolStillCurrent is invoked
+	// by preCallGuard before it re-reads the kill generation, so engaging the kill from inside the
+	// callback puts both facts in one pass without any timing assumption.
+	in.ToolStillCurrent = func() bool {
+		st.EngageKillSwitch("test", 1)
+		return false
+	}
+	out := e.Execute(context.Background(), in, e.Resolve(in))
+
+	if up.calls != 0 {
+		t.Fatalf("premise: nothing may be sent, got %d upstream calls", up.calls)
+	}
+	if out.Reason != mcperr.ReasonRolloutEmergencyActive {
+		t.Fatalf("premise: the CLIENT must be told the emergency kill is the reason, got %v", out.Reason)
+	}
+	codes, _ := sfy.seen()
+	if len(codes) != 1 || codes[0] != "tool_fingerprint_drift" {
+		t.Fatalf("SECURITY: the drift was observed and dropped because the kill won the refusal — "+
+			"a kill can be cleared, and the activation would resume unlatched against the new "+
+			"fingerprint; breaches=%v", codes)
+	}
+}

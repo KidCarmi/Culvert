@@ -174,7 +174,8 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// revalidation, then the emergency kill) run inside preCallGuard so nothing sits between them and
 		// Upstream.Call. The kill re-read stays LAST (PREREQ-MCP-KILL-1). A demoted-generation refusal is
 		// mapped to the gate-refusal classification path with a bounded rollout reason.
-		if gerr := e.preCallGuard(in, admKillGen, revalidate); gerr != nil {
+		gerr, driftObserved := e.preCallGuard(in, admKillGen, revalidate)
+		if gerr != nil {
 			// The physical call never began, so this is the ONE case where
 			// definitely_not_sent is mechanically provable rather than inferred.
 			sendState = model.SendDefinitelyNotSent
@@ -190,7 +191,14 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			// It is reported with the ATTEMPT's generation, not the current one: this request was
 			// admitted under that activation, and a demote-and-reactivate in between must not
 			// charge a stale observation to a fresh experiment.
-			if cls.stale && attempt != nil {
+			// THE BREACH IS KEYED ON THE OBSERVATION, NOT ON WHICH REFUSAL WON.
+			//
+			// Reading cls.stale meant a pass where BOTH the tool drifted and the emergency kill
+			// advanced reported only the kill — the drift was seen and then dropped. Since a kill
+			// can be cleared, the activation would resume unlatched against the new fingerprint,
+			// and later requests would merely fail approval validation (Codex round 15). The
+			// client is still told the kill is the reason; the Canary is told the truth.
+			if driftObserved && attempt != nil {
 				e.cfg.Safety.Breach(in.Capability.String(), attempt.generation, "tool_fingerprint_drift")
 			}
 			bf.stale, bf.killed = cls.stale, cls.killed
@@ -302,7 +310,14 @@ func (e *Executor) finishUpstreamLeg(ctx context.Context, in runtime.ExecInput, 
 // makes the outcome MORE restrictive. This is the ONE side-effect boundary shared by both the
 // credential and no-credential paths, so the check lives here and nowhere else, and callUpstream
 // places NOTHING between this guard and Upstream.Call.
-func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() bool) error {
+// It returns the refusal error AND the drift OBSERVATION separately, because the two answer
+// different questions. The error is what the CLIENT is told, and there the emergency kill
+// deliberately wins; driftObserved is what the CANARY is told, and a rug-pull that happened is a
+// fact about the world whether or not an operator's kill switch also fired in the same pass.
+// Folding them together lost the breach exactly when two things went wrong at once — and since a
+// kill can later be CLEARED, the activation would resume unlatched against the new fingerprint
+// (Codex round 15).
+func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() bool) (err error, driftObserved bool) {
 	drifted := in.ToolStillCurrent != nil && !in.ToolStillCurrent()
 	// The composition-layer live-generation revalidation is evaluated BEFORE the kill re-read (like the
 	// freshness callback), so the kill generation stays the LAST authoritative state read before
@@ -310,15 +325,17 @@ func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRev
 	// nil predicate (no gate, or Shadow) leaves this byte-identical to the pre-gate boundary.
 	liveDemoted := liveRevalidate != nil && !liveRevalidate()
 	if e.cfg.State.KillGeneration() != admKillGen {
-		return errKilledAtBoundary // emergency stop is paramount, even if the tool also drifted or demoted
+		// Emergency stop is paramount in the REASON reported to the client, even if the tool also
+		// drifted or demoted — but the drift is still returned, so the Canary hears about it.
+		return errKilledAtBoundary, drifted
 	}
 	if drifted {
-		return errToolDriftedBeforeCall
+		return errToolDriftedBeforeCall, true
 	}
 	if liveDemoted {
-		return errLiveGenerationDemotedAtBoundary // the reserved Canary generation was demoted mid-flight
+		return errLiveGenerationDemotedAtBoundary, false // the reserved Canary generation was demoted mid-flight
 	}
-	return nil
+	return nil, false
 }
 
 // classifyBoundaryRefusal maps a boundary drift/kill refusal detected by callUpstream to its

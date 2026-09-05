@@ -1030,6 +1030,29 @@ run_mutation M107 \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
   's/\t\t\tif cls\.stale && attempt != nil \{\n\t\t\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), attempt\.generation, "tool_fingerprint_drift"\)\n\t\t\t\}\n//'
 
+# M108-M110 are Codex round 15 — all three are consequences of round 14's own wiring.
+#
+# M108 keys the breach on which refusal WON rather than on the observation, so a pass where the
+# kill and the drift both fire drops the drift. The mutation carries `_ = driftObserved` so it
+# COMPILES: a build failure proves nothing under this campaign's own header rule.
+run_mutation M108 \
+  'a drift observed alongside an emergency kill is dropped' \
+  'TestBreach_DriftIsReportedEvenWhenTheKillWinsTheRefusal|TestBreach_BoundaryToolDriftTripsFingerprintDrift' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\t\tif driftObserved && attempt != nil \{/\t\t\tif _ = driftObserved; cls.stale \&\& attempt != nil {/'
+
+run_mutation M109 \
+  'drift on shadow-evaluated out-of-scope traffic stops the whole Canary' \
+  'TestCanaryBreach_ShadowEvaluationDoesNotStopTheCanary|TestCanaryBreach_PreExecutorToolDriftIsReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\tif canaryScoped \{\n\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), code\)\n\t\}/\tp.deps.reportCanaryBreach(p.capability.String(), code)/'
+
+run_mutation M110 \
+  'an eligibility change is reported as fingerprint drift' \
+  'TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift|TestCanaryBreach_PreExecutorToolDriftIsReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\t\treturn "server_identity_drift"/\t\treturn "tool_fingerprint_drift"/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

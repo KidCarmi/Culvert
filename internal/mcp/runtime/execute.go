@@ -151,7 +151,9 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecI
 	// Re-validate against the LIVE catalog and refuse a stale decision before any
 	// side effect. This is the drift MCP-TOOL-001 / MCP-T-011 / MCP-T-016 exist to
 	// prevent, and the executor never re-checked it.
-	if out, stale := p.refuseOnToolDrift(rb, ei.Input, ei.MessageID); stale {
+	// canaryScoped: only the ENFORCING execute disposition is the Canary's own reviewed traffic. A
+	// shadow evaluation (including the Canary-mode out-of-scope fallback) is not.
+	if out, stale := p.refuseOnToolDrift(rb, ei.Input, ei.MessageID, res.Disposition == rollout.EffectExecute); stale {
 		return out
 	}
 	// SEC-MCP-03. The executor performs the REAL upstream side effect and must
@@ -199,18 +201,36 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecI
 // compare, and inventing drift there would refuse traffic the gateway is
 // configured to allow.
 func (p *pipeline) toolHasDrifted(in policy.DecisionInput) bool {
+	return p.toolDriftClass(in) != ""
+}
+
+// toolDriftClass names WHICH KIND of drift the decision's tool has suffered, as one of the
+// whole-Canary breach codes, or "" for none. toolHasDrifted is the boolean view of the same
+// predicate, so the refusal behaviour is unchanged and there is exactly one implementation.
+//
+// The class matters because the abort's first cause is IMMUTABLE. Reporting every drift as
+// tool_fingerprint_drift meant an operator was told the tool's SHAPE changed when what actually
+// happened was their own catalog.DisableServer — and, since the admission-time classifier calls
+// that same condition server_identity_drift, the name an operator saw depended on which detection
+// window happened to win the race (Codex round 15). Two windows must not disagree about what one
+// fact is called; that is the round-5 window/budget lesson in a different subsystem.
+//
+// A tool that has VANISHED from the catalog is classed as fingerprint drift: the server may be
+// perfectly healthy, and what is gone is the reviewed tool itself. Neither code is a exact fit and
+// the taxonomy offers no third, so the choice is recorded here rather than left to the reader.
+func (p *pipeline) toolDriftClass(in policy.DecisionInput) string {
 	if in.Tool == nil || p.deps.Catalog == nil {
-		return false
+		return ""
 	}
 	rec, ok := p.deps.Catalog.Current().Get(catalog.ToolKey{
 		Server: registry.ServerID(in.Tool.ServerID), Name: in.Tool.Name,
 	})
 	if !ok {
-		return true
+		return "tool_fingerprint_drift"
 	}
 	sum := rec.Fingerprint.Sum()
 	if hex.EncodeToString(sum[:]) != in.Tool.FingerprintHash {
-		return true
+		return "tool_fingerprint_drift"
 	}
 	// ELIGIBILITY IS A SEPARATE AXIS FROM THE FINGERPRINT, and checking only the
 	// fingerprint misses an entire class of revocation. catalog.DisableServer copies
@@ -225,11 +245,18 @@ func (p *pipeline) toolHasDrifted(in policy.DecisionInput) bool {
 	// built with (policy.go) -- so this asks exactly the question the decision
 	// answered, rather than a second, independently-drifting notion of "eligible".
 	disp, drift := policyDisposition(rec.Eligibility)
-	return disp != in.Tool.Disposition || drift != in.Tool.Drift
+	if disp != in.Tool.Disposition || drift != in.Tool.Drift {
+		// The fingerprint is IDENTICAL and the eligibility moved — DisableServer, a quarantine, a
+		// review requirement. The tool's shape did not change; its server stopped being usable,
+		// which is exactly what the admission-time classifier calls server_identity_drift.
+		return "server_identity_drift"
+	}
+	return ""
 }
 
-func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID) (Outcome, bool) {
-	if !p.toolHasDrifted(in) {
+func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID, canaryScoped bool) (Outcome, bool) {
+	code := p.toolDriftClass(in)
+	if code == "" {
 		return Outcome{}, false
 	}
 	// AUTHORITATIVE DRIFT, and refusing the request is only half the answer.
@@ -241,8 +268,16 @@ func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id
 	// before this check stopped nothing, and every later request against the new fingerprint failed
 	// approval validation instead, which reads as ordinary denial (Codex round 14).
 	//
-	// The seam is nil in every non-Canary composition, so this is a no-op there.
-	p.deps.reportCanaryBreach(p.capability.String(), "tool_fingerprint_drift")
+	// ONLY FOR THE CANARY'S OWN TRAFFIC. With Shadow fallback enabled, an OUT-OF-SCOPE request
+	// under Canary mode resolves to a shadow evaluation and still reaches this refusal — so an
+	// unconditional report let a catalog change for a tool the experiment never reviewed abort the
+	// whole Canary (Codex round 15). That is the direction a safety control must never err in:
+	// stopping a healthy experiment for something outside its own blast radius is indistinguishable,
+	// to an operator, from the control being wrong. The seam is nil in every non-Canary composition,
+	// so this is a no-op there as well.
+	if canaryScoped {
+		p.deps.reportCanaryBreach(p.capability.String(), code)
+	}
 	p.ctr.requestsRejected.Add(1)
 	rb.rec.PolicyAction = "BLOCKED_BY_DECISION_STALE"
 	rb.rec.PolicyReason = mcperr.ReasonDecisionSnapshotStale.Code()

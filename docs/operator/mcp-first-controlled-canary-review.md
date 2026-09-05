@@ -929,9 +929,9 @@ reported, it denies AND stops. What is NOT claimed is that this node can current
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
-**Fourteen adversarial rounds hardened this closure, and what they found is the useful record.** Each
+**Fifteen adversarial rounds hardened this closure, and what they found is the useful record.** Each
 round's fix exposed the next layer inward, which is convergence rather than churn — but every one of
-the thirty findings was a way the latch could be right and the surrounding machinery still wrong.
+the thirty-three findings was a way the latch could be right and the surrounding machinery still wrong.
 Rounds 4 through 6 found defects that rounds 3, 4 and 5 had themselves introduced, which is the
 honest shape of this kind of work: a fix that tightens one predicate is a new opportunity to get the
 adjacent one wrong. Both round-6 findings are of that kind, and both are the SAME predicate one
@@ -993,6 +993,9 @@ ONE of the two shapes a cancellation arrives in.
 | 13 | A directly classified breach was ALSO counted as a health sample | Round 8 added the identity breach and left the settle unconditional, so a pinned-identity mismatch was both a whole-Canary stop and an ordinary target failure in the rate population — the laundering `HealthMonitor`'s own contract forbids in as many words. One event feeding two different stop decisions, and an identity breach shown as a target failure on the persisted counters |
 | 14 | Two of the THREE tool-drift detections reported nothing | Drift is caught before the executor (`refuseOnToolDrift`), at admission (the gate's classifier) and at the final boundary (`ToolStillCurrent`), and only the middle one routed anywhere. A rug-pull landing in either other window refused the request and left the Canary holding execution authority — and every later request against the new fingerprint then merely failed approval validation, which reads as routine denial rather than proof the reviewed target is gone |
 | 14 | The real-peer rig leaked abort state between tests | Found by the determinism gate, not by a review: the rig resets every global it touches except `globalCanaryRuntime`, which did not matter while only reservation paths latched. Once a REFUSAL could latch, a stop set by one test was visible to whatever the shuffle ran next. The gate exists for exactly this, and it earned its keep the first time a latch moved onto a new path |
+| 15 | A drift observed alongside an emergency kill was dropped | The breach was keyed on which refusal WON. The kill deliberately wins the reason reported to the CLIENT, but the drift is a fact about the world — and since a kill can be CLEARED, the activation would resume unlatched against the new fingerprint |
+| 15 | Drift on shadow-evaluated traffic stopped the whole Canary | With Shadow fallback, an OUT-OF-SCOPE Canary request still reaches the pre-executor refusal, so a catalog change for a tool the experiment never reviewed aborted it. The one finding of the fifteen in the FALSE-POSITIVE direction, and the most dangerous kind: a healthy experiment stopped for something outside its blast radius is indistinguishable, to an operator, from a broken control |
+| 15 | An eligibility change was reported as fingerprint drift | `toolHasDrifted` is true for two different facts, and the code was hard-coded. `DisableServer` preserves the fingerprint on purpose, and the admission-time classifier calls that condition `server_identity_drift` — so the IMMUTABLE first cause depended on which detection window won, and could tell an operator the tool's shape changed when they had disabled the server themselves |
 
 Two of these deserve to be remembered past this PR. The generation finding and the health-latch
 finding were both **gaps my own comments described and my own code did not implement** — the header
@@ -1043,7 +1046,7 @@ sides, and "the latch wins" is only true if it is true at every interleaving.
 
 ### Blocker 7 — red team
 
-Thirty-one adversarial scenarios, each answered by a named gate rather than by argument.
+Thirty-four adversarial scenarios, each answered by a named gate rather than by argument.
 
 | Scenario | Outcome | Gate |
 |---|---|---|
@@ -1077,6 +1080,9 @@ Thirty-one adversarial scenarios, each answered by a named gate rather than by a
 | That same identity breach reaches the rate detector too | it does not: a condition with its own immediate classification is excluded from the population, so one event cannot feed two stop decisions | `TestBreach_TLSIdentityMismatchTripsServerIdentityDrift` (control: `TestBreach_OrdinaryUpstreamFailureIsStillASample` — an ordinary failure IS still a sample) |
 | The reviewed tool is redefined BEFORE the request reaches the executor | the pre-executor refusal reports `tool_fingerprint_drift` through the runtime's narrow seam; the request fails AND the experiment stops | `TestCanaryBreach_PreExecutorToolDriftIsReported` (controls: `TestCanaryBreach_CurrentFingerprintReportsNothing`, and `TestCanaryBreach_NoSeamComposedIsAPlainRefusal` for the disabled-by-default posture) |
 | The reviewed tool is redefined AFTER admission, at the final boundary | the same code, carried with the ATTEMPT's generation so a demote-and-reactivate cannot charge it to a fresh experiment | `TestBreach_BoundaryToolDriftTripsFingerprintDrift` (control: `TestBreach_UndriftedBoundaryRaisesNoDriftBreach`), and end to end against the real peer in `TestConc07_ToolDriftAfterIntentRefusesTheSend` |
+| The tool drifts AND the emergency kill engages in the same pass | the client is told the kill is the reason (its precedence is unchanged) and the Canary is still told about the drift | `TestBreach_DriftIsReportedEvenWhenTheKillWinsTheRefusal` |
+| A tool the experiment never reviewed drifts, under Shadow fallback | the request is refused and the Canary keeps running — the stop is bound to the enforcing execute disposition, not to every request that reaches the refusal | `TestCanaryBreach_ShadowEvaluationDoesNotStopTheCanary` |
+| The operator disables the server, leaving the fingerprint intact | `server_identity_drift`, the same name the admission-time classifier gives it — not `tool_fingerprint_drift` | `TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift` |
 | The client hangs up mid-call, twice | nothing stops, AND nothing is recorded: a cancellation is not evidence about the target in either direction, so it never enters the population to dilute it. A deadline overrun still is a charged sample | `TestAttemptSettled_CallerCancellationIsNotASampleAtAll` (a five-row table covering BOTH cancellation shapes — reason-classified and wrapped-during-body-read — each ⇒ 0 samples, against a deadline wrapped the SAME way, a plain deadline and a connect failure ⇒ 1 charged sample each) |
 
 The three controls that keep this from being a proof of "abort on everything": a healthy population
@@ -1678,11 +1684,11 @@ demonstration still scores CAUGHT.
 
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **107 mutations** (M61–M78 are the blocker-7
-auto-abort set; M79–M107 were added by the fourteen adversarial rounds above — 104 driven through
+`scripts/mcp-canary-mutation-campaign.sh` now carries **110 mutations** (M61–M78 are the blocker-7
+auto-abort set; M79–M110 were added by the fifteen adversarial rounds above — 107 driven through
 `run_mutation`, plus M02, M17 and M80, which stay hand-written because they mutate more than one
 site; M91 stopped needing a helper when round 8 collapsed the three orderings into one block). The 78-mutation state recorded below was clean on its second run;
-M79–M107 were each verified failing against their own reintroduced defect as they were written. The
+M79–M110 were each verified failing against their own reintroduced defect as they were written. The
 first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
 which is the campaign doing its job, so it is recorded rather than quietly re-run:
 
