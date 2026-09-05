@@ -150,6 +150,24 @@ func (lt *mcpLiveTier) armed() bool {
 	return lt.state == liveTierArmed
 }
 
+// admissionOpen reports whether the tier would admit a new live invocation right now —
+// the exact condition admitExecution tests, WITHOUT taking an in-flight slot.
+//
+// It exists for the auxiliary admission (SEC-MCP-AUX-1), which needs the lifecycle
+// answer twice: once to admit, and once as the final-boundary revalidation immediately
+// before the irreversible call, so a disarm or a quiesce that lands between the two
+// still refuses. Re-running admitExecution there would take a SECOND in-flight slot
+// that the drain would then wait on forever, so the predicate is read-only.
+//
+// It is deliberately NOT `armed()`: admitClosed is set by unarmForDemote and by
+// enterQuiesceLocked and is the bit that actually closes admission, so a predicate
+// that ignored it would report a quiescing tier as open.
+func (lt *mcpLiveTier) admissionOpen() bool {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	return lt.state == liveTierArmed && !lt.admitClosed
+}
+
 // markComposed records that the live executor object was composed and installed. It moves
 // absent→composed. It never arms. A second call is idempotent. The bounded reason is fixed
 // ("composed") — a composition that does NOT proceed records its reason via setComposeReason.

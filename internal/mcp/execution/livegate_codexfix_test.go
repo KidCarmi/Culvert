@@ -35,6 +35,12 @@ func (g *stubLiveGate) AdmitSideEffect(in LiveGateInput) LiveGateDecision {
 	return LiveGateDecision{Admit: false, Reason: g.reason}
 }
 
+// AdmitAuxiliary answers the lifecycle-only admission with the same fixed verdict, so
+// a stub that refuses refuses BOTH admissions — the fail-closed direction for a double.
+func (g *stubLiveGate) AdmitAuxiliary(in LiveGateInput) LiveGateDecision {
+	return g.AdmitSideEffect(in)
+}
+
 func (g *stubLiveGate) observedNow() time.Time {
 	g.mu.Lock()
 	defer g.mu.Unlock()
