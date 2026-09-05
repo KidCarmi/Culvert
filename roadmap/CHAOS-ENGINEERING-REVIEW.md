@@ -44,7 +44,12 @@ durable audit JSONL — a 50 MB rotating file keeping ONE archive. Inside the en
 60-POST/min limit, one client commits ~60 MiB/min of chosen bytes and rotates the entire retained
 compliance record away in under two minutes. The instrument built for exactly this outcome
 (`internal/audit`'s `writeErrors`, CWE-778) cannot see it, because **every one of these writes
-succeeds**. Closes AU-14/AU-15; the count axis is recorded open as AU-16. See §25.
+succeeds**. Closes AU-14/AU-15; the count axis is recorded open as AU-16. The sweep also found and MEASURED the
+same class on the **proxy data path** — `sanitizeLog(r.Host)` bounds nothing and the proxy server sets
+no `MaxHeaderBytes`, so one request with a 200 KB host writes 204,899 bytes to the process log and a
+204,812-byte `Host` field to the request log, on a port every client can reach. Recorded OPEN as
+**PX-21** rather than bundled: rejecting an over-long host is probably the right fix and is a
+data-plane behaviour change that needs its own review. See §25.
 
 **2026-08-24 — CHAOS-55 sweep (the fencing lease's recovery paths).** ADR-0005 built the
 fence to answer *may this node write?* and answers it correctly in every direction. What it never
@@ -428,6 +433,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | PX-17 | **An unrecoverable listener error was retried identically to a transient one.** EBADF/ENOTSOCK on the listening descriptor return instantly and forever, so the "retry" was a pure spin that could never accept anything, on a port that stayed BOUND — clients hung against a black hole instead of getting connection-refused. | NEW → **CLOSED** (CHAOS-54: the loop stops, closes the listener so clients fail fast, and records the service DOWN; transient/unknown errors still retry, which is the fail-safe direction) | M/H | was: `socks5.go` `serve`; now `socks5AcceptFatal` — see §22 |
 | PX-18 | **The SOCKS5 listener had NO health surface** — absent from `/healthz`, `/readyz`, `/api/diagnostics` and `/metrics`. A listener spinning on EMFILE and a listener that had stopped accepting entirely were both reported by every probe as a fully healthy node. | NEW → **CLOSED** (CHAOS-54: `socks5_listener` contract row, report-only `/readyz socks5` row, `/healthz socks5` field, `culvert_socks5_{listener_up,accept_errors_total,accept_degraded,accept_backoff_seconds}`, `socks5_listener_down` alert) | M/H | `socks5_health.go` — see §22 |
 | PX-20 | **Every `net.ErrClosed` from `Accept` was read as an expected shutdown.** `ErrClosed` says the listener is gone; it does NOT say a shutdown was requested, and `Stop` is only one of the ways a listener can end up closed. Any closure outside the shutdown path therefore terminated the accept loop with EVERY probe still green (`socks5: ready`, `culvert_socks5_listener_up 1`, `ok` contract row) — PX-18 reintroduced in a narrower costume, inside the very change that closed PX-18. Raised by Codex review on the PR, not by the sweep. | NEW → **CLOSED** (CHAOS-54: the loop checks whether `stopping` was actually closed; `Stop` closes it BEFORE `ln.Close()`, so the check is race-free in the direction that matters and errs toward silence, never toward a false page) | M/H | was: `socks5.go` `serve`; see §22.3 |
+| PX-21 | **The same unbounded-untrusted-value class as AU-14, on the PROXY data path, and it is NOT fixed.** `handleRequest` writes `sanitizeLog(r.Host)` into the POLICY_* process-log line and `r.Host` verbatim into the request-log entry. `sanitizeLog` neutralises control characters but bounds NOTHING, and the proxy `http.Server` sets no `MaxHeaderBytes`, so net/http admits a request line plus headers up to ~1 MiB. **Measured on the default-deny path: one request with a 200 KB host wrote 204,899 bytes to the process log and a 204,812-byte `Host` field to the request log.** Both sinks are rotating files with one archive, and the proxy port is reachable by every client on the network — a far broader audience than the admin login endpoint, with the process log holding the diagnostics for every other incident (the §22 amplification lesson). | **NEW, OPEN** | **H** | `proxy.go:689,728` (`sanitizeLog(r.Host)`), `recordRequestAuthURI` `proxy.go:688`; reproduction in §25.6 |
 | PX-19 | **The SOCKS5 accept loop had no panic guard.** `handleSOCKS5` carries `recoverGoroutine`, but a panic in `serve` itself propagated to the runtime and killed the whole proxy process (the PX-4 class, one level up). | NEW → **CLOSED** (CHAOS-54: contained and reported as listener DOWN — the CHAOS-24 objection to recovering in a worker goroutine does not apply when the recovery path is the loudest state the subsystem can produce) | M | was: `socks5.go` `serve`; see §22 |
 | PX-6 | **No global connection cap**; per-IP map is unbounded in cardinality; limiter ships **disabled by default**. Distributed flood → FD/memory exhaustion. | GAP | H | `internal/connlimit/connlimit.go:12,67` (default disabled, `Acquire`→true when off) |
 | PX-7 | Bandwidth/QoS token buckets are **never enforced on the data path** — `AllowBytes` has no call site in the relays. Configured QoS silently does nothing. | GAP (feature dead) | M | `internal/bandwidth` `AllowBytes` `bandwidth.go:261` — no caller in `proxy.go`/`socks5.go` |
@@ -2914,6 +2920,30 @@ for a write-amplification defect must not be one itself.
   to close, and the 60/min limiter already bounds the attempt rate.
 
 ### 25.6 Residual risk
+
+- **PX-21 (NEW, open, and larger than the finding this sweep fixed).** The
+  identical class — an unbounded untrusted value copied into a rotating sink —
+  is live on the **proxy data path**, which every client on the network can
+  reach. `handleRequest` logs `sanitizeLog(r.Host)`; `sanitizeLog` neutralises
+  control characters and bounds nothing, and the proxy `http.Server` sets no
+  `MaxHeaderBytes`, so net/http admits ~1 MiB of request line plus headers.
+  Measured with a throwaway probe against `handleRequest` on the default-deny
+  path (200 KB host, `GET http://<host>/`):
+
+  ```
+  status=403  process-log bytes=204899  (host was 204812 bytes)
+  reqlog newest entry: host len=204812  status="POLICY_DEFAULT_DENY"
+  ```
+
+  This is deliberately **recorded rather than fixed here**. It is a different
+  domain with a different fix shape and a real design decision the owner should
+  make, not a reviewer: RFC 1035 caps a hostname at 253 bytes, so *rejecting*
+  an over-long host outright is defensible and probably correct — but that
+  changes data-plane behaviour and has to answer for IPv6 literals, non-DNS
+  authorities and the CONNECT form before it ships. Truncating only at the log
+  call sites is the smaller, safer move and does not close the request-log
+  field. Bundling either into an admin-auth fix would have shipped a data-path
+  behaviour change under a security-hardening title.
 
 - **AU-16 (count axis, open).** The lockout maps are still bounded only by
   (attempt rate × `Window`). A distributed source with many IPs, each inside its
