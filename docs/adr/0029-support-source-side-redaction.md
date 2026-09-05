@@ -1,8 +1,8 @@
 # ADR-0029: Source-side redaction & a data-classification registry for support data
 
-- **Status:** Proposed (design recorded 2026-07-12; no code moved)
+- **Status:** Accepted — partially implemented. `internal/redaction`'s struct-based classification over collector output shipped as part of appliance track M1–M2 (see `docs/support/SUPPORTABILITY-ROADMAP.md`). This ADR's other two classification registries — persisted `/data` files and log/stream fields — have not shipped.
 - **Date:** 2026-07-12
-- **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
+- **Deciders:** Principal Supportability Architect (proposed); project maintainer (ratified through shipped implementation)
 - **Relates to:** ADR-0007 (secret containment — the `NEVER_EXPORT` enforcement), ADR-0028 (bundle framework), `config_surfaces.go` (the existing classification pattern). Full design in `docs/support/REDACTION-MODEL.md`.
 
 ## Context
