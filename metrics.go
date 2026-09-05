@@ -724,6 +724,10 @@ culvert_yara_blocked_total %d
 # TYPE culvert_clam_scan_errors_total counter
 culvert_clam_scan_errors_total %d
 
+# HELP culvert_clamav_scan_errors_total Total ClamAV scan errors mid-request (content forwarded unscanned, fail-open). Canonical name for the culvert_clamav_* family; identical value to culvert_clam_scan_errors_total, kept for wire compatibility.
+# TYPE culvert_clamav_scan_errors_total counter
+culvert_clamav_scan_errors_total %d
+
 # HELP culvert_scan_timeout_total Total body scans that exceeded the scan budget and were refused (fail-closed)
 # TYPE culvert_scan_timeout_total counter
 culvert_scan_timeout_total %d
@@ -805,6 +809,7 @@ culvert_auth_sso_required_total %d
 		clamBlocked,
 		yaraBlocked,
 		scanCounters.ClamScanError,
+		scanCounters.ClamScanError, // culvert_clamav_scan_errors_total dual-emit (T-31)
 		scanCounters.ScanTimeout,
 		scanCounters.ClamSaturated,
 		scanCounters.ScanLateDiscarded,

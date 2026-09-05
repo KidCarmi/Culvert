@@ -46,7 +46,7 @@ All are on `/metrics`, on `GET /api/security-scan/status`, and in the
 | `culvert_clam_saturated_total` | `stat_clam_saturated` | *ClamAV at capacity* | A scan could not get a ClamAV slot within the budget. The daemon is **healthy**; the node is out of scanning capacity. |
 | `culvert_scan_timeout_total` | `stat_scan_timeout` | *Scan timeouts* | Responses refused because the scan exceeded the budget. |
 | `culvert_scan_late_discarded_total` | `stat_scan_late_discard` | *Late verdicts discarded* | A scan finished **after** the budget and said "clean"; the refusal stood and the verdict was thrown away. |
-| `culvert_clam_scan_errors_total` | `stat_clam_scan_error` | *ClamAV scan errors* | A genuine daemon fault (unreachable, protocol error). Fires the `scan_clam_error` alert. |
+| `culvert_clam_scan_errors_total` | `stat_clam_scan_error` | *ClamAV scan errors* | A genuine daemon fault (unreachable, protocol error). Fires the `scan_clam_error` alert. Dual-emitted as `culvert_clamav_scan_errors_total` — same value, the canonical name that matches the `culvert_clamav_*` family (`culvert_clamav_blocked_total`); build new dashboards/alert rules against the `culvert_clamav_*` prefix, `culvert_clam_scan_errors_total` is kept only for existing consumers. |
 
 **Capacity and faults are deliberately separate.** `culvert_clam_saturated_total`
 does **not** raise `scan_clam_error`, because the response is different: add
