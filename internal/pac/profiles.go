@@ -203,8 +203,18 @@ func (s *ProfileStore) Get() ProfilesConfig {
 	return copyProfilesConfig(s.cfg)
 }
 
+// ProfileSetHook is a TEST-ONLY observation seam invoked at the entry of
+// every Set with the candidate about to be written (before the store lock is
+// taken). It lets an interleaving proof observe WHICH writer reached the
+// authoritative store and when, without adding any synchronization the
+// production path lacks. Production leaves it nil.
+var ProfileSetHook func(cfg ProfilesConfig)
+
 // Set replaces the config and persists it (tolerant — see type comment).
 func (s *ProfileStore) Set(cfg ProfilesConfig) error {
+	if h := ProfileSetHook; h != nil {
+		h(cfg)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Persist-before-swap (2F-B, C1): the durable write is the commit point.
