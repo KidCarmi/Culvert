@@ -18,6 +18,22 @@ invocation: `usable` + a DENY / REQUIRE_APPROVAL / REQUIRE_CONFIRMATION rule sti
 denies / requires approval / requires confirmation, and `usable` with no matching
 rule is still default-deny.
 
+**This is a fourth, independent gate from the pre-existing "MCP Approvals" GUI panel.**
+`internal/mcp/approval` (`KindOperational`/`KindPublication`, `GET /api/mcp/approvals`,
+`POST /api/mcp/approval-decision`, the `mcp.approval.*`/`mcp.publication.*` audit events,
+and the "MCP Approvals" nav panel) governs two different questions entirely: a
+human four-eyes sign-off on one live `REQUIRE_APPROVAL` policy-rule decision
+(Operational), and a human sign-off to publish a candidate policy (Publication).
+Neither ever grants tool trust, and a tool-trust decision here never satisfies either
+of those. A tool that is `usable` for `live_execution` can still hit a
+`REQUIRE_APPROVAL` policy rule at call time and need a *separate* Operational
+approval before it runs — both gates can be required on the same call, and each is
+tracked, audited, and revoked independently. The word "approval" spans all four
+concepts (Trust's own approve/reject decision plus Operational and Publication) by
+design — see `GET /api/mcp/tool-approvals` / `POST /api/mcp/tool-approval-decision`
+and the `mcp.tooltrust.*` audit events for this feature's own approve/reject
+vocabulary, kept lexically distinct from `mcp.approval.*`/`mcp.publication.*`.
+
 ## Purpose / trust ceiling
 
 An approval carries a purpose, and the two purposes are **disjoint** — one approval
