@@ -11,7 +11,7 @@ current posture (do NOT collapse these into "done" or "not done"):
 |---|---|
 | Canary architecture — preflight, budget ceiling, trust firewall | **IMPLEMENTED** |
 | Canary architecture — scope gate (`ValidateScope`) | **PARTIAL** — forbids percentage/group/wildcard and caps server & tenant at 1, but `MaxCanaryTools`/`MaxCanaryPrincipals` are **2** and `principalCount` sums Principals+Clients+Agents, so the machine gate does NOT enforce the one-tool/one-synthetic-principal experiment; that must be imposed as an external authorization prerequisite (review §10) |
-| Canary architecture — whole-Canary AUTOMATIC abort | **PARTIAL / DEFECTIVE** — only `budget_exhausted` and `scope_escape` have automatic trippers; the other eight declared breaches do not auto-stop (see §16 below and the review §16) |
+| Canary architecture — whole-Canary AUTOMATIC abort | **IMPLEMENTED** (review blocker 7 CLOSED) — every declared `AbortCanary` code has a production trip path onto the ONE `canary.AbortController`; the two rate detectors are reachable inside the 3-execution corpus, and the time box stops the experiment with NO further request arriving. The latch revokes EXECUTION AUTHORITY, not the node's mode: demotion stays governed by blockers 10 and 12, so `ModeCanary + ABORTED` is the truthful state. Two codes have wired funnels but no production PRODUCER yet — `credential_safety_failure` (blocker 9) and `unexpected_upstream_response` (blocker 8). See §16 below and the review §16/§25a |
 | Canary architecture — durable invocation evidence | **PARTIAL / DEFECTIVE** — events carry no `OutcomeEvidence`; the post-call outcome commit is success-only (upstream errors + DLP blocks emit no post-call event) and a post-send crash is indeterminate, so the executed/status/duration reconciliation the procedure below assumes is not fully backed (review §15/§18) |
 | Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
 | Live tier arming | **NOT OPERATOR-PERFORMABLE YET** — the governed, node-readiness-gated `armLiveTier` function exists and is correct, but has NO production caller (no startup path, admin API, or other non-test code invokes it); arming is reachable only from tests today |
@@ -178,6 +178,19 @@ latency_pathology · unexpected_upstream_response · independent_witness_mismatc
 > upstream request timeout — they are NOT product SLAs. The error-rate numerator counts ordinary
 > post-admission execution failures only; request-scoped policy/scope denials carry their own
 > classification and are never counted here.
+>
+> **What counts as a failure (rounds 5 and 6).** The UPSTREAM LEG's own verdict, in all three shapes
+> it arrives in: a transport error, a nil response, or a decoded JSON-RPC `error` object — the last
+> being the peer answering that the tool failed, which Culvert already classifies
+> `ReasonUpstreamCallFailed`. It is deliberately NOT Culvert's disposition: a response-DLP block after
+> a successful peer answer is this gateway's own policy working, and counting it would let a healthy
+> Canary abort itself for its own controls firing.
+>
+> **The operator surface is never more optimistic than admission.** `activation_runtime.auto_stop`
+> derives `window_expired` and `execution_authority` from the same two-ended `WindowOpen` predicate
+> the reservation path uses, so a clock rolled behind the activation instant is reported as a closed
+> window immediately rather than at the next watchdog fire. That is reporting, not deciding — nothing
+> in the admission path reads it, and `AbortController` remains the one abort authority.
 
 ## Explicit non-goals
 
