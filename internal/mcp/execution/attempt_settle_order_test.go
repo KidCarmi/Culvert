@@ -349,7 +349,7 @@ func (s *breachOrderSafety) AttemptSettled(string, uint64, bool, time.Duration) 
 	}
 }
 
-func (s *breachOrderSafety) seen() ([]string, map[string]int32) {
+func (s *breachOrderSafety) seen() (codes []string, releasesAtCode map[string]int32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.codes...), s.releasesAt
