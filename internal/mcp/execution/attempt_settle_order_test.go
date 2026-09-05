@@ -15,6 +15,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events/spool"
 	"github.com/KidCarmi/Culvert/internal/mcp/jsonrpc"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
@@ -301,5 +302,187 @@ func TestAttemptSettled_IsReportedBeforeTheReservationIsReleased(t *testing.T) {
 	// would satisfy the assertion above and break the budget's own accounting (§11).
 	if got := atomic.LoadInt32(&releases); got != 1 {
 		t.Fatalf("the reservation must still be released exactly once, got %d", got)
+	}
+}
+
+// outcomeFailingBackend fails appends once armed, so the terminal outcome commit fails and the
+// outcome_evidence_loss breach path runs.
+//
+// It is armed FROM the settle callback rather than by inspecting frame bytes: the settle is the
+// step immediately before the terminal commit, so arming there fails exactly that append and
+// leaves the send intent and decision durable. Matching on frame content would depend on the
+// frame's encoding, which is not this test's business.
+type outcomeFailingBackend struct {
+	spool.Backend
+	fail atomic.Bool
+}
+
+func (b *outcomeFailingBackend) AppendSync(path string, frame []byte, perm os.FileMode) error {
+	if b.fail.Load() {
+		return errors.New("evidence volume is gone")
+	}
+	return b.Backend.AppendSync(path, frame, perm)
+}
+
+// breachOrderSafety records the release count observed when a Breach was reported.
+type breachOrderSafety struct {
+	releases    *int32
+	armOnSettle *outcomeFailingBackend
+	mu          sync.Mutex
+	codes       []string
+	releasesAt  map[string]int32
+}
+
+func (s *breachOrderSafety) Breach(_ string, _ uint64, code string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.codes = append(s.codes, code)
+	if s.releasesAt == nil {
+		s.releasesAt = map[string]int32{}
+	}
+	s.releasesAt[code] = atomic.LoadInt32(s.releases)
+}
+
+func (s *breachOrderSafety) AttemptSettled(string, uint64, bool, time.Duration) {
+	if s.armOnSettle != nil {
+		s.armOnSettle.fail.Store(true)
+	}
+}
+
+func (s *breachOrderSafety) seen() ([]string, map[string]int32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.codes...), s.releasesAt
+}
+
+// TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased extends the round-7
+// ordering to the OTHER breach the terminal path can raise.
+//
+// Round 7 held the slot until the health SAMPLE was counted. But the terminal outcome commit is
+// itself a breach producer — a failed commit is `outcome_evidence_loss`, a single-occurrence
+// whole-Canary stop — and it runs after the settle. With the release still deferred by the upstream
+// leg, the slot went back before that commit was even attempted, so a waiting request could reserve
+// and cross Upstream.Call while the breach was still being recorded (Codex round 8 P1). The new
+// ordering protects every step that decides authority, not just the sample.
+func TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased(t *testing.T) {
+	var releases int32
+	be := &outcomeFailingBackend{Backend: spool.NewOSBackend()}
+	sfy := &breachOrderSafety{releases: &releases, armOnSettle: be}
+	up := &fakeUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, be))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_loss", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	codes, at := sfy.seen()
+	if len(codes) != 1 || codes[0] != "outcome_evidence_loss" {
+		t.Fatalf("premise: the fixture must produce exactly one outcome_evidence_loss breach, got %v", codes)
+	}
+	if at["outcome_evidence_loss"] != 0 {
+		t.Fatalf("SECURITY: the slot was released before the evidence-loss breach was reported "+
+			"(%d release(s) already done) — the next request can reach the upstream while the "+
+			"breach that should have stopped the Canary is still being recorded",
+			at["outcome_evidence_loss"])
+	}
+	if got := atomic.LoadInt32(&releases); got != 1 {
+		t.Fatalf("the reservation must still be released exactly once, got %d", got)
+	}
+}
+
+// tlsIdentityUpstream answers with the reason the transport returns when the connected peer's
+// TLS/workload identity does not match the pin.
+type tlsIdentityUpstream struct{ calls int }
+
+func (u *tlsIdentityUpstream) Call(context.Context, upstreamclient.Target, string, json.RawMessage, upstreamclient.CallOptions) (*upstreamclient.Response, error) {
+	u.calls++
+	return nil, mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient",
+		"peer identity does not match the pinned identity")
+}
+
+// TestBreach_TLSIdentityMismatchTripsServerIdentityDrift pins that a peer we can no longer identify
+// is a whole-Canary breach, not one bad sample.
+//
+// The request-scoped live-trust revalidation checks the CATALOG record before the dial, so the
+// ACTUAL peer's identity is judged only here. Reduced to an ordinary failed attempt, the FIRST
+// mismatch stopped nothing — `server_identity_drift` is single-occurrence in the taxonomy, and a
+// further invocation could be admitted against an unidentifiable server (Codex round 8 P1).
+func TestBreach_TLSIdentityMismatchTripsServerIdentityDrift(t *testing.T) {
+	var releases int32
+	sfy := &breachOrderSafety{releases: &releases}
+	up := &tlsIdentityUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_tls", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	codes, at := sfy.seen()
+	if len(codes) != 1 || codes[0] != "server_identity_drift" {
+		t.Fatalf("SECURITY: a pinned-identity mismatch must trip server_identity_drift on the "+
+			"FIRST occurrence, got breaches %v", codes)
+	}
+	if at["server_identity_drift"] != 0 {
+		t.Fatal("the breach must be reported before the slot goes back")
+	}
+}
+
+// THE CONTROL for the trust breach: an ordinary upstream failure must NOT be laundered into
+// server_identity_drift. Without this the fix is satisfiable by reporting the breach on every
+// error, which would stop a healthy Canary on the first transient fault.
+func TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift(t *testing.T) {
+	var releases int32
+	sfy := &breachOrderSafety{releases: &releases}
+	up := &fakeUpstream{err: mcperr.New(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "dial")}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_plain", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	if codes, _ := sfy.seen(); len(codes) != 0 {
+		t.Fatalf("an ordinary upstream failure must raise no whole-Canary breach, got %v", codes)
+	}
+}
+
+// TestAttemptSettled_CallerCancellationIsNotATargetFailure pins the health detector's one
+// exclusion on the error side.
+//
+// context.Canceled means the CLIENT went away; the peer may have been perfectly healthy. Counted as
+// a failure, two such cancellations reach the 1-of-2 threshold and stop a Canary that had nothing
+// wrong with it (Codex round 8 P2) — the same rule the upstream pool's circuit breaker already
+// follows. It is deliberately narrow: a DEADLINE overrun is ReasonUpstreamTimeout and IS charged,
+// which the control below pins.
+func TestAttemptSettled_CallerCancellationIsNotATargetFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		failed bool
+	}{
+		{"caller cancelled", mcperr.New(mcperr.ReasonUpstreamCancelled, "upstreamclient", "cancelled"), false},
+		{"deadline exceeded", mcperr.New(mcperr.ReasonUpstreamTimeout, "upstreamclient", "deadline exceeded"), true},
+		{"connect failed", mcperr.New(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "dial"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sfy := &failSafety{}
+			e := newExec(t, stateForMode(t, rollout.ModeCanary), &fakeUpstream{err: tc.err}, realEvents(t, nil))
+			e.cfg.Safety = sfy
+			e.cfg.LiveGate = identityGate{reservationID: "rsv_cancel", generation: 7}
+
+			in := execInput(policy.ActionAllow, false)
+			_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+			got := sfy.flags()
+			if len(got) != 1 {
+				t.Fatalf("exactly one settled attempt expected, got %d", len(got))
+			}
+			if got[0] != tc.failed {
+				t.Fatalf("failed=%v, want %v — a caller cancellation is not evidence about the "+
+					"target, but a deadline overrun is", got[0], tc.failed)
+			}
+		})
 	}
 }

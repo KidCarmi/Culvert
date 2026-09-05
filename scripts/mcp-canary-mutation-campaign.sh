@@ -981,6 +981,29 @@ run_mutation M99 \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
   's/\t\t\te\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\t\tif release != nil \{\n\t\t\t\trelease\(\)\n\t\t\t\}\n/\t\t\tif release != nil {\n\t\t\t\trelease()\n\t\t\t}\n\t\t\te.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))\n/'
 
+# M100-M102 are Codex round 8. The release ordering has to hold for EVERY step that decides
+# authority, not only the health sample (M99) — the terminal outcome commit is itself the
+# outcome_evidence_loss producer. And the failure classifier needs one entry in each direction:
+# a pinned-identity mismatch is a breach rather than a sample, and a caller cancellation is not
+# evidence about the target at all.
+run_mutation M100 \
+  'the slot is released before the terminal outcome commit can report evidence loss' \
+  'TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)\n\t\treleaseReservation\(releaseSlot\)/\t\treleaseReservation(releaseSlot)\n\t\te.commitAttemptOutcome(in, attempt, sendState, out)/'
+
+run_mutation M101 \
+  'a pinned-identity mismatch is reduced to one ordinary failed sample' \
+  'TestBreach_TLSIdentityMismatchTripsServerIdentityDrift|TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\te\.reportUpstreamTrustBreach\(in, attempt, upErr\)\n//'
+
+run_mutation M102 \
+  'a caller cancellation is charged against the target' \
+  'TestAttemptSettled_CallerCancellationIsNotATargetFailure' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\tif err != nil && mcperr\.ReasonOf\(err\) == mcperr\.ReasonUpstreamCancelled \{\n\t\treturn false\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

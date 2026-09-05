@@ -64,9 +64,16 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// Declared BEFORE the deferred commit so that commit can read the upstream leg's own verdict.
 	var upResp *upstreamclient.Response
 	var upErr error
+	// releaseSlot is the budget reservation's release, captured from the admit below so the SLOT
+	// GOES BACK LAST — after the settle and after the terminal outcome commit. See the ordering
+	// note on that defer.
+	var releaseSlot func()
 	defer func() {
 		if attempt == nil {
-			return // no durable intent ⇒ no physical attempt to account for
+			// No durable intent ⇒ no physical attempt to account for. The slot may still be held
+			// (openAttempt can fail after the reservation), so the release below still runs.
+			releaseReservation(releaseSlot)
+			return
 		}
 		// The UPSTREAM LEG's own verdict, computed here because this is where it is
 		// known. "Did the peer give us a usable answer?" is a different question from
@@ -83,7 +90,29 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// such tool failures produced zero failures, never reached the 1-of-2 threshold, and
 		// admitted a third execution against a target that had just failed twice (Codex round
 		// 6 P1 — the same defect class as round 5, one shape further in).
+		// THE ORDER OF THESE FOUR STEPS IS THE SECURITY PROPERTY, and each was learned separately.
+		//
+		//  1. A TLS/workload identity mismatch is a whole-Canary breach in its OWN right, not one
+		//     ordinary bad sample. server_identity_drift is single-occurrence in the taxonomy, and
+		//     the request-scoped live-trust check runs against the CATALOG before the dial — so a
+		//     peer that no longer matches its pin is discovered only here. Reduced to a sample it
+		//     needed a second one to matter, and another invocation could be admitted against a
+		//     server we can no longer identify (Codex round 8 P1). It is reported FIRST so it wins
+		//     the immutable first cause over any threshold the same attempt might also cross.
+		//  2. The settle, which may latch a rate breach (round 3, round 7).
+		//  3. The terminal outcome, whose FAILURE is itself the outcome_evidence_loss breach — and
+		//     the sample must be durable before it (round 3).
+		//  4. Only then the slot goes back.
+		//
+		// Steps 1-3 all decide whether the Canary keeps its authority; step 4 is what admits the
+		// next request. Releasing before any of them reopens the same window three times over: at
+		// MaxConcurrentExecutions of 1 a waiting request reserves and crosses Upstream.Call while
+		// the breach that should have stopped the experiment is still being recorded (round 7 for
+		// the sample, round 8 for the outcome commit).
+		e.reportUpstreamTrustBreach(in, attempt, upErr)
+		e.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))
 		e.commitAttemptOutcome(in, attempt, sendState, out)
+		releaseReservation(releaseSlot)
 	}()
 
 	// OVN-09 (residual window). callUpstream is the ONE place either branch performs
@@ -114,33 +143,13 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		}
 		release, revalidate := adm.release, adm.revalidate
 		reservationID, activationGen := adm.reservationID, adm.activationGen
-		// THE HEALTH SAMPLE IS REPORTED BEFORE THE RESERVATION GOES BACK, IN ONE DEFER, AND THE
-		// ORDER INSIDE IT IS THE POINT.
-		//
-		// Reporting the settle and releasing the slot are not independent bookkeeping. The settle
-		// is what may latch elevated_error_rate, and the release is what lets the NEXT request
-		// reserve. Split the other way round — release deferred here, settle deferred by the outer
-		// runExecute — the release necessarily ran first, because an inner closure's defers run
-		// when the closure returns. With MaxConcurrentExecutions of 1 that is not a theoretical
-		// gap: the second failed call returns, its slot comes back, a waiting third request
-		// reserves and crosses Upstream.Call, and only then does the second sample arrive and prove
-		// the Canary should have stopped at 1-of-2. The threshold was reachable and still did not
-		// prevent the next physical invocation (Codex round 7 P1).
-		//
-		// This is the round-3 latch-atomicity finding one level further out: there the latch was
-		// not atomic with the OBSERVATION, here the observation was not ordered against the
-		// RELEASE. Both are the same mistake — treating the pieces of one decision as separate
-		// events — and both are fixed by making the sequence explicit rather than emergent.
-		//
-		// It is ONE defer with two statements rather than two defers relying on LIFO, because the
-		// ordering is a security property and must be readable as one. release stays deferred so a
-		// reserved slot is never leaked when a later boundary guard refuses (§11).
-		defer func() {
-			e.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))
-			if release != nil {
-				release()
-			}
-		}()
+		// The release is handed to the OUTER defer rather than deferred here, because everything
+		// that decides whether the Canary keeps its authority — the trust breach, the health
+		// sample, the terminal outcome commit — happens out there, and the slot must not go back
+		// before all of it. Deferred here it necessarily ran first: an inner closure's defers run
+		// when the closure returns. It stays release-on-every-path (§11) because the outer defer
+		// runs on every path too, including a boundary refusal after the reservation was taken.
+		releaseSlot = release
 		// DURABLE SEND INTENT (§6) — committed AFTER the budget reservation (so it can
 		// name the slot) and BEFORE the final boundary guards, because its purpose is
 		// to survive a crash that happens after the peer receives bytes. Only a
@@ -341,7 +350,39 @@ func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, s
 // Canary abort itself for its own controls firing. The question this predicate answers is "is the
 // target misbehaving", never "did the client get a result".
 func upstreamLegFailed(resp *upstreamclient.Response, err error) bool {
+	// A CALLER cancellation is not evidence about the target. context.Canceled means the client
+	// went away; the peer may have been perfectly healthy, and two such cancellations would reach
+	// the 1-of-2 threshold and stop a Canary that had nothing wrong with it (Codex round 8 P2).
+	// This is the same rule the upstream pool's circuit breaker already follows (CHAOS-11), and it
+	// is deliberately NARROW: a DEADLINE overrun is ReasonUpstreamTimeout, not this reason, and it
+	// IS charged — a target too slow to answer inside the budget is a target misbehaving.
+	if err != nil && mcperr.ReasonOf(err) == mcperr.ReasonUpstreamCancelled {
+		return false
+	}
 	return err != nil || resp == nil || resp.Error != nil
+}
+
+// releaseReservation returns the budget slot, nil-safe so the ordered defer above reads as one
+// sequence rather than a chain of guards.
+func releaseReservation(release func()) {
+	if release != nil {
+		release()
+	}
+}
+
+// reportUpstreamTrustBreach latches server_identity_drift when the connected peer's TLS/workload
+// identity did not match the pin.
+//
+// The request-scoped live-trust revalidation checks the CATALOG record before the dial; this is the
+// only place the ACTUAL peer's identity is judged, and a mismatch is a single-occurrence
+// whole-Canary breach rather than an ordinary failed attempt. Treating it as a sample meant the
+// first mismatch stopped nothing and a further invocation could be admitted against a server we can
+// no longer identify.
+func (e *Executor) reportUpstreamTrustBreach(in runtime.ExecInput, rec *attemptRecord, err error) {
+	if rec == nil || err == nil || mcperr.ReasonOf(err) != mcperr.ReasonUpstreamTLSIdentity {
+		return
+	}
+	e.cfg.Safety.Breach(in.Capability.String(), rec.generation, "server_identity_drift")
 }
 
 // finishUpstream processes a successful upstream response: it forwards a sanitized
