@@ -996,6 +996,16 @@ run_mutation M103 \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
   's/ \|\| errors\.Is\(err, context\.Canceled\)//'
 
+# M104 is Codex round 12: the watchdog callback reads the clock four times instead of once, so a
+# wall-clock step landing between two reads lets it choose contradictory branches — and re-arm the
+# only traffic-independent stop for a duration measured from an instant it had already rejected.
+run_mutation M104 \
+  'the watchdog callback samples the clock separately for each branch' \
+  'TestAutoStop_WatchdogDecidesEveryBranchFromOneClockSample' \
+  . mcp_canary_autostop.go \
+  's/windowDeadlineIfOpen\(capb, now\); ok && now\.Before\(d\)/windowDeadlineIfOpen(capb, canaryNow()); ok \&\& canaryNow().Before(d)/' \
+  's/rt\.rearmWindowWatchdog\(capb, gen, d\.Sub\(now\)\)/rt.rearmWindowWatchdog(capb, gen, d.Sub(canaryNow()))/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

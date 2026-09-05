@@ -122,20 +122,30 @@ func armWindowWatchdogLocked(rt *canaryRuntime, capb rollout.Capability, cr *can
 		if globalCanaryRuntime.currentGeneration(capb) != gen {
 			return
 		}
-		if d, ok := globalCanaryRuntime.windowDeadlineIfOpen(capb); ok && canaryNow().Before(d) {
+		// ONE CLOCK SAMPLE DECIDES EVERY BRANCH BELOW, and that is the point of the variable.
+		//
+		// Read separately, the openness test, the "is the deadline still ahead" test, the re-arm
+		// duration and the trip timestamp were FOUR samples. A clock stepping backwards between any
+		// two of them lets the callback pick contradictory branches: the first sample says the
+		// window is open, the second is already before the activation instant, and the callback
+		// re-arms — possibly for a very long time — on a window that is in fact closed, leaving
+		// Aborted and the immutable first cause unset (Codex round 12). A rollback must move the
+		// callback to ONE verdict, not between two.
+		now := canaryNow()
+		if d, ok := globalCanaryRuntime.windowDeadlineIfOpen(capb, now); ok && now.Before(d) {
 			// FIRED EARLY, and this must RE-ARM rather than return. time.AfterFunc measures a
 			// duration; the deadline is absolute wall-clock. If the clock moves backwards after
 			// activation the timer still fires on schedule while the deadline is genuinely still in
 			// the future — and a one-shot timer that simply returns leaves the activation with NO
 			// watchdog at all, back to waiting for a request to notice (Codex P1). Re-arming for
 			// the remaining time keeps the traffic-independence claim true.
-			rt.rearmWindowWatchdog(capb, gen, d.Sub(canaryNow()))
+			rt.rearmWindowWatchdog(capb, gen, d.Sub(now))
 			return
 		}
 		// The generation travels with the trip and is verified under the same lock that latches:
 		// this callback cannot be cancelled once it is running, so a demote-and-reactivate between
 		// the check above and the trip must not abort the replacement.
-		rt.tripCanaryAbortForGeneration(capb, gen, "window_expired", canaryNow())
+		rt.tripCanaryAbortForGeneration(capb, gen, "window_expired", now)
 	})
 }
 
@@ -181,11 +191,13 @@ func stopWindowWatchdogLocked(cr *canaryCapRuntime) {
 // watchdog callback uses it rather than windowDeadline so a clock rolled back behind the activation
 // cannot make an early fire re-arm indefinitely: the window is closed, so the callback falls through
 // to the trip instead.
-func (rt *canaryRuntime) windowDeadlineIfOpen(capb rollout.Capability) (time.Time, bool) {
+// now is supplied by the caller rather than read here, so a caller that must decide several things
+// about the same instant decides them all against ONE sample (Codex round 12).
+func (rt *canaryRuntime) windowDeadlineIfOpen(capb rollout.Capability, now time.Time) (time.Time, bool) {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
-	if !cr.active || cr.enforcer == nil || !cr.enforcer.WindowOpen(canaryNow()) {
+	if !cr.active || cr.enforcer == nil || !cr.enforcer.WindowOpen(now) {
 		return time.Time{}, false
 	}
 	d := cr.enforcer.WindowDeadline()

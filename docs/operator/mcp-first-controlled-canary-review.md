@@ -506,7 +506,10 @@ found exactly TWO production `aborter.Trip` sites, both in `reserveCanaryExecuti
 caller — so eight of the ten declared `AbortCanary` codes were declared but never tripped, and after
 any of them LATER requests could still reach the upstream. **That gap is now closed (blocker 7).**
 The taxonomy is twelve `AbortCanary` codes and every one has a wired trip path that converges on
-the SAME `AbortController` — there is no second latch, no parallel registry, no per-breach stop:
+the SAME `AbortController` — there is no second latch, no parallel registry, no per-breach stop.
+NINE of the twelve also have a production PRODUCER; the three that do not are marked in the table and
+explained in the honesty note below. Read the column as "where a report of this code goes", not as
+"this node can currently generate it":
 
 | Whole-Canary code | Automatic trip path |
 |---|---|
@@ -520,7 +523,7 @@ the SAME `AbortController` — there is no second latch, no parallel registry, n
 | `credential_safety_failure` | reported through the `CanarySafety` seam; denies AND stops (no production producer exists yet — see the honesty note below) |
 | `elevated_error_rate` | `HealthMonitor.Observe`: `sample_floor = 2`, trips iff `2 × failures ≥ samples` (≥ 50%) over the CURRENT activation generation |
 | `latency_pathology` | `HealthMonitor.Observe`: one attempt at or above `HealthLatencyHardLimit` (15s) trips with NO floor; a mean at or above `HealthLatencyMeanLimit` (10s) trips at the floor |
-| `out_of_scope_execution` | the identity-cap breach the enforcer reports as `scope_escape`; a read-first/scope refusal of a single request stays request-scoped by design |
+| `out_of_scope_execution` | reported through the `CanarySafety` seam; denies AND stops. **No production producer exists yet** — the identity-cap breach beside it is `scope_escape`, a DIFFERENT code, and a read-first/scope refusal of a single request stays request-scoped by design. A side effect outside the enumerated scope is prevented by the scope gate rather than detected, so an independent witness (blocker 8) is what would report one — see the honesty note below |
 | `unexpected_upstream_response` | reserved for the authoritative production witness (blocker 8); reachable through the same funnel once that adapter is wired |
 
 **Reachability inside the 3-execution corpus.** `HealthSampleFloor = 2`, and the hard-latency rule has
@@ -926,9 +929,9 @@ reported, it denies AND stops. What is NOT claimed is that this node can current
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
-**Ten adversarial rounds hardened this closure, and what they found is the useful record.** Each
+**Twelve adversarial rounds hardened this closure, and what they found is the useful record.** Each
 round's fix exposed the next layer inward, which is convergence rather than churn — but every one of
-the twenty-four findings was a way the latch could be right and the surrounding machinery still wrong.
+the twenty-seven findings was a way the latch could be right and the surrounding machinery still wrong.
 Rounds 4 through 6 found defects that rounds 3, 4 and 5 had themselves introduced, which is the
 honest shape of this kind of work: a fix that tightens one predicate is a new opportunity to get the
 adjacent one wrong. Both round-6 findings are of that kind, and both are the SAME predicate one
@@ -984,6 +987,9 @@ ONE of the two shapes a cancellation arrives in.
 | 8 | A caller cancellation was charged against the target | `context.Canceled` means the CLIENT went away. Two of them reached the 1-of-2 threshold and would have stopped a Canary that had nothing wrong with it — the direction a safety threshold must never err in for the opposite reason to all the others |
 | 9 | The cancellation was excluded from the NUMERATOR but not the population | Round 8's own fix, one notch short. Recorded as a non-failing sample it padded the denominator, so a cancellation plus a success plus a real failure was 1-of-3 and the Canary stayed active. "Not a failure" and "not a sample" are different statements |
 | 10 | Only one of the two cancellation SHAPES was matched | The transport treats everything after response headers as "a failure of the ANSWER, never of delivery", so a caller who hangs up during the BODY read is wrapped as `ReasonUpstreamCallFailed`. A reason-only test read that as the target failing, and two such hang-ups would trip `elevated_error_rate` on a peer that answered both times |
+| 11 | The runbook's PROCEDURE step still described request-driven expiry | The status table and §16 were updated when the blocker closed; step 8 — the one an operator follows at the window boundary — was not, so the same file gave two mutually exclusive accounts of the same behaviour |
+| 12 | The watchdog callback read the clock four times | Openness, "is the deadline ahead", the re-arm duration and the trip timestamp were separate samples. A wall-clock step between any two lets the callback pick contradictory branches and re-arm the only traffic-independent stop for a duration measured from an instant it had already rejected |
+| 12 | The §16 trip-path table still gave `out_of_scope_execution` a producer | It mapped the code to the identity-cap breach, which the enforcer actually reports as `scope_escape`. An operator auditing producer coverage there would have reached the conclusion the previous commit existed to remove |
 
 Two of these deserve to be remembered past this PR. The generation finding and the health-latch
 finding were both **gaps my own comments described and my own code did not implement** — the header
@@ -1034,7 +1040,7 @@ sides, and "the latch wins" is only true if it is true at every interleaving.
 
 ### Blocker 7 — red team
 
-Twenty-seven adversarial scenarios, each answered by a named gate rather than by argument.
+Twenty-eight adversarial scenarios, each answered by a named gate rather than by argument.
 
 | Scenario | Outcome | Gate |
 |---|---|---|
@@ -1054,6 +1060,7 @@ Twenty-seven adversarial scenarios, each answered by a named gate rather than by
 | A breach is reported for the OTHER capability | ignored; Gateway and Management are physically isolated | `TestAutoStop_BreachIsCapabilityIsolated` |
 | The clock is rolled back BEHIND the activation instant | the boundary AND the arm path both read the window as closed, so the activation latches `window_expired` instead of arming a watchdog for a phantom hour | `TestAutoStop_ClockRollbackBehindActivationClosesTheBoundary`, `TestAutoStop_ClockBehindActivationLatchesAtRestoreInsteadOfArming` |
 | The watchdog fires while the clock is behind the activation | it latches rather than re-arming; the callback consults the window-open-aware accessor, not the bare upper bound | `TestAutoStop_WatchdogFiringUnderRollbackLatchesInsteadOfReArming` (control: `TestAutoStop_ClockInsideTheWindowStillArmsNormally`) |
+| The wall clock steps WHILE the watchdog callback is deciding | every branch is decided from one sample, so the callback cannot both call the window open and measure the remainder from before the activation began | `TestAutoStop_WatchdogDecidesEveryBranchFromOneClockSample` |
 | The target answers every call with HTTP 500 | each is a settled attempt and a FAILURE, so the second trips `elevated_error_rate` at the 1-of-2 threshold — the peer answering badly is exactly the population the detector exists to judge | `TestAttemptSettled_PeerErrorResponseCountsAsAFailure` (control: `TestAttemptSettled_SuccessfulExecutionIsNotAFailure`) |
 | Culvert's own DLP blocks a request AFTER the peer answered | NOT a failure: the target is healthy and the policy is working. A Canary must not abort itself for its own controls firing | `TestAttemptSettled_SuccessfulExecutionIsNotAFailure`, `TestAutoStop_RequestScopedRefusalsNeverStopTheCanary` |
 | The time box closes and an admission notices before the watchdog | both name `window_expired`; the immutable first cause no longer depends on which path won the race | `TestAutoStop_WindowDenialAtAdmissionRecordsWindowExpired` (control: `TestAutoStop_TotalExhaustionStillRecordsBudgetExhausted`) |
@@ -1665,11 +1672,11 @@ demonstration still scores CAUGHT.
 
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **103 mutations** (M61–M78 are the blocker-7
-auto-abort set; M79–M103 were added by the ten adversarial rounds above — 100 driven through
+`scripts/mcp-canary-mutation-campaign.sh` now carries **104 mutations** (M61–M78 are the blocker-7
+auto-abort set; M79–M104 were added by the twelve adversarial rounds above — 101 driven through
 `run_mutation`, plus M02, M17 and M80, which stay hand-written because they mutate more than one
 site; M91 stopped needing a helper when round 8 collapsed the three orderings into one block). The 78-mutation state recorded below was clean on its second run;
-M79–M103 were each verified failing against their own reintroduced defect as they were written. The
+M79–M104 were each verified failing against their own reintroduced defect as they were written. The
 first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
 which is the campaign doing its job, so it is recorded rather than quietly re-run:
 

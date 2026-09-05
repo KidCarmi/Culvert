@@ -96,3 +96,31 @@ func newReconcileTestExecutor(t *testing.T, safety execution.CanarySafety) *exec
 	}
 	return ex
 }
+
+// swapCanaryClockSeq installs a clock that returns each supplied instant in turn and then repeats
+// the last one. It exists to model a wall-clock STEP that lands between two reads inside a single
+// code path — the shape a single-sample discipline is there to make impossible.
+func swapCanaryClockSeq(t *testing.T, seq ...time.Time) (reads func() int) {
+	t.Helper()
+	if len(seq) == 0 {
+		t.Fatal("swapCanaryClockSeq needs at least one instant")
+	}
+	prev := canaryNow
+	var mu sync.Mutex
+	i := 0
+	canaryNow = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		at := seq[i]
+		if i < len(seq)-1 {
+			i++
+		}
+		return at
+	}
+	t.Cleanup(func() { canaryNow = prev })
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return i
+	}
+}

@@ -1479,3 +1479,52 @@ func TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission(t *testing.T) {
 		t.Fatal("the surface reported a closed window; a reservation must actually be denied")
 	}
 }
+
+// TestAutoStop_WatchdogDecidesEveryBranchFromOneClockSample pins the single-sample discipline in the
+// watchdog callback.
+//
+// The callback has to decide four things about the same instant: is the window open, is the deadline
+// still ahead, how long is left, and when did the trip happen. Read separately those were FOUR clock
+// samples, and a wall-clock step landing between any two of them lets the callback pick contradictory
+// branches — the first sample says the window is open while the next is already behind the activation
+// instant, so it treats the fire as early and re-arms for a duration measured against the ROLLED-BACK
+// clock. On a one-hour window that is a two-hour sleep on a Canary that cannot admit anything (Codex
+// round 12).
+//
+// The observable is the re-armed duration: with one sample it is the true remainder measured at that
+// instant; with the split samples it is the remainder measured from before the activation began.
+func TestAutoStop_WatchdogDecidesEveryBranchFromOneClockSample(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	start := canaryRuntimeTestNow
+	budget := runtimeTestBudget(3)
+	window := budget.Window
+
+	// The clock is normal for the activation, then steps: the callback's FIRST read lands inside
+	// the window, and every later read is an hour BEFORE the activation instant.
+	inside := start.Add(window / 2)
+	rolledBack := start.Add(-time.Hour)
+	nowP := start
+	swapCanaryClockVar(t, &nowP)
+	fireIndex, armedFor, armedCount := swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, budget, start); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if armedCount() != 1 {
+		t.Fatalf("premise: a healthy activation arms one watchdog, got %d", armedCount())
+	}
+
+	swapCanaryClockSeq(t, inside, rolledBack)
+	fireIndex(0)
+
+	if armedCount() != 2 {
+		t.Fatalf("the callback fired inside the window, so it must RE-ARM, armed=%d", armedCount())
+	}
+	want := start.Add(window).Sub(inside) // the true remainder at the instant the callback decided
+	if got := armedFor(); got != want {
+		t.Fatalf("SECURITY: the watchdog was re-armed for %v, want %v — a clock step between the "+
+			"callback's reads let it measure the remaining window from an instant it had already "+
+			"rejected, scheduling the only traffic-independent stop far past the real deadline",
+			got, want)
+	}
+}
