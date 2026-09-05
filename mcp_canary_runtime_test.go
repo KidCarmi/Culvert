@@ -27,8 +27,17 @@ func withCanaryRuntimeTestEnv(t *testing.T, buildVer string) *canaryRuntime {
 	buildCommit = testBuildCommit // composed identity = "<buildVer>+<commit>" so currentRuntimeIdentity().Valid() (Codex P1, round-22)
 	globalCanaryRuntime = &canaryRuntime{}
 	t.Cleanup(func() { dataDir = prevDir; version = prevVer; buildCommit = prevCommit; globalCanaryRuntime = prevRt })
+	// Every test in this file activates at canaryRuntimeTestNow. Pin the auto-stop clock to it, or
+	// the absolute window deadline derived from that activation instant is years in the past
+	// against the real clock and each activation would begin life window_expired — which is
+	// CORRECT behaviour being applied to a fake activation instant. Tests that exercise the window
+	// itself override this with swapCanaryClockVar and move time explicitly.
+	swapCanaryClock(t, func() time.Time { return canaryRuntimeTestNow })
 	return globalCanaryRuntime
 }
+
+// canaryRuntimeTestNow is the single activation instant this file's tests operate at.
+var canaryRuntimeTestNow = time.Unix(1_700_000_000, 0)
 
 func runtimeTestBudget(total int) canary.Budget {
 	return canary.Budget{

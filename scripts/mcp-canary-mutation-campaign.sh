@@ -661,6 +661,121 @@ run_mutation M60 \
   . mcp_tooltrust_clock_test.go '--race=swapToolTrustNowFn,mcpToolTrustCoordinator).now' \
   's/\tmcpToolTrust\.mu\.Lock\(\)\n\tprev := mcpToolTrust\.nowFn\n\tmcpToolTrust\.nowFn = fn\n\tmcpToolTrust\.mu\.Unlock\(\)\n/\tprev := mcpToolTrust.nowFn\n\tmcpToolTrust.nowFn = fn\n/'
 
+# ══════════════════════════════════════════════════════════════════════════════
+# BLOCKER #7 — whole-Canary automatic abort. Each mutation reintroduces one way a
+# breach could stop a request without stopping the EXPERIMENT, or one way the
+# experiment could keep authority it should have lost.
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_mutation M61 \
+  'admission no longer consults the abort latch' \
+  'TestAutoStop_LatchedAbortMakesNewReservationImpossible|TestAutoStopConc02_BreachWhileManyAwaitAdmission' \
+  . mcp_canary_runtime.go \
+  's/\tif !cr\.aborter\.ExecutionEligible\(generation\) \{/\tif false {/'
+
+run_mutation M62 \
+  'the abort latch auto-clears when read' \
+  'TestAutoStop_LatchedAbortMakesNewReservationImpossible|TestAutoStop_FirstCausePreservedAcrossLaterBreaches' \
+  . internal/mcp/canary/abort_control.go \
+  's/\treturn gen == c\.generation \&\& c\.aborted/\treturn false/'
+
+run_mutation M63 \
+  'a restart clears the abort latch' \
+  'TestAutoStop_RestartAfterExpiryRestoresAborted|TestCanaryRuntime_RestartPreservesAbortLatch' \
+  . internal/mcp/canary/abort_control.go \
+  's/\treturn &AbortController\{generation: gen, aborted: snap\.Aborted, code: snap\.Code, atNanos: snap\.AtUnixNano\}/\treturn \&AbortController{generation: gen}/'
+
+run_mutation M64 \
+  'outcome evidence loss goes back to being metric-only' \
+  'TestAutoStop_OutcomeEvidenceLossAbortsTheWholeCanary' \
+  . internal/mcp/execution/attempt_evidence.go \
+  's/\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), "outcome_evidence_loss"\)\n//'
+
+run_mutation M65 \
+  'tool fingerprint drift denies the request but does not abort' \
+  'TestAutoStop_ToolFingerprintDriftAbortsTheWholeCanary' \
+  . mcp_live_gate.go \
+  's/\t\treturn false, "tool_fingerprint_drift"/\t\treturn false, ""/'
+
+run_mutation M66 \
+  'server identity drift denies the request but does not abort' \
+  'TestAutoStop_ServerIdentityDriftAbortsTheWholeCanary' \
+  . mcp_live_gate.go \
+  's/\t\treturn false, "server_identity_drift"/\t\treturn false, ""/'
+
+run_mutation M67 \
+  'the breach funnel silently drops credential_safety_failure' \
+  'TestAutoStop_CredentialSafetyFailureAbortsTheWholeCanary' \
+  . mcp_canary_autostop.go \
+  's/\tf\.rt\.tripCanaryAbort\(f\.capb, code, canaryNow\(\)\)/\tif code == "credential_safety_failure" {\n\t\treturn\n\t}\n\tf.rt.tripCanaryAbort(f.capb, code, canaryNow())/'
+
+run_mutation M68 \
+  'a reconciliation conflict is recorded but reaches no abort' \
+  'TestAutoStop_WitnessConflictAbortsTheWholeCanary' \
+  . internal/mcp/execution/reconcile.go \
+  's/\t\te\.cfg\.Safety\.Breach\(capability, "independent_witness_mismatch"\)/\t\t_ = capability/'
+
+run_mutation M69 \
+  'a scope escape denies the request but does not abort' \
+  'TestLiveAbort_BudgetExhaustionTripsWholeCanary|TestCanaryRuntime_ScopeEscapeTripsWholeCanaryAbort' \
+  . mcp_canary_runtime.go \
+  's/\t\tcr\.aborter\.Trip\("scope_escape", generation, now\)/\t\t_ = generation/'
+
+run_mutation M70 \
+  'budget exhaustion denies the request but does not abort' \
+  'TestAutoStop_DeniedReservationItselfTripsBudgetExhausted' \
+  . mcp_canary_runtime.go \
+  's/\t\tcr\.aborter\.Trip\("budget_exhausted", generation, now\)/\t\t_ = generation/'
+
+run_mutation M71 \
+  'the deadline is only ever checked when a request arrives' \
+  'TestAutoStop_WindowExpiresWithNoTrafficAtAll|TestAutoStop_RestartAfterExpiryRestoresAborted' \
+  . mcp_canary_runtime.go \
+  's/\treconcileWindowDeadlineLocked\(rt, capb, cr\)\n\treturn gen, nil/\treturn gen, nil/' \
+  's/\treconcileWindowDeadlineLocked\(rt, capb, cr\)\n\}/}/'
+
+run_mutation M72 \
+  'a restart grants a fresh full window' \
+  'TestAutoStop_RestartNeverGrantsAFreshWindow|TestAutoStop_RestartAfterExpiryRestoresAborted' \
+  . internal/mcp/canary/budget_enforce.go \
+  's/\treturn time\.Unix\(0, e\.startNanos\)\.Add\(e\.budget\.Window\)/\treturn time.Now().Add(e.budget.Window)/'
+
+run_mutation M73 \
+  'the error-rate sample floor is raised beyond the 3-execution corpus' \
+  'TestHealth_SampleFloorFitsTheFirstCanaryCorpus|TestHealth_ErrorRateReachableWithinThreeExecutions' \
+  ./internal/mcp/canary/ internal/mcp/canary/health.go \
+  's/\tHealthSampleFloor = 2/\tHealthSampleFloor = 5/'
+
+run_mutation M74 \
+  'the latency hard limit is pushed past the upstream timeout, making it unreachable' \
+  'TestHealth_SampleFloorFitsTheFirstCanaryCorpus|TestHealth_HardLatencyTripsOnOneAttemptWithNoFloor' \
+  ./internal/mcp/canary/ internal/mcp/canary/health.go \
+  's/\tHealthLatencyHardLimit = 15 \* time\.Second/\tHealthLatencyHardLimit = 45 * time.Second/'
+
+run_mutation M75 \
+  'a later breach overwrites the first abort reason' \
+  'TestAutoStop_FirstCausePreservedAcrossLaterBreaches|TestAutoStopConc03_TwoBreachesRaceForFirstCause' \
+  . internal/mcp/canary/abort_control.go \
+  's/\tif !c\.aborted \{/\tif true {/'
+
+run_mutation M76 \
+  'the final live revalidation stops consulting the abort latch' \
+  'TestAutoStop_LatchedAbortStopsAnAlreadyAdmittedRequestBeforeTheCall|TestAutoStopConc11_LatchDuringInflightAdmissionSendsNothingMore' \
+  . mcp_canary_runtime.go \
+  's/\treturn cr\.aborter\.ExecutionEligible\(gen\)/\treturn true/'
+
+run_mutation M77 \
+  'the window watchdog fires but trips nothing' \
+  'TestAutoStop_WindowExpiresWithNoTrafficAtAll' \
+  . mcp_canary_autostop.go \
+  's/\t\trt\.tripCanaryAbort\(capb, "window_expired", canaryNow\(\)\)/\t\t_ = capb/'
+
+run_mutation M78 \
+  'an expired window restores as a healthy, executable activation' \
+  'TestAutoStop_RestartAfterExpiryRestoresAborted|TestAutoStopConc05_DeadlineVersusRestart' \
+  . mcp_canary_autostop.go \
+  's/\t\ttripAutoStopLocked\(rt, capb, cr, "window_expired", now\)\n\t\treturn/\t\treturn/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

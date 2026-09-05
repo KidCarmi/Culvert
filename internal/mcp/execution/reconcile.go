@@ -246,3 +246,29 @@ func ReconcileTransitionAllowed(from, to model.ReconciliationResult) bool {
 	}
 	return to.Valid()
 }
+
+// ReconcileAndReport runs ReconcileOrphan and routes an AUTHORITATIVE physical-effect contradiction
+// to the whole-Canary breach seam (First Controlled Canary review, blocker #7 §10).
+//
+// This is the load-bearing path the review requires: when reconciliation eventually says the world
+// disagrees with Culvert's own record of what it did — a duplicated attempt, a reservation reused, a
+// binding that does not match the intent — that verdict must already be able to stop the experiment,
+// not merely be written down. All three of those shapes arrive here as ReconConflict; the #1306
+// derivation folds a >1 observation count and a mismatched binding into exactly that verdict, so
+// conflict is the single signal to act on and there is no second classification to keep in sync.
+//
+// It does NOT create a production witness. With no witness wired, ReconcileOrphan returns
+// reconciliation_required and nothing trips — the shipped posture, and blocker #1/#8's to change.
+// What this closes is the gap where the signal existed and had nowhere to go.
+func (e *Executor) ReconcileAndReport(ctx context.Context, w Witness, orphan RecoveredAttempt,
+	expectServer, expectMethod string, capability string, now int64,
+) (model.ReconciliationEvidence, error) {
+	ev, err := ReconcileOrphan(ctx, w, orphan, expectServer, expectMethod, now)
+	if err != nil {
+		return ev, err
+	}
+	if ev.Result == model.ReconConflict {
+		e.cfg.Safety.Breach(capability, "independent_witness_mismatch")
+	}
+	return ev, nil
+}

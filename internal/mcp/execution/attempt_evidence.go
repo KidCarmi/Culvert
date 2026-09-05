@@ -4,6 +4,8 @@ package execution
 // physical tool invocation (First Controlled Canary review §6, §8, §9, §10).
 
 import (
+	"time"
+
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/runtime"
@@ -21,6 +23,12 @@ type attemptRecord struct {
 	// attempt that does not carry it produces an outcome that cannot be persisted —
 	// and because the outcome commit is best-effort, the loss would be silent.
 	decisionRef string
+	// startedAt is the instant the durable send intent was committed — i.e. the moment this
+	// attempt became a physical possibility. The settle-time delta is the attempt latency the
+	// First-Canary latency detector judges. It deliberately spans the intent commit rather than
+	// only Upstream.Call, because the question the detector answers is "how long is this
+	// experiment taking to do one thing", not "how fast is the peer's socket".
+	startedAt time.Time
 }
 
 // attemptIDOf returns the attempt identity to put on the wire, or "" when this
@@ -50,6 +58,7 @@ func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, 
 		reservationID: reservationID,
 		generation:    activationGen,
 		decisionRef:   decisionRef,
+		startedAt:     e.cfg.Clock(),
 	}
 	f := decisionFacts(in)
 	f.Criticality, f.ActionClass = model.CritOrdinary, model.ActionClassRead
@@ -121,6 +130,30 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 		FailureReason: out.Reason.String(),
 	}
 	if _, cerr := e.cfg.Events.CommitDecision(f); cerr != nil {
+		// A physical invocation may have happened and its terminal outcome is NOT durable: the
+		// Canary can no longer reconstruct what it did to the world. That is a whole-Canary
+		// breach, not a statistic. The metric stays for observability, but the SAFETY path is the
+		// breach seam — before blocker #7 this condition incremented a counter whose production
+		// implementation was an empty method body, so evidence loss stopped nothing at all.
 		e.cfg.Metrics.ObserveOutcomeEvidenceLoss(in.Capability.String())
+		e.cfg.Safety.Breach(in.Capability.String(), "outcome_evidence_loss")
+	}
+	// One SETTLED post-admission attempt, for the population detectors.
+	//
+	// THE SAMPLE SET IS "INVOCATIONS ACTUALLY ATTEMPTED", and both exclusions matter:
+	//
+	//   - a request-scoped denial (policy, scope, allowance) never mints an attempt record and so
+	//     never reaches this function at all — a Canary must not abort itself for correctly
+	//     refusing requests;
+	//   - definitely_not_sent means a boundary guard refused AFTER the intent commit — an
+	//     emergency kill, a tool drift, a demotion. Nothing was sent, so there is no execution to
+	//     judge. Counting those would make an operator's own kill switch look like an error rate
+	//     and latch elevated_error_rate for the stop working exactly as designed.
+	//
+	// Among attempts that WERE made, failure is "no proof the peer answered" — that is the
+	// upstream leg failing, and it is deliberately NOT out.Executed: a DLP block after a
+	// successful peer response is Culvert's policy working, not the target being unhealthy.
+	if state != model.SendStateUnset && state != model.SendDefinitelyNotSent {
+		e.cfg.Safety.AttemptSettled(in.Capability.String(), !state.ProvesReceipt(), e.cfg.Clock().Sub(rec.startedAt))
 	}
 }

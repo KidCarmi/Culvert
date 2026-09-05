@@ -382,6 +382,11 @@ func mcpCanaryStatus() map[string]any {
 			"generation":          globalCanaryRuntime.currentGeneration(rollout.CapabilityGateway),
 			"execution_eligible":  globalCanaryRuntime.executionEligible(rollout.CapabilityGateway, time.Now()),
 			"budget_ceilings_are": "first_canary",
+			// Automatic-stop truth (blocker #7 §20). execution_eligible alone cannot distinguish
+			// "no Canary ever activated" from "a Canary activated and was aborted", and mode alone
+			// keeps saying Canary after an abort. auto_stop names the first cause and reports
+			// execution AUTHORITY separately, so a stopped experiment is never read as healthy.
+			"auto_stop": canaryAbortStatusFor(rollout.CapabilityGateway),
 		},
 		"first_canary_bounds": map[string]any{
 			"max_servers":            canary.MaxCanaryServers,

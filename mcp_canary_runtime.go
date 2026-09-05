@@ -51,6 +51,10 @@ type canaryRuntimeState struct {
 	Budget         canary.Budget         `json:"budget"`
 	BudgetSnapshot canary.BudgetSnapshot `json:"budget_snapshot"`
 	AbortSnapshot  canary.AbortSnapshot  `json:"abort_snapshot"`
+	// HealthSnapshot carries the elevated-error-rate / latency-pathology counters. It is durable
+	// for the same reason the budget is: a detector that resets on restart is one a crash can
+	// silently disarm, handing a misbehaving Canary a clean slate.
+	HealthSnapshot canary.HealthSnapshot `json:"health_snapshot"`
 }
 
 // canaryCapRuntime is one capability's in-memory activation runtime.
@@ -61,6 +65,12 @@ type canaryCapRuntime struct {
 	budget     canary.Budget
 	enforcer   *canary.BudgetEnforcer
 	aborter    *canary.AbortController
+	health     *canary.HealthMonitor
+	// windowStop cancels this activation's traffic-independent window watchdog. It is a
+	// convenience for a RUNNING process only: the authoritative expiry check is the derived
+	// deadline (enforcer.WindowDeadline), re-evaluated on restore, so losing this timer can
+	// never restore authority the clock has already taken away.
+	windowStop func()
 }
 
 // canaryRuntime holds the two isolated capability runtimes.
@@ -245,6 +255,7 @@ func (rt *canaryRuntime) beginCanaryActivation(capb rollout.Capability, budget c
 	cr.budget = budget
 	cr.enforcer = canary.NewBudgetEnforcer(budget, gen, now)
 	cr.aborter = canary.NewAbortController(gen)
+	cr.health = canary.NewHealthMonitor(gen)
 	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
 		// The activation was never durably established — DISARM in memory (fail closed) so no
 		// execution path can reserve work for an activation that does not durably exist (Codex P1).
@@ -252,6 +263,7 @@ func (rt *canaryRuntime) beginCanaryActivation(capb rollout.Capability, budget c
 		cr.active = false
 		cr.enforcer = nil
 		cr.aborter = nil
+		cr.health = nil
 		cr.budget = canary.Budget{}
 		// The persist may have left a VISIBLE Active record on disk (e.g. an AtomicWrite that replaced
 		// the target but could not fsync — ErrReplacedNotSynced). Durably remove it so a restart cannot
@@ -259,6 +271,11 @@ func (rt *canaryRuntime) beginCanaryActivation(capb rollout.Capability, budget c
 		_ = rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "begin", err) // in-memory already disarmed; residual risk is logged
 		return gen, err
 	}
+	// Arm the traffic-independent automatic stop for the new activation. It is armed AFTER the
+	// durable persist, so a begin that never became durable never leaves a watchdog behind for an
+	// activation that does not exist. The same call also latches immediately if the derived
+	// deadline is somehow already past (a clock jump between the activation instant and now).
+	reconcileWindowDeadlineLocked(rt, capb, cr)
 	return gen, nil
 }
 
@@ -278,9 +295,11 @@ func (rt *canaryRuntime) demoteCanary(capb rollout.Capability) error {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
+	stopWindowWatchdogLocked(cr)
 	cr.active = false
 	cr.enforcer = nil
 	cr.aborter = nil
+	cr.health = nil
 	cr.budget = canary.Budget{}
 	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
 		// Persisting the disarmed record failed — remove the durable file so a restart cannot restore
@@ -498,6 +517,9 @@ func (rt *canaryRuntime) persistLocked(capb rollout.Capability, cr *canaryCapRun
 	if cr.aborter != nil {
 		st.AbortSnapshot = cr.aborter.Snapshot()
 	}
+	if cr.health != nil {
+		st.HealthSnapshot = cr.health.Snapshot()
+	}
 	raw, err := json.Marshal(st)
 	if err != nil {
 		return err
@@ -575,14 +597,22 @@ func (rt *canaryRuntime) restoreCapability(capb rollout.Capability) {
 	cr.budget = st.Budget
 	cr.enforcer = canary.RestoreBudgetEnforcer(st.Budget, st.Generation, st.BudgetSnapshot)
 	cr.aborter = canary.RestoreAbortController(st.Generation, st.AbortSnapshot)
+	cr.health = canary.RestoreHealthMonitor(st.Generation, st.HealthSnapshot)
 	if cr.enforcer == nil || cr.aborter == nil {
 		cr.active = false
 		cr.enforcer = nil
 		cr.aborter = nil
+		cr.health = nil
 		cr.budget = canary.Budget{}
 		return
 	}
 	cr.active = true
+	// The window is absolute and generation-bound. A restart NEVER restarts the clock: the
+	// deadline is re-derived from the persisted activation instant, so a process that comes back
+	// after expiry latches window_expired HERE — before any admission path can observe an
+	// execution-eligible activation — and one that comes back before expiry re-arms a watchdog
+	// for the REMAINING time only.
+	reconcileWindowDeadlineLocked(rt, capb, cr)
 }
 
 // strictDecodeCanaryRuntimeJSON decodes exactly one JSON value into v, rejecting unknown fields and

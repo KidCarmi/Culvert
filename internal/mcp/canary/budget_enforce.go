@@ -266,6 +266,20 @@ func (e *BudgetEnforcer) windowOpenLocked(now time.Time) bool {
 	return elapsed >= 0 && elapsed < int64(e.budget.Window)
 }
 
+// WindowDeadline returns the ABSOLUTE instant this activation's time box expires: the recorded
+// activation instant plus the budget Window. It is derived from the SAME persisted activation
+// instant the window check uses, so it cannot drift from Reserve's verdict, and a restart restoring
+// that instant restores the SAME deadline — a restart can never hand the Canary a fresh full window.
+// A nil enforcer or a non-positive window yields the zero time (no deadline to enforce).
+func (e *BudgetEnforcer) WindowDeadline() time.Time {
+	if e == nil || e.budget.Window <= 0 {
+		return time.Time{}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return time.Unix(0, e.startNanos).Add(e.budget.Window)
+}
+
 // WindowOpen reports whether the time-boxed window is still open at now: false once the configured
 // Window has elapsed, AND false on a backward clock step (now earlier than the activation instant) —
 // mirroring Reserve's window gate exactly, so a status/eligibility read agrees with what a Reserve

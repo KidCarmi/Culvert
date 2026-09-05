@@ -254,6 +254,11 @@ func armCanaryWithRealPeerBackend(t *testing.T, p *controlledPeer, budgetTotal i
 }
 
 func armCanaryWithRealPeerFull(t *testing.T, p *controlledPeer, budgetTotal int, trustOK bool, tweak func(*mcpLiveSideEffectGate), be spool.Backend) *peerRig {
+	// This harness composes and activates at a FIXED fake instant (time.Unix(0,1)). Pin the Canary
+	// auto-stop clock to it: the window deadline is ABSOLUTE and derived from the activation
+	// instant, so against the real clock a 1970 activation is decades expired and every request
+	// here would be refused by a correct window_expired latch.
+	swapCanaryClock(t, func() time.Time { return time.Unix(0, 1) })
 	t.Helper()
 	restore := ssrf.AllowLoopbackForTest()
 	t.Cleanup(restore)

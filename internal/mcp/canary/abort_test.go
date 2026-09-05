@@ -16,6 +16,11 @@ func TestAbortConditions_ClassificationIsComplete(t *testing.T) {
 		"server_identity_drift": true, "outcome_evidence_loss": true, "credential_safety_failure": true,
 		"budget_exhausted": true, "elevated_error_rate": true, "latency_pathology": true,
 		"unexpected_upstream_response": true,
+		// independent_witness_mismatch: authoritative reconciliation contradicting Culvert's own
+		// record. window_expired: the time-boxed activation ending on its own, with or without
+		// traffic — an automatic STOP, classified whole-Canary because it revokes execution
+		// authority for the generation exactly as a fault-driven abort does.
+		"independent_witness_mismatch": true, "window_expired": true,
 	}
 	wantRequest := map[string]bool{
 		"policy_deny": true, "stale_decision": true, "credential_not_ready": true,

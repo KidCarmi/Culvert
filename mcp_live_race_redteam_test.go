@@ -252,6 +252,11 @@ func TestLiveRedTeam_OldGenerationNotResurrectedOnRestore(t *testing.T) {
 func armCanaryLiveTierTrust(t *testing.T, up *recordingUpstream, trust func() bool, budgetTotal int) *mcpruntime.Config {
 	t.Helper()
 	resetLiveTierGlobals(t)
+	// This harness composes and activates at a FIXED fake instant (time.Unix(0,1)). Pin the
+	// Canary auto-stop clock to the same instant, or the absolute window deadline derived from a
+	// 1970 activation is — correctly — decades past, and every live test would begin life
+	// window_expired. Tests that exercise the window drive it explicitly instead.
+	swapCanaryClock(t, func() time.Time { return time.Unix(0, 1) })
 	setDataDirForTest(t, t.TempDir())
 	gw := getMCPRollout().gateway
 	prevCfg := gw.CurrentConfig()
@@ -260,7 +265,7 @@ func armCanaryLiveTierTrust(t *testing.T, up *recordingUpstream, trust func() bo
 	}
 	t.Cleanup(func() { _ = gw.SetConfig(prevCfg, "test-restore", time.Unix(0, 2).UnixNano()) })
 	gate := liveRealGate(rollout.CapabilityGateway, true)
-	gate.trustOK = func(string, string, string, string, time.Time) bool { return trust() }
+	gate.trustOK = func(string, string, string, string, time.Time) (bool, string) { return trust(), "" }
 	cfg := &mcpruntime.Config{}
 	if err := composeGatewayLiveTierInto(cfg, liveTierComposition{
 		Upstream: up, Events: liveTestEvents(t),
