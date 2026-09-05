@@ -277,7 +277,7 @@ run_mutation M07 \
   'preCallGuard no longer re-reads the emergency-kill generation' \
   'TestKillBoundary_|TestCanaryPrerequisite_' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/\tif e\.cfg\.State\.KillGeneration\(\) != admKillGen \{\n\t\treturn errKilledAtBoundary \/\/ emergency stop is paramount, even if the tool also drifted or demoted\n\t\}\n//'
+  's/\tif e\.cfg\.State\.KillGeneration\(\) != admKillGen \{.*?\n\t\}\n//s'
 
 # ── (8) the final tool-freshness guard is removed ───────────────────────────
 run_mutation M08 \
