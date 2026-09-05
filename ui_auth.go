@@ -90,6 +90,13 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+	// CHAOS-58: bound the username BEFORE it can reach the lockout maps, the
+	// audit ring or the durable audit JSONL. This endpoint is public, so an
+	// unbounded name here is an unauthenticated write amplifier into all three
+	// (see login_input_bounds.go).
+	if rejectOversizeLoginUser(w, r, body.User) {
+		return
+	}
 	// RISK-019: resolve the real client behind a configured trusted proxy, so
 	// an L7 proxy that collapses peer IPs can't let one attacker lock out every
 	// admin (falls back to the direct peer when no trusted proxy is set).
