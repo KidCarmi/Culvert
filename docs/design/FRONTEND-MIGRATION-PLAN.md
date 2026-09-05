@@ -1,7 +1,10 @@
 # Frontend Migration Plan
 
 - **Status**: Accepted with ADR-FE-001 (2026-08-21, external architecture review corrections
-  incorporated). **Implementation has not begun**; FE-1A starts only on explicit go-ahead.
+  incorporated). **Implementation is underway**: FE-0 through FE-4 are IMPLEMENTED (see the
+  phase table in §3, each carrying its own implementation record); FE-5 onward have not
+  started. The new frontend stays disabled by default in shipped builds — see the FE-1B entry
+  below and `CULVERT_EXPERIMENTAL_UI` — until FE-8 cutover.
 - **Shape**: clean parallel replacement. The legacy `static/index.html` keeps serving `/` until
   cutover; the new app is developed under `frontend/` and its `/app/` preview route is
   **disabled by default**, available only under an explicit experimental development/test flag
@@ -142,7 +145,15 @@ FE-8, then required). All gates are evidence gates.
 Design artifacts produced; external review received; corrections incorporated; ADR-FE-001
 Accepted. Exit: this round.
 
-### FE-1A — Frontend Build Foundation (no Go changes)
+### FE-1A — Frontend Build Foundation (no Go changes) — IMPLEMENTED (this branch)
+
+> **Implemented contract (FE-1A round).** The `frontend/` scaffold (package.json,
+> package-lock.json, `.node-version`, tsconfig/vite/eslint/prettier configs, committed
+> `dist/`, `src/`) is in the tree at the pins recorded in ADR-FE-001. The frontend
+> verification/drift lane is wired as `frontend-verify.yml`, invoked as the `frontend` gate
+> job of `pr-fast-gate.yml` (path-classified on `frontend/*`, `ui_frontend_v2*`,
+> `api/openapi/openapi.json`, and the two workflow files themselves). This entry is
+> evidenced by the two files, not asserted from the phase objective below.
 - **Objective**: `frontend/` scaffold with the exact ADR baseline pins; strict TypeScript;
   ESLint rules (incl. the contract §4 inline-style bans and §7 no-cast rules); generated +
   committed `types.gen.ts`; deterministic committed `dist/`; the full drift & determinism
