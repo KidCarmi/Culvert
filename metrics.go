@@ -84,11 +84,20 @@ type ruleMetrics struct {
 //  1. A map reachable from a PUBLISHED view is never mutated in place. Writers
 //     build a replacement and swap it (publishViewLocked). Registration is
 //     bounded at 200 per process, so copy-on-write is free in practice.
+//
 //  2. Every mutator of hits/last republishes before releasing mu. Adding one
 //     that does not is a silent CORRECTNESS failure — a restored counter that
 //     never increments, or a rule whose hits vanish from /metrics — not merely a
 //     performance one. Pinned per mutator by
 //     TestRuleMetricsView_EveryMutatorRepublishes.
+//
+//     That applies to REPLACING the maps as much as to inserting into them, and
+//     replacement is the easier one to get wrong: the view then names cells the
+//     maps no longer hold, so the fast path increments a counter nothing reads
+//     and returns satisfied. Replace whole state via setCountersLocked, which
+//     cannot forget; after an in-place delete, call publishViewLocked. Pinned by
+//     TestRuleMetricsView_ResetLeavesNoStaleView and
+//     TestRuleMetricsView_InPlaceDeleteRepublishes.
 //
 // The counters themselves are still shared int64s mutated atomically THROUGH
 // the view; only the map structure is immutable. That is deliberate and matches
@@ -112,6 +121,60 @@ func (rm *ruleMetrics) publishViewLocked() {
 		next[name] = ruleCounter{hits: ptr, last: rm.last[name]}
 	}
 	rm.view.Store(&next)
+}
+
+// ruleCounterState is the whole authoritative counter state of a ruleMetrics.
+//
+// It exists so that REPLACING that state — as distinct from inserting into it —
+// is a single operation that cannot forget to republish the derived view. A
+// stale view entry is not a missing increment but a SILENT one: RecordHit's fast
+// path would find the old name, increment the cell it points at, and return
+// satisfied, while the freshly installed maps never see the hit and every
+// reader (/metrics, OTLP, persistence) reports zero.
+//
+// Reported by Codex on PR #1321 against a reset helper that assigned the six
+// fields directly; reproduced by `go test -count=2 -run
+// '^TestHitCounters_LastHitPersistRoundTrip$' .`, where the second run in the
+// same process persisted no counters at all. Pinned by
+// TestRuleMetricsView_ResetLeavesNoStaleView.
+type ruleCounterState struct {
+	hits          map[string]*int64
+	last          map[string]*int64
+	byID          map[string]persistedRuleCounter
+	loadedByName  map[string]persistedRuleCounter
+	appliedByName map[string]int64
+	order         []string
+}
+
+// emptyRuleCounterState is a fully initialised, zero-counter state.
+func emptyRuleCounterState() ruleCounterState {
+	return ruleCounterState{
+		hits:          make(map[string]*int64),
+		last:          make(map[string]*int64),
+		byID:          make(map[string]persistedRuleCounter),
+		loadedByName:  make(map[string]persistedRuleCounter),
+		appliedByName: make(map[string]int64),
+	}
+}
+
+// countersLocked captures the current authoritative state so a caller can put it
+// back later. Callers MUST hold rm.mu.
+func (rm *ruleMetrics) countersLocked() ruleCounterState {
+	return ruleCounterState{
+		hits: rm.hits, last: rm.last, byID: rm.byID,
+		loadedByName: rm.loadedByName, appliedByName: rm.appliedByName, order: rm.order,
+	}
+}
+
+// setCountersLocked installs a whole counter state and republishes the view in
+// the same critical section, so the two can never disagree. Callers MUST hold
+// rm.mu for writing. This is the ONLY sanctioned way to replace the counter
+// maps; assigning the fields directly leaves a stale view (see
+// ruleCounterState).
+func (rm *ruleMetrics) setCountersLocked(s ruleCounterState) {
+	rm.hits, rm.last, rm.byID = s.hits, s.last, s.byID
+	rm.loadedByName, rm.appliedByName, rm.order = s.loadedByName, s.appliedByName, s.order
+	rm.publishViewLocked()
 }
 
 var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64), byID: make(map[string]persistedRuleCounter), loadedByName: make(map[string]persistedRuleCounter), appliedByName: make(map[string]int64)}

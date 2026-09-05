@@ -426,16 +426,18 @@ func TestOTLPRuleMetrics_Empty(t *testing.T) {
 	// policy engine. Under -count>1 or -shuffle=on, a previously-registered
 	// rule bleeds into this test and the "0 rules" assertion fires. Snapshot
 	// and clear ruleMet for the duration of the test, then restore.
+	// Both directions go through setCountersLocked so the lock-free read view is
+	// republished with the maps it is derived from (see ruleCounterState).
 	ruleMet.mu.Lock()
-	savedHits := ruleMet.hits
-	savedOrder := ruleMet.order
-	ruleMet.hits = map[string]*int64{}
-	ruleMet.order = nil
+	saved := ruleMet.countersLocked()
+	cleared := saved
+	cleared.hits = map[string]*int64{}
+	cleared.order = nil
+	ruleMet.setCountersLocked(cleared)
 	ruleMet.mu.Unlock()
 	t.Cleanup(func() {
 		ruleMet.mu.Lock()
-		ruleMet.hits = savedHits
-		ruleMet.order = savedOrder
+		ruleMet.setCountersLocked(saved)
 		ruleMet.mu.Unlock()
 	})
 

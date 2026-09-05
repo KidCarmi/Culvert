@@ -132,6 +132,66 @@ func TestRuleMetricsView_EveryMutatorRepublishes(t *testing.T) {
 	})
 }
 
+// TestRuleMetricsView_ResetLeavesNoStaleView covers the class Codex reported on
+// PR #1321: REPLACING the authoritative maps (rather than inserting into them)
+// used to leave the view naming the previous maps' counter cells. RecordHit's
+// fast path then found the old name, incremented a cell nothing reads, and
+// returned satisfied — so the hit was lost SILENTLY and every reader saw zero.
+//
+// In-process this looks like a second test run in the same binary persisting no
+// counters at all, which is exactly how `go test -count=2` surfaced it.
+func TestRuleMetricsView_ResetLeavesNoStaleView(t *testing.T) {
+	rm := newTestRuleMetrics()
+	rm.RecordHit("carried-over")
+	oldCell := rm.hits["carried-over"]
+
+	// Replace the whole state, as a reset helper does between runs.
+	rm.mu.Lock()
+	rm.setCountersLocked(emptyRuleCounterState())
+	rm.mu.Unlock()
+
+	rm.RecordHit("carried-over")
+
+	rm.mu.RLock()
+	newCell := rm.hits["carried-over"]
+	rm.mu.RUnlock()
+	if newCell == nil {
+		t.Fatal("REGRESSION: the hit never reached the fresh maps — a stale view " +
+			"entry absorbed it into the previous state's counter cell")
+	}
+	if newCell == oldCell {
+		t.Fatal("REGRESSION: the hit landed in the PREVIOUS state's cell")
+	}
+	if got := atomic.LoadInt64(newCell); got != 1 {
+		t.Fatalf("fresh counter = %d, want 1", got)
+	}
+	if got := atomic.LoadInt64(oldCell); got != 1 {
+		t.Fatalf("previous counter moved after reset: %d, want 1", got)
+	}
+	assertViewMatchesAuthoritative(t, rm, "setCountersLocked")
+}
+
+// TestRuleMetricsView_InPlaceDeleteRepublishes is the sibling case: deleting
+// entries from the authoritative maps in place (cleanupRuleMet) must also
+// republish, or the view keeps naming the removed rule and RecordHit resurrects
+// a counter no reader will ever report.
+func TestRuleMetricsView_InPlaceDeleteRepublishes(t *testing.T) {
+	rm := newTestRuleMetrics()
+	rm.RecordHit("doomed")
+
+	rm.mu.Lock()
+	delete(rm.hits, "doomed")
+	delete(rm.last, "doomed")
+	rm.order = nil
+	rm.publishViewLocked()
+	rm.mu.Unlock()
+
+	if _, ok := ruleMetView(t, rm)["doomed"]; ok {
+		t.Fatal("REGRESSION: deleted rule still present in the view")
+	}
+	assertViewMatchesAuthoritative(t, rm, "in-place delete")
+}
+
 // TestBenchGate_RecordHitTakesNoLock is the hard cost gate, and it is
 // deliberately STRUCTURAL rather than timing-based.
 //
