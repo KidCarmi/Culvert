@@ -138,14 +138,25 @@ set is empty. This requires the separately-reviewed activation to have:
    `tools/call` invocations, with auxiliary lifecycle/discovery traffic counted separately and never
    folded into that total (review §9). Any mismatch WITHIN the side-effect-bearing class is a
    whole-Canary breach → auto-stop.
-8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16) — demote to
-   Shadow and/or engage the kill switch. **Window expiry is NOT an automatic transition today:**
-   `budget_exhausted` is tripped only from `reserveCanaryExecution` (`mcp_canary_runtime.go:391`) and
-   `BudgetDeniedWindow` is produced only by `BudgetEnforcer.Reserve` — both request-driven — so if no
-   further request arrives after the window elapses, nothing trips and the node stays in Canary mode
-   indefinitely. Expiry ends the authority to ADMIT, it does not stop the experiment. Until a
-   deadline-driven stop exists, the operator MUST explicitly demote/kill at the window boundary
-   (review §16, blocker 7).
+8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16).
+   **Two things happen here and they are NOT the same, so read both:**
+
+   *Automatic (blocker 7, CLOSED).* Execution AUTHORITY is revoked by the node itself. A watchdog
+   armed from the persisted activation instant latches `window_expired` with NO further request
+   arriving, exhaustion latches when the final authorized attempt settles, and every other
+   `AbortCanary` code has a production trip path onto the one `canary.AbortController`. After the
+   latch no new reservation is granted and a request already admitted fails the final live
+   revalidation before `Upstream.Call`. The operator does not have to be watching for this.
+
+   *Still MANUAL (blockers 10 and 12).* The node's MODE does not change. The latch revokes authority;
+   it does not demote, so the truthful state at the boundary is `ModeCanary + ABORTED`, and the
+   governed Shadow/Observe transition is not operator-reachable today. **The operator MUST still
+   perform the demotion (or engage the kill switch) at the window boundary** — not to stop execution,
+   which has already stopped, but to return the node to a governed steady state.
+
+   Read `activation_runtime.auto_stop` rather than the mode: it reports `execution_authority`
+   (`granted` / `revoked` / `none`) and the immutable first cause separately from `Mode`, and it is
+   never more optimistic than the admission gate.
 9. **Roll back** at the first sign of any whole-Canary breach; the kill generation is authoritative at
    the admission boundary (PREREQ-MCP-KILL-1) — but NOT across the transport retry loop:
    `upstreamclient.Call` retries an idempotent read without re-checking the kill, so a retry POST can
