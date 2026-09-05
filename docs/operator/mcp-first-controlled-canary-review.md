@@ -907,6 +907,33 @@ a signal is reported, it denies AND stops. `independent_witness_mismatch` is wir
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
+**Three adversarial rounds hardened this closure, and what they found is the useful record.** Each
+round's fix exposed the next layer inward, which is convergence rather than churn — but every one of
+the eleven findings was a way the latch could be right and the surrounding machinery still wrong.
+
+| Round | Finding | Why it mattered |
+|---|---|---|
+| 1 | Safety reports carried no activation generation | A demote-and-reactivate while a request was in flight charged its outcome to whichever activation was current when it reported: an old failure in a new detector, or an old breach latching a new experiment. `safety.go`'s own header already stated the requirement; the code did not implement it |
+| 1 | The watchdog trip was not atomic with its generation check | A callback already running cannot be cancelled, so passing the check and then being descheduled latched the REPLACEMENT activation |
+| 1 | An early watchdog fire disarmed the activation | A clock moving backwards fires the timer while the absolute deadline is still future; a one-shot timer that returned left NO watchdog — the exact defect this work exists to close |
+| 1 | Restore turned a missing or foreign health snapshot into a FRESH monitor | Execution authority with the evidence wiped. "No evidence" is not "no failures" |
+| 1 | A crash between persisting the counters and latching the abort | The counters proved a breach; the controller said all was well. Restore now RE-DERIVES the verdict |
+| 1 | A failed health persist only logged | One restart away from treating the next bad attempt as the first sample |
+| 1 | Exhaustion could not latch when the final slot never sent | The settled-attempt path excludes definitely-not-sent, so a boundary refusal of the LAST reservation left the status surface reporting granted authority |
+| 2 | The final boundary trusted the watchdog | `time.AfterFunc` gives no ordering guarantee against the request goroutine, so "the latch will have happened" was a race |
+| 2 | Restored samples were not bounded by reservations | The one damaged shape that makes the detector LESS likely to fire: fabricated clean samples dilute a real failure rate below the threshold |
+| 3 | A snapshot could ERASE a hard-latency observation | `{Samples:1, Sum:15s, Hard:0}` is impossible for this writer and hid a breach the live path had already proved |
+| 3 | The health sample could lag the terminal outcome | A crash between them made a failed FIRST attempt vanish, since restore legitimately accepts fewer samples than reservations |
+| 3 | The health latch was not atomic with the observation | A third request could reserve and cross the boundary between the sample that proved the breach and the latch acting on it |
+| 3 | The boundary tested only the upper end of the window | Every other gate treats a clock rolled back behind the activation as closed; the boundary did not |
+
+Two of these deserve to be remembered past this PR. The generation finding and the health-latch
+finding were both **gaps my own comments described and my own code did not implement** — the header
+of `safety.go` stated the generation requirement verbatim, and `observeAttemptSettled` justified
+splitting the latch from the observation with deadlock reasoning that `tripAutoStopLocked` had
+already made obsolete. A comment that states an invariant is not the invariant.
+
+
 **This closure changes nothing about the verdict.** Blocker 7 was one of fifteen reasons a GO is
 forbidden. Twelve remain open and blocker 8 remains open-but-narrowed.
 
@@ -1549,8 +1576,10 @@ demonstration still scores CAUGHT.
 
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **78 mutations: 78 caught, 0 survived, 0
-skipped, 0 not-proven** (M61–M78 are the blocker-7 auto-abort set). **That is the SECOND run.** The
+`scripts/mcp-canary-mutation-campaign.sh` now carries **91 mutations** (M61–M78 are the blocker-7
+auto-abort set; M79–M91 were added by the three adversarial rounds above). The 78-mutation state
+recorded below was clean on its second run; M79–M91 were each verified failing against their own
+reintroduced defect as they were written. The
 first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
 which is the campaign doing its job, so it is recorded rather than quietly re-run:
 
