@@ -1161,6 +1161,80 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD, ROUND 3 (this branch, 2026-09-05).** External
+> freeze review of the round-2 candidate (`33f6f21c`) accepted the round-2
+> corrections and found two residual blockers about whether the new
+> continuity guarantee survives EVERY relevant state transition; each was
+> red-before on the untouched candidate (`dc16c2e2`:
+> `pac_lifecycle_transition_red_test.go` F1a/F1b/F2/F3/F4a/F4b/F5 6/6
+> failing, `pac-2fe-c3-red.test.ts` D9a/D9b 2/2, `pac-2fe-c3-red-page.test.tsx`
+> P22/P23 2/2, real-binary `e2e/pac-2fe-c3.spec.ts` R12/R13 2/2 — R12 showed
+> "Published — Active revision 2", R13 "history evidence is bounded" with the
+> re-send OFFERED) and corrected append-only. **(1) Replace-import and config
+> rollback reused active revisions without changing the history epoch.**
+> `importPACProfilesCandidate` (replace mode) and `applyPACFromBackup` install
+> profiles wholesale keeping positive revisions, so a request reviewed at
+> (epoch E, revision N, spec A) and delayed until spec B sat at the SAME
+> revision N passed the epoch check and the revision fence (the classifier
+> had even declared `not_landed / fence_moved` and cleared the marker), and a
+> committed operation evicted from both bounded histories could be replayed
+> after a rollback restored its original base — equality of the present
+> history UUID alone was insufficient. Corrected contract: the epoch is now a
+> **durable transition of the observed active identity** — every lifecycle
+> record carries `ObservedActiveRevision`/`ObservedActiveSpecDigest`, the
+> authoritative identity it was last consulted against; `LifecycleStore.
+> ObserveActive` (the single place an epoch is minted, rotated or retired,
+> persist-before-swap) runs on every lifecycle read and before every
+> operation, and the commit/repair paths record their own observation. An
+> observed REWIND, or a DIFFERENT spec at the SAME revision, ROTATES
+> `historyIncarnation` while every piece of evidence (revisions, decided
+> operations, draft, intents) is preserved, so a dispatch or re-send reviewed
+> in the earlier epoch is refused `409 history_incarnation_mismatch` whatever
+> writer performed the transition (replace-mode import, config rollback,
+> CP→DP snapshot). Independently, `expectedActiveSpecDigest` is now a
+> publish/rollback fence beside `expectedActiveRevision` (`409 stale`,
+> `current.expectedActiveSpecDigest` + `current.revision`; optional for API
+> callers, always sent by the admin frontend — `PacPublishArgs`/`PacRollbackArgs`
+> carry it and the page dispatches it from the reviewed lifecycle). A
+> retained committed operation is still resolved by the lookup across a
+> rotation (the ring survives), so the conservative refusal costs no
+> resolution. **(2) Epoch transitions were not crash-safe, and migration
+> could expose an unpersisted epoch.** `pacProfileDelete` removed the active
+> profile before its lifecycle record, logged a record-removal failure and
+> still returned 204 — the same durable state a crash between the writes
+> leaves — and a recreate then inherited the surviving old epoch; `Load`
+> assigned freshly minted identities into memory before persisting them, so
+> a failed write advertised an identity nothing could be proven against.
+> Corrected: the delete records `DeletePending` DURABLY as its FIRST write (a
+> failed first write refuses the delete with nothing changed), then removes
+> the active profile, then the record (a failure is logged; 204 still reports
+> the committed active mutation); a flagged record whose profile is absent is
+> finished by the next access or boot (`pacReconcilePendingDeletes`), one
+> whose profile is still present has its epoch rotated, and a deleted
+> profile's leftover record never advertises its epoch. Profile create calls
+> `LifecycleStore.Recreate` BEFORE the active create (a fresh record + fresh
+> identity replacing whatever survives under the id; a failed epoch write
+> refuses the create), so a recreated profile can never be exposed beside the
+> old epoch even when a later write fails. `Load` mints into a candidate map
+> and swaps only once persisted; on failure the identity stays EMPTY — the
+> GET reports "", a dispatch naming any epoch is refused, the next access
+> retries the durable mint and a restart keeps it. The admin frontend
+> WITHHOLDS publish/rollback (callout "History epoch identity not durable")
+> for an existing profile whose `historyIncarnation` is "" — an operation
+> reviewed against no epoch could never be resolved if its response were
+> lost. Test seam: `pac.LifecycleWriteHook` (nil in production, the sibling
+> of `ResetWriteHook`) fails one specific lifecycle write. Fixture
+> completions (transparent, assertions unchanged): the accepted
+> `TestPACIntent_IntentPersistFailure_ChangesNothing` captures its baseline
+> after one lifecycle read has recorded the epoch's observation; three
+> round-1/2 frontend fixtures carry the now-required
+> `expectedActiveSpecDigest` / `historyIncarnation`. The real-binary journey
+> R13 draws its eviction from three synthetic client identities because the
+> admin plane allows 60 mutations per minute per client IP. Retained from
+> round 2: the ceremony context, immutable markers, version-1 marker handling,
+> committed identity fields and the apicontract fixture repair. Contract
+> artifacts regenerated; route count unchanged (241).
+>
 > **2F-E CORRECTION RECORD, ROUND 2 (this branch, 2026-09-05).** External
 > freeze review of the corrected candidate (`db6f4d35`) executed the pure
 > recovery functions and found three residual blockers; each was red-before
