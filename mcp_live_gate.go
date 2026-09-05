@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"sync"
 	"time"
@@ -124,8 +125,24 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 	// upstream leg (executor defers it), and returns BOTH the budget concurrency slot and the lifecycle
 	// in-flight count — including the §11 case where a later kill/freshness/demotion abort occurs after
 	// this admit.
+	// Reservation identity (review §5/§6). The budget enforcer meters COUNTS, not
+	// identities, so the grant itself carries no name. Minting one here — at the
+	// single admission point, after the slot is actually granted — binds each
+	// physical attempt to the exact slot that paid for it, so an effect can never be
+	// attributed to an unauthorized reservation and an orphan can be traced back to
+	// its grant. Failing to mint fails CLOSED: an unnameable reservation must not be
+	// allowed to authorize an unattributable side effect.
+	resID, rerr := newCanaryReservationID()
+	if rerr != nil {
+		g.releaseBudget(gen)
+		releaseAdmit()
+		return deny(mcperr.ReasonEventEvidenceMissing)
+	}
+
 	return execution.LiveGateDecision{
-		Admit: true,
+		Admit:                true,
+		ReservationID:        resID,
+		ActivationGeneration: gen,
 		Revalidate: func() bool {
 			if g.generationCurrent == nil {
 				return true // no revalidation seam wired ⇒ preserve prior behavior (never falsely refuse)
@@ -214,4 +231,21 @@ func mcpLiveGateDenialSnapshot() map[string]uint64 {
 		out[k] = v
 	}
 	return out
+}
+
+// canaryReservationIDBytes is the entropy width for a reservation identity: 128
+// bits, matching the attempt identity, so neither is the weaker link when the two
+// are correlated in evidence.
+const canaryReservationIDBytes = 16
+
+// newCanaryReservationID mints the identity for one granted budget slot. It is
+// non-secret (it appears in evidence and is reconciled against), Culvert-minted,
+// and never derived from request content — deriving it from caller input would let
+// two distinct grants share one name and collapse them in the ledger.
+func newCanaryReservationID() (string, error) {
+	b := make([]byte, canaryReservationIDBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "rsv_" + hex.EncodeToString(b), nil
 }

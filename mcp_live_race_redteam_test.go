@@ -19,7 +19,30 @@ import (
 // enforcer + lifecycle admission are serialized, so the number of executions that cross the boundary
 // is an EXACT function of the budget, whatever the interleaving.
 
-// §20: concurrent executions respect the whole-Canary budget — exactly total cross the boundary.
+// §20: concurrent executions respect the whole-Canary budget.
+//
+// The security invariant is an INEQUALITY — at most `total` executions may cross
+// the boundary, whatever the interleaving. It is deliberately NOT an equality, and
+// the reason is worth stating because this test used to assert one:
+//
+// When more requests race than the budget allows, the reservation that exhausts the
+// budget TRIPS the whole-Canary abort (`budget_exhausted`). Once latched, the
+// boundary's generation revalidation refuses every request still in flight —
+// including ones that already hold a granted reservation. So an over-budget burst
+// can legitimately end with FEWER physical effects than the budget, down to zero,
+// while the slots are still consumed (conservative consumption, §12).
+//
+// Whether that happens is a race between the abort latching and the in-flight
+// requests reaching the wire, so `== total` was only ever true when the window
+// between reservation and send was narrow. Committing the durable send intent in
+// that window (review blocker #8) widened it, which is what made the old assertion
+// fail — the behavior it was pinning was never guaranteed. The intent commit's
+// position is frozen by the boundary ordering and must not move to make an equality
+// hold: policy/trust/budget → durable send intent → freshness → generation
+// revalidation → emergency kill → Upstream.Call.
+//
+// Restoring `== total` here would therefore make the abort controller doing its job
+// look like a failure, and the pressure would be to weaken the abort.
 func TestLiveRace_ConcurrentExecutionsRespectBudget(t *testing.T) {
 	const total = 3
 	up := &recordingUpstream{}
@@ -35,8 +58,46 @@ func TestLiveRace_ConcurrentExecutionsRespectBudget(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if up.callCount() != total {
-		t.Fatalf("exactly %d executions may cross the boundary regardless of interleaving, got %d", total, up.callCount())
+
+	if got := up.callCount(); got > total {
+		t.Fatalf("PHYSICAL EFFECT BREACH: at most %d executions may cross the boundary, got %d", total, got)
+	}
+	// The shortfall must be EXPLAINED, not merely tolerated. Exactly `total` slots
+	// must have been consumed: that is what distinguishes "the abort stopped them"
+	// from "executions silently vanished", and without it the inequality above would
+	// hide the second case entirely.
+	cr := globalCanaryRuntime.capRuntime(rollout.CapabilityGateway)
+	cr.mu.Lock()
+	spent := cr.enforcer.TotalReserved()
+	cr.mu.Unlock()
+	if spent != total {
+		t.Fatalf("exactly %d reservations must be consumed regardless of interleaving, got %d", total, spent)
+	}
+}
+
+// §20: the LIVENESS half, where it is actually guaranteed. With exactly as many
+// racers as slots nothing exhausts the budget, so nothing trips the abort and every
+// admitted request must reach the upstream.
+//
+// This is the positive control for the inequality above: without it, that gate would
+// pass on a build where NO execution can ever cross the boundary.
+func TestLiveRace_RacersEqualToBudgetAllCross(t *testing.T) {
+	const total = 3
+	up := &recordingUpstream{}
+	cfg := armCanaryLiveTier(t, up, true, total)
+	ex := cfg.Deps.Executor
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			in := liveExecInput(policy.OpRead, "t1", "p1")
+			_ = ex.Execute(context.Background(), in, ex.Resolve(in))
+		}()
+	}
+	wg.Wait()
+	if got := up.callCount(); got != total {
+		t.Fatalf("with %d racers for %d slots every request must cross, got %d", total, total, got)
 	}
 }
 

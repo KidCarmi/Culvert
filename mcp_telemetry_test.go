@@ -474,7 +474,7 @@ func TestValidateBatch_AcceptsV1AndV2RejectsUnknown(t *testing.T) {
 		t.Fatalf("a v2 shadow batch must validate (else its partition wedges out of the archive): %v", err)
 	}
 	bad := v2("c")
-	bad.SchemaVersion = 3
+	bad.SchemaVersion = unknownSchemaVersion
 	if _, _, err := validateBatch([]evmodel.Event{bad}); err == nil {
 		t.Fatal("an unsupported schema version must be rejected")
 	}

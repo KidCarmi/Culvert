@@ -750,7 +750,7 @@ BLOCKED-vs-FAILED note in §26).
 | Tight scope validated (no percentage/group/wildcard; server & tenant capped at 1) | YES (§10) |
 | Machine gate enforces exactly-one tool AND exactly-one principal | **NO — caps are 2; must be an external prerequisite (§10)** |
 | Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
-| Budget bounds PHYSICAL side-effect-bearing invocations via a RETRY-FREE path (charging not accepted) | **NO — idempotent read retries up to ~3× per reservation; retry-disablement is not representable, and charging attempts is rejected because it can spend all 3 slots on one reservation (§9/§26, blocker 6)** |
+| Budget bounds PHYSICAL side-effect-bearing invocations via a RETRY-FREE path (charging not accepted) | **YES — `RetryMode`/`RetryDisabled` is representable and wired into the ONLY production upstream client; N reservations ⇒ ≤ N physical POSTs measured AT THE WIRE under concurrency and ambiguous transport failure (blocker 6 CLOSED)** |
 | Witness distinguishes side-effect-bearing tool invocations from auxiliary lifecycle/discovery traffic | **NO — no such controlled recording server exists; without the partition a correct run's `initialize`/`tools/list` POSTs misclassify as a breach (§9/§14)** |
 | Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **NO — no numeric limit, window, or sample floor exists; an unreachable floor with below-floor `no-trip` disables both detectors for the whole experiment (§16/§26, blocker 7)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
@@ -760,14 +760,678 @@ BLOCKED-vs-FAILED note in §26).
 | Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
-| Durable record determines whether a pre-crash upstream invocation occurred | **NO — success-only outcome evidence + unclosable post-send crash window (§15/§18)** |
+| Durable record determines whether a pre-crash upstream invocation occurred | **NO — narrowed. Internal durable truth/recovery/reconciliation COMPLETE (terminal outcome on every exit path, durable pre-send intent, orphan derivation, typed witness contract); the authoritative production witness adapter REMAINS unwired, so the answer is `reconciliation_required`, not determinate (§15/§18, blocker 8)** |
 | Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **NO — only budget/scope auto-trip (§16)** |
 | Operator-reachable graceful rollback (quiesce or Canary→Shadow/Observe demotion) — §17's "rollback AND kill" bar | **NO — quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured` (§17)** |
 | Crash/restart does not silently re-arm/resume | YES (§18) |
-| Unresolved P0/P1 finding | **YES — two product-defect prerequisites (auto-abort wiring, durable outcome evidence), each a dedicated PR (§21/§24)** |
+| Unresolved P0/P1 finding | **YES — the auto-abort wiring prerequisite remains; the durable-outcome-evidence prerequisite is narrowed to the authoritative production witness adapter (§21/§24/§25a)** |
 
-Multiple mandatory criteria are NO and two P1 product-defect prerequisites are open. A GO is
-therefore forbidden.
+Multiple mandatory criteria are NO and P1 product-defect work remains open. A GO is therefore
+forbidden. (§25a records the only two post-adoption status changes: blocker 6 CLOSED, blocker 8
+narrowed but still OPEN. The other thirteen are untouched and the §26 verdict is unchanged.)
+
+---
+
+## §25a Blocker 6 closure and blocker 8 status (post-review evidence)
+
+This section records the ONLY two status changes made to the frozen ledger since it was adopted.
+The other thirteen blockers are untouched. Nothing here changes the §26 verdict.
+
+### Blocker 6 — CLOSED
+
+The closure bar was: on the real Canary-shaped path, N authorized reservations must imply at most N
+physical side-effect-bearing tool POSTs; N+1 must be denied with zero N+1 POST; no transparent
+retry; a unique attempt identity per authorized tool effect; auxiliary traffic excluded from the
+effect count — all under concurrency and ambiguous transport failure. Each clause is now mechanically
+proven:
+
+| Clause | Evidence |
+|---|---|
+| No transparent retry | `RetryMode`/`RetryDisabled` in `internal/mcp/upstreamclient`; `newProductionUpstreamClient` builds from `RetryFreeLimits`; `TestRetryFree_ExactlyOnePhysicalSendOnAmbiguousDrop`, with `TestRetryDefault_ControlMultipleSendsOnAmbiguousDrop` proving the same peer shape DOES re-send under the historical defaults |
+| N reservations ⇒ ≤ N physical POSTs | `TestConc01` (equality at capacity), `TestConc02` (over-subscribed), `TestHTTPSE2E_BudgetBoundsPhysicalPOSTs` — all counted AT THE CONTROLLED PEER, not at a Go seam |
+| N+1 ⇒ zero N+1 POST | `TestHTTPSE2E_BudgetBoundsPhysicalPOSTs`, `TestHTTPSE2E_GateDenialSendsNoBytes` |
+| Unique attempt identity per effect | `TestHTTPSE2E_EachPOSTCarriesADistinctAttemptID`, `TestConc03`; a reservation bound to two attempts is now NAMED as a breach (`RecoveryReport.ReservationBreaches`, `TestRedTeam08`) |
+| Auxiliary traffic excluded | `upstreamclient.ClassifyMethod`; `TestHTTPSE2E_AuxiliaryTrafficIsNotMetered`, `TestRedTeam13`, with an unknown method failing CLOSED as side-effect-bearing |
+| Under ambiguous transport failure | `TestHTTPSE2E_AmbiguousDropIsStillExactlyOnePOST`, `TestRedTeam01`, `TestRedTeam14` |
+
+The measurement is at the WIRE deliberately. Every pre-existing live-tier E2E counted invocations at
+the `UpstreamCaller` interface, which measures what the executor INTENDED to send; the retry loop
+lives below that seam, so an interface-level counter reads 1 while the peer is POSTed twice.
+
+**Charging each attempt to the budget remains REJECTED** as a closure route, unchanged from the
+frozen review: it bounds the count but lets three retries of one logical reservation consume the
+whole experiment, destroying the exactly-N-invocations witness invariant.
+
+### Blocker 8 — OPEN (narrowed)
+
+    internal durable truth / recovery / reconciliation: COMPLETE
+    production authoritative witness integration:        REMAINS
+
+Complete: a terminal `PhaseOutcome` on every one of `runExecute`'s exit paths (previously one — the
+success path); a durable `PhaseSendIntent` committed before the irreversible send and after the
+budget reservation; orphan derivation from the durable stream alone with no second ledger; a typed
+witness contract that takes FACTS and derives the verdict, never a caller-supplied boolean; and
+append-only reconciliation evidence in the same event stream.
+
+Not complete, and the reason this stays OPEN: **the authoritative production witness adapter is
+intentionally unwired.** It belongs to the controlled-upstream work (blocker 1). Until it exists, a
+post-send crash resolves to `reconciliation_required` — the correct conservative answer, but not a
+determinate one, which is what the closure bar asks for.
+
+Note that "every normal path emits `PhaseOutcome`", "orphan recovery exists", and "the local
+controlled witness reconciles correctly" are ALL true here and are explicitly NOT sufficient for
+closure.
+
+### One defect found and fixed while proving the above
+
+The terminal outcome event carried no `DecisionRef`. `model.Event.Validate` requires one, so the
+event was rejected — and because the outcome commit is deliberately best-effort (it must never block
+a response for work that already happened), the record simply vanished. Every unit test passed
+throughout, because they commit through a sink that does not validate.
+
+The consequence was blocker 8's failure mode reintroduced by the mechanism meant to close it: on
+restart, EVERY completed execution looked exactly like a crash, so the one signal that means "a
+physical invocation's fate is unknown" was also produced by the success path.
+
+This is now a permanent proof rule for this program:
+
+> Any security-critical evidence test used to close blocker 8 must exercise the REAL validator
+> and/or read the committed record back from the REAL spool. A permissive fake sink is useful for
+> unit isolation; it is NOT proof of durable evidence truth.
+
+### Durability of the new evidence across a version rollback
+
+The attempt-identity and physical-send fields, and the reconciliation sub-fact, are covered by the
+canonical digest. Writing them under the pre-existing schema stamp made every such record
+**unreadable to a build that predates them**: that build drops the fields it does not know,
+recomputes a different digest, and reports the record as SPOOL CORRUPTION — the condition that means
+tampering or disk damage — aborting recovery. An ordinary version rollback would have raised the
+wrong alarm and stopped the node reading its own ledger.
+
+Two changes, following the existing v2 (Shadow) precedent exactly:
+
+* the shapes are stamped `SchemaVersionV3`, derived from the assembled event so the version can
+  never disagree with what is about to be digested, and paired in BOTH directions by validation
+  (attempt evidence requires v3; a v3 stamp requires attempt evidence). Records carrying none of the
+  new fields stay v1, so no pre-existing digest moves;
+* recovery reads the version from the ALREADY-AUTHENTICATED plaintext **before** the strict decode
+  and the digest check, both of which structurally cannot pass on a newer record. The posture is
+  unchanged — the partition is still held degraded, and a node must not serve from a ledger it
+  cannot read — but the reason an operator acts on changes from "record event invalid" to
+  "unsupported schema version": roll the binary forward, rather than suspect the disk.
+
+Proven end to end by forging a record that is cryptographically intact, chain-consistent, and of an
+unknown version (`TestAttemptV3_ARollbackReportsASchemaFaultNotCorruption`), with a control proving
+the forge itself is sound when the version IS supported, and mutation M30 restoring the old ordering.
+
+**Residual, stated plainly:** a binary built BEFORE this change still reports corruption when it
+meets a v3 record, because its strict decoder rejects unknown fields before any version check. That
+is not fixable from here — already-shipped readers cannot be changed — and it is inherent to strict
+decoding plus an intrinsic digest; the v2 Shadow change carries the identical property. What is
+fixed is every rollback from this build forward.
+
+### Two further evidence-truth corrections
+
+**A peer that answers badly has still run the tool.** Receipt was inferred from a successfully
+DECODED response, so a non-200, an unreadable body or undecodable bytes — all of which arrive as a
+nil response plus an error, the same shape a dial failure produces — were recorded as
+`may_have_been_sent`. Conservative, but false: response headers arrived, so the side effect has
+already happened, and the attempt was being sent for witness reconciliation with nothing left to
+establish. The transport now carries the observed-response fact out with the error
+(`upstreamclient.ResponseObserved`). This only ever moves uncertainty DOWN a step real evidence
+supports; `definitely_not_sent` stays reachable only before the call begins.
+Gates: `TestHTTPSE2E_AnUnusableAnswerIsStillAnAnswer` with
+`TestHTTPSE2E_AFailureBeforeTheAnswerStaysUncertain` as its control; mutation M31.
+
+**`Outcome.Executed` stays derived from the send state — a proposed change was REJECTED.** Deriving
+it from the terminal disposition instead reads better locally (`executed=true` beside a "blocked"
+execution state looks contradictory), but it writes `executed=false` into the durable record for
+invocations that demonstrably reached the peer — an ambiguous transport failure, and a DLP block
+after the peer answered, are both dispositionally not-executed and in both the tool HAS run. That is
+precisely the conversion this work exists to prevent. The apparent contradiction is the design:
+`Decision.ExecutionState` is CULVERT's disposition, `Outcome.Executed` and `PhysicalSendState` are
+the PEER's reality. Pinned by `TestOutcomeTruth_*` (with the boundary-refusal control proving the
+flag is not simply hardcoded true) and mutation M28.
+
+### Two more, from the round after that
+
+**Definitive absence needs a binding that matches.** The witness-binding check guarded only the
+"observed exactly once" branch, so a witness reporting a COMPLETE view of a DIFFERENT reservation,
+server or method — containing zero invocations — resolved the attempt to `reconciled_not_received`.
+That is not contradictory evidence but INAPPLICABLE evidence, an answer to a question nobody asked,
+and it was invisible downstream because `ReconcileOrphan` records the orphan's OWN reservation on
+the evidence, so recovery's binding check compared a value against itself. The verdict for a
+mismatch is `reconciliation_required`, deliberately NOT a conflict: a conflict asserts a breach of
+the exactly-once invariant, and zero observations of some other authorization is no evidence of a
+breach — reporting one would manufacture an alarm from inapplicable data, the mirror of
+manufacturing absence, and would be the easier direction for a misdirected witness to trigger.
+Gates: `TestReconcile_DefinitiveAbsenceRequiresAMatchingBinding` (with the matching-binding control)
+and `TestReconcile_MismatchedAbsenceIsNotReportedAsAConflict` (with the observed-once control);
+mutation M32.
+
+**A rejected redirect is still an answer.** `net/http` returns a non-nil response together with an
+error in exactly one case — `CheckRedirect` refused — which is the retry-free client rejecting a 3xx.
+The peer answered, so the send state is `peer_response_received`. Both facts had to move together:
+leaving `preResponse` true told the retry classifier nothing had been received yet, which under the
+DEFAULT (retrying) limits would authorize re-sending an idempotent request the peer had already
+answered. Gate: `TestHTTPSE2E_ARejectedRedirectIsStillAnAnswer`, which also asserts the peer saw
+exactly one POST; mutation M33.
+
+### Three more, from the round after that
+
+**"Exactly one" needs the same completeness proof "never happened" does.** Requiring it for absence
+but not for receipt was an asymmetry with a real consequence: `reconciled_received` is DEFINED as
+exactly one and is treated as RESOLVED, so a partial view containing one invocation settled an
+attempt whose duplicate simply lay outside the observed set — hiding the precise thing blocker #6
+exists to detect. A duplicate is still a conflict at any completeness (a duplicate seen is a
+duplicate, and a wider view could only find more), which is pinned separately so completeness can
+never become a way to downgrade an observed breach. Gate:
+`TestReconcile_ExactlyOneNeedsTheSameCompletenessProofAsAbsence`; mutation M34.
+
+**Not contradicting is weaker than applying to this attempt.** The binding check treated an EMPTY
+LOCAL value as agreement, so a legacy or nil-gate orphan carrying no durable `ReservationID` could be
+resolved by a witness view scoped to some other authorization: nothing contradicted, but nothing
+corroborated either. The two tests are now distinct — `bindingContradicts` (both sides name it,
+differently ⇒ conflict) and `bindingCorroborated` (every dimension the witness names is confirmed by
+a matching non-empty local value ⇒ required for ANY resolved verdict, in either direction). Gate:
+`TestReconcile_AnUnboundOrphanCannotBeResolvedByAnotherAuthorization`; mutation M35.
+
+**Reconciliation evidence for a settled attempt was discarded.** Only the orphan branch consulted the
+index, so a witness saying "never received" beside an outcome recording that the peer ANSWERED was
+reported as a clean settled attempt — one of two authoritative claims about the same physical effect
+silently dropped, reachable whenever a late terminal outcome races an orphan reconciliation. It now
+fails closed on a binding mismatch, on a witness-observed duplicate, and on either direction of
+contradiction; `reconciliation_required` asserts nothing and agreement is just corroboration. Gate:
+`TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded`; mutation M36.
+
+### Two more, from the round after that
+
+**Idempotence must key on identity, not just verdict.** A repeated reconciliation record was
+deduped on `Result` alone, so a second record agreeing on the verdict but naming a DIFFERENT
+reservation or generation was discarded at index time — before the binding rule downstream could
+ever see it. Two records under one attempt id describing two authorizations is the ledger fault
+whatever verdict they share. Gate:
+`TestRecovery_RepeatedReconciliationMustAgreeOnIdentityNotJustVerdict`, with controls proving a
+genuinely identical repeat is still idempotent and an unresolved record is still superseded;
+mutation M37.
+
+**Two states prove non-receipt, not one.** The contradiction check tested
+`== definitely_not_sent`, but `reconciled_not_received` is equally a positive proof that the peer
+was not reached — so a ledger asserting BOTH receipt and definitive non-receipt passed as cleanly
+settled. `MayHaveReachedPeer()` is the predicate that owns the distinction, and a settled outcome
+always carries a valid state, so its false branch is exactly "proven not reached" rather than
+"unknown". Gate: `TestRecovery_ReceiptAgainstEitherProvenNonReceiptFailsClosed`; mutation M38.
+
+### Three more, from the round after that
+
+**Auxiliary traffic was admitted through the side-effect gate.** `openAttempt` refuses to mint an
+attempt identity for lifecycle and discovery methods, and its own comment states the contract — such
+traffic "must never consume an execution reservation or inflate the physical-effect count". The
+composition-layer gate ran ABOVE that check, unconditionally, so the contract held for the durable
+intent and not for the reservation it names. Both directions were wrong: the production gate
+validates tool trust against a tool binding auxiliary traffic does not have and REFUSES, so an armed
+Canary node could not complete a session handshake or list tools; a gate that admitted instead
+permanently spent a Canary slot on a call that can cause no side effect, and `MaxTotalExecutions`
+stopped measuring physical invocations. Admission now consults the SAME fail-closed classifier
+`openAttempt` uses, whose default is side-effect-bearing, so an unclassified method is metered rather
+than exempted. The boundary is unchanged: tool freshness and the FINAL emergency-kill re-read read
+authoritative state directly, not through the gate, so they still run for every method. Gates:
+`TestAuxiliaryTraffic_NeverReachesTheSideEffectGate` and `TestAuxiliaryTraffic_SurvivesARefusingGate`,
+with `tools/call` controls on both fixtures and `TestUnclassifiedMethodIsStillMetered` for the
+fail-closed direction; mutation M39.
+
+**A resolved verdict was committable against facts that deny it.** The durable validator checked only
+enum membership, so a record claiming `reconciled_not_received` while reporting one observation and
+no completeness proof could be persisted — and recovery TRUSTS the stored result rather than
+re-deriving it, so contradictory or incomplete witness data became definitive knowledge. Each
+resolved verdict is now constrained to exactly what `deriveReconResult` requires to reach it: absence
+needs zero observations AND a completeness proof, receipt needs exactly one AND a completeness proof.
+`reconciliation_required` asserts nothing and stays unconstrained; `reconciliation_conflict` stays
+unconstrained deliberately, since it is reachable both from a duplicate and from a single observation
+whose binding contradicts the intent, and refusing to record a breach is a worse failure than
+recording one whose count looks unusual. Gates:
+`TestReconciliation_ResolvedVerdictNeedsACompletenessProof`,
+`TestReconciliation_ResolvedVerdictMustMatchItsCount`, with the well-supported control and the
+explicit conflict-is-unconstrained gate; mutation M40.
+
+**Unmatched reconciliation evidence was never examined.** `deriveAttempts` iterates INTENTS, so a
+reconciliation record whose `AttemptID` matched no intent was read by nothing: recovery returned a
+clean, EMPTY report while the ledger held an authoritative claim about an invocation no durable
+authorization covers. That is the same fault the terminal-outcome rule already refuses, and the same
+silence this path exists to remove. Gate:
+`TestRecovery_ReconciliationWithoutAnIntentFailsClosed`, including the dangerous shape where a
+healthy attempt makes the report look populated, plus a matched-record control; mutation M41.
+
+### One from the round after that, recorded rather than fixed
+
+**The unmatched-record rules assume an unreclaimed ledger.** Both sweeps in
+`deriveAttempts` — the terminal-outcome one and the reconciliation one added above — read an
+unmatched record as a ledger fault. That is sound only for a COMPLETE ledger, and the spool does not
+guarantee one: send intents, terminal outcomes and reconciliation records are all `CritOrdinary` and
+therefore all land in P-ORD, and reclamation deletes whole sealed P-ORD segments oldest-first with no
+relational retention. A legitimately retained SUFFIX can hold a record whose intent was reclaimed,
+and these rules would call that corruption.
+
+The two are not equally exposed, and the one Codex flagged is the safer: nothing in production
+commits a `PhaseReconciliation` event while the authoritative witness adapter stays unwired, whereas
+outcomes have a producer on every executed attempt — so the OUTCOME sweep is the reachable one, and
+it was not flagged.
+
+**Deliberately not resolved here.** Distinguishing "reclaimed" from "unauthorized" needs information
+the read seam does not carry — a retention floor or a tombstone — and no in-band ordering argument
+recovers it, because reclamation removes a PREFIX: if an intent was reclaimed then every surviving
+record is newer than it, which is consistent with both explanations. Adding that capability is spool
+work belonging to the witness integration, and weakening the rules to a report would trade a
+detection that catches an invocation with no durable authorization for an availability property no
+caller needs yet — `RecoverAttempts` has NO production caller.
+
+**This is now a named precondition of blocker #8's remaining work:** wiring `RecoverAttempts` into
+production requires closing it first, by relational retention (never reclaim an intent while later
+records for its attempt survive) or a retention floor on `EvidenceReader`. Pinned by
+`TestRecovery_UnmatchedRecordRulesAssumeAnUnreclaimedLedger`, whose failure message says so.
+
+### Three from the round after that, two of which hid each other
+
+**An unanswered POST could never be reconciled, and two independent defects caused it.**
+`settledReconOK` rejected `reconciled_not_received` whenever `MayHaveReachedPeer()` was true — but that
+is the CONSERVATIVE predicate and answers true for `may_have_been_sent`, which is uncertainty, not
+receipt. Separately, `ReconcileOrphan` gated on `State != AttemptReconciliationRequired`, which reads
+"settled" as "known" — two different questions, since an upstream POST that ends without a response
+settles as `may_have_been_sent` whose own `ReconciliationRequired()` answers true. So the single most
+important case a witness exists for was both un-askable and, had it been asked, un-recordable. Fixing
+either alone leaves it unresolvable, which is why the gate is end-to-end
+(`TestReconcile_AnUnansweredPostIsResolvableEndToEnd`).
+
+`PhysicalSendState.ProvesReceipt()` is now the positive predicate and is deliberately **NOT** the
+negation of `MayHaveReachedPeer()`: the middle ground — neither proven-received nor
+proven-not-received — is real and is exactly what a witness resolves. Collapsing the two would
+silently re-break this case, so the distinction is pinned structurally
+(`TestPhysicalSendState_ProvesReceiptIsNotTheNegationOfMayHaveReachedPeer`). The gate is now
+`RecoveredAttempt.NeedsReconciliation()`, which also refuses in the OTHER direction: once a witness
+has RESOLVED an attempt, asking again can only move knowledge backwards — an outage answers
+`reconciliation_required`, the append-only ledger rightly refuses that downgrade, and the query would
+turn a healthy resolved attempt into a recovery failure. Mutations M42 and M43.
+
+**A rule made its own correct answer unrecordable.** `deriveReconResult` deliberately answers
+`ReconRequired` for a malformed (negative) witness count, but the producer copied that count onto the
+evidence and the round-6 validator rejects a negative count for EVERY verdict — so the documented
+fail-closed record could not reach the append-only ledger at all. The count is now omitted rather
+than recorded as a falsehood; the record still names the witness and still resolves nothing, which is
+exactly what is true. Pinned from both sides — producer
+(`TestReconcile_AMalformedCountYieldsACommittableRecord`) and the real validator
+(`TestReconciliation_TheFailClosedRecordIsCommittable`, with the negative count still refused as its
+control). Mutation M44.
+
+**Two tests that pinned these defects were rewritten, not deleted.** The fail-closed table in
+`TestRecovery_ReconciliationAgainstASettledAttemptIsNotDiscarded` listed "not_received against an
+ambiguous send" as a contradiction; it is now a RESOLUTION control on the same fixture.
+`TestReconcile_SettledAttemptIsRejected` asserted that any settled attempt is refused; it is now
+`TestReconcile_GateIsUnresolvedKnowledgeNotSettledness`, which pins both directions of the corrected
+gate plus an unreconciled-orphan control.
+
+### One from the round after that: a verdict may not understate its own facts
+
+**A duplicate could be recorded as "asserts nothing".** Round 6 constrained the two
+RESOLVED verdicts against their facts and deliberately left `reconciliation_required`
+unconstrained, because it asserts nothing. But observing more than one matching invocation
+is a definitive exactly-once breach at ANY completeness — a rule this review already
+states — so a record reporting `count > 1` under `reconciliation_required` is not
+"asserts nothing", it is a breach wearing a shrug. And `reconciliation_required` is the one
+verdict `settledReconOK`'s switch ignores entirely, so recovery reported the attempt
+cleanly settled while its own facts recorded the duplicate physical effect the whole
+mechanism exists to detect.
+
+Fixed in BOTH directions, because the read side is the one that matters more: the durable
+validator refuses to commit `count > 1` under any non-conflict verdict, and
+`effectiveReconResult` refuses at READ time to let a stated verdict understate its own
+facts. The read-side guard is not redundant — the spool's read path runs the schema and
+shadow checks, **not** the full `Event.Validate` — so a record from an importer, an
+alternate producer or an older binary is read back and trusted. The conflict direction is
+NOT re-constrained: it still accepts any count, since it is also reachable from a single
+observation whose binding contradicts the intent. Gates:
+`TestReconciliation_ADuplicateMustSayConflict` and
+`TestRecovery_ADuplicateIsNotSilencedByAWeakerVerdict` (settled and orphan shapes, with a
+single-observation control proving the fix did not start calling everything a conflict).
+Mutations M45 and M46.
+
+### Two from the round after that: the read path had to mirror the whole validator
+
+Round 9 documented the read-path asymmetry — the spool's read path runs the schema and
+shadow checks, **not** the full `Event.Validate` — and then defended exactly ONE rule
+against it. Both round-10 findings are the rest of that bill.
+
+**An unsupported RESOLVED verdict was trusted on the read path.** A record claiming
+definitive absence with an observation in it, or receipt without exactly one, or either
+without a completeness proof, bypasses commit-time validation and was returned unchanged;
+`orphanFrom` then converted it into definitive non-receipt — manufacturing certainty, the
+one thing this engine must never do. `effectiveReconResult` is now the read path's mirror
+of `validateVerdictAgainstFacts`, folding in ONE direction per rule: a duplicate is
+UPGRADED to conflict, an unsupported resolved verdict is DOWNGRADED to
+`reconciliation_required`. Gate: `TestRecovery_ReadPathMirrorsTheDurableValidator`, five
+unsupported shapes with supported controls in both directions. Mutation M47.
+
+**Idempotence compared the stated string, not the knowledge.** Two records can share an
+attempt, an authorization and a verdict while carrying materially different FACTS — a
+`reconciliation_required` reporting zero observations, then another reporting TWO. The
+second was dropped as a harmless repeat *before* the fold could upgrade it, so a duplicate
+physical invocation was silenced one layer above the guard that exists to catch it. Both
+sides are folded before comparison now, so a record is dropped only when it adds nothing,
+and an observed duplicate cannot be walked back by a later weaker record. Gate:
+`TestRecovery_IdempotenceComparesKnowledgeNotTheStatedString`. Mutation M48.
+
+**Test fixtures were corrected, not the rule.** Several fixtures built resolved verdicts
+carrying no supporting facts — records that could never have been committed — and the fold
+correctly degrades them. `reconFacts` now fills the facts that support a verdict, so those
+tests measure the rule under test rather than the fold.
+
+### And two more of the same class, on the record SHAPE
+
+Rounds 9 and 10 mirrored the durable validator's VERDICT rules on the read path. Round 11
+is the same asymmetry applied to the record SHAPE, and both findings corrupt attempt
+derivation rather than merely looking odd:
+
+- **Outcome evidence smuggled onto a reconciliation record.** `Event.Validate` rejects the
+  combination outright, but the indexer dispatched on phase and dropped the outcome on the
+  floor — so a SUPPORTED `reconciled_not_received` carrying an embedded
+  `peer_response_received` outcome was reported as definitive non-receipt with the
+  contradictory receipt silently discarded.
+- **A terminal outcome with no `DecisionRef`.** The validator requires one on every
+  outcome, because an outcome never replaces the pre-execution decision commit. Without
+  it `settledFrom` still settles the attempt and suppresses reconciliation, closing out a
+  physical effect with no link to the decision that authorized it.
+
+`readPathAttemptRulesOK` mirrors both at the indexer's entry. **Its scope is stated rather
+than implied**: it is a mirror of specific COUPLING rules, not a call to `Event.Validate`.
+Running the full validator there would reject records for reasons unrelated to attempt
+derivation (capability, criticality, decision fields) and turn recovery — the thing an
+operator runs to find out what happened — into a hard failure over an unrelated field. The
+bar for mirroring a rule is that its absence makes the derived answer WRONG. Gate:
+`TestRecovery_ReadPathMirrorsTheStructuralCouplingRules`, both violations plus two
+controls — well-formed records of both shapes still recover, and a SEND INTENT may still
+carry outcome evidence (the coupling rule is phase-specific; a blanket "outcome evidence
+only on PhaseOutcome" rule would break every intent). Mutation M49.
+
+### Three more, closing the coupling rules symmetrically
+
+Round 12 answered the questions the round-11 request put, and all three answers were yes:
+
+- **The coupling was one-directional.** Round 11 rejected outcome evidence on a
+  reconciliation record; `Event.Validate` rejects reconciliation evidence on EVERY
+  non-reconciliation phase. A `PhaseOutcome` carrying an embedded
+  `reconciliation_conflict` was indexed as an outcome with the conflict dropped — a
+  duplicate physical invocation reported as a cleanly settled attempt.
+- **`DecisionRef` was checked for EMPTINESS, not validity.** `"decision_1"` names no
+  committed decision any more than `""` does, and `settledFrom` would close the attempt on
+  the strength of it. The rule is now mirrored through `model.ValidDecisionRef`, an
+  EXPORTED predicate over the writer's own `checkID`, rather than a second copy of the
+  prefix/body/charset/length checks — a drifting mirror is worse than no mirror, because
+  it looks enforced. `TestValidDecisionRef_IsTheSameRuleValidateApplies` asserts the
+  predicate and `Validate` agree on the same input.
+- **`PhysicalSendState` was uncoupled from the phase.** A send intent is committed BEFORE
+  the call begins and cannot know a send state — "in flight or interrupted" is precisely
+  the absence of a terminal outcome — yet a v3 intent claiming `peer_response_received`
+  validated, and recovery then dropped the claim on the floor. The inverse was also open:
+  an attempt-bearing outcome could carry an unset or unknown state, which does not fail at
+  commit but much later inside recovery, on an attempt whose physical effect is already
+  done. Both directions are now enforced at the writer. Mutations M50-M52.
+
+### And the rule that should have been written that way three rounds ago
+
+Round 13 found the SAME coupling leaking a third time — a `PhaseRecoveryMarker` or
+`PhaseHealth` record carrying an attempt-bearing outcome, which recovery dispatches past
+without indexing, leaving a send intent reported as an unresolved orphan while the ledger
+holds its `peer_response_received` terminal outcome — plus the round-12 send-intent
+send-state rule, added at the writer and not mirrored on the read path.
+
+**The lesson is the shape of the rule, not the two shapes reported.** Reconciliation
+evidence has had a GLOBAL coupling check since it was introduced; outcome evidence was
+policed only by the phases that happened to look for it, so each round closed one more
+forbidden phase. Both couplings are now stated ONCE over their **allowed set** — outcome
+evidence on `PhaseOutcome` or `PhaseSendIntent`, reconciliation evidence on
+`PhaseReconciliation` — at the writer AND on the read path. A rule written that way holds
+for phases nobody has written yet.
+
+The gates are enumerations over ALL phases rather than the reported shapes
+(`TestRecovery_PayloadCouplingIsStatedOverTheAllowedSet`,
+`TestValidate_OutcomeEvidenceCouplingIsStatedOverTheAllowedSet`), so adding a phase
+without deciding which payloads it may carry now fails a test. Mutations M53-M55.
+
+**Convergence note, recorded honestly.** Rounds 9-13 are one class: the spool read path
+validates less than the commit path, so a record NO PRODUCTION PRODUCER EMITS could be read
+back and trusted. They are real and worth closing, and round 12-13 moved part of the rule
+to the writer where it belongs — but they are defense-in-depth for the future witness
+integration rather than defects in the shipped path. Nothing commits a `PhaseReconciliation`
+event today and `RecoverAttempts` has no production caller.
+
+### Round 14: back on the live path, and one deployment prerequisite
+
+**A local refusal is not an ambiguous send.** `sendState` is set to `may_have_been_sent`
+immediately before `Upstream.Call`, which is right for anything that can put bytes on a
+wire — but `Call` refuses some invocations before any leg begins: method not admitted, an
+invalid target, pool admission refused, an endpoint that will not canonicalize, a resolve
+failure, a request that will not build. Recording those as ambiguous was conservative but
+FALSE, and it cost twice: the durable outcome claimed `executed` for an invocation that
+never happened, and the attempt was routed to witness reconciliation with nothing to
+establish.
+
+`preResponse` could not serve as the signal and that is the subtle part — a DNS resolve
+failure sets it and sent nothing, while a peer that reads the whole request and hangs up
+also sets it and demonstrably did. The client now carries a distinct `neverSent` fact out
+on the error (`SendNeverStarted`), the mirror of `ResponseObserved`, and like it the fact
+is **absent by default**: an unmarked error — from a path nobody classified, or a test
+double — keeps the conservative state. That is the CONTROL
+(`TestPhysicalSendState_AnUnmarkedFailureStaysAmbiguous`), and both gates read the
+DURABLE record rather than the ExecOutput, because `ExecOutput.Executed` is Culvert's
+disposition while `Outcome.PhysicalSendState` is the peer's reality. Mutation M56.
+
+**A deployment prerequisite, promoted from a recorded residual.** §25a already recorded
+that a binary built BEFORE the v3 change reports `event_spool_corrupt` when it meets a v3
+record, because its strict decoder rejects unknown fields before any version check. What
+was recorded as a residual is really an **ordering requirement**: a forward-compatible
+(peek-first) reader must be deployed to every node that could perform recovery BEFORE any
+release starts writing v3 records. Rolling back past that reader turns a schema fault into
+a corruption alarm on a healthy ledger. No code change can reach already-shipped readers —
+the only lever is ordering, and it now says so where an operator will read it.
+
+### Round 15: a Call is not a leg
+
+**`neverSent` is a whole-Call fact, and it was being reported per leg.** Round 14 added the
+never-sent fact so `definitely_not_sent` becomes reachable only from positive evidence. Round
+15 found the fact escaping at the wrong granularity: `Client.Call` owns a retry loop, and
+`lastErr` was overwritten each iteration, so whichever leg failed LAST spoke for the whole
+Call.
+
+The reachable sequence is ordinary rather than contrived, and both halves of it already
+existed in the code. Leg 1 is read in full by the peer and then fails before a response —
+transport.go's `preResponse` leg, which is exactly the `(idempotent, preResponse)`
+classification that AUTHORIZES a re-send. A later leg fails at resolve, and transport.go
+marks that leg `{preResponse: true, neverSent: true}`: retry-classified AND
+certainty-claiming at the same time. `SendNeverStarted` then reported true for a Call whose
+first leg demonstrably put an invocation on the wire, and `run.go` turned that into
+`definitely_not_sent` — `MayHaveReachedPeer()` false, `Outcome.Executed` false. Uncertainty
+converted into `executed=false`, which is the one conversion this accounting exists to
+prevent.
+
+`foldLegFacts` aggregates across legs, and the two facts fold in OPPOSITE directions because
+each direction is the conservative one. `responseObserved` is a **disjunction** — any leg
+that saw the peer answer proves receipt, and no later leg can un-prove it. `neverSent` is a
+**conjunction** — it is the strongest claim in the send-state lattice, the one an operator
+acts on by re-running the invocation, so it requires unanimity across every attempted leg.
+`preResponse` is deliberately NOT folded: it is a per-leg input to retry classification, not
+evidence carried to the caller, and the `retryable()` call site still reads the per-leg
+value.
+
+**On the shipped live path this was not reachable**, and that is stated here rather than used
+to dismiss it: `RetryFreeLimits` pins the budget to zero and `Call` short-circuits on
+`RetriesDisabled`, so a live execution has exactly one leg. It is fixed anyway, because a
+per-leg fact escaping as a whole-Call claim manufactures certainty, and that safety must not
+rest on one caller's choice of limits. Mutations M57–M59.
+
+### A red race gate that was not this PR's, fixed here anyway
+
+The Fast gate's `-race` job went red with a data race in `TestShadowSoak`. It is **not this
+PR's defect** — both racing lines are byte-identical on `origin/main`, and this PR's only
+edit to `shadow_soak_test.go` is an unrelated schema-version constant — but it made a
+required check red, there was no fix elsewhere to port, and the fix is small, local and
+test-only.
+
+`mcpToolTrustCoordinator.now()` reads `nowFn` under `mu.RLock`, and its own comment says
+why: *"the background reconcile loop may call it concurrently with a test swapping the
+coordinator"*. Two soak helpers assigned the field directly, upholding one half of that
+contract. Every other writer in the tree already locks, which is what makes this an
+oversight rather than a design question.
+
+The other side is a **goroutine leak**: `newGapEnv` starts a reconcile loop bound to the
+process-lifecycle ctx and nothing cancels it when the test ends, so it ticks for the rest
+of the binary's life — over a 1365s race run a 30s ticker gets ~45 chances to land inside a
+later test's clock swap. **Recorded, not fixed**: giving `newGapEnv` a cancellable lifecycle
+is a separate change, and locking the writers closes the race regardless.
+
+**The first draft of the gate passed against the unsynchronised shape**, and was therefore
+worthless. It observed ZERO concurrent reads — the main goroutine finished every swap before
+the scheduler started the reader. The gate now waits for the reader before swapping and
+asserts a non-zero read count, so an overlap-free variant fails loudly instead of passing
+vacuously. `run_mutation` also gained a `--race` flag: a mutation whose defect is a data race
+is invisible without the detector, so the mutated build passes and scores as a survivor —
+the campaign's worst failure mode. Mutation M60.
+
+### Round 17: a mutation must be caught for the RIGHT reason
+
+Round 16 was clean. Round 17 then found the weakness in the `--race` scoring added the round
+before — and it answers a question that had been put to the review rather than checked
+first, which is the wrong way round.
+
+`run_mutation` scored any nonzero exit as CAUGHT. For an ordinary mutation that is
+defensible; for a `--race` mutation it is not, because the entire proof is *the detector
+reported it*. `go test` compiles and vets before running, so a build break, a vet failure, a
+panic, a timeout, or an **unrelated** race all exit nonzero — and every one of them would
+have scored M60 as caught while proving nothing about the lock that was removed.
+
+Scoring for `--race` mutations is now **evidence-based rather than exit-code-based**: the
+output must carry a race report, and that report must name the mutated access. Attribution
+requires **both** sides of the intended pair — the mutated writer and the guarded reader —
+because a single-sided pattern would still admit an unrelated race that happened to touch the
+same function.
+
+The attribution pattern had to be discovered rather than guessed: a first attempt matched on
+the field name `nowFn`, which never appears in a race report at all. Reports name functions
+and addresses, not struct fields, so that check rejected the *real* race as unattributable.
+
+Verified three ways, because a scoring change that cannot reject anything is worse than no
+check: the real race mutation scores CAUGHT naming both symbols; a mutation that breaks the
+build scores NOT PROVEN; a mutation that fails the test without racing scores NOT PROVEN.
+**Both negatives scored CAUGHT before the change.**
+
+### Round 18: the campaign was measuring the compiler
+
+Round 17 tightened `--race` scoring. Round 18 answered the scope question that change left
+open — one I had put to the review rather than settled myself — and answered it against me.
+
+The header has always said: *"A COMPILE FAILURE IS NOT PROOF unless the mutation targets a
+structural wall whose stated purpose is compile-time prevention. Mutations here are written to
+compile and change behavior, so the failure comes from an assertion."* **The scoring never
+enforced it.** `go test` compiles and vets before running, so a mutation that fails to build
+exits nonzero without any gate having executed, and `run_mutation` counted the bare exit code.
+The stated rule and the implementation disagreed — the same class of defect this review keeps
+finding in the product, sitting in the instrument used to measure the product.
+
+Default is now: a build or vet failure scores **NOT PROVEN**. A mutation whose proof genuinely
+IS the compile failure declares itself with `--compile-wall`, and for it a build failure is
+required while anything else is a SURVIVOR.
+
+**Then the change was measured rather than assumed, and it found two mutations that had never
+proven anything.**
+
+**M59** was added two rounds earlier, by this work. The `||` in its perl pattern is
+ALTERNATION, not a literal, so the pattern carried an empty alternative — which matches at
+offset 0. Perl rewrote the TOP OF THE FILE instead of the struct literal
+(`observed.go:1:3: expected 'package', found responseObserved`), and the mutation scored CAUGHT
+across three campaign runs purely because it corrupted the file. An audit of every mutation
+pattern in the script found this is the **only** instance of that hazard.
+
+**M05** blanked `ReservationID` but left `resID` declared and unused, so the package did not
+compile and `TestMeteredExecution_` / `TestHTTPSE2E_EachPOSTCarriesADistinctAttemptID` /
+`TestConc03_` never ran. It now drops the binding too, so the mutation compiles and the
+assertion is what rejects it.
+
+Both were reported CAUGHT by every earlier campaign run in this PR. The tally was honest for
+58 of 60; for those two it was measuring the compiler. This is the strongest argument in the
+whole review for the rule that a gate must be run against the shape it claims to reject —
+**a mutation campaign measures the gates, and a mutation that does not compile measures
+nothing.**
+
+### Round 19: the fix for round 18 had two holes of its own
+
+**The build-failure check could not fire on a large build failure.** `set -o pipefail` is on,
+and every search of captured output used `printf '%s' "$out" | grep -q`. `grep -q` exits at the
+first match, `printf` then dies of SIGPIPE (141), and pipefail reports the PIPELINE as failed
+even though the pattern matched. All four uses were mis-scoring, each in a different direction:
+a matched build failure did not set `build_broke` (so it scored CAUGHT), a matched
+"no tests to run" did not raise BROKEN GATE, a matched race report read as "no race reported",
+and a matched attribution symbol read as missing.
+
+Compiler output begins with the `# github.com/KidCarmi/...` header, so the match is at the
+FRONT — the worst case for this bug. Demonstrated rather than argued: a 460 KB output of exactly
+that shape gives `build_broke=0` through the pipe and `1` through a herestring. `has_re` /
+`has_fixed` now feed grep from a herestring, which has no producer to kill, so the exit status
+is grep's alone.
+
+**The rule was enforced in one place and not the other.** M02 and M17 must drive `go test`
+themselves (M02 removes two independent enforcement points; M17 is the two-sided proof-rule
+demonstration), and both scored a nonzero exit as CAUGHT with no build check — the exact defect
+round 18 had just fixed inside `run_mutation`, still live one function away. `build_or_vet_failed`
+is now a shared helper used by all three, and M17 applies it to BOTH sides it drives.
+
+This is the second consecutive round in which the instrument, not the product, was wrong — and
+the second in which a fix introduced the shape it was fixing. That is worth recording plainly:
+the campaign is the evidence this review rests on, so a defect in it is not a lesser class of
+defect.
+
+### Round 20: three holes in three rounds is a structural signal
+
+M17's CAUGHT condition is `sink_rc == 0 && spool_rc != 0` — the sink side must PASS while the
+real-spool side FAILS. But an unmatched `-run` pattern also exits 0, so if M17's sink gate ever
+drifted, a genuinely failing spool side would score the mutation CAUGHT **while its required
+control never ran**. Round 19 had added the build check to both of M17's sides and left the
+no-tests check off.
+
+That is the third consecutive round finding a hole in a hand-rolled copy of the same
+classification: round 18 found the build check missing from `run_mutation`, round 19 found it
+missing from M02 and M17, round 20 found the no-tests check still missing from M17. **Three
+holes in three rounds is a structural signal, not three coincidences** — duplicated
+classification is what kept producing them — so this round replaces the duplication rather than
+patching it again.
+
+`gate_ran` is now the single answer to *"did this invocation actually reach an assertion?"*.
+There are exactly two ways it does not, and each is misread by a bare status check: the pattern
+matched no tests (exit 0, indistinguishable from a pass) or the package did not build (nonzero,
+indistinguishable from a caught mutation). `run_mutation`, M02 and M17 all route through it, and
+M17 applies it to both sides it drives. The one deliberate exception is `--compile-wall`, decided
+before `gate_ran` because a build failure is that case's proof rather than its absence.
+
+Demonstrated in all three directions rather than asserted: the defect shape (drifted sink
+pattern + failing spool) scored CAUGHT before and is rejected now, and a genuine two-sided
+demonstration still scores CAUGHT.
+
+### Campaign state
+
+`scripts/mcp-canary-mutation-campaign.sh` now carries **60 mutations: 60 caught, 0 survived, 0
+skipped, 0 not-proven** — every one rejected by a named assertion, the race mutation by an
+attributed detector report, and none by a build failure. Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
+not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
+prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
+longer matches the source is scored as a FAILURE rather than a pass.
+
+That last rule earned its keep SEVEN times, every one of them against a fix made *inside this work*.
+M03, M04 and M12 drifted against refactors done here — the `runExecute` decomposition made to satisfy
+the complexity linters, and the `RecoverAttempts` split. M20 drifted against the binding fix above,
+in the very same file the mutation M32 targets. M45 drifted when round 11's checks were folded into
+one helper, M50 when round 13 restated a coupling over the allowed set and flipped the operand, and
+M31 when round 14 renamed `markResponseObserved` to `markLegFacts`. A campaign that scored a skip as
+a pass would have reported a clean run over seven dead gates — and the last three would have gone
+dead in exactly the rounds that were hardening the code they measured. The rule is not defensive
+tidiness: a mutation campaign measures the GATES, and a pattern that no longer matches measures
+nothing at all.
 
 ---
 
@@ -783,6 +1447,11 @@ this review verified against the code. The list below is exhaustive AS A SET: to
 every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary and sufficient to pass
 §25 — but the mapping is grouped, not strictly 1:1 (e.g. §25's independent-witness row folds under
 blocker 7's auto-abort and also depends on blockers 1 and 6).
+
+**Post-adoption status (see §25a).** The baseline remains **fifteen**; the list below is preserved
+as adopted. Exactly two entries have changed status since: **blocker 6 is CLOSED**, and **blocker 8
+is narrowed but still OPEN**. Thirteen are untouched, and the verdict above is unchanged — closing
+blocker 6 removes one of fifteen reasons a GO is forbidden, not the prohibition.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -802,8 +1471,9 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    finer classifier or a designed discovery-trust path is required.
 5. **The machine gate does not enforce exactly-one tool/principal (§10).** `MaxCanaryTools`/
    `MaxCanaryPrincipals` are 2, so the one-of-everything shape is an external prerequisite.
-6. **The budget does not bound physical upstream invocations (§9).** Idempotent read retries can
-   send the POST ~3× per single budget reservation.
+6. ~~**The budget does not bound physical upstream invocations (§9).**~~ **CLOSED** — see
+   "Blocker 6 closure" below. Idempotent read retries could send the POST ~3× per single budget
+   reservation; the Canary path is now retry-free and the bound is proven at the wire.
 7. **Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.** Only
    `budget_exhausted`/`scope_escape` auto-trip; the other eight declared breaches do not, and nothing
    reconciles the independent witness — so a divergence would not auto-stop later requests.
@@ -816,7 +1486,11 @@ blocker 7's auto-abort and also depends on blockers 1 and 6).
    deadline-driven stop/rollback (a timer that demotes without needing another request), or the
    authorization must require explicit operator cleanup and stop describing expiry as automatic.
 8. **Durable outcome evidence is incomplete/success-only, with an unclosable post-send crash window
-   (§15/§18) — a product defect.** A pre-crash upstream invocation is not always determinable.
+   (§15/§18) — a product defect.** **STILL OPEN, narrowed** — see "Blocker 8 status" below. The
+   internal half (terminal outcome on every exit path, durable send intent, orphan recovery,
+   typed witness reconciliation) is complete and proven against the real spool; the AUTHORITATIVE
+   PRODUCTION WITNESS ADAPTER remains unwired, and until it is, a post-send crash resolves to
+   `reconciliation_required` rather than to a determinate answer.
 9. **Credential path unresolved (§4).** Credential selection comes from the tool's matched policy
    RULE, not from provisioning a server/tool, and the production broker has ZERO providers, so a
    `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning a target

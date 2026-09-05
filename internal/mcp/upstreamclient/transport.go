@@ -52,13 +52,13 @@ func (p *serverPool) acquire(ctx context.Context) (func(), error) {
 }
 
 // roundTrip performs one bounded, pinned HTTPS POST of body to target.Endpoint. It
-// returns (rawBody, preResponse, error): preResponse is true when the failure
+// returns (rawBody, legFacts, error): preResponse is true when the failure
 // happened before any response headers were received (dial/TLS/timeout) so an
 // idempotent read may retry.
-func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string) (respBody []byte, preResponse bool, err error) {
+func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string, attemptID string) (respBody []byte, facts legFacts, err error) {
 	canon, class, err := destination.Canonicalize(target.Endpoint, c.cfg.Policy, c.cfg.InspectionLimits)
 	if err != nil {
-		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
+		return nil, legFacts{neverSent: true}, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
 	}
 	// Reject only structurally-forbidden endpoint classes here; the authoritative
 	// SSRF classification (private/loopback/metadata handling) happens in Resolve +
@@ -75,12 +75,12 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	// genuinely internal MCP server needs a per-target policy that does not exist
 	// yet — adding one is a design change, not a flag flip.
 	if class == destination.ClassMalformed || class == destination.ClassBlockedScheme {
-		return nil, false, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
+		return nil, legFacts{neverSent: true}, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
 	}
 	now := c.cfg.Clock()
 	pin, _, err := destination.Resolve(ctx, canon, c.cfg.Policy, c.cfg.Resolver, c.cfg.InspectionLimits, now, c.cfg.Limits.PinTTL())
 	if err != nil {
-		return nil, true, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
+		return nil, legFacts{preResponse: true, neverSent: true}, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
 	}
 
 	client, transport := c.httpClientFor(target, canon, pin)
@@ -98,7 +98,7 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	// the bare origin root.
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, canon.RequestURL(), bytesReader(body))
 	if err != nil {
-		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "build request", err)
+		return nil, legFacts{neverSent: true}, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "build request", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -108,21 +108,46 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
+	// Attempt identity for independent witness correlation (§5/§11). Non-secret and
+	// Culvert-minted; empty for lifecycle/discovery traffic, which carries no attempt.
+	if attemptID != "" {
+		req.Header.Set(AttemptHeader, attemptID)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, true, classifyTransportError(err)
+		// net/http returns a NON-NIL response together with an error in exactly one
+		// case: CheckRedirect refused (its Body is already closed). That is the
+		// retry-free client rejecting a 3xx — and the peer demonstrably ANSWERED, so
+		// this is a failure of the answer, not of delivery (Codex round 3, P2).
+		//
+		// Both facts have to move together. Reporting responseObserved=false forced a
+		// known-executed attempt into witness reconciliation; leaving preResponse=true
+		// told the retry classifier that nothing had been received yet, which under
+		// the DEFAULT (retrying) limits would authorize re-sending an idempotent
+		// request the peer had already answered — a second physical invocation on the
+		// path that still retries.
+		if resp != nil {
+			return nil, legFacts{responseObserved: true}, classifyTransportError(err)
+		}
+		return nil, legFacts{preResponse: true}, classifyTransportError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// client.Do returned without error, so the peer answered: response headers are
+	// in hand. Everything below is a failure of the ANSWER, never of delivery — the
+	// invocation demonstrably reached the peer and any side effect it has already
+	// happened. That fact is recorded here and carried out through the error, so the
+	// executor does not have to infer receipt from a successfully decoded response.
+	observed := legFacts{responseObserved: true}
 	raw, err := readBounded(resp.Body, c.cfg.Limits.MaxResponseBytes())
 	if err != nil {
-		return nil, false, err
+		return nil, observed, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, false, mcperr.New(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "upstream non-200 status")
+		return nil, observed, mcperr.New(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "upstream non-200 status")
 	}
-	return raw, false, nil
+	return raw, observed, nil
 }
 
 // httpClientFor builds a per-call http.Client whose transport dials ONLY the

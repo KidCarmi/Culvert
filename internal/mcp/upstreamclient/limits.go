@@ -20,6 +20,33 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 )
 
+// RetryMode selects how MaxReadRetries is INTERPRETED. It exists because the
+// historical encoding could not express "no transport retries" at all: zero means
+// "use the safe default" (2) and negatives are rejected, so every configuration —
+// including a deliberately retry-free one — got a retrying client.
+//
+// That ambiguity is a security property, not a style question. The First
+// Controlled Canary requires that ONE accepted execution reservation produce AT
+// MOST ONE physical side-effect-bearing tool invocation; a transport that may
+// silently re-send an idempotent read turns one authorized effect into up to
+// three, and the emergency kill is not re-read between those attempts. The mode
+// is therefore explicit and closed: no magic sentinel, no overloaded zero.
+type RetryMode uint8
+
+const (
+	// RetryDefault is the zero value and preserves the historical behavior for
+	// every existing caller: MaxReadRetries==0 fills with the safe default.
+	RetryDefault RetryMode = iota
+	// RetryDisabled performs EXACTLY ONE physical attempt per Call, whatever the
+	// method's idempotency or the failure's pre-response classification. Setting a
+	// non-zero MaxReadRetries alongside it is a contradiction and fails closed.
+	RetryDisabled
+)
+
+// valid reports whether the mode is a known value. An unknown mode fails closed
+// rather than defaulting to the retrying behavior.
+func (m RetryMode) valid() bool { return m == RetryDefault || m == RetryDisabled }
+
 // LimitConfig bounds every upstream resource. Zero in a field means the safe
 // default.
 type LimitConfig struct {
@@ -33,6 +60,9 @@ type LimitConfig struct {
 	RequestTimeout    time.Duration // whole-request deadline
 	PinTTL            time.Duration // resolve→connect pin lifetime
 	MaxReadRetries    int           // bounded retry budget for idempotent reads
+	// RetryMode interprets MaxReadRetries. Zero (RetryDefault) keeps the historical
+	// fill-with-default behavior; RetryDisabled means exactly one physical attempt.
+	RetryMode RetryMode
 }
 
 // Limits is the immutable validated bounds set.
@@ -60,11 +90,42 @@ func DefaultLimits() Limits { l, _ := NewLimits(LimitConfig{}); return l }
 
 // NewLimits validates and freezes a bounds set, filling zero fields with defaults.
 func NewLimits(c LimitConfig) (Limits, error) {
+	if !c.RetryMode.valid() {
+		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "unknown retry mode")
+	}
+	// A retry-free client that also carries a retry budget is a contradiction. Fail
+	// closed rather than silently honoring one half: the caller must say what it means.
+	if c.RetryMode == RetryDisabled && c.MaxReadRetries != 0 {
+		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "retry-disabled mode must not set a retry budget")
+	}
+	// REDIRECTS ARE A RETRY BY ANOTHER NAME (Codex round 1, P1). Disabling the
+	// explicit retry loop is not sufficient to bound physical invocations: a
+	// same-origin 307/308 makes net/http replay the POST body, and the replay carries
+	// the SAME AttemptID, so one accepted reservation would produce two physical
+	// side-effect-bearing invocations that the retry loop never sees and no witness
+	// could tell apart. A retry-free client must therefore refuse redirects outright.
+	if c.RetryMode == RetryDisabled && c.MaxRedirects != 0 {
+		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "retry-disabled mode must not permit redirects")
+	}
 	out := fillLimitDefaults(c)
 	if limitConfigHasNegative(out) {
 		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "negative limit")
 	}
 	return Limits{c: out, valid: true}, nil
+}
+
+// RetryFreeLimits returns bounds identical to base but with transport retries
+// EXPLICITLY disabled. This is the First-Canary upstream client shape: one
+// reservation, one attempt, at most one side-effect-bearing physical invocation.
+func RetryFreeLimits(base LimitConfig) (Limits, error) {
+	base.RetryMode = RetryDisabled
+	base.MaxReadRetries = 0
+	// Forced, not merely validated: a caller passing a base with a redirect budget
+	// gets a retry-free client, never an error it might be tempted to resolve by
+	// keeping the redirects. See NewLimits for why a redirect is a second physical
+	// invocation.
+	base.MaxRedirects = 0
+	return NewLimits(base)
 }
 
 // fillLimitDefaults replaces each zero field with its safe default. MaxRedirects is
@@ -95,7 +156,9 @@ func fillLimitDefaults(c LimitConfig) LimitConfig {
 	if out.PinTTL == 0 {
 		out.PinTTL = defPinTTL
 	}
-	if out.MaxReadRetries == 0 {
+	// Only RetryDefault fills the retry budget. Under RetryDisabled the budget stays
+	// zero: filling it here is exactly the bug this mode exists to remove.
+	if out.RetryMode == RetryDefault && out.MaxReadRetries == 0 {
 		out.MaxReadRetries = defMaxReadRetries
 	}
 	return out
@@ -110,6 +173,11 @@ func limitConfigHasNegative(c LimitConfig) bool {
 
 // Valid reports whether the limits were constructed.
 func (l Limits) Valid() bool { return l.valid }
+
+// RetriesDisabled reports whether this client performs exactly one physical
+// attempt per Call. Call consults it BEFORE any idempotency/pre-response test, so
+// no failure classification can reintroduce a second side-effect-bearing send.
+func (l Limits) RetriesDisabled() bool { return l.c.RetryMode == RetryDisabled }
 
 // MaxConnsPerServer returns the per-server connection pool bound.
 func (l Limits) MaxConnsPerServer() int { return l.c.MaxConnsPerServer }

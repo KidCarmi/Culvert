@@ -69,6 +69,13 @@ type CallOptions struct {
 	// set only from inside the broker materialization callback and lives only for the
 	// duration of the request.
 	AuthHeader string
+	// AttemptID names the ONE potential physical tool invocation this call carries
+	// (review §5). It is emitted as a request header so the controlled recording
+	// upstream can attribute each received invocation to exactly one authorized
+	// attempt — the correlation an independent witness needs to answer "did Culvert
+	// cause exactly the effects it authorized?". It is non-secret, and empty for
+	// lifecycle/discovery traffic, which carries no attempt.
+	AttemptID string
 }
 
 // Response is the decoded, admitted upstream JSON-RPC response.
@@ -114,28 +121,69 @@ func Admitted(method string) bool { return admittedMethods[method] }
 // decoded response. It fails closed with a classified, sanitized error; it never
 // leaks a raw network error or forwards a client token.
 func (c *Client) Call(ctx context.Context, target Target, method string, params json.RawMessage, opts CallOptions) (*Response, error) {
+	// Each of these three refusals happens before any leg begins, so no request bytes
+	// exist on any connection. Marking them lets the executor record
+	// definitely_not_sent instead of sending a provably-undelivered attempt to witness
+	// reconciliation that has nothing to establish (Codex round 14).
 	if !Admitted(method) {
-		return nil, mcperr.New(mcperr.ReasonUpstreamTransportRejected, "upstreamclient", "method not admitted upstream")
+		return nil, markNeverSent(mcperr.New(mcperr.ReasonUpstreamTransportRejected, "upstreamclient", "method not admitted upstream"))
 	}
 	if target.Endpoint == "" || target.ServerID == "" {
-		return nil, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint must come from the registered record")
+		return nil, markNeverSent(mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint must come from the registered record"))
 	}
 	pool := c.poolFor(target.ServerID)
 	release, err := pool.acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, markNeverSent(err)
 	}
 	defer release()
 
 	budget := c.cfg.Limits.MaxReadRetries()
+	// Retry-free mode is decided ONCE, outside the loop, from immutable validated
+	// limits — not re-derived per attempt where a later edit could make it
+	// conditional.
+	retriesDisabled := c.cfg.Limits.RetriesDisabled()
 	var lastErr error
+	// call accumulates what is known about the WHOLE Call, not about its last leg.
+	// Seeded with the vacuous truth "nothing has been sent yet", which the first fold
+	// replaces with real evidence — the loop below always runs at least one leg before
+	// call is read. See foldLegFacts for why the two facts fold in opposite
+	// directions.
+	call := legFacts{neverSent: true}
 	for attempt := 0; ; attempt++ {
-		resp, preResponse, err := c.attempt(ctx, target, method, params, opts)
+		resp, facts, err := c.attempt(ctx, target, method, params, opts)
 		if err == nil {
 			return resp, nil
 		}
-		lastErr = err
-		if !retryable(opts.Idempotent, attempt, budget, preResponse) {
+		// Fold this leg into what is known about the whole Call, then carry THAT out
+		// with the error — never the bare leg. Two facts ride out here:
+		//
+		// responseObserved: a non-200, a malformed body or a truncated read are
+		// failures of the ANSWER: the peer received the invocation and any side effect
+		// it has already happened. Without it the executor could only infer receipt
+		// from a successfully DECODED response, so a known-executed attempt was
+		// recorded as may_have_been_sent and sent for witness reconciliation that had
+		// nothing left to establish.
+		//
+		// neverSent: the mirror, and the one that must survive a RETRY correctly — see
+		// foldLegFacts. It is a conjunction across legs precisely because the last leg
+		// can be the one that sent nothing while an earlier one reached the peer.
+		call = foldLegFacts(call, facts)
+		lastErr = markLegFacts(err, call)
+		// EXACTLY-ONE-PHYSICAL-SEND (First Controlled Canary, blocker #6).
+		// This test precedes retryable() deliberately: retryable() consults the
+		// method's idempotency and whether the failure arrived before any response,
+		// and BOTH are attacker- or peer-influenced. A peer that reads the full
+		// request and then drops the connection produces exactly the
+		// idempotent+preResponse shape that authorizes a re-send — which would turn
+		// one accepted budget reservation into a second side-effect-bearing tool
+		// invocation, with no emergency-kill re-read between them. In retry-free
+		// mode there is no classification that can reach a second attempt.
+		if retriesDisabled {
+			return nil, lastErr
+		}
+		// facts, NOT call: retry classification is about the leg that just failed.
+		if !retryable(opts.Idempotent, attempt, budget, facts.preResponse) {
 			return nil, lastErr
 		}
 	}
@@ -153,10 +201,8 @@ func (c *Client) poolFor(serverID string) *serverPool {
 	return p
 }
 
-// attempt performs one upstream round-trip. It returns (response, preResponse,
-// error): preResponse is true when the failure occurred BEFORE any response was
-// received (so an idempotent read may retry).
-func (c *Client) attempt(ctx context.Context, target Target, method string, params json.RawMessage, opts CallOptions) (*Response, bool, error) {
+// attempt performs one upstream round-trip. It returns (response, legFacts, error).
+func (c *Client) attempt(ctx context.Context, target Target, method string, params json.RawMessage, opts CallOptions) (*Response, legFacts, error) {
 	// Version-negotiation state and the JSON-RPC framing are the caller's concern;
 	// this method transports one already-built message. The wire id is independent.
 	wireID := opts.WireID
@@ -165,21 +211,23 @@ func (c *Client) attempt(ctx context.Context, target Target, method string, para
 	}
 	body, err := buildRequest(method, wireID, params)
 	if err != nil {
-		return nil, false, err
+		return nil, legFacts{}, err
 	}
-	raw, preResponse, err := c.roundTrip(ctx, target, body, opts.AuthHeader)
+	raw, facts, err := c.roundTrip(ctx, target, body, opts.AuthHeader, opts.AttemptID)
 	if err != nil {
-		return nil, preResponse, err
+		return nil, facts, err
 	}
 	msg, err := jsonrpc.Decode(raw, c.kernelLim)
 	if err != nil {
-		// A malformed/hostile upstream response rejects the whole response.
-		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamResponseInvalid, "upstreamclient", "upstream response decode", err)
+		// A malformed/hostile upstream response rejects the whole response. The bytes
+		// still CAME from the peer, so facts (responseObserved) is carried through
+		// unchanged: an unintelligible answer is still an answer.
+		return nil, facts, mcperr.Wrap(mcperr.ReasonUpstreamResponseInvalid, "upstreamclient", "upstream response decode", err)
 	}
 	if !msg.IsResponse() {
-		return nil, false, mcperr.New(mcperr.ReasonUpstreamResponseInvalid, "upstreamclient", "upstream did not return a response")
+		return nil, facts, mcperr.New(mcperr.ReasonUpstreamResponseInvalid, "upstreamclient", "upstream did not return a response")
 	}
-	return &Response{ID: msg.ID, Result: msg.Result, Error: msg.Error, RawBytes: raw}, false, nil
+	return &Response{ID: msg.ID, Result: msg.Result, Error: msg.Error, RawBytes: raw}, facts, nil
 }
 
 // buildRequest constructs a strict single-object JSON-RPC request. Notifications
