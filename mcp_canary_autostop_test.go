@@ -895,8 +895,12 @@ func TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming(t *testing.T) {
 	if armedCount() != 1 {
 		t.Fatalf("begin must arm exactly one watchdog, got %d", armedCount())
 	}
-	// The clock moves BACKWARD: the timer's duration has elapsed but the deadline has not.
-	nowP = canaryRuntimeTestNow.Add(-time.Minute)
+	// The timer fires EARLY: its duration elapsed in real time, but the absolute deadline has not
+	// been reached (a clock that ran ahead and was corrected back, still INSIDE the window). This
+	// is deliberately not a rollback BEHIND the activation instant — that closes the window at its
+	// lower end and must LATCH, which
+	// TestAutoStop_ClockBehindActivationLatchesAtRestoreInsteadOfArming covers.
+	nowP = canaryRuntimeTestNow.Add(10 * time.Minute)
 	fireIndex(0)
 	if rt.abortedNow(capb) {
 		t.Fatal("an early fire must not latch — the deadline has not passed")
@@ -1255,5 +1259,105 @@ func TestAutoStop_ClockRollbackBehindActivationClosesTheBoundary(t *testing.T) {
 	nowP = canaryRuntimeTestNow.Add(-time.Minute)
 	if rt.generationActive(capb, gen) {
 		t.Fatal("SECURITY: a clock rolled back behind the activation must close the boundary, not merely the upper deadline")
+	}
+}
+
+// ── Codex round 4 ─────────────────────────────────────────────────────────────────────────────
+
+// A clock rolled back BEHIND the persisted activation instant closes every admission, so the
+// activation must LATCH at restore rather than arm a watchdog for a deadline that still looks
+// distant. Otherwise the status surface reports granted authority on a Canary that cannot execute
+// at all — and the watchdog callback, repeating the same one-ended check, re-arms forever.
+func TestAutoStop_ClockBehindActivationLatchesAtRestoreInsteadOfArming(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	_, _, armedCount := swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if armedCount() != 1 {
+		t.Fatalf("premise: a healthy activation arms one watchdog, got %d", armedCount())
+	}
+
+	// Restart with the clock BEHIND the activation instant. The deadline is still an hour away by
+	// the upper-bound test, but the window is not open.
+	nowP = canaryRuntimeTestNow.Add(-time.Hour)
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+
+	if !fresh.abortedNow(capb) {
+		t.Fatal("SECURITY: a clock behind the activation closes every admission — the activation must latch, not arm")
+	}
+	if code := fresh.abortCodeNow(capb); code != "window_expired" {
+		t.Fatalf("first cause must be window_expired, got %q", code)
+	}
+	if st := canaryAbortStatusFor(capb); st.ExecutionAuthority == "granted" {
+		t.Fatal("SECURITY: the status must not report granted authority while every admission is closed")
+	}
+	if o, _ := fresh.reserveCanaryExecution(capb, nowP, rtIdent); o == canary.BudgetGranted {
+		t.Fatal("no reservation may be granted")
+	}
+}
+
+// The same rollback reached WITHOUT a restart: the activation is armed and healthy, the clock rolls
+// back behind the activation instant while the process runs, and the watchdog then fires. The
+// callback must LATCH, not re-arm — otherwise it re-arms on every fire, forever, while every
+// admission is closed and the status surface keeps reporting granted authority. This is the path
+// the restore gate cannot reach, and the reason the callback consults a window-open-aware accessor
+// rather than the bare deadline.
+func TestAutoStop_WatchdogFiringUnderRollbackLatchesInsteadOfReArming(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	fireIndex, _, armedCount := swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if armedCount() != 1 {
+		t.Fatalf("premise: one watchdog armed, got %d", armedCount())
+	}
+	// The clock rolls back BEHIND the activation instant while the activation is live.
+	nowP = canaryRuntimeTestNow.Add(-time.Hour)
+	fireIndex(0)
+
+	if !rt.abortedNow(capb) {
+		t.Fatal("SECURITY: a watchdog firing while the window is closed at its LOWER end must latch, not re-arm")
+	}
+	if code := rt.abortCodeNow(capb); code != "window_expired" {
+		t.Fatalf("first cause must be window_expired, got %q", code)
+	}
+	if armedCount() != 1 {
+		t.Fatalf("a latching callback must not also arm a replacement watchdog, armed=%d", armedCount())
+	}
+}
+
+// THE CONTROL: a clock inside the window still arms a watchdog and grants authority, so the
+// two-ended predicate cannot be satisfied by latching everything.
+func TestAutoStop_ClockInsideTheWindowStillArmsNormally(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	_, _, armedCount := swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	nowP = canaryRuntimeTestNow.Add(time.Minute) // inside the 1h window
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+
+	if fresh.abortedNow(capb) {
+		t.Fatal("an activation restored INSIDE its window must not latch")
+	}
+	if armedCount() < 2 {
+		t.Fatalf("the restore must arm a watchdog for the remaining time, armed=%d", armedCount())
+	}
+	if st := canaryAbortStatusFor(capb); st.ExecutionAuthority != "granted" {
+		t.Fatalf("a healthy restored activation still holds authority, got %q", st.ExecutionAuthority)
 	}
 }

@@ -905,6 +905,26 @@ else
   fi
 fi
 
+# ============================================================================
+# CODEX ROUND 4 ON #1314
+# ============================================================================
+
+run_mutation M92 \
+  'the arm path tests only the upper deadline, so a clock behind the activation arms instead of latching' \
+  'TestAutoStop_ClockBehindActivationLatchesAtRestoreInsteadOfArming|TestAutoStop_ClockInsideTheWindowStillArmsNormally' \
+  . mcp_canary_autostop.go \
+  's/\tif !cr\.enforcer\.WindowOpen\(now\) \{/\tif !now.Before(deadline) {/'
+
+# M93 targets the RUNTIME path the restore gate cannot reach: the watchdog callback firing while
+# the window is closed at its lower end. Reverting the accessor alone survived the restore gate
+# (restore latches before any watchdog exists), which is why
+# TestAutoStop_WatchdogFiringUnderRollbackLatchesInsteadOfReArming exists.
+run_mutation M93 \
+  'the watchdog callback re-arms forever on a rolled-back clock' \
+  'TestAutoStop_WatchdogFiringUnderRollbackLatchesInsteadOfReArming|TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming' \
+  . mcp_canary_autostop.go \
+  's/globalCanaryRuntime\.windowDeadlineIfOpen\(capb\)/globalCanaryRuntime.windowDeadline(capb)/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

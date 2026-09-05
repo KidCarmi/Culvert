@@ -84,9 +84,20 @@ func reconcileWindowDeadlineLocked(rt *canaryRuntime, capb rollout.Capability, c
 		return // no window configured — nothing to time out (ValidateBudget already refuses this)
 	}
 	now := canaryNow()
-	if !now.Before(deadline) {
-		// Already expired. Latch here, under the same lock the admission path takes, so there is no
-		// window in which a restored activation reads as eligible.
+	// The FULL two-ended predicate, the same one the final boundary uses. Testing only
+	// `now.Before(deadline)` here left an asymmetry I introduced in the previous round: with the
+	// clock rolled back BEHIND the persisted activation instant, WindowOpen is false — every
+	// admission is closed — while the upper-bound test reads "plenty of time left", so nothing
+	// latched and a watchdog was armed for a deadline potentially far in the future. The callback
+	// repeated the same one-ended check and re-armed, so `auto_stop` reported GRANTED authority
+	// indefinitely on a Canary that could not execute at all (Codex round 4 P2).
+	//
+	// The code is window_expired for both ends. It names the time box refusing to authorize
+	// execution, which is what has happened; a clock behind the activation cannot be used to reason
+	// about elapsed time at all, so there is no weaker honest answer.
+	if !cr.enforcer.WindowOpen(now) {
+		// Latch here, under the same lock the admission path takes, so there is no window in which
+		// a restored activation reads as eligible.
 		tripAutoStopLocked(rt, capb, cr, "window_expired", now)
 		return
 	}
@@ -111,7 +122,7 @@ func armWindowWatchdogLocked(rt *canaryRuntime, capb rollout.Capability, cr *can
 		if globalCanaryRuntime.currentGeneration(capb) != gen {
 			return
 		}
-		if d, ok := globalCanaryRuntime.windowDeadline(capb); ok && canaryNow().Before(d) {
+		if d, ok := globalCanaryRuntime.windowDeadlineIfOpen(capb); ok && canaryNow().Before(d) {
 			// FIRED EARLY, and this must RE-ARM rather than return. time.AfterFunc measures a
 			// duration; the deadline is absolute wall-clock. If the clock moves backwards after
 			// activation the timer still fires on schedule while the deadline is genuinely still in
@@ -164,6 +175,21 @@ func stopWindowWatchdogLocked(cr *canaryCapRuntime) {
 		cr.windowStop()
 		cr.windowStop = nil
 	}
+}
+
+// windowDeadlineIfOpen reports the deadline ONLY while the window is open at both ends. The
+// watchdog callback uses it rather than windowDeadline so a clock rolled back behind the activation
+// cannot make an early fire re-arm indefinitely: the window is closed, so the callback falls through
+// to the trip instead.
+func (rt *canaryRuntime) windowDeadlineIfOpen(capb rollout.Capability) (time.Time, bool) {
+	cr := rt.capRuntime(capb)
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if !cr.active || cr.enforcer == nil || !cr.enforcer.WindowOpen(canaryNow()) {
+		return time.Time{}, false
+	}
+	d := cr.enforcer.WindowDeadline()
+	return d, !d.IsZero()
 }
 
 // windowDeadline reports the activation's absolute deadline and whether one is armed. Read-only,
