@@ -889,6 +889,7 @@ with the additional requirement that **the abort must not depend on another requ
 | The closed time box is named the same whichever path notices it | A window denial at admission records `window_expired`, not `budget_exhausted` — the first cause is immutable, so without this the operator-visible reason depended on a race between the admission and the watchdog; `TestAutoStop_WindowDenialAtAdmissionRecordsWindowExpired`, control `TestAutoStop_TotalExhaustionStillRecordsBudgetExhausted`; mutation M95 caught |
 | A peer that answers BADLY counts as a failure | `upstreamLegFailed` names all THREE shapes — a transport error, a nil response, and a decoded JSON-RPC error object — because each was reached by a different wrong predicate: deriving failure from receipt made two HTTP 500s read as successes (round 5), and a transport-only test made two JSON-RPC tool errors read as successes (round 6). `TestAttemptSettled_PeerErrorResponseCountsAsAFailure`, `TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure`, control `TestAttemptSettled_SuccessfulExecutionIsNotAFailure`; mutations M94, M96 caught |
 | The settled sample is durable BEFORE the terminal outcome | A crash between the two writes must over-count an outcome record rather than erase failure evidence, because restore legitimately accepts fewer samples than reservations; `TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit`; mutation M91 caught |
+| The settled sample is counted BEFORE the reservation is released | The settle may latch `elevated_error_rate`; the release is what admits the next request. They are one decision, so they are one defer with an explicit order — not two defers relying on LIFO; `TestAttemptSettled_IsReportedBeforeTheReservationIsReleased`; mutation M99 caught |
 | The rate detectors can evaluate inside the authorized corpus | `HealthSampleFloor = 2`; error rate trips iff `2 × failures ≥ samples`; hard latency ≥ 15s trips with no floor; mean ≥ 10s trips at the floor. `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` is the anti-drift gate; mutations M73, M74 caught |
 | Request-scoped refusals do NOT stop the experiment | `TestAutoStop_RequestScopedRefusalsNeverStopTheCanary` and `TestAutoStop_MerelyUnauthorizedRequestDoesNotStopTheCanary` are the controls that keep the closure from being achieved by aborting on everything |
 | Breaches are capability-isolated | `TestAutoStop_BreachIsCapabilityIsolated`; the funnel refuses a capability that is not its own |
@@ -912,14 +913,21 @@ a signal is reported, it denies AND stops. `independent_witness_mismatch` is wir
 reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
 that does not close blocker 8 and does not introduce a fake production witness.
 
-**Six adversarial rounds hardened this closure, and what they found is the useful record.** Each
+**Seven adversarial rounds hardened this closure, and what they found is the useful record.** Each
 round's fix exposed the next layer inward, which is convergence rather than churn — but every one of
-the eighteen findings was a way the latch could be right and the surrounding machinery still wrong.
-The last three rounds found defects that rounds 3, 4 and 5 had themselves introduced, which is the
+the nineteen findings was a way the latch could be right and the surrounding machinery still wrong.
+Rounds 4 through 6 found defects that rounds 3, 4 and 5 had themselves introduced, which is the
 honest shape of this kind of work: a fix that tightens one predicate is a new opportunity to get the
 adjacent one wrong. Both round-6 findings are of that kind, and both are the SAME predicate one
 shape further out — the failure classifier and the window classifier each had one caller left that
 had not been brought along.
+
+**Round 7 is the one to read if you only read one.** Rounds 5 and 6 made the error-rate detector
+able to SEE a failing peer; round 7 found that seeing it did not yet STOP anything, because the
+reservation went back before the sample was counted. A reachable threshold that does not prevent the
+next physical invocation is not a safety control, and nothing in rounds 1–6 would have caught it:
+every one of them asked whether the right thing was eventually recorded, and this asks whether it
+was recorded in time.
 
 | Round | Finding | Why it mattered |
 |---|---|---|
@@ -941,6 +949,7 @@ had not been brought along.
 | 5 | A window denial at admission was named `budget_exhausted` | `WholeCanaryExhaustion` groups the window denial with the total denial, and the first cause is immutable — so the operator-visible reason for a closed time box depended on which path noticed first, this admission or the watchdog |
 | 6 | A JSON-RPC `error` object counted as a success | Round 5's replacement predicate was transport-only. The peer answering "the tool failed" arrives as a non-nil response with a nil Go error — and `finishUpstream`, two hundred lines below, already classifies exactly that response as `ReasonUpstreamCallFailed`. The detector disagreed with the code beside it about the most ordinary tool failure there is |
 | 6 | The operator surface was more optimistic than the admission gate | Rounds 3 and 4 taught the boundary, the arm path and the callback the two-ended window predicate; the STATUS builder kept the upper-bound test. Under a clock rolled behind the activation it rendered `window_expired:false` and `execution_authority:"granted"` while every reservation was denied — for the whole remaining timer duration, which is exactly when an operator reads it |
+| 7 | The reservation was released before the health sample was counted | The settle rode the outer defer while `release()` rode the leg's, so the release necessarily ran first. At `MaxConcurrentExecutions = 1` a third request could reserve and cross `Upstream.Call` before the second failure was counted — the 1-of-2 threshold was reachable, and still did not prevent the next physical invocation. The round-3 latch-atomicity finding one level further out: there the latch was not atomic with the OBSERVATION, here the observation was not ordered against the RELEASE |
 
 Two of these deserve to be remembered past this PR. The generation finding and the health-latch
 finding were both **gaps my own comments described and my own code did not implement** — the header
@@ -991,7 +1000,7 @@ sides, and "the latch wins" is only true if it is true at every interleaving.
 
 ### Blocker 7 — red team
 
-Twenty-three adversarial scenarios, each answered by a named gate rather than by argument.
+Twenty-four adversarial scenarios, each answered by a named gate rather than by argument.
 
 | Scenario | Outcome | Gate |
 |---|---|---|
@@ -1018,6 +1027,7 @@ Twenty-three adversarial scenarios, each answered by a named gate rather than by
 | The persisted health record claims more samples than reservations | refused: fabricated clean samples are the one damaged shape that makes the detector LESS likely to fire | `TestAutoStop_InflatedSampleCountNeverRestoresAsExecutable` (control: `TestAutoStop_HonestSampleCountsStillRestore`) |
 | The target answers with a JSON-RPC tool error rather than an HTTP error | the same failure: the peer ran nothing useful and said so, so the second one trips `elevated_error_rate` | `TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure` (control: `TestAttemptSettled_SuccessfulExecutionIsNotAFailure`) |
 | An operator reads the surface during a rollback, before any request or timer | it reports `window_expired` and revoked authority — reporting the closed window WITHOUT latching, so the abort controller stays the one authority | `TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission` (in-test control: an open window still reports a live experiment) |
+| A third request is waiting while the second attempt fails | it cannot reserve: the sample is counted and the latch decided BEFORE the slot goes back, so the 1-of-2 threshold actually prevents the next invocation rather than merely recording it | `TestAttemptSettled_IsReportedBeforeTheReservationIsReleased` (in-test control: the slot is still released exactly once — an ordering fix that leaked the reservation would otherwise pass) |
 
 The three controls that keep this from being a proof of "abort on everything": a healthy population
 never stops the Canary (`TestAutoStop_HealthyPopulationNeverStopsTheCanary`), request-scoped refusals
@@ -1618,11 +1628,11 @@ demonstration still scores CAUGHT.
 
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **98 mutations** (M61–M78 are the blocker-7
-auto-abort set; M79–M98 were added by the six adversarial rounds above — 94 driven through
+`scripts/mcp-canary-mutation-campaign.sh` now carries **99 mutations** (M61–M78 are the blocker-7
+auto-abort set; M79–M99 were added by the seven adversarial rounds above — 95 driven through
 `run_mutation`, plus M02, M17, M80 and M91, which are hand-written because they mutate more than one
 site or reorder two blocks). The 78-mutation state recorded below was clean on its second run;
-M79–M98 were each verified failing against their own reintroduced defect as they were written. The
+M79–M99 were each verified failing against their own reintroduced defect as they were written. The
 first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
 which is the campaign doing its job, so it is recorded rather than quietly re-run:
 

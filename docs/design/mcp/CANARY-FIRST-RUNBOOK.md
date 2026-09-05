@@ -184,7 +184,9 @@ latency_pathology · unexpected_upstream_response · independent_witness_mismatc
 > being the peer answering that the tool failed, which Culvert already classifies
 > `ReasonUpstreamCallFailed`. It is deliberately NOT Culvert's disposition: a response-DLP block after
 > a successful peer answer is this gateway's own policy working, and counting it would let a healthy
-> Canary abort itself for its own controls firing.
+> Canary abort itself for its own controls firing. The sample is counted, and the latch it may prove
+> decided, BEFORE the reservation goes back — otherwise a waiting request takes the freed slot and
+> reaches the upstream before the failure that should have stopped the experiment is even counted.
 >
 > **The operator surface is never more optimistic than admission.** `activation_runtime.auto_stop`
 > derives `window_expired` and `execution_authority` from the same two-ended `WindowOpen` predicate

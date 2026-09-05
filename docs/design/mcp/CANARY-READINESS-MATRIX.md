@@ -140,7 +140,9 @@ report, never a second authority: nothing in the admission path reads it. An "or
 failure", for the error-rate detector, is the UPSTREAM LEG's verdict (`upstreamLegFailed`): a
 transport error, a nil response, or a decoded JSON-RPC error object. Culvert's own response-DLP
 block after a successful peer answer is deliberately NOT a failure — a Canary must not abort itself
-for its own controls firing.
+for its own controls firing. The sample is counted, and the latch it may prove decided, BEFORE the
+reservation is released: a threshold that is merely reachable does not stop anything if the next
+request can take the freed slot first.
 
 **Per-request fail-closed (Canary survives):** policy_deny, stale_decision,
 credential_not_ready, response_inspection_block, emergency_kill_for_request, allowance_consumed.
