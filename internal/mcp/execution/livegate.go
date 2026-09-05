@@ -34,6 +34,40 @@ type LiveExecutionGate interface {
 	// AdmitSideEffect decides whether this request may cross the irreversible upstream
 	// boundary. It performs NO upstream call and NO credential materialization.
 	AdmitSideEffect(in LiveGateInput) LiveGateDecision
+
+	// AdmitAuxiliary decides whether a NON-side-effect-bearing invocation — MCP
+	// lifecycle and discovery traffic — may cross the same upstream boundary.
+	//
+	// It is a SEPARATE admission because the two questions are genuinely different,
+	// and collapsing them in either direction is a defect this interface has already
+	// suffered once in each direction:
+	//
+	//   - Routing auxiliary traffic through AdmitSideEffect spends a Canary execution
+	//     reservation on a call that can cause no side effect (so MaxTotalExecutions
+	//     stops measuring physical invocations) and refuses it on a tool-trust
+	//     revalidation that has no tool to bind (so an armed node cannot complete a
+	//     session handshake or list tools).
+	//   - Skipping the gate ENTIRELY for auxiliary traffic — the first fix for the
+	//     above — also discards the questions that DO apply to it: whether the live
+	//     tier is armed at all, and whether it has begun quiescing. Those are the
+	//     operator's disarm and wind-down controls, and after a restart the tier is
+	//     deliberately left composed-but-unarmed while the persisted rollout mode may
+	//     still resolve EffectExecute. Auxiliary traffic reaching a third-party
+	//     upstream — establishing a session, reading its catalog, and carrying a
+	//     materialized credential when the decision obliges one — on a tier the
+	//     operator has disarmed or is winding down is the fail-closed restart posture
+	//     (§17) being lost for every method except tools/call.
+	//
+	// So this admission runs the LIFECYCLE half and nothing else: no budget
+	// reservation, no read-first, no live-trust revalidation. A denial fails the
+	// invocation closed with the gate's bounded reason and Upstream.Call is never
+	// reached; an admit returns a Release the executor runs exactly once after the
+	// upstream leg, exactly as AdmitSideEffect does.
+	//
+	// It is part of the REQUIRED interface rather than an optional one on purpose: a
+	// gate that does not answer this question must not be able to answer it by
+	// omission, because omission is the permissive direction.
+	AdmitAuxiliary(in LiveGateInput) LiveGateDecision
 }
 
 // LiveGateInput carries the authoritative, already-resolved facts the composition-layer gate

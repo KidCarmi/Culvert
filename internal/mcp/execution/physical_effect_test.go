@@ -29,6 +29,12 @@ func (g identityGate) AdmitSideEffect(LiveGateInput) LiveGateDecision {
 	}
 }
 
+// AdmitAuxiliary admits the lifecycle-only path. It deliberately returns NO reservation
+// identity: auxiliary traffic has no attempt, so there is no slot to name.
+func (g identityGate) AdmitAuxiliary(LiveGateInput) LiveGateDecision {
+	return LiveGateDecision{Admit: true, Release: func() {}}
+}
+
 // TestMeteredExecution_FailsClosedWithoutReservationIdentity is the structural gate
 // demanded by the physical-effect contract: a metered Canary execution MUST carry a
 // reservation identity and an activation generation. Either omission would make the

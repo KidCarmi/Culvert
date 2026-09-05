@@ -38,6 +38,10 @@ type mcpLiveSideEffectGate struct {
 	// admit is the lifecycle admission (globalMCPLiveTier.admitExecution): returns a release and
 	// ok==true only while armed and not quiescing.
 	admit func() (release func(), ok bool)
+	// admitOpen is the read-only form of the same question (globalMCPLiveTier.admissionOpen),
+	// used as the auxiliary admission's final-boundary revalidation so a disarm or quiesce that
+	// lands after admission still refuses. It takes no in-flight slot.
+	admitOpen func() bool
 	// readFirst decides whether the operation class may cross the boundary.
 	readFirst func(policy.OperationClass) bool
 	// trustOK revalidates the exact current live approval for (tenant, server, tool) as of now,
@@ -66,6 +70,7 @@ func newMCPLiveSideEffectGate(capb rollout.Capability) *mcpLiveSideEffectGate {
 	return &mcpLiveSideEffectGate{
 		capb:      capb,
 		admit:     lt.admitExecution,
+		admitOpen: lt.admissionOpen,
 		readFirst: canary.IsReadFirstOperation,
 		trustOK:   mcpLiveTrustRevalidate,
 		reserve: func(now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
@@ -153,6 +158,56 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 			g.releaseBudget(gen)
 			releaseAdmit()
 		},
+	}
+}
+
+// AdmitAuxiliary implements execution.LiveExecutionGate for NON-side-effect-bearing traffic —
+// MCP lifecycle (initialize / notifications/initialized / ping / notifications/cancelled) and
+// discovery (tools/list). SEC-MCP-AUX-1.
+//
+// It runs gate (1) ONLY — the lifecycle admission. The other three are deliberately absent, and
+// each absence is a decision rather than an omission:
+//
+//   - READ-FIRST (2) is not asked, because the operation class carried by session lifecycle
+//     traffic is not the tool-call class the read-first rule was written for; asking it here is
+//     the gate answering a question about a tool that does not exist.
+//   - LIVE-TRUST REVALIDATION (3) is not asked for the same reason and more sharply: it binds
+//     (tenant, server, TOOL, fingerprint), and auxiliary traffic has no tool binding, so the
+//     production predicate refuses every time. That refusal is what made an armed Canary node
+//     unable to complete a session handshake or list tools.
+//   - BUDGET RESERVATION (4) is not taken, because the budget counts AUTHORIZED TOOL
+//     EXECUTIONS. Spending a slot on a call that can cause no side effect makes
+//     MaxTotalExecutions stop measuring physical invocations, which is exactly the accounting
+//     property the physical-effect ledger exists to establish.
+//
+// What remains is the half that DOES apply: a tier the operator has disarmed, or has begun
+// quiescing, must not open a session to a third-party upstream, read its catalog, or carry a
+// materialized credential to it. That is the same fail-closed posture a restart deliberately
+// leaves behind (a re-composed tier is never automatically re-armed), and it must not depend on
+// which method the client happened to send.
+//
+// The returned Revalidate re-asks the SAME question read-only at the final boundary, so a
+// disarm or quiesce landing between admission and the irreversible call still refuses; Release
+// returns the lifecycle in-flight count exactly once, so a quiesce drain always completes.
+// No ReservationID and no ActivationGeneration are returned: an auxiliary invocation has no
+// attempt, so naming a slot it never consumed could only misattribute a physical effect.
+func (g *mcpLiveSideEffectGate) AdmitAuxiliary(_ execution.LiveGateInput) execution.LiveGateDecision {
+	releaseAdmit, ok := g.admit()
+	if !ok {
+		if g.note != nil {
+			g.note(mcperr.ReasonRolloutModeInvalid)
+		}
+		return execution.LiveGateDecision{Admit: false, Reason: mcperr.ReasonRolloutModeInvalid}
+	}
+	return execution.LiveGateDecision{
+		Admit: true,
+		Revalidate: func() bool {
+			if g.admitOpen == nil {
+				return true // no revalidation seam wired ⇒ preserve the admission decision
+			}
+			return g.admitOpen()
+		},
+		Release: releaseAdmit,
 	}
 }
 

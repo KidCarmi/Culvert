@@ -698,26 +698,33 @@ func (e *Executor) admitSideEffect(in runtime.ExecInput) (sideEffectAdmission, e
 	if e.cfg.LiveGate == nil {
 		return sideEffectAdmission{}, nil
 	}
-	// AUXILIARY TRAFFIC IS NOT ADMITTED, because it has nothing to admit. Lifecycle
-	// and discovery methods invoke no tool, so §4's contract — stated on openAttempt
-	// and previously enforced only there — is that they must never consume an
-	// execution reservation or inflate the physical-effect count. Running the gate
-	// for them contradicted that contract in both directions: the production gate
-	// validates tool trust against an empty tool binding and REFUSES, so an armed
-	// Canary node could not complete a session handshake or list tools; a gate that
-	// admitted instead would permanently spend a Canary slot on a call that can cause
-	// no side effect, and MaxTotalExecutions would stop measuring physical
-	// invocations — the accounting blocker #6 exists to make true.
+	// AUXILIARY TRAFFIC TAKES THE OTHER ADMISSION, it is not exempted from admission.
+	// Lifecycle and discovery methods invoke no tool, so §4's contract — stated on
+	// openAttempt — is that they must never consume an execution reservation or
+	// inflate the physical-effect count. Sending them through AdmitSideEffect
+	// contradicted that in both directions: the production gate validates tool trust
+	// against an empty tool binding and REFUSES, so an armed Canary node could not
+	// complete a session handshake or list tools; a gate that admitted instead would
+	// permanently spend a Canary slot on a call that can cause no side effect, and
+	// MaxTotalExecutions would stop measuring physical invocations — the accounting
+	// blocker #6 exists to make true.
+	//
+	// SEC-MCP-AUX-1. Skipping the gate ENTIRELY was the first fix for that, and it
+	// over-corrected: the lifecycle half of the admission — is the live tier armed,
+	// and has it begun quiescing? — applies to auxiliary traffic exactly as it applies
+	// to a tool call, and dropping it handed away the operator's disarm and wind-down
+	// controls for every method except tools/call. AdmitAuxiliary runs that half and
+	// nothing else.
 	//
 	// The classifier is the SAME fail-closed one openAttempt uses, and its default is
-	// side-effect-bearing: exemption is granted only to classes positively known to
-	// invoke no tool, so an unclassified method is metered, never exempted. Skipping
-	// the gate does not weaken the boundary — preCallGuard's tool-freshness check and
-	// the FINAL emergency-kill re-read read authoritative state directly
-	// (e.cfg.State.KillGeneration() against the admission generation passed in by the
-	// runtime), not through the gate, so they still run for every method.
+	// side-effect-bearing: the auxiliary admission is granted only to classes
+	// positively known to invoke no tool, so an unclassified method is metered, never
+	// diverted. preCallGuard's tool-freshness check and the FINAL emergency-kill
+	// re-read read authoritative state directly (e.cfg.State.KillGeneration() against
+	// the admission generation passed in by the runtime), not through the gate, so
+	// they still run for every method whichever admission it took.
 	if !upstreamclient.ClassifyMethod(in.Method).SideEffectBearing() {
-		return sideEffectAdmission{}, nil
+		return e.admitAuxiliary(in)
 	}
 	d := e.cfg.LiveGate.AdmitSideEffect(e.liveGateInput(in))
 	if !d.Admit {
@@ -729,4 +736,22 @@ func (e *Executor) admitSideEffect(in runtime.ExecInput) (sideEffectAdmission, e
 		reservationID: d.ReservationID,
 		activationGen: d.ActivationGeneration,
 	}, nil
+}
+
+// admitAuxiliary runs the LIFECYCLE-only admission for a non-side-effect-bearing
+// invocation (SEC-MCP-AUX-1). See LiveExecutionGate.AdmitAuxiliary for why this is a
+// separate question from the side-effect admission.
+//
+// The identity fields are deliberately DROPPED even when the gate supplies them. An
+// auxiliary invocation has no attempt — openAttempt returns (nil, nil) for it on the
+// same fail-closed classifier — so carrying a reservation identity here could only
+// ever attribute a physical effect to a slot that authorized none. A denial reaches
+// exactly the same fail-closed classification path as a side-effect denial, so the
+// client sees the gate's bounded reason rather than a transport or durability fault.
+func (e *Executor) admitAuxiliary(in runtime.ExecInput) (sideEffectAdmission, error) {
+	d := e.cfg.LiveGate.AdmitAuxiliary(e.liveGateInput(in))
+	if !d.Admit {
+		return sideEffectAdmission{reason: d.Reason}, errLiveGateRefused
+	}
+	return sideEffectAdmission{release: d.Release, revalidate: d.Revalidate}, nil
 }
