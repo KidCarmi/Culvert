@@ -148,10 +148,14 @@ export function classifyRecovery(
   if (resetTouches(lc, marker))
     return { kind: "unresolved", reason: "history_reset" };
   const retained = lc.operationsRetained ?? lc.operations.length;
+  // The profile the operation was reviewed against is gone or was recreated
+  // (active revisions are monotonic — one BELOW the reviewed revision means
+  // a delete + recreate took the history with it). A never-published
+  // profile (activeN 0, empty history) is NOT missing — that is the normal
+  // state before a first publish.
   if (
     marker.expectedActiveRevision > 0 &&
-    (!lc.activeExists ||
-      (lc.activeN === 0 && lc.revisions.length === 0 && retained === 0))
+    (!lc.activeExists || lc.activeRevision < marker.expectedActiveRevision)
   )
     return { kind: "unresolved", reason: "history_missing" };
   const complete =
