@@ -1161,6 +1161,56 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD, ROUND 5 (this branch, 2026-09-05).** External
+> freeze review of the round-4 candidate (`3f9877fe`) accepted the writer
+> transaction boundary and the recoverable create transition and found one
+> final durability blocker; it was red-before on the untouched candidate
+> (`3b25315d`: `pac_lifecycle_cas_durability_red_test.go` X1 failing — a
+> deterministic, channel-controlled fault-injection + restart proof through
+> the production handlers) and corrected append-only (`75537b24`). **A
+> compare-and-swap refusal was answered as a terminal decision even when its
+> decision record had not been persisted.** `pacWriteConflict` cleared the
+> pending intent, appended the aborted decision, only LOGGED a failed
+> `pacLifecycle.Put` and still answered `409 concurrent_write` — so the
+> durable file kept the pending intent while the browser cleared its marker,
+> and the next reconciliation (`pacReconcileLocked` on the next access or a
+> restart) classified that intent from the active revision + candidate digest
+> ALONE. An intervening out-of-boundary writer that installed the candidate's
+> exact target revision/spec plus an unrelated change therefore made the
+> operation "committed": a history revision, a success audit and a config
+> version were minted for an operation that never performed the active write
+> (X1 on the candidate: committed attribution at the very first GET). Three
+> coupled corrections, nothing weakened. **(1) Durable writer identity.** The
+> profiles file carries `lastWriteId` beside the config
+> (`internal/pac/profiles.go`): every `Set`/`SetIfGeneration` stamps a fresh
+> random id, and the lifecycle commit stamps its operationId through the new
+> `CommitIfGeneration` — the same store-generation compare-and-swap under the
+> same `pacProfilesAPIMu`, plus the identity. An older file loads with an
+> unknown identity; an older binary ignores the key. **(2) Attribution by
+> identity, never by content.** `pacClassifyReconcile` turns the content
+> verdict of `pac.ClassifyOutcome` into COMMITTED only when the store's writer
+> identity is the intent's operationId; identical target content installed
+> by another writer is settled as the durable `concurrent_write` refusal (a
+> new `conflict` verdict in `pacReconcileLocked`: pending cleared, aborted
+> decision recorded, no history/audit/config-version, the intervening
+> configuration intact); an unknown identity is AMBIGUOUS — refused until an
+> admin repair — never a guessed commit. **(3) Terminal only when durable.**
+> The `409 concurrent_write` decision is answered only after its record
+> persisted; a failed persist answers the NON-TERMINAL `500 outcome_unknown`
+> with `detail: refusal_not_durable` and `state: pending`, which is exactly
+> the outcome shape the accepted frontend already keeps its marker for
+> (`failureKeepsMarker`: `server_outcome` + `outcome_unknown`) — no frontend
+> change; the pending intent stays the durable truth across the restart with
+> persistence still failing, and once persistence recovers the reconciliation
+> records the same refusal durably (`historyState: recorded`, operation
+> `aborted`) and a repeat of the operationId replays `409 concurrent_write`.
+> The CAS, the shared writer mutex, the create transition, the epoch fencing,
+> the ceremony context and every accepted RED assertion are untouched (the X1
+> "never attributed as committed" closure was extracted verbatim into a
+> top-level helper for the gocognit gate, assertions unchanged, original
+> commit preserved). OpenAPI documents the `refusal_not_durable` detail on the
+> lifecycle POST 500 (bundle + types regenerated).
+>
 > **2F-E CORRECTION RECORD, ROUND 4 (this branch, 2026-09-05).** External
 > freeze review of the round-3 candidate (`d510d6c1`) accepted the migration
 > durability and recorded-delete corrections and found two residual blockers;
