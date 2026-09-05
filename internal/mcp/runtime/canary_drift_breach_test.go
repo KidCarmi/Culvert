@@ -34,7 +34,7 @@ func (r *breachRecorder) codes() []string {
 
 // driftFixture ingests one tool and returns a pipeline plus a DecisionInput whose fingerprint no
 // longer matches the live catalog — the exact shape refuseOnToolDrift exists to refuse.
-func driftFixture(t *testing.T, rec *breachRecorder) (*pipeline, policy.DecisionInput, policy.DecisionInput) {
+func driftFixture(t *testing.T, rec *breachRecorder) (p *pipeline, stale, fresh policy.DecisionInput) {
 	t.Helper()
 	k := newESKey(t, "k1")
 	deps := testDeps(t, k, nil)
@@ -42,7 +42,7 @@ func driftFixture(t *testing.T, rec *breachRecorder) (*pipeline, policy.Decision
 	if rec != nil {
 		deps.CanaryBreach = rec.report
 	}
-	p := newGatewayPipeline(t, deps)
+	pl := newGatewayPipeline(t, deps)
 
 	liveRec, ok := deps.Catalog.Current().Get(catalog.ToolKey{
 		Server: registry.ServerID(testServerID), Name: "x",
@@ -60,7 +60,7 @@ func driftFixture(t *testing.T, rec *breachRecorder) (*pipeline, policy.Decision
 			},
 		}
 	}
-	return p, mk("stale" + live), mk(live)
+	return pl, mk("stale" + live), mk(live)
 }
 
 // TestCanaryBreach_PreExecutorToolDriftIsReported pins the PRE-EXECUTOR half of the drift funnel.
