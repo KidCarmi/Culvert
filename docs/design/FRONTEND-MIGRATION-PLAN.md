@@ -1161,6 +1161,65 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD, ROUND 4 (this branch, 2026-09-05).** External
+> freeze review of the round-3 candidate (`d510d6c1`) accepted the migration
+> durability and recorded-delete corrections and found two residual blockers;
+> each was red-before on the untouched candidate (`41726989`:
+> `pac_lifecycle_writer_boundary_red_test.go` H1/H2/G1/G2 4/4 failing —
+> channel-controlled, through the PRODUCTION entry points, no test-side
+> mutex) and corrected append-only (`8b2bcd89`). **(1) The production writer
+> boundary was incomplete.** The lifecycle publish built its whole-config
+> candidate and committed it under `pacProfilesAPIMu`, but the production
+> config IMPORT (`apiConfigImport`) and config-version ROLLBACK
+> (`applyPACFromBackup`) wrote the active store WITHOUT that mutex — so a
+> publish parked between its durable intent (`intent_persisted`) and its
+> commit overwrote their completed changes to UNRELATED profiles and pools
+> with its stale candidate (the round-3 sequential helpers had hidden the gap
+> by taking the mutex themselves; corrected transparently, assertions
+> unchanged, the import helper now goes through the production handler).
+> Corrected contract: every writer of the active profile store builds its
+> candidate AND commits it under `pacProfilesAPIMu` — import, rollback and the
+> CP→DP snapshot apply enter the shared boundary through
+> `pacProfilesWriterLock` around exactly their PAC read-modify-write. Lock
+> order reviewed and recorded on the helper: `objectReferenceMutationGate` →
+> `configRollbackMu` → `pacProfilesAPIMu` (taken LAST by the bulk writers;
+> nothing reachable under `pacProfilesAPIMu` acquires the gate or
+> `configRollbackMu` — the post-commit effects reach `saveConfigVersionMu` and
+> `ConfigStore.mu`, which `Update` releases before notifying subscribers).
+> Behind the mutex the lifecycle commit is a compare-and-swap on a new
+> `ProfileStore` GENERATION (`GetWithGeneration`/`SetIfGeneration`): the
+> candidate is written only while the store is still at the generation it was
+> built from, atomically under the store lock; a writer outside the boundary is
+> detected at the commit and refused `409 concurrent_write` — recorded as the
+> operation's aborted outcome (a re-send replays it), nothing written, the
+> intervening change intact (wall W1; W2 covers the snapshot apply waiting at
+> the boundary, with the wholesale rewind observed as an epoch rotation).
+> Proofs H1/H2 park the publish, start the production writer, release only once
+> it has reached the store or is WAITING at the boundary, and require the
+> valid serial outcome with both changes present. **(2) The create ordering
+> destroyed recovery evidence on failure.** Round 3 replaced the whole
+> lifecycle record (`Recreate`) BEFORE the active create, so a refused or
+> crashed active creation had already destroyed the draft, revisions, decided
+> operations and intents that legitimately exist beside an absent profile (a
+> rollback removed it; a draft saved before a first publication). Corrected
+> contract: the create is a RECOVERABLE two-write transition — `PrepareCreate`
+> durably records `CreatePending` + a `PreparedIncarnation` while the existing
+> identity and every piece of evidence stay untouched; the active create
+> commits; `FinalizeCreate` makes the prepared identity the epoch (evidence
+> kept). A refused active create withdraws the preparation (evidence and
+> identity intact, truthful failure, no success audit, no config version —
+> G1); a crash between the writes is finished by the next access/boot from the
+> durable transition alone (`ObserveActive`: profile present ⇒ finalize,
+> absent ⇒ withdraw; the boot reconciliation covers create and delete
+> transitions — G2), and an access that cannot finalize durably reports no
+> identity — the old epoch is never exposed beside a created profile; a later
+> successful recreation still refuses a request reviewed against the old epoch
+> and keeps the evidence (G3). No frontend change: the accepted recovery,
+> ceremony context, marker immutability, migration and delete-transition
+> behaviour are unchanged; a `concurrent_write` refusal reaches the page as an
+> ordinary refused dispatch. OpenAPI documents the new refusal (bundle + types
+> regenerated).
+>
 > **2F-E CORRECTION RECORD, ROUND 3 (this branch, 2026-09-05).** External
 > freeze review of the round-2 candidate (`33f6f21c`) accepted the round-2
 > corrections and found two residual blockers about whether the new
