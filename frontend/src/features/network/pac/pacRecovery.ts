@@ -20,10 +20,18 @@
 // Lifecycle rules (load-bearing):
 //  - WRITE happens BEFORE the network dispatch and is VERIFIED by read-back;
 //    NO DURABLE MARKER ⇒ NO DISPATCH.
-//  - CLEAR happens only on a terminal outcome: a confirmed response, an
-//    authoritative refusal (the appliance answered — nothing pending), a
+//  - ONE outstanding operation across the whole PAC surface (2F-E correction
+//    finding 2): a write NEVER overwrites a marker of a different operation,
+//    and NEVER succeeds over storage that cannot be read (unreadable /
+//    unavailable) — an unreadable marker may be somebody's unresolved
+//    operation. Only the same operation may be re-persisted (a re-send).
+//  - CLEAR is OWNERSHIP-MATCHED: it removes the marker only when it carries
+//    the operation the caller resolved, so a late completion of one
+//    operation can never erase another's marker. It happens only on a
+//    terminal outcome: a VERIFIED response, an authoritative refusal, a
 //    proven LANDED / NOT-LANDED resolution, the explicit typed abandon
-//    ceremony, or an authentication boundary. NEVER on component unmount.
+//    ceremony (also ownership-matched), or an authentication boundary (the
+//    one unconditional purge). NEVER on component unmount.
 //  - READ is subject-bound: a marker written under a different authenticated
 //    identity is discarded, never inherited.
 import { isRecord } from "../../../api/decode";
@@ -84,6 +92,16 @@ export function writePacRecovery(
   m: PacRecoveryMarker,
 ): boolean {
   if (!grammarValid(m, subject)) return false;
+  // Single outstanding operation: refuse over a different operation's
+  // marker and over any store that cannot be read.
+  const existing = readPacRecovery(subject);
+  if (existing.kind === "unavailable" || existing.kind === "unreadable")
+    return false;
+  if (
+    existing.kind === "valid" &&
+    existing.marker.operationId !== m.operationId
+  )
+    return false;
   try {
     // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2F-E lifecycle recovery): the single NON-SECRET PAC operation-identity marker; field allowlist pinned by pac-2fe-red.test.ts.
     sessionStorage.setItem(
@@ -114,6 +132,10 @@ export function writePacRecovery(
  * read" and "cannot interpret" are NOT "absent". A well-formed marker bound
  * to a DIFFERENT subject is discarded (never inherited) and reads "none". */
 export function readPacRecovery(subject: string): PacRecoveryRead {
+  // No authenticated identity yet (the auth state is still hydrating):
+  // nothing may be read, and above all nothing may be DISCARDED as
+  // "foreign" — the marker must survive a reload. Fail closed.
+  if (subject.trim() === "") return { kind: "unavailable" };
   let raw: string | null;
   try {
     // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2F-E lifecycle recovery): the single NON-SECRET PAC operation-identity marker; field allowlist pinned by pac-2fe-red.test.ts.
@@ -166,19 +188,47 @@ export function readPacRecovery(subject: string): PacRecoveryRead {
   return { kind: "valid", marker };
 }
 
-/** Terminal clear — confirmed outcome, authoritative refusal, proven
- * resolution, or the explicit abandon ceremony. */
-export function clearPacRecovery(): void {
+/** Terminal, OWNERSHIP-MATCHED clear — confirmed outcome, authoritative
+ * refusal, proven resolution, or the explicit abandon ceremony of exactly
+ * `operationId`. Returns whether a marker of that operation was removed; a
+ * marker of another operation (or an unreadable store) is left untouched. */
+export function clearPacRecovery(operationId: string): boolean {
+  let raw: string | null;
+  try {
+    // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2F-E lifecycle recovery): the single NON-SECRET PAC operation-identity marker; field allowlist pinned by pac-2fe-red.test.ts.
+    raw = sessionStorage.getItem(PAC_RECOVERY_KEY);
+  } catch {
+    return false;
+  }
+  if (raw === null) return false;
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!isRecord(v) || v["operationId"] !== operationId) return false;
+  try {
+    // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2F-E lifecycle recovery): the single NON-SECRET PAC operation-identity marker; field allowlist pinned by pac-2fe-red.test.ts.
+    sessionStorage.removeItem(PAC_RECOVERY_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The one UNCONDITIONAL purge — the authentication boundary only. */
+function purgePacRecovery(): void {
   try {
     // eslint-disable-next-line no-restricted-globals -- sanctioned narrow exception to contract §9.B1 (2F-E lifecycle recovery): the single NON-SECRET PAC operation-identity marker; field allowlist pinned by pac-2fe-red.test.ts.
     sessionStorage.removeItem(PAC_RECOVERY_KEY);
   } catch {
-    // nothing to clear if storage is unavailable
+    // nothing to purge if storage is unavailable
   }
 }
 
-// Auth-boundary rule: logout / session expiry / identity change clears the
+// Auth-boundary rule: logout / session expiry / identity change purges the
 // marker (module-level registration — NOT tied to any component unmount).
 registerAuthCleanup(() => {
-  clearPacRecovery();
+  purgePacRecovery();
 });

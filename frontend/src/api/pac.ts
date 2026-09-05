@@ -308,6 +308,28 @@ export interface PacDecidedOp {
   status: number;
 }
 
+export interface PacOperationLookup {
+  operationId: string;
+  found: boolean;
+  state: PacOpState | undefined;
+  status: number | undefined;
+  ts: string;
+  /** the history revision the operation produced (0 when none / unknown) */
+  revisionN: number;
+}
+
+const decodeOperationLookup: Decoder<PacOperationLookup> = (v, path = "$") => {
+  const o = readRecord(v, path);
+  return {
+    operationId: field(o, "operationId", readString, path),
+    found: field(o, "found", readBoolean, path),
+    state: opt(o, "state", readEnum(PAC_OP_STATES), path),
+    status: opt(o, "status", readNumber, path),
+    ts: opt(o, "ts", readString, path) ?? "",
+    revisionN: opt(o, "revisionN", readNumber, path) ?? 0,
+  };
+};
+
 export interface PacAmbiguousOp {
   op: PacPendingOp;
   observedRevision: number;
@@ -356,6 +378,18 @@ export interface PacLifecycle {
   ambiguous: PacAmbiguousOp | undefined;
   operations: readonly PacDecidedOp[];
   activeSpecDigest: string;
+  /** Digest of the SAVED draft ("" when no draft was ever saved) — the
+   * identity a publish binds its marker to (2F-E correction). */
+  draftSpecDigest: string;
+  /** Recovery-evidence limits (2F-E correction): how many decided
+   * operations the appliance retains against its cap. `operations` lists
+   * only the 20 most recent; absence there proves nothing unless the
+   * retained ring is complete. Absent on a pre-correction appliance. */
+  operationsRetained: number | undefined;
+  operationsCap: number | undefined;
+  /** The answer to `?operationId=` — one operation looked up in the FULL
+   * retained ring and the revision history. */
+  operation: PacOperationLookup | undefined;
   poolChangedSince: boolean;
   scope: string;
   historyReset: PacHistoryReset | undefined;
@@ -501,6 +535,10 @@ export const decodePacLifecycle: Decoder<PacLifecycle> = (v, path = "$") => {
     ambiguous: opt(o, "ambiguous", decodeAmbiguous, path),
     operations: opt(o, "operations", readArray(decodeDecidedOp), path) ?? [],
     activeSpecDigest: opt(o, "activeSpecDigest", readString, path) ?? "",
+    draftSpecDigest: opt(o, "draftSpecDigest", readString, path) ?? "",
+    operationsRetained: opt(o, "operationsRetained", readNumber, path),
+    operationsCap: opt(o, "operationsCap", readNumber, path),
+    operation: opt(o, "operation", decodeOperationLookup, path),
     poolChangedSince: opt(o, "poolChangedSince", readBoolean, path) ?? false,
     scope: opt(o, "scope", readString, path) ?? "",
     historyReset: opt(o, "historyReset", decodePacHistoryReset, path),
@@ -1225,12 +1263,22 @@ export function deletePacPool(
   );
 }
 
+export interface PacLifecycleReadOptions {
+  /** ask the appliance to look ONE operation up in its full retained ring */
+  operationId?: string;
+}
+
 export function getPacLifecycle(
   id: string,
   signal?: AbortSignal,
+  opts?: PacLifecycleReadOptions,
 ): Promise<PacLifecycle> {
+  const q =
+    opts?.operationId !== undefined
+      ? `?operationId=${encodeURIComponent(opts.operationId)}`
+      : "";
   return apiRequest(
-    profilePath(id, "/lifecycle"),
+    `${profilePath(id, "/lifecycle")}${q}`,
     decodePacLifecycle,
     sig(signal),
   );
