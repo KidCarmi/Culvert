@@ -305,8 +305,9 @@ test("R1 bounded history + superseded publication: Recover proves 'committed as 
       false,
     );
     await page.getByRole("button", { name: "Recover" }).click();
-    await expect(page.getByText(/committed/i).first()).toBeVisible();
-    await expect(page.getByText(/no longer/i).first()).toBeVisible();
+    const outcome = page.getByRole("status").filter({ hasText: /committed/i });
+    await expect(outcome).toBeVisible();
+    await expect(outcome).toContainText(/no longer/i);
     await expect(page.getByText(/did not land/i)).toHaveCount(0);
     expect(await markerRaw(page)).toBeNull();
   } finally {
@@ -349,15 +350,18 @@ test("R2 not received: the base is unchanged so Recover keeps the operation unre
     await page.unroute(`**/api/pac/profiles/${PROF_A}/lifecycle`);
     expect(num(await lifecycle(api, PROF_A), "activeN")).toBe(0);
     await page.getByRole("button", { name: "Recover" }).click();
-    await expect(page.getByText(/not observed/i).first()).toBeVisible();
+    await expect(
+      page.getByRole("status").filter({ hasText: /not observed/i }),
+    ).toBeVisible();
     expect(await markerRaw(page)).not.toBeNull();
     await expect(
       page.getByRole("button", { name: "Publish", exact: true }),
     ).toBeDisabled();
     await page.getByRole("button", { name: /^Re-send/ }).click();
     await page.getByRole("button", { name: "Re-send now" }).click();
+    // the success NOTICE — the history card is captioned "Published revisions"
     await expect(
-      page.getByText("Published", { exact: false }).first(),
+      page.getByRole("status").filter({ hasText: "Published" }),
     ).toBeVisible();
     expect(await markerRaw(page)).toBeNull();
     const lc = await lifecycle(api, PROF_A);
@@ -444,7 +448,9 @@ for (const variant of [
         page.getByRole("button", { name: "Publish", exact: true }),
       ).toBeDisabled();
       await page.getByRole("button", { name: "Recover" }).click();
-      await expect(page.getByText(/committed/i).first()).toBeVisible();
+      await expect(
+        page.getByRole("status").filter({ hasText: /committed/i }),
+      ).toBeVisible();
       expect(await markerRaw(page)).toBeNull();
     } finally {
       await cleanup(api);
@@ -517,7 +523,9 @@ test("R6 A → B navigation and reload: an unresolved operation on A withholds p
     const rowA = page.getByRole("row", { name: new RegExp(NAME_A) });
     await rowA.getByRole("button", { name: "Open" }).click();
     await page.getByRole("button", { name: "Recover" }).click();
-    await expect(page.getByText(/committed/i).first()).toBeVisible();
+    await expect(
+      page.getByRole("status").filter({ hasText: /committed/i }),
+    ).toBeVisible();
     expect(await markerRaw(page)).toBeNull();
     // B is free again
     await page.getByRole("button", { name: /All profiles/ }).click();
