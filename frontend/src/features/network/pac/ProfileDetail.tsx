@@ -65,9 +65,10 @@ import {
   classifyDispatchFailure,
   classifyRecovery,
   failureKeepsMarker,
-  landedStateCommitted,
   shortDigest,
+  verifyOperationResult,
 } from "./pacLifecycle";
+import type { PacUnresolvedReason } from "./pacLifecycle";
 import {
   clearPacRecovery,
   readPacRecovery,
@@ -119,6 +120,7 @@ type Ceremony =
       errorText: string;
     }
   | { kind: "repair"; result: ConfirmResult; errorText: string }
+  | { kind: "resend"; result: ConfirmResult; errorText: string }
   | { kind: "ack"; result: ConfirmResult; errorText: string }
   | { kind: "abandon"; typed: string }
   | { kind: "delete"; typed: string; result: ConfirmResult; errorText: string };
@@ -135,6 +137,34 @@ export interface ProfileDetailProps {
   pools: readonly PacPool[];
   onBack: () => void;
   onChanged: () => void;
+  /** 2F-E correction (finding 4): local navigation is guarded on it */
+  onDirtyChange?: (dirty: boolean) => void;
+}
+
+/** The recovery store as this profile sees it (2F-E correction, finding
+ * 2): ONE outstanding operation across the whole PAC surface — a marker of
+ * another profile, or a store that cannot be read, withholds every
+ * lifecycle dispatch here just like an own unresolved operation does. */
+type RecoveryState =
+  | { kind: "none" }
+  | { kind: "own"; marker: PacRecoveryMarker }
+  | { kind: "foreign"; marker: PacRecoveryMarker }
+  | { kind: "unreadable" }
+  | { kind: "unavailable" };
+
+function readRecoveryState(subject: string, profileId: string): RecoveryState {
+  const read = readPacRecovery(subject);
+  switch (read.kind) {
+    case "valid":
+      return read.marker.profileId === profileId
+        ? { kind: "own", marker: read.marker }
+        : { kind: "foreign", marker: read.marker };
+    case "none":
+      return { kind: "none" };
+    case "unreadable":
+    case "unavailable":
+      return { kind: read.kind };
+  }
 }
 
 export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
@@ -164,7 +194,10 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
     activeRevision: number;
     activeSpecDigest: string;
   } | null>(null);
-  const [unresolved, setUnresolved] = useState<PacRecoveryMarker | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryState>({ kind: "none" });
+  const unresolved = recovery.kind === "own" ? recovery.marker : null;
+  // why the last authoritative read left the own operation unresolved
+  const [basis, setBasis] = useState<PacUnresolvedReason | null>(null);
   const [recovering, setRecovering] = useState(false);
   const [editorDirty, setEditorDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -172,22 +205,16 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
   const [sim, setSim] = useState<PacSimResult | null>(null);
   const [simError, setSimError] = useState("");
 
-  // Recovery hydration: a marker for THIS profile written under THIS
-  // subject latches the surface until it is resolved (never on unmount).
+  // Recovery hydration: the store is read under THIS subject; an own
+  // marker, a foreign marker, or an unreadable/unavailable store all latch
+  // the surface until resolved (never cleared on unmount).
   useEffect(() => {
-    const read = readPacRecovery(subject);
-    if (read.kind === "valid" && read.marker.profileId === p.id)
-      setUnresolved(read.marker);
-    if (read.kind === "unreadable" || read.kind === "unavailable") {
-      setNotice({
-        variant: "warning",
-        title:
-          "Recovery store " +
-          (read.kind === "unreadable" ? "unreadable" : "unavailable"),
-        text: "An earlier operation marker could not be read; publish and rollback stay withheld until the browser storage is repaired or this tab is closed.",
-      });
-    }
+    setRecovery(readRecoveryState(subject, p.id));
   }, [subject, p.id]);
+  const { onDirtyChange } = p;
+  useEffect(() => {
+    onDirtyChange?.(editorDirty);
+  }, [editorDirty, onDirtyChange]);
 
   const clearRefusals = (): void => {
     setFence(null);
@@ -205,7 +232,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
         }
       : null);
   const lifecycleBlocked =
-    unresolved !== null ||
+    recovery.kind !== "none" ||
     page.unknown !== null ||
     historyReset !== null ||
     (lc !== undefined && lc.state !== "idle");
@@ -218,9 +245,23 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
     !saving;
 
   // ── the operation runner (publish / rollback, challenge retry) ─────────
+  // The server digest of the candidate an operation commits — a publish
+  // sends the saved draft (else the active spec when no draft exists), a
+  // rollback re-publishes the recorded spec of revision targetN.
+  const candidateDigest = (
+    action: PacRecoveryAction,
+    targetN: number,
+  ): string => {
+    if (lc === undefined) return "";
+    if (action === "publish")
+      return lc.draft !== undefined ? lc.draftSpecDigest : lc.activeSpecDigest;
+    return lc.revisions.find((r) => r.n === targetN)?.specDigest ?? "";
+  };
+
   const runOperation = async (
     args: OpArgs,
     confirm: PacConfirmEcho | undefined,
+    opts: { resend?: boolean; startedAt?: number } = {},
   ): Promise<void> => {
     if (lc === undefined) return;
     const marker: PacRecoveryMarker = {
@@ -229,19 +270,27 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
       profileId: p.id,
       expectedActiveRevision: args.expectedActiveRevision,
       expectedActiveSpecDigest: args.expectedActiveSpecDigest,
-      candidateSpecDigest: "",
+      candidateSpecDigest: candidateDigest(args.action, args.targetN),
       targetN: args.targetN,
-      startedAt: Date.now(),
+      startedAt: opts.startedAt ?? Date.now(),
     };
-    // NO DURABLE MARKER ⇒ NO DISPATCH.
+    // NO DURABLE MARKER ⇒ NO DISPATCH — and never over another operation's
+    // marker or an unreadable store (single outstanding operation).
     if (!writePacRecovery(subject, marker)) {
+      const state = readRecoveryState(subject, p.id);
+      setRecovery(state);
       setCeremony((c) =>
-        c.kind === "publish" || c.kind === "rollback" || c.kind === "challenge"
+        c.kind === "publish" ||
+        c.kind === "rollback" ||
+        c.kind === "challenge" ||
+        c.kind === "resend"
           ? {
               ...c,
               result: "failed",
               errorText:
-                "The operation identity could not be persisted in this browser; nothing was sent. Repair browser storage and retry.",
+                state.kind === "foreign" || state.kind === "own"
+                  ? "Another operation is still unresolved in this browser; nothing was sent. Resolve it first."
+                  : "The operation identity could not be persisted in this browser; nothing was sent. Repair browser storage and retry.",
             }
           : c,
       );
@@ -276,8 +325,30 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
               },
               signal,
             );
-      clearPacRecovery();
-      setUnresolved(null);
+      // A 2xx is a PROVEN commit only when it names THIS operation and
+      // carries the action's positive commit flag; anything else keeps the
+      // marker and is resolved authoritatively.
+      const verdict = verifyOperationResult(res, {
+        operationId: args.operationId,
+        action: args.action,
+      });
+      if (!verdict.ok) {
+        setRecovery({ kind: "own", marker });
+        setBasis(null);
+        setCeremony({ kind: "none" });
+        setNotice({
+          variant: "warning",
+          title: "Response could not be tied to this operation",
+          text:
+            verdict.reason === "identity"
+              ? `The appliance answered for operation ${shortDigest(res.operationId)}, not ${shortDigest(args.operationId)}. Nothing is assumed — use Recover.`
+              : "The answer carries no positive commit evidence for this action. Nothing is assumed — use Recover.",
+        });
+        return;
+      }
+      clearPacRecovery(args.operationId);
+      setRecovery(readRecoveryState(subject, p.id));
+      setBasis(null);
       setCeremony({ kind: "none" });
       const pendingNote =
         res.historyState === "pending_reconciliation"
@@ -298,12 +369,20 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
     } catch (err) {
       const f = classifyDispatchFailure(err);
       if (failureKeepsMarker(f)) {
-        setUnresolved(marker);
+        setRecovery({ kind: "own", marker });
+        setBasis(null);
         setCeremony({ kind: "none" });
         setNotice(null);
         return;
       }
-      clearPacRecovery();
+      const continuesSameOperation =
+        f.kind === "challenge" && f.challenge.code === "confirm_required";
+      // A refusal of a RE-SEND keeps the marker: whether the operation
+      // committed earlier is decided by the authoritative read that follows.
+      if (!continuesSameOperation && opts.resend !== true)
+        clearPacRecovery(args.operationId);
+      if (!continuesSameOperation)
+        setRecovery(readRecoveryState(subject, p.id));
       switch (f.kind) {
         case "fence":
           setCeremony({ kind: "none" });
@@ -369,7 +448,8 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           setCeremony((c) =>
             c.kind === "publish" ||
             c.kind === "rollback" ||
-            c.kind === "challenge"
+            c.kind === "challenge" ||
+            c.kind === "resend"
               ? { ...c, result: "failed", errorText: f.text }
               : c,
           );
@@ -377,9 +457,49 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
         case "unknown":
           break;
       }
+      if (opts.resend === true && !continuesSameOperation) {
+        setCeremony({ kind: "none" });
+        await recoverMarker(marker);
+      }
     } finally {
       page.owner.settle(signal);
     }
+  };
+
+  // ── re-send of an UNRESOLVED operation: the SAME operationId, the SAME
+  // candidate and fences. At most once on the appliance: a landed one is
+  // replayed, a stale one is refused, otherwise it lands now. ──────────────
+  const resendBlocked = (): string | null => {
+    if (unresolved === null || lc === undefined) return "nothing to re-send";
+    if (basis === "history_reset")
+      return "the node-local history was reset — acknowledge it first";
+    const digest = candidateDigest(unresolved.action, unresolved.targetN);
+    if (digest !== unresolved.candidateSpecDigest)
+      return unresolved.action === "publish"
+        ? "the reviewed candidate is no longer the saved draft"
+        : "the reviewed rollback target is no longer recorded";
+    if (unresolved.action === "publish" && candidate === undefined)
+      return "no candidate exists any more";
+    return null;
+  };
+  const startResend = (): void => {
+    if (unresolved === null || lc === undefined || candidate === undefined)
+      return;
+    setCeremony({ kind: "resend", result: "pending", errorText: "" });
+    void runOperation(
+      {
+        action: unresolved.action,
+        operationId: unresolved.operationId,
+        draft: candidate,
+        targetN: unresolved.targetN,
+        expectedActiveRevision: unresolved.expectedActiveRevision,
+        expectedActiveSpecDigest: unresolved.expectedActiveSpecDigest,
+        collectionEtag: lc.collectionEtag,
+        reason: "",
+      },
+      undefined,
+      { resend: true, startedAt: unresolved.startedAt },
+    );
   };
 
   const startPublish = (reason: string): void => {
@@ -425,25 +545,38 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
   };
 
   // ── authoritative recovery ─────────────────────────────────────────────
-  const recover = async (): Promise<void> => {
-    if (unresolved === null) return;
+  const recoverMarker = async (marker: PacRecoveryMarker): Promise<void> => {
     setRecovering(true);
     const signal = page.owner.begin();
     try {
-      const fresh = await getPacLifecycle(p.id, signal);
-      const r = classifyRecovery(unresolved, fresh);
-      const id = shortDigest(unresolved.operationId);
+      const fresh = await getPacLifecycle(p.id, signal, {
+        operationId: marker.operationId,
+      });
+      const r = classifyRecovery(marker, fresh);
+      const id = shortDigest(marker.operationId);
+      const resolved = (): void => {
+        clearPacRecovery(marker.operationId);
+        setRecovery(readRecoveryState(subject, p.id));
+        setBasis(null);
+      };
       switch (r.kind) {
         case "landed":
-          clearPacRecovery();
-          setUnresolved(null);
+          resolved();
           setNotice({
-            variant: landedStateCommitted(r.state) ? "success" : "warning",
-            title: `Operation ${id} landed`,
-            text: `The appliance decided this ${unresolved.action}: ${r.state} (HTTP ${String(r.status)}). ${landedStateCommitted(r.state) ? "The candidate is the active profile." : "Nothing was committed."}`,
+            variant: r.committed ? "success" : "warning",
+            title: r.committed
+              ? `Operation ${id} landed — committed as history revision ${String(r.revisionN)}`
+              : `Operation ${id} landed — decided ${r.state}, nothing committed`,
+            text: r.committed
+              ? (r.currentlyActive
+                  ? "It is the active revision on this node."
+                  : "It is no longer the active revision — a later publish or rollback superseded it; see the publish history.") +
+                ` (decided ${r.state}, HTTP ${String(r.status)})`
+              : `The appliance decided this ${marker.action} as ${r.state} (HTTP ${String(r.status)}) — nothing was committed.`,
           });
           break;
         case "pending":
+          setBasis(null);
           setNotice({
             variant: "info",
             title: `Operation ${id} still pending`,
@@ -451,8 +584,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           });
           break;
         case "ambiguous":
-          clearPacRecovery();
-          setUnresolved(null);
+          resolved();
           setNotice({
             variant: "critical",
             title: `Operation ${id} is ambiguous on the appliance`,
@@ -460,16 +592,33 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           });
           break;
         case "not_landed":
-          clearPacRecovery();
-          setUnresolved(null);
+          resolved();
           setNotice({
             variant: "info",
             title: `Operation ${id} did not land`,
+            text: "Proven: the appliance's retained history is complete and holds no record of it, and the reviewed active revision has moved, so it can no longer be committed. Review the draft against the fresh active profile before publishing again.",
+          });
+          break;
+        case "unresolved":
+          setBasis(r.reason);
+          setNotice({
+            variant: "warning",
+            title:
+              r.reason === "not_observed"
+                ? `Operation ${id} not observed on the appliance`
+                : r.reason === "history_bounded"
+                  ? `Operation ${id} — history evidence is bounded`
+                  : r.reason === "history_reset"
+                    ? `Operation ${id} — the history was reset`
+                    : `Operation ${id} — the history is missing`,
             text:
-              "No intent for it exists on the appliance — nothing was committed." +
-              (r.baseMoved
-                ? " The active revision moved meanwhile: review the draft against the fresh active profile before publishing again."
-                : " You may dispatch a fresh operation."),
+              r.reason === "not_observed"
+                ? "The appliance holds no record of it and the reviewed base is unchanged, so the request may still be in flight or may never have arrived. Nothing is proven. Re-send the SAME operation (at most once on the appliance: a landed one is replayed, a stale one is refused, otherwise it lands now) or abandon it deliberately."
+                : r.reason === "history_bounded"
+                  ? `The appliance retains only the last ${String(fresh.operationsCap ?? 64)} decisions for this profile and this operation is not among them; older decisions were evicted, so absence proves nothing. Re-send the SAME operation (a still-retained landed one is replayed; a stale one is refused) or review the publish history and abandon deliberately.`
+                  : r.reason === "history_reset"
+                    ? "The node-local history was quarantined after this operation was dispatched, so its record may be lost. Acknowledge the reset first; then re-send the SAME operation or abandon it deliberately."
+                    : "No active spec or history exists for this profile on this node any more, so nothing can prove or disprove the commit. Re-send the SAME operation or abandon it deliberately.",
           });
           break;
       }
@@ -486,14 +635,24 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
     }
   };
 
+  const recover = async (): Promise<void> => {
+    if (unresolved === null) return;
+    await recoverMarker(unresolved);
+  };
+
   // ── draft save / repair / ack / delete ─────────────────────────────────
-  const saveDraft = async (draft: PacProfileInput): Promise<void> => {
+  // The save carries the BASE revision the edit was made against (2F-E
+  // correction, finding 4) — never the freshest token the page holds.
+  const saveDraft = async (
+    draft: PacProfileInput,
+    baseRevision: number,
+  ): Promise<void> => {
     if (lc === undefined) return;
     setSaving(true);
     clearRefusals();
     const signal = page.owner.begin();
     try {
-      await savePacDraft(p.id, draft, lc.draftRevision, signal);
+      await savePacDraft(p.id, draft, baseRevision, signal);
       setNotice({
         variant: "success",
         title: "Draft saved",
@@ -666,11 +825,12 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           role="alert"
         >
           <p>
-            The request was dispatched but no result was observed. Its identity
-            (<Mono>{unresolved.operationId}</Mono>) was persisted before
-            dispatch; the appliance decides an operation at most once. Recover
-            reads the lifecycle and resolves it authoritatively — nothing is
-            retried blindly.
+            The request was dispatched but no verified result was observed. Its
+            identity (<Mono>{unresolved.operationId}</Mono>) was persisted
+            before dispatch; the appliance decides an operation at most once.
+            Recover reads the lifecycle and resolves it from the appliance's own
+            records — nothing is retried blindly. Publish and rollback are
+            withheld on every profile until it is resolved.
           </p>
           {p.isAdmin && (
             <div className={styles.toolbarActions}>
@@ -684,6 +844,23 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
               >
                 Recover
               </Button>
+              {basis !== null && basis !== "history_reset" && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={recovering || resendBlocked() !== null}
+                  title={resendBlocked() ?? undefined}
+                  onClick={() => {
+                    setCeremony({
+                      kind: "resend",
+                      result: "idle",
+                      errorText: "",
+                    });
+                  }}
+                >
+                  Re-send same operation
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="danger-quiet"
@@ -696,6 +873,34 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
               </Button>
             </div>
           )}
+          {basis !== null && resendBlocked() !== null && (
+            <p>Re-send is not possible: {resendBlocked()}.</p>
+          )}
+        </Callout>
+      )}
+      {recovery.kind === "foreign" && (
+        <Callout
+          variant="unknown"
+          title={`Unresolved ${recovery.marker.action} operation on profile ${recovery.marker.profileId}`}
+          role="alert"
+        >
+          Operation <Mono>{recovery.marker.operationId}</Mono> on profile{" "}
+          <Mono>{recovery.marker.profileId}</Mono> was dispatched without an
+          observed result. One operation may be outstanding across the whole PAC
+          surface: publish and rollback are withheld here until it is resolved
+          on that profile (Recover, or the typed Abandon).
+        </Callout>
+      )}
+      {(recovery.kind === "unreadable" || recovery.kind === "unavailable") && (
+        <Callout
+          variant="warning"
+          title={`Recovery store ${recovery.kind}`}
+          role="alert"
+        >
+          The browser storage that holds the operation-identity marker is{" "}
+          {recovery.kind}; an earlier operation may be unresolved and no new
+          identity could be persisted. Publish and rollback are withheld until
+          the storage is repaired or this tab is closed.
         </Callout>
       )}
       {page.unknown !== null && (
@@ -924,11 +1129,12 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
             ) : p.isAdmin ? (
               <ProfileDraftEditor
                 serverDraft={candidate}
+                serverRevision={lc.draft !== undefined ? lc.draftRevision : 0}
                 pools={p.pools}
                 disabled={lifecycleBlocked}
                 saving={saving}
-                onSave={(d) => {
-                  void saveDraft(d);
+                onSave={(d, baseRevision) => {
+                  void saveDraft(d, baseRevision);
                 }}
                 onDirtyChange={setEditorDirty}
               />
@@ -1276,6 +1482,42 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           }}
         />
       )}
+      {ceremony.kind === "resend" &&
+        unresolved !== null &&
+        lc !== undefined && (
+          <ConfirmationDialog
+            open
+            tier={2}
+            title={`Re-send the unresolved ${unresolved.action}`}
+            body={
+              <div>
+                <p>
+                  Sends operation <Mono>{unresolved.operationId}</Mono> again
+                  with the SAME reviewed candidate (
+                  <Mono>{shortDigest(unresolved.candidateSpecDigest)}</Mono>)
+                  and the same fence (active revision{" "}
+                  {String(unresolved.expectedActiveRevision)}). The appliance
+                  decides an operation at most once: if it already landed, the
+                  recorded outcome is replayed; if the active revision moved, it
+                  is refused; otherwise it lands now.
+                </p>
+              </div>
+            }
+            impact="Clients receive the new PAC on their next fetch if the operation lands now; nothing else is changed."
+            rollback="Roll back to the previous history revision through the Publish history."
+            confirmLabel="Re-send now"
+            result={ceremony.result}
+            {...(ceremony.errorText !== ""
+              ? { errorText: ceremony.errorText }
+              : {})}
+            onConfirm={() => {
+              if (ceremony.result !== "pending") startResend();
+            }}
+            onCancel={() => {
+              setCeremony({ kind: "none" });
+            }}
+          />
+        )}
       {ceremony.kind === "abandon" && unresolved !== null && (
         <ConfirmationDialog
           open
@@ -1298,8 +1540,9 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           }}
           result="idle"
           onConfirm={() => {
-            clearPacRecovery();
-            setUnresolved(null);
+            clearPacRecovery(unresolved.operationId);
+            setRecovery(readRecoveryState(subject, p.id));
+            setBasis(null);
             setCeremony({ kind: "none" });
             page.refreshToResolve();
           }}

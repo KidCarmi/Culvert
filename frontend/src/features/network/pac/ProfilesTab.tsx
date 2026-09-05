@@ -49,6 +49,7 @@ import {
   NODE_LOCAL_NOTE,
 } from "./pacShared";
 import { ProfileDetail } from "./ProfileDetail";
+import { useDiscardGuard } from "./discardGuard";
 import styles from "../../policy/policy.module.css";
 
 const EMPTY_FORM: PacProfileInput = {
@@ -79,7 +80,14 @@ type CreateState =
       errorText: string;
     };
 
-export function ProfilesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
+export function ProfilesTab({
+  isAdmin,
+  onDirtyChange,
+}: {
+  isAdmin: boolean;
+  /** 2F-E correction (finding 4): the page guards tab switches on it */
+  onDirtyChange?: (dirty: boolean) => void;
+}): JSX.Element {
   const { state: auth } = useAuth();
   const subject = auth.user ?? "";
   const page = useObjectPage(["network", "pac", "profiles"], getPacProfiles);
@@ -91,28 +99,50 @@ export function ProfilesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
   const [issues, setIssues] = useState<PacIssuesRefusal | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [markerProfile, setMarkerProfile] = useState<string | null>(null);
+  const [storeState, setStoreState] = useState<
+    "ok" | "unreadable" | "unavailable"
+  >("ok");
+  const [detailDirty, setDetailDirty] = useState(false);
+  const discard = useDiscardGuard("the unsaved PAC draft changes");
 
   // An unresolved operation for ANY profile is surfaced on the list so the
-  // operator can open that profile and recover.
+  // operator can open that profile and recover; a store that cannot be
+  // read is surfaced too (it withholds every lifecycle dispatch).
   useEffect(() => {
     const read = readPacRecovery(subject);
     setMarkerProfile(read.kind === "valid" ? read.marker.profileId : null);
+    setStoreState(
+      read.kind === "unreadable" || read.kind === "unavailable"
+        ? read.kind
+        : "ok",
+    );
   }, [subject, selected, page.q.dataUpdatedAt]);
 
   if (selected !== null) {
     return (
-      <ProfileDetail
-        id={selected}
-        isAdmin={isAdmin}
-        pools={listing?.pools ?? []}
-        onBack={() => {
-          setSelected(null);
-          page.refreshToResolve();
-        }}
-        onChanged={() => {
-          page.refreshToResolve();
-        }}
-      />
+      <>
+        {discard.element}
+        <ProfileDetail
+          id={selected}
+          isAdmin={isAdmin}
+          pools={listing?.pools ?? []}
+          onDirtyChange={(d) => {
+            setDetailDirty(d);
+            onDirtyChange?.(d);
+          }}
+          onBack={() => {
+            discard.request(detailDirty, () => {
+              setDetailDirty(false);
+              onDirtyChange?.(false);
+              setSelected(null);
+              page.refreshToResolve();
+            });
+          }}
+          onChanged={() => {
+            page.refreshToResolve();
+          }}
+        />
+      </>
     );
   }
 
@@ -231,8 +261,21 @@ export function ProfilesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
           role="alert"
         >
           An operation on profile <Mono>{markerProfile}</Mono> was dispatched
-          without an observed result. Open that profile and use Recover before
-          dispatching anything else.
+          without an observed result. Publish and rollback are withheld on EVERY
+          profile until it is resolved: open that profile and use Recover (or
+          the typed Abandon).
+        </Callout>
+      )}
+      {storeState !== "ok" && (
+        <Callout
+          variant="warning"
+          title={`Recovery store ${storeState}`}
+          role="alert"
+        >
+          The browser storage that holds the operation-identity marker is{" "}
+          {storeState}; an earlier operation may be unresolved. Publish and
+          rollback are withheld on every profile until the storage is repaired
+          or this tab is closed.
         </Callout>
       )}
       {notice !== null && (

@@ -3,8 +3,18 @@
 // a recorded backend deferral). Every edit is LOCAL until "Save draft"
 // sends it under the draftRevision fence; nothing here touches the active
 // profile — publishing is the detail view's ceremony.
+//
+// 2F-E correction (finding 4): an edit is BOUND to the draft revision it was
+// based on. The editor keeps its BASE (the server draft + its revision the
+// edit started from); Save always sends the base revision, never the
+// freshest token the page happens to hold, so a stale edit is refused by
+// the appliance (409 stale, rendered) instead of silently overwriting
+// another admin's newer draft. When a Refresh reveals a newer server draft
+// while edits are pending, the conflict is surfaced and resolved only by an
+// explicit choice: keep the edits and re-base onto the newer revision, or
+// discard them. A clean editor follows the server draft silently.
 import { useEffect, useState, type JSX } from "react";
-import { Button, Callout } from "../../../design-system/primitives";
+import { Button, Callout, Mono } from "../../../design-system/primitives";
 import {
   Checkbox,
   InputField,
@@ -53,31 +63,47 @@ function normalizeDraft(d: PacProfileInput): unknown {
 
 export interface ProfileDraftEditorProps {
   serverDraft: PacProfile;
+  /** the draftRevision the server draft was read at (0 = no draft yet) */
+  serverRevision: number;
   pools: readonly PacPool[];
   disabled: boolean;
   saving: boolean;
-  onSave: (draft: PacProfileInput) => void;
+  /** save `draft` under the BASE revision the edit was made against */
+  onSave: (draft: PacProfileInput, baseRevision: number) => void;
   onDirtyChange: (dirty: boolean) => void;
+}
+
+interface Base {
+  spec: PacProfile;
+  revision: number;
 }
 
 export function ProfileDraftEditor(p: ProfileDraftEditorProps): JSX.Element {
   const [draft, setDraft] = useState<PacProfileInput>(p.serverDraft);
-  const [base, setBase] = useState<PacProfile>(p.serverDraft);
+  const [base, setBase] = useState<Base>({
+    spec: p.serverDraft,
+    revision: p.serverRevision,
+  });
+  const dirty = !draftEquals(draft, base.spec);
   // A fresh server draft (after save/refresh) re-seeds the editor ONLY when
-  // the operator has no unsaved work — never silently discards edits.
-  if (base !== p.serverDraft) {
-    const wasDirty = !draftEquals(draft, base);
-    setBase(p.serverDraft);
-    if (!wasDirty) setDraft(p.serverDraft);
+  // the operator has no unsaved work — never silently discards edits and
+  // never silently advances the base token under pending edits.
+  const serverMoved =
+    base.spec !== p.serverDraft || base.revision !== p.serverRevision;
+  if (serverMoved && !dirty) {
+    setBase({ spec: p.serverDraft, revision: p.serverRevision });
+    setDraft(p.serverDraft);
   }
-  const dirty = !draftEquals(draft, p.serverDraft);
+  const conflict = dirty && p.serverRevision !== base.revision;
   const guard = useDirtyGuard(dirty, "the unsaved PAC draft changes");
   // Parent notification is an EFFECT (never a render-time parent setState):
-  // the parent gates Publish on the editor's dirty state.
+  // the parent gates Publish and local navigation on the editor's dirty
+  // state; unmounting reports clean.
   const { onDirtyChange } = p;
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   const ro = p.disabled || p.saving;
 
   const setRule = (i: number, patch: Partial<PacRuleInput>): void => {
@@ -101,6 +127,41 @@ export function ProfileDraftEditor(p: ProfileDraftEditorProps): JSX.Element {
   return (
     <div>
       {guard.element}
+      {conflict && (
+        <Callout
+          variant="warning"
+          title="Draft changed on the appliance"
+          role="alert"
+        >
+          <p>
+            Your edits are based on draft revision{" "}
+            <Mono>{String(base.revision)}</Mono>; the appliance now holds
+            revision <Mono>{String(p.serverRevision)}</Mono> (saved by another
+            session). Saving as-is is refused as stale. Choose:
+          </p>
+          <div className={styles.toolbarActions}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                setBase({ spec: p.serverDraft, revision: p.serverRevision });
+              }}
+            >
+              Keep my edits (re-base to revision {String(p.serverRevision)})
+            </Button>
+            <Button
+              size="sm"
+              variant="danger-quiet"
+              onClick={() => {
+                setBase({ spec: p.serverDraft, revision: p.serverRevision });
+                setDraft(p.serverDraft);
+              }}
+            >
+              Discard my edits
+            </Button>
+          </div>
+        </Callout>
+      )}
       <div className={styles.editorGroup}>
         <InputField
           label="Name"
@@ -315,7 +376,7 @@ export function ProfileDraftEditor(p: ProfileDraftEditorProps): JSX.Element {
             variant="primary"
             disabled={!dirty || p.saving}
             onClick={() => {
-              p.onSave(draft);
+              p.onSave(draft, base.revision);
             }}
           >
             Save draft
@@ -325,7 +386,7 @@ export function ProfileDraftEditor(p: ProfileDraftEditorProps): JSX.Element {
             variant="ghost"
             disabled={!dirty || p.saving}
             onClick={() => {
-              setDraft(p.serverDraft);
+              setDraft(base.spec);
             }}
           >
             Discard local edits

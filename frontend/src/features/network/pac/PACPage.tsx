@@ -16,6 +16,7 @@ import { ProfilesTab } from "./ProfilesTab";
 import { PoolsTab } from "./PoolsTab";
 import { ExceptionsTab } from "./ExceptionsTab";
 import { LegacyPacTab } from "./LegacyPacTab";
+import { useDiscardGuard } from "./discardGuard";
 import styles from "../../policy/policy.module.css";
 
 const TABS = ["Profiles", "Pools", "DIRECT Exceptions", "Legacy PAC"] as const;
@@ -26,6 +27,10 @@ export function PACPage(): JSX.Element {
   const { state } = useAuth();
   const role = state.role ?? "viewer";
   const isAdmin = hasRole(role, "admin");
+  // 2F-E correction (finding 4): tabs are LOCAL state, not routes — a
+  // dirty editor on the current tab asks before it is unmounted.
+  const [dirty, setDirty] = useState(false);
+  const discard = useDiscardGuard("the unsaved changes on this tab");
 
   return (
     <>
@@ -42,17 +47,26 @@ export function PACPage(): JSX.Element {
             role="tab"
             aria-selected={t === tab}
             onClick={() => {
-              setTab(t);
+              if (t === tab) return;
+              discard.request(dirty, () => {
+                setDirty(false);
+                setTab(t);
+              });
             }}
           >
             {t}
           </Button>
         ))}
       </div>
-      {tab === "Profiles" && <ProfilesTab isAdmin={isAdmin} />}
+      {discard.element}
+      {tab === "Profiles" && (
+        <ProfilesTab isAdmin={isAdmin} onDirtyChange={setDirty} />
+      )}
       {tab === "Pools" && <PoolsTab isAdmin={isAdmin} />}
       {tab === "DIRECT Exceptions" && <ExceptionsTab isAdmin={isAdmin} />}
-      {tab === "Legacy PAC" && <LegacyPacTab isAdmin={isAdmin} />}
+      {tab === "Legacy PAC" && (
+        <LegacyPacTab isAdmin={isAdmin} onDirtyChange={setDirty} />
+      )}
     </>
   );
 }

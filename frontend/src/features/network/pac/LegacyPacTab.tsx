@@ -1,7 +1,7 @@
 // 2F-E — the legacy default PAC (/pac/default.pac, the pre-profile
 // exclusions list): revision-fenced, validation issues rendered verbatim,
 // the canonical exclusions echoed back from the appliance after a save.
-import { useState, type JSX } from "react";
+import { useEffect, useState, type JSX } from "react";
 import {
   Button,
   Callout,
@@ -52,7 +52,14 @@ function formOf(c: PacConfig): Form {
   };
 }
 
-export function LegacyPacTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
+export function LegacyPacTab({
+  isAdmin,
+  onDirtyChange,
+}: {
+  isAdmin: boolean;
+  /** 2F-E correction (finding 4): the page guards tab switches on it */
+  onDirtyChange?: (dirty: boolean) => void;
+}): JSX.Element {
   const page = useObjectPage(["network", "pac", "legacy-config"], getPacConfig);
   const cfg = page.q.data;
   const [form, setForm] = useState<Form | null>(null);
@@ -81,6 +88,11 @@ export function LegacyPacTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
     dirty && isAdmin,
     "the unsaved legacy PAC changes",
   );
+  const dirtyForPage = dirty && isAdmin;
+  useEffect(() => {
+    onDirtyChange?.(dirtyForPage);
+  }, [dirtyForPage, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const runSave = async (): Promise<void> => {
     if (form === null || cfg === undefined) return;
