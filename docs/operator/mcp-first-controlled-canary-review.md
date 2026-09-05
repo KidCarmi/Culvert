@@ -500,32 +500,69 @@ A detector that cannot possibly evaluate within the authorized corpus does not s
 prerequisite. The same rule governs the witness-reconciliation trip, which is evaluated over the
 side-effect-bearing invocation class only (§9) — auxiliary lifecycle/discovery traffic is counted
 separately and is never itself a mismatch.
-**Correction (Codex P1) — most whole-Canary trips are NOT wired to an automatic tripper.** A
-repository-wide search finds exactly TWO production `aborter.Trip` sites in the execution path, both
-in `reserveCanaryExecution` (`mcp_canary_runtime.go:391,394`): `budget_exhausted` and `scope_escape`.
-The generic `tripCanaryAbort` wrapper (`mcp_canary_runtime.go:453`) has NO production caller (Codex
-P1, verified), so ALL the other declared `AbortCanary` codes are NOT auto-tripped:
-- `out_of_scope_execution`: no auto-trip (the per-request read-first/scope gate denies the request
-  but does not stop the Canary).
-- `tool_fingerprint_drift` / `server_identity_drift`: drift only DENIES the single request at
-  `preCallGuard` (`errToolDriftedBeforeCall`); it does not trip the whole Canary.
-- `credential_safety_failure`: no auto-trip.
-- `outcome_evidence_loss`: only increments a metric (`ObserveOutcomeEvidenceLoss`, `run.go:282`).
-- `unexpected_upstream_response`: nothing reconciles the witness (see §14); no auto-trip.
-- `elevated_error_rate` / `latency_pathology`: no threshold tripper wired.
+**Correction (Codex P1), and its closure.** When this section was written, a repository-wide search
+found exactly TWO production `aborter.Trip` sites, both in `reserveCanaryExecution`
+(`budget_exhausted`, `scope_escape`), and the generic `tripCanaryAbort` wrapper had NO production
+caller — so eight of the ten declared `AbortCanary` codes were declared but never tripped, and after
+any of them LATER requests could still reach the upstream. **That gap is now closed (blocker 7).**
+The taxonomy is twelve `AbortCanary` codes and every one has a production trip path that converges on
+the SAME `AbortController` — there is no second latch, no parallel registry, no per-breach stop:
 
-So the ONLY whole-Canary breaches that auto-stop are `budget_exhausted` and `scope_escape`; the other
-EIGHT declared breaches do not. After any of them, LATER requests could still reach the upstream
-instead of the Canary auto-stopping. The automatic controls that DO hold are the budget ceiling, the
-identity/blast-radius cap (`scope_escape`), the per-request kill re-read, per-request tool-drift
-denial, and the operator emergency kill (the graceful demotion/quiesce rollback is NOT
-operator-reachable — §17, blocker 10). The gap is a **product-defect prerequisite** (§26): whole-Canary
-auto-abort must be wired for ALL eight remaining declared breaches
-(`out_of_scope_execution`, `tool_fingerprint_drift`, `server_identity_drift`,
-`credential_safety_failure`, `outcome_evidence_loss`, `unexpected_upstream_response`,
-`elevated_error_rate`, `latency_pathology`) before a First Canary is authorized. My earlier
-"scope/budget/drift/kill controls ARE automatic" claim was wrong for everything except budget and
-scope_escape.
+| Whole-Canary code | Automatic trip path |
+|---|---|
+| `budget_exhausted` | `reserveCanaryExecution` on `BudgetDeniedTotal`, AND — traffic-independently — `observeAttemptSettled` once the allowance is spent and nothing is still in flight, AND `reconcileWindowDeadlineLocked` at restore |
+| `scope_escape` | `reserveCanaryExecution` on `BudgetDeniedScope` |
+| `window_expired` | `reconcileWindowDeadlineLocked` — a watchdog armed for the REMAINING time at begin and at restore, plus a synchronous latch when the deadline has already passed |
+| `tool_fingerprint_drift` | `mcpLiveTrustRevalidate` classifies a fingerprint mismatch as authoritative drift; `mcpLiveSideEffectGate.AdmitSideEffect` routes it to `tripBreach` |
+| `server_identity_drift` | the same path, on loss of the approved server identity |
+| `outcome_evidence_loss` | `execution`'s outcome-commit failure branch, through the `CanarySafety` seam (the metric remains in parallel, for observability) |
+| `independent_witness_mismatch` | `Executor.ReconcileAndReport` on `ReconConflict` — an authoritative reconciliation contradicting Culvert's own record |
+| `credential_safety_failure` | reported through the `CanarySafety` seam; denies AND stops (no production producer exists yet — see the honesty note below) |
+| `elevated_error_rate` | `HealthMonitor.Observe`: `sample_floor = 2`, trips iff `2 × failures ≥ samples` (≥ 50%) over the CURRENT activation generation |
+| `latency_pathology` | `HealthMonitor.Observe`: one attempt at or above `HealthLatencyHardLimit` (15s) trips with NO floor; a mean at or above `HealthLatencyMeanLimit` (10s) trips at the floor |
+| `out_of_scope_execution` | the identity-cap breach the enforcer reports as `scope_escape`; a read-first/scope refusal of a single request stays request-scoped by design |
+| `unexpected_upstream_response` | reserved for the authoritative production witness (blocker 8); reachable through the same funnel once that adapter is wired |
+
+**Reachability inside the 3-execution corpus.** `HealthSampleFloor = 2`, and the hard-latency rule has
+NO floor, so both rate detectors can evaluate — and trip — within `MaxTotalExecutions = 3`.
+`TestHealth_SampleFloorFitsTheFirstCanaryCorpus` pins that as an anti-drift gate: it fails if the floor
+is raised beyond the corpus, or if the hard latency limit is pushed past the 30s upstream request
+timeout that is what makes it observable at all. Below the floor the error-rate detector does not
+trip, which is acceptable only because the floor is reachable; the hard-latency rule covers the
+single-sample case regardless. The numerator is ordinary post-admission execution failures — NOT
+request-scoped policy or scope denials, which already carry their own classification. These are
+First-Canary safety thresholds derived from the 30s upstream timeout; they are NOT product SLAs.
+
+**The time-box is now self-enforcing (closes Codex round 31).** The deadline is ABSOLUTE and derived
+from the persisted activation instant (`BudgetSnapshot.StartUnixNano + Budget.Window`), never from a
+countdown restarted at boot. So: expiry stops the experiment with NO request arriving; a restart never
+grants a fresh window; a restart AFTER expiry latches `window_expired` synchronously under the same
+lock the admission path takes, so a restored activation is never even briefly execution-eligible; and
+a clock rolled backwards cannot manufacture authority, because the remaining time is measured against
+that same absolute deadline. The timer is a convenience, not the authority — the watchdog callback
+re-derives the deadline and refuses to act early, and it is generation-guarded so a timer outliving
+its activation cannot abort the activation that replaced it.
+
+**What the latch does, and does not, do.** It revokes EXECUTION AUTHORITY: no new reservation is
+granted, and a request ALREADY admitted fails the final live revalidation inside `preCallGuard`
+BEFORE `Upstream.Call` (the emergency kill remains the last check before the boundary). It does NOT
+demote the node to Shadow — automatic demotion is governed by blockers 10 and 12, and an internal path
+around them would be a lie told in code. `ModeCanary + ABORTED` is the truthful state, and
+`activation_runtime.auto_stop` reports `execution_authority: "revoked"` beside the first cause, so an
+operator cannot read a stopped experiment as a running one. Budget exhaustion is deliberately NOT
+latched when the final slot is merely RESERVED: the Nth request must be allowed to make the invocation
+it was authorized to make, and the latch waits for that attempt to settle.
+
+**Honesty note — `credential_safety_failure` has no production producer.** The broker prevents
+client-token passthrough BY CONSTRUCTION rather than detecting it at runtime, and credentials are
+blocker 9. What is proven here is the part that IS in scope: when such a signal is reported it denies
+AND stops the whole experiment, with no "continue because the next tool may not need a credential"
+path. The same holds for `unexpected_upstream_response`, which awaits blocker 8's authoritative
+witness adapter; the funnel it will report through is wired and gated today.
+
+The line this section draws, and a gate pins: a merely UNAUTHORIZED request fails closed WITHOUT
+stopping the experiment. A Canary that aborted on every unauthorized request would be useless. Only
+authoritative evidence that the experiment's PREMISE no longer holds is whole-Canary.
 
 ---
 
@@ -752,7 +789,7 @@ BLOCKED-vs-FAILED note in §26).
 | Tiny budget; N reservations allowed / N+1 impossible | YES for reservations (§9) |
 | Budget bounds PHYSICAL side-effect-bearing invocations via a RETRY-FREE path (charging not accepted) | **YES — `RetryMode`/`RetryDisabled` is representable and wired into the ONLY production upstream client; N reservations ⇒ ≤ N physical POSTs measured AT THE WIRE under concurrency and ambiguous transport failure (blocker 6 CLOSED)** |
 | Witness distinguishes side-effect-bearing tool invocations from auxiliary lifecycle/discovery traffic | **NO — no such controlled recording server exists; without the partition a correct run's `initialize`/`tools/list` POSTs misclassify as a breach (§9/§14)** |
-| Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **NO — no numeric limit, window, or sample floor exists; an unreachable floor with below-floor `no-trip` disables both detectors for the whole experiment (§16/§26, blocker 7)** |
+| Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **YES — `sample_floor = 2`, error rate trips at ≥ 50% (`2 × failures ≥ samples`) over the current activation generation, hard per-attempt latency ≥ 15s trips with NO floor, mean ≥ 10s trips at the floor; `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` fails if the floor drifts beyond the corpus (§16, blocker 7 CLOSED)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
 | The exact tool is `catalog.Usable` (not Quarantined) at request time | **NO — `seedTools` lands it Quarantined; the engine hard-quarantines before any rule; `ApproveLive` never promotes (§6/§7, blocker 13)** |
 | The exact request resolves to an ALLOW-class rule with satisfiable obligations | **NO — a no-`CredentialProfile` rule may be DENY; an unmatched request default-denies; `PolicyHealthy` only proves a snapshot exists (§4/§13, blocker 14)** |
@@ -761,21 +798,22 @@ BLOCKED-vs-FAILED note in §26).
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
 | Evidence carries no secrets/credentials | YES (§15) |
 | Durable record determines whether a pre-crash upstream invocation occurred | **NO — narrowed. Internal durable truth/recovery/reconciliation COMPLETE (terminal outcome on every exit path, durable pre-send intent, orphan derivation, typed witness contract); the authoritative production witness adapter REMAINS unwired, so the answer is `reconciliation_required`, not determinate (§15/§18, blocker 8)** |
-| Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **NO — only budget/scope auto-trip (§16)** |
+| Whole-Canary auto-abort covers drift / evidence-loss / unexpected-response / thresholds | **YES — every declared `AbortCanary` code has a production trip path onto the ONE `AbortController`; the latch revokes execution authority (no new reservation, and an already-admitted request fails the final revalidation before `Upstream.Call`) and the time-box stops with no request arriving. `unexpected_upstream_response` awaits blocker 8's authoritative witness adapter and `credential_safety_failure` has no production producer (blocker 9) — both funnels are wired and gated (§16, blocker 7 CLOSED)** |
 | Operator-reachable graceful rollback (quiesce or Canary→Shadow/Observe demotion) — §17's "rollback AND kill" bar | **NO — quiesce has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured` (§17)** |
 | Crash/restart does not silently re-arm/resume | YES (§18) |
-| Unresolved P0/P1 finding | **YES — the auto-abort wiring prerequisite remains; the durable-outcome-evidence prerequisite is narrowed to the authoritative production witness adapter (§21/§24/§25a)** |
+| Unresolved P0/P1 finding | **YES — the durable-outcome-evidence prerequisite remains, narrowed to the authoritative production witness adapter (blocker 8). The auto-abort wiring prerequisite is CLOSED (blocker 7, §25a) (§21/§24/§25a)** |
 
 Multiple mandatory criteria are NO and P1 product-defect work remains open. A GO is therefore
-forbidden. (§25a records the only two post-adoption status changes: blocker 6 CLOSED, blocker 8
-narrowed but still OPEN. The other thirteen are untouched and the §26 verdict is unchanged.)
+forbidden. (§25a records the only post-adoption status changes: blockers 6 and 7 CLOSED, blocker 8
+narrowed but still OPEN. The other twelve are untouched and the §26 verdict is unchanged.)
 
 ---
 
-## §25a Blocker 6 closure and blocker 8 status (post-review evidence)
+## §25a Blocker 6 and 7 closure, blocker 8 status (post-review evidence)
 
-This section records the ONLY two status changes made to the frozen ledger since it was adopted.
-The other thirteen blockers are untouched. Nothing here changes the §26 verdict.
+This section records the ONLY status changes made to the frozen ledger since it was adopted:
+blockers 6 and 7 are CLOSED and blocker 8 is narrowed but still OPEN. The other twelve blockers are
+untouched, the baseline is still fifteen, and nothing here changes the §26 verdict.
 
 ### Blocker 6 — CLOSED
 
@@ -821,6 +859,102 @@ determinate one, which is what the closure bar asks for.
 Note that "every normal path emits `PhaseOutcome`", "orphan recovery exists", and "the local
 controlled witness reconciles correctly" are ALL true here and are explicitly NOT sufficient for
 closure.
+
+### Blocker 7 — CLOSED
+
+The closure bar, stated as the invariant the work had to produce:
+
+```
+first authoritative whole-Canary breach
+             ↓
+monotonic abort latch
+             ↓
+no new Canary execution admission
+             ↓
+automatic stop / demotion path
+```
+
+with the additional requirement that **the abort must not depend on another request arriving**.
+
+| Clause | Evidence |
+|---|---|
+| Every declared whole-Canary breach reaches ONE abort authority | `canarySafetyFunnel` (`mcp_canary_autostop.go`) and the gate's `tripBreach` (`mcp_live_gate.go`) both converge on `rt.tripCanaryAbort` → `AbortController.Trip`; `tripAutoStopLocked` reaches the same controller inline because the caller already holds `cr.mu`. There is no second latch. Mutations M64, M65, M66, M67, M68, M69, M70, M77 each remove one trip path and are caught |
+| The latch is monotonic and first-cause-wins | `AbortController.Trip` latches once; `TestAutoStop_FirstCausePreservedAcrossLaterBreaches` and `TestAutoStopConc03_TwoBreachesRaceForFirstCause` pin it under contention; mutations M62, M75 caught |
+| No new execution admission after the latch | `reserveCanaryExecution` consults `ExecutionEligible`; `TestAutoStop_LatchedAbortMakesNewReservationImpossible`, `TestAutoStopConc02_BreachWhileManyAwaitAdmission`; mutation M61 caught |
+| An ALREADY-admitted request makes no further physical side effect | The final live revalidation (`LiveGateDecision.Revalidate`, run inside `preCallGuard` BEFORE the emergency-kill re-read) consults the same latch; `TestAutoStop_LatchedAbortStopsAnAlreadyAdmittedRequestBeforeTheCall` with its unaborted control, and `TestAutoStopConc11_LatchDuringInflightAdmissionSendsNothingMore`; mutation M76 caught |
+| The stop does not depend on another request arriving | The absolute window deadline is derived from the persisted activation instant and armed as a watchdog at begin and at restore; `TestAutoStop_WindowExpiresWithNoTrafficAtAll` proves a stop with ZERO traffic, `TestAutoStop_BudgetExhaustionStopsWithoutAnNPlusOneRequest` proves exhaustion latches on the final SETTLE rather than on an N+1 request; mutations M71, M77, M78 caught |
+| A restart never resets or extends the window | The deadline is `BudgetSnapshot.StartUnixNano + Budget.Window`, so it survives restart by construction; `TestAutoStop_RestartNeverGrantsAFreshWindow`, `TestAutoStop_RestartAfterExpiryRestoresAborted` (which also proves the latch happens BEFORE any admission is possible), `TestAutoStopConc05_DeadlineVersusRestart`; mutations M63, M72 caught |
+| A clock rollback grants no authority | `TestAutoStop_ClockRollbackGrantsNoExtraAuthority` |
+| The rate detectors can evaluate inside the authorized corpus | `HealthSampleFloor = 2`; error rate trips iff `2 × failures ≥ samples`; hard latency ≥ 15s trips with no floor; mean ≥ 10s trips at the floor. `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` is the anti-drift gate; mutations M73, M74 caught |
+| Request-scoped refusals do NOT stop the experiment | `TestAutoStop_RequestScopedRefusalsNeverStopTheCanary` and `TestAutoStop_MerelyUnauthorizedRequestDoesNotStopTheCanary` are the controls that keep the closure from being achieved by aborting on everything |
+| Breaches are capability-isolated | `TestAutoStop_BreachIsCapabilityIsolated`; the funnel refuses a capability that is not its own |
+| An unknown breach code fails closed | `TestAutoStop_UnknownBreachCodeFailsClosed`; `AbortConditions` resolves an unrecognised code to `AbortCanary` |
+| Corrupt persisted state never loads as executable | `TestAutoStop_CorruptPersistedStateNeverLoadsAsExecutable` |
+| The operator can see that authority is revoked | `TestAutoStop_StatusReportsRevokedAuthorityWhileStillModeCanary`; `activation_runtime.auto_stop` on the preflight surface |
+
+**What was deliberately NOT done, and why.** Automatic DEMOTION to Shadow is not part of this closure.
+Demotion is a governed lifecycle transition owned by blockers 10 and 12; building a hidden internal
+path around them would have produced a system whose code said something its governance did not. What
+the latch revokes is EXECUTION AUTHORITY, and `ModeCanary + ABORTED` is the truthful state until that
+governed transition exists — which is why the status surface reports `execution_authority` separately
+from mode rather than letting `Mode: Canary` imply a running experiment.
+
+Two declared codes have no production PRODUCER yet and this is stated rather than papered over:
+`credential_safety_failure` (the broker prevents client-token passthrough by construction rather than
+detecting it — blocker 9) and `unexpected_upstream_response` (awaiting blocker 8's authoritative
+witness adapter). Both funnels are wired and gated, so what is proven is the in-scope half: when such
+a signal is reported, it denies AND stops. `independent_witness_mismatch` is wired to the
+reconciliation conflict that DOES exist today (`Executor.ReconcileAndReport` on `ReconConflict`);
+that does not close blocker 8 and does not introduce a fake production witness.
+
+**This closure changes nothing about the verdict.** Blocker 7 was one of fifteen reasons a GO is
+forbidden. Twelve remain open and blocker 8 remains open-but-narrowed.
+
+
+### Blocker 7 — deterministic concurrency matrix
+
+Eleven cases, in `mcp_canary_autostop_conc_test.go`, all barrier-driven (no sleeps) and all run under
+`-race`. The matrix exists because the abort latch and the admission path are the same lock's two
+sides, and "the latch wins" is only true if it is true at every interleaving.
+
+| Case | What it pins |
+|---|---|
+| CONC-01 breach vs. simultaneous reservation | the reservation either predates the latch or is denied; never both granted and latched-before |
+| CONC-02 breach while many await admission | every waiter that arrives after the latch is denied; none slips through on the lock handoff |
+| CONC-03 two breaches race for first cause | exactly one code latches, and it is stable — the loser never rewrites the reason |
+| CONC-04 deadline vs. reservation | a reservation racing the window boundary cannot land past it |
+| CONC-05 deadline vs. restart | a restart racing expiry restores as aborted, never as a fresh window |
+| CONC-06/07/08 breach vs. next request | the request after the breach is denied on all three arrival orders |
+| CONC-09 budget exhaustion vs. N+1 | the N+1 is denied and exhaustion latches once, not per racer |
+| CONC-10 status read under concurrent trip | the operator surface is consistent under contention — it never reports `granted` after the latch |
+| CONC-11 latch during in-flight admission | an admitted request that has NOT yet called upstream sends nothing more; the final revalidation catches it |
+
+### Blocker 7 — red team
+
+Eleven adversarial scenarios, each answered by a named gate rather than by argument.
+
+| Scenario | Outcome | Gate |
+|---|---|---|
+| Evidence disk fails AFTER the peer executed | `outcome_evidence_loss` latches the whole Canary (the metric still fires, in parallel) | `TestAutoStop_OutcomeEvidenceLossAbortsTheWholeCanary` |
+| Two breaches arrive simultaneously | one latches; the first cause is stable and the second is dropped, not merged | `TestAutoStop_FirstCausePreservedAcrossLaterBreaches`, `TestAutoStopConc03_TwoBreachesRaceForFirstCause` |
+| The clock moves BACKWARD | no additional authority: remaining time is measured against the same absolute deadline | `TestAutoStop_ClockRollbackGrantsNoExtraAuthority` |
+| Crash 1 ms BEFORE the deadline | restore re-derives the absolute deadline and arms a watchdog for the REMAINING time only | `TestAutoStop_RestartNeverGrantsAFreshWindow` |
+| Restart 1 ms AFTER the deadline | `window_expired` latches synchronously under the same lock the admission path takes, before any admission is possible | `TestAutoStop_RestartAfterExpiryRestoresAborted`, `TestAutoStopConc05_DeadlineVersusRestart` |
+| NO request arrives for the whole window | the watchdog stops the experiment anyway — this is the case the pre-fix design could not handle | `TestAutoStop_WindowExpiresWithNoTrafficAtAll` |
+| A breach lands between reservation and the final kill boundary | the request fails the final live revalidation and makes no upstream call; the unaborted control still crosses | `TestAutoStop_LatchedAbortStopsAnAlreadyAdmittedRequestBeforeTheCall` + `TestAutoStop_ControlUnabortedRequestStillCrosses`, `TestAutoStopConc11_LatchDuringInflightAdmissionSendsNothingMore` |
+| The witness reports a receipt contradicting our record | `independent_witness_mismatch` latches | `TestAutoStop_WitnessConflictAbortsTheWholeCanary` |
+| A physical AttemptID appears twice at the peer | same path — the duplicate is a reconciliation conflict, not a tolerated retry | `TestAutoStop_WitnessConflictAbortsTheWholeCanary` (duplicate-witness fixture) |
+| Requests keep arriving after the abort | every one is denied at reservation; nothing reaches the upstream | `TestAutoStop_LatchedAbortMakesNewReservationImpossible`, `TestAutoStopConc06to08_BreachVersusNextRequest` |
+| The persisted abort/deadline state is corrupted | the record never restores into an executable activation, and the status surface does not report `granted` | `TestAutoStop_CorruptPersistedStateNeverLoadsAsExecutable` |
+| A stale watchdog from a previous activation fires | it aborts nothing: the callback is generation-guarded AND re-derives the deadline | `TestAutoStop_StaleWatchdogCannotAbortALaterActivation` |
+| An unrecognised breach code is reported | fails closed to whole-Canary | `TestAutoStop_UnknownBreachCodeFailsClosed` |
+| A breach is reported for the OTHER capability | ignored; Gateway and Management are physically isolated | `TestAutoStop_BreachIsCapabilityIsolated` |
+
+The three controls that keep this from being a proof of "abort on everything": a healthy population
+never stops the Canary (`TestAutoStop_HealthyPopulationNeverStopsTheCanary`), request-scoped refusals
+never stop it (`TestAutoStop_RequestScopedRefusalsNeverStopTheCanary`), and a merely unauthorized
+request never stops it (`TestAutoStop_MerelyUnauthorizedRequestDoesNotStopTheCanary`).
+
 
 ### One defect found and fixed while proving the above
 
@@ -1415,8 +1549,32 @@ demonstration still scores CAUGHT.
 
 ### Campaign state
 
-`scripts/mcp-canary-mutation-campaign.sh` now carries **60 mutations: 60 caught, 0 survived, 0
-skipped, 0 not-proven** — every one rejected by a named assertion, the race mutation by an
+`scripts/mcp-canary-mutation-campaign.sh` now carries **78 mutations: 78 caught, 0 survived, 0
+skipped, 0 not-proven** (M61–M78 are the blocker-7 auto-abort set). **That is the SECOND run.** The
+first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
+which is the campaign doing its job, so it is recorded rather than quietly re-run:
+
+- M62/M63/M72/M75 named ROOT-package gates but ran them in `./internal/mcp/canary`, where they
+  matched no tests. The mutated package is a dependency of the root package, so the root gate
+  exercises it; the package argument was simply wrong. The `gate_ran` classifier caught all four as
+  BROKEN GATE rather than scoring them as passes — the reason it exists.
+- M65/M66 SURVIVED because the drift gates stubbed `trustOK`, the very classifier those mutations
+  target. They proved the trip ROUTING and nothing about the CLASSIFICATION. They now drive the real
+  `mcpLiveTrustRevalidate` through a real inventory and a real four-eyes live approval, stubbing only
+  the live-tier lifecycle seam (that tier is deliberately never armed in this build, so the
+  production `admit` would reject before the trust check is reached). **Stub the smallest thing that
+  is in the way, never the thing under test** — the same lesson as round 17's "a mutation must be
+  caught for the RIGHT reason", arriving this time through a test double rather than a compiler.
+- M70 SURVIVED because this PR's own traffic-independent settle-site latch covers for the
+  reserve-site trip: with the reserve trip deleted the experiment still stops, one event later.
+  `TestAutoStop_DeniedReservationItselfTripsBudgetExhausted` isolates it — nothing settles (the
+  single slot is still in flight), so only the refusal itself can stop the Canary. Two paths to the
+  same code need two gates, or either can be deleted unnoticed.
+
+One incidental hole surfaced with them: `TestAutoStop_LatchedAbortMakesNewReservationImpossible`
+never read the latch, only that admission had closed. Those are different questions — a latch that
+cleared itself when read would leave admission correctly shut while the node reported a healthy
+experiment — so it now asserts the latch is observable and stays observable across reads — every one rejected by a named assertion, the race mutation by an
 attributed detector report, and none by a build failure. Each reintroduces one specific defect and must fail a NAMED gate; a compile failure is
 not counted as proof unless the mutation targets a structural wall whose purpose is compile-time
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
@@ -1449,9 +1607,10 @@ every mandatory NO/CONDITIONAL row in §25, so closing ALL of them is necessary 
 blocker 7's auto-abort and also depends on blockers 1 and 6).
 
 **Post-adoption status (see §25a).** The baseline remains **fifteen**; the list below is preserved
-as adopted. Exactly two entries have changed status since: **blocker 6 is CLOSED**, and **blocker 8
-is narrowed but still OPEN**. Thirteen are untouched, and the verdict above is unchanged — closing
-blocker 6 removes one of fifteen reasons a GO is forbidden, not the prohibition.
+as adopted, and nothing is renumbered or deleted. Three entries have changed status since:
+**blocker 6 is CLOSED**, **blocker 7 is CLOSED**, and **blocker 8 is narrowed but still OPEN**.
+Twelve are untouched, and the verdict above is unchanged — closing blockers 6 and 7 removes two of
+fifteen reasons a GO is forbidden, not the prohibition.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -1474,17 +1633,14 @@ blocker 6 removes one of fifteen reasons a GO is forbidden, not the prohibition.
 6. ~~**The budget does not bound physical upstream invocations (§9).**~~ **CLOSED** — see
    "Blocker 6 closure" below. Idempotent read retries could send the POST ~3× per single budget
    reservation; the Canary path is now retry-free and the bound is proven at the wire.
-7. **Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.** Only
-   `budget_exhausted`/`scope_escape` auto-trip; the other eight declared breaches do not, and nothing
-   reconciles the independent witness — so a divergence would not auto-stop later requests.
-   **The time-box is not self-enforcing either (Codex round 31).** `budget_exhausted` has exactly ONE
-   production trip site (`mcp_canary_runtime.go:391`), reached from `reserveCanaryExecution`, and
-   `BudgetDeniedWindow` is produced only by `BudgetEnforcer.Reserve` (`budget_enforce.go:197`) — both
-   REQUEST-DRIVEN. So if no further request arrives after the window elapses, nothing trips: the abort
-   controller stays unlatched and the node remains in Canary mode indefinitely. Window expiry is
-   therefore an expiry of AUTHORITY TO ADMIT, not an automatic stop. Closing this needs a
-   deadline-driven stop/rollback (a timer that demotes without needing another request), or the
-   authorization must require explicit operator cleanup and stop describing expiry as automatic.
+7. ~~**Whole-Canary auto-abort is incomplete (§14/§16) — a product defect.**~~ **CLOSED** — see
+   "Blocker 7 closure" in §25a. Only `budget_exhausted`/`scope_escape` auto-tripped, the other eight
+   declared breaches did not, nothing reconciled the independent witness, and the time-box was
+   request-driven (Codex round 31), so an elapsed window stopped nothing if no further request
+   arrived. Every declared `AbortCanary` code now has a production trip path onto the one
+   `AbortController`, the two rate detectors are reachable inside the 3-execution corpus, and the
+   deadline is absolute and self-enforcing. The latch revokes EXECUTION AUTHORITY; it does not demote
+   the node, which stays governed by blockers 10 and 12.
 8. **Durable outcome evidence is incomplete/success-only, with an unclosable post-send crash window
    (§15/§18) — a product defect.** **STILL OPEN, narrowed** — see "Blocker 8 status" below. The
    internal half (terminal outcome on every exit path, durable send intent, orphan recovery,

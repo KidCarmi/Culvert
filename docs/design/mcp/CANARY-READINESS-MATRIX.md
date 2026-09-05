@@ -122,7 +122,19 @@ as the policy engine actually classified it. Pinned by `operation_test.go`.
 **Whole-Canary breach (single occurrence stops the Canary):** out_of_scope_execution,
 scope_escape, tool_fingerprint_drift, server_identity_drift, outcome_evidence_loss,
 credential_safety_failure, budget_exhausted, elevated_error_rate, latency_pathology,
-unexpected_upstream_response.
+unexpected_upstream_response, independent_witness_mismatch, window_expired.
+
+**AUTOMATIC (review §16, blocker 7 CLOSED).** Every code above has a production trip path onto the
+ONE `canary.AbortController`; the latch revokes EXECUTION AUTHORITY (no new reservation, and an
+already-admitted request fails the final live revalidation before `Upstream.Call`). Two of them —
+`window_expired` and `budget_exhausted` — stop the experiment with NO further request arriving:
+the window deadline is absolute (derived from the persisted activation instant, so a restart never
+extends it) and exhaustion latches when the final authorized attempt SETTLES. Rate thresholds:
+`sample_floor = 2`, error rate trips at ≥ 50%, hard per-attempt latency ≥ 15s trips with no floor,
+mean latency ≥ 10s trips at the floor — all reachable within `MaxTotalExecutions = 3`. The latch does
+NOT demote the node: demotion stays governed by review blockers 10 and 12, so `ModeCanary + ABORTED`
+is the truthful state and `activation_runtime.auto_stop` reports `execution_authority` separately
+from mode.
 
 **Per-request fail-closed (Canary survives):** policy_deny, stale_decision,
 credential_not_ready, response_inspection_block, emergency_kill_for_request, allowance_consumed.
@@ -248,15 +260,12 @@ Every one is a **separately-reviewed activation**, not a config change:
    invariant counts only the side-effect-bearing tool invocations: auxiliary MCP lifecycle/discovery
    traffic (`initialize`, `notifications/initialized`, `tools/list`) consumes no reservation and must be
    separately counted and attributable, never folded into the three; and (g)
-   two **product-defect prerequisites** — the whole-Canary auto-abort is unwired for the eight
-   declared breaches beyond `budget_exhausted`/`scope_escape`, and the durable outcome record is
-   success-only with an unclosable post-send crash window (review §14–§16, §18). Wiring a tripper is
-   not sufficient for the two RATE-based breaches: for `elevated_error_rate` and `latency_pathology`
-   the reviewed minimum sample floor MUST be REACHABLE within the exact corpus
-   (`MaxTotalExecutions=3`), or the below-floor behavior MUST stop fail-closed — a floor above three
-   with a below-floor `no-trip` leaves both detectors unable to evaluate for the whole experiment while
-   the prerequisite reads as closed (review §16/§26). The same reachability rule governs the
-   witness-reconciliation trip; and (h) a
+   one remaining **product-defect prerequisite** — the durable outcome record's authoritative
+   production witness adapter (review §18; the auto-abort half is CLOSED, see the abort taxonomy above
+   and review §25a). The reachability rule that governed the two RATE-based breaches is satisfied:
+   `sample_floor = 2` is reachable within the exact corpus (`MaxTotalExecutions=3`) and the
+   hard-latency rule needs no floor at all, pinned against drift by
+   `TestHealth_SampleFloorFitsTheFirstCanaryCorpus`; and (h) a
    **governed operator-reachable graceful rollback** — only the emergency kill is reachable today
    (`quiesceLiveTier` has no caller; `apiMCPRolloutTransition` returns `distribution_not_configured`
    for a Canary→Shadow/Observe target), yet the review contract requires rollback AND kill (review §17);

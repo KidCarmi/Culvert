@@ -157,29 +157,37 @@ set is empty. This requires the separately-reviewed activation to have:
 
 out_of_scope_execution · scope_escape · tool_fingerprint_drift · server_identity_drift ·
 outcome_evidence_loss · credential_safety_failure · budget_exhausted · elevated_error_rate ·
-latency_pathology · unexpected_upstream_response.
+latency_pathology · unexpected_upstream_response · independent_witness_mismatch · window_expired.
 
-> **Current wiring (do not assume all are automatic).** As of this baseline only
-> `budget_exhausted` and `scope_escape` auto-trip the whole Canary (from `reserveCanaryExecution`);
-> `tool_fingerprint_drift`/`server_identity_drift` only DENY the offending request, `outcome_evidence_loss`
-> only increments a metric, and `unexpected_upstream_response`/`elevated_error_rate`/`latency_pathology`
-> plus witness reconciliation have no automatic tripper yet. Wiring the rest is a pre-Canary
-> product-defect prerequisite — see `docs/operator/mcp-first-controlled-canary-review.md` §16.
+> **Wiring (review blocker 7 CLOSED).** Every code above now has a production trip path, and they all
+> converge on the ONE `canary.AbortController` — there is no second latch. Drift denies the request AND
+> stops the experiment; outcome-evidence loss stops it (the metric remains in parallel); a
+> reconciliation conflict stops it. What the latch revokes is EXECUTION AUTHORITY: no new reservation,
+> and a request already admitted fails the final live revalidation before `Upstream.Call`.
+> It does NOT demote the node — demotion stays governed by review blockers 10 and 12, so the truthful
+> state is `ModeCanary + ABORTED` and `activation_runtime.auto_stop` reports `execution_authority`
+> separately from mode. Two codes have no production PRODUCER yet:
+> `credential_safety_failure` (blocker 9) and `unexpected_upstream_response` (blocker 8); their funnels
+> are wired and gated. See `docs/operator/mcp-first-controlled-canary-review.md` §16.
 >
-> **Threshold reachability (review §16/§26).** For `elevated_error_rate` and `latency_pathology` the
-> reviewed minimum sample floor MUST be reachable inside the exact corpus (`MaxTotalExecutions=3`), or
-> the below-floor behavior MUST stop fail-closed. A floor above three combined with a below-floor
-> `no-trip` means neither detector can ever evaluate during the experiment — errors or latency
-> pathology would persist for its whole duration while the automatic-abort prerequisite was recorded as
-> closed. The same reachability rule applies to the witness-reconciliation trip.
+> **Threshold reachability (review §16/§26) — satisfied.** `sample_floor = 2`; the error rate trips iff
+> `2 × failures ≥ samples` (≥ 50%) over the current activation generation; a single attempt at or above
+> 15s trips `latency_pathology` with NO floor, and a mean at or above 10s trips it at the floor. All are
+> reachable within `MaxTotalExecutions = 3`, and `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` fails
+> if the floor drifts beyond the corpus. These are First-Canary safety thresholds derived from the 30s
+> upstream request timeout — they are NOT product SLAs. The error-rate numerator counts ordinary
+> post-admission execution failures only; request-scoped policy/scope denials carry their own
+> classification and are never counted here.
 
 ## Explicit non-goals
 
 - No customer traffic, no production credential, no production upstream.
 - No wildcard/percentage scope, no write/destructive/control operation.
-- No standing Canary — it is a time-boxed experiment. **The time box is not yet self-enforcing:**
-  window expiry ends the authority to ADMIT but does not stop the experiment (the only
-  `budget_exhausted` trip is request-driven, step 8), so until a deadline-driven stop exists the
-  operator MUST demote/kill explicitly at the window boundary.
+- No standing Canary — it is a time-boxed experiment. **The time box is self-enforcing** (blocker 7):
+  the deadline is absolute, derived from the persisted activation instant, and a watchdog latches
+  `window_expired` with NO further request arriving; a restart never grants a fresh window and a
+  restart after expiry latches before any admission is possible. The operator MUST still perform the
+  governed demotion at the boundary, because the latch revokes execution authority but does not change
+  the node's mode (blockers 10/12).
 - Graduation (read → bounded write → destructive/control, or wider scope) is a **new** Canary for
   the added delta, under its own review (`ROLLOUT-AND-ROLLBACK.md`).
