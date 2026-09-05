@@ -736,7 +736,12 @@ func pacCommitOperationLocked(w http.ResponseWriter, r *http.Request, id string,
 	// cannot have moved; a writer OUTSIDE it is detected here atomically and
 	// the operation is refused — the candidate never overwrites a change it
 	// was not built on.
-	setErr := pacProfiles.SetIfGeneration(cfg, gen)
+	// The commit also stamps the operationId as the durable identity of the
+	// writer of the installed content (round 5): a later reconciliation
+	// attributes a commit to this intent only when that identity matches —
+	// content alone cannot tell this commit from another writer installing
+	// the same target.
+	setErr := pacProfiles.CommitIfGeneration(cfg, gen, op.OperationID)
 	if errors.Is(setErr, pac.ErrProfilesChanged) {
 		pacWriteConflict(w, id, lc, op, setErr)
 		return
@@ -853,13 +858,11 @@ func pacWriteAborted(w http.ResponseWriter, id string, lc *pac.ProfileLifecycle,
 	_, _ = w.Write(raw)
 }
 
-// pacWriteConflict answers a commit whose compare-and-swap found the active
-// store changed by a writer outside the transaction boundary: NOTHING was
-// written; the operation is recorded as aborted (a re-sent operationId
-// replays this refusal) and the caller is told to review the current state.
-func pacWriteConflict(w http.ResponseWriter, id string, lc *pac.ProfileLifecycle, op *pac.PendingOp, setErr error) {
-	logger.Printf("PAC: %s %s of %q refused: %v", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(id), setErr)
-	active, _ := pacProfiles.ProfileByID(id)
+// pacConflictDecision is the durable decided outcome of a compare-and-swap
+// refusal: NOTHING was written by the operation; a re-sent operationId
+// replays this refusal.
+func pacConflictDecision(op *pac.PendingOp) pac.DecidedOp {
+	active, _ := pacProfiles.ProfileByID(op.ProfileID)
 	result := map[string]any{
 		"error":       "the active profile store was changed by another writer between the review of this operation and its commit; nothing was changed by this operation — review the current active profile and dispatch a NEW operation",
 		"code":        "concurrent_write",
@@ -867,14 +870,44 @@ func pacWriteConflict(w http.ResponseWriter, id string, lc *pac.ProfileLifecycle
 		"current":     map[string]any{"revision": active.Revision, "activeSpecDigest": pac.ProfileSpecDigest(active)},
 	}
 	raw, _ := json.Marshal(result) //nolint:errcheck // plain map
+	return pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpAborted, TS: op.TS, Status: http.StatusConflict, Result: raw}
+}
+
+// pacWriteConflict answers a commit whose compare-and-swap found the active
+// store changed by a writer outside the transaction boundary: NOTHING was
+// written. The refusal is answered as a TERMINAL decision (409
+// concurrent_write, a re-sent operationId replays it) ONLY once it is
+// DURABLE (round 5): if the decision record cannot be persisted, the durable
+// truth is still the pending intent, so the caller gets the NON-TERMINAL
+// outcome_unknown (the browser keeps its marker) and the next
+// reconciliation — which attributes a commit only to the writer identity
+// the store records — settles the intent as this same refusal.
+func pacWriteConflict(w http.ResponseWriter, id string, lc *pac.ProfileLifecycle, op *pac.PendingOp, setErr error) {
+	logger.Printf("PAC: %s %s of %q refused: %v", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(id), setErr)
+	d := pacConflictDecision(op)
 	lc.PendingOp = nil
-	lc.RecordDecided(pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpAborted, TS: op.TS, Status: http.StatusConflict, Result: raw})
+	lc.RecordDecided(d)
 	if err := pacLifecycle.Put(lc); err != nil {
-		logger.Printf("PAC: conflict record persist failed for %q: %v", sanitizeLog(id), err)
+		logger.Printf("PAC: conflict record persist failed for %q: %v; the intent stays pending until the refusal can be recorded", sanitizeLog(id), err)
+		pacWriteRefusalNotDurable(w, op)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusConflict)
-	_, _ = w.Write(raw)
+	_, _ = w.Write(d.Result)
+}
+
+// pacWriteRefusalNotDurable answers a refusal whose decision record could
+// not be persisted: the outcome is NOT terminal — the operation stays
+// pending in the durable history and is settled by reconciliation.
+func pacWriteRefusalNotDurable(w http.ResponseWriter, op *pac.PendingOp) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort body
+		"error": "the operation was refused (the active store changed before its commit; nothing was written) but the refusal could not be recorded durably; the operation is retained as pending and will be reconciled as this refusal",
+		"code":  "outcome_unknown", "detail": "refusal_not_durable",
+		"operationId": op.OperationID, "state": pac.OpPending,
+	})
 }
 
 func pacWriteOutcomeUnknown(w http.ResponseWriter, id, action string, op *pac.PendingOp, setErr error) {
@@ -1078,6 +1111,34 @@ func pacAuditCommitted(op *pac.PendingOp, n int64, active pac.Profile, reconcile
 	auditAdd(entry)
 }
 
+// pacReconcileConflict is the reconciliation verdict for an intent whose
+// target content IS active but was installed by ANOTHER writer.
+const pacReconcileConflict = "conflict"
+
+// pacClassifyReconcile classifies a pending intent for reconciliation (2F-E
+// correction round 5): the content verdict of pac.ClassifyOutcome is
+// attributed to this intent ONLY when the store's durable writer identity is
+// the intent's operationId. Identical target content installed by another
+// writer (the exact case a refused compare-and-swap leaves behind when its
+// refusal record could not be persisted) is the durable refusal, never a
+// commit; a store whose writer identity is unknown (a file that predates the
+// identity) is AMBIGUOUS — refused until an admin repair — never a guessed
+// commit.
+func pacClassifyReconcile(op *pac.PendingOp, active pac.Profile, hasActive bool) string {
+	class := pac.ClassifyOutcome(op, active, hasActive)
+	if class != pac.OpCommitted {
+		return class
+	}
+	switch pacProfiles.LastWriteID() {
+	case op.OperationID:
+		return pac.OpCommitted
+	case "":
+		return pac.OpAmbiguous
+	default:
+		return pacReconcileConflict
+	}
+}
+
 // pacReconcileLocked settles a pending intent against the authoritative
 // active state (under pacProfilesAPIMu) and completes a committed one's
 // effects (per mode). It returns false when the settled record could not be
@@ -1090,12 +1151,17 @@ func pacReconcileLocked(lc *pac.ProfileLifecycle, mode pacEffectsMode) bool {
 	active, ok := pacProfiles.ProfileByID(op.ProfileID)
 	now := time.Now().UTC().Format(time.RFC3339)
 	if !op.Committed() {
-		switch pac.ClassifyOutcome(op, active, ok) {
+		switch pacClassifyReconcile(op, active, ok) {
 		case pac.OpCommitted:
 			if !pacPersistCommittedLocked(lc, op, active.Revision) {
 				return false
 			}
 			logger.Printf("PAC: reconciled %s %s of %q as COMMITTED", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID))
+		case pacReconcileConflict:
+			lc.PendingOp = nil
+			lc.RecordDecided(pacConflictDecision(op))
+			logger.Printf("PAC: reconciled %s %s of %q as REFUSED (concurrent_write): the active store carries its target content but was written by another writer", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(op.ProfileID))
+			return pacPutReconciled(lc, op)
 		case pac.OpAborted:
 			raw, _ := json.Marshal(map[string]any{"error": "the operation never reached the active store", "code": "aborted", "operationId": op.OperationID}) //nolint:errcheck // plain map
 			lc.PendingOp = nil

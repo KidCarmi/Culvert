@@ -18701,7 +18701,7 @@
                 }
               }
             },
-            "description": "`outcome_unknown` (the active write could not be proven; the intent is retained as pending) or `active_write_failed` (proven failure, aborted)."
+            "description": "`outcome_unknown` (the active write could not be proven; the intent is retained as pending — also, 2F-E correction round 5 with `detail: refusal_not_durable`, a compare-and-swap refusal whose decision record could not be persisted: nothing was written, the intent stays pending and reconciliation settles it as the same `concurrent_write` refusal; the browser keeps its marker) or `active_write_failed` (proven failure, aborted)."
           },
           "503": {
             "content": {

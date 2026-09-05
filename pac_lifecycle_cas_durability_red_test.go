@@ -82,24 +82,7 @@ func TestPACBoundary_X1_UndurableCASRefusalIsNonTerminalAndNeverBecomesACommit(t
 	}
 	assertNotCommitted := func(stage string) {
 		t.Helper()
-		g := pacEvidenceGet(t, "?operationId="+opX)
-		for _, r := range g["revisions"].([]any) {
-			if r.(map[string]any)["operationId"] == opX {
-				t.Errorf("%s: the operation must never be attributed as committed (history revision recorded)", stage)
-			}
-		}
-		if n := pacIntentAudits(opX, "pac.profile_publish"); n != 0 {
-			t.Errorf("%s: no success audit may exist for the refused operation (got %d)", stage, n)
-		}
-		if n := len(configVersions.List()); n != versions {
-			t.Errorf("%s: no config version may be captured for the refused operation (%d → %d)", stage, versions, n)
-		}
-		if o, ok := pacBoundaryProfile(t, "other"); !ok || o.Name != "Other renamed outside the boundary" {
-			t.Errorf("%s: the intervening change must stay intact: %+v ok=%v", stage, o, ok)
-		}
-		if p, ok := pacBoundaryProfile(t, "branch-il"); !ok || p.Revision != 2 || pac.ProfileSpecDigest(p) != pac.ProfileSpecDigest(target) {
-			t.Errorf("%s: the active store must be exactly what the intervening writer installed: %+v ok=%v", stage, p, ok)
-		}
+		pacBoundaryAssertNotCommitted(t, stage, opX, versions, target)
 	}
 	assertNotCommitted("before restart")
 	// 5. restart from the durable files, persistence still failing
@@ -121,4 +104,32 @@ func TestPACBoundary_X1_UndurableCASRefusalIsNonTerminalAndNeverBecomesACommit(t
 		t.Fatalf("a repeat of the operationId must replay the durable refusal: %d %s", again.Code, again.Body.String())
 	}
 	assertNotCommitted("after replay")
+}
+
+// pacBoundaryAssertNotCommitted is the X1 "never attributed as committed"
+// assertion set, extracted verbatim from the test body (transparent
+// correction for the gocognit gate — no assertion changed): no history
+// revision for the operation, no success audit, no config version, the
+// intervening writer's unrelated change intact, and the active store exactly
+// what that writer installed.
+func pacBoundaryAssertNotCommitted(t *testing.T, stage, opX string, versions int, target pac.Profile) {
+	t.Helper()
+	g := pacEvidenceGet(t, "?operationId="+opX)
+	for _, r := range g["revisions"].([]any) {
+		if r.(map[string]any)["operationId"] == opX {
+			t.Errorf("%s: the operation must never be attributed as committed (history revision recorded)", stage)
+		}
+	}
+	if n := pacIntentAudits(opX, "pac.profile_publish"); n != 0 {
+		t.Errorf("%s: no success audit may exist for the refused operation (got %d)", stage, n)
+	}
+	if n := len(configVersions.List()); n != versions {
+		t.Errorf("%s: no config version may be captured for the refused operation (%d → %d)", stage, versions, n)
+	}
+	if o, ok := pacBoundaryProfile(t, "other"); !ok || o.Name != "Other renamed outside the boundary" {
+		t.Errorf("%s: the intervening change must stay intact: %+v ok=%v", stage, o, ok)
+	}
+	if p, ok := pacBoundaryProfile(t, "branch-il"); !ok || p.Revision != 2 || pac.ProfileSpecDigest(p) != pac.ProfileSpecDigest(target) {
+		t.Errorf("%s: the active store must be exactly what the intervening writer installed: %+v ok=%v", stage, p, ok)
+	}
 }

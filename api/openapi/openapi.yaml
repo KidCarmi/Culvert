@@ -8922,7 +8922,12 @@ paths:
         '500':
           description: >-
             `outcome_unknown` (the active write could not be proven; the intent is
-            retained as pending) or `active_write_failed` (proven failure, aborted).
+            retained as pending — also, 2F-E correction round 5 with
+            `detail: refusal_not_durable`, a compare-and-swap refusal whose
+            decision record could not be persisted: nothing was written, the
+            intent stays pending and reconciliation settles it as the same
+            `concurrent_write` refusal; the browser keeps its marker) or
+            `active_write_failed` (proven failure, aborted).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

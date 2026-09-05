@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/google/uuid"
 )
 
 // DefaultProfileID names the virtual legacy-backed profile.
@@ -148,6 +149,23 @@ type ProfileStore struct {
 	// other writer landed in between (SetIfGeneration) — the compare-and-swap
 	// wall behind the shared pacProfilesAPIMu transaction boundary.
 	gen uint64
+	// lastWriteID is the durable IDENTITY OF THE WRITER of the current
+	// content (2F-E correction round 5), persisted beside the config in the
+	// profiles file: every Set stamps a fresh random id, the lifecycle
+	// commit (CommitIfGeneration) stamps its operationId. Content alone
+	// cannot say WHO installed it — an intervening writer can install a
+	// candidate's exact target — so a reconciliation that finds the active
+	// store at an intent's target content attributes the commit to the
+	// intent ONLY when this identity is the intent's operationId.
+	lastWriteID string
+}
+
+// profilesFile is the on-disk shape of the store: the config plus the
+// writer identity of the current content. An older binary ignores the extra
+// key; an older file loads with an empty identity (unknown writer).
+type profilesFile struct {
+	ProfilesConfig
+	LastWriteID string `json:"lastWriteId,omitempty"`
 }
 
 // ErrProfilesChanged is returned by SetIfGeneration when the store's
@@ -168,9 +186,12 @@ func (s *ProfileStore) Load(path string) error {
 	if err != nil {
 		return fmt.Errorf("pac profiles: read %s: %w", path, err)
 	}
-	if err := json.Unmarshal(data, &s.cfg); err != nil {
+	var f profilesFile
+	if err := json.Unmarshal(data, &f); err != nil {
 		return fmt.Errorf("pac profiles: parse %s: %w", path, err)
 	}
+	s.cfg = f.ProfilesConfig
+	s.lastWriteID = f.LastWriteID
 	normalizeProfileRevisions(&s.cfg)
 	s.modTime = time.Now()
 	s.gen++
@@ -232,7 +253,17 @@ func (s *ProfileStore) Set(cfg ProfilesConfig) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.setLocked(cfg)
+	return s.setLocked(cfg, uuid.NewString())
+}
+
+// LastWriteID returns the durable identity of the writer of the current
+// content: the operationId of the lifecycle commit that installed it, a
+// random id for any other writer, "" for a store file that predates the
+// identity (unknown writer).
+func (s *ProfileStore) LastWriteID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastWriteID
 }
 
 // GetWithGeneration returns a copy of the config together with the store
@@ -267,7 +298,24 @@ func (s *ProfileStore) SetIfGeneration(cfg ProfilesConfig, expected uint64) erro
 	if s.gen != expected {
 		return fmt.Errorf("%w (generation %d, candidate built at %d)", ErrProfilesChanged, s.gen, expected)
 	}
-	return s.setLocked(cfg)
+	return s.setLocked(cfg, uuid.NewString())
+}
+
+// CommitIfGeneration is SetIfGeneration for a LIFECYCLE commit: the
+// candidate is written under the same compare-and-swap and the store records
+// writeID (the operationId) as the durable identity of the writer, so a later
+// reconciliation can tell this commit from another writer that installed
+// identical content.
+func (s *ProfileStore) CommitIfGeneration(cfg ProfilesConfig, expected uint64, writeID string) error {
+	if h := ProfileSetHook; h != nil {
+		h(cfg)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != expected {
+		return fmt.Errorf("%w (generation %d, candidate built at %d)", ErrProfilesChanged, s.gen, expected)
+	}
+	return s.setLocked(cfg, writeID)
 }
 
 // setLocked is the persist-before-swap commit (2F-B, C1): the durable write
@@ -275,11 +323,11 @@ func (s *ProfileStore) SetIfGeneration(cfg ProfilesConfig, expected uint64) erro
 // written, so a failed write leaves the in-memory (and therefore the
 // cluster-synced) view exactly where it was — never a torn "memory says
 // candidate, disk says previous" state. Caller holds s.mu.
-func (s *ProfileStore) setLocked(cfg ProfilesConfig) error {
+func (s *ProfileStore) setLocked(cfg ProfilesConfig, writeID string) error {
 	next := copyProfilesConfig(cfg)
 	normalizeProfileRevisions(&next)
 	if s.path != "" {
-		data, err := json.MarshalIndent(next, "", "  ")
+		data, err := json.MarshalIndent(profilesFile{ProfilesConfig: next, LastWriteID: writeID}, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -288,6 +336,7 @@ func (s *ProfileStore) setLocked(cfg ProfilesConfig) error {
 		}
 	}
 	s.cfg = next
+	s.lastWriteID = writeID
 	s.modTime = time.Now()
 	s.gen++
 	return nil
@@ -335,16 +384,17 @@ func (s *ProfileStore) PoolMap() map[string]Pool {
 
 // ProfileState is a full ProfileStore snapshot for test isolation.
 type ProfileState struct {
-	Cfg     ProfilesConfig
-	Path    string
-	ModTime time.Time
+	Cfg         ProfilesConfig
+	Path        string
+	ModTime     time.Time
+	LastWriteID string
 }
 
 // Snapshot returns the store's full state (test support, -shuffle hermetic).
 func (s *ProfileStore) Snapshot() ProfileState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return ProfileState{Cfg: copyProfilesConfig(s.cfg), Path: s.path, ModTime: s.modTime}
+	return ProfileState{Cfg: copyProfilesConfig(s.cfg), Path: s.path, ModTime: s.modTime, LastWriteID: s.lastWriteID}
 }
 
 // Restore resets the store to a previously captured state (test support).
@@ -354,6 +404,7 @@ func (s *ProfileStore) Restore(st ProfileState) {
 	s.cfg = copyProfilesConfig(st.Cfg)
 	s.path = st.Path
 	s.modTime = st.ModTime
+	s.lastWriteID = st.LastWriteID
 	s.gen++
 }
 
