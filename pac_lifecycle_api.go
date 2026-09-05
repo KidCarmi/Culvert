@@ -736,12 +736,13 @@ func pacCommitOperationLocked(w http.ResponseWriter, r *http.Request, id string,
 	// cannot have moved; a writer OUTSIDE it is detected here atomically and
 	// the operation is refused — the candidate never overwrites a change it
 	// was not built on.
-	// The commit also stamps the operationId as the durable identity of the
-	// writer of the installed content (round 5): a later reconciliation
-	// attributes a commit to this intent only when that identity matches —
-	// content alone cannot tell this commit from another writer installing
-	// the same target.
-	setErr := pacProfiles.CommitIfGeneration(cfg, gen, op.OperationID)
+	// The commit also stamps the operationId as the durable provenance of
+	// the TARGET PROFILE's installed content (round 5, per-profile since
+	// round 6): a later reconciliation attributes a commit to this intent
+	// only when that provenance matches — content alone cannot tell this
+	// commit from another writer installing the same target, and a later
+	// write of an unrelated profile or pool preserves it.
+	setErr := pacProfiles.CommitIfGeneration(cfg, gen, id, op.OperationID)
 	if errors.Is(setErr, pac.ErrProfilesChanged) {
 		pacWriteConflict(w, id, lc, op, setErr)
 		return
@@ -1116,20 +1117,22 @@ func pacAuditCommitted(op *pac.PendingOp, n int64, active pac.Profile, reconcile
 const pacReconcileConflict = "conflict"
 
 // pacClassifyReconcile classifies a pending intent for reconciliation (2F-E
-// correction round 5): the content verdict of pac.ClassifyOutcome is
-// attributed to this intent ONLY when the store's durable writer identity is
-// the intent's operationId. Identical target content installed by another
-// writer (the exact case a refused compare-and-swap leaves behind when its
-// refusal record could not be persisted) is the durable refusal, never a
-// commit; a store whose writer identity is unknown (a file that predates the
-// identity) is AMBIGUOUS — refused until an admin repair — never a guessed
-// commit.
+// correction round 5, per-profile provenance since round 6): the content
+// verdict of pac.ClassifyOutcome is attributed to this intent ONLY when the
+// TARGET PROFILE's durable writer provenance is the intent's operationId.
+// Identical target content installed by another writer (the exact case a
+// refused compare-and-swap leaves behind when its refusal record could not
+// be persisted) is the durable refusal, never a commit; a genuine commit
+// keeps its provenance across later writes of OTHER profiles or pools, so it
+// is still attributed after them; a profile whose provenance is unknown (a
+// file that predates it) is AMBIGUOUS — refused until an admin repair —
+// never a guessed commit.
 func pacClassifyReconcile(op *pac.PendingOp, active pac.Profile, hasActive bool) string {
 	class := pac.ClassifyOutcome(op, active, hasActive)
 	if class != pac.OpCommitted {
 		return class
 	}
-	switch pacProfiles.LastWriteID() {
+	switch pacProfiles.ProfileWriteID(op.ProfileID) {
 	case op.OperationID:
 		return pac.OpCommitted
 	case "":

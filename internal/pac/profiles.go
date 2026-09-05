@@ -12,6 +12,7 @@ package pac
 // Custom profiles and pools persist in <dataDir>/pac_profiles.json.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -149,23 +150,32 @@ type ProfileStore struct {
 	// other writer landed in between (SetIfGeneration) — the compare-and-swap
 	// wall behind the shared pacProfilesAPIMu transaction boundary.
 	gen uint64
-	// lastWriteID is the durable IDENTITY OF THE WRITER of the current
-	// content (2F-E correction round 5), persisted beside the config in the
-	// profiles file: every Set stamps a fresh random id, the lifecycle
-	// commit (CommitIfGeneration) stamps its operationId. Content alone
-	// cannot say WHO installed it — an intervening writer can install a
-	// candidate's exact target — so a reconciliation that finds the active
-	// store at an intent's target content attributes the commit to the
-	// intent ONLY when this identity is the intent's operationId.
-	lastWriteID string
+	// provenance is the durable, PER-PROFILE identity of the writer that
+	// last CHANGED each profile (2F-E correction round 5, corrected to
+	// profile granularity in round 6), persisted beside the config in the
+	// same atomic write of the profiles file. Content alone cannot say WHO
+	// installed it — an intervening writer can install a candidate's exact
+	// target — so a reconciliation that finds the active store at an
+	// intent's target content attributes the commit to the intent ONLY when
+	// the TARGET PROFILE's provenance is the intent's operationId. The
+	// lifecycle commit (CommitIfGeneration) stamps its operationId on its
+	// target profile; every other writer stamps a fresh random id on each
+	// profile whose content it changes and PRESERVES the provenance of every
+	// profile it leaves untouched (a pool-only or unrelated-profile write
+	// never erases a commit's provenance — round 6); a profile that is
+	// removed drops its entry. A single document-level identity (round 5's
+	// `lastWriteId`) was not sufficient: any unrelated later write replaced
+	// it and a genuine commit was then reconciled as refused.
+	provenance map[string]string
 }
 
 // profilesFile is the on-disk shape of the store: the config plus the
-// writer identity of the current content. An older binary ignores the extra
-// key; an older file loads with an empty identity (unknown writer).
+// per-profile writer provenance. An older binary ignores the extra key; an
+// older file (or a profile without an entry) loads with an empty identity
+// (unknown writer — ambiguous, never guessed).
 type profilesFile struct {
 	ProfilesConfig
-	LastWriteID string `json:"lastWriteId,omitempty"`
+	Provenance map[string]string `json:"profileWriteIds,omitempty"`
 }
 
 // ErrProfilesChanged is returned by SetIfGeneration when the store's
@@ -191,7 +201,7 @@ func (s *ProfileStore) Load(path string) error {
 		return fmt.Errorf("pac profiles: parse %s: %w", path, err)
 	}
 	s.cfg = f.ProfilesConfig
-	s.lastWriteID = f.LastWriteID
+	s.provenance = f.Provenance
 	normalizeProfileRevisions(&s.cfg)
 	s.modTime = time.Now()
 	s.gen++
@@ -253,17 +263,18 @@ func (s *ProfileStore) Set(cfg ProfilesConfig) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.setLocked(cfg, uuid.NewString())
+	return s.setLocked(cfg, "", "")
 }
 
-// LastWriteID returns the durable identity of the writer of the current
-// content: the operationId of the lifecycle commit that installed it, a
-// random id for any other writer, "" for a store file that predates the
-// identity (unknown writer).
-func (s *ProfileStore) LastWriteID() string {
+// ProfileWriteID returns the durable identity of the writer that last
+// changed profile id: the operationId of the lifecycle commit that installed
+// its current content, a random id for any other writer, "" when unknown
+// (a store file that predates the provenance, or a profile without an
+// entry).
+func (s *ProfileStore) ProfileWriteID(id string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.lastWriteID
+	return s.provenance[id]
 }
 
 // GetWithGeneration returns a copy of the config together with the store
@@ -298,15 +309,17 @@ func (s *ProfileStore) SetIfGeneration(cfg ProfilesConfig, expected uint64) erro
 	if s.gen != expected {
 		return fmt.Errorf("%w (generation %d, candidate built at %d)", ErrProfilesChanged, s.gen, expected)
 	}
-	return s.setLocked(cfg, uuid.NewString())
+	return s.setLocked(cfg, "", "")
 }
 
-// CommitIfGeneration is SetIfGeneration for a LIFECYCLE commit: the
-// candidate is written under the same compare-and-swap and the store records
-// writeID (the operationId) as the durable identity of the writer, so a later
-// reconciliation can tell this commit from another writer that installed
-// identical content.
-func (s *ProfileStore) CommitIfGeneration(cfg ProfilesConfig, expected uint64, writeID string) error {
+// CommitIfGeneration is SetIfGeneration for a LIFECYCLE commit of profile
+// profileID: the candidate is written under the same compare-and-swap and
+// the store records writeID (the operationId) as the durable provenance of
+// THAT profile — co-written atomically with the authoritative content — so a
+// later reconciliation can tell this commit from another writer that
+// installed identical content. Every other profile keeps the provenance
+// rule of Set (changed ⇒ fresh id, untouched ⇒ preserved).
+func (s *ProfileStore) CommitIfGeneration(cfg ProfilesConfig, expected uint64, profileID, writeID string) error {
 	if h := ProfileSetHook; h != nil {
 		h(cfg)
 	}
@@ -315,19 +328,23 @@ func (s *ProfileStore) CommitIfGeneration(cfg ProfilesConfig, expected uint64, w
 	if s.gen != expected {
 		return fmt.Errorf("%w (generation %d, candidate built at %d)", ErrProfilesChanged, s.gen, expected)
 	}
-	return s.setLocked(cfg, writeID)
+	return s.setLocked(cfg, profileID, writeID)
 }
 
 // setLocked is the persist-before-swap commit (2F-B, C1): the durable write
 // is the commit point. Memory is replaced only after the file is durably
 // written, so a failed write leaves the in-memory (and therefore the
 // cluster-synced) view exactly where it was — never a torn "memory says
-// candidate, disk says previous" state. Caller holds s.mu.
-func (s *ProfileStore) setLocked(cfg ProfilesConfig, writeID string) error {
+// candidate, disk says previous" state. Caller holds s.mu. commitProfileID
+// / commitWriteID name the lifecycle commit's target profile and its
+// operationId ("" for any other writer); the per-profile provenance is
+// derived by nextProvenance and written in the SAME atomic write.
+func (s *ProfileStore) setLocked(cfg ProfilesConfig, commitProfileID, commitWriteID string) error {
 	next := copyProfilesConfig(cfg)
 	normalizeProfileRevisions(&next)
+	prov := nextProvenance(s.cfg, s.provenance, next, commitProfileID, commitWriteID)
 	if s.path != "" {
-		data, err := json.MarshalIndent(profilesFile{ProfilesConfig: next, LastWriteID: writeID}, "", "  ")
+		data, err := json.MarshalIndent(profilesFile{ProfilesConfig: next, Provenance: prov}, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -336,10 +353,47 @@ func (s *ProfileStore) setLocked(cfg ProfilesConfig, writeID string) error {
 		}
 	}
 	s.cfg = next
-	s.lastWriteID = writeID
+	s.provenance = prov
 	s.modTime = time.Now()
 	s.gen++
 	return nil
+}
+
+// nextProvenance derives the per-profile writer provenance of next from the
+// previous content + provenance: the commit's target profile is stamped with
+// the commit's identity; a profile whose content is byte-identical to its
+// previous content keeps its previous provenance (unknown stays unknown — an
+// identity is never invented for content nobody changed); a profile whose
+// content changed, or that is new, is stamped with a fresh random identity;
+// a profile absent from next drops its entry.
+func nextProvenance(prev ProfilesConfig, prevProv map[string]string, next ProfilesConfig, commitProfileID, commitWriteID string) map[string]string {
+	before := make(map[string]Profile, len(prev.Profiles))
+	for i := range prev.Profiles {
+		before[prev.Profiles[i].ID] = prev.Profiles[i]
+	}
+	out := make(map[string]string, len(next.Profiles))
+	for i := range next.Profiles {
+		id := next.Profiles[i].ID
+		switch old, existed := before[id]; {
+		case commitWriteID != "" && id == commitProfileID:
+			out[id] = commitWriteID
+		case existed && profileContentEqual(old, next.Profiles[i]):
+			if w := prevProv[id]; w != "" {
+				out[id] = w
+			}
+		default:
+			out[id] = uuid.NewString()
+		}
+	}
+	return out
+}
+
+// profileContentEqual compares two profiles by their canonical JSON (so a
+// nil and an empty rule list are the same content).
+func profileContentEqual(a, b Profile) bool {
+	ja, errA := json.Marshal(a)
+	jb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ja, jb)
 }
 
 // ModTime reports when the config last changed (zero before any load/set).
@@ -384,17 +438,17 @@ func (s *ProfileStore) PoolMap() map[string]Pool {
 
 // ProfileState is a full ProfileStore snapshot for test isolation.
 type ProfileState struct {
-	Cfg         ProfilesConfig
-	Path        string
-	ModTime     time.Time
-	LastWriteID string
+	Cfg        ProfilesConfig
+	Path       string
+	ModTime    time.Time
+	Provenance map[string]string
 }
 
 // Snapshot returns the store's full state (test support, -shuffle hermetic).
 func (s *ProfileStore) Snapshot() ProfileState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return ProfileState{Cfg: copyProfilesConfig(s.cfg), Path: s.path, ModTime: s.modTime, LastWriteID: s.lastWriteID}
+	return ProfileState{Cfg: copyProfilesConfig(s.cfg), Path: s.path, ModTime: s.modTime, Provenance: copyProvenance(s.provenance)}
 }
 
 // Restore resets the store to a previously captured state (test support).
@@ -404,8 +458,19 @@ func (s *ProfileStore) Restore(st ProfileState) {
 	s.cfg = copyProfilesConfig(st.Cfg)
 	s.path = st.Path
 	s.modTime = st.ModTime
-	s.lastWriteID = st.LastWriteID
+	s.provenance = copyProvenance(st.Provenance)
 	s.gen++
+}
+
+func copyProvenance(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func copyProfilesConfig(cfg ProfilesConfig) ProfilesConfig {
