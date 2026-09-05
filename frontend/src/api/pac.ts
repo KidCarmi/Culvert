@@ -404,7 +404,13 @@ export interface PacLifecycle {
   /** 2F-E correction round 2 — the durable identity of this profile's
    * node-local history EPOCH (rotates on delete/recreate and on a history
    * reset). "" when the history is missing altogether; absent on an
-   * appliance that predates the field (continuity then cannot be proven). */
+   * appliance that predates the field (continuity then cannot be proven).
+   * Round 3: it also rotates whenever the appliance OBSERVES the active
+   * profile replaced at the same revision or rewound (replace import,
+   * config rollback, CP→DP snapshot — any writer), and it is "" when the
+   * appliance could not make the identity DURABLE — a dispatch reviewed
+   * against no epoch could never be resolved if its response is lost, so
+   * the page withholds publish/rollback until one exists. */
   historyIncarnation: string | undefined;
   poolChangedSince: boolean;
   scope: string;
@@ -1323,6 +1329,11 @@ export interface PacPublishArgs {
   operationId: string;
   draft: PacProfileInput;
   expectedActiveRevision: number;
+  /** 2F-E correction round 3 — the reviewed active ProfileSpecDigest, an
+   * INDEPENDENT fence beside the revision: a replace-mode import or a
+   * config rollback can install a different spec at the same revision. The
+   * appliance refuses a mismatch (409 stale). */
+  expectedActiveSpecDigest: string;
   collectionEtag: string;
   reason: string;
   /** 2F-E correction round 2 — the history epoch the candidate was reviewed
@@ -1344,6 +1355,7 @@ export function publishPacProfile(
       operationId: a.operationId,
       draft: profileWire({ ...a.draft, id }),
       expectedActiveRevision: a.expectedActiveRevision,
+      expectedActiveSpecDigest: a.expectedActiveSpecDigest,
       collectionEtag: a.collectionEtag,
       reason: a.reason,
       expectedHistoryIncarnation: a.historyIncarnation,
@@ -1357,6 +1369,8 @@ export interface PacRollbackArgs {
   operationId: string;
   targetN: number;
   expectedActiveRevision: number;
+  /** see PacPublishArgs.expectedActiveSpecDigest */
+  expectedActiveSpecDigest: string;
   collectionEtag: string;
   reason: string;
   /** see PacPublishArgs.historyIncarnation */
@@ -1376,6 +1390,7 @@ export function rollbackPacProfile(
       operationId: a.operationId,
       targetN: a.targetN,
       expectedActiveRevision: a.expectedActiveRevision,
+      expectedActiveSpecDigest: a.expectedActiveSpecDigest,
       collectionEtag: a.collectionEtag,
       reason: a.reason,
       expectedHistoryIncarnation: a.historyIncarnation,

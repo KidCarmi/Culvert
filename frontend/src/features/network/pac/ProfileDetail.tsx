@@ -249,10 +249,18 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           activeSpecDigest: lc.activeSpecDigest,
         }
       : null);
+  // 2F-E correction round 3: an existing profile whose history epoch
+  // identity the appliance could not make DURABLE (reported as "") admits no
+  // dispatch — an operation reviewed against no epoch could never be
+  // resolved if its response were lost, and a re-send into a later-minted
+  // epoch would run it again. Withheld until a durable identity exists.
+  const epochUnknown =
+    lc !== undefined && lc.activeExists && (lc.historyIncarnation ?? "") === "";
   const lifecycleBlocked =
     recovery.kind !== "none" ||
     page.unknown !== null ||
     historyReset !== null ||
+    epochUnknown ||
     (lc !== undefined && lc.state !== "idle");
   const canPublish =
     p.isAdmin &&
@@ -332,6 +340,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                 operationId: args.operationId,
                 draft: args.draft,
                 expectedActiveRevision: args.expectedActiveRevision,
+                expectedActiveSpecDigest: args.expectedActiveSpecDigest,
                 collectionEtag: args.collectionEtag,
                 reason: args.reason,
                 historyIncarnation: args.historyIncarnation,
@@ -345,6 +354,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                 operationId: args.operationId,
                 targetN: args.targetN,
                 expectedActiveRevision: args.expectedActiveRevision,
+                expectedActiveSpecDigest: args.expectedActiveSpecDigest,
                 collectionEtag: args.collectionEtag,
                 reason: args.reason,
                 historyIncarnation: args.historyIncarnation,
@@ -947,6 +957,20 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           {recovery.kind}; an earlier operation may be unresolved and no new
           identity could be persisted. Publish and rollback are withheld until
           the storage is repaired or this tab is closed.
+        </Callout>
+      )}
+      {epochUnknown && (
+        <Callout
+          variant="warning"
+          title="History epoch identity not durable"
+          role="alert"
+        >
+          The appliance could not persist the identity of this profile&apos;s
+          node-local history epoch (a failed write at migration or mint), so an
+          operation dispatched now could not be resolved against it if the
+          response were lost. Publish and rollback are withheld until the
+          appliance reports a durable history epoch — refresh once its storage
+          is repaired.
         </Callout>
       )}
       {page.unknown !== null && (

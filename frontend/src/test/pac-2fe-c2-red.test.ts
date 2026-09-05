@@ -464,6 +464,8 @@ describe("D8 publish / rollback carry the reviewed history epoch to the applianc
       operationId: OP_ID,
       draft: DRAFT,
       expectedActiveRevision: 3,
+      // fixture completion (2F-E correction round 3): the spec digest is a required, independent fence
+      expectedActiveSpecDigest: "sha256:bbbb",
       collectionEtag: "sha256:coll",
       reason: "r",
       historyIncarnation: INC_A,
@@ -477,6 +479,8 @@ describe("D8 publish / rollback carry the reviewed history epoch to the applianc
       operationId: OP_ID,
       targetN: 1,
       expectedActiveRevision: 3,
+      // fixture completion (2F-E correction round 3): the spec digest is a required, independent fence
+      expectedActiveSpecDigest: "sha256:bbbb",
       collectionEtag: "sha256:coll",
       reason: "r",
       historyIncarnation: INC_A,

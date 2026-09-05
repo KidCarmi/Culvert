@@ -290,6 +290,8 @@ describe("A4/A5 request shapes", () => {
       operationId: OP_ID,
       draft: DRAFT,
       expectedActiveRevision: 3,
+      // fixture completion (2F-E correction round 3): the spec digest is a required, independent fence
+      expectedActiveSpecDigest: "sha256:bbbb",
       collectionEtag: "sha256:coll",
       historyIncarnation: "a1a1a1a1-0000-4000-8000-000000000001",
       reason: "rollout",

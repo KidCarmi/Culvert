@@ -137,6 +137,9 @@ function baseLifecycle(): Record<string, unknown> {
     ambiguous: null,
     operations: [],
     activeSpecDigest: "sha256:bbbb",
+    // fixture completion (2F-E correction round 3): the appliance reports a
+    // durable history epoch identity; without one the page withholds dispatch
+    historyIncarnation: "a1a1a1a1-0000-4000-8000-000000000001",
     poolChangedSince: false,
     scope: "node-local",
     previousRevision: 1,
