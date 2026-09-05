@@ -112,12 +112,37 @@ func truncateForAudit(s string) string {
 // attempt therefore creates NO limiter entry and leaves NO attacker-sized
 // bytes anywhere.
 //
-// 400 is deliberate over 401: the length of a submitted username is not a
-// secret and is not a credential oracle (no local account can carry a name this
-// long — apiSetupComplete and the user-creation API both cap at 64), so
-// distinguishing it costs nothing and tells an honest client what to fix.
+// A CONFIGURED account is never refused, however long its name.
+// apiSetupComplete and the user-creation API cap a username at 64 characters,
+// but they are not the only creation paths: `-user` / `auth.user` reach
+// cfg.SetAuth and `--reset-password` reaches cfg.SetUIUser, and NEITHER the
+// stores nor validateAuthStartupCredentials (which validates only the
+// password) bound the name. So an over-long username can already be a valid,
+// persisted admin, and refusing it here would lock that operator out of the
+// admin UI on upgrade — turning a hardening change into an outage for the one
+// person who has to fix it. The guard therefore refuses only a name that names
+// NOTHING, which is the whole attack: the amplification comes from an
+// unbounded value an attacker invents, not from one the operator configured
+// (whose length is bounded by their own config, not by the 1 MiB body cap).
+// Raised by Codex review on PR #1320, against exactly the claim this comment
+// used to make.
+//
+// The narrow cost is that, for names past the bound only, a 400 rather than a
+// 401 says "no such account" — and an attacker must already guess the exact
+// over-long name to learn anything from it. That is a far better trade than
+// refusing a real admin's login.
+//
+// 400 is deliberate over 401 for a name that exists nowhere: the length of a
+// submitted username is not a secret, so saying so tells an honest client what
+// to fix.
 func rejectOversizeLoginUser(w http.ResponseWriter, r *http.Request, user string) bool {
 	if len(user) <= maxUsernameLen {
+		return false
+	}
+	// Non-retaining probe: a map hash and compare, nothing stored. Must run
+	// BEFORE the rejection and must mirror VerifyUIUser's own name resolution
+	// (roster or legacy single user) — see Config.LoginNameConfigured.
+	if cfg.LoginNameConfigured(user) {
 		return false
 	}
 	loginOversizeRejected.Add(1)

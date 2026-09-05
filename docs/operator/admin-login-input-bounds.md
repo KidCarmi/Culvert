@@ -22,10 +22,21 @@ The refused attempt **is** still recorded in the audit log as
 `auth.login.rejected`, with the username truncated to 64 bytes and marked
 `…[truncated, N bytes]`, and the real length in the entry's detail.
 
-No real account can be affected: local admin users are created with a 1–64
-character name (both first-time setup and the user-creation API enforce that),
-so the limit is unreachable for every name that can name an account. The admin
-UI cannot produce a username this long.
+**A name that already belongs to a configured account is never rejected**, however
+long it is. The 1–64 character cap you see in first-time setup and the
+user-creation API lives in those *handlers*, not in the user store: `-user` /
+`auth.user` and `--reset-password` can persist an admin with a longer name. If
+your deployment has one, it keeps working exactly as before, and Culvert logs a
+warning at startup:
+
+```
+Auth: admin username is N bytes, above the 256-byte login limit — it still
+authenticates, but rename it: every other credential entry point caps at 64
+```
+
+That warning is not fatal and needs no immediate action, but renaming the
+account to something within 64 characters brings it in line with every other
+credential path. The admin UI cannot produce a username past the limit.
 
 ## Why the bound exists
 
@@ -84,6 +95,8 @@ magnitude lives in the counter, not in the log.
 
 1. Find the source: the log line names the client IP (resolved through
    `realClientIP`, so it is the real client when a trusted proxy is configured).
+   Note that a rejection means the submitted name matched **no** configured
+   account — a real admin's login is never counted here.
 2. The rejections themselves need no action — nothing was written, no lockout
    state was created, and the audit log recorded each attempt at constant size.
 3. Treat it as reconnaissance against the admin plane. If the admin UI is

@@ -2793,7 +2793,7 @@ faults this codebase already has runbooks for.
 
 **Date:** 2026-09-05 · **Domain:** authentication / audit / persistence ·
 **Status:** shipped · **Closes:** AU-14, AU-15 ·
-**Gates:** `login_input_bounds_test.go` (8) + `internal/lockout/lockout_keybound_test.go` (8) ·
+**Gates:** `login_input_bounds_test.go` (10) + `internal/lockout/lockout_keybound_test.go` (9) ·
 **Runbook:** `docs/operator/admin-login-input-bounds.md`
 
 ### 25.1 Why this domain
@@ -2812,6 +2812,12 @@ its rate limiter on a FIXED sentinel (`setupKey`). The proxy-side credential
 path validated its own at `maxUsernameLen` (256) years ago
 (`proxy_portal.go:145`). The admin login endpoint — the one an attacker
 actually finds first, because it is what the UI posts to — validated nothing.
+
+Note the handler-vs-store split that §25.4 turns on: those 1–64 caps live in the
+API *handlers*. Neither `cfg.SetAuth` nor `cfg.SetUIUser` bounds a username, and
+`validateAuthStartupCredentials` validates only the password — so `-user` /
+`auth.user` and `--reset-password` can persist an admin whose name is longer
+than any of these limits.
 
 ### 25.2 The shape of the miss
 
@@ -2873,8 +2879,38 @@ the constant the proxy-auth path already uses for exactly this question) and
 returns **before** the limiter, the credential check and the alert. A rejected
 attempt therefore creates no limiter entry and leaves no attacker-sized bytes
 anywhere. 400 rather than 401 is deliberate: the length of a submitted username
-is not a secret and is not a credential oracle, since no local account can carry
-a name this long (both `apiSetupComplete` and the user-creation API cap at 64).
+is not a secret and is not a credential oracle for a name that exists nowhere.
+
+**A CONFIGURED account is never refused, however long its name**, and the first
+draft of this change got that wrong. It asserted that no local account could
+carry such a name because `apiSetupComplete` and the user-creation API cap at
+64 — but those are handlers, not the stores (see §25.1), so an over-long
+username can already be a valid persisted admin and the guard would have locked
+that operator out of their own admin UI on upgrade: a hardening change turned
+into an outage for the one person who has to fix it. Raised by Codex review on
+PR #1320, against exactly the claim the code comment made. The guard now
+consults `cfg.LoginNameConfigured`, a non-retaining probe whose resolution MUST
+stay identical to `VerifyUIUser`'s (roster **or** legacy single user — the
+existing `UIUserExists` checks only the roster and would have missed the legacy
+case). `warnOversizeConfiguredUsernames` reports such an account once at boot,
+deliberately as a WARNING and never fatally: the stores never bounded the name,
+so failing the boot would brick an appliance whose config was legal when it was
+written.
+
+The narrow cost is that, for names past the bound only, a 400 rather than a 401
+says "no such account" — and an attacker must already have guessed the exact
+over-long name to learn anything from it. That is a far better trade than
+refusing a real admin's login.
+
+That exemption has a consequence in the leaf, and it is why the clamp there is
+**injective**: a configured over-long name now reaches the limiter, so a plain
+truncation would let an attacker who knew that admin's first 256 bytes submit an
+ordinary ≤256-byte name clamping to the SAME key and drive the tier-2 account
+lock against them — lockout-as-DoS, precisely what the two-tier design
+(RISK-012) exists to prevent. `boundUsername` appends a SHA-256 digest of the
+whole name to a rune-safe prefix, which keeps the key bounded and distinct
+names distinct (`TestBoundUsername_IsInjective`, verified failing against a
+plain truncation).
 
 **In the leaf (`internal/lockout`).** `Cleanup`'s doc claimed the maps were
 bounded against an unbounded-memory DoS; on the entry-count axis they were, and

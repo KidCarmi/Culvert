@@ -46,7 +46,42 @@ func TestBoundUsername_CutsOnARuneBoundary(t *testing.T) {
 		t.Fatalf("clamped to %d bytes, want <= %d", len(got), MaxUsernameKeyLen)
 	}
 	if !isValidUTF8Prefix(name, got) {
-		t.Errorf("clamped value is not a whole-rune prefix of the input")
+		t.Errorf("clamped value is not a whole-rune prefix of the input plus its digest")
+	}
+}
+
+// TestBoundUsername_IsInjective is a SECURITY gate, not a tidiness one. The
+// login endpoint exempts a CONFIGURED over-long username from its rejection, so
+// such a name reaches this limiter. Under a plain truncation, an attacker who
+// knew that admin's first 256 bytes could submit an ordinary <=256-byte name
+// that clamps to the same key and drive the tier-2 account lock against them —
+// lockout-as-DoS, the exact defect the two-tier design (RISK-012) prevents.
+func TestBoundUsername_IsInjective(t *testing.T) {
+	prefix := strings.Repeat("P", MaxUsernameKeyLen*2)
+	seen := map[string]string{}
+	for _, suffix := range []string{"-alice", "-bob", "-carol", "", "-alice2"} {
+		name := prefix + suffix
+		key := boundUsername(name)
+		if len(key) > MaxUsernameKeyLen {
+			t.Errorf("suffix %q: key is %d bytes, want <= %d", suffix, len(key), MaxUsernameKeyLen)
+		}
+		if prev, dup := seen[key]; dup {
+			// Names and keys are hundreds of bytes; print identity, not payload.
+			t.Errorf("suffix %q (%d bytes) collides with suffix %q on one key — "+
+				"two distinct admins share a lockout entry", suffix, len(name), prev)
+		}
+		seen[key] = suffix
+	}
+	// The dangerous direction specifically: a name AT the bound must not clamp
+	// onto the same key as a longer name sharing its bytes.
+	atBound := prefix[:MaxUsernameKeyLen]
+	if boundUsername(atBound) == boundUsername(prefix) {
+		t.Error("a name at the bound shares a key with a longer name sharing its prefix")
+	}
+	// Determinism: the same name must always produce the same key, or Check and
+	// RecordFailure would disagree.
+	if boundUsername(prefix) != boundUsername(prefix) {
+		t.Error("boundUsername is not deterministic")
 	}
 }
 
@@ -83,15 +118,26 @@ func TestBoundUsername_InvalidUTF8StaysBoundedAndNonEmpty(t *testing.T) {
 	if got == "" {
 		t.Error("invalid UTF-8 collapsed to the empty username")
 	}
+	// Injectivity must hold for invalid UTF-8 too — the digest carries the
+	// identity even when there is no rune boundary to cut on.
+	if boundUsername(name+"\x80") == got {
+		t.Error("two distinct invalid-UTF-8 names collide on one key")
+	}
 }
 
-// isValidUTF8Prefix reports whether got is a prefix of name that ends on a rune
-// boundary (i.e. re-encoding the decoded runes reproduces it exactly).
+// isValidUTF8Prefix reports whether got is a clamped form of name: the portion
+// before the "…" digest marker is a prefix of name that ends on a rune boundary
+// (i.e. re-encoding the decoded runes reproduces it exactly). A name within the
+// bound is returned verbatim and has no marker.
 func isValidUTF8Prefix(name, got string) bool {
-	if !strings.HasPrefix(name, got) {
+	body := got
+	if i := strings.LastIndex(got, "…"); i >= 0 {
+		body = got[:i]
+	}
+	if !strings.HasPrefix(name, body) {
 		return false
 	}
-	return string([]rune(got)) == got
+	return string([]rune(body)) == body
 }
 
 // TestOversizeUsername_NeverEntersAMapKey is the DEFECT gate: it fails against
@@ -118,7 +164,7 @@ func TestOversizeUsername_NeverEntersAMapKey(t *testing.T) {
 		}
 	}
 	if len(l.pairs) != 1 || len(l.accounts) != 1 {
-		t.Errorf("entries = %d pair / %d account, want 1 / 1 (oversize names alias onto one bounded key)",
+		t.Errorf("entries = %d pair / %d account, want 1 / 1 (repeated failures for ONE name share its key)",
 			len(l.pairs), len(l.accounts))
 	}
 }

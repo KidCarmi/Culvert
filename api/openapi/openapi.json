@@ -1766,7 +1766,7 @@
             "type": "string"
           },
           "user": {
-            "description": "Admin username. Bounded at 256 bytes (CHAOS-58): this endpoint is\npublic, and an unbounded value here reaches the account-lockout\nmaps and the durable audit log. A longer value is rejected with\n400 before any credential evaluation. Local accounts are created\nwith a 1-64 character name, so the limit cannot affect a real user.\n",
+            "description": "Admin username. Bounded at 256 bytes (CHAOS-58): this endpoint is\npublic, and an unbounded value here reaches the account-lockout\nmaps and the durable audit log. A longer value is rejected with\n400 before any credential evaluation. A name that already belongs\nto a configured account is never rejected, however long, so the\nlimit cannot lock out a real admin.\n",
             "maxLength": 256,
             "type": "string"
           }

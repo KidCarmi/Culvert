@@ -197,8 +197,9 @@ components:
             Admin username. Bounded at 256 bytes (CHAOS-58): this endpoint is
             public, and an unbounded value here reaches the account-lockout
             maps and the durable audit log. A longer value is rejected with
-            400 before any credential evaluation. Local accounts are created
-            with a 1-64 character name, so the limit cannot affect a real user.
+            400 before any credential evaluation. A name that already belongs
+            to a configured account is never rejected, however long, so the
+            limit cannot lock out a real admin.
         pass: { type: string, format: password }
         totp:
           type: string

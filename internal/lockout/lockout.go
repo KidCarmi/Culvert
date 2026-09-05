@@ -4,6 +4,8 @@
 package lockout
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -68,36 +70,58 @@ const (
 // caller can reintroduce the exposure by forgetting to.
 //
 // 256 bytes matches maxUsernameLen on the proxy-auth path (proxy_portal.go),
-// which already answered this question for Proxy-Authorization; a local admin
-// user is created with a 1-64 character name, so the clamp is unreachable for
-// every name that can name a real account. Names past the bound alias onto
-// their prefix, which is harmless precisely because none of them can be real.
+// which already answered this question for Proxy-Authorization. Note that a
+// name past the bound CAN name a real account: `-user`/`auth.user` and
+// `--reset-password` reach cfg.SetAuth/cfg.SetUIUser, and neither store bounds
+// the name (only the API handlers cap at 64). The login endpoint therefore
+// exempts a configured name from its own rejection, which means such a name
+// reaches this limiter — so the clamp must stay INJECTIVE. See boundUsername.
 const MaxUsernameKeyLen = 256
 
-// boundUsername clamps username to MaxUsernameKeyLen bytes, cutting on a UTF-8
-// rune boundary so a truncated key stays renderable on the Snapshot admin
-// surface. It MUST be applied at every public entry point that takes a
-// username: Check and RecordFailure disagreeing about the key would silently
-// split one attacker's failures across two counters and weaken the lock.
+// usernameDigestLen is the hex-encoded SHA-256 prefix appended to a clamped
+// name, plus the "…" marker. 16 hex characters is 64 bits: enough that two
+// distinct usernames colliding is not something an attacker can construct.
+const usernameDigestLen = len("…") + 16
+
+// boundUsername clamps username to MaxUsernameKeyLen bytes. It MUST be applied
+// at every public entry point that takes a username: Check and RecordFailure
+// disagreeing about the key would silently split one attacker's failures across
+// two counters and weaken the lock.
+//
+// The clamp is INJECTIVE, and that is a security property rather than tidiness.
+// A plain truncation aliases every name sharing the first 256 bytes onto one
+// entry, and because the login endpoint admits an over-long CONFIGURED name,
+// one of those entries can belong to a real admin: an attacker who knew that
+// admin's first 256 bytes could then submit an ordinary ≤256-byte name that
+// clamps to the same key and drive the tier-2 account lock against them —
+// lockout-as-DoS, the exact defect the two-tier design (RISK-012) exists to
+// prevent. Appending a digest of the WHOLE name keeps the key bounded while
+// keeping distinct names distinct.
+//
+// The retained prefix is cut on a UTF-8 rune boundary so the key stays
+// renderable on the Snapshot admin surface.
 func boundUsername(username string) string {
 	if len(username) <= MaxUsernameKeyLen {
 		return username
 	}
-	cut := MaxUsernameKeyLen
+	sum := sha256.Sum256([]byte(username))
+	cut := MaxUsernameKeyLen - usernameDigestLen
 	// A rune is at most 4 bytes, so one of the four bytes at or below the cut is
 	// a rune start for any valid UTF-8 input. The search is bounded rather than
 	// an unbounded walk back: an all-continuation-byte input would otherwise
-	// walk to 0 and alias every such name onto the EMPTY username, which a
-	// caller can also submit legitimately. Falling back to the raw byte cut
-	// keeps the value bounded (the point of the clamp), deterministic, and
-	// distinct from "".
+	// walk to 0. Falling back to the raw byte cut keeps the value bounded (the
+	// point of the clamp) and deterministic; the digest carries the identity
+	// either way.
 	for i := 0; i < 4 && cut > 0; i++ {
 		if utf8.RuneStart(username[cut]) {
-			return username[:cut]
+			break
 		}
 		cut--
 	}
-	return username[:MaxUsernameKeyLen]
+	if cut <= 0 || !utf8.RuneStart(username[cut]) {
+		cut = MaxUsernameKeyLen - usernameDigestLen
+	}
+	return username[:cut] + "…" + hex.EncodeToString(sum[:])[:16]
 }
 
 // pairKey builds the tier-1 map key. \x00 cannot appear in an IP, so the
