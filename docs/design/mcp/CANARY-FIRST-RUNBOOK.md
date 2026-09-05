@@ -187,6 +187,11 @@ latency_pathology · unexpected_upstream_response · independent_witness_mismatc
 > Canary abort itself for its own controls firing. The sample is counted, and the latch it may prove
 > decided, BEFORE the reservation goes back — otherwise a waiting request takes the freed slot and
 > reaches the upstream before the failure that should have stopped the experiment is even counted.
+> The same holds for every other step that decides authority: the order is trust-breach → settle →
+> terminal outcome → release, and the terminal outcome commit is itself the `outcome_evidence_loss`
+> producer. Two classifier entries go in opposite directions on purpose — a pinned-identity mismatch
+> is the single-occurrence `server_identity_drift` breach rather than a sample, and a caller
+> cancellation is not evidence about the target (a deadline overrun still is).
 >
 > **The operator surface is never more optimistic than admission.** `activation_runtime.auto_stop`
 > derives `window_expired` and `execution_authority` from the same two-ended `WindowOpen` predicate

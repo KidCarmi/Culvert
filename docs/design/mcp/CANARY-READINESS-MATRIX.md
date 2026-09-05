@@ -141,8 +141,13 @@ failure", for the error-rate detector, is the UPSTREAM LEG's verdict (`upstreamL
 transport error, a nil response, or a decoded JSON-RPC error object. Culvert's own response-DLP
 block after a successful peer answer is deliberately NOT a failure — a Canary must not abort itself
 for its own controls firing. The sample is counted, and the latch it may prove decided, BEFORE the
-reservation is released: a threshold that is merely reachable does not stop anything if the next
-request can take the freed slot first.
+reservation is released — and so is every OTHER step that decides authority: the ordered sequence
+is trust-breach → settle → terminal outcome → release, because a threshold that is merely reachable
+does not stop anything if the next request can take the freed slot first. Two entries in the
+classifier are deliberate and go in opposite directions: a pinned-identity mismatch
+(`ReasonUpstreamTLSIdentity`) is the single-occurrence `server_identity_drift` breach rather than a
+sample, and a caller cancellation (`context.Canceled`) is not evidence about the target at all — a
+DEADLINE overrun is, and is still charged.
 
 **Per-request fail-closed (Canary survives):** policy_deny, stale_decision,
 credential_not_ready, response_inspection_block, emergency_kill_for_request, allowance_consumed.
