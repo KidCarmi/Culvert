@@ -287,6 +287,23 @@ func (s *LifecycleStore) MarkDeletePending(profileID string) error {
 	return s.swapRecordLocked(rec)
 }
 
+// ClearDeletePending withdraws a recorded delete transition whose active
+// delete was PROVABLY refused (validation, or a persist-before-swap write
+// that returned an error: memory and file are unchanged), so an unchanged
+// profile keeps its epoch. Persist-before-swap; a failed write leaves the
+// flag, and the next access rotates the epoch conservatively.
+func (s *LifecycleStore) ClearDeletePending(profileID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.byID[profileID]
+	if !ok || !cur.DeletePending {
+		return nil
+	}
+	rec := cloneLifecycle(cur)
+	rec.DeletePending = false
+	return s.swapRecordLocked(rec)
+}
+
 // Recreate starts a NEW history epoch for profileID — a fresh record with a
 // freshly minted identity observing the given active identity — replacing
 // whatever record (finished, half-deleted or stale) may survive under that

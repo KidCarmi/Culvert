@@ -322,24 +322,33 @@ func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "the delete could not be recorded in the node-local history; nothing was changed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if pacApplyProfilesMutation(w, r, "pac.profile_delete", id, before, candidate) {
-		// Drop the node-local lifecycle history for the deleted profile. A
-		// failure here is finished by the next access/boot (the flag above);
-		// the active mutation is committed and is reported as such.
-		if err := pacLifecycle.Delete(id); err != nil {
-			logger.Printf("PAC: lifecycle delete for %s: %v (finished at the next access)", sanitizeLog(id), err)
+	if !pacApplyProfilesMutation(w, r, "pac.profile_delete", id, before, candidate) {
+		// The active delete was PROVABLY refused (validation, or a
+		// persist-before-swap write that returned an error): withdraw the
+		// transition so the unchanged profile keeps its epoch. If even this
+		// write fails, the flag stays and the next access rotates the epoch
+		// conservatively — never the other way round.
+		if err := pacLifecycle.ClearDeletePending(id); err != nil {
+			logger.Printf("PAC: delete transition for %s could not be withdrawn after the refused delete: %v (the epoch rotates at the next access)", sanitizeLog(id), err)
 		}
-		// Drop the node-local DIRECT-exception governance too, so a later
-		// profile recreated under the SAME id cannot silently inherit the old
-		// owner/reason/expiry and show a newly introduced bypass as governed
-		// without fresh attestation.
-		pacExceptionsMu.Lock()
-		if err := pacExceptions.Delete(id); err != nil {
-			logger.Printf("PAC: exception delete for %s: %v", sanitizeLog(id), err)
-		}
-		pacExceptionsMu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
+		return
 	}
+	// Drop the node-local lifecycle history for the deleted profile. A
+	// failure here is finished by the next access/boot (the flag above);
+	// the active mutation is committed and is reported as such.
+	if err := pacLifecycle.Delete(id); err != nil {
+		logger.Printf("PAC: lifecycle delete for %s: %v (finished at the next access)", sanitizeLog(id), err)
+	}
+	// Drop the node-local DIRECT-exception governance too, so a later
+	// profile recreated under the SAME id cannot silently inherit the old
+	// owner/reason/expiry and show a newly introduced bypass as governed
+	// without fresh attestation.
+	pacExceptionsMu.Lock()
+	if err := pacExceptions.Delete(id); err != nil {
+		logger.Printf("PAC: exception delete for %s: %v", sanitizeLog(id), err)
+	}
+	pacExceptionsMu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {

@@ -51,6 +51,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
@@ -465,5 +466,39 @@ func TestPACTransition_F5_MigrationWriteFailure_UnpersistedEpochIsNotAdvertised(
 	rec = pacTransitionPublishAt(t, opX, 2, pacIntentDraft("v3", false), incDurable, "")
 	if rec.Code != 200 {
 		t.Fatalf("publish in the durable epoch: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ── F6 (correction-time proof, not part of the baseline RED matrix) ──────────
+
+// A delete whose ACTIVE write is provably refused withdraws the recorded
+// transition: the untouched profile keeps its epoch and a request reviewed
+// in it still lands.
+func TestPACTransition_F6_RefusedActiveDeleteWithdrawsTheTransitionAndKeepsTheEpoch(t *testing.T) {
+	pacTransitionEnv(t)
+	if rev := pacContinuityPut(t, "Branch IL base"); rev != 2 {
+		t.Fatalf("base revision = %d, want 2", rev)
+	}
+	pacContinuitySaveDraft(t, pacIntentDraft("v2", false))
+	inc := pacContinuityIncarnation(t)
+	// the active store cannot be written (persist-before-swap: memory and
+	// file stay as they are), so the delete is refused
+	profilesPath := pacFencePaths.profiles
+	pacProfiles.Restore(pac.ProfileState{Cfg: pacProfiles.Get(), Path: filepath.Join(t.TempDir(), "missing", "pac_profiles.json")})
+	cur := pacContinuityProfile(t)
+	rec := pacFenceReq(t, "DELETE", fmt.Sprintf("/api/pac/profiles/branch-il?revision=%d", cur.Revision), "", pacIntentIP)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a refused active delete must be reported as a failure: %d %s", rec.Code, rec.Body.String())
+	}
+	pacProfiles.Restore(pac.ProfileState{Cfg: pacProfiles.Get(), Path: profilesPath})
+	if _, ok := pacProfiles.ProfileByID("branch-il"); !ok {
+		t.Fatal("the profile must be untouched")
+	}
+	if got := pacContinuityIncarnation(t); got != inc {
+		t.Fatalf("a refused delete must not rotate the epoch: %s → %s", inc, got)
+	}
+	rec = pacTransitionPublishAt(t, uuid.NewString(), 2, pacIntentDraft("v2", false), inc, "")
+	if rec.Code != 200 {
+		t.Fatalf("a request reviewed in the kept epoch must land: %d %s", rec.Code, rec.Body.String())
 	}
 }
