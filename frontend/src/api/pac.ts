@@ -268,8 +268,11 @@ export interface PacRevision {
 }
 
 export interface PacProfileDiff {
-  rulesAdded: readonly PacRule[];
-  rulesRemoved: readonly PacRule[];
+  /** Rule DESCRIPTIONS (server-rendered strings, e.g. "rule 3: direct
+   * domain intranet.example"), never rule objects — `internal/pac`
+   * ProfileDiff. */
+  rulesAdded: readonly string[];
+  rulesRemoved: readonly string[];
   rulesReordered: boolean;
   poolChanged: boolean;
   oldPool: string;
@@ -334,8 +337,12 @@ export interface PacHistoryReset {
 export interface PacLifecycle {
   profileId: string;
   activeExists: boolean;
-  active: PacProfile;
-  draft: PacProfile;
+  /** Absent when the profile has no active spec on this node
+   * (`activeExists:false` — the backend serialises a zero Profile there). */
+  active: PacProfile | undefined;
+  /** Absent until a draft has ever been saved (`draftRevision` 0 — the
+   * backend serialises a zero Profile there, not the active spec). */
+  draft: PacProfile | undefined;
   draftDirty: boolean;
   activeN: number;
   revisions: readonly PacRevision[];
@@ -379,8 +386,8 @@ export const decodePacProfileDiff: Decoder<PacProfileDiff> = (
 ) => {
   const o = readRecord(v, path);
   return {
-    rulesAdded: opt(o, "rulesAdded", readArray(decodePacRule), path) ?? [],
-    rulesRemoved: opt(o, "rulesRemoved", readArray(decodePacRule), path) ?? [],
+    rulesAdded: opt(o, "rulesAdded", readStrings, path) ?? [],
+    rulesRemoved: opt(o, "rulesRemoved", readStrings, path) ?? [],
     rulesReordered: opt(o, "rulesReordered", readBoolean, path) ?? false,
     poolChanged: opt(o, "poolChanged", readBoolean, path) ?? false,
     oldPool: opt(o, "oldPool", readString, path) ?? "",
@@ -471,16 +478,21 @@ export const decodePacHistoryReset: Decoder<PacHistoryReset> = (
 
 export const decodePacLifecycle: Decoder<PacLifecycle> = (v, path = "$") => {
   const o = readRecord(v, path);
+  const activeExists = field(o, "activeExists", readBoolean, path);
+  const draftRevision = field(o, "draftRevision", readNumber, path);
   return {
     profileId: field(o, "profileId", readString, path),
-    activeExists: field(o, "activeExists", readBoolean, path),
-    active: field(o, "active", decodePacProfile, path),
-    draft: field(o, "draft", decodePacProfile, path),
+    activeExists,
+    active: activeExists
+      ? field(o, "active", decodePacProfile, path)
+      : undefined,
+    draft:
+      draftRevision > 0 ? field(o, "draft", decodePacProfile, path) : undefined,
     draftDirty: field(o, "draftDirty", readBoolean, path),
     activeN: field(o, "activeN", readNumber, path),
     revisions: opt(o, "revisions", readArray(decodeRevision), path) ?? [],
     draftDiff: opt(o, "draftDiff", decodePacProfileDiff, path),
-    draftRevision: field(o, "draftRevision", readNumber, path),
+    draftRevision,
     activeRevision: field(o, "activeRevision", readNumber, path),
     collectionEtag: field(o, "collectionEtag", readString, path),
     state: field(o, "state", readEnum(PAC_LIFECYCLE_STATES), path),

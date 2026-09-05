@@ -144,6 +144,11 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
     getPacLifecycle(p.id, signal),
   );
   const lc = page.q.data;
+  // The REVIEWED CANDIDATE: the saved node-local draft when one exists,
+  // otherwise the current active spec (an initial publish records the
+  // profile as it is served today — the backend keeps no draft until one
+  // is saved).
+  const candidate = lc === undefined ? undefined : (lc.draft ?? lc.active);
   const [ceremony, setCeremony] = useState<Ceremony>({ kind: "none" });
   const [notice, setNotice] = useState<Notice | null>(null);
   const [fence, setFence] = useState<{
@@ -207,6 +212,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
   const canPublish =
     p.isAdmin &&
     lc !== undefined &&
+    candidate !== undefined &&
     !lifecycleBlocked &&
     !editorDirty &&
     !saving;
@@ -377,13 +383,13 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
   };
 
   const startPublish = (reason: string): void => {
-    if (lc === undefined) return;
+    if (lc === undefined || candidate === undefined) return;
     setCeremony({ kind: "publish", reason, result: "pending", errorText: "" });
     void runOperation(
       {
         action: "publish",
         operationId: mintPacOperationId(),
-        draft: lc.draft,
+        draft: candidate,
         targetN: 0,
         expectedActiveRevision: lc.activeRevision,
         expectedActiveSpecDigest: lc.activeSpecDigest,
@@ -395,7 +401,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
   };
 
   const startRollback = (targetN: number, reason: string): void => {
-    if (lc === undefined) return;
+    if (lc === undefined || candidate === undefined) return;
     setCeremony({
       kind: "rollback",
       targetN,
@@ -407,7 +413,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
       {
         action: "rollback",
         operationId: mintPacOperationId(),
-        draft: lc.draft,
+        draft: candidate,
         targetN,
         expectedActiveRevision: lc.activeRevision,
         expectedActiveSpecDigest: lc.activeSpecDigest,
@@ -797,7 +803,7 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
           )}
 
           <Card
-            title={`${lc.active.name !== "" ? lc.active.name : p.id} — active profile`}
+            title={`${lc.active !== undefined && lc.active.name !== "" ? lc.active.name : p.id} — active profile`}
             actions={
               <span>
                 <StatusBadge
@@ -824,11 +830,21 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                   <Mono key="d">{shortDigest(lc.activeSpecDigest)}</Mono>,
                 ],
                 ["History revision", String(lc.activeN)],
-                ["Enabled", lc.active.enabled ? "yes" : "no"],
-                ["Pool", lc.active.poolId !== "" ? lc.active.poolId : "—"],
-                ["Availability mode", lc.active.availabilityMode],
-                ["Private networks", lc.active.privateNetworks],
-                ["Rules", String(lc.active.rules.length)],
+                ...(lc.active !== undefined
+                  ? [
+                      ["Enabled", lc.active.enabled ? "yes" : "no"] as const,
+                      [
+                        "Pool",
+                        lc.active.poolId !== "" ? lc.active.poolId : "—",
+                      ] as const,
+                      [
+                        "Availability mode",
+                        lc.active.availabilityMode,
+                      ] as const,
+                      ["Private networks", lc.active.privateNetworks] as const,
+                      ["Rules", String(lc.active.rules.length)] as const,
+                    ]
+                  : [["Active profile", "not present on this node"] as const]),
                 ["PAC path", <Mono key="p">{`/pac/${p.id}.pac`}</Mono>],
               ]}
             />
@@ -875,16 +891,16 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                       removed DIRECT path: <Mono>{d}</Mono>
                     </li>
                   ))}
-                  {lc.draftDiff.rulesAdded.length > 0 && (
-                    <li>
-                      rules added: {String(lc.draftDiff.rulesAdded.length)}
+                  {lc.draftDiff.rulesAdded.map((d) => (
+                    <li key={`a-${d}`}>
+                      rule added: <Mono>{d}</Mono>
                     </li>
-                  )}
-                  {lc.draftDiff.rulesRemoved.length > 0 && (
-                    <li>
-                      rules removed: {String(lc.draftDiff.rulesRemoved.length)}
+                  ))}
+                  {lc.draftDiff.rulesRemoved.map((d) => (
+                    <li key={`x-${d}`}>
+                      rule removed: <Mono>{d}</Mono>
                     </li>
-                  )}
+                  ))}
                   {lc.draftDiff.rulesReordered && <li>rules reordered</li>}
                   {lc.draftDiff.poolChanged && (
                     <li>
@@ -900,9 +916,14 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
                 </ul>
               </Callout>
             )}
-            {p.isAdmin ? (
+            {candidate === undefined ? (
+              <p>
+                No draft and no active spec exist for this profile on this node
+                — nothing can be reviewed or published.
+              </p>
+            ) : p.isAdmin ? (
               <ProfileDraftEditor
-                serverDraft={lc.draft}
+                serverDraft={candidate}
                 pools={p.pools}
                 disabled={lifecycleBlocked}
                 saving={saving}
@@ -914,14 +935,14 @@ export function ProfileDetail(p: ProfileDetailProps): JSX.Element {
             ) : (
               <KeyValue
                 items={[
-                  ["Name", lc.draft.name],
-                  ["Enabled", lc.draft.enabled ? "yes" : "no"],
-                  ["Pool", lc.draft.poolId !== "" ? lc.draft.poolId : "—"],
-                  ["Availability mode", lc.draft.availabilityMode],
-                  ["Private networks", lc.draft.privateNetworks],
+                  ["Name", candidate.name],
+                  ["Enabled", candidate.enabled ? "yes" : "no"],
+                  ["Pool", candidate.poolId !== "" ? candidate.poolId : "—"],
+                  ["Availability mode", candidate.availabilityMode],
+                  ["Private networks", candidate.privateNetworks],
                   [
                     "Rules",
-                    lc.draft.rules
+                    candidate.rules
                       .map(
                         (r) =>
                           `${r.kind} ${r.pattern} → ${r.action}${r.poolId !== undefined && r.poolId !== "" ? ` (${r.poolId})` : ""}`,

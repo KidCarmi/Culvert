@@ -89,7 +89,7 @@ const LC = {
     },
   ],
   draftDiff: {
-    rulesAdded: [RULE],
+    rulesAdded: ["rule 1: direct domain intranet.example"],
     rulesReordered: false,
     poolChanged: false,
     newDirectPaths: ["rule: direct domain intranet.example"],
@@ -127,8 +127,8 @@ describe("A1 lifecycle decoder", () => {
     const lc = decodePacLifecycle(LC);
     expect(lc.profileId).toBe("hq");
     expect(lc.activeExists).toBe(true);
-    expect(lc.active.revision).toBe(3);
-    expect(lc.draft.rules).toHaveLength(1);
+    expect(lc.active?.revision).toBe(3);
+    expect(lc.draft?.rules).toHaveLength(1);
     expect(lc.draftRevision).toBe(4);
     expect(lc.activeRevision).toBe(3);
     expect(lc.collectionEtag).toBe("sha256:coll");

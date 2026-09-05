@@ -321,9 +321,14 @@ test("admin: publish (revision 1), publish again (revision 2), roll back to 1 th
     await expect.poll(async () => num(await lifecycle(api), "activeN")).toBe(3);
     const lc = await lifecycle(api);
     const active = lc["active"];
+    // `rules` is omitempty on the wire: an absent key IS the empty list.
     expect(
-      isRecord(active) && Array.isArray(active["rules"])
-        ? active["rules"].length
+      isRecord(active)
+        ? Array.isArray(active["rules"])
+          ? active["rules"].length
+          : active["rules"] === undefined
+            ? 0
+            : -1
         : -1,
     ).toBe(0);
     assertNoCrossSurface(calls);

@@ -122,7 +122,7 @@ function baseLifecycle(): Record<string, unknown> {
       },
     ],
     draftDiff: {
-      rulesAdded: [RULE],
+      rulesAdded: ["rule 1: direct domain intranet.example"],
       rulesReordered: false,
       poolChanged: false,
       newDirectPaths: BINDING.newDirectPaths,

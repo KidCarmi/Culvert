@@ -256,7 +256,7 @@ export function ProfilesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
       )}
       {listing !== undefined && (
         <>
-          <Card title="Default profile (legacy, managed on the Legacy PAC tab)">
+          <Card title="Default profile (legacy)">
             <p>
               <Mono>{listing.defaultProfile.pacPath}</Mono> —{" "}
               {listing.defaultProfile.enabled ? "enabled" : "disabled"}; proxy{" "}
@@ -265,12 +265,13 @@ export function ProfilesTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
                 : "(none — fail-open DIRECT)"}
               ; {String(listing.defaultProfile.exclusions)} exclusion(s);
               availability {listing.defaultProfile.availabilityMode}; private
-              networks {listing.defaultProfile.privateNetworks}.
+              networks {listing.defaultProfile.privateNetworks}. Managed on the
+              Legacy tab.
             </p>
           </Card>
           <Card title={`Profiles (${String(listing.profiles.length)})`}>
             {listing.profiles.length === 0 ? (
-              <EmptyState title="No PAC profiles">
+              <EmptyState title="No profiles yet">
                 Profiles steer clients per site or group; create one to start a
                 node-local draft.
               </EmptyState>
