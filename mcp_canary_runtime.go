@@ -360,10 +360,13 @@ func (rt *canaryRuntime) generationActive(capb rollout.Capability, gen uint64) b
 	// This makes the watchdog what it was always described as — a convenience that stops an IDLE
 	// experiment — rather than the only thing standing between an expired window and an upstream
 	// call.
-	if cr.enforcer != nil {
-		if d := cr.enforcer.WindowDeadline(); !d.IsZero() && !canaryNow().Before(d) {
-			return false
-		}
+	// WindowOpen, not merely "before the deadline": the window has TWO ends. Reserve and the
+	// eligibility read both treat now < the activation instant as CLOSED, because a clock that has
+	// rolled back behind the activation cannot be used to reason about elapsed time at all. Testing
+	// only the upper bound here would let an already-admitted request cross during exactly that
+	// rollback (Codex round 3 P2) — the one condition every other gate in this file refuses.
+	if cr.enforcer != nil && !cr.enforcer.WindowOpen(canaryNow()) {
+		return false
 	}
 	return true
 }

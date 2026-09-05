@@ -1200,3 +1200,60 @@ func TestAutoStop_HonestSampleCountsStillRestore(t *testing.T) {
 		})
 	}
 }
+
+// ── Codex round 3 ─────────────────────────────────────────────────────────────────────────────
+
+// The observation and the latch it proves are ONE critical section. Split, a third request could
+// take cr.mu between them, reserve the remaining slot and pass the final boundary while the
+// population had already proved the Canary must stop.
+func TestAutoStop_HealthBreachLatchesUnderTheSameLockAsTheObservation(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := canaryRuntimeTestNow
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gen := rt.currentGeneration(capb)
+	f := &canarySafetyFunnel{rt: rt, capb: capb}
+
+	f.AttemptSettled(capb.String(), gen, true, time.Second) // 1 failure, below the floor
+	if rt.abortedNow(capb) {
+		t.Fatal("one failure is below the floor")
+	}
+	// The observation that proves the breach must leave the runtime ALREADY latched: the funnel
+	// performs no second step, so there is no window for a racing reservation.
+	f.AttemptSettled(capb.String(), gen, false, time.Second) // 1 of 2 = 50%
+	if !rt.abortedNow(capb) {
+		t.Fatal("SECURITY: the observation that proves the breach must latch it, not hand a code to a later step")
+	}
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o == canary.BudgetGranted {
+		t.Fatal("SECURITY: no reservation may be granted once the population proved the breach")
+	}
+}
+
+// The final boundary must refuse a clock that rolled back BEHIND the activation instant, not only
+// one that ran past the deadline. Every other gate in the runtime treats negative elapsed time as a
+// closed window; the boundary must agree or an already-admitted request crosses during exactly that
+// condition.
+func TestAutoStop_ClockRollbackBehindActivationClosesTheBoundary(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	nowP := canaryRuntimeTestNow
+	swapCanaryClockVar(t, &nowP)
+	_, _, _ = swapCanaryTimer(t)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	gen := rt.currentGeneration(capb)
+	if o, _ := rt.reserveCanaryExecution(capb, canaryRuntimeTestNow, rtIdent); o != canary.BudgetGranted {
+		t.Fatalf("premise: the reservation must be granted, got %v", o)
+	}
+	if !rt.generationActive(capb, gen) {
+		t.Fatal("premise: the boundary is open while the clock is sane")
+	}
+	// The clock rolls back BEHIND the activation instant while the request is in flight.
+	nowP = canaryRuntimeTestNow.Add(-time.Minute)
+	if rt.generationActive(capb, gen) {
+		t.Fatal("SECURITY: a clock rolled back behind the activation must close the boundary, not merely the upper deadline")
+	}
+}

@@ -69,6 +69,24 @@ func (s HealthSnapshot) Valid() bool {
 		return false
 	case s.Samples == 0 && (s.LatencySumNs != 0 || s.Failures != 0 || s.HardLatencies != 0):
 		return false
+	// The hard-latency COUNTER and the latency SUM constrain each other, and getting this wrong is
+	// the one damaged shape that erases a breach the live path had already proven. {Samples:1,
+	// LatencySumNs:15s, HardLatencies:0} is arithmetically tidy and IMPOSSIBLE for this writer:
+	// Observe increments HardLatencies for that very sample. Restored, Verdict sees no hard latency
+	// and skips the mean check below the floor — so an activation whose single attempt already
+	// tripped latency_pathology comes back holding execution authority (Codex round 3 P1).
+	//
+	// Two bounds follow from the definition of the counter, and together they pin the one-sample
+	// case exactly:
+	//   - each hard sample contributed at least the limit, so the sum is at least that many limits;
+	//   - if NO sample was hard, every sample was strictly under the limit, so the sum is strictly
+	//     under Samples limits.
+	case s.LatencySumNs < int64(s.HardLatencies)*int64(HealthLatencyHardLimit):
+		return false
+	// Samples > 0 guards the bound: at zero samples the sum is zero and "0 >= 0" would reject the
+	// ordinary empty snapshot every fresh activation persists.
+	case s.Samples > 0 && s.HardLatencies == 0 && s.LatencySumNs >= int64(s.Samples)*int64(HealthLatencyHardLimit):
+		return false
 	}
 	return true
 }

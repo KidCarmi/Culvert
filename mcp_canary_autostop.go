@@ -216,10 +216,11 @@ func (f *canarySafetyFunnel) AttemptSettled(capability string, gen uint64, faile
 	if f == nil || f.rt == nil || capability != f.capb.String() {
 		return
 	}
-	code, ok := f.rt.observeAttemptSettled(f.capb, gen, failed, latency)
-	if ok && code != "" {
-		f.rt.tripCanaryAbortForGeneration(f.capb, gen, code, canaryNow())
-	}
+	// The latch happens INSIDE observeAttemptSettled, under the same lock that records the
+	// observation. Returning a code for the caller to trip left a window in which a third request
+	// could take cr.mu, reserve the remaining slot and pass the final boundary between the sample
+	// that proved the breach and the latch that acted on it (Codex round 3 P1).
+	f.rt.observeAttemptSettled(f.capb, gen, failed, latency)
 }
 
 // observeAttemptSettled records one settled attempt against the capability's health monitor and
@@ -227,20 +228,27 @@ func (f *canarySafetyFunnel) AttemptSettled(capability string, gen uint64, faile
 // the updated counters so a restart cannot wipe accumulated failure evidence.
 //
 // It does NOT trip: the trip is the caller's, on the ONE authority, without this lock held.
-func (rt *canaryRuntime) observeAttemptSettled(capb rollout.Capability, gen uint64, failed bool, latency time.Duration) (string, bool) {
+func (rt *canaryRuntime) observeAttemptSettled(capb rollout.Capability, gen uint64, failed bool, latency time.Duration) {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if !cr.active || cr.health == nil || cr.generation != gen {
-		return "", false
+		return
 	}
-	code := cr.health.Observe(gen, failed, latency)
+	// Observe and the latch it may prove are ONE critical section. Splitting them — recording here
+	// and tripping from the caller after the lock is released — leaves a window in which the
+	// population already proves the Canary must stop and the runtime still says it may execute, and
+	// a request that takes the lock in that window reserves and crosses the boundary legitimately.
+	if code := cr.health.Observe(gen, failed, latency); code != "" {
+		tripAutoStopLocked(rt, capb, cr, code, canaryNow())
+		return // tripAutoStopLocked persisted (or failed closed) already
+	}
 	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
 		// FAIL CLOSED. These counters are declared restart-durable safety state, and the reason is
 		// the whole point of persisting them: a detector that resets on restart is one a crash can
 		// silently disarm. Logging a persist failure and carrying on would leave the process one
 		// restart away from treating the next bad attempt as the FIRST sample — the detector
-		// admitting work it had already seen enough to stop (Codex P1).
+		// admitting work it had already seen enough to stop (Codex round 1 P1).
 		//
 		// So the same doctrine as a failed abort persist applies: the durable record is removed, so
 		// a restart restores nothing rather than restoring an activation whose evidence is stale.
@@ -250,7 +258,6 @@ func (rt *canaryRuntime) observeAttemptSettled(capb rollout.Capability, gen uint
 			capb.String(), sanitizeLog(err.Error()))
 		_ = rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "health", err)
 	}
-	return code, true
 }
 
 // ── operator truth (blocker #7 §20) ──────────────────────────────────────────────────────────

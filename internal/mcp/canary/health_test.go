@@ -200,3 +200,51 @@ func TestHealth_VerdictRemembersAHardLatency(t *testing.T) {
 		t.Fatalf("a banked hard latency must survive the restart, got %q", v)
 	}
 }
+
+// A snapshot that ERASES a hard-latency observation must be refused. {Samples:1, LatencySumNs:15s,
+// HardLatencies:0} is arithmetically tidy and impossible for this writer — Observe increments
+// HardLatencies for exactly that sample — and restored it would hide a breach the live path already
+// proved: Verdict finds no hard latency and skips the mean check below the floor.
+func TestHealth_RestoreRefusesAnErasedHardLatency(t *testing.T) {
+	erased := HealthSnapshot{Generation: 3, Samples: 1, LatencySumNs: int64(HealthLatencyHardLimit)}
+	if erased.Valid() {
+		t.Fatal("SECURITY: a sample at the hard limit with a zero hard-latency counter is impossible and must not validate")
+	}
+	if _, ok := RestoreHealthMonitor(3, erased); ok {
+		t.Fatal("SECURITY: such a snapshot must refuse the restore")
+	}
+	// The honest form of the same observation restores AND still proves the breach.
+	honest := HealthSnapshot{Generation: 3, Samples: 1, LatencySumNs: int64(HealthLatencyHardLimit), HardLatencies: 1}
+	h, ok := RestoreHealthMonitor(3, honest)
+	if !ok {
+		t.Fatal("the honest form of the same observation must restore")
+	}
+	if v := h.Verdict(); v != "latency_pathology" {
+		t.Fatalf("the restored hard latency must still prove the breach, got %q", v)
+	}
+}
+
+// The two bounds relating the hard-latency counter to the sum, and the controls that keep them from
+// being satisfiable by refusing everything.
+func TestHealth_HardLatencyCounterBoundsAreConsistent(t *testing.T) {
+	lim := int64(HealthLatencyHardLimit)
+	for name, snap := range map[string]HealthSnapshot{
+		"sum below one hard latency":   {Generation: 1, Samples: 2, LatencySumNs: lim - 1, HardLatencies: 1},
+		"two hard, sum of one":         {Generation: 1, Samples: 2, LatencySumNs: lim, HardLatencies: 2},
+		"none hard but sum reaches it": {Generation: 1, Samples: 2, LatencySumNs: 2 * lim},
+	} {
+		if snap.Valid() {
+			t.Fatalf("SECURITY: %s must not validate", name)
+		}
+	}
+	for name, snap := range map[string]HealthSnapshot{
+		"empty":                {Generation: 1},
+		"fast samples":         {Generation: 1, Samples: 3, LatencySumNs: int64(3 * time.Second)},
+		"one hard, one fast":   {Generation: 1, Samples: 2, LatencySumNs: lim + int64(time.Second), HardLatencies: 1},
+		"every sample is hard": {Generation: 1, Samples: 2, LatencySumNs: 2 * lim, HardLatencies: 2},
+	} {
+		if !snap.Valid() {
+			t.Fatalf("an honest snapshot (%s) must validate — refusing it would disarm a healthy experiment", name)
+		}
+	}
+}

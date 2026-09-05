@@ -858,6 +858,53 @@ run_mutation M87 \
   . mcp_canary_runtime.go \
   's/\tif healthOK && st\.HealthSnapshot\.Samples > st\.BudgetSnapshot\.TotalReserved \{\n\t\thealthOK = false\n\t\}\n//'
 
+# ============================================================================
+# CODEX ROUND 3 ON #1314
+# ============================================================================
+
+run_mutation M88 \
+  'a snapshot may erase a hard-latency observation' \
+  'TestHealth_RestoreRefusesAnErasedHardLatency|TestHealth_HardLatencyCounterBoundsAreConsistent' \
+  ./internal/mcp/canary/ internal/mcp/canary/health.go \
+  's/\tcase s\.Samples > 0 && s\.HardLatencies == 0 && s\.LatencySumNs >= int64\(s\.Samples\)\*int64\(HealthLatencyHardLimit\):\n\t\treturn false\n//'
+
+run_mutation M89 \
+  'the health breach is handed to a later step instead of latching under the lock' \
+  'TestAutoStop_HealthBreachLatchesUnderTheSameLockAsTheObservation' \
+  . mcp_canary_autostop.go \
+  's/\tif code := cr\.health\.Observe\(gen, failed, latency\); code != "" \{\n\t\ttripAutoStopLocked\(rt, capb, cr, code, canaryNow\(\)\)\n\t\treturn \/\/ tripAutoStopLocked persisted \(or failed closed\) already\n\t\}/\tif code := cr.health.Observe(gen, failed, latency); code != "" {\n\t\t_ = code\n\t}/'
+
+run_mutation M90 \
+  'the final boundary tests only the upper deadline, admitting a rolled-back clock' \
+  'TestAutoStop_ClockRollbackBehindActivationClosesTheBoundary' \
+  . mcp_canary_runtime.go \
+  's/\tif cr\.enforcer != nil && !cr\.enforcer\.WindowOpen\(canaryNow\(\)\) \{\n\t\treturn false\n\t\}/\tif cr.enforcer != nil {\n\t\tif d := cr.enforcer.WindowDeadline(); !d.IsZero() \&\& !canaryNow().Before(d) {\n\t\t\treturn false\n\t\t}\n\t}/'
+
+# M91 REORDERS two blocks rather than editing one, so its mutation lives in a helper
+# script (scripts/mutations/m91_settle_after_outcome.py) instead of a sed expression.
+# The swap is written to COMPILE: a compile failure would prove nothing, per the
+# header rule, so the helper exits 1 when its pattern no longer matches and the
+# mutation is scored SKIPPED rather than as a pass.
+printf '\n[M91] the terminal outcome is made durable before the health sample\n'
+printf '      gate: TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit  (./internal/mcp/execution/)\n'
+if ! python3 scripts/mutations/m91_settle_after_outcome.py || git diff --quiet internal/mcp/execution/attempt_evidence.go; then
+  printf '      SKIPPED — pattern drifted\n'; SKIPPED=$((SKIPPED+1))
+  revert internal/mcp/execution/attempt_evidence.go
+else
+  gofmt -w internal/mcp/execution/attempt_evidence.go
+  m91_out=$(go test -count=1 -run 'TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit' ./internal/mcp/execution/ 2>&1); m91_rc=$?
+  revert internal/mcp/execution/attempt_evidence.go
+  if ! gate_ran M91 "the settle-order gate" "$m91_out"; then
+    [ $KEEP -eq 0 ] && exit 1
+  elif [ $m91_rc -ne 0 ]; then
+    printf '      CAUGHT (gate failed as required)\n'; PASS=$((PASS+1))
+  else
+    printf '      *** SURVIVED *** the gate passed with the outcome written first\n'
+    SURVIVED=$((SURVIVED+1)); SURVIVORS+=("M91: the health sample may lag the terminal outcome")
+    [ $KEEP -eq 0 ] && exit 1
+  fi
+fi
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves
