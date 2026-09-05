@@ -1161,6 +1161,111 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD (this branch, 2026-09-05).** External freeze
+> review of the 2F-E candidate (`39e2cfdb`) found five blockers; each was
+> red-before on the untouched candidate (`d6214d98`: `pac-2fe-c-red.test.ts`
+> C1–C5 17/20 failing with 3 controls, `pac-2fe-c-red-page.test.tsx` P7–P16
+> 11/11, `pac_lifecycle_evidence_red_test.go` E1–E3 3/3, real-binary
+> `e2e/pac-2fe-c.spec.ts` R1–R8 8/8) and corrected append-only.
+> **(1) Recovery mistook absence for proof of non-commit.** `classifyRecovery`
+> answered `not_landed` whenever the operation was absent from the 20 listed
+> decisions, the pending intent and the ambiguity record — but the appliance
+> retains 64 decisions and lists 20, a history reset empties the ring, and a
+> request that has not reached intent persistence is absent while it can
+> still commit; the success copy also read a historical record as "the
+> candidate is the active profile". Corrected contract (`pacLifecycle.ts`):
+> the classifier takes the appliance's word when it has it — the new
+> `?operationId=` lookup over the FULL retained ring and the revision
+> history (revisions carry the operationId that produced them), the listed
+> decisions, the pending intent, the ambiguity record — and declares
+> non-commit ONLY with authoritative evidence: retained ring complete
+> (`operationsRetained < operationsCap`, or fewer than 20 listed without a
+> lookup), no history reset touching the dispatch window (unacknowledged, or
+> stamped at/after the dispatch with a 15-minute skew tolerance), the
+> operation absent, AND the reviewed fence moved (active revisions are
+> monotonic, so the appliance can no longer commit it). Everything else stays
+> UNRESOLVED with a named reason — `not_observed` (base unchanged: the
+> request may still be in flight), `history_bounded`, `history_reset`,
+> `history_missing` (the profile is gone or its revision went BELOW the
+> reviewed one: delete + recreate) — and the identity is retained. A landed
+> resolution distinguishes "committed as history revision N" from "currently
+> active" (N is `activeN`) and from decided-aborted. Resolution of an
+> unresolved operation is deliberate: **Re-send same operation** (Tier 2; the
+> SAME operationId, candidate — refused when the saved draft's
+> `draftSpecDigest` no longer matches the marker — and fences; at most once on
+> the appliance: replayed if landed, refused if stale, else it lands now; a
+> refusal is followed by a fresh authoritative read, never by a clear) or the
+> typed Abandon. The accepted A6 assertion that endorsed the absence rule was
+> corrected transparently (original values recorded in the case comment).
+> **The backend half, explicitly identified** (`3dc88637`, the only Go change
+> of the round): the lifecycle GET now carries `draftSpecDigest`,
+> `operationsRetained`, `operationsCap` and answers `?operationId=<uuid>` with
+> `operation {found, state, status, ts, revisionN}` (pure read; malformed id
+> 400). **(2) One marker key, no ownership.** Corrected (`pacRecovery.ts`):
+> ONE outstanding operation across the whole PAC surface — a write never
+> overwrites a different operation's marker and never succeeds over an
+> unreadable/unavailable store (only the same operation may be re-persisted
+> for a re-send); `clearPacRecovery(operationId)` is ownership-matched so a
+> late completion cannot erase another marker; the authentication boundary
+> is the one unconditional purge; a marker of ANOTHER profile, or an
+> unreadable/unavailable store, withholds publish and rollback on every
+> profile (named on the listing and the detail); an unknown subject (auth
+> state still hydrating) reads as unavailable and never discards a marker as
+> foreign — found by the page matrix: the first render discarded a valid
+> marker before the identity was known, which would have broken the reload
+> guarantee. **(3) Unproven responses cleared the identity.** Corrected: a
+> 2xx that cannot be decoded or has the wrong content type, and an
+> intermediary 5xx without a structured PAC decision, classify as UNKNOWN
+> (marker kept); a decoded 2xx is a proven commit only when it names the
+> dispatched operationId AND carries the action's positive flag
+> (`published`/`rolledBack`), else the marker is kept and the page says the
+> response could not be tied to the operation; proven commit with pending
+> reconciliation stays distinct from unknown. **(4) Local navigation lost
+> dirty drafts; Refresh re-armed stale edits.** Corrected: PAC tabs and
+> "← All profiles" are guarded by a local discard dialog ("Discard unsaved
+> changes?" — Cancel keeps the editor); the draft editor binds an edit to
+> the draft revision it started from and Save sends THAT base revision, so
+> a stale edit is refused 409 (rendered) instead of overwriting another
+> admin's newer draft; a Refresh revealing a newer server draft under
+> pending edits surfaces "Draft changed on the appliance" and is resolved
+> only by an explicit "Keep my edits (re-base to revision M)" or "Discard my
+> edits". **(5) Contract artifacts.** The lifecycle GET is documented
+> (`PACLifecycle`, `PACOperationLookup`, the evidence limits and the
+> non-commit proof rule), the POST documents the per-action request contract
+> and at-most-once replay, the profile/pool/exception DELETEs are documented
+> as 204 (the handlers always answered 204); bundle, offline docs, inventory
+> and `types.gen.ts` regenerated; conformance coverage
+> (`pac_lifecycle_evidence_red_test.go` E3: GET response validated, publish
+> request validated, DELETE 204 without a 200). The classification manifest
+> gained `openapi_extra_paths` (further contract paths served by the SAME
+> registered route + method — the lifecycle GET shares the `/api/pac/profiles/`
+> GET registration; the manifest forbids a second row per route + method).
+> **Real-binary proofs** (`pac-2fe-c.spec.ts`): R1 lost response + 25 further
+> API publishes (20 listed) → Recover proves "committed as revision 1, no
+> longer active"; R2 request never received (aborted before dispatch) → "not
+> observed", publish withheld, re-send lands with the same operationId
+> (exactly two POSTs); R3/R4/R5 gateway 502 / malformed 200 / wrong-identity
+> 200 AFTER the appliance committed → unresolved, marker kept, Recover proves
+> the commit; R6 A → B navigation and reload → B withheld and named until A
+> is resolved; R7 two-admin draft → stale save refused with the current
+> token, server draft untouched, explicit re-base then saves; R8 dirty editor
+> asks before a tab switch. **Harness completions** (disclosed, no expected
+> value changed): the original page fixture serves the lookup URL; the
+> Pools-tab discriminator and the success-notice discriminator in the
+> correction page matrix; the fetch spy typing; the A7 clear call names the
+> operation. **Found by the real-binary run and fixed in-round**: the
+> `history_missing` rule first misclassified a created-but-never-published
+> profile (`2c30a3ca`). **Limitations recorded.** The marker is
+> sessionStorage (per tab; a second tab cannot see it — the established
+> session lifecycle, same as the 2E-B/2E-C markers). The reset-ordering
+> tolerance (15 min) errs toward UNRESOLVED. A `history_bounded` operation
+> whose base moved and whose record was evicted can only be abandoned
+> deliberately after reviewing the publish history. A re-send carries no
+> history reason (the original reason is not part of the non-secret marker).
+> The 2E-C enrollment marker (`enrollRecovery.ts`) reads with the same
+> possibly-empty subject on first render and is NOT changed here (outside
+> the 2F-E findings; recorded for 2F-G). 2F-F/2F-G untouched.
+
 > **2F-E IMPLEMENTATION RECORD (this branch, 2026-09-05).** PAC React at
 > `/app/network/pac` under the approved C1–C12 contract; frontend-only
 > (no Go, no OpenAPI change). **Entry gate.** `origin/main` had advanced
