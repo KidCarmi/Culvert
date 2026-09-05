@@ -1655,9 +1655,9 @@ demonstration still scores CAUGHT.
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **103 mutations** (M61–M78 are the blocker-7
-auto-abort set; M79–M103 were added by the ten adversarial rounds above — 99 driven through
-`run_mutation`, plus M02, M17, M80 and M91, which are hand-written because they mutate more than one
-site or reorder two blocks). The 78-mutation state recorded below was clean on its second run;
+auto-abort set; M79–M103 were added by the ten adversarial rounds above — 100 driven through
+`run_mutation`, plus M02, M17 and M80, which stay hand-written because they mutate more than one
+site; M91 stopped needing a helper when round 8 collapsed the three orderings into one block). The 78-mutation state recorded below was clean on its second run;
 M79–M103 were each verified failing against their own reintroduced defect as they were written. The
 first scored 71/3/4 and every one of the seven was a defect in the PROOF, not in the abort wiring —
 which is the campaign doing its job, so it is recorded rather than quietly re-run:
