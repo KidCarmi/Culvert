@@ -244,13 +244,63 @@ func pacLifecycleOperationLookup(lc *pac.ProfileLifecycle, operationID string) m
 	return out
 }
 
-func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
+// pacLifecycleDerived is the request-independent half of the lifecycle
+// view: the reviewed draft diff, the pool-drift flag, the active/draft spec
+// digests and the 20 most recent decided operations (bodies stripped).
+type pacLifecycleDerived struct {
+	diff             *pac.ProfileDiff
+	poolChanged      bool
+	activeSpecDigest string
+	draftSpecDigest  string
+	ops              []pac.DecidedOp
+}
+
+func pacDeriveLifecycleView(lc *pac.ProfileLifecycle, cfg pac.ProfilesConfig, active pac.Profile, activeOK bool) pacLifecycleDerived {
+	var d pacLifecycleDerived
+	if lc.DraftDirty && activeOK {
+		diff := pac.DiffProfiles(active, true, lc.Draft)
+		d.diff = &diff
+	}
+	pools := map[string]pac.Pool{}
+	for i := range cfg.Pools {
+		pools[cfg.Pools[i].ID] = cfg.Pools[i]
+	}
+	if rev, has := lc.ActiveRevision(); has && rev.PoolDigest != "" && activeOK {
+		d.poolChanged = pac.PoolDigest(pac.ReferencedPools(active, pools)) != rev.PoolDigest
+	}
+	if activeOK {
+		d.activeSpecDigest = pac.ProfileSpecDigest(active)
+	}
+	if lc.DraftRevision > 0 {
+		d.draftSpecDigest = pac.ProfileSpecDigest(lc.Draft)
+	}
+	d.ops = make([]pac.DecidedOp, 0, len(lc.Operations))
+	for i := len(lc.Operations) - 1; i >= 0 && len(d.ops) < 20; i-- {
+		o := lc.Operations[i]
+		o.Result = nil // the recorded body is replayed by operationId, not listed
+		d.ops = append(d.ops, o)
+	}
+	return d
+}
+
+// pacLifecycleLookupID validates the optional `?operationId=` (a UUID or
+// nothing); false means a 400 was written.
+func pacLifecycleLookupID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	lookupID := r.URL.Query().Get("operationId")
-	if lookupID != "" {
-		if _, err := uuid.Parse(lookupID); err != nil {
-			http.Error(w, "operationId must be a UUID", http.StatusBadRequest)
-			return
-		}
+	if lookupID == "" {
+		return "", true
+	}
+	if _, err := uuid.Parse(lookupID); err != nil {
+		http.Error(w, "operationId must be a UUID", http.StatusBadRequest)
+		return "", false
+	}
+	return lookupID, true
+}
+
+func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
+	lookupID, ok := pacLifecycleLookupID(w, r)
+	if !ok {
+		return
 	}
 	pacProfilesAPIMu.Lock()
 	lc, _ := pacLifecycle.Get(id)
@@ -264,33 +314,7 @@ func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
 	reset := pacLifecycle.HistoryResetRecord()
 	pacProfilesAPIMu.Unlock()
 
-	var diff *pac.ProfileDiff
-	if lc.DraftDirty && activeOK {
-		d := pac.DiffProfiles(active, true, lc.Draft)
-		diff = &d
-	}
-	pools := map[string]pac.Pool{}
-	for i := range cfg.Pools {
-		pools[cfg.Pools[i].ID] = cfg.Pools[i]
-	}
-	poolChanged := false
-	if rev, has := lc.ActiveRevision(); has && rev.PoolDigest != "" && activeOK {
-		poolChanged = pac.PoolDigest(pac.ReferencedPools(active, pools)) != rev.PoolDigest
-	}
-	activeSpecDigest := ""
-	if activeOK {
-		activeSpecDigest = pac.ProfileSpecDigest(active)
-	}
-	ops := make([]pac.DecidedOp, 0, len(lc.Operations))
-	for i := len(lc.Operations) - 1; i >= 0 && len(ops) < 20; i-- {
-		o := lc.Operations[i]
-		o.Result = nil // the recorded body is replayed by operationId, not listed
-		ops = append(ops, o)
-	}
-	draftSpecDigest := ""
-	if lc.DraftRevision > 0 {
-		draftSpecDigest = pac.ProfileSpecDigest(lc.Draft)
-	}
+	d := pacDeriveLifecycleView(lc, cfg, active, activeOK)
 	resp := map[string]any{
 		"profileId":    id,
 		"activeExists": activeOK,
@@ -301,12 +325,12 @@ func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
 		// saved draft (the identity a publish binds to), how many decided
 		// operations are RETAINED against the cap (the list below shows at
 		// most 20), and the optional one-operation lookup.
-		"draftSpecDigest":    draftSpecDigest,
+		"draftSpecDigest":    d.draftSpecDigest,
 		"operationsRetained": len(lc.Operations),
 		"operationsCap":      pac.MaxDecidedOps,
 		"activeN":            lc.ActiveN,
 		"revisions":          lc.Revisions,
-		"draftDiff":          diff,
+		"draftDiff":          d.diff,
 		// 2F-A tokens.
 		"draftRevision":  lc.DraftRevision,
 		"activeRevision": active.Revision,
@@ -316,9 +340,9 @@ func pacLifecycleGet(w http.ResponseWriter, r *http.Request, id string) {
 		"historyState":     historyState,
 		"pendingOp":        lc.PendingOp,
 		"ambiguous":        lc.Ambiguous,
-		"operations":       ops,
-		"activeSpecDigest": activeSpecDigest,
-		"poolChangedSince": poolChanged,
+		"operations":       d.ops,
+		"activeSpecDigest": d.activeSpecDigest,
+		"poolChangedSince": d.poolChanged,
 		"scope":            "node-local",
 	}
 	if reset != nil {
