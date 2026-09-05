@@ -83,7 +83,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// such tool failures produced zero failures, never reached the 1-of-2 threshold, and
 		// admitted a third execution against a target that had just failed twice (Codex round
 		// 6 P1 — the same defect class as round 5, one shape further in).
-		e.commitAttemptOutcome(in, attempt, sendState, out, upstreamLegFailed(upResp, upErr))
+		e.commitAttemptOutcome(in, attempt, sendState, out)
 	}()
 
 	// OVN-09 (residual window). callUpstream is the ONE place either branch performs
@@ -114,9 +114,33 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		}
 		release, revalidate := adm.release, adm.revalidate
 		reservationID, activationGen := adm.reservationID, adm.activationGen
-		if release != nil {
-			defer release()
-		}
+		// THE HEALTH SAMPLE IS REPORTED BEFORE THE RESERVATION GOES BACK, IN ONE DEFER, AND THE
+		// ORDER INSIDE IT IS THE POINT.
+		//
+		// Reporting the settle and releasing the slot are not independent bookkeeping. The settle
+		// is what may latch elevated_error_rate, and the release is what lets the NEXT request
+		// reserve. Split the other way round — release deferred here, settle deferred by the outer
+		// runExecute — the release necessarily ran first, because an inner closure's defers run
+		// when the closure returns. With MaxConcurrentExecutions of 1 that is not a theoretical
+		// gap: the second failed call returns, its slot comes back, a waiting third request
+		// reserves and crosses Upstream.Call, and only then does the second sample arrive and prove
+		// the Canary should have stopped at 1-of-2. The threshold was reachable and still did not
+		// prevent the next physical invocation (Codex round 7 P1).
+		//
+		// This is the round-3 latch-atomicity finding one level further out: there the latch was
+		// not atomic with the OBSERVATION, here the observation was not ordered against the
+		// RELEASE. Both are the same mistake — treating the pieces of one decision as separate
+		// events — and both are fixed by making the sequence explicit rather than emergent.
+		//
+		// It is ONE defer with two statements rather than two defers relying on LIFO, because the
+		// ordering is a security property and must be readable as one. release stays deferred so a
+		// reserved slot is never leaked when a later boundary guard refuses (§11).
+		defer func() {
+			e.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))
+			if release != nil {
+				release()
+			}
+		}()
 		// DURABLE SEND INTENT (§6) — committed AFTER the budget reservation (so it can
 		// name the slot) and BEFORE the final boundary guards, because its purpose is
 		// to survive a crash that happens after the peer receives bytes. Only a

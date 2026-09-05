@@ -887,13 +887,13 @@ run_mutation M90 \
 # mutation is scored SKIPPED rather than as a pass.
 printf '\n[M91] the terminal outcome is made durable before the health sample\n'
 printf '      gate: TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit  (./internal/mcp/execution/)\n'
-if ! python3 scripts/mutations/m91_settle_after_outcome.py || git diff --quiet internal/mcp/execution/attempt_evidence.go; then
+if ! python3 scripts/mutations/m91_settle_after_outcome.py || git diff --quiet internal/mcp/execution/run.go; then
   printf '      SKIPPED — pattern drifted\n'; SKIPPED=$((SKIPPED+1))
-  revert internal/mcp/execution/attempt_evidence.go
+  revert internal/mcp/execution/run.go
 else
-  gofmt -w internal/mcp/execution/attempt_evidence.go
+  gofmt -w internal/mcp/execution/run.go
   m91_out=$(go test -count=1 -run 'TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit' ./internal/mcp/execution/ 2>&1); m91_rc=$?
-  revert internal/mcp/execution/attempt_evidence.go
+  revert internal/mcp/execution/run.go
   if ! gate_ran M91 "the settle-order gate" "$m91_out"; then
     [ $KEEP -eq 0 ] && exit 1
   elif [ $m91_rc -ne 0 ]; then
@@ -967,6 +967,16 @@ run_mutation M98 \
   'TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission' \
   . mcp_canary_autostop.go \
   's/\tcase active \&\& \(aborted \|\| windowClosed\):/\tcase active \&\& aborted:/'
+
+# M99 is Codex round 7: the reservation goes back BEFORE the health sample is counted, so with
+# MaxConcurrentExecutions of 1 a third request can reserve and cross Upstream.Call before the
+# second failure latches elevated_error_rate. The two statements are simply swapped — the
+# mutation compiles, releases exactly once, and differs only in ORDER.
+run_mutation M99 \
+  'the reservation is released before the health sample is counted' \
+  'TestAttemptSettled_IsReportedBeforeTheReservationIsReleased' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\t\te\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\t\tif release != nil \{\n\t\t\t\trelease\(\)\n\t\t\t\}\n/\t\t\tif release != nil {\n\t\t\t\trelease()\n\t\t\t}\n\t\t\te.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))\n/'
 
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #

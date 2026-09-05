@@ -86,7 +86,7 @@ func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, 
 // the (separately-scoped) whole-Canary abort wiring consumes. This function
 // deliberately does not stop the Canary itself — that is blocker #7's job, and a
 // second abort path here would be a parallel framework.
-func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, out runtime.ExecOutput, upstreamFailed bool) {
+func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, out runtime.ExecOutput) {
 	f := outcomeFacts(in)
 	f.Phase = model.PhaseOutcome
 	// outcomeFacts stamps Decision.ExecutionState = "executed" for the success path.
@@ -129,50 +129,6 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 		StatusClass:   out.ExecutionState,
 		FailureReason: out.Reason.String(),
 	}
-	// One SETTLED post-admission attempt, for the population detectors.
-	//
-	// THIS RUNS BEFORE THE TERMINAL OUTCOME COMMIT, and the order is the point. AttemptSettled
-	// persists the detector counters; CommitDecision persists the outcome. A crash between them
-	// used to leave the ledger durably proving a settled attempt while the runtime snapshot omitted
-	// its health sample — and because restore legitimately accepts Samples < TotalReserved (a
-	// reservation refused at the boundary settles nothing), that missing sample is indistinguishable
-	// from one that never happened. A failed FIRST attempt would simply disappear, the next failure
-	// would be counted as sample one, and a third execution would be admitted instead of stopping at
-	// the 1-of-2 threshold (Codex round 3 P1).
-	//
-	// Reversed, a crash in the same window over-counts nothing: the sample is real (the attempt did
-	// settle), only its outcome record is missing — and a missing outcome is already the
-	// outcome_evidence_loss breach. Evidence that survives one write too many is recoverable;
-	// evidence erased by a crash is not.
-	//
-	// THE SAMPLE SET IS "INVOCATIONS ACTUALLY ATTEMPTED", and both exclusions matter:
-	//
-	//   - a request-scoped denial (policy, scope, allowance) never mints an attempt record and so
-	//     never reaches this function at all — a Canary must not abort itself for correctly
-	//     refusing requests;
-	//   - definitely_not_sent means a boundary guard refused AFTER the intent commit — an
-	//     emergency kill, a tool drift, a demotion. Nothing was sent, so there is no execution to
-	//     judge. Counting those would make an operator's own kill switch look like an error rate
-	//     and latch elevated_error_rate for the stop working exactly as designed.
-	//
-	// FAILURE IS THE UPSTREAM LEG'S VERDICT, not the send state.
-	//
-	// This read "no proof the peer answered" (!state.ProvesReceipt()) and was wrong in the most
-	// ordinary direction there is: run.go records SendPeerResponseReceived for a non-200, an
-	// unreadable body and an undecodable one, because a peer that answers badly has still RUN the
-	// tool. Receipt was therefore proven and the attempt counted as a success — so two consecutive
-	// HTTP 500s from the target produced ZERO failures, never reached the 1-of-2 threshold, and the
-	// third execution was admitted against a demonstrably unhealthy peer (Codex round 5 P1). The
-	// detector could not see the failure mode it exists to catch.
-	//
-	// upstreamFailed is computed at the call site, where the leg's own result is in scope. It is
-	// still deliberately NOT out.Executed: a DLP block AFTER a successful peer response leaves
-	// upstreamFailed false, because that is Culvert's policy working rather than the target being
-	// unhealthy — the exclusion the original comment was right about and the predicate was not.
-	if state != model.SendStateUnset && state != model.SendDefinitelyNotSent {
-		e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, upstreamFailed, e.cfg.Clock().Sub(rec.startedAt))
-	}
-
 	if _, cerr := e.cfg.Events.CommitDecision(f); cerr != nil {
 		// A physical invocation may have happened and its terminal outcome is NOT durable: the
 		// Canary can no longer reconstruct what it did to the world. That is a whole-Canary
@@ -182,4 +138,40 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 		e.cfg.Metrics.ObserveOutcomeEvidenceLoss(in.Capability.String())
 		e.cfg.Safety.Breach(in.Capability.String(), rec.generation, "outcome_evidence_loss")
 	}
+}
+
+// reportAttemptSettled reports ONE settled post-admission attempt to the population detectors.
+//
+// IT IS CALLED FROM THE UPSTREAM LEG, BEFORE THE RESERVATION IS RELEASED AND BEFORE THE TERMINAL
+// OUTCOME IS COMMITTED. Both orderings are security properties, and each was learned from a
+// separate defect:
+//
+//   - BEFORE THE RELEASE (Codex round 7). The settle is what may latch elevated_error_rate; the
+//     release is what admits the next request. Released first, a third request could reserve and
+//     cross Upstream.Call before the second failure was even counted, so a reachable threshold
+//     still failed to prevent the next physical invocation.
+//   - BEFORE THE TERMINAL OUTCOME (Codex round 3). A crash between the two writes must over-count
+//     an outcome record rather than erase failure evidence: restore legitimately accepts fewer
+//     samples than reservations, so a missing sample is indistinguishable from an attempt that
+//     never settled, while a missing OUTCOME is already the outcome_evidence_loss breach. Evidence
+//     that survives one write too many is recoverable; evidence a crash erased is not.
+//
+// THE SAMPLE SET IS "INVOCATIONS ACTUALLY ATTEMPTED", and both exclusions matter:
+//
+//   - a request-scoped denial (policy, scope, allowance) never mints an attempt record and so
+//     never reaches this function at all — a Canary must not abort itself for correctly refusing
+//     requests;
+//   - definitely_not_sent means a boundary guard refused AFTER the intent commit — an emergency
+//     kill, a tool drift, a demotion. Nothing was sent, so there is no execution to judge.
+//     Counting those would make an operator's own kill switch look like an error rate and latch
+//     elevated_error_rate for the stop working exactly as designed.
+//
+// failed is the UPSTREAM LEG's verdict (see upstreamLegFailed), never Culvert's disposition: a
+// response-DLP block after a successful peer answer is this gateway's policy working rather than
+// the target being unhealthy.
+func (e *Executor) reportAttemptSettled(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, failed bool) {
+	if rec == nil || state == model.SendStateUnset || state == model.SendDefinitelyNotSent {
+		return
+	}
+	e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, failed, e.cfg.Clock().Sub(rec.startedAt))
 }

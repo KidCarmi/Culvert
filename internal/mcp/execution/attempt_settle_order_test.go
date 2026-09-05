@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,5 +225,81 @@ func TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure(t *testing.T) {
 		t.Fatal("SECURITY: a JSON-RPC error response is the peer saying the tool failed — " +
 			"counting it as a success blinds the error-rate detector to the most ordinary " +
 			"failure mode there is")
+	}
+}
+
+// releaseOrderGate hands out a Release that counts its own invocations, so a Safety double can ask
+// "had the slot already gone back when this attempt settled?".
+type releaseOrderGate struct {
+	reservationID string
+	generation    uint64
+	releases      *int32
+}
+
+func (g releaseOrderGate) AdmitSideEffect(LiveGateInput) LiveGateDecision {
+	return LiveGateDecision{
+		Admit: true, Release: func() { atomic.AddInt32(g.releases, 1) },
+		ReservationID: g.reservationID, ActivationGeneration: g.generation,
+	}
+}
+
+// releaseOrderSafety captures the release count observed at the instant AttemptSettled fired.
+type releaseOrderSafety struct {
+	releases      *int32
+	mu            sync.Mutex
+	settled       int
+	releasesAt    int32
+	settledFailed bool
+}
+
+func (s *releaseOrderSafety) Breach(string, uint64, string) {}
+
+func (s *releaseOrderSafety) AttemptSettled(_ string, _ uint64, failed bool, _ time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settled++
+	s.settledFailed = failed
+	s.releasesAt = atomic.LoadInt32(s.releases)
+}
+
+// TestAttemptSettled_IsReportedBeforeTheReservationIsReleased pins the second ordering the settle
+// carries, and it is the one that decides whether a reachable threshold actually STOPS anything.
+//
+// The settle is what may latch elevated_error_rate. The release is what lets the next request
+// reserve. Ordered the other way — release deferred inside callUpstream, settle deferred by the
+// outer runExecute — the release necessarily ran first, because an inner closure's defers run when
+// the closure returns. With MaxConcurrentExecutions of 1 that means: the second failing call
+// returns, its slot comes back, a waiting third request reserves and crosses Upstream.Call, and
+// only THEN is the second failure counted. The 1-of-2 threshold was reachable and still failed to
+// prevent the next physical invocation (Codex round 7 P1).
+//
+// The assertion is that ZERO releases had happened when the sample was reported. That is exactly
+// the property; it does not depend on scheduling, a sleep, or a second goroutine.
+func TestAttemptSettled_IsReportedBeforeTheReservationIsReleased(t *testing.T) {
+	var releases int32
+	sfy := &releaseOrderSafety{releases: &releases}
+	up := &jsonrpcErrorUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	e.cfg.Safety = sfy
+	e.cfg.LiveGate = releaseOrderGate{reservationID: "rsv_rel", generation: 7, releases: &releases}
+
+	in := execInput(policy.ActionAllow, false)
+	_ = e.Execute(context.Background(), in, e.Resolve(in))
+
+	if sfy.settled != 1 {
+		t.Fatalf("exactly one settled attempt expected, got %d", sfy.settled)
+	}
+	if !sfy.settledFailed {
+		t.Fatal("premise: this fixture must settle as a FAILURE, or the ordering it pins is moot")
+	}
+	if sfy.releasesAt != 0 {
+		t.Fatalf("SECURITY: the slot was released before the attempt settled (%d release(s) already "+
+			"done) — the next request can reserve and reach the upstream before the failure that "+
+			"should have stopped the Canary is even counted", sfy.releasesAt)
+	}
+	// THE CONTROL: the slot must still come back. An "ordering fix" that leaked the reservation
+	// would satisfy the assertion above and break the budget's own accounting (§11).
+	if got := atomic.LoadInt32(&releases); got != 1 {
+		t.Fatalf("the reservation must still be released exactly once, got %d", got)
 	}
 }
