@@ -302,21 +302,77 @@ func containsSub(list []string, sub string) bool {
 // registered route + method. Each extra path counts as documented by the row
 // (no PHANTOM OPERATION) and must exist in the contract (else
 // DOCUMENTED-BUT-MISSING).
+//
+// Round-2 repair (external freeze review of db6f4d35): the original positive
+// fixture named `/api/thing` as BOTH the primary and the extra path, so it
+// passed whether or not extra paths were matched at all. The fixture now
+// documents a SECOND path that only the extra mapping can cover, and a
+// control proves the mapping is necessary: the same row WITHOUT the extra
+// path leaves that operation a PHANTOM.
+const extraPathsSpec = `openapi: 3.0.4
+info: { title: t, version: 1.0.0 }
+paths:
+  /api/thing:
+    get:
+      operationId: getThing
+      summary: Get the thing
+      description: Returns the thing.
+      tags: [thing]
+      security: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-stability: stable
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { type: object } } } }
+        '403': { description: forbidden, content: { text/plain: { schema: { type: string } } } }
+  /api/thing/{name}/detail:
+    get:
+      operationId: getThingDetail
+      summary: Get the thing detail
+      description: Returns the detail sub-resource served by the same prefix route.
+      tags: [thing]
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      security: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-stability: stable
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { type: object } } } }
+        '403': { description: forbidden, content: { text/plain: { schema: { type: string } } } }
+`
+
 func TestCoverage_ExtraOpenAPIPathsCoverAndMustExist(t *testing.T) {
-	spec := loadGood(t) // documents GET /api/thing
-	routes := []Route{{Path: "/api/other", Method: "GET", Handler: "apiOther"}}
-	covered := &Classification{Rows: []ClassRow{
-		{Route: "/api/other", Method: "GET", Visibility: "admin-supported", Documented: true,
-			OpenAPIPath: "/api/thing", ExtraOpenAPIPaths: []string{"/api/thing"}},
-	}}
-	if v := CheckCoverage(routes, spec, covered); containsSub(v, "PHANTOM OPERATION") {
-		t.Fatalf("an operation named by openapi_extra_paths must count as documented: %v", v)
+	spec, err := LoadSpec(writeTemp(t, "extra.yaml", extraPathsSpec))
+	if err != nil {
+		t.Fatal(err)
 	}
-	missing := &Classification{Rows: []ClassRow{
-		{Route: "/api/other", Method: "GET", Visibility: "admin-supported", Documented: true,
-			OpenAPIPath: "/api/thing", ExtraOpenAPIPaths: []string{"/api/thing/absent"}},
+	routes := []Route{{Path: "/api/thing/", Method: "GET", Handler: "apiThingItem"}}
+	// Positive: the prefix route documents its primary path AND, through the
+	// extra mapping, the detail sub-resource — neither is a phantom.
+	covered := &Classification{Rows: []ClassRow{
+		{Route: "/api/thing/", Method: "GET", Visibility: "admin-supported", Documented: true,
+			OpenAPIPath: "/api/thing", ExtraOpenAPIPaths: []string{"/api/thing/{name}/detail"}},
 	}}
-	if v := CheckCoverage(routes, spec, missing); !containsSub(v, "DOCUMENTED-BUT-MISSING") {
+	if v := CheckCoverage(routes, spec, covered); containsSub(v, "PHANTOM OPERATION") || containsSub(v, "DOCUMENTED-BUT-MISSING") {
+		t.Fatalf("both paths must count as documented through the row + its openapi_extra_paths: %v", v)
+	}
+	// Control: WITHOUT the extra mapping the detail operation is a PHANTOM —
+	// the mapping is necessary, not decorative.
+	withoutExtra := &Classification{Rows: []ClassRow{
+		{Route: "/api/thing/", Method: "GET", Visibility: "admin-supported", Documented: true, OpenAPIPath: "/api/thing"},
+	}}
+	if v := CheckCoverage(routes, spec, withoutExtra); !containsSub(v, "PHANTOM OPERATION: GET /api/thing/{name}/detail") {
+		t.Fatalf("without openapi_extra_paths the detail operation must be reported as a PHANTOM: %v", v)
+	}
+	// Negative: an extra path absent from the contract is DOCUMENTED-BUT-MISSING.
+	missing := &Classification{Rows: []ClassRow{
+		{Route: "/api/thing/", Method: "GET", Visibility: "admin-supported", Documented: true,
+			OpenAPIPath: "/api/thing", ExtraOpenAPIPaths: []string{"/api/thing/{name}/detail", "/api/thing/absent"}},
+	}}
+	if v := CheckCoverage(routes, spec, missing); !containsSub(v, "DOCUMENTED-BUT-MISSING: GET /api/thing/absent") {
 		t.Fatalf("an openapi_extra_paths entry absent from the contract must be reported: %v", v)
 	}
 }
