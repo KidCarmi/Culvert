@@ -280,6 +280,15 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_login_state_evictions_total Interactive-login callback state dropped at the cap before it could be redeemed. Non-zero means some SSO logins failed with \"invalid or expired state\"\n")
 	fmt.Fprintf(w, "# TYPE culvert_login_state_evictions_total counter\nculvert_login_state_evictions_total{store=\"oidc_pkce\"} %d\nculvert_login_state_evictions_total{store=\"saml\"} %d\n",
 		globalPKCEStore.Evictions(), globalSAMLStateStore.Evictions())
+
+	// CHAOS-58: admin logins refused for an over-long username. The admin login
+	// endpoint is public, and an unbounded username there was an unauthenticated
+	// write amplifier into the lockout maps and the durable audit log. The
+	// rejection is otherwise invisible (the caller gets a 400), so a climbing
+	// counter is the operator's only signal that a source is probing it.
+	fmt.Fprintf(w, "\n# HELP culvert_login_oversize_rejected_total Admin login attempts refused because the submitted username exceeded the byte limit. Sustained growth means an unauthenticated source is probing /api/auth/login\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
+		loginOversizeRejected.Load())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

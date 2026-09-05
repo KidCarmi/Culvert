@@ -972,6 +972,25 @@ func (c *Config) UIUserExists(username string) bool {
 	return c.uiUsers[username] != nil
 }
 
+// LoginNameConfigured reports whether username names an account VerifyUIUser
+// could authenticate — the roster, or the legacy single user.
+//
+// It exists for CHAOS-58's oversize-username guard (login_input_bounds.go),
+// which must never refuse a name that belongs to a real admin. Its resolution
+// MUST stay identical to VerifyUIUser's below: a name this returns false for is
+// a name the login endpoint may reject outright, so any divergence locks an
+// operator out of the admin UI.
+//
+// Deliberately NOT UIUserExists: that one checks only c.uiUsers, and a legacy
+// single-user deployment can carry a name that lives solely in c.user.
+// Deliberately not password-aware, and it retains nothing — the caller passes
+// untrusted input, so this is a hash-and-compare, never a store.
+func (c *Config) LoginNameConfigured(username string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsers[username] != nil || (c.user != "" && username == c.user)
+}
+
 func (c *Config) VerifyUIUser(username, password string) (UIRole, bool) {
 	c.mu.RLock()
 	uiU := c.uiUsers[username]

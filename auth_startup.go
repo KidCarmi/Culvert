@@ -52,4 +52,24 @@ func loadAuth(auth authStartupConfig) {
 			logger.Printf("UIUsers: loaded from %s", auth.UIUsersFile)
 		}
 	}
+	warnOversizeConfiguredUsernames()
+}
+
+// warnOversizeConfiguredUsernames reports admin accounts whose name exceeds the
+// login endpoint's maxUsernameLen bound (CHAOS-58).
+//
+// Such an account still authenticates — rejectOversizeLoginUser exempts any
+// configured name — so this is deliberately a WARNING and never fatal: the
+// stores have never bounded the name, so failing the boot would brick an
+// appliance whose config was legal when it was written, over a hardening
+// change. The operator is told once, at startup, so they learn it here rather
+// than from a login that behaves unlike every other account.
+func warnOversizeConfiguredUsernames() {
+	for _, u := range cfg.ListUIUsers() {
+		if len(u.Username) > maxUsernameLen {
+			logWarnf("Auth: admin username is %d bytes, above the %d-byte login limit — "+
+				"it still authenticates, but rename it: every other credential entry point caps at 64",
+				len(u.Username), maxUsernameLen)
+		}
+	}
 }

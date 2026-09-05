@@ -1,0 +1,249 @@
+package lockout
+
+import (
+	"strings"
+	"testing"
+)
+
+// ─── CHAOS-58 — the limiter's map keys are bounded in SIZE, not just in count ──
+//
+// Cleanup's own doc claims the maps are bounded "against an unbounded-memory
+// DoS", and on the ENTRY-COUNT axis they are. They were not bounded on the
+// SIZE axis: both keys derive from a username an UNAUTHENTICATED caller chooses
+// on the admin login POST, and an entry cannot be swept before its Window has
+// elapsed, so one caller retained (rate x Window x username size) bytes.
+//
+// These gates pin the size bound and — just as important — pin that the clamp
+// is applied CONSISTENTLY, because a Check and a RecordFailure that disagreed
+// about the key would split one attacker's failures across two counters and
+// silently weaken the lock instead of strengthening it.
+
+// oversizeName returns a username n bytes long.
+func oversizeName(n int) string { return strings.Repeat("A", n) }
+
+func TestBoundUsername_ClampsAtMaxAndLeavesShortNamesIdentical(t *testing.T) {
+	for _, n := range []int{0, 1, 63, MaxUsernameKeyLen - 1, MaxUsernameKeyLen} {
+		in := oversizeName(n)
+		if got := boundUsername(in); got != in {
+			t.Errorf("boundUsername(%d bytes) mutated a name within the bound (len %d)", n, len(got))
+		}
+	}
+	for _, n := range []int{MaxUsernameKeyLen + 1, 4096, 1 << 20} {
+		if got := boundUsername(oversizeName(n)); len(got) > MaxUsernameKeyLen {
+			t.Errorf("boundUsername(%d bytes) = %d bytes, want <= %d", n, len(got), MaxUsernameKeyLen)
+		}
+	}
+}
+
+// TestBoundUsername_CutsOnARuneBoundary keeps a truncated key renderable on the
+// Snapshot admin surface: the clamp must not leave a half-encoded rune behind.
+func TestBoundUsername_CutsOnARuneBoundary(t *testing.T) {
+	// "é" is 2 bytes, so a run of them straddles MaxUsernameKeyLen when the
+	// prefix length is odd — the case a naive byte cut gets wrong.
+	name := "x" + strings.Repeat("é", MaxUsernameKeyLen)
+	got := boundUsername(name)
+	if len(got) > MaxUsernameKeyLen {
+		t.Fatalf("clamped to %d bytes, want <= %d", len(got), MaxUsernameKeyLen)
+	}
+	if !isValidUTF8Prefix(name, got) {
+		t.Errorf("clamped value is not a whole-rune prefix of the input plus its digest")
+	}
+}
+
+// TestBoundUsername_IsInjective is a SECURITY gate, not a tidiness one. The
+// login endpoint exempts a CONFIGURED over-long username from its rejection, so
+// such a name reaches this limiter. Under a plain truncation, an attacker who
+// knew that admin's first 256 bytes could submit an ordinary <=256-byte name
+// that clamps to the same key and drive the tier-2 account lock against them —
+// lockout-as-DoS, the exact defect the two-tier design (RISK-012) prevents.
+func TestBoundUsername_IsInjective(t *testing.T) {
+	prefix := strings.Repeat("P", MaxUsernameKeyLen*2)
+	seen := map[string]string{}
+	for _, suffix := range []string{"-alice", "-bob", "-carol", "", "-alice2"} {
+		name := prefix + suffix
+		key := boundUsername(name)
+		if len(key) > MaxUsernameKeyLen {
+			t.Errorf("suffix %q: key is %d bytes, want <= %d", suffix, len(key), MaxUsernameKeyLen)
+		}
+		if prev, dup := seen[key]; dup {
+			// Names and keys are hundreds of bytes; print identity, not payload.
+			t.Errorf("suffix %q (%d bytes) collides with suffix %q on one key — "+
+				"two distinct admins share a lockout entry", suffix, len(name), prev)
+		}
+		seen[key] = suffix
+	}
+	// The dangerous direction specifically: a name AT the bound must not clamp
+	// onto the same key as a longer name sharing its bytes.
+	atBound := prefix[:MaxUsernameKeyLen]
+	if boundUsername(atBound) == boundUsername(prefix) {
+		t.Error("a name at the bound shares a key with a longer name sharing its prefix")
+	}
+	// Determinism, on EQUAL CONTENT rather than the same expression: Check and
+	// RecordFailure receive separately-built strings for what is one username,
+	// so the key must depend on the bytes and nothing else (no salt, no
+	// address, no call counter).
+	same := strings.Repeat("P", MaxUsernameKeyLen*2)
+	if boundUsername(prefix) != boundUsername(same) {
+		t.Error("two equal usernames produced different keys — Check and RecordFailure would disagree")
+	}
+}
+
+// TestBoundUsername_CutsCleanlyForEveryRuneWidth walks every alignment of a
+// 1-, 2-, 3- and 4-byte rune across the cut. The 4-byte case is the one a
+// 3-step boundary search gets wrong (three continuation bytes can sit at the
+// cut), and a padding offset is what puts each width into every alignment.
+func TestBoundUsername_CutsCleanlyForEveryRuneWidth(t *testing.T) {
+	runes := []string{"a", "é", "€", "𝄞"} // 1, 2, 3, 4 bytes
+	for _, r := range runes {
+		for pad := 0; pad < 4; pad++ {
+			name := strings.Repeat("x", pad) + strings.Repeat(r, MaxUsernameKeyLen)
+			got := boundUsername(name)
+			if len(got) > MaxUsernameKeyLen {
+				t.Errorf("rune %q pad %d: clamped to %d bytes, want <= %d", r, pad, len(got), MaxUsernameKeyLen)
+			}
+			if !isValidUTF8Prefix(name, got) {
+				t.Errorf("rune %q pad %d: clamped value is not a whole-rune prefix", r, pad)
+			}
+		}
+	}
+}
+
+// TestBoundUsername_InvalidUTF8StaysBoundedAndNonEmpty pins the fallback. An
+// all-continuation-byte name has no rune boundary to find; an unbounded walk
+// back would alias every such name onto the EMPTY username, which a caller can
+// also submit legitimately.
+func TestBoundUsername_InvalidUTF8StaysBoundedAndNonEmpty(t *testing.T) {
+	name := strings.Repeat("\x80", MaxUsernameKeyLen*4)
+	got := boundUsername(name)
+	if len(got) > MaxUsernameKeyLen {
+		t.Errorf("clamped to %d bytes, want <= %d", len(got), MaxUsernameKeyLen)
+	}
+	if got == "" {
+		t.Error("invalid UTF-8 collapsed to the empty username")
+	}
+	// Injectivity must hold for invalid UTF-8 too — the digest carries the
+	// identity even when there is no rune boundary to cut on.
+	if boundUsername(name+"\x80") == got {
+		t.Error("two distinct invalid-UTF-8 names collide on one key")
+	}
+}
+
+// isValidUTF8Prefix reports whether got is a clamped form of name: the portion
+// before the "…" digest marker is a prefix of name that ends on a rune boundary
+// (i.e. re-encoding the decoded runes reproduces it exactly). A name within the
+// bound is returned verbatim and has no marker.
+func isValidUTF8Prefix(name, got string) bool {
+	body := got
+	if i := strings.LastIndex(got, "…"); i >= 0 {
+		body = got[:i]
+	}
+	if !strings.HasPrefix(name, body) {
+		return false
+	}
+	return string([]rune(body)) == body
+}
+
+// TestOversizeUsername_NeverEntersAMapKey is the DEFECT gate: it fails against
+// the pre-fix limiter, where the 1 MiB name became two map keys retained for a
+// full Window.
+func TestOversizeUsername_NeverEntersAMapKey(t *testing.T) {
+	l := NewLoginLimiter()
+	huge := oversizeName(1 << 20) // 1 MiB — what the 1 MiB body cap admits
+
+	for i := 0; i < 3; i++ {
+		l.RecordFailure("198.51.100.7", huge)
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key := range l.pairs {
+		if len(key) > MaxUsernameKeyLen+len("198.51.100.7")+1 {
+			t.Errorf("pair key retained %d bytes of attacker input", len(key))
+		}
+	}
+	for key := range l.accounts {
+		if len(key) > MaxUsernameKeyLen {
+			t.Errorf("account key retained %d bytes of attacker input", len(key))
+		}
+	}
+	if len(l.pairs) != 1 || len(l.accounts) != 1 {
+		t.Errorf("entries = %d pair / %d account, want 1 / 1 (repeated failures for ONE name share its key)",
+			len(l.pairs), len(l.accounts))
+	}
+}
+
+// TestOversizeUsername_CheckAndRecordAgree is the CONTROL for the gate above: a
+// clamp applied on only some entry points would pass the byte-size assertion
+// while breaking the lock it is supposed to protect. The lock must still trip
+// after MaxAttempts and must still be observable through Check.
+func TestOversizeUsername_CheckAndRecordAgree(t *testing.T) {
+	l := NewLoginLimiter()
+	const ip = "198.51.100.8"
+	huge := oversizeName(MaxUsernameKeyLen * 40)
+
+	if locked, _ := l.Check(ip, huge); locked {
+		t.Fatal("locked before any failure was recorded")
+	}
+	for i := 0; i < MaxAttempts-1; i++ {
+		if tripped := l.RecordFailure(ip, huge); tripped {
+			t.Fatalf("pair lock tripped early at attempt %d", i+1)
+		}
+	}
+	if left := l.AttemptsLeft(ip, huge); left != 1 {
+		t.Errorf("AttemptsLeft = %d, want 1 — AttemptsLeft is reading a different key", left)
+	}
+	if tripped := l.RecordFailure(ip, huge); !tripped {
+		t.Fatal("pair lock did not trip on attempt MaxAttempts — Record and Check disagree on the key")
+	}
+	locked, secs := l.Check(ip, huge)
+	if !locked || secs <= 0 {
+		t.Fatalf("Check after the trip = (%v, %d), want locked with time remaining", locked, secs)
+	}
+
+	// ResetUser is the operator's unlock lever and must reach the same key.
+	l.ResetUser(huge)
+	if locked, _ := l.Check(ip, huge); locked {
+		t.Error("still locked after ResetUser — the unlock path clamps differently")
+	}
+}
+
+// TestOversizeUsername_SnapshotStaysBounded pins the admin-visible surface: an
+// operator listing active lockouts must not be handed megabytes of attacker
+// text (it is rendered into the Lockouts panel and serialised over the API).
+func TestOversizeUsername_SnapshotStaysBounded(t *testing.T) {
+	l := NewLoginLimiter()
+	huge := oversizeName(1 << 20)
+	for i := 0; i < MaxAttempts; i++ {
+		l.RecordFailure("198.51.100.9", huge)
+	}
+	snap := l.Snapshot()
+	if len(snap) == 0 {
+		t.Fatal("no active lockout recorded")
+	}
+	for _, e := range snap {
+		if len(e.Username) > MaxUsernameKeyLen {
+			t.Errorf("Snapshot exposed a %d-byte username, want <= %d", len(e.Username), MaxUsernameKeyLen)
+		}
+	}
+}
+
+// TestBoundedNames_BehaviourUnchanged is the no-regression control: every name
+// short enough to be a real account must key exactly as it did before, so the
+// clamp cannot be the reason a lockout stops working.
+func TestBoundedNames_BehaviourUnchanged(t *testing.T) {
+	l := NewLoginLimiter()
+	const ip, user, other = "198.51.100.10", "admin", "admin2"
+
+	for i := 0; i < MaxAttempts; i++ {
+		l.RecordFailure(ip, user)
+	}
+	if locked, _ := l.Check(ip, user); !locked {
+		t.Error("ordinary username did not lock after MaxAttempts")
+	}
+	if locked, _ := l.Check(ip, other); locked {
+		t.Error("a distinct ordinary username was locked — keys collided")
+	}
+	if locked, _ := l.Check("198.51.100.11", user); locked {
+		t.Error("a distinct IP was pair-locked — tier-1 keying changed")
+	}
+}

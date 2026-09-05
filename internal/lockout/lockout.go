@@ -4,11 +4,14 @@
 package lockout
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,6 +56,73 @@ const (
 	// trustMaxIPs bounds the per-user trusted-IP set (oldest evicted).
 	trustMaxIPs = 8
 )
+
+// MaxUsernameKeyLen bounds the username portion of every limiter map key.
+//
+// Both maps are keyed by data an UNAUTHENTICATED caller chooses: the login
+// POST carries the username verbatim, and an entry survives at least Window
+// (the janitor cannot remove it before then — see Cleanup). Cleanup therefore
+// bounds the ENTRY COUNT over time but said nothing about the SIZE of a key,
+// so a single caller sending oversized usernames retained
+// (request rate x Window x username size) bytes of heap in a package whose own
+// contract is to be bounded. The callers in package main clamp their input
+// first; this bound is the structural half of the same guarantee, so no future
+// caller can reintroduce the exposure by forgetting to.
+//
+// 256 bytes matches maxUsernameLen on the proxy-auth path (proxy_portal.go),
+// which already answered this question for Proxy-Authorization. Note that a
+// name past the bound CAN name a real account: `-user`/`auth.user` and
+// `--reset-password` reach cfg.SetAuth/cfg.SetUIUser, and neither store bounds
+// the name (only the API handlers cap at 64). The login endpoint therefore
+// exempts a configured name from its own rejection, which means such a name
+// reaches this limiter — so the clamp must stay INJECTIVE. See boundUsername.
+const MaxUsernameKeyLen = 256
+
+// usernameDigestLen is the hex-encoded SHA-256 prefix appended to a clamped
+// name, plus the "…" marker. 16 hex characters is 64 bits: enough that two
+// distinct usernames colliding is not something an attacker can construct.
+const usernameDigestLen = len("…") + 16
+
+// boundUsername clamps username to MaxUsernameKeyLen bytes. It MUST be applied
+// at every public entry point that takes a username: Check and RecordFailure
+// disagreeing about the key would silently split one attacker's failures across
+// two counters and weaken the lock.
+//
+// The clamp is INJECTIVE, and that is a security property rather than tidiness.
+// A plain truncation aliases every name sharing the first 256 bytes onto one
+// entry, and because the login endpoint admits an over-long CONFIGURED name,
+// one of those entries can belong to a real admin: an attacker who knew that
+// admin's first 256 bytes could then submit an ordinary ≤256-byte name that
+// clamps to the same key and drive the tier-2 account lock against them —
+// lockout-as-DoS, the exact defect the two-tier design (RISK-012) exists to
+// prevent. Appending a digest of the WHOLE name keeps the key bounded while
+// keeping distinct names distinct.
+//
+// The retained prefix is cut on a UTF-8 rune boundary so the key stays
+// renderable on the Snapshot admin surface.
+func boundUsername(username string) string {
+	if len(username) <= MaxUsernameKeyLen {
+		return username
+	}
+	sum := sha256.Sum256([]byte(username))
+	cut := MaxUsernameKeyLen - usernameDigestLen
+	// A rune is at most 4 bytes, so one of the four bytes at or below the cut is
+	// a rune start for any valid UTF-8 input. The search is bounded rather than
+	// an unbounded walk back: an all-continuation-byte input would otherwise
+	// walk to 0. Falling back to the raw byte cut keeps the value bounded (the
+	// point of the clamp) and deterministic; the digest carries the identity
+	// either way.
+	for i := 0; i < 4 && cut > 0; i++ {
+		if utf8.RuneStart(username[cut]) {
+			break
+		}
+		cut--
+	}
+	if cut <= 0 || !utf8.RuneStart(username[cut]) {
+		cut = MaxUsernameKeyLen - usernameDigestLen
+	}
+	return username[:cut] + "…" + hex.EncodeToString(sum[:])[:16]
+}
 
 // pairKey builds the tier-1 map key. \x00 cannot appear in an IP, so the
 // separator is injection-safe (a crafted username cannot alias another
@@ -142,6 +212,7 @@ func (l *LoginLimiter) isTrustedLocked(ip, username string, now time.Time) bool 
 // The pair lock always applies; the account lock is bypassed for IPs with a
 // live trust grant. Expired entries are lazily deleted.
 func (l *LoginLimiter) Check(ip, username string) (locked bool, secondsRemaining int) {
+	username = boundUsername(username)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -203,6 +274,7 @@ func (l *LoginLimiter) accountLockSecondsLocked(ip, username string, now time.Ti
 // endpoint, where there is no account to protect yet and an account-wide
 // counter would let a few IPs globally block bootstrap (lockout-as-DoS).
 func (l *LoginLimiter) CheckPair(ip, username string) (locked bool, secondsRemaining int) {
+	username = boundUsername(username)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if secs := l.pairLockSecondsLocked(ip, username, time.Now()); secs > 0 {
@@ -216,6 +288,7 @@ func (l *LoginLimiter) CheckPair(ip, username string) (locked bool, secondsRemai
 // companion to CheckPair. Returns true when this attempt JUST tripped the
 // pair lock.
 func (l *LoginLimiter) RecordPairFailure(ip, username string) bool {
+	username = boundUsername(username)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	pk := pairKey(ip, username)
@@ -231,6 +304,7 @@ func (l *LoginLimiter) RecordPairFailure(ip, username string) bool {
 // both tiers. Returns true when this attempt JUST tripped either lock (so
 // the caller can log the lockout event).
 func (l *LoginLimiter) RecordFailure(ip, username string) bool {
+	username = boundUsername(username)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -259,6 +333,7 @@ func (l *LoginLimiter) RecordFailure(ip, username string) bool {
 // successful login must not erase the evidence of a concurrent distributed
 // attack, and the victim doesn't need it cleared — their IP is now trusted.
 func (l *LoginLimiter) RecordSuccess(ip, username string) {
+	username = boundUsername(username)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.pairs, pairKey(ip, username))
@@ -324,6 +399,7 @@ func (l *LoginLimiter) Cleanup() {
 // AttemptsLeft returns how many more failures the (ip, username) pair is
 // allowed before the tier-1 lock trips.
 func (l *LoginLimiter) AttemptsLeft(ip, username string) int {
+	username = boundUsername(username)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e := l.pairs[pairKey(ip, username)]
@@ -344,6 +420,7 @@ func (l *LoginLimiter) AttemptsLeft(ip, username string) int {
 // old single-tier code abused RecordSuccess as a full reset, and it is the
 // natural hook for a future admin "unlock account" API.
 func (l *LoginLimiter) ResetUser(username string) {
+	username = boundUsername(username)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.accounts, username)
