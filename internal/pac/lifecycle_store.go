@@ -444,11 +444,24 @@ func (s *LifecycleStore) Delete(id string) error {
 	return nil
 }
 
+// LifecycleWriteHook is a TEST-ONLY fault-injection seam consulted
+// immediately before every durable write of the lifecycle store file, with
+// the candidate map about to be written; a non-nil error is treated exactly
+// like the underlying write failing. Production leaves it nil. (2F-E
+// correction round 3: the seam that lets a test prove what an epoch
+// transition does when one of its durable writes fails.)
+var LifecycleWriteHook func(path string, next map[string]*ProfileLifecycle) error
+
 // persistMap durably writes the given map (the candidate of a
 // persist-before-swap mutation) without touching s.byID.
 func (s *LifecycleStore) persistMap(m map[string]*ProfileLifecycle) error {
 	if s.path == "" {
 		return nil
+	}
+	if h := LifecycleWriteHook; h != nil {
+		if err := h(s.path, m); err != nil {
+			return err
+		}
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
