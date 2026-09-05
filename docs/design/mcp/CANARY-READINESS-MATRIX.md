@@ -134,7 +134,13 @@ extends it) and exhaustion latches when the final authorized attempt SETTLES. Ra
 mean latency ≥ 10s trips at the floor — all reachable within `MaxTotalExecutions = 3`. The latch does
 NOT demote the node: demotion stays governed by review blockers 10 and 12, so `ModeCanary + ABORTED`
 is the truthful state and `activation_runtime.auto_stop` reports `execution_authority` separately
-from mode.
+from mode. That surface derives `execution_authority` and `window_expired` from the SAME two-ended
+window predicate admission uses, so it can never be more optimistic than the gate it describes — a
+report, never a second authority: nothing in the admission path reads it. An "ordinary execution
+failure", for the error-rate detector, is the UPSTREAM LEG's verdict (`upstreamLegFailed`): a
+transport error, a nil response, or a decoded JSON-RPC error object. Culvert's own response-DLP
+block after a successful peer answer is deliberately NOT a failure — a Canary must not abort itself
+for its own controls firing.
 
 **Per-request fail-closed (Canary survives):** policy_deny, stale_decision,
 credential_not_ready, response_inspection_block, emergency_kill_for_request, allowance_consumed.
