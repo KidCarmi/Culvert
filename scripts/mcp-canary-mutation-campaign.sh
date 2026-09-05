@@ -887,7 +887,7 @@ run_mutation M91 \
   'the terminal outcome is made durable before the health sample' \
   'TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)/\t\te.commitAttemptOutcome(in, attempt, sendState, out)\n\t\te.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))/'
+  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upResp, upErr\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)/\t\te.commitAttemptOutcome(in, attempt, sendState, out)\n\t\te.reportAttemptSettled(in, attempt, sendState, upResp, upErr)/'
 
 # ============================================================================
 # CODEX ROUND 4 ON #1314
@@ -923,8 +923,8 @@ run_mutation M93 \
 run_mutation M94 \
   'an upstream error response counts as a successful attempt' \
   'TestAttemptSettled_PeerErrorResponseCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
-  ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/e\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)/e.reportAttemptSettled(in, attempt, sendState, !sendState.ProvesReceipt())/'
+  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
+  's/upstreamLegFailed\(resp, err\), e\.cfg\.Clock/!state.ProvesReceipt(), e.cfg.Clock/'
 
 run_mutation M95 \
   'a window denial at admission is recorded as budget_exhausted' \
@@ -963,7 +963,7 @@ run_mutation M99 \
   'the reservation is released before the health sample is counted' \
   'TestAttemptSettled_IsReportedBeforeTheReservationIsReleased' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upstreamLegFailed\(upResp, upErr\)\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)\n\t\treleaseReservation\(releaseSlot\)/\t\treleaseReservation(releaseSlot)\n\t\te.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))\n\t\te.commitAttemptOutcome(in, attempt, sendState, out)/'
+  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upResp, upErr\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)\n\t\treleaseReservation\(releaseSlot\)/\t\treleaseReservation(releaseSlot)\n\t\te.reportAttemptSettled(in, attempt, sendState, upResp, upErr)\n\t\te.commitAttemptOutcome(in, attempt, sendState, out)/'
 
 # M100-M102 are Codex round 8. The release ordering has to hold for EVERY step that decides
 # authority, not only the health sample (M99) — the terminal outcome commit is itself the
@@ -983,10 +983,10 @@ run_mutation M101 \
   's/\t\te\.reportUpstreamTrustBreach\(in, attempt, upErr\)\n//'
 
 run_mutation M102 \
-  'a caller cancellation is charged against the target' \
-  'TestAttemptSettled_CallerCancellationIsNotATargetFailure' \
-  ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/\tif err != nil && mcperr\.ReasonOf\(err\) == mcperr\.ReasonUpstreamCancelled \{\n\t\treturn false\n\t\}\n//'
+  'a caller cancellation is counted as an ordinary sample' \
+  'TestAttemptSettled_CallerCancellationIsNotASampleAtAll' \
+  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
+  's/\tif callerCancelled\(err\) \{\n\t\treturn\n\t\}\n//'
 
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #

@@ -110,7 +110,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// the breach that should have stopped the experiment is still being recorded (round 7 for
 		// the sample, round 8 for the outcome commit).
 		e.reportUpstreamTrustBreach(in, attempt, upErr)
-		e.reportAttemptSettled(in, attempt, sendState, upstreamLegFailed(upResp, upErr))
+		e.reportAttemptSettled(in, attempt, sendState, upResp, upErr)
 		e.commitAttemptOutcome(in, attempt, sendState, out)
 		releaseReservation(releaseSlot)
 	}()
@@ -350,16 +350,25 @@ func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, s
 // Canary abort itself for its own controls firing. The question this predicate answers is "is the
 // target misbehaving", never "did the client get a result".
 func upstreamLegFailed(resp *upstreamclient.Response, err error) bool {
-	// A CALLER cancellation is not evidence about the target. context.Canceled means the client
-	// went away; the peer may have been perfectly healthy, and two such cancellations would reach
-	// the 1-of-2 threshold and stop a Canary that had nothing wrong with it (Codex round 8 P2).
-	// This is the same rule the upstream pool's circuit breaker already follows (CHAOS-11), and it
-	// is deliberately NARROW: a DEADLINE overrun is ReasonUpstreamTimeout, not this reason, and it
-	// IS charged — a target too slow to answer inside the budget is a target misbehaving.
-	if err != nil && mcperr.ReasonOf(err) == mcperr.ReasonUpstreamCancelled {
-		return false
-	}
 	return err != nil || resp == nil || resp.Error != nil
+}
+
+// callerCancelled reports whether the upstream leg ended because the CLIENT went away.
+//
+// Such an attempt is NOT EVIDENCE ABOUT THE TARGET IN EITHER DIRECTION, which is why it is excluded
+// from the population entirely rather than recorded as a success. Round 8 marked it non-failing and
+// still counted it, so it silently padded the DENOMINATOR: with a budget above three calls, a
+// cancellation plus one good response plus one real failure is 1-of-3, under the 1-of-2 threshold,
+// and the Canary stayed active and admitted another invocation (Codex round 9). "Not a failure" and
+// "not a sample" are different statements, and only the second one is true here. Its duration is
+// excluded from the latency detector for the same reason — the client's patience is not the peer's
+// speed.
+//
+// Deliberately NARROW, and the same rule the upstream pool's circuit breaker follows (CHAOS-11): a
+// DEADLINE overrun is ReasonUpstreamTimeout, not this reason, and it IS charged — a target too slow
+// to answer inside the budget is a target misbehaving.
+func callerCancelled(err error) bool {
+	return err != nil && mcperr.ReasonOf(err) == mcperr.ReasonUpstreamCancelled
 }
 
 // releaseReservation returns the budget slot, nil-safe so the ordered defer above reads as one

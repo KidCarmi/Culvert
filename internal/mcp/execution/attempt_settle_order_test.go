@@ -448,23 +448,28 @@ func TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift(t *testing.T) {
 	}
 }
 
-// TestAttemptSettled_CallerCancellationIsNotATargetFailure pins the health detector's one
-// exclusion on the error side.
+// TestAttemptSettled_CallerCancellationIsNotASampleAtAll pins the health detector's one exclusion
+// on the error side, and pins it as an exclusion from the POPULATION rather than from the numerator.
 //
-// context.Canceled means the CLIENT went away; the peer may have been perfectly healthy. Counted as
-// a failure, two such cancellations reach the 1-of-2 threshold and stop a Canary that had nothing
-// wrong with it (Codex round 8 P2) — the same rule the upstream pool's circuit breaker already
-// follows. It is deliberately narrow: a DEADLINE overrun is ReasonUpstreamTimeout and IS charged,
-// which the control below pins.
-func TestAttemptSettled_CallerCancellationIsNotATargetFailure(t *testing.T) {
+// context.Canceled means the CLIENT went away; the peer may have been perfectly healthy. Round 8
+// marked such an attempt non-failing and still recorded it, which silently padded the DENOMINATOR:
+// with a budget above three calls, a cancellation plus one good response plus one real failure is
+// 1-of-3 — under the 1-of-2 threshold — so the Canary stayed active and admitted another invocation
+// (Codex round 9). "Not a failure" and "not a sample" are different statements, and only the second
+// is true here.
+//
+// The exclusion is deliberately narrow, which the other two rows pin: a DEADLINE overrun is
+// ReasonUpstreamTimeout and IS a charged failure, and so is an ordinary connect failure.
+func TestAttemptSettled_CallerCancellationIsNotASampleAtAll(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		err    error
-		failed bool
+		name    string
+		err     error
+		samples int
+		failed  bool
 	}{
-		{"caller cancelled", mcperr.New(mcperr.ReasonUpstreamCancelled, "upstreamclient", "cancelled"), false},
-		{"deadline exceeded", mcperr.New(mcperr.ReasonUpstreamTimeout, "upstreamclient", "deadline exceeded"), true},
-		{"connect failed", mcperr.New(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "dial"), true},
+		{"caller cancelled", mcperr.New(mcperr.ReasonUpstreamCancelled, "upstreamclient", "cancelled"), 0, false},
+		{"deadline exceeded", mcperr.New(mcperr.ReasonUpstreamTimeout, "upstreamclient", "deadline exceeded"), 1, true},
+		{"connect failed", mcperr.New(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "dial"), 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sfy := &failSafety{}
@@ -476,12 +481,13 @@ func TestAttemptSettled_CallerCancellationIsNotATargetFailure(t *testing.T) {
 			_ = e.Execute(context.Background(), in, e.Resolve(in))
 
 			got := sfy.flags()
-			if len(got) != 1 {
-				t.Fatalf("exactly one settled attempt expected, got %d", len(got))
+			if len(got) != tc.samples {
+				t.Fatalf("settled samples = %d, want %d — a caller cancellation must not enter the "+
+					"population at all, because padding the denominator dilutes a real failure "+
+					"below the threshold", len(got), tc.samples)
 			}
-			if got[0] != tc.failed {
-				t.Fatalf("failed=%v, want %v — a caller cancellation is not evidence about the "+
-					"target, but a deadline overrun is", got[0], tc.failed)
+			if tc.samples == 1 && got[0] != tc.failed {
+				t.Fatalf("failed=%v, want %v — a deadline overrun IS the target misbehaving", got[0], tc.failed)
 			}
 		})
 	}

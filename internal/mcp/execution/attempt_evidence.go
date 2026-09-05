@@ -9,6 +9,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/runtime"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
 
 // attemptRecord is the in-memory handle to a committed durable send intent. Its
@@ -166,12 +167,18 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 //     Counting those would make an operator's own kill switch look like an error rate and latch
 //     elevated_error_rate for the stop working exactly as designed.
 //
-// failed is the UPSTREAM LEG's verdict (see upstreamLegFailed), never Culvert's disposition: a
+// A THIRD exclusion lives here rather than in the caller: a CALLER CANCELLATION is not evidence
+// about the target in either direction, so it is not a sample at all (see callerCancelled).
+//
+// The verdict is the UPSTREAM LEG's (see upstreamLegFailed), never Culvert's disposition: a
 // response-DLP block after a successful peer answer is this gateway's policy working rather than
 // the target being unhealthy.
-func (e *Executor) reportAttemptSettled(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, failed bool) {
+func (e *Executor) reportAttemptSettled(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, resp *upstreamclient.Response, err error) {
 	if rec == nil || state == model.SendStateUnset || state == model.SendDefinitelyNotSent {
 		return
 	}
-	e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, failed, e.cfg.Clock().Sub(rec.startedAt))
+	if callerCancelled(err) {
+		return
+	}
+	e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, upstreamLegFailed(resp, err), e.cfg.Clock().Sub(rec.startedAt))
 }
