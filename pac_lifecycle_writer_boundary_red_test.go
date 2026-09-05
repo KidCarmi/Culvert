@@ -84,8 +84,9 @@ func pacBoundarySeedOther(t *testing.T, name string) {
 			kept = append(kept, cfg.Profiles[i])
 		}
 	}
-	cfg.Profiles = append(kept, pac.Profile{ID: "other", Name: name, Enabled: true, PoolID: "spare",
+	kept = append(kept, pac.Profile{ID: "other", Name: name, Enabled: true, PoolID: "spare",
 		PrivateNetworks: pac.PrivateProxy, AvailabilityMode: pac.ModeBalanced, Rules: []pac.Rule{}, Revision: 1})
+	cfg.Profiles = kept
 	if err := pacProfiles.Set(cfg); err != nil {
 		t.Fatal(err)
 	}

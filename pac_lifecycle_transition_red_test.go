@@ -78,27 +78,37 @@ func pacTransitionSpec(name string, revision int64) pac.Profile {
 }
 
 // pacTransitionReplaceImport installs spec at its own revision through the
-// exact replace-mode import path (importPACProfilesCandidate + the tolerant
-// Set), keeping the pools.
+// PRODUCTION replace-mode config import (apiConfigImport), keeping the pools.
+//
+// 2F-E correction round 4 (transparent helper correction; the assertions of
+// the sequential rewind tests are unchanged): the round-3 helper wrote the
+// store itself while holding pacProfilesAPIMu — synchronization the
+// production import did not have, which hid the writer-boundary gap the
+// round-4 review named. The helper now goes through the production entry
+// point and holds nothing; the production path serializes itself.
 func pacTransitionReplaceImport(t *testing.T, spec pac.Profile) {
 	t.Helper()
 	b := configBackup{Version: configBackupVersion, PACProfiles: []pac.Profile{spec}}
-	pacProfilesAPIMu.Lock()
-	defer pacProfilesAPIMu.Unlock()
-	if err := pacProfiles.Set(importPACProfilesCandidate(pacProfiles.Get(), &b, true)); err != nil {
-		t.Fatalf("replace import: %v", err)
+	body, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	apiConfigImport(w, adminRequest("POST", "/api/config/import?mode=replace", string(body)))
+	if w.Code != 200 {
+		t.Fatalf("replace import: %d %s", w.Code, w.Body.String())
 	}
 }
 
-// pacTransitionRollback restores spec (at its own revision) through the exact
-// config-rollback path (applyPACFromBackup), keeping the pools.
+// pacTransitionRollback restores spec (at its own revision) through the
+// PRODUCTION config-rollback path (applyPACFromBackup), keeping the pools.
+// Same round-4 helper correction as above: no test-side mutex — the
+// production path serializes itself.
 func pacTransitionRollback(t *testing.T, spec pac.Profile) {
 	t.Helper()
 	cur := pacProfiles.Get()
 	b := configBackup{Version: configBackupVersion, PACProfiles: []pac.Profile{spec}, PACPools: cur.Pools,
 		PACProxyHost: pacStore.Get().ProxyHost, PACProxyPort: pacStore.Get().ProxyPort, PACExclusions: pacStore.Get().Exclusions}
-	pacProfilesAPIMu.Lock()
-	defer pacProfilesAPIMu.Unlock()
 	applyPACFromBackup(&b)
 }
 

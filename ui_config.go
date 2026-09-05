@@ -1301,8 +1301,14 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// PAC profiles/pools (PAC initiative PR 2): import never wipes —
 	// absent/empty fields skip in both modes; merge upserts by ID; replace
 	// replaces the whole set. Pre-validated above; tolerant Set here.
+	// 2F-E correction round 4: the read-modify-write runs inside the shared
+	// PAC writer transaction boundary (pacProfilesWriterLock — lock order
+	// gate → pacProfilesAPIMu), so a lifecycle publish parked between its
+	// intent and its commit can neither interleave with nor overwrite it.
 	if len(b.PACProfiles) > 0 || len(b.PACPools) > 0 {
+		unlock := pacProfilesWriterLock()
 		_ = pacProfiles.Set(importPACProfilesCandidate(pacProfiles.Get(), &b, replaceMode))
+		unlock()
 	}
 
 	// Alert webhooks (Finding 10.3).

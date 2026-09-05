@@ -1006,7 +1006,10 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 	}
 	// PAC profiles/pools (PAC initiative PR 2): nil-skip (old CP), non-nil
 	// replace — [] is an explicit wipe. Tolerant Set (never rejects).
+	// 2F-E correction round 4: inside the shared PAC writer transaction
+	// boundary (pacProfilesWriterLock — lock order gate → pacProfilesAPIMu).
 	if snap.PACProfiles != nil || snap.PACPools != nil {
+		unlock := pacProfilesWriterLock()
 		cur := pacProfiles.Get()
 		if snap.PACProfiles != nil {
 			cur.Profiles = snap.PACProfiles
@@ -1017,6 +1020,7 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 		if err := pacProfiles.Set(cur); err != nil {
 			logger.Printf("DataPlane: PAC profiles: %v", err)
 		}
+		unlock()
 	}
 
 	if snap.ThreatDomainAllowlist != nil {

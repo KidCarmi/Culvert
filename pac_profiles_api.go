@@ -75,6 +75,37 @@ func writePACIssues(w http.ResponseWriter, msg string, issues []pac.ValidationIs
 // revisions. Mirrors the saveConfigVersionMu precedent (configversion.go).
 var pacProfilesAPIMu sync.Mutex
 
+// pacProfilesWriterLock enters the SHARED PAC writer transaction boundary
+// for a bulk writer of the active profile store — the config import
+// (apiConfigImport), the config-version rollback (applyConfigBackup) and the
+// CP→DP snapshot apply (applyConfigSnapshot). Every writer of pacProfiles
+// now builds its candidate AND commits it under pacProfilesAPIMu, the same
+// mutex the lifecycle publish/rollback and the CRUD handlers hold from their
+// validation to their commit, so a publish parked between its intent and its
+// commit can never be interleaved with — and can never overwrite — a bulk
+// writer's completed change (2F-E correction round 4, blocker 1).
+//
+// LOCK ORDER (acyclic; reviewed): objectReferenceMutationGate →
+// configRollbackMu → pacProfilesAPIMu. The three bulk writers hold the gate
+// (and the rollback additionally configRollbackMu) OUTERMOST and take
+// pacProfilesAPIMu LAST, around exactly their PAC read-modify-write. Nothing
+// reachable under pacProfilesAPIMu acquires the gate or configRollbackMu:
+// the post-commit effects (pacAfterActiveCommit, pacCompleteCommittedLocked)
+// reach only saveConfigVersionMu (captureConfigBackup is read-only w.r.t.
+// the gate) and ConfigStore.mu (Update releases it before notifying
+// subscribers), the audit ring and the alert latch. Behind the mutex, the
+// lifecycle commit ALSO carries a store-generation compare-and-swap
+// (ProfileStore.SetIfGeneration): a writer outside this boundary is detected
+// atomically at the commit and the publish refuses instead of overwriting.
+//
+// The returned func releases the boundary. The stage seam lets a proof
+// observe a writer WAITING here.
+func pacProfilesWriterLock() func() {
+	pacLifecycleStage("pac_writer_waiting")
+	pacProfilesAPIMu.Lock()
+	return pacProfilesAPIMu.Unlock
+}
+
 // pacProfilesMutationAllowed gates mutations to CP/standalone nodes: a
 // data-plane node's profile store is CP-managed (snapshot-synced) — a local
 // edit would silently diverge until the next CP version bump, then be
@@ -226,21 +257,34 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 		if !pacGuardDirectCRUD(w, candidate, p, pac.Profile{}, false, "create", in.Confirm) {
 			return
 		}
-		// 2F-E correction round 2/3: a (re)created profile starts a NEW
-		// node-local history epoch. The fresh record is made durable BEFORE
-		// the active create (persist-before-swap on both sides): whatever
-		// record may survive under this id — a delete whose record removal
-		// failed or crashed, a stale epoch — is replaced first, so a
-		// recreated profile can never be exposed beside the old epoch; a
-		// failed epoch write refuses the create with nothing changed.
-		if _, err := pacLifecycle.Recreate(p.ID, p.Revision, pac.ProfileSpecDigest(p)); err != nil {
-			logger.Printf("PAC: history epoch for %q could not be recorded at create: %v", sanitizeLog(p.ID), err)
-			http.Error(w, "the profile's history epoch could not be recorded; nothing was changed: "+err.Error(), http.StatusInternalServerError)
+		// 2F-E correction round 2/3/4: a (re)created profile starts a NEW
+		// node-local history epoch, and the transition is RECOVERABLE across
+		// both writes. The new identity is PREPARED durably before the active
+		// create while the prior identity and evidence (a draft saved before
+		// a first publication, the history of a profile a rollback removed)
+		// stay untouched; the active create is committed; then the prepared
+		// identity is FINALIZED. A refused active create withdraws the
+		// preparation (evidence intact, truthful failure, no audit, no config
+		// version); a crash between the writes is finished by the next
+		// access/boot from the durable transition (profile present ⇒
+		// finalize, absent ⇒ withdraw); an access that cannot finalize
+		// durably reports no identity, never the old epoch.
+		if _, err := pacLifecycle.PrepareCreate(p.ID); err != nil {
+			logger.Printf("PAC: create transition for %q could not be recorded: %v", sanitizeLog(p.ID), err)
+			http.Error(w, "the profile's history epoch could not be prepared; nothing was changed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if pacApplyProfilesMutation(w, r, "pac.profile_create", p.ID, before, candidate) {
-			jsonOK(w, p)
+		pacLifecycleStage("create_prepared")
+		if !pacApplyProfilesMutation(w, r, "pac.profile_create", p.ID, before, candidate) {
+			if err := pacLifecycle.WithdrawCreate(p.ID); err != nil {
+				logger.Printf("PAC: create transition for %q could not be withdrawn after the refused create: %v (withdrawn at the next access)", sanitizeLog(p.ID), err)
+			}
+			return
 		}
+		if _, err := pacLifecycle.FinalizeCreate(p.ID, p.Revision, pac.ProfileSpecDigest(p)); err != nil {
+			logger.Printf("PAC: create transition for %q could not be finalized: %v (finalized at the next access)", sanitizeLog(p.ID), err)
+		}
+		jsonOK(w, p)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

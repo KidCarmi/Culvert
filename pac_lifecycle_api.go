@@ -42,6 +42,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -238,19 +239,21 @@ func pacHistoryIncarnationLocked(id string, lc *pac.ProfileLifecycle, active pac
 	return inc, fresh
 }
 
-// pacReconcilePendingDeletes finishes (or fences) every delete transition
-// the previous process left half-done: a flagged record whose profile is
-// gone is removed, one whose profile is still present has its epoch rotated
-// (pac.LifecycleStore.ObserveActive). Run at startup once both stores are
-// loaded; a failed write is retried by the next access to that profile.
-func pacReconcilePendingDeletes() {
+// pacReconcilePendingTransitions finishes (or fences) every delete or
+// create transition the previous process left half-done, from the durable
+// state alone (pac.LifecycleStore.ObserveActive): a delete whose profile is
+// gone removes its record, a delete whose profile is still present rotates
+// its epoch; a create whose profile is present is finalized (the prepared
+// identity becomes the epoch, evidence kept), a create whose profile is
+// absent is withdrawn (identity and evidence intact). Run at startup once
+// both stores are loaded; a failed write is retried by the next access.
+func pacReconcilePendingTransitions() {
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
-	for _, id := range pacLifecycle.PendingDeletes() {
+	for _, id := range pacLifecycle.PendingTransitions() {
 		active, ok := pacProfiles.ProfileByID(id)
-		if _, _ = pacHistoryIncarnationLocked(id, nil, active, ok); ok {
-			logger.Printf("PAC: delete transition of %q was recorded but the profile is still active; its history epoch was rotated", sanitizeLog(id))
-		}
+		_, _ = pacHistoryIncarnationLocked(id, nil, active, ok)
+		logger.Printf("PAC: a pending profile transition of %q was reconciled at boot (profile present: %t)", sanitizeLog(id), ok)
 	}
 }
 
@@ -696,8 +699,9 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 		}
 		challengeToken = req.Confirm.Challenge
 	}
-	// Candidate config, validated BEFORE any durable step.
-	cfg := pacCandidateConfig(id, candidate, active.Revision+1)
+	// Candidate config, validated BEFORE any durable step, built from the
+	// store generation it must still be at when it is committed.
+	cfg, gen := pacCandidateConfig(id, candidate, active.Revision+1)
 	if issues := pac.ValidateProfilesConfig(cfg); len(issues) > 0 {
 		writePACIssues(w, "validation failed", issues)
 		return
@@ -712,20 +716,31 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 		TargetN: req.TargetN, Actor: sessionAdmin(r), AuditActor: auditActor(r), Reason: reason,
 		TS: time.Now().UTC().Format(time.RFC3339), State: pac.OpPending,
 	}
-	pacCommitOperationLocked(w, r, id, lc, &op, cfg)
+	pacCommitOperationLocked(w, r, id, lc, &op, cfg, gen)
 }
 
 // pacCommitOperationLocked is the durable half of a publish/rollback: intent
 // → authoritative commit → classification → durable committed → post-commit
 // effects (see the file header).
-func pacCommitOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc *pac.ProfileLifecycle, op *pac.PendingOp, cfg pac.ProfilesConfig) {
+func pacCommitOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc *pac.ProfileLifecycle, op *pac.PendingOp, cfg pac.ProfilesConfig, gen uint64) {
 	if !pacPersistIntent(w, lc, op) {
 		return
 	}
 	pacLifecycleStage("intent_persisted")
 
 	// The authoritative commit, classified against the in-memory snapshot.
-	setErr := pacProfiles.Set(cfg)
+	// The commit is a compare-and-swap on the store generation the candidate
+	// was built from (2F-E correction round 4): every production writer of
+	// the active store holds pacProfilesAPIMu across its own read-modify-
+	// write (pacProfilesWriterLock), so within the boundary the generation
+	// cannot have moved; a writer OUTSIDE it is detected here atomically and
+	// the operation is refused — the candidate never overwrites a change it
+	// was not built on.
+	setErr := pacProfiles.SetIfGeneration(cfg, gen)
+	if errors.Is(setErr, pac.ErrProfilesChanged) {
+		pacWriteConflict(w, id, lc, op, setErr)
+		return
+	}
 	observed, observedOK := pacProfiles.ProfileByID(id)
 	class := pac.ClassifyOutcome(op, observed, observedOK)
 	if setErr == nil && class != pac.OpCommitted {
@@ -792,18 +807,18 @@ func pacResolveCandidate(w http.ResponseWriter, id string, lc *pac.ProfileLifecy
 
 // pacCandidateConfig is the whole-config candidate with the profile replaced
 // (or appended) at the given active revision.
-func pacCandidateConfig(id string, candidate pac.Profile, revision int64) pac.ProfilesConfig {
+func pacCandidateConfig(id string, candidate pac.Profile, revision int64) (cfg pac.ProfilesConfig, gen uint64) {
 	published := candidate
 	published.Revision = revision
-	cfg := pacProfiles.Get()
+	cfg, gen = pacProfiles.GetWithGeneration()
 	for i := range cfg.Profiles {
 		if cfg.Profiles[i].ID == id {
 			cfg.Profiles[i] = published
-			return cfg
+			return cfg, gen
 		}
 	}
 	cfg.Profiles = append(cfg.Profiles, published)
-	return cfg
+	return cfg, gen
 }
 
 // pacPersistIntent durably records the intent; on failure nothing has
@@ -835,6 +850,30 @@ func pacWriteAborted(w http.ResponseWriter, id string, lc *pac.ProfileLifecycle,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = w.Write(raw)
+}
+
+// pacWriteConflict answers a commit whose compare-and-swap found the active
+// store changed by a writer outside the transaction boundary: NOTHING was
+// written; the operation is recorded as aborted (a re-sent operationId
+// replays this refusal) and the caller is told to review the current state.
+func pacWriteConflict(w http.ResponseWriter, id string, lc *pac.ProfileLifecycle, op *pac.PendingOp, setErr error) {
+	logger.Printf("PAC: %s %s of %q refused: %v", sanitizeLog(op.Action), sanitizeLog(op.OperationID), sanitizeLog(id), setErr)
+	active, _ := pacProfiles.ProfileByID(id)
+	result := map[string]any{
+		"error":       "the active profile store was changed by another writer between the review of this operation and its commit; nothing was changed by this operation — review the current active profile and dispatch a NEW operation",
+		"code":        "concurrent_write",
+		"operationId": op.OperationID,
+		"current":     map[string]any{"revision": active.Revision, "activeSpecDigest": pac.ProfileSpecDigest(active)},
+	}
+	raw, _ := json.Marshal(result) //nolint:errcheck // plain map
+	lc.PendingOp = nil
+	lc.RecordDecided(pac.DecidedOp{OperationID: op.OperationID, Action: op.Action, State: pac.OpAborted, TS: op.TS, Status: http.StatusConflict, Result: raw})
+	if err := pacLifecycle.Put(lc); err != nil {
+		logger.Printf("PAC: conflict record persist failed for %q: %v", sanitizeLog(id), err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
 	_, _ = w.Write(raw)
 }
 

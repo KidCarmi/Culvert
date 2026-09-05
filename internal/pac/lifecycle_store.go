@@ -27,7 +27,7 @@ func newHistoryIncarnation() string { return uuid.NewString() }
 
 // hasHistoryContent reports whether a record carries operator history (a
 // saved draft, revisions, an intent) as opposed to being an epoch-identity
-// placeholder minted by ObserveActive/Recreate for a profile nobody has
+// placeholder minted by ObserveActive/PrepareCreate for a profile nobody has
 // drafted against yet.
 func hasHistoryContent(lc *ProfileLifecycle) bool {
 	return lc.Draft.ID != "" || len(lc.Revisions) > 0 || lc.PendingOp != nil || lc.Ambiguous != nil || len(lc.Operations) > 0
@@ -173,6 +173,10 @@ func (s *LifecycleStore) mintMissingIncarnations() (map[string]*ProfileLifecycle
 //
 //   - no record, no profile        → "" (the history is missing altogether)
 //   - no record, profile present   → mint a record (identity + observation)
+//   - CreatePending, present       → finalize the create (the prepared
+//     identity becomes the epoch; evidence kept)
+//   - CreatePending, absent        → withdraw the create (flags cleared;
+//     identity and evidence untouched)
 //   - DeletePending, absent        → finish the delete: remove the record, ""
 //   - DeletePending, present       → rotate (the transition began; discard)
 //   - identity empty               → mint (a failed migration retries here)
@@ -198,6 +202,17 @@ func (s *LifecycleStore) ObserveActive(profileID string, activeRevision int64, a
 			return "", false, nil
 		}
 		inc, err := s.mintRecordLocked(&ProfileLifecycle{ProfileID: profileID}, activeRevision, activeSpecDigest, true)
+		return inc, false, err
+	}
+	if cur.CreatePending {
+		if activeExists {
+			rec := finalizeCreateRecord(cur, activeRevision, activeSpecDigest)
+			if err := s.swapRecordLocked(rec); err != nil {
+				return "", false, err
+			}
+			return rec.HistoryIncarnation, true, nil
+		}
+		inc, err := s.withdrawCreateLocked(cur)
 		return inc, false, err
 	}
 	if cur.DeletePending {
@@ -304,34 +319,112 @@ func (s *LifecycleStore) ClearDeletePending(profileID string) error {
 	return s.swapRecordLocked(rec)
 }
 
-// Recreate starts a NEW history epoch for profileID — a fresh record with a
-// freshly minted identity observing the given active identity — replacing
-// whatever record (finished, half-deleted or stale) may survive under that
-// id. Called BEFORE the active create is committed, so the old epoch can
-// never be exposed beside a recreated profile even when a later write
-// fails. Persist-before-swap: a failed write changes nothing.
-func (s *LifecycleStore) Recreate(profileID string, activeRevision int64, activeSpecDigest string) (string, error) {
+// PrepareCreate durably records that a CREATE transition for profileID has
+// begun: the identity of the NEW epoch is minted into PreparedIncarnation
+// and CreatePending is set, while the existing identity and every piece of
+// evidence stay untouched (see ProfileLifecycle.CreatePending). It is the
+// FIRST write of a profile create and must succeed before the active profile
+// is created; a record left by a FINISHED delete (DeletePending beside the
+// absent profile a create requires) is discarded first — that evidence was
+// already released by the delete. Idempotent: a transition already prepared
+// keeps its prepared identity. Persist-before-swap.
+func (s *LifecycleStore) PrepareCreate(profileID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.byID == nil {
 		s.byID = map[string]*ProfileLifecycle{}
 	}
-	rec := &ProfileLifecycle{ProfileID: profileID, HistoryIncarnation: newHistoryIncarnation(),
-		ObservedActiveRevision: activeRevision, ObservedActiveSpecDigest: activeSpecDigest}
+	var rec *ProfileLifecycle
+	switch cur, ok := s.byID[profileID]; {
+	case ok && cur.CreatePending && cur.PreparedIncarnation != "":
+		return cur.PreparedIncarnation, nil
+	case ok && !cur.DeletePending:
+		rec = cloneLifecycle(cur)
+	default:
+		rec = &ProfileLifecycle{ProfileID: profileID}
+	}
+	rec.CreatePending = true
+	rec.PreparedIncarnation = newHistoryIncarnation()
+	if err := s.swapRecordLocked(rec); err != nil {
+		return "", err
+	}
+	return rec.PreparedIncarnation, nil
+}
+
+// FinalizeCreate completes a prepared create once the active create is
+// PROVEN: the prepared identity becomes the epoch identity, the flags are
+// cleared, the observation is set — the evidence is kept. Idempotent (a
+// record no longer pending returns its identity). Persist-before-swap: on a
+// failed write the record stays pending and the next access finalizes it
+// (or reports no identity), never exposing the old epoch.
+func (s *LifecycleStore) FinalizeCreate(profileID string, activeRevision int64, activeSpecDigest string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.byID[profileID]
+	if !ok {
+		return "", errors.New("pac lifecycle: no create transition recorded")
+	}
+	if !cur.CreatePending {
+		return cur.HistoryIncarnation, nil
+	}
+	rec := finalizeCreateRecord(cur, activeRevision, activeSpecDigest)
 	if err := s.swapRecordLocked(rec); err != nil {
 		return "", err
 	}
 	return rec.HistoryIncarnation, nil
 }
 
-// PendingDeletes lists the profile ids whose delete transition is recorded
-// as begun (for the startup reconciliation).
-func (s *LifecycleStore) PendingDeletes() []string {
+func finalizeCreateRecord(cur *ProfileLifecycle, activeRevision int64, activeSpecDigest string) *ProfileLifecycle {
+	rec := cloneLifecycle(cur)
+	if rec.PreparedIncarnation != "" {
+		rec.HistoryIncarnation = rec.PreparedIncarnation
+	} else if rec.HistoryIncarnation == "" {
+		rec.HistoryIncarnation = newHistoryIncarnation()
+	}
+	rec.CreatePending, rec.PreparedIncarnation = false, ""
+	rec.ObservedActiveRevision, rec.ObservedActiveSpecDigest = activeRevision, activeSpecDigest
+	return rec
+}
+
+// WithdrawCreate cancels a prepared create whose active create was PROVABLY
+// refused (validation, or a persist-before-swap write that returned an
+// error): the flags are cleared and the prior identity and evidence are kept
+// exactly as they were; a placeholder record that held nothing else is
+// removed. Persist-before-swap; on a failed write the flags stay and the
+// next access withdraws them (the profile is absent).
+func (s *LifecycleStore) WithdrawCreate(profileID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.byID[profileID]
+	if !ok || !cur.CreatePending {
+		return nil
+	}
+	_, err := s.withdrawCreateLocked(cur)
+	return err
+}
+
+// withdrawCreateLocked clears a pending create on cur (see WithdrawCreate)
+// and returns the identity that remains valid. Caller holds s.mu.
+func (s *LifecycleStore) withdrawCreateLocked(cur *ProfileLifecycle) (string, error) {
+	if cur.HistoryIncarnation == "" && !hasHistoryContent(cur) {
+		return "", s.removeRecordLocked(cur.ProfileID)
+	}
+	rec := cloneLifecycle(cur)
+	rec.CreatePending, rec.PreparedIncarnation = false, ""
+	if err := s.swapRecordLocked(rec); err != nil {
+		return "", err
+	}
+	return rec.HistoryIncarnation, nil
+}
+
+// PendingTransitions lists the profile ids whose delete or create
+// transition is recorded as begun (for the startup reconciliation).
+func (s *LifecycleStore) PendingTransitions() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var ids []string
 	for id, lc := range s.byID {
-		if lc.DeletePending {
+		if lc.DeletePending || lc.CreatePending {
 			ids = append(ids, id)
 		}
 	}
@@ -605,10 +698,15 @@ func (s *LifecycleStore) Put(lc *ProfileLifecycle) error {
 			lc.HistoryIncarnation = newHistoryIncarnation()
 		}
 	}
-	// The delete-transition flag is owned by the delete path and the
-	// observer (ObserveActive); an ordinary write never clears it.
-	if cur, ok := s.byID[lc.ProfileID]; ok && cur.DeletePending {
-		lc.DeletePending = true
+	// The transition flags are owned by the delete/create paths and the
+	// observer (ObserveActive); an ordinary write never clears them.
+	if cur, ok := s.byID[lc.ProfileID]; ok {
+		if cur.DeletePending {
+			lc.DeletePending = true
+		}
+		if cur.CreatePending {
+			lc.CreatePending, lc.PreparedIncarnation = true, cur.PreparedIncarnation
+		}
 	}
 	// Persist-before-swap (2F-B, C1): write the candidate map durably first;
 	// memory is replaced only on success, so a failed write leaves the

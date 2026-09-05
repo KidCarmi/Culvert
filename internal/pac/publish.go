@@ -111,6 +111,22 @@ type ProfileLifecycle struct {
 	// still present (the transition began; whether the active delete ran is
 	// unknowable from here, so the epoch is conservatively discarded).
 	DeletePending bool `json:"deletePending,omitempty"`
+	// CreatePending + PreparedIncarnation (2F-E correction round 4) are the
+	// durable first write of a profile CREATE: the identity of the NEW epoch
+	// is minted and recorded BEFORE the active profile is created, while the
+	// existing identity and every piece of evidence (draft, revisions,
+	// decided operations, intents — which legitimately exist beside an
+	// absent profile after a rollback removed it, or a draft saved before a
+	// first publication) stay untouched. The transition is FINALIZED — the
+	// prepared identity becomes HistoryIncarnation, evidence kept — only once
+	// the active create is proven (the handler, or the next access/boot when
+	// the profile is observed present), and WITHDRAWN (flags cleared,
+	// evidence and identity intact) when the active create was refused or
+	// the profile is observed still absent after a crash. A pending create
+	// never exposes the old epoch beside a created profile: an access that
+	// cannot finalize durably reports no identity at all.
+	CreatePending       bool   `json:"createPending,omitempty"`
+	PreparedIncarnation string `json:"preparedIncarnation,omitempty"`
 }
 
 // ActiveRevision returns the currently-serving revision and true, or false

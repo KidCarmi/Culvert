@@ -80,9 +80,10 @@ func loadPAC(cfg pacStartupConfig) error {
 	// record) run in main.go's pacReconcileAllLifecycles once every store is
 	// loaded — capturing a config version here would snapshot a partial
 	// configuration that a later rollback would treat as authoritative.
-	// 2F-E correction round 3: finish (or fence) every delete transition the
-	// previous process left half-done, against the active store just loaded.
-	pacReconcilePendingDeletes()
+	// 2F-E correction round 3/4: finish (or fence) every delete or create
+	// transition the previous process left half-done, against the active
+	// store just loaded.
+	pacReconcilePendingTransitions()
 	pacSettleLifecycleIntents()
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)
 	return nil

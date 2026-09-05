@@ -777,7 +777,12 @@ func applyPACFromBackup(b *configBackup) {
 	// PAC profiles/pools (PAC initiative PR 2): nil → snapshot predates the
 	// feature, skip; [] → explicit wipe; populated → wholesale replace.
 	// Tolerant Set — rollback must never reject historical data.
+	// 2F-E correction round 4: inside the shared PAC writer transaction
+	// boundary (pacProfilesWriterLock — lock order gate → configRollbackMu →
+	// pacProfilesAPIMu), so a lifecycle publish parked between its intent and
+	// its commit can neither interleave with nor overwrite the restore.
 	if b.PACProfiles != nil || b.PACPools != nil {
+		unlock := pacProfilesWriterLock()
 		cur := pacProfiles.Get()
 		if b.PACProfiles != nil {
 			cur.Profiles = b.PACProfiles
@@ -786,6 +791,7 @@ func applyPACFromBackup(b *configBackup) {
 			cur.Pools = b.PACPools
 		}
 		_ = pacProfiles.Set(cur)
+		unlock()
 	}
 
 	// SaaS feed config (F3a-2): applied only when the snapshot carries it

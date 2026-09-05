@@ -8908,7 +8908,13 @@ paths:
             `current.historyIncarnation`; nothing is committed or replayed).
             `stale` is also the refusal of a mismatched `expectedActiveSpecDigest`
             (2F-E correction round 3; `current.expectedActiveSpecDigest` +
-            `current.revision`).
+            `current.revision`). `concurrent_write` (2F-E correction round 4):
+            the active profile store was changed by a writer outside the
+            appliance's PAC writer transaction boundary between the review of
+            the operation and its commit (detected atomically by a store-
+            generation compare-and-swap); nothing was written, the refusal is
+            the decided outcome of the operationId (a re-send replays it) —
+            review the current state and dispatch a NEW operation.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

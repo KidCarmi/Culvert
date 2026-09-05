@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -140,7 +141,20 @@ type ProfileStore struct {
 	cfg     ProfilesConfig
 	path    string
 	modTime time.Time
+	// gen is the store GENERATION (2F-E correction round 4): a monotonic
+	// counter advanced by every successful replacement of the config (Set,
+	// SetIfGeneration, Load, Restore). A writer that builds a candidate from
+	// one generation and commits it later can prove, atomically, that no
+	// other writer landed in between (SetIfGeneration) — the compare-and-swap
+	// wall behind the shared pacProfilesAPIMu transaction boundary.
+	gen uint64
 }
+
+// ErrProfilesChanged is returned by SetIfGeneration when the store's
+// generation is no longer the one the candidate was built from: another
+// writer landed between the candidate's construction and its commit, and
+// nothing was written.
+var ErrProfilesChanged = errors.New("pac profiles: the active store changed since the candidate was built")
 
 // Load reads config from the JSON file; a missing file is a no-op.
 func (s *ProfileStore) Load(path string) error {
@@ -159,6 +173,7 @@ func (s *ProfileStore) Load(path string) error {
 	}
 	normalizeProfileRevisions(&s.cfg)
 	s.modTime = time.Now()
+	s.gen++
 	return nil
 }
 
@@ -217,11 +232,50 @@ func (s *ProfileStore) Set(cfg ProfilesConfig) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Persist-before-swap (2F-B, C1): the durable write is the commit point.
-	// Memory is replaced only after the file is durably written, so a failed
-	// write leaves the in-memory (and therefore the cluster-synced) view
-	// exactly where it was — never a torn "memory says candidate, disk says
-	// previous" state.
+	return s.setLocked(cfg)
+}
+
+// GetWithGeneration returns a copy of the config together with the store
+// generation it was read at — the pair a writer needs to build a candidate
+// it can later commit with SetIfGeneration.
+func (s *ProfileStore) GetWithGeneration() (cfg ProfilesConfig, gen uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return copyProfilesConfig(s.cfg), s.gen
+}
+
+// Generation returns the current store generation.
+func (s *ProfileStore) Generation() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gen
+}
+
+// SetIfGeneration is Set guarded by a compare-and-swap on the store
+// generation: the candidate is written ONLY if the store is still at
+// expected (the generation GetWithGeneration reported when the candidate was
+// built); otherwise ErrProfilesChanged is returned and NOTHING is written.
+// The comparison and the write happen under one lock, so an intervening
+// writer is detected atomically — it can never be overwritten by a candidate
+// that predates it.
+func (s *ProfileStore) SetIfGeneration(cfg ProfilesConfig, expected uint64) error {
+	if h := ProfileSetHook; h != nil {
+		h(cfg)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != expected {
+		return fmt.Errorf("%w (generation %d, candidate built at %d)", ErrProfilesChanged, s.gen, expected)
+	}
+	return s.setLocked(cfg)
+}
+
+// setLocked is the persist-before-swap commit (2F-B, C1): the durable write
+// is the commit point. Memory is replaced only after the file is durably
+// written, so a failed write leaves the in-memory (and therefore the
+// cluster-synced) view exactly where it was — never a torn "memory says
+// candidate, disk says previous" state. Caller holds s.mu.
+func (s *ProfileStore) setLocked(cfg ProfilesConfig) error {
 	next := copyProfilesConfig(cfg)
 	normalizeProfileRevisions(&next)
 	if s.path != "" {
@@ -235,6 +289,7 @@ func (s *ProfileStore) Set(cfg ProfilesConfig) error {
 	}
 	s.cfg = next
 	s.modTime = time.Now()
+	s.gen++
 	return nil
 }
 
@@ -299,6 +354,7 @@ func (s *ProfileStore) Restore(st ProfileState) {
 	s.cfg = copyProfilesConfig(st.Cfg)
 	s.path = st.Path
 	s.modTime = st.ModTime
+	s.gen++
 }
 
 func copyProfilesConfig(cfg ProfilesConfig) ProfilesConfig {
