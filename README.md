@@ -113,6 +113,10 @@ curl -x http://localhost:8080 https://example.com
 
 ### Monitoring stack (optional)
 
+> Requires a source checkout (see [Docker (manual)](#docker-manual)) — `docker-compose.monitoring.yml`
+> and its `deploy/prometheus.yml` + `deploy/grafana` assets are not part of the one-line
+> installer's source-free `/srv/culvert` bundle.
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 # Grafana → http://localhost:3000  (user: admin, password: $GF_ADMIN_PASSWORD, default "changeme")
