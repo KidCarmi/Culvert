@@ -1161,6 +1161,47 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > recorded, not a regression. Contract artifacts regenerated (`openapi.yaml` →
 > bundle + `types.gen.ts`); route count unchanged (241).
 >
+> **2F-E CORRECTION RECORD, ROUND 8 (this branch, 2026-09-06).** External
+> freeze review of the round-7 candidate (`bde20ba1`) accepted the ancestry
+> and qualification and found one source-level contract break; it was
+> red-before on the untouched candidate (`109371c6`:
+> `pac_lifecycle_candidate_only_red_test.go` V1/V2a/V2b/V2c/V3 failing) and
+> corrected append-only (`82b39900`). **Candidate-only profile ids bypassed
+> the pre-write settlement.** `pacChangedProfileIDs` built a map of the
+> candidate profiles but iterated over the BEFORE profiles only, so an id
+> absent from the active store and present in the candidate — an ADDITION —
+> was never settled. An absent profile can still carry a durable pending
+> first-publish lifecycle intent (the publish died after `intent_persisted`),
+> so the POST create (whose `PrepareCreate` keeps that intent), a
+> merge/replace config import, a config-version rollback and a CP→DP
+> snapshot all installed the profile while the earlier intent stayed
+> unsettled (V1 on the candidate: 200, profile installed, success audit,
+> config version and cluster publication; V2: the PAC slice applied), and
+> the later reconciliation read AMBIGUOUS from the replaced content (V3).
+> Corrected contract: **the settled set is the deterministic union of every
+> profile whose PRESENCE or CONTENT differs between before and candidate** —
+> removed, content-changed and candidate-only added, sorted; untouched
+> profiles stay excluded and pools are never listed. The settlement, its
+> refusal (CRUD `503 lifecycle_unsettled`) and its deferral surfaces (import
+> `pac_profiles_not_applied`, rollback error, snapshot next sync) are
+> unchanged. For the POST create the settlement runs after `PrepareCreate`
+> inside `pacApplyProfilesMutation`, and the transition stays recoverable on
+> every failure boundary as proven in round 4 (G2/G3): a refusal withdraws
+> the preparation, and a withdrawal that cannot persist is finished at the
+> next access/boot — V1 exercises exactly that boundary (lifecycle
+> persistence failing after `create_prepared`): the create is refused
+> fail-closed with no active mutation, no success audit, no config version
+> and no cluster publication, the earlier intent stays durably recoverable,
+> and once persistence recovers the create succeeds with the earlier intent
+> settled exactly once as aborted (it never wrote) across a repeated GET and
+> restart. V2a/V2b/V2c pin the deferral on the three bulk paths with the
+> target absent and the intent recoverable (the snapshot applies at the next
+> sync, settling it once); V3 pins the controls (a genuinely new id with no
+> pending intent stays creatable; untouched-profile and pool-only writes stay
+> unblocked while the history cannot be written). X1, Y1/Y2, Z1–Z3 and W3/W4
+> stay green. OpenAPI documents the 503 on the profile POST and the addition
+> case on the import field (bundle + types regenerated).
+>
 > **2F-E CORRECTION RECORD, ROUND 7 (this branch, 2026-09-05).** External
 > freeze review of the round-6 candidate (`b1495ea8`) accepted X1/Y1/Y2 (a
 > commit's provenance survives unrelated-profile and pool-only writes) and
