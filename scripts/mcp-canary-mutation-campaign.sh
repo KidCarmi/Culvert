@@ -1022,13 +1022,13 @@ run_mutation M106 \
   'a rug-pull refused before the executor stops nothing' \
   'TestCanaryBreach_PreExecutorToolDriftIsReported|TestCanaryBreach_CurrentFingerprintReportsNothing' \
   ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
-  's/\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), "tool_fingerprint_drift"\)\n//'
+  's/\tif canaryScoped \{\n\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), code\)\n\t\}\n//'
 
 run_mutation M107 \
   'a rug-pull caught at the final boundary stops nothing' \
   'TestBreach_BoundaryToolDriftTripsFingerprintDrift|TestBreach_UndriftedBoundaryRaisesNoDriftBreach' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/\t\t\tif cls\.stale && attempt != nil \{\n\t\t\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), attempt\.generation, "tool_fingerprint_drift"\)\n\t\t\t\}\n//'
+  's/\t\t\tif driftObserved && attempt != nil \{\n\t\t\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), attempt\.generation, "tool_fingerprint_drift"\)\n\t\t\t\}\n/\t\t\t_ = driftObserved\n/'
 
 # M108-M110 are Codex round 15 — all three are consequences of round 14's own wiring.
 #
