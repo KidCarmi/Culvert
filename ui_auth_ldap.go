@@ -192,6 +192,18 @@ const (
 	ldapTestMaxGroupSample = 8
 )
 
+// ldapTestTotalBudget is the whole-test envelope (CHAOS-57). ldapTestOpTimeout
+// bounds each LDAP MESSAGE round trip, but go-ldap runs the post-StartTLS
+// tls.Handshake() on the raw socket outside its request timer, so a directory
+// that ACKs StartTLS and then never negotiates TLS hangs with SetTimeout armed.
+// This is generous relative to the sum of the stages because an admin
+// diagnostic should report a slow directory rather than clip it; its job is to
+// guarantee the handler goroutine is released at all.
+//
+// A var, not a const, purely so the chaos gates can drive it down instead of
+// sleeping for the production budget. Never mutated in production.
+var ldapTestTotalBudget = 45 * time.Second
+
 // apiIdPTestRequest is the strict request shape for POST /api/idp/test.
 // Profile is a full IdP profile candidate (the same shape POST/PUT /api/idp
 // accepts) — the test runs BEFORE persistence. An empty ldap.bindPassword on
@@ -316,11 +328,14 @@ func ldapDialErrorAction(err error) string {
 // the pipeline (later stages are reported as skipped).
 func runLDAPDirectoryTest(pc *LDAPProfileConfig, testUsername, testPassword string) *ldapTestReport {
 	rep := &ldapTestReport{}
-	conn, ok := ldapTestConnect(rep, pc)
+	conn, stopWatchdog, ok := ldapTestConnect(rep, pc)
 	if !ok {
 		return rep
 	}
+	// LIFO: stop the watchdog first, then close — so the timer can never fire
+	// against a connection the test is already tearing down.
 	defer conn.Close() //nolint:errcheck // best-effort close of a test connection
+	defer stopWatchdog()
 
 	if !ldapTestServiceBind(rep, conn, pc) {
 		return rep
@@ -340,7 +355,12 @@ func runLDAPDirectoryTest(pc *LDAPProfileConfig, testUsername, testPassword stri
 }
 
 // ldapTestConnect performs the reachable + transport-security stages.
-func ldapTestConnect(rep *ldapTestReport, pc *LDAPProfileConfig) (*ldap.Conn, bool) {
+//
+// It returns the connection AND the canceller for the whole-test watchdog; the
+// caller must defer the canceller. The watchdog is armed here rather than in
+// runLDAPDirectoryTest because the StartTLS stage — the one stage no per-message
+// timer can bound — runs inside this function (CHAOS-57).
+func ldapTestConnect(rep *ldapTestReport, pc *LDAPProfileConfig) (*ldap.Conn, func(), bool) {
 	isLDAPS := strings.HasPrefix(strings.ToLower(pc.URL), "ldaps://")
 	tlsCfg := ldapTLSConfig(pc.URL, pc.TLSSkipVerify)
 	start := time.Now()
@@ -354,9 +374,12 @@ func ldapTestConnect(rep *ldapTestReport, pc *LDAPProfileConfig) (*ldap.Conn, bo
 			Name: "reachable", Label: "Server reachable", OK: false, DurationMs: durMs,
 			Error: ldapTestErrText(err), Action: ldapDialErrorAction(err),
 		})
-		return nil, false
+		return nil, func() {}, false
 	}
 	conn.SetTimeout(ldapTestOpTimeout)
+	// Armed BEFORE StartTLS: the handshake below is the one stage SetTimeout
+	// cannot bound (CHAOS-57, armLDAPConnWatchdog).
+	stopWatchdog := armLDAPConnWatchdog(conn, ldapTestTotalBudget, "ldap-directory-test")
 	rep.Steps = append(rep.Steps, ldapTestStep{Name: "reachable", Label: "Server reachable", OK: true, DurationMs: durMs})
 
 	switch {
@@ -369,8 +392,9 @@ func ldapTestConnect(rep *ldapTestReport, pc *LDAPProfileConfig) (*ldap.Conn, bo
 				Name: "tls", Label: "StartTLS upgrade", OK: false,
 				Error: ldapTestErrText(err), Action: ldapDialErrorAction(err),
 			})
+			stopWatchdog()
 			conn.Close() //nolint:errcheck // test connection teardown after failed upgrade
-			return nil, false
+			return nil, func() {}, false
 		}
 		rep.Steps = append(rep.Steps, ldapTestStep{Name: "tls", Label: "StartTLS upgrade", OK: true,
 			Detail: tlsVerifyDetail(pc)})
@@ -378,7 +402,7 @@ func ldapTestConnect(rep *ldapTestReport, pc *LDAPProfileConfig) (*ldap.Conn, bo
 		rep.Steps = append(rep.Steps, ldapTestStep{Name: "tls", Label: "Transport security", OK: true,
 			Detail: "Plain LDAP — credentials are transmitted unencrypted. Use LDAPS or StartTLS in production."})
 	}
-	return conn, true
+	return conn, stopWatchdog, true
 }
 
 func tlsVerifyDetail(pc *LDAPProfileConfig) string {
