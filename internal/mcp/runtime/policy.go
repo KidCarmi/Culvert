@@ -448,10 +448,10 @@ func policySenderBinding(sc identity.SenderConstraint) policy.SenderBinding {
 // certainty, so it is attributed to none. That loses nothing an operator needs: the demoted
 // activation has no authority left to revoke, and the catalog change that caused the drift is
 // persistent, so the very next request under the new activation observes it and latches correctly.
-func (p *pipeline) resolveUnderStableGeneration(ei ExecInput) (rollout.Resolution, uint64) {
+func (p *pipeline) resolveUnderStableGeneration(ei ExecInput) (res rollout.Resolution, stableGen uint64) {
 	capability := p.capability.String()
 	before := p.deps.canaryGeneration(capability)
-	res := p.executor.Resolve(ei)
+	res = p.executor.Resolve(ei)
 	if after := p.deps.canaryGeneration(capability); after != before {
 		return res, 0
 	}
