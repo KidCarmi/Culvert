@@ -1077,7 +1077,7 @@ run_mutation M113 \
   'the generation is read once after the resolution instead of proven stable across it' \
   'TestCanaryBreach_GenerationStraddlingAnActivationChangeIsAttributedToNone' \
   ./internal/mcp/runtime/ internal/mcp/runtime/policy.go \
-  's/\tbefore := p\.deps\.canaryGeneration\(capability\)\n\tres := p\.executor\.Resolve\(ei\)\n\tif after := p\.deps\.canaryGeneration\(capability\); after != before \{\n\t\treturn res, 0\n\t\}\n\treturn res, before\n/\tres := p\.executor\.Resolve\(ei\)\n\treturn res, p\.deps\.canaryGeneration\(capability\)\n/'
+  's/\tbefore := p\.deps\.canaryGeneration\(capability\)\n\tres = p\.executor\.Resolve\(ei\)\n\tif after := p\.deps\.canaryGeneration\(capability\); after != before \{\n\t\treturn res, 0\n\t\}\n\treturn res, before\n/\tres = p\.executor\.Resolve\(ei\)\n\treturn res, p\.deps\.canaryGeneration\(capability\)\n/'
 
 # M114/M115 are Codex round 18 — zero is a WILDCARD downstream ("whatever is current"), not a null,
 # so the round-17 "attribute to none" sentinel inverted into "attribute to all". Two mutations
