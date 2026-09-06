@@ -1022,7 +1022,7 @@ run_mutation M106 \
   'a rug-pull refused before the executor stops nothing' \
   'TestCanaryBreach_PreExecutorToolDriftIsReported|TestCanaryBreach_CurrentFingerprintReportsNothing' \
   ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
-  's/\tif canaryScoped \{\n\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), code\)\n\t\}\n//'
+  's/\tif canaryScoped \{\n(?:\t\t\/\/[^\n]*\n)*\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), canaryGen, code\)\n\t\}\n//'
 
 run_mutation M107 \
   'a rug-pull caught at the final boundary stops nothing' \
@@ -1045,7 +1045,7 @@ run_mutation M109 \
   'drift on shadow-evaluated out-of-scope traffic stops the whole Canary' \
   'TestCanaryBreach_ShadowEvaluationDoesNotStopTheCanary|TestCanaryBreach_PreExecutorToolDriftIsReported' \
   ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
-  's/\tif canaryScoped \{\n\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), code\)\n\t\}/\tp.deps.reportCanaryBreach(p.capability.String(), code)/'
+  's/\tif canaryScoped \{\n(?:\t\t\/\/[^\n]*\n)*\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), canaryGen, code\)\n\t\}/\t_ = canaryScoped\n\tp.deps.reportCanaryBreach(p.capability.String(), canaryGen, code)/'
 
 run_mutation M110 \
   'an eligibility change is reported as fingerprint drift' \
