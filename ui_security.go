@@ -1431,13 +1431,30 @@ func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 		if t := globalOCSP.LastFailClosedAt(); !t.IsZero() {
 			lastFailClosedAt = t.Format(time.RFC3339)
 		}
-		jsonOK(w, map[string]any{
+		resp := map[string]any{
 			"enabled":          globalOCSP.Enabled(),
 			"cacheLen":         globalOCSP.CacheLen(),
 			"failClosedTotal":  globalOCSP.FailClosedTotal(),
 			"revokedTotal":     globalOCSP.RevokedTotal(),
 			"lastFailClosedAt": lastFailClosedAt,
-		})
+		}
+		// Upstream mTLS client-cert health rides the same admin surface as
+		// OCSP — both are loaded together by loadMTLSAndOCSP — so an admin
+		// can tell "not configured" apart from "configured but failed to
+		// load / expiring soon" without SSH or a log grep.
+		if mc := mtlsClientCertHealth(); mc.configured {
+			resp["mtlsClientCertConfigured"] = true
+			resp["mtlsClientCertLoaded"] = mc.loaded
+			resp["mtlsClientCertFile"] = mc.file
+			if mc.loaded {
+				resp["mtlsClientCertNotAfter"] = mc.notAfter.UTC().Format(time.RFC3339)
+				resp["mtlsClientCertDaysRemaining"] = daysUntil(mc.notAfter)
+			}
+			if mc.lastError != "" {
+				resp["mtlsClientCertLastError"] = mc.lastError
+			}
+		}
+		jsonOK(w, resp)
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return

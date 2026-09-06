@@ -4465,6 +4465,20 @@ Firefox (all platforms):
           OCSP responders were unreachable and Culvert treated affected certificates as revoked (fail-closed), blocking those connections. Last occurrence: <strong id="ocsp-failclosed-last">-</strong>.
         </div>
       </div>
+      <!-- Upstream mTLS Client Certificate -->
+      <div class="panel" style="margin-top:16px" id="mtls-client-cert-panel">
+        <div class="panel-header"><span class="panel-title">Upstream mTLS Client Certificate</span></div>
+        <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem;flex-wrap:wrap">
+          <span>Status: <strong id="mtls-client-cert-status">Not configured</strong></span>
+          <span id="mtls-client-cert-expiry-wrap" style="display:none">Expires: <strong id="mtls-client-cert-expiry">-</strong></span>
+        </div>
+        <div id="mtls-client-cert-error-banner" style="display:none;margin:0 16px 16px;background:rgba(220,53,69,.1);border-left:3px solid var(--red,#dc3545);padding:8px 12px;border-radius:6px;font-size:.78rem;color:var(--red,#dc3545)">
+          The configured upstream mTLS client certificate failed to load — connections to upstreams requiring client-cert authentication proceed WITHOUT it. <span id="mtls-client-cert-error-detail"></span>
+        </div>
+        <div id="mtls-client-cert-expired-banner" style="display:none;margin:0 16px 16px;background:rgba(220,53,69,.1);border-left:3px solid var(--red,#dc3545);padding:8px 12px;border-radius:6px;font-size:.78rem;color:var(--red,#dc3545)">
+          The configured upstream mTLS client certificate has EXPIRED. Culvert still presents it as-is — an upstream that validates certificate lifetime will reject those connections. Re-issue and upload a new certificate.
+        </div>
+      </div>
       <!-- Dual-CA Overlap -->
       <div class="panel" style="margin-top:16px" id="dual-ca-panel">
         <div class="panel-header"><span class="panel-title">Dual-CA Overlap</span></div>
@@ -17211,6 +17225,34 @@ async function loadCAMgmt() {
       document.getElementById('ocsp-failclosed-last').textContent = ocsp.lastFailClosedAt || '-';
     } else {
       fcBanner.style.display = 'none';
+    }
+    const mtlsStatus = document.getElementById('mtls-client-cert-status');
+    const mtlsExpiryWrap = document.getElementById('mtls-client-cert-expiry-wrap');
+    const mtlsErrBanner = document.getElementById('mtls-client-cert-error-banner');
+    const mtlsExpiredBanner = document.getElementById('mtls-client-cert-expired-banner');
+    if (!ocsp.mtlsClientCertConfigured) {
+      mtlsStatus.textContent = 'Not configured';
+      mtlsStatus.style.color = 'var(--muted)';
+      mtlsExpiryWrap.style.display = 'none';
+      mtlsErrBanner.style.display = 'none';
+      mtlsExpiredBanner.style.display = 'none';
+    } else if (ocsp.mtlsClientCertLoaded) {
+      const days = ocsp.mtlsClientCertDaysRemaining;
+      const expired = typeof days === 'number' && days < 0;
+      mtlsStatus.textContent = (expired ? 'Expired' : 'Loaded') + ' (' + (ocsp.mtlsClientCertFile || '') + ')';
+      mtlsStatus.style.color = expired ? 'var(--red,#dc3545)' : (typeof days === 'number' && days < 14) ? 'var(--yellow)' : 'var(--green)';
+      mtlsExpiryWrap.style.display = '';
+      document.getElementById('mtls-client-cert-expiry').textContent =
+        (ocsp.mtlsClientCertNotAfter || '-') + (typeof days === 'number' ? ' (' + days + 'd)' : '');
+      mtlsErrBanner.style.display = 'none';
+      mtlsExpiredBanner.style.display = expired ? '' : 'none';
+    } else {
+      mtlsStatus.textContent = 'Load failed';
+      mtlsStatus.style.color = 'var(--red,#dc3545)';
+      mtlsExpiryWrap.style.display = 'none';
+      mtlsErrBanner.style.display = '';
+      mtlsExpiredBanner.style.display = 'none';
+      document.getElementById('mtls-client-cert-error-detail').textContent = ocsp.mtlsClientCertLastError || '';
     }
   }
   // Dual-CA overlap status.

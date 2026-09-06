@@ -407,6 +407,12 @@ components:
         failClosedTotal: { type: integer, format: int64 }
         revokedTotal: { type: integer, format: int64 }
         lastFailClosedAt: { type: string }
+        mtlsClientCertConfigured: { type: boolean, description: "True when an upstream mTLS client certificate (client_cert_file/client_key_file) is configured. Omitted when unset." }
+        mtlsClientCertLoaded: { type: boolean, description: "True when the configured client certificate loaded successfully and is active on the upstream transport. Present only when mtlsClientCertConfigured is true." }
+        mtlsClientCertFile: { type: string, description: "Configured client-certificate file path. Present only when mtlsClientCertConfigured is true." }
+        mtlsClientCertNotAfter: { type: string, format: date-time, description: "Expiry (RFC 3339) of the loaded client certificate. Present only when mtlsClientCertLoaded is true." }
+        mtlsClientCertDaysRemaining: { type: integer, description: "Days until the loaded client certificate expires (negative if already expired). Present only when mtlsClientCertLoaded is true." }
+        mtlsClientCertLastError: { type: string, description: "Most recent client-certificate load failure. Present only when the configured certificate failed to load." }
     SessionTimeout:
       type: object
       required: [hours]
@@ -3028,7 +3034,7 @@ paths:
       operationId: getOCSP
       tags: [security]
       summary: OCSP status
-      description: Returns OCSP revocation-check status and counters.
+      description: Returns OCSP revocation-check status and counters, plus the upstream mTLS client-certificate's load/expiry status (both are loaded together at startup).
       security:
         - sessionCookie: []
         - basicAuth: []

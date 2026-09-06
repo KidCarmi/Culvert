@@ -1966,6 +1966,31 @@
           "lastFailClosedAt": {
             "type": "string"
           },
+          "mtlsClientCertConfigured": {
+            "description": "True when an upstream mTLS client certificate (client_cert_file/client_key_file) is configured. Omitted when unset.",
+            "type": "boolean"
+          },
+          "mtlsClientCertDaysRemaining": {
+            "description": "Days until the loaded client certificate expires (negative if already expired). Present only when mtlsClientCertLoaded is true.",
+            "type": "integer"
+          },
+          "mtlsClientCertFile": {
+            "description": "Configured client-certificate file path. Present only when mtlsClientCertConfigured is true.",
+            "type": "string"
+          },
+          "mtlsClientCertLastError": {
+            "description": "Most recent client-certificate load failure. Present only when the configured certificate failed to load.",
+            "type": "string"
+          },
+          "mtlsClientCertLoaded": {
+            "description": "True when the configured client certificate loaded successfully and is active on the upstream transport. Present only when mtlsClientCertConfigured is true.",
+            "type": "boolean"
+          },
+          "mtlsClientCertNotAfter": {
+            "description": "Expiry (RFC 3339) of the loaded client certificate. Present only when mtlsClientCertLoaded is true.",
+            "format": "date-time",
+            "type": "string"
+          },
           "revokedTotal": {
             "format": "int64",
             "type": "integer"
@@ -14433,7 +14458,7 @@
     },
     "/api/ocsp": {
       "get": {
-        "description": "Returns OCSP revocation-check status and counters.",
+        "description": "Returns OCSP revocation-check status and counters, plus the upstream mTLS client-certificate's load/expiry status (both are loaded together at startup).",
         "operationId": "getOCSP",
         "responses": {
           "200": {
