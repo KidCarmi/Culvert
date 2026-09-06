@@ -132,11 +132,18 @@ func TestMatchSchedule_EmptySchedule(t *testing.T) {
 }
 
 func TestMatchSchedule_AllDays(t *testing.T) {
-	// Schedule covering all 7 days with a wide time window — should always match.
+	// Schedule covering all 7 days with a full-day window — should always match.
+	//
+	// The end bound is "24:00", NOT "23:59". scheduleTimeMatch is half-open
+	// (cur >= start && cur < end) and parseClockMinutes documents "24:00" as the
+	// exclusive end-of-day bound a full-day window closes with, so "23:59"
+	// excludes the 23:59 minute itself. Written that way this test asserted
+	// "always matches" against a window that genuinely does not cover 1439 of
+	// the day's 1440 minutes, and failed for one minute out of every day.
 	s := &PolicySchedule{
 		Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
 		TimeStart: "00:00",
-		TimeEnd:   "23:59",
+		TimeEnd:   "24:00",
 	}
 	if !matchSchedule(s) {
 		t.Error("all-day all-week schedule should match")
