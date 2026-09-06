@@ -93,10 +93,22 @@ type Deps struct {
 
 // reportCanaryBreach forwards an authoritative whole-Canary breach when a reporter is composed.
 // Nil-safe so call sites stay free of branching.
+//
+// A ZERO generation is DROPPED, and that is a security requirement rather than tidiness. Zero is
+// not a null here — downstream, `tripCanaryAbortForGeneration` documents `wantGen == 0` as
+// "whatever is current" and SKIPS the generation check entirely, a wildcard reserved for the
+// unbound `tripCanaryAbort` entry point. So forwarding the 0 that resolveUnderStableGeneration
+// produces for "this request straddled an activation change and belongs to neither" would mean
+// exactly "stop whichever activation is running now" — inverting the guarantee into the precise
+// defect it exists to prevent (Codex round 18).
+//
+// This path is generation-BOUND by construction: every request that can report here resolved under
+// some activation, so a zero can only mean "could not be attributed", never "attribute to all".
 func (d Deps) reportCanaryBreach(capability string, gen uint64, code string) {
-	if d.CanaryBreach != nil {
-		d.CanaryBreach(capability, gen, code)
+	if d.CanaryBreach == nil || gen == 0 {
+		return
 	}
+	d.CanaryBreach(capability, gen, code)
 }
 
 // canaryGeneration snapshots the capability's activation generation. Nil-safe: with no reporter

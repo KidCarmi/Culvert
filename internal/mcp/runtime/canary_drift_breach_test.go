@@ -257,21 +257,31 @@ func TestCanaryBreach_PreExecutorDriftCarriesTheResolvedGeneration(t *testing.T)
 	}
 }
 
-// TestCanaryBreach_NoActivationReportsGenerationZero is the companion control. With nothing
-// activated the pipeline still reports — the funnel, not the pipeline, decides that a zero
-// generation stops nothing — so a future change that made the pipeline silently swallow the report
-// (rather than the authority discard it) would remove a breach the authority never saw.
-func TestCanaryBreach_NoActivationReportsGenerationZero(t *testing.T) {
+// TestCanaryBreach_ZeroGenerationIsNeverReported pins Codex round 18, and it is the INVERSION of
+// what this test asserted one round ago.
+//
+// It used to require that a zero generation still be REPORTED, on the reasoning that the authority,
+// not the pipeline, should decide a zero stops nothing. That reasoning was wrong about the
+// authority: `tripCanaryAbortForGeneration` documents `wantGen == 0` as "whatever is current" and
+// SKIPS the generation check — a wildcard reserved for the unbound `tripCanaryAbort`. So the zero
+// this path produces for "straddled an activation change, belongs to neither" meant "stop whichever
+// activation is running now", inverting the round-17 guarantee into the very defect it closed.
+//
+// The old test passed against that, because it asserted the report was EMITTED and never followed
+// it to what the report DID. That is this PR's recurring mistake in its sharpest form: a control
+// that checks the statement I had in mind instead of the one the guarantee needs.
+func TestCanaryBreach_ZeroGenerationIsNeverReported(t *testing.T) {
 	rec := &breachRecorder{}
 	p, stale, _ := driftFixture(t, rec)
 	rb := p.newRecord(Request{}, fixedClock())
 
 	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true, 0); !refused {
-		t.Fatal("a drifted decision must still be refused")
+		t.Fatal("a drifted decision must still be refused — the refusal is unchanged")
 	}
-	got := rec.reports()
-	if len(got) != 1 || got[0].gen != 0 {
-		t.Fatalf("expected one report carrying generation 0, got %+v", got)
+	if got := rec.reports(); len(got) != 0 {
+		t.Fatalf("SECURITY: an unattributable observation was reported as generation %d; zero is a "+
+			"WILDCARD downstream, not a null, so this stops whatever activation is running now: %+v",
+			got[0].gen, got)
 	}
 }
 

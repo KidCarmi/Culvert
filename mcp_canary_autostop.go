@@ -240,6 +240,15 @@ func (f *canarySafetyFunnel) Breach(capability string, gen uint64, code string) 
 	if f == nil || f.rt == nil || capability != f.capb.String() {
 		return
 	}
+	// Defence in depth against the wildcard. This funnel is the generation-BOUND reporter: every
+	// caller observed a specific activation, so a zero is always a caller bug. It matters more than
+	// an ordinary guard because zero is not inert downstream — tripCanaryAbortForGeneration reads
+	// wantGen == 0 as "whatever is current" and skips the generation check, so a zero slipping
+	// through here stops a live experiment on the strength of an unattributable observation. The
+	// wildcard stays available where it is intended, on the unbound tripCanaryAbort (Codex round 18).
+	if gen == 0 {
+		return
+	}
 	// gen is the ATTEMPT's activation, not the current one. The trip verifies it under the same
 	// lock that latches, so a breach reported by a request that outlived its activation is
 	// discarded rather than charged to whatever activation replaced it.

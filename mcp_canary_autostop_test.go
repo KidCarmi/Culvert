@@ -1655,3 +1655,53 @@ func TestAutoStop_ActivationGenerationIsStrictlyMonotonic(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoStop_ZeroGenerationBreachCannotStopALiveActivation is Codex round 18, driven through the
+// composed seam to the real authority.
+//
+// Round 17 returns 0 for "this request straddled an activation change and belongs to neither".
+// Downstream, tripCanaryAbortForGeneration documents wantGen == 0 as "whatever is current" and
+// SKIPS the generation check — a wildcard deliberately reserved for the unbound tripCanaryAbort. So
+// the sentinel meaning "attribute to none" collided with a value already meaning "attribute to
+// all", and the round-17 fix stopped the live experiment on exactly the observation it was written
+// to discard.
+//
+// The wildcard is NOT removed: it stays where it is intended. What changes is that the
+// generation-BOUND reporter refuses it, at both the runtime seam that produces it and the funnel
+// that forwards it.
+func TestAutoStop_ZeroGenerationBreachCannotStopALiveActivation(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	swapCanaryClock(t, func() time.Time { return canaryRuntimeTestNow })
+	swapCanaryTimer(t)
+
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	breach, gen := gatewayCanarySeams()
+	live := gen(capb.String())
+	if live == 0 {
+		t.Fatal("premise: an armed activation must report a non-zero generation")
+	}
+
+	// The unattributable report.
+	breach(capb.String(), 0, "tool_fingerprint_drift")
+
+	if rt.abortedNow(capb) {
+		t.Fatal("SECURITY: a zero-generation breach stopped the live activation — zero is a WILDCARD " +
+			"downstream (\"whatever is current\"), not a null, so the round-17 'attribute to none' " +
+			"sentinel became 'attribute to all'")
+	}
+	if st := canaryAbortStatusFor(capb); st.ExecutionAuthority != "granted" {
+		t.Fatalf("the live activation must keep its authority, got %q", st.ExecutionAuthority)
+	}
+
+	// THE CONTROL. The wildcard is still available where it is MEANT to be — on the unbound entry
+	// point — so this test cannot be satisfied by disabling aborts altogether.
+	if res := rt.tripCanaryAbort(capb, "outcome_evidence_loss", canaryNow()); res != canary.TripCanaryLatched {
+		t.Fatalf("control: the unbound tripCanaryAbort must still latch, got %v", res)
+	}
+	if !rt.abortedNow(capb) {
+		t.Fatal("control: the unbound abort must have stopped the Canary")
+	}
+}

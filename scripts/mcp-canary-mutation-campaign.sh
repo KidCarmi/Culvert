@@ -1079,6 +1079,23 @@ run_mutation M113 \
   ./internal/mcp/runtime/ internal/mcp/runtime/policy.go \
   's/\tbefore := p\.deps\.canaryGeneration\(capability\)\n\tres := p\.executor\.Resolve\(ei\)\n\tif after := p\.deps\.canaryGeneration\(capability\); after != before \{\n\t\treturn res, 0\n\t\}\n\treturn res, before\n/\tres := p\.executor\.Resolve\(ei\)\n\treturn res, p\.deps\.canaryGeneration\(capability\)\n/'
 
+# M114/M115 are Codex round 18 — zero is a WILDCARD downstream ("whatever is current"), not a null,
+# so the round-17 "attribute to none" sentinel inverted into "attribute to all". Two mutations
+# because the guard is deliberately duplicated: the runtime seam that PRODUCES the zero and the
+# generation-bound funnel that would FORWARD it are independently breakable.
+
+run_mutation M114 \
+  'the runtime seam forwards a zero generation instead of dropping it' \
+  'TestCanaryBreach_ZeroGenerationIsNeverReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/deps.go \
+  's/\tif d\.CanaryBreach == nil \|\| gen == 0 \{\n\t\treturn\n\t\}\n\td\.CanaryBreach\(capability, gen, code\)\n/\tif d\.CanaryBreach != nil \{\n\t\td\.CanaryBreach\(capability, gen, code\)\n\t\}\n/'
+
+run_mutation M115 \
+  'the generation-bound funnel accepts the zero wildcard' \
+  'TestAutoStop_ZeroGenerationBreachCannotStopALiveActivation' \
+  . mcp_canary_autostop.go \
+  's/\tif gen == 0 \{\n\t\treturn\n\t\}\n//'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves
