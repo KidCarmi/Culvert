@@ -1528,3 +1528,80 @@ func TestAutoStop_WatchdogDecidesEveryBranchFromOneClockSample(t *testing.T) {
 			got, want)
 	}
 }
+
+// TestAutoStop_StaleGenerationPreExecutorBreachCannotStopTheNextActivation is Codex round 16's P1,
+// driven through the real composition funnel rather than the pipeline seam.
+//
+// The scenario is the one the review names: a request resolves to an enforcing disposition under
+// activation G1, is paused, G1 is demoted and G2 activated, and only THEN does that request reach
+// the pre-executor drift refusal. Round 14's adapter resolved the generation at report time, so the
+// stale request's observation latched G2 — an experiment that never saw the drift and whose own
+// reviewed target may be entirely healthy.
+//
+// This is the false-positive direction, which is the more dangerous one for a safety control: an
+// operator cannot distinguish an experiment stopped for something outside its blast radius from a
+// broken abort, and the pressure after that is to weaken the abort.
+func TestAutoStop_StaleGenerationPreExecutorBreachCannotStopTheNextActivation(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	swapCanaryClock(t, func() time.Time { return canaryRuntimeTestNow })
+	swapCanaryTimer(t)
+	funnel := newCanarySafetyFunnel(capb)
+
+	// G1: the activation the stale request resolves under.
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin G1: %v", err)
+	}
+	g1 := funnel.Generation(capb.String())
+	if g1 == 0 {
+		t.Fatal("premise: an armed activation must report a non-zero generation")
+	}
+
+	// The request is now in flight, holding g1. G1 is demoted and G2 activated beneath it.
+	if err := rt.demoteCanary(capb); err != nil {
+		t.Fatalf("demote G1: %v", err)
+	}
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+		t.Fatalf("begin G2: %v", err)
+	}
+	g2 := funnel.Generation(capb.String())
+	if g2 == g1 {
+		t.Fatalf("premise: a demote-and-reactivate must produce a new generation, got %d twice", g1)
+	}
+	if rt.abortedNow(capb) {
+		t.Fatal("premise: the fresh activation must start unlatched")
+	}
+
+	// The stale request finally reaches its pre-executor drift refusal and reports with the
+	// generation it RESOLVED under — THROUGH THE COMPOSED SEAM, not the funnel method directly.
+	//
+	// That distinction is the gate. Calling funnel.Breach here would only re-prove the funnel's
+	// generation strictness, which predates this fix and was never the defect; the defect lived in
+	// how the composition layer FILLED the seam. Driving gatewayCanarySeams is what fails if that
+	// wiring goes back to resolving a generation of its own (the M70 lesson: two paths to one code
+	// need two gates, or either can be broken unnoticed).
+	breach, gen := gatewayCanarySeams()
+	if got := gen(capb.String()); got != g2 {
+		t.Fatalf("premise: the composed generation seam must report the live activation %d, got %d", g2, got)
+	}
+	breach(capb.String(), g1, "tool_fingerprint_drift")
+
+	if rt.abortedNow(capb) {
+		t.Fatal("SECURITY: a pre-executor breach observed on behalf of a demoted activation stopped " +
+			"the activation that replaced it — the new experiment never saw this drift")
+	}
+	if st := canaryAbortStatusFor(capb); st.ExecutionAuthority != "granted" {
+		t.Fatalf("the fresh activation must keep its execution authority, got %q", st.ExecutionAuthority)
+	}
+
+	// THE CONTROL. The same breach through the same seam, against the CURRENT generation, must
+	// still stop it — otherwise this test would pass just as well against a seam that had stopped
+	// aborting entirely.
+	breach(capb.String(), g2, "tool_fingerprint_drift")
+	if !rt.abortedNow(capb) {
+		t.Fatal("control: a breach carrying the CURRENT generation must still stop the Canary")
+	}
+	if st := canaryAbortStatusFor(capb); st.FirstAbortReason != "tool_fingerprint_drift" {
+		t.Fatalf("first cause should be the drift, got %q", st.FirstAbortReason)
+	}
+}

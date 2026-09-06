@@ -67,21 +67,45 @@ type Deps struct {
 	// merely failed approval validation, which looks like ordinary denial rather than proof the
 	// experiment's premise no longer holds (Codex round 14).
 	//
-	// The signature carries no activation generation ON PURPOSE. This package cannot import the
-	// composition layer (the dependency runs the other way), and at this point no reservation has
-	// been made, so there is no generation this request was admitted under. The adapter resolves
-	// "the activation admitting right now", exactly as the admission gate's own drift path does.
-	CanaryBreach func(capability, code string)
+	// THE GENERATION IS CARRIED, NOT RE-RESOLVED.
+	//
+	// No reservation exists at this point, so there is no ADMITTED generation — but there is a
+	// RESOLVED one: the activation whose rollout snapshot made this request enforcing. Resolving
+	// "the activation admitting right now" at report time instead let a request that resolved
+	// under G1, then paused while G1 was demoted and G2 activated, stop G2 with a drift it
+	// observed on behalf of an experiment that no longer exists (Codex round 16). That is the
+	// round-1 finding — a safety report carrying no activation — reintroduced in this seam, and
+	// it is the same single-snapshot rule the resolution itself already follows: routing and
+	// execution must never observe two snapshots of the mutable rollout state.
+	//
+	// So CanaryGeneration is read ONCE, at the single resolution point, and the value is carried
+	// to the report. The adapter is the composition layer's ordinary generation-bound Breach,
+	// which discards a stale generation under the same lock that latches.
+	CanaryBreach func(capability string, gen uint64, code string)
+	// CanaryGeneration reports the capability's activation generation at the instant it is called
+	// (0 = none active). It is called exactly once per request, beside the rollout resolution, so
+	// the generation and the disposition come from the same moment. Nil ⇒ 0, which every breach
+	// path treats as "no activation to stop".
+	CanaryGeneration func(capability string) uint64
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
 }
 
 // reportCanaryBreach forwards an authoritative whole-Canary breach when a reporter is composed.
 // Nil-safe so call sites stay free of branching.
-func (d Deps) reportCanaryBreach(capability, code string) {
+func (d Deps) reportCanaryBreach(capability string, gen uint64, code string) {
 	if d.CanaryBreach != nil {
-		d.CanaryBreach(capability, code)
+		d.CanaryBreach(capability, gen, code)
 	}
+}
+
+// canaryGeneration snapshots the capability's activation generation. Nil-safe: with no reporter
+// composed there is no Canary to stop and 0 is the correct answer.
+func (d Deps) canaryGeneration(capability string) uint64 {
+	if d.CanaryGeneration == nil {
+		return 0
+	}
+	return d.CanaryGeneration(capability)
 }
 
 func (d Deps) now() time.Time {

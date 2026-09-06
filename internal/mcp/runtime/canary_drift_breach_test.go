@@ -15,22 +15,40 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 )
 
+// breachReport is one reported pre-executor breach: the code AND the activation generation it was
+// charged to. The generation is half the contract — a breach charged to the wrong activation stops
+// an experiment that never saw the fault — so the recorder keeps both.
+type breachReport struct {
+	gen  uint64
+	code string
+}
+
 // breachRecorder captures what the pipeline reported through the optional Canary seam.
 type breachRecorder struct {
 	mu   sync.Mutex
-	seen []string
+	seen []breachReport
 }
 
-func (r *breachRecorder) report(_, code string) {
+func (r *breachRecorder) report(_ string, gen uint64, code string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.seen = append(r.seen, code)
+	r.seen = append(r.seen, breachReport{gen: gen, code: code})
 }
 
 func (r *breachRecorder) codes() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.seen...)
+	out := make([]string, 0, len(r.seen))
+	for _, b := range r.seen {
+		out = append(out, b.code)
+	}
+	return out
+}
+
+func (r *breachRecorder) reports() []breachReport {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]breachReport(nil), r.seen...)
 }
 
 // driftFixture ingests one tool and returns a pipeline plus a DecisionInput whose fingerprint no
@@ -76,7 +94,7 @@ func TestCanaryBreach_PreExecutorToolDriftIsReported(t *testing.T) {
 	p, stale, _ := driftFixture(t, rec)
 
 	rb := p.newRecord(Request{}, fixedClock())
-	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true); !refused {
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true, testCanaryGen); !refused {
 		t.Fatal("premise: a stale fingerprint must be refused here")
 	}
 
@@ -94,7 +112,7 @@ func TestCanaryBreach_CurrentFingerprintReportsNothing(t *testing.T) {
 	p, _, fresh := driftFixture(t, rec)
 
 	rb := p.newRecord(Request{}, fixedClock())
-	if _, refused := p.refuseOnToolDrift(rb, fresh, jsonrpc.ID{}, true); refused {
+	if _, refused := p.refuseOnToolDrift(rb, fresh, jsonrpc.ID{}, true, testCanaryGen); refused {
 		t.Fatal("premise: a current fingerprint must not be refused")
 	}
 	if got := rec.codes(); len(got) != 0 {
@@ -109,7 +127,7 @@ func TestCanaryBreach_NoSeamComposedIsAPlainRefusal(t *testing.T) {
 	p, stale, _ := driftFixture(t, nil)
 
 	rb := p.newRecord(Request{}, fixedClock())
-	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true); !refused {
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true, testCanaryGen); !refused {
 		t.Fatal("a stale fingerprint must still be refused with no seam composed")
 	}
 }
@@ -128,7 +146,7 @@ func TestCanaryBreach_ShadowEvaluationDoesNotStopTheCanary(t *testing.T) {
 
 	rb := p.newRecord(Request{}, fixedClock())
 	// canaryScoped=false is what dispatchExecute passes for a shadow evaluation.
-	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, false); !refused {
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, false, testCanaryGen); !refused {
 		t.Fatal("premise: the request must still be REFUSED — only the whole-Canary stop is scoped")
 	}
 	if got := rec.codes(); len(got) != 0 {
@@ -170,7 +188,7 @@ func TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift(t *testing.T) 
 		},
 	}
 	rb := p.newRecord(Request{}, fixedClock())
-	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true); refused {
+	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true, testCanaryGen); refused {
 		t.Fatal("premise: nothing has drifted yet")
 	}
 
@@ -187,7 +205,7 @@ func TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift(t *testing.T) 
 		t.Fatal("premise: DisableServer must preserve the fingerprint, or this test proves nothing")
 	}
 
-	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true); !refused {
+	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true, testCanaryGen); !refused {
 		t.Fatal("an eligibility change must still be refused")
 	}
 	got := rec.codes()
@@ -195,5 +213,62 @@ func TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift(t *testing.T) 
 		t.Fatalf("SECURITY: an eligibility change must be reported as server_identity_drift — the "+
 			"fingerprint did not move, and the admission-time classifier calls this same condition "+
 			"by that name; reported=%v", got)
+	}
+}
+
+// testCanaryGen is the activation generation the fixtures pretend resolved the request. It is
+// deliberately NOT 1 and NOT 0: a zero would be indistinguishable from "no activation", and the
+// point of the round-16 contract is that a SPECIFIC generation travels from the resolution point
+// to the report unchanged.
+const testCanaryGen uint64 = 7
+
+// TestCanaryBreach_PreExecutorDriftCarriesTheResolvedGeneration pins Codex round 16's P1.
+//
+// The seam used to take no generation, and the composition adapter resolved "the activation
+// admitting right now" at REPORT time. The premise was that a request with no reservation was
+// never admitted under an activation, so any generation would do. It was RESOLVED under one — and
+// between resolution and this refusal a demote-and-reactivate can intervene, at which point the
+// old request's drift observation was charged to, and stopped, the NEW experiment.
+//
+// This is the round-1 finding ("safety reports carried no activation generation") reappearing in a
+// seam introduced five rounds later, and it is the more dangerous direction: a healthy experiment
+// stopped by a fault it never saw. The generation now travels with the request.
+func TestCanaryBreach_PreExecutorDriftCarriesTheResolvedGeneration(t *testing.T) {
+	rec := &breachRecorder{}
+	p, stale, _ := driftFixture(t, rec)
+	rb := p.newRecord(Request{}, fixedClock())
+
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true, testCanaryGen); !refused {
+		t.Fatal("a drifted decision must still be refused")
+	}
+	got := rec.reports()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one breach, got %d: %+v", len(got), got)
+	}
+	if got[0].gen != testCanaryGen {
+		t.Fatalf("SECURITY: the breach must be charged to the generation that RESOLVED the request "+
+			"(%d), not one re-read at report time; got %d — a request that outlived its activation "+
+			"can otherwise stop the experiment that replaced it", testCanaryGen, got[0].gen)
+	}
+	if got[0].code != "tool_fingerprint_drift" {
+		t.Fatalf("unexpected code %q", got[0].code)
+	}
+}
+
+// TestCanaryBreach_NoActivationReportsGenerationZero is the companion control. With nothing
+// activated the pipeline still reports — the funnel, not the pipeline, decides that a zero
+// generation stops nothing — so a future change that made the pipeline silently swallow the report
+// (rather than the authority discard it) would remove a breach the authority never saw.
+func TestCanaryBreach_NoActivationReportsGenerationZero(t *testing.T) {
+	rec := &breachRecorder{}
+	p, stale, _ := driftFixture(t, rec)
+	rb := p.newRecord(Request{}, fixedClock())
+
+	if _, refused := p.refuseOnToolDrift(rb, stale, jsonrpc.ID{}, true, 0); !refused {
+		t.Fatal("a drifted decision must still be refused")
+	}
+	got := rec.reports()
+	if len(got) != 1 || got[0].gen != 0 {
+		t.Fatalf("expected one report carrying generation 0, got %+v", got)
 	}
 }

@@ -97,8 +97,14 @@ func (p *pipeline) dispatchPolicy(ctx context.Context, rb *recBuilder, req Reque
 		// (Codex P2, PR #1234). A record-only disposition keeps the inline Observe path;
 		// everything else is handed to Execute with the same resolution.
 		res := p.executor.Resolve(ei)
+		// Snapshot the activation generation HERE, beside the resolution, for the same reason the
+		// resolution itself happens exactly once: both describe the mutable rollout state, and a
+		// later re-read can describe a DIFFERENT activation. A pre-executor breach carrying a
+		// generation resolved at report time let a request that resolved under G1 stop the G2 that
+		// replaced it (Codex round 16).
+		canaryGen := p.deps.canaryGeneration(p.capability.String())
 		if res.Disposition != rollout.EffectRecordOnly {
-			return p.dispatchExecute(ctx, rb, ei, res)
+			return p.dispatchExecute(ctx, rb, ei, res, canaryGen)
 		}
 		// record-only disposition ⇒ the inline Observe evidence path. Honor an emergency kill
 		// engaged AFTER Resolve before that path commits: the kill is a capability-wide

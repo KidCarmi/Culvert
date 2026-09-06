@@ -246,18 +246,24 @@ func (f *canarySafetyFunnel) Breach(capability string, gen uint64, code string) 
 	f.rt.tripCanaryAbortForGeneration(f.capb, gen, code, canaryNow())
 }
 
-// BreachAtCurrentActivation routes a breach detected BEFORE any reservation exists — the runtime
-// pipeline's pre-executor drift refusal — to the abort authority.
+// Generation snapshots this capability's activation generation for a request that has not reserved
+// a slot yet. The runtime pipeline calls it ONCE, beside the rollout resolution, and carries the
+// value to any pre-executor breach it reports.
 //
-// It resolves "the activation admitting right now" rather than taking a generation, because there
-// is none to take: no slot was reserved, so this request was not admitted under any activation. The
-// admission gate's own drift path already resolves it exactly this way. A zero generation means no
-// activation is running, and the trip discards it.
-func (f *canarySafetyFunnel) BreachAtCurrentActivation(capability, code string) {
+// It exists instead of a BreachAtCurrentActivation helper that resolved the generation at REPORT
+// time. That helper's premise — "no slot was reserved, so this request was not admitted under any
+// activation, so use the one admitting right now" — is false in the way that matters: the request
+// was RESOLVED under an activation even though it was not ADMITTED under one, and between those
+// two moments a demote-and-reactivate can intervene. A request that resolved under G1 then stopped
+// the G2 that replaced it (Codex round 16) — the round-1 "safety reports carried no activation
+// generation" finding, reintroduced in a seam added five rounds later.
+//
+// A zero generation means no activation is running, and the generation-bound Breach discards it.
+func (f *canarySafetyFunnel) Generation(capability string) uint64 {
 	if f == nil || f.rt == nil || capability != f.capb.String() {
-		return
+		return 0
 	}
-	f.Breach(capability, f.rt.currentGeneration(f.capb), code)
+	return f.rt.currentGeneration(f.capb)
 }
 
 // AttemptSettled feeds one settled attempt to the generation-bound health detectors and trips the

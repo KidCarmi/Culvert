@@ -1053,6 +1053,23 @@ run_mutation M110 \
   ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
   's/\t\treturn "server_identity_drift"/\t\treturn "tool_fingerprint_drift"/'
 
+# M111/M112 are Codex round 16 — the pre-executor breach must carry the generation that RESOLVED
+# the request, not one re-read at report time. Two mutations because there are two places to break
+# it independently: the pipeline can ignore the value it was handed, and the composition layer can
+# fill the seam with an adapter that re-resolves. Either alone reopens the defect.
+
+run_mutation M111 \
+  'the pipeline ignores the generation it was handed and re-resolves at report time' \
+  'TestCanaryBreach_PreExecutorDriftCarriesTheResolvedGeneration|TestCanaryBreach_PreExecutorToolDriftIsReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), canaryGen, code\)\n/\t\t_ = canaryGen\n\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), p\.deps\.canaryGeneration\(p\.capability\.String\(\)\), code\)\n/'
+
+run_mutation M112 \
+  'the composed breach seam re-resolves the generation instead of forwarding it' \
+  'TestAutoStop_StaleGenerationPreExecutorBreachCannotStopTheNextActivation' \
+  . mcp_observe_startup.go \
+  's/\treturn f\.Breach, f\.Generation\n/\treturn func\(capability string, _ uint64, code string\) \{ f\.Breach\(capability, f\.Generation\(capability\), code\) \}, f\.Generation\n/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

@@ -142,7 +142,7 @@ func (p *pipeline) buildExecInput(req Request, msg jsonrpc.Message, ident *ident
 // (dispatchPolicy), so a composed evaluator never displaces the decision-event commit.
 // It receives the resolution the runtime already resolved and passes it to Execute, so
 // the disposition is never re-resolved.
-func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecInput, res rollout.Resolution) Outcome {
+func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecInput, res rollout.Resolution, canaryGen uint64) Outcome {
 	// OVN-09 — decision/execution TOCTOU. The policy decision was computed against
 	// a catalog SNAPSHOT. Between then and the irreversible upstream call there is a
 	// real window (inspection, durable commit, credential planning, provider fetch)
@@ -153,7 +153,7 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecI
 	// prevent, and the executor never re-checked it.
 	// canaryScoped: only the ENFORCING execute disposition is the Canary's own reviewed traffic. A
 	// shadow evaluation (including the Canary-mode out-of-scope fallback) is not.
-	if out, stale := p.refuseOnToolDrift(rb, ei.Input, ei.MessageID, res.Disposition == rollout.EffectExecute); stale {
+	if out, stale := p.refuseOnToolDrift(rb, ei.Input, ei.MessageID, res.Disposition == rollout.EffectExecute, canaryGen); stale {
 		return out
 	}
 	// SEC-MCP-03. The executor performs the REAL upstream side effect and must
@@ -254,7 +254,7 @@ func (p *pipeline) toolDriftClass(in policy.DecisionInput) string {
 	return ""
 }
 
-func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID, canaryScoped bool) (Outcome, bool) {
+func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID, canaryScoped bool, canaryGen uint64) (Outcome, bool) {
 	code := p.toolDriftClass(in)
 	if code == "" {
 		return Outcome{}, false
@@ -276,7 +276,10 @@ func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id
 	// to an operator, from the control being wrong. The seam is nil in every non-Canary composition,
 	// so this is a no-op there as well.
 	if canaryScoped {
-		p.deps.reportCanaryBreach(p.capability.String(), code)
+		// canaryGen is the generation that RESOLVED this request, snapshotted beside the rollout
+		// resolution, never re-read here — a request that outlived its activation must not stop
+		// whatever replaced it (Codex round 16).
+		p.deps.reportCanaryBreach(p.capability.String(), canaryGen, code)
 	}
 	p.ctr.requestsRejected.Add(1)
 	rb.rec.PolicyAction = "BLOCKED_BY_DECISION_STALE"
