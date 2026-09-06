@@ -4,9 +4,12 @@ package execution
 // physical tool invocation (First Controlled Canary review §6, §8, §9, §10).
 
 import (
+	"time"
+
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/runtime"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
 
 // attemptRecord is the in-memory handle to a committed durable send intent. Its
@@ -21,6 +24,12 @@ type attemptRecord struct {
 	// attempt that does not carry it produces an outcome that cannot be persisted —
 	// and because the outcome commit is best-effort, the loss would be silent.
 	decisionRef string
+	// startedAt is the instant the durable send intent was committed — i.e. the moment this
+	// attempt became a physical possibility. The settle-time delta is the attempt latency the
+	// First-Canary latency detector judges. It deliberately spans the intent commit rather than
+	// only Upstream.Call, because the question the detector answers is "how long is this
+	// experiment taking to do one thing", not "how fast is the peer's socket".
+	startedAt time.Time
 }
 
 // attemptIDOf returns the attempt identity to put on the wire, or "" when this
@@ -50,6 +59,7 @@ func (e *Executor) commitSendIntent(in runtime.ExecInput, reservationID string, 
 		reservationID: reservationID,
 		generation:    activationGen,
 		decisionRef:   decisionRef,
+		startedAt:     e.cfg.Clock(),
 	}
 	f := decisionFacts(in)
 	f.Criticality, f.ActionClass = model.CritOrdinary, model.ActionClassRead
@@ -121,6 +131,64 @@ func (e *Executor) commitAttemptOutcome(in runtime.ExecInput, rec *attemptRecord
 		FailureReason: out.Reason.String(),
 	}
 	if _, cerr := e.cfg.Events.CommitDecision(f); cerr != nil {
+		// A physical invocation may have happened and its terminal outcome is NOT durable: the
+		// Canary can no longer reconstruct what it did to the world. That is a whole-Canary
+		// breach, not a statistic. The metric stays for observability, but the SAFETY path is the
+		// breach seam — before blocker #7 this condition incremented a counter whose production
+		// implementation was an empty method body, so evidence loss stopped nothing at all.
 		e.cfg.Metrics.ObserveOutcomeEvidenceLoss(in.Capability.String())
+		e.cfg.Safety.Breach(in.Capability.String(), rec.generation, "outcome_evidence_loss")
 	}
+}
+
+// reportAttemptSettled reports ONE settled post-admission attempt to the population detectors.
+//
+// IT IS CALLED FROM THE UPSTREAM LEG, BEFORE THE RESERVATION IS RELEASED AND BEFORE THE TERMINAL
+// OUTCOME IS COMMITTED. Both orderings are security properties, and each was learned from a
+// separate defect:
+//
+//   - BEFORE THE RELEASE (Codex round 7). The settle is what may latch elevated_error_rate; the
+//     release is what admits the next request. Released first, a third request could reserve and
+//     cross Upstream.Call before the second failure was even counted, so a reachable threshold
+//     still failed to prevent the next physical invocation.
+//   - BEFORE THE TERMINAL OUTCOME (Codex round 3). A crash between the two writes must over-count
+//     an outcome record rather than erase failure evidence: restore legitimately accepts fewer
+//     samples than reservations, so a missing sample is indistinguishable from an attempt that
+//     never settled, while a missing OUTCOME is already the outcome_evidence_loss breach. Evidence
+//     that survives one write too many is recoverable; evidence a crash erased is not.
+//
+// THE SAMPLE SET IS "INVOCATIONS ACTUALLY ATTEMPTED", and both exclusions matter:
+//
+//   - a request-scoped denial (policy, scope, allowance) never mints an attempt record and so
+//     never reaches this function at all — a Canary must not abort itself for correctly refusing
+//     requests;
+//   - definitely_not_sent means a boundary guard refused AFTER the intent commit — an emergency
+//     kill, a tool drift, a demotion. Nothing was sent, so there is no execution to judge.
+//     Counting those would make an operator's own kill switch look like an error rate and latch
+//     elevated_error_rate for the stop working exactly as designed.
+//
+// TWO further exclusions live here rather than in the caller: a CALLER CANCELLATION is not evidence
+// about the target in either direction (see callerCancelled), and an error that carries its own
+// whole-Canary classification is judged directly rather than through a rate (see
+// upstreamBreachCode).
+//
+// The verdict is the UPSTREAM LEG's (see upstreamLegFailed), never Culvert's disposition: a
+// response-DLP block after a successful peer answer is this gateway's policy working rather than
+// the target being unhealthy.
+func (e *Executor) reportAttemptSettled(in runtime.ExecInput, rec *attemptRecord, state model.PhysicalSendState, resp *upstreamclient.Response, err error) {
+	if rec == nil || state == model.SendStateUnset || state == model.SendDefinitelyNotSent {
+		return
+	}
+	if callerCancelled(err) {
+		return
+	}
+	// A condition that carries its OWN immediate whole-Canary classification has already stopped
+	// the experiment on its own terms, and must not also arrive through a rate — HealthMonitor's
+	// contract says so in as many words. Counting it would report an identity breach as an ordinary
+	// target failure on the persisted counters and the operator surface, and would let one event
+	// contribute to two different stop decisions (Codex round 13).
+	if upstreamBreachCode(err) != "" {
+		return
+	}
+	e.cfg.Safety.AttemptSettled(in.Capability.String(), rec.generation, upstreamLegFailed(resp, err), e.cfg.Clock().Sub(rec.startedAt))
 }

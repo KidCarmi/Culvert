@@ -335,7 +335,7 @@ func newInjectedGate(s *gateSeams) *mcpLiveSideEffectGate {
 			}, true
 		},
 		readFirst: func(policy.OperationClass) bool { return s.readOK },
-		trustOK:   func(string, string, string, string, time.Time) bool { return s.trustOK },
+		trustOK:   func(string, string, string, string, time.Time) (bool, string) { return s.trustOK, "" },
 		reserve: func(time.Time, canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
 			return s.outcome, 7
 		},

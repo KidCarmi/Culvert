@@ -254,12 +254,28 @@ func armCanaryWithRealPeerBackend(t *testing.T, p *controlledPeer, budgetTotal i
 }
 
 func armCanaryWithRealPeerFull(t *testing.T, p *controlledPeer, budgetTotal int, trustOK bool, tweak func(*mcpLiveSideEffectGate), be spool.Backend) *peerRig {
+	// This harness composes and activates at a FIXED fake instant (time.Unix(0,1)). Pin the Canary
+	// auto-stop clock to it: the window deadline is ABSOLUTE and derived from the activation
+	// instant, so against the real clock a 1970 activation is decades expired and every request
+	// here would be refused by a correct window_expired latch.
+	swapCanaryClock(t, func() time.Time { return time.Unix(0, 1) })
 	t.Helper()
 	restore := ssrf.AllowLoopbackForTest()
 	t.Cleanup(restore)
 
 	resetLiveTierGlobals(t)
 	setDataDirForTest(t, t.TempDir())
+	// ISOLATE THE CANARY RUNTIME, for the same reason every other global here is reset.
+	//
+	// This rig latches real abort state on the process-global runtime — and since Codex round 14 it
+	// does so on paths that merely refuse a request (a boundary rug-pull now stops the experiment).
+	// Left shared, a latch set by one test is visible to whatever the shuffle runs next: any test
+	// that reads abort state without beginning its own activation sees a Canary someone else
+	// stopped. That is an order-dependent failure the ordinary run never shows and the determinism
+	// gate does — which is exactly what the determinism gate is for.
+	prevRt := globalCanaryRuntime
+	globalCanaryRuntime = &canaryRuntime{}
+	t.Cleanup(func() { globalCanaryRuntime = prevRt })
 
 	gw := getMCPRollout().gateway
 	prevCfg := gw.CurrentConfig()

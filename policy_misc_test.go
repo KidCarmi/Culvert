@@ -33,10 +33,16 @@ func TestMatchSchedule_WrongDay(t *testing.T) {
 }
 
 func TestMatchSchedule_TimeRange_InRange(t *testing.T) {
-	// Use a very wide time range that always includes now
+	// A full-day window, which must include now whatever the clock says.
+	//
+	// "24:00" and not "23:59": the matcher is half-open, so a 23:59 end bound
+	// excludes the final minute of the day and this "matches any time" claim
+	// was false for one minute in every 1440 (see TestScheduleTimeMatch_FullDay
+	// WindowCoversEveryMinute, which pins the boundary without consulting the
+	// wall clock at all).
 	s := &PolicySchedule{
 		TimeStart: "00:00",
-		TimeEnd:   "23:59",
+		TimeEnd:   "24:00",
 	}
 	if !matchSchedule(s) {
 		t.Error("matchSchedule with 00:00-23:59 should match any time")
@@ -218,5 +224,40 @@ func TestCertMgr_LoadOrInitCA_ExistingPath(t *testing.T) {
 	}
 	if !cm2.Ready() {
 		t.Error("LoadOrInitCA from existing file should be ready")
+	}
+}
+
+// TestScheduleTimeMatch_FullDayWindowCoversEveryMinute pins the half-open
+// boundary across the WHOLE day without reading the wall clock, so the two
+// full-day schedule tests above can never again depend on what minute CI
+// happens to start in.
+//
+// This exists because they did. Both asserted that "00:00"–"23:59" matches any
+// time; the matcher is half-open, so it excludes minute 1439, and the Deep
+// determinism gate went red on a run that crossed 23:59 UTC. A clock-reading
+// test that is wrong for one minute a day is worse than one that is simply
+// wrong: it passes 1439 times for every time it fails, so the failure reads as
+// a flake and gets re-run rather than diagnosed.
+//
+// The engine behaviour is deliberate and is NOT what changed here — an
+// exclusive end bound is what lets two adjacent windows tile a day without
+// overlapping. Only the tests' premise was wrong.
+func TestScheduleTimeMatch_FullDayWindowCoversEveryMinute(t *testing.T) {
+	day := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	for m := 0; m < 24*60; m++ {
+		now := day.Add(time.Duration(m) * time.Minute)
+		if !scheduleTimeMatch("00:00", "24:00", now) {
+			t.Fatalf("00:00-24:00 must cover every minute of the day, missed %02d:%02d", m/60, m%60)
+		}
+	}
+	// The control: 23:59 as an end bound is NOT a full day, and saying so is
+	// the whole point — if this ever starts matching, the exclusive end bound
+	// has been changed and adjacent windows have begun to overlap.
+	last := day.Add(23*time.Hour + 59*time.Minute)
+	if scheduleTimeMatch("00:00", "23:59", last) {
+		t.Fatal("00:00-23:59 must exclude the 23:59 minute: the end bound is exclusive by design")
+	}
+	if !scheduleTimeMatch("00:00", "23:59", last.Add(-time.Minute)) {
+		t.Fatal("00:00-23:59 must still match 23:58")
 	}
 }

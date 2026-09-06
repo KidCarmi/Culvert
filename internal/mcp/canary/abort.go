@@ -74,6 +74,14 @@ func AbortConditions() []AbortCondition {
 			WhyCanaryWide: "sustained latency pathology — the Canary is degrading the data path"},
 		{Code: "unexpected_upstream_response", Scope: AbortCanary,
 			WhyCanaryWide: "an upstream response that response-inspection could not classify safely — fail the Canary, not just the request"},
+		{Code: "independent_witness_mismatch", Scope: AbortCanary,
+			WhyCanaryWide: "authoritative reconciliation contradicts Culvert's own record of what physically happened — " +
+				"a duplicated attempt, a reservation reused, or a binding that does not match the intent. The experiment's " +
+				"central claim is that it can account for every physical effect; a contradiction retires that claim"},
+		{Code: "window_expired", Scope: AbortCanary,
+			WhyCanaryWide: "the time-boxed activation window elapsed. It is an automatic STOP rather than a fault: a first " +
+				"Canary is authorized for a bounded interval, and authority must end when the interval does — with or " +
+				"without traffic to notice it"},
 
 		// ── per-request fail-closed: the Canary continues ─────────────────────────────
 		{Code: "policy_deny", Scope: AbortRequest},

@@ -401,7 +401,7 @@ func TestLiveCommit_DemotedGenerationRefusedAtFinalBoundary(t *testing.T) {
 		capb:      capb,
 		admit:     mcpLiveTierFor(capb).admitExecution,
 		readFirst: canary.IsReadFirstOperation,
-		trustOK:   func(string, string, string, string, time.Time) bool { return true },
+		trustOK:   func(string, string, string, string, time.Time) (bool, string) { return true, "" },
 		reserve: func(time.Time, canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
 			return canary.BudgetGranted, 7
 		},

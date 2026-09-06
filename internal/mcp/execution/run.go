@@ -61,15 +61,60 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	// post-call evidence at all.
 	var attempt *attemptRecord
 	sendState := model.SendStateUnset
-	defer func() {
-		if attempt == nil {
-			return // no durable intent ⇒ no physical attempt to account for
-		}
-		e.commitAttemptOutcome(in, attempt, sendState, out)
-	}()
-
+	// Declared BEFORE the deferred commit so that commit can read the upstream leg's own verdict.
 	var upResp *upstreamclient.Response
 	var upErr error
+	// releaseSlot is the budget reservation's release, captured from the admit below so the SLOT
+	// GOES BACK LAST — after the settle and after the terminal outcome commit. See the ordering
+	// note on that defer.
+	var releaseSlot func()
+	defer func() {
+		if attempt == nil {
+			// No durable intent ⇒ no physical attempt to account for. The slot may still be held
+			// (openAttempt can fail after the reservation), so the release below still runs.
+			releaseReservation(releaseSlot)
+			return
+		}
+		// The UPSTREAM LEG's own verdict, computed here because this is where it is
+		// known. "Did the peer give us a usable answer?" is a different question from
+		// "did Culvert return a result?", and a different question again from "did the
+		// invocation reach the peer?" — the health detector needs the first, and only
+		// this scope has it (Codex round 5 P1).
+		//
+		// A JSON-RPC `error` object is the THIRD shape a failure arrives in, and it is the
+		// most ordinary one: the transport succeeded, the body decoded, and the peer is
+		// telling us the tool did not work. Client.Call returns it as a non-nil Response with
+		// a nil Go error, so a transport-only predicate read it as a SUCCESS — while
+		// finishUpstream, two hundred lines down, already classifies exactly that response as
+		// ReasonUpstreamCallFailed. The detector disagreed with the code beside it, and two
+		// such tool failures produced zero failures, never reached the 1-of-2 threshold, and
+		// admitted a third execution against a target that had just failed twice (Codex round
+		// 6 P1 — the same defect class as round 5, one shape further in).
+		// THE ORDER OF THESE FOUR STEPS IS THE SECURITY PROPERTY, and each was learned separately.
+		//
+		//  1. A TLS/workload identity mismatch is a whole-Canary breach in its OWN right, not one
+		//     ordinary bad sample. server_identity_drift is single-occurrence in the taxonomy, and
+		//     the request-scoped live-trust check runs against the CATALOG before the dial — so a
+		//     peer that no longer matches its pin is discovered only here. Reduced to a sample it
+		//     needed a second one to matter, and another invocation could be admitted against a
+		//     server we can no longer identify (Codex round 8 P1). It is reported FIRST so it wins
+		//     the immutable first cause over any threshold the same attempt might also cross.
+		//  2. The settle, which may latch a rate breach (round 3, round 7).
+		//  3. The terminal outcome, whose FAILURE is itself the outcome_evidence_loss breach — and
+		//     the sample must be durable before it (round 3).
+		//  4. Only then the slot goes back.
+		//
+		// Steps 1-3 all decide whether the Canary keeps its authority; step 4 is what admits the
+		// next request. Releasing before any of them reopens the same window three times over: at
+		// MaxConcurrentExecutions of 1 a waiting request reserves and crosses Upstream.Call while
+		// the breach that should have stopped the experiment is still being recorded (round 7 for
+		// the sample, round 8 for the outcome commit).
+		e.reportUpstreamTrustBreach(in, attempt, upErr)
+		e.reportAttemptSettled(in, attempt, sendState, upResp, upErr)
+		e.commitAttemptOutcome(in, attempt, sendState, out)
+		releaseReservation(releaseSlot)
+	}()
+
 	// OVN-09 (residual window). callUpstream is the ONE place either branch performs
 	// the irreversible side effect, so the last-moment drift re-check belongs here
 	// rather than at each call site: a later branch added above this line inherits it.
@@ -98,9 +143,13 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		}
 		release, revalidate := adm.release, adm.revalidate
 		reservationID, activationGen := adm.reservationID, adm.activationGen
-		if release != nil {
-			defer release()
-		}
+		// The release is handed to the OUTER defer rather than deferred here, because everything
+		// that decides whether the Canary keeps its authority — the trust breach, the health
+		// sample, the terminal outcome commit — happens out there, and the slot must not go back
+		// before all of it. Deferred here it necessarily ran first: an inner closure's defers run
+		// when the closure returns. It stays release-on-every-path (§11) because the outer defer
+		// runs on every path too, including a boundary refusal after the reservation was taken.
+		releaseSlot = release
 		// DURABLE SEND INTENT (§6) — committed AFTER the budget reservation (so it can
 		// name the slot) and BEFORE the final boundary guards, because its purpose is
 		// to survive a crash that happens after the peer receives bytes. Only a
@@ -125,11 +174,33 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// revalidation, then the emergency kill) run inside preCallGuard so nothing sits between them and
 		// Upstream.Call. The kill re-read stays LAST (PREREQ-MCP-KILL-1). A demoted-generation refusal is
 		// mapped to the gate-refusal classification path with a bounded rollout reason.
-		if gerr := e.preCallGuard(in, admKillGen, revalidate); gerr != nil {
+		gerr, driftObserved := e.preCallGuard(in, admKillGen, revalidate)
+		if gerr != nil {
 			// The physical call never began, so this is the ONE case where
 			// definitely_not_sent is mechanically provable rather than inferred.
 			sendState = model.SendDefinitelyNotSent
 			cls := classifyBoundaryError(gerr)
+			// A DRIFT REFUSAL AT THE BOUNDARY IS THE SAME BREACH THE ADMISSION GATE REPORTS.
+			//
+			// Tool drift is detectable at three points — before the executor, at admission, and
+			// here — and only the middle one used to route anywhere. A rug-pull landing AFTER
+			// admission was refused as an ordinary stale decision, so the experiment kept its
+			// authority and every later request merely failed approval validation, which reads as
+			// routine denial rather than proof the reviewed target is gone (Codex round 14).
+			//
+			// It is reported with the ATTEMPT's generation, not the current one: this request was
+			// admitted under that activation, and a demote-and-reactivate in between must not
+			// charge a stale observation to a fresh experiment.
+			// THE BREACH IS KEYED ON THE OBSERVATION, NOT ON WHICH REFUSAL WON.
+			//
+			// Reading cls.stale meant a pass where BOTH the tool drifted and the emergency kill
+			// advanced reported only the kill — the drift was seen and then dropped. Since a kill
+			// can be cleared, the activation would resume unlatched against the new fingerprint,
+			// and later requests would merely fail approval validation (Codex round 15). The
+			// client is still told the kill is the reason; the Canary is told the truth.
+			if driftObserved && attempt != nil {
+				e.cfg.Safety.Breach(in.Capability.String(), attempt.generation, "tool_fingerprint_drift")
+			}
 			bf.stale, bf.killed = cls.stale, cls.killed
 			if cls.demoted {
 				bf.gateRefused, bf.gateReason = true, mcperr.ReasonRolloutModeInvalid
@@ -239,7 +310,14 @@ func (e *Executor) finishUpstreamLeg(ctx context.Context, in runtime.ExecInput, 
 // makes the outcome MORE restrictive. This is the ONE side-effect boundary shared by both the
 // credential and no-credential paths, so the check lives here and nowhere else, and callUpstream
 // places NOTHING between this guard and Upstream.Call.
-func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() bool) error {
+// It returns the refusal error AND the drift OBSERVATION separately, because the two answer
+// different questions. The error is what the CLIENT is told, and there the emergency kill
+// deliberately wins; driftObserved is what the CANARY is told, and a rug-pull that happened is a
+// fact about the world whether or not an operator's kill switch also fired in the same pass.
+// Folding them together lost the breach exactly when two things went wrong at once — and since a
+// kill can later be CLEARED, the activation would resume unlatched against the new fingerprint
+// (Codex round 15).
+func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() bool) (err error, driftObserved bool) {
 	drifted := in.ToolStillCurrent != nil && !in.ToolStillCurrent()
 	// The composition-layer live-generation revalidation is evaluated BEFORE the kill re-read (like the
 	// freshness callback), so the kill generation stays the LAST authoritative state read before
@@ -247,15 +325,17 @@ func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRev
 	// nil predicate (no gate, or Shadow) leaves this byte-identical to the pre-gate boundary.
 	liveDemoted := liveRevalidate != nil && !liveRevalidate()
 	if e.cfg.State.KillGeneration() != admKillGen {
-		return errKilledAtBoundary // emergency stop is paramount, even if the tool also drifted or demoted
+		// Emergency stop is paramount in the REASON reported to the client, even if the tool also
+		// drifted or demoted — but the drift is still returned, so the Canary hears about it.
+		return errKilledAtBoundary, drifted
 	}
 	if drifted {
-		return errToolDriftedBeforeCall
+		return errToolDriftedBeforeCall, true
 	}
 	if liveDemoted {
-		return errLiveGenerationDemotedAtBoundary // the reserved Canary generation was demoted mid-flight
+		return errLiveGenerationDemotedAtBoundary, false // the reserved Canary generation was demoted mid-flight
 	}
-	return nil
+	return nil, false
 }
 
 // classifyBoundaryRefusal maps a boundary drift/kill refusal detected by callUpstream to its
@@ -285,6 +365,98 @@ func (e *Executor) classifyBoundaryRefusal(in runtime.ExecInput, killedAtCall, s
 	default:
 		return runtime.ExecOutput{}, false
 	}
+}
+
+// upstreamLegFailed is the health detector's failure predicate: did the UPSTREAM LEG fail?
+//
+// Three shapes, and all three are the TARGET failing rather than Culvert refusing:
+//
+//   - a transport or protocol error (err) — no answer, or an unusable one;
+//   - a nil response with no error, a defensive impossibility treated as a failure because
+//     "no answer and no reason" is not evidence of health;
+//   - a decoded JSON-RPC error object — the peer answered and said the tool failed.
+//
+// It is deliberately NOT out.Executed. A response-DLP block AFTER a successful peer answer is
+// Culvert's own policy working, not the target misbehaving, and counting it would let a healthy
+// Canary abort itself for its own controls firing. The question this predicate answers is "is the
+// target misbehaving", never "did the client get a result".
+func upstreamLegFailed(resp *upstreamclient.Response, err error) bool {
+	return err != nil || resp == nil || resp.Error != nil
+}
+
+// callerCancelled reports whether the upstream leg ended because the CLIENT went away.
+//
+// Such an attempt is NOT EVIDENCE ABOUT THE TARGET IN EITHER DIRECTION, which is why it is excluded
+// from the population entirely rather than recorded as a success. Round 8 marked it non-failing and
+// still counted it, so it silently padded the DENOMINATOR: with a budget above three calls, a
+// cancellation plus one good response plus one real failure is 1-of-3, under the 1-of-2 threshold,
+// and the Canary stayed active and admitted another invocation (Codex round 9). "Not a failure" and
+// "not a sample" are different statements, and only the second one is true here. Its duration is
+// excluded from the latency detector for the same reason — the client's patience is not the peer's
+// speed.
+//
+// Deliberately NARROW, and the same rule the upstream pool's circuit breaker follows (CHAOS-11): a
+// DEADLINE overrun is ReasonUpstreamTimeout, not this reason, and it IS charged — a target too slow
+// to answer inside the budget is a target misbehaving.
+func callerCancelled(err error) bool {
+	if err == nil {
+		return false
+	}
+	// TWO SHAPES, because cancellation arrives differently depending on WHEN the caller goes away.
+	//
+	// Before or during client.Do, the transport classifies it and the REASON says so. But once
+	// response headers are in hand, the transport's own comment is emphatic that everything after
+	// is "a failure of the ANSWER, never of delivery" — so a cancellation during the BODY read is
+	// wrapped as ReasonUpstreamCallFailed, and a reason-only test reads it as the target failing.
+	// Two such client hang-ups would trip elevated_error_rate on a peer that answered both times
+	// (Codex round 10).
+	//
+	// errors.Is reaches the cause because mcperr.Error implements Unwrap. It is exact rather than
+	// broad: context.DeadlineExceeded is a DIFFERENT sentinel and does not match here, so a target
+	// too slow to answer inside the budget is still a charged sample.
+	return mcperr.ReasonOf(err) == mcperr.ReasonUpstreamCancelled || errors.Is(err, context.Canceled)
+}
+
+// releaseReservation returns the budget slot, nil-safe so the ordered defer above reads as one
+// sequence rather than a chain of guards.
+func releaseReservation(release func()) {
+	if release != nil {
+		release()
+	}
+}
+
+// upstreamBreachCode returns the whole-Canary breach code an upstream-leg error carries IN ITS OWN
+// RIGHT, or "" when the error is an ordinary failure for the population detectors to judge.
+//
+// It is the single source of truth for that question, and it has two readers by design: the breach
+// reporter below raises the code, and reportAttemptSettled uses the same answer to keep the attempt
+// OUT of the rate population. Splitting them let the two disagree — round 8 added the breach and
+// left the settle unconditional, so an identity mismatch was reported as a whole-Canary breach AND
+// counted as an ordinary target failure, which is exactly the laundering HealthMonitor's own
+// contract forbids: a condition with its own immediate classification must not also arrive through
+// a rate (Codex round 13). One function means a code added here is excluded from the population by
+// construction rather than by remembering.
+func upstreamBreachCode(err error) string {
+	if err != nil && mcperr.ReasonOf(err) == mcperr.ReasonUpstreamTLSIdentity {
+		return "server_identity_drift"
+	}
+	return ""
+}
+
+// reportUpstreamTrustBreach latches server_identity_drift when the connected peer's TLS/workload
+// identity did not match the pin.
+//
+// The request-scoped live-trust revalidation checks the CATALOG record before the dial; this is the
+// only place the ACTUAL peer's identity is judged, and a mismatch is a single-occurrence
+// whole-Canary breach rather than an ordinary failed attempt. Treating it as a sample meant the
+// first mismatch stopped nothing and a further invocation could be admitted against a server we can
+// no longer identify.
+func (e *Executor) reportUpstreamTrustBreach(in runtime.ExecInput, rec *attemptRecord, err error) {
+	code := upstreamBreachCode(err)
+	if rec == nil || code == "" {
+		return
+	}
+	e.cfg.Safety.Breach(in.Capability.String(), rec.generation, code)
 }
 
 // finishUpstream processes a successful upstream response: it forwards a sanitized

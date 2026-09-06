@@ -294,6 +294,18 @@ func TestConc07_ToolDriftAfterIntentRefusesTheSend(t *testing.T) {
 	p := startControlledPeer(t, respondOK)
 	rig := armCanaryWithRealPeer(t, p, 10)
 
+	// THE CONTROL RUNS FIRST, and that ordering is now load-bearing.
+	//
+	// It used to run second, on the premise that a drift refusal costs the request and nothing
+	// else. Since Codex round 14 that premise is false by design: a rug-pull caught at the boundary
+	// is an authoritative whole-Canary breach, so it LATCHES the abort and every later request on
+	// this rig is correctly denied. Running the control after the drift would now be asserting the
+	// old contract — the fix would look like a regression, and "make the control pass" would mean
+	// removing the stop this PR exists to add.
+	if out := rig.exec(peerExecInput(p, policy.OpRead)); !out.Executed || p.count() != 1 {
+		t.Fatalf("control: the same fixture must execute without drift, out=%+v count=%d", out, p.count())
+	}
+
 	in := peerExecInput(p, policy.OpRead)
 	// ToolStillCurrent is the PRODUCTION freshness seam preCallGuard consults at the
 	// boundary — the runtime installs it from the live catalog. Reporting false is
@@ -303,12 +315,24 @@ func TestConc07_ToolDriftAfterIntentRefusesTheSend(t *testing.T) {
 	if out.Executed {
 		t.Fatalf("a drifted tool must not execute, out=%+v", out)
 	}
-	if got := p.count(); got != 0 {
-		t.Fatalf("a freshness refusal must send no bytes, peer saw %d POSTs", got)
+	if got := p.count(); got != 1 {
+		t.Fatalf("a freshness refusal must send no bytes of its own, peer saw %d POSTs (the control sent 1)", got)
 	}
-	// CONTROL: the undrifted request on the same rig DOES reach the peer.
-	if out := rig.exec(peerExecInput(p, policy.OpRead)); !out.Executed || p.count() != 1 {
-		t.Fatalf("control: the same fixture must execute without drift, out=%+v count=%d", out, p.count())
+	// AND THE EXPERIMENT STOPS. Refusing the request is only half the answer: the reviewed tool is
+	// gone, so the Canary's premise no longer holds. This is the same claim the unit gates make, and
+	// it is asserted here too because this is the rig that drives the REAL executor end to end.
+	if !globalCanaryRuntime.abortedNow(rollout.CapabilityGateway) {
+		t.Fatal("SECURITY: a boundary rug-pull must stop the whole Canary, not merely refuse the request")
+	}
+	if code := globalCanaryRuntime.abortCodeNow(rollout.CapabilityGateway); code != "tool_fingerprint_drift" {
+		t.Fatalf("first cause must be tool_fingerprint_drift, got %q", code)
+	}
+	// And nothing further is admitted.
+	if out := rig.exec(peerExecInput(p, policy.OpRead)); out.Executed {
+		t.Fatal("no request may execute after the drift latched the abort")
+	}
+	if got := p.count(); got != 1 {
+		t.Fatalf("no further bytes may reach the peer after the latch, peer saw %d POSTs", got)
 	}
 }
 

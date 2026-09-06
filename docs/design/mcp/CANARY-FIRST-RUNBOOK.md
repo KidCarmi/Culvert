@@ -11,8 +11,8 @@ current posture (do NOT collapse these into "done" or "not done"):
 |---|---|
 | Canary architecture — preflight, budget ceiling, trust firewall | **IMPLEMENTED** |
 | Canary architecture — scope gate (`ValidateScope`) | **PARTIAL** — forbids percentage/group/wildcard and caps server & tenant at 1, but `MaxCanaryTools`/`MaxCanaryPrincipals` are **2** and `principalCount` sums Principals+Clients+Agents, so the machine gate does NOT enforce the one-tool/one-synthetic-principal experiment; that must be imposed as an external authorization prerequisite (review §10) |
-| Canary architecture — whole-Canary AUTOMATIC abort | **PARTIAL / DEFECTIVE** — only `budget_exhausted` and `scope_escape` have automatic trippers; the other eight declared breaches do not auto-stop (see §16 below and the review §16) |
-| Canary architecture — durable invocation evidence | **PARTIAL / DEFECTIVE** — events carry no `OutcomeEvidence`; the post-call outcome commit is success-only (upstream errors + DLP blocks emit no post-call event) and a post-send crash is indeterminate, so the executed/status/duration reconciliation the procedure below assumes is not fully backed (review §15/§18) |
+| Canary architecture — whole-Canary AUTOMATIC abort | **IMPLEMENTED** (review blocker 7 CLOSED) — every declared `AbortCanary` code has a wired trip path onto the ONE `canary.AbortController`; the two rate detectors are reachable inside the 3-execution corpus, and the time box stops the experiment with NO further request arriving. The latch revokes EXECUTION AUTHORITY, not the node's mode: demotion stays governed by blockers 10 and 12, so `ModeCanary + ABORTED` is the truthful state. THREE codes have wired funnels but no production PRODUCER yet — `out_of_scope_execution` (the scope gate refuses before execution, so this is prevented by construction; an independent witness would produce it), `credential_safety_failure` (blocker 9) and `unexpected_upstream_response` (blocker 8). See §16 below and the review §16/§25a |
+| Canary architecture — durable invocation evidence | **PARTIAL** (review blocker 8 STILL OPEN, narrowed) — the internal half is complete and proven against the REAL spool: events carry `OutcomeEvidence`, the terminal outcome is committed on every exit path (not just success), the send intent is durable before the irreversible call, and orphan recovery plus typed witness reconciliation exist. What is still missing is the AUTHORITATIVE PRODUCTION WITNESS ADAPTER, so a post-send crash resolves to `reconciliation_required` rather than to a determinate answer, and the procedure below cannot fully close the executed/status/duration reconciliation on its own (review §15/§18) |
 | Production live-tier dependency composition | **COMPOSABLE** — opt-in behind `CULVERT_MCP_LIVE_DEPS` (`composeProductionGatewayLiveTier`); default OFF |
 | Live tier arming | **NOT OPERATOR-PERFORMABLE YET** — the governed, node-readiness-gated `armLiveTier` function exists and is correct, but has NO production caller (no startup path, admin API, or other non-test code invokes it); arming is reachable only from tests today |
 | Manual controls — graceful rollback | **NOT OPERATOR-REACHABLE** — only the emergency kill (`POST /api/mcp/rollout/emergency`) is wired; `quiesceLiveTier` has no production caller and `apiMCPRolloutTransition` returns `distribution_not_configured` for a Canary→Shadow/Observe target, so the "rollback rehearsed first" control below is not admin-invokable today (review §17) |
@@ -138,14 +138,25 @@ set is empty. This requires the separately-reviewed activation to have:
    `tools/call` invocations, with auxiliary lifecycle/discovery traffic counted separately and never
    folded into that total (review §9). Any mismatch WITHIN the side-effect-bearing class is a
    whole-Canary breach → auto-stop.
-8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16) — demote to
-   Shadow and/or engage the kill switch. **Window expiry is NOT an automatic transition today:**
-   `budget_exhausted` is tripped only from `reserveCanaryExecution` (`mcp_canary_runtime.go:391`) and
-   `BudgetDeniedWindow` is produced only by `BudgetEnforcer.Reserve` — both request-driven — so if no
-   further request arrives after the window elapses, nothing trips and the node stays in Canary mode
-   indefinitely. Expiry ends the authority to ADMIT, it does not stop the experiment. Until a
-   deadline-driven stop exists, the operator MUST explicitly demote/kill at the window boundary
-   (review §16, blocker 7).
+8. **Stop** on budget exhaustion, window expiry, or any `AbortCanary` condition (§16).
+   **Two things happen here and they are NOT the same, so read both:**
+
+   *Automatic (blocker 7, CLOSED).* Execution AUTHORITY is revoked by the node itself. A watchdog
+   armed from the persisted activation instant latches `window_expired` with NO further request
+   arriving, exhaustion latches when the final authorized attempt settles, and every other
+   `AbortCanary` code has a wired trip path onto the one `canary.AbortController`. After the
+   latch no new reservation is granted and a request already admitted fails the final live
+   revalidation before `Upstream.Call`. The operator does not have to be watching for this.
+
+   *Still MANUAL (blockers 10 and 12).* The node's MODE does not change. The latch revokes authority;
+   it does not demote, so the truthful state at the boundary is `ModeCanary + ABORTED`, and the
+   governed Shadow/Observe transition is not operator-reachable today. **The operator MUST still
+   perform the demotion (or engage the kill switch) at the window boundary** — not to stop execution,
+   which has already stopped, but to return the node to a governed steady state.
+
+   Read `activation_runtime.auto_stop` rather than the mode: it reports `execution_authority`
+   (`granted` / `revoked` / `none`) and the immutable first cause separately from `Mode`, and it is
+   never more optimistic than the admission gate.
 9. **Roll back** at the first sign of any whole-Canary breach; the kill generation is authoritative at
    the admission boundary (PREREQ-MCP-KILL-1) — but NOT across the transport retry loop:
    `upstreamclient.Call` retries an idempotent read without re-checking the kill, so a retry POST can
@@ -157,29 +168,62 @@ set is empty. This requires the separately-reviewed activation to have:
 
 out_of_scope_execution · scope_escape · tool_fingerprint_drift · server_identity_drift ·
 outcome_evidence_loss · credential_safety_failure · budget_exhausted · elevated_error_rate ·
-latency_pathology · unexpected_upstream_response.
+latency_pathology · unexpected_upstream_response · independent_witness_mismatch · window_expired.
 
-> **Current wiring (do not assume all are automatic).** As of this baseline only
-> `budget_exhausted` and `scope_escape` auto-trip the whole Canary (from `reserveCanaryExecution`);
-> `tool_fingerprint_drift`/`server_identity_drift` only DENY the offending request, `outcome_evidence_loss`
-> only increments a metric, and `unexpected_upstream_response`/`elevated_error_rate`/`latency_pathology`
-> plus witness reconciliation have no automatic tripper yet. Wiring the rest is a pre-Canary
-> product-defect prerequisite — see `docs/operator/mcp-first-controlled-canary-review.md` §16.
+> **Wiring (review blocker 7 CLOSED).** Every code above now has a wired trip path, and they all
+> converge on the ONE `canary.AbortController` — there is no second latch. Drift denies the request AND
+> stops the experiment; outcome-evidence loss stops it (the metric remains in parallel); a
+> reconciliation conflict stops it. What the latch revokes is EXECUTION AUTHORITY: no new reservation,
+> and a request already admitted fails the final live revalidation before `Upstream.Call`.
+> It does NOT demote the node — demotion stays governed by review blockers 10 and 12, so the truthful
+> state is `ModeCanary + ABORTED` and `activation_runtime.auto_stop` reports `execution_authority`
+> separately from mode. THREE codes have no production PRODUCER yet — `out_of_scope_execution`
+> (prevented by the scope gate before execution rather than detected; an independent witness would
+> produce it), plus:
+> `credential_safety_failure` (blocker 9) and `unexpected_upstream_response` (blocker 8); their funnels
+> are wired and gated. See `docs/operator/mcp-first-controlled-canary-review.md` §16.
 >
-> **Threshold reachability (review §16/§26).** For `elevated_error_rate` and `latency_pathology` the
-> reviewed minimum sample floor MUST be reachable inside the exact corpus (`MaxTotalExecutions=3`), or
-> the below-floor behavior MUST stop fail-closed. A floor above three combined with a below-floor
-> `no-trip` means neither detector can ever evaluate during the experiment — errors or latency
-> pathology would persist for its whole duration while the automatic-abort prerequisite was recorded as
-> closed. The same reachability rule applies to the witness-reconciliation trip.
+> **Threshold reachability (review §16/§26) — satisfied.** `sample_floor = 2`; the error rate trips iff
+> `2 × failures ≥ samples` (≥ 50%) over the current activation generation; a single attempt at or above
+> 15s trips `latency_pathology` with NO floor, and a mean at or above 10s trips it at the floor. All are
+> reachable within `MaxTotalExecutions = 3`, and `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` fails
+> if the floor drifts beyond the corpus. These are First-Canary safety thresholds derived from the 30s
+> upstream request timeout — they are NOT product SLAs. The error-rate numerator counts ordinary
+> post-admission execution failures only; request-scoped policy/scope denials carry their own
+> classification and are never counted here.
+>
+> **What counts as a failure (rounds 5 and 6).** The UPSTREAM LEG's own verdict, in all three shapes
+> it arrives in: a transport error, a nil response, or a decoded JSON-RPC `error` object — the last
+> being the peer answering that the tool failed, which Culvert already classifies
+> `ReasonUpstreamCallFailed`. It is deliberately NOT Culvert's disposition: a response-DLP block after
+> a successful peer answer is this gateway's own policy working, and counting it would let a healthy
+> Canary abort itself for its own controls firing. The sample is counted, and the latch it may prove
+> decided, BEFORE the reservation goes back — otherwise a waiting request takes the freed slot and
+> reaches the upstream before the failure that should have stopped the experiment is even counted.
+> The same holds for every other step that decides authority: the order is trust-breach → settle →
+> terminal outcome → release, and the terminal outcome commit is itself the `outcome_evidence_loss`
+> producer. Two classifier entries go in opposite directions on purpose — a pinned-identity mismatch
+> is the single-occurrence `server_identity_drift` breach rather than a sample, and a caller
+> cancellation — in both the shapes it arrives in, reason-classified before the answer and wrapped as
+> a call failure during the body read — is not evidence about the target in EITHER direction, so it is
+> excluded from the
+> population rather than counted as a success (a deadline overrun still is a charged sample).
+>
+> **The operator surface is never more optimistic than admission.** `activation_runtime.auto_stop`
+> derives `window_expired` and `execution_authority` from the same two-ended `WindowOpen` predicate
+> the reservation path uses, so a clock rolled behind the activation instant is reported as a closed
+> window immediately rather than at the next watchdog fire. That is reporting, not deciding — nothing
+> in the admission path reads it, and `AbortController` remains the one abort authority.
 
 ## Explicit non-goals
 
 - No customer traffic, no production credential, no production upstream.
 - No wildcard/percentage scope, no write/destructive/control operation.
-- No standing Canary — it is a time-boxed experiment. **The time box is not yet self-enforcing:**
-  window expiry ends the authority to ADMIT but does not stop the experiment (the only
-  `budget_exhausted` trip is request-driven, step 8), so until a deadline-driven stop exists the
-  operator MUST demote/kill explicitly at the window boundary.
+- No standing Canary — it is a time-boxed experiment. **The time box is self-enforcing** (blocker 7):
+  the deadline is absolute, derived from the persisted activation instant, and a watchdog latches
+  `window_expired` with NO further request arriving; a restart never grants a fresh window and a
+  restart after expiry latches before any admission is possible. The operator MUST still perform the
+  governed demotion at the boundary, because the latch revokes execution authority but does not change
+  the node's mode (blockers 10/12).
 - Graduation (read → bounded write → destructive/control, or wider scope) is a **new** Canary for
   the added delta, under its own review (`ROLLOUT-AND-ROLLBACK.md`).

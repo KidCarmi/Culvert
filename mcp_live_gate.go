@@ -42,7 +42,10 @@ type mcpLiveSideEffectGate struct {
 	readFirst func(policy.OperationClass) bool
 	// trustOK revalidates the exact current live approval for (tenant, server, tool) as of now,
 	// bound to the DECISION's fingerprint (the fingerprint the request was actually decided against).
-	trustOK func(tenant, serverID, toolName, fingerprint string, now time.Time) bool
+	// It returns ok, plus a whole-Canary DRIFT code when the denial is not merely "this request
+	// has no approval" but authoritative evidence that the reviewed target changed underneath the
+	// experiment. "" means request-scoped: deny this request, the Canary continues.
+	trustOK func(tenant, serverID, toolName, fingerprint string, now time.Time) (bool, string)
 	// reserve reserves a Canary budget slot for the execution identity, returning the outcome and
 	// the generation the reservation was made under.
 	reserve func(now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64)
@@ -55,6 +58,12 @@ type mcpLiveSideEffectGate struct {
 	generationCurrent func(gen uint64) bool
 	// note records a bounded denial reason for metrics/telemetry (never a secret). Optional.
 	note func(reason mcperr.Reason)
+	// tripBreach routes an authoritative whole-Canary breach detected at admission to the ONE
+	// abort authority (rt.tripCanaryAbort). nil in tests that do not exercise the abort path.
+	tripBreach func(gen uint64, code string)
+	// currentGeneration reports the activation generation admitting right now, so a breach observed
+	// during admission can be charged to it rather than to a later one.
+	currentGeneration func() uint64
 }
 
 var _ execution.LiveExecutionGate = (*mcpLiveSideEffectGate)(nil)
@@ -74,6 +83,10 @@ func newMCPLiveSideEffectGate(capb rollout.Capability) *mcpLiveSideEffectGate {
 		releaseBudget:     func(gen uint64) { globalCanaryRuntime.releaseCanaryExecution(capb, gen) },
 		generationCurrent: func(gen uint64) bool { return globalCanaryRuntime.generationActive(capb, gen) },
 		note:              noteMCPLiveGateDenied,
+		tripBreach: func(gen uint64, code string) {
+			globalCanaryRuntime.tripCanaryAbortForGeneration(capb, gen, code, canaryNow())
+		},
+		currentGeneration: func() uint64 { return globalCanaryRuntime.currentGeneration(capb) },
 	}
 }
 
@@ -101,7 +114,29 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 	}
 
 	// (3) Runtime live-trust revalidation (§10), bound to the DECISION's fingerprint.
-	if !g.trustOK(in.Tenant, in.ServerID, in.ToolName, in.Fingerprint, in.Now) {
+	//
+	// The activation is captured BEFORE the check so an authoritative drift is charged to the
+	// activation that was admitting this request, not to whatever is current by the time the trip
+	// runs. A demote-and-reactivate in between makes the observation stale, and a stale observation
+	// must not stop a fresh experiment.
+	// Optional seam: a gate built without it (the injected doubles) reports 0, which the trip reads
+	// as "no activation named" and treats as the current one — the pre-existing behaviour.
+	var admittingGen uint64
+	if g.currentGeneration != nil {
+		admittingGen = g.currentGeneration()
+	}
+	trustedNow, driftCode := g.trustOK(in.Tenant, in.ServerID, in.ToolName, in.Fingerprint, in.Now)
+	if driftCode != "" {
+		// AUTHORITATIVE DRIFT (blocker #7 §17). The reviewed tool/server is no longer the one the
+		// approval was granted against. That is not a request that happens to lack authorization —
+		// it is proof the experiment's premise (a pinned, reviewed target) no longer holds, so the
+		// request fails closed AND the whole Canary latches. The trip goes through the one abort
+		// authority; it never latches anything locally.
+		if g.tripBreach != nil {
+			g.tripBreach(admittingGen, driftCode)
+		}
+	}
+	if !trustedNow {
 		releaseAdmit()
 		return deny(mcperr.ReasonLiveTrustRevalidationFailed)
 	}
@@ -173,24 +208,41 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 //   - the CURRENT target fingerprint must still EQUAL the decision fingerprint, so an approval issued
 //     for a DIFFERENT fingerprint (e.g. an F2 approval when this request was decided under F1) can
 //     never authorize this side effect. The approval is then validated against that same fingerprint.
-func mcpLiveTrustRevalidate(tenant, serverID, toolName, decisionFP string, now time.Time) bool {
+func mcpLiveTrustRevalidate(tenant, serverID, toolName, decisionFP string, now time.Time) (trusted bool, driftCode string) {
 	if mcpToolTrust == nil {
-		return false
+		return false, ""
 	}
 	ti := mcpToolTrust.loadTarget(serverID, toolName)
 	if !ti.found || ti.target.Tenant == "" || ti.target.Tenant != tenant {
-		return false
+		// Request-scoped: this request names a target that is not this tenant's reviewed one. A
+		// Canary that correctly refuses such a request is a Canary working, not a breach.
+		return false, ""
 	}
 	// The reviewed server must still be usable at the boundary (P1b): an operator disable or a lost
 	// identity verification after runExecute snapshotted in.Server fails closed here.
+	//
+	// WHOLE-CANARY. This one signal conflates two causes — an operator disabling the server and the
+	// server losing identity verification — and they are not separable from the data available
+	// here (a distinguishable peer-freshness source is blocker #11). The conservative reading is
+	// taken deliberately: in BOTH cases the trust anchor the experiment was authorized against is
+	// no longer the one in force, and the safe response to "the approved anchor is gone" is to stop
+	// changing reality, not to keep going because one of the two possible causes was benign.
 	if !ti.target.ServerUsable {
-		return false
+		return false, "server_identity_drift"
 	}
 	// Bind trust to the DECISION's fingerprint, not merely whichever fingerprint is current (P1a): the
 	// current target must STILL equal the fingerprint this request was decided against, so an
 	// F1→F2→F1 flap cannot let an F2 approval authorize an F1 request.
-	if decisionFP == "" || hex.EncodeToString(ti.target.Fingerprint[:]) != decisionFP {
-		return false
+	//
+	// WHOLE-CANARY when a fingerprint EXISTS and differs: that is the rug-pull the taxonomy names —
+	// the executed tool is not the reviewed tool. A MISSING decision fingerprint is request-scoped:
+	// it means this request never carried one, which is a malformed request, not evidence the
+	// target changed.
+	if decisionFP == "" {
+		return false, ""
+	}
+	if hex.EncodeToString(ti.target.Fingerprint[:]) != decisionFP {
+		return false, "tool_fingerprint_drift"
 	}
 	tgt := canary.LiveTarget{
 		Tenant:            tenant,
@@ -201,10 +253,12 @@ func mcpLiveTrustRevalidate(tenant, serverID, toolName, decisionFP string, now t
 	}
 	for _, a := range mcpToolTrust.activeLiveApprovals(now) {
 		if canary.SatisfiesLiveExecution(a, tgt, now) == canary.TrustOK {
-			return true
+			return true, ""
 		}
 	}
-	return false
+	// No satisfying approval: request-scoped. The target still matches what was reviewed; this
+	// request simply is not authorized (expired, revoked, never granted).
+	return false, ""
 }
 
 // mcpLiveGateDenials counts live side-effect gate denials by bounded reason code, for the

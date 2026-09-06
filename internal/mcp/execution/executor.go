@@ -57,6 +57,10 @@ type Config struct {
 	// byte-identical to the pre-gate path (the ShadowEvaluator and any non-live composition
 	// never set it). See livegate.go.
 	LiveGate LiveExecutionGate
+	// Safety is the OPTIONAL narrow whole-Canary breach seam (blocker #7). Nil means no Canary is
+	// composed; it is replaced by a no-op so call sites never branch. It is deliberately separate
+	// from Metrics — see safety.go for why observability and control must not share a sink.
+	Safety CanarySafety
 }
 
 // Executor implements runtime.ExecutionProvider. It is the LIVE object: it possesses
@@ -83,6 +87,9 @@ func New(cfg Config) (*Executor, error) {
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
+	}
+	if cfg.Safety == nil {
+		cfg.Safety = noopCanarySafety{}
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = noopMetrics{}

@@ -23,7 +23,7 @@ func TestLiveTrustRevalidate_BindsToDecisionFingerprint(t *testing.T) {
 	now := mcpToolTrust.now()
 
 	// Baseline: the decision fingerprint equals the current target ⇒ a valid approval revalidates OK.
-	if !mcpLiveTrustRevalidate(ttTenant, sid, tool, fpHex, now) {
+	if ok, _ := mcpLiveTrustRevalidate(ttTenant, sid, tool, fpHex, now); !ok {
 		t.Fatal("a valid live approval bound to the current fingerprint must revalidate OK")
 	}
 	// P1a: a decision fingerprint that does NOT match the current target is denied, even though a
@@ -32,11 +32,11 @@ func TestLiveTrustRevalidate_BindsToDecisionFingerprint(t *testing.T) {
 	if otherFP == fpHex {
 		otherFP = "0123456789abcdef" + fpHex[16:]
 	}
-	if mcpLiveTrustRevalidate(ttTenant, sid, tool, otherFP, now) {
+	if ok, _ := mcpLiveTrustRevalidate(ttTenant, sid, tool, otherFP, now); ok {
 		t.Fatal("P1a: a decision fingerprint that does not match the current target must be denied")
 	}
 	// An empty decision fingerprint fails closed.
-	if mcpLiveTrustRevalidate(ttTenant, sid, tool, "", now) {
+	if ok, _ := mcpLiveTrustRevalidate(ttTenant, sid, tool, "", now); ok {
 		t.Fatal("an empty decision fingerprint must be denied")
 	}
 }
@@ -52,7 +52,7 @@ func TestLiveTrustRevalidate_RejectsUnusableServer(t *testing.T) {
 	_ = clk
 	requestAndApproveLive(t, sid, tool, fpHex, cat.Current().Revision())
 	now := mcpToolTrust.now()
-	if !mcpLiveTrustRevalidate(ttTenant, sid, tool, fpHex, now) {
+	if ok, _ := mcpLiveTrustRevalidate(ttTenant, sid, tool, fpHex, now); !ok {
 		t.Fatal("precondition: the valid approval must revalidate OK before the server is disabled")
 	}
 
@@ -71,7 +71,7 @@ func TestLiveTrustRevalidate_RejectsUnusableServer(t *testing.T) {
 	}
 	publishMCPInventory(mcpInvLoaded, "", reg2, cat2)
 
-	if mcpLiveTrustRevalidate(ttTenant, sid, tool, fpHex, now) {
+	if ok, _ := mcpLiveTrustRevalidate(ttTenant, sid, tool, fpHex, now); ok {
 		t.Fatal("P1b: a request against a server that is no longer usable must be denied at the boundary")
 	}
 }

@@ -257,6 +257,7 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 // recorded) while the effective runtime stays Observe-only and can never execute an
 // upstream tool call.
 func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCfg *tls.Config, authCfg authn.CapabilityAuthConfig, meta *mcpruntime.ProtectedResourceMetadata, keys authn.KeyResolver, reg *registry.Registry, cat *catalog.Catalog, ev mcpruntime.EventProvider, pol mcpruntime.PolicyProvider) mcpruntime.Config {
+	canaryBreach, canaryGeneration := gatewayCanarySeams()
 	deps := mcpruntime.Deps{
 		Keys:     keys,
 		Registry: reg, // QUAL-2: shared read-only inventory (empty when no qualification file)
@@ -272,6 +273,19 @@ func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCf
 		// authorization — with no executor an ALLOW returns execution_state=not_implemented
 		// and no credential/upstream/broker/side-effect runs. Still Observe-only.
 		Policy: pol,
+		// Blocker 7: the pipeline refuses a drifted decision BEFORE the executor is reached, and
+		// that refusal is an authoritative whole-Canary breach as much as the one the admission
+		// gate reports. The funnel is generation-strict and capability-scoped, and it trips nothing
+		// when no activation is running — so on an Observe-only node (the default posture) this
+		// wire is inert (Codex round 14).
+		//
+		// ONE funnel serves both seams, and the breach seam is the ORDINARY generation-bound
+		// Breach — the same authority the admission and settle paths use, which discards a stale
+		// generation under the same lock that latches. The pipeline snapshots the generation via
+		// Generation at its single rollout-resolution point and carries it here, so a request that
+		// outlived its activation cannot stop the next one (Codex round 16).
+		CanaryBreach:     canaryBreach,
+		CanaryGeneration: canaryGeneration,
 	}
 	if modes.senderProfile.RequiresDPoP() {
 		deps.Replay = senderconstraint.NewReplayCache(limits.DefaultAuth(), nil)
@@ -511,4 +525,23 @@ func readFileClean(path string) ([]byte, error) {
 		return nil, errMCPConfig("path traversal not allowed")
 	}
 	return os.ReadFile(cleaned) // #nosec G304 -- admin-provided startup-config path, ".." rejected above
+}
+
+// gatewayCanarySeams returns the two Canary seams the gateway pipeline is wired with: the breach
+// reporter and the generation snapshot.
+//
+// It is a named function, and not two inline field assignments, so the wiring itself is testable.
+// The pipeline seam is gated in internal/mcp/runtime, but that gate cannot see how the composition
+// layer fills it in — and this is exactly a place where two paths reach one code and either can be
+// broken alone (the M70 lesson). The invariant it exists to hold:
+//
+//   - ONE funnel serves both seams. Two funnels would be two objects that agree by construction
+//     today and are free to disagree later, when the whole point is that the generation the
+//     pipeline snapshots and the authority that latches on it are the same thing.
+//   - The breach seam is the ORDINARY generation-bound Breach. It must FORWARD the generation it is
+//     handed, never re-resolve one: a request that resolved under a since-demoted activation would
+//     otherwise stop whatever replaced it (Codex round 16).
+func gatewayCanarySeams() (breach func(capability string, gen uint64, code string), generation func(capability string) uint64) {
+	f := newCanarySafetyFunnel(rollout.CapabilityGateway)
+	return f.Breach, f.Generation
 }

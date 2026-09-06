@@ -56,8 +56,68 @@ type Deps struct {
 	// tools/call (credential broker + PR-8 commit-before-materialization + upstream
 	// client + response DLP). A nil executor is the disabled-by-default posture.
 	Executor ExecutionProvider
+	// CanaryBreach is the OPTIONAL narrow seam for reporting an authoritative WHOLE-CANARY breach
+	// that this pipeline detects BEFORE the executor is reached. Nil ⇒ nothing composed and nothing
+	// reported, which is the disabled-by-default posture.
+	//
+	// It exists because tool drift is detectable at three points and only one of them used to route
+	// anywhere: the composition-layer admission gate. This pipeline refuses a drifted decision
+	// BEFORE the executor (refuseOnToolDrift), so a rug-pull landing in that window failed the
+	// request and left the Canary running — every later request against the new fingerprint then
+	// merely failed approval validation, which looks like ordinary denial rather than proof the
+	// experiment's premise no longer holds (Codex round 14).
+	//
+	// THE GENERATION IS CARRIED, NOT RE-RESOLVED.
+	//
+	// No reservation exists at this point, so there is no ADMITTED generation — but there is a
+	// RESOLVED one: the activation whose rollout snapshot made this request enforcing. Resolving
+	// "the activation admitting right now" at report time instead let a request that resolved
+	// under G1, then paused while G1 was demoted and G2 activated, stop G2 with a drift it
+	// observed on behalf of an experiment that no longer exists (Codex round 16). That is the
+	// round-1 finding — a safety report carrying no activation — reintroduced in this seam, and
+	// it is the same single-snapshot rule the resolution itself already follows: routing and
+	// execution must never observe two snapshots of the mutable rollout state.
+	//
+	// So CanaryGeneration is read ONCE, at the single resolution point, and the value is carried
+	// to the report. The adapter is the composition layer's ordinary generation-bound Breach,
+	// which discards a stale generation under the same lock that latches.
+	CanaryBreach func(capability string, gen uint64, code string)
+	// CanaryGeneration reports the capability's activation generation at the instant it is called
+	// (0 = none active). It is called exactly once per request, beside the rollout resolution, so
+	// the generation and the disposition come from the same moment. Nil ⇒ 0, which every breach
+	// path treats as "no activation to stop".
+	CanaryGeneration func(capability string) uint64
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
+}
+
+// reportCanaryBreach forwards an authoritative whole-Canary breach when a reporter is composed.
+// Nil-safe so call sites stay free of branching.
+//
+// A ZERO generation is DROPPED, and that is a security requirement rather than tidiness. Zero is
+// not a null here — downstream, `tripCanaryAbortForGeneration` documents `wantGen == 0` as
+// "whatever is current" and SKIPS the generation check entirely, a wildcard reserved for the
+// unbound `tripCanaryAbort` entry point. So forwarding the 0 that resolveUnderStableGeneration
+// produces for "this request straddled an activation change and belongs to neither" would mean
+// exactly "stop whichever activation is running now" — inverting the guarantee into the precise
+// defect it exists to prevent (Codex round 18).
+//
+// This path is generation-BOUND by construction: every request that can report here resolved under
+// some activation, so a zero can only mean "could not be attributed", never "attribute to all".
+func (d Deps) reportCanaryBreach(capability string, gen uint64, code string) {
+	if d.CanaryBreach == nil || gen == 0 {
+		return
+	}
+	d.CanaryBreach(capability, gen, code)
+}
+
+// canaryGeneration snapshots the capability's activation generation. Nil-safe: with no reporter
+// composed there is no Canary to stop and 0 is the correct answer.
+func (d Deps) canaryGeneration(capability string) uint64 {
+	if d.CanaryGeneration == nil {
+		return 0
+	}
+	return d.CanaryGeneration(capability)
 }
 
 func (d Deps) now() time.Time {

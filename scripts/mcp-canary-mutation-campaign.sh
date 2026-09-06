@@ -277,7 +277,7 @@ run_mutation M07 \
   'preCallGuard no longer re-reads the emergency-kill generation' \
   'TestKillBoundary_|TestCanaryPrerequisite_' \
   ./internal/mcp/execution/ internal/mcp/execution/run.go \
-  's/\tif e\.cfg\.State\.KillGeneration\(\) != admKillGen \{\n\t\treturn errKilledAtBoundary \/\/ emergency stop is paramount, even if the tool also drifted or demoted\n\t\}\n//'
+  's/\tif e\.cfg\.State\.KillGeneration\(\) != admKillGen \{.*?\n\t\}\n//s'
 
 # ── (8) the final tool-freshness guard is removed ───────────────────────────
 run_mutation M08 \
@@ -660,6 +660,441 @@ run_mutation M60 \
   'TestToolTrustClock_SwapIsSynchronisedWithConcurrentReaders' \
   . mcp_tooltrust_clock_test.go '--race=swapToolTrustNowFn,mcpToolTrustCoordinator).now' \
   's/\tmcpToolTrust\.mu\.Lock\(\)\n\tprev := mcpToolTrust\.nowFn\n\tmcpToolTrust\.nowFn = fn\n\tmcpToolTrust\.mu\.Unlock\(\)\n/\tprev := mcpToolTrust.nowFn\n\tmcpToolTrust.nowFn = fn\n/'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BLOCKER #7 — whole-Canary automatic abort. Each mutation reintroduces one way a
+# breach could stop a request without stopping the EXPERIMENT, or one way the
+# experiment could keep authority it should have lost.
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_mutation M61 \
+  'admission no longer consults the abort latch' \
+  'TestAutoStop_LatchedAbortMakesNewReservationImpossible|TestAutoStopConc02_BreachWhileManyAwaitAdmission' \
+  . mcp_canary_runtime.go \
+  's/\tif !cr\.aborter\.ExecutionEligible\(generation\) \{/\tif false {/'
+
+run_mutation M62 \
+  'the abort latch auto-clears when read' \
+  'TestAutoStop_LatchedAbortMakesNewReservationImpossible|TestAutoStop_FirstCausePreservedAcrossLaterBreaches' \
+  . internal/mcp/canary/abort_control.go \
+  's/\treturn gen == c\.generation \&\& c\.aborted/\treturn false/'
+
+run_mutation M63 \
+  'a restart clears the abort latch' \
+  'TestAutoStop_RestartAfterExpiryRestoresAborted|TestCanaryRuntime_RestartPreservesAbortLatch' \
+  . internal/mcp/canary/abort_control.go \
+  's/\treturn &AbortController\{generation: gen, aborted: snap\.Aborted, code: snap\.Code, atNanos: snap\.AtUnixNano\}/\treturn \&AbortController{generation: gen}/'
+
+run_mutation M64 \
+  'outcome evidence loss goes back to being metric-only' \
+  'TestAutoStop_OutcomeEvidenceLossAbortsTheWholeCanary' \
+  . internal/mcp/execution/attempt_evidence.go \
+  's/\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), rec\.generation, "outcome_evidence_loss"\)\n//'
+
+run_mutation M65 \
+  'tool fingerprint drift denies the request but does not abort' \
+  'TestAutoStop_ToolFingerprintDriftAbortsTheWholeCanary' \
+  . mcp_live_gate.go \
+  's/\t\treturn false, "tool_fingerprint_drift"/\t\treturn false, ""/'
+
+run_mutation M66 \
+  'server identity drift denies the request but does not abort' \
+  'TestAutoStop_ServerIdentityDriftAbortsTheWholeCanary' \
+  . mcp_live_gate.go \
+  's/\t\treturn false, "server_identity_drift"/\t\treturn false, ""/'
+
+run_mutation M67 \
+  'the breach funnel silently drops credential_safety_failure' \
+  'TestAutoStop_CredentialSafetyFailureAbortsTheWholeCanary' \
+  . mcp_canary_autostop.go \
+  's/\tf\.rt\.tripCanaryAbortForGeneration\(f\.capb, gen, code, canaryNow\(\)\)/\tif code == "credential_safety_failure" {\n\t\treturn\n\t}\n\tf.rt.tripCanaryAbortForGeneration(f.capb, gen, code, canaryNow())/'
+
+run_mutation M68 \
+  'a reconciliation conflict is recorded but reaches no abort' \
+  'TestAutoStop_WitnessConflictAbortsTheWholeCanary' \
+  . internal/mcp/execution/reconcile.go \
+  's/\t\te\.cfg\.Safety\.Breach\(capability, orphan\.ActivationGeneration, "independent_witness_mismatch"\)/\t\t_ = capability/'
+
+run_mutation M69 \
+  'a scope escape denies the request but does not abort' \
+  'TestLiveAbort_BudgetExhaustionTripsWholeCanary|TestCanaryRuntime_ScopeEscapeTripsWholeCanaryAbort' \
+  . mcp_canary_runtime.go \
+  's/\t\tcr\.aborter\.Trip\("scope_escape", generation, now\)/\t\t_ = generation/'
+
+run_mutation M70 \
+  'budget exhaustion denies the request but does not abort' \
+  'TestAutoStop_DeniedReservationItselfTripsBudgetExhausted' \
+  . mcp_canary_runtime.go \
+  's/\t\tcr\.aborter\.Trip\("budget_exhausted", generation, now\)/\t\t_ = generation/'
+
+run_mutation M71 \
+  'the deadline is only ever checked when a request arrives' \
+  'TestAutoStop_WindowExpiresWithNoTrafficAtAll|TestAutoStop_RestartAfterExpiryRestoresAborted' \
+  . mcp_canary_runtime.go \
+  's/\treconcileWindowDeadlineLocked\(rt, capb, cr\)\n\treturn gen, nil/\treturn gen, nil/' \
+  's/\treconcileWindowDeadlineLocked\(rt, capb, cr\)\n\}/}/'
+
+run_mutation M72 \
+  'a restart grants a fresh full window' \
+  'TestAutoStop_RestartNeverGrantsAFreshWindow|TestAutoStop_RestartAfterExpiryRestoresAborted' \
+  . internal/mcp/canary/budget_enforce.go \
+  's/\treturn time\.Unix\(0, e\.startNanos\)\.Add\(e\.budget\.Window\)/\treturn time.Now().Add(e.budget.Window)/'
+
+run_mutation M73 \
+  'the error-rate sample floor is raised beyond the 3-execution corpus' \
+  'TestHealth_SampleFloorFitsTheFirstCanaryCorpus|TestHealth_ErrorRateReachableWithinThreeExecutions' \
+  ./internal/mcp/canary/ internal/mcp/canary/health.go \
+  's/\tHealthSampleFloor = 2/\tHealthSampleFloor = 5/'
+
+run_mutation M74 \
+  'the latency hard limit is pushed past the upstream timeout, making it unreachable' \
+  'TestHealth_SampleFloorFitsTheFirstCanaryCorpus|TestHealth_HardLatencyTripsOnOneAttemptWithNoFloor' \
+  ./internal/mcp/canary/ internal/mcp/canary/health.go \
+  's/\tHealthLatencyHardLimit = 15 \* time\.Second/\tHealthLatencyHardLimit = 45 * time.Second/'
+
+run_mutation M75 \
+  'a later breach overwrites the first abort reason' \
+  'TestAutoStop_FirstCausePreservedAcrossLaterBreaches|TestAutoStopConc03_TwoBreachesRaceForFirstCause' \
+  . internal/mcp/canary/abort_control.go \
+  's/\tif !c\.aborted \{/\tif true {/'
+
+run_mutation M76 \
+  'the final live revalidation stops consulting the abort latch' \
+  'TestAutoStop_LatchedAbortStopsAnAlreadyAdmittedRequestBeforeTheCall|TestAutoStopConc11_LatchDuringInflightAdmissionSendsNothingMore' \
+  . mcp_canary_runtime.go \
+  's/\tif !cr\.aborter\.ExecutionEligible\(gen\) \{\n\t\treturn false\n\t\}\n//'
+
+run_mutation M77 \
+  'the window watchdog fires but trips nothing' \
+  'TestAutoStop_WindowExpiresWithNoTrafficAtAll' \
+  . mcp_canary_autostop.go \
+  's/\t\trt\.tripCanaryAbortForGeneration\(capb, gen, "window_expired", now\)/\t\t_ = capb/'
+
+run_mutation M78 \
+  'an expired window restores as a healthy, executable activation' \
+  'TestAutoStop_RestartAfterExpiryRestoresAborted|TestAutoStopConc05_DeadlineVersusRestart' \
+  . mcp_canary_autostop.go \
+  's/\t\ttripAutoStopLocked\(rt, capb, cr, "window_expired", now\)\n\t\treturn/\t\treturn/'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CODEX ROUND 1 ON #1314 — every safety report is bound to its own activation
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_mutation M79 \
+  'a breach from a superseded activation stops the one that replaced it' \
+  'TestAutoStop_StaleBreachNeverStopsTheNextActivation' \
+  . mcp_canary_runtime.go \
+  's/\tif wantGen != 0 && cr\.generation != wantGen \{/\tif false {/'
+
+# The generation guard on the settled-attempt path is DELIBERATELY redundant with
+# HealthMonitor.Observe's own strictness, so removing either one alone is caught by
+# nothing — the other still holds, which is the point of defense in depth. The
+# mutation therefore removes BOTH; a campaign entry that removed one and passed
+# would be measuring the redundancy, not the property.
+printf '\n[M80] a settled attempt from a superseded activation counts against the next one\n'
+printf '      gate: TestAutoStop_StaleSettledAttemptNeverCountsAgainstTheNextActivation  (both guards removed)\n'
+perl -0pi -e 's/cr\.health == nil \|\| cr\.generation != gen \{\n\t\treturn\n\t\}/cr.health == nil {\n\t\treturn\n\t}/' mcp_canary_autostop.go
+perl -0pi -e 's/\tif h == nil \|\| gen != h\.generation \{\n\t\treturn ""\n\t\}/\tif h == nil {\n\t\treturn ""\n\t}/' internal/mcp/canary/health.go
+if git diff --quiet mcp_canary_autostop.go || git diff --quiet internal/mcp/canary/health.go; then
+  printf '      SKIPPED — pattern drifted\n'; SKIPPED=$((SKIPPED+1))
+  revert mcp_canary_autostop.go internal/mcp/canary/health.go
+else
+  m80_out=$(go test -count=1 -run 'TestAutoStop_StaleSettledAttemptNeverCountsAgainstTheNextActivation' . 2>&1); m80_rc=$?
+  revert mcp_canary_autostop.go internal/mcp/canary/health.go
+  if ! gate_ran M80 "the stale-sample gate" "$m80_out"; then
+    [ $KEEP -eq 0 ] && exit 1
+  elif [ $m80_rc -ne 0 ]; then
+    printf '      CAUGHT (gate failed as required)\n'; PASS=$((PASS+1))
+  else
+    printf '      *** SURVIVED *** the gate passed with both guards removed\n'
+    SURVIVED=$((SURVIVED+1)); SURVIVORS+=("M80: stale samples enter the new population")
+    [ $KEEP -eq 0 ] && exit 1
+  fi
+fi
+
+run_mutation M81 \
+  'an early watchdog fire disarms the activation instead of re-arming' \
+  'TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming' \
+  . mcp_canary_autostop.go \
+  's/\t\t\trt\.rearmWindowWatchdog\(capb, gen, d\.Sub\(now\)\)\n//'
+
+run_mutation M82 \
+  'exhaustion never latches when the final slot is refused at the boundary' \
+  'TestAutoStop_ExhaustionLatchesWhenTheFinalSlotNeverSends' \
+  . mcp_canary_runtime.go \
+  's/\tif cr\.enforcer\.Remaining\(\) <= 0 && cr\.enforcer\.Inflight\(\) == 0 \{\n\t\ttripAutoStopLocked\(rt, capb, cr, "budget_exhausted", canaryNow\(\)\)\n\t\}\n//'
+
+run_mutation M83 \
+  'restore trusts the abort latch instead of re-deriving what the counters prove' \
+  'TestAutoStop_RestoreReDerivesABreachTheCountersAlreadyProve' \
+  . mcp_canary_autostop.go \
+  's/\tif code := cr\.health\.Verdict\(\); code != "" \{\n\t\ttripAutoStopLocked\(rt, capb, cr, code, canaryNow\(\)\)\n\t\treturn\n\t\}\n//'
+
+run_mutation M84 \
+  'a failed health persist is logged and the Canary carries on' \
+  'TestAutoStop_HealthPersistFailureFailsClosed' \
+  . mcp_canary_autostop.go \
+  's/\t\t_ = rt\.removeRuntimeStateAfterSafetyPersistFailure\(capb, "health", err\)\n//'
+
+run_mutation M85 \
+  'a damaged health snapshot restores as a cleared detector' \
+  'TestAutoStop_DamagedHealthSnapshotNeverRestoresAsExecutable|TestHealth_RestoreRefusesDamagedCounters' \
+  . internal/mcp/canary/health.go \
+  's/\tif snap\.Generation != gen \|\| !snap\.Valid\(\) \{\n\t\treturn nil, false\n\t\}/\tif snap.Generation != gen || !snap.Valid() {\n\t\treturn \&HealthMonitor{generation: gen}, true\n\t}/'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CODEX ROUND 2 ON #1314
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_mutation M86 \
+  'the final boundary trusts the async watchdog instead of re-checking the deadline' \
+  'TestAutoStop_ExpiredWindowStopsAnAlreadyAdmittedRequestAtTheBoundary' \
+  . mcp_canary_runtime.go \
+  's/\tif cr\.enforcer != nil && !cr\.enforcer\.WindowOpen\(canaryNow\(\)\) \{\n\t\treturn false\n\t\}\n//'
+
+run_mutation M87 \
+  'a health snapshot may claim more samples than the activation ever reserved' \
+  'TestAutoStop_InflatedSampleCountNeverRestoresAsExecutable|TestAutoStop_HonestSampleCountsStillRestore' \
+  . mcp_canary_runtime.go \
+  's/\tif healthOK && st\.HealthSnapshot\.Samples > st\.BudgetSnapshot\.TotalReserved \{\n\t\thealthOK = false\n\t\}\n//'
+
+# ============================================================================
+# CODEX ROUND 3 ON #1314
+# ============================================================================
+
+run_mutation M88 \
+  'a snapshot may erase a hard-latency observation' \
+  'TestHealth_RestoreRefusesAnErasedHardLatency|TestHealth_HardLatencyCounterBoundsAreConsistent' \
+  ./internal/mcp/canary/ internal/mcp/canary/health.go \
+  's/\tcase s\.Samples > 0 && s\.HardLatencies == 0 && s\.LatencySumNs >= int64\(s\.Samples\)\*int64\(HealthLatencyHardLimit\):\n\t\treturn false\n//'
+
+run_mutation M89 \
+  'the health breach is handed to a later step instead of latching under the lock' \
+  'TestAutoStop_HealthBreachLatchesUnderTheSameLockAsTheObservation' \
+  . mcp_canary_autostop.go \
+  's/\tif code := cr\.health\.Observe\(gen, failed, latency\); code != "" \{\n\t\ttripAutoStopLocked\(rt, capb, cr, code, canaryNow\(\)\)\n\t\treturn \/\/ tripAutoStopLocked persisted \(or failed closed\) already\n\t\}/\tif code := cr.health.Observe(gen, failed, latency); code != "" {\n\t\t_ = code\n\t}/'
+
+run_mutation M90 \
+  'the final boundary tests only the upper deadline, admitting a rolled-back clock' \
+  'TestAutoStop_ClockRollbackBehindActivationClosesTheBoundary' \
+  . mcp_canary_runtime.go \
+  's/\tif cr\.enforcer != nil && !cr\.enforcer\.WindowOpen\(canaryNow\(\)\) \{\n\t\treturn false\n\t\}/\tif cr.enforcer != nil {\n\t\tif d := cr.enforcer.WindowDeadline(); !d.IsZero() \&\& !canaryNow().Before(d) {\n\t\t\treturn false\n\t\t}\n\t}/'
+
+# M91 owns settle-before-OUTCOME; M99 owns settle-before-RELEASE and M100 owns
+# outcome-before-RELEASE. Round 8 collapsed all three into one ordered block in the outer defer,
+# so what used to need a helper script is now a two-line swap — the helper was retired with it.
+run_mutation M91 \
+  'the terminal outcome is made durable before the health sample' \
+  'TestAttemptSettled_IsReportedBeforeTheTerminalOutcomeCommit' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upResp, upErr\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)/\t\te.commitAttemptOutcome(in, attempt, sendState, out)\n\t\te.reportAttemptSettled(in, attempt, sendState, upResp, upErr)/'
+
+# ============================================================================
+# CODEX ROUND 4 ON #1314
+# ============================================================================
+
+run_mutation M92 \
+  'the arm path tests only the upper deadline, so a clock behind the activation arms instead of latching' \
+  'TestAutoStop_ClockBehindActivationLatchesAtRestoreInsteadOfArming|TestAutoStop_ClockInsideTheWindowStillArmsNormally' \
+  . mcp_canary_autostop.go \
+  's/\tif !cr\.enforcer\.WindowOpen\(now\) \{/\tif !now.Before(deadline) {/'
+
+# M93 targets the RUNTIME path the restore gate cannot reach: the watchdog callback firing while
+# the window is closed at its lower end. Reverting the accessor alone survived the restore gate
+# (restore latches before any watchdog exists), which is why
+# TestAutoStop_WatchdogFiringUnderRollbackLatchesInsteadOfReArming exists.
+run_mutation M93 \
+  'the watchdog callback re-arms forever on a rolled-back clock' \
+  'TestAutoStop_WatchdogFiringUnderRollbackLatchesInsteadOfReArming|TestAutoStop_EarlyWatchdogFireReArmsInsteadOfDisarming' \
+  . mcp_canary_autostop.go \
+  's/globalCanaryRuntime\.windowDeadlineIfOpen\(capb, now\)/globalCanaryRuntime.windowDeadline(capb)/'
+
+# ============================================================================
+# CODEX ROUND 5 ON #1314
+# ============================================================================
+
+# M94's gate needs a fixture whose error carries the OBSERVED-RESPONSE fact. A bare
+# error leaves the send state at may_have_been_sent, where the defective predicate
+# ALSO reports failure — the first draft of this gate passed against both shapes and
+# proved nothing (recorded in the review artifact).
+# M94 derives failure from the SEND STATE instead of the upstream leg — the round-5 defect. It
+# moved to run.go with the settle call in round 7; the predicate's own body is M96's target, so
+# this one mutates the ARGUMENT and the two stay independent.
+run_mutation M94 \
+  'an upstream error response counts as a successful attempt' \
+  'TestAttemptSettled_PeerErrorResponseCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
+  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
+  's/upstreamLegFailed\(resp, err\), e\.cfg\.Clock/!state.ProvesReceipt(), e.cfg.Clock/'
+
+run_mutation M95 \
+  'a window denial at admission is recorded as budget_exhausted' \
+  'TestAutoStop_WindowDenialAtAdmissionRecordsWindowExpired|TestAutoStop_TotalExhaustionStillRecordsBudgetExhausted' \
+  . mcp_canary_runtime.go \
+  's/\tcase outcome == canary\.BudgetDeniedWindow:/\tcase false:/'
+
+# M96/M97 are Codex round 6: the error-rate detector's third failure shape, and the operator
+# surface's own window predicate.
+
+run_mutation M96 \
+  'a JSON-RPC error response counts as a successful attempt' \
+  'TestAttemptSettled_PeerJSONRPCErrorCountsAsAFailure|TestAttemptSettled_SuccessfulExecutionIsNotAFailure' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/return err != nil \|\| resp == nil \|\| resp\.Error != nil/return err != nil || resp == nil/'
+
+run_mutation M97 \
+  'the operator status tests only the upper end of the window' \
+  'TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission' \
+  . mcp_canary_autostop.go \
+  's/st\.WindowExpired = windowClosed/st.WindowExpired = !canaryNow().Before(deadline)/'
+
+# The reported AUTHORITY is a SECOND line, so it needs its own mutation — the M70 lesson: two
+# paths to the same claim can each be deleted unnoticed while the other keeps the gate green.
+run_mutation M98 \
+  'a closed window still reports granted execution authority' \
+  'TestAutoStop_StatusIsNeverMoreOptimisticThanAdmission' \
+  . mcp_canary_autostop.go \
+  's/\tcase active \&\& \(aborted \|\| windowClosed\):/\tcase active \&\& aborted:/'
+
+# M99 is Codex round 7: the reservation goes back BEFORE the health sample is counted, so with
+# MaxConcurrentExecutions of 1 a third request can reserve and cross Upstream.Call before the
+# second failure latches elevated_error_rate. The two statements are simply swapped — the
+# mutation compiles, releases exactly once, and differs only in ORDER.
+run_mutation M99 \
+  'the reservation is released before the health sample is counted' \
+  'TestAttemptSettled_IsReportedBeforeTheReservationIsReleased' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\te\.reportAttemptSettled\(in, attempt, sendState, upResp, upErr\)\n\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)\n\t\treleaseReservation\(releaseSlot\)/\t\treleaseReservation(releaseSlot)\n\t\te.reportAttemptSettled(in, attempt, sendState, upResp, upErr)\n\t\te.commitAttemptOutcome(in, attempt, sendState, out)/'
+
+# M100-M102 are Codex round 8. The release ordering has to hold for EVERY step that decides
+# authority, not only the health sample (M99) — the terminal outcome commit is itself the
+# outcome_evidence_loss producer. And the failure classifier needs one entry in each direction:
+# a pinned-identity mismatch is a breach rather than a sample, and a caller cancellation is not
+# evidence about the target at all.
+run_mutation M100 \
+  'the slot is released before the terminal outcome commit can report evidence loss' \
+  'TestBreach_OutcomeEvidenceLossIsReportedBeforeTheReservationIsReleased' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\te\.commitAttemptOutcome\(in, attempt, sendState, out\)\n\t\treleaseReservation\(releaseSlot\)/\t\treleaseReservation(releaseSlot)\n\t\te.commitAttemptOutcome(in, attempt, sendState, out)/'
+
+run_mutation M101 \
+  'a pinned-identity mismatch is reduced to one ordinary failed sample' \
+  'TestBreach_TLSIdentityMismatchTripsServerIdentityDrift|TestBreach_OrdinaryUpstreamFailureIsNotIdentityDrift' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\te\.reportUpstreamTrustBreach\(in, attempt, upErr\)\n//'
+
+run_mutation M102 \
+  'a caller cancellation is counted as an ordinary sample' \
+  'TestAttemptSettled_CallerCancellationIsNotASampleAtAll' \
+  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
+  's/\tif callerCancelled\(err\) \{\n\t\treturn\n\t\}\n//'
+
+# M103 is Codex round 10: cancellation arrives in TWO shapes, and the reason-only test misses the
+# one that happens after response headers — which the transport wraps as ReasonUpstreamCallFailed.
+run_mutation M103 \
+  'a cancellation during the body read is charged against the target' \
+  'TestAttemptSettled_CallerCancellationIsNotASampleAtAll' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/ \|\| errors\.Is\(err, context\.Canceled\)//'
+
+# M104 is Codex round 12: the watchdog callback reads the clock four times instead of once, so a
+# wall-clock step landing between two reads lets it choose contradictory branches — and re-arm the
+# only traffic-independent stop for a duration measured from an instant it had already rejected.
+run_mutation M104 \
+  'the watchdog callback samples the clock separately for each branch' \
+  'TestAutoStop_WatchdogDecidesEveryBranchFromOneClockSample' \
+  . mcp_canary_autostop.go \
+  's/windowDeadlineIfOpen\(capb, now\); ok && now\.Before\(d\)/windowDeadlineIfOpen(capb, canaryNow()); ok \&\& canaryNow().Before(d)/' \
+  's/rt\.rearmWindowWatchdog\(capb, gen, d\.Sub\(now\)\)/rt.rearmWindowWatchdog(capb, gen, d.Sub(canaryNow()))/'
+
+# M105 is Codex round 13: a condition that carries its own whole-Canary classification is ALSO
+# counted as an ordinary health sample — the laundering HealthMonitor's contract forbids, and the
+# defect round 8 introduced by adding the breach and leaving the settle unconditional.
+run_mutation M105 \
+  'a directly classified breach is also fed to the rate detector' \
+  'TestBreach_TLSIdentityMismatchTripsServerIdentityDrift|TestBreach_OrdinaryUpstreamFailureIsStillASample' \
+  ./internal/mcp/execution/ internal/mcp/execution/attempt_evidence.go \
+  's/\tif upstreamBreachCode\(err\) != "" \{\n\t\treturn\n\t\}\n//'
+
+# M106/M107 are Codex round 14: tool drift is detectable at THREE points and only the middle one
+# (the admission gate) reported anything. Each of the two silent detections gets its own mutation,
+# because they are separate windows in separate packages and either can be deleted unnoticed.
+run_mutation M106 \
+  'a rug-pull refused before the executor stops nothing' \
+  'TestCanaryBreach_PreExecutorToolDriftIsReported|TestCanaryBreach_CurrentFingerprintReportsNothing' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\tif canaryScoped \{\n(?:\t\t\/\/[^\n]*\n)*\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), canaryGen, code\)\n\t\}\n//'
+
+run_mutation M107 \
+  'a rug-pull caught at the final boundary stops nothing' \
+  'TestBreach_BoundaryToolDriftTripsFingerprintDrift|TestBreach_UndriftedBoundaryRaisesNoDriftBreach' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\t\tif driftObserved && attempt != nil \{\n\t\t\t\te\.cfg\.Safety\.Breach\(in\.Capability\.String\(\), attempt\.generation, "tool_fingerprint_drift"\)\n\t\t\t\}\n/\t\t\t_ = driftObserved\n/'
+
+# M108-M110 are Codex round 15 — all three are consequences of round 14's own wiring.
+#
+# M108 keys the breach on which refusal WON rather than on the observation, so a pass where the
+# kill and the drift both fire drops the drift. The mutation carries `_ = driftObserved` so it
+# COMPILES: a build failure proves nothing under this campaign's own header rule.
+run_mutation M108 \
+  'a drift observed alongside an emergency kill is dropped' \
+  'TestBreach_DriftIsReportedEvenWhenTheKillWinsTheRefusal|TestBreach_BoundaryToolDriftTripsFingerprintDrift' \
+  ./internal/mcp/execution/ internal/mcp/execution/run.go \
+  's/\t\t\tif driftObserved && attempt != nil \{/\t\t\tif _ = driftObserved; cls.stale \&\& attempt != nil {/'
+
+run_mutation M109 \
+  'drift on shadow-evaluated out-of-scope traffic stops the whole Canary' \
+  'TestCanaryBreach_ShadowEvaluationDoesNotStopTheCanary|TestCanaryBreach_PreExecutorToolDriftIsReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\tif canaryScoped \{\n(?:\t\t\/\/[^\n]*\n)*\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), canaryGen, code\)\n\t\}/\t_ = canaryScoped\n\tp.deps.reportCanaryBreach(p.capability.String(), canaryGen, code)/'
+
+run_mutation M110 \
+  'an eligibility change is reported as fingerprint drift' \
+  'TestCanaryBreach_EligibilityDriftIsNotCalledFingerprintDrift|TestCanaryBreach_PreExecutorToolDriftIsReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\t\treturn "server_identity_drift"/\t\treturn "tool_fingerprint_drift"/'
+
+# M111/M112 are Codex round 16 — the pre-executor breach must carry the generation that RESOLVED
+# the request, not one re-read at report time. Two mutations because there are two places to break
+# it independently: the pipeline can ignore the value it was handed, and the composition layer can
+# fill the seam with an adapter that re-resolves. Either alone reopens the defect.
+
+run_mutation M111 \
+  'the pipeline ignores the generation it was handed and re-resolves at report time' \
+  'TestCanaryBreach_PreExecutorDriftCarriesTheResolvedGeneration|TestCanaryBreach_PreExecutorToolDriftIsReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/execute.go \
+  's/\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), canaryGen, code\)\n/\t\t_ = canaryGen\n\t\tp\.deps\.reportCanaryBreach\(p\.capability\.String\(\), p\.deps\.canaryGeneration\(p\.capability\.String\(\)\), code\)\n/'
+
+run_mutation M112 \
+  'the composed breach seam re-resolves the generation instead of forwarding it' \
+  'TestAutoStop_StaleGenerationPreExecutorBreachCannotStopTheNextActivation' \
+  . mcp_observe_startup.go \
+  's/\treturn f\.Breach, f\.Generation\n/\treturn func\(capability string, _ uint64, code string\) \{ f\.Breach\(capability, f\.Generation\(capability\), code\) \}, f\.Generation\n/'
+
+# M113 is Codex round 17 — reading the generation ONCE after the resolution (the round-16 shape)
+# narrows the window but does not close it. The stability check is what makes it a proof.
+
+run_mutation M113 \
+  'the generation is read once after the resolution instead of proven stable across it' \
+  'TestCanaryBreach_GenerationStraddlingAnActivationChangeIsAttributedToNone' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/policy.go \
+  's/\tbefore := p\.deps\.canaryGeneration\(capability\)\n\tres = p\.executor\.Resolve\(ei\)\n\tif after := p\.deps\.canaryGeneration\(capability\); after != before \{\n\t\treturn res, 0\n\t\}\n\treturn res, before\n/\tres = p\.executor\.Resolve\(ei\)\n\treturn res, p\.deps\.canaryGeneration\(capability\)\n/'
+
+# M114/M115 are Codex round 18 — zero is a WILDCARD downstream ("whatever is current"), not a null,
+# so the round-17 "attribute to none" sentinel inverted into "attribute to all". Two mutations
+# because the guard is deliberately duplicated: the runtime seam that PRODUCES the zero and the
+# generation-bound funnel that would FORWARD it are independently breakable.
+
+run_mutation M114 \
+  'the runtime seam forwards a zero generation instead of dropping it' \
+  'TestCanaryBreach_ZeroGenerationIsNeverReported' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/deps.go \
+  's/\tif d\.CanaryBreach == nil \|\| gen == 0 \{\n\t\treturn\n\t\}\n\td\.CanaryBreach\(capability, gen, code\)\n/\tif d\.CanaryBreach != nil \{\n\t\td\.CanaryBreach\(capability, gen, code\)\n\t\}\n/'
+
+run_mutation M115 \
+  'the generation-bound funnel accepts the zero wildcard' \
+  'TestAutoStop_ZeroGenerationBreachCannotStopALiveActivation' \
+  . mcp_canary_autostop.go \
+  's/\tif gen == 0 \{\n\t\treturn\n\t\}\n//'
 
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #

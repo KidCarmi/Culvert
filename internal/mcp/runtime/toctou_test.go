@@ -176,7 +176,7 @@ func TestTOCTOU_StaleDecisionFingerprintIsRefusedAtTheExecutionBoundary(t *testi
 			Disposition: liveDisp, Drift: liveDrift,
 		},
 	}
-	out, ok := p.refuseOnToolDrift(rb, in, jsonrpc.ID{})
+	out, ok := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true, testCanaryGen)
 	if !ok {
 		t.Fatal("a stale decision fingerprint must be refused at the execution boundary")
 	}
@@ -195,7 +195,7 @@ func TestTOCTOU_StaleDecisionFingerprintIsRefusedAtTheExecutionBoundary(t *testi
 			Disposition: liveDisp, Drift: liveDrift,
 		},
 	}
-	if _, refused := p.refuseOnToolDrift(rb, fresh, jsonrpc.ID{}); refused {
+	if _, refused := p.refuseOnToolDrift(rb, fresh, jsonrpc.ID{}, true, testCanaryGen); refused {
 		t.Fatal("a current fingerprint must not be refused")
 	}
 }
@@ -212,7 +212,7 @@ func TestTOCTOU_ToolRemovedAfterDecisionRefusesExecution(t *testing.T) {
 		Capability: policy.CapGateway,
 		Tool:       &policy.Tool{Name: "never-ingested", ServerID: testServerID, FingerprintHash: "abc"},
 	}
-	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}); !refused {
+	if _, refused := p.refuseOnToolDrift(rb, in, jsonrpc.ID{}, true, testCanaryGen); !refused {
 		t.Fatal("a decision naming a tool that is no longer in the catalog must be refused")
 	}
 }

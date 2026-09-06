@@ -96,9 +96,9 @@ func (p *pipeline) dispatchPolicy(ctx context.Context, rb *recBuilder, req Reque
 		// routing and execution never observe two snapshots of the mutable rollout state
 		// (Codex P2, PR #1234). A record-only disposition keeps the inline Observe path;
 		// everything else is handed to Execute with the same resolution.
-		res := p.executor.Resolve(ei)
+		res, canaryGen := p.resolveUnderStableGeneration(ei)
 		if res.Disposition != rollout.EffectRecordOnly {
-			return p.dispatchExecute(ctx, rb, ei, res)
+			return p.dispatchExecute(ctx, rb, ei, res, canaryGen)
 		}
 		// record-only disposition ⇒ the inline Observe evidence path. Honor an emergency kill
 		// engaged AFTER Resolve before that path commits: the kill is a capability-wide
@@ -417,4 +417,43 @@ func policySenderBinding(sc identity.SenderConstraint) policy.SenderBinding {
 	default:
 		return policy.SenderBindingNone
 	}
+}
+
+// resolveUnderStableGeneration resolves the rollout disposition and returns it together with the
+// activation generation that was current for the WHOLE resolution — or 0 when that cannot be
+// established, which attributes the request to no activation and therefore stops none.
+//
+// Reading the generation once BESIDE the resolution (Codex round 16) narrowed the window but did
+// not close it (Codex round 17): between `Resolve` and the read, a demote-and-reactivate can still
+// land, and the old request's later drift is then reported against — and accepted by — an
+// activation that never saw it.
+//
+// A single lock covering both is not available: the rollout state the executor resolves against and
+// the canary runtime's generation are different objects under different locks, and restructuring
+// the resolution path to share one is a larger and riskier change than the defect.
+//
+// So the guarantee is established by MONOTONICITY instead of by a shared lock. `cr.generation` is
+// only ever incremented (`generation++`, "a re-activation NEVER reuses a prior generation"); the one
+// other write is the startup restore, before anything serves. A generation therefore names exactly
+// one activation for the life of the process and can never recur. Reading it either side of the
+// resolution and requiring the two to be EQUAL is then a proof, not a heuristic: the value cannot
+// have left G and come back, so if both reads say G, G was current throughout — including at the
+// instant the resolution read the rollout state.
+//
+// That monotonicity is load-bearing enough to be pinned on its own
+// (TestAutoStop_ActivationGenerationIsStrictlyMonotonic): if a future change ever let a generation
+// be reused, this returns a confident wrong answer rather than a detectable one.
+//
+// A mismatch means the request straddled a transition and belongs to neither activation with
+// certainty, so it is attributed to none. That loses nothing an operator needs: the demoted
+// activation has no authority left to revoke, and the catalog change that caused the drift is
+// persistent, so the very next request under the new activation observes it and latches correctly.
+func (p *pipeline) resolveUnderStableGeneration(ei ExecInput) (res rollout.Resolution, stableGen uint64) {
+	capability := p.capability.String()
+	before := p.deps.canaryGeneration(capability)
+	res = p.executor.Resolve(ei)
+	if after := p.deps.canaryGeneration(capability); after != before {
+		return res, 0
+	}
+	return res, before
 }

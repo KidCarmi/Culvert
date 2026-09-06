@@ -151,6 +151,11 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 		// The composition-layer side-effect gate: budget reservation + runtime live-trust
 		// revalidation + read-first, consulted at the boundary BEFORE the executor's kill re-check.
 		LiveGate: gate,
+		// The whole-Canary breach seam (blocker #7). Authoritative safety facts the ENGINE
+		// observes — evidence loss, and the settled-attempt population behind the error-rate and
+		// latency detectors — reach the ONE abort authority through this funnel. It is separate
+		// from Metrics on purpose: Metrics may discard, this may not.
+		Safety: newCanarySafetyFunnel(rollout.CapabilityGateway),
 	})
 	if err != nil {
 		lt.setComposeReason("executor_construct_failed")
