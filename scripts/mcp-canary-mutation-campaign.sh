@@ -1070,6 +1070,15 @@ run_mutation M112 \
   . mcp_observe_startup.go \
   's/\treturn f\.Breach, f\.Generation\n/\treturn func\(capability string, _ uint64, code string\) \{ f\.Breach\(capability, f\.Generation\(capability\), code\) \}, f\.Generation\n/'
 
+# M113 is Codex round 17 — reading the generation ONCE after the resolution (the round-16 shape)
+# narrows the window but does not close it. The stability check is what makes it a proof.
+
+run_mutation M113 \
+  'the generation is read once after the resolution instead of proven stable across it' \
+  'TestCanaryBreach_GenerationStraddlingAnActivationChangeIsAttributedToNone' \
+  ./internal/mcp/runtime/ internal/mcp/runtime/policy.go \
+  's/\tbefore := p\.deps\.canaryGeneration\(capability\)\n\tres := p\.executor\.Resolve\(ei\)\n\tif after := p\.deps\.canaryGeneration\(capability\); after != before \{\n\t\treturn res, 0\n\t\}\n\treturn res, before\n/\tres := p\.executor\.Resolve\(ei\)\n\treturn res, p\.deps\.canaryGeneration\(capability\)\n/'
+
 # ── (17) THE PROOF RULE ITSELF ──────────────────────────────────────────────
 #
 # The defect from M16 is invisible to a permissive test sink. This mutation proves

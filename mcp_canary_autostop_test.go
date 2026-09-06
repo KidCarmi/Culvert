@@ -1605,3 +1605,53 @@ func TestAutoStop_StaleGenerationPreExecutorBreachCannotStopTheNextActivation(t 
 		t.Fatalf("first cause should be the drift, got %q", st.FirstAbortReason)
 	}
 }
+
+// TestAutoStop_ActivationGenerationIsStrictlyMonotonic pins the property the round-17 fix's
+// correctness argument rests on, so it can never become false silently.
+//
+// The pre-executor breach cannot take the generation and the rollout resolution under one lock —
+// they are different objects under different locks. Instead it reads the generation either side of
+// the resolution and requires the two to be EQUAL. That is a proof rather than a heuristic ONLY
+// because a generation can never recur: if the value could go G -> G' -> G, two equal reads would
+// no longer establish that G held throughout, and the check would return a confident wrong answer
+// instead of a detectable one.
+//
+// So this test is not about the counter. It is the load-bearing premise of a security control, and
+// it lives here rather than as a comment because a future change that reused a generation would
+// otherwise break that control silently and at a distance.
+func TestAutoStop_ActivationGenerationIsStrictlyMonotonic(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	swapCanaryClock(t, func() time.Time { return canaryRuntimeTestNow })
+	swapCanaryTimer(t)
+
+	seen := map[uint64]bool{}
+	prev := rt.currentGeneration(capb)
+	seen[prev] = true
+
+	// Several activate/demote cycles: every generation must be new AND strictly greater.
+	for i := range 6 {
+		if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(3), canaryRuntimeTestNow); err != nil {
+			t.Fatalf("begin %d: %v", i, err)
+		}
+		g := rt.currentGeneration(capb)
+		if g <= prev {
+			t.Fatalf("SECURITY: generation must strictly increase; cycle %d went %d -> %d. The "+
+				"pre-executor breach proves its generation held across the resolution by reading it "+
+				"twice and comparing; a generation that can recur makes that comparison a lie", i, prev, g)
+		}
+		if seen[g] {
+			t.Fatalf("SECURITY: generation %d was REUSED at cycle %d — a generation must name exactly "+
+				"one activation for the life of the process", g, i)
+		}
+		seen[g] = true
+		prev = g
+		if err := rt.demoteCanary(capb); err != nil {
+			t.Fatalf("demote %d: %v", i, err)
+		}
+		// A demote must not roll the counter back either.
+		if after := rt.currentGeneration(capb); after < prev {
+			t.Fatalf("SECURITY: demote rolled the generation back %d -> %d", prev, after)
+		}
+	}
+}

@@ -5,6 +5,7 @@ package runtime
 // Codex round 14).
 
 import (
+	"context"
 	"encoding/hex"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/jsonrpc"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // breachReport is one reported pre-executor breach: the code AND the activation generation it was
@@ -270,5 +272,69 @@ func TestCanaryBreach_NoActivationReportsGenerationZero(t *testing.T) {
 	got := rec.reports()
 	if len(got) != 1 || got[0].gen != 0 {
 		t.Fatalf("expected one report carrying generation 0, got %+v", got)
+	}
+}
+
+// straddlingExec advances the activation generation DURING Resolve, reproducing a
+// demote-and-reactivate that lands between the resolution and the generation read.
+type straddlingExec struct{ gen *uint64 }
+
+func (e *straddlingExec) Resolve(ExecInput) rollout.Resolution {
+	*e.gen++ // a new activation took over while this request was being resolved
+	return rollout.Resolution{Disposition: rollout.EffectExecute}
+}
+
+func (e *straddlingExec) Execute(_ context.Context, _ ExecInput, _ rollout.Resolution) ExecOutput {
+	return ExecOutput{Status: 200, Disposition: DispObserveOnly, ExecutionState: "not_implemented"}
+}
+func (e *straddlingExec) KillActive() bool { return false }
+
+// TestCanaryBreach_GenerationStraddlingAnActivationChangeIsAttributedToNone pins Codex round 17.
+//
+// Round 16 moved the generation read from report time to immediately after the resolution. That
+// NARROWED the window — from "resolution → drift refusal", which spans inspection, the durable
+// commit and credential planning — to two adjacent statements. It did not CLOSE it: a
+// demote-and-reactivate landing in between still returns the NEW generation, which the
+// generation-strict funnel then accepts, aborting an experiment that never observed the drift.
+//
+// A shared lock is not available (the rollout state and the canary generation are different objects
+// under different locks), so the guarantee comes from MONOTONICITY: reading either side and
+// requiring equality proves the generation held throughout, because it can never recur. A mismatch
+// means the request belongs to neither activation with certainty, so it is attributed to none.
+func TestCanaryBreach_GenerationStraddlingAnActivationChangeIsAttributedToNone(t *testing.T) {
+	k := newESKey(t, "k1")
+	deps := testDeps(t, k, nil)
+	gen := uint64(7)
+	deps.CanaryGeneration = func(string) uint64 { return gen }
+	deps.Executor = &straddlingExec{gen: &gen}
+	p := newGatewayPipeline(t, deps)
+
+	res, got := p.resolveUnderStableGeneration(ExecInput{})
+	if res.Disposition != rollout.EffectExecute {
+		t.Fatalf("premise: the fixture must resolve to an enforcing disposition, got %v", res.Disposition)
+	}
+	if gen != 8 {
+		t.Fatalf("premise: the fixture must advance the generation during Resolve, got %d", gen)
+	}
+	if got != 0 {
+		t.Fatalf("SECURITY: a request that straddled an activation change was attributed to "+
+			"generation %d; it belongs to neither activation, and charging the new one aborts an "+
+			"experiment that never saw the drift", got)
+	}
+}
+
+// TestCanaryBreach_StableGenerationIsCarriedWhenNothingChanges is the control. Without it, a fix
+// that simply always returned 0 would satisfy the test above while silently disabling every
+// pre-executor breach.
+func TestCanaryBreach_StableGenerationIsCarriedWhenNothingChanges(t *testing.T) {
+	k := newESKey(t, "k1")
+	deps := testDeps(t, k, nil)
+	deps.CanaryGeneration = func(string) uint64 { return testCanaryGen }
+	deps.Executor = &recordingExec{}
+	p := newGatewayPipeline(t, deps)
+
+	if _, got := p.resolveUnderStableGeneration(ExecInput{}); got != testCanaryGen {
+		t.Fatalf("control: a stable activation must carry its generation through, want %d got %d",
+			testCanaryGen, got)
 	}
 }
