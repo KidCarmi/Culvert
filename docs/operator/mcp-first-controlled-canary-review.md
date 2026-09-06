@@ -1718,16 +1718,27 @@ not counted as proof unless the mutation targets a structural wall whose purpose
 prevention, a gate matching no tests is a hard campaign failure, and a mutation whose pattern no
 longer matches the source is scored as a FAILURE rather than a pass.
 
-That last rule earned its keep SEVEN times, every one of them against a fix made *inside this work*.
+That last rule earned its keep TEN times, every one of them against a fix made *inside this work*.
 M03, M04 and M12 drifted against refactors done here — the `runExecute` decomposition made to satisfy
 the complexity linters, and the `RecoverAttempts` split. M20 drifted against the binding fix above,
 in the very same file the mutation M32 targets. M45 drifted when round 11's checks were folded into
 one helper, M50 when round 13 restated a coupling over the allowed set and flipped the operand, and
-M31 when round 14 renamed `markResponseObserved` to `markLegFacts`. A campaign that scored a skip as
-a pass would have reported a clean run over seven dead gates — and the last three would have gone
-dead in exactly the rounds that were hardening the code they measured. The rule is not defensive
-tidiness: a mutation campaign measures the GATES, and a pattern that no longer matches measures
-nothing at all.
+M31 when round 14 renamed `markResponseObserved` to `markLegFacts`. Round 15 then killed three more
+at once, because it changed the shape of the very code the round-14 gates measure: M07 against the
+new two-value `preCallGuard` signature, M106 against the pre-executor breach moving inside
+`if canaryScoped { … }`, and M107 against the boundary condition becoming `driftObserved` rather
+than `cls.stale`. A campaign that scored a skip as a pass would have reported a clean run over ten
+dead gates — and six of the ten would have gone dead in exactly the rounds that were hardening the
+code they measured. The rule is not defensive tidiness: a mutation campaign measures the GATES, and
+a pattern that no longer matches measures nothing at all.
+
+Two repairs carry a second rule with them. M107 cannot simply delete its target: `driftObserved` is
+bound from `preCallGuard` and deleting its only use stops the tree compiling, and a build failure
+proves nothing under this campaign's own header rule. It substitutes `_ = driftObserved`, the same
+guard M108 already needed. Every repair here was verified end to end before the run that counted it
+— the pattern APPLIES (the file actually changes), the tree BUILDS, and the gate fails by a NAMED
+security assertion — because the failure mode being guarded against is a mutation that looks caught
+while proving something other than what it claims.
 
 ---
 
