@@ -1222,8 +1222,9 @@ components:
           description: >-
             2F-E correction round 7: present when the PAC profiles/pools slice
             was NOT applied because a pending lifecycle operation of a profile
-            the import changes could not be settled durably (every writer
-            settles a profile's pending intent before changing it). The rest
+            the import changes OR ADDS could not be settled durably (every
+            writer settles a profile's pending intent before changing its
+            presence or content). The rest
             of the import applied; retry the PAC slice once the node-local
             history is writable.
     UpstreamImportSummary:
@@ -6130,6 +6131,19 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '409': { $ref: '#/components/responses/PACStale' }
         '428': { $ref: '#/components/responses/PACPreconditionRequired' }
+        '503':
+          description: >-
+            `lifecycle_unsettled` (2F-E correction rounds 7/8): the profile id
+            being created carries an unresolved lifecycle operation (a
+            first-publish intent of the still-absent profile) whose outcome
+            could not be recorded durably in the node-local history, so the
+            create is refused with nothing changed — every writer settles a
+            profile's pending lifecycle intent durably BEFORE changing its
+            presence or content, additions included. Retry once the history
+            is writable. Unrelated profiles and pools are never blocked.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/pac/posture/inventory:

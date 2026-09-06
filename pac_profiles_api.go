@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 
@@ -184,21 +185,44 @@ func pacSettlePendingBeforeWrite(before, candidate pac.ProfilesConfig) error {
 	return nil
 }
 
-// pacChangedProfileIDs lists the profiles of before whose content candidate
-// changes or drops (pac.ProfileContentEqual — the store's own change test).
+// pacChangedProfileIDs lists, in deterministic (sorted) order, every profile
+// whose PRESENCE or CONTENT differs between before and candidate: a profile
+// candidate drops, a profile whose content changes
+// (pac.ProfileContentEqual — the store's own change test), and — 2F-E
+// correction round 8 — a profile candidate ADDS. An absent profile can still
+// carry a durable pending first-publish lifecycle intent (the publish died
+// after its intent was persisted), so a candidate-only addition must settle
+// it exactly like a change of an existing profile; iterating over the before
+// profiles only silently exempted every addition (the POST create, a
+// merge/replace import, a rollback and a CP→DP snapshot). Untouched profiles
+// are excluded, and pools are never listed.
 func pacChangedProfileIDs(before, candidate pac.ProfilesConfig) []string {
+	prev := make(map[string]pac.Profile, len(before.Profiles))
+	for i := range before.Profiles {
+		prev[before.Profiles[i].ID] = before.Profiles[i]
+	}
 	next := make(map[string]pac.Profile, len(candidate.Profiles))
 	for i := range candidate.Profiles {
 		next[candidate.Profiles[i].ID] = candidate.Profiles[i]
 	}
-	var changed []string
+	changed := make(map[string]struct{})
 	for i := range before.Profiles {
 		id := before.Profiles[i].ID
 		if n, ok := next[id]; !ok || !pac.ProfileContentEqual(before.Profiles[i], n) {
-			changed = append(changed, id)
+			changed[id] = struct{}{}
 		}
 	}
-	return changed
+	for id := range next {
+		if _, existed := prev[id]; !existed {
+			changed[id] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(changed))
+	for id := range changed {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // pacAfterActiveCommit runs the post-commit side effects of a PROVEN active
