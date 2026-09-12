@@ -48,30 +48,15 @@ func newSOCKS5Server(ln net.Listener) *socks5Server {
 	}
 }
 
-// startSOCKS5 binds a TCP listener for SOCKS5 connections, constructs the
-// owner, and spawns the accept loop. Bind failure is fatal — preserving the
-// previous startSOCKS5 behaviour. Returns the server so initSOCKS5 can stash
-// the handle on startupState for runProxyUntilShutdown to Stop.
-// Supports CONNECT (TCP proxy) only; UDP ASSOCIATE is rejected by handleSOCKS5.
-// Respects the global blocklist, IP filter, rate limiter, and plugin chain.
-func startSOCKS5(port int) *socks5Server {
-	// Use ListenConfig.Listen(ctx, ...) per project policy (CLAUDE.md
-	// "HTTP contexts" + golangci noctx); ctx is Background here because
-	// startup binding is synchronous and not user-cancellable.
-	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		logFatalf("SOCKS5 listen error: %v", err)
-	}
-	srv := newSOCKS5Server(ln)
-	// Record the feature as configured BEFORE the accept loop starts, so a
-	// listener that fails on its very first Accept is reported against a
-	// configured service rather than as "SOCKS5 not configured" (CHAOS-54).
-	noteSOCKS5Configured(port)
-	srv.Start()
-	logger.Printf("SOCKS5: socks5://localhost:%d", port)
-	return srv
-}
+// startSOCKS5 lives in socks5_bind.go (CHAOS-66). It used to bind here and
+// `logFatalf` on failure — which os.Exit(1)s the process — so an occupied
+// SOCKS5 port, or a privileged one on a deployment that had dropped
+// CAP_NET_BIND_SERVICE, terminated the whole appliance from `initSOCKS5`,
+// BEFORE the HTTP/HTTPS proxy listener and the admin UI were ever started.
+// The bind is now supervised: it retries at a bounded rate and the rest of the
+// appliance is unaffected. Supports CONNECT (TCP proxy) only; UDP ASSOCIATE is
+// rejected by handleSOCKS5. Respects the global blocklist, IP filter, rate
+// limiter, and plugin chain.
 
 // Start spawns the accept-loop goroutine. No-ops on a nil receiver or a
 // server constructed from a nil listener; that branch exists so future

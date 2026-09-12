@@ -163,8 +163,8 @@ type startupState struct {
 	rlCleanupCancel context.CancelFunc
 	feedSyncer      *FeedSyncer
 	scanSvc         *ScanService
-	adminUISrv      *http.Server  // P1.1 / S4.AdminUI: graceful shutdown handle
-	socks5Srv       *socks5Server // P1.5 / S4.SOCKS5: listener-close shutdown handle
+	adminUISrv      *http.Server      // P1.1 / S4.AdminUI: graceful shutdown handle
+	socks5Srv       *socks5Supervisor // P1.5 / S4.SOCKS5: listener-close shutdown handle (CHAOS-66: the supervisor owns bind→serve→rebind)
 }
 
 func main() {

@@ -1194,15 +1194,25 @@ culvert_logstore_quarantined_copies %d
 	// error or a contained panic) — terminal, restart required. A listener
 	// that is retrying stays up=1 with `accept_degraded 1`, because it recovers
 	// on its own the moment descriptors free up.
+	//
+	// CHAOS-66 extends `up` symmetrically to the BIND: it is 0 when the accept
+	// loop stopped OR when the listener has been unable to bind for longer than
+	// socks5BindUnavailableAfter. A listener that is merely RETRYING its bind
+	// stays up=1 with `unavailable 0`, exactly as a listener retrying its
+	// accepts stays up=1 with `accept_degraded 1` — an ordinary redeploy in
+	// which a predecessor still holds the port must not page.
 	if sk := socks5ListenerState(); sk.Configured {
-		up, degraded := 1, 0
-		if sk.Down {
+		up, degraded, unavailable := 1, 0, 0
+		if sk.Down || sk.BindUnavailable {
 			up = 0
 		}
 		if sk.Degraded {
 			degraded = 1
 		}
-		_, _ = fmt.Fprintf(w, `# HELP culvert_socks5_listener_up 1 while the SOCKS5 accept loop is running; 0 once it has stopped and the port is closed
+		if sk.BindUnavailable {
+			unavailable = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_socks5_listener_up 1 while the SOCKS5 listener is bound and its accept loop is running; 0 once it has stopped or has been unbindable past the threshold
 # TYPE culvert_socks5_listener_up gauge
 culvert_socks5_listener_up %d
 
@@ -1217,11 +1227,31 @@ culvert_socks5_accept_degraded %d
 # HELP culvert_socks5_accept_backoff_seconds Current SOCKS5 accept retry backoff; 0 when accepts are succeeding
 # TYPE culvert_socks5_accept_backoff_seconds gauge
 culvert_socks5_accept_backoff_seconds %g
+
+# HELP culvert_socks5_unavailable 1 while the SOCKS5 listener has been unable to bind its port for longer than the threshold
+# TYPE culvert_socks5_unavailable gauge
+culvert_socks5_unavailable %d
+
+# HELP culvert_socks5_bind_failures_total Failed SOCKS5 listener bind attempts since startup
+# TYPE culvert_socks5_bind_failures_total counter
+culvert_socks5_bind_failures_total %d
+
+# HELP culvert_socks5_binds_total Successful SOCKS5 listener binds since startup
+# TYPE culvert_socks5_binds_total counter
+culvert_socks5_binds_total %d
+
+# HELP culvert_socks5_bind_backoff_seconds Current SOCKS5 rebind backoff; 0 when the listener is bound
+# TYPE culvert_socks5_bind_backoff_seconds gauge
+culvert_socks5_bind_backoff_seconds %g
 `,
 			up,
 			sk.Total,
 			degraded,
 			sk.Backoff.Seconds(),
+			unavailable,
+			sk.BindTotal,
+			sk.Binds,
+			sk.BindBackoff.Seconds(),
 		)
 	}
 

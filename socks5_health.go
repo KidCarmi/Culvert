@@ -51,9 +51,12 @@ package main
 //   - alerts — `socks5_listener_down`.
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -146,6 +149,57 @@ type socks5ListenerHealth struct {
 	// urgent of the two, which is the storage_health.go "two failures must not
 	// share a rate gate" rule (Codex P2) in a different costume.
 	downAlerted bool
+
+	// ── The BIND plane (CHAOS-66) ────────────────────────────────────────────
+	//
+	// Everything above describes a listener that is BOUND and whose accept loop
+	// is misbehaving. These fields describe the step before it: a listener that
+	// cannot get a socket at all. They are a separate episode with their own
+	// rate gate and their own fire-once latch, for the same reason `alerted`
+	// and `downAlerted` are separate — "cannot bind the port" and "bound, but
+	// accepts are failing" point the operator at completely different things.
+
+	// everBound distinguishes the two situations that read identically in a
+	// gauge but need opposite responses: a listener that has NEVER come up (a
+	// misconfiguration — wrong port, a port permanently owned by something
+	// else, a deployment that has never had SOCKS5) versus one that was serving
+	// and lost its socket (an environmental fault).
+	everBound bool
+
+	// stopped records the supervisor loop exiting for SHUTDOWN rather than for
+	// a fault, so a node in the middle of a clean teardown never reports a
+	// SOCKS5 failure on its way out.
+	stopped bool
+
+	// bindFirstFailure is the start of the current run of consecutive bind
+	// failures; zero once a bind succeeds. Unavailability is measured from
+	// here, so a listener that fails, binds, and fails again never accumulates
+	// toward the threshold across healthy periods.
+	bindFirstFailure time.Time
+	bindLastFailure  time.Time
+	bindLastReason   string
+	bindBackoff      time.Duration
+
+	// bindConsecutive resets on an observed successful BIND; bindTotal never
+	// does. Recovery is established by EVIDENCE (a listener that actually
+	// bound), never by elapsed time — the house rule from storage_health.go and
+	// ca_health.go. A retry loop that stops failing because it stopped trying
+	// has not recovered. binds counts successful binds, so a flapping listener
+	// is distinguishable from a stable one.
+	bindConsecutive int64
+	bindTotal       int64
+	binds           int64
+
+	// bindLogAt gates the bind-failure log line; bindSuppressed counts what the
+	// gate swallowed since the last emitted line so the recovery line can state
+	// it.
+	bindLogAt      time.Time
+	bindSuppressed int64
+
+	// bindAlerted is a fire-once latch per UNAVAILABILITY episode: one page
+	// when the listener goes persistently unbindable, not one per retry.
+	// Cleared by an observed bind, so a second incident pages again.
+	bindAlerted bool
 }
 
 var socks5Listener socks5ListenerHealth
@@ -172,6 +226,20 @@ type socks5ListenerSnapshot struct {
 	Consecutive int64
 	Total       int64
 	FailingFor  time.Duration
+
+	// The bind plane (CHAOS-66). BindFailing is "cannot get a socket right now,
+	// retrying"; BindUnavailable is the same condition sustained past
+	// socks5BindUnavailableAfter, which is the state that pages.
+	EverBound       bool
+	Stopped         bool
+	BindFailing     bool
+	BindUnavailable bool
+	BindLastReason  string
+	BindBackoff     time.Duration
+	BindConsecutive int64
+	BindTotal       int64
+	Binds           int64
+	BindFailingFor  time.Duration
 }
 
 // fireSOCKS5ListenerAlert delivers the `socks5_listener_down` alert.
@@ -299,6 +367,159 @@ func noteSOCKS5ListenerDown(reason string) {
 	}
 }
 
+// classifySOCKS5BindError maps a bind failure to a BOUNDED reason class
+// (CHAOS-66).
+//
+// Bounded for the same two reasons socks5AcceptReason is: the class reaches the
+// alert Detail, which alerts.Store.Dispatch dedups on `event + ":" + Detail`
+// (a raw error embeds the listener address and would mint one dedup key per
+// failure — the WK-12/RS-5 defect), and it reaches the viewer-role
+// /api/diagnostics row, which must not carry internal addresses. The full error
+// goes to the rate-limited log line and nowhere else.
+//
+// Matched with errors.As on syscall.Errno, never by string: net wraps bind
+// errors as *net.OpError{Err: *os.SyscallError{Err: syscall.Errno}} and the
+// text is platform-specific. The class set deliberately mirrors
+// classifyAdminUIListenError's — it is the same fault on the same kind of
+// socket, and one vocabulary across both listeners is what lets an operator
+// read either runbook.
+func classifySOCKS5BindError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.EADDRINUSE:
+			return "port_in_use"
+		case syscall.EACCES, syscall.EPERM:
+			return "permission_denied"
+		case syscall.EADDRNOTAVAIL:
+			return "address_unavailable"
+		case syscall.EMFILE, syscall.ENFILE:
+			return "descriptors_exhausted"
+		}
+	}
+	// `network_error` requires an actual TIMEOUT, not merely an error the net
+	// package wrapped. Every bind failure arrives as *net.OpError, which
+	// satisfies net.Error unconditionally (verified: Timeout() is false for a
+	// bind EINVAL), so an unqualified errors.As(&ne) branch swallows every
+	// unrecognised errno into a class that names the wrong subsystem and sends
+	// the operator down a network-troubleshooting path for a socket or
+	// permission fault — while making `listen_failed` unreachable for any real
+	// listen error. classifyAdminUIListenError had exactly this shape and was
+	// narrowed in the same change; its test only ever passed a bare
+	// errors.New, which is why the branch looked correct.
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "network_error"
+	}
+	return "listen_failed"
+}
+
+// noteSOCKS5BindFailure records one failed bind attempt and returns whether the
+// caller should emit a log line for it.
+func noteSOCKS5BindFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool) {
+	socks5Listener.mu.Lock()
+
+	socks5Listener.bindTotal++
+	socks5Listener.bindConsecutive++
+	socks5Listener.bindLastFailure = now
+	socks5Listener.bindLastReason = reason
+	socks5Listener.bindBackoff = backoff
+	socks5Listener.stopped = false
+	if socks5Listener.bindFirstFailure.IsZero() {
+		socks5Listener.bindFirstFailure = now
+	}
+
+	if socks5Listener.bindLogAt.IsZero() || now.Sub(socks5Listener.bindLogAt) >= socks5BindLogInterval {
+		socks5Listener.bindLogAt = now
+		shouldLog = true
+	} else {
+		socks5Listener.bindSuppressed++
+	}
+
+	// Unavailability is a DURATION, not a count: an ordinary redeploy in which
+	// a predecessor still holds the port clears in seconds, and paging on that
+	// would page on every restart.
+	unavailable := now.Sub(socks5Listener.bindFirstFailure) >= socks5BindUnavailableAfter
+	alertNow := unavailable && !socks5Listener.bindAlerted
+	if alertNow {
+		socks5Listener.bindAlerted = true
+	}
+	failures := socks5Listener.bindConsecutive
+	port := socks5Listener.port
+	everBound := socks5Listener.everBound
+	socks5Listener.mu.Unlock()
+
+	if alertNow {
+		// The Detail states explicitly that the rest of the appliance is
+		// serving. That is the single most important fact for whoever this
+		// pages: before CHAOS-66 this condition meant the whole gateway was
+		// gone, so an operator who remembers the old behaviour must not go
+		// looking for a dead data plane.
+		history := "has never bound"
+		if everBound {
+			history = "lost its socket and cannot rebind"
+		}
+		fireSOCKS5ListenerAlert(fmt.Sprintf(
+			"SOCKS5 listener on port %d %s after %s of retrying (%d consecutive failures, reason: %s); SOCKS5 clients cannot connect. The HTTP/HTTPS proxy and the admin UI are unaffected",
+			port, history, socks5BindUnavailableAfter, failures, reason))
+	}
+	return shouldLog
+}
+
+// noteSOCKS5Bound records an OBSERVED successful bind and returns the number of
+// bind-failure log lines the rate gate suppressed during the episode that just
+// ended, plus whether an episode was in fact ended (so the caller only logs a
+// recovery line when there was something to recover from).
+//
+// This is the only thing that clears the bind-failure state — and, because a
+// fresh socket is exactly the recovery for an unrecoverable one, the only thing
+// that clears `down` as well. Elapsed time never does: a supervisor that has
+// stopped failing because it has stopped attempting looks identical to a bound
+// one, which is the mistake ca_health.go and storage_health.go both call out by
+// name.
+func noteSOCKS5Bound() (suppressed int64, recovered bool) {
+	socks5Listener.mu.Lock()
+	defer socks5Listener.mu.Unlock()
+
+	socks5Listener.binds++
+	socks5Listener.everBound = true
+	socks5Listener.stopped = false
+
+	// A bind proves the socket exists again, so the accept loop's terminal
+	// `down` no longer describes reality. Clearing it here is what makes the
+	// CHAOS-54 down state recoverable without a restart now that something
+	// rebinds.
+	socks5Listener.down = false
+	socks5Listener.downReason = ""
+	socks5Listener.downAlerted = false
+
+	if socks5Listener.bindConsecutive == 0 && socks5Listener.bindFirstFailure.IsZero() {
+		return 0, false
+	}
+	suppressed = socks5Listener.bindSuppressed
+	socks5Listener.bindConsecutive = 0
+	socks5Listener.bindSuppressed = 0
+	socks5Listener.bindFirstFailure = time.Time{}
+	socks5Listener.bindBackoff = 0
+	socks5Listener.bindAlerted = false
+	socks5Listener.bindLogAt = time.Time{}
+	return suppressed, true
+}
+
+// noteSOCKS5ListenerStopped records the supervisor exiting because Stop was
+// called, so a clean teardown is never reported as a fault. It deliberately
+// does NOT clear the failure history: an operator reading the last diagnostics
+// of a node that is shutting down should still see that SOCKS5 had been unable
+// to bind.
+func noteSOCKS5ListenerStopped() {
+	socks5Listener.mu.Lock()
+	socks5Listener.stopped = true
+	socks5Listener.mu.Unlock()
+}
+
 // socks5ListenerState returns a consistent copy of the accept loop's state.
 func socks5ListenerState() socks5ListenerSnapshot {
 	socks5Listener.mu.Lock()
@@ -312,11 +533,24 @@ func socks5ListenerState() socks5ListenerSnapshot {
 		Backoff:     socks5Listener.backoff,
 		Consecutive: socks5Listener.consecutive,
 		Total:       socks5Listener.total,
+
+		EverBound:       socks5Listener.everBound,
+		Stopped:         socks5Listener.stopped,
+		BindLastReason:  socks5Listener.bindLastReason,
+		BindBackoff:     socks5Listener.bindBackoff,
+		BindConsecutive: socks5Listener.bindConsecutive,
+		BindTotal:       socks5Listener.bindTotal,
+		Binds:           socks5Listener.binds,
 	}
 	if !socks5Listener.firstFailure.IsZero() {
 		snap.Failing = true
 		snap.FailingFor = socks5Listener.lastFailure.Sub(socks5Listener.firstFailure)
 		snap.Degraded = snap.FailingFor >= socks5AcceptDegradedAfter
+	}
+	if !socks5Listener.bindFirstFailure.IsZero() {
+		snap.BindFailing = true
+		snap.BindFailingFor = socks5Listener.bindLastFailure.Sub(socks5Listener.bindFirstFailure)
+		snap.BindUnavailable = snap.BindFailingFor >= socks5BindUnavailableAfter
 	}
 	return snap
 }
@@ -344,6 +578,18 @@ func resetSOCKS5HealthForTest() {
 	socks5Listener.suppressed = 0
 	socks5Listener.alerted = false
 	socks5Listener.downAlerted = false
+	socks5Listener.everBound = false
+	socks5Listener.stopped = false
+	socks5Listener.bindFirstFailure = time.Time{}
+	socks5Listener.bindLastFailure = time.Time{}
+	socks5Listener.bindLastReason = ""
+	socks5Listener.bindBackoff = 0
+	socks5Listener.bindConsecutive = 0
+	socks5Listener.bindTotal = 0
+	socks5Listener.binds = 0
+	socks5Listener.bindLogAt = time.Time{}
+	socks5Listener.bindSuppressed = 0
+	socks5Listener.bindAlerted = false
 	socks5EverFailed.Store(false)
 }
 
@@ -356,9 +602,9 @@ func socks5ListenerStatus() string {
 	switch {
 	case !snap.Configured:
 		return "disabled"
-	case snap.Down:
+	case snap.Down, snap.BindUnavailable:
 		return "down"
-	case snap.Degraded:
+	case snap.Degraded, snap.BindFailing:
 		return "degraded"
 	default:
 		return "ready"
@@ -388,13 +634,46 @@ func checkSOCKS5Listener() OperatorContractCheck {
 			Message: "SOCKS5 listener not configured",
 		}
 	}
+	// The BIND branches come first: a listener with no socket at all is a more
+	// fundamental state than one whose accepts are failing, and while the
+	// supervisor is unbound the accept-plane fields describe the PREVIOUS
+	// socket. CHAOS-66.
+	if snap.BindUnavailable {
+		msg := fmt.Sprintf("SOCKS5 listener has never bound port %d (%s) after %s of retrying (%d attempts)",
+			snap.Port, snap.BindLastReason, snap.BindFailingFor.Round(time.Second), snap.BindConsecutive)
+		action := fmt.Sprintf("Check what else is bound to port %d on this host, and that the process may bind it; the listener rebinds automatically once the port is free — no restart required. The HTTP/HTTPS proxy and the admin UI are unaffected.", snap.Port)
+		if snap.EverBound {
+			msg = fmt.Sprintf("SOCKS5 listener lost port %d and has been unable to rebind for %s (%s, %d attempts)",
+				snap.Port, snap.BindFailingFor.Round(time.Second), snap.BindLastReason, snap.BindConsecutive)
+		}
+		return OperatorContractCheck{
+			Code:           "socks5_listener",
+			Status:         diagFail,
+			Message:        msg,
+			OperatorAction: action,
+		}
+	}
 	if snap.Down {
 		return OperatorContractCheck{
 			Code:   "socks5_listener",
 			Status: diagFail,
-			Message: fmt.Sprintf("SOCKS5 listener stopped accepting connections (%s) after %d accept errors; the port is closed",
+			Message: fmt.Sprintf("SOCKS5 listener stopped accepting connections (%s) after %d accept errors; the port is closed and a rebind is pending",
 				snap.DownReason, snap.Total),
-			OperatorAction: "Restart this node to rebind the SOCKS5 listener, then check the server logs for the underlying socket fault.",
+			// CHAOS-66 changed this action. It used to read "Restart this node
+			// to rebind the SOCKS5 listener", which was correct when nothing
+			// re-opened the socket; the supervisor now does, so telling an
+			// operator to restart a gateway carrying production traffic would
+			// be advice that costs an outage to achieve what already happens.
+			OperatorAction: "Check the server logs for the underlying socket fault; the listener rebinds automatically — no restart required.",
+		}
+	}
+	if snap.BindFailing {
+		return OperatorContractCheck{
+			Code:   "socks5_listener",
+			Status: diagWarn,
+			Message: fmt.Sprintf("SOCKS5 listener has been unable to bind port %d for %s (%d attempts, reason: %s); retrying with backoff",
+				snap.Port, snap.BindFailingFor.Round(time.Second), snap.BindConsecutive, snap.BindLastReason),
+			OperatorAction: fmt.Sprintf("Usually a predecessor process still holding port %d; it clears on its own. The HTTP/HTTPS proxy and the admin UI are unaffected.", snap.Port),
 		}
 	}
 	if snap.Degraded {
@@ -406,12 +685,12 @@ func checkSOCKS5Listener() OperatorContractCheck {
 			OperatorAction: "Check the process file-descriptor limit and system-wide descriptor usage; the listener recovers automatically once descriptors free up.",
 		}
 	}
-	if snap.Total > 0 {
+	if snap.Total > 0 || snap.BindTotal > 0 {
 		return OperatorContractCheck{
 			Code:   "socks5_listener",
 			Status: diagOK,
-			Message: fmt.Sprintf("SOCKS5 listener accepting connections (%d transient accept errors since startup)",
-				snap.Total),
+			Message: fmt.Sprintf("SOCKS5 listener accepting connections (%d transient accept errors, %d transient bind failures since startup)",
+				snap.Total, snap.BindTotal),
 		}
 	}
 	return OperatorContractCheck{
@@ -444,12 +723,17 @@ func appendSOCKS5ReadinessCheck(checks map[string]*readinessCheck) {
 		return
 	}
 	switch {
+	case snap.BindUnavailable:
+		checks["socks5"] = &readinessCheck{
+			Status: "fail",
+			Detail: "SOCKS5 listener could not bind its port — see server logs",
+		}
 	case snap.Down:
 		checks["socks5"] = &readinessCheck{
 			Status: "fail",
 			Detail: "SOCKS5 listener has stopped accepting connections — see server logs",
 		}
-	case snap.Degraded:
+	case snap.BindFailing, snap.Degraded:
 		checks["socks5"] = &readinessCheck{
 			Status: "fail",
 			Detail: "SOCKS5 listener is not accepting connections — see server logs",
