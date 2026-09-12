@@ -11,6 +11,57 @@ model. For day-to-day troubleshooting of a stuck or unhealthy pool, see
 [Operations §6](../OPERATIONS.md#6-cdr-sluice-recovery) — this guide does
 not repeat that material.
 
+## Known limitations (read before enabling in production)
+
+These were confirmed against the current implementation and are not yet
+fixed; they materially affect how safely CDR can be relied on today.
+
+- **CDR alone does not trigger body buffering.** The proxy only buffers a
+  response body for inspection when the remote scan service, DPI (on text
+  content), or the local ClamAV/YARA body scanner is enabled
+  (`bodyNeedsBuffering`, `security_scan.go:249-263`) — CDR's own enabled
+  state is not part of that decision. Enabling CDR with every other
+  scanner disabled results in `scanInspectBody` returning before CDR is
+  ever reached (`proxy_tunnel.go:1280-1284`), so **no file is inspected or
+  sanitized at all**, silently. Enable at least one of the other body
+  scanners alongside CDR.
+- **Only the scan-window prefix is sanitized, not the whole file.** The
+  proxy buffers at most `maxScanBufferBytes()` bytes (driven by DPI/ClamAV's
+  own configured limits, not a CDR-specific one) and passes only that
+  prefix to CDR; the untouched remainder is appended and forwarded as-is
+  after CDR returns (`proxy_tunnel.go:1294-1330`, `1369-1378`). For a file
+  larger than that window, only the leading prefix is scanned/sanitized —
+  the tail reaches the client exactly as the origin sent it. The same
+  buffering also means a file larger than `cdrMaxFileSize` (50 MiB) does
+  not reliably trip that check via this path, since CDR only ever sees a
+  prefix capped by the (typically smaller) scan window.
+- **An unreachable/empty pool fails open regardless of `fail_mode`.** When
+  no pool member is selectable — the pool is empty, or every circuit
+  breaker is open — `runCDRStage` returns the original file untouched and
+  unblocked without consulting `fail_mode` at all
+  (`cdr_proxy.go:391-395`, `cdrstore.go:485-496`). A deployment configured
+  as fail-closed is **not** protected against this specific case: `fail_mode`
+  is only consulted once a live client attempts (and fails) a call, not
+  when there is no client to try. See
+  [Fail-open vs fail-closed behavior](#fail-open-vs-fail-closed-behavior)
+  below.
+- **Runtime enablement does not start the health/renewal poller.** The
+  poller that drives client-certificate auto-renewal and Sluice
+  server-cert rotation handling is started from exactly one place —
+  process startup with CDR already enabled (`cdr_startup.go:47-70`).
+  Enabling CDR at runtime (first enrollment, or `PUT /api/cdr/config`)
+  initializes the client pool but does **not** start the poller, so none
+  of the [certificate rotation](#certificate-rotation) behavior described
+  below runs until the process is restarted with CDR enabled.
+- **Deleting one instance can take the whole pool offline.** In a
+  multi-instance deployment, `DELETE /api/cdr/instances?name=` shuts down
+  the *entire* client pool — not just the named instance — whenever any
+  instance was still selectable at the time of the call
+  (`cdr_ui.go:302-309` calling `shutdownCDRClient()`, which clears the
+  effective config and empties the whole pool: `cdrstore.go:551-556`).
+  The remaining, still-enrolled instances stop serving until an operator
+  re-enrolls one of them or restarts the process.
+
 ## Architecture
 
 Culvert is the gRPC client; Sluice is a separate service (typically a
@@ -31,8 +82,11 @@ Culvert can enroll **multiple** Sluice instances. Each becomes a
 breaker (closed → open after consecutive failures → half-open probe →
 closed; `cdr_breaker.go:1-30`). The proxy path (`cdrPickPooled`) skips
 open-breaker instances and round-robins across the rest; if every
-instance's breaker is open, CDR falls through to the configured fail
-mode (`cdr_pool.go:12-15`). A background poller (`cdr_health.go`) calls
+instance's breaker is open (or the pool is empty), no client is
+selectable and the file is forwarded unsanitized and unblocked —
+**`fail_mode` is not consulted in this case** (see
+[Known limitations](#known-limitations-read-before-enabling-in-production)).
+A background poller (`cdr_health.go`) calls
 `Health` on every pool member every 15 seconds, caches the result for
 `GET /api/cdr/health`, and drives auto-renewal and server-cert-rotation
 handling (below).
@@ -93,15 +147,23 @@ credential), `NOT_ISSUED`, or `AMBIGUOUS` (`cdr_enroll_receipts.go:34-42`,
 prunes these receipts; an unresolved receipt cannot be deleted
 (`cdr_enroll_receipts.go:375-395`).
 
-Deleting an instance (`DELETE /api/cdr/instances?name=…`) only removes
+Deleting an instance (`DELETE /api/cdr/instances?name=…`) removes
 Culvert's local registry entry and shreds the local PEM copies — it does
 **not** revoke trust on the Sluice side. Sluice keeps trusting every
 still-valid certificate generation until it expires or is explicitly
 revoked there; the response and audit event report every fingerprint
 that remains trusted so the operator knows what still needs revoking
-(`cdr_ui.go:238-323`, `267-276`).
+(`cdr_ui.go:238-323`, `267-276`). In a multi-instance deployment this
+delete also shuts down the *entire* client pool, not just the named
+instance, whenever any instance was still selectable — see
+[Known limitations](#known-limitations-read-before-enabling-in-production).
 
 ## Certificate rotation
+
+Everything in this section is driven by the background health poller,
+which only starts at process startup with CDR already enabled — see
+[Known limitations](#known-limitations-read-before-enabling-in-production)
+for what that means for an instance enrolled or enabled at runtime.
 
 **Sluice server certificate** (the side Culvert pins by fingerprint):
 the health poller reads `HealthResponse.rotated_fingerprint` /
@@ -188,11 +250,17 @@ repairs the store by position (`cdrpolicy.go:167-246`, `280-311`).
 
 ## Fail-open vs fail-closed behavior
 
-Whether an unreachable/erroring Sluice pool blocks traffic or lets it
-through unsanitized is controlled by the `fail_mode` setting
-(`cdr.fail_mode` in `config.yaml`, or `-cdr-fail-mode {open|closed}` on
-the CLI; default `open`) — see `CDRFailOpen()` (`config.go:401-406`) and
-the runtime toggle at `PUT /api/cdr/config`. An oversize file
+Whether an *erroring* Sluice call blocks traffic or lets it through
+unsanitized is controlled by the `fail_mode` setting (`cdr.fail_mode` in
+`config.yaml`, or `-cdr-fail-mode {open|closed}` on the CLI; default
+`open`) — see `CDRFailOpen()` (`config.go:401-406`) and the runtime
+toggle at `PUT /api/cdr/config`. This governs the outcome of a call that
+was *attempted* and failed; it does **not** govern the case where no
+pool member was selectable in the first place (empty pool, or every
+circuit breaker open) — that case always forwards the file unsanitized
+and unblocked, `fail_mode` notwithstanding (see
+[Known limitations](#known-limitations-read-before-enabling-in-production)).
+An oversize file
 (`SKIPPED_OVERSIZE`) is never subject to fail-mode — it always passes
 through unsanitized with a log line, the same as any other scan being
 skipped for size (`cdr_proxy.go:436-453`). For the three diagnostics
