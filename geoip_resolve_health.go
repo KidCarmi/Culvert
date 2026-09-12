@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -273,6 +274,63 @@ func swapGeoWarmSemForTest(n int) func() {
 	orig := geoWarmSem
 	geoWarmSem = make(chan struct{}, n)
 	return func() { geoWarmSem = orig }
+}
+
+// checkGeoResolution is the `geo_resolution` operator-contract row (CHAOS-60).
+//
+// Before this check existed, the ONLY way an operator could see that
+// country-scoped policy rules were failing to converge — culvert_geo_
+// policy_unresolved_total climbing, or the warm pool saturated — was
+// scraping the raw /metrics text endpoint or reading the process log; a rule
+// silently not matching read identically to "no traffic matched this rule"
+// from the admin UI. This adds the same evidence to GET /api/diagnostics,
+// which the Diagnostics panel already renders generically, so a node whose
+// country rules have stopped enforcing shows a warning without any curl.
+//
+// Severity policy mirrors checkDNSResolution() (dns_health.go), the sibling
+// half of the same CHAOS-60 warmer, including its "never used → ok" shape:
+// a permanent row would be noise on an appliance with no GeoIP database or
+// no destination-country rules, and both postures leave Started/Unresolved
+// at zero forever, which is indistinguishable from "not yet exercised" —
+// exactly the message below.
+//   - saturated now, or unresolved evaluations outnumber completed warms →
+//     warn, never fail. The gateway is still proxying every request; what is
+//     degraded is geo-scoped policy MATCHING, not the data plane.
+//   - otherwise → ok, carrying the cumulative counts so a past saturation
+//     episode stays visible after recovery.
+func checkGeoResolution() OperatorContractCheck {
+	gr := geoResolveState()
+	if gr.Saturated {
+		return OperatorContractCheck{
+			Code:   "geo_resolution",
+			Status: diagWarn,
+			Message: fmt.Sprintf("GeoIP resolution warm pool is saturated (%d in flight, %d warms dropped since startup) — country-scoped policy rules are not matching hosts whose country is not yet cached",
+				gr.InFlight, gr.Dropped),
+			OperatorAction: "More distinct destination hosts are being asked about than the resolver pool can keep up with, usually because DNS is slow or a scanning/beaconing source is active. Traffic is still proxied; country-scoped rules stop matching new hosts until the pool recovers.",
+		}
+	}
+	if gr.Unresolved > 0 && gr.Started > 0 && gr.Unresolved >= gr.Started {
+		return OperatorContractCheck{
+			Code:   "geo_resolution",
+			Status: diagWarn,
+			Message: fmt.Sprintf("Country-scoped policy rules are evaluating against an unknown country as often as hosts are being resolved (%d unresolved evaluations, %d warms started, %d dropped) — enforcement does not appear to be converging",
+				gr.Unresolved, gr.Started, gr.Dropped),
+			OperatorAction: "Check this node's DNS resolver reachability and whether the warm pool is dropping (culvert_geo_warm_dropped_total). A low, steady rate of unresolved evaluations is expected (one per host per cache lifetime); a rate tracking request volume means country rules are effectively not matching.",
+		}
+	}
+	if gr.Started == 0 && gr.Unresolved == 0 {
+		return OperatorContractCheck{
+			Code:    "geo_resolution",
+			Status:  diagOK,
+			Message: "No destination-country policy resolution performed (no GeoIP database loaded, or no destination-country rules in use)",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "geo_resolution",
+		Status: diagOK,
+		Message: fmt.Sprintf("GeoIP destination-country policy resolution healthy (%d warms started, %d dropped, %d failed, %d unresolved evaluations since startup)",
+			gr.Started, gr.Dropped, gr.Failed, gr.Unresolved),
+	}
 }
 
 // resetGeoResolveHealthForTest isolates the process-global warm record between

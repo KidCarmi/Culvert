@@ -26,6 +26,17 @@ block the user can clear by retrying. For a deny-rule the request falls through
 to whatever lower-priority rule matches. This is expected behaviour, not a
 fault; the counter below is how you tell expected from broken.
 
+## Diagnostics panel
+
+`GET /api/diagnostics` (and the admin GUI's Diagnostics panel) carries a
+`geo_resolution` row summarizing the same state described below, so a
+country-rule enforcement problem is visible without scraping `/metrics` or
+reading the process log. It warns when the warm pool is saturated or when
+unresolved evaluations are outpacing completed warms, and stays `ok`
+(reporting cumulative counts) otherwise — including on an appliance with no
+GeoIP database or no destination-country rules, where it simply reports that
+no resolution has been attempted.
+
 ## Metrics
 
 All six are exported only when a GeoIP database is loaded.

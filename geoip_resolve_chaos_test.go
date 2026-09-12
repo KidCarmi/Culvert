@@ -683,3 +683,39 @@ func TestChaos60_OneHotHostCannotMonopolizeTheWarmPool(t *testing.T) {
 		resetGeoResolveHealthForTest()
 	}
 }
+
+// TestCheckGeoResolution_OperatorContractRow pins the `geo_resolution`
+// diagnostics row: before it existed, a country-scoped rule that silently
+// stopped matching (a saturated warm pool, or unresolved evaluations
+// outnumbering completed warms) was visible only on the raw /metrics text
+// endpoint or in the process log — nowhere in GET /api/diagnostics or the
+// admin GUI. This is the same evidence, admin-visible without a curl.
+func TestCheckGeoResolution_OperatorContractRow(t *testing.T) {
+	resetGeoResolveHealthForTest()
+	t.Cleanup(resetGeoResolveHealthForTest)
+
+	if c := checkGeoResolution(); c.Code != "geo_resolution" || c.Status != diagOK {
+		t.Fatalf("idle state: got %+v, want ok/geo_resolution", c)
+	}
+
+	geoWarm.started.Add(10)
+	geoWarm.unresolved.Add(1)
+	if c := checkGeoResolution(); c.Status != diagOK {
+		t.Fatalf("low unresolved rate: got %+v, want ok", c)
+	}
+	resetGeoResolveHealthForTest()
+
+	geoWarm.started.Add(2)
+	geoWarm.unresolved.Add(5)
+	if c := checkGeoResolution(); c.Status != diagWarn || c.OperatorAction == "" {
+		t.Fatalf("unresolved evaluations outnumbering warms: got %+v, want warn with an operator action", c)
+	}
+	resetGeoResolveHealthForTest()
+
+	geoWarm.mu.Lock()
+	geoWarm.saturated = true
+	geoWarm.mu.Unlock()
+	if c := checkGeoResolution(); c.Status != diagWarn || c.OperatorAction == "" {
+		t.Fatalf("saturated pool: got %+v, want warn with an operator action", c)
+	}
+}
