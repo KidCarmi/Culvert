@@ -346,3 +346,50 @@ func TestValidateCDR_RejectsNonHexServerFingerprint(t *testing.T) {
 		})
 	}
 }
+
+// ── CDR server_fingerprint CLI/YAML validation parity (validCDRServerFingerprint) ──
+//
+// config.yaml's cdr.server_fingerprint is hex/length-validated by
+// FileConfig.validateCDR at load time (see the test above) — but the CLI flag
+// -cdr-server-fingerprint reaches the exact same CDRConfig.ServerFingerprint field
+// (merged in cdr_startup_config.go's resolveCDRStartupConfig, CLI wins over
+// config.yaml) with no equivalent gate, the same CLI/YAML parity gap
+// TestValidCDRFailMode closes for cdr.fail_mode / -cdr-fail-mode above.
+//
+// A malformed CLI value (e.g. a fat-fingered "-cdr-server-fingerprint" paste) is not
+// rejected at startup at all: it reaches buildCDRTLSConfig (cdr.go) only when
+// the CDR client dials, which fails NON-FATALLY (loadCDR logs "CDR: initial
+// client dial failed, CDR effectively disabled" and continues). Because
+// cdr.fail_mode defaults to fail-OPEN, that silently disables CDR content
+// sanitization for every request from then on, with no startup error naming
+// the bad flag — the exact failure mode validateCDR's own comment says the
+// YAML-side check exists to prevent, just reached from the other input path.
+//
+// validCDRServerFingerprint is the shared predicate (mirroring
+// validCDRFailMode): used by validateCDR (config.go) for the YAML path and by
+// initCDR (main.go) for the CLI path, so both channels reject the same
+// invalid values instead of only one of them.
+func TestValidCDRServerFingerprint(t *testing.T) {
+	tests := []struct {
+		name string
+		fp   string
+		want bool // true = accepted (validCDRServerFingerprint returns "")
+	}{
+		{"empty (unset)", "", true},
+		{"valid 64-char hex", strings.Repeat("ab", 32), true},
+		{"valid with sha256: prefix", "sha256:" + strings.Repeat("cd", 32), true},
+		{"valid with colons", strings.Repeat("ab:", 31) + "ab", true},
+		{"right length, non-hex chars", strings.Repeat("zq", 32), false},
+		{"right length, one bad char", strings.Repeat("a", 63) + "z", false},
+		{"too short", strings.Repeat("a", 63), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validCDRServerFingerprint(tt.fp) == ""
+			if got != tt.want {
+				t.Errorf("validCDRServerFingerprint(%q) accepted=%v (msg=%q), want accepted=%v",
+					tt.fp, got, validCDRServerFingerprint(tt.fp), tt.want)
+			}
+		})
+	}
+}
