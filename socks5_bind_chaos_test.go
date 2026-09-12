@@ -94,7 +94,7 @@ func waitForSOCKS5(t *testing.T, d time.Duration, what string, cond func() bool)
 // the real-binary run in §36 shows a served request after a rebind.
 func assertPortHeld(t *testing.T, port int) {
 	t.Helper()
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	ln, err := ctxListen(fmt.Sprintf(":%d", port))
 	if err == nil {
 		_ = ln.Close()
 		t.Fatalf("port %d is free: the listener recorded as bound is not actually listening", port)
@@ -612,7 +612,7 @@ func TestChaos66_AdoptRefusesAListenerBoundAfterStop(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ctxListen("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestChaos66_StopDuringStartupLeavesNothingServing(t *testing.T) {
 		cancel()
 
 		// The port must be free again: nothing may still be listening.
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		ln, err := ctxListen(fmt.Sprintf(":%d", port))
 		if err != nil {
 			t.Fatalf("trial %d: port %d still held after Stop — a bind raced Stop and was left serving: %v",
 				trial, port, err)
