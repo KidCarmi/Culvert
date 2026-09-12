@@ -6636,16 +6636,18 @@ whole gateway was gone.
 
 ### Gates
 
-`socks5_bind_chaos_test.go` — 20 gates. "Verified failing against the pre-fix
+`socks5_bind_chaos_test.go` — 24 gates. "Verified failing against the pre-fix
 shape" has a stronger meaning than usual here: the pre-fix shape calls
 `os.Exit(1)`, which kills the TEST BINARY mid-run and takes the whole package
 with it, so the defect cannot be reintroduced and kept green (the §33 property).
 
-Six mutations were each applied to the fixed tree and confirmed to fail their
+EIGHT mutations were each applied to the fixed tree and confirmed to fail their
 gate: a non-interruptible backoff sleep; `adopt` ignoring a concurrent `Stop`;
 `configured` recorded only after a successful bind; a rebind that does not clear
 the accept-plane `down`; unavailability keyed on a COUNT instead of a DURATION;
-and the reverted classifier narrowing.
+the reverted classifier narrowing; `startSOCKS5` spawning and returning without
+waiting for its first bind attempt; and the first-attempt marker released BEFORE
+the note call that records the state rather than after.
 
 **One gate was found vacuous and replaced, which is worth recording.** The
 adopt/Stop race was first gated end-to-end — start the supervisor, `Stop`
