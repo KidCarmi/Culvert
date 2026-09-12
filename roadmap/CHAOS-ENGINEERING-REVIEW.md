@@ -95,6 +95,35 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-12 — CHAOS-66 sweep (the SOCKS5 listener's BIND). Id claimed in this
+row before the implementation commit**, per the convention above; `CHAOS-66` was
+free (65 was the highest merged) and did not move. The sweep closes the row §33
+left open in as many words: *"`startSOCKS5`'s BIND failure is still fatal — an
+occupied SOCKS5 port takes down HTTP proxying."* It does, and worse than the
+sentence suggests — `initSOCKS5` runs BEFORE `startAdminUI` and
+`buildAndStartProxyServer`, so an OPTIONAL, off-by-default listener that cannot
+get its port kills the PRIMARY data plane, the management plane and the health
+endpoints before any of them exist. Reproduced against the real binary: exit 1,
+`proxy http_code=000`, zero admin-UI log lines; under `restart: unless-stopped`
+an unattended crash loop recoverable only with shell access. The triggers are
+routine (a draining predecessor holding the port, a privileged port after
+`CAP_NET_BIND_SERVICE` was dropped, an interface not yet up) and none is visible
+to `validatePortCollisions`, which compares Culvert's own three ports to each
+other only. Fixed by a supervisor owning bind → serve → rebind, borrowing
+CHAOS-54/55/57's mechanism wholesale rather than inventing a second dialect;
+`socks5Server` is byte-identical, so §22's 18 accept-loop gates are untouched.
+Two consequences worth the reader's attention: an observed bind now CLEARS the
+accept plane's `down` (§22 recorded it as terminal, correct only while nothing
+re-opened the socket) and the `down` row stopped telling operators to restart
+the node, which after this change would cost a production outage to achieve what
+happens on its own. A second, smaller finding rode along: `network_error` in
+`classifyAdminUIListenError` was unreachable-by-accident in the other direction
+— `*net.OpError` satisfies `net.Error` unconditionally, so every unrecognised
+errno was reported as a network fault and `listen_failed` could only be reached
+by an error the net package had NOT produced; the shipped gate passed exactly
+that one shape. Both classifiers now require `Timeout()`. See §36 and
+`docs/operator/socks5-listener-health.md`.
+
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
 file as commit one, which is the remedy the header above reaches twice
@@ -6402,3 +6431,268 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The SOCKS5 listener's BIND, and which plane may kill which
+
+**Date:** 2026-09-12
+**Scope:** `startSOCKS5` / `initSOCKS5` / the SOCKS5 listener lifecycle, and the
+classifier it shares with the admin UI listener.
+**Status:** Shipped. Closes the register row CHAOS-57 (§33) left open:
+*"`startSOCKS5`'s BIND failure is still fatal — an occupied SOCKS5 port takes
+down HTTP proxying."*
+
+### The finding
+
+`startSOCKS5` bound its listener with exactly one error branch:
+
+```go
+ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+if err != nil {
+        logFatalf("SOCKS5 listen error: %v", err)   // ← os.Exit(1)
+}
+```
+
+So every way the OPTIONAL SOCKS5 listener could fail to bind terminated the
+whole appliance. And it did so from `initSOCKS5`, which `main.go` runs at line
+239 — **before `startAdminUI` and before `buildAndStartProxyServer`** — so the
+HTTP/HTTPS proxy and the admin UI never start at all.
+
+This is §33's finding one plane over, and it lands strictly harder. There the
+MANAGEMENT plane killed the DATA plane. Here a **secondary, opt-in data plane**
+— SOCKS5 is off by default (`-socks5-port 0`) — kills the **primary** data
+plane, the management plane and the health endpoints, before any of them exist.
+
+### Reproduction (real binary, not reasoned about)
+
+Port 11080 held by an unrelated process:
+
+```
+$ ./culvert -port 18080 -ui-port 19090 -socks5-port 11080
+...
+SOCKS5 listen error: listen tcp :11080: bind: address already in use
+EXIT CODE: 1
+
+$ curl -x http://127.0.0.1:18080 http://example.com
+proxy http_code=000                    ← the HTTP proxy port never listened
+$ grep -c 'UIHTTP\|Admin UI' boot.log
+0                                      ← startAdminUI never ran
+```
+
+Three routine triggers, none of them visible to the one check that looks like it
+should catch them — `validatePortCollisions` compares Culvert's own three ports
+to EACH OTHER only, and nothing else on the host is in its field of view:
+
+- **`port_in_use` (EADDRINUSE)** — a predecessor container still draining, a
+  host-network service, an operator collision, a second Culvert instance.
+- **`permission_denied` (EACCES/EPERM)** — a privileged SOCKS5 port on a
+  deployment that dropped `CAP_NET_BIND_SERVICE` or stopped running as root.
+- **`address_unavailable` (EADDRNOTAVAIL)** — binding before the interface the
+  address lives on is up: an ordinary host-boot race.
+
+Under `restart: unless-stopped` (three services in the shipped
+`docker-compose.yml`) each becomes an unattended **crash loop**: no proxy, no
+admin UI, no `/health`, no `/ready`, recoverable only with shell access. That is
+the terminal state §19 closed for the category store and §33 for the admin UI,
+reached this time from a subsystem the customer may not even be using.
+
+**"It exits, so it fails closed" is wrong here and must not be re-argued.**
+§33 states the reason: process death picks NO posture, it delegates the choice
+to the topology. An explicit-proxy fleet loses all egress; a PAC/WPAD fleet with
+a `DIRECT` fallback, or a transparent deployment that bypasses a dead next hop,
+goes **unfiltered**.
+
+### The fix
+
+A `socks5Supervisor` (`socks5_bind.go`) owns bind → serve → rebind.
+`socks5Server` — the unit §22's 18 accept-loop gates construct directly from a
+pre-bound listener — is **byte-identical**, which is what lets this change add a
+lifecycle without disturbing the semantics those gates pin.
+
+Five rules, all borrowed from CHAOS-54/55/57 rather than invented as a second
+dialect:
+
+1. **No bind path is fatal.** `startSOCKS5` always returns a live handle.
+2. **Retry is RATE-bounded, never COUNT-bounded** (1 s doubling to 30 s, ±20%
+   jitter). The terminal state of "give up" is a configured service that is gone
+   until someone restarts the appliance — the outcome this change removes.
+   *"Avoid infinite retries"* is satisfied the CHAOS-54/55 way: the retry is
+   never SILENT (onset logged immediately, then ≤1 line/60 s, then a recovery
+   line naming the suppressed count, magnitude in a counter).
+3. **Recovery is declared on OBSERVED evidence only** — a listener that actually
+   bound. Elapsed time never clears the state, because a loop that stopped
+   failing because it stopped attempting looks identical to a bound one.
+4. **The sleep is INTERRUPTIBLE**, so the 2 s `socks5-listener-stop` shutdown
+   budget is never spent waiting out a 30 s backoff.
+5. **Reason classes are BOUNDED**, matched with `errors.As` on `syscall.Errno`,
+   never by string. The raw error reaches the rate-limited log and nowhere else:
+   an unbounded reason gives the alert dedup key one value per failure (the
+   WK-12/RS-5 defect) and would put the listener address on a viewer-role
+   surface.
+
+Three further decisions worth recording because each had a plausible
+alternative:
+
+**`noteSOCKS5Configured` moved BEFORE the first bind attempt.** It gates every
+SOCKS5 surface, so leaving it after a successful bind means a listener that has
+NEVER come up reports *"SOCKS5 listener not configured"* — byte-identical to the
+ordinary appliance that never asked for SOCKS5, on precisely the node where an
+operator is trying to find out why SOCKS5 is unreachable. This is the same
+reasoning CHAOS-54 applied one step later when it moved the call ahead of the
+accept loop.
+
+**An observed bind now CLEARS the accept plane's `down`.** §22 recorded `down`
+as terminal for the process, which was correct when nothing re-opened the
+socket. Something does now, and a fresh socket is exactly the recovery for an
+unrecoverable one. Had it not been cleared, a listener that recovered would keep
+reporting a fail row, a `listener_up 0` gauge and a page until the node
+restarted — reporting an outage that is over. The `down` row's operator action
+moved with it: it used to read *"Restart this node to rebind the SOCKS5
+listener"*, which after this change would be advice that costs a production
+outage to achieve what already happens on its own.
+
+**The backoff is never reset inside the loop**, exactly as
+`serveAdminUIWithRetry` does it. Resetting on every successful bind would let a
+socket that dies immediately after each bind settle into a steady
+one-bind-per-floor cadence forever; letting it escalate monotonically to the
+ceiling bounds that pathological case at one attempt per 30 s. The cost — a
+listener that recovers after a long outage and only later loses its socket
+rebinds at the escalated rate rather than the floor — is bounded by the ceiling
+and strictly better than the pre-change behaviour, which never rebound at all.
+
+### A second, smaller finding: `network_error` was unreachable-by-accident
+
+`classifyAdminUIListenError` (shipped in §33) ends:
+
+```go
+var ne net.Error
+if errors.As(err, &ne) { return "network_error" }
+return "listen_failed"
+```
+
+Every bind failure arrives as `*net.OpError`, which satisfies `net.Error`
+**unconditionally** (verified: `Timeout()` is false for a bind `EINVAL`). So the
+branch swallowed every unrecognised errno into a class naming the wrong
+subsystem — sending an operator down a network-troubleshooting path for a socket
+or permission fault — and made `listen_failed` unreachable for any error the net
+package produced. The original gate passed only a bare `errors.New`, which is
+the one shape that *does* reach `listen_failed`, so the branch looked correct.
+
+Both classifiers now require `ne.Timeout()`. The lesson is the §35 one in a
+different costume: *a table-driven classifier gate proves only as much as the
+shapes it feeds in* — and the shape that mattered here is the one the production
+path actually produces.
+
+### Verification
+
+The fix was verified against the real binary, not only in test. With the port
+held at boot:
+
+```
+proxy http_code=403        ← the proxy is serving and enforcing policy
+adminui http_code=200      ← the admin UI is serving
+/health: {"status":"ok", ..., "socks5":"degraded", "admin_ui":"ready"}
+ERROR SOCKS5 listener on port 11080 could not bind (port_in_use): ... —
+  retrying in 878ms; the HTTP/HTTPS proxy data plane and the admin UI are unaffected
+```
+
+…and after releasing the port, with **no restart**:
+
+```
+SOCKS5: listener on port 11080 bound and accepting again (4 suppressed bind-failure log line(s))
+SOCKS5 OK 127.0.0.1 -> "104.20.23.154:80"
+```
+
+Note the jitter (878 ms against a 1 s floor) and the rate gate (one line, four
+suppressed, across 31 s) are both visible in the real run.
+
+### Surfaces
+
+All reuse existing operator vocabulary; **no new alert event**, because a new
+name would be silently unsubscribed on every configured webhook (the §27 rule).
+`socks5_listener_down` now carries the bind case too, with a Detail that states
+explicitly that the rest of the appliance is serving — the single most important
+fact for whoever it pages, since before this change the condition meant the
+whole gateway was gone.
+
+- `/api/diagnostics` — the existing `socks5_listener` row, with bind branches
+  ahead of the accept branches (a listener with no socket at all is a more
+  fundamental state, and while unbound the accept-plane fields describe the
+  PREVIOUS socket).
+- `/readyz` — the existing report-only `socks5` row. Report-only stays
+  load-bearing: a node whose SOCKS5 listener cannot bind proxies HTTP/HTTPS
+  perfectly, and failing the default verdict would eject a healthy gateway over
+  an optional subsystem. Fixed detail strings — `/readyz` is unauthenticated.
+- `/healthz` — the existing `socks5` field; the enum is unchanged
+  (`disabled`/`ready`/`degraded`/`down`), so no dashboard or probe changes.
+- `/metrics` — `culvert_socks5_unavailable`, `_bind_failures_total`,
+  `_binds_total`, `_bind_backoff_seconds`, emitted **only when configured** (the
+  CHAOS-54 rule: a flat 0 from every appliance that never enabled SOCKS5 is
+  indistinguishable from a broken listener, and the paging rule is `== 0`).
+  `culvert_socks5_listener_up` extends symmetrically — 0 when the accept loop
+  stopped OR the bind has failed past the threshold; a listener merely retrying
+  stays 1, so an ordinary redeploy does not page.
+
+### Gates
+
+`socks5_bind_chaos_test.go` — 20 gates. "Verified failing against the pre-fix
+shape" has a stronger meaning than usual here: the pre-fix shape calls
+`os.Exit(1)`, which kills the TEST BINARY mid-run and takes the whole package
+with it, so the defect cannot be reintroduced and kept green (the §33 property).
+
+Six mutations were each applied to the fixed tree and confirmed to fail their
+gate: a non-interruptible backoff sleep; `adopt` ignoring a concurrent `Stop`;
+`configured` recorded only after a successful bind; a rebind that does not clear
+the accept-plane `down`; unavailability keyed on a COUNT instead of a DURATION;
+and the reverted classifier narrowing.
+
+**One gate was found vacuous and replaced, which is worth recording.** The
+adopt/Stop race was first gated end-to-end — start the supervisor, `Stop`
+immediately, assert the port is free — and it passed against the broken build,
+because the loop exits at its top `stopRequested` check before ever reaching the
+bind, so the window was never entered. The window is real (`go s.run()` can be
+scheduled onto another P and be inside `lc.Listen` while the caller is already
+in `Stop`) but is microseconds wide and cannot be scheduled from a test, and a
+gate that can flake gets muted. It is now pinned as a UNIT on `adopt`'s
+invariant — `Stop` sets `stopped` under the same lock BEFORE it reads `cur` —
+which catches the mutation deterministically; the end-to-end version was kept,
+renamed to what it actually proves.
+
+Two CONTROLS, because the cheapest way to pass every "it did not exit"
+assertion is to delete the fatal and report the listener healthy — strictly
+WORSE than the defect, trading a loud crash loop for a SOCKS5 service that is
+silently absent forever on a node whose every probe reads green:
+`ControlUnboundListenerIsNeverReportedReady` (every surface must say so, in both
+the transient and the sustained state) and `ControlHealthyBindIsSilent` (the
+fault plane must not tax the healthy plane — no alert, no warn row, no counter
+movement, and the listener genuinely accepts).
+
+A STRUCTURAL wall (`TheSOCKS5ListenerPathHasNoFatal`) scans the three listener
+sources for `logFatalf`/`log.Fatal`, with a not-vacuous line-count check.
+Behavioural coverage cannot name this reintroduction — a returning `logFatalf`
+kills the test binary rather than failing an assertion, so the signal would be
+an unexplained package-wide crash. It deliberately does NOT cover `main.go`'s
+`logFatalf("Proxy error")`, which is correct and must stay: the proxy IS the
+product, and a gateway that cannot serve must exit loudly rather than linger as
+a black hole. **That asymmetry — an optional listener degrades, the primary one
+does not — is the whole finding.**
+
+### Residual risk / deliberately left
+
+- **The other boot-path fatals are untouched** (register row R-F): `catStore`
+  (`urlcategories_startup.go`), the blocklist file (`blocklist_startup.go`) and
+  the policy file (`main.go`) still `logFatalf` on a load error that is not
+  `IsNotExist`. These are POLICY-load-bearing — a gateway that silently starts
+  with no policy is a worse failure than one that refuses to start — so the
+  posture is defensible, unlike a listener's. It deserves its own sweep with an
+  owner decision on each, not a drive-by change inside this one.
+- **`startUI`'s sibling faults** are already closed by §33; the CP gRPC bind
+  (`cluster_startup.go`) remains fatal and is the closest unexamined analogue —
+  recorded, not changed here (one concern per change).
+- **SOCKS5 still never consults the policy engine** (no category/GeoIP/schedule
+  rules, no default-deny) — §22's residual, unchanged.
+- A listener that binds successfully and whose socket dies instantly on every
+  accept will cycle at the 30 s ceiling indefinitely. It is rate-bounded, loudly
+  reported (`down`, alert, gauge at zero) and strictly better than the previous
+  terminal state, but it is a cycle rather than a convergence.
