@@ -909,6 +909,19 @@ func initCDR(s *startupState) {
 	if fm := *s.cdrFailModeFlag; !validCDRFailMode(fm) {
 		log.Fatalf("Invalid -cdr-fail-mode %q: must be \"open\" or \"closed\"", fm)
 	}
+	// Same mirroring for -cdr-fingerprint: config.yaml's cdr.server_fingerprint
+	// is hex/length-validated at load time (validateCDR), but the CLI flag
+	// reaches the exact same CDRConfig.ServerFingerprint field with no
+	// equivalent gate. An invalid value here doesn't fail startup at all — it
+	// sails through to buildCDRTLSConfig (cdr.go), which rejects it only when
+	// the CDR client dials, logging a NON-FATAL "CDR: initial client dial
+	// failed, CDR effectively disabled" (loadCDR, cdr_startup.go). With the
+	// default fail-open FailMode, that silently disables CDR content
+	// sanitization for every request from then on, with nothing at startup
+	// pointing at the typo'd flag.
+	if msg := validCDRServerFingerprint(*s.cdrFingerprintFlag); msg != "" {
+		log.Fatalf("Invalid -cdr-fingerprint %q: %s", *s.cdrFingerprintFlag, msg)
+	}
 	loadCDR(
 		resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
 			Enabled:     *s.cdrEnabledFlag,

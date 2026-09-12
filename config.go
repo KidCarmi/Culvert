@@ -418,6 +418,39 @@ func validCDRFailMode(fm string) bool {
 	return fm == "" || fm == "open" || fm == "closed"
 }
 
+// validCDRServerFingerprint validates the "cdr.server_fingerprint" /
+// -cdr-fingerprint value shared by the YAML (validateCDR) and CLI (initCDR,
+// main.go) paths: empty (unset) is valid; otherwise it must decode to
+// exactly a SHA-256-sized (32-byte / 64-hex-char) digest after stripping an
+// optional "sha256:"/"SHA256:" prefix and colon separators — the same
+// normalization buildCDRTLSConfig (cdr.go) applies at connect time. Returns
+// "" when valid, else a message describing why (without the "cdr.xxx:" /
+// "-cdr-fingerprint" field prefix, which each caller supplies itself).
+func validCDRServerFingerprint(fp string) string {
+	fp = strings.TrimSpace(fp)
+	if fp == "" {
+		return ""
+	}
+	fp = strings.TrimPrefix(fp, "sha256:")
+	fp = strings.TrimPrefix(fp, "SHA256:")
+	fp = strings.ReplaceAll(fp, ":", "")
+	if len(fp) != 64 {
+		return fmt.Sprintf("expected 64 hex chars (SHA-256), got %d", len(fp))
+	}
+	// Length alone isn't enough: a 64-character value that isn't valid hex
+	// would otherwise sail through validation and only surface later as a
+	// non-fatal CDR client-dial failure (loadCDR, cdr_startup.go) — CDR
+	// silently never comes up (and, under the default fail-open FailMode,
+	// content silently skips CDR sanitization) instead of a clear, immediate
+	// startup error naming the bad field. buildCDRTLSConfig (cdr.go) enforces
+	// the same hex requirement at connect time; this mirrors it here so the
+	// failure is loud and immediate regardless of which path supplied it.
+	if _, err := hex.DecodeString(fp); err != nil {
+		return "expected 64 hex chars (SHA-256), got non-hex characters"
+	}
+	return ""
+}
+
 func loadFileConfig(path string) (*FileConfig, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -621,22 +654,8 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 		// 3072 KB = 3 MiB, a safe ceiling under the 4 MiB gRPC frame cap.
 		errs = append(errs, fmt.Sprintf("cdr.chunk_size_kb: must be 16–3072, got %d", s))
 	}
-	if fp := strings.TrimSpace(fc.CDR.ServerFingerprint); fp != "" {
-		fp = strings.TrimPrefix(fp, "sha256:")
-		fp = strings.TrimPrefix(fp, "SHA256:")
-		fp = strings.ReplaceAll(fp, ":", "")
-		if len(fp) != 64 {
-			errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
-		} else if _, err := hex.DecodeString(fp); err != nil {
-			// Length alone isn't enough: a 64-character value that isn't valid
-			// hex would otherwise sail through startup validation and only
-			// surface later as a non-fatal CDR client-dial failure (loadCDR,
-			// cdr_startup.go) — CDR silently never comes up instead of a clear
-			// startup error naming the bad field. buildCDRTLSConfig (cdr.go)
-			// enforces the same hex requirement at connect time; this mirrors
-			// it at config-load time so the failure is loud and immediate.
-			errs = append(errs, "cdr.server_fingerprint: expected 64 hex chars (SHA-256), got non-hex characters")
-		}
+	if msg := validCDRServerFingerprint(fc.CDR.ServerFingerprint); msg != "" {
+		errs = append(errs, "cdr.server_fingerprint: "+msg)
 	}
 	if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {
 		errs = append(errs, "cdr.certs_dir: must not contain path traversal (..)")
