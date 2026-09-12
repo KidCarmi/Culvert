@@ -242,14 +242,26 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// established (CallOptions.PreSend). "The last authoritative state read before the send" is
 		// now literally true rather than nearly true.
 		// Refusals are classified through the SAME applyBoundaryRefusal as the guard above.
-		var preSendErr error
-		var preSendDrift bool
+		//
+		// THE REFUSAL TRAVELS IN THE ERROR, NEVER IN A CAPTURED VARIABLE. One of the two re-ask
+		// sites lives inside the TLS dialer, and net/http may dial on a goroutine of its own — so
+		// a closure that wrote its verdict into locals here and had them read after Call returned
+		// would be a data race, and on an abandoned dial (the request context ends while the
+		// handshake is finishing) it would also attribute that dial's refusal to a request that
+		// actually failed on the context. The upstream client made exactly this argument for its
+		// own marker type and then this side reintroduced the shape it had just avoided.
+		//
+		// Carrying both facts IN the error needs no synchronisation: the value is delivered to the
+		// waiting goroutine by net/http through a channel, so it is properly ordered before Call
+		// returns, and an abandoned dial's error is discarded rather than read. A pre-send refusal
+		// is never retryable (it is marked never-sent, so retryable()'s pre-response requirement
+		// fails), so the error Call returns is always the refusal itself when one happened.
 		preSend := func() error {
 			perr, drift := e.preCallGuard(in, admKillGen, revalidate)
-			if perr != nil {
-				preSendErr, preSendDrift = perr, drift
+			if perr == nil {
+				return nil
 			}
-			return perr
+			return &preSendGuardErr{err: perr, drifted: drift}
 		}
 
 		// Once the call BEGINS, request bytes may already be on the wire. Assume the
@@ -265,12 +277,13 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
 			AttemptID: attemptIDOf(attempt), PreSend: preSend,
 		})
-		if preSendErr != nil {
+		var preSendRefusal *preSendGuardErr
+		if errors.As(err, &preSendRefusal) {
 			// A pre-send refusal is a BOUNDARY refusal that happened to be detected inside the
 			// client. Classify it exactly as the pre-call guard's, so the Canary still hears about
 			// a drift observed there and the client still reads the gate's own bounded reason.
 			// sendState is left to the never-sent evidence below, which is correct on a retry leg.
-			applyBoundaryRefusal(preSendErr, preSendDrift)
+			applyBoundaryRefusal(preSendRefusal.err, preSendRefusal.drifted)
 		}
 		if upstreamclient.SendNeverStarted(err) {
 			// The call was refused before any request bytes existed — method not
@@ -827,6 +840,28 @@ func executePreconditionFailure(e *Executor, in runtime.ExecInput) (mcperr.Reaso
 	}
 	return mcperr.ReasonNone, true
 }
+
+// preSendGuardErr carries a pre-call-guard refusal raised from INSIDE the upstream client — its
+// underlying guard error, and whether tool drift was observed alongside it — back out through the
+// value Call returns.
+//
+// It exists so those two facts never travel in a variable captured by the pre-send closure. The
+// closure runs at two sites, and one of them is the TLS dialer, which net/http may run on a
+// goroutine of its own; a captured variable written there and read after Call returns is a data
+// race, and on an abandoned dial it would also attribute that dial's refusal to a request that
+// failed for an unrelated reason. An error value is delivered back through net/http's own channel
+// handoff, so it is ordered before Call returns and is discarded when the dial is abandoned.
+//
+// Unwrap exposes the guard error, so classifyBoundaryError's errors.Is chain — and every other
+// errors.Is/As in this package and the client's never-sent marking — behaves exactly as it does
+// for a refusal raised by the pre-call guard directly.
+type preSendGuardErr struct {
+	err     error
+	drifted bool
+}
+
+func (e *preSendGuardErr) Error() string { return e.err.Error() }
+func (e *preSendGuardErr) Unwrap() error { return e.err }
 
 // boundaryRefusal names which final guard refused, so the caller can map it to a
 // bounded reason without repeating the errors.Is chain.
