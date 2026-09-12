@@ -683,3 +683,53 @@ func TestChaos60_OneHotHostCannotMonopolizeTheWarmPool(t *testing.T) {
 		resetGeoResolveHealthForTest()
 	}
 }
+
+// TestCheckGeoResolution_OperatorContractRow pins the `geo_resolution`
+// diagnostics row: before it existed, a saturated warm pool — which stops
+// country-scoped rules from matching — was visible only on the raw /metrics
+// text endpoint or in the process log, never in GET /api/diagnostics or the
+// admin GUI. This is the same evidence, admin-visible without a curl.
+func TestCheckGeoResolution_OperatorContractRow(t *testing.T) {
+	resetGeoResolveHealthForTest()
+	t.Cleanup(resetGeoResolveHealthForTest)
+
+	if c := checkGeoResolution(); c.Code != "geo_resolution" || c.Status != diagOK {
+		t.Fatalf("idle state: got %+v, want ok/geo_resolution", c)
+	}
+
+	geoWarm.started.Add(10)
+	geoWarm.unresolved.Add(1)
+	if c := checkGeoResolution(); c.Status != diagOK {
+		t.Fatalf("low unresolved rate: got %+v, want ok", c)
+	}
+	resetGeoResolveHealthForTest()
+
+	geoWarm.mu.Lock()
+	geoWarm.saturated = true
+	geoWarm.mu.Unlock()
+	if c := checkGeoResolution(); c.Status != diagWarn || c.OperatorAction == "" {
+		t.Fatalf("saturated pool: got %+v, want warn with an operator action", c)
+	}
+}
+
+// TestCheckGeoResolution_OrdinaryColdMissDoesNotWarn is a CONTROL pinning a
+// P1 finding from PR #1371 review: on the ordinary, expected cold-miss path a
+// single request against an uncached host records exactly one warm AND one
+// unresolved evaluation, and several applicable DestCountry rules against one
+// host record SEVERAL unresolved evaluations against that ONE warm — so
+// Unresolved reaching or exceeding Started is the NORMAL shape moments after
+// the very first geo-scoped request, not a sign that enforcement has stopped
+// converging. A comparison-based check here would latch `warn` permanently
+// on any node that has ever served one country-scoped request.
+func TestCheckGeoResolution_OrdinaryColdMissDoesNotWarn(t *testing.T) {
+	resetGeoResolveHealthForTest()
+	t.Cleanup(resetGeoResolveHealthForTest)
+
+	// One warm, matched by five DestCountry rules against the same host in
+	// one request — Unresolved (5) far exceeds Started (1).
+	geoWarm.started.Add(1)
+	geoWarm.unresolved.Add(5)
+	if c := checkGeoResolution(); c.Status != diagOK {
+		t.Fatalf("ordinary multi-rule cold miss: got %+v, want ok (this is expected steady-state behavior, not degradation)", c)
+	}
+}

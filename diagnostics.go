@@ -170,6 +170,7 @@ func buildOperatorContract() OperatorContract {
 		checkSOCKS5Listener(),
 		checkAdminUIListener(),
 		checkDNSResolution(),
+		checkGeoResolution(),
 		checkRequestLogPersistence(),
 		checkIdentityBackend(),
 		checkCredentialVerification(),
