@@ -29,13 +29,23 @@ fault; the counter below is how you tell expected from broken.
 ## Diagnostics panel
 
 `GET /api/diagnostics` (and the admin GUI's Diagnostics panel) carries a
-`geo_resolution` row summarizing the same state described below, so a
-country-rule enforcement problem is visible without scraping `/metrics` or
-reading the process log. It warns when the warm pool is saturated or when
-unresolved evaluations are outpacing completed warms, and stays `ok`
-(reporting cumulative counts) otherwise — including on an appliance with no
-GeoIP database or no destination-country rules, where it simply reports that
-no resolution has been attempted.
+`geo_resolution` row summarizing the warm pool's state, so a saturated pool —
+which stops country-scoped rules from matching new hosts — is visible without
+scraping `/metrics` or reading the process log. It warns only while the pool
+is saturated, and stays `ok` (reporting the cumulative counts) the rest of the
+time, including on an appliance with no GeoIP database or no
+destination-country rules, where it simply reports that no resolution has
+been attempted.
+
+The row deliberately does NOT compare `Unresolved` against `Started`: on the
+ordinary cold-miss path a single request against an uncached host records
+exactly one warm and one unresolved evaluation, and several applicable
+country rules against the same host record several unresolved evaluations
+against that one warm — so `Unresolved >= Started` is the expected shape
+seconds after the first geo-scoped request, not a sign of trouble. Use
+`culvert_geo_policy_unresolved_total`'s *rate* against request volume (below)
+to judge real non-convergence; a single cumulative-counter comparison cannot
+tell the two apart.
 
 ## Metrics
 
