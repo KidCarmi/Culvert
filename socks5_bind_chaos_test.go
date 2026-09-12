@@ -181,6 +181,58 @@ func TestChaos66_ConfiguredIsRecordedBeforeTheFirstBind(t *testing.T) {
 	}
 }
 
+// TestChaos66_StartSOCKS5ResolvesItsFirstBindBeforeReturning closes the window
+// Codex review found on PR #1376.
+//
+// `noteSOCKS5Configured` runs before the bind, because it gates every SOCKS5
+// surface and a listener that has never come up must not report as "not
+// configured". But if startSOCKS5 returned while the supervisor goroutine had
+// not yet run, `configured` would be true with no failure recorded and nothing
+// bound — and every surface would then describe a listener that does not exist:
+// `/healthz` ready, the /readyz row ok, the contract row "accepting
+// connections", `culvert_socks5_listener_up` 1. That is the same class of lie
+// this whole change exists to remove, so the fix is to not have the window
+// rather than to report it accurately.
+//
+// Both arms assert with NO waiting: whatever startSOCKS5 returns, the state is
+// already truthful. The bind case is the one that would regress silently — a
+// listener that binds fast enough in practice hides the defect on most runs.
+func TestChaos66_StartSOCKS5ResolvesItsFirstBindBeforeReturning(t *testing.T) {
+	t.Run("bound", func(t *testing.T) {
+		socks5ChaosSetup(t)
+		port := freeSOCKS5Port(t)
+		startSupervisedSOCKS5(t, port)
+
+		snap := socks5ListenerState()
+		if snap.Binds == 0 || !snap.EverBound {
+			t.Fatalf("startSOCKS5 returned before its first bind resolved: %+v", snap)
+		}
+		if got := socks5ListenerStatus(); got != "ready" {
+			t.Errorf("/healthz socks5 = %q immediately after startSOCKS5, want \"ready\"", got)
+		}
+		assertPortHeld(t, port)
+	})
+
+	t.Run("unbindable", func(t *testing.T) {
+		socks5ChaosSetup(t)
+		port, release := occupyPort(t)
+		defer release()
+		startSupervisedSOCKS5(t, port)
+
+		snap := socks5ListenerState()
+		if snap.BindTotal == 0 {
+			t.Fatal("startSOCKS5 returned before its first bind attempt was recorded — " +
+				"every SOCKS5 surface would report a listener that does not exist")
+		}
+		if got := socks5ListenerStatus(); got == "ready" {
+			t.Error("/healthz socks5 reports \"ready\" immediately after a failed first bind")
+		}
+		if body := renderMetrics(t); !strings.Contains(body, "culvert_socks5_bind_failures_total 1") {
+			t.Error("the first failed bind is not reflected in /metrics when startSOCKS5 returns")
+		}
+	})
+}
+
 // TestChaos66_ListenerRebindsOnceThePortIsFree is the recovery gate: the whole
 // point of retrying is that the operator does not have to restart a gateway
 // carrying production traffic to get SOCKS5 back.

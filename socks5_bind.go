@@ -158,6 +158,13 @@ type socks5Supervisor struct {
 	// done is closed when the supervisor loop exits.
 	done chan struct{}
 
+	// firstAttempt is closed once the loop has RESOLVED its first bind attempt,
+	// one way or the other. startSOCKS5 waits on it so it cannot return while
+	// every SOCKS5 surface still describes a listener that does not exist yet —
+	// see the comment there.
+	firstAttempt chan struct{}
+	firstOnce    sync.Once
+
 	// mu guards the handoff between the loop and Stop. stopped is the flag that
 	// closes the adopt/Stop race: Stop sets it BEFORE reading cur, and adopt
 	// refuses under the same lock, so a listener bound concurrently with Stop is
@@ -184,13 +191,38 @@ type socks5Supervisor struct {
 // service.
 func startSOCKS5(port int) *socks5Supervisor {
 	s := &socks5Supervisor{
-		port:     port,
-		stopping: make(chan struct{}),
-		done:     make(chan struct{}),
+		port:         port,
+		stopping:     make(chan struct{}),
+		done:         make(chan struct{}),
+		firstAttempt: make(chan struct{}),
 	}
 	noteSOCKS5Configured(port)
 	go s.run()
+
+	// Wait for the FIRST bind attempt to resolve before returning.
+	//
+	// Without this, `configured` is true while the supervisor goroutine has not
+	// run yet, and in that window every surface describes a listener that does
+	// not exist: /healthz says `ready`, the report-only /readyz row says `ok`,
+	// the contract row says "accepting connections", and
+	// culvert_socks5_listener_up reads 1 — with no socket bound. That is the
+	// same class of lie this whole change exists to remove, so reporting the
+	// window accurately (a "pending" state) would be the weaker fix: better to
+	// not have the window. Reported by Codex review on PR #1376.
+	//
+	// The wait is bounded by ONE bind(2), which does not block — and it is the
+	// pre-CHAOS-66 behaviour, where startSOCKS5 bound synchronously before
+	// returning. Only the fatal on failure is gone. `run` closes the channel
+	// from a deferred call as well as after each attempt, so a panic before the
+	// first attempt cannot hang startup.
+	<-s.firstAttempt
 	return s
+}
+
+// markFirstAttempt releases startSOCKS5 once the first bind attempt has
+// resolved. Idempotent; safe to call from both the loop and its deferred guard.
+func (s *socks5Supervisor) markFirstAttempt() {
+	s.firstOnce.Do(func() { close(s.firstAttempt) })
 }
 
 // Stop interrupts the supervisor, stops the currently bound listener if there
@@ -268,6 +300,9 @@ func (s *socks5Supervisor) release(srv *socks5Server) {
 // subsystem can produce, so recovering is safe in the direction that matters.
 func (s *socks5Supervisor) run() {
 	defer close(s.done)
+	// Runs AFTER the recover below (defers are LIFO), so startSOCKS5 is
+	// released on every exit path including a panic.
+	defer s.markFirstAttempt()
 	defer func() {
 		if v := recover(); v != nil {
 			recordCrash("socks5-listener-bind", "", v)
@@ -299,7 +334,13 @@ func (s *socks5Supervisor) run() {
 		if err != nil {
 			reason := classifySOCKS5BindError(err)
 			wait := jitterDuration(backoff, socks5BindJitter)
-			if noteSOCKS5BindFailure(reason, backoff, time.Now()) {
+			shouldLog := noteSOCKS5BindFailure(reason, backoff, time.Now())
+			// Released only AFTER the failure is recorded: startSOCKS5 may
+			// return the moment this fires, and it must never return to a
+			// state that has not been written yet — that is the same window
+			// in miniature.
+			s.markFirstAttempt()
+			if shouldLog {
 				// The FULL error goes here and nowhere else: the contract row,
 				// the alert and the readiness detail all carry the bounded
 				// class only. logErrorf applies sanitizeLog (CWE-117) to the
@@ -322,7 +363,9 @@ func (s *socks5Supervisor) run() {
 		// UI's equivalent announced a listener that did not exist yet (§33);
 		// keeping the announcement strictly downstream of the evidence is the
 		// rule, not the accident of where it happened to sit.
-		if suppressed, recovered := noteSOCKS5Bound(); recovered {
+		suppressed, recovered := noteSOCKS5Bound()
+		s.markFirstAttempt() // after the bind is recorded, for the reason above
+		if recovered {
 			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
 				s.port, suppressed)
 		} else {

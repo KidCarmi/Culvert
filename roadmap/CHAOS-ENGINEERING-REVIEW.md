@@ -6678,6 +6678,65 @@ product, and a gateway that cannot serve must exit loudly rather than linger as
 a black hole. **That asymmetry — an optional listener degrades, the primary one
 does not — is the whole finding.**
 
+### Codex round — the window between "configured" and the first bind
+
+`noteSOCKS5Configured` is called BEFORE the first bind attempt, and that
+ordering is deliberate (see above): it gates every SOCKS5 surface, so recording
+it after a successful bind reports a listener that has never come up as "not
+configured". Codex review on PR #1376 found the cost of that ordering, which the
+first draft dismissed in a sentence as "a sub-millisecond window": `startSOCKS5`
+returned as soon as `go s.run()` was spawned, so until the goroutine was
+scheduled `configured` was true with no failure recorded and nothing bound —
+and every surface then described a listener that does not exist (`/healthz`
+`ready`, the report-only `/readyz` row `ok`, the contract row "accepting
+connections", `culvert_socks5_listener_up` 1).
+
+The dismissal was wrong on its own terms. The window is not bounded by a
+syscall; it is bounded by the SCHEDULER, and `main.go` goes straight on to
+`startAdminUI` and `buildAndStartProxyServer`, so the health endpoints can
+become reachable before that goroutine has run at all — on a loaded boot,
+exactly when an operator is most likely to look.
+
+**The fix is to remove the window, not to report it.** Reporting it accurately
+(a "pending" state) was the obvious remedy and is the weaker one: it would have
+added a fifth state to a `/healthz` enum this change had deliberately left
+alone, and it would still have shipped a surface that says "not serving yet"
+where the honest answer is available for the cost of one syscall. `startSOCKS5`
+now waits for the loop to RESOLVE its first bind attempt — success or failure —
+before returning, which is also what the pre-CHAOS-66 code did (it bound
+synchronously); only the fatal on failure is gone. The wait is bounded by one
+non-blocking `bind(2)`, and `run` closes the handshake channel from a deferred
+call as well as after each attempt, so a panic before the first attempt cannot
+hang startup.
+
+The general lesson is the one §35 records three times in a row, arriving from a
+different direction: *a state that is only briefly wrong is still wrong, and
+"briefly" is a claim about the scheduler, not about the code.* Pinned by
+`StartSOCKS5ResolvesItsFirstBindBeforeReturning`, which asserts with NO waiting
+in both arms and was verified failing against the spawn-and-return shape.
+
+### Governance note: a lint gate this sweep did not actually run
+
+The PR claimed `golangci-lint run` was clean on every changed file. It was not
+run. The locally installed binary is built against an older Go than the module
+targets and aborts before linting; the first invocation's output was passed
+through a filename filter, so the abort produced no matching lines and read as
+success. CI then reported a real `funlen` finding the local run had never
+looked at.
+
+The finding itself is PRE-EXISTING and untouched by this sweep — `main` is
+byte-identical to the base branch — and CI surfaced it only because
+`--new-from-rev` attributes issues by diff HUNK, so a two-line edit to
+`startupState` pulled in `func main()` three lines below it. It is suppressed
+with a reason rather than split, on the in-repo precedent for orchestration
+functions (`ui.go`'s `newAdminUIHandler`, the maintenance agent's apply
+handlers): the startup ORDER is load-bearing throughout `main.go` and
+extracting the sequence hides it. Splitting `main` deserves its own change.
+
+The transferable rule: *filtering a tool's output to the files you care about
+converts every hard failure of that tool into a silent pass.* Check the exit
+status, or read the unfiltered output, before claiming a gate is green.
+
 ### Residual risk / deliberately left
 
 - **The other boot-path fatals are untouched** (register row R-F): `catStore`
