@@ -1,6 +1,9 @@
 package main
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // cdr_startup_config.go — resolved config for the CDR (Sluice) slice. Pure
 // DTO + a single side-effect-free resolver invoked from the initCDR shim.
@@ -67,7 +70,14 @@ func resolveCDRStartupConfig(fc *FileConfig, dataDir string, flags cdrCLIFlags) 
 	if sz := firstNonZero(flags.MaxSizeMB, cfg.MaxFileSizeMB); sz != 0 {
 		cfg.MaxFileSizeMB = sz
 	}
-	if fp := firstStr(flags.Fingerprint, cfg.ServerFingerprint); fp != "" {
+	// TrimSpace the CLI value BEFORE the emptiness check: firstStr treats any
+	// non-empty string as "the flag was set", and a whitespace-only
+	// -cdr-server-fingerprint would otherwise count as set and silently
+	// override (discard) a valid config.yaml pin with a value that itself
+	// trims back to empty — weakening TLS verification from
+	// fingerprint-pinned to CA-only (or disabling CDR entirely) with nothing
+	// pointing at the cause (Codex review, PR #1374).
+	if fp := firstStr(strings.TrimSpace(flags.Fingerprint), cfg.ServerFingerprint); fp != "" {
 		cfg.ServerFingerprint = fp
 	}
 	if d := firstStr(flags.CertsDir, cfg.CertsDir); d != "" {

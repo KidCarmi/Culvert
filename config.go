@@ -419,13 +419,13 @@ func validCDRFailMode(fm string) bool {
 }
 
 // validCDRServerFingerprint validates the "cdr.server_fingerprint" /
-// -cdr-fingerprint value shared by the YAML (validateCDR) and CLI (initCDR,
+// -cdr-server-fingerprint value shared by the YAML (validateCDR) and CLI (initCDR,
 // main.go) paths: empty (unset) is valid; otherwise it must decode to
 // exactly a SHA-256-sized (32-byte / 64-hex-char) digest after stripping an
 // optional "sha256:"/"SHA256:" prefix and colon separators — the same
 // normalization buildCDRTLSConfig (cdr.go) applies at connect time. Returns
 // "" when valid, else a message describing why (without the "cdr.xxx:" /
-// "-cdr-fingerprint" field prefix, which each caller supplies itself).
+// "-cdr-server-fingerprint" field prefix, which each caller supplies itself).
 func validCDRServerFingerprint(fp string) string {
 	fp = strings.TrimSpace(fp)
 	if fp == "" {

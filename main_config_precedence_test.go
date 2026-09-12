@@ -351,12 +351,12 @@ func TestValidateCDR_RejectsNonHexServerFingerprint(t *testing.T) {
 //
 // config.yaml's cdr.server_fingerprint is hex/length-validated by
 // FileConfig.validateCDR at load time (see the test above) — but the CLI flag
-// -cdr-fingerprint reaches the exact same CDRConfig.ServerFingerprint field
+// -cdr-server-fingerprint reaches the exact same CDRConfig.ServerFingerprint field
 // (merged in cdr_startup_config.go's resolveCDRStartupConfig, CLI wins over
 // config.yaml) with no equivalent gate, the same CLI/YAML parity gap
 // TestValidCDRFailMode closes for cdr.fail_mode / -cdr-fail-mode above.
 //
-// A malformed CLI value (e.g. a fat-fingered "-cdr-fingerprint" paste) is not
+// A malformed CLI value (e.g. a fat-fingered "-cdr-server-fingerprint" paste) is not
 // rejected at startup at all: it reaches buildCDRTLSConfig (cdr.go) only when
 // the CDR client dials, which fails NON-FATALLY (loadCDR logs "CDR: initial
 // client dial failed, CDR effectively disabled" and continues). Because
