@@ -200,6 +200,35 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- A SOCKS5 listener bind failure no longer terminates the whole appliance
+  (CHAOS-66). `startSOCKS5` bound with a single `logFatalf` branch, and
+  `initSOCKS5` runs *before* the admin UI and the proxy listener start — so an
+  occupied SOCKS5 port meant the HTTP/HTTPS proxy and the admin UI never came
+  up at all, and under `restart: unless-stopped` an unattended crash loop
+  recoverable only with shell access. This is the CHAOS-57 fault one plane
+  over and it lands harder: there the management plane killed the data plane,
+  here an *optional*, off-by-default listener killed the primary data plane,
+  the management plane and the health endpoints together. The triggers are
+  routine and invisible to `validatePortCollisions`, which only compares
+  Culvert's own three ports to each other: a predecessor container still
+  draining, a privileged port after `CAP_NET_BIND_SERVICE` was dropped, an
+  interface not yet up. The listener now rebinds with a jittered,
+  interruptible backoff for as long as the process lives, and an accept-loop
+  failure that invalidates the socket — previously terminal until a restart —
+  recovers the same way. **No SOCKS5 fault requires a node restart any more**,
+  and the `socks5_listener` diagnostics row no longer tells operators to
+  perform one. New read-only surfaces: `culvert_socks5_unavailable`,
+  `culvert_socks5_bind_failures_total`, `culvert_socks5_binds_total` and
+  `culvert_socks5_bind_backoff_seconds`, emitted only on a node with a
+  configured listener. `runProxyUntilShutdown`'s fatal proxy-listener branch
+  is deliberately unchanged. See `docs/operator/socks5-listener-health.md`.
+- Listener failures are no longer misreported as network faults. Every bind
+  error arrives wrapped in `*net.OpError`, which satisfies `net.Error`
+  unconditionally, so the admin UI listener's classifier labelled every
+  unrecognised errno `network_error` — pointing an operator at network
+  troubleshooting for a socket or permission fault — and could reach
+  `listen_failed` only for an error the `net` package had not produced. Both
+  listener classifiers now require an actual timeout for `network_error`.
 - An admin UI listener failure no longer terminates the proxy data plane
   (CHAOS-57). `startUI`'s listen goroutine called `logFatalf`, so an occupied
   admin port or an unreadable `-tls-cert`/`-tls-key` pair exited the whole
