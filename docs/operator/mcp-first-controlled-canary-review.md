@@ -2224,7 +2224,32 @@ usability.
 | Why it matters, end to end | `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion` — same policy, same rule, same request; the only variable is the governed catalog disposition. Before: `ActionQuarantine` / `MCP.TOOL.UNKNOWN`, no rule consulted. After: ordinary evaluation is reached |
 | Fail-closed on the degenerate inputs | `TestCatalogUsable_EmptyScopeIsNotVacuouslyUsable` (a scope admitting no tool must not satisfy a fact about its tools) and `TestCatalogUsable_AbsentInventoryFailsClosed` (the condition under which nothing is known about the tool is the condition under which the fact must not be claimed) |
 | The fact reaches every activation call site | `TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall` — an AST wall requiring every field of `canaryActivationInputs` to be forwarded at every `CanaryActivationInput` literal in `mcp_rollout.go` (the transition commit and the restart reconcile). It is deliberately WIDER than blocker 13: dropping any activation fact at a commit site is the same defect. It is structural because no behavioural test can reach either site in this build — the live tier is never armed, so the commit refuses at an earlier gate and a dropped field is invisible |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — CAMPAIGN_RESULT |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 14 mutations, 14 caught, 0 survived, 0 skipped |
+
+**What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
+run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
+
+Three survivors were genuine missing gates. Two were degenerate-input cases nothing covered — an
+empty scope satisfying "every tool the scope admits is Usable" by vacuous truth, and an absent
+inventory failing OPEN on the exact condition under which nothing is known about the tool. The third
+was structural and would not have been found any other way: the production path resolves activation
+facts once and HAND-SPREADS them into a `CanaryActivationInput` at two call sites, and dropping a
+field at either was invisible to every behavioural test, because in this build the live tier is never
+armed and the commit refuses at an earlier gate. That is the shape a survivor is most valuable in —
+not a gate that was weak, but a site no gate could reach.
+
+Two were defects in the campaign itself, and the second is the one worth carrying forward. M08 left
+two imports unused, so it failed to BUILD, which under this campaign's own header rule proves
+nothing. M09 targeted a line that also occurs, IDENTICALLY AND EARLIER IN THE SAME FILE, inside
+`buildLiveApprovalBindings`: an unanchored substitution mutated that function instead, the gate
+passed for an entirely correct reason, and the result read as a hole in the gates. A pattern that is
+not unique in its file mutates whichever occurrence comes first, which may be code the named gate
+does not watch — so a survivor whose mutation is not anchored is re-read before it is believed. The
+same lesson as §25a's "four instances in one campaign", reached from the opposite direction: there,
+a mutation looked caught while proving less than claimed; here, one looked survived while proving
+nothing at all.
+
+The repaired campaign scores 14/14 with no survivors and no skips.
 
 **Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
 policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
