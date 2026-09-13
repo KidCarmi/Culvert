@@ -37,6 +37,7 @@ const PRESENT_ONLY_FIELDS = [
   "startTls",
   "tlsSkipVerify",
   "cacheTtlSeconds",
+  "cutoverConfirmValue",
 ] as const;
 
 const NEWLY_REQUIRED = [

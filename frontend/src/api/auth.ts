@@ -16,6 +16,7 @@ import {
   DecodeError,
   field,
   readBoolean,
+  readNumber,
   readEnum,
   readOptional,
   readRecord,
@@ -51,6 +52,10 @@ export type AuthStatus =
       role: Role;
       /** the pre-setup bootstrap shape (user === ""), never a human session */
       bootstrap: boolean;
+      /** FE-6A.2 — the caller's durable per-user security generation (the fence
+       * a self-service password change echoes); absent only in the pre-setup
+       * bootstrap window */
+      securityGeneration?: number;
       tlsFallback: boolean;
       tlsFallbackReason: string;
     };
@@ -99,7 +104,20 @@ export const decodeAuthStatus: Decoder<AuthStatus> = (v, path = "$") => {
     // window, which always carries role admin — anything else is malformed.
     throw new DecodeError(`${path}.user`, "non-empty identity", user);
   }
-  return { loggedIn: true, user, role, bootstrap: user === "", ...tls };
+  const securityGeneration = field(
+    o,
+    "securityGeneration",
+    readOptional(readNumber),
+    path,
+  );
+  return {
+    loggedIn: true,
+    user,
+    role,
+    bootstrap: user === "",
+    ...(securityGeneration !== undefined ? { securityGeneration } : {}),
+    ...tls,
+  };
 };
 
 export const decodeLoginResponse: Decoder<LoginResult> = (v, path = "$") => {

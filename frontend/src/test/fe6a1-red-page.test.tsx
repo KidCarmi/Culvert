@@ -143,6 +143,7 @@ const LEGACY_CUTOVER = {
   startTls: false,
   tlsSkipVerify: false,
   cacheTtlSeconds: 300,
+  cutoverConfirmValue: "ldaps://legacy.example:636",
   cutoverDurability: "pending_reconciliation",
   cutover: {
     operationId: CUTOVER_ID,
@@ -349,6 +350,24 @@ function nonGET(): Array<{ method: string; url: string }> {
 }
 
 // ── P1 ─────────────────────────────────────────────────────────────────────
+/** FE-6A.2: the ONLY non-Refresh buttons an admin may see on each surface. */
+const IDP_ADMIN_CONTROLS: readonly string[] = [
+  "Refresh",
+  "Add provider",
+  "Edit",
+  "Delete",
+  "Import legacy configuration",
+  "Repair registry",
+];
+const ADMIN_PAGE_CONTROLS: readonly string[] = [
+  "Refresh",
+  "Add account",
+  "Change my password",
+  "Edit",
+  "Delete",
+  "Clear",
+];
+
 it("P1 viewer: populated registry renders every server fact, indicators only, no controls, no non-GET, no admin lookup", async () => {
   await mount("viewer", "/objects/identity-providers");
   await flushUntil(() => {
@@ -447,7 +466,9 @@ it("P3 admin: legacy cutover record + pending_reconciliation + the operation loo
       .length,
   ).toBeGreaterThanOrEqual(1);
   expect(nonGET()).toEqual([]);
-  expect(buttonTexts().every((b) => b === "Refresh")).toBe(true);
+  // FE-6A.2: an ADMIN now sees the contracted mutation controls; rendering
+  // still issues no non-GET (asserted above) and nothing outside this set.
+  expect(buttonTexts().every((b) => IDP_ADMIN_CONTROLS.includes(b))).toBe(true);
 });
 
 it("P3b viewer: the cutover record renders but the admin-only lookup is never issued", async () => {
@@ -505,7 +526,11 @@ it("P5 admin: roster facts, last-admin posture, TOTP presence, lockouts; no muta
   expect(t).toContain("account");
   expect(t).toContain("pair");
   expect(t).toContain("120");
-  expect(buttonTexts().every((b) => b === "Refresh")).toBe(true);
+  // FE-6A.2: an ADMIN sees the contracted mutation controls (no non-GET was
+  // issued by rendering — asserted below/above); nothing outside this set.
+  expect(buttonTexts().every((b) => ADMIN_PAGE_CONTROLS.includes(b))).toBe(
+    true,
+  );
   expect(
     container.querySelectorAll("input,select,textarea,dialog,form").length,
   ).toBe(0);

@@ -147,7 +147,7 @@ describe("C1 bounded classes are enums", () => {
       "wire_size_exceeded",
     ]);
     expect([...IDP_LEDGER_DEGRADED_REASONS]).toEqual(["unreadable", "corrupt"]);
-    expect([...IDP_OPERATION_ACTIONS]).toEqual(["idp.create"]);
+    expect([...IDP_OPERATION_ACTIONS]).toEqual(["idp.create", "idp.update"]);
     // Refusal codes writeIdPRefusal can record on an aborted/unknown intent
     // + the three settlement families × three verdicts.
     for (const c of [
@@ -309,6 +309,7 @@ describe("C2 missing evidence fails closed", () => {
       startTls: false,
       tlsSkipVerify: false,
       cacheTtlSeconds: 300,
+      cutoverConfirmValue: "ldaps://x:636",
     };
     const l = decodeLegacyLDAP(present);
     expect(l.present ? l.bindCredentialConfigured : null).toBe(true);

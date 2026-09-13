@@ -2,8 +2,12 @@
 // the frozen FE-6A.0 roster read model (ui_auth.go apiAuthUsers GET →
 // store.go UIUserInfo + RosterRevision, node-local) and the login lock set
 // (apiAuthLockouts GET → internal/lockout LockedEntry + Generation,
-// node-local). READ ONLY: no create / update / delete / password / TOTP /
-// lockout-reset call lives here — the slice exposes none.
+// node-local), plus — FE-6A.2 — the WRITE client: create / update / delete
+// an account, clear a lockout and change one's own password as action-bound,
+// fence-carrying (query string), never-retrying calls whose 2xx is a verdict
+// only when it proves the target identity and the contracted facts, and
+// whose refusal is a verdict only inside the ENDPOINT-SPECIFIC allowlist
+// (ADMIN_REFUSAL_CONTRACT). TOTP enrollment stays out of scope (GAP-2).
 //
 // Secret boundary: the roster read model carries no credential material by
 // construction (UIUserInfo has no hash, seed or backup code). The browser
@@ -12,7 +16,7 @@
 // FAILURE — never rendered, never cached. Both endpoints are admin-only
 // (uiRoutes); a 403 is the server's authoritative role verdict and is
 // rendered as a bounded state by the page, never retried into.
-import { apiRequest } from "./client";
+import { ApiError, apiRequest } from "./client";
 import { readRole } from "./auth";
 import type { Role } from "./auth";
 import {
@@ -216,4 +220,398 @@ export function getLockouts(signal?: AbortSignal): Promise<Lockouts> {
     decodeLockouts,
     signal !== undefined ? { signal } : {},
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FE-6A.2 — WRITE client
+// ═══════════════════════════════════════════════════════════════════════════
+
+const BOOL_TRUE: Decoder<true> = (v, path = "$") => {
+  if (v !== true) throw new DecodeError(path, "true", v);
+  return true;
+};
+
+function bindUser(
+  u: AdminUser,
+  username: string,
+  role: Role | undefined,
+  path: string,
+): void {
+  if (u.username !== username)
+    throw new DecodeError(
+      `${path}.user.username`,
+      `the target account ${username}`,
+      u.username,
+    );
+  if (role !== undefined && u.role !== role)
+    throw new DecodeError(
+      `${path}.user.role`,
+      `the submitted role ${role}`,
+      u.role,
+    );
+}
+
+export interface UserCreateResult {
+  ok: true;
+  user: AdminUser;
+  revision: number;
+  persisted: boolean;
+}
+
+export interface UserUpdateResult extends UserCreateResult {
+  sessionsRevoked: boolean;
+  selfAffected: boolean;
+  securityGeneration: number;
+}
+
+export interface UserDeleteResult {
+  ok: true;
+  deleted: true;
+  username: string;
+  revision: number;
+  persisted: boolean;
+  sessionsRevoked: boolean;
+  selfAffected: boolean;
+}
+
+export interface ChangePasswordResult {
+  ok: true;
+  revision: number;
+  persisted: boolean;
+  sessionsRevoked: boolean;
+  selfAffected: boolean;
+  securityGeneration: number;
+}
+
+export interface ClearLockoutResult {
+  ok: true;
+  username: string;
+  generation: number;
+  scope: "node-local";
+}
+
+export interface CreateUserInput {
+  username: string;
+  password: string;
+  role: Role;
+}
+export interface UpdateUserInput {
+  username: string;
+  role?: Role;
+  password?: string;
+}
+
+const fenced = (path: string, key: string, value: number): string =>
+  `${path}?${key}=${encodeURIComponent(String(value))}`;
+const withSignal = (signal?: AbortSignal): { signal?: AbortSignal } =>
+  signal !== undefined ? { signal } : {};
+
+/** POST /api/auth/users?revision= — create is never an upsert. */
+export function createAdminUser(
+  input: CreateUserInput,
+  revision: number,
+  signal?: AbortSignal,
+): Promise<UserCreateResult> {
+  const decoder: Decoder<UserCreateResult> = (v, path = "$") => {
+    const o = readRecord(v, path);
+    refuseSecretKeys(o, path);
+    field(o, "ok", BOOL_TRUE, path);
+    const user = field(o, "user", decodeAdminUser, path);
+    bindUser(user, input.username, input.role, path);
+    return {
+      ok: true,
+      user,
+      revision: field(o, "revision", readNumber, path),
+      persisted: field(o, "persisted", readBoolean, path),
+    };
+  };
+  return apiRequest(fenced("/api/auth/users", "revision", revision), decoder, {
+    method: "POST",
+    body: {
+      username: input.username,
+      password: input.password,
+      role: input.role,
+    },
+    ...withSignal(signal),
+  });
+}
+
+/** PUT /api/auth/users?revision= — role and/or password; the session facts
+ * (sessionsRevoked / selfAffected) are REQUIRED on the answer. */
+export function updateAdminUser(
+  input: UpdateUserInput,
+  revision: number,
+  signal?: AbortSignal,
+): Promise<UserUpdateResult> {
+  const decoder: Decoder<UserUpdateResult> = (v, path = "$") => {
+    const o = readRecord(v, path);
+    refuseSecretKeys(o, path);
+    field(o, "ok", BOOL_TRUE, path);
+    const user = field(o, "user", decodeAdminUser, path);
+    bindUser(user, input.username, input.role, path);
+    return {
+      ok: true,
+      user,
+      revision: field(o, "revision", readNumber, path),
+      persisted: field(o, "persisted", readBoolean, path),
+      sessionsRevoked: field(o, "sessionsRevoked", readBoolean, path),
+      selfAffected: field(o, "selfAffected", readBoolean, path),
+      securityGeneration: field(o, "securityGeneration", readNumber, path),
+    };
+  };
+  const body: Record<string, string> = { username: input.username };
+  if (input.role !== undefined) body["role"] = input.role;
+  if (input.password !== undefined) body["password"] = input.password;
+  return apiRequest(fenced("/api/auth/users", "revision", revision), decoder, {
+    method: "PUT",
+    body,
+    ...withSignal(signal),
+  });
+}
+
+/** DELETE /api/auth/users?username=&revision= — bodiless. */
+export function deleteAdminUser(
+  username: string,
+  revision: number,
+  signal?: AbortSignal,
+): Promise<UserDeleteResult> {
+  const decoder: Decoder<UserDeleteResult> = (v, path = "$") => {
+    const o = readRecord(v, path);
+    refuseSecretKeys(o, path);
+    field(o, "ok", BOOL_TRUE, path);
+    field(o, "deleted", BOOL_TRUE, path);
+    const got = field(o, "username", readString, path);
+    if (got !== username)
+      throw new DecodeError(
+        `${path}.username`,
+        `the deleted account ${username}`,
+        got,
+      );
+    return {
+      ok: true,
+      deleted: true,
+      username: got,
+      revision: field(o, "revision", readNumber, path),
+      persisted: field(o, "persisted", readBoolean, path),
+      sessionsRevoked: field(o, "sessionsRevoked", readBoolean, path),
+      selfAffected: field(o, "selfAffected", readBoolean, path),
+    };
+  };
+  const qs = new URLSearchParams({ username, revision: String(revision) });
+  return apiRequest(`/api/auth/users?${qs.toString()}`, decoder, {
+    method: "DELETE",
+    ...withSignal(signal),
+  });
+}
+
+/** POST /api/auth/change-password?generation= — fenced on the caller's own
+ * security generation (GET /api/auth/status); snake_case body by contract. */
+export function changeOwnPassword(
+  input: { currentPassword: string; newPassword: string },
+  generation: number,
+  signal?: AbortSignal,
+): Promise<ChangePasswordResult> {
+  const decoder: Decoder<ChangePasswordResult> = (v, path = "$") => {
+    const o = readRecord(v, path);
+    refuseSecretKeys(o, path);
+    field(o, "ok", BOOL_TRUE, path);
+    return {
+      ok: true,
+      revision: field(o, "revision", readNumber, path),
+      persisted: field(o, "persisted", readBoolean, path),
+      sessionsRevoked: field(o, "sessionsRevoked", readBoolean, path),
+      selfAffected: field(o, "selfAffected", readBoolean, path),
+      securityGeneration: field(o, "securityGeneration", readNumber, path),
+    };
+  };
+  return apiRequest(
+    fenced("/api/auth/change-password", "generation", generation),
+    decoder,
+    {
+      method: "POST",
+      body: {
+        current_password: input.currentPassword,
+        new_password: input.newPassword,
+      },
+      ...withSignal(signal),
+    },
+  );
+}
+
+/** POST /api/auth/lockouts?generation= — clears every lock for the username. */
+export function clearLockout(
+  username: string,
+  generation: number,
+  signal?: AbortSignal,
+): Promise<ClearLockoutResult> {
+  const decoder: Decoder<ClearLockoutResult> = (v, path = "$") => {
+    const o = readRecord(v, path);
+    field(o, "ok", BOOL_TRUE, path);
+    const got = field(o, "username", readString, path);
+    if (got !== username)
+      throw new DecodeError(
+        `${path}.username`,
+        `the cleared account ${username}`,
+        got,
+      );
+    const gen = field(o, "generation", readNumber, path);
+    if (gen < 1) throw new DecodeError(`${path}.generation`, ">= 1", gen);
+    return {
+      ok: true,
+      username: got,
+      generation: gen,
+      scope: field(o, "scope", readEnum(["node-local"] as const), path),
+    };
+  };
+  return apiRequest(
+    fenced("/api/auth/lockouts", "generation", generation),
+    decoder,
+    {
+      method: "POST",
+      body: { username },
+      ...withSignal(signal),
+    },
+  );
+}
+
+// ── Endpoint-specific typed refusals ───────────────────────────────────────
+
+export const ADMIN_ENDPOINTS = [
+  "users.create",
+  "users.update",
+  "users.delete",
+  "change_password",
+  "lockouts.clear",
+] as const;
+export type AdminEndpoint = (typeof ADMIN_ENDPOINTS)[number];
+type AdminFence = "revision" | "generation" | null;
+
+interface AdminCodeContract {
+  status: number;
+  /** which fence fact a stale / precondition_required refusal must carry */
+  fence: AdminFence;
+}
+
+const COMMON: Record<string, AdminCodeContract> = {
+  invalid_input: { status: 400, fence: null },
+  forbidden: { status: 403, fence: null },
+  method_not_allowed: { status: 405, fence: null },
+};
+const ROSTER: Record<string, AdminCodeContract> = {
+  ...COMMON,
+  stale: { status: 409, fence: "revision" },
+  precondition_required: { status: 428, fence: "revision" },
+  persist_failed: { status: 500, fence: null },
+  persistence_not_configured: { status: 503, fence: null },
+};
+
+/** Exactly the codes each endpoint can emit (ui_auth.go handlers +
+ * writeRosterRefusal) at their contracted status. */
+export const ADMIN_REFUSAL_CONTRACT: Readonly<
+  Record<AdminEndpoint, Readonly<Record<string, AdminCodeContract>>>
+> = {
+  "users.create": {
+    ...ROSTER,
+    user_exists: { status: 409, fence: null },
+    last_admin: { status: 409, fence: null },
+  },
+  "users.update": {
+    ...ROSTER,
+    not_found: { status: 404, fence: null },
+    last_admin: { status: 409, fence: null },
+  },
+  "users.delete": {
+    ...ROSTER,
+    not_found: { status: 404, fence: null },
+    last_admin: { status: 409, fence: null },
+  },
+  change_password: {
+    ...COMMON,
+    invalid_credentials: { status: 403, fence: null },
+    not_found: { status: 404, fence: null },
+    stale: { status: 409, fence: "generation" },
+    precondition_required: { status: 428, fence: "generation" },
+    persist_failed: { status: 500, fence: null },
+    persistence_not_configured: { status: 503, fence: null },
+  },
+  "lockouts.clear": {
+    ...COMMON,
+    not_found: { status: 404, fence: null },
+    stale: { status: 409, fence: "generation" },
+    precondition_required: { status: 428, fence: "generation" },
+  },
+};
+
+export interface AdminRefusal {
+  endpoint: AdminEndpoint;
+  status: number;
+  code: string;
+  facts: { revision?: number; generation?: number };
+}
+
+function parsedBody(err: ApiError): Record<string, unknown> | null {
+  if (err.bodyText === undefined) return null;
+  try {
+    const v: unknown = JSON.parse(err.bodyText);
+    return isRecord(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+const safeNumber = (v: unknown): number | undefined =>
+  typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+
+/** A verdict ONLY for a code the endpoint can emit, at its status, with its
+ * fence fact when one is required; the server's `error` line never leaves. */
+export function asAdminRefusal(
+  err: unknown,
+  endpoint: AdminEndpoint,
+): AdminRefusal | null {
+  if (
+    !(err instanceof ApiError) ||
+    err.kind !== "http" ||
+    err.status === undefined
+  )
+    return null;
+  const body = parsedBody(err);
+  if (body === null) return null;
+  const code = body["code"];
+  if (typeof code !== "string") return null;
+  const contract = ADMIN_REFUSAL_CONTRACT[endpoint][code];
+  if (contract === undefined || contract.status !== err.status) return null;
+  const cur = isRecord(body["current"]) ? body["current"] : {};
+  const facts: AdminRefusal["facts"] = {};
+  const revision = safeNumber(cur["revision"]);
+  if (revision !== undefined) facts.revision = revision;
+  const generation = safeNumber(cur["generation"]);
+  if (generation !== undefined) facts.generation = generation;
+  if (contract.fence === "revision" && facts.revision === undefined)
+    return null;
+  if (contract.fence === "generation" && facts.generation === undefined)
+    return null;
+  return { endpoint, status: err.status, code, facts };
+}
+
+/** Any endpoint's verdict test for the UNPROVEN classifier. */
+function anyAdminRefusal(err: ApiError): boolean {
+  return ADMIN_ENDPOINTS.some((e) => asAdminRefusal(err, e) !== null);
+}
+
+/** True when the mutation MAY be applied but no trustworthy verdict exists. */
+export function adminUnproven(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return true;
+  switch (err.kind) {
+    case "target":
+      return false;
+    case "network":
+    case "timeout":
+    case "aborted":
+    case "contenttype":
+    case "decode":
+    case "toolarge":
+      return true;
+    case "http":
+      if (err.status === 401 || err.status === 403) return false;
+      return !anyAdminRefusal(err);
+  }
 }

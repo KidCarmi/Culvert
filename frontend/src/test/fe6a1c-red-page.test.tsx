@@ -73,6 +73,7 @@ const LEGACY_CUTOVER = {
   startTls: false,
   tlsSkipVerify: false,
   cacheTtlSeconds: 300,
+  cutoverConfirmValue: "ldaps://legacy.example:636",
   cutoverDurability: "durable",
   cutover: {
     operationId: CUTOVER_ID,

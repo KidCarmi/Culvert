@@ -31,13 +31,18 @@ import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { RouterProvider, createMemoryRouter } from "react-router";
-import type { Router as RemixRouter } from "@remix-run/router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AuthMachine } from "../auth/machine";
 import { AuthProvider } from "../auth/AuthProvider";
 import { IdentityProvidersPage } from "../features/objects/IdentityProvidersPage";
 import { AdministratorsPage } from "../features/administration/AdministratorsPage";
 import { IDP_RECOVERY_KEY } from "../features/objects/idpRecovery";
+import { isRecord } from "../api/decode";
+
+const rec = (v: unknown): Record<string, unknown> => {
+  if (!isRecord(v)) throw new Error("not a record");
+  return v;
+};
 import {
   CLIENT_SECRET,
   LEGACY_ABSENT,
@@ -63,10 +68,10 @@ let calls: Call[];
 let route: (c: Call) => Response | Promise<Response>;
 let container: HTMLDivElement;
 let root: Root;
-let router: RemixRouter | undefined;
-let postLogout: ReturnType<typeof vi.fn>;
+type MemoryRouter = ReturnType<typeof createMemoryRouter>;
+let router: MemoryRouter | undefined;
+let postLogout: ReturnType<typeof vi.fn<() => Promise<{ ok: true }>>>;
 
-// eslint-disable-next-line no-restricted-globals -- RED harness inspects the sanctioned marker store
 const marker = (): string | null => sessionStorage.getItem(IDP_RECOVERY_KEY);
 
 function json(body: unknown, status = 200): Response {
@@ -80,8 +85,21 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   calls = [];
-  // eslint-disable-next-line no-restricted-globals -- RED harness isolation
   sessionStorage.clear();
+  // jsdom has no top-layer <dialog>: the same polyfill every page matrix uses.
+  Element.prototype.scrollIntoView = vi.fn();
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.open = true;
+    },
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.open = false;
+    },
+  });
   route = () => Promise.reject(new TypeError("unrouted"));
   vi.stubGlobal(
     "fetch",
@@ -109,7 +127,9 @@ afterEach(() => {
 
 type RoleName = "viewer" | "operator" | "admin";
 function machineFor(role: RoleName, qc: QueryClient): AuthMachine {
-  postLogout = vi.fn(() => Promise.resolve({ ok: true }));
+  postLogout = vi.fn<() => Promise<{ ok: true }>>(() =>
+    Promise.resolve({ ok: true }),
+  );
   return new AuthMachine(qc, {
     getSetupStatus: () =>
       Promise.resolve({
@@ -132,7 +152,7 @@ function machineFor(role: RoleName, qc: QueryClient): AuthMachine {
 }
 
 async function mount(role: RoleName, path: string): Promise<void> {
-  router = createMemoryRouter(
+  const rt = createMemoryRouter(
     [
       {
         path: "/objects/identity-providers",
@@ -143,6 +163,7 @@ async function mount(role: RoleName, path: string): Promise<void> {
     ],
     { initialEntries: [path] },
   );
+  router = rt;
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const machine = machineFor(role, qc);
   await machine.boot();
@@ -152,7 +173,7 @@ async function mount(role: RoleName, path: string): Promise<void> {
       <StrictMode>
         <QueryClientProvider client={qc}>
           <AuthProvider machine={machine}>
-            <RouterProvider router={router as RemixRouter} />
+            <RouterProvider router={rt} />
           </AuthProvider>
         </QueryClientProvider>
       </StrictMode>,
@@ -185,7 +206,7 @@ function button(name: string, scope: ParentNode = document): HTMLButtonElement {
   const b = buttons(name, scope)[0];
   if (b === undefined)
     throw new Error(
-      `no button "${name}" in: ${(scope as Element).textContent ?? ""}`,
+      `no button "${name}" in: ${scope instanceof Element ? (scope.textContent ?? "") : ""}`,
     );
   return b;
 }
@@ -225,6 +246,8 @@ async function type(
 ): Promise<void> {
   const el = inputByLabel(label, scope);
   await act(async () => {
+    // The prototype setter bypasses React's value tracker so the input event is observed.
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- invoked with call()
     const setter = Object.getOwnPropertyDescriptor(
       Object.getPrototypeOf(el),
       "value",
@@ -255,7 +278,7 @@ const openDialog = (): HTMLDialogElement => {
   return d;
 };
 const gets = (path: string): number =>
-  calls.filter((c) => c.method === "GET" && c.url.startsWith(path)).length;
+  calls.filter((c) => c.method === "GET" && c.url === path).length; // exact: the registry read only
 
 const LDAP_ROW = ldapProfileAnswer("ldap00000001", 2);
 const OIDC_ROW = oidcProfileAnswer("a1b2c3d4e5f6", 3, { operationId: OP_ID });
@@ -406,7 +429,7 @@ it("P3 a stale document fence renders the current token, clears the marker, neve
 
 // ── P4 lost response + ledger recovery ────────────────────────────────────
 it("P4 a lost create response keeps the marker; Recover settles it from the ledger", async () => {
-  let lookup: unknown = {
+  let lookup: Record<string, unknown> = {
     operationId: "",
     state: "pending",
     action: "idp.create",
@@ -421,8 +444,7 @@ it("P4 a lost create response keeps the marker; Recover settles it from the ledg
     "/api/idp": () => Promise.reject(new TypeError("Failed to fetch")),
     "/api/idp/operations/": (c) => {
       const id = c.url.split("/").pop() ?? "";
-      const l = lookup as Record<string, unknown>;
-      return json({ ...l, operationId: id });
+      return json({ ...lookup, operationId: id });
     },
   });
   await mount("admin", "/objects/identity-providers");
@@ -449,7 +471,7 @@ it("P4 a lost create response keeps the marker; Recover settles it from the ledg
   expect(marker()).not.toBeNull();
   // committed + audited ⇒ terminal, ownership-matched clear
   lookup = {
-    ...(lookup as Record<string, unknown>),
+    ...lookup,
     state: "committed",
     audited: true,
     finishedAt: "2026-09-13T10:00:02Z",
@@ -579,7 +601,11 @@ it("P6 409 referenced renders the referencing rules with working links", async (
 });
 
 // ── P7 unproven 2xx ───────────────────────────────────────────────────────
-it("P7 an unproven 2xx closes the editor, drops the secret, latches mutations and re-reads once", async () => {
+// (RED correction, transparent: the first cut asserted the latch SYNCHRONOUSLY
+// after the callout, but the contract's single automatic read-back can land
+// in the same tick and — by contract — clears the latch. A TRANSPORT death
+// performs no automatic read-back, so the latch is deterministic there.)
+it("P7 an unproven 2xx (wrong media type) closes the editor, drops the secret and re-reads exactly once", async () => {
   idpRoutes({
     "/api/idp/a1b2c3d4e5f6": () =>
       new Response("ok", {
@@ -606,12 +632,45 @@ it("P7 an unproven 2xx closes the editor, drops the secret, latches mutations an
   });
   expect(document.querySelector("dialog[open]")).toBeNull();
   expect(document.body.innerHTML).not.toContain(CLIENT_SECRET);
-  expect(button("Add provider").disabled).toBe(true);
-  for (const b of buttons("Edit")) expect(b.disabled).toBe(true);
   await flushUntil(() => {
     expect(gets("/api/idp")).toBe(getsBefore + 1);
   });
   expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1);
+});
+it("P7b a transport death latches every mutation until the operator refreshes", async () => {
+  idpRoutes({
+    "/api/idp/a1b2c3d4e5f6": () =>
+      Promise.reject(new TypeError("Failed to fetch")),
+  });
+  await mount("admin", "/objects/identity-providers");
+  await flushUntil(() => {
+    expect(buttons("Edit").length).toBeGreaterThan(0);
+  });
+  const row = Array.from(container.querySelectorAll("tr")).find((r) =>
+    (r.textContent ?? "").includes("Corp OIDC"),
+  );
+  if (row === undefined) throw new Error("no row");
+  const getsBefore = gets("/api/idp");
+  await click("Edit", row);
+  const dlg = openDialog();
+  await type("Client secret", CLIENT_SECRET, dlg);
+  await click("Review and save", dlg);
+  await click("Save provider", openDialog());
+  await flushUntil(() => {
+    expect(text()).toContain("Outcome unproven");
+  });
+  expect(document.querySelector("dialog[open]")).toBeNull();
+  expect(document.body.innerHTML).not.toContain(CLIENT_SECRET);
+  expect(button("Add provider").disabled).toBe(true);
+  for (const b of buttons("Edit")) expect(b.disabled).toBe(true);
+  for (const b of buttons("Delete")) expect(b.disabled).toBe(true);
+  expect(gets("/api/idp")).toBe(getsBefore); // no automatic read-back after a transport death
+  expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1);
+  await click("Refresh");
+  await flushUntil(() => {
+    expect(gets("/api/idp")).toBe(getsBefore + 1);
+    expect(button("Add provider").disabled).toBe(false);
+  });
 });
 
 // ── P8 cutover ceremony ───────────────────────────────────────────────────
@@ -659,7 +718,7 @@ it("P8 enabling an LDAP profile on a node with a live legacy block runs the cuto
   expect(q.get("operationId")).toMatch(/^[0-9a-f-]{36}$/);
   expect(q.get("cutoverConfirm")).toBe(LEGACY_URL);
   expect(put?.markerAtDispatch).toContain(q.get("operationId") ?? "!");
-  expect((put?.body as Record<string, unknown>)["enabled"]).toBe(true);
+  expect(rec(put?.body)["enabled"]).toBe(true);
 });
 
 // ── P9 repair ─────────────────────────────────────────────────────────────

@@ -26,7 +26,12 @@
 //       indicator keys.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
-import { DecodeError } from "../api/decode";
+import { DecodeError, isRecord } from "../api/decode";
+
+const rec = (v: unknown): Record<string, unknown> => {
+  if (!isRecord(v)) throw new Error("not a record");
+  return v;
+};
 import {
   IDP_OPERATION_ACTIONS,
   IDP_TEST_STEP_ERRORS,
@@ -114,8 +119,8 @@ describe("A1 verbs, fences and bodies", () => {
     );
     expect(c?.url).not.toContain(CLIENT_SECRET);
     expect(c?.body).toEqual(idpWriteBody(OIDC_SPEC));
-    const body = c?.body as Record<string, unknown>;
-    const oidc = body["oidc"] as Record<string, unknown>;
+    const body = rec(c?.body);
+    const oidc = rec(body["oidc"]);
     expect(oidc["clientSecret"]).toBe(CLIENT_SECRET);
     expect("clientSecretConfigured" in oidc).toBe(false);
     expect("id" in body).toBe(false);
@@ -152,10 +157,8 @@ describe("A1 verbs, fences and bodies", () => {
     await updateIdP("a1b2c3d4e5f6", keep, { revision: 3 });
     expect(calls[0]?.method).toBe("PUT");
     expect(calls[0]?.url).toBe("/api/idp/a1b2c3d4e5f6?revision=3");
-    const body1 = calls[0]?.body as Record<string, unknown>;
-    expect("clientSecret" in (body1["oidc"] as Record<string, unknown>)).toBe(
-      false,
-    );
+    const body1 = rec(calls[0]?.body);
+    expect("clientSecret" in rec(body1["oidc"])).toBe(false);
     const clear: IdPWriteSpec = {
       ...OIDC_SPEC,
       oidc: { ...OIDC_SPEC.oidc, clientSecret: "" },
@@ -167,7 +170,7 @@ describe("A1 verbs, fences and bodies", () => {
         }),
       );
     await updateIdP("a1b2c3d4e5f6", clear, { revision: 4 });
-    expect((calls[1]?.body as Record<string, unknown>)["oidc"]).toMatchObject({
+    expect(rec(calls[1]?.body)["oidc"]).toMatchObject({
       clientSecret: "",
     });
   });
@@ -591,7 +594,7 @@ describe("A5 wrong media type and transport loss", () => {
       operationId: OP_ID,
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
-    expect((err as ApiError).kind).toBe("contenttype");
+    expect(err instanceof ApiError ? err.kind : null).toBe("contenttype");
     expect(idpUnproven(err)).toBe(true);
     expect(calls).toHaveLength(1);
   });
@@ -622,13 +625,11 @@ describe("A6 the LDAP directory test", () => {
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.url).toBe("/api/idp/test");
     expect(calls[0]?.url).not.toContain(TEST_PASSWORD);
-    const body = calls[0]?.body as Record<string, unknown>;
+    const body = rec(calls[0]?.body);
     expect(body["testUsername"]).toBe("alice");
     expect(body["testPassword"]).toBe(TEST_PASSWORD);
-    expect((body["profile"] as Record<string, unknown>)["id"]).toBe(
-      "ldap00000001",
-    );
-    expect((body["profile"] as Record<string, unknown>)["type"]).toBe("ldap");
+    expect(rec(body["profile"])["id"]).toBe("ldap00000001");
+    expect(rec(body["profile"])["type"]).toBe("ldap");
   });
   it("ok:false is a FAILED test; a 2xx without ok, or with an unknown step error, is unproven", async () => {
     answer = () =>

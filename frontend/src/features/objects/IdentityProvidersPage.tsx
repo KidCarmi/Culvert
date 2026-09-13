@@ -27,10 +27,12 @@
 // Snapshot doctrine (ADR-FE-002): manual Refresh, no polling. The auth
 // boundary clears the query cache (authBoundaryTeardown); this surface keeps
 // no other subject-bound state and persists nothing.
+import { useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PageHeader } from "../../layouts/AppShell";
 import {
+  Button,
   Callout,
   Card,
   EmptyState,
@@ -41,26 +43,66 @@ import {
   StatusBadge,
   Timestamp,
 } from "../../design-system/primitives";
+import type { ConfirmResult } from "../../design-system/dialog";
 import { DataTable } from "../../design-system/table";
 import { SnapshotBar, useSnapshot } from "../../shared/snapshot";
+import { useDirtyGuard } from "../../shared/dirtyGuard";
 import { readErrorSummary, refusalCodeOf } from "../../shared/readErrorSummary";
 import { useAuth } from "../../auth/AuthProvider";
 import { hasRole } from "../../auth/rbac";
 import { ApiError } from "../../api/client";
 import {
   IDP_LOOKUP_REFUSAL_CODES,
+  asIdPRefusal,
+  candidateDigest,
+  createIdP,
+  deleteIdP,
+  discoverOIDC,
   getIdPList,
   getIdPOperation,
   getIdPReferences,
   getLegacyLDAP,
+  importLegacyLDAP,
+  repairIdPRegistry,
+  specCarriesSecret,
+  testIdP,
+  updateIdP,
 } from "../../api/idp";
 import type {
   IdPList,
   IdPOperation,
   IdPProfile,
+  IdPRefusal,
+  IdPRefusalCode,
+  IdPWriteSpec,
   LegacyLDAP,
 } from "../../api/idp";
 import type { ObjectRefConsumer } from "../../api/policy";
+import { useObjectPage } from "./useObjectPage";
+import {
+  clearIdPRecovery,
+  readIdPRecovery,
+  writeIdPRecovery,
+} from "./idpRecovery";
+import type { IdPRecoveryMarker, IdPRecoveryRead } from "./idpRecovery";
+import {
+  AbandonCeremony,
+  CutoverCeremony,
+  DeleteProviderCeremony,
+  IdPFenceCallout,
+  IdPRefusalCallout,
+  IdPUnprovenCallout,
+  ImportCeremony,
+  ProviderEditorDialog,
+  RepairCeremony,
+  ReviewCeremony,
+  carriesCutover,
+  draftDirty,
+  draftFrom,
+  draftToSpec,
+  stripSecrets,
+} from "./idpWrites";
+import type { DiscoverState, ProviderDraft, TestState } from "./idpWrites";
 import styles from "../diagnostics/diagnostics.module.css";
 
 /** null = the where-used read for this profile did not succeed (unknown —
@@ -208,7 +250,20 @@ function LedgerCard({ list }: { list: IdPList }): JSX.Element {
   );
 }
 
-function ProvidersCard({ snap }: { snap: RegistrySnapshot }): JSX.Element {
+interface RowActions {
+  canMutate: boolean;
+  onEdit: (p: IdPProfile) => void;
+  onDelete: (p: IdPProfile) => void;
+}
+
+function ProvidersCard({
+  snap,
+  actions,
+}: {
+  snap: RegistrySnapshot;
+  /** admin only — never rendered below the role */
+  actions: RowActions | null;
+}): JSX.Element {
   const rows = snap.list.profiles;
   return (
     <Card title="Providers">
@@ -270,6 +325,34 @@ function ProvidersCard({ snap }: { snap: RegistrySnapshot }): JSX.Element {
                   "—"
                 ),
             },
+            ...(actions !== null
+              ? [
+                  {
+                    key: "actions",
+                    header: "Actions",
+                    render: (p: IdPProfile) => (
+                      <span>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={!actions.canMutate}
+                          onClick={() => actions.onEdit(p)}
+                        >
+                          Edit
+                        </Button>{" "}
+                        <Button
+                          size="sm"
+                          variant="danger-quiet"
+                          disabled={!actions.canMutate}
+                          onClick={() => actions.onDelete(p)}
+                        >
+                          Delete
+                        </Button>
+                      </span>
+                    ),
+                  },
+                ]
+              : []),
           ]}
           rows={rows}
           rowKey={(p) => p.id}
@@ -407,10 +490,13 @@ function LegacyCard({
   legacy,
   isAdmin,
   ledgerKey,
+  onImport,
 }: {
   legacy: LegacyLDAP;
   isAdmin: boolean;
   ledgerKey: LedgerKey;
+  /** admin only, present block only; null ⇒ no control rendered */
+  onImport: (() => void) | null;
 }): JSX.Element {
   const yesNo = (b: boolean): string => (b ? "yes" : "no");
   const items: Array<readonly [string, JSX.Element | string]> = [
@@ -467,7 +553,18 @@ function LegacyCard({
   items.push(["Authority cutover", durabilityBadge(legacy)]);
   const c = legacy.cutover;
   return (
-    <Card title="Legacy YAML LDAP">
+    <Card
+      title="Legacy YAML LDAP"
+      {...(onImport !== null && legacy.present
+        ? {
+            actions: (
+              <Button size="sm" variant="secondary" onClick={onImport}>
+                Import legacy configuration
+              </Button>
+            ),
+          }
+        : {})}
+    >
       <KeyValue items={items} />
       {c !== undefined && (
         <div>
@@ -532,12 +629,507 @@ function LegacyCard({
 // INDEPENDENT authoritative snapshots (correction, blocker 4): each renders
 // its own loading / error / data state, so a failed or refused registry
 // read never blanks a valid legacy snapshot and vice versa.
+type Ceremony =
+  | { kind: "closed" }
+  | {
+      kind: "editor";
+      mode: "create" | "edit";
+      initial: IdPProfile | null;
+      draft: ProviderDraft;
+      base: ProviderDraft;
+      /** a re-send bound to an unresolved operation's identity */
+      boundOperationId?: string;
+      error: string | null;
+    }
+  | {
+      kind: "review";
+      mode: "create" | "edit";
+      initial: IdPProfile | null;
+      spec: IdPWriteSpec;
+      draft: ProviderDraft;
+      operationId: string;
+    }
+  | {
+      kind: "cutover";
+      mode: "create" | "edit";
+      initial: IdPProfile | null;
+      spec: IdPWriteSpec;
+      draft: ProviderDraft;
+      operationId: string;
+      legacy: LegacyLDAP & { present: true };
+    }
+  | { kind: "delete"; profile: IdPProfile }
+  | { kind: "repair"; evidence: string }
+  | { kind: "import"; legacy: LegacyLDAP & { present: true } }
+  | { kind: "abandon"; marker: IdPRecoveryMarker };
+
+type RecoveryView =
+  | { kind: "none" }
+  | { kind: "looking" }
+  | { kind: "op"; op: IdPOperation }
+  | { kind: "never_recorded" }
+  | { kind: "refused"; code: string }
+  | { kind: "unproven" };
+
+/** Refusal codes that PROVE nothing was written — the marker may be cleared. */
+const TERMINAL_NOTHING_WRITTEN: readonly IdPRefusalCode[] = [
+  "invalid_input",
+  "forbidden",
+  "not_found",
+  "vanished",
+  "stale",
+  "precondition_required",
+  "persistence_not_configured",
+  "provider_compile_failed",
+  "operation_id_required",
+  "cutover_confirm_required",
+  "confirm_mismatch",
+  "operation_aborted",
+  "operation_ledger_degraded",
+  "operation_ledger_full",
+  "operation_unsettled",
+  "persist_failed",
+  "registry_degraded",
+  "method_not_allowed",
+];
+
+function mintOperationId(): string {
+  return crypto.randomUUID();
+}
+
 export function IdentityProvidersPage(): JSX.Element {
   const { state } = useAuth();
   const isAdmin = hasRole(state.role ?? "viewer", "admin");
-  const registry = useSnapshot(["objects", "idp", "registry"], fetchRegistry);
+  const subject = state.phase === "authenticated" ? state.user : "";
+  const page = useObjectPage(["objects", "idp", "registry"], fetchRegistry);
+  const registry = page.q;
   const legacy = useSnapshot(["objects", "idp", "legacy-ldap"], getLegacyLDAP);
   const snap = registry.data;
+
+  const [ceremony, setCeremony] = useState<Ceremony>({ kind: "closed" });
+  const [result, setResult] = useState<ConfirmResult>("idle");
+  const [errorText, setErrorText] = useState<string | undefined>(undefined);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [fence, setFence] = useState<IdPRefusal | null>(null);
+  const [refusal, setRefusal] = useState<IdPRefusal | null>(null);
+  const [unproven, setUnproven] = useState<{
+    action: string;
+    status: number | undefined;
+  } | null>(null);
+  const [forbidden, setForbidden] = useState<string | null>(null);
+  const [recovery, setRecovery] = useState<IdPRecoveryRead>({
+    kind: "unresolved",
+  });
+  const [recoveryView, setRecoveryView] = useState<RecoveryView>({
+    kind: "none",
+  });
+  const [test, setTest] = useState<TestState>({ kind: "idle" });
+  const [discover, setDiscover] = useState<DiscoverState>({ kind: "idle" });
+  /** the NON-SECRET draft of the last dispatched candidate, for a re-send prefill */
+  const lastCandidate = useRef<{
+    operationId: string;
+    draft: ProviderDraft;
+  } | null>(null);
+
+  useEffect(() => {
+    setRecovery(readIdPRecovery(subject));
+  }, [subject]);
+
+  const dirty =
+    ceremony.kind === "editor" && draftDirty(ceremony.draft, ceremony.base);
+  const guard = useDirtyGuard(dirty, "the provider editor");
+
+  const blocked = page.unknown !== null || recovery.kind !== "none";
+  const canMutate =
+    isAdmin && snap !== undefined && !blocked && result !== "pending";
+
+  const clearOutcome = (): void => {
+    setNotice(null);
+    setFence(null);
+    setRefusal(null);
+    setUnproven(null);
+    setForbidden(null);
+  };
+  const close = (): void => {
+    setCeremony({ kind: "closed" });
+    setResult("idle");
+    setErrorText(undefined);
+    setTest({ kind: "idle" });
+    setDiscover({ kind: "idle" });
+  };
+  const refreshAll = (): void => {
+    page.refreshToResolve();
+    void legacy.refetch();
+  };
+  const rereadRecovery = (): void => {
+    setRecovery(readIdPRecovery(subject));
+  };
+
+  const markUnproven = (action: string, err: unknown): void => {
+    close(); // drops every secret with the dialog tree
+    setUnproven({
+      action,
+      status: err instanceof ApiError ? err.status : undefined,
+    });
+    page.latchUnknown("edit");
+    const transport =
+      err instanceof ApiError &&
+      (err.kind === "network" ||
+        err.kind === "timeout" ||
+        err.kind === "aborted");
+    if (!transport) refreshAll();
+  };
+
+  const fail = (
+    err: unknown,
+    action: string,
+    marker: IdPRecoveryMarker | null,
+  ): void => {
+    const r = asIdPRefusal(err);
+    if (r !== null) {
+      close();
+      if (r.code === "stale" || r.code === "precondition_required") setFence(r);
+      else setRefusal(r);
+      if (marker !== null && TERMINAL_NOTHING_WRITTEN.includes(r.code))
+        clearIdPRecovery(marker.operationId);
+      rereadRecovery();
+      refreshAll();
+      return;
+    }
+    if (err instanceof ApiError && err.forbidden) {
+      close();
+      setForbidden(action);
+      if (marker !== null) clearIdPRecovery(marker.operationId);
+      rereadRecovery();
+      refreshAll();
+      return;
+    }
+    // UNPROVEN: the marker (if any) is KEPT — the ledger settles it.
+    markUnproven(action, err);
+    rereadRecovery();
+  };
+
+  // ── dispatch ──────────────────────────────────────────────────────────────
+  const dispatchWrite = async (
+    mode: "create" | "edit",
+    initial: IdPProfile | null,
+    spec: IdPWriteSpec,
+    draft: ProviderDraft,
+    operationId: string,
+    cutoverConfirm: string | undefined,
+  ): Promise<void> => {
+    if (snap === undefined) return;
+    clearOutcome();
+    const needsOperation = mode === "create" || cutoverConfirm !== undefined;
+    let marker: IdPRecoveryMarker | null = null;
+    if (needsOperation) {
+      marker = {
+        operationId,
+        action: mode === "create" ? "create" : "update",
+        profileId: initial?.id ?? "",
+        name: spec.name,
+        type: spec.type,
+        candidateDigest: candidateDigest(spec),
+        fence:
+          mode === "create"
+            ? snap.list.revision
+            : String(initial?.revision ?? 0),
+        cutover: cutoverConfirm !== undefined,
+        startedAt: Date.now(),
+      };
+      if (!writeIdPRecovery(subject, marker)) {
+        setResult("failed");
+        setErrorText(
+          readIdPRecovery(subject).kind === "valid"
+            ? "Another provider operation is still unresolved in this browser; nothing was sent."
+            : "The operation identity could not be persisted in this browser; nothing was sent.",
+        );
+        rereadRecovery();
+        return;
+      }
+      lastCandidate.current = { operationId, draft: stripSecrets(draft) };
+    }
+    setResult("pending");
+    const signal = page.owner.begin();
+    try {
+      const out =
+        mode === "create"
+          ? await createIdP(
+              spec,
+              {
+                documentRevision: snap.list.revision,
+                operationId,
+                ...(cutoverConfirm !== undefined ? { cutoverConfirm } : {}),
+              },
+              signal,
+            )
+          : await updateIdP(
+              initial?.id ?? "",
+              spec,
+              {
+                revision: initial?.revision ?? 0,
+                ...(needsOperation ? { operationId } : {}),
+                ...(cutoverConfirm !== undefined ? { cutoverConfirm } : {}),
+              },
+              signal,
+            );
+      if (marker !== null) clearIdPRecovery(marker.operationId);
+      lastCandidate.current = null;
+      close();
+      setNotice(
+        out.kind === "replayed"
+          ? `Provider ${mode === "create" ? "create" : "update"} replayed from the appliance's ledger (operation ${out.operationId}); nothing was written twice`
+          : mode === "create"
+            ? `Provider created (${out.profile.name}, revision ${String(out.profile.revision)})${out.auditState === "pending" ? " — success audit still owed by the appliance" : ""}`
+            : `Provider updated (${out.profile.name}, revision ${String(out.profile.revision)})${cutoverConfirm !== undefined ? " — legacy authenticator retired" : ""}`,
+      );
+      rereadRecovery();
+      refreshAll();
+    } catch (err) {
+      fail(
+        err,
+        mode === "create" ? "create provider" : "update provider",
+        marker,
+      );
+    } finally {
+      page.owner.settle(signal);
+    }
+  };
+
+  const review = (): void => {
+    if (ceremony.kind !== "editor") return;
+    const spec = draftToSpec(ceremony.draft, ceremony.mode, ceremony.initial);
+    if (typeof spec === "string") {
+      setCeremony({ ...ceremony, error: spec });
+      return;
+    }
+    const operationId = ceremony.boundOperationId ?? mintOperationId();
+    if (
+      ceremony.boundOperationId !== undefined &&
+      recovery.kind === "valid" &&
+      recovery.marker.candidateDigest !== candidateDigest(spec)
+    ) {
+      setCeremony({
+        ...ceremony,
+        error:
+          "This re-send is bound to the unresolved operation's candidate; re-enter the same candidate or abandon the operation first.",
+      });
+      return;
+    }
+    const cut = carriesCutover(spec, legacy.data);
+    if (cut !== null) {
+      setCeremony({
+        kind: "cutover",
+        mode: ceremony.mode,
+        initial: ceremony.initial,
+        spec,
+        draft: ceremony.draft,
+        operationId,
+        legacy: cut,
+      });
+      return;
+    }
+    if (specCarriesSecret(spec)) {
+      setCeremony({
+        kind: "review",
+        mode: ceremony.mode,
+        initial: ceremony.initial,
+        spec,
+        draft: ceremony.draft,
+        operationId,
+      });
+      return;
+    }
+    void dispatchWrite(
+      ceremony.mode,
+      ceremony.initial,
+      spec,
+      ceremony.draft,
+      operationId,
+      undefined,
+    );
+  };
+
+  const runDelete = async (profile: IdPProfile): Promise<void> => {
+    clearOutcome();
+    setResult("pending");
+    const signal = page.owner.begin();
+    try {
+      await deleteIdP(profile.id, profile.revision, signal);
+      close();
+      setNotice(`Provider deleted (${profile.name})`);
+      refreshAll();
+    } catch (err) {
+      fail(err, "delete provider", null);
+    } finally {
+      page.owner.settle(signal);
+    }
+  };
+  const runRepair = async (evidence: string): Promise<void> => {
+    clearOutcome();
+    setResult("pending");
+    const signal = page.owner.begin();
+    try {
+      await repairIdPRegistry(evidence, signal);
+      close();
+      setNotice(
+        "Registry repaired — it is empty and accepts writes again; the quarantined copy stays on disk",
+      );
+      refreshAll();
+    } catch (err) {
+      fail(err, "repair registry", null);
+    } finally {
+      page.owner.settle(signal);
+    }
+  };
+  const runImport = async (): Promise<void> => {
+    clearOutcome();
+    setResult("pending");
+    const signal = page.owner.begin();
+    try {
+      const p = await importLegacyLDAP(signal);
+      close();
+      setNotice(
+        `Legacy configuration imported as the disabled provider ${p.name}`,
+      );
+      refreshAll();
+    } catch (err) {
+      fail(err, "import legacy configuration", null);
+    } finally {
+      page.owner.settle(signal);
+    }
+  };
+  const runTest = async (cred: {
+    username: string;
+    password: string;
+  }): Promise<void> => {
+    if (ceremony.kind !== "editor") return;
+    const spec = draftToSpec(ceremony.draft, ceremony.mode, ceremony.initial);
+    if (typeof spec === "string") {
+      setCeremony({ ...ceremony, error: spec });
+      return;
+    }
+    setTest({ kind: "running" });
+    try {
+      const report = await testIdP(
+        {
+          ...spec,
+          ...(ceremony.initial !== null ? { id: ceremony.initial.id } : {}),
+        },
+        cred,
+      );
+      setTest({ kind: "report", report });
+    } catch (err) {
+      const r = asIdPRefusal(err);
+      setTest(
+        r !== null
+          ? { kind: "refused", refusal: r }
+          : {
+              kind: "unproven",
+              status: err instanceof ApiError ? err.status : undefined,
+            },
+      );
+    }
+  };
+  const runDiscover = async (issuer: string): Promise<void> => {
+    setDiscover({ kind: "running" });
+    try {
+      const d = await discoverOIDC(issuer);
+      setCeremony((c) =>
+        c.kind === "editor"
+          ? {
+              ...c,
+              draft: {
+                ...c.draft,
+                oidc: {
+                  ...c.draft.oidc,
+                  authorizationEndpoint:
+                    d.authorizationEndpoint ??
+                    c.draft.oidc.authorizationEndpoint,
+                  tokenEndpoint: d.tokenEndpoint ?? c.draft.oidc.tokenEndpoint,
+                  introspectionEndpoint:
+                    d.introspectionEndpoint ??
+                    c.draft.oidc.introspectionEndpoint,
+                  userinfoEndpoint:
+                    d.userinfoEndpoint ?? c.draft.oidc.userinfoEndpoint,
+                  jwksUri: d.jwksUri ?? c.draft.oidc.jwksUri,
+                },
+              },
+            }
+          : c,
+      );
+      setDiscover({ kind: "done", found: Object.keys(d).length });
+    } catch (err) {
+      const r = asIdPRefusal(err);
+      setDiscover(
+        r !== null
+          ? { kind: "refused", refusal: r }
+          : {
+              kind: "unproven",
+              status: err instanceof ApiError ? err.status : undefined,
+            },
+      );
+    }
+  };
+
+  // ── recovery ──────────────────────────────────────────────────────────────
+  const recover = async (marker: IdPRecoveryMarker): Promise<void> => {
+    setRecoveryView({ kind: "looking" });
+    try {
+      const op = await getIdPOperation(marker.operationId);
+      setRecoveryView({ kind: "op", op });
+      if (op.state === "committed") {
+        clearIdPRecovery(marker.operationId);
+        lastCandidate.current = null;
+        setNotice(
+          `Operation ${marker.operationId} is committed on the appliance${op.audited ? "" : " (success audit still owed)"}`,
+        );
+        rereadRecovery();
+        refreshAll();
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        setRecoveryView({ kind: "never_recorded" });
+        return;
+      }
+      const code = refusalCodeOf(err, IDP_LOOKUP_REFUSAL_CODES);
+      setRecoveryView(
+        code !== null ? { kind: "refused", code } : { kind: "unproven" },
+      );
+    }
+  };
+  const resend = (marker: IdPRecoveryMarker): void => {
+    const initial =
+      marker.action === "update"
+        ? (snap?.list.profiles.find((p) => p.id === marker.profileId) ?? null)
+        : null;
+    const remembered =
+      lastCandidate.current?.operationId === marker.operationId
+        ? lastCandidate.current.draft
+        : null;
+    const base = remembered ?? {
+      ...draftFrom(initial),
+      type: marker.type,
+      name: marker.name,
+    };
+    setCeremony({
+      kind: "editor",
+      mode: marker.action === "create" ? "create" : "edit",
+      initial,
+      draft: base,
+      base,
+      boundOperationId: marker.operationId,
+      error: null,
+    });
+  };
+  const abandon = (marker: IdPRecoveryMarker): void => {
+    clearIdPRecovery(marker.operationId);
+    lastCandidate.current = null;
+    close();
+    setRecoveryView({ kind: "none" });
+    rereadRecovery();
+  };
+
   const ledgerKeyFor = (l: LegacyLDAP): LedgerKey => {
     if (snap === undefined) return { kind: "registry_unavailable" };
     const key = snap.list.profiles.find(
@@ -547,25 +1139,191 @@ export function IdentityProvidersPage(): JSX.Element {
       ? { kind: "known", operationId: key }
       : { kind: "absent" };
   };
+
+  const openCreate = (): void => {
+    clearOutcome();
+    const base = draftFrom(null);
+    setCeremony({
+      kind: "editor",
+      mode: "create",
+      initial: null,
+      draft: base,
+      base,
+      error: null,
+    });
+  };
+  const openEdit = (p: IdPProfile): void => {
+    clearOutcome();
+    const base = draftFrom(p);
+    setCeremony({
+      kind: "editor",
+      mode: "edit",
+      initial: p,
+      draft: base,
+      base,
+      error: null,
+    });
+  };
+
+  const rowActions = isAdmin
+    ? {
+        canMutate,
+        onEdit: openEdit,
+        onDelete: (p: IdPProfile) => {
+          clearOutcome();
+          setCeremony({ kind: "delete", profile: p });
+        },
+      }
+    : null;
+
   return (
     <>
       <PageHeader
         title="Identity Providers"
-        subtitle="Registry read model — identity, state, revisions, fleet publication and the legacy LDAP cutover posture (read-only)"
+        subtitle="Registry — identity, state, revisions, fleet publication, the legacy LDAP cutover posture; admin writes are fenced and ceremonied"
         actions={
-          <SnapshotBar
-            updatedAt={Math.max(registry.dataUpdatedAt, legacy.dataUpdatedAt)}
-            fetching={registry.isFetching || legacy.isFetching}
-            error={registry.isError || legacy.isError}
-            hasData={snap !== undefined || legacy.data !== undefined}
-            onRefresh={() => {
-              void registry.refetch();
-              void legacy.refetch();
-            }}
-          />
+          <>
+            {isAdmin && snap !== undefined && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={!canMutate}
+                onClick={openCreate}
+              >
+                Add provider
+              </Button>
+            )}
+            <SnapshotBar
+              updatedAt={Math.max(registry.dataUpdatedAt, legacy.dataUpdatedAt)}
+              fetching={registry.isFetching || legacy.isFetching}
+              error={registry.isError || legacy.isError}
+              hasData={snap !== undefined || legacy.data !== undefined}
+              onRefresh={refreshAll}
+            />
+          </>
         }
       />
       <div className={styles.stack}>
+        {notice !== null && (
+          <Callout variant="success" role="status">
+            {notice}
+          </Callout>
+        )}
+        {fence !== null && <IdPFenceCallout refusal={fence} />}
+        {refusal !== null && <IdPRefusalCallout refusal={refusal} />}
+        {unproven !== null && (
+          <IdPUnprovenCallout
+            action={unproven.action}
+            status={unproven.status}
+          />
+        )}
+        {forbidden !== null && (
+          <Callout
+            variant="warning"
+            title="Refused — insufficient role"
+            role="alert"
+          >
+            The appliance refused to {forbidden} (HTTP 403); nothing was
+            changed.
+          </Callout>
+        )}
+        {isAdmin && recovery.kind === "valid" && (
+          <Callout
+            variant="unknown"
+            title="Unresolved provider operation"
+            role="alert"
+          >
+            <p>
+              A {recovery.marker.action} of{" "}
+              <strong>{recovery.marker.name}</strong> (
+              <Mono>{recovery.marker.type}</Mono>
+              {recovery.marker.cutover ? ", carrying the legacy cutover" : ""})
+              was dispatched as operation{" "}
+              <Mono>{recovery.marker.operationId}</Mono> and its answer was not
+              verified. Every mutation stays blocked until the appliance's
+              ledger settles it; nothing is re-sent automatically.
+            </p>
+            <div>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={recoveryView.kind === "looking"}
+                onClick={() => void recover(recovery.marker)}
+              >
+                Recover
+              </Button>{" "}
+              {recoveryView.kind === "never_recorded" && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => resend(recovery.marker)}
+                  >
+                    Re-send
+                  </Button>{" "}
+                </>
+              )}
+              {(recoveryView.kind === "never_recorded" ||
+                (recoveryView.kind === "op" &&
+                  recoveryView.op.state === "aborted")) && (
+                <Button
+                  size="sm"
+                  variant="danger-quiet"
+                  onClick={() =>
+                    setCeremony({ kind: "abandon", marker: recovery.marker })
+                  }
+                >
+                  Abandon
+                </Button>
+              )}
+            </div>
+            <div>
+              {recoveryView.kind === "looking" && "Looking the operation up…"}
+              {recoveryView.kind === "op" &&
+                operationStateView(recoveryView.op)}
+              {recoveryView.kind === "never_recorded" && (
+                <span>
+                  The appliance never recorded this operation: the write did not
+                  start. The same candidate may be re-sent under the same
+                  operation identity, or the marker abandoned.
+                </span>
+              )}
+              {recoveryView.kind === "refused" && (
+                <StatusBadge status="unknown">
+                  Lookup refused: {recoveryView.code}
+                </StatusBadge>
+              )}
+              {recoveryView.kind === "unproven" && (
+                <StatusBadge status="unknown">
+                  Lookup outcome unproven — try Recover again
+                </StatusBadge>
+              )}
+            </div>
+          </Callout>
+        )}
+        {isAdmin && recovery.kind === "none" && recoveryView.kind === "op" && (
+          <Callout
+            variant="success"
+            title="Operation resolved from the appliance's ledger"
+            role="status"
+          >
+            <Mono>{recoveryView.op.operationId}</Mono> ·{" "}
+            {operationStateView(recoveryView.op)}
+          </Callout>
+        )}
+        {isAdmin &&
+          (recovery.kind === "unavailable" ||
+            recovery.kind === "unreadable") && (
+            <Callout
+              variant="unknown"
+              title="Recovery marker store unusable"
+              role="alert"
+            >
+              This browser cannot{" "}
+              {recovery.kind === "unavailable" ? "reach" : "read"} its operation
+              recovery store, so no provider write is dispatched from it.
+            </Callout>
+          )}
         {snap === undefined && registry.isPending && (
           <Skeleton>Loading the identity-provider registry…</Skeleton>
         )}
@@ -588,11 +1346,29 @@ export function IdentityProvidersPage(): JSX.Element {
                   ? "recorded"
                   : "not recorded"}
                 . The registry is empty and refuses changes until it is repaired
-                (server posture).
+                (server posture).{" "}
+                {isAdmin && snap.list.quarantineEvidence !== undefined && (
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={
+                      !isAdmin || page.unknown !== null || result === "pending"
+                    }
+                    onClick={() => {
+                      clearOutcome();
+                      setCeremony({
+                        kind: "repair",
+                        evidence: snap.list.quarantineEvidence ?? "",
+                      });
+                    }}
+                  >
+                    Repair registry
+                  </Button>
+                )}
               </Callout>
             )}
             <RegistryCard list={snap.list} />
-            <ProvidersCard snap={snap} />
+            <ProvidersCard snap={snap} actions={rowActions} />
             <LedgerCard list={snap.list} />
           </>
         )}
@@ -609,9 +1385,134 @@ export function IdentityProvidersPage(): JSX.Element {
             legacy={legacy.data}
             isAdmin={isAdmin}
             ledgerKey={ledgerKeyFor(legacy.data)}
+            onImport={
+              isAdmin && legacy.data.present && canMutate
+                ? () => {
+                    clearOutcome();
+                    if (legacy.data?.present === true)
+                      setCeremony({ kind: "import", legacy: legacy.data });
+                  }
+                : null
+            }
           />
         )}
       </div>
+      {guard.element}
+      {ceremony.kind === "editor" && (
+        <ProviderEditorDialog
+          mode={ceremony.mode}
+          initial={ceremony.initial}
+          draft={ceremony.draft}
+          onChange={(d) => setCeremony({ ...ceremony, draft: d, error: null })}
+          onReview={review}
+          onCancel={close}
+          pending={result === "pending"}
+          error={ceremony.error}
+          test={test}
+          onTest={(cred) => void runTest(cred)}
+          discover={discover}
+          onDiscover={(issuer) => void runDiscover(issuer)}
+        />
+      )}
+      {ceremony.kind === "review" && (
+        <ReviewCeremony
+          mode={ceremony.mode}
+          initial={ceremony.initial}
+          spec={ceremony.spec}
+          result={result}
+          {...(errorText !== undefined ? { errorText } : {})}
+          onConfirm={() =>
+            void dispatchWrite(
+              ceremony.mode,
+              ceremony.initial,
+              ceremony.spec,
+              ceremony.draft,
+              ceremony.operationId,
+              undefined,
+            )
+          }
+          onCancel={() =>
+            setCeremony({
+              kind: "editor",
+              mode: ceremony.mode,
+              initial: ceremony.initial,
+              draft: ceremony.draft,
+              base: draftFrom(ceremony.initial),
+              error: null,
+            })
+          }
+        />
+      )}
+      {ceremony.kind === "cutover" && (
+        <CutoverCeremony
+          spec={ceremony.spec}
+          initial={ceremony.initial}
+          fence={
+            ceremony.mode === "create"
+              ? (snap?.list.revision ?? "")
+              : String(ceremony.initial?.revision ?? 0)
+          }
+          operationId={ceremony.operationId}
+          legacy={ceremony.legacy}
+          result={result}
+          {...(errorText !== undefined ? { errorText } : {})}
+          onConfirm={() =>
+            void dispatchWrite(
+              ceremony.mode,
+              ceremony.initial,
+              ceremony.spec,
+              ceremony.draft,
+              ceremony.operationId,
+              ceremony.legacy.cutoverConfirmValue,
+            )
+          }
+          onCancel={() =>
+            setCeremony({
+              kind: "editor",
+              mode: ceremony.mode,
+              initial: ceremony.initial,
+              draft: ceremony.draft,
+              base: draftFrom(ceremony.initial),
+              error: null,
+            })
+          }
+        />
+      )}
+      {ceremony.kind === "delete" && (
+        <DeleteProviderCeremony
+          profile={ceremony.profile}
+          result={result}
+          {...(errorText !== undefined ? { errorText } : {})}
+          onConfirm={() => void runDelete(ceremony.profile)}
+          onCancel={close}
+        />
+      )}
+      {ceremony.kind === "repair" && (
+        <RepairCeremony
+          evidence={ceremony.evidence}
+          result={result}
+          {...(errorText !== undefined ? { errorText } : {})}
+          onConfirm={() => void runRepair(ceremony.evidence)}
+          onCancel={close}
+        />
+      )}
+      {ceremony.kind === "import" && (
+        <ImportCeremony
+          legacy={ceremony.legacy}
+          result={result}
+          {...(errorText !== undefined ? { errorText } : {})}
+          onConfirm={() => void runImport()}
+          onCancel={close}
+        />
+      )}
+      {ceremony.kind === "abandon" && (
+        <AbandonCeremony
+          marker={ceremony.marker}
+          result={result}
+          onConfirm={() => abandon(ceremony.marker)}
+          onCancel={close}
+        />
+      )}
     </>
   );
 }

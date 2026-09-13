@@ -15,6 +15,7 @@ import { NavLink, Outlet, useLocation } from "react-router";
 import type { Role } from "../api/auth";
 import { useAuth } from "../auth/AuthProvider";
 import { hasRole } from "../auth/rbac";
+import { ChangePasswordDialog } from "../features/administration/ChangePasswordDialog";
 import {
   CulvertMark,
   IconActivity,
@@ -251,6 +252,10 @@ export function AppShell(): JSX.Element {
     setSigningOut(true);
     void machine.logout(); // machine tears down + transitions; gate unmounts us
   };
+  // FE-6A.2: self-service password change for EVERY authenticated role; on
+  // success the appliance reports selfAffected and the shell signs out.
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pwNote, setPwNote] = useState<string | null>(null);
 
   const visibleSections = NAV.map((s) => ({
     ...s,
@@ -322,6 +327,14 @@ export function AppShell(): JSX.Element {
           <Button
             size="sm"
             variant="ghost"
+            onClick={() => setPwOpen(true)}
+            disabled={signingOut || pwOpen}
+          >
+            Change password
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
             onClick={signOut}
             disabled={signingOut}
           >
@@ -330,6 +343,33 @@ export function AppShell(): JSX.Element {
         </span>
       </header>
       <main id="main" className={styles.main} tabIndex={-1}>
+        {pwNote !== null && (
+          <Callout
+            variant="unknown"
+            title="Outcome unproven — change my password"
+            role="alert"
+          >
+            {pwNote}
+          </Callout>
+        )}
+        {pwOpen && (
+          <ChangePasswordDialog
+            user={state.user}
+            generation={state.securityGeneration}
+            onCancel={() => setPwOpen(false)}
+            onOutcome={(o) => {
+              setPwOpen(false);
+              if (o.kind === "changed") {
+                signOut();
+                return;
+              }
+              setPwNote(
+                `The answer could not be verified${o.status !== undefined ? ` (HTTP ${String(o.status)})` : ""}. The password may already have changed and your sessions may already be revoked; nothing was retried. Sign in again with the credential you believe is current.`,
+              );
+              void machine.revalidateAuthenticatedSession();
+            }}
+          />
+        )}
         {state.tlsFallback && (
           <div className={styles.tlsBanner}>
             <Callout

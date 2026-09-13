@@ -12,7 +12,7 @@ export const METADATA_XML =
 export const LEGACY_URL = "ldap://legacy.corp.example:389";
 export const QUARANTINE = "idp_profiles.json.corrupt.1757600000000000000";
 
-export const OIDC_SPEC: IdPWriteSpec = {
+export const OIDC_SPEC: Extract<IdPWriteSpec, { type: "oidc" }> = {
   type: "oidc",
   name: "Corp OIDC",
   enabled: true,
@@ -31,7 +31,7 @@ export const OIDC_SPEC: IdPWriteSpec = {
   },
 };
 
-export const LDAP_SPEC: IdPWriteSpec = {
+export const LDAP_SPEC: Extract<IdPWriteSpec, { type: "ldap" }> = {
   type: "ldap",
   name: "DC LDAP",
   enabled: false,
@@ -54,7 +54,7 @@ export const LDAP_SPEC: IdPWriteSpec = {
   },
 };
 
-export const SAML_SPEC: IdPWriteSpec = {
+export const SAML_SPEC: Extract<IdPWriteSpec, { type: "saml" }> = {
   type: "saml",
   name: "Corp SAML",
   enabled: false,

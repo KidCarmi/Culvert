@@ -11,7 +11,7 @@
 //   M4 the same operationId is reusable only for the SAME bound candidate;
 //      a different candidate under the same id is refused locally.
 //   M5 clearing is ownership-matched; the auth boundary purges.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   IDP_RECOVERY_KEY,
   clearIdPRecovery,
@@ -22,6 +22,7 @@ import {
 import type { IdPRecoveryMarker } from "../features/objects/idpRecovery";
 import { runAuthTeardown } from "../auth/teardown";
 import { QueryClient } from "@tanstack/react-query";
+import { isRecord } from "../api/decode";
 import { BIND_PASSWORD, CLIENT_SECRET, OP_ID, OP_ID_2 } from "./fe6a2-fixtures";
 
 const MARKER: IdPRecoveryMarker = {
@@ -36,7 +37,6 @@ const MARKER: IdPRecoveryMarker = {
   startedAt: 1_757_600_000_000,
 };
 
-// eslint-disable-next-line no-restricted-globals -- RED harness inspects the sanctioned marker store directly
 const store = (): Storage => sessionStorage;
 
 beforeEach(() => {
@@ -51,7 +51,9 @@ describe("M1 marker shape", () => {
     expect(writeIdPRecovery("admin", MARKER)).toBe(true);
     const raw = store().getItem(IDP_RECOVERY_KEY);
     expect(raw).not.toBeNull();
-    const parsed = JSON.parse(raw ?? "{}") as Record<string, unknown>;
+    const parsedRaw: unknown = JSON.parse(raw ?? "{}");
+    if (!isRecord(parsedRaw)) throw new Error("not a record");
+    const parsed = parsedRaw;
     expect(Object.keys(parsed).sort()).toEqual(
       [
         "action",
@@ -87,14 +89,15 @@ describe("M2 write-before-dispatch read-back", () => {
     expect(readIdPRecovery("admin")).toEqual({ kind: "valid", marker: MARKER });
   });
   it("an unusable store means NO dispatch and reads unavailable", () => {
-    const setItem = Storage.prototype.setItem;
-    Storage.prototype.setItem = () => {
-      throw new DOMException("quota", "QuotaExceededError");
-    };
+    const spy = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("quota", "QuotaExceededError");
+      });
     try {
       expect(writeIdPRecovery("admin", MARKER)).toBe(false);
     } finally {
-      Storage.prototype.setItem = setItem;
+      spy.mockRestore();
     }
     store().setItem(IDP_RECOVERY_KEY, "{not json");
     expect(readIdPRecovery("admin")).toEqual({ kind: "unreadable" });

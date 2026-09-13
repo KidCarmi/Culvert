@@ -29,6 +29,7 @@ export const LEGACY_PRESENT: Record<string, unknown> = {
   startTls: true,
   tlsSkipVerify: true,
   cacheTtlSeconds: 300,
+  cutoverConfirmValue: "ldaps://legacy-dc.example:636",
   cutoverDurability: "not_retired",
 };
 

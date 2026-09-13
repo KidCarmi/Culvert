@@ -58,6 +58,10 @@ export interface AuthState {
   /** authenticated identity ("" outside `authenticated`) */
   user: string;
   role: Role | null;
+  /** FE-6A.2 — the caller's durable security generation (the fence a
+   * self-service password change echoes); absent outside `authenticated`
+   * and in the bootstrap window */
+  securityGeneration?: number;
   tlsFallback: boolean;
   tlsFallbackReason: string;
   /** bounded, non-sensitive detail for the auth_error retry screen */
@@ -204,6 +208,9 @@ export class AuthMachine {
         phase: "authenticated",
         user: auth.user,
         role: auth.role,
+        ...(auth.securityGeneration !== undefined
+          ? { securityGeneration: auth.securityGeneration }
+          : {}),
         tlsFallback: auth.tlsFallback,
         tlsFallbackReason: auth.tlsFallbackReason,
         errorDetail: "",

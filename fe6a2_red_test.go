@@ -220,7 +220,8 @@ func TestFE6A2_BR4_CutoverPutIsLedgerRecordedAndReplays(t *testing.T) {
 // BR5 — the legacy console switches in the same commit (2F-A rule): its
 // enabling writes carry the confirm and it handles the new 428.
 func TestFE6A2_BR5_LegacyConsoleSendsCutoverConfirm(t *testing.T) {
-	src, err := os.ReadFile("static/index.html")
+	// The canonical cwd-independent path (static_read_wall_test.go).
+	src, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatal(err)
 	}
