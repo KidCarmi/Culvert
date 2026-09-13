@@ -23,6 +23,13 @@
 > This is recorded rather than quietly corrected: it is a concrete instance of the same class of risk
 > DEBT-014 already tracks for this program — a scheduled, unwatched review can produce an incomplete or
 > incorrect conclusion — except here the catch came from automated PR review rather than a parallel run.
+> **Second correction, same PR, requested manual re-review:** a follow-up "@codex review" on the fixed
+> commit found the T-54 fix itself was still incomplete — `staleResponseTotal` (`ui_security.go:1841`)
+> has the exact same "Response"-insertion mismatch against `StaleTotal()`/`stale` that the first fix
+> already named for `malformedResponseTotal`, and the first pass missed it despite auditing the same
+> block of code. T-54 below now covers all three mismatched identifiers. Two rounds of external review
+> catching gaps in one report is itself a signal about this routine's own audit thoroughness, not just
+> about OCSP naming, and is left visible here rather than smoothed into a single clean-looking finding.
 
 ---
 
@@ -106,14 +113,14 @@ this report merged rather than after.
 - **Business concept:** the reason a fetched OCSP response was discarded rather than treated as an
   affirmative revocation verdict (`internal/ocsp/ocsp.go`, CHAOS-65).
 - **Current names:**
-  - Go accessors (`internal/ocsp/ocsp.go:243,248,256`): `MalformedTotal()`, `UnauthorizedResponderTotal()`,
-    `UnknownTotal()`.
-  - `/metrics` `reason=` labels (`ocsp_metrics.go:58-61`): `malformed`, `unauthorized_responder`,
+  - Go accessors (`internal/ocsp/ocsp.go:243,248,252,256`): `MalformedTotal()`,
+    `UnauthorizedResponderTotal()`, `StaleTotal()`, `UnknownTotal()`.
+  - `/metrics` `reason=` labels (`ocsp_metrics.go:58-61`): `malformed`, `unauthorized_responder`, `stale`,
     `unknown_status`.
-  - New admin JSON fields, added this window (`ui_security.go`, also documented in
+  - New admin JSON fields, added this window (`ui_security.go:1839-1842`, also documented in
     `api/openapi/openapi.yaml:488-491` and `openapi.json:2675-2741`, and already consumed by
     `static/index.html:17514-17527`): `malformedResponseTotal`, `unauthorizedResponderTotal`,
-    `unknownStatusTotal`.
+    `staleResponseTotal`, `unknownStatusTotal`.
   - Operator doc's canonical rejection-reasons table (`docs/operator/ocsp-revocation-checking.md:44-47`,
     §2 "Posture"): lists `not_for_certificate`, `stale`, `unknown_status`, `responder_blocked` — but
     **omits `malformed` and `unauthorized_responder` entirely** from the table (the GUI's red banner does
@@ -122,15 +129,16 @@ this report merged rather than after.
   - `UnauthorizedResponderTotal`/`unauthorized_responder`/`unauthorizedResponderTotal` are, by contrast,
     spelled identically across all three code surfaces — only the doc-table omission is the problem for
     that one reason.
-- **Why the current naming is problematic:** for `malformed`, three code surfaces use three different
-  spellings for one concept (`Malformed` / `malformed` / `malformedResponseTotal` — the JSON field alone
-  inserts "Response"), so an admin cross-referencing the Go source, a `/metrics` scrape, and the admin API
-  response for the same discarded-response reason sees three different names. For `unknown_status`, the
-  Go accessor (`UnknownTotal`) omits "Status" that both the metric label and the JSON field include — a
-  smaller but real two-vs-one inconsistency. Separately, two of the six discard reasons that already have
-  live counters and (for `unauthorized_responder`) a dedicated red GUI banner are missing from the
-  operator doc's own canonical reference table for "why was this response discarded" — the exact question
-  that table exists to answer.
+- **Why the current naming is problematic:** for `malformed` and `stale`, three code surfaces use three
+  different spellings for each one concept (`Malformed`/`malformed`/`malformedResponseTotal`,
+  `Stale`/`stale`/`staleResponseTotal` — in both cases the JSON field alone inserts "Response"), so an
+  admin cross-referencing the Go source, a `/metrics` scrape, and the admin API response for the same
+  discarded-response reason sees three different names. For `unknown_status`, the Go accessor
+  (`UnknownTotal`) omits "Status" that both the metric label and the JSON field include — a smaller but
+  real two-vs-one inconsistency. Separately, two of the six discard reasons that already have live
+  counters and (for `unauthorized_responder`) a dedicated red GUI banner are missing from the operator
+  doc's own canonical reference table for "why was this response discarded" — the exact question that
+  table exists to answer.
 - **Why the new name is better:** using the `/metrics` `reason=` label as the canonical spelling for each
   concept (it is already the vocabulary an operator learns from `/metrics`, from any Prometheus alert
   rule, and from the doc's existing table rows) and applying it consistently to the Go accessor and the
@@ -138,21 +146,22 @@ this report merged rather than after.
   for; adding the two missing table rows lets the doc answer the question it already claims to answer for
   all six reasons, not four.
 - **Affected code:** `internal/ocsp/ocsp.go` (rename `UnknownTotal`→`UnknownStatusTotal` to match its own
-  metric label — `MalformedTotal`/`UnauthorizedResponderTotal` already match their labels and need no Go
-  change); `ui_security.go` (rename JSON field `malformedResponseTotal`→`malformedTotal`).
+  metric label — `MalformedTotal`/`UnauthorizedResponderTotal`/`StaleTotal` already match their labels
+  and need no Go change); `ui_security.go` (rename JSON fields `malformedResponseTotal`→`malformedTotal`
+  and `staleResponseTotal`→`staleTotal`).
 - **Affected API:** `api/openapi/openapi.yaml`/`openapi.json` (regenerate via `make api-bundle` after the
-  JSON field rename — this is a documented, already-shipped API surface, not a same-PR drive-by rename).
-- **Affected GUI:** `static/index.html:17515` (update the one field reference to match the renamed JSON
-  key).
+  JSON field renames — this is a documented, already-shipped API surface, not a same-PR drive-by rename).
+- **Affected GUI:** `static/index.html:17515` (update the two field references to match the renamed JSON
+  keys).
 - **Affected Documentation:** `docs/operator/ocsp-revocation-checking.md` §2 — **fixed in this pass** (two
   rows added to the rejection-reasons table for `malformed` and `unauthorized_responder`; zero code/API
   risk, so unlike the Go/JSON rename this needed no coordinated PR and was applied immediately, consistent
   with this program's practice of fixing trivial, zero-compat-risk gaps on sight — see e.g. T-53 and the
   panel-title fix in the 2026-09-09 report).
 - **Affected Configuration:** none.
-- **Migration Complexity:** Small (two identifier renames plus one generated-spec regen; the JSON field is
-  new this same window and has exactly one known consumer, `static/index.html`, updated in the same
-  change).
+- **Migration Complexity:** Small (three identifier renames — `UnknownTotal`, `malformedResponseTotal`,
+  `staleResponseTotal` — plus one generated-spec regen; the JSON fields are new this same window and have
+  exactly one known consumer, `static/index.html`, updated in the same change).
 - **Compatibility Risk:** Low — the field is documented in the OpenAPI spec but shipped only in this same
   merge window, so no external consumer has had time to depend on the specific spelling being changed.
 - **Estimated PR Size:** Small.
@@ -198,7 +207,7 @@ added for the new finding:
 | Medium | T-9 (carried over) | Rename `exportedAt` → `capturedAt` with read-compat alias | Low-medium | Medium |
 | Medium | T-11 (carried over) | Reconcile `allow`/`deny` default-action vocabulary vs. the four-value `PolicyAction` enum | Low / Medium-large | Small / Medium-large |
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
-| Low-Medium | **T-54 (new)** | Rename OCSP admin JSON field `malformedResponseTotal`→`malformedTotal` and Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the one GUI consumer. (Doc-table gap already fixed this pass.) | Low | Small |
+| Low-Medium | **T-54 (new)** | Rename OCSP admin JSON fields `malformedResponseTotal`→`malformedTotal` and `staleResponseTotal`→`staleTotal`, and Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references. (Doc-table gap already fixed this pass.) | Low | Small |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
