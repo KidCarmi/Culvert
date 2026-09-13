@@ -31,6 +31,11 @@ YAML_PORT="${CULVERT_E2E_YAML_PORT:-19093}"
 # a running appliance into it, and no other instance may carry it (a
 # quarantined registry refuses every IdP write the other journeys need).
 IDPQ_PORT="${CULVERT_E2E_IDPQ_PORT:-19094}"
+# FE-6A.2 IDPW: the WRITE-journey appliance — boots on a corrupt registry
+# (quarantined) with a legacy `ldap:` block, so one browser journey can run
+# repair → legacy import → cutover ceremony → edit → delete end to end
+# without consuming YAMLUP's once-ever cutover or IDPQ's read-only posture.
+IDPW_PORT="${CULVERT_E2E_IDPW_PORT:-19095}"
 WORK="$(mktemp -d)"
 BIN="$WORK/culvert"
 
@@ -41,6 +46,7 @@ cleanup() {
   [ -n "${FAIL_PID:-}" ] && kill "$FAIL_PID" 2>/dev/null || true
   [ -n "${YAMLUP_PID:-}" ] && kill "$YAMLUP_PID" 2>/dev/null || true
   [ -n "${IDPQ_PID:-}" ] && kill "$IDPQ_PID" 2>/dev/null || true
+  [ -n "${IDPW_PID:-}" ] && kill "$IDPW_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   rm -rf "$WORK" 2>/dev/null || true
 }
@@ -246,6 +252,23 @@ ldap:
 EOF2
 printf '[{"id":"torn","name":"torn"' > "$WORK/idpq/idp_profiles.json"
 
+# FE-6A.2 IDPW: private roster copy, the same legacy `ldap:` block (present /
+# active / not retired) and a corrupt registry file — the fe6a2 write journey
+# repairs it through the T2 ceremony (confirm = the quarantine base name),
+# imports the legacy block (disabled), retires the legacy authenticator via
+# the cutover ceremony (confirm = the legacy directory URL), edits and deletes.
+mkdir -p "$WORK/idpw"
+cp "$WORK/auth/ui_users.json" "$WORK/idpw/ui_users.json"
+cat > "$WORK/idpw/config.yaml" <<EOF2
+log_store_path: $WORK/idpw/logstore
+ldap:
+  url: ldaps://legacy-dc.invalid:636
+  base_dn: dc=legacy,dc=invalid
+  bind_dn: cn=svc,dc=legacy,dc=invalid
+  bind_password: YAMLBINDCANARY-legacy-ldap-never-in-browser
+EOF2
+printf '[{"id":"torn","name":"torn"' > "$WORK/idpw/idp_profiles.json"
+
 # 2E-A premise: a per-run LOCAL YARA rules directory so the Content Security
 # YARA journey exercises the real engine deterministically (no external
 # service; the dir starts empty and the spec cleans up what it creates).
@@ -259,6 +282,7 @@ start_instance FRESH "$FRESH_PORT" "$((PROXY_PORT + 1))" -ui-users-file "$WORK/f
 start_instance FAIL "$FAIL_PORT" "$((PROXY_PORT + 2))" -ui-users-file "$WORK/failparent/blocker/ui_users.json" -config "$WORK/failcfg.yaml"
 start_instance YAMLUP "$YAML_PORT" "$((PROXY_PORT + 3))" -ui-users-file "$WORK/yamlup/ui_users.json" -config "$WORK/yamlup/config.yaml" -idp-profiles-file "$WORK/yamlup/idp_profiles.json"
 start_instance IDPQ "$IDPQ_PORT" "$((PROXY_PORT + 4))" -ui-users-file "$WORK/idpq/ui_users.json" -config "$WORK/idpq/config.yaml" -idp-profiles-file "$WORK/idpq/idp_profiles.json"
+start_instance IDPW "$IDPW_PORT" "$((PROXY_PORT + 5))" -ui-users-file "$WORK/idpw/ui_users.json" -config "$WORK/idpw/config.yaml" -idp-profiles-file "$WORK/idpw/idp_profiles.json"
 
 wait_ready() {
   port="$1"; name="$2"
@@ -278,6 +302,7 @@ wait_ready "$FRESH_PORT" FRESH
 wait_ready "$FAIL_PORT" FAIL
 wait_ready "$YAML_PORT" YAMLUP
 wait_ready "$IDPQ_PORT" IDPQ
+wait_ready "$IDPW_PORT" IDPW
 echo "e2e-smoke: all five instances ready"
 
 # API-establish the retained-history premise (§19): the AUTH instance boots
@@ -363,6 +388,7 @@ CULVERT_E2E_FRESH_URL="http://127.0.0.1:$FRESH_PORT" \
 CULVERT_E2E_SETUPFAIL_URL="http://127.0.0.1:$FAIL_PORT" \
 CULVERT_E2E_YAML_URL="http://127.0.0.1:$YAML_PORT" \
 CULVERT_E2E_IDPQ_URL="http://127.0.0.1:$IDPQ_PORT" \
+CULVERT_E2E_IDPW_URL="http://127.0.0.1:$IDPW_PORT" \
 CULVERT_E2E_AUTH_DATA_DIR="$WORK/run-AUTH" \
 CULVERT_E2E_SLUICE_ADDR="127.0.0.1:$SLUICE_PORT" \
 CULVERT_E2E_SLUICE_FP="$SLUICE_FP" \

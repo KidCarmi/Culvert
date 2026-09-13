@@ -136,10 +136,14 @@ async function createProfile(
   ctx: APIRequestContext,
   body: Record<string, unknown>,
   operationId?: string,
+  cutoverConfirm?: string,
 ): Promise<Record<string, unknown>> {
   const rev = await documentRevision(ctx);
   const qs = new URLSearchParams({ documentRevision: rev });
   if (operationId !== undefined) qs.set("operationId", operationId);
+  // FE-6A.2: a cutover-bearing write must also carry the server's confirm
+  // value (the legacy directory URL published as cutoverConfirmValue).
+  if (cutoverConfirm !== undefined) qs.set("cutoverConfirm", cutoverConfirm);
   const resp = await ctx.post(`/api/idp?${qs.toString()}`, { data: body });
   expect(resp.ok(), await resp.text()).toBe(true);
   const v: unknown = await resp.json();
@@ -328,6 +332,10 @@ test.beforeAll(async () => {
   const legacy = await yaml.get("/api/idp/legacy-ldap");
   expect(legacy.ok()).toBe(true);
   const lv: unknown = await legacy.json();
+  const cutoverConfirm =
+    isRecord(lv) && typeof lv["cutoverConfirmValue"] === "string"
+      ? lv["cutoverConfirmValue"]
+      : "ldaps://legacy-dc.invalid:636";
   if (!(isRecord(lv) && lv["retired"] === true)) {
     const answer = await createProfile(
       yaml,
@@ -344,6 +352,7 @@ test.beforeAll(async () => {
         },
       },
       CUTOVER_OP_ID,
+      cutoverConfirm,
     );
     expect(answer["operationId"]).toBe(CUTOVER_OP_ID);
   }
