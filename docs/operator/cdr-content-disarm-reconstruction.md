@@ -72,6 +72,40 @@ fixed; they materially affect how safely CDR can be relied on today.
   effective config and empties the whole pool: `cdrstore.go:551-556`).
   The remaining, still-enrolled instances stop serving until an operator
   re-enrolls one of them or restarts the process.
+- **Disabling and re-enabling CDR at runtime silently drops `fail_mode`
+  to open (and every other tuned setting) until restart.** `PUT
+  /api/cdr/config {"enabled": false}` calls `shutdownCDRClient()`, which
+  resets the active config to an empty `CDRConfig{}`
+  (`cdrstore.go:551-555`); re-enabling only flips `Enabled` back to
+  `true` on that same emptied struct (`setCDREnabledRuntime`,
+  `cdrstore.go:475-483`) and initializes the client pool from it
+  (`cdr_ui.go:164-171`) — the YAML/CLI-configured `fail_mode`, timeout,
+  chunk size, and file-size limits are gone, not restored. Since an
+  empty `fail_mode` reads as open (`CDRFailOpen()`,
+  `config.go:401-406`), a deployment explicitly configured as
+  fail-closed silently becomes fail-open the moment an operator toggles
+  CDR off and back on through the API or GUI, with no error and no
+  warning. Restart the process after any runtime disable/re-enable
+  cycle to restore the configured settings.
+- **A tripped circuit breaker can stop recovering automatically.** The
+  half-open state allows exactly one probe (`HalfOpenProbes`, default 1;
+  `cdr_breaker.go:36-51`, `106-133`), but `runCDRStage` calls
+  `cdrActiveClient()` — which itself calls `cdrPool.Pick()` and so can
+  consume that one probe slot — purely to check whether *any* client is
+  selectable (`cdr_proxy.go:391-395`), then discards the result;
+  `safeCDRSanitize` calls `cdrPickPooled()` (`cdr_pool.go:223-225`)
+  independently right after to actually pick a client for the RPC. When
+  a breaker has just transitioned from open to half-open, the first call
+  consumes the sole probe and the second is denied, so the real Sanitize
+  RPC is never attempted and neither `OnSuccess` nor `OnFailure` is ever
+  reported — the breaker is left permanently half-open with its budget
+  exhausted, never trying again on its own. In a single-instance
+  deployment this means CDR silently and permanently stops sanitizing
+  anything after the first breaker trip (falling into the "empty/unreachable
+  pool" case above) until the pool is rebuilt (re-enroll, restart, or a
+  config reload); in a multi-instance deployment, the tripped instance
+  specifically never automatically rejoins rotation, even though healthy
+  instances keep serving.
 
 ## Architecture
 
@@ -160,9 +194,15 @@ performs a fresh authoritative `EnrollStatus` check against Sluice and
 classifies the operation as `LANDED_AND_STORED`,
 `ISSUED_BUT_NOT_STORED` (with an exact revocation path for the orphaned
 credential), `NOT_ISSUED`, or `AMBIGUOUS` (`cdr_enroll_receipts.go:34-42`,
-`553-702`). `GET/DELETE /api/cdr/instances/enroll/receipts` lists and
-prunes these receipts; an unresolved receipt cannot be deleted
-(`cdr_enroll_receipts.go:375-395`).
+`553-702`). `GET /api/cdr/instances/enroll/receipts` lists these
+receipts; `DELETE /api/cdr/instances/enroll/receipts?operationId=<id>`
+prunes one by its operation id (required — a bare `DELETE` with no
+`operationId` is refused with 400), and an unresolved receipt cannot be
+deleted this way (`cdr_enroll_receipts.go:726-753`). If the receipt
+store itself is degraded (duplicate/empty operation ids), the repair
+path is the same positional form as CDR policies:
+`DELETE /api/cdr/instances/enroll/receipts?position=N&operationId=<verbatim
+id at that position>` (`cdr_enroll_receipts.go:726-736`).
 
 Deleting an instance (`DELETE /api/cdr/instances?name=…`) removes
 Culvert's local registry entry and shreds the local PEM copies — it does
@@ -201,14 +241,23 @@ cert under the same CN without revoking the old one, so an in-flight
 renewal never breaks a live stream (`cdr.go:574-589`). The new
 credential's fingerprint is recorded durably (as a "staged" generation
 in the instance's credential lineage) *before* the new key/cert PEMs are
-written, and the PEM swap itself is atomic (tmp file + rename, cert then
-key) so a crash mid-swap leaves either the old or the new pair intact,
-never a half-written one (`cdr_health.go:219-341`). If a renewal's RPC
-outcome is lost (e.g. a network timeout after Sluice already issued),
-the next poll cycle resolves it via `EnrollStatus` before attempting any
-new renewal, marking an issued-but-never-landed credential as
-**orphaned** so it surfaces for revocation rather than silently
-disappearing (`cdr_health.go:343-405`).
+written. The PEM swap itself is **not** a single atomic operation — each
+file is written to a `.tmp` path and renamed into place, but the cert is
+renamed *before* the key (`installRenewedPEMs`, `cdr_health.go:314-341`),
+as two separate `os.Rename` calls. A crash or rename failure between
+those two calls leaves the *new* certificate paired with the *old* key
+on disk — a mismatched pair, not "either the old or the new pair
+intact" — which will fail the next mTLS handshake against Sluice. If a
+renewal's RPC outcome is lost (e.g. a network timeout after Sluice
+already issued), or if the local write/rename sequence above is
+interrupted, the next poll cycle resolves the *RPC* side via
+`EnrollStatus` before attempting any new renewal, marking an
+issued-but-never-landed credential as **orphaned** so it surfaces for
+revocation rather than silently disappearing (`cdr_health.go:343-405`);
+this guide has not independently verified that the same reconciliation
+also repairs a mismatched on-disk cert/key pair left by an
+interrupted local rename, as distinct from a lost RPC outcome
+(`cdr_health.go:343-405`).
 
 ## Revocation
 
@@ -331,13 +380,14 @@ states this drives (`enabled-healthy`, `enabled-degraded`,
 | Method | Path | Min role | Purpose |
 |---|---|---|---|
 | GET | `/api/cdr/config` | viewer | Effective runtime config + derived `clientActive`/`failOpen` |
-| PUT | `/api/cdr/config` | admin | Toggle `cdr.enabled` at runtime (persists across restart) |
+| PUT | `/api/cdr/config` | admin | Toggle `cdr.enabled` at runtime (persists across restart; disabling then re-enabling drops `fail_mode` and other tuned settings to their zero values — see [Known limitations](#known-limitations-read-before-enabling-in-production)) |
 | GET | `/api/cdr/instances` | viewer | List enrolled instances, enriched with cert expiry + circuit-breaker state |
 | DELETE | `/api/cdr/instances?name=` | admin | Remove local registry entry + shred local certs (does not revoke on Sluice) |
 | POST | `/api/cdr/instances/enroll` | admin | Enroll a new Sluice instance (token exchange) |
 | POST | `/api/cdr/instances/enroll/recover` | admin | Authoritatively resolve an ambiguous enrollment/renewal operation |
 | GET | `/api/cdr/instances/enroll/receipts` | viewer | List enrollment recovery receipts |
-| DELETE | `/api/cdr/instances/enroll/receipts` | admin | Remove a resolved (terminal) receipt |
+| DELETE | `/api/cdr/instances/enroll/receipts?operationId=` | admin | Remove a resolved (terminal) receipt (required param; 400 without it) |
+| DELETE | `/api/cdr/instances/enroll/receipts?position=N&operationId=` | admin | Degraded-store repair: remove the receipt at position `N`, fenced on its verbatim operation id |
 | POST | `/api/cdr/instances/revoke` | admin | Revoke a credential on Sluice (`name` or orphan `fingerprint`) |
 | GET | `/api/cdr/policies` | viewer | List CDR policy rules |
 | POST | `/api/cdr/policies` | admin | Add a CDR policy rule |
