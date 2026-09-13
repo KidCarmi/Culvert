@@ -3,23 +3,43 @@ package main
 // Per-request policy-decision log-line cost (Performance Guardian).
 //
 // applyPolicyDecision emits exactly one decision line per proxied request
-// (POLICY_ALLOW / POLICY_BLOCK / POLICY_DROP / POLICY_REDIRECT). Profiling the
-// end-to-end forward benchmark (BenchmarkPerfQual_ProxyHTTPForward, alloc_objects)
-// attributed 65,538 of the 99,878 objects handleRequest allocates OUTSIDE the
-// upstream round trip to that single line's argument construction — roughly two
-// thirds of the dispatch pipeline's own allocation, before any policy, auth or
-// transport work is counted.
+// (POLICY_ALLOW / POLICY_BLOCK / POLICY_DROP / POLICY_REDIRECT /
+// POLICY_DEFAULT_DENY), so the line sits on 100% of the dispatch hot path.
 //
-// Two of its allocations were pure waste; see the contract comment above
-// logPolicyAllow in proxy.go for what they were and why removing them is sound.
+// ── The sink these benchmarks use is load-bearing ───────────────────────────
 //
-// EVERYTHING BELOW MEASURES THE PRODUCTION FUNCTIONS. logPolicyAllow and its
-// siblings are the real emitters applyPolicyDecision calls, so a change that
-// reintroduces an allocation on the request path shows up here and in the gate.
-// The one exception is plLegacyAllowLine, which deliberately freezes the
-// PRE-CHANGE shape so the before/after comparison stays reproducible in-tree on
-// any runner — the convention BenchmarkHTTPForward_LegacyClientPerRequest
-// already follows. It is the baseline, never the thing under test.
+// log.New(io.Discard, …) sets the Logger's isDiscard flag and Logger.output
+// returns on that flag BEFORE calling fmt.Appendf, so a benchmark pointed at
+// io.Discard measures the ARGUMENT BOXING ONLY and never the formatting. Every
+// benchmark and gate in this file therefore writes to plNullSink — a plain
+// discarding io.Writer that is deliberately NOT io.Discard — so what is
+// measured is what a gateway pays. The difference is not a detail: against
+// io.Discard the pre-change POLICY_ALLOW line measured 415 ns/op; against a
+// real sink it measured 1240.
+//
+// That blind spot is why the fmt cost survived the previous pass over these
+// same functions (PR #1256, which removed two of ten allocations and measured
+// the remainder against io.Discard). DO NOT point these at io.Discard again.
+//
+// ── What the current shape replaced ─────────────────────────────────────────
+//
+// Two frozen shapes are kept here as oracles, and both are baselines, never the
+// thing under test:
+//
+//   plLegacy*   the shape before PR #1256: pri rendered via
+//               strings.ReplaceAll(fmt.Sprintf("%d", …), "\n", "") and the rule
+//               name sanitized twice.
+//   plFmt*      the shape before THIS change: one logger.Printf per branch with
+//               the format string verbatim as it stood.
+//
+// plFmt* is what TestPolicyDecisionLine_MatchesFrozenFmtShapes compares the
+// production emitters against, byte for byte, so the equivalence claim rests on
+// a verbatim copy of the replaced code rather than on a re-description of it.
+//
+// EVERYTHING ELSE HERE MEASURES THE PRODUCTION FUNCTIONS — logPolicyAllow and
+// its siblings are the real emitters applyPolicyDecision calls, so a change
+// that reintroduces fmt or an allocation on the request path shows up here and
+// in the gate.
 //
 //	go test -run '^$' -bench 'BenchmarkPolicyDecisionLine' -benchmem -count=6 .
 
@@ -27,6 +47,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -90,19 +112,176 @@ func plCurrentAllowLine(rule string, priority int) {
 }
 
 // plSwapLogger points the package logger at w and returns a restore func.
-// Benchmarks send it to io.Discard so they measure argument construction and
-// formatting — the work the request goroutine actually performs — without the
-// log sink's I/O, which is asynchronous in production anyway (internal/logsink).
 func plSwapLogger(w io.Writer) func() {
 	prev := logger
 	logger = log.New(w, "", 0)
 	return func() { logger = prev }
 }
 
+// plNullSink discards every write, like io.Discard, while being a DIFFERENT
+// type — which is the entire point. log.New special-cases io.Discard by value
+// and sets the Logger's isDiscard flag, and Logger.output returns on that flag
+// before it formats anything, so benchmarking through io.Discard measures the
+// argument boxing and skips fmt entirely. Writing through an ordinary writer
+// exercises the same code path a production sink does (internal/logsink, whose
+// Write is a channel send) minus the I/O.
+type plNullSink struct{}
+
+func (plNullSink) Write(p []byte) (int, error) { return len(p), nil }
+
+// plBenchWriter is the writer plSwapLoggerNull installs. It is a variable so
+// TestBenchGate_PolicyLogSinkIsNotIoDiscard can substitute a counting writer
+// and prove that the swap really routes through it — i.e. that the benchmarks
+// are formatting and writing, not short-circuiting on log's isDiscard flag.
+// Checking the TYPE of plNullSink instead would not catch a plSwapLoggerNull
+// that hardcodes io.Discard past it.
+var plBenchWriter io.Writer = plNullSink{}
+
+// plSwapLoggerNull is what every benchmark and gate in this file uses.
+func plSwapLoggerNull() func() { return plSwapLogger(plBenchWriter) }
+
+// ── The frozen fmt shapes (oracles for THIS change) ─────────────────────────
+//
+// Verbatim copies of the five logger.Printf calls as they stood immediately
+// before the hand-appended emitters replaced them, format strings included.
+// They are the oracle the differential test compares production against, and
+// the baseline the before/after benchmarks measure against. Nothing else may
+// call them.
+
+const (
+	plFmtAllowFmt       = "POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}"
+	plFmtDropFmt        = "POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}"
+	plFmtBlockFmt       = "POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}"
+	plFmtRedirectFmt    = "POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}"
+	plFmtDefaultDenyFmt = "POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}"
+)
+
+func plFmtAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plFmtAllowFmt,
+		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+func plFmtDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plFmtDropFmt,
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+func plFmtBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plFmtBlockFmt,
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+func plFmtRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plFmtRedirectFmt,
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+func plFmtDefaultDeny(clientIP, method, host, reqID, identity string) {
+	logger.Printf(plFmtDefaultDenyFmt, clientIP, method, sanitizeLog(host), reqID, sanitizeLog(identity))
+}
+
+// plFmtCurrentAllowLine is the frozen fmt allow line with the standard arguments.
+func plFmtCurrentAllowLine(rule string, priority int) {
+	plFmtAllow(rule, priority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
+}
+
+// ── Long-but-plausible arguments ────────────────────────────────────────────
+//
+// A descriptive rule name, a deep subdomain, an email identity and a full
+// condition list: ~390 bytes of line, the shape that decides whether the
+// emitter's stack buffer is big enough to keep the whole thing at one
+// allocation. Nothing exotic — every field is something a real deployment
+// configures.
+var plLongArgs = struct{ rule, host, cond, identity string }{
+	rule:     "corp-saas-allow-with-a-fairly-long-descriptive-rule-name",
+	host:     "very-long-subdomain-name.department.region.example-corporation.com",
+	cond:     "fqdn,category,geo,schedule,source-cidr,identity-group,time-window",
+	identity: "firstname.lastname+tag@department.example-corporation.co.uk",
+}
+
 // ── Before vs after ─────────────────────────────────────────────────────────
+//
+// Three shapes, all timed in the same run on the same hardware so the
+// comparison is self-contained and needs no re-baselining per runner:
+// _Legacy (pre-#1256), _Fmt (the logger.Printf shape this change replaced) and
+// _Current (production).
+
+func BenchmarkPolicyDecisionLine_Fmt(b *testing.B) {
+	defer plSwapLoggerNull()()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		plFmtCurrentAllowLine(plRule, plPriority)
+	}
+}
+
+func BenchmarkPolicyDecisionLine_FmtParallel(b *testing.B) {
+	defer plSwapLoggerNull()()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			plFmtCurrentAllowLine(plRule, plPriority)
+		}
+	})
+}
+
+// The long-value shape: the emitter's stack buffer must absorb it without
+// spilling to a heap regrow, and the fmt shape's per-argument cost grows with
+// it while the hand-appended one does not.
+
+func BenchmarkPolicyDecisionLine_FmtLong(b *testing.B) {
+	defer plSwapLoggerNull()()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		plFmtAllow(plLongArgs.rule, 4242, plArgs.clientIP, plArgs.method, plLongArgs.host, plLongArgs.cond, plArgs.reqID, plLongArgs.identity)
+	}
+}
+
+func BenchmarkPolicyDecisionLine_CurrentLong(b *testing.B) {
+	defer plSwapLoggerNull()()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logPolicyAllow(plLongArgs.rule, 4242, plArgs.clientIP, plArgs.method, plLongArgs.host, plLongArgs.cond, plArgs.reqID, plLongArgs.identity)
+	}
+}
+
+// The quoting helper on its own: two of these run per allow line, and they were
+// the largest remaining item once fmt was gone.
+
+func BenchmarkPolicyQuote_Fast(b *testing.B) {
+	buf := make([]byte, 0, 128)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = appendQuotedLogValue(buf[:0], plHost)
+	}
+}
+
+func BenchmarkPolicyQuote_StrconvQuote(b *testing.B) {
+	buf := make([]byte, 0, 128)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = strconv.AppendQuote(buf[:0], plHost)
+	}
+}
+
+func BenchmarkPolicyDecisionLine_DefaultDeny(b *testing.B) {
+	defer plSwapLoggerNull()()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logPolicyDefaultDeny(plArgs.clientIP, plArgs.method, plArgs.host, plArgs.reqID, plArgs.identity)
+	}
+}
 
 func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLoggerNull()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -111,7 +290,7 @@ func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLoggerNull()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -128,7 +307,7 @@ func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
 // so the comparison stays honest.
 
 func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLoggerNull()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -139,7 +318,7 @@ func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLoggerNull()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -155,7 +334,7 @@ func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
 // beaconing flood, so they are measured too rather than assumed to match.
 
 func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLoggerNull()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -164,7 +343,7 @@ func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Drop(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLoggerNull()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -191,6 +370,113 @@ func plCapture(fn func()) string {
 	fn()
 	restore()
 	return buf.String()
+}
+
+// TestPolicyDecisionLine_MatchesFrozenFmtShapes is the half that outranks every
+// benchmark in this file.
+//
+// The five decision lines are consumed by SIEM forwarders and log parsers, so
+// replacing fmt with hand-appended bytes is acceptable ONLY if the emitted
+// bytes are unchanged. Each production emitter is compared against a verbatim
+// copy of the logger.Printf call it replaced — not against a re-description of
+// the format — over the inputs where a hand-rolled formatter can plausibly
+// diverge from fmt:
+//
+//   - %q: quotes, backslashes, control bytes, DEL, non-ASCII, invalid UTF-8,
+//     and the empty string (the fast path in appendQuotedLogValue);
+//   - %d: zero, negative, and the int boundaries (strconv.AppendInt vs fmt);
+//   - lines long enough to overflow the emitter's stack buffer, where append
+//     switches to a heap regrow mid-line.
+func TestPolicyDecisionLine_MatchesFrozenFmtShapes(t *testing.T) {
+	priorities := []int{0, 1, 7, 42, 100, 999, 2147483647, -1, -32768, math.MinInt, math.MaxInt}
+	values := []string{
+		"corp-saas-allow",
+		"",
+		"rule with spaces",
+		"rule\nwith\nnewlines",
+		"rule\rwith\rCR",
+		"rule\twith\ttabs",
+		"rule\x00with\x1bcontrol",
+		"del\x7fbyte",
+		"ünïcode-rule-名前",
+		`quotes"and\backslashes`,
+		"invalid\xffutf8\xfe",
+		"\xed\xa0\x80surrogate",
+		strings.Repeat("long-", 60), // overflows the emitter's stack buffer
+	}
+	for _, v := range values {
+		for _, pri := range priorities {
+			cases := map[string][2]func(){
+				"allow": {
+					func() { plFmtAllow(v, pri, plArgs.clientIP, plArgs.method, v, v, plArgs.reqID, v) },
+					func() { logPolicyAllow(v, pri, plArgs.clientIP, plArgs.method, v, v, plArgs.reqID, v) },
+				},
+				"drop": {
+					func() { plFmtDrop(v, pri, plArgs.clientIP, v, v, plArgs.reqID, v) },
+					func() { logPolicyDrop(v, pri, plArgs.clientIP, v, v, plArgs.reqID, v) },
+				},
+				"block": {
+					func() { plFmtBlock(v, pri, plArgs.clientIP, v, v, plArgs.reqID, v) },
+					func() { logPolicyBlock(v, pri, plArgs.clientIP, v, v, plArgs.reqID, v) },
+				},
+				"redirect": {
+					func() { plFmtRedirect(v, pri, plArgs.clientIP, v, v, v, plArgs.reqID, v) },
+					func() { logPolicyRedirect(v, pri, plArgs.clientIP, v, v, v, plArgs.reqID, v) },
+				},
+				"default_deny": {
+					func() { plFmtDefaultDeny(plArgs.clientIP, plArgs.method, v, plArgs.reqID, v) },
+					func() { logPolicyDefaultDeny(plArgs.clientIP, plArgs.method, v, plArgs.reqID, v) },
+				},
+			}
+			for name, pair := range cases {
+				want, got := plCapture(pair[0]), plCapture(pair[1])
+				if want != got {
+					t.Errorf("%s diverged for value=%q pri=%d:\n  fmt: %q\n  got: %q", name, v, pri, want, got)
+				}
+			}
+		}
+	}
+}
+
+// TestAppendQuotedLogValue_MatchesStrconvQuote pins the fast path against the
+// function it shortcuts, over the boundary bytes randomness is least likely to
+// produce on its own. FuzzAppendQuotedLogValue covers the rest of the space.
+func TestAppendQuotedLogValue_MatchesStrconvQuote(t *testing.T) {
+	cases := []string{
+		"", " ", "~", "plain-ascii", "files.example.com",
+		"\x1f", "\x20", "\x7e", "\x7f", "\x80", "\xff",
+		`"`, `\`, `a"b`, `a\b`, `""`,
+		"tab\there", "nl\nhere", "nul\x00here",
+		"ünïcode", "名前", "emoji😀", "\xed\xa0\x80", "\xfe\xff",
+		strings.Repeat("x", 300),
+	}
+	for _, s := range cases {
+		got := string(appendQuotedLogValue(nil, s))
+		if want := strconv.Quote(s); got != want {
+			t.Errorf("appendQuotedLogValue(%q) = %q, strconv.Quote = %q", s, got, want)
+		}
+	}
+	// Appending must preserve whatever was already in the buffer, on both paths.
+	for _, s := range []string{"plain", "needs\x00escape"} {
+		got := string(appendQuotedLogValue([]byte("prefix:"), s))
+		if want := "prefix:" + strconv.Quote(s); got != want {
+			t.Errorf("append onto a non-empty buffer: got %q want %q", got, want)
+		}
+	}
+}
+
+// FuzzAppendQuotedLogValue is the general equivalence proof: for ANY string the
+// fast path must produce exactly what strconv.Quote produces, since that is
+// what fmt's %q produced before.
+func FuzzAppendQuotedLogValue(f *testing.F) {
+	for _, seed := range []string{"", "corp-saas-allow", `a"b\c`, "ünï-名前", "\xff\xfe", "\x7f\x20", strings.Repeat("q", 200)} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if got, want := string(appendQuotedLogValue(nil, s)), strconv.Quote(s); got != want {
+			t.Fatalf("s=%q: appendQuotedLogValue = %q, strconv.Quote = %q", s, got, want)
+		}
+	})
 }
 
 // TestPolicyDecisionLine_RenderIsByteIdentical is the half that outranks every
