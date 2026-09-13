@@ -328,7 +328,7 @@ func (c *mcpToolTrustCoordinator) reconcile() {
 //
 // ok is false when no store or no inventory is published; the caller then has no trust state to be
 // coherent with and decides for itself (the activation resolver fails closed).
-func (c *mcpToolTrustCoordinator) reconcileAndSnapshot() (*registry.Snapshot, *catalog.Snapshot, bool) {
+func (c *mcpToolTrustCoordinator) reconcileAndSnapshot() (servers *registry.Snapshot, tools *catalog.Snapshot, ok bool) {
 	c.deriveMu.Lock()
 	defer c.deriveMu.Unlock()
 	c.reconcileLocked()

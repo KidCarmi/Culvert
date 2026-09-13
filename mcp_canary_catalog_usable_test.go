@@ -693,7 +693,18 @@ func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
 
 	// And the capture itself still reads each source exactly once, under the lock. Without this
 	// half the wall could be satisfied by a helper that re-reads internally.
-	var cap *ast.FuncDecl
+	assertCoherentCaptureReadsEachSourceOnce(t)
+}
+
+// assertCoherentCaptureReadsEachSourceOnce carries the second half of the wall above: the
+// resolver taking exactly one capture is worth nothing if the capture itself re-reads a
+// source internally, so the same one-read-per-source invariant is asserted on
+// reconcileAndSnapshot. Split out of the gate only to keep that gate under the cognitive
+// complexity bound; it is not independently meaningful and has no independent caller.
+func assertCoherentCaptureReadsEachSourceOnce(t *testing.T) {
+	t.Helper()
+
+	var captureFn *ast.FuncDecl
 	tfset := token.NewFileSet()
 	tfile, err := parser.ParseFile(tfset, "mcp_tooltrust.go", nil, 0)
 	if err != nil {
@@ -701,28 +712,30 @@ func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
 	}
 	for _, d := range tfile.Decls {
 		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "reconcileAndSnapshot" {
-			cap = f
+			captureFn = f
 			break
 		}
 	}
-	if cap == nil {
+	if captureFn == nil {
 		t.Fatal("wall is vacuous: reconcileAndSnapshot not found (it was renamed or moved)")
 	}
 	capCounts := map[string]int{}
-	ast.Inspect(cap, func(n ast.Node) bool {
+	ast.Inspect(captureFn, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-			if sel.Sel.Name == "Current" {
-				if id, ok := sel.X.(*ast.Ident); ok {
-					capCounts[id.Name+".Current"]++
-				}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if sel.Sel.Name == "Current" {
+			if id, ok := sel.X.(*ast.Ident); ok {
+				capCounts[id.Name+".Current"]++
 			}
-			if sel.Sel.Name == "Lock" {
-				capCounts["Lock"]++
-			}
+		}
+		if sel.Sel.Name == "Lock" {
+			capCounts["Lock"]++
 		}
 		return true
 	})

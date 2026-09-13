@@ -785,9 +785,9 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 // its seeded Quarantined floor — the row could only be unmet anyway. Returning false rather than
 // falling back to an uncoordinated read keeps ONE path into this decision, so the coherence
 // argument above cannot be bypassed by a future caller taking the other branch.
-func mcpToolTrustReconcileSnapshotFor() (*catalog.Snapshot, *registry.Snapshot, bool) {
-	reg, cat, ok := mcpToolTrustReconcileSnapshot()
-	if !ok {
+func mcpToolTrustReconcileSnapshotFor() (snap *catalog.Snapshot, servers *registry.Snapshot, ok bool) {
+	reg, cat, composed := mcpToolTrustReconcileSnapshot()
+	if !composed {
 		return nil, nil, false
 	}
 	return cat, reg, true
