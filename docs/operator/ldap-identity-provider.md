@@ -93,6 +93,16 @@ Authority rules (durable cutover):
   cutover sentinel, so retiring the proxy backend can never reopen the
   first-time-setup gate — including on appliances with no local admin
   account.
+- **Confirm fence (FE-6A.2).** `GET /api/idp/legacy-ldap` publishes
+  `cutoverConfirmValue` (the legacy directory URL) while the block is present.
+  Every cutover-bearing write — `POST /api/idp` or `PUT /api/idp/{id}` that
+  enables an LDAP profile on a node whose block is present and not yet
+  retired — must carry `?operationId=<uuid>` (`428 operation_id_required`)
+  and `?cutoverConfirm=<cutoverConfirmValue>` (`428 cutover_confirm_required`
+  or `409 confirm_mismatch`, both with `current.confirmValue`). Both are
+  checked before anything is written; a wrong value retires nothing. The
+  cutover through PUT is recorded in the operation ledger (`idp.update`) and
+  replays like a create. See `idp-registry-recovery.md` §4.
 - **Break-glass revert** (explicit, offline, audited by the surrounding
   change control — there is deliberately no API): stop Culvert, remove the
   `"legacy_ldap_retired"` field from `/data/admin_settings.json`, remove or

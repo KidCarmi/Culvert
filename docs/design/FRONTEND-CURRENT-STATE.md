@@ -9,7 +9,13 @@
   generated per-method inventory is `api/route-classification.yaml`.
   FE-6A.1 note (2026-09-12): the Identity Providers (`/app/objects/identity-providers`, viewer
   read) and Administrators (`/app/administrators`, admin read) READ surfaces have migrated
-  (parity rows FE-V27/FE-V37); every mutation of both stays on the legacy console until FE-6A.2.
+  (parity rows FE-V27/FE-V37). FE-6A.2 (2026-09-13): both WRITE surfaces have migrated too —
+  fenced create/update/delete, the LDAP directory test, OIDC discovery, legacy import, the
+  server-confirmed legacy-LDAP cutover, registry repair and operation recovery for IdPs;
+  roster create/update/delete, lockout clear and the self-service password change for
+  administrators (every mutation admin-only; the shell's "Change password" for every role).
+  Operator runbooks: `docs/operator/idp-registry-recovery.md`,
+  `docs/operator/administrator-account-recovery.md`.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`
   (per-feature matrix), `FRONTEND-SECURITY-CONTRACT.md` (invariants),
   `FRONTEND-MIGRATION-PLAN.md` (program)
