@@ -2228,7 +2228,11 @@ usability.
 | ONE read of each source per decision | `TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` — the verdict is derived from exactly one catalog snapshot and one registry snapshot, and `loadTarget` (which re-reads both) is not called, so a republish landing mid-scan cannot pair an old Usable record with newer ownership (Codex P2 round 2) |
 | The registry/catalog PAIR is detected, not assumed | `TestCatalogUsable_RepinWindowIsNotUsable` — `Registry.Repin` and the catalog re-ingest that follows it are SEPARATE publications, so between them the registry pins I2 while the record describes I1. One snapshot of each source (row above) is NECESSARY AND NOT SUFFICIENT: it makes the decision consistent AS A READ and cannot reconcile two publications that disagree, because the inconsistency is in the published state rather than in the reading of it. The resolver therefore compares `rec.Fingerprint.Identity` against `srv.PinnedIdentity` — `loadTarget`'s own formula, over the two snapshots already held, so no read is added. Without it the row reports met for a target whose every request the runtime refuses as `AnchorLost`/`RegistryPinDiverged` (`TestReviewedBinding_C18`) — a Canary that activates and cannot execute (Codex P2 round 6). `TestCatalogUsable_CoherentPairStillUsable` is the control, since the cheapest way to pass is to refuse everything |
 | `srv.Usable()` — LOAD-BEARING, and the only check rejecting one interleaving | This row previously said UNREACHABLE. That was WRONG (Codex P2 round 7). `TestCatalogUsable_DisabledServerIsNotUsable` does pass with and without the line, but it is SEQUENTIAL: its disable lands before the reconcile, which demotes the record, so the eligibility check rejects it and this guard is never reached. The registry publishes INDEPENDENTLY of the resolver, so a disable — or, sharply, a mismatching `Registry.VerifyIdentity`, whose branch clears `Enabled` but DOES NOT TOUCH `PinnedIdentity` (`registry.go:136-148`) — can instead land AFTER `mcpToolTrustReconcile()` returns and BEFORE `reg.Current()` is read three lines later. In that window the record is still `Usable`, the tenant still owns the server, the digest still matches, and the identity comparison above still passes because the pin never moved: `srv.Usable()` is the ONLY check that rejects it. Reaching it behaviourally needs a production seam interposing between the reconcile and the registry read purely to let a test drive a race — the worse trade, and the same call made for the snapshot race in round 2 — so it is pinned by `TestCatalogUsable_ServerUsabilityGuardIsPresent` and campaign M18 |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 18 mutations, 18 caught, 0 survived, 0 skipped |
+| The trust-store/catalog pair is PREVENTED, not detected | `TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` (structural) + M19. `Revoke` holds `deriveMu` across `store.Revoke` AND the catalog demotion so the pair moves together; a reader that reconciles, RELEASES the lock, then reads `cat.Current()` can be scheduled into the middle of that section and see a durably-revoked approval whose tool is still `catalog.Usable` — every other check passes and the row reports met (Codex P2 round 8). `mcpToolTrust.reconcileAndSnapshot()` now reconciles and captures BOTH snapshots under ONE hold. **TWO PAIRS, TWO REMEDIES:** the registry/catalog pair CANNOT be closed by locking — the inconsistency is in the published state — so it is DETECTED; this pair CAN be, because one writer owns both halves, so it is PREVENTED. Which remedy applies depends on whether a single writer owns the pair |
+| The coherence gate is structural, and the behavioural one is labelled as a control | `TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation` proves liveness only — no deadlock, row not emptied. It is NOT the coherence gate: `mcpToolTrustReconcile` also takes `deriveMu`, so the PRE-FIX shape blocks identically. Measured, not assumed — the first version of it was written as the proof and PASSED against the reintroduced defect. The structural wall was verified to discriminate ("the resolver reads the inventory directly 2 time(s)") |
+| The read-path seams cannot be half-wired | `installToolTrustReadHooks` / `clearToolTrustReadHooks` install and clear BOTH seams together. Installing only the reconcile hook leaves the coherent seam at its fail-closed default, which does not error — it silently makes this row unsatisfiable. Test wiring mirrors production by calling these rather than assigning the vars |
+| An interrupted campaign restores its mutation | The harness records the file under mutation before the first edit and clears it after the revert, with an EXIT/INT/TERM trap restoring whatever is still recorded (Codex P2 round 8). Verified by killing a live run mid-mutation and watching the file come back clean. SIGKILL cannot be trapped, so the residual is bounded by the pre-existing dirty-tree refusal: a stranded mutation stops the NEXT run rather than being silently re-measured |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 19 mutations, 19 caught, 0 survived, 0 skipped |
 
 **What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
 run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
@@ -2253,11 +2257,11 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores **18 caught, 0 survived, 0 skipped** on the closing head. M15 through
-M18 were added later, for the four defects adversarial review found on the PR itself (passive
-expiry; a decision straddling two snapshots; the registry repin window; and a guard this ledger had
-wrongly written off as unreachable) — all real, and none reachable by the twelve cases the
-specification enumerated.
+The repaired campaign scores **19 caught, 0 survived, 0 skipped** on the closing head. M15 through
+M19 were added later, for the five defects adversarial review found on the PR itself (passive
+expiry; a decision straddling two snapshots; the registry repin window; a guard this ledger had
+wrongly written off as unreachable; and a snapshot capture that left the derivation section) — all
+real, and none reachable by the twelve cases the specification enumerated.
 
 **That score was recorded here once before it had been measured, and it was wrong.** After M16 was
 added, this row was written as 16/16 by extrapolation — every prior run had been clean and the new
@@ -2302,6 +2306,21 @@ deleted a guard as vacuous that was not, and then declared `srv.Usable()` unreac
 last line of defence for the reconcile/registry-read window. *"I measured it"* was true both times and
 still produced a false claim, because a measurement over one interleaving says nothing about the
 others.
+
+**A wall can pin a SPELLING instead of an invariant, and only a mutation found it.** Re-anchoring
+M16 after the round-8 fix produced a form that reads the inventory through a variable named `rg`
+rather than `reg` — and the snapshot wall, which counted `Current()` calls keyed on the RECEIVER'S
+IDENTIFIER, scored ZERO violations against a mutation that reintroduces exactly the defect it exists
+to reject. It now counts every `Current()` inside the resolver regardless of receiver name, and any
+`sharedInventory()` call. The weaker wall passed its own tests and would have shipped; what exposed
+it was being forced to re-express a mutation whose target had moved.
+
+**Sweep the whole campaign after a code change, not one run at a time.** Two consecutive runs each
+burned a full campaign to surface a single SKIP (M11, then M15). Checking every mutation's pattern
+against the current source at once found both remaining drifts plus one false positive in a few
+seconds. The running tally of targets silently moved is M08, M09, M16, M11, M15 and M16 again —
+**five of six moved by this PR's own fixes**, which is why the rule is to re-run everything after any
+change to the code OR the campaign.
 
 **Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
 policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
