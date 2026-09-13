@@ -276,7 +276,7 @@ run_mutation M11 \
   'the resolver reports the fact satisfied when no inventory is published (fail-open)' \
   'TestCatalogUsable_AbsentInventoryFailsClosed' \
   . "$PREFLIGHT" \
-  's/\tif reg == nil \|\| cat == nil \{\n\t\treturn false\n\t\}/\tif reg == nil || cat == nil {\n\t\treturn true\n\t}/'
+  's/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)\n\tif !ok \{\n\t\treturn false\n\t\}/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor()\n\tif !ok {\n\t\treturn true\n\t}/'
 
 # M12 — AUTHORITY COLLAPSE. ApproveLive gains the promotion ApproveShadow performs, so a
 # live_execution approval makes a tool catalog.Usable. This is §2's central rule: the two approvals
