@@ -42,6 +42,8 @@ following is discarded, not treated as a pass:
 | Discarded because | Counter (`reason=` label) |
 |---|---|
 | the signed response is about a **different certificate** | `not_for_certificate` |
+| the signer is not an RFC 6960 authorized responder for the issuer (most importantly, a certificate signing a verdict about itself) | `unauthorized_responder` |
+| the response could not be parsed at all — unintelligible DER, a bad signature, an HTML error page (an ordinary broken responder, not an attack signal) | `malformed` |
 | the response is outside its `ThisUpdate`/`NextUpdate` window | `stale` |
 | the responder answered `unknown` — the issuer does not recognise the certificate | `unknown_status` |
 | the responder URL was refused before any request (bad scheme, private address) | `responder_blocked` |
