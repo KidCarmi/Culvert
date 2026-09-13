@@ -314,7 +314,7 @@ run_mutation M15 \
   'the resolver reads the catalog without materializing expiry first' \
   'TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick' \
   . "$PREFLIGHT" \
-  's/\tmcpToolTrustReconcile\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)/\treg, cat := mcpInventory.sharedInventory()/'
+  's/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)\n\tif !ok \{\n\t\treturn false\n\t\}/\trg, ct := mcpInventory.sharedInventory()\n\tif rg == nil || ct == nil {\n\t\treturn false\n\t}\n\tsnap := ct.Current()\n\tservers := rg.Current()/'
 
 # M16 — THE DECISION STRADDLES TWO SNAPSHOTS. Resolving ownership through loadTarget re-reads
 # cat.Current() AND reg.Current(), so a republish landing mid-scan pairs an old Usable F1 record
@@ -336,8 +336,7 @@ run_mutation M16 \
   'the resolver re-reads the registry snapshot inside the scan' \
   'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
   . "$PREFLIGHT" \
-  's/\tservers := reg\.Current\(\)/\t_ = reg.Current()/' \
-  's/\t\t\tsrv, sok := servers\.Get\(registry\.ServerID\(st\.Server\)\)/\t\t\tsrv, sok := reg.Current().Get(registry.ServerID(st.Server))/'
+  's/\t\t\tsrv, sok := servers\.Get\(registry\.ServerID\(st\.Server\)\)/\t\t\t_ = servers\n\t\t\trg, _ := mcpInventory.sharedInventory()\n\t\t\tsrv, sok := rg.Current().Get(registry.ServerID(st.Server))/'
 
 # M17 — THE REPIN WINDOW IS NOT DETECTED. Registry.Repin and the catalog re-ingest that follows it
 # are SEPARATE publications, so between them the registry pins I2 while the catalog record describes

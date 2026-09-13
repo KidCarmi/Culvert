@@ -653,9 +653,16 @@ func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
 		}
 		switch sel.Sel.Name {
 		case "Current":
-			if id, ok := sel.X.(*ast.Ident); ok {
-				counts[id.Name+".Current"]++
-			}
+			// Counted by NAME-INDEPENDENT key. Keying on the receiver's identifier
+			// (reg.Current / cat.Current) made the wall evadable by renaming the variable:
+			// campaign M16 rewrote the scan to read through `rg` and the wall scored zero
+			// violations. A direct snapshot read is a direct snapshot read whatever it is
+			// called, so every Current() inside this function counts.
+			counts["anyCurrent"]++
+		case "sharedInventory":
+			// Reaching the inventory at all inside the resolver means a read outside the
+			// coherent capture, whether or not Current() is called on the result here.
+			counts["sharedInventory"]++
 		case "loadTarget":
 			// loadTarget re-reads BOTH current snapshots internally, so one call reintroduces
 			// the whole defect however the surrounding reads are counted.
@@ -674,7 +681,7 @@ func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
 	// reconcileAndSnapshot, under one hold of deriveMu, so the capture cannot straddle another
 	// writer's critical section. The invariant is unchanged — exactly one read of each source per
 	// decision — so the wall follows it into both functions rather than being relaxed.
-	if n := counts["cat.Current"] + counts["reg.Current"]; n != 0 {
+	if n := counts["anyCurrent"] + counts["sharedInventory"]; n != 0 {
 		t.Fatalf("SECURITY: the resolver reads the inventory directly %d time(s). Both snapshots "+
 			"must come from the ONE coherent capture (mcpToolTrustReconcileSnapshot), or the read "+
 			"can land inside Revoke's critical section and see a revoked approval still Usable", n)
