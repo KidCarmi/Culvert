@@ -292,12 +292,21 @@ run_mutation M15 \
 # first created by DELETING the cross-check as "vacuous": same catalog, different reads.)
 #
 # --compile-wall is NOT used: the mutation compiles, and the structural gate is what rejects it.
+# RE-ANCHORED (round 6): the original form replaced the ownership lookup with loadTarget AND
+# deleted `servers := reg.Current()`, which stopped compiling once the repin/usable checks below
+# began using srv — so it reported NOT PROVEN and the campaign proved nothing about this gate.
+# That is the third time on this PR that a code change silently moved a mutation's target (M08's
+# unused-variable trap, M09 after the single-snapshot fix, now M16), and a NOT-PROVEN mutation is
+# the same silent failure as a SKIP.
+#
+# The re-anchored form keeps srv defined and expresses the defect directly: a per-iteration
+# reg.Current() IS the second read, so the decision can again straddle two snapshots.
 run_mutation M16 \
-  'the resolver resolves ownership through a second snapshot read' \
+  'the resolver re-reads the registry snapshot inside the scan' \
   'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
   . "$PREFLIGHT" \
-  's/\t\t\tsrv, sok := servers\.Get\(registry\.ServerID\(st\.Server\)\)\n\t\t\tif !sok \|\| string\(srv\.OwnerScope\) != tenant \{/\t\t\tti := mcpToolTrust.loadTarget(st.Server, st.Name)\n\t\t\tif !ti.found || ti.target.Tenant != tenant {/' \
-  's/\tservers := reg\.Current\(\)\n//'
+  's/\tservers := reg\.Current\(\)/\t_ = reg.Current()/' \
+  's/\t\t\tsrv, sok := servers\.Get\(registry\.ServerID\(st\.Server\)\)/\t\t\tsrv, sok := reg.Current().Get(registry.ServerID(st.Server))/'
 
 # M17 — THE REPIN WINDOW IS NOT DETECTED. Registry.Repin and the catalog re-ingest that follows it
 # are SEPARATE publications, so between them the registry pins I2 while the catalog record describes
