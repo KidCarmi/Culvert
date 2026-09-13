@@ -173,6 +173,7 @@ printf '============================================================\n'
 READINESS=internal/mcp/canary/readiness.go
 FPRINT=internal/mcp/catalog/fingerprint.go
 PREFLIGHT=mcp_canary_preflight.go
+TOOLTRUST=mcp_tooltrust.go
 ROLLOUT=mcp_rollout.go
 TRUST=mcp_tooltrust.go
 POLICYENG=internal/mcp/policy/engine.go
@@ -385,6 +386,20 @@ run_mutation M19 \
   'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
   . "$PREFLIGHT" \
   's/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)\n\tif !ok \{\n\t\treturn false\n\t\}/\tmcpToolTrustReconcile()\n\treg, cat := mcpInventory.sharedInventory()\n\tif reg == nil || cat == nil {\n\t\treturn false\n\t}\n\tsnap := cat.Current()\n\tservers := reg.Current()/'
+
+# M20 — THE CAPTURE UNLOCKS BEFORE IT CAPTURES. This is M19's defect one layer in, and it is the
+# shape that defeated the FIRST version of the M19 gate: reconcileAndSnapshot still takes deriveMu
+# exactly once and still reads each source exactly once, so a wall counting calls sees nothing
+# wrong — while Revoke can persist a revoked approval in the window between the unlock and the two
+# Current() reads, leaving the catalog reporting the tool Usable. The gate therefore asserts the
+# CRITICAL SECTION (deriveMu by name, unlock DEFERRED, no bare unlock) rather than call counts: a
+# deferred unlock runs after the return expression is evaluated, so both captures are inside the
+# section by construction. (Codex P2 round 10, PR #1378 — raised against my own round-8 gate.)
+run_mutation M20 \
+  'the coherent capture releases deriveMu before reading either snapshot' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tc\.deriveMu\.Lock\(\)\n\tdefer c\.deriveMu\.Unlock\(\)\n\tc\.reconcileLocked\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)\n/\tc.deriveMu.Lock()\n\tc.reconcileLocked()\n\treg, cat := mcpInventory.sharedInventory()\n\tc.deriveMu.Unlock()\n/'
 
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"

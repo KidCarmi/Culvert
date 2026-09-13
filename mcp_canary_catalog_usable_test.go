@@ -616,21 +616,7 @@ func catalogPromotionOwners(t *testing.T) map[string][]string {
 // the shape directly.
 
 func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "mcp_canary_preflight.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse mcp_canary_preflight.go: %v", err)
-	}
-	var fn *ast.FuncDecl
-	for _, d := range file.Decls {
-		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "canaryScopedToolsCatalogUsable" {
-			fn = f
-			break
-		}
-	}
-	if fn == nil {
-		t.Fatal("wall is vacuous: canaryScopedToolsCatalogUsable not found (it was renamed or moved)")
-	}
+	fn := findFuncDeclInFile(t, "mcp_canary_preflight.go", "canaryScopedToolsCatalogUsable")
 
 	counts := map[string]int{}
 	ast.Inspect(fn, func(n ast.Node) bool {
@@ -698,29 +684,66 @@ func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
 
 // assertCoherentCaptureReadsEachSourceOnce carries the second half of the wall above: the
 // resolver taking exactly one capture is worth nothing if the capture itself re-reads a
-// source internally, so the same one-read-per-source invariant is asserted on
-// reconcileAndSnapshot. Split out of the gate only to keep that gate under the cognitive
-// complexity bound; it is not independently meaningful and has no independent caller.
+// source internally, or if it drops the derivation lock before it captures.
+//
+// COUNTING AN "ARBITRARY Lock" WAS NOT ENOUGH, and this is the second time on this PR that a
+// wall of mine pinned something weaker than the invariant it advertised (Codex P2 round 10).
+// The first version counted any selector named Lock and any Current(); that shape PASSES
+// against a reconcileAndSnapshot whose unlock is moved ahead of the two captures — one Lock,
+// one read of each source, and the revoke interleaving the whole round-8 fix exists to
+// prevent is fully restored. Verified by building exactly that function and running this
+// gate against it: ok, 0.096s.
+//
+// So the assertion is now about the CRITICAL SECTION, not about call counts: the lock must be
+// deriveMu by name, its unlock must be DEFERRED, and no bare deriveMu.Unlock may appear. A
+// deferred unlock runs after the return expression is evaluated, so both Current() calls are
+// inside the section BY CONSTRUCTION rather than by reading the statement order.
 func assertCoherentCaptureReadsEachSourceOnce(t *testing.T) {
 	t.Helper()
 
-	var captureFn *ast.FuncDecl
-	tfset := token.NewFileSet()
-	tfile, err := parser.ParseFile(tfset, "mcp_tooltrust.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse mcp_tooltrust.go: %v", err)
+	captureFn := findFuncDeclInFile(t, "mcp_tooltrust.go", "reconcileAndSnapshot")
+	shape := inspectCaptureShape(captureFn)
+
+	if shape.catCurrent != 1 || shape.regCurrent != 1 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot reads cat.Current()=%d reg.Current()=%d, want 1 "+
+			"and 1 — the coherent capture must take exactly one snapshot of each source",
+			shape.catCurrent, shape.regCurrent)
 	}
-	for _, d := range tfile.Decls {
-		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "reconcileAndSnapshot" {
-			captureFn = f
-			break
+	if shape.deriveLock != 1 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot takes deriveMu %d time(s), want exactly 1. "+
+			"Without holding the DERIVATION lock (not merely some lock) across the capture, the "+
+			"snapshots can straddle Revoke's critical section", shape.deriveLock)
+	}
+	if shape.deferredDeriveUnlock != 1 || shape.bareDeriveUnlock != 0 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot has %d deferred and %d non-deferred "+
+			"deriveMu.Unlock, want 1 and 0. The unlock MUST be deferred: an unlock placed "+
+			"before the two Current() captures leaves this gate's call counts unchanged while "+
+			"reopening the window in which Revoke persists a revoked approval and the catalog "+
+			"still reports the tool Usable",
+			shape.deferredDeriveUnlock, shape.bareDeriveUnlock)
+	}
+}
+
+// captureShape is what the wall above measures about reconcileAndSnapshot.
+type captureShape struct {
+	catCurrent           int
+	regCurrent           int
+	deriveLock           int
+	deferredDeriveUnlock int
+	bareDeriveUnlock     int
+}
+
+func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
+	deferred := map[*ast.CallExpr]bool{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if d, ok := n.(*ast.DeferStmt); ok && d.Call != nil {
+			deferred[d.Call] = true
 		}
-	}
-	if captureFn == nil {
-		t.Fatal("wall is vacuous: reconcileAndSnapshot not found (it was renamed or moved)")
-	}
-	capCounts := map[string]int{}
-	ast.Inspect(captureFn, func(n ast.Node) bool {
+		return true
+	})
+
+	var shape captureShape
+	ast.Inspect(fn, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -729,26 +752,59 @@ func assertCoherentCaptureReadsEachSourceOnce(t *testing.T) {
 		if !ok {
 			return true
 		}
-		if sel.Sel.Name == "Current" {
+		switch sel.Sel.Name {
+		case "Current":
 			if id, ok := sel.X.(*ast.Ident); ok {
-				capCounts[id.Name+".Current"]++
+				if id.Name == "cat" {
+					shape.catCurrent++
+				}
+				if id.Name == "reg" {
+					shape.regCurrent++
+				}
 			}
-		}
-		if sel.Sel.Name == "Lock" {
-			capCounts["Lock"]++
+		case "Lock":
+			if receiverFieldName(sel) == "deriveMu" {
+				shape.deriveLock++
+			}
+		case "Unlock":
+			if receiverFieldName(sel) != "deriveMu" {
+				return true
+			}
+			if deferred[call] {
+				shape.deferredDeriveUnlock++
+			} else {
+				shape.bareDeriveUnlock++
+			}
 		}
 		return true
 	})
-	if capCounts["cat.Current"] != 1 || capCounts["reg.Current"] != 1 {
-		t.Fatalf("SECURITY: reconcileAndSnapshot reads cat.Current()=%d reg.Current()=%d, want 1 "+
-			"and 1 — the coherent capture must take exactly one snapshot of each source",
-			capCounts["cat.Current"], capCounts["reg.Current"])
+	return shape
+}
+
+// receiverFieldName names the field a method is called on — "deriveMu" for c.deriveMu.Lock().
+// Identifying the mutex is the point: "some lock is held" is not the invariant, "the derivation
+// lock is held" is.
+func receiverFieldName(sel *ast.SelectorExpr) string {
+	inner, ok := sel.X.(*ast.SelectorExpr)
+	if !ok {
+		return ""
 	}
-	if capCounts["Lock"] != 1 {
-		t.Fatalf("SECURITY: reconcileAndSnapshot takes %d locks, want exactly 1 (deriveMu). "+
-			"Without holding it across the capture the snapshots can straddle a writer's section",
-			capCounts["Lock"])
+	return inner.Sel.Name
+}
+
+func findFuncDeclInFile(t *testing.T, filename, funcName string) *ast.FuncDecl {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), filename, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", filename, err)
 	}
+	for _, d := range file.Decls {
+		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == funcName {
+			return f
+		}
+	}
+	t.Fatalf("wall is vacuous: %s not found in %s (it was renamed or moved)", funcName, filename)
+	return nil
 }
 
 // ── the production preflight itself carries the row ──────────────────────────
