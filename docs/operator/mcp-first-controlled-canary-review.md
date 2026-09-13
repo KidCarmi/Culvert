@@ -2251,9 +2251,26 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores 16/16 with no survivors and no skips. M15 and M16 were added later,
-for the two defects adversarial review found on the PR itself (passive expiry; a decision straddling
-two snapshots) — both real, and neither reachable by the twelve cases the specification enumerated.
+The repaired campaign scores **16 caught, 0 survived, 0 skipped** on the closing head. M15 and M16
+were added later, for the two defects adversarial review found on the PR itself (passive expiry; a
+decision straddling two snapshots) — both real, and neither reachable by the twelve cases the
+specification enumerated.
+
+**That score was recorded here once before it had been measured, and it was wrong.** After M16 was
+added, this row was written as 16/16 by extrapolation — every prior run had been clean and the new
+gate had been verified by hand — and the first actual run returned **15 caught, 0 survived, 1
+SKIPPED**. M09 had stopped matching: the round-2 fix replaced the `loadTarget` ownership lookup with
+a direct registry-snapshot read, so the mutation no longer described the code it targeted, and the
+tenant-ownership check had no working proof at that head. It was re-anchored (and written to COMPILE
+— the naive deletion leaves two variables unused, which under the campaign's header rule proves
+nothing) and re-run to the score above.
+
+Two things are worth keeping from that. **A campaign score is a measurement, not a property of the
+suite**: it must be re-run after any change to the code OR the campaign, because the thing that
+silently breaks is the mutation's grip on its target, not the gate. And **the failure mode is a SKIP,
+not a survivor** — a skipped mutation is scored as "nothing to see" by a reader skimming for
+survivors, so `skipped: 0` is as load-bearing as `survived: 0`, which is why the harness exits
+non-zero on either.
 
 **Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
 policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
