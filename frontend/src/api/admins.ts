@@ -167,12 +167,17 @@ const decodeLockout: Decoder<Lockout> = (v, path = "$") => {
 
 export const decodeLockouts: Decoder<Lockouts> = (v, path = "$") => {
   const o = readRecord(v, path);
+  // REQUIRED nullable slice (apiAuthLockouts always emits the key; OpenAPI:
+  // required + nullable): a MISSING key is a decode failure — a malformed
+  // response must never render "No active lockouts" — while `null` stays
+  // the empty slice (correction round 2, D4).
+  if (!("lockouts" in o)) {
+    throw new DecodeError(`${path}.lockouts`, "array or null", undefined);
+  }
   const raw = o["lockouts"];
   return {
     lockouts:
-      raw === undefined || raw === null
-        ? []
-        : readArray(decodeLockout)(raw, `${path}.lockouts`),
+      raw === null ? [] : readArray(decodeLockout)(raw, `${path}.lockouts`),
     generation: field(o, "generation", readNumber, path),
     scope: field(o, "scope", readEnum(["node-local"] as const), path),
   };

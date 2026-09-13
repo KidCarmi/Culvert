@@ -138,6 +138,11 @@ const LEGACY_CUTOVER = {
   baseDn: "dc=legacy",
   bindDn: "cn=svc,dc=legacy",
   bindCredentialConfigured: true,
+  userFilter: "(uid=%s)",
+  requiredGroup: "",
+  startTls: false,
+  tlsSkipVerify: false,
+  cacheTtlSeconds: 300,
   cutoverDurability: "pending_reconciliation",
   cutover: {
     operationId: CUTOVER_ID,

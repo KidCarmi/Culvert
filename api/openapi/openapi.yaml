@@ -2640,33 +2640,55 @@ components:
         requiredGroup: { type: string }
         cacheTtlSeconds: { type: integer }
     LegacyLDAPSummary:
-      type: object
       description: >-
         FE-6A.1 correction — the typed read model of GET /api/idp/legacy-ldap (apiIdPLegacyLDAP). Node-local.
-        When `present` is true the block's non-secret identity (url, baseDn, bindDn, userFilter, requiredGroup,
-        startTls, tlsSkipVerify, cacheTtlSeconds), `active`, `shadowed` and `bindCredentialConfigured` are ALWAYS
-        on the wire — a reader must refuse a present block that omits them; when false none of them is.
-        `cutoverDurability` and `cutover` are always reported (the cutover object only once a cutover happened).
+        A STATE-DEPENDENT UNION on `present` (correction round 2): `present:false` (LegacyLDAPAbsent) carries
+        NONE of the block's facts — a reader must refuse a record that carries any of them; `present:true`
+        (LegacyLDAPPresent) ALWAYS carries every non-secret setting (url, baseDn, bindDn, userFilter,
+        requiredGroup, startTls, tlsSkipVerify, cacheTtlSeconds) plus `active`, `shadowed` and
+        `bindCredentialConfigured` — a reader must refuse a present block that omits any of them.
+        `cutoverDurability` is always reported and `cutover` once a cutover happened, in both states.
         The bind password is never returned.
+      oneOf:
+        - $ref: '#/components/schemas/LegacyLDAPAbsent'
+        - $ref: '#/components/schemas/LegacyLDAPPresent'
+    LegacyLDAPAbsent:
+      type: object
+      description: No legacy YAML `ldap:` block on this node. Only the authority facts are on the wire.
       required: [present, retired, scope, cutoverDurability]
       additionalProperties: false
       properties:
-        present: { type: boolean }
-        active: { type: boolean, description: "present only — the legacy block is the live proxy-auth backend." }
+        present: { type: boolean, enum: [false] }
         retired: { type: boolean, description: "The DURABLE legacy→registry authority cutover has happened." }
-        shadowed: { type: boolean, description: "present only — retired OR an enabled registry LDAP profile exists." }
+        scope: { type: string, enum: [node-local] }
+        cutoverDurability: { $ref: '#/components/schemas/LegacyLDAPCutoverDurability' }
+        cutover: { $ref: '#/components/schemas/LegacyLDAPCutover' }
+    LegacyLDAPPresent:
+      type: object
+      description: A legacy YAML `ldap:` block is configured on this node. Every non-secret setting is always emitted.
+      required: [present, active, retired, shadowed, scope, url, baseDn, bindDn, bindCredentialConfigured, userFilter, requiredGroup, startTls, tlsSkipVerify, cacheTtlSeconds, cutoverDurability]
+      additionalProperties: false
+      properties:
+        present: { type: boolean, enum: [true] }
+        active: { type: boolean, description: "The legacy block is the live proxy-auth backend." }
+        retired: { type: boolean, description: "The DURABLE legacy→registry authority cutover has happened." }
+        shadowed: { type: boolean, description: "retired OR an enabled registry LDAP profile exists." }
         scope: { type: string, enum: [node-local] }
         url: { type: string }
         baseDn: { type: string }
         bindDn: { type: string }
-        bindCredentialConfigured: { type: boolean, description: "present only — derived indicator, never the value." }
-        userFilter: { type: string }
-        requiredGroup: { type: string }
-        startTls: { type: boolean }
-        tlsSkipVerify: { type: boolean }
-        cacheTtlSeconds: { type: integer }
-        cutoverDurability: { type: string, enum: [not_retired, durable, pending_reconciliation], description: "not_retired = no cutover; durable = the cutover sentinel + record are persisted; pending_reconciliation = the cutover is active at runtime but its sentinel save failed (reconciled at the next restart)." }
+        bindCredentialConfigured: { type: boolean, description: "Derived indicator, never the value." }
+        userFilter: { type: string, description: "The user search filter; \"\" is a configured value." }
+        requiredGroup: { type: string, description: "Group membership required for authentication; \"\" = none." }
+        startTls: { type: boolean, description: "StartTLS is negotiated on a plain ldap:// connection." }
+        tlsSkipVerify: { type: boolean, description: "SECURITY-EFFECTIVE — the directory certificate is NOT verified when true." }
+        cacheTtlSeconds: { type: integer, description: "Authentication-result cache TTL in seconds." }
+        cutoverDurability: { $ref: '#/components/schemas/LegacyLDAPCutoverDurability' }
         cutover: { $ref: '#/components/schemas/LegacyLDAPCutover' }
+    LegacyLDAPCutoverDurability:
+      type: string
+      enum: [not_retired, durable, pending_reconciliation]
+      description: "not_retired = no cutover; durable = the cutover sentinel + record are persisted; pending_reconciliation = the cutover is active at runtime but its sentinel save failed (reconciled at the next restart)."
     LegacyLDAPCutover:
       type: object
       description: The durable, operation-identified legacy→registry LDAP authority cutover record (FE-6A.0 R7). Its `operationId` is the cutover's OWN identity; the enabling create's ledger key is that profile's `operationId` provenance on IdPProfileRead.

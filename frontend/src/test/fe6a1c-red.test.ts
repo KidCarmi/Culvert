@@ -304,6 +304,11 @@ describe("C2 missing evidence fails closed", () => {
       baseDn: "dc=x",
       bindDn: "cn=svc",
       bindCredentialConfigured: true,
+      userFilter: "(uid=%s)",
+      requiredGroup: "",
+      startTls: false,
+      tlsSkipVerify: false,
+      cacheTtlSeconds: 300,
     };
     const l = decodeLegacyLDAP(present);
     expect(l.present ? l.bindCredentialConfigured : null).toBe(true);

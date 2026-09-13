@@ -386,23 +386,50 @@ interface LegacyLDAPBase {
   cutover?: LegacyCutover;
 }
 
-/** A present legacy block always states its identity and its indicator. */
+/** The facts apiIdPLegacyLDAP emits ONLY when the YAML block is present —
+ * every one of them, on every present answer (correction round 2, D1/D2). */
+export interface LegacyLDAPPresentFacts {
+  /** the legacy block is the live proxy-auth backend */
+  active: boolean;
+  /** retired OR an enabled registry LDAP profile exists */
+  shadowed: boolean;
+  url: string;
+  baseDn: string;
+  bindDn: string;
+  /** derived write-only-secret indicator — never the value */
+  bindCredentialConfigured: boolean;
+  /** the user search filter ("" is a configured value, not absence) */
+  userFilter: string;
+  /** group membership required for authentication ("" = none) */
+  requiredGroup: string;
+  /** StartTLS is negotiated on a plain ldap:// connection */
+  startTls: boolean;
+  /** SECURITY-EFFECTIVE: the directory's certificate is NOT verified */
+  tlsSkipVerify: boolean;
+  /** authentication-result cache TTL in seconds */
+  cacheTtlSeconds: number;
+}
+
+/** The keys that may appear ONLY on a present block. */
+export const LEGACY_PRESENT_ONLY_KEYS = [
+  "active",
+  "shadowed",
+  "url",
+  "baseDn",
+  "bindDn",
+  "bindCredentialConfigured",
+  "userFilter",
+  "requiredGroup",
+  "startTls",
+  "tlsSkipVerify",
+  "cacheTtlSeconds",
+] as const satisfies readonly (keyof LegacyLDAPPresentFacts)[];
+
+/** A RUNTIME discriminated union: `present:false` carries none of the
+ * present-only facts (a record that does is refused whole), `present:true`
+ * carries every one of them. */
 export type LegacyLDAP = LegacyLDAPBase &
-  (
-    | { present: false }
-    | {
-        present: true;
-        /** the legacy block is the live proxy-auth backend */
-        active: boolean;
-        /** retired OR an enabled registry LDAP profile exists */
-        shadowed: boolean;
-        url: string;
-        baseDn: string;
-        bindDn: string;
-        /** derived write-only-secret indicator — never the value */
-        bindCredentialConfigured: boolean;
-      }
-  );
+  ({ present: false } | ({ present: true } & LegacyLDAPPresentFacts));
 
 // ── Decoders ───────────────────────────────────────────────────────────────
 
@@ -536,6 +563,12 @@ export const decodeIdPList: Decoder<IdPList> = (v, path = "$") => {
     readEvidenceBaseName,
     path,
   );
+  // REQUIRED nullable Go slice (idpListReadModel always emits the key;
+  // OpenAPI: required + nullable): a MISSING key is a decode failure, `null`
+  // is the empty slice (correction round 2, D3).
+  if (!("profiles" in o)) {
+    throw new DecodeError(`${path}.profiles`, "array or null", undefined);
+  }
   const rawProfiles = o["profiles"];
   const degraded = field(o, "degraded", readBoolean, path);
   if (degraded && degradedReason === undefined) {
@@ -552,7 +585,7 @@ export const decodeIdPList: Decoder<IdPList> = (v, path = "$") => {
     ...(quarantineEvidence !== undefined ? { quarantineEvidence } : {}),
     revision: field(o, "revision", readString, path),
     profiles:
-      rawProfiles === undefined || rawProfiles === null
+      rawProfiles === null
         ? []
         : readArray(decodeIdPProfile)(rawProfiles, `${path}.profiles`),
     scope: field(o, "scope", readEnum(["cluster-synced"] as const), path),
@@ -697,7 +730,15 @@ export const decodeLegacyLDAP: Decoder<LegacyLDAP> = (v, path = "$") => {
     ...(cutover !== undefined ? { cutover } : {}),
   };
   const present = field(o, "present", readBoolean, path);
-  if (!present) return { ...base, present: false };
+  if (!present) {
+    // A real union member: an absent block that ALSO carries a present-only
+    // fact is contradictory evidence and is refused whole — never accepted
+    // with the extra facts silently discarded (correction round 2, D1).
+    for (const k of LEGACY_PRESENT_ONLY_KEYS) {
+      forbid(o, k, path, "present:false");
+    }
+    return { ...base, present: false };
+  }
   return {
     ...base,
     present: true,
@@ -712,6 +753,13 @@ export const decodeLegacyLDAP: Decoder<LegacyLDAP> = (v, path = "$") => {
       readBoolean,
       path,
     ),
+    // Always emitted by the handler on a present block; incomplete evidence
+    // is refused, never rendered as a default (correction round 2, D2).
+    userFilter: field(o, "userFilter", readString, path),
+    requiredGroup: field(o, "requiredGroup", readString, path),
+    startTls: field(o, "startTls", readBoolean, path),
+    tlsSkipVerify: field(o, "tlsSkipVerify", readBoolean, path),
+    cacheTtlSeconds: field(o, "cacheTtlSeconds", readNumber, path),
   };
 };
 

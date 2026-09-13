@@ -426,11 +426,42 @@ function LegacyCard({
     items.push(["Active for proxy authentication", yesNo(legacy.active)]);
     items.push(["Shadowed by the registry", yesNo(legacy.shadowed)]);
     items.push(["Directory", <Mono key="url">{legacy.url}</Mono>]);
+    items.push(["Base DN", <Mono key="base">{legacy.baseDn}</Mono>]);
     items.push(["Bind DN", <Mono key="bind">{legacy.bindDn}</Mono>]);
     items.push([
       "Write-only material",
       `Bind credential: ${legacy.bindCredentialConfigured ? "configured" : "not configured"}`,
     ]);
+    // The security-effective legacy configuration, verbatim from the wire
+    // (correction round 2, DP1): "" is a configured value and is said so.
+    items.push([
+      "User filter",
+      legacy.userFilter === "" ? (
+        "(empty)"
+      ) : (
+        <Mono key="filter">{legacy.userFilter}</Mono>
+      ),
+    ]);
+    items.push([
+      "Required group",
+      legacy.requiredGroup === "" ? (
+        "(none)"
+      ) : (
+        <Mono key="group">{legacy.requiredGroup}</Mono>
+      ),
+    ]);
+    items.push(["StartTLS", legacy.startTls ? "Negotiated" : "Not negotiated"]);
+    items.push([
+      "TLS certificate verification",
+      legacy.tlsSkipVerify ? (
+        <StatusBadge key="tls" status="critical">
+          Skipped (tlsSkipVerify)
+        </StatusBadge>
+      ) : (
+        "Enforced"
+      ),
+    ]);
+    items.push(["Result cache TTL", `${String(legacy.cacheTtlSeconds)} s`]);
   }
   items.push(["Legacy authority", legacy.retired ? "Retired" : "Not retired"]);
   items.push(["Authority cutover", durabilityBadge(legacy)]);

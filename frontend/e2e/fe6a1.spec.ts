@@ -623,6 +623,16 @@ test.describe("J4 quarantined registry", () => {
     await expect(main.getByText("Present", { exact: true })).toBeVisible();
     await expect(main.getByText("Not retired").first()).toBeVisible();
     await expect(main.getByText("Bind credential: configured")).toBeVisible();
+    // Correction round 2: the security-effective legacy configuration is
+    // rendered from the wire — this block sets neither start_tls nor
+    // tls_skip_verify, so both are false and must be said so.
+    await expect(main.getByText("TLS certificate verification")).toBeVisible();
+    await expect(main.getByText("Enforced", { exact: true })).toBeVisible();
+    await expect(
+      main.getByText("Not negotiated", { exact: true }),
+    ).toBeVisible();
+    await expect(main.getByText("Skipped (tlsSkipVerify)")).toHaveCount(0);
+    await expect(main.getByText("Result cache TTL")).toBeVisible();
     await expect(
       main.getByText("Operation ledger", { exact: false }).first(),
     ).toBeVisible();
