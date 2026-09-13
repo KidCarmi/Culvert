@@ -52,6 +52,36 @@ declare -a SURVIVORS=()
 
 revert() { git checkout -- "$@" 2>/dev/null || true; }
 
+# IN-FLIGHT MUTATION RECOVERY (Codex P2 round 8, PR #1378).
+#
+# revert runs only AFTER `go test` returns. If the run is interrupted or killed in between --
+# Ctrl-C, a harness reaping the process, the OOM killer, or the disk filling so the toolchain dies
+# -- the shell exits with a DELIBERATELY DEFECTIVE production change still in the worktree. Later
+# builds then compile against the wrong source, and the mutation can be committed by accident.
+#
+# This is not hypothetical: during this PR a run died mid-M12 and left ApproveLive rewritten to call
+# promoteFor -- the exact authority-separation violation the Canary design forbids -- sitting
+# uncommitted in a tracked file. It was noticed by `git status`, not by anything here.
+#
+# So the file under mutation is recorded before the first edit and cleared after the revert, and an
+# EXIT/INT/TERM trap restores whatever is still recorded. EXIT covers the ordinary and `set -e`
+# paths; INT and TERM cover the signals that skip it. SIGKILL cannot be trapped by anyone, which is
+# why the campaign also refuses to start on a dirty tree -- a stranded mutation from a SIGKILLed run
+# stops the next run rather than being silently re-measured.
+MUTATING_FILE=""
+restore_in_flight() {
+  local rc=$?
+  if [ -n "$MUTATING_FILE" ]; then
+    printf "\n!! interrupted with %s still mutated — restoring it\n" "$MUTATING_FILE" >&2
+    revert "$MUTATING_FILE"
+    MUTATING_FILE=""
+  fi
+  return $rc
+}
+trap restore_in_flight EXIT
+trap 'restore_in_flight; exit 130' INT
+trap 'restore_in_flight; exit 143' TERM
+
 # has_re / has_fixed use a herestring, never a producer pipe: under `set -o pipefail` a
 # matched grep kills printf with SIGPIPE and the PIPELINE scores as failed.
 has_re()    { grep -qE -- "$1" <<<"$2"; }
@@ -91,6 +121,7 @@ run_mutation() {
   printf '      gate: %s  (%s)\n' "$gate" "$pkg"
 
   local before; before="$(git rev-parse HEAD:"$file" 2>/dev/null || echo none)"
+  MUTATING_FILE="$file" # armed BEFORE the first edit; the trap restores it if we die here
   for script in "$@"; do
     perl -0pi -e "$script" "$file"
   done
@@ -98,14 +129,14 @@ run_mutation() {
   if [ "$before" = "$after" ]; then
     printf '      SKIPPED — the mutation did not change %s (pattern drifted)\n' "$file"
     SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: SKIPPED (pattern drifted in $file)")
-    revert "$file"
+    revert "$file"; MUTATING_FILE=""
     [ $KEEP -eq 0 ] && exit 1
     return
   fi
 
   local out; out="$(go test -count=1 -run "$gate" "$pkg" 2>&1)"
   local rc=$?
-  revert "$file"
+  revert "$file"; MUTATING_FILE=""
 
   if [ $compile_wall -eq 1 ]; then
     if build_or_vet_failed "$out"; then
