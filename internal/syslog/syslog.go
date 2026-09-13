@@ -199,11 +199,12 @@ func jitterBackoff(d time.Duration) time.Duration {
 		return d
 	}
 	span := float64(d) * reconnectBackoffJitter
-	// #nosec G404 -- a retry delay, not security material: this only spreads a
-	// fleet's reconnect attempts so they do not arrive in lockstep. Predicting it
-	// buys an attacker nothing, and crypto/rand would add a syscall to a path the
-	// drain goroutine takes on every failed delivery.
-	out := time.Duration(float64(d) + (mrand.Float64()*2-1)*span)
+	// The draw only spreads a fleet's reconnect attempts so they do not arrive in
+	// lockstep; predicting it buys an attacker nothing, and crypto/rand would add
+	// a syscall to a path the drain goroutine takes on every failed delivery.
+	// Same call shape and same reasoning as release_refresh.go and
+	// saas_feed_scheduler.go, which jitter their own schedules.
+	out := time.Duration(float64(d) + (mrand.Float64()*2-1)*span) // #nosec G404 -- retry jitter, not crypto
 	if out < time.Millisecond {
 		return time.Millisecond
 	}
