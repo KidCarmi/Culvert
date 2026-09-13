@@ -139,22 +139,24 @@ deliberate:
 
 ## Steering profiles
 
-A **profile** is a named PAC configuration served at a stable URL:
+A **steering profile** is a named PAC configuration served at a stable URL:
 
 ```
 /pac/<profile-id>.pac
 ```
 
-`/proxy.pac` remains a permanent alias for the **default** profile
+`/proxy.pac` remains a permanent alias for the **default** steering profile
 (`/pac/default.pac`), which is the legacy configuration (proxy host/port +
 exclusions) — managed exactly as before via the PAC panel / `/api/pac-config`,
-byte-identical output. Custom profiles are managed in the PAC panel's
-Steering Profiles section (`/api/pac/profiles`, admin-only mutations) and
-persist in `<dataDir>/pac_profiles.json` (on the backup surface).
+byte-identical output. Custom steering profiles are managed in the PAC
+panel's Steering Profiles section (`/api/pac/profiles`, admin-only
+mutations) and persist in `<dataDir>/pac_profiles.json` (on the backup
+surface).
 
 The new admin frontend (`CULVERT_EXPERIMENTAL_UI`, `/app/network/pac`)
-manages the same profiles, pools, lifecycle (draft → publish → history →
-rollback) and DIRECT-exception governance through the same endpoints. Every
+manages the same steering profiles, pools, lifecycle (draft → publish →
+history → rollback) and DIRECT-exception governance through the same
+endpoints (see the note below on that frontend's own wording). Every
 mutation there is **admin-only** (operators and viewers read; the appliance
 refuses lower roles with 403 before any handler runs). The page labels the
 draft, the publish history and the exception governance **node-local**
@@ -164,6 +166,16 @@ included in `culvert backup` (restore the lifecycle / governance files on a
 promoted node — see the HA / failover note under "Draft → Publish → Rollback
 lifecycle" and "DIRECT exception governance"). Pools and the ACTIVE profile
 spec are the cluster-synced part, and the page says so on the Pools tab.
+
+> **Known wording gap (tracked, not yet fixed):** the new admin frontend's
+> own PAC screens (`frontend/src/features/network/pac/*.tsx`) currently say
+> bare "PAC profile" throughout their labels and headings, never "steering
+> profile" — the same unqualified-"profile" pattern the legacy GUI was
+> corrected to avoid on this screen. This runbook and the legacy GUI use the
+> canonical **steering profile** term per `docs/design/PRODUCT-TERMINOLOGY.md`.
+> The mismatch is cosmetic (both surfaces manage the identical `/api/pac/profiles`
+> object) but is real: see the terminology governance backlog for the tracked
+> fix, which needs a frontend rebuild and is therefore not a docs-only change.
 
 Each profile carries:
 
