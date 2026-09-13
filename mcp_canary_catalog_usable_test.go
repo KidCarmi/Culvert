@@ -744,6 +744,33 @@ func assertCoherentCaptureReadsEachSourceOnce(t *testing.T) {
 		t.Fatalf("SECURITY: the deferred deriveMu.Unlock at %d precedes the Lock at %d",
 			shape.deferPos, shape.lockPos)
 	}
+	// THE MUTEX IS UNALIASABLE, not merely tracked (Codex P2 round 15). Taking `mu := &c.deriveMu`,
+	// unlocking through it before the reads and re-locking after leaves one direct Lock, one
+	// deferred direct Unlock, zero bare direct unlocks, correct order and no closure — measured,
+	// ok 0.105s — while Revoke interleaves with the captures exactly as before.
+	//
+	// Following aliases was the offered remedy and is the WRONG SHAPE: four rounds running, each
+	// escape has been a different syntax (unlock moved, captures moved, closure, now an alias), and
+	// an alias-tracking gate simply names the fifth. Requiring the mutex to be MENTIONED only in
+	// its two canonical statements, and no other Lock/Unlock to appear at all, is total rather than
+	// enumerative — there is no syntax for releasing a lock you may not name.
+	if shape.deriveMuRefs != 2 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot mentions deriveMu %d time(s), want exactly 2 "+
+			"(the Lock and the deferred Unlock). A third mention is an ALIAS, and an alias can "+
+			"release the lock in a form every other assertion here is blind to", shape.deriveMuRefs)
+	}
+	if shape.foreignLockOps != 0 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot performs %d Lock/Unlock operation(s) on something "+
+			"other than c.deriveMu. The capture may hold exactly one lock and name it directly; "+
+			"anything else can drop the derivation hold while the assertions above still pass",
+			shape.foreignLockOps)
+	}
+	if shape.foreignReceiverCalls != 0 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot calls %d method(s) on the coordinator other than "+
+			"reconcileLocked. A helper can unlock deriveMu in a body this gate never parses — "+
+			"measured, ok 0.099s — so the capture is allowed exactly one collaborator and every "+
+			"lock operation must be visible here", shape.foreignReceiverCalls)
+	}
 	if shape.asyncStmts != 0 {
 		t.Fatalf("SECURITY: reconcileAndSnapshot contains %d goroutine/closure construct(s). "+
 			"The capture must be STRAIGHT-LINE: a read that is after the lock in source order "+
@@ -776,15 +803,29 @@ type captureShape struct {
 	catPos     token.Pos
 	regPos     token.Pos
 	asyncStmts int
+	// deriveMuRefs counts EVERY mention of the field, so an alias (`mu := &c.deriveMu`) shows
+	// up as a third reference; foreignLockOps counts any Lock/Unlock on anything else, which
+	// is what an alias's own calls look like. Together they make the mutex unaliasable rather
+	// than merely tracked — see the gate's comment for why enumeration was the wrong answer.
+	deriveMuRefs   int
+	foreignLockOps int
+	// foreignReceiverCalls counts calls on the coordinator other than reconcileLocked. A helper
+	// method can release deriveMu in a body this gate never parses, which no assertion about
+	// THIS function's syntax can see — so the capture is allowed exactly one collaborator.
+	foreignReceiverCalls int
 }
 
 func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
 	deferred := deferredCalls(fn)
 	var shape captureShape
 	ast.Inspect(fn, func(n ast.Node) bool {
-		switch n.(type) {
+		switch t := n.(type) {
 		case *ast.GoStmt, *ast.FuncLit:
 			shape.asyncStmts++
+		case *ast.SelectorExpr:
+			if t.Sel.Name == "deriveMu" {
+				shape.deriveMuRefs++
+			}
 		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -815,6 +856,9 @@ func deferredCalls(fn *ast.FuncDecl) map[*ast.CallExpr]bool {
 // note records one selector call against the shape. Split out of inspectCaptureShape only to
 // keep that function under the cognitive-complexity bound; it is not independently meaningful.
 func (shape *captureShape) note(sel *ast.SelectorExpr, call *ast.CallExpr, isDeferred bool) {
+	if id, ok := sel.X.(*ast.Ident); ok && id.Name == "c" && sel.Sel.Name != "reconcileLocked" {
+		shape.foreignReceiverCalls++
+	}
 	switch sel.Sel.Name {
 	case "Current":
 		id, ok := sel.X.(*ast.Ident)
@@ -829,13 +873,18 @@ func (shape *captureShape) note(sel *ast.SelectorExpr, call *ast.CallExpr, isDef
 			shape.regCurrent++
 			shape.regPos = call.Pos()
 		}
-	case "Lock":
-		if receiverFieldName(sel) == "deriveMu" {
+	case "Lock", "RLock":
+		if receiverFieldName(sel) != "deriveMu" {
+			shape.foreignLockOps++
+			return
+		}
+		if sel.Sel.Name == "Lock" {
 			shape.deriveLock++
 			shape.lockPos = call.Pos()
 		}
-	case "Unlock":
+	case "Unlock", "RUnlock":
 		if receiverFieldName(sel) != "deriveMu" {
+			shape.foreignLockOps++
 			return
 		}
 		if isDeferred {

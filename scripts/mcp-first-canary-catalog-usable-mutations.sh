@@ -519,6 +519,29 @@ run_mutation M30 \
   . "$TOOLTRUST" \
   's/\treturn reg\.Current\(\), cat\.Current\(\), true\n/\tgrab := func() (*registry.Snapshot, *catalog.Snapshot) { return reg.Current(), cat.Current() }\n\ts, t := grab()\n\treturn s, t, true\n/'
 
+# M31 — THE MUTEX IS RELEASED THROUGH AN ALIAS. The round-14 positional fix asserts the lock precedes
+# both reads; it says nothing about a release in between, and `mu := &c.deriveMu; mu.Unlock()` is
+# invisible to a check keyed on the receiver being c.deriveMu. One direct Lock, one deferred direct
+# Unlock, zero bare direct unlocks, correct order, no closure — and Revoke interleaves with the
+# captures exactly as before the round-8 fix. Closed by making the mutex UNALIASABLE: it may be
+# mentioned exactly twice, in its two canonical statements. (Codex P2 round 15, PR #1378.)
+run_mutation M31 \
+  'the coherent capture releases deriveMu through an alias' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tif reg == nil \|\| cat == nil \{\n\t\treturn nil, nil, false\n\t\}\n\treturn reg\.Current\(\), cat\.Current\(\), true\n/\tif reg == nil || cat == nil {\n\t\treturn nil, nil, false\n\t}\n\tmu := \&c.deriveMu\n\tmu.Unlock()\n\ts, t := reg.Current(), cat.Current()\n\tmu.Lock()\n\treturn s, t, true\n/'
+
+# M32 — THE MUTEX IS RELEASED THROUGH A HELPER METHOD. One level past the alias and found by asking
+# the question of M31's fix rather than waiting: a method on the coordinator can unlock deriveMu in a
+# body this gate never parses, so no assertion about THIS function's syntax can see it. The capture
+# is therefore allowed exactly one collaborator (reconcileLocked); every lock operation must be
+# visible in the function the gate reads.
+run_mutation M32 \
+  'the coherent capture releases deriveMu through a helper method' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tif reg == nil \|\| cat == nil \{\n\t\treturn nil, nil, false\n\t\}\n\treturn reg\.Current\(\), cat\.Current\(\), true\n\}\n/\tif reg == nil || cat == nil {\n\t\treturn nil, nil, false\n\t}\n\tc.unlockDeriveMut()\n\ts, t := reg.Current(), cat.Current()\n\tc.relockDeriveMut()\n\treturn s, t, true\n}\n\nfunc (c *mcpToolTrustCoordinator) unlockDeriveMut() { c.deriveMu.Unlock() }\nfunc (c *mcpToolTrustCoordinator) relockDeriveMut() { c.deriveMu.Lock() }\n/'
+
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ "$SKIPPED" -gt 0 ]; then
