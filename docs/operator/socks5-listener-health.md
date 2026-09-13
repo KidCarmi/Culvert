@@ -14,8 +14,10 @@ its surfaces goes non-green.
 > exits the process — and it did so *before* the HTTP/HTTPS proxy listener and
 > the admin UI started. An occupied SOCKS5 port therefore took down the entire
 > appliance, and under `restart: unless-stopped` became an unattended crash
-> loop. It is now contained to the SOCKS5 service. **No SOCKS5 fault requires a
-> node restart any more.**
+> loop. It is now contained to the SOCKS5 service. **No accept- or bind-plane
+> SOCKS5 fault requires a node restart any more** — the one exception is the
+> supervisor itself stopping, which is reported as its own state (see the
+> table below) precisely so the two are not confused.
 
 ---
 
@@ -27,6 +29,7 @@ its surfaces goes non-green.
 | **degraded** (bind) | The listener cannot bind its port and is retrying, backed off to at most one attempt per 30 s. Under 30 s old — usually a predecessor process still holding the port. | **Yes** — as soon as the port frees | Nothing, unless it persists |
 | **down** (bind) | The listener has been unable to bind for more than 30 s. SOCKS5 is unavailable. | **Yes**, once the cause clears | Find what owns the port, or whether the process may bind it — see below |
 | **down** (accept) | The listening socket itself became invalid. The loop closed it, so clients get connection-refused rather than hanging, and a rebind is pending. | **Yes** — the supervisor rebinds | Check the logs for the socket fault |
+| **down** (supervisor) | The supervisor itself stopped (a contained panic). Nothing will rebind the port. | **No** | Restart the node, then check the logs for the fault that stopped it |
 
 Do not collapse these. They point at different actions.
 
@@ -135,10 +138,20 @@ SOCKS5 accept recovered after backing off to 1s (2841 further error lines suppre
 ```
 
 The suppressed count is the magnitude — `culvert_socks5_accept_errors_total`
-carries the exact figure. A `FATAL` line means the accept loop stopped; the supervisor then rebinds:
+carries the exact figure. A `FATAL` line means the accept loop stopped; the supervisor then rebinds, and
+the line says so:
 
 ```
-SOCKS5 accept FATAL (listener_socket_invalid): ... — listener closed, SOCKS5 is unavailable until restart
+SOCKS5 accept FATAL (listener_socket_invalid): ... — listener closed, the supervisor is rebinding; no restart required
+```
+
+**The one state that still requires a restart** is the supervisor itself
+stopping — today only its contained panic. That is reported distinctly, so the
+two are never confused:
+
+```
+socks5_listener contract row: "SOCKS5 listener supervisor stopped (bind loop panicked); nothing will rebind the port"
+alert: "... the port is closed and SOCKS5 is unavailable until this node restarts"
 ```
 
 The bind-failure line is rate-limited the same way — first failure immediately,

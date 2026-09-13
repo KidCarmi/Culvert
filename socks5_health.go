@@ -107,9 +107,11 @@ type socks5ListenerHealth struct {
 	configured bool
 	port       int
 
-	// down is set when the accept loop STOPPED — an unrecoverable listener
-	// error or a contained panic. It is terminal for the process: nothing
-	// re-opens the socket, so this is the state that must be loudest.
+	// down is set when the listener STOPPED — an unrecoverable accept error or
+	// a contained panic. Before CHAOS-66 this was terminal for the process;
+	// the supervisor now rebinds, so `downRecoveryPending` below says whether
+	// this particular `down` is recoverable, and every operator-facing surface
+	// branches on it. Still the loudest state the subsystem can produce.
 	down       bool
 	downReason string
 
@@ -149,6 +151,13 @@ type socks5ListenerHealth struct {
 	// urgent of the two, which is the storage_health.go "two failures must not
 	// share a rate gate" rule (Codex P2) in a different costume.
 	downAlerted bool
+
+	// downRecoveryPending distinguishes the two ways the listener can be down,
+	// which point at OPPOSITE operator actions: the accept loop stopping is
+	// recoverable (the supervisor rebinds), the supervisor's own contained
+	// panic is not (nothing rebinds). Before CHAOS-66 every `down` was
+	// terminal, so one message served both.
+	downRecoveryPending bool
 
 	// ── The BIND plane (CHAOS-66) ────────────────────────────────────────────
 	//
@@ -215,17 +224,20 @@ var socks5EverFailed atomic.Bool
 // socks5ListenerSnapshot is the lock-free view handed to the reporting
 // surfaces.
 type socks5ListenerSnapshot struct {
-	Configured  bool
-	Port        int
-	Down        bool
-	DownReason  string
-	Degraded    bool
-	Failing     bool
-	LastReason  string
-	Backoff     time.Duration
-	Consecutive int64
-	Total       int64
-	FailingFor  time.Duration
+	Configured bool
+	Port       int
+	Down       bool
+	DownReason string
+	// DownRecoveryPending: a rebind is pending (accept-plane fault) rather than
+	// terminal (the supervisor itself stopped).
+	DownRecoveryPending bool
+	Degraded            bool
+	Failing             bool
+	LastReason          string
+	Backoff             time.Duration
+	Consecutive         int64
+	Total               int64
+	FailingFor          time.Duration
 
 	// The bind plane (CHAOS-66). BindFailing is "cannot get a socket right now,
 	// retrying"; BindUnavailable is the same condition sustained past
@@ -345,26 +357,57 @@ func noteSOCKS5AcceptSuccess() (suppressed int64) {
 	return suppressed
 }
 
-// noteSOCKS5ListenerDown records that the accept loop STOPPED and will not
-// resume. reason is a bounded classification for the same cardinality and
-// disclosure reasons as noteSOCKS5AcceptFailure's.
-//
-// This always alerts (subject to the fire-once latch), never rate-limits: it
-// happens at most once per process and it means a configured service is gone.
+// noteSOCKS5ListenerDown records that the ACCEPT LOOP stopped: the socket is
+// gone, but the supervisor owns the lifecycle and a rebind is pending. reason is
+// a bounded classification for the same cardinality and disclosure reasons as
+// noteSOCKS5AcceptFailure's.
 func noteSOCKS5ListenerDown(reason string) {
+	noteSOCKS5DownWithRecovery(reason, true)
+}
+
+// noteSOCKS5SupervisorDown records that the SUPERVISOR ITSELF stopped — today
+// only its contained panic — so nothing will rebind and the listener is gone
+// until the node restarts.
+//
+// The split from noteSOCKS5ListenerDown exists because CHAOS-66 made the
+// accept-plane `down` RECOVERABLE while this one stayed terminal, and every
+// operator-facing surface has to tell those two apart. Codex review on PR #1376
+// caught the first half of this: the contract row's operator action had been
+// updated to "no restart required" while the alert Detail and both accept-loop
+// log lines still said "unavailable until restart" — and a blanket reword of
+// all three would have gone wrong in the other direction, promising an
+// automatic rebind on the one path that does not have one. Two named functions
+// rather than a bool parameter, so the call site says which it means.
+func noteSOCKS5SupervisorDown(reason string) {
+	noteSOCKS5DownWithRecovery(reason, false)
+}
+
+// noteSOCKS5DownWithRecovery is the shared core.
+//
+// It always alerts (subject to the fire-once latch) and never rate-limits: it
+// happens at most once per episode and it means a configured service is gone.
+// The Detail stays BOUNDED — port plus reason class plus a fixed sentence —
+// because it is the `event + ":" + Detail` dedup key.
+func noteSOCKS5DownWithRecovery(reason string, recoveryPending bool) {
 	socks5Listener.mu.Lock()
 	socks5Listener.down = true
 	socks5Listener.downReason = reason
+	socks5Listener.downRecoveryPending = recoveryPending
 	alertNow := !socks5Listener.downAlerted
 	socks5Listener.downAlerted = true
 	port := socks5Listener.port
 	socks5Listener.mu.Unlock()
 
-	if alertNow {
-		fireSOCKS5ListenerAlert(fmt.Sprintf(
-			"SOCKS5 listener on port %d has STOPPED accepting connections (%s); the port is closed and SOCKS5 is unavailable until this node restarts",
-			port, reason))
+	if !alertNow {
+		return
 	}
+	outlook := "the supervisor is rebinding automatically — no restart required"
+	if !recoveryPending {
+		outlook = "SOCKS5 is unavailable until this node restarts"
+	}
+	fireSOCKS5ListenerAlert(fmt.Sprintf(
+		"SOCKS5 listener on port %d has STOPPED accepting connections (%s); the port is closed and %s. The HTTP/HTTPS proxy and the admin UI are unaffected",
+		port, reason, outlook))
 }
 
 // classifySOCKS5BindError maps a bind failure to a BOUNDED reason class
@@ -494,6 +537,7 @@ func noteSOCKS5Bound() (suppressed int64, recovered bool) {
 	// rebinds.
 	socks5Listener.down = false
 	socks5Listener.downReason = ""
+	socks5Listener.downRecoveryPending = false
 	socks5Listener.downAlerted = false
 
 	if socks5Listener.bindConsecutive == 0 && socks5Listener.bindFirstFailure.IsZero() {
@@ -525,14 +569,16 @@ func socks5ListenerState() socks5ListenerSnapshot {
 	socks5Listener.mu.Lock()
 	defer socks5Listener.mu.Unlock()
 	snap := socks5ListenerSnapshot{
-		Configured:  socks5Listener.configured,
-		Port:        socks5Listener.port,
-		Down:        socks5Listener.down,
-		DownReason:  socks5Listener.downReason,
-		LastReason:  socks5Listener.lastReason,
-		Backoff:     socks5Listener.backoff,
-		Consecutive: socks5Listener.consecutive,
-		Total:       socks5Listener.total,
+		Configured: socks5Listener.configured,
+		Port:       socks5Listener.port,
+		Down:       socks5Listener.down,
+		DownReason: socks5Listener.downReason,
+
+		DownRecoveryPending: socks5Listener.downRecoveryPending,
+		LastReason:          socks5Listener.lastReason,
+		Backoff:             socks5Listener.backoff,
+		Consecutive:         socks5Listener.consecutive,
+		Total:               socks5Listener.total,
 
 		EverBound:       socks5Listener.everBound,
 		Stopped:         socks5Listener.stopped,
@@ -578,6 +624,7 @@ func resetSOCKS5HealthForTest() {
 	socks5Listener.suppressed = 0
 	socks5Listener.alerted = false
 	socks5Listener.downAlerted = false
+	socks5Listener.downRecoveryPending = false
 	socks5Listener.everBound = false
 	socks5Listener.stopped = false
 	socks5Listener.bindFirstFailure = time.Time{}
@@ -654,17 +701,25 @@ func checkSOCKS5Listener() OperatorContractCheck {
 		}
 	}
 	if snap.Down {
+		// CHAOS-66 changed this action, and then had to SPLIT it. It used to
+		// read "Restart this node to rebind the SOCKS5 listener", correct while
+		// nothing re-opened the socket; the supervisor now does, so that advice
+		// would cost a production outage to achieve what already happens. But
+		// the supervisor's own contained panic is still terminal, so promising
+		// an automatic rebind there would be the same error inverted.
+		msg := fmt.Sprintf("SOCKS5 listener stopped accepting connections (%s) after %d accept errors; the port is closed and a rebind is pending",
+			snap.DownReason, snap.Total)
+		action := "Check the server logs for the underlying socket fault; the listener rebinds automatically — no restart required."
+		if !snap.DownRecoveryPending {
+			msg = fmt.Sprintf("SOCKS5 listener supervisor stopped (%s); nothing will rebind the port",
+				snap.DownReason)
+			action = "Restart this node to rebind the SOCKS5 listener, then check the server logs for the fault that stopped the supervisor. The HTTP/HTTPS proxy and the admin UI are unaffected."
+		}
 		return OperatorContractCheck{
-			Code:   "socks5_listener",
-			Status: diagFail,
-			Message: fmt.Sprintf("SOCKS5 listener stopped accepting connections (%s) after %d accept errors; the port is closed and a rebind is pending",
-				snap.DownReason, snap.Total),
-			// CHAOS-66 changed this action. It used to read "Restart this node
-			// to rebind the SOCKS5 listener", which was correct when nothing
-			// re-opened the socket; the supervisor now does, so telling an
-			// operator to restart a gateway carrying production traffic would
-			// be advice that costs an outage to achieve what already happens.
-			OperatorAction: "Check the server logs for the underlying socket fault; the listener rebinds automatically — no restart required.",
+			Code:           "socks5_listener",
+			Status:         diagFail,
+			Message:        msg,
+			OperatorAction: action,
 		}
 	}
 	if snap.BindFailing {

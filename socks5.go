@@ -250,14 +250,14 @@ func (s *socks5Server) serve() {
 			default:
 			}
 			noteSOCKS5ListenerDown("listener_closed_unexpectedly")
-			logger.Printf("SOCKS5 accept: listener was closed without a shutdown request — SOCKS5 is unavailable until restart")
+			logger.Printf("SOCKS5 accept: listener was closed without a shutdown request — the supervisor is rebinding; no restart required")
 			return
 		}
 		reason := socks5AcceptReason(err)
 		if socks5AcceptFatal(err) {
 			_ = s.ln.Close()
 			noteSOCKS5ListenerDown(reason)
-			logger.Printf("SOCKS5 accept FATAL (%s): %v — listener closed, SOCKS5 is unavailable until restart",
+			logger.Printf("SOCKS5 accept FATAL (%s): %v — listener closed, the supervisor is rebinding; no restart required",
 				reason, err)
 			return
 		}

@@ -6636,7 +6636,7 @@ whole gateway was gone.
 
 ### Gates
 
-`socks5_bind_chaos_test.go` — 24 gates. "Verified failing against the pre-fix
+`socks5_bind_chaos_test.go` — 26 gates. "Verified failing against the pre-fix
 shape" has a stronger meaning than usual here: the pre-fix shape calls
 `os.Exit(1)`, which kills the TEST BINARY mid-run and takes the whole package
 with it, so the defect cannot be reintroduced and kept green (the §33 property).
@@ -6716,6 +6716,51 @@ different direction: *a state that is only briefly wrong is still wrong, and
 "briefly" is a claim about the scheduler, not about the code.* Pinned by
 `StartSOCKS5ResolvesItsFirstBindBeforeReturning`, which asserts with NO waiting
 in both arms and was verified failing against the spawn-and-return shape.
+
+### Codex round 2 — the stale restart instruction, and why a blanket reword was wrong
+
+An observed bind clears the accept plane's `down`, so the operator action on the
+`socks5_listener` contract row was changed from *"Restart this node to rebind the
+SOCKS5 listener"* to *"the listener rebinds automatically"*. Codex review found
+that only ONE of the three surfaces carrying that instruction had been updated:
+`noteSOCKS5ListenerDown`'s alert Detail still said *"unavailable until this node
+restarts"*, and both accept-loop log lines still said *"unavailable until
+restart"*. An operator following either would restart a gateway carrying
+production traffic to achieve something already in progress.
+
+This is the rule the SOCKS5 log-injection note records one level up, in a new
+costume: *fixing one surface does not fix the call.* When a behavioural change
+invalidates a piece of operator guidance, the unit of work is every surface that
+carries it, not the one the change happened to touch.
+
+**But the obvious fix — reword all three — would have been wrong in the other
+direction.** `noteSOCKS5ListenerDown` had four call sites, and one of them is the
+SUPERVISOR's own contained panic (`socks5_bind.go`'s recover block). That path is
+still terminal: the loop has exited, nothing rebinds, and a restart genuinely is
+the remedy. Promising an automatic rebind there sends an operator away from the
+one restart that is needed — the same defect inverted, and strictly worse,
+because it is silent.
+
+So the recorder is SPLIT by what is true of each plane:
+`noteSOCKS5ListenerDown` (accept plane, rebind pending) and
+`noteSOCKS5SupervisorDown` (terminal). Two named functions rather than a bool
+parameter, so the call site states which it means; a `downRecoveryPending` field
+carries it to the contract row, and the alert's outlook clause branches on it
+while the Detail stays bounded in both directions (it is the dedup key).
+
+**A gate on the recorders was not enough, and mutation testing is what showed
+it.** Swapping which recorder the supervisor's panic guard calls left both
+behavioural subtests passing — they exercise the functions, not the wiring, and
+the panic guard is a defensive path with no injection seam. That is the same
+vacuity class as the adopt/`Stop` gate above. The wiring is now pinned
+structurally (each plane's file calls its own recorder and not the other's),
+verified failing against that swap, alongside a source scan for the phrase
+itself — behavioural coverage cannot reach the two log lines, which need a live
+socket fault to emit.
+
+One process note, because it cost a cycle: restoring a file from a mutation with
+`git checkout <file>` discarded the uncommitted fix in it. The structural wall
+caught the regression immediately, which is the argument for having written it.
 
 ### Governance note: a lint gate this sweep did not actually run
 

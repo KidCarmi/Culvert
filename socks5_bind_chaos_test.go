@@ -738,6 +738,151 @@ func TestChaos66_DownOperatorActionNoLongerDemandsARestart(t *testing.T) {
 	}
 }
 
+// TestChaos66_RestartGuidanceMatchesWhetherARebindIsPending pins the SECOND
+// Codex round on PR #1376.
+//
+// CHAOS-66 made the accept plane's `down` recoverable but updated only ONE of
+// the three surfaces that carried the old "unavailable until restart"
+// instruction: the contract row's operator action. The alert Detail and both
+// accept-loop log lines still told operators to restart a gateway that was
+// already rebinding — the same class of miss this PR's own SOCKS5 log-injection
+// note records one level up (*fixing one surface does not fix the call*).
+//
+// And a blanket reword would have been wrong in the OTHER direction: the
+// supervisor's own contained panic is still terminal, so promising an automatic
+// rebind there sends an operator away from the one restart that is genuinely
+// needed. Hence two named recorders, and this gate asserts BOTH directions —
+// an inverted pair passes any single-direction assertion.
+func TestChaos66_RestartGuidanceMatchesWhetherARebindIsPending(t *testing.T) {
+	t.Run("accept plane stopped — rebind pending", func(t *testing.T) {
+		fired := socks5ChaosSetup(t)
+		noteSOCKS5Configured(1080)
+		noteSOCKS5ListenerDown("listener_socket_invalid")
+
+		snap := socks5ListenerState()
+		if !snap.Down || !snap.DownRecoveryPending {
+			t.Fatalf("accept-plane down is not recorded as recoverable: %+v", snap)
+		}
+		row := checkSOCKS5Listener()
+		if strings.Contains(strings.ToLower(row.OperatorAction), "restart this node") {
+			t.Errorf("contract row tells the operator to restart while a rebind is pending: %q", row.OperatorAction)
+		}
+		if len(*fired) != 1 {
+			t.Fatalf("expected one alert, got %d", len(*fired))
+		}
+		if strings.Contains(strings.ToLower((*fired)[0]), "until this node restarts") {
+			t.Errorf("alert still says restart-required while a rebind is pending: %s", (*fired)[0])
+		}
+		if !strings.Contains(strings.ToLower((*fired)[0]), "no restart required") {
+			t.Errorf("alert does not state that the rebind is automatic: %s", (*fired)[0])
+		}
+	})
+
+	t.Run("supervisor stopped — genuinely terminal", func(t *testing.T) {
+		fired := socks5ChaosSetup(t)
+		noteSOCKS5Configured(1080)
+		noteSOCKS5SupervisorDown("bind loop panicked")
+
+		snap := socks5ListenerState()
+		if !snap.Down || snap.DownRecoveryPending {
+			t.Fatalf("supervisor-down is not recorded as terminal: %+v", snap)
+		}
+		row := checkSOCKS5Listener()
+		if !strings.Contains(strings.ToLower(row.OperatorAction), "restart this node") {
+			t.Errorf("contract row omits the restart an unsupervised listener needs: %q", row.OperatorAction)
+		}
+		if len(*fired) != 1 {
+			t.Fatalf("expected one alert, got %d", len(*fired))
+		}
+		if !strings.Contains(strings.ToLower((*fired)[0]), "until this node restarts") {
+			t.Errorf("alert promises recovery that will not happen: %s", (*fired)[0])
+		}
+	})
+
+	// The two subtests above exercise the RECORDERS. They cannot catch the
+	// wiring regressing — swapping which recorder the supervisor's panic guard
+	// calls leaves both of them passing, verified by mutation. The panic guard
+	// is a defensive path with no injection seam, so the wiring is pinned
+	// structurally: the supervisor file records TERMINAL, the accept-loop file
+	// records RECOVERABLE, and neither reaches for the other's recorder.
+	t.Run("each plane is wired to its own recorder", func(t *testing.T) {
+		for _, tc := range []struct{ file, want, reject string }{
+			{"socks5_bind.go", "noteSOCKS5SupervisorDown(", "noteSOCKS5ListenerDown("},
+			{"socks5.go", "noteSOCKS5ListenerDown(", "noteSOCKS5SupervisorDown("},
+		} {
+			src, err := os.ReadFile(tc.file)
+			if err != nil {
+				t.Fatalf("read %s: %v", tc.file, err)
+			}
+			body := string(src)
+			if !strings.Contains(body, tc.want) {
+				t.Errorf("%s does not call %s", tc.file, tc.want)
+			}
+			if strings.Contains(body, tc.reject) {
+				t.Errorf("%s calls %s — the two planes' down states point at opposite operator actions",
+					tc.file, tc.reject)
+			}
+		}
+	})
+
+	t.Run("the alert Detail stays bounded in both directions", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			note func(string)
+		}{
+			{"recoverable", noteSOCKS5ListenerDown},
+			{"terminal", noteSOCKS5SupervisorDown},
+		} {
+			fired := socks5ChaosSetup(t)
+			noteSOCKS5Configured(1080)
+			tc.note("listener_socket_invalid")
+			if len(*fired) != 1 {
+				t.Fatalf("%s: expected one alert, got %d", tc.name, len(*fired))
+			}
+			// Detail is the `event + ":" + Detail` dedup key (WK-12/RS-5).
+			for _, leak := range []string{"0.0.0.0", "127.0.0.1", "listen tcp", "accept tcp"} {
+				if strings.Contains((*fired)[0], leak) {
+					t.Errorf("%s: alert detail leaks %q: %s", tc.name, leak, (*fired)[0])
+				}
+			}
+		}
+	})
+}
+
+// TestChaos66_NoListenerSourceStillPromisesARestart is the wall for the class.
+//
+// The finding was three surfaces carrying one stale instruction, so a
+// behavioural gate on the two that a test can reach still leaves the log lines
+// — which need a live socket fault to emit — unguarded. This scans the listener
+// sources for the phrase instead, allowing it only where a restart really is
+// the remedy.
+func TestChaos66_NoListenerSourceStillPromisesARestart(t *testing.T) {
+	checked := 0
+	for _, f := range []string{"socks5.go", "socks5_bind.go", "socks5_health.go"} {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			checked++
+			code, _, _ := strings.Cut(line, "//")
+			low := strings.ToLower(code)
+			if !strings.Contains(low, "until restart") && !strings.Contains(low, "until this node restarts") {
+				continue
+			}
+			// The one legitimate use: the terminal supervisor-down branch.
+			if strings.Contains(code, "outlook =") {
+				continue
+			}
+			t.Errorf("%s:%d still promises a restart on a path the supervisor rebinds: %s",
+				f, i+1, strings.TrimSpace(line))
+		}
+	}
+	if checked < 500 {
+		t.Fatalf("the restart-guidance scan only examined %d lines — it is not reading the listener sources", checked)
+	}
+}
+
 // ── Gauge semantics ──────────────────────────────────────────────────────────
 
 // TestChaos66_RetryingStaysUpButSustainedGoesDown pins the metric contract.

@@ -306,7 +306,7 @@ func (s *socks5Supervisor) run() {
 	defer func() {
 		if v := recover(); v != nil {
 			recordCrash("socks5-listener-bind", "", v)
-			noteSOCKS5ListenerDown("bind loop panicked")
+			noteSOCKS5SupervisorDown("bind loop panicked")
 		}
 	}()
 
