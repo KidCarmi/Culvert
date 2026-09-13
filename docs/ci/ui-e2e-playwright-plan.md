@@ -119,11 +119,13 @@ tier.
 
 Every test in the quality program so far drives the **traffic plane** over real
 sockets (policy, MITM/SSL-inspect, CONNECT relay, SOCKS5, auth×authz). None of
-it renders the **admin UI**, which is a single ~11.6k-line SPA
-(`static/index.html`) exposing (as of this writing) **24 `data-view` panels**
-— the `updates` panel has since been removed with the legacy update
-mechanism, and later programs (MCP, Policy Learning, Decryption Exclusions,
-Support) have added several more not reflected in this snapshot:
+it renders the **admin UI**, a single ~11.6k-line SPA (`static/index.html`).
+The panel list below is a **historical snapshot from when this plan was
+authored, not the current total** (`static/index.html` carries 38 unique
+`data-view` panels at the time of this correction): the `updates` panel it
+originally included has since been removed with the legacy update mechanism,
+and later programs (MCP, Policy Learning, Decryption Exclusions, Support)
+have added many more not reflected below:
 
 ```
 audit authpolicy blocklist ca-mgmt catgroups cdr certificates cluster
