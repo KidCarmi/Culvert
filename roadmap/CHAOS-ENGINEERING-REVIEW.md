@@ -6825,7 +6825,7 @@ This is the same family as the CHAOS-57 recovery lesson already recorded here:
 is told to act on must be derived from evidence supporting the specific claim it
 makes.
 
-Gates: six added (file → 32), each verified failing against the shape it
+Gates: seven added (file → 33), each verified failing against the shape it
 replaces — the frozen duration on both planes, the missing rollback floor, the
 unclamped sleep, the hard-coded row action, and a CONTROL requiring the four
 diagnosable classes to carry DISTINCT remedies (a switch returning one string
@@ -6833,6 +6833,38 @@ per branch satisfies every "names its own remedy" assertion otherwise).
 `TestChaos66_ContractRowCarriesTheReasonSpecificRemedy` exists because testing
 the helper alone passes while the row still hard-codes its action — the
 vacuity lesson from round 2, applied before it could cost a cycle this time.
+
+**The fix broke the determinism gate, and how is the lesson worth more than
+the fix.** Giving the READ path a clock while every gate drives the WRITE path
+with synthetic stamps MIXES two clocks, and `socks5ElapsedSince`'s max() lets
+the real one dominate. A gate that records failures 19 s apart synthetically
+and asserts "not yet degraded" was then also asserting, invisibly, that under
+30 s of WALL time passed between two of its own statements. True in
+milliseconds locally; false on a shared runner under `-count=2`.
+
+**What made it diagnosable was that it did NOT reproduce.** Re-running the
+whole package locally under CI's own printed shuffle seed passed, which rules
+out ordering — the thing a determinism failure looks like — and leaves the
+environment. Then it reproduces on demand: remove the freeze, insert 31 s of
+wall time between the recording and the assertion, and the gate fails with `a
+5s burst of bind failures was reported as unavailable`; restore the freeze and
+the identical delay passes.
+
+So `socks5ChaosSetup` now FREEZES the read clock at test start, which restores
+the pre-round-3 semantics for every existing gate while making them
+deterministic, and a gate that wants an episode to age advances the injected
+clock explicitly — as the condition under test rather than an accident of
+scheduling. `TestChaos66_HealthSnapshotDependsOnlyOnTheInjectedClock` is the
+wall: it holds the clock still across real elapsed time and requires the
+reported duration not to move, then advances the injected clock alone and
+requires that it does (the second half is not optional — without it a read
+path that ignored the clock entirely would pass).
+
+The transferable rule: **a snapshot must be a pure function of recorded state
+and an INJECTED clock.** The moment a read path reads the wall clock, every
+test that drives the write path synthetically acquires a hidden timing
+dependency — and it will surface on the busiest machine, which is CI, not the
+one you developed on.
 
 ### Governance note: a lint gate this sweep did not actually run
 

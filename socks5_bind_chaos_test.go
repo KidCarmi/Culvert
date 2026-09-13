@@ -1275,3 +1275,53 @@ func TestChaos66_ContractRowCarriesTheReasonSpecificRemedy(t *testing.T) {
 		t.Errorf("contract row action does not come from the classifier:\n got: %s\nwant: %s", row.OperatorAction, want)
 	}
 }
+
+// TestChaos66_HealthSnapshotDependsOnlyOnTheInjectedClock is the wall for the
+// class that broke the determinism gate on this PR.
+//
+// Round 3 gave the health READ path a clock. Every other gate in this file
+// drives the WRITE path with synthetic stamps, so if the read clock stays real
+// the two are MIXED: a gate that records failures 19 s apart synthetically and
+// then asserts "not yet degraded" is also asserting that under 30 s of WALL
+// time passed between two of its own statements. That is true in milliseconds
+// locally and false on a shared runner under `-count=2` — the failure was green
+// locally under CI's own shuffle seed, which is what ruled out ordering and
+// pointed at wall time.
+//
+// So the snapshot must be a pure function of (recorded state, injected clock).
+// This gate holds the clock still across real elapsed time and requires the
+// reported duration not to move, then advances the injected clock alone and
+// requires that it does.
+func TestChaos66_HealthSnapshotDependsOnlyOnTheInjectedClock(t *testing.T) {
+	socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	// Anchor the episode in the past so the CLOCK term dominates the stored
+	// span — otherwise a real-clock read would be masked by `observed` and this
+	// gate would pass against the defect.
+	base := time.Now()
+	clock := base
+	swapSOCKS5HealthClock(t, func() time.Time { return clock })
+	noteSOCKS5BindFailure("port_in_use", time.Second, base.Add(-20*time.Second))
+
+	first := socks5ListenerState().BindFailingFor
+	if first < 20*time.Second {
+		t.Fatalf("episode not aged against the injected clock: %s", first)
+	}
+
+	// Real time passes; the injected clock does not move.
+	time.Sleep(150 * time.Millisecond)
+
+	if second := socks5ListenerState().BindFailingFor; second != first {
+		t.Errorf("reported duration moved with WALL time while the injected clock was still (%s -> %s): "+
+			"every synthetic-stamp gate in this file then silently depends on how long it takes to run",
+			first, second)
+	}
+
+	// Advancing the injected clock MUST move it, or the gate above would pass
+	// against a read path that ignores the clock entirely.
+	clock = base.Add(time.Minute)
+	if third := socks5ListenerState().BindFailingFor; third <= first {
+		t.Errorf("advancing the injected clock did not age the episode: %s -> %s", first, third)
+	}
+}
