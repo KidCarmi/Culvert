@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -58,10 +61,28 @@ import (
 // Secrets NEVER enter the ledger: the spec digest is over the public
 // projection, the recorded result is the response the client received, and
 // the audit `after` is the public profile projection.
+//
+// THE OPERATION BINDS THE EXACT SUBMITTED SECRET (FE-6A.2 correction,
+// Blocker 2): the public spec digest cannot tell secret A from secret B, so
+// the same operationId re-sent with a DIFFERENT secret used to REPLAY the
+// first write's success. Every intent now also carries a CANDIDATE
+// COMMITMENT — an HMAC-SHA256 over the length-framed secret material
+// (OIDC clientSecret, LDAP bindPassword, inline SAML metadata) under a
+// NODE-LOCAL key (`.idp_candidate_key`, 0600, beside the ledger, never
+// archived — the same rule as `.upstream_cred_key`). The commitment reveals
+// nothing without the key and the key never travels with the ledger; a
+// replay must match BOTH the public digest and the commitment, else it is
+// 409 operation_mismatch with nothing written. An intent recorded before
+// this field existed carries no commitment and is compared by digest only.
 
 const (
 	idpOperationsFile = "idp_operations.json"
 	idpOperationsMax  = 256
+	// idpCandidateKeyFileName is the node-local HMAC key the candidate
+	// commitments are computed under (beside idp_operations.json). Excluded
+	// from every backup archive by name (backup.go) and never restored.
+	idpCandidateKeyFileName = ".idp_candidate_key"
+	idpCandidateKeyLen      = 32
 
 	idpOpPending        = "pending"
 	idpOpCommitted      = "committed"
@@ -77,19 +98,23 @@ func validIdPOperationID(s string) bool { return idpOperationIDPattern.MatchStri
 
 // idpOperation is one durable intent record. Every field is non-secret.
 type idpOperation struct {
-	OperationID      string          `json:"operationId"`
-	State            string          `json:"state"`
-	Action           string          `json:"action"` // idp.create | idp.update (FE-6A.2: a cutover through PUT)
-	Actor            string          `json:"actor"`
-	ProfileID        string          `json:"profileId"`
-	ProfileName      string          `json:"profileName,omitempty"`
-	SpecDigest       string          `json:"specDigest"`
-	RegistryRevision string          `json:"registryRevision"` // the document revision the caller fenced on
-	Cutover          bool            `json:"cutover"`          // the write carried the legacy-LDAP cutover
-	StartedAt        string          `json:"startedAt"`
-	FinishedAt       string          `json:"finishedAt,omitempty"`
-	Code             string          `json:"code,omitempty"`   // refusal code of an aborted/unknown outcome, or the settlement reason
-	Result           json.RawMessage `json:"result,omitempty"` // the recorded success response (replayed verbatim)
+	OperationID string `json:"operationId"`
+	State       string `json:"state"`
+	Action      string `json:"action"` // idp.create | idp.update (FE-6A.2: a cutover through PUT)
+	Actor       string `json:"actor"`
+	ProfileID   string `json:"profileId"`
+	ProfileName string `json:"profileName,omitempty"`
+	SpecDigest  string `json:"specDigest"`
+	// CandidateCommitment binds the EXACT submitted secret material to the
+	// intent (HMAC under the node-local candidate key); "" on records that
+	// predate the field. Never the secret, never reversible without the key.
+	CandidateCommitment string          `json:"candidateCommitment,omitempty"`
+	RegistryRevision    string          `json:"registryRevision"` // the document revision the caller fenced on
+	Cutover             bool            `json:"cutover"`          // the write carried the legacy-LDAP cutover
+	StartedAt           string          `json:"startedAt"`
+	FinishedAt          string          `json:"finishedAt,omitempty"`
+	Code                string          `json:"code,omitempty"`   // refusal code of an aborted/unknown outcome, or the settlement reason
+	Result              json.RawMessage `json:"result,omitempty"` // the recorded success response (replayed verbatim)
 	// CommittedRevision is the registry document revision AFTER the commit.
 	CommittedRevision string `json:"committedRevision,omitempty"`
 	// Audited records that the success audit for a committed operation has
@@ -130,6 +155,13 @@ type idpOperationStore struct {
 	path     string // "" = in-memory (a non-persisted registry)
 	ops      []*idpOperation
 	degraded *idpOpsDegradation
+	// commitKey is the node-local candidate-commitment key (Blocker 2):
+	// loaded from `.idp_candidate_key` beside the ledger, minted 0600 when
+	// absent (a fresh key cannot lock anything out — an intent it cannot
+	// verify is refused as a mismatch, never replayed), random per process
+	// for an in-memory ledger. An UNREADABLE key file is the same fail-closed
+	// degraded posture as an unreadable ledger.
+	commitKey []byte
 }
 
 var (
@@ -165,6 +197,89 @@ func idpSpecDigest(p *IdPProfile) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// idpLoadOrMintCandidateKey reads the node-local candidate key, minting one
+// (0600) when none exists. A read error other than absence is returned:
+// the caller fails closed rather than committing under a key it cannot
+// verify later. A short/long file is treated as unreadable (never silently
+// re-minted over — that would orphan every commitment it produced).
+func idpLoadOrMintCandidateKey(path string) ([]byte, error) {
+	key, err := os.ReadFile(path) // #nosec G304 -- beside the operator-configured registry file
+	switch {
+	case err == nil:
+		if len(key) != idpCandidateKeyLen {
+			return nil, fmt.Errorf("candidate key: unexpected length %d", len(key))
+		}
+		return key, nil
+	case os.IsNotExist(err):
+		key = make([]byte, idpCandidateKeyLen)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return nil, rerr
+		}
+		if werr := os.WriteFile(path, key, 0o600); werr != nil {
+			return nil, werr
+		}
+		return key, nil
+	default:
+		return nil, err
+	}
+}
+
+// CandidateCommitment is the keyed commitment over the EXACT secret
+// material of a candidate: length-framed type + OIDC clientSecret + LDAP
+// bindPassword + inline SAML metadata, HMAC-SHA256 under the node-local key.
+// The public spec digest carries the rest of the identity; together they
+// name exactly one submitted candidate.
+func (s *idpOperationStore) CandidateCommitment(p *IdPProfile) string {
+	if p == nil {
+		return ""
+	}
+	s.mu.Lock()
+	key := s.commitKey
+	s.mu.Unlock()
+	if len(key) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	frame := func(v string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(v)))
+		mac.Write(n[:])
+		mac.Write([]byte(v))
+	}
+	frame("idp-candidate-v1")
+	frame(string(p.Type))
+	if p.OIDC != nil {
+		frame(p.OIDC.ClientSecret)
+	} else {
+		frame("")
+	}
+	if p.LDAP != nil {
+		frame(p.LDAP.BindPassword)
+	} else {
+		frame("")
+	}
+	if p.SAML != nil {
+		frame(p.SAML.MetadataXML)
+	} else {
+		frame("")
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// matchesCandidate reports whether a recorded intent names the same
+// candidate as the (digest, commitment) pair of a re-dispatch: the public
+// digest must match, and — for every record carrying a commitment — the
+// exact secret material must match too.
+func (op *idpOperation) matchesCandidate(specDigest, commitment string) bool {
+	if op.SpecDigest != specDigest {
+		return false
+	}
+	if op.CandidateCommitment == "" {
+		return true // pre-commitment record: digest-only identity
+	}
+	return hmac.Equal([]byte(op.CandidateCommitment), []byte(commitment))
+}
+
 // newIdPOperationStore binds the store beside the registry file (or keeps
 // it in memory when the registry itself is not persisted) and loads it. A
 // damaged ledger enters the DURABLE degraded posture: the file is left in
@@ -172,9 +287,19 @@ func idpSpecDigest(p *IdPProfile) string {
 func newIdPOperationStore(registryPath string) *idpOperationStore {
 	s := &idpOperationStore{}
 	if registryPath == "" {
+		s.commitKey = make([]byte, idpCandidateKeyLen)
+		_, _ = rand.Read(s.commitKey) // in-memory ledger: a per-process key
 		return s
 	}
 	s.path = filepath.Join(filepath.Dir(registryPath), idpOperationsFile)
+	if key, kerr := idpLoadOrMintCandidateKey(filepath.Join(filepath.Dir(registryPath), idpCandidateKeyFileName)); kerr != nil {
+		s.degraded = &idpOpsDegradation{Reason: "unreadable",
+			Detail: "the operation ledger's node-local candidate key cannot be read; operation-identified writes and lookups are refused until the key file is restored (or removed, which mints a fresh key that verifies no earlier intent) and the node restarted"}
+		logger.Printf("IdP: candidate-commitment key UNREADABLE — operation ledger fail-closed (%s)", sanitizeLog(filepath.Base(idpCandidateKeyFileName)))
+		return s
+	} else {
+		s.commitKey = key
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {

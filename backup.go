@@ -155,6 +155,12 @@ const webhookSigningKeyFileName = ".alert_webhook_key"
 // duplicated as a literal for the same reason as the webhook key above.
 const upstreamSealingKeyFileName = ".upstream_cred_key"
 
+// idpCandidateKeyArtifactName is the node-local HMAC key the IdP operation
+// ledger commits candidate secrets under (FE-6A.2 correction, Blocker 2;
+// idp_operations.go idpCandidateKeyFileName). A keyed commitment is only a
+// commitment while its key never travels with the ledger it protects.
+const idpCandidateKeyArtifactName = idpCandidateKeyFileName
+
 // isNodeLocalKeyArtifactPath reports whether a path refers to node-local key
 // material that must never share an archive with the ciphertext it unwraps —
 // today a CA-3 KEK, the alert-webhook signing key or the upstream credential
@@ -168,7 +174,7 @@ const upstreamSealingKeyFileName = ".upstream_cred_key"
 // defense-in-depth for the config_versions/ walk and any future dataDir glob.
 func isNodeLocalKeyArtifactPath(tarOrSrcPath string) bool {
 	base := filepath.Base(filepath.ToSlash(tarOrSrcPath))
-	return isKEKArtifactPath(tarOrSrcPath) || base == webhookSigningKeyFileName || base == upstreamSealingKeyFileName
+	return isKEKArtifactPath(tarOrSrcPath) || base == webhookSigningKeyFileName || base == upstreamSealingKeyFileName || base == idpCandidateKeyArtifactName
 }
 
 // adminSettingsTarPath is the archived settings file the sanitizer rewrites.

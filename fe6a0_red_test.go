@@ -669,7 +669,7 @@ func TestFE6A0_R7_CutoverSentinelPersistFailureRefusesTheEnable(t *testing.T) {
 	reg, regPath := fe6aLegacyLDAPFixture(t, fe6aBrokenPath(t, "admin_settings.json"))
 	probe := fe6aProbeIdP(t, reg, regPath)
 
-	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s", "url": fe6aStubDirectory(t)})
 	body["enabled"] = true
 	w := httptest.NewRecorder()
 	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID(), "cutoverConfirm=ldap://legacy.corp.example:389"), body))
@@ -695,7 +695,7 @@ func TestFE6A0_R7_CutoverIsOperationIdentifiedAndAtMostOnce(t *testing.T) {
 	_, _ = fe6aLegacyLDAPFixture(t, settings)
 	since := fe6aSince()
 
-	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s", "url": fe6aStubDirectory(t)})
 	body["enabled"] = true
 	w := httptest.NewRecorder()
 	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID(), "cutoverConfirm=ldap://legacy.corp.example:389"), body))

@@ -14182,12 +14182,26 @@ async function loadLegacyLDAPBanner() {
 }
 
 async function importLegacyLDAP() {
-  const res = await apiFetch('/api/idp/legacy-ldap/import', { method: 'POST' });
-  if (!res.ok) { toast('Import failed: ' + apiErrorText(await res.text()), 'error'); return; }
+  // FE-6A.2 correction (Blocker 1): the import is FENCED on the loaded
+  // registry document revision and OPERATION-IDENTIFIED (a lost response
+  // replays from the appliance's ledger instead of minting a second profile).
+  if (!_idpDocumentRevision) { await loadIdPList(); }
+  const q = 'documentRevision=' + encodeURIComponent(_idpDocumentRevision || '') +
+    '&operationId=' + encodeURIComponent(newOperationId());
+  const res = await apiFetch('/api/idp/legacy-ldap/import?' + q, { method: 'POST' });
+  if (!res.ok) {
+    if (res.status === 409 || res.status === 428) {
+      toast('Import refused: ' + apiErrorText(await res.text()) + ' — the registry has been reloaded, please retry', 'error');
+      loadIdPList();
+      return;
+    }
+    toast('Import failed: ' + apiErrorText(await res.text()), 'error');
+    return;
+  }
   const p = await res.json();
-  toast('Imported as a disabled provider - test it, then enable', 'success');
+  toast(p.replayed ? 'Import already recorded on the appliance (replayed) - nothing imported twice' : 'Imported as a disabled provider - test it, then enable', 'success');
   loadIdPList();
-  openIdPModal(p);
+  if (!p.replayed) openIdPModal(p);
 }
 
 function syncSAMLMetadataSourceChoice() {
@@ -14344,15 +14358,16 @@ async function saveIdP() {
     q.push('operationId=' + encodeURIComponent(newOperationId()));
   }
   if (cutoverConfirm !== null) q.push('cutoverConfirm=' + encodeURIComponent(cutoverConfirm));
-  // Safe activation (ADR-0027): enabling an LDAP provider runs a live
-  // connection preflight server-side BEFORE anything persists — a broken
-  // candidate can never replace a working enabled provider.
+  // Safe activation (ADR-0027; FE-6A.2 correction, Blocker 3): the server
+  // runs the directory connection preflight for EVERY enabled-LDAP write at
+  // the write boundary — the parameter is kept for compatibility only.
   if (type === 'ldap' && body.enabled) q.push('preflight=connection');
   if (q.length) url += '?' + q.join('&');
   const res = await apiFetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (!res.ok) {
     if (res.status === 422) {
-      // Preflight failure: show the staged report; nothing was changed.
+      // Preflight failure (code preflight_failed, bounded current.step/
+      // current.reason): show the staged report; nothing was changed.
       try {
         const rep = await res.json();
         if (rep && rep.test) renderLDAPTestReport(rep.test);

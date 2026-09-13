@@ -28,7 +28,11 @@ func loadLegacyAuthProviders(c legacyAuthProvidersStartupConfig) error {
 		// observation marks the durable sentinel). The customer's YAML file
 		// is never modified; after cutover it is import source material only.
 		if legacyLDAPRetired() || (idpRegistry != nil && idpRegistry.HasEnabledLDAP()) {
-			markLegacyLDAPRetired("enabled LDAP identity provider present in the IdP registry at startup")
+			// FE-6A.2 correction (Blocker 4): an OBSERVATION, not a
+			// transition — the settings load (later in boot) reconciles it
+			// against the durable sentinel, so a completed cutover keeps its
+			// record identity and emits no new retirement audit.
+			observeLegacyLDAPShadowAtBoot()
 			logWarnf("Auth: legacy YAML ldap block is RETIRED — the IdP registry is the sole operational LDAP " +
 				"authority (durable cutover). The ldap block is ignored for authentication; remove it, or manage " +
 				"LDAP from Objects → Identity Providers")

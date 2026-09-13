@@ -478,7 +478,7 @@
       },
       "AuthRefusal": {
         "additionalProperties": false,
-        "description": "FE-6A.0 typed refusal shared by the Identity Providers and Administrators surfaces. `code` is bounded: invalid_input (400), forbidden / invalid_credentials (403), not_found / vanished (404), stale / last_admin / user_exists / referenced / confirm_mismatch / not_degraded / repair_unavailable / operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown (409), precondition_required / operation_id_required / cutover_confirm_required (428), persist_failed / outcome_unknown (500), provider_compile_failed (502), registry_degraded / persistence_not_configured / operation_ledger_degraded / operation_ledger_full / operation_unsettled (503), method_not_allowed (405). `current` carries typed facts for the retry (revision, documentRevision, generation, references, confirmValue, detail, reason, operationId, state, code). A refusal mutates nothing, audits no success and publishes no cluster snapshot.",
+        "description": "FE-6A.0 typed refusal shared by the Identity Providers and Administrators surfaces. `code` is bounded: invalid_input (400), forbidden / invalid_credentials (403), not_found / vanished (404), stale / last_admin / user_exists / referenced / confirm_mismatch / not_degraded / repair_unavailable / operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown (409), precondition_required / operation_id_required / cutover_confirm_required (428), preflight_failed (422, `current.step`/`current.reason` — see IdPPreflightRefusal), persist_failed / outcome_unknown (500), provider_compile_failed (502), registry_degraded / persistence_not_configured / operation_ledger_degraded / operation_ledger_full / operation_unsettled (503), method_not_allowed (405). `current` carries typed facts for the retry (revision, documentRevision, generation, references, confirmValue, detail, reason, operationId, state, code). A refusal mutates nothing, audits no success and publishes no cluster snapshot.",
         "properties": {
           "code": {
             "type": "string"
@@ -2608,10 +2608,11 @@
         "description": "Durable, non-secret record of an operation-identified IdP write (FE-6A.0 correction, Blocker 9).",
         "properties": {
           "action": {
-            "description": "idp.update — FE-6A.2: an operation-identified update (a cutover through PUT).",
+            "description": "idp.update — FE-6A.2: an operation-identified update (a cutover through PUT); idp.import — FE-6A.2 correction: the fenced, operation-identified legacy LDAP import.",
             "enum": [
               "idp.create",
-              "idp.update"
+              "idp.update",
+              "idp.import"
             ],
             "type": "string"
           },
@@ -2752,6 +2753,62 @@
           "unresolved",
           "capacity",
           "auditSink"
+        ],
+        "type": "object"
+      },
+      "IdPPreflightRefusal": {
+        "additionalProperties": false,
+        "description": "FE-6A.2 correction (Blocker 3) — an ENABLED LDAP write (create, newly enabled update, or an update that changes an enabled provider's directory connection spec) crosses the directory connection preflight at the write boundary UNCONDITIONALLY. On failure nothing is written (no registry, ledger, cutover, audit or fleet change): `current.step` names the failed stage and `current.reason` the bounded error class; `test` carries the staged report for the legacy console.",
+        "properties": {
+          "code": {
+            "enum": [
+              "preflight_failed"
+            ],
+            "type": "string"
+          },
+          "current": {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "enum": [
+                  "timeout",
+                  "tls_failed",
+                  "unreachable",
+                  "invalid_credentials",
+                  "no_such_object",
+                  "insufficient_access",
+                  "directory_error"
+                ],
+                "type": "string"
+              },
+              "step": {
+                "enum": [
+                  "reachable",
+                  "tls",
+                  "service_bind",
+                  "base_dn",
+                  "user_lookup"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "step",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "error": {
+            "type": "string"
+          },
+          "test": {
+            "$ref": "#/components/schemas/IdPTestReport"
+          }
+        },
+        "required": [
+          "error",
+          "code",
+          "current"
         ],
         "type": "object"
       },
@@ -3205,6 +3262,73 @@
           "pending_reconciliation"
         ],
         "type": "string"
+      },
+      "LegacyLDAPImportResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/IdPMutationResult"
+          },
+          {
+            "properties": {
+              "documentRevision": {
+                "description": "The registry document revision AFTER the import.",
+                "type": "string"
+              },
+              "imported": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "source": {
+                "$ref": "#/components/schemas/LegacyLDAPImportSource"
+              }
+            },
+            "type": "object"
+          }
+        ],
+        "description": "FE-6A.2 correction — the action-bound answer of POST /api/idp/legacy-ldap/import: the disabled profile's read model plus `imported:true`, the RESULTING registry `documentRevision`, the echoed `operationId`, the legacy `source` identity and the fleet fact. A replay of a known operationId returns the recorded answer with `replayed:true` (or the minimal `{id, operationId, settled, replayed}` shape when the record was settled from the profile's provenance)."
+      },
+      "LegacyLDAPImportSource": {
+        "additionalProperties": false,
+        "description": "FE-6A.2 correction — the NON-SECRET identity of the legacy `ldap:` block an import copied (the same facts GET /api/idp/legacy-ldap publishes); never the bind credential.",
+        "properties": {
+          "baseDn": {
+            "type": "string"
+          },
+          "bindCredentialConfigured": {
+            "type": "boolean"
+          },
+          "bindDn": {
+            "type": "string"
+          },
+          "requiredGroup": {
+            "type": "string"
+          },
+          "startTls": {
+            "type": "boolean"
+          },
+          "tlsSkipVerify": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          },
+          "userFilter": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "baseDn",
+          "bindDn",
+          "bindCredentialConfigured",
+          "startTls",
+          "tlsSkipVerify",
+          "userFilter",
+          "requiredGroup"
+        ],
+        "type": "object"
       },
       "LegacyLDAPPresent": {
         "additionalProperties": false,
@@ -15760,7 +15884,7 @@
             }
           },
           {
-            "description": "LDAP only — run a live connection test before anything persists (422 on failure).",
+            "description": "Accepted for compatibility and IGNORED (FE-6A.2 correction, Blocker 3): an ENABLED LDAP candidate crosses the directory connection preflight at the write boundary unconditionally; failure ⇒ 422 preflight_failed with bounded `current.step`/`current.reason`, nothing written.",
             "in": "query",
             "name": "preflight",
             "required": false,
@@ -15806,12 +15930,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/IdPPreflightRefusal"
                 }
               }
             },
-            "description": "LDAP activation preflight failed (?preflight=connection); the current configuration remains active and unchanged."
+            "description": "preflight_failed — the enabled-LDAP candidate did not pass the directory connection preflight; nothing was written (FE-6A.2 correction)."
           },
           "428": {
             "$ref": "#/components/responses/AuthRefusalPreconditionRequired"
@@ -15954,18 +16077,39 @@
     },
     "/api/idp/legacy-ldap/import": {
       "post": {
-        "description": "Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`\nblock, copying every security-effective field (including the stored\nbind credential, which never transits the browser). The administrator\nthen tests and enables the profile — the explicit, downgrade-safe\nmigration path into the IdP registry. The YAML file is never\nmodified. 404 when no legacy ldap block is configured.\n",
+        "description": "Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`\nblock, copying every security-effective field (including the stored\nbind credential, which never transits the browser). The administrator\nthen tests and enables the profile — the explicit, downgrade-safe\nmigration path into the IdP registry. The YAML file is never\nmodified. 404 when no legacy ldap block is configured.\n\nFE-6A.2 correction — the import is a FENCED, OPERATION-IDENTIFIED\nmutation with the create's durable-ledger semantics: `documentRevision`\n(the loaded IdPList.revision; absent ⇒ 428 precondition_required, moved ⇒\n409 stale, both with `current.documentRevision`, decided inside the\nregistry transaction) and a client UUID `operationId` (absent ⇒ 428\noperation_id_required) are REQUIRED. A known operationId replays its\nrecorded outcome (`replayed:true`, nothing written twice); a different\ncandidate under a known id is 409 operation_mismatch. The answer is\naction-bound: `imported:true`, the disabled profile's identity and entry\nrevision, the RESULTING `documentRevision`, the echoed `operationId`, the\nlegacy `source` identity (never its credential) and the fleet fact.\n",
         "operationId": "importLegacyLDAP",
+        "parameters": [
+          {
+            "description": "The loaded registry document revision (IdPList.revision). Absent ⇒ 428 precondition_required; moved ⇒ 409 stale.",
+            "in": "query",
+            "name": "documentRevision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Client-generated UUID identifying this import intent. Absent ⇒ 428 operation_id_required. Re-sent with the same candidate ⇒ the recorded result (`replayed:true`).",
+            "in": "query",
+            "name": "operationId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IdPProfileRead"
+                  "$ref": "#/components/schemas/LegacyLDAPImportResult"
                 }
               }
             },
-            "description": "The imported (disabled) LDAP IdP profile, secret-redacted."
+            "description": "The import's action-bound result (or the replayed recorded result of an earlier dispatch of the same operationId)."
           },
           "400": {
             "$ref": "#/components/responses/AuthRefusalBadRequest"
@@ -15975,6 +16119,12 @@
           },
           "404": {
             "$ref": "#/components/responses/AuthRefusalNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/AuthRefusalConflict"
+          },
+          "428": {
+            "$ref": "#/components/responses/AuthRefusalPreconditionRequired"
           },
           "500": {
             "$ref": "#/components/responses/AuthRefusalPersistFailed"
@@ -15997,7 +16147,7 @@
         ],
         "x-culvert-audit-event": "idp.import",
         "x-culvert-danger-level": "medium",
-        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.2.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
@@ -16337,7 +16487,7 @@
             }
           },
           {
-            "description": "LDAP only — run a live directory test before anything persists (422 on failure).",
+            "description": "Accepted for compatibility and IGNORED (FE-6A.2 correction, Blocker 3): a write that introduces or changes an ENABLED LDAP provider's directory connection crosses the preflight at the write boundary unconditionally; failure ⇒ 422 preflight_failed, nothing written.",
             "in": "query",
             "name": "preflight",
             "required": false,
@@ -16386,12 +16536,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/IdPPreflightRefusal"
                 }
               }
             },
-            "description": "LDAP activation preflight failed; nothing was changed."
+            "description": "preflight_failed — the enabled-LDAP candidate did not pass the directory connection preflight; nothing was written (FE-6A.2 correction)."
           },
           "428": {
             "$ref": "#/components/responses/AuthRefusalPreconditionRequired"

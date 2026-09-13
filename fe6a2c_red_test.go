@@ -120,6 +120,20 @@ func fe6a2cStub(t *testing.T, opts ldapstub.Options) *ldapstub.Server {
 	return s
 }
 
+// fe6a2cResetCutoverRecord isolates the process-global cutover record (the
+// fixtures restore the retired FLAG, not the record another test recorded).
+func fe6a2cResetCutoverRecord(t *testing.T) {
+	t.Helper()
+	prev := legacyLDAPCutoverRec.Load()
+	prevDurable := legacyLDAPCutoverDurableFlag.Load()
+	legacyLDAPCutoverRec.Store(nil)
+	legacyLDAPCutoverDurableFlag.Store(false)
+	t.Cleanup(func() {
+		legacyLDAPCutoverRec.Store(prev)
+		legacyLDAPCutoverDurableFlag.Store(prevDurable)
+	})
+}
+
 func fe6a2cRestartRegistry(t *testing.T, regPath string) *IdPRegistry {
 	t.Helper()
 	adminSettingsSaveWG.Wait()
@@ -419,6 +433,7 @@ func TestFE6A2C_R6_EnabledLDAPCreateWithoutPreflightIsRefused(t *testing.T) {
 func TestFE6A2C_R7_CutoverPutPreflightFailureIsZeroMutation(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	reg, regPath := fe6aLegacyLDAPFixture(t, settings)
+	fe6a2cResetCutoverRecord(t)
 	closed := fe6a2cClosedPort(t)
 	create := ldapProfileBodyForPut("Registry AD", map[string]any{"url": "ldap://" + closed, "bindPassword": "s"})
 	create["enabled"] = false
@@ -476,6 +491,7 @@ func TestFE6A2C_R7_CutoverPutPreflightFailureIsZeroMutation(t *testing.T) {
 func TestFE6A2C_R8_CompletedCutoverIsIdempotentAcrossBoots(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	_, _ = fe6aLegacyLDAPFixture(t, settings)
+	fe6a2cResetCutoverRecord(t)
 	stub := fe6a2cStub(t, ldapstub.Options{})
 	since := fe6aSince()
 	body := ldapProfileBodyForPut("Registry AD", map[string]any{"url": stub.URL(), "bindPassword": "s"})

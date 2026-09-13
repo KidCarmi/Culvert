@@ -110,7 +110,7 @@ func TestFE6A2_BR1_CutoverPutRequiresOperationId(t *testing.T) {
 func TestFE6A2_BR2_CutoverRequiresServerConfirmValue(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	reg, _ := fe6aLegacyLDAPFixture(t, settings)
-	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s", "url": fe6aStubDirectory(t)})
 	body["enabled"] = true
 	const opID = "6a2e0000-0000-4000-8000-00000000be01"
 	// absent confirm ⇒ 428 carrying the required value
@@ -166,7 +166,7 @@ func TestFE6A2_BR4_CutoverPutIsLedgerRecordedAndReplays(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	reg, _ := fe6aLegacyLDAPFixture(t, settings)
 	id := fe6a2DisabledLDAP(t)
-	body := ldapProfileBodyForPut("Registry AD", nil)
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"url": fe6aStubDirectory(t)})
 	body["enabled"] = true
 	const opID = "6a2e0000-0000-4000-8000-00000000be04"
 	code, first := fe6a2PutFenced(t, id, body, "operationId="+opID, "cutoverConfirm="+fe6a2LegacyURL)
@@ -239,7 +239,7 @@ func TestFE6A2_C1_NonCutoverPutIsUnchanged(t *testing.T) {
 	fe6aSwapConfigStore(t)
 	// No legacy YAML block on this node ⇒ no cutover ⇒ plain fenced PUT.
 	withLegacyLDAPYAML(t, nil)
-	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s", "url": fe6aStubDirectory(t)})
 	body["enabled"] = false
 	code, m := fe6acCreateFenced(t, body)
 	if code != http.StatusOK {

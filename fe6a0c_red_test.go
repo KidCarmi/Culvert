@@ -728,7 +728,7 @@ func TestFE6A0C_CR8_RejectedPublicationIsAStructuredFact(t *testing.T) {
 func TestFE6A0C_CR9_CutoverWriteRequiresAndReplaysTheOperationId(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	reg, _ := fe6aLegacyLDAPFixture(t, settings)
-	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s", "url": fe6aStubDirectory(t)})
 	body["enabled"] = true
 	// A cutover-bearing write without an operationId is refused before any write.
 	code, m := fe6acCreateFenced(t, body)
@@ -786,7 +786,7 @@ func TestFE6A0C_CR9_CutoverWriteRequiresAndReplaysTheOperationId(t *testing.T) {
 
 func TestFE6A0C_CR9_AbortedCutoverIsLookedUpAsAborted(t *testing.T) {
 	reg, _ := fe6aLegacyLDAPFixture(t, fe6aBrokenPath(t, "admin_settings.json"))
-	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s", "url": fe6aStubDirectory(t)})
 	body["enabled"] = true
 	const opID = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 	code, m := fe6acCreateFenced(t, body, "operationId="+opID, "cutoverConfirm=ldap://legacy.corp.example:389")

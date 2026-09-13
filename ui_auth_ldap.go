@@ -12,6 +12,7 @@ package main
 // logged, cached, or audited.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -115,6 +116,29 @@ func apiIdPLegacyLDAP(w http.ResponseWriter, r *http.Request) {
 // credential, which never transits the browser). The admin then tests and
 // enables it — the deterministic, downgrade-safe migration path. The YAML
 // file is never modified.
+//
+// FE-6A.2 correction (Blocker 1): the import is a FENCED, OPERATION-
+// IDENTIFIED mutation with the create's durable-ledger semantics — never an
+// unfenced Upsert:
+//
+//  1. `?operationId=` (client UUID) is REQUIRED (428 operation_id_required):
+//     a lost response is recovered through the ledger (replay / lookup),
+//     never by a second import minting a second profile;
+//  2. a known operationId REPLAYS its recorded outcome (committed ⇒ the same
+//     action-bound answer with replayed:true; aborted / pending / unknown ⇒
+//     the contracted 409), and a different candidate under a known id ⇒ 409
+//     operation_mismatch;
+//  3. `?documentRevision=` is REQUIRED (428 precondition_required with
+//     current.documentRevision) and decided INSIDE the registry transaction
+//     (409 stale) — a concurrent registry change is refused, nothing written;
+//  4. the durable intent (action idp.import, bound to the pre-minted id, the
+//     candidate's public digest + keyed secret commitment and the fence) is
+//     recorded BEFORE the write; the profile carries the operationId as its
+//     provenance; the success audit is part of the operation;
+//  5. the answer is ACTION-BOUND: imported:true, the disabled profile's
+//     identity/revision, the RESULTING documentRevision, the echoed
+//     operationId, the legacy SOURCE identity (never its credential) and the
+//     fleet publication fact.
 func apiIdPLegacyLDAPImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeRefusal(w, http.StatusMethodNotAllowed, refusalMethodNotAllowed, "method not allowed", nil)
@@ -131,20 +155,73 @@ func apiIdPLegacyLDAPImport(w http.ResponseWriter, r *http.Request) {
 	if !requireDurableIdP(w) {
 		return
 	}
+	if idpRegistry.Degraded() != nil {
+		writeIdPRefusal(w, errIdPRegistryDegraded)
+		return
+	}
+	opID, ok := idpRequiredOperationID(w, r,
+		"the legacy import mints a registry profile: supply a client-generated UUID operationId so a lost response can be recovered without a second import")
+	if !ok {
+		return
+	}
 	p := &IdPProfile{
 		Name:    "Imported legacy LDAP",
 		Type:    IdPTypeLDAP,
 		Enabled: false, // explicit test-then-enable; never activates blind
 		LDAP:    legacyLDAPToProfileConfig(c),
 	}
-	if err := idpRegistry.Upsert(p); err != nil {
+	normalizeIdPProfileWriteInput(p)
+	specDigest := idpSpecDigest(p)
+	ops := idpRegistry.operations()
+	commitment := ops.CandidateCommitment(p)
+	if idpReplayKnownOperation(w, ops, opID, specDigest, commitment) {
+		return
+	}
+	docRev, ok := idpCreateDocumentFence(w, r)
+	if !ok {
+		return
+	}
+	p.ID = mintIdPID()
+	if !idpBeginCreateIntent(w, ops, idpOperation{
+		OperationID: opID, Action: "idp.import", Actor: auditActor(r), ProfileName: p.Name,
+		ProfileID: p.ID, SpecDigest: specDigest, CandidateCommitment: commitment, RegistryRevision: docRev,
+	}) {
+		return
+	}
+	if err := idpRegistry.Create(p, docRev, opID, nil); err != nil {
+		idpFinishFailedOperation(ops, opID, err)
 		writeIdPRefusal(w, err)
 		return
 	}
 	fleet := idpPublishFleet("legacy LDAP import")
-	auditEventDiff(r, "idp.import", p.ID, "imported legacy YAML LDAP configuration"+fleet.auditSuffix(), nil, auditIdPProfile(p))
-	logger.Printf("UI: legacy YAML LDAP imported as IdP profile id=%q (disabled; test-then-enable)", sanitizeLog(p.ID))
-	jsonOK(w, idpWithFleet(publicIdPProfile(p), fleet))
+	result := idpWithFleet(publicIdPProfile(p), fleet)
+	result["imported"] = true
+	result["operationId"] = opID
+	result["documentRevision"] = idpRegistry.DocumentRevision()
+	result["source"] = legacyLDAPImportSource(c)
+	detail := "imported legacy YAML LDAP configuration" + fleet.auditSuffix() + " operationId=" + opID
+	if !idpRecordCommittedOperation(w, ops, opID, p, result, detail) {
+		return
+	}
+	idpCompleteOperationAudit(r, ops, opID, result)
+	logger.Printf("UI: legacy YAML LDAP imported as IdP profile id=%q (disabled; test-then-enable) operationId=%q", sanitizeLog(p.ID), sanitizeLog(opID))
+	jsonOK(w, result)
+}
+
+// legacyLDAPImportSource is the NON-SECRET identity of the legacy block an
+// import copied — the same facts GET /api/idp/legacy-ldap publishes, so the
+// client can bind the answer to the source it reviewed. Never the credential.
+func legacyLDAPImportSource(c *LDAPConfig) map[string]any {
+	return map[string]any{
+		"url":                      c.URL,
+		"baseDn":                   c.BaseDN,
+		"bindDn":                   c.BindDN,
+		"bindCredentialConfigured": c.BindPassword != "",
+		"startTls":                 c.StartTLS,
+		"tlsSkipVerify":            c.TLSSkipVerify,
+		"userFilter":               c.UserFilter,
+		"requiredGroup":            c.RequiredGroup,
+	}
 }
 
 // legacyLDAPToProfileConfig maps the YAML LDAPConfig into the profile shape,
@@ -576,34 +653,64 @@ func ldapTestUserLookup(rep *ldapTestReport, conn *ldap.Conn, pc *LDAPProfileCon
 
 // ─── Activation preflight (safe activation, ADR-0027 §15) ────────────────────
 
-// ldapActivationPreflight gates a profile write behind a live connection test
-// when the caller requested it (?preflight=connection). Only meaningful for
-// LDAP; other types return nil (their compile path validates what it can
-// without network). On failure the caller must NOT mutate anything — the
-// currently working provider stays live.
-func ldapActivationPreflight(r *http.Request, p *IdPProfile) *ldapTestReport {
-	if r.URL.Query().Get("preflight") != "connection" {
+// ldapWriteActivationGate is the appliance's ACTIVATION PREFLIGHT at the
+// write boundary (ADR-0027 §15; FE-6A.2 correction, Blocker 3 — it is no
+// longer opt-in through ?preflight=connection, which is accepted for
+// compatibility and ignored). A write QUALIFIES when its candidate is an
+// ENABLED LDAP provider that is new, newly enabled, or whose directory
+// connection spec changed (URL, transport security, service account, base
+// DN); a label/priority/attribute-mapping edit of an already-enabled
+// provider does not re-dial the directory. Nil for a non-qualifying write;
+// otherwise the live directory test report (bind + base-object search — the
+// same stages the admin test surface runs), which the caller must refuse on
+// !OK BEFORE recording an intent or writing anything. A malformed candidate
+// is left to the registry's own validation (400), never reported as a
+// directory failure.
+func ldapWriteActivationGate(before, p *IdPProfile) *ldapTestReport {
+	if p == nil || !p.Enabled || p.Type != IdPTypeLDAP || p.LDAP == nil {
 		return nil
 	}
-	if p.Type != IdPTypeLDAP || p.LDAP == nil {
+	if before != nil && before.Enabled && before.Type == IdPTypeLDAP && before.LDAP != nil &&
+		!ldapConnectionSpecChanged(before.LDAP, p.LDAP) {
 		return nil
 	}
 	if err := validateLDAPProfileConfig(p.LDAP); err != nil {
-		return &ldapTestReport{OK: false, Steps: []ldapTestStep{{
-			Name: "validate", Label: "Configuration validation", OK: false, Error: err.Error(),
-		}}}
+		return nil
 	}
 	return runLDAPDirectoryTest(p.LDAP, "", "")
 }
 
-// writeLDAPPreflightFailure responds to a failed activation preflight with
-// the staged report (422: the candidate is well-formed but the directory
-// rejected it) and confirms no mutation occurred.
-func writeLDAPPreflightFailure(w http.ResponseWriter, rep *ldapTestReport) {
+// ldapConnectionSpecChanged reports whether the fields the directory
+// preflight exercises differ between two LDAP configs.
+func ldapConnectionSpecChanged(a, b *LDAPProfileConfig) bool {
+	return a.URL != b.URL || a.StartTLS != b.StartTLS || a.TLSSkipVerify != b.TLSSkipVerify ||
+		a.BindDN != b.BindDN || a.BindPassword != b.BindPassword || a.BaseDN != b.BaseDN
+}
+
+// ldapPreflightFailure returns the first failed stage of a report as the
+// bounded (step, reason) pair the refusal carries: step ∈ the closed stage
+// vocabulary, reason ∈ ldapTestErrText's closed class vocabulary.
+func ldapPreflightFailure(rep *ldapTestReport) (step, reason string) {
+	for _, s := range rep.Steps {
+		if !s.OK && !s.Skipped {
+			return s.Name, s.Error
+		}
+	}
+	return "reachable", "directory_error"
+}
+
+// writeLDAPPreflightRefusal answers a failed activation preflight as the
+// STRUCTURED 422 preflight_failed refusal: `current.step`/`current.reason`
+// are the bounded facts the v2 client renders; the staged report rides
+// beside them as `test` for the legacy console. Nothing was written.
+func writeLDAPPreflightRefusal(w http.ResponseWriter, rep *ldapTestReport) {
+	step, reason := ldapPreflightFailure(rep)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnprocessableEntity)
-	jsonOK(w, map[string]any{
-		"error": "connection preflight failed — the current configuration remains active and unchanged",
-		"test":  rep,
+	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort refusal body
+		"error":   "directory connection preflight failed — the current configuration remains active and unchanged",
+		"code":    refusalPreflightFailed,
+		"current": map[string]any{"step": step, "reason": reason},
+		"test":    rep,
 	})
 }

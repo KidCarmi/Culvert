@@ -1161,23 +1161,25 @@ func apiIdPCreate(w http.ResponseWriter, r *http.Request) {
 	normalizeIdPProfileWriteInput(&p)
 	specDigest := idpSpecDigest(&p)
 	ops := idpRegistry.operations()
-	if idpReplayKnownOperation(w, ops, opID, specDigest) {
+	commitment := ops.CandidateCommitment(&p)
+	if idpReplayKnownOperation(w, ops, opID, specDigest, commitment) {
 		return
 	}
 	docRev, ok := idpCreateDocumentFence(w, r)
 	if !ok {
 		return
 	}
-	// Optional safe-activation preflight (?preflight=connection): a live
-	// connection test must pass BEFORE anything persists (LDAP only).
-	if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
-		writeLDAPPreflightFailure(w, rep)
+	// Activation gate (FE-6A.2 correction, Blocker 3): an ENABLED LDAP
+	// candidate crosses the directory connection preflight HERE, at the
+	// write boundary, unconditionally — before the intent, before any write.
+	if rep := ldapWriteActivationGate(nil, &p); rep != nil && !rep.OK {
+		writeLDAPPreflightRefusal(w, rep)
 		return
 	}
 	p.ID = mintIdPID()
 	if !idpBeginCreateIntent(w, ops, idpOperation{
 		OperationID: opID, Action: "idp.create", Actor: auditActor(r), ProfileName: p.Name,
-		ProfileID: p.ID, SpecDigest: specDigest, RegistryRevision: docRev, Cutover: cutover != nil,
+		ProfileID: p.ID, SpecDigest: specDigest, CandidateCommitment: commitment, RegistryRevision: docRev, Cutover: cutover != nil,
 	}) {
 		return
 	}
@@ -1229,7 +1231,7 @@ func idpCompleteOperationAudit(r *http.Request, ops *idpOperationStore, opID str
 // idpReplayKnownOperation answers a re-dispatched operationId from its
 // durable record (or refuses on a degraded ledger). Returns true when the
 // response has been written. No-op without an operationId.
-func idpReplayKnownOperation(w http.ResponseWriter, ops *idpOperationStore, opID, specDigest string) bool {
+func idpReplayKnownOperation(w http.ResponseWriter, ops *idpOperationStore, opID, specDigest, commitment string) bool {
 	if opID == "" {
 		return false
 	}
@@ -1241,7 +1243,7 @@ func idpReplayKnownOperation(w http.ResponseWriter, ops *idpOperationStore, opID
 	if prev == nil {
 		return false
 	}
-	apiIdPReplayOperation(w, prev, specDigest)
+	apiIdPReplayOperation(w, prev, specDigest, commitment)
 	return true
 }
 
@@ -1275,6 +1277,22 @@ func idpCreateOperationID(w http.ResponseWriter, r *http.Request, cutover bool) 
 	if opID == "" && cutover {
 		writeRefusal(w, http.StatusPreconditionRequired, refusalOperationIDRequired,
 			"this write retires the legacy YAML ldap authenticator: supply a client-generated UUID operationId so a lost response can be recovered without a second cutover", nil)
+		return "", false
+	}
+	return opID, true
+}
+
+// idpRequiredOperationID resolves a client operationId that this write
+// REQUIRES (FE-6A.2 correction, Blocker 1 — the legacy import): malformed ⇒
+// 400, absent ⇒ 428 operation_id_required with the caller's reason.
+func idpRequiredOperationID(w http.ResponseWriter, r *http.Request, why string) (string, bool) {
+	opID := strings.TrimSpace(r.URL.Query().Get("operationId"))
+	if opID == "" {
+		writeRefusal(w, http.StatusPreconditionRequired, refusalOperationIDRequired, why, nil)
+		return "", false
+	}
+	if !validIdPOperationID(opID) {
+		writeRefusal(w, http.StatusBadRequest, refusalInvalidInput, "operationId must be a UUID", nil)
 		return "", false
 	}
 	return opID, true
@@ -1347,7 +1365,7 @@ func idpBeginCreateIntent(w http.ResponseWriter, ops *idpOperationStore, op idpO
 		return false
 	}
 	if !created {
-		apiIdPReplayOperation(w, prev, op.SpecDigest)
+		apiIdPReplayOperation(w, prev, op.SpecDigest, op.CandidateCommitment)
 		return false
 	}
 	return true
@@ -1371,8 +1389,11 @@ func idpFinishFailedOperation(ops *idpOperationStore, opID string, err error) {
 
 // apiIdPReplayOperation answers a re-dispatched operationId from the durable
 // record — never by performing the write again.
-func apiIdPReplayOperation(w http.ResponseWriter, prev *idpOperation, specDigest string) {
-	if prev.SpecDigest != specDigest {
+func apiIdPReplayOperation(w http.ResponseWriter, prev *idpOperation, specDigest, commitment string) {
+	// FE-6A.2 correction (Blocker 2): the SAME operationId with a DIFFERENT
+	// secret is a different candidate — 409 operation_mismatch, never the
+	// first write's replayed success.
+	if !prev.matchesCandidate(specDigest, commitment) {
 		writeRefusal(w, http.StatusConflict, refusalOperationMismatch,
 			"this operationId was already used for a different candidate; generate a new operationId for a new write",
 			map[string]any{"operationId": prev.OperationID, "state": prev.State})
@@ -1541,9 +1562,10 @@ func apiIdPUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	normalizeIdPProfileWriteInput(&p)
 	specDigest := idpSpecDigest(&p)
 	ops := idpRegistry.operations()
+	commitment := ops.CandidateCommitment(&p)
 	// A re-dispatched operationId is answered from its durable record with
 	// the ORIGINAL fence semantics: the replay never re-decides the revision.
-	if idpReplayKnownOperation(w, ops, opID, specDigest) {
+	if idpReplayKnownOperation(w, ops, opID, specDigest, commitment) {
 		return
 	}
 	// Fast pre-check against the value read now; the authoritative fence is
@@ -1555,16 +1577,18 @@ func apiIdPUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		writeIdPRefusal(w, errIdPRegistryDegraded)
 		return
 	}
-	// Optional safe-activation preflight (?preflight=connection): a broken
-	// candidate must never replace a working enabled provider — on failure
-	// nothing is mutated and the live provider stays untouched (LDAP only).
-	if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
-		writeLDAPPreflightFailure(w, rep)
+	// Activation gate (FE-6A.2 correction, Blocker 3): a write that
+	// introduces or changes an ENABLED LDAP provider crosses the directory
+	// connection preflight at the write boundary, unconditionally — a
+	// broken candidate never replaces a working provider, and a failure
+	// leaves registry, ledger, cutover, audit and fleet untouched.
+	if rep := ldapWriteActivationGate(before, &p); rep != nil && !rep.OK {
+		writeLDAPPreflightRefusal(w, rep)
 		return
 	}
 	if !idpBeginCreateIntent(w, ops, idpOperation{
 		OperationID: opID, Action: "idp.update", Actor: auditActor(r), ProfileName: p.Name,
-		ProfileID: id, SpecDigest: specDigest, RegistryRevision: idpRegistry.DocumentRevision(), Cutover: cutover != nil,
+		ProfileID: id, SpecDigest: specDigest, CandidateCommitment: commitment, RegistryRevision: idpRegistry.DocumentRevision(), Cutover: cutover != nil,
 	}) {
 		return
 	}

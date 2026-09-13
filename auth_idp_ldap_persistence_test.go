@@ -422,9 +422,10 @@ func TestLegacyLDAP_NoLocalAdmin_UnconditionalCutoverKeepsConsoleGated(t *testin
 		t.Fatal("precondition: the wired legacy provider anchors IsConfigured")
 	}
 
-	// Admin creates an enabled registry LDAP profile via the API.
+	// Admin creates an enabled registry LDAP profile via the API (pointed at
+	// a directory that answers the write-boundary preflight).
 	w := httptest.NewRecorder()
-	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
+	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s", "url": fe6aStubDirectory(t)})
 	body["enabled"] = true
 	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID(), "cutoverConfirm=ldap://legacy.corp.example:389"), body))
 	assertStatus(t, w, http.StatusOK)

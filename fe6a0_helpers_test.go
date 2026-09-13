@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
+	"github.com/KidCarmi/Culvert/internal/ldapstub"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -56,6 +57,21 @@ func fencedLockoutsPath() string {
 
 // testOperationID mints a client operationId (UUID v4 shape) for a
 // cutover-bearing IdP write (Blocker 9).
+// fe6aStubDirectory starts an in-process LDAP responder (bind + base-object
+// search) and returns its URL. FE-6A.2 correction (Blocker 3): an ENABLED
+// LDAP write crosses the directory connection preflight at the write
+// boundary unconditionally, so a test that enables a profile must point it
+// at a directory that answers.
+func fe6aStubDirectory(t *testing.T) string {
+	t.Helper()
+	s, err := ldapstub.Listen("127.0.0.1:0", ldapstub.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s.URL()
+}
+
 func testOperationID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])

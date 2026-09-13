@@ -374,6 +374,42 @@ var legacyLDAPShadowWarnOnce sync.Once
 // deactivating the proxy backend can never fail the admin-UI setup gate open.
 func legacyLDAPRetired() bool { return legacyLDAPRetiredFlag.Load() }
 
+// legacyLDAPBootObserved records that THIS boot's legacy-provider slice
+// observed an enabled registry LDAP profile BEFORE the durable settings were
+// loaded (FE-6A.2 correction, Blocker 4). The observation enforces the
+// single-authority rule immediately (the legacy provider is never wired)
+// but it is NOT a transition until the settings load has reconciled it
+// against the durable sentinel: a completed cutover keeps its record
+// identity and emits no new retirement audit; only a node whose readable
+// settings carry NO sentinel records the observed transition — once.
+var legacyLDAPBootObserved atomic.Bool
+
+// observeLegacyLDAPShadowAtBoot is the boot-time observation (the legacy
+// slice runs before the settings load): fail-closed single authority now,
+// no record, no audit, no save — the settings load decides what it was.
+func observeLegacyLDAPShadowAtBoot() {
+	legacyLDAPRetiredFlag.Store(true)
+	legacyLDAPCutoverDurableFlag.Store(false)
+	legacyLDAPBootObserved.Store(true)
+}
+
+// reconcileLegacyLDAPBootObservation is called by the settings load once
+// the durable truth is known. durableRetired reports whether the READABLE
+// settings carry the sentinel (its record, if any, was adopted by the
+// caller). Returns true when THIS call recorded a new observed transition
+// (audited once) that the caller must now persist.
+func reconcileLegacyLDAPBootObservation(durableRetired bool) bool {
+	if !legacyLDAPBootObserved.Swap(false) {
+		return false
+	}
+	if durableRetired {
+		return false // a completed cutover: same identity, nothing new
+	}
+	rec := newLegacyLDAPCutover(nil, "", "system", "observed")
+	recordLegacyLDAPRetirement(rec, "enabled LDAP identity provider present in the IdP registry at startup")
+	return true
+}
+
 // LegacyLDAPCutover is the DURABLE, operation-identified record of the
 // legacy-YAML → registry LDAP authority cutover (FE-6A.0 R7). It binds the
 // once-ever transition to the candidate that carried it (profile id + the
@@ -455,6 +491,14 @@ func markLegacyLDAPRetiredWith(rec LegacyLDAPCutover, reason string) bool {
 	if legacyLDAPRetiredFlag.Swap(true) {
 		return false
 	}
+	recordLegacyLDAPRetirement(rec, reason)
+	return true
+}
+
+// recordLegacyLDAPRetirement stores the cutover record and emits the ONE
+// retirement audit for a transition that has been decided (the runtime
+// Swap above, or the boot reconciliation).
+func recordLegacyLDAPRetirement(rec LegacyLDAPCutover, reason string) {
 	legacyLDAPCutoverRec.Store(&rec)
 	audit.Add(audit.Entry{
 		TS:       time.Now().UnixMilli(),
@@ -466,7 +510,6 @@ func markLegacyLDAPRetiredWith(rec LegacyLDAPCutover, reason string) bool {
 		Detail: "legacy YAML ldap block permanently retired as an operational authenticator (" + reason +
 			"); registry is the sole LDAP authority; operationId=" + rec.OperationID,
 	})
-	return true
 }
 
 // enforceLegacyLDAPShadowing enforces the single-authority rule at every

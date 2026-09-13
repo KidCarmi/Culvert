@@ -591,6 +591,12 @@ func applyLegacyLDAPRetirement(s *AdminSettings) {
 			legacyLDAPCutoverRec.Store(&rec)
 		}
 	}
+	// FE-6A.2 correction (Blocker 4): the boot observation is reconciled
+	// against the durable truth HERE. A completed cutover (sentinel present)
+	// keeps its record identity and emits nothing; readable settings that
+	// carry NO sentinel record the observed transition exactly once (the
+	// save below makes it durable).
+	reconcileLegacyLDAPBootObservation(s.LegacyLDAPRetired)
 	enforceLegacyLDAPShadowing()
 	if legacyLDAPRetired() && !s.LegacyLDAPRetired {
 		// In-memory cutover predates the settings load — make it durable.

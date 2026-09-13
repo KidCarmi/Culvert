@@ -45,6 +45,7 @@ const (
 	// block's server-published cutoverConfirmValue in ?cutoverConfirm= — the
 	// T2 ceremony is bound to the authenticator being retired by a SERVER fact.
 	refusalCutoverConfirmRequired = "cutover_confirm_required"  // 428: ?cutoverConfirm= absent on a cutover-bearing write
+	refusalPreflightFailed        = "preflight_failed"          // 422: an ENABLED LDAP write did not pass the directory connection preflight at the write boundary (FE-6A.2 correction, Blocker 3): current.{step, reason} bounded, nothing written
 	refusalOperationMismatch      = "operation_mismatch"        // 409: operationId reused for a different candidate
 	refusalOperationInProgress    = "operation_in_progress"     // 409: the same operation is still being decided
 	refusalOperationAborted       = "operation_aborted"         // 409: replay of an operation that aborted

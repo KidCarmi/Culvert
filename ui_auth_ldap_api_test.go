@@ -176,15 +176,30 @@ func TestAPIIdPItem_PutWithoutPreflightKeepsExistingSemantics(t *testing.T) {
 	}
 }
 
-func TestLDAPActivationPreflight_IgnoresNonLDAPAndAbsentParam(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPut, "/api/idp/x", http.NoBody)
-	if rep := ldapActivationPreflight(r, ldapTestProfile("x", "X")); rep != nil {
-		t.Fatal("preflight ran without the query param")
+func TestLDAPActivationGate_QualifiesOnlyEnabledLDAPConnectionChanges(t *testing.T) {
+	// FE-6A.2 correction (Blocker 3): the gate is no longer opt-in; it
+	// qualifies a write by its candidate, never by a query parameter.
+	disabled := ldapTestProfile("x", "X")
+	disabled.Enabled = false
+	if rep := ldapWriteActivationGate(nil, disabled); rep != nil {
+		t.Fatal("a DISABLED ldap candidate must not dial the directory")
 	}
-	r = httptest.NewRequest(http.MethodPut, "/api/idp/x?preflight=connection", http.NoBody)
-	oidc := &IdPProfile{Type: IdPTypeOIDC}
-	if rep := ldapActivationPreflight(r, oidc); rep != nil {
-		t.Fatal("preflight must be a no-op for non-LDAP types")
+	oidc := &IdPProfile{Type: IdPTypeOIDC, Enabled: true}
+	if rep := ldapWriteActivationGate(nil, oidc); rep != nil {
+		t.Fatal("the gate must be a no-op for non-LDAP types")
+	}
+	before := ldapTestProfile("x", "X")
+	before.Enabled = true
+	renamed := ldapTestProfile("x", "Renamed")
+	renamed.Enabled = true
+	if rep := ldapWriteActivationGate(before, renamed); rep != nil {
+		t.Fatal("a label-only edit of an already-enabled provider must not re-dial the directory")
+	}
+	moved := ldapTestProfile("x", "X")
+	moved.Enabled = true
+	moved.LDAP.BaseDN = "DC=elsewhere"
+	if !ldapConnectionSpecChanged(before.LDAP, moved.LDAP) {
+		t.Fatal("a base-DN change is a connection-spec change")
 	}
 }
 
@@ -253,7 +268,9 @@ func TestAPIIdPLegacyLDAPImport_CreatesDisabledProfilePreservingSecurityFields(t
 	})
 
 	w := httptest.NewRecorder()
-	apiIdPLegacyLDAPImport(w, jsonReq(http.MethodPost, "/api/idp/legacy-ldap/import", nil))
+	// FE-6A.2 correction (Blocker 1): the import is fenced on the document
+	// revision and operation-identified.
+	apiIdPLegacyLDAPImport(w, jsonReq(http.MethodPost, "/api/idp/legacy-ldap/import?documentRevision="+idpRegistry.DocumentRevision()+"&operationId="+testOperationID(), nil))
 	assertStatus(t, w, http.StatusOK)
 	body := w.Body.String()
 	if strings.Contains(body, "legacy-secret") {
