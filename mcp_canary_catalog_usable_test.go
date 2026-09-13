@@ -969,22 +969,26 @@ func TestCatalogUsable_RepinWindowIsNotUsable(t *testing.T) {
 }
 
 // TestCatalogUsable_DisabledServerIsNotUsable pins the BEHAVIOUR that a server disabled in
-// the registry cannot satisfy the row. It is deliberately NOT claimed as a defect gate for the
-// srv.Usable() check, because it passes with or without it — measured, not assumed.
+// the registry cannot satisfy the row. It is deliberately NOT claimed as the defect gate for
+// srv.Usable(), because it passes with or without that line — measured, not assumed. Being
+// sequential, its disable lands BEFORE the resolver's reconcile, which withdraws trust and
+// demotes the record, so the eligibility check rejects it and srv.Usable() is never reached.
 //
-// The reason is the reconcile at the top of the resolver: it withdraws trust for a disabled
-// server, so rec.Eligibility has already left catalog.Usable by the time the eligibility check
-// reads it. srv.Usable() is therefore UNREACHABLE today, and the reason is structural rather
-// than lucky: Usable() is Enabled && VerifyVerified, and the registry's only transition into a
-// mismatched verification (VerifyIdentity) sets Enabled=false in the same write, so there is no
-// reachable !Usable-but-enabled state for the catalog to disagree about.
+// An earlier revision of this comment concluded from that measurement that srv.Usable() was
+// UNREACHABLE. That was WRONG (Codex P2 round 7). The registry publishes independently of this
+// resolver, so a disable — or, sharply, a mismatching VerifyIdentity, whose branch clears
+// Enabled WITHOUT touching PinnedIdentity — can instead land AFTER mcpToolTrustReconcile()
+// returns and BEFORE reg.Current() is read. In that window the record is still Usable, the
+// tenant still owns the server, the digest still matches, the identity pin still matches, and
+// srv.Usable() is the ONLY check that rejects it.
 //
-// It is kept as defense-in-depth anyway, with that fact recorded rather than implied: it costs
-// one boolean on an admin-rate path, and it is the registry's own predicate, so a future state
-// that is !Usable without clearing Enabled would otherwise be accepted silently. Saying so here
-// is the point — an unreachable check presented as load-bearing is how a suite stops meaning
-// what it claims, and this PR has already been wrong in BOTH directions on exactly that
-// question (a guard deleted as vacuous that was not, and a claim of checkability that was).
+// The guard is therefore load-bearing, pinned structurally by
+// TestCatalogUsable_ServerUsabilityGuardIsPresent and by campaign mutation M18. What this test
+// proves is the sequential half only, and it says so rather than implying more.
+//
+// The lesson worth keeping: reasoning sequentially about state that is PUBLISHED CONCURRENTLY
+// is unsound in BOTH directions. On this PR it deleted a guard as vacuous that was not (round
+// 2), and then labelled this one unreachable when it is the last line of defence (round 7).
 func TestCatalogUsable_DisabledServerIsNotUsable(t *testing.T) {
 	r := newUsableRig(t)
 	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
@@ -1017,5 +1021,59 @@ func TestCatalogUsable_CoherentPairStillUsable(t *testing.T) {
 	if !canaryScopedToolsCatalogUsable(r.scope()) {
 		t.Fatal("CONTROL: a coherent, governed-promoted, same-identity, enabled target must be " +
 			"usable — the repin/disabled checks must narrow the row, never empty it")
+	}
+}
+
+// TestCatalogUsable_ServerUsabilityGuardIsPresent pins `srv.Usable()` STRUCTURALLY, because the
+// state it is the sole defence against is reachable only by an interleaving no sequential test can
+// construct (Codex P2 round 7, PR #1378).
+//
+// The registry publishes independently of the resolver, so a mismatching Registry.VerifyIdentity
+// can land AFTER mcpToolTrustReconcile() returns and BEFORE reg.Current() is read. Its branch sets
+// Enabled=false and Verification=VerifyIdentityMismatch but DOES NOT TOUCH PinnedIdentity — so in
+// that window the catalog record is still Usable, the tenant still owns the server, the digest still
+// matches, and the identity comparison still passes because the pin never moved. srv.Usable() is
+// the only check that rejects it.
+//
+// Reaching that behaviourally needs a production seam interposing between the reconcile and the
+// registry read, purely so a test can drive a race. That is the worse trade — the same call made
+// for the snapshot race in round 2 — so the guard is pinned by its presence instead, with campaign
+// mutation M18 proving the gate actually rejects its removal.
+//
+// This test exists because the guard was briefly, and wrongly, documented as unreachable.
+func TestCatalogUsable_ServerUsabilityGuardIsPresent(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "mcp_canary_preflight.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp_canary_preflight.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "canaryScopedToolsCatalogUsable" {
+			fn = f
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("wall is vacuous: canaryScopedToolsCatalogUsable not found (it was renamed or moved)")
+	}
+
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Usable" {
+			found = true
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("SECURITY: the resolver no longer asks the REGISTRY whether the server is usable. " +
+			"rec.Eligibility is the catalog's LAST INGESTED opinion, and a mismatching VerifyIdentity " +
+			"landing between the reconcile and the registry read leaves the record Usable, the tenant " +
+			"owning, the digest matching and the identity pin UNCHANGED — so every other check passes " +
+			"and this was the only one rejecting it")
 	}
 }

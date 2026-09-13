@@ -323,6 +323,23 @@ run_mutation M17 \
   . "$PREFLIGHT" \
   's/\t\t\tif rec\.Fingerprint\.Identity != srv\.PinnedIdentity \{\n\t\t\t\treturn false\n\t\t\t\}\n//'
 
+# M18 — THE REGISTRY'S OWN USABILITY VERDICT IS DROPPED. rec.Eligibility is the CATALOG's last
+# ingested opinion of the server. The registry publishes independently, so a disable — or a
+# mismatching VerifyIdentity, whose branch clears Enabled WITHOUT touching PinnedIdentity — can land
+# after mcpToolTrustReconcile() returns and before reg.Current() is read. In that window the record
+# is still Usable, ownership matches, the digest matches, and the identity pin matches, so this is
+# the ONLY check that rejects it.
+#
+# The gate is STRUCTURAL by necessity: reaching that state behaviourally needs a production seam
+# interposing between the reconcile and the registry read, and adding one purely to let a test drive
+# a race is the worse trade. (Codex P2 round 7, PR #1378 — raised against a comment of mine that had
+# called this guard unreachable.)
+run_mutation M18 \
+  'the resolver stops asking the registry whether the server is usable' \
+  'TestCatalogUsable_ServerUsabilityGuardIsPresent' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif !srv\.Usable\(\) \{\n\t\t\t\treturn false\n\t\t\t\}\n//'
+
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ "$SKIPPED" -gt 0 ]; then

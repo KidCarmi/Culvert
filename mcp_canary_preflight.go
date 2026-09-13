@@ -708,17 +708,35 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 			if !sok || string(srv.OwnerScope) != tenant {
 				return false
 			}
-			// Defense-in-depth, and UNREACHABLE today — recorded rather than implied, because a
-			// check presented as load-bearing when it cannot fire is how a suite stops meaning
-			// what it claims. The reconcile above withdraws trust for a disabled server, so
-			// rec.Eligibility has already left catalog.Usable before the check above reads it;
-			// and Usable() is Enabled && VerifyVerified, while the registry's only transition
-			// into a mismatched verification (Registry.VerifyIdentity) clears Enabled in the
-			// same write — so no reachable state is !Usable() with Enabled still true.
-			// TestCatalogUsable_DisabledServerIsNotUsable measures that: it passes with and
-			// without this line. Kept because Usable() is the REGISTRY's own predicate, so a
-			// future !Usable state that does not clear Enabled would otherwise be accepted here
-			// silently, and the cost is one boolean on an admin-rate path.
+			// LOAD-BEARING, and the ONLY check that rejects one specific interleaving. An earlier
+			// revision of this comment called it unreachable; that was WRONG, and wrong in an
+			// instructive way (Codex P2 round 7, PR #1378).
+			//
+			// The sequential argument — reconcile withdraws trust for a disabled server, so
+			// rec.Eligibility has already left catalog.Usable before the check above reads it —
+			// holds only when the disable happens BEFORE the reconcile. The registry publishes
+			// independently of this function, so it can also happen AFTER `mcpToolTrustReconcile()`
+			// returns and BEFORE `reg.Current()` is read a few lines below.
+			//
+			// In that window a mismatching Registry.VerifyIdentity is the sharp case: its branch
+			// sets Enabled=false and Verification=VerifyIdentityMismatch but DOES NOT TOUCH
+			// PinnedIdentity. So the catalog record is still Usable, the tenant still owns the
+			// server, the digest still matches, and the identity comparison below still passes
+			// because the pin never moved. Every other check is satisfied and this one is the
+			// only thing standing between that state and a Ready verdict.
+			//
+			// TestCatalogUsable_DisabledServerIsNotUsable does NOT prove this — it is sequential,
+			// so its disable lands before the reconcile and it passes with or without this line.
+			// The interleaving needs a seam interposing between the reconcile and the registry
+			// read, and adding a production seam whose only purpose is to let a test drive a race
+			// is the worse trade (the same call made for the snapshot race in round 2), so the
+			// guard is pinned STRUCTURALLY by TestCatalogUsable_ServerUsabilityGuardIsPresent and
+			// by campaign mutation M18.
+			//
+			// The general lesson, which this function has now learned twice in opposite
+			// directions: reasoning sequentially about state that is PUBLISHED CONCURRENTLY is
+			// unsound in both directions — it deleted a guard as vacuous in round 2 that was not,
+			// and it labelled this one unreachable when it is the last line of defence.
 			if !srv.Usable() {
 				return false
 			}
