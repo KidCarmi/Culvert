@@ -160,22 +160,62 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 }
 
 // TestEvaluateNode_ExcludesActivationInputs is the Codex P2 regression: the scope-independent
-// node dry run must never report an activation-input fact (scope/approval/budget/server/
-// fingerprint) as unmet, so node_ready reflects NODE deficiencies alone. With every node fact
-// satisfied but every activation fact false, EvaluateNode must be Ready with an empty Unmet
-// set, while the full Evaluate reports exactly the seven activation reasons.
+// node dry run must never report an activation-input fact (scope/read-first/exact-first-Canary/
+// approval/server/fingerprint/catalog-usability/budget) as unmet, so node_ready reflects NODE
+// deficiencies alone. With every node fact satisfied but every activation fact false,
+// EvaluateNode must be Ready with an empty Unmet set, while the full Evaluate reports exactly
+// the eight activation reasons.
+//
+// The expected set and the constructed Facts are both checked AGAINST readinessChecks rather
+// than trusted as hand-written enumeration (Codex P2, PR #1378). Without those two derived
+// assertions this test is self-referential: a newly added factActivation row that allTrueFacts
+// initializes true, and that neither the map nor the explicit false assignments below mention,
+// leaves Evaluate reporting the same count as the stale map and the test passes while proving
+// nothing about the new row. That is not a hypothetical -- CANARY-READINESS-MATRIX.md drifted
+// to an undercount by exactly this route and stayed wrong across two reviews.
 func TestEvaluateNode_ExcludesActivationInputs(t *testing.T) {
 	activationReasons := map[Reason]bool{
 		ReasonScopeNotBounded: true, ReasonScopeNotReadFirst: true, ReasonScopeNotExactFirstCanary: true,
 		ReasonLiveApprovalInvalid: true, ReasonServerNotUsable: true, ReasonToolFingerprintStale: true,
 		ReasonToolNotCatalogUsable: true, ReasonBudgetNotConfigured: true,
 	}
+
+	// DERIVED CHECK 1 -- membership. The hand-written map above must equal the factActivation
+	// rows of readinessChecks exactly, so adding a row without listing it here fails the build
+	// rather than silently shrinking what this test covers.
+	fromTable := map[Reason]bool{}
+	for i := range readinessChecks {
+		if readinessChecks[i].scope == factActivation {
+			fromTable[readinessChecks[i].reason] = true
+		}
+	}
+	if len(fromTable) != len(activationReasons) {
+		t.Fatalf("activationReasons lists %d reasons but readinessChecks marks %d rows factActivation: %v vs %v",
+			len(activationReasons), len(fromTable), activationReasons, fromTable)
+	}
+	for r := range fromTable {
+		if !activationReasons[r] {
+			t.Fatalf("readinessChecks marks %q factActivation but activationReasons omits it -- add it here and to the explicit false assignments below", r)
+		}
+	}
+
 	// Node facts all true; the eight activation facts all false.
 	f := allTrueFacts()
 	f.ScopeBounded, f.ScopeReadFirst, f.ScopeExactFirstCanary = false, false, false
 	f.LiveApprovalValid, f.ServerUsable = false, false
 	f.ToolFingerprintCurrent, f.BudgetConfigured = false, false
 	f.ToolCatalogUsable = false
+
+	// DERIVED CHECK 2 -- the fixture matches its own description. Asked directly, every
+	// factActivation accessor must answer false and every factNode accessor true. Check 1 alone
+	// does not get here: a row can be listed in the map and still left true in the Facts above,
+	// which would drop it out of Unmet and make the count assertion pass for the wrong reason.
+	for i := range readinessChecks {
+		c := readinessChecks[i]
+		if got, want := c.ok(f), c.scope == factNode; got != want {
+			t.Fatalf("fixture is wrong for %q (scope=%d): accessor returned %v, want %v -- node facts must be true and activation facts false", c.reason, c.scope, got, want)
+		}
+	}
 
 	node := EvaluateNode(f)
 	if !node.Ready || len(node.Unmet) != 0 {

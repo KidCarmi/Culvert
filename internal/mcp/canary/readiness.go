@@ -228,12 +228,15 @@ var readinessChecks = []readinessCheck{
 func Evaluate(f Facts) Readiness { return evaluate(f, false) }
 
 // EvaluateNode returns the SCOPE-INDEPENDENT node readiness verdict: it evaluates only the
-// node-level prerequisites and NEVER reports an activation-input fact (scope, read-first,
-// live approval, server usability, tool fingerprint, budget) as unmet. This is the operator
-// dry-run surface consumed before any scope is chosen — a node that has satisfied every
-// node-level prerequisite reports node_ready true even though no activation input has been
-// supplied yet, instead of being permanently not-ready because the seven activation facts
-// default false (Codex P2, PR #1249). The complete verdict is Evaluate, driven by the
+// node-level prerequisites and NEVER reports an activation-input fact (scope bounded,
+// read-first, exact first-Canary scope, live approval, server usability, tool fingerprint,
+// exact scoped tool catalog-usable, budget) as unmet. This is the operator dry-run surface
+// consumed before any scope is chosen — a node that has satisfied every node-level
+// prerequisite reports node_ready true even though no activation input has been supplied yet,
+// instead of being permanently not-ready because the eight activation facts default false
+// (Codex P2, PR #1249). The count and membership live in readinessChecks (the factActivation
+// rows); this comment restates them and TestEvaluateNode_ExcludesActivationInputs derives them
+// from that table, so a new row cannot leave this list quietly stale. The complete verdict is Evaluate, driven by the
 // activation preflight once a scope/approval/budget exist.
 func EvaluateNode(f Facts) Readiness { return evaluate(f, true) }
 

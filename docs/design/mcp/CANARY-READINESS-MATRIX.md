@@ -80,11 +80,18 @@ row is **node-level** (including row 21, the open coordinator-rehearsal prerequi
 every node prerequisite reports `node_ready` true even before a scope is chosen, instead of
 being permanently not-ready because the eight activation facts default false. `canary.Evaluate`
 (the full verdict, driven by `evaluateCanaryActivationPreflight` once a scope/approval/budget
-exist) checks both. Pinned by `TestEvaluateNode_ExcludesActivationInputs` (Codex P2, PR #1249),
-which enumerates exactly this set as `activationReasons` and asserts the full `Evaluate` reports
-precisely those and no others — so the membership and the count above are checkable against the
-code rather than maintained by hand. The set is `factActivation` in `readinessChecks`
-(`internal/mcp/canary/readiness.go`); that table, not this paragraph, is ground truth.
+exist) checks both. The set is the `factActivation` rows of `readinessChecks`
+(`internal/mcp/canary/readiness.go`); **that table, not this paragraph, is ground truth**, and
+`TestEvaluateNode_ExcludesActivationInputs` (Codex P2, PR #1249) DERIVES the expectation from it
+rather than restating it: it builds the reason set by walking `readinessChecks` for
+`factActivation` and requires the test's own list to equal it, then asks every accessor directly
+and requires each activation fact false and each node fact true before asserting the verdict.
+Adding a row without listing it fails the build, as does listing one the fixture leaves true.
+That derivation was added in PR #1378 because without it the test was self-referential — it
+compared `Evaluate` against a hand-written map, so a new `factActivation` row that
+`allTrueFacts()` initialized true and the map omitted kept the test green while proving nothing
+about the new row (verified: the pre-derivation test passes against exactly that mutation).
+This paragraph drifted to an undercount by the same route and stayed wrong across two reviews.
 
 ## Live-execution trust firewall (`tooltrust` + `canary.SatisfiesLiveExecution`)
 
