@@ -61,7 +61,7 @@ live tier; Canary *requires* it).
 | 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`), driven by the authoritative `tooltrust.Store` through `buildLiveApprovalBindings` in `productionCanaryActivationInputs` | **satisfiable; unmet until a valid grant is issued** |
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |
-| 19 | Exact scoped tool is `catalog.Usable` | `tool_not_catalog_usable` | `canaryScopedToolsCatalogUsable` in `productionCanaryActivationInputs` — reconciles tool trust, then derives from ONE catalog snapshot + ONE registry snapshot: the exact scoped tool's record is `catalog.Usable`, its digest equals the scope's PINNED fingerprint (format-bound, since `Sum` folds `FormatVersion` in), and the naming tenant owns the server. Satisfied ONLY by the governed `shadow_evaluation` promotion lifecycle; a `live_execution` approval never promotes. It is LIVE governance state, re-observed each evaluation and never copied into the activation's immutable reviewed snapshot. Distinct from row 8 (`catalog_unhealthy`), which asks whether the catalog is READABLE, not whether THIS target passed trust review. | **satisfiable; unmet until the exact tool is promoted** |
+| 19 | Exact scoped tool is `catalog.Usable` | `tool_not_catalog_usable` | `canaryScopedToolsCatalogUsable` in `productionCanaryActivationInputs` — reconciles tool trust, then derives from ONE catalog snapshot + ONE registry snapshot: the exact scoped tool's record is `catalog.Usable`, its digest equals the scope's PINNED fingerprint (format-bound, since `Sum` folds `FormatVersion` in), and the naming tenant owns the server. Satisfied ONLY by the governed `shadow_evaluation` promotion lifecycle; a `live_execution` approval never promotes. It is LIVE governance state, re-observed each evaluation and never copied into the activation's immutable reviewed snapshot. Distinct from row 11 (`catalog_unhealthy`), which asks whether the catalog is READABLE, not whether THIS target passed trust review. | **satisfiable; unmet until the exact tool is promoted** |
 | 20 | Rollback path healthy (**mechanics**) | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND a build-bound EXECUTABLE rollback-rehearsal record (a real Canary→Shadow→Observe drill through the actual persist/restore path, §5) validates for the current build. **Rollback MECHANICS evidence only** — it does NOT traverse the authoritative coordinator (see row 21). | **NO (undrilled)** |
 | 21 | Authoritative rollback rehearsed (coordinator) | `rollback_coordinator_rehearsal_pending` | `productionCoordinatorRollbackRehearsed` — reads DURABLE, build-bound evidence that the Canary→Shadow→Observe demotion was driven through the REAL coordinator core (`commitRolloutTransitionCore`, the same body every production transition runs) and recovered to Observe, so the rehearsal fails for every security reason a real rollback would (Shadow preflight, emergency kill, config validity, durability). Run via `POST /api/mcp/rollout/rehearse-rollback-authoritative`. Distinct from row 20 (mechanics). **CLOSABLE** by a successful coordinator-routed drill; the shipped default stays open (no drill has run — and it requires the full shadow tier, which the unshipped tool-approval slice gates). | **NO (until drilled)** |
 | 22 | Budget configured | `canary_budget_not_configured` | `canary.ValidateBudget` | activation input |
@@ -70,16 +70,21 @@ Live-tier facts (5, 6, 7, 14, 15) are all false together in this build (the guar
 executor — whose boundary guards are pinned by `internal/mcp/execution`'s PREREQ-MCP-KILL-1
 tests — composes as one unit and is never composed).
 
-**Node vs activation readiness (two evaluators).** Rows 3, 4, 16, 17, 18, 19, 22 (scope bounded,
-scope read-first, live approval, server usable, tool fingerprint, budget) are **activation-
-level**: they are meaningful only once an operator supplies a concrete scope, approval, and
-budget. Every other row is **node-level** (including row 21, the open coordinator-rehearsal
-prerequisite, which the `node_ready` dry run surfaces). `canary.EvaluateNode` (the `node_ready` dry run at
+**Node vs activation readiness (two evaluators).** Rows 3, 4, 4a, 16, 17, 18, 19, 22 (scope
+bounded, scope read-first, exact first-Canary scope, live approval, server usable, tool
+fingerprint, exact scoped tool `catalog.Usable`, budget) are **activation-level**: they are
+meaningful only once an operator supplies a concrete scope, approval, and budget. Every other
+row is **node-level** (including row 21, the open coordinator-rehearsal prerequisite, which the
+`node_ready` dry run surfaces). `canary.EvaluateNode` (the `node_ready` dry run at
 `GET /api/mcp/rollout` → `canary`) evaluates ONLY node-level rows, so a node that has satisfied
 every node prerequisite reports `node_ready` true even before a scope is chosen, instead of
-being permanently not-ready because the seven activation facts default false. `canary.Evaluate`
+being permanently not-ready because the eight activation facts default false. `canary.Evaluate`
 (the full verdict, driven by `evaluateCanaryActivationPreflight` once a scope/approval/budget
-exist) checks both. Pinned by `TestEvaluateNode_ExcludesActivationInputs` (Codex P2, PR #1249).
+exist) checks both. Pinned by `TestEvaluateNode_ExcludesActivationInputs` (Codex P2, PR #1249),
+which enumerates exactly this set as `activationReasons` and asserts the full `Evaluate` reports
+precisely those and no others — so the membership and the count above are checkable against the
+code rather than maintained by hand. The set is `factActivation` in `readinessChecks`
+(`internal/mcp/canary/readiness.go`); that table, not this paragraph, is ground truth.
 
 ## Live-execution trust firewall (`tooltrust` + `canary.SatisfiesLiveExecution`)
 
@@ -243,23 +248,23 @@ composed are now implemented and dormant-by-construction (Execution posture stay
   AbortRequest codes NEVER latch it (request-fails-closed ≠ Canary-stops).
 - **§5 Executable rollback rehearsal (mechanics)** — the self-attested marker is replaced by a real
   Canary→Shadow→Observe drill through the actual rollout persist/restore path, recorded as durable
-  build-bound evidence; readiness row 19 (`rollbackPathHealthy`) requires that evidence to validate.
+  build-bound evidence; readiness row 20 (`rollbackPathHealthy`) requires that evidence to validate.
   This is rollback **mechanics** evidence: it drives the scratch ladder directly (`SetConfig` +
   `persistRolloutStateTo`), NOT through the authoritative `commitRolloutTransitionAt` coordinator, so
   it does not prove parity with that coordinator's Shadow preflight, emergency-kill, revision,
   durability, and rollback guards. The authoritative rehearsal is a SEPARATE hard prerequisite
-  (row 20, `rollback_coordinator_rehearsal_pending`, `CANARY-ROLLBACK-COORDINATOR-REHEARSAL`) that
+  (row 21, `rollback_coordinator_rehearsal_pending`, `CANARY-ROLLBACK-COORDINATOR-REHEARSAL`) that
   keeps Canary readiness FALSE regardless of the mechanics rehearsal — no transition can become READY
   on the mechanics rehearsal alone.
-- **Authoritative rollback rehearsal (coordinator parity, row 20)** — the follow-up landed: the rollout
+- **Authoritative rollback rehearsal (coordinator parity, row 21)** — the follow-up landed: the rollout
   coordinator is extracted into a single locked core (`commitRolloutTransitionCore`) that every
   production transition AND the rehearsal share, and the rehearsal drives the Canary→Shadow→Observe
   ladder through that core on a SCRATCH state/file (never live state), recovers to Observe, and records
   DISTINCT durable build-bound evidence (`mcp_canary_coordinator_rehearsal.go`). So the rehearsal fails
   for every security reason a real rollback would (Shadow preflight, emergency kill, config validity,
   durability), proven by the parity wall and the rejection/mutation campaign. `productionCoordinatorRollbackRehearsed`
-  reads that evidence, so row 20 CLOSES for a build only after a successful coordinator-routed drill.
-  The mechanics fact (row 19) and this fact stay DISTINCT.
+  reads that evidence, so row 21 CLOSES for a build only after a successful coordinator-routed drill.
+  The mechanics fact (row 20) and this fact stay DISTINCT.
 - **Runtime lifecycle** — `mcp_canary_runtime.go` owns the monotonic activation generation and the
   durable budget/abort state; `beginCanaryActivation` (the future-arming seam) is UNINVOKED in this
   build, so no generation is ever bumped and no execution is ever reserved in production.
@@ -381,10 +386,10 @@ Every one is a **separately-reviewed activation**, not a config change:
    a live mode begins the generation exactly once; a demotion invalidates it), and the live side-effect
    gate (`mcp_live_gate.go`) drives `reserveCanaryExecution` at the boundary before the executor's
    kill re-check. Still gated on the tier being armed AND a real Shadow→Canary transition committing.
-4. Close **`CANARY-ROLLBACK-COORDINATOR-REHEARSAL`** (row 20) by running the authoritative rehearsal
+4. Close **`CANARY-ROLLBACK-COORDINATOR-REHEARSAL`** (row 21) by running the authoritative rehearsal
    on a genuinely rollback-capable node (`POST /api/mcp/rollout/rehearse-rollback-authoritative`). The
    machinery landed (coordinator core extracted; the rehearsal routes the scratch demotion through it,
-   fails for every real rollback gate, and records durable build-bound evidence), so row 20 CLOSES for a
+   fails for every real rollback gate, and records durable build-bound evidence), so row 21 CLOSES for a
    build once a coordinator-routed drill succeeds. In the shipped build this still requires the full
    shadow tier (gated by the unshipped tool-approval slice), so it stays open by default.
 5. Execute the first Canary per `CANARY-FIRST-RUNBOOK.md` (synthetic identity, recording
