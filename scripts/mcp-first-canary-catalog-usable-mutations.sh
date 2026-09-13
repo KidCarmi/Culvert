@@ -175,6 +175,8 @@ FPRINT=internal/mcp/catalog/fingerprint.go
 PREFLIGHT=mcp_canary_preflight.go
 TOOLTRUST=mcp_tooltrust.go
 ROLLOUT=mcp_rollout.go
+READINESS=internal/mcp/canary/readiness.go
+POLICYENGINE=internal/mcp/policy/engine.go
 TRUST=mcp_tooltrust.go
 POLICYENG=internal/mcp/policy/engine.go
 
@@ -435,6 +437,39 @@ run_mutation M23 \
   'TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes' \
   . "$PREFLIGHT" \
   's/(func canaryScopedToolsCatalogUsable\(scope rollout\.ScopeSpec\) bool \{\n)/$1\tif false {\n\t\t_, c := mcpInventory.sharedInventory()\n\t\tpromote := c.Promote\n\t\t_, _ = promote(catalog.ToolKey{}, catalog.Fingerprint{})\n\t}\n/'
+
+# M24 — AN ACCESSOR IS SATISFIED BY SOMETHING OTHER THAN ITS OWN FACT. The pure-package tests flip
+# ONE field off an all-true fixture, so every other fact is true in every case they run; an accessor
+# reading `f.ToolCatalogUsable || !f.LiveExecutorComposed` is therefore invisible to all of them. On
+# the SHIPPED node the live executor is absent, so that accessor reports the tool catalog-usable
+# whatever the catalog says and Unmet silently stops listing a missing prerequisite. Caught by the
+# all-false derived gate, which is the opposite fixture. (Codex P2 round 12, PR #1378.)
+run_mutation M24 \
+  'the catalog-usability accessor is satisfied by an unrelated fact being false' \
+  'TestEvaluate_EveryUnmetFactIsReportedTogether' \
+  ./internal/mcp/canary "$READINESS" \
+  's/\{func\(f Facts\) bool \{ return f\.ToolCatalogUsable \}/{func(f Facts) bool { return f.ToolCatalogUsable || !f.LiveExecutorComposed }/'
+
+# M25 — THE ACTIVATION FACT IS SATISFIED BY THE APPROVAL IT ALREADY REQUIRES. Every real activation
+# carries a live approval, so `in.ToolCatalogUsable || len(in.ToolApprovals) > 0` makes the row
+# unreachable in production while passing any fixture that carries no approvals — which the preflight
+# fixture did. The fixture now issues a VALID live approval first and holds it constant, so the only
+# thing changing between the two evaluations is catalog usability. (Codex P2 round 12, PR #1378.)
+run_mutation M25 \
+  'the preflight satisfies catalog usability from the presence of a live approval' \
+  'TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  . "$PREFLIGHT" \
+  's/\tf\.ToolCatalogUsable = in\.ToolCatalogUsable\n/\tf.ToolCatalogUsable = in.ToolCatalogUsable || len(in.ToolApprovals) > 0\n/'
+
+# M26 — THE CATALOG DISPOSITION STOPS HARD-OVERRIDING. This is the premise the whole policy E2E rests
+# on: a Quarantined tool must be pre-empted BEFORE ordinary rule matching, independent of drift. Drop
+# the disposition arm and a quarantined tool falls through to the rules — where the fixture's ALLOW
+# would match it. The E2E's `before` leg is what refuses it.
+run_mutation M26 \
+  'the policy engine stops hard-overriding a catalog-quarantined tool' \
+  'TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion' \
+  . "$POLICYENGINE" \
+  's/case in\.Tool\.Drift == DriftUnknownTool \|\| in\.Tool\.Disposition == DispQuarantined:/case in.Tool.Drift == DriftUnknownTool:/'
 
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"

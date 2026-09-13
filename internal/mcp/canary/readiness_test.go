@@ -287,3 +287,53 @@ func containsReason(rs []Reason, want Reason) bool {
 	}
 	return false
 }
+
+// ── every unmet prerequisite is reported TOGETHER, not one at a time ─────────
+//
+// Codex P2 round 12. The single-field flips above prove each accessor in ISOLATION: they
+// start from allTrueFacts() and turn exactly one fact off, so every OTHER fact is true in
+// every case they run. That makes them blind to an accessor that consults another fact —
+// `return f.ToolCatalogUsable || !f.LiveExecutorComposed` passes the whole package, because
+// the disjunct is false in every fixture those tests build. On the SHIPPED node the live
+// executor is absent, so that accessor would report the tool catalog-usable no matter what
+// the catalog says, and Unmet would silently stop listing a missing prerequisite.
+//
+// Verified: the mutation above was applied and `go test ./internal/mcp/canary/` returned ok.
+//
+// This gate is the opposite fixture — every prerequisite FALSE — and it is DERIVED: the
+// expected reason set is read off readinessChecks, so a new row is covered the moment it
+// exists. Every accessor in the table is a plain positive field read, so all-false must
+// yield all-unmet exactly; an accessor that consults a second fact breaks that, whichever
+// direction it leans.
+func TestEvaluate_EveryUnmetFactIsReportedTogether(t *testing.T) {
+	// Capability holds so evaluate() reaches the table; every prerequisite is false.
+	got := Evaluate(Facts{CapabilityGateway: true})
+
+	want := map[Reason]bool{}
+	for _, c := range readinessChecks {
+		want[c.reason] = true
+	}
+	if len(want) == 0 {
+		t.Fatal("gate is vacuous: readinessChecks is empty")
+	}
+
+	have := map[Reason]bool{}
+	for _, r := range got.Unmet {
+		have[r] = true
+	}
+	for r := range want {
+		if !have[r] {
+			t.Errorf("SECURITY: with EVERY prerequisite false, %s is missing from Unmet — its "+
+				"accessor is satisfied by something other than its own fact, so on a node where "+
+				"that other fact happens to hold the prerequisite stops being reported", r)
+		}
+	}
+	for r := range have {
+		if !want[r] {
+			t.Errorf("Unmet reports %s, which is not a row in readinessChecks", r)
+		}
+	}
+	if got.Ready {
+		t.Fatal("CONTROL: a node with every prerequisite false must not be Ready")
+	}
+}

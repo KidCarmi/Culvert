@@ -823,11 +823,26 @@ func findFuncDeclInFile(t *testing.T, filename, funcName string) *ast.FuncDecl {
 
 func TestCatalogUsable_ProductionPreflightCarriesTheRow(t *testing.T) {
 	r := newUsableRig(t)
+
+	// A VALID LIVE APPROVAL is issued FIRST and held constant across both evaluations, so
+	// catalog usability is the only thing that changes between them (Codex P2 round 12).
+	// Without it the fixture carried no approvals on either side, and a wiring that read
+	// `in.ToolCatalogUsable || len(in.ToolApprovals) > 0` passed this test and the whole
+	// preflight suite — measured — while letting any otherwise-valid activation bypass
+	// catalog usability merely by carrying the approval it is already required to carry.
+	// live_execution NEVER promotes, so issuing it cannot make the tool Usable: the first
+	// evaluation below must still report the row, which is itself the proof of that.
+	requestAndApproveLive(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t))
+
 	in := CanaryActivationInput{
 		Capability: rollout.CapabilityGateway, Scope: r.scope(), ScopeRev: 1,
 		Now: time.Unix(1_700_000_000, 0),
 	}
 	ai := productionCanaryActivationInputs(in.Capability, in.Scope, in.ScopeRev)
+	if len(ai.ToolApprovals) == 0 {
+		t.Fatal("fixture is vacuous: the live approval must reach the activation inputs, or " +
+			"this test cannot distinguish catalog usability from approval presence")
+	}
 	in.ToolApprovals, in.Budget = ai.ToolApprovals, ai.Budget
 	in.ServerUsable, in.FingerprintCurrent = ai.ServerUsable, ai.FingerprintCurrent
 	in.ToolCatalogUsable = ai.ToolCatalogUsable
@@ -1014,9 +1029,20 @@ func TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion(t *t
 	}
 
 	after := policyQuarantineDecisionFor(t, catalogDispositionNow(t, r))
-	if after.Action == policy.ActionQuarantine && after.Reason == policy.ReasonToolUnknown {
-		t.Fatal("after a governed promotion the catalog-quarantine hard override must no longer fire — " +
-			"the request must reach ordinary policy evaluation (whether a rule then ALLOWS it is blocker #14)")
+	// EVERY quarantine is rejected, not just the one carrying ReasonToolUnknown. Pairing the
+	// action with one reason made this a proxy: mapping the promoted tool to
+	// policy.DispReviewRequired leaves the request quarantined under a DIFFERENT catalog
+	// override and the test still passed — measured (Codex P2 round 12). A quarantine from
+	// any catalog disposition means the override pre-empted ordinary evaluation, which is
+	// exactly what this E2E exists to disprove.
+	//
+	// It still stops short of blocker #14: "not quarantined" says the hard override no longer
+	// fires and says NOTHING about whether the operator ALLOW rule matched. Ordinary
+	// evaluation reaching default-DENY would satisfy this assertion too.
+	if after.Action == policy.ActionQuarantine {
+		t.Fatalf("after a governed promotion NO catalog-disposition override may fire — the "+
+			"request must reach ordinary policy evaluation (whether a rule then ALLOWS it is "+
+			"blocker #14). Got action=%v reason=%v", after.Action, after.Reason)
 	}
 }
 
