@@ -452,6 +452,10 @@ If Sluice is enrolled but reporting unhealthy:
    traffic flowing while you fix the engine; remember to revert once
    resolved.
 
+For instance enrollment, certificate rotation/revocation, and policy
+configuration, see
+[`docs/operator/cdr-content-disarm-reconstruction.md`](operator/cdr-content-disarm-reconstruction.md).
+
 ---
 
 ## 7. Cluster `cluster-insecure` warning
