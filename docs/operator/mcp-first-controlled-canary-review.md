@@ -2234,7 +2234,7 @@ usability.
 | The coherence gate is structural, and the behavioural one is labelled as a control | `TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation` proves liveness only — no deadlock, row not emptied. It is NOT the coherence gate: `mcpToolTrustReconcile` also takes `deriveMu`, so the PRE-FIX shape blocks identically. Measured, not assumed — the first version of it was written as the proof and PASSED against the reintroduced defect. The structural wall was verified to discriminate ("the resolver reads the inventory directly 2 time(s)") |
 | The read-path seams cannot be half-wired | `installToolTrustReadHooks` / `clearToolTrustReadHooks` install and clear BOTH seams together. Installing only the reconcile hook leaves the coherent seam at its fail-closed default, which does not error — it silently makes this row unsatisfiable. Test wiring mirrors production by calling these rather than assigning the vars |
 | An interrupted campaign restores its mutation | The harness records the file under mutation before the first edit and clears it after the revert, with an EXIT/INT/TERM trap restoring whatever is still recorded (Codex P2 round 8). Verified by killing a live run mid-mutation and watching the file come back clean. SIGKILL cannot be trapped, so the residual is bounded by the pre-existing dirty-tree refusal: a stranded mutation stops the NEXT run rather than being silently re-measured |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 23 mutations, 23 caught, 0 survived, 0 skipped |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 26 mutations, 26 caught, 0 survived, 0 skipped |
 
 **What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
 run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
@@ -2259,8 +2259,8 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores **23 caught, 0 survived, 0 skipped** on the closing head. M15 through
-M23 were added later, for the nine defects adversarial review found on the PR itself (passive
+The repaired campaign scores **26 caught, 0 survived, 0 skipped** on the closing head. M15 through
+M26 were added later, for the twelve defects adversarial review found on the PR itself (passive
 expiry; a decision straddling two snapshots; the registry repin window; a guard this ledger had
 wrongly written off as unreachable; a snapshot capture that left the derivation section; and a
 capture that unlocks before it captures) — all real, and none reachable by the twelve cases the
@@ -2277,7 +2277,32 @@ scan matched only calls whose callee is a selector, so `promote := cat.Promote` 
 must be on `srv`, negated, guarding a `return false` (plus the behavioural test above); the scan
 walks selectors rather than call callees. M21/M22/M23 cover the three shapes.
 
-**Four instances across three rounds, one defect.** A wall that pins something CORRELATED with the
+**Round 12 found the same defect in the BEHAVIOURAL gates, which is the answer to whether the
+pattern stopped at the AST walls: it did not.** Three more P2s, each reproduced: the pure-package
+tests flip ONE fact off an all-true fixture, so an accessor reading
+`f.ToolCatalogUsable || !f.LiveExecutorComposed` passes the whole package while reporting the tool
+usable on any node where the executor is absent — i.e. the shipped one; the preflight fixture carried
+no live approval on either side, so a wiring of `in.ToolCatalogUsable || len(in.ToolApprovals) > 0`
+passed it while letting any real activation bypass catalog usability via the approval it already
+carries; and the policy E2E paired `ActionQuarantine` with ONE reason, so a quarantine under any
+other reason read as "ordinary evaluation was reached". Fixes: a DERIVED all-false gate reading its
+expected reason set off `readinessChecks`; a valid live approval issued first and held constant, with
+an anti-vacuity check that it reaches the inputs; and rejection of EVERY `ActionQuarantine` — which
+still stops short of blocker #14, since ordinary evaluation reaching default-DENY satisfies it too.
+M24/M25/M26 cover the three.
+
+**One correction to that round, recorded because agreeing with a finding is not the same as
+accepting its demonstration.** Codex proposed proving (3) by mapping the promoted tool to
+`policy.DispReviewRequired`. That mutant does NOT reproduce: `engine.go`'s quarantine arm is
+`DriftUnknownTool || DispQuarantined`, there is no review-required override, and a review-required
+disposition falls through to ordinary matching — so it passes the FIXED gate too. The finding is
+nonetheless right, and the engine's SECOND quarantine arm demonstrates it exactly:
+`DriftPrivilegeExpansion` quarantines under `ReasonToolPrivilegeExpansion`, which the old assertion
+accepted (`ok`) and the new one refuses (`Got action=QUARANTINE reason=MCP.TOOL.PRIVILEGE_EXPANSION`).
+
+**Seven instances across four rounds, one defect.** The AST walls pinned a key name, a call count, a
+callee's syntax and a method name; the behavioural gates pinned a fixture that could only vary one
+way, an input the fixture never supplied, and one reason standing in for an action. A wall that pins something CORRELATED with the
 invariant — a key name, a call count, a callee's syntax, a method name — rather than the invariant.
 Every one passed its own tests and would have shipped. The question that finds them is not *"does
 this fail against the defect I just fixed"* but ***"what is the cheapest shape that satisfies these
