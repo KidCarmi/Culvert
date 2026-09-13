@@ -754,50 +754,24 @@ func TestChaos66_DownOperatorActionNoLongerDemandsARestart(t *testing.T) {
 // needed. Hence two named recorders, and this gate asserts BOTH directions —
 // an inverted pair passes any single-direction assertion.
 func TestChaos66_RestartGuidanceMatchesWhetherARebindIsPending(t *testing.T) {
-	t.Run("accept plane stopped — rebind pending", func(t *testing.T) {
-		fired := socks5ChaosSetup(t)
-		noteSOCKS5Configured(1080)
-		noteSOCKS5ListenerDown("listener_socket_invalid")
-
-		snap := socks5ListenerState()
-		if !snap.Down || !snap.DownRecoveryPending {
-			t.Fatalf("accept-plane down is not recorded as recoverable: %+v", snap)
-		}
-		row := checkSOCKS5Listener()
-		if strings.Contains(strings.ToLower(row.OperatorAction), "restart this node") {
-			t.Errorf("contract row tells the operator to restart while a rebind is pending: %q", row.OperatorAction)
-		}
-		if len(*fired) != 1 {
-			t.Fatalf("expected one alert, got %d", len(*fired))
-		}
-		if strings.Contains(strings.ToLower((*fired)[0]), "until this node restarts") {
-			t.Errorf("alert still says restart-required while a rebind is pending: %s", (*fired)[0])
-		}
-		if !strings.Contains(strings.ToLower((*fired)[0]), "no restart required") {
-			t.Errorf("alert does not state that the rebind is automatic: %s", (*fired)[0])
-		}
-	})
-
-	t.Run("supervisor stopped — genuinely terminal", func(t *testing.T) {
-		fired := socks5ChaosSetup(t)
-		noteSOCKS5Configured(1080)
-		noteSOCKS5SupervisorDown("bind loop panicked")
-
-		snap := socks5ListenerState()
-		if !snap.Down || snap.DownRecoveryPending {
-			t.Fatalf("supervisor-down is not recorded as terminal: %+v", snap)
-		}
-		row := checkSOCKS5Listener()
-		if !strings.Contains(strings.ToLower(row.OperatorAction), "restart this node") {
-			t.Errorf("contract row omits the restart an unsupervised listener needs: %q", row.OperatorAction)
-		}
-		if len(*fired) != 1 {
-			t.Fatalf("expected one alert, got %d", len(*fired))
-		}
-		if !strings.Contains(strings.ToLower((*fired)[0]), "until this node restarts") {
-			t.Errorf("alert promises recovery that will not happen: %s", (*fired)[0])
-		}
-	})
+	// Both directions run through ONE symmetric helper on purpose. Each surface
+	// is asserted against the polarity the recorder claims, so an inverted
+	// recoveryPending fails on whichever arm it lands in — a pair of
+	// hand-written single-direction subtests can be satisfied by an inverted
+	// implementation as long as each only checks its own happy phrase.
+	for _, tc := range []struct {
+		name            string
+		note            func(string)
+		reason          string
+		recoveryPending bool
+	}{
+		{"accept plane stopped — rebind pending", noteSOCKS5ListenerDown, "listener_socket_invalid", true},
+		{"supervisor stopped — genuinely terminal", noteSOCKS5SupervisorDown, "bind loop panicked", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertDownGuidanceMatchesRecovery(t, tc.note, tc.reason, tc.recoveryPending)
+		})
+	}
 
 	// The two subtests above exercise the RECORDERS. They cannot catch the
 	// wiring regressing — swapping which recorder the supervisor's panic guard
@@ -805,48 +779,87 @@ func TestChaos66_RestartGuidanceMatchesWhetherARebindIsPending(t *testing.T) {
 	// is a defensive path with no injection seam, so the wiring is pinned
 	// structurally: the supervisor file records TERMINAL, the accept-loop file
 	// records RECOVERABLE, and neither reaches for the other's recorder.
-	t.Run("each plane is wired to its own recorder", func(t *testing.T) {
-		for _, tc := range []struct{ file, want, reject string }{
-			{"socks5_bind.go", "noteSOCKS5SupervisorDown(", "noteSOCKS5ListenerDown("},
-			{"socks5.go", "noteSOCKS5ListenerDown(", "noteSOCKS5SupervisorDown("},
-		} {
-			src, err := os.ReadFile(tc.file)
-			if err != nil {
-				t.Fatalf("read %s: %v", tc.file, err)
-			}
-			body := string(src)
-			if !strings.Contains(body, tc.want) {
-				t.Errorf("%s does not call %s", tc.file, tc.want)
-			}
-			if strings.Contains(body, tc.reject) {
-				t.Errorf("%s calls %s — the two planes' down states point at opposite operator actions",
-					tc.file, tc.reject)
-			}
-		}
-	})
+	t.Run("each plane is wired to its own recorder", assertEachPlaneUsesItsOwnRecorder)
+	t.Run("the alert Detail stays bounded in both directions", assertDownAlertDetailIsBounded)
+}
 
-	t.Run("the alert Detail stays bounded in both directions", func(t *testing.T) {
-		for _, tc := range []struct {
-			name string
-			note func(string)
-		}{
-			{"recoverable", noteSOCKS5ListenerDown},
-			{"terminal", noteSOCKS5SupervisorDown},
-		} {
-			fired := socks5ChaosSetup(t)
-			noteSOCKS5Configured(1080)
-			tc.note("listener_socket_invalid")
-			if len(*fired) != 1 {
-				t.Fatalf("%s: expected one alert, got %d", tc.name, len(*fired))
-			}
-			// Detail is the `event + ":" + Detail` dedup key (WK-12/RS-5).
-			for _, leak := range []string{"0.0.0.0", "127.0.0.1", "listen tcp", "accept tcp"} {
-				if strings.Contains((*fired)[0], leak) {
-					t.Errorf("%s: alert detail leaks %q: %s", tc.name, leak, (*fired)[0])
-				}
+// assertDownGuidanceMatchesRecovery pins that every operator-facing surface
+// agrees with whether a rebind is actually pending. A restart is the remedy
+// exactly when it is NOT — so each check is an equality against
+// recoveryPending rather than a one-sided substring assertion.
+func assertDownGuidanceMatchesRecovery(t *testing.T, note func(string), reason string, recoveryPending bool) {
+	t.Helper()
+	fired := socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+	note(reason)
+
+	snap := socks5ListenerState()
+	if !snap.Down || snap.DownRecoveryPending != recoveryPending {
+		t.Fatalf("down state does not record recoveryPending=%v: %+v", recoveryPending, snap)
+	}
+
+	row := checkSOCKS5Listener()
+	demandsRestart := strings.Contains(strings.ToLower(row.OperatorAction), "restart this node")
+	if demandsRestart == recoveryPending {
+		t.Errorf("contract row restart guidance is inverted (recoveryPending=%v): %q",
+			recoveryPending, row.OperatorAction)
+	}
+
+	if len(*fired) != 1 {
+		t.Fatalf("expected one alert, got %d", len(*fired))
+	}
+	alert := strings.ToLower((*fired)[0])
+	if strings.Contains(alert, "until this node restarts") == recoveryPending {
+		t.Errorf("alert restart guidance is inverted (recoveryPending=%v): %s",
+			recoveryPending, (*fired)[0])
+	}
+	if strings.Contains(alert, "no restart required") != recoveryPending {
+		t.Errorf("alert automatic-rebind guidance is inverted (recoveryPending=%v): %s",
+			recoveryPending, (*fired)[0])
+	}
+}
+
+func assertEachPlaneUsesItsOwnRecorder(t *testing.T) {
+	for _, tc := range []struct{ file, want, reject string }{
+		{"socks5_bind.go", "noteSOCKS5SupervisorDown(", "noteSOCKS5ListenerDown("},
+		{"socks5.go", "noteSOCKS5ListenerDown(", "noteSOCKS5SupervisorDown("},
+	} {
+		src, err := os.ReadFile(tc.file)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.file, err)
+		}
+		body := string(src)
+		if !strings.Contains(body, tc.want) {
+			t.Errorf("%s does not call %s", tc.file, tc.want)
+		}
+		if strings.Contains(body, tc.reject) {
+			t.Errorf("%s calls %s — the two planes' down states point at opposite operator actions",
+				tc.file, tc.reject)
+		}
+	}
+}
+
+func assertDownAlertDetailIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		note func(string)
+	}{
+		{"recoverable", noteSOCKS5ListenerDown},
+		{"terminal", noteSOCKS5SupervisorDown},
+	} {
+		fired := socks5ChaosSetup(t)
+		noteSOCKS5Configured(1080)
+		tc.note("listener_socket_invalid")
+		if len(*fired) != 1 {
+			t.Fatalf("%s: expected one alert, got %d", tc.name, len(*fired))
+		}
+		// Detail is the `event + ":" + Detail` dedup key (WK-12/RS-5).
+		for _, leak := range []string{"0.0.0.0", "127.0.0.1", "listen tcp", "accept tcp"} {
+			if strings.Contains((*fired)[0], leak) {
+				t.Errorf("%s: alert detail leaks %q: %s", tc.name, leak, (*fired)[0])
 			}
 		}
-	})
+	}
 }
 
 // TestChaos66_NoListenerSourceStillPromisesARestart is the wall for the class.
