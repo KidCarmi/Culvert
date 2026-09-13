@@ -245,9 +245,12 @@ type syslogFeedSnapshot struct {
 	// Configured reflects operator INTENT (syslogConfiguredAddr), recorded
 	// regardless of whether InitSyslog succeeded — so "never configured" and
 	// "configured but the writer could not be built" stay distinguishable.
+	//
+	// The collector ADDRESS is deliberately NOT on this snapshot: its consumers
+	// are the viewer-role contract row, /metrics and /healthz, none of which may
+	// carry an operator-configured endpoint. The one place that needs it — the
+	// rate-limited failure log line — reads the health record's own copy.
 	Configured bool
-	Addr       string
-	Network    string
 
 	// Active is false when intent exists but no writer is serving it: the boot
 	// dial failed, or a later re-init to a new target failed and left the
@@ -278,10 +281,7 @@ type syslogFeedSnapshot struct {
 // reads is an atomic or an immutable, precisely so the diagnostics row cannot
 // queue behind a wedged collector.
 func syslogFeedState() syslogFeedSnapshot {
-	snap := syslogFeedSnapshot{
-		Configured: syslogConfiguredAddr != "",
-		Addr:       syslogConfiguredAddr,
-	}
+	snap := syslogFeedSnapshot{Configured: syslogConfiguredAddr != ""}
 	sw := activeSyslog()
 	// syslogConfigured is set SOLELY on a successful InitSyslog; comparing it
 	// against intent catches the case where an earlier target is still being
@@ -291,7 +291,6 @@ func syslogFeedState() syslogFeedSnapshot {
 	}
 	snap.Active = true
 	st := sw.Stats()
-	snap.Network = st.Network
 	snap.Unverifiable = st.Network == "udp"
 	snap.Delivered = st.Delivered
 	snap.Drops = st.Drops

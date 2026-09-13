@@ -85,7 +85,6 @@ type Writer struct {
 	consecFail      atomic.Int64           // consecutive failed delivery attempts; 0 = last one landed
 	lastSuccessNano atomic.Int64           // 0 = nothing has EVER been delivered
 	firstFailNano   atomic.Int64           // start of the current failing run; 0 = not failing
-	lastFailNano    atomic.Int64           //
 	backoffNanos    atomic.Int64           //
 	lastReason      atomic.Pointer[string] // BOUNDED class, never a raw error string
 
@@ -200,6 +199,10 @@ func jitterBackoff(d time.Duration) time.Duration {
 		return d
 	}
 	span := float64(d) * reconnectBackoffJitter
+	// #nosec G404 -- a retry delay, not security material: this only spreads a
+	// fleet's reconnect attempts so they do not arrive in lockstep. Predicting it
+	// buys an attacker nothing, and crypto/rand would add a syscall to a path the
+	// drain goroutine takes on every failed delivery.
 	out := time.Duration(float64(d) + (mrand.Float64()*2-1)*span)
 	if out < time.Millisecond {
 		return time.Millisecond
@@ -473,7 +476,6 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 func (s *Writer) noteFailureLocked(reason string, now time.Time) DeliveryOutcome {
 	s.drops.Add(1)
 	n := s.consecFail.Add(1)
-	s.lastFailNano.Store(now.UnixNano())
 	if s.firstFailNano.Load() == 0 {
 		s.firstFailNano.Store(now.UnixNano())
 	}
@@ -499,7 +501,6 @@ func (s *Writer) noteSuccessLocked(now time.Time) DeliveryOutcome {
 	s.lastSuccessNano.Store(now.UnixNano())
 	recovered := s.consecFail.Swap(0) > 0
 	s.firstFailNano.Store(0)
-	s.lastFailNano.Store(0)
 	s.clearBackoffLocked()
 	return DeliveryOutcome{OK: true, Recovered: recovered, Drops: s.drops.Load()}
 }
@@ -660,7 +661,6 @@ type Stats struct {
 	LastReason  string        // bounded class of the most recent failure
 	LastSuccess time.Time     // zero = NOTHING has ever been delivered
 	FirstFail   time.Time     // zero = not currently failing
-	LastFail    time.Time     //
 	Backoff     time.Duration // current reconnect delay; 0 when healthy
 }
 
@@ -683,9 +683,6 @@ func (s *Writer) Stats() Stats {
 	}
 	if n := s.firstFailNano.Load(); n != 0 {
 		st.FirstFail = time.Unix(0, n)
-	}
-	if n := s.lastFailNano.Load(); n != 0 {
-		st.LastFail = time.Unix(0, n)
 	}
 	return st
 }

@@ -15,9 +15,11 @@ package main
 // permanently red, which would page every appliance in the fleet forever.
 
 import (
+	"context"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,7 +48,7 @@ func withSyslogFeedIsolation(t *testing.T) {
 // a SIEM that was up when the appliance booted and is not up any more.
 func deadTCPCollector(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -144,7 +146,7 @@ func TestChaos66_UDPFeedThatHasNeverDeliveredIsNotReportedActive(t *testing.T) {
 // Overstating that is what made the pre-fix row unreliable.
 func TestChaos66_UDPDeliveryIsReportedAsUnverifiable(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	pc, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -259,7 +261,7 @@ func TestChaos66_AlertFiresOncePerEpisode(t *testing.T) {
 // delivered, which is the evidence the pre-fix row never had.
 func TestChaos66_Control_HealthyTCPFeedReportsOK(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -391,4 +393,111 @@ func waitForSyslogFeed(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition not reached within the timeout")
+}
+
+// A collector that comes BACK must clear the episode: the latch resets, a
+// recovery line is emitted, and a LATER outage pages again. Without this the
+// first SIEM outage of a process's life would be the only one it ever reported.
+//
+// Recovery is driven by an OBSERVED delivery, which is the only thing that
+// clears it — see TestChaos66_Control_RecoveryNeedsObservedDelivery for the
+// other half.
+func TestChaos66_RecoveryClearsTheEpisodeAndASecondOutagePagesAgain(t *testing.T) {
+	withSyslogFeedIsolation(t)
+	syslogFeedDegradedAfter = 20 * time.Millisecond
+	fired := make(chan string, 64)
+	fireSyslogFeedAlert = func(detail string) { fired <- detail }
+
+	// Stand a collector up so InitSyslog succeeds and a writer exists, then take
+	// it away — the shape the sweep is about. The address is kept so the
+	// collector can come back on it.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	addr := ln.Addr().String()
+	if err := InitSyslog("tcp://"+addr, "rfc5424"); err != nil {
+		t.Fatalf("InitSyslog: %v", err)
+	}
+	syslogConfigured, syslogConfiguredAddr = "tcp://"+addr, "tcp://"+addr
+	_ = ln.Close()
+
+	driveFailures(t, 20)
+	waitForSyslogFeed(t, func() bool { return syslogFeedState().Degraded })
+	for i := 0; i < 20; i++ {
+		activeSyslog().WriteAudit(map[string]string{"event": "a"})
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(fired) == 0 {
+		t.Fatal("setup: the first outage never paged")
+	}
+	for len(fired) > 0 {
+		<-fired
+	}
+
+	// The collector comes back on the same address.
+	back, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		t.Skipf("could not rebind %s to stage the recovery: %v", addr, err)
+	}
+	defer back.Close()
+	var connMu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := back.Accept()
+			if err != nil {
+				return
+			}
+			connMu.Lock()
+			conns = append(conns, c)
+			connMu.Unlock()
+			go func() { _, _ = io.Copy(io.Discard, c) }()
+		}
+	}()
+
+	// Wait for a NEW delivery, not for EverDelivered: that flag is sticky, and a
+	// line can legitimately have landed before the collector went away, so it is
+	// true throughout the outage. The recovery signal is the failing run
+	// clearing, which only an accepted write can do.
+	before := syslogFeedState().Delivered
+	waitForSyslogFeed(t, func() bool {
+		activeSyslog().WriteAudit(map[string]string{"event": "b"})
+		snap := syslogFeedState()
+		return snap.Delivered > before && !snap.Failing
+	})
+	if snap := syslogFeedState(); snap.Degraded || snap.Failing {
+		t.Errorf("feed still reports degraded/failing after an observed delivery: %+v", snap)
+	}
+	if checkSyslogFeed().Status != diagOK {
+		t.Errorf("syslog_feed did not go green after recovery: %q", checkSyslogFeed().Message)
+	}
+
+	// Second outage: the latch must have cleared, so this pages again. Closing
+	// the LISTENER is not enough — it stops new accepts but leaves the writer's
+	// established connection draining, so the accepted conns must go too.
+	_ = back.Close()
+	connMu.Lock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	connMu.Unlock()
+	driveFailures(t, 20)
+	waitForSyslogFeed(t, func() bool { return syslogFeedState().Degraded })
+	for i := 0; i < 20; i++ {
+		activeSyslog().WriteAudit(map[string]string{"event": "c"})
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(fired) == 0 {
+		t.Error("the second outage never paged; the alert latch survived recovery, so a process only ever reports its first SIEM outage")
+	}
 }

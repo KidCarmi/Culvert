@@ -1429,7 +1429,7 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 		setActiveSyslog(prevSW)
 		resetSyslogFeedHealth()
 	})
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	pc, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

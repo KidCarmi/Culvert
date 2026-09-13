@@ -205,19 +205,19 @@ func TestChaos66_SweepQueueCountsBufferedLines(t *testing.T) {
 // The accounting invariant Close must uphold: every line handed to the Writer
 // is either delivered or counted as a drop. Nothing vanishes.
 func TestChaos66_CloseAccountsForEveryQueuedLine(t *testing.T) {
-	const sent = 64
+	const sent uint64 = 64
 	ok := &okConn{}
 	w := newTestWriter(ok, func() (net.Conn, error) { return ok, nil })
 	w.startAsync()
-	for i := 0; i < sent; i++ {
+	for i := uint64(0); i < sent; i++ {
 		w.Write([]byte("line"))
 	}
 	_ = w.Close()
 
 	st := w.Stats()
 	if got := st.Delivered + st.Drops; got != sent {
-		t.Errorf("delivered(%d) + drops(%d) = %d, want %d — %d lines vanished without being counted",
-			st.Delivered, st.Drops, got, sent, sent-int(got))
+		t.Errorf("delivered(%d) + drops(%d) = %d, want %d — lines vanished without being counted",
+			st.Delivered, st.Drops, got, sent)
 	}
 	if n := len(w.queue); n != 0 {
 		t.Errorf("%d lines still buffered after Close", n)

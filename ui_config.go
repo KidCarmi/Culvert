@@ -1858,7 +1858,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if body.Addr == "" {
 			// Disable syslog.
 			if sw := activeSyslog(); sw != nil {
-				sw.Close()
+				_ = sw.Close()
 				setActiveSyslog(nil)
 			}
 			resetSyslogFeedHealth()
