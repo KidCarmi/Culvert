@@ -307,9 +307,11 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	// admin UI that ListenAndServeTLS used to negotiate.
 	customTLS := certFile != "" && keyFile != ""
 	if customTLS {
-		if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
 			return fmt.Errorf("%w: %w", errAdminUITLSMaterial, err)
 		}
+		noteAdminUITLSCertExpiry(cert)
 	}
 
 	lc := &net.ListenConfig{}
