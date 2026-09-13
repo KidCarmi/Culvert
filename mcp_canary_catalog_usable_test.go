@@ -46,9 +46,26 @@ type usableRig struct {
 
 func newUsableRig(t *testing.T) usableRig {
 	t.Helper()
+	// The published inventory is a PROCESS GLOBAL with no owner-scoped teardown, so seeding one
+	// leaks a healthy registry+catalog into every later test in the package. That is not
+	// hypothetical: TestCanaryMatrix_DormantNodeRejections asserts a dormant node reports
+	// registry_unhealthy AND catalog_unhealthy, and it silently loses both when it happens to run
+	// after a seeding test — a failure whose appearance depends only on -run filtering and
+	// -shuffle ordering. This file restores what it found.
+	restoreMCPInventory(t)
 	composeToolTrust(t, func() time.Time { return time.Unix(1_700_000_000, 0) })
 	_, cat, serverID, toolName, fpHex := seedToolTrustInventory(t)
 	return usableRig{cat: cat, serverID: serverID, toolName: toolName, fpHex: fpHex}
+}
+
+// restoreMCPInventory snapshots the published inventory and re-publishes it verbatim when the
+// test ends, so a seeding test is hermetic with respect to the package's process globals.
+func restoreMCPInventory(t *testing.T) {
+	t.Helper()
+	mcpInventory.mu.RLock()
+	state, reason, reg, cat := mcpInventory.state, mcpInventory.reason, mcpInventory.reg, mcpInventory.cat
+	mcpInventory.mu.RUnlock()
+	t.Cleanup(func() { publishMCPInventory(state, reason, reg, cat) })
 }
 
 // scope returns the exact First-Canary scope over this rig's tool, pinned to fpHex
@@ -333,10 +350,8 @@ func TestCatalogUsable_AbsentInventoryFailsClosed(t *testing.T) {
 		t.Fatal("CONTROL: a published inventory must satisfy the fact, or this gate proves nothing")
 	}
 	scope := r.scope()
-	// The published inventory is a process global with no owner-scoped teardown, so this
-	// test restores it rather than leaving a withdrawn one for whatever -shuffle runs next.
-	reg, cat := mcpInventory.sharedInventory()
-	t.Cleanup(func() { publishMCPInventory(mcpInvLoaded, "", reg, cat) })
+	// newUsableRig already restores whatever inventory this test found, so withdrawing here
+	// cannot leak past the test.
 	publishMCPInventory(mcpInvNotConfigured, "test: inventory withdrawn", nil, nil)
 	if canaryScopedToolsCatalogUsable(scope) {
 		t.Fatal("SECURITY: with no published inventory the fact must fail closed")
