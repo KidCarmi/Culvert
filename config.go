@@ -523,6 +523,22 @@ func (fc *FileConfig) validate() error {
 	return nil
 }
 
+// validIPFilterMode reports whether m is a recognized security.ip_filter_mode /
+// -ip-filter-mode value: "" (unset — filter disabled), "allow", or "block".
+// Shared by FileConfig.validateEnums (the config.yaml path, which fails the
+// whole config load on an unrecognized value) and loadFileConfigAndFlags in
+// main.go (the CLI-flag path). Without this shared gate, a typo in
+// -ip-filter-mode (e.g. "alow", or the common confusion "deny" instead of
+// "block") was stored verbatim and reached IPFilter.SetMode with no
+// validation — IPFilter.Allowed's default case treats any mode other than
+// the exact strings "allow"/"block"/"" as "corrupt/unknown mode — deny all
+// (fail closed)", so the typo silently blocked every proxied request (HTTP,
+// CONNECT, and SOCKS5 alike) with no startup error naming the bad flag. The
+// same typo in config.yaml already refused to start.
+func validIPFilterMode(m string) bool {
+	return m == "" || m == "allow" || m == "block"
+}
+
 // validateEnums checks the string-enum fields (default_action, ip_filter_mode,
 // log_format, log_level, syslog_format).
 func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-style validation; each branch is trivial
@@ -534,7 +550,7 @@ func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-
 	}
 
 	// ip_filter_mode
-	if m := fc.Security.IPFilterMode; m != "" && m != "allow" && m != "block" {
+	if m := fc.Security.IPFilterMode; !validIPFilterMode(m) {
 		errs = append(errs, fmt.Sprintf("security.ip_filter_mode: must be \"allow\" or \"block\", got %q", m))
 	}
 

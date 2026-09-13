@@ -611,6 +611,22 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
+	// config.yaml's security.ip_filter_mode is validated by
+	// FileConfig.validateEnums (validIPFilterMode) at load time, but that
+	// check runs on the raw YAML field BEFORE the CLI -ip-filter-mode
+	// override is merged in above — a value that reaches s.ipModeVal only via
+	// the CLI flag never passed through validateEnums at all. Unvalidated, it
+	// flows straight to IPFilter.SetMode (connlimit_startup.go), whose
+	// Allowed() treats any mode other than the exact strings
+	// "allow"/"block"/"" as "corrupt/unknown mode — deny all (fail closed)" —
+	// so a typo'd -ip-filter-mode (e.g. "alow", or "deny" instead of "block")
+	// silently blocked every proxied request (HTTP, CONNECT, and SOCKS5
+	// alike) with no startup error naming the bad flag. The same typo in
+	// config.yaml already refuses to start; this closes the CLI-path gap the
+	// same way validatePortRanges/validatePortCollisions close theirs.
+	if !validIPFilterMode(s.ipModeVal) {
+		log.Fatalf("Invalid -ip-filter-mode (or security.ip_filter_mode) %q: must be \"allow\" or \"block\"", s.ipModeVal)
+	}
 }
 
 // initUIExtras is the PR3 expansion shim: resolve the UI-extras slice

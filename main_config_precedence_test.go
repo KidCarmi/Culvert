@@ -393,3 +393,66 @@ func TestValidCDRServerFingerprint(t *testing.T) {
 		})
 	}
 }
+
+// ── ip_filter_mode CLI/YAML validation parity (validIPFilterMode) ───────────
+//
+// config.yaml's security.ip_filter_mode is validated by
+// FileConfig.validateEnums at load time: an unrecognized value (e.g. a typo
+// like "alow", or the common confusion "deny" instead of "block") fails the
+// whole config load with a clear error, so the operator sees the mistake
+// immediately.
+//
+// The CLI flag -ip-filter-mode reaches the SAME field (merged via firstStr in
+// loadFileConfigAndFlags, CLI wins over config.yaml) but had no equivalent
+// gate: an invalid CLI value flowed straight into s.ipModeVal and from there
+// to IPFilter.SetMode (connlimit_startup.go) with no validation at all.
+// IPFilter.Allowed's default branch treats any mode other than the exact
+// strings "allow"/"block"/"" as "corrupt/unknown mode — deny all (fail
+// closed)" — so a typo in an operator's -ip-filter-mode flag (e.g. a
+// systemd ExecStart line or a hand-edited docker-compose.yml `command:`
+// override) silently blocked every proxied request (HTTP, CONNECT, and
+// SOCKS5 alike), with no startup warning, error, or log line pointing at the
+// mistake. The same typo in config.yaml already refuses to start.
+//
+// validIPFilterMode is the shared predicate (mirroring validCDRFailMode):
+// used by validateEnums (config.go) for the YAML path and by
+// loadFileConfigAndFlags (main.go) for the CLI path, so both channels reject
+// the same invalid values instead of only one of them.
+func TestValidIPFilterMode(t *testing.T) {
+	tests := []struct {
+		mode string
+		want bool
+	}{
+		{"", true},       // unset — filter disabled
+		{"allow", true},  // explicit allowlist mode
+		{"block", true},  // explicit blocklist mode
+		{"alow", false},  // typo — must be rejected, not silently deny-all
+		{"deny", false},  // common confusion with "block" — must be rejected
+		{"ALLOW", false}, // config.yaml's validateEnums is case-sensitive; CLI must match
+		{"Block", false},
+		{"bogus", false},
+	}
+	for _, tt := range tests {
+		if got := validIPFilterMode(tt.mode); got != tt.want {
+			t.Errorf("validIPFilterMode(%q) = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// TestIPFilterAllowed_UnknownModeDenyAll demonstrates the real-world impact
+// an unvalidated -ip-filter-mode had: IPFilter.Allowed's fail-closed default
+// branch denies EVERY address once the mode is anything other than the exact
+// strings "allow"/"block"/"" — including an ordinary typo, not just outright
+// corruption. This is why the CLI path must reject an invalid mode at
+// startup (TestValidIPFilterMode / loadFileConfigAndFlags) rather than let it
+// reach IPFilter.SetMode: an unvalidated typo does not degrade gracefully,
+// it silently takes down 100% of proxied traffic.
+func TestIPFilterAllowed_UnknownModeDenyAll(t *testing.T) {
+	f := &IPFilter{single: map[string]bool{}}
+	f.SetMode("alow") // a plausible typo for "allow"
+	for _, ip := range []string{"1.2.3.4", "10.0.0.1", "203.0.113.7"} {
+		if f.Allowed(ip) {
+			t.Errorf("Allowed(%q) = true under corrupt mode %q; want false (fail-closed deny-all)", ip, f.Mode())
+		}
+	}
+}
