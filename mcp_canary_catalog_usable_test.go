@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -448,22 +447,40 @@ func TestCatalogUsable_RestartDoesNotResurrectStaleUsability(t *testing.T) {
 // promotion lifecycle had been deleted, which is the vacuous form this avoids.
 
 func TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes(t *testing.T) {
+	owners := catalogPromotionOwners(t)
+	// ANTI-VACUITY: the governed lifecycle must still be visible, or this wall proves nothing.
+	governed, ok := owners["mcp_tooltrust.go"]
+	if !ok || len(governed) == 0 {
+		t.Fatal("ANTI-VACUOUS: the governed promotion lifecycle must be visible in mcp_tooltrust.go — " +
+			"a wall that finds no promotion at all would pass even if promotion had been deleted")
+	}
+	// Every promoter must live in the trust coordinator, never in a request/data-plane file.
+	for file, fns := range owners {
+		if file != "mcp_tooltrust.go" {
+			t.Fatalf("SECURITY: catalog promotion/demotion reached from %s (%v) — promotion is "+
+				"control-plane governance only; a Gateway request must never make a tool Usable",
+				file, fns)
+		}
+	}
+}
+
+// catalogPromotionOwners maps each non-test root-package file to the functions in it that
+// call a catalog Promote/Demote, by AST. Split out from the wall above so the wall reads as
+// its two assertions — the governed path is visible, and nothing else promotes — rather than
+// as a parse loop with a verdict at the bottom.
+func catalogPromotionOwners(t *testing.T) map[string][]string {
+	t.Helper()
 	files, err := filepath.Glob("*.go")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("glob root package: %v (%d files)", err, len(files))
 	}
-	// promoteOwners: file -> enclosing funcs that call cat.Promote / cat.Demote.
 	owners := map[string][]string{}
 	fset := token.NewFileSet()
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
-		src, rerr := os.ReadFile(f)
-		if rerr != nil {
-			t.Fatalf("read %s: %v", f, rerr)
-		}
-		file, perr := parser.ParseFile(fset, f, src, 0)
+		file, perr := parser.ParseFile(fset, f, nil, 0)
 		if perr != nil {
 			t.Fatalf("parse %s: %v", f, perr)
 		}
@@ -488,20 +505,7 @@ func TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes(t *testing.T) {
 			})
 		}
 	}
-	// ANTI-VACUITY: the governed lifecycle must still be visible, or this wall proves nothing.
-	governed, ok := owners["mcp_tooltrust.go"]
-	if !ok || len(governed) == 0 {
-		t.Fatal("ANTI-VACUOUS: the governed promotion lifecycle must be visible in mcp_tooltrust.go — " +
-			"a wall that finds no promotion at all would pass even if promotion had been deleted")
-	}
-	// Every promoter must live in the trust coordinator, never in a request/data-plane file.
-	for file, fns := range owners {
-		if file != "mcp_tooltrust.go" {
-			t.Fatalf("SECURITY: catalog promotion/demotion reached from %s (%v) — promotion is "+
-				"control-plane governance only; a Gateway request must never make a tool Usable",
-				file, fns)
-		}
-	}
+	return owners
 }
 
 // ── the production preflight itself carries the row ──────────────────────────
@@ -564,10 +568,7 @@ func TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall(t *tes
 
 	// The fields the probe resolves, taken from the type rather than a hand-written list,
 	// so a new activation fact is covered the moment it exists.
-	var want []string
-	for _, f := range parseStructFields(t, fset, "mcp_canary_preflight.go", "canaryActivationInputs") {
-		want = append(want, f)
-	}
+	want := parseStructFields(t, fset, "mcp_canary_preflight.go", "canaryActivationInputs")
 	if len(want) < 2 {
 		t.Fatalf("wall is vacuous: canaryActivationInputs must have fields, found %v", want)
 	}
