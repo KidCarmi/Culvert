@@ -12,12 +12,31 @@
 // same boundary independently: a response carrying a secret-bearing key at
 // ANY depth (clientSecret, bindPassword, metadataXml, password, secret,
 // ciphertext, sealed …) is a DECODE FAILURE — never rendered, never cached.
-// The `oidc` / `saml` / `ldap` sub-configs stay open objects on the OpenAPI
-// contract, so only the facts the surface renders are decoded from them; the
-// rest is ignored after the secret sweep.
 //
-// Bounded vocabularies are decoded as enums and REFUSED when unknown — the
-// surface never maps an unrecognised server state onto a rendered one.
+// Bounded vocabularies (FE-6A.1 correction, blocker 1). Every server CLASS
+// the surface renders is decoded against the AUTHORITATIVE closed set the
+// contract declares (api/openapi/openapi.yaml, mirrored from the Go
+// constants) and REFUSED when unknown — a raw dependency error can never
+// ride a "reason" or "code" field into the DOM:
+//   • fleet rejection class      — controlplane_snapshot.go publishReject*
+//   • ledger degradation reason  — idp_operations.go newIdPOperationStore
+//   • operation action           — idp.create
+//   • operation code             — the refusal codes writeIdPRefusal records
+//                                  on an aborted / outcome_unknown intent, and
+//                                  the settlement family <why>_<verdict>
+//   • lookup refusal code        — what GET /api/idp/operations/{id} answers
+//
+// Missing evidence is never negative truth (blocker 2): every fact the wire
+// ALWAYS carries is required — Go emits `priority` and `emailDomains`
+// (nullable) without omitempty, a profile always carries exactly its own
+// type's sub-config, a PRESENT legacy block always carries its identity and
+// its bind-credential indicator. Only the indicator bits INSIDE a present
+// sub-config keep Go's omitempty rule (absent ⇒ false), which the contract
+// now declares explicitly (IdPOIDCRead / IdPSAMLRead / IdPLDAPRead).
+//
+// The operation record is a DISCRIMINATED UNION (blocker 3): each state has
+// exactly the fields idp_operations.go Finish/MarkAudited/settleOperation
+// give it; a contradictory record is refused whole, never partially rendered.
 import { apiRequest } from "./client";
 import {
   DecodeError,
@@ -44,13 +63,38 @@ function opt<T>(
   return readOptional(read)(o[key], `${path}.${key}`);
 }
 
-/** A nullable Go slice: absent / null ⇒ []. */
-function readStringsOrNull(v: unknown, path: string): readonly string[] {
+/** A REQUIRED nullable Go slice: the key must be on the wire; null ⇒ []. */
+function requiredStringsOrNull(
+  o: Record<string, unknown>,
+  key: string,
+  path: string,
+): readonly string[] {
+  if (!(key in o))
+    throw new DecodeError(`${path}.${key}`, "array|null", undefined);
+  const v = o[key];
+  if (v === null) return [];
+  return readArray(readString)(v, `${path}.${key}`);
+}
+
+/** An optional nullable Go slice (omitempty): absent / null ⇒ []. */
+function optionalStringsOrNull(v: unknown, path: string): readonly string[] {
   if (v === undefined || v === null) return [];
   return readArray(readString)(v, path);
 }
 
-// ── Vocabularies (server contract; ui_auth.go / idp_operations.go) ─────────
+/** Refuse a key that is present with a non-null value. */
+function refuseForeign(
+  o: Record<string, unknown>,
+  key: string,
+  path: string,
+  expected: string,
+): void {
+  if (key in o && o[key] !== null) {
+    throw new DecodeError(`${path}.${key}`, expected, "[present]");
+  }
+}
+
+// ── Vocabularies (server contract; mirrored from the Go constants) ─────────
 
 export const IDP_TYPES = ["oidc", "saml", "ldap"] as const;
 export type IdPType = (typeof IDP_TYPES)[number];
@@ -64,6 +108,22 @@ export type IdPDegradedReason = (typeof IDP_DEGRADED_REASONS)[number];
 export const IDP_CLUSTER_STATES = ["published", "pending"] as const;
 export type IdPClusterState = (typeof IDP_CLUSTER_STATES)[number];
 
+/** controlplane_snapshot.go publishReject* — the bounded class a rejected
+ * fleet publication is reported as. */
+export const IDP_FLEET_REJECTION_REASONS = [
+  "identity_degraded",
+  "snapshot_invalid",
+  "marshal_failed",
+  "wire_size_exceeded",
+] as const;
+export type IdPFleetRejectionReason =
+  (typeof IDP_FLEET_REJECTION_REASONS)[number];
+
+/** idp_operations.go newIdPOperationStore — the ledger's fail-closed posture. */
+export const IDP_LEDGER_DEGRADED_REASONS = ["unreadable", "corrupt"] as const;
+export type IdPLedgerDegradedReason =
+  (typeof IDP_LEDGER_DEGRADED_REASONS)[number];
+
 export const IDP_AUDIT_SINKS = ["memory", "file"] as const;
 export type IdPAuditSink = (typeof IDP_AUDIT_SINKS)[number];
 
@@ -74,6 +134,63 @@ export const IDP_OPERATION_STATES = [
   "outcome_unknown",
 ] as const;
 export type IdPOperationState = (typeof IDP_OPERATION_STATES)[number];
+
+export const IDP_OPERATION_ACTIONS = ["idp.create"] as const;
+export type IdPOperationAction = (typeof IDP_OPERATION_ACTIONS)[number];
+
+/** The refusal codes writeIdPRefusal (ui_auth.go) can record on an aborted
+ * or outcome_unknown intent. */
+export const IDP_OPERATION_REFUSAL_CODES = [
+  "stale",
+  "invalid_input",
+  "provider_compile_failed",
+  "operation_ledger_degraded",
+  "operation_unsettled",
+  "operation_ledger_full",
+  "persist_failed",
+  "vanished",
+  "registry_degraded",
+  "outcome_unknown",
+] as const;
+
+/** auth_idp.go settleOperation — `<why>_<verdict>`: why ∈ reconciled (boot),
+ * lookup (the GET), settled_before_write (a later writer on the profile). */
+export const IDP_SETTLEMENT_FAMILIES = [
+  "reconciled",
+  "lookup",
+  "settled_before_write",
+] as const;
+export const IDP_SETTLEMENT_COMMITTED_CODES = IDP_SETTLEMENT_FAMILIES.map(
+  (w) => `${w}_committed` as const,
+);
+export const IDP_SETTLEMENT_ABORTED_CODES = IDP_SETTLEMENT_FAMILIES.flatMap(
+  (w) => [`${w}_absent` as const, `${w}_unproven` as const],
+);
+
+/** Every code an operation record may carry (the contract's closed enum). */
+export const IDP_OPERATION_CODES: readonly string[] = [
+  ...IDP_OPERATION_REFUSAL_CODES,
+  ...IDP_SETTLEMENT_COMMITTED_CODES,
+  ...IDP_SETTLEMENT_ABORTED_CODES,
+];
+/** Codes a COMMITTED record may carry (settlement verdicts only). */
+const COMMITTED_CODES: readonly string[] = IDP_SETTLEMENT_COMMITTED_CODES;
+/** Codes an ABORTED / OUTCOME_UNKNOWN record may carry. */
+const TERMINAL_FAILURE_CODES: readonly string[] = [
+  ...IDP_OPERATION_REFUSAL_CODES,
+  ...IDP_SETTLEMENT_ABORTED_CODES,
+];
+
+/** What GET /api/idp/operations/{id} itself answers as a typed refusal
+ * (ui_auth.go apiIdPOperations + requireRoleJSON + writeIdPRefusal on a
+ * degraded ledger). Anything else is not a verdict this surface may name. */
+export const IDP_LOOKUP_REFUSAL_CODES = [
+  "invalid_input",
+  "forbidden",
+  "not_found",
+  "operation_ledger_degraded",
+] as const;
+export type IdPLookupRefusalCode = (typeof IDP_LOOKUP_REFUSAL_CODES)[number];
 
 export const LEGACY_CUTOVER_DURABILITY = [
   "not_retired",
@@ -158,10 +275,10 @@ export interface IdPLDAPFacts {
   bindCredentialConfigured: boolean;
 }
 
-export interface IdPProfile {
+/** A profile carries exactly its own type's sub-config. */
+export type IdPProfile = {
   id: string;
   name: string;
-  type: IdPType;
   enabled: boolean;
   priority: number;
   /** server-minted ENTRY fencing token (≥1) */
@@ -170,14 +287,14 @@ export interface IdPProfile {
   operationId?: string;
   emailDomains: readonly string[];
   knownGroups: readonly string[];
-  oidc?: IdPOIDCFacts;
-  saml?: IdPSAMLFacts;
-  ldap?: IdPLDAPFacts;
-}
+} & (
+  | { type: "oidc"; oidc: IdPOIDCFacts }
+  | { type: "saml"; saml: IdPSAMLFacts }
+  | { type: "ldap"; ldap: IdPLDAPFacts }
+);
 
 export interface IdPFleetRejection {
-  /** bounded rejection class (publishRejectionClass), never the raw error */
-  reason: string;
+  reason: IdPFleetRejectionReason;
   at: string;
 }
 
@@ -189,8 +306,7 @@ export interface IdPClusterFacts {
 
 export interface IdPLedgerFacts {
   degraded: boolean;
-  /** bounded class (unreadable | corrupt) when degraded */
-  degradedReason?: string;
+  degradedReason?: IdPLedgerDegradedReason;
   retained: number;
   unresolved: number;
   capacity: number;
@@ -211,23 +327,45 @@ export interface IdPList {
   operations: IdPLedgerFacts;
 }
 
-export interface IdPOperation {
+interface IdPOperationBase {
   operationId: string;
-  state: IdPOperationState;
-  action: string;
+  action: IdPOperationAction;
   actor: string;
   profileId: string;
   registryRevision: string;
   cutover: boolean;
   startedAt: string;
-  audited: boolean;
-  /** committed only: the durable success audit is still owed */
-  auditState?: "pending";
-  finishedAt?: string;
-  /** aborted / outcome_unknown: the bounded refusal code (+ settlement suffix) */
-  code?: string;
-  committedRevision?: string;
 }
+
+/** The discriminated union the ledger record actually takes. */
+export type IdPOperation = IdPOperationBase &
+  (
+    | { state: "pending"; audited: false }
+    | {
+        state: "committed";
+        audited: true;
+        finishedAt: string;
+        committedRevision: string;
+        /** a settlement verdict, when the commit was settled rather than direct */
+        code?: string;
+      }
+    | {
+        state: "committed";
+        audited: false;
+        /** the durable success audit is still owed (recoverable) */
+        auditState: "pending";
+        finishedAt: string;
+        committedRevision: string;
+        code?: string;
+      }
+    | {
+        state: "aborted" | "outcome_unknown";
+        audited: false;
+        finishedAt: string;
+        /** the bounded refusal code, or the settlement verdict */
+        code: string;
+      }
+  );
 
 export interface LegacyCutover {
   operationId: string;
@@ -240,23 +378,31 @@ export interface LegacyCutover {
   durable: boolean;
 }
 
-export interface LegacyLDAP {
-  present: boolean;
-  /** present only: the legacy block is the live proxy-auth backend */
-  active?: boolean;
+interface LegacyLDAPBase {
   /** the DURABLE authority cutover has happened */
   retired: boolean;
-  /** present only: retired OR an enabled registry LDAP profile exists */
-  shadowed?: boolean;
   scope: "node-local";
   cutoverDurability: LegacyCutoverDurability;
   cutover?: LegacyCutover;
-  url?: string;
-  baseDn?: string;
-  bindDn?: string;
-  /** derived write-only-secret indicator — never the value */
-  bindCredentialConfigured?: boolean;
 }
+
+/** A present legacy block always states its identity and its indicator. */
+export type LegacyLDAP = LegacyLDAPBase &
+  (
+    | { present: false }
+    | {
+        present: true;
+        /** the legacy block is the live proxy-auth backend */
+        active: boolean;
+        /** retired OR an enabled registry LDAP profile exists */
+        shadowed: boolean;
+        url: string;
+        baseDn: string;
+        bindDn: string;
+        /** derived write-only-secret indicator — never the value */
+        bindCredentialConfigured: boolean;
+      }
+  );
 
 // ── Decoders ───────────────────────────────────────────────────────────────
 
@@ -265,6 +411,7 @@ const decodeOIDCFacts: Decoder<IdPOIDCFacts> = (v, path = "$") => {
   return {
     issuer: opt(o, "issuer", readString, path) ?? "",
     clientId: opt(o, "clientId", readString, path) ?? "",
+    // Go omitempty: absent ⇒ false (declared on IdPOIDCRead).
     clientSecretConfigured:
       opt(o, "clientSecretConfigured", readBoolean, path) ?? false,
   };
@@ -292,30 +439,37 @@ const decodeLDAPFacts: Decoder<IdPLDAPFacts> = (v, path = "$") => {
 export const decodeIdPProfile: Decoder<IdPProfile> = (v, path = "$") => {
   const o = readRecord(v, path);
   refuseSecretKeys(o, path);
+  const type = field(o, "type", readEnum(IDP_TYPES), path);
   const operationId = opt(o, "operationId", readString, path);
-  const oidc = opt(o, "oidc", decodeOIDCFacts, path);
-  const saml = opt(o, "saml", decodeSAMLFacts, path);
-  const ldap = opt(o, "ldap", decodeLDAPFacts, path);
-  return {
+  const base = {
     id: field(o, "id", readString, path),
     name: field(o, "name", readString, path),
-    type: field(o, "type", readEnum(IDP_TYPES), path),
     enabled: field(o, "enabled", readBoolean, path),
-    priority: opt(o, "priority", readNumber, path) ?? 0,
+    priority: field(o, "priority", readNumber, path),
     revision: field(o, "revision", readNumber, path),
     ...(operationId !== undefined ? { operationId } : {}),
-    emailDomains: readStringsOrNull(o["emailDomains"], `${path}.emailDomains`),
-    knownGroups: readStringsOrNull(o["knownGroups"], `${path}.knownGroups`),
-    ...(oidc !== undefined ? { oidc } : {}),
-    ...(saml !== undefined ? { saml } : {}),
-    ...(ldap !== undefined ? { ldap } : {}),
+    emailDomains: requiredStringsOrNull(o, "emailDomains", path),
+    knownGroups: optionalStringsOrNull(o["knownGroups"], `${path}.knownGroups`),
   };
+  // Exactly the type's own sub-config is present; a foreign one is refused.
+  for (const other of IDP_TYPES) {
+    if (other !== type)
+      refuseForeign(o, other, path, `absent (type is ${type})`);
+  }
+  switch (type) {
+    case "oidc":
+      return { ...base, type, oidc: field(o, "oidc", decodeOIDCFacts, path) };
+    case "saml":
+      return { ...base, type, saml: field(o, "saml", decodeSAMLFacts, path) };
+    case "ldap":
+      return { ...base, type, ldap: field(o, "ldap", decodeLDAPFacts, path) };
+  }
 };
 
 const decodeFleetRejection: Decoder<IdPFleetRejection> = (v, path = "$") => {
   const o = readRecord(v, path);
   return {
-    reason: field(o, "reason", readString, path),
+    reason: field(o, "reason", readEnum(IDP_FLEET_REJECTION_REASONS), path),
     at: field(o, "at", readString, path),
   };
 };
@@ -332,9 +486,22 @@ const decodeClusterFacts: Decoder<IdPClusterFacts> = (v, path = "$") => {
 
 const decodeLedgerFacts: Decoder<IdPLedgerFacts> = (v, path = "$") => {
   const o = readRecord(v, path);
-  const degradedReason = opt(o, "degradedReason", readString, path);
+  const degraded = field(o, "degraded", readBoolean, path);
+  const degradedReason = opt(
+    o,
+    "degradedReason",
+    readEnum(IDP_LEDGER_DEGRADED_REASONS),
+    path,
+  );
+  if (degraded && degradedReason === undefined) {
+    throw new DecodeError(
+      `${path}.degradedReason`,
+      "bounded reason",
+      undefined,
+    );
+  }
   return {
-    degraded: field(o, "degraded", readBoolean, path),
+    degraded,
     ...(degradedReason !== undefined ? { degradedReason } : {}),
     retained: field(o, "retained", readNumber, path),
     unresolved: field(o, "unresolved", readNumber, path),
@@ -370,9 +537,17 @@ export const decodeIdPList: Decoder<IdPList> = (v, path = "$") => {
     path,
   );
   const rawProfiles = o["profiles"];
+  const degraded = field(o, "degraded", readBoolean, path);
+  if (degraded && degradedReason === undefined) {
+    throw new DecodeError(
+      `${path}.degradedReason`,
+      "bounded reason",
+      undefined,
+    );
+  }
   return {
     persisted: field(o, "persisted", readBoolean, path),
-    degraded: field(o, "degraded", readBoolean, path),
+    degraded,
     ...(degradedReason !== undefined ? { degradedReason } : {}),
     ...(quarantineEvidence !== undefined ? { quarantineEvidence } : {}),
     revision: field(o, "revision", readString, path),
@@ -386,28 +561,107 @@ export const decodeIdPList: Decoder<IdPList> = (v, path = "$") => {
   };
 };
 
+/** Refuse a key that is present on a record whose state forbids it. */
+function forbid(
+  o: Record<string, unknown>,
+  key: string,
+  path: string,
+  state: string,
+): void {
+  if (key in o) {
+    throw new DecodeError(
+      `${path}.${key}`,
+      `absent on a ${state} record`,
+      "[present]",
+    );
+  }
+}
+
 export const decodeIdPOperation: Decoder<IdPOperation> = (v, path = "$") => {
   const o = readRecord(v, path);
   refuseSecretKeys(o, path);
-  const auditState = opt(o, "auditState", readEnum(["pending"] as const), path);
-  const finishedAt = opt(o, "finishedAt", readString, path);
-  const code = opt(o, "code", readString, path);
-  const committedRevision = opt(o, "committedRevision", readString, path);
-  return {
+  const base: IdPOperationBase = {
     operationId: field(o, "operationId", readString, path),
-    state: field(o, "state", readEnum(IDP_OPERATION_STATES), path),
-    action: field(o, "action", readString, path),
+    action: field(o, "action", readEnum(IDP_OPERATION_ACTIONS), path),
     actor: field(o, "actor", readString, path),
     profileId: field(o, "profileId", readString, path),
     registryRevision: field(o, "registryRevision", readString, path),
     cutover: field(o, "cutover", readBoolean, path),
     startedAt: field(o, "startedAt", readString, path),
-    audited: field(o, "audited", readBoolean, path),
-    ...(auditState !== undefined ? { auditState } : {}),
-    ...(finishedAt !== undefined ? { finishedAt } : {}),
-    ...(code !== undefined ? { code } : {}),
-    ...(committedRevision !== undefined ? { committedRevision } : {}),
   };
+  const state = field(o, "state", readEnum(IDP_OPERATION_STATES), path);
+  const audited = field(o, "audited", readBoolean, path);
+  const auditState = opt(o, "auditState", readEnum(["pending"] as const), path);
+  switch (state) {
+    case "pending": {
+      if (audited)
+        throw new DecodeError(
+          `${path}.audited`,
+          "false on a pending record",
+          audited,
+        );
+      for (const k of [
+        "auditState",
+        "finishedAt",
+        "code",
+        "committedRevision",
+        "result",
+      ]) {
+        forbid(o, k, path, "pending");
+      }
+      return { ...base, state, audited: false };
+    }
+    case "committed": {
+      const finishedAt = field(o, "finishedAt", readString, path);
+      const committedRevision = field(o, "committedRevision", readString, path);
+      const code = opt(o, "code", readEnum(COMMITTED_CODES), path);
+      if (audited) {
+        forbid(o, "auditState", path, "committed+audited");
+        return {
+          ...base,
+          state,
+          audited: true,
+          finishedAt,
+          committedRevision,
+          ...(code !== undefined ? { code } : {}),
+        };
+      }
+      if (auditState !== "pending") {
+        throw new DecodeError(
+          `${path}.auditState`,
+          "pending (audit owed on an unaudited commit)",
+          auditState,
+        );
+      }
+      return {
+        ...base,
+        state,
+        audited: false,
+        auditState,
+        finishedAt,
+        committedRevision,
+        ...(code !== undefined ? { code } : {}),
+      };
+    }
+    case "aborted":
+    case "outcome_unknown": {
+      if (audited)
+        throw new DecodeError(
+          `${path}.audited`,
+          `false on an ${state} record`,
+          audited,
+        );
+      for (const k of ["auditState", "committedRevision", "result"])
+        forbid(o, k, path, state);
+      return {
+        ...base,
+        state,
+        audited: false,
+        finishedAt: field(o, "finishedAt", readString, path),
+        code: field(o, "code", readEnum(TERMINAL_FAILURE_CODES), path),
+      };
+    }
+  }
 };
 
 const decodeLegacyCutover: Decoder<LegacyCutover> = (v, path = "$") => {
@@ -430,23 +684,9 @@ const decodeLegacyCutover: Decoder<LegacyCutover> = (v, path = "$") => {
 export const decodeLegacyLDAP: Decoder<LegacyLDAP> = (v, path = "$") => {
   const o = readRecord(v, path);
   refuseSecretKeys(o, path);
-  const active = opt(o, "active", readBoolean, path);
-  const shadowed = opt(o, "shadowed", readBoolean, path);
   const cutover = opt(o, "cutover", decodeLegacyCutover, path);
-  const url = opt(o, "url", readString, path);
-  const baseDn = opt(o, "baseDn", readString, path);
-  const bindDn = opt(o, "bindDn", readString, path);
-  const bindCredentialConfigured = opt(
-    o,
-    "bindCredentialConfigured",
-    readBoolean,
-    path,
-  );
-  return {
-    present: field(o, "present", readBoolean, path),
-    ...(active !== undefined ? { active } : {}),
+  const base: LegacyLDAPBase = {
     retired: field(o, "retired", readBoolean, path),
-    ...(shadowed !== undefined ? { shadowed } : {}),
     scope: field(o, "scope", readEnum(["node-local"] as const), path),
     cutoverDurability: field(
       o,
@@ -455,12 +695,23 @@ export const decodeLegacyLDAP: Decoder<LegacyLDAP> = (v, path = "$") => {
       path,
     ),
     ...(cutover !== undefined ? { cutover } : {}),
-    ...(url !== undefined ? { url } : {}),
-    ...(baseDn !== undefined ? { baseDn } : {}),
-    ...(bindDn !== undefined ? { bindDn } : {}),
-    ...(bindCredentialConfigured !== undefined
-      ? { bindCredentialConfigured }
-      : {}),
+  };
+  const present = field(o, "present", readBoolean, path);
+  if (!present) return { ...base, present: false };
+  return {
+    ...base,
+    present: true,
+    active: field(o, "active", readBoolean, path),
+    shadowed: field(o, "shadowed", readBoolean, path),
+    url: field(o, "url", readString, path),
+    baseDn: field(o, "baseDn", readString, path),
+    bindDn: field(o, "bindDn", readString, path),
+    bindCredentialConfigured: field(
+      o,
+      "bindCredentialConfigured",
+      readBoolean,
+      path,
+    ),
   };
 };
 

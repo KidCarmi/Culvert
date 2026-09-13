@@ -112,12 +112,18 @@ export interface Lockouts {
   scope: "node-local";
 }
 
+/** Three EXPLICIT administrator postures (correction, blocker 5): a fail-closed
+ * read model never assumes the backend's at-least-one-admin invariant. */
+export const ROSTER_POSTURES = ["none", "last_admin", "multiple"] as const;
+export type RosterPosture = (typeof ROSTER_POSTURES)[number];
+
 export interface RosterFacts {
   total: number;
   adminCount: number;
   /** the username of the ONLY admin, when exactly one remains (the server
    * refuses demoting or deleting it: errRosterLastAdmin) — else null */
   lastAdmin: string | null;
+  posture: RosterPosture;
 }
 
 // ── Decoders ───────────────────────────────────────────────────────────────
@@ -128,7 +134,9 @@ const decodeAdminUser: Decoder<AdminUser> = (v, path = "$") => {
   return {
     username: field(o, "username", readString, path),
     role: field(o, "role", readRole, path),
-    totpEnabled: opt(o, "totpEnabled", readBoolean, path) ?? false,
+    // Always on the wire (UIUserInfo, no omitempty): its absence is a
+    // contract violation, never "not configured" (correction, blocker 2).
+    totpEnabled: field(o, "totpEnabled", readBoolean, path),
     securityGeneration: field(o, "securityGeneration", readNumber, path),
   };
 };
@@ -136,12 +144,11 @@ const decodeAdminUser: Decoder<AdminUser> = (v, path = "$") => {
 export const decodeAdminRoster: Decoder<AdminRoster> = (v, path = "$") => {
   const o = readRecord(v, path);
   refuseSecretKeys(o, path);
-  const raw = o["users"];
   return {
-    users:
-      raw === undefined || raw === null
-        ? []
-        : readArray(decodeAdminUser)(raw, `${path}.users`),
+    // ListUIUsers always returns a non-nil slice (UserList.users required,
+    // not nullable): a missing or null roster is refused, never rendered as
+    // "no accounts" (correction, blocker 2).
+    users: field(o, "users", readArray(decodeAdminUser), path),
     revision: field(o, "revision", readNumber, path),
     scope: field(o, "scope", readEnum(["node-local"] as const), path),
   };
@@ -174,10 +181,17 @@ export const decodeLockouts: Decoder<Lockouts> = (v, path = "$") => {
 /** Pure derivation over the decoded roster (no server field is invented). */
 export function rosterFacts(r: AdminRoster): RosterFacts {
   const admins = r.users.filter((u) => u.role === "admin");
+  const posture: RosterPosture =
+    admins.length === 0
+      ? "none"
+      : admins.length === 1
+        ? "last_admin"
+        : "multiple";
   return {
     total: r.users.length,
     adminCount: admins.length,
-    lastAdmin: admins.length === 1 ? (admins[0]?.username ?? null) : null,
+    lastAdmin: posture === "last_admin" ? (admins[0]?.username ?? null) : null,
+    posture,
   };
 }
 

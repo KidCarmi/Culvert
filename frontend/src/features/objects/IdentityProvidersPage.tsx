@@ -48,6 +48,7 @@ import { useAuth } from "../../auth/AuthProvider";
 import { hasRole } from "../../auth/rbac";
 import { ApiError } from "../../api/client";
 import {
+  IDP_LOOKUP_REFUSAL_CODES,
   getIdPList,
   getIdPOperation,
   getIdPReferences,
@@ -90,16 +91,19 @@ async function fetchRegistry(signal: AbortSignal): Promise<RegistrySnapshot> {
   return { list, references: new Map(entries) };
 }
 
+// The decoder guarantees exactly the type's own sub-config is present, so
+// the indicator is read from a fact the server stated — never invented from
+// a missing object.
 function materialIndicator(p: IdPProfile): string {
   const word = (configured: boolean): string =>
     configured ? "configured" : "not configured";
   switch (p.type) {
     case "oidc":
-      return `Client secret: ${word(p.oidc?.clientSecretConfigured ?? false)}`;
+      return `Client secret: ${word(p.oidc.clientSecretConfigured)}`;
     case "saml":
-      return `Inline metadata: ${word(p.saml?.inlineMetadataConfigured ?? false)}`;
+      return `Inline metadata: ${word(p.saml.inlineMetadataConfigured)}`;
     case "ldap":
-      return `Bind credential: ${word(p.ldap?.bindCredentialConfigured ?? false)}`;
+      return `Bind credential: ${word(p.ldap.bindCredentialConfigured)}`;
   }
 }
 
@@ -182,15 +186,15 @@ function LedgerCard({ list }: { list: IdPList }): JSX.Element {
   const ops = list.operations;
   return (
     <Card title="Operation ledger">
-      {ops.degraded && (
+      {ops.degraded && ops.degradedReason !== undefined && (
         <Callout
           variant="critical"
           title="Operation ledger degraded"
           role="alert"
         >
-          Reason: <Mono>{ops.degradedReason ?? "unknown"}</Mono>.
-          Operation-identified writes and lookups are refused until the ledger
-          is restored and the node restarted (server posture).
+          Reason: <Mono>{ops.degradedReason}</Mono>. Operation-identified writes
+          and lookups are refused until the ledger is restored and the node
+          restarted (server posture).
         </Callout>
       )}
       <ul>
@@ -365,9 +369,19 @@ function OperationRecord({
         <StatusBadge status="neutral">No retained operation record</StatusBadge>
       );
     }
-    const code = refusalCodeOf(err);
+    // A refusal is a verdict only inside the lookup's contracted vocabulary;
+    // an unrecognised code is reported as a refusal WITHOUT echoing it.
+    const code = refusalCodeOf(err, IDP_LOOKUP_REFUSAL_CODES);
     if (code !== null) {
       return <StatusBadge status="unknown">Lookup refused: {code}</StatusBadge>;
+    }
+    if (err instanceof ApiError && err.kind === "http") {
+      return (
+        <StatusBadge status="unknown">
+          Lookup refused (HTTP {String(err.status ?? 0)}, unrecognised refusal
+          code)
+        </StatusBadge>
+      );
     }
     return (
       <StatusBadge status="unknown">
@@ -384,6 +398,11 @@ function OperationRecord({
 // therefore keyed on the enabling profile's provenance — a join over two
 // server facts, never a guess; without it (profile gone, or created without
 // an operationId) no lookup is issued and that is said.
+type LedgerKey =
+  | { kind: "known"; operationId: string }
+  | { kind: "absent" } // registry read, enabling profile gone or without provenance
+  | { kind: "registry_unavailable" }; // the registry snapshot itself could not be read
+
 function LegacyCard({
   legacy,
   isAdmin,
@@ -391,10 +410,9 @@ function LegacyCard({
 }: {
   legacy: LegacyLDAP;
   isAdmin: boolean;
-  ledgerKey: string | undefined;
+  ledgerKey: LedgerKey;
 }): JSX.Element {
-  const yesNo = (b: boolean | undefined): string =>
-    b === undefined ? "—" : b ? "yes" : "no";
+  const yesNo = (b: boolean): string => (b ? "yes" : "no");
   const items: Array<readonly [string, JSX.Element | string]> = [
     [
       "Scope",
@@ -407,11 +425,11 @@ function LegacyCard({
   if (legacy.present) {
     items.push(["Active for proxy authentication", yesNo(legacy.active)]);
     items.push(["Shadowed by the registry", yesNo(legacy.shadowed)]);
-    items.push(["Directory", <Mono key="url">{legacy.url ?? ""}</Mono>]);
-    items.push(["Bind DN", <Mono key="bind">{legacy.bindDn ?? ""}</Mono>]);
+    items.push(["Directory", <Mono key="url">{legacy.url}</Mono>]);
+    items.push(["Bind DN", <Mono key="bind">{legacy.bindDn}</Mono>]);
     items.push([
       "Write-only material",
-      `Bind credential: ${legacy.bindCredentialConfigured === true ? "configured" : "not configured"}`,
+      `Bind credential: ${legacy.bindCredentialConfigured ? "configured" : "not configured"}`,
     ]);
   }
   items.push(["Legacy authority", legacy.retired ? "Retired" : "Not retired"]);
@@ -446,24 +464,28 @@ function LegacyCard({
               ["Record durable", c.durable ? "yes" : "no"],
               [
                 "Ledger key (enabling create)",
-                ledgerKey !== undefined ? (
-                  <Mono key="lk">{ledgerKey}</Mono>
+                ledgerKey.kind === "known" ? (
+                  <Mono key="lk">{ledgerKey.operationId}</Mono>
                 ) : (
                   "—"
                 ),
               ],
               [
                 "Operation record",
-                ledgerKey !== undefined ? (
+                ledgerKey.kind === "known" ? (
                   <OperationRecord
                     key="rec"
-                    operationId={ledgerKey}
+                    operationId={ledgerKey.operationId}
                     isAdmin={isAdmin}
                   />
-                ) : (
+                ) : ledgerKey.kind === "absent" ? (
                   <span key="nolk">
                     No ledger key: the enabling profile is not in the registry
                     or carries no create provenance.
+                  </span>
+                ) : (
+                  <span key="nolk">
+                    Ledger key unavailable: the registry could not be read.
                   </span>
                 ),
               ],
@@ -475,12 +497,25 @@ function LegacyCard({
   );
 }
 
+// The registry (cluster-synced) and the legacy YAML block (node-local) are
+// INDEPENDENT authoritative snapshots (correction, blocker 4): each renders
+// its own loading / error / data state, so a failed or refused registry
+// read never blanks a valid legacy snapshot and vice versa.
 export function IdentityProvidersPage(): JSX.Element {
   const { state } = useAuth();
   const isAdmin = hasRole(state.role ?? "viewer", "admin");
   const registry = useSnapshot(["objects", "idp", "registry"], fetchRegistry);
   const legacy = useSnapshot(["objects", "idp", "legacy-ldap"], getLegacyLDAP);
   const snap = registry.data;
+  const ledgerKeyFor = (l: LegacyLDAP): LedgerKey => {
+    if (snap === undefined) return { kind: "registry_unavailable" };
+    const key = snap.list.profiles.find(
+      (p) => p.id === l.cutover?.profileId,
+    )?.operationId;
+    return key !== undefined
+      ? { kind: "known", operationId: key }
+      : { kind: "absent" };
+  };
   return (
     <>
       <PageHeader
@@ -488,10 +523,10 @@ export function IdentityProvidersPage(): JSX.Element {
         subtitle="Registry read model — identity, state, revisions, fleet publication and the legacy LDAP cutover posture (read-only)"
         actions={
           <SnapshotBar
-            updatedAt={registry.dataUpdatedAt}
+            updatedAt={Math.max(registry.dataUpdatedAt, legacy.dataUpdatedAt)}
             fetching={registry.isFetching || legacy.isFetching}
             error={registry.isError || legacy.isError}
-            hasData={snap !== undefined}
+            hasData={snap !== undefined || legacy.data !== undefined}
             onRefresh={() => {
               void registry.refetch();
               void legacy.refetch();
@@ -499,48 +534,53 @@ export function IdentityProvidersPage(): JSX.Element {
           />
         }
       />
-      {snap === undefined && registry.isPending && (
-        <Skeleton>Loading the identity-provider registry…</Skeleton>
-      )}
-      {snap === undefined && registry.isError && (
-        <ErrorState title="Identity-provider registry unavailable">
-          {readErrorSummary(registry.error, "identity-provider registry")}
-        </ErrorState>
-      )}
-      {snap !== undefined && (
-        <div className={styles.stack}>
-          {snap.list.degraded && (
-            <Callout variant="critical" title="Registry degraded" role="alert">
-              Reason: <Mono>{snap.list.degradedReason ?? "unknown"}</Mono>.
-              Quarantine evidence:{" "}
-              {snap.list.quarantineEvidence !== undefined
-                ? "recorded"
-                : "not recorded"}
-              . The registry is empty and refuses changes until it is repaired
-              (server posture).
-            </Callout>
-          )}
-          <RegistryCard list={snap.list} />
-          <ProvidersCard snap={snap} />
-          <LedgerCard list={snap.list} />
-          {legacy.data !== undefined && (
-            <LegacyCard
-              legacy={legacy.data}
-              isAdmin={isAdmin}
-              ledgerKey={
-                snap.list.profiles.find(
-                  (p) => p.id === legacy.data?.cutover?.profileId,
-                )?.operationId
-              }
-            />
-          )}
-          {legacy.data === undefined && legacy.isError && (
-            <ErrorState title="Legacy YAML LDAP posture unavailable">
-              {readErrorSummary(legacy.error, "legacy LDAP read model")}
-            </ErrorState>
-          )}
-        </div>
-      )}
+      <div className={styles.stack}>
+        {snap === undefined && registry.isPending && (
+          <Skeleton>Loading the identity-provider registry…</Skeleton>
+        )}
+        {snap === undefined && registry.isError && (
+          <ErrorState title="Identity-provider registry unavailable">
+            {readErrorSummary(registry.error, "identity-provider registry")}
+          </ErrorState>
+        )}
+        {snap !== undefined && (
+          <>
+            {snap.list.degraded && snap.list.degradedReason !== undefined && (
+              <Callout
+                variant="critical"
+                title="Registry degraded"
+                role="alert"
+              >
+                Reason: <Mono>{snap.list.degradedReason}</Mono>. Quarantine
+                evidence:{" "}
+                {snap.list.quarantineEvidence !== undefined
+                  ? "recorded"
+                  : "not recorded"}
+                . The registry is empty and refuses changes until it is repaired
+                (server posture).
+              </Callout>
+            )}
+            <RegistryCard list={snap.list} />
+            <ProvidersCard snap={snap} />
+            <LedgerCard list={snap.list} />
+          </>
+        )}
+        {legacy.data === undefined && legacy.isPending && (
+          <Skeleton>Loading the legacy YAML LDAP posture…</Skeleton>
+        )}
+        {legacy.data === undefined && legacy.isError && (
+          <ErrorState title="Legacy YAML LDAP posture unavailable">
+            {readErrorSummary(legacy.error, "legacy LDAP read model")}
+          </ErrorState>
+        )}
+        {legacy.data !== undefined && (
+          <LegacyCard
+            legacy={legacy.data}
+            isAdmin={isAdmin}
+            ledgerKey={ledgerKeyFor(legacy.data)}
+          />
+        )}
+      </div>
     </>
   );
 }

@@ -2529,7 +2529,40 @@ components:
         cutover: { type: boolean, description: "The write carried the legacy-LDAP authority cutover." }
         startedAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time }
-        code: { type: string, description: "aborted/outcome_unknown — the refusal code; `<why>_committed` / `<why>_absent` / `<why>_unproven` after a settlement, where why is reconciled (boot), lookup (this GET) or settled_before_write (a later writer on the same profile). unproven = the profile exists but carries another writer's provenance." }
+        code:
+          type: string
+          description: >-
+            FE-6A.1 correction — a CLOSED vocabulary, never free text. aborted / outcome_unknown carry the
+            refusal code the write was answered with (stale, invalid_input, provider_compile_failed,
+            operation_ledger_degraded, operation_unsettled, operation_ledger_full, persist_failed, vanished,
+            registry_degraded, outcome_unknown) or a settlement verdict `<why>_absent` / `<why>_unproven`;
+            committed carries `<why>_committed` when the commit was SETTLED rather than direct (absent on a
+            direct commit). why is reconciled (boot), lookup (this GET) or settled_before_write (a later
+            writer on the same profile). unproven = the profile exists but carries another writer's provenance.
+            Per-state shape: pending carries none of finishedAt / code / committedRevision / result / auditState;
+            committed carries finishedAt + committedRevision and either audited:true (no auditState) or
+            audited:false + auditState:pending; aborted / outcome_unknown carry finishedAt + code and never
+            committedRevision / result / auditState.
+          enum:
+            - stale
+            - invalid_input
+            - provider_compile_failed
+            - operation_ledger_degraded
+            - operation_unsettled
+            - operation_ledger_full
+            - persist_failed
+            - vanished
+            - registry_degraded
+            - outcome_unknown
+            - reconciled_committed
+            - reconciled_absent
+            - reconciled_unproven
+            - lookup_committed
+            - lookup_absent
+            - lookup_unproven
+            - settled_before_write_committed
+            - settled_before_write_absent
+            - settled_before_write_unproven
         committedRevision: { type: string, description: "committed — the registry document revision after the commit." }
         result: { type: object, additionalProperties: true, description: "committed — the response the client received." }
     IdPProfileRead:
@@ -2538,21 +2571,116 @@ components:
         Secret-free read model of one identity-provider profile (FE-6A.0 R6): the OIDC client secret, inline
         SAML metadata XML and LDAP bind password are NEVER present — only the derived configured
         indicators (oidc.clientSecretConfigured, saml.inlineMetadataConfigured, ldap.bindCredentialConfigured).
-      required: [id, name, type, enabled, revision]
+      required: [id, name, type, enabled, revision, priority, emailDomains]
       additionalProperties: true
       properties:
         id: { type: string }
         name: { type: string }
-        type: { type: string, enum: [oidc, saml, ldap] }
-        emailDomains: { type: array, items: { type: string }, nullable: true }
+        type: { type: string, enum: [oidc, saml, ldap], description: "FE-6A.1 correction — exactly the sub-config named by `type` is present (oidc | saml | ldap); the other two are never on the wire (Go omitempty on nil pointers). A reader must refuse a profile whose own sub-config is missing or that carries another type's." }
+        emailDomains: { type: array, items: { type: string }, nullable: true, description: "Always on the wire (null when empty)." }
         enabled: { type: boolean }
-        priority: { type: integer }
+        priority: { type: integer, description: "Always on the wire (0 = default)." }
         knownGroups: { type: array, items: { type: string }, nullable: true }
         revision: { type: integer, format: int64, description: "Server-minted entry fencing token (≥1); echo it on PUT/DELETE." }
         operationId: { type: string, format: uuid, description: "Durable PROVENANCE of the operation-identified create that produced this entry (round 3): co-written with the profile, preserved across replaces, ignored on input." }
-        oidc: { type: object, additionalProperties: true, nullable: true }
-        saml: { type: object, additionalProperties: true, nullable: true }
-        ldap: { type: object, additionalProperties: true, nullable: true }
+        oidc: { $ref: '#/components/schemas/IdPOIDCRead' }
+        saml: { $ref: '#/components/schemas/IdPSAMLRead' }
+        ldap: { $ref: '#/components/schemas/IdPLDAPRead' }
+    IdPOIDCRead:
+      type: object
+      description: >-
+        Secret-free OIDC sub-config on a READ model (publicIdPProfile). `clientSecretConfigured` is the
+        ONLY trace of the write-only client secret; it is emitted with Go omitempty, so ABSENT means false.
+        Every other field is the non-secret configuration as stored.
+      additionalProperties: true
+      properties:
+        issuer: { type: string }
+        clientId: { type: string }
+        clientSecretConfigured: { type: boolean, description: "Derived indicator; absent ⇒ false. Never the value." }
+        scopes: { type: array, items: { type: string }, nullable: true }
+        groupsClaim: { type: string }
+        requiredScope: { type: string }
+        requiredAudience: { type: string }
+        tlsSkipVerify: { type: boolean }
+        authorizationEndpoint: { type: string }
+        tokenEndpoint: { type: string }
+        introspectionEndpoint: { type: string }
+        userinfoEndpoint: { type: string }
+        jwksUri: { type: string }
+    IdPSAMLRead:
+      type: object
+      description: >-
+        Secret-free SAML sub-config on a READ model. `inlineMetadataConfigured` is the ONLY trace of the
+        write-only inline metadata XML; emitted with Go omitempty, so ABSENT means false.
+      additionalProperties: true
+      properties:
+        metadataUrl: { type: string }
+        inlineMetadataConfigured: { type: boolean, description: "Derived indicator; absent ⇒ false. Never the XML." }
+        nameIdFormat: { type: string }
+        groupsAttribute: { type: string }
+        emailAttribute: { type: string }
+        nameAttribute: { type: string }
+    IdPLDAPRead:
+      type: object
+      description: >-
+        Secret-free LDAP sub-config on a READ model. `bindCredentialConfigured` is the ONLY trace of the
+        write-only bind password; emitted with Go omitempty, so ABSENT means false.
+      additionalProperties: true
+      properties:
+        url: { type: string }
+        startTls: { type: boolean }
+        tlsSkipVerify: { type: boolean }
+        bindDn: { type: string }
+        bindCredentialConfigured: { type: boolean, description: "Derived indicator; absent ⇒ false. Never the value." }
+        baseDn: { type: string }
+        userFilter: { type: string }
+        emailAttribute: { type: string }
+        nameAttribute: { type: string }
+        groupAttribute: { type: string }
+        requiredGroup: { type: string }
+        cacheTtlSeconds: { type: integer }
+    LegacyLDAPSummary:
+      type: object
+      description: >-
+        FE-6A.1 correction — the typed read model of GET /api/idp/legacy-ldap (apiIdPLegacyLDAP). Node-local.
+        When `present` is true the block's non-secret identity (url, baseDn, bindDn, userFilter, requiredGroup,
+        startTls, tlsSkipVerify, cacheTtlSeconds), `active`, `shadowed` and `bindCredentialConfigured` are ALWAYS
+        on the wire — a reader must refuse a present block that omits them; when false none of them is.
+        `cutoverDurability` and `cutover` are always reported (the cutover object only once a cutover happened).
+        The bind password is never returned.
+      required: [present, retired, scope, cutoverDurability]
+      additionalProperties: false
+      properties:
+        present: { type: boolean }
+        active: { type: boolean, description: "present only — the legacy block is the live proxy-auth backend." }
+        retired: { type: boolean, description: "The DURABLE legacy→registry authority cutover has happened." }
+        shadowed: { type: boolean, description: "present only — retired OR an enabled registry LDAP profile exists." }
+        scope: { type: string, enum: [node-local] }
+        url: { type: string }
+        baseDn: { type: string }
+        bindDn: { type: string }
+        bindCredentialConfigured: { type: boolean, description: "present only — derived indicator, never the value." }
+        userFilter: { type: string }
+        requiredGroup: { type: string }
+        startTls: { type: boolean }
+        tlsSkipVerify: { type: boolean }
+        cacheTtlSeconds: { type: integer }
+        cutoverDurability: { type: string, enum: [not_retired, durable, pending_reconciliation], description: "not_retired = no cutover; durable = the cutover sentinel + record are persisted; pending_reconciliation = the cutover is active at runtime but its sentinel save failed (reconciled at the next restart)." }
+        cutover: { $ref: '#/components/schemas/LegacyLDAPCutover' }
+    LegacyLDAPCutover:
+      type: object
+      description: The durable, operation-identified legacy→registry LDAP authority cutover record (FE-6A.0 R7). Its `operationId` is the cutover's OWN identity; the enabling create's ledger key is that profile's `operationId` provenance on IdPProfileRead.
+      required: [operationId, actor, trigger, at, durable]
+      additionalProperties: false
+      properties:
+        operationId: { type: string }
+        profileId: { type: string }
+        profileName: { type: string }
+        registryRevision: { type: string }
+        actor: { type: string }
+        trigger: { type: string, enum: [admin_api, observed] }
+        at: { type: string, format: date-time }
+        durable: { type: boolean }
     IdPDeleteResult:
       type: object
       required: [ok, deleted, id, revision, persisted, cluster]
@@ -11244,7 +11372,7 @@ paths:
           description: Legacy YAML LDAP summary.
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema: { $ref: '#/components/schemas/LegacyLDAPSummary' }
         '403': { $ref: '#/components/responses/AuthRefusalForbidden' }
   /api/idp/legacy-ldap/import:
     post:

@@ -150,7 +150,7 @@ const DEGRADED = {
   cluster: {
     state: "pending",
     publishedVersion: 41,
-    lastRejection: { reason: "publish_rejected", at: "2026-09-12T10:00:00Z" },
+    lastRejection: { reason: "snapshot_invalid", at: "2026-09-12T10:00:00Z" },
   },
   operations: {
     degraded: true,
@@ -194,7 +194,7 @@ describe("A1 decodeIdPList", () => {
     expect(l.profiles).toEqual([]);
     expect(l.cluster.state).toBe("pending");
     expect(l.cluster.lastRejection).toEqual({
-      reason: "publish_rejected",
+      reason: "snapshot_invalid",
       at: "2026-09-12T10:00:00Z",
     });
     expect(l.operations.degraded).toBe(true);
@@ -240,13 +240,23 @@ describe("A2 decodeIdPProfile", () => {
     expect(p.operationId).toBe("0b6f9a1e-2c3d-4e5f-8a9b-0c1d2e3f4a5b");
     expect(p.emailDomains).toEqual(["corp.example"]);
     expect(p.knownGroups).toEqual(["eng"]);
-    expect(p.oidc?.clientSecretConfigured).toBe(true);
-    expect(p.oidc?.issuer).toBe("https://issuer.example");
-    expect(decodeIdPProfile(SAML).saml?.inlineMetadataConfigured).toBe(false);
-    expect(decodeIdPProfile(SAML).emailDomains).toEqual([]);
-    expect(decodeIdPProfile(SAML).operationId).toBeUndefined();
-    expect(decodeIdPProfile(LDAP).ldap?.bindCredentialConfigured).toBe(true);
-    expect(decodeIdPProfile(LDAP).ldap?.bindDn).toBe("cn=svc,dc=example");
+    // The profile is a discriminated union (correction, blocker 2): the
+    // sub-config exists only under its own type.
+    expect(p.type === "oidc" ? p.oidc.clientSecretConfigured : null).toBe(true);
+    expect(p.type === "oidc" ? p.oidc.issuer : null).toBe(
+      "https://issuer.example",
+    );
+    const s = decodeIdPProfile(SAML);
+    expect(s.type === "saml" ? s.saml.inlineMetadataConfigured : null).toBe(
+      false,
+    );
+    expect(s.emailDomains).toEqual([]);
+    expect(s.operationId).toBeUndefined();
+    const l = decodeIdPProfile(LDAP);
+    expect(l.type === "ldap" ? l.ldap.bindCredentialConfigured : null).toBe(
+      true,
+    );
+    expect(l.type === "ldap" ? l.ldap.bindDn : null).toBe("cn=svc,dc=example");
     expect(IDP_TYPES).toEqual(["oidc", "saml", "ldap"]);
   });
 
@@ -327,15 +337,19 @@ describe("A4 decodeIdPOperation", () => {
     const c = decodeIdPOperation(BASE);
     expect(c.state).toBe("committed");
     expect(c.audited).toBe(true);
-    expect(c.auditState).toBeUndefined();
-    expect(c.committedRevision).toBe("r-abc123");
+    // Discriminated union (correction, blocker 3): an audited commit carries
+    // no auditState and a pending record carries no terminal fields.
+    expect("auditState" in c ? c.auditState : undefined).toBeUndefined();
+    expect(c.state === "committed" ? c.committedRevision : null).toBe(
+      "r-abc123",
+    );
     expect(c.cutover).toBe(true);
     const owed = decodeIdPOperation({
       ...BASE,
       audited: false,
       auditState: "pending",
     });
-    expect(owed.auditState).toBe("pending");
+    expect("auditState" in owed ? owed.auditState : null).toBe("pending");
     const intent = omit(
       omit(omit(BASE, "finishedAt"), "committedRevision"),
       "result",
@@ -346,7 +360,7 @@ describe("A4 decodeIdPOperation", () => {
       audited: false,
     });
     expect(p.state).toBe("pending");
-    expect(p.finishedAt).toBeUndefined();
+    expect("finishedAt" in p ? p.finishedAt : undefined).toBeUndefined();
     const terminal = omit(omit(BASE, "committedRevision"), "result");
     const a = decodeIdPOperation({
       ...terminal,
@@ -354,8 +368,10 @@ describe("A4 decodeIdPOperation", () => {
       audited: false,
       code: "stale",
     });
-    expect(a.code).toBe("stale");
-    expect(a.finishedAt).toBe("2026-09-12T09:59:01Z");
+    expect(a.state === "aborted" ? a.code : null).toBe("stale");
+    expect(a.state === "aborted" ? a.finishedAt : null).toBe(
+      "2026-09-12T09:59:01Z",
+    );
     const u = decodeIdPOperation({
       ...terminal,
       state: "outcome_unknown",
@@ -417,11 +433,12 @@ describe("A5 decodeLegacyLDAP", () => {
       },
     });
     expect(l.present).toBe(true);
-    expect(l.active).toBe(false);
+    // Union (correction, blocker 2): the block's facts exist only when present.
+    expect(l.present ? l.active : null).toBe(false);
     expect(l.retired).toBe(true);
-    expect(l.shadowed).toBe(true);
-    expect(l.bindCredentialConfigured).toBe(true);
-    expect(l.url).toBe("ldaps://legacy.example:636");
+    expect(l.present ? l.shadowed : null).toBe(true);
+    expect(l.present ? l.bindCredentialConfigured : null).toBe(true);
+    expect(l.present ? l.url : null).toBe("ldaps://legacy.example:636");
     expect(l.cutoverDurability).toBe("pending_reconciliation");
     expect(l.cutover?.trigger).toBe("admin_api");
     expect(l.cutover?.durable).toBe(false);

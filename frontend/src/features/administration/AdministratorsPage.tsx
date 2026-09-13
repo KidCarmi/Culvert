@@ -95,11 +95,17 @@ export function AdministratorsPage(): JSX.Element {
                   `${String(facts.adminCount)} administrator account${facts.adminCount === 1 ? "" : "s"}`,
                 ],
                 [
-                  "Last-admin posture",
-                  facts.lastAdmin !== null ? (
+                  "Administrator posture",
+                  // Three EXPLICIT states (correction, blocker 5) — the read
+                  // model never assumes the backend's at-least-one-admin rule.
+                  facts.posture === "none" ? (
+                    <StatusBadge status="critical">
+                      No administrator accounts
+                    </StatusBadge>
+                  ) : facts.posture === "last_admin" ? (
                     <StatusBadge status="warn">
-                      Last admin: {facts.lastAdmin} — the appliance refuses
-                      demoting or deleting it
+                      Last admin: {facts.lastAdmin ?? ""} — the appliance
+                      refuses demoting or deleting it
                     </StatusBadge>
                   ) : (
                     "More than one administrator"

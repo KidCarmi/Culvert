@@ -25,9 +25,16 @@ export function readErrorSummary(err: unknown, what: string): string {
   return `The ${what} could not be read.`;
 }
 
-/** The bounded refusal `code` from a typed JSON refusal body, or null. The
- * server's `error` line is deliberately not surfaced. */
-export function refusalCodeOf(err: unknown): string | null {
+/** The bounded refusal `code` from a typed JSON refusal body — a verdict ONLY
+ * when it is one of the codes the endpoint is contracted to answer
+ * (`allowed`); anything else, including a well-formed but foreign code, is
+ * null. The server's `error` line is deliberately never surfaced
+ * (FE-6A.1 correction, blocker 1: a "code" field is a bounded class, not a
+ * string to be echoed). */
+export function refusalCodeOf<T extends string>(
+  err: unknown,
+  allowed: readonly T[],
+): T | null {
   if (!(err instanceof ApiError) || err.bodyText === undefined) return null;
   let parsed: unknown;
   try {
@@ -38,5 +45,6 @@ export function refusalCodeOf(err: unknown): string | null {
   if (!isRecord(parsed)) return null;
   const code = parsed["code"];
   if (typeof code !== "string") return null;
-  return /^[a-z0-9_]{1,64}$/.test(code) ? code : null;
+  const hit = allowed.find((a) => a === code);
+  return hit ?? null;
 }

@@ -111,7 +111,7 @@ const DEGRADED = {
   cluster: {
     state: "pending",
     publishedVersion: 41,
-    lastRejection: { reason: "publish_rejected", at: "2026-09-12T10:00:00Z" },
+    lastRejection: { reason: "snapshot_invalid", at: "2026-09-12T10:00:00Z" },
   },
   operations: {
     degraded: true,
@@ -401,7 +401,7 @@ it("P2 degraded registry: bounded reason, evidence recorded without its name, em
   expect(t).not.toContain(".corrupt.");
   expect(t).toContain("No identity providers");
   expect(t).toContain("Pending publication");
-  expect(t).toContain("publish_rejected");
+  expect(t).toContain("snapshot_invalid");
   expect(t).toContain("Operation ledger degraded");
   expect(t).toContain("Audit sink: memory");
   expect(buttonTexts().every((b) => b === "Refresh")).toBe(true);

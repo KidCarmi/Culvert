@@ -41,10 +41,16 @@ import {
   decodeIdPProfile,
   decodeLegacyLDAP,
 } from "../api/idp";
+import type { IdPOperation } from "../api/idp";
 import { decodeAdminRoster, rosterFacts } from "../api/admins";
 import { refusalCodeOf } from "../shared/readErrorSummary";
 
 const RAW = "dial tcp /data/private: permission denied";
+
+/** The operation record is a discriminated union: `code` exists only on the
+ * shapes that carry one, so a test reads it through a narrowing accessor. */
+const codeOf = (op: IdPOperation): string | undefined =>
+  "code" in op ? op.code : undefined;
 
 const omit = (o: Record<string, unknown>, k: string): Record<string, unknown> =>
   Object.fromEntries(Object.entries(o).filter(([key]) => key !== k));
@@ -222,11 +228,15 @@ describe("C1 bounded classes are enums", () => {
       decodeIdPOperation({ ...COMMITTED, code: "reconciled_absent" }),
     ).toThrow(DecodeError); // a committed record never carries an absent verdict
     expect(
-      decodeIdPOperation({ ...COMMITTED, code: "lookup_committed" }).code,
+      codeOf(decodeIdPOperation({ ...COMMITTED, code: "lookup_committed" })),
     ).toBe("lookup_committed");
     expect(
-      decodeIdPOperation({ ...ABORTED, code: "settled_before_write_unproven" })
-        .code,
+      codeOf(
+        decodeIdPOperation({
+          ...ABORTED,
+          code: "settled_before_write_unproven",
+        }),
+      ),
     ).toBe("settled_before_write_unproven");
   });
 
@@ -291,10 +301,12 @@ describe("C2 missing evidence fails closed", () => {
       scope: "node-local",
       cutoverDurability: "not_retired",
       url: "ldaps://x:636",
+      baseDn: "dc=x",
       bindDn: "cn=svc",
       bindCredentialConfigured: true,
     };
-    expect(decodeLegacyLDAP(present).bindCredentialConfigured).toBe(true);
+    const l = decodeLegacyLDAP(present);
+    expect(l.present ? l.bindCredentialConfigured : null).toBe(true);
     expect(() =>
       decodeLegacyLDAP(omit(present, "bindCredentialConfigured")),
     ).toThrow(DecodeError);
@@ -332,13 +344,17 @@ describe("C2 missing evidence fails closed", () => {
       DecodeError,
     );
     // Go omitempty on the indicator bits INSIDE a present sub-config: absent ⇒ false (declared on the contract)
-    expect(
-      decodeIdPProfile({
-        ...OIDC,
-        oidc: { issuer: "https://i", clientId: "c" },
-      }).oidc?.clientSecretConfigured,
-    ).toBe(false);
-    expect(decodeIdPProfile(LDAP).ldap?.bindCredentialConfigured).toBe(true);
+    const o = decodeIdPProfile({
+      ...OIDC,
+      oidc: { issuer: "https://i", clientId: "c" },
+    });
+    expect(o.type === "oidc" ? o.oidc.clientSecretConfigured : null).toBe(
+      false,
+    );
+    const ld = decodeIdPProfile(LDAP);
+    expect(ld.type === "ldap" ? ld.ldap.bindCredentialConfigured : null).toBe(
+      true,
+    );
   });
 });
 
@@ -346,11 +362,12 @@ describe("C3 operation record is a discriminated union", () => {
   it("accepts every coherent shape", () => {
     expect(decodeIdPOperation(PENDING).state).toBe("pending");
     expect(decodeIdPOperation(COMMITTED).audited).toBe(true);
-    expect(decodeIdPOperation(COMMITTED_OWED).auditState).toBe("pending");
-    expect(decodeIdPOperation(ABORTED).code).toBe("stale");
-    expect(decodeIdPOperation({ ...ABORTED, code: "lookup_absent" }).code).toBe(
-      "lookup_absent",
-    );
+    const owed = decodeIdPOperation(COMMITTED_OWED);
+    expect("auditState" in owed ? owed.auditState : null).toBe("pending");
+    expect(codeOf(decodeIdPOperation(ABORTED))).toBe("stale");
+    expect(
+      codeOf(decodeIdPOperation({ ...ABORTED, code: "lookup_absent" })),
+    ).toBe("lookup_absent");
     expect(decodeIdPOperation(UNKNOWN).state).toBe("outcome_unknown");
   });
 
