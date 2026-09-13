@@ -6762,6 +6762,78 @@ One process note, because it cost a cycle: restoring a file from a mutation with
 `git checkout <file>` discarded the uncommitted fix in it. The structural wall
 caught the regression immediately, which is the argument for having written it.
 
+### Codex round 3 — the outage clock, and the remedy that did not match the fault
+
+Two findings, both on the health plane rather than the lifecycle, and the first
+is this sweep's own subject arriving from a direction it had not looked.
+
+**(1) A threshold that elapses must be OBSERVED, and both halves of that were
+missing.** Every episode duration was computed as `lastFailure - firstFailure`,
+so it stopped advancing the instant an attempt returned and only resumed on the
+next one. The bind plane retries at a 30 s ceiling with ±20% jitter against a
+30 s threshold, so a failure landing at 29 s was followed by up to 36 s of
+silence during which `/healthz` still said *degraded*,
+`culvert_socks5_listener_up` was still `1`, the contract row still said
+*retrying*, and the page did not fire — for an outage that had already crossed
+the line the runbook documents. A duration derived from two stored stamps needs
+no clock and is therefore frozen between them, which is precisely why nothing
+noticed: the READ path had no clock at all, while every `note*` function took
+its `now` from the caller.
+
+This is **CHAOS-61's rule in a second place** — *freshness is EVALUATED, never
+latched* (the `ca_health.go` `Usable()` discipline) — and it needed BOTH halves,
+which is the transferable part. Deriving the duration from the clock
+(`socks5ElapsedSince`, via the `socks5HealthNow` seam) fixes every READ surface
+continuously. It does not fix the ALERT, because the alert is produced by an
+ATTEMPT — `noteSOCKS5BindFailure` holds the fire-once latch and nothing else
+wakes the loop. So the retry sleep is also clamped so it cannot straddle the
+threshold (`clampSOCKS5BindSleep`), which is **CHAOS-55's `recoveryPollCeiling`
+reasoning**: an interval that can straddle a state transition must be capped
+below it, and that is a correctness bound rather than tuning. It costs at most
+one extra attempt per episode, so the 30 s ceiling still bounds the pathological
+case it was chosen for; capping the ceiling itself was rejected as paying
+permanently for a property that matters on one sleep.
+
+`socks5ElapsedSince` takes the LATER of the stored and clock-derived ends, so a
+clock rollback cannot shrink — or un-report — an outage already observed. That
+asymmetry is deliberate and is the OPPOSITE of CHAOS-61's, which rules a
+broadcast on a rolled-back clock stale: there the fail-safe answer is to
+distrust a remote value, here it is the longer duration, because the failure
+being closed is an outage going unpaged.
+
+The ACCEPT plane carried the identical shape with a 1 s ceiling, so its exposure
+was ~1 s rather than 36 s. It is fixed in the same line rather than recorded as
+a residual: two dialects for one question inside one struct is the trap this
+file keeps closing, and whoever reads `FailingFor` next must not have to know
+which plane freezes.
+
+**(2) A bounded classifier is worth nothing if one remedy is printed for every
+class.** The `socks5_listener` row's operator action was a single string naming
+port ownership and bind permission, emitted whatever `BindLastReason` said — so
+a node out of file descriptors, or one whose interface had not come up, was sent
+to hunt the owner of a port nobody holds. The classifier exists precisely to
+tell these apart (it matches errnos through `errors.As` rather than reporting one
+generic failure), so discarding that at the one surface an operator reads
+undoes the reason it was built. `socks5BindRemedy` now selects per class, with
+two clauses invariant across every branch — that the listener rebinds by itself,
+and that the proxy and admin UI are unaffected — and the unrecognised classes
+(`network_error`, `listen_failed`) pointing at the log line, the only place the
+raw error is written.
+
+This is the same family as the CHAOS-57 recovery lesson already recorded here:
+*the evidence must match the claim.* A counter, a row or an action an operator
+is told to act on must be derived from evidence supporting the specific claim it
+makes.
+
+Gates: six added (file → 32), each verified failing against the shape it
+replaces — the frozen duration on both planes, the missing rollback floor, the
+unclamped sleep, the hard-coded row action, and a CONTROL requiring the four
+diagnosable classes to carry DISTINCT remedies (a switch returning one string
+per branch satisfies every "names its own remedy" assertion otherwise).
+`TestChaos66_ContractRowCarriesTheReasonSpecificRemedy` exists because testing
+the helper alone passes while the row still hard-codes its action — the
+vacuity lesson from round 2, applied before it could cost a cycle this time.
+
 ### Governance note: a lint gate this sweep did not actually run
 
 The PR claimed `golangci-lint run` was clean on every changed file. It was not

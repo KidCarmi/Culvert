@@ -203,6 +203,13 @@ either runbook reads the same):
 | `network_error` | — a genuine network timeout | Rare for a bind |
 | `listen_failed` | anything else | Check the log line for the raw error |
 
+**The `socks5_listener` contract row's suggested action is selected from this
+reason class**, so the remedy it hands you already matches the fault — a node
+out of descriptors is told to raise `LimitNOFILE`, not to go looking for the
+owner of a port nobody holds. `network_error` and `listen_failed` are the
+unrecognised classes and point you at the log line, which is the only place the
+raw error is written.
+
 What to do:
 
 1. **Find the owner of the port.**
@@ -226,6 +233,19 @@ What to do:
 Retries are bounded in **rate** (1 s doubling to 30 s, ±20% jitter), never in
 count: the listener keeps trying for the life of the process, and every attempt
 is accounted for by the counter even though only one line per minute is logged.
+
+One sleep in each outage is shortened so it cannot carry the supervisor past the
+30 s threshold without an attempt to observe it. Without that, a failure landing
+at 29 s would not attempt again for up to 36 s, and the page that should arrive
+at 30 s would arrive around 65 s — the alert is produced by an attempt, and
+nothing else wakes the loop. It costs at most one extra attempt per outage,
+after which the 30 s ceiling applies normally.
+
+The reported outage duration (and therefore `culvert_socks5_unavailable`,
+`culvert_socks5_listener_up` and the contract row) is measured against the
+clock, not against the last attempt, so it keeps advancing during a backoff. An
+observed failure is a floor: a clock that jumps backwards cannot shrink an
+outage that has already been seen.
 
 ---
 

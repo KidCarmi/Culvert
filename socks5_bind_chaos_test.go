@@ -384,15 +384,15 @@ func TestChaos66_BindFailureLoggingIsRateLimited(t *testing.T) {
 	noteSOCKS5Configured(1080)
 
 	start := time.Now()
-	if !noteSOCKS5BindFailure("port_in_use", time.Second, start) {
+	if logged, _ := noteSOCKS5BindFailure("port_in_use", time.Second, start); !logged {
 		t.Error("the first bind failure of an episode was not logged")
 	}
 	for i := 1; i < 20; i++ {
-		if noteSOCKS5BindFailure("port_in_use", time.Second, start.Add(time.Duration(i)*time.Second)) {
+		if logged, _ := noteSOCKS5BindFailure("port_in_use", time.Second, start.Add(time.Duration(i)*time.Second)); logged {
 			t.Fatalf("failure %d inside the rate window was logged", i)
 		}
 	}
-	if !noteSOCKS5BindFailure("port_in_use", time.Second, start.Add(socks5BindLogInterval+time.Second)) {
+	if logged, _ := noteSOCKS5BindFailure("port_in_use", time.Second, start.Add(socks5BindLogInterval+time.Second)); !logged {
 		t.Error("a failure past the rate window was not logged")
 	}
 }
@@ -1069,5 +1069,209 @@ func TestChaos66_TheSOCKS5ListenerPathHasNoFatal(t *testing.T) {
 	// would pass forever while proving nothing.
 	if checked < 500 {
 		t.Fatalf("the fatal scan only examined %d lines — it is not reading the listener sources", checked)
+	}
+}
+
+// ── Codex round 3: the outage clock, and the remedy that matches the fault ───
+
+// swapSOCKS5HealthClock points the health READ path at a clock the test drives,
+// so an episode can age without recording another attempt — which is the whole
+// condition under test.
+func swapSOCKS5HealthClock(t *testing.T, now func() time.Time) {
+	t.Helper()
+	prev := socks5HealthNow
+	socks5HealthNow = now
+	t.Cleanup(func() { socks5HealthNow = prev })
+}
+
+// TestChaos66_UnavailabilityIsObservedWhileWaitingBetweenRetries is the defect
+// gate for Codex round 3's first finding.
+//
+// Both episode durations were `lastFailure - firstFailure`, which stops
+// advancing the instant an attempt returns. At the 30 s ceiling with ±20%
+// jitter the next attempt can be 36 s away, so an outage that crossed its
+// threshold stayed reported as "merely retrying" — `/healthz` degraded,
+// `culvert_socks5_listener_up` 1, the contract row not failing — for the whole
+// gap. Nothing here records a second failure: the point is that the passage of
+// time alone must move the verdict.
+func TestChaos66_UnavailabilityIsObservedWhileWaitingBetweenRetries(t *testing.T) {
+	socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	start := time.Now()
+	clock := start
+	swapSOCKS5HealthClock(t, func() time.Time { return clock })
+
+	// The episode opens, then its LAST attempt lands one second short of the
+	// threshold — the shape the retry schedule actually produces at the ceiling.
+	noteSOCKS5BindFailure("port_in_use", socks5BindBackoffInitial, start)
+	noteSOCKS5BindFailure("port_in_use", socks5BindBackoffMax, start.Add(socks5BindUnavailableAfter-time.Second))
+	clock = start.Add(socks5BindUnavailableAfter - time.Second)
+
+	if snap := socks5ListenerState(); snap.BindUnavailable {
+		t.Fatalf("reported unavailable before the threshold elapsed: failingFor=%s", snap.BindFailingFor)
+	}
+
+	// No further attempt — only the clock moves, as it does during a backoff.
+	clock = start.Add(socks5BindUnavailableAfter + 2*time.Second)
+
+	snap := socks5ListenerState()
+	if !snap.BindUnavailable {
+		t.Errorf("threshold elapsed during a backoff but the listener is still reported as merely retrying (failingFor=%s)", snap.BindFailingFor)
+	}
+	if snap.BindFailingFor < socks5BindUnavailableAfter {
+		t.Errorf("BindFailingFor froze at the last attempt: %s", snap.BindFailingFor)
+	}
+	if row := checkSOCKS5Listener(); row.Status != diagFail {
+		t.Errorf("contract row is %q during an outage past its threshold, want fail", row.Status)
+	}
+	if body := renderMetrics(t); !strings.Contains(body, "culvert_socks5_listener_up 0") {
+		t.Error("culvert_socks5_listener_up is not 0 during an outage past its threshold — the documented paging rule is `== 0`")
+	}
+}
+
+// TestChaos66_AcceptDegradationIsObservedWhileWaitingToo pins the same fix on
+// the accept plane, whose ceiling is 1 s so its exposure was ~1 s rather than
+// 36 s. It is gated anyway: the two planes must not disagree about what an
+// episode duration means.
+func TestChaos66_AcceptDegradationIsObservedWhileWaitingToo(t *testing.T) {
+	socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	start := time.Now()
+	clock := start
+	swapSOCKS5HealthClock(t, func() time.Time { return clock })
+
+	noteSOCKS5AcceptFailure("resource_exhausted", time.Second, start)
+	clock = start.Add(socks5AcceptDegradedAfter + time.Second)
+
+	if snap := socks5ListenerState(); !snap.Degraded {
+		t.Errorf("accept degradation froze at the last attempt: failingFor=%s", snap.FailingFor)
+	}
+}
+
+// TestChaos66_AnObservedFailureIsAFloorOnTheEpisode pins the clock-rollback
+// direction. An NTP correction or a VM restore must never SHRINK an outage that
+// has already been observed, because under-reporting is what silences a page.
+func TestChaos66_AnObservedFailureIsAFloorOnTheEpisode(t *testing.T) {
+	first := time.Now()
+	last := first.Add(socks5BindUnavailableAfter + 5*time.Second)
+
+	// Clock rolled back to before the episode even started.
+	if got := socks5ElapsedSince(first, last, first.Add(-time.Hour)); got < socks5BindUnavailableAfter {
+		t.Errorf("a rolled-back clock shrank an observed %s episode to %s", last.Sub(first), got)
+	}
+	// Forward clock with no new attempt: the clock wins.
+	if got := socks5ElapsedSince(first, first, first.Add(90*time.Second)); got != 90*time.Second {
+		t.Errorf("elapsed = %s, want 90s from the clock", got)
+	}
+	// A first-failure stamped in the future must not read as negative.
+	if got := socks5ElapsedSince(first.Add(time.Hour), first.Add(time.Hour), first); got != 0 {
+		t.Errorf("elapsed = %s, want 0 for a future episode start", got)
+	}
+}
+
+// TestChaos66_BindSleepNeverStraddlesTheThreshold pins the second half of the
+// same finding: the read surfaces age against the clock, but the ALERT is
+// produced by an attempt, so the retry cadence must not carry the supervisor
+// past the threshold without one. CHAOS-55's recoveryPollCeiling rule.
+func TestChaos66_BindSleepNeverStraddlesTheThreshold(t *testing.T) {
+	// The shape that produced the finding: one second short of the threshold,
+	// sleeping the jittered ceiling.
+	justShort := socks5BindUnavailableAfter - time.Second
+	for _, wait := range []time.Duration{socks5BindBackoffMax, time.Duration(float64(socks5BindBackoffMax) * 1.2)} {
+		got := clampSOCKS5BindSleep(wait, justShort)
+		if justShort+got > socks5BindUnavailableAfter+socks5BindClampFloor {
+			t.Errorf("a %s sleep at %s into an episode lands %s in, past the %s threshold — the alert cannot fire until it does",
+				wait, justShort, justShort+got, socks5BindUnavailableAfter)
+		}
+	}
+
+	// Once the threshold is crossed the clamp must stop applying, or a long
+	// outage would retry far more often than the ceiling allows — the cost the
+	// 30 s ceiling exists to bound.
+	if got := clampSOCKS5BindSleep(socks5BindBackoffMax, socks5BindUnavailableAfter+time.Minute); got != socks5BindBackoffMax {
+		t.Errorf("clamp still applies past the threshold: %s, want %s", got, socks5BindBackoffMax)
+	}
+	// A sleep already inside the remaining window is untouched.
+	if got := clampSOCKS5BindSleep(time.Second, time.Second); got != time.Second {
+		t.Errorf("clamped a sleep that already fits: %s", got)
+	}
+	// It never degenerates into a spin.
+	if got := clampSOCKS5BindSleep(socks5BindBackoffMax, socks5BindUnavailableAfter-time.Nanosecond); got < socks5BindClampFloor {
+		t.Errorf("clamped sleep %s is below the %s floor — that is a busy loop", got, socks5BindClampFloor)
+	}
+}
+
+// TestChaos66_BindRemedyMatchesTheFailureReason is the defect gate for Codex
+// round 3's second finding: every reason class got the port-ownership advice,
+// so a node out of descriptors or with an interface that is not up was sent to
+// hunt the owner of a port nobody holds.
+func TestChaos66_BindRemedyMatchesTheFailureReason(t *testing.T) {
+	// Each class must name its OWN remedy and must not name the wrong one.
+	for _, tc := range []struct {
+		reason string
+		want   []string
+		reject []string
+	}{
+		{"port_in_use", []string{"port 1080"}, []string{"descriptor", "interface"}},
+		{"permission_denied", []string{"CAP_NET_BIND_SERVICE"}, []string{"descriptor", "already holds"}},
+		{"address_unavailable", []string{"interface"}, []string{"descriptor", "already holds"}},
+		{"descriptors_exhausted", []string{"file descriptors", "LimitNOFILE"}, []string{"already holds", "CAP_NET_BIND_SERVICE"}},
+		{"listen_failed", []string{"server logs"}, []string{"descriptor", "CAP_NET_BIND_SERVICE"}},
+		{"network_error", []string{"server logs"}, []string{"descriptor", "CAP_NET_BIND_SERVICE"}},
+	} {
+		got := socks5BindRemedy(tc.reason, 1080)
+		low := strings.ToLower(got)
+		for _, want := range tc.want {
+			if !strings.Contains(low, strings.ToLower(want)) {
+				t.Errorf("%s remedy omits %q: %s", tc.reason, want, got)
+			}
+		}
+		for _, reject := range tc.reject {
+			if strings.Contains(low, strings.ToLower(reject)) {
+				t.Errorf("%s remedy points at the wrong fault (%q): %s", tc.reason, reject, got)
+			}
+		}
+		// The two invariant clauses, in EVERY branch.
+		if !strings.Contains(low, "no restart required") {
+			t.Errorf("%s remedy drops the automatic-rebind clause: %s", tc.reason, got)
+		}
+		if !strings.Contains(low, "admin ui are unaffected") {
+			t.Errorf("%s remedy drops the proxy/admin-UI clause — this row used to mean the whole appliance was gone: %s", tc.reason, got)
+		}
+	}
+
+	// CONTROL: the remedies must be DISTINCT, or a switch that returns one
+	// string per branch would satisfy every assertion above.
+	seen := map[string]string{}
+	for _, reason := range []string{"port_in_use", "permission_denied", "address_unavailable", "descriptors_exhausted"} {
+		got := socks5BindRemedy(reason, 1080)
+		if prev, dup := seen[got]; dup {
+			t.Errorf("%s and %s share one remedy — the classifier's distinctions are being discarded", prev, reason)
+		}
+		seen[got] = reason
+	}
+}
+
+// TestChaos66_ContractRowCarriesTheReasonSpecificRemedy pins that the row
+// actually consumes socks5BindRemedy. Testing the helper alone would pass with
+// the row still hard-coding one action — the vacuous-gate lesson from round 2.
+func TestChaos66_ContractRowCarriesTheReasonSpecificRemedy(t *testing.T) {
+	socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	start := time.Now()
+	clock := start
+	swapSOCKS5HealthClock(t, func() time.Time { return clock })
+	noteSOCKS5BindFailure("descriptors_exhausted", time.Second, start)
+	clock = start.Add(socks5BindUnavailableAfter + time.Second)
+
+	row := checkSOCKS5Listener()
+	if row.Status != diagFail {
+		t.Fatalf("row status %q, want fail", row.Status)
+	}
+	if want := socks5BindRemedy("descriptors_exhausted", 1080); row.OperatorAction != want {
+		t.Errorf("contract row action does not come from the classifier:\n got: %s\nwant: %s", row.OperatorAction, want)
 	}
 }

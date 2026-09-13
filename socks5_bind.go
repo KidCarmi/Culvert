@@ -135,6 +135,11 @@ const (
 	// restart in which a predecessor still holds the port clears in a few
 	// seconds, and paging on that would page on every ordinary redeploy.
 	socks5BindUnavailableAfter = 30 * time.Second
+
+	// socks5BindClampFloor is the shortest sleep clampSOCKS5BindSleep will
+	// produce, so the one attempt it schedules to observe the threshold cannot
+	// degenerate into a near-zero spin when the threshold is all but reached.
+	socks5BindClampFloor = 100 * time.Millisecond
 )
 
 // socks5Supervisor owns the SOCKS5 listener's whole lifecycle: bind, hand the
@@ -333,13 +338,16 @@ func (s *socks5Supervisor) run() {
 		ln, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			reason := classifySOCKS5BindError(err)
-			wait := jitterDuration(backoff, socks5BindJitter)
-			shouldLog := noteSOCKS5BindFailure(reason, backoff, time.Now())
+			shouldLog, failingFor := noteSOCKS5BindFailure(reason, backoff, time.Now())
 			// Released only AFTER the failure is recorded: startSOCKS5 may
 			// return the moment this fires, and it must never return to a
 			// state that has not been written yet — that is the same window
 			// in miniature.
 			s.markFirstAttempt()
+			// Clamped so this sleep cannot carry us past the unavailability
+			// threshold without an attempt to observe it — the alert is
+			// attempt-driven and nothing else wakes this loop.
+			wait := clampSOCKS5BindSleep(jitterDuration(backoff, socks5BindJitter), failingFor)
 			if shouldLog {
 				// The FULL error goes here and nowhere else: the contract row,
 				// the alert and the readiness detail all carry the bounded

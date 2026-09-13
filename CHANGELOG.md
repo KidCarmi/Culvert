@@ -222,6 +222,24 @@ endpoints for credentialed parents.
   `culvert_socks5_bind_backoff_seconds`, emitted only on a node with a
   configured listener. `runProxyUntilShutdown`'s fatal proxy-listener branch
   is deliberately unchanged. See `docs/operator/socks5-listener-health.md`.
+- A SOCKS5 listener outage is now reported the moment its threshold elapses,
+  not on the next retry. Both episode durations were measured between the first
+  and *last* recorded failure, so they stopped advancing between attempts: with
+  the rebind backoff at its 30 s ceiling (±20% jitter), a failure landing at
+  29 s left `/healthz` reporting *degraded*, `culvert_socks5_listener_up` at
+  `1`, the `socks5_listener` row saying *retrying* and the `socks5_listener_down`
+  alert unfired for up to 36 s after the documented 30 s outage threshold had
+  passed. Durations are now aged against the clock, and one sleep per outage is
+  shortened so it cannot carry the supervisor past the threshold without an
+  attempt to observe it (the alert is attempt-driven). A clock that jumps
+  backwards can no longer shrink an outage already observed. The accept plane
+  carried the same shape with a 1 s ceiling and is fixed identically.
+- The `socks5_listener` row's suggested action now matches the failure reason.
+  One action string — check the port owner and bind permission — was printed for
+  every class, so a node out of file descriptors, or one whose interface had not
+  come up, was directed to hunt the owner of a port nobody holds. Each bounded
+  reason class now carries its own remedy; `network_error` and `listen_failed`
+  remain the unrecognised classes and point at the log line.
 - Listener failures are no longer misreported as network faults. Every bind
   error arrives wrapped in `*net.OpError`, which satisfies `net.Error`
   unconditionally, so the admin UI listener's classifier labelled every

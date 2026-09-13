@@ -97,6 +97,17 @@ const (
 // socks5ListenerHealth is the process-wide record of the SOCKS5 accept loop's
 // state. Mutex-guarded rather than atomic-per-field because every reader
 // (diagnostics row, readiness row, metrics block) needs a consistent view
+// socks5HealthNow is the clock the READ path ages an in-progress failure
+// episode against.
+//
+// The WRITE path is already clock-injected — every note* function takes its
+// `now` from the caller — but the READ path had no clock at all, which is
+// exactly how the staleness below went unnoticed: a duration computed from two
+// stored stamps needs no clock and is therefore frozen between them. A seam
+// rather than a bare time.Now() call so a gate can drive a synthetic episode;
+// production never replaces it.
+var socks5HealthNow = time.Now
+
 // across all of it.
 type socks5ListenerHealth struct {
 	mu sync.Mutex
@@ -461,8 +472,10 @@ func classifySOCKS5BindError(err error) string {
 }
 
 // noteSOCKS5BindFailure records one failed bind attempt and returns whether the
-// caller should emit a log line for it.
-func noteSOCKS5BindFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool) {
+// caller should emit a log line for it, plus how long the current episode has
+// been running so the caller can keep its retry cadence inside the
+// unavailability threshold (see clampSOCKS5BindSleep).
+func noteSOCKS5BindFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool, failingFor time.Duration) {
 	socks5Listener.mu.Lock()
 
 	socks5Listener.bindTotal++
@@ -485,7 +498,8 @@ func noteSOCKS5BindFailure(reason string, backoff time.Duration, now time.Time) 
 	// Unavailability is a DURATION, not a count: an ordinary redeploy in which
 	// a predecessor still holds the port clears in seconds, and paging on that
 	// would page on every restart.
-	unavailable := now.Sub(socks5Listener.bindFirstFailure) >= socks5BindUnavailableAfter
+	failingFor = socks5ElapsedSince(socks5Listener.bindFirstFailure, now, now)
+	unavailable := failingFor >= socks5BindUnavailableAfter
 	alertNow := unavailable && !socks5Listener.bindAlerted
 	if alertNow {
 		socks5Listener.bindAlerted = true
@@ -509,7 +523,78 @@ func noteSOCKS5BindFailure(reason string, backoff time.Duration, now time.Time) 
 			"SOCKS5 listener on port %d %s after %s of retrying (%d consecutive failures, reason: %s); SOCKS5 clients cannot connect. The HTTP/HTTPS proxy and the admin UI are unaffected",
 			port, history, socks5BindUnavailableAfter, failures, reason))
 	}
-	return shouldLog
+	return shouldLog, failingFor
+}
+
+// socks5BindRemedy maps a bounded bind-failure reason class to the step that
+// actually resolves it.
+//
+// The classifier exists to tell these apart — that is the whole reason
+// classifySOCKS5BindError matches errnos through errors.As instead of reporting
+// one generic failure — so handing every class the port-ownership advice throws
+// the classification away at the one surface an operator reads. A node out of
+// descriptors, or one whose interface is not up yet, was being sent to hunt for
+// the owner of a port nobody holds (Codex review round 3, PR #1376).
+//
+// Two clauses are invariant across every branch and must stay: that the
+// listener rebinds by itself (so nobody restarts a gateway to achieve what is
+// already happening — the round-2 finding) and that the proxy and admin UI are
+// unaffected (so nobody goes looking for a dead data plane — this row used to
+// mean the whole appliance was gone). The strings carry no host, address or
+// raw error: this row is viewer-role, and the bounded class is the contract.
+func socks5BindRemedy(reason string, port int) string {
+	const rebinds = " The listener rebinds automatically once this is resolved — no restart required, and the HTTP/HTTPS proxy and the admin UI are unaffected."
+
+	switch reason {
+	case "port_in_use":
+		return fmt.Sprintf("Find and stop whatever already holds port %d on this host (`ss -ltnp | grep :%d`): commonly a predecessor container still draining, a host-network service, or a second Culvert.", port, port) + rebinds
+	case "permission_denied":
+		return fmt.Sprintf("This process may not bind port %d. Grant it CAP_NET_BIND_SERVICE, run it as a user that may bind the port, or move SOCKS5 to a port above 1023.", port) + rebinds
+	case "address_unavailable":
+		return "The bind address is not available on this host yet — usually an interface that has not come up, or an address that is not local to this machine. Check the interface and the configured address." + rebinds
+	case "descriptors_exhausted":
+		return "This process is out of file descriptors, so no listener can be opened at all. Raise its limit (systemd `LimitNOFILE`, or `ulimit -n`) and look for a descriptor leak — other subsystems are degrading too, whatever their own health rows say." + rebinds
+	default:
+		// network_error and listen_failed are the UNRECOGNISED classes, so the
+		// honest next step is the log line, which is the only place the raw
+		// error is written.
+		return fmt.Sprintf("Check the server logs for the underlying bind error, and what else is bound to port %d on this host.", port) + rebinds
+	}
+}
+
+// clampSOCKS5BindSleep shortens a backoff that would carry the supervisor past
+// the unavailability threshold without ever observing it.
+//
+// The read surfaces now age an episode against the clock, so they are correct
+// continuously — but the ALERT is produced by an ATTEMPT (noteSOCKS5BindFailure
+// holds the fire-once latch), and nothing else wakes the supervisor. So a sleep
+// longer than the time remaining to the threshold leaves the documented outage
+// UNPAGED for the difference: at the 30 s ceiling with ±20% jitter, a failure
+// landing at 29 s does not attempt again for up to 36 s, and the page that is
+// supposed to arrive at 30 s arrives at ~65 s.
+//
+// This is CHAOS-55's `recoveryPollCeiling` rule, which states it plainly: an
+// interval that can straddle a state transition must be capped below it, and
+// that is a CORRECTNESS bound rather than tuning. It costs at most ONE extra
+// attempt per episode — once the threshold is crossed the clamp stops applying
+// and the ceiling governs freely — so the 30 s ceiling still bounds the
+// pathological case it was chosen for.
+//
+// Capping the CEILING instead was the obvious alternative and is worse: it
+// would slow every long outage's retry cadence permanently to buy a property
+// that matters only on one sleep.
+func clampSOCKS5BindSleep(wait, failingFor time.Duration) time.Duration {
+	remaining := socks5BindUnavailableAfter - failingFor
+	if remaining <= 0 || wait <= remaining {
+		return wait
+	}
+	// A floor keeps the one clamped sleep from becoming a near-zero spin when
+	// the threshold is already all but reached; overshooting it by <100 ms
+	// costs nothing an operator can perceive.
+	if remaining < socks5BindClampFloor {
+		return socks5BindClampFloor
+	}
+	return remaining
 }
 
 // noteSOCKS5Bound records an OBSERVED successful bind and returns the number of
@@ -564,8 +649,54 @@ func noteSOCKS5ListenerStopped() {
 	socks5Listener.mu.Unlock()
 }
 
+// socks5ElapsedSince returns how long a failure episode that began at `first`
+// has been running, given the last attempt recorded at `last` and the clock.
+//
+// It takes the LATER of the two ends rather than simply `now - first`, so a
+// clock that goes BACKWARDS (an NTP correction, a VM restore) cannot shrink —
+// or un-report — an outage that has already been observed. A recorded failure
+// is evidence, so it is a floor: the episode is at least `last - first` however
+// the clock is now set. The asymmetry is deliberate and is the opposite of
+// CHAOS-61's, which rules a broadcast on a rolled-back clock STALE: there the
+// fail-safe answer is to distrust a remote value, here it is the LONGER
+// duration, because the failure mode being closed is an outage going unpaged.
+func socks5ElapsedSince(first, last, now time.Time) time.Duration {
+	elapsed := now.Sub(first)
+	if observed := last.Sub(first); observed > elapsed {
+		elapsed = observed
+	}
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
 // socks5ListenerState returns a consistent copy of the accept loop's state.
+//
+// An IN-PROGRESS episode is aged against the clock, NOT against the last
+// recorded attempt. Both durations used to be `lastFailure - firstFailure`,
+// which stops advancing the moment an attempt returns and only resumes on the
+// next one — so a threshold that has genuinely elapsed stayed unreported for
+// the whole gap between attempts. On the BIND plane that gap is the retry
+// ceiling plus jitter (30 s ± 20% ⇒ up to 36 s against a 30 s threshold), so a
+// failure landing just under the threshold left `/healthz` merely degraded,
+// `culvert_socks5_listener_up` at 1 and the contract row green-ish for another
+// half minute after the documented outage began (Codex review round 3, PR
+// #1376). This is CHAOS-61's rule in a second place: a value that EXPIRES is
+// evaluated on every read, never latched at write time — the `ca_health.go`
+// `Usable()` discipline.
+//
+// The ACCEPT plane carried the identical shape with a 1 s ceiling, so its
+// exposure was ~1 s rather than 36 s. It is fixed in the same line rather than
+// recorded, because two dialects for one question inside one struct is the
+// trap this file keeps closing: whoever reads `FailingFor` next must not have
+// to know which plane freezes and which does not.
 func socks5ListenerState() socks5ListenerSnapshot {
+	// Read the clock BEFORE the lock: nothing here needs it to be consistent
+	// with the fields, and a syscall under a mutex every health surface takes
+	// is a habit worth not forming.
+	now := socks5HealthNow()
+
 	socks5Listener.mu.Lock()
 	defer socks5Listener.mu.Unlock()
 	snap := socks5ListenerSnapshot{
@@ -590,12 +721,12 @@ func socks5ListenerState() socks5ListenerSnapshot {
 	}
 	if !socks5Listener.firstFailure.IsZero() {
 		snap.Failing = true
-		snap.FailingFor = socks5Listener.lastFailure.Sub(socks5Listener.firstFailure)
+		snap.FailingFor = socks5ElapsedSince(socks5Listener.firstFailure, socks5Listener.lastFailure, now)
 		snap.Degraded = snap.FailingFor >= socks5AcceptDegradedAfter
 	}
 	if !socks5Listener.bindFirstFailure.IsZero() {
 		snap.BindFailing = true
-		snap.BindFailingFor = socks5Listener.bindLastFailure.Sub(socks5Listener.bindFirstFailure)
+		snap.BindFailingFor = socks5ElapsedSince(socks5Listener.bindFirstFailure, socks5Listener.bindLastFailure, now)
 		snap.BindUnavailable = snap.BindFailingFor >= socks5BindUnavailableAfter
 	}
 	return snap
@@ -688,7 +819,7 @@ func checkSOCKS5Listener() OperatorContractCheck {
 	if snap.BindUnavailable {
 		msg := fmt.Sprintf("SOCKS5 listener has never bound port %d (%s) after %s of retrying (%d attempts)",
 			snap.Port, snap.BindLastReason, snap.BindFailingFor.Round(time.Second), snap.BindConsecutive)
-		action := fmt.Sprintf("Check what else is bound to port %d on this host, and that the process may bind it; the listener rebinds automatically once the port is free — no restart required. The HTTP/HTTPS proxy and the admin UI are unaffected.", snap.Port)
+		action := socks5BindRemedy(snap.BindLastReason, snap.Port)
 		if snap.EverBound {
 			msg = fmt.Sprintf("SOCKS5 listener lost port %d and has been unable to rebind for %s (%s, %d attempts)",
 				snap.Port, snap.BindFailingFor.Round(time.Second), snap.BindLastReason, snap.BindConsecutive)
