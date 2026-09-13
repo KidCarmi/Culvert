@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -191,11 +193,78 @@ func TestIPFilterView_DifferentialRandomized(t *testing.T) {
 
 // ─── The publish contract ───────────────────────────────────────────────────
 
+// TestIPFilterView_MutatorInventoryIsComplete is what makes the publish
+// contract SELF-ENFORCING rather than a convention.
+//
+// Its sibling below covers every mutator that exists TODAY, but it is a
+// hand-maintained list, and its own doc comment asks the next author to
+// remember to extend it. That is the one instruction a wall must never depend
+// on: a mutator added without publishView is a SILENT security failure in both
+// filter modes — in "allow" a revoked allowlist entry keeps admitting traffic,
+// in "block" a newly added entry never denies any — and neither shows up as a
+// test failure, a log line, or a metric. It shows up as a filter that is
+// configured and not enforcing.
+//
+// So this test enumerates the type's exported methods by reflection and
+// requires each one to be CLASSIFIED, mutator or reader. A new method fails the
+// build until somebody answers which it is, exactly as
+// TestRLExemptView_MutatorInventoryIsComplete does for the RateLimiter exempt
+// view (security_ratelimit_exempt_view_test.go) and
+// TestRuleView_MutatorInventoryIsComplete does for internal/rewrite. IPFilter
+// was the one read-view subsystem of the three without one, and it is the most
+// exposed of them: Allowed() is the FIRST gate on every proxied request, ahead
+// of the rate limiter, authentication and policy.
+//
+// Unlike the RateLimiter's version this needs no name-token filter — every
+// exported method on *IPFilter is part of the filter surface.
+func TestIPFilterView_MutatorInventoryIsComplete(t *testing.T) {
+	// Mutators change the exemptMu-guarded write-side state and MUST call
+	// publishView before releasing the lock. Each is covered by a republish
+	// case: the five in TestIPFilterView_EveryMutatorRepublishes, plus AddAll
+	// in TestIPFilterAddAll_PublishesOnce (the bulk primitive publishes ONCE at
+	// the end, which is why it has its own gate rather than a subtest there).
+	mutators := map[string]bool{
+		"SetMode": true, "Add": true, "AddAll": true,
+		"Remove": true, "ClearAll": true,
+	}
+	// Readers answer from the published view or from the write-side state under
+	// a read lock. They publish nothing and must not.
+	readers := map[string]bool{"Mode": true, "List": true, "Allowed": true}
+
+	var unclassified []string
+	rt := reflect.TypeOf(&IPFilter{})
+	for i := 0; i < rt.NumMethod(); i++ {
+		name := rt.Method(i).Name
+		if !mutators[name] && !readers[name] {
+			unclassified = append(unclassified, name)
+		}
+	}
+	sort.Strings(unclassified)
+	if len(unclassified) > 0 {
+		t.Fatalf("unclassified IPFilter method(s) %v: if it MUTATES the filter it must call "+
+			"publishView() before releasing f.mu and be given a republish case in "+
+			"TestIPFilterView_EveryMutatorRepublishes; if it only reads, add it to `readers`. "+
+			"An unpublished mutation is a silent security failure — a revoked allowlist entry "+
+			"that keeps admitting, or a new blocklist entry that never denies.",
+			unclassified)
+	}
+
+	// Not-vacuous control. A classification wall that enumerated nothing would
+	// pass forever; this fails if reflection stops seeing the surface (a type
+	// rename, a move to an interface, a build-tag split).
+	if got := rt.NumMethod(); got < len(mutators)+len(readers) {
+		t.Fatalf("the inventory saw only %d exported method(s) on *IPFilter but %d are classified — "+
+			"the wall is no longer reading the type it claims to guard", got, len(mutators)+len(readers))
+	}
+}
+
 // TestIPFilterView_EveryMutatorRepublishes is the security half of the read-
 // view contract. A mutator that changes the write-side state without calling
 // publishView leaves readers on a stale view: a revoked allowlist entry keeps
 // admitting traffic, a removed blocklist entry keeps denying it. Every mutator
-// gets a case here, and a new one must be added alongside.
+// gets a case here, and a new one must be added alongside —
+// TestIPFilterView_MutatorInventoryIsComplete above is what makes forgetting
+// fail the build rather than ship silently.
 func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 	t.Run("SetMode", func(t *testing.T) {
 		f := &IPFilter{single: map[string]bool{}}
