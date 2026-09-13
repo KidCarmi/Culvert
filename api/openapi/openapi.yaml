@@ -2232,6 +2232,35 @@ components:
         format: { type: string }
         drops: { type: integer }
         panics: { type: integer }
+        # CHAOS-66 — delivery evidence. `drops` alone cannot distinguish a feed
+        # that is working from one that has never delivered anything (a UDP
+        # target that does not exist reports zero of both).
+        delivered:
+          type: integer
+          description: Lines the collector socket accepted since startup.
+        queue_full:
+          type: integer
+          description: >-
+            Subset of drops caused by the delivery queue overflowing rather than
+            by the collector being unreachable.
+        status:
+          type: string
+          enum: [disabled, down, failing, degraded, ready]
+          description: Feed posture derived from observed delivery.
+        degraded:
+          type: boolean
+          description: Delivery has been failing past the degradation threshold.
+        last_reason:
+          type: string
+          description: >-
+            Bounded failure class of the most recent delivery failure
+            (connect_failed, connect_timeout, dns_failure, write_timeout,
+            write_failed). Never a raw error string.
+        unverifiable:
+          type: boolean
+          description: >-
+            True for UDP targets: the protocol carries no acknowledgement, so
+            receipt cannot be proven from this node.
     SetSyslogBody:
       type: object
       additionalProperties: false

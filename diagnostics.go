@@ -829,24 +829,26 @@ func checkOIDCJWKSTrust() OperatorContractCheck {
 // distinguishes "not configured" from "configured but silently down". Mirrors
 // checkAuditPersistence. Side-effect-free: reads process state only, never
 // dials the collector (use POST /api/syslog/test for an active probe).
+// CHAOS-66 rewrote this row to report OBSERVED DELIVERY. It previously reported
+// the boot dial and nothing else, which is green for every failure that starts
+// after boot — and, because UDP is the default transport and a UDP dial
+// exchanges no packets, green unconditionally for the common configuration.
+// Every judgement below is derived from evidence the engine records (lines the
+// socket accepted, consecutive failures, how long the current failing run has
+// lasted); see syslog_health.go.
 func checkSyslogFeed() OperatorContractCheck {
-	if syslogConfiguredAddr == "" {
+	snap := syslogFeedState()
+	if !snap.Configured {
 		return OperatorContractCheck{
 			Code:    "syslog_feed",
 			Status:  diagOK,
 			Message: "not configured — no remote syslog/SIEM forwarding",
 		}
 	}
-	// Healthy only when the target we actually connected to (syslogConfigured,
-	// set SOLELY on a successful InitSyslog) matches the operator's current
-	// intent (syslogConfiguredAddr, recorded regardless of outcome). A bare
-	// globalSyslog != nil check is not enough: observability inits from
-	// YAML/flags BEFORE admin settings apply a persisted override, so if the
-	// first target connects and a later re-init to a new target fails,
-	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
-	// has moved on — the persisted SIEM target is silently down but a nil-check
-	// would still report OK.
-	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+	// Intent exists but nothing is serving it: the boot dial failed, or a later
+	// re-init to a new target failed and left the PREVIOUS writer in place while
+	// intent moved on.
+	if !snap.Active {
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,
@@ -854,10 +856,69 @@ func checkSyslogFeed() OperatorContractCheck {
 			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
 		}
 	}
+	// A writer exists and delivery has been failing without interruption past
+	// the threshold. FAIL, not warn: unlike the SOCKS5 listener this does not
+	// self-heal from the appliance's side, and what is being lost is the
+	// outbound copy of the compliance record.
+	if snap.Degraded {
+		return OperatorContractCheck{
+			Code:   "syslog_feed",
+			Status: diagFail,
+			Message: fmt.Sprintf("remote syslog/SIEM forwarding has been failing for %s (%d consecutive failures, reason: %s); %d events have been lost and are NOT recoverable from the collector",
+				snap.FailingFor.Round(time.Second), snap.Consecutive, snap.LastReason, snap.Drops),
+			OperatorAction: "Restore the collector and the network path to it; delivery resumes automatically on the next successful write. Events dropped during the outage exist only in this node's local audit and request logs — export them from there if the SIEM copy is required.",
+		}
+	}
+	if snap.Failing {
+		return OperatorContractCheck{
+			Code:   "syslog_feed",
+			Status: diagWarn,
+			Message: fmt.Sprintf("remote syslog/SIEM forwarding is failing (%d consecutive, reason: %s, %d events lost); retrying with backoff",
+				snap.Consecutive, snap.LastReason, snap.Drops),
+			OperatorAction: "No action yet if the collector is being restarted — delivery resumes on its own. If this persists, check the collector and the network path to it.",
+		}
+	}
+	// Nothing has EVER been delivered. On TCP the connection is up and the
+	// collector is accepting, so this only happens before the first event; on
+	// UDP it is the strongest hint available that the target does not exist.
+	if !snap.EverDelivered {
+		if snap.Unverifiable {
+			return OperatorContractCheck{
+				Code:           "syslog_feed",
+				Status:         diagWarn,
+				Message:        "configured over UDP but nothing has been forwarded yet — a UDP socket reports no delivery errors, so a collector that does not exist is indistinguishable from an idle one",
+				OperatorAction: "Send a test event (POST /api/syslog/test) and confirm it arrives at the collector. Consider tcp:// for a SIEM feed that must be verifiable.",
+			}
+		}
+		return OperatorContractCheck{
+			Code:    "syslog_feed",
+			Status:  diagOK,
+			Message: "remote syslog/SIEM forwarding is connected; no events forwarded yet",
+		}
+	}
+	// Delivering. The UDP caveat is stated rather than implied: the socket
+	// accepting a datagram is not evidence the collector received it, and
+	// claiming otherwise is what made the old row unreliable.
+	if snap.Unverifiable {
+		return OperatorContractCheck{
+			Code:   "syslog_feed",
+			Status: diagOK,
+			Message: fmt.Sprintf("remote syslog/SIEM forwarding is active over UDP (%d events sent, %d lost) — UDP carries no acknowledgement, so receipt is not verifiable from this node",
+				snap.Delivered, snap.Drops),
+		}
+	}
+	if snap.Drops > 0 {
+		return OperatorContractCheck{
+			Code:   "syslog_feed",
+			Status: diagOK,
+			Message: fmt.Sprintf("remote syslog/SIEM forwarding is active (%d events delivered, %d lost to earlier outages)",
+				snap.Delivered, snap.Drops),
+		}
+	}
 	return OperatorContractCheck{
 		Code:    "syslog_feed",
 		Status:  diagOK,
-		Message: "remote syslog/SIEM forwarding is active",
+		Message: fmt.Sprintf("remote syslog/SIEM forwarding is active (%d events delivered)", snap.Delivered),
 	}
 }
 

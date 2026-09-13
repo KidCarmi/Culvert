@@ -1807,19 +1807,36 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
-		var drops, panics uint64
-		if globalSyslog != nil {
-			format = globalSyslog.Format()
+		var drops, panics, delivered, queueFull uint64
+		if sw := activeSyslog(); sw != nil {
+			// Every accessor below is LOCK-FREE (CHAOS-66). They used to take
+			// the delivery mutex, which the drain goroutine holds across dial +
+			// write + write, so this handler hung for ~15 s against a wedged
+			// collector — the admin page an operator opens precisely BECAUSE
+			// the SIEM looks wrong.
+			format = sw.Format()
 			// Read panics before drops: deliverGuarded's recover branch always
 			// increments panics first, then drops (independent atomics, no
 			// combined snapshot). Reading in the same order means a report can
 			// only ever lag panics behind drops, never the reverse — so the
 			// UI's `drops > 0` gate can never hide a real panic behind a
 			// stale-looking drops==0.
-			panics = globalSyslog.Panics()
-			drops = globalSyslog.Drops()
+			panics = sw.Panics()
+			st := sw.Stats()
+			drops, delivered, queueFull = st.Drops, st.Delivered, st.QueueFull
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
+		// `delivered` is the field that makes this surface answerable: drops
+		// alone cannot distinguish a feed that is working from one that has
+		// never delivered anything (a UDP target that does not exist reports
+		// zero of both).
+		snap := syslogFeedState()
+		jsonOK(w, map[string]any{
+			"addr": syslogConfigured, "format": format,
+			"drops": drops, "panics": panics,
+			"delivered": delivered, "queue_full": queueFull,
+			"status": syslogFeedStatus(), "degraded": snap.Degraded,
+			"last_reason": snap.LastReason, "unverifiable": snap.Unverifiable,
+		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1840,10 +1857,11 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Addr == "" {
 			// Disable syslog.
-			if globalSyslog != nil {
-				globalSyslog.Close()
-				globalSyslog = nil
+			if sw := activeSyslog(); sw != nil {
+				sw.Close()
+				setActiveSyslog(nil)
 			}
+			resetSyslogFeedHealth()
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
@@ -1857,9 +1875,9 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		syslogConfigured = body.Addr
 		syslogConfiguredAddr = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+activeSyslog().Format()+")")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": activeSyslog().Format()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1874,13 +1892,14 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if globalSyslog == nil {
+	sw := activeSyslog()
+	if sw == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
 	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
 	// now via the exported io.Writer surface (writeMsg is package-internal).
-	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
+	_, _ = sw.Write([]byte("Culvert syslog test message — connectivity verified"))
 	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
 }
 

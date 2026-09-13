@@ -1225,6 +1225,73 @@ culvert_socks5_accept_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-66 — the SIEM forwarding plane. Emitted ONLY when a feed is
+	// configured: a flat `culvert_syslog_up 0` from every appliance that
+	// forwards nowhere is indistinguishable from one whose collector is dead,
+	// and the documented paging rule is `== 0` (the socks5/cluster_ca/dns
+	// emission rule).
+	//
+	// `last_success_age_seconds` is the series to alert on, not `drops_total`:
+	// drops are a rate that depends on proxied traffic, so a quiet node with a
+	// dead collector barely moves the counter, while the age of the last
+	// ACCEPTED write grows regardless of load. It is OMITTED entirely when
+	// nothing has ever been delivered — a `0` there would read as "delivered
+	// just now", the exact inversion this sweep exists to remove; that state is
+	// carried by `up 0` instead.
+	if sf := syslogFeedState(); sf.Configured {
+		sfUp, sfDegraded := 1, 0
+		// `up` is 0 for all three ways a configured feed can be dark: no writer
+		// is serving the operator's intent, nothing has EVER been delivered, or
+		// delivery has been failing past the degradation threshold. It is
+		// deliberately NOT cleared by a single failed attempt — that would flap
+		// on every collector restart; a transient run shows up in
+		// backoff_seconds and drops_total instead.
+		if !sf.Active || !sf.EverDelivered || sf.Degraded {
+			sfUp = 0
+		}
+		if sf.Degraded {
+			sfDegraded = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_syslog_up 1 while the configured SIEM syslog feed has delivered at least one event and is not currently dark
+# TYPE culvert_syslog_up gauge
+culvert_syslog_up %d
+
+# HELP culvert_syslog_delivered_total Syslog lines the collector socket accepted since startup
+# TYPE culvert_syslog_delivered_total counter
+culvert_syslog_delivered_total %d
+
+# HELP culvert_syslog_drops_total Syslog lines that never reached the collector since startup
+# TYPE culvert_syslog_drops_total counter
+culvert_syslog_drops_total %d
+
+# HELP culvert_syslog_queue_full_total Subset of drops caused by the delivery queue overflowing rather than by the collector being unreachable
+# TYPE culvert_syslog_queue_full_total counter
+culvert_syslog_queue_full_total %d
+
+# HELP culvert_syslog_degraded 1 while syslog delivery has been failing for longer than the degradation threshold
+# TYPE culvert_syslog_degraded gauge
+culvert_syslog_degraded %d
+
+# HELP culvert_syslog_backoff_seconds Current syslog reconnect backoff; 0 when delivery is succeeding
+# TYPE culvert_syslog_backoff_seconds gauge
+culvert_syslog_backoff_seconds %g
+`,
+			sfUp,
+			sf.Delivered,
+			sf.Drops,
+			sf.QueueFull,
+			sfDegraded,
+			sf.Backoff.Seconds(),
+		)
+		if sf.EverDelivered {
+			_, _ = fmt.Fprintf(w, `
+# HELP culvert_syslog_last_success_age_seconds Seconds since the collector last accepted a line; omitted until the first delivery
+# TYPE culvert_syslog_last_success_age_seconds gauge
+culvert_syslog_last_success_age_seconds %g
+`, sf.LastSuccessAge.Seconds())
+		}
+	}
+
 	// CHAOS-61: cluster rate-limit broadcast freshness. Emitted ONLY on a node
 	// where cluster-wide rate limiting is armed — `remote_stale 0` on a
 	// standalone proxy that never had a Control Plane is indistinguishable from
