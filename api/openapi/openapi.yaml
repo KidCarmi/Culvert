@@ -158,7 +158,8 @@ components:
         roster/entry write (`current.revision`), `documentRevision` on an IdP create (`current.documentRevision`),
         `generation` on a self-service password change or a lockout reset (`current.generation`); or, on an IdP
         write that would retire the legacy YAML ldap authenticator, no client `operationId`
-        (`code: operation_id_required`). Nothing was changed.
+        (`code: operation_id_required`) or no `cutoverConfirm` echo of the legacy block's `cutoverConfirmValue`
+        (`code: cutover_confirm_required`, `current.confirmValue` — FE-6A.2). Nothing was changed.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/AuthRefusal' }
@@ -345,7 +346,7 @@ components:
         bounded: invalid_input (400), forbidden / invalid_credentials (403), not_found / vanished (404),
         stale / last_admin / user_exists / referenced / confirm_mismatch / not_degraded / repair_unavailable /
         operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown (409),
-        precondition_required / operation_id_required (428), persist_failed / outcome_unknown (500),
+        precondition_required / operation_id_required / cutover_confirm_required (428), persist_failed / outcome_unknown (500),
         provider_compile_failed (502), registry_degraded / persistence_not_configured /
         operation_ledger_degraded / operation_ledger_full / operation_unsettled (503),
         method_not_allowed (405). `current` carries typed facts for the retry (revision, documentRevision,
@@ -2522,7 +2523,7 @@ components:
         state: { type: string, enum: [pending, committed, aborted, outcome_unknown], description: "A terminal state is reported ONLY once its durable record exists (round 3): a create whose terminal record could not be persisted answers 500 outcome_unknown and the record stays pending until the lookup, a later writer on the same profile, or the next boot settles it from the profile's durable provenance." }
         audited: { type: boolean, description: "committed — the operation-keyed success audit is DURABLY present exactly once in the audit record (round 4: the entry carries `operationId`, the append is idempotent on that key, and this marker is persisted only after the durable append; a crash or failure between them is retried by the lookup, by settlement and at boot, re-running only the missing step)." }
         auditState: { type: string, enum: [pending], description: "committed only, when the success audit is still owed (append not durable or marker not persisted) — recoverable; absent once `audited` is true." }
-        action: { type: string, enum: [idp.create] }
+        action: { type: string, enum: [idp.create, idp.update], description: "idp.update — FE-6A.2: an operation-identified update (a cutover through PUT)." }
         actor: { type: string }
         profileId: { type: string, description: "The candidate's pre-minted profile id." }
         registryRevision: { type: string, description: "The registry document revision the write was fenced on." }
@@ -2666,7 +2667,7 @@ components:
     LegacyLDAPPresent:
       type: object
       description: A legacy YAML `ldap:` block is configured on this node. Every non-secret setting is always emitted.
-      required: [present, active, retired, shadowed, scope, url, baseDn, bindDn, bindCredentialConfigured, userFilter, requiredGroup, startTls, tlsSkipVerify, cacheTtlSeconds, cutoverDurability]
+      required: [present, active, retired, shadowed, scope, url, baseDn, bindDn, bindCredentialConfigured, userFilter, requiredGroup, startTls, tlsSkipVerify, cacheTtlSeconds, cutoverConfirmValue, cutoverDurability]
       additionalProperties: false
       properties:
         present: { type: boolean, enum: [true] }
@@ -2683,6 +2684,7 @@ components:
         startTls: { type: boolean, description: "StartTLS is negotiated on a plain ldap:// connection." }
         tlsSkipVerify: { type: boolean, description: "SECURITY-EFFECTIVE — the directory certificate is NOT verified when true." }
         cacheTtlSeconds: { type: integer, description: "Authentication-result cache TTL in seconds." }
+        cutoverConfirmValue: { type: string, description: "FE-6A.2 — the SERVER-required confirmation value a cutover-bearing write must echo as ?cutoverConfirm= (the legacy directory URL — the authenticator being retired). Always emitted while the block is present." }
         cutoverDurability: { $ref: '#/components/schemas/LegacyLDAPCutoverDurability' }
         cutover: { $ref: '#/components/schemas/LegacyLDAPCutover' }
     LegacyLDAPCutoverDurability:
@@ -11876,6 +11878,15 @@ paths:
           required: false
           schema: { type: string, format: uuid }
           description: Client-generated UUID identifying this write intent (required for a cutover-bearing write).
+        - name: cutoverConfirm
+          in: query
+          required: false
+          schema: { type: string }
+          description: >-
+            FE-6A.2 — REQUIRED on a cutover-bearing write (an ENABLED ldap profile on a node whose legacy YAML
+            `ldap:` block is present and not retired): the server's `cutoverConfirmValue` from
+            GET /api/idp/legacy-ldap, echoed verbatim. Absent ⇒ 428 cutover_confirm_required, wrong ⇒ 409
+            confirm_mismatch — both carry `current.confirmValue`; nothing is written either way.
         - name: preflight
           in: query
           required: false
@@ -12001,6 +12012,23 @@ paths:
           required: false
           schema: { type: integer, format: int64 }
           description: The loaded entry revision (wins over the body value).
+        - name: operationId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: >-
+            FE-6A.2 — client-generated UUID identifying this write intent; REQUIRED (428 operation_id_required)
+            when the update carries the legacy-LDAP cutover (enabling an ldap profile on a node whose legacy
+            YAML block is present and not retired). Recorded in the operation ledger as action `idp.update`
+            with the same replay / mismatch semantics as a create; echoed on success.
+        - name: cutoverConfirm
+          in: query
+          required: false
+          schema: { type: string }
+          description: >-
+            FE-6A.2 — REQUIRED on a cutover-bearing update: the server's `cutoverConfirmValue` from
+            GET /api/idp/legacy-ldap. Absent ⇒ 428 cutover_confirm_required, wrong ⇒ 409 confirm_mismatch
+            (both with `current.confirmValue`); nothing is written either way.
         - name: preflight
           in: query
           required: false

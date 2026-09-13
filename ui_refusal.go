@@ -39,12 +39,16 @@ const (
 	// (FE-6A.0 correction, Blocker 7).
 	refusalPersistenceNotConfigured = "persistence_not_configured"
 	// FE-6A.0 correction, Blocker 6/9 (IdP):
-	refusalProviderCompileFailed = "provider_compile_failed"   // 502: dependency / provider construction (bounded reason)
-	refusalOperationIDRequired   = "operation_id_required"     // 428: a cutover-bearing write needs a client operationId
-	refusalOperationMismatch     = "operation_mismatch"        // 409: operationId reused for a different candidate
-	refusalOperationInProgress   = "operation_in_progress"     // 409: the same operation is still being decided
-	refusalOperationAborted      = "operation_aborted"         // 409: replay of an operation that aborted
-	refusalOperationUnknown      = "operation_outcome_unknown" // 409: replay of a split outcome awaiting reconciliation
+	refusalProviderCompileFailed = "provider_compile_failed" // 502: dependency / provider construction (bounded reason)
+	refusalOperationIDRequired   = "operation_id_required"   // 428: a cutover-bearing write needs a client operationId
+	// FE-6A.2: a cutover-bearing write (POST or PUT) must also echo the legacy
+	// block's server-published cutoverConfirmValue in ?cutoverConfirm= — the
+	// T2 ceremony is bound to the authenticator being retired by a SERVER fact.
+	refusalCutoverConfirmRequired = "cutover_confirm_required"  // 428: ?cutoverConfirm= absent on a cutover-bearing write
+	refusalOperationMismatch      = "operation_mismatch"        // 409: operationId reused for a different candidate
+	refusalOperationInProgress    = "operation_in_progress"     // 409: the same operation is still being decided
+	refusalOperationAborted       = "operation_aborted"         // 409: replay of an operation that aborted
+	refusalOperationUnknown       = "operation_outcome_unknown" // 409: replay of a split outcome awaiting reconciliation
 	// Round-3 correction (Blockers 1–2): the operation ledger is fail-closed.
 	refusalOperationLedgerDegraded = "operation_ledger_degraded" // 503: corrupt/unreadable ledger, evidence preserved
 	refusalOperationLedgerFull     = "operation_ledger_full"     // 503: every slot holds an unresolved intent

@@ -79,7 +79,7 @@ func validIdPOperationID(s string) bool { return idpOperationIDPattern.MatchStri
 type idpOperation struct {
 	OperationID      string          `json:"operationId"`
 	State            string          `json:"state"`
-	Action           string          `json:"action"` // idp.create
+	Action           string          `json:"action"` // idp.create | idp.update (FE-6A.2: a cutover through PUT)
 	Actor            string          `json:"actor"`
 	ProfileID        string          `json:"profileId"`
 	ProfileName      string          `json:"profileName,omitempty"`

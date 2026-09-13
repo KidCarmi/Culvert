@@ -1153,6 +1153,9 @@ func apiIdPCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !idpCutoverConfirmGate(w, r, cutover != nil) {
+		return
+	}
 	// Normalise the candidate the same way the registry will (write-only
 	// echo fields stripped) so the intent digest is the registry's view.
 	normalizeIdPProfileWriteInput(&p)
@@ -1218,7 +1221,7 @@ func idpCompleteOperationAudit(r *http.Request, ops *idpOperationStore, opID str
 		err = ops.emitOperationAudit(*rec)
 	}
 	if err != nil {
-		logger.Printf("UI: IdP create operation %s committed; success audit pending (%s)", sanitizeLog(opID), boundedPersistClass(err))
+		logger.Printf("UI: IdP operation %s committed; success audit pending (%s)", sanitizeLog(opID), boundedPersistClass(err))
 		result["auditState"] = "pending"
 	}
 }
@@ -1254,7 +1257,7 @@ func idpRecordCommittedOperation(w http.ResponseWriter, ops *idpOperationStore, 
 	if err == nil {
 		return true
 	}
-	logger.Printf("UI: IdP create id=%q operation %s committed but its terminal record is not durable (%s)", sanitizeLog(p.ID), sanitizeLog(opID), boundedPersistClass(err))
+	logger.Printf("UI: IdP write id=%q operation %s committed but its terminal record is not durable (%s)", sanitizeLog(p.ID), sanitizeLog(opID), boundedPersistClass(err))
 	writeRefusal(w, http.StatusInternalServerError, refusalOutcomeUnknown,
 		"outcome unknown: the registry write landed but the operation's terminal record could not be persisted; poll GET /api/idp/operations/{operationId} — the result is settled durably from the registry's own provenance",
 		map[string]any{"detail": "operation_record_not_durable", "operationId": opID, "id": p.ID})
@@ -1275,6 +1278,43 @@ func idpCreateOperationID(w http.ResponseWriter, r *http.Request, cutover bool) 
 		return "", false
 	}
 	return opID, true
+}
+
+// idpCutoverConfirmValue is the SERVER-required confirmation value for the
+// legacy-LDAP authority cutover (FE-6A.2): the legacy block's directory URL —
+// the identity of the authenticator being retired. Published on
+// GET /api/idp/legacy-ldap as cutoverConfirmValue; "" without a block.
+func idpCutoverConfirmValue() string {
+	if c := legacyLDAPYAMLConfig(); c != nil {
+		return c.URL
+	}
+	return ""
+}
+
+// idpCutoverConfirmGate (FE-6A.2) binds the cutover ceremony to the block
+// being retired by a server fact: a cutover-bearing write must echo the
+// server's cutoverConfirmValue in ?cutoverConfirm= — absent ⇒ 428
+// cutover_confirm_required, wrong ⇒ 409 confirm_mismatch, both carrying
+// current.confirmValue — decided BEFORE anything is written. No-op when the
+// write carries no cutover. Returns false when the response has been written.
+func idpCutoverConfirmGate(w http.ResponseWriter, r *http.Request, cutover bool) bool {
+	if !cutover {
+		return true
+	}
+	want := idpCutoverConfirmValue()
+	got := strings.TrimSpace(r.URL.Query().Get("cutoverConfirm"))
+	cur := map[string]any{"confirmValue": want}
+	if got == "" {
+		writeRefusal(w, http.StatusPreconditionRequired, refusalCutoverConfirmRequired,
+			"this write retires the legacy YAML ldap authenticator: echo the legacy block's cutoverConfirmValue (GET /api/idp/legacy-ldap) as ?cutoverConfirm= to confirm which authenticator is being retired", cur)
+		return false
+	}
+	if got != want {
+		writeRefusal(w, http.StatusConflict, refusalConfirmMismatch,
+			"cutoverConfirm does not name the legacy block being retired; nothing was changed", cur)
+		return false
+	}
+	return true
 }
 
 // idpCreateDocumentFence applies the document-revision pre-check (428 absent,
@@ -1469,6 +1509,9 @@ func apiIdPUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		writeRefusal(w, http.StatusBadRequest, refusalInvalidInput, "invalid JSON", nil)
 		return
 	}
+	// The fence token is read BEFORE the candidate is normalised (the body's
+	// revision is a fallback for the query token and normalisation zeroes it).
+	token := revisionFence(r, p.Revision)
 	before := idpRegistry.Get(id)
 	if before == nil {
 		writeRefusal(w, http.StatusNotFound, refusalVanished, "profile not found", nil)
@@ -1477,9 +1520,34 @@ func apiIdPUpdate(w http.ResponseWriter, r *http.Request, id string) {
 	if !requireDurableIdP(w) {
 		return
 	}
+	p.ID = id
+	preserveWriteOnlyIdPFields(before, &p, writeOnlyIdPFieldPresence{
+		oidcClientSecret: oidcClientSecretPresent(body),
+		samlMetadataXML:  samlMetadataXMLPresent(body),
+		ldapBindPassword: ldapBindPasswordPresent(body),
+	})
+	// FE-6A.2: a cutover through PUT carries the SAME operation identity and
+	// confirm fence as a cutover through POST — a lost response is recovered
+	// through the ledger (replay), never by a second cutover, and the T2
+	// ceremony is bound to the block being retired by the server's own value.
+	cutover := idpLegacyCutoverHook(r, &p)
+	opID, ok := idpCreateOperationID(w, r, cutover != nil)
+	if !ok {
+		return
+	}
+	if !idpCutoverConfirmGate(w, r, cutover != nil) {
+		return
+	}
+	normalizeIdPProfileWriteInput(&p)
+	specDigest := idpSpecDigest(&p)
+	ops := idpRegistry.operations()
+	// A re-dispatched operationId is answered from its durable record with
+	// the ORIGINAL fence semantics: the replay never re-decides the revision.
+	if idpReplayKnownOperation(w, ops, opID, specDigest) {
+		return
+	}
 	// Fast pre-check against the value read now; the authoritative fence is
 	// decided again INSIDE the registry transaction (Update).
-	token := revisionFence(r, p.Revision)
 	if !checkRevisionFence(w, token, idpEntryRevision(before)) {
 		return
 	}
@@ -1487,12 +1555,6 @@ func apiIdPUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		writeIdPRefusal(w, errIdPRegistryDegraded)
 		return
 	}
-	p.ID = id
-	preserveWriteOnlyIdPFields(before, &p, writeOnlyIdPFieldPresence{
-		oidcClientSecret: oidcClientSecretPresent(body),
-		samlMetadataXML:  samlMetadataXMLPresent(body),
-		ldapBindPassword: ldapBindPasswordPresent(body),
-	})
 	// Optional safe-activation preflight (?preflight=connection): a broken
 	// candidate must never replace a working enabled provider — on failure
 	// nothing is mutated and the live provider stays untouched (LDAP only).
@@ -1500,15 +1562,33 @@ func apiIdPUpdate(w http.ResponseWriter, r *http.Request, id string) {
 		writeLDAPPreflightFailure(w, rep)
 		return
 	}
-	if err := idpRegistry.Update(&p, token, idpLegacyCutoverHook(r, &p)); err != nil {
+	if !idpBeginCreateIntent(w, ops, idpOperation{
+		OperationID: opID, Action: "idp.update", Actor: auditActor(r), ProfileName: p.Name,
+		ProfileID: id, SpecDigest: specDigest, RegistryRevision: idpRegistry.DocumentRevision(), Cutover: cutover != nil,
+	}) {
+		return
+	}
+	if err := idpRegistry.Update(&p, token, opID, cutover); err != nil {
+		idpFinishFailedOperation(ops, opID, err)
 		writeIdPRefusal(w, err)
 		return
 	}
 	enforceLegacyLDAPShadowing()
 	fleet := idpPublishFleet("IdP update")
-	auditEventDiff(r, "idp.update", id, p.Name+fleet.auditSuffix(), auditIdPProfile(before), auditIdPProfile(&p))
+	result := idpWithFleet(publicIdPProfile(&p), fleet)
+	detail := p.Name + fleet.auditSuffix()
+	if opID != "" {
+		result["operationId"] = opID
+		detail += " operationId=" + opID
+		if !idpRecordCommittedOperation(w, ops, opID, &p, result, detail) {
+			return
+		}
+		idpCompleteOperationAudit(r, ops, opID, result)
+	} else {
+		auditEventDiff(r, "idp.update", id, detail, auditIdPProfile(before), auditIdPProfile(&p))
+	}
 	logger.Printf("UI: IdP profile updated id=%q name=%q fleet=%s", sanitizeLog(id), sanitizeLog(p.Name), fleet.Publication)
-	jsonOK(w, idpWithFleet(publicIdPProfile(&p), fleet))
+	jsonOK(w, result)
 }
 
 // idpDeletePauseHook is a TEST SEAM: when non-nil it runs inside the

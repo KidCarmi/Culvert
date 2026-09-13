@@ -92,6 +92,9 @@ func apiIdPLegacyLDAP(w http.ResponseWriter, r *http.Request) {
 		"startTls":                 c.StartTLS,
 		"tlsSkipVerify":            c.TLSSkipVerify,
 		"cacheTtlSeconds":          int(c.CacheTTL / time.Second),
+		// FE-6A.2: the SERVER-required confirmation value for the authority
+		// cutover — a cutover-bearing write must echo it as ?cutoverConfirm=.
+		"cutoverConfirmValue": c.URL,
 	}
 	// FE-6A.0 R7: the operation-identified cutover record (actor,
 	// operationId, the enabling profile + registry revision it was bound to)

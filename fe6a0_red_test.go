@@ -672,7 +672,7 @@ func TestFE6A0_R7_CutoverSentinelPersistFailureRefusesTheEnable(t *testing.T) {
 	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
 	body["enabled"] = true
 	w := httptest.NewRecorder()
-	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID()), body))
+	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID(), "cutoverConfirm=ldap://legacy.corp.example:389"), body))
 	fe6aAssertRefusal(t, w, http.StatusInternalServerError, "persist_failed")
 
 	if legacyLDAPRetired() {
@@ -698,7 +698,7 @@ func TestFE6A0_R7_CutoverIsOperationIdentifiedAndAtMostOnce(t *testing.T) {
 	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
 	body["enabled"] = true
 	w := httptest.NewRecorder()
-	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID()), body))
+	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID(), "cutoverConfirm=ldap://legacy.corp.example:389"), body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("enable = %d: %s", w.Code, w.Body.String())
 	}

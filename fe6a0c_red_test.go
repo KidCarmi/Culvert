@@ -739,7 +739,7 @@ func TestFE6A0C_CR9_CutoverWriteRequiresAndReplaysTheOperationId(t *testing.T) {
 		t.Fatal("refused cutover write mutated state")
 	}
 	const opID = "3f0e0d3a-5b7f-4f2b-9a8f-1c2d3e4f5a6b"
-	code, first := fe6acCreateFenced(t, body, "operationId="+opID)
+	code, first := fe6acCreateFenced(t, body, "operationId="+opID, "cutoverConfirm=ldap://legacy.corp.example:389")
 	if code != http.StatusOK {
 		t.Fatalf("cutover create = %d %v", code, first)
 	}
@@ -748,7 +748,7 @@ func TestFE6A0C_CR9_CutoverWriteRequiresAndReplaysTheOperationId(t *testing.T) {
 	}
 	before := fe6acAuditSnapshot()
 	// The lost-response retry: same operationId, same candidate → REPLAY.
-	code, again := fe6acCreateFenced(t, body, "operationId="+opID)
+	code, again := fe6acCreateFenced(t, body, "operationId="+opID, "cutoverConfirm=ldap://legacy.corp.example:389")
 	if code != http.StatusOK {
 		t.Fatalf("replay = %d %v", code, again)
 	}
@@ -778,7 +778,7 @@ func TestFE6A0C_CR9_CutoverWriteRequiresAndReplaysTheOperationId(t *testing.T) {
 	fe6aAssertRefusal(t, w, http.StatusNotFound, "not_found")
 	// A different candidate under the same operationId is a mismatch, never a second write.
 	body["name"] = "Different"
-	code, mm := fe6acCreateFenced(t, body, "operationId="+opID)
+	code, mm := fe6acCreateFenced(t, body, "operationId="+opID, "cutoverConfirm=ldap://legacy.corp.example:389")
 	if code != http.StatusConflict || mm["code"] != "operation_mismatch" {
 		t.Fatalf("mismatched replay = %d %v, want 409 operation_mismatch", code, mm)
 	}
@@ -789,7 +789,7 @@ func TestFE6A0C_CR9_AbortedCutoverIsLookedUpAsAborted(t *testing.T) {
 	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
 	body["enabled"] = true
 	const opID = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
-	code, m := fe6acCreateFenced(t, body, "operationId="+opID)
+	code, m := fe6acCreateFenced(t, body, "operationId="+opID, "cutoverConfirm=ldap://legacy.corp.example:389")
 	if code != http.StatusInternalServerError || m["code"] != "persist_failed" {
 		t.Fatalf("cutover with a failing sentinel = %d %v", code, m)
 	}
@@ -806,7 +806,7 @@ func TestFE6A0C_CR9_AbortedCutoverIsLookedUpAsAborted(t *testing.T) {
 		t.Fatalf("lookup state = %v, want aborted", st)
 	}
 	// A retry of the same operation replays the aborted verdict — never a second attempt.
-	code, m = fe6acCreateFenced(t, body, "operationId="+opID)
+	code, m = fe6acCreateFenced(t, body, "operationId="+opID, "cutoverConfirm=ldap://legacy.corp.example:389")
 	if code != http.StatusConflict || m["code"] != "operation_aborted" {
 		t.Fatalf("replay of an aborted operation = %d %v, want 409 operation_aborted", code, m)
 	}

@@ -14151,13 +14151,19 @@ async function testLDAPConnection() {
 
 // ─── Legacy YAML LDAP import (explicit migration) ────────────────────────────
 
+// FE-6A.2: the legacy YAML LDAP posture as last read — saveIdP consults it
+// to decide whether an enabling LDAP write carries the authority cutover
+// (present + not retired), which the server fences on a client operationId
+// AND the block's cutoverConfirmValue (typed by the operator here).
+let _legacyLDAPInfo = null;
 async function loadLegacyLDAPBanner() {
   const banner = document.getElementById('idp-legacy-ldap-banner');
   if (!banner) return;
   try {
     const res = await apiFetch('/api/idp/legacy-ldap');
-    if (!res.ok) { banner.style.display = 'none'; return; }
+    if (!res.ok) { banner.style.display = 'none'; _legacyLDAPInfo = null; return; }
     const info = await res.json();
+    _legacyLDAPInfo = info;
     if (!info.present) { banner.style.display = 'none'; return; }
     if (info.shadowed) {
       banner.innerHTML = `<strong>Legacy LDAP configuration is inactive.</strong> config.yaml still contains an
@@ -14300,6 +14306,27 @@ async function saveIdP() {
       }
     }
   }
+  // FE-6A.2: an ENABLING LDAP write on a node whose legacy YAML ldap block is
+  // present and not retired retires that authenticator (durable, no API to
+  // undo). The server requires a client operationId (lost-response recovery
+  // through the operation ledger) AND the block's cutoverConfirmValue —
+  // typed by the operator in the tier-3 dialog below (the 2F-A rule: legacy
+  // and v2 consoles switch to the server fence in one commit).
+  let cutoverConfirm = null;
+  const li = _legacyLDAPInfo;
+  if (type === 'ldap' && body.enabled && li && li.present && !li.retired) {
+    const word = String(li.cutoverConfirmValue || li.url || '');
+    const ok = await confirmDanger({
+      title: 'Retire the legacy YAML LDAP authenticator',
+      msg: 'Enabling this provider retires the config.yaml ldap: block (' + escHtml(word) + ') as the proxy authenticator. This is durable and survives restarts, disable and delete of the provider.',
+      impact: 'Users authenticating through the legacy block switch to this registry provider.',
+      rollback: 'None through the API — offline break-glass only.',
+      confirmWord: word,
+      okLabel: 'Retire and enable',
+    });
+    if (!ok) return;
+    cutoverConfirm = word;
+  }
   const method = id ? 'PUT' : 'POST';
   let url      = id ? `/api/idp/${id}` : '/api/idp';
   const q = [];
@@ -14312,7 +14339,11 @@ async function saveIdP() {
   if (!id) {
     q.push('documentRevision=' + encodeURIComponent(_idpDocumentRevision));
     q.push('operationId=' + encodeURIComponent(newOperationId()));
+  } else if (cutoverConfirm !== null) {
+    // FE-6A.2: a cutover through PUT is operation-identified too.
+    q.push('operationId=' + encodeURIComponent(newOperationId()));
   }
+  if (cutoverConfirm !== null) q.push('cutoverConfirm=' + encodeURIComponent(cutoverConfirm));
   // Safe activation (ADR-0027): enabling an LDAP provider runs a live
   // connection preflight server-side BEFORE anything persists — a broken
   // candidate can never replace a working enabled provider.
@@ -14332,7 +14363,17 @@ async function saveIdP() {
       return;
     }
     if (res.status === 409 || res.status === 428) {
-      toast('Error: ' + apiErrorText(await res.text()) + ' — the list has been reloaded', 'error');
+      const fenceText = await res.text();
+      let fenceBody = null;
+      try { fenceBody = JSON.parse(fenceText); } catch (e) { fenceBody = null; }
+      if (fenceBody && fenceBody.code === 'cutover_confirm_required') {
+        // FE-6A.2: the server saw a cutover this console did not — the legacy
+        // posture changed under us; reload it and let the operator retry.
+        toast('This write retires the legacy YAML LDAP authenticator and needs its confirmation — the legacy posture has been reloaded, please retry', 'error');
+        loadLegacyLDAPBanner();
+        return;
+      }
+      toast('Error: ' + apiErrorText(fenceText) + ' — the list has been reloaded', 'error');
       closeIdPModal();
       loadIdPList();
       return;

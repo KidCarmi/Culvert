@@ -858,12 +858,20 @@ func (r *IdPRegistry) Create(p *IdPProfile, expectedDocRev, operationID string, 
 // (*idpStaleError with the authoritative value). The fence is decided INSIDE
 // the transaction, never against a value the caller read earlier. The
 // candidate carries the next revision.
-func (r *IdPRegistry) Update(p *IdPProfile, expectedRev int64, beforePublish func(next []*IdPProfile) error) error {
+//
+// FE-6A.2: an operation-identified update (operationID != "") stamps its
+// identity as the profile's provenance in the SAME atomic write — the
+// ledger settles the intent by that provenance exactly as it does for a
+// create — and its own intent is excluded from settle-before-write.
+func (r *IdPRegistry) Update(p *IdPProfile, expectedRev int64, operationID string, beforePublish func(next []*IdPProfile) error) error {
 	compiled, err := prepareProfile(p)
 	if err != nil {
 		return err
 	}
-	return r.mutate(false, "", func(cur []*IdPProfile, live map[string]IdentityProvider) (idpCandidate, error) {
+	if operationID != "" {
+		p.OperationID = operationID
+	}
+	return r.mutate(false, operationID, func(cur []*IdPProfile, live map[string]IdentityProvider) (idpCandidate, error) {
 		existing := findIdPProfile(cur, p.ID)
 		if existing == nil {
 			return idpCandidate{}, errIdPVanished

@@ -426,7 +426,7 @@ func TestLegacyLDAP_NoLocalAdmin_UnconditionalCutoverKeepsConsoleGated(t *testin
 	w := httptest.NewRecorder()
 	body := ldapProfileBodyForPut("Registry AD", map[string]any{"bindPassword": "s"})
 	body["enabled"] = true
-	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID()), body))
+	apiIdPList(w, jsonReq(http.MethodPost, fencedIdPCreatePath("operationId="+testOperationID(), "cutoverConfirm=ldap://legacy.corp.example:389"), body))
 	assertStatus(t, w, http.StatusOK)
 
 	if got := cfg.snapshotAuthBackend().provider; got != nil {
