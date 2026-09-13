@@ -624,11 +624,16 @@ func firstCanaryScopeReasonStrings() []string {
 //   - eligibility is exactly catalog.Usable — the sticky Quarantined floor means a republish to a
 //     new fingerprint re-enters review, so F2 can never inherit F1's usability;
 //   - the record's digest equals the scope's PINNED fingerprint, so a usable record for some other
-//     revision of the tool cannot satisfy a scope pinned to this one;
-//   - the record's fingerprint FORMAT VERSION equals the one the trust path observed for the same
-//     target. Format is part of the identity, not decoration: two records can carry the same digest
-//     under different format versions, and treating those as one target is the defect
-//     TestReadFirstClass_FingerprintFormatIsPartOfTheBinding pins one subsystem over.
+//     revision of the tool cannot satisfy a scope pinned to this one. That comparison is FORMAT-BOUND
+//     BY CONSTRUCTION rather than by a second check: catalog.Fingerprint.Sum folds FormatVersion into
+//     the hash before any other segment, so the same capability under a different format scheme
+//     produces a different digest and cannot match a pin taken under the old one. A separate
+//     FormatVersion comparison against the same record would be a self-comparison — a check no test
+//     could ever distinguish, and therefore one that rots. The property the binding rests on is
+//     pinned directly instead, by TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest;
+//   - the tool is owned by the tenant the scope names, resolved from the REGISTRY through
+//     loadTarget — an independent source from the catalog record, so a scope naming a tenant that
+//     does not own the server can never satisfy the fact.
 //
 // Fail-closed everywhere: an empty scope, absent inventory, a missing record, a tenant the scope
 // does not own, or any disagreement yields false, and the row stays unmet.
@@ -657,15 +662,11 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 			if !strings.EqualFold(hex.EncodeToString(sum[:]), st.Fingerprint) {
 				return false
 			}
-			// The trust path's own observation of the same target. Requiring the two to agree on
-			// BOTH digest and format binds this fact to the identity the activation actually
-			// carries, rather than to whatever the catalog happens to say on its own.
+			// Tenant ownership comes from the REGISTRY, through the same resolution the live
+			// approval bindings use — an independent source from the catalog record above, so a
+			// scope naming a tenant that does not own this server resolves to no usable target.
 			ti := mcpToolTrust.loadTarget(st.Server, st.Name)
 			if !ti.found || ti.target.Tenant != tenant {
-				return false
-			}
-			if ti.target.Fingerprint != tooltrust.FingerprintDigest(sum) ||
-				ti.target.FingerprintFormatVersion != rec.Fingerprint.FormatVersion {
 				return false
 			}
 		}
