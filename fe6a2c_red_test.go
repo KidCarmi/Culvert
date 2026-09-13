@@ -39,6 +39,7 @@ package main
 //       the responses carry no secret.
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -60,7 +61,7 @@ const (
 )
 
 // fe6a2cImport POSTs the fenced, operation-identified legacy import.
-func fe6a2cImport(t *testing.T, extra ...string) (int, map[string]any) {
+func fe6a2cImport(t *testing.T, extra ...string) (status int, body map[string]any) {
 	t.Helper()
 	path := "/api/idp/legacy-ldap/import"
 	if len(extra) > 0 {
@@ -72,7 +73,7 @@ func fe6a2cImport(t *testing.T, extra ...string) (int, map[string]any) {
 }
 
 // fe6a2cLookup GETs the operation ledger record.
-func fe6a2cLookup(t *testing.T, opID string) (int, map[string]any) {
+func fe6a2cLookup(t *testing.T, opID string) (status int, body map[string]any) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	apiIdPOperations(w, jsonReq(http.MethodGet, "/api/idp/operations/"+opID, nil))
@@ -100,7 +101,7 @@ func fe6a2cAuditCount(since int64, action, objectID string) int {
 // fe6a2cClosedPort returns a loopback address nothing listens on.
 func fe6a2cClosedPort(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,11 +155,6 @@ func fe6a2cProfiles(t *testing.T) []map[string]any {
 		}
 	}
 	return out
-}
-
-func fe6a2cRawJSON(t *testing.T, w *httptest.ResponseRecorder) string {
-	t.Helper()
-	return w.Body.String()
 }
 
 // ── R1 — import is fenced on the document revision and operation-identified ──

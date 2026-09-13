@@ -13,6 +13,7 @@
 package ldapstub
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -65,7 +66,7 @@ type Server struct {
 
 // Listen starts a stub on addr ("127.0.0.1:0" for an ephemeral port).
 func Listen(addr string, opts Options) (*Server, error) {
-	ln, err := net.Listen("tcp", addr)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -130,38 +131,9 @@ func (s *Server) handle(c net.Conn) {
 		req := pkt.Children[1]
 		switch req.Tag {
 		case appBindRequest:
-			s.binds.Add(1)
-			code := resultSuccess
-			if len(req.Children) >= 3 {
-				dn, _ := req.Children[1].Value.(string)
-				pw := ""
-				if req.Children[2].ClassType == ber.ClassContext && req.Children[2].Tag == 0 {
-					pw = string(req.Children[2].Data.Bytes())
-				}
-				if dn != "" {
-					switch {
-					case s.opts.RejectBind:
-						code = resultInvalidCredentials
-					case s.opts.BindDN != "" && (dn != s.opts.BindDN || pw != s.opts.BindPassword):
-						code = resultInvalidCredentials
-					}
-				}
-			}
-			write(c, envelope(msgID, result(appBindResponse, code, "")))
+			s.bind(c, msgID, req)
 		case appSearchRequest:
-			base := ""
-			if len(req.Children) > 0 {
-				base, _ = req.Children[0].Value.(string)
-			}
-			if !s.baseKnown(base) {
-				write(c, envelope(msgID, result(appSearchResultDone, resultNoSuchObject, "")))
-				continue
-			}
-			entry := ber.Encode(ber.ClassApplication, ber.TypeConstructed, appSearchResultEntry, nil, "Search Result Entry")
-			entry.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, base, "objectName"))
-			entry.AppendChild(ber.NewSequence("attributes"))
-			write(c, envelope(msgID, entry))
-			write(c, envelope(msgID, result(appSearchResultDone, resultSuccess, "")))
+			s.search(c, msgID, req)
 		case appUnbindRequest:
 			return
 		case appExtendedRequest:
@@ -170,6 +142,49 @@ func (s *Server) handle(c net.Conn) {
 			write(c, envelope(msgID, result(appSearchResultDone, resultProtocolError, "stub: unsupported operation")))
 		}
 	}
+}
+
+// bind answers a BindRequest: success, or invalidCredentials per Options.
+func (s *Server) bind(c net.Conn, msgID int64, req *ber.Packet) {
+	s.binds.Add(1)
+	code := resultSuccess
+	if len(req.Children) >= 3 {
+		dn, _ := req.Children[1].Value.(string)
+		pw := ""
+		if req.Children[2].ClassType == ber.ClassContext && req.Children[2].Tag == 0 {
+			pw = req.Children[2].Data.String()
+		}
+		if dn != "" && s.rejects(dn, pw) {
+			code = resultInvalidCredentials
+		}
+	}
+	write(c, envelope(msgID, result(appBindResponse, code, "")))
+}
+
+// rejects decides whether an authenticated simple bind is refused.
+func (s *Server) rejects(dn, pw string) bool {
+	if s.opts.RejectBind {
+		return true
+	}
+	return s.opts.BindDN != "" && (dn != s.opts.BindDN || pw != s.opts.BindPassword)
+}
+
+// search answers a SearchRequest with one entry for a known base, or
+// noSuchObject.
+func (s *Server) search(c net.Conn, msgID int64, req *ber.Packet) {
+	base := ""
+	if len(req.Children) > 0 {
+		base, _ = req.Children[0].Value.(string)
+	}
+	if !s.baseKnown(base) {
+		write(c, envelope(msgID, result(appSearchResultDone, resultNoSuchObject, "")))
+		return
+	}
+	entry := ber.Encode(ber.ClassApplication, ber.TypeConstructed, appSearchResultEntry, nil, "Search Result Entry")
+	entry.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, base, "objectName"))
+	entry.AppendChild(ber.NewSequence("attributes"))
+	write(c, envelope(msgID, entry))
+	write(c, envelope(msgID, result(appSearchResultDone, resultSuccess, "")))
 }
 
 func (s *Server) baseKnown(base string) bool {

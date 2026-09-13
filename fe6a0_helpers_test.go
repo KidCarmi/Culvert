@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
-	"github.com/KidCarmi/Culvert/internal/ldapstub"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ldapstub"
 )
 
 // fencedIdPPath builds the fenced /api/idp/{id} path for a PUT/DELETE in
