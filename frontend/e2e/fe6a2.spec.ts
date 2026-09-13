@@ -214,7 +214,7 @@ test.describe("FE-6A.2 W — provider writes on the write appliance", () => {
     await importedRow.getByRole("button", { name: "Edit" }).click();
     await page
       .getByRole("dialog")
-      .getByLabel("Name")
+      .getByLabel(/^Name\s*\*?$/)
       .fill("Renamed legacy LDAP");
     await page
       .getByRole("dialog")
@@ -294,9 +294,9 @@ test.describe("FE-6A.2 A — administrator writes", () => {
     // A1 create (T2 review before the POST)
     await main.getByRole("button", { name: "Add account" }).click();
     let dlg = page.getByRole("dialog");
-    await dlg.getByLabel("Username").fill(ACCOUNT);
+    await dlg.getByLabel(/^Username\b/).fill(ACCOUNT);
     await dlg.getByLabel("Role").selectOption("viewer");
-    await dlg.getByLabel("Password", { exact: true }).fill(PASS1);
+    await dlg.getByLabel(/^Password\b/).fill(PASS1);
     await dlg.getByRole("button", { name: "Review and create" }).click();
     await expect(page.getByRole("dialog").getByText(ACCOUNT)).toBeVisible();
     await page
@@ -310,9 +310,9 @@ test.describe("FE-6A.2 A — administrator writes", () => {
     // also the self-service subject
     await main.getByRole("button", { name: "Add account" }).click();
     dlg = page.getByRole("dialog");
-    await dlg.getByLabel("Username").fill(SELF);
+    await dlg.getByLabel(/^Username\b/).fill(SELF);
     await dlg.getByLabel("Role").selectOption("viewer");
-    await dlg.getByLabel("Password", { exact: true }).fill(PASS1);
+    await dlg.getByLabel(/^Password\b/).fill(PASS1);
     await dlg.getByRole("button", { name: "Review and create" }).click();
     await page
       .getByRole("dialog")
@@ -372,8 +372,8 @@ test.describe("FE-6A.2 A — administrator writes", () => {
     await expect(p2.getByRole("button", { name: "Sign out" })).toBeVisible();
     await p2.getByRole("button", { name: "Change password" }).click();
     const pw = p2.getByRole("dialog");
-    await pw.getByLabel("Current password").fill(PASS1);
-    await pw.getByLabel("New password").fill(PASS2);
+    await pw.getByLabel(/^Current password\b/).fill(PASS1);
+    await pw.getByLabel(/^New password\b/).fill(PASS2);
     await pw.getByRole("button", { name: "Change password" }).click();
     // selfAffected ⇒ complete teardown to the login boundary
     await expect(p2.getByRole("button", { name: "Sign in" })).toBeVisible();
