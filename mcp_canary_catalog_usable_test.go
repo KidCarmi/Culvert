@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -296,6 +297,53 @@ func TestCatalogUsable_TenantThatDoesNotOwnTheServerIsNotUsable(t *testing.T) {
 	}
 }
 
+// ── 7e. an EMPTY scope is not vacuously usable ───────────────────────────────
+//
+// "every tool the scope admits is Usable" is vacuously TRUE for a scope that admits no
+// tool. That is the shape in which a fact about an experiment's target is satisfied by
+// an experiment with no target, so the resolver refuses an empty scope explicitly
+// rather than letting the loop fall through.
+
+func TestCatalogUsable_EmptyScopeIsNotVacuouslyUsable(t *testing.T) {
+	r := newUsableRig(t)
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("CONTROL: the populated scope must satisfy the fact, or this gate proves nothing")
+	}
+	noTools := r.scope()
+	noTools.Tools = nil
+	if canaryScopedToolsCatalogUsable(noTools) {
+		t.Fatal("SECURITY: a scope that admits no tool must not satisfy a fact about its tools")
+	}
+	noTenants := r.scope()
+	noTenants.Tenants = nil
+	if canaryScopedToolsCatalogUsable(noTenants) {
+		t.Fatal("SECURITY: a scope that names no tenant must not satisfy the fact")
+	}
+}
+
+// ── 7f. an unpublished inventory fails CLOSED ────────────────────────────────
+//
+// The condition under which nothing whatsoever is known about the tool is exactly the
+// condition under which the fact must not be claimed.
+
+func TestCatalogUsable_AbsentInventoryFailsClosed(t *testing.T) {
+	r := newUsableRig(t)
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("CONTROL: a published inventory must satisfy the fact, or this gate proves nothing")
+	}
+	scope := r.scope()
+	// The published inventory is a process global with no owner-scoped teardown, so this
+	// test restores it rather than leaving a withdrawn one for whatever -shuffle runs next.
+	reg, cat := mcpInventory.sharedInventory()
+	t.Cleanup(func() { publishMCPInventory(mcpInvLoaded, "", reg, cat) })
+	publishMCPInventory(mcpInvNotConfigured, "test: inventory withdrawn", nil, nil)
+	if canaryScopedToolsCatalogUsable(scope) {
+		t.Fatal("SECURITY: with no published inventory the fact must fail closed")
+	}
+}
+
 // ── 8. a usable, live-approved F2 does NOT revive an F1-reviewed activation ──
 //
 // Blocker #7's immutable reviewed snapshot is not weakened by anything here: a new
@@ -491,6 +539,111 @@ func TestCatalogUsable_ProductionPreflightCarriesTheRow(t *testing.T) {
 	if hasReason(after, canary.ReasonToolNotCatalogUsable) {
 		t.Fatalf("CONTROL: after the governed promotion this row must be MET, got %v", after.Unmet)
 	}
+}
+
+// ── every activation-input field reaches every preflight call site ───────────
+//
+// The production path resolves activation facts ONCE, into canaryActivationInputs, and
+// then spreads them by hand into a CanaryActivationInput at each preflight call site —
+// the transition commit and the restart reconcile. A hand-spread struct is exactly the
+// shape in which one field is silently dropped at one site, and a behavioural test
+// cannot reach either site in this build: the live tier is never armed, so the commit
+// refuses at an earlier gate and the mutation stays invisible.
+//
+// So the gate is STRUCTURAL. Every field of canaryActivationInputs must be forwarded at
+// every literal built from a probe result, by AST, and the wall names the sites it found
+// so a preflight call site added without a forwarding pass fails here rather than
+// shipping an activation that decides on a fact it never received.
+//
+// It is deliberately wider than blocker #13: dropping ANY activation fact at a commit
+// site is the same defect, and a wall scoped to one field would be re-derived — and
+// re-missed — the next time a fact is added.
+
+func TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall(t *testing.T) {
+	fset := token.NewFileSet()
+
+	// The fields the probe resolves, taken from the type rather than a hand-written list,
+	// so a new activation fact is covered the moment it exists.
+	var want []string
+	for _, f := range parseStructFields(t, fset, "mcp_canary_preflight.go", "canaryActivationInputs") {
+		want = append(want, f)
+	}
+	if len(want) < 2 {
+		t.Fatalf("wall is vacuous: canaryActivationInputs must have fields, found %v", want)
+	}
+	if !slices.Contains(want, "ToolCatalogUsable") {
+		t.Fatal("wall is looking at the wrong type: ToolCatalogUsable must be an activation input")
+	}
+
+	file, err := parser.ParseFile(fset, "mcp_rollout.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp_rollout.go: %v", err)
+	}
+	sites := 0
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		if id, ok := lit.Type.(*ast.Ident); !ok || id.Name != "CanaryActivationInput" {
+			return true
+		}
+		sites++
+		set := map[string]bool{}
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if k, ok := kv.Key.(*ast.Ident); ok {
+				set[k.Name] = true
+			}
+		}
+		for _, f := range want {
+			if !set[f] {
+				t.Errorf("mcp_rollout.go:%d builds a CanaryActivationInput that never sets %s — "+
+					"the probe resolves that activation fact and this call site throws it away, so "+
+					"the preflight decides without it", fset.Position(lit.Pos()).Line, f)
+			}
+		}
+		return true
+	})
+	// Anti-vacuity: the wall must have found the real call sites. Today there are two —
+	// the transition commit and the restart reconcile.
+	if sites < 2 {
+		t.Fatalf("wall is vacuous: expected at least 2 CanaryActivationInput literals in "+
+			"mcp_rollout.go, found %d (the selector has drifted)", sites)
+	}
+}
+
+// parseStructFields returns the exported field names of the named struct in the given
+// root-package file.
+func parseStructFields(t *testing.T, fset *token.FileSet, filename, typeName string) []string {
+	t.Helper()
+	file, err := parser.ParseFile(fset, filename, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", filename, err)
+	}
+	var out []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != typeName {
+			return true
+		}
+		st, ok := ts.Type.(*ast.StructType)
+		if !ok {
+			return true
+		}
+		for _, f := range st.Fields.List {
+			for _, nm := range f.Names {
+				if nm.IsExported() {
+					out = append(out, nm.Name)
+				}
+			}
+		}
+		return false
+	})
+	return out
 }
 
 // ── TOCTOU: usability withdrawn after a Ready preflight ──────────────────────

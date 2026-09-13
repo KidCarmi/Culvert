@@ -14,7 +14,7 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **FIFTEEN independent blockers** (this review's set — together they cover
+cannot be assembled today on **FIFTEEN independent blockers** (five since CLOSED — 4, 5, 6, 7, 13; this review's set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6). **The fifteen
 are what THIS review found against §25; they are not the complete set of what must be closed before a
@@ -42,9 +42,10 @@ peer, so exact-current fingerprint + rug-pull invalidation bind only the seeded 
 no operator-reachable governed Canary ACTIVATION entry point — `apiMCPRolloutTransition` returns
 `distribution_not_configured` and no non-test code constructs/`Publish`es the distribution publication
 coordinator, so even with arming + activation inputs closed nothing transitions the node into Canary
-mode (§13/§17); and (13) the seeded controlled tool is `catalog.Quarantined` and nothing promotes it —
-the policy engine hard-quarantines it BEFORE any user rule and `ApproveLive` deliberately never calls
-`catalog.Promote`, so every exact-tool request is denied even with 1–12 closed (§6/§7); and (14) the
+mode (§13/§17); and (13) **CLOSED** — the seeded controlled tool was `catalog.Quarantined` with
+nothing in the activation gate saying so; catalog usability is now a machine-checked activation
+fact bound to the exact scoped target and pinned fingerprint, satisfied only by the governed
+`shadow_evaluation` promotion lifecycle (§25b); and (14) the
 exact request must resolve to an ALLOW-class decision with satisfiable obligations — a
 no-`CredentialProfile` rule may still be DENY, an unmatched request default-denies, and `PolicyHealthy`
 only proves a snapshot exists (§4/§13); and (15) the one-NODE bound is not enforced by anything —
@@ -1106,7 +1107,7 @@ BLOCKED-vs-FAILED note in §26).
 | Witness distinguishes side-effect-bearing tool invocations from auxiliary lifecycle/discovery traffic | **NO — no such controlled recording server exists; without the partition a correct run's `initialize`/`tools/list` POSTs misclassify as a breach (§9/§14)** |
 | Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **YES — `sample_floor = 2`, error rate trips at ≥ 50% (`2 × failures ≥ samples`) over the current activation generation, hard per-attempt latency ≥ 15s trips with NO floor, mean ≥ 10s trips at the floor; `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` fails if the floor drifts beyond the corpus (§16, blocker 7 CLOSED)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
-| The exact tool is `catalog.Usable` (not Quarantined) at request time | **NO — `seedTools` lands it Quarantined; the engine hard-quarantines before any rule; `ApproveLive` never promotes (§6/§7, blocker 13)** |
+| The exact tool is `catalog.Usable` (not Quarantined) at request time | ~~**NO**~~ **YES (blocker 13 CLOSED, §25b)** — usability is now a MACHINE-CHECKED ACTIVATION FACT (`canary.ReasonToolNotCatalogUsable`), resolved from the authoritative catalog for the exact scoped target at the exact pinned fingerprint. It is satisfied only by the governed `shadow_evaluation` promotion lifecycle; `ApproveLive` still never promotes, and a structural wall proves no data-plane caller can (§6/§7) |
 | The exact request resolves to an ALLOW-class rule with satisfiable obligations | **NO — a no-`CredentialProfile` rule may be DENY; an unmatched request default-denies; `PolicyHealthy` only proves a snapshot exists (§4/§13, blocker 14)** |
 | Operator-reachable governed path to TRANSITION the node into Canary mode | **NO — `apiMCPRolloutTransition` returns `distribution_not_configured`; no non-test `publication.New`/`Publish` caller (§13/§17, blocker 12)** |
 | Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
@@ -1119,8 +1120,9 @@ BLOCKED-vs-FAILED note in §26).
 | Unresolved P0/P1 finding | **YES — the durable-outcome-evidence prerequisite remains, narrowed to the authoritative production witness adapter (blocker 8). The auto-abort wiring prerequisite is CLOSED (blocker 7, §25a) (§21/§24/§25a)** |
 
 Multiple mandatory criteria are NO and P1 product-defect work remains open. A GO is therefore
-forbidden. (§25a records the only post-adoption status changes: blockers 5, 6 and 7 CLOSED,
-blocker 8 narrowed but still OPEN. The other eleven are untouched and the §26 verdict is unchanged.)
+forbidden. (§25a and §25b record the only post-adoption status changes: blockers 4, 5, 6, 7 and 13
+CLOSED, blocker 8 narrowed but still OPEN. The other nine are untouched and the §26 verdict is
+unchanged.)
 
 ---
 
@@ -2206,12 +2208,12 @@ would let them inherit a neighbour's closure) and NOT filed as a sixteenth block
 fifteen are preserved exactly as adopted). A First Canary requires the fifteen closed AND every such
 §24 finding closed.
 
-**Post-adoption status (see §25a).** The baseline remains **fifteen**; the list below is preserved
-as adopted, and nothing is renumbered or deleted. Five entries have changed status since:
+**Post-adoption status (see §25a, §25b).** The baseline remains **fifteen**; the list below is
+preserved as adopted, and nothing is renumbered or deleted. Six entries have changed status since:
 **blocker 4 is CLOSED**, **blocker 5 is CLOSED**, **blocker 6 is CLOSED**, **blocker 7 is CLOSED**,
-and **blocker 8 is narrowed but still OPEN**. Ten are untouched, and the verdict above is unchanged
-— closing blockers 4, 5, 6 and 7 removes four of fifteen reasons a GO is forbidden, not the
-prohibition.
+**blocker 13 is CLOSED**, and **blocker 8 is narrowed but still OPEN**. Nine are untouched, and the
+verdict above is unchanged — closing blockers 4, 5, 6, 7 and 13 removes five of fifteen reasons a GO
+is forbidden, not the prohibition.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -2424,7 +2426,7 @@ prohibition.
    twin of blocker 10 (which is the same unwired path in the rollback direction), and it means the
    §25 checklist — wire arming + activation inputs — is NOT sufficient to start the Canary. A governed
    operator-reachable forward-transition/publication entry point must be wired.
-13. **The seeded controlled tool is `catalog.Quarantined` and nothing promotes it (§6/§7).** `seedTools`
+13. **[CLOSED — see §25b] The seeded controlled tool is `catalog.Quarantined` and nothing promotes it (§6/§7).** `seedTools`
    lands every inventory tool Quarantined (`mcp_inventory.go:15-17`) — the correct record-only Observe
    disposition — and the policy engine hard-overrides a `DispQuarantined` tool to `ActionQuarantine`
    BEFORE any user rule is evaluated (`internal/mcp/policy/engine.go:132-135`). `ApproveLive`
@@ -2436,6 +2438,14 @@ prohibition.
    and the classifier deliberately declines to speak for an unusable target rather than substituting
    for this control. Catalog USABILITY must be a mandatory criterion: a `shadow_evaluation` approval (which
    promotes) or another governed promotion path must make the exact tool `catalog.Usable`.
+   **CLOSED (§25b).** It is now a mandatory MACHINE-CHECKED activation criterion rather than a
+   runbook step: the activation preflight carries `canary.ReasonToolNotCatalogUsable`, resolved from
+   the authoritative catalog for the exact scoped target at the exact pinned fingerprint. No new
+   trust authority was introduced — the governed `shadow_evaluation` lifecycle remains the only
+   writer of `catalog.Usable`, `ApproveLive` still deliberately promotes nothing, and a structural
+   wall proves no data-plane caller can. ENFORCEMENT is unchanged and still lives in the policy
+   engine; what changed is that a node can no longer report Ready for an experiment every request
+   would die in.
 14. **The exact request must resolve to an ALLOW-class decision with satisfiable obligations (§4/§13).**
    Closing the credential condition (blocker 9) by choosing a rule with no `CredentialProfile` does not
    make the request executable: that rule may itself be DENY-class, and if NO enabled rule matches,
@@ -2500,12 +2510,14 @@ verdict FAILED.)
   implement a working credential provider/path — the production broker composes zero providers, so a
   credential-requiring rule fails closed. This is NOT sufficient alone: the same rule must also be
   ALLOW-class with satisfiable obligations (blocker 14);
-- make the exact tool **`catalog.Usable`** (blocker 13, §6/§7) — `seedTools` lands it Quarantined and
-  the engine hard-overrides a quarantined tool to `ActionQuarantine` before any user rule runs, while
-  `ApproveLive` deliberately never promotes ("live trust never materializes `catalog.Usable`"). Issue a
-  `shadow_evaluation` approval (the promoting path) or wire another governed promotion path, and treat
-  catalog usability as a MANDATORY criterion — without it every exact-tool request is denied even with
-  all other blockers closed;
+- ~~make the exact tool **`catalog.Usable`**, and treat catalog usability as a MANDATORY
+  criterion~~ **DONE AS A MACHINE CRITERION (blocker 13 CLOSED, §25b)** — it is no longer an
+  external prerequisite anyone could forget or attest to by hand. The activation preflight resolves
+  usability for the exact scoped target and reports `tool_not_catalog_usable` when it does not hold,
+  so a Quarantined tool yields `Ready:false` instead of a green light for an experiment the policy
+  engine would hard-quarantine. The OPERATOR step that remains is the one the gate now enforces:
+  issue a `shadow_evaluation` approval (the only promoting path) for the exact tool at the exact
+  fingerprint. `ApproveLive` still never promotes;
 - require the exact request to resolve to an **ALLOW-class policy decision with every execution
   obligation satisfiable** (blocker 14, §4/§13) — verify the exact (principal, tenant, server, tool,
   operation) matches an enabled ALLOW-class rule; an unmatched request default-denies

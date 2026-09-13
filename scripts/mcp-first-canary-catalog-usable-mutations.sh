@@ -174,7 +174,7 @@ run_mutation M03 \
 # away, so the serialized re-evaluation inside the commit never sees it.
 run_mutation M04 \
   'the transition commit drops the resolved fact before re-evaluating the preflight' \
-  'TestCatalogUsable_ProductionPreflightCarriesTheRow|TestCanaryActivationGate' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' \
   . "$ROLLOUT" \
   's/\t\t\tToolCatalogUsable:  ai\.ToolCatalogUsable,\n//'
 
@@ -182,7 +182,7 @@ run_mutation M04 \
 # config; dropping the fact there lets a node resume a live mode a fresh commit would now reject.
 run_mutation M05 \
   'the restart-reconcile preflight drops the resolved fact' \
-  'TestCatalogUsable_ProductionPreflightCarriesTheRow|TestMCPRolloutRestore' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' \
   . "$ROLLOUT" \
   's/\t\t\t\t\tToolCatalogUsable: ai\.ToolCatalogUsable, Now: time\.Now\(\),/\t\t\t\t\tNow: time.Now(),/'
 
@@ -209,7 +209,7 @@ run_mutation M08 \
   'the resolver stops comparing the record digest against the scope pinned fingerprint' \
   'TestCatalogUsable_UsableRecordDoesNotSatisfyAScopePinnedElsewhere' \
   . "$PREFLIGHT" \
-  's/\t\t\tif !strings\.EqualFold\(hex\.EncodeToString\(sum\[:\]\), st\.Fingerprint\) \{\n\t\t\t\treturn false\n\t\t\t\}\n/\t\t\t_ = sum\n/'
+  's/if !strings\.EqualFold\(hex\.EncodeToString\(sum\[:\]\), st\.Fingerprint\) \{/if !strings.EqualFold(hex.EncodeToString(sum[:]), hex.EncodeToString(sum[:])) {/'
 
 # M09 — TENANT OWNERSHIP IS NOT CHECKED. A scope naming any tenant satisfies the fact for a server
 # that tenant does not own.
@@ -217,13 +217,13 @@ run_mutation M09 \
   'the resolver stops checking that the naming tenant owns the server' \
   'TestCatalogUsable_TenantThatDoesNotOwnTheServerIsNotUsable' \
   . "$PREFLIGHT" \
-  's/\t\t\tif !ti\.found \|\| ti\.target\.Tenant != tenant \{/\t\t\tif false \&\& !ti.found \&\& tenant == "" \{/'
+  's/(scope naming a tenant that does not own this server resolves to no usable target\.\n\t\t\tti := mcpToolTrust\.loadTarget\(st\.Server, st\.Name\)\n)\t\t\tif !ti\.found \|\| ti\.target\.Tenant != tenant \{/$1\t\t\tif !ti.found \&\& tenant == "\\x00never" {/'
 
 # M10 — AN EMPTY SCOPE IS "USABLE". Vacuous truth: a scope admitting no tool satisfies a fact about
 # every tool it admits, so the row is met for an experiment with no reviewed target at all.
 run_mutation M10 \
   'the resolver reports the fact satisfied for an empty scope (vacuous truth)' \
-  'TestCatalogUsable_SeededToolIsQuarantinedAndNotUsable|TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  'TestCatalogUsable_EmptyScopeIsNotVacuouslyUsable' \
   . "$PREFLIGHT" \
   's/\tif len\(scope\.Tools\) == 0 \|\| len\(scope\.Tenants\) == 0 \{\n\t\treturn false\n\t\}/\tif len(scope.Tools) == 0 || len(scope.Tenants) == 0 {\n\t\treturn true\n\t}/'
 
@@ -231,7 +231,7 @@ run_mutation M10 \
 # known about the tool.
 run_mutation M11 \
   'the resolver reports the fact satisfied when no inventory is published (fail-open)' \
-  'TestCatalogUsable_SeededToolIsQuarantinedAndNotUsable|TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  'TestCatalogUsable_AbsentInventoryFailsClosed' \
   . "$PREFLIGHT" \
   's/\tif reg == nil \|\| cat == nil \{\n\t\treturn false\n\t\}/\tif reg == nil || cat == nil {\n\t\treturn true\n\t}/'
 
@@ -242,7 +242,7 @@ run_mutation M12 \
   'a live_execution approval promotes the tool to catalog.Usable' \
   'TestCatalogUsable_LiveApprovalAloneNeverPromotes|TestCatalogUsable_ShadowAndLiveAreIndependentFacts' \
   . "$TRUST" \
-  's/(func \(c \*mcpToolTrustCoordinator\) ApproveLive\(id, approver string\) \(\*tooltrust\.ToolApproval, error\) \{\n)/$1\tdefer func() { c.promoteFor(c.loadTarget(c.serverOf(id), c.toolOf(id))) }()\n/'
+  's/\t\/\/ Deliberately NO promoteFor \/ catalog mutation: live trust never materializes catalog\.Usable\.\n\treturn granted, nil/\tif _, perr := c.promoteFor(granted); perr != nil {\n\t\treturn nil, perr\n\t}\n\treturn granted, nil/'
 
 # M13 — THE DIGEST STOPS BINDING THE FORMAT. The resolver has no separate format comparison BY
 # DESIGN, because Sum folds FormatVersion in before any other segment. Remove that and the format
