@@ -631,9 +631,11 @@ func firstCanaryScopeReasonStrings() []string {
 //     FormatVersion comparison against the same record would be a self-comparison — a check no test
 //     could ever distinguish, and therefore one that rots. The property the binding rests on is
 //     pinned directly instead, by TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest;
-//   - the tool is owned by the tenant the scope names, resolved from the REGISTRY through
-//     loadTarget — an independent source from the catalog record, so a scope naming a tenant that
-//     does not own the server can never satisfy the fact.
+//   - the tool is owned by the tenant the scope names, read DIRECTLY from the registry snapshot
+//     taken alongside the catalog snapshot — an independent source from the catalog record, so a
+//     scope naming a tenant that does not own the server can never satisfy the fact. It is
+//     deliberately NOT resolved through loadTarget: that helper re-reads BOTH current snapshots,
+//     which would put this decision back across two reads (see the one-snapshot note below).
 //
 // Fail-closed everywhere: an empty scope, absent inventory, a missing record, a tenant the scope
 // does not own, or any disagreement yields false, and the row stays unmet.
