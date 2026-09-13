@@ -137,6 +137,13 @@ would give the alert dedup key one distinct value per failure.
 | `address_unavailable` | the configured bind address is not on this host | fix the address; usually a stale static IP after a re-IP |
 | `descriptors_exhausted` | process/system FD exhaustion | this is a whole-node resource incident — see `docs/operator/socks5-listener-health.md`, same root cause |
 
+   A custom pair's `tls_certificate` failure is often an EXPIRED certificate
+   rather than a bad upload — check `GET /api/settings/network` →
+   `ui_tls_cert_not_after`/`ui_tls_cert_days_remaining` (also shown on the
+   Certificates panel) *before* it fails, not just after: this is the
+   admin UI's own serving certificate, separate from the MITM inspection
+   root CA and the outbound upstream mTLS client cert, each of which has
+   its own expiry surface elsewhere in the product.
 3. **No restart is required for any of these.** The listener rebinds
    automatically within 30 s of the fault clearing. Confirm with
    `culvert_admin_ui_up == 1`, or the `admin UI listener recovered` log line.

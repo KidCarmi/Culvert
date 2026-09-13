@@ -2,10 +2,13 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
@@ -57,6 +60,56 @@ var uiCustomTLSActive bool
 // look identical to an admin polling GET /api/settings/network, and only
 // the second one makes the GUI's "restart to activate" message false.
 var uiCustomTLSCorrupt bool
+
+// adminUITLSCertMu guards the admin UI's OWN serving-certificate expiry —
+// the certificate a browser actually negotiates against to reach the GUI at
+// all, whether it came from an explicit -tls-cert/-tls-key (flag or YAML) or
+// a GUI-uploaded pair. This is a DIFFERENT certificate from the two other
+// expiries this product already surfaces: the MITM inspection root CA
+// (ca.go, CHAOS-28) and the outbound upstream mTLS client cert
+// (mtls_ocsp_startup.go) — neither of those covers it, and nothing parsed
+// this certificate's NotAfter before. An operator running a custom admin-UI
+// cert therefore had no way to see it approaching expiry short of opening
+// the file by hand; once it actually expires, admin_ui_health.go's retry
+// loop keeps retrying the same now-expired pair forever with no in-product
+// signal beyond a rate-limited log line. Populated on every successful
+// custom-cert TLS bind by noteAdminUITLSCertExpiry (ui.go); read-only via
+// GET /api/settings/network. The auto self-signed fallback (10-year
+// validity, internal/uitls) is deliberately not tracked here — it is not
+// operator-configured and not worth an expiry warning.
+var (
+	adminUITLSCertMu       sync.RWMutex
+	adminUITLSCertNotAfter time.Time
+	adminUITLSCertKnown    bool
+)
+
+// noteAdminUITLSCertExpiry records the NotAfter of the leaf certificate in a
+// custom cert/key pair the admin UI is about to serve. Best-effort: a
+// malformed leaf (should be unreachable — the caller already validated the
+// pair loads as a matching tls.Certificate) leaves the prior value in place
+// rather than discarding a possibly-still-accurate expiry.
+func noteAdminUITLSCertExpiry(cert tls.Certificate) {
+	if len(cert.Certificate) == 0 {
+		return
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return
+	}
+	adminUITLSCertMu.Lock()
+	defer adminUITLSCertMu.Unlock()
+	adminUITLSCertNotAfter = leaf.NotAfter
+	adminUITLSCertKnown = true
+}
+
+// adminUITLSCertExpiry returns the currently known admin-UI serving
+// certificate expiry. known is false until a custom cert/key pair has
+// bound successfully at least once in this process's lifetime.
+func adminUITLSCertExpiry() (notAfter time.Time, known bool) {
+	adminUITLSCertMu.RLock()
+	defer adminUITLSCertMu.RUnlock()
+	return adminUITLSCertNotAfter, adminUITLSCertKnown
+}
 
 func customUITLSCertPath() string { return filepath.Join(dataDir, customUITLSCertFile) }
 func customUITLSKeyPath() string  { return filepath.Join(dataDir, customUITLSKeyFile) }
