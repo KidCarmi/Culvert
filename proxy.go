@@ -823,23 +823,33 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 // here use plSwapLogger, which deliberately uses a no-op writer that is not
 // that sentinel.
 
-// logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
-// authority as the client sent it), not the port-stripped host the block
-// branches log — preserved from the pre-extraction call sites verbatim.
-func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
-	safeRule := sanitizeLog(rule)
-	var arr [policyLineBufSize]byte
-	b := arr[:0]
-	b = append(b, "POLICY_ALLOW rule="...)
+// appendPolicyLineHead writes the opening every decision line shares: the
+// verdict prefix, the quoted rule name, the priority and the client IP.
+//
+// The four emitters differ only in their prefix, their middle segment and their
+// action label, so head/tail live here rather than being spelled out four
+// times — dupl flagged the block/drop pair as identical when they were, and
+// four copies of one byte layout is how the SIEM contract drifts between
+// branches (Codex/reviewdog, PR #1377).
+//
+// The buffer is passed in and returned rather than allocated here so it stays
+// the caller's stack array: append does not leak its argument, so the array
+// does not escape. That is load-bearing for the 1-alloc contract and is pinned
+// by TestBenchGate_PolicyDecisionLineAllocs.
+func appendPolicyLineHead(b []byte, prefix, safeRule string, priority int, clientIP string) []byte {
+	b = append(b, prefix...)
 	b = appendQuotedLog(b, safeRule)
 	b = append(b, " pri="...)
 	b = strconv.AppendInt(b, int64(priority), 10)
 	b = append(b, ' ')
-	b = append(b, clientIP...)
-	b = append(b, ' ')
-	b = append(b, method...)
-	b = append(b, ' ')
-	b = appendQuotedLog(b, sanitizeLog(host))
+	return append(b, clientIP...)
+}
+
+// appendPolicyLineTail writes the closing every decision line shares: the
+// matched conditions and the {req_id … identity … rule … action …} trailer.
+// safeRule is the ALREADY-sanitized name, reused from the head so the scan is
+// paid once per line for a value that appears twice.
+func appendPolicyLineTail(b []byte, matchedConditions, reqID, identity, safeRule, action string) []byte {
 	b = append(b, " ["...)
 	b = append(b, sanitizeLog(matchedConditions)...)
 	b = append(b, "] {req_id="...)
@@ -848,7 +858,23 @@ func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedCo
 	b = append(b, sanitizeLog(identity)...)
 	b = append(b, " rule="...)
 	b = append(b, safeRule...)
-	b = append(b, " action=allow}"...)
+	b = append(b, " action="...)
+	b = append(b, action...)
+	return append(b, '}')
+}
+
+// logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
+// authority as the client sent it), not the port-stripped host the block
+// branches log — preserved from the pre-extraction call sites verbatim.
+func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	var arr [policyLineBufSize]byte
+	b := appendPolicyLineHead(arr[:0], "POLICY_ALLOW rule=", safeRule, priority, clientIP)
+	b = append(b, ' ')
+	b = append(b, method...)
+	b = append(b, ' ')
+	b = appendQuotedLog(b, sanitizeLog(host))
+	b = appendPolicyLineTail(b, matchedConditions, reqID, identity, safeRule, "allow")
 	emitDecisionLine(string(b))
 }
 
@@ -856,24 +882,10 @@ func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedCo
 func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
 	var arr [policyLineBufSize]byte
-	b := arr[:0]
-	b = append(b, "POLICY_DROP rule="...)
-	b = appendQuotedLog(b, safeRule)
-	b = append(b, " pri="...)
-	b = strconv.AppendInt(b, int64(priority), 10)
-	b = append(b, ' ')
-	b = append(b, clientIP...)
+	b := appendPolicyLineHead(arr[:0], "POLICY_DROP rule=", safeRule, priority, clientIP)
 	b = append(b, " -> "...)
 	b = appendQuotedLog(b, sanitizeLog(host))
-	b = append(b, " ["...)
-	b = append(b, sanitizeLog(matchedConditions)...)
-	b = append(b, "] {req_id="...)
-	b = append(b, reqID...)
-	b = append(b, " identity="...)
-	b = append(b, sanitizeLog(identity)...)
-	b = append(b, " rule="...)
-	b = append(b, safeRule...)
-	b = append(b, " action=drop}"...)
+	b = appendPolicyLineTail(b, matchedConditions, reqID, identity, safeRule, "drop")
 	emitDecisionLine(string(b))
 }
 
@@ -881,24 +893,10 @@ func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions,
 func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
 	var arr [policyLineBufSize]byte
-	b := arr[:0]
-	b = append(b, "POLICY_BLOCK rule="...)
-	b = appendQuotedLog(b, safeRule)
-	b = append(b, " pri="...)
-	b = strconv.AppendInt(b, int64(priority), 10)
-	b = append(b, ' ')
-	b = append(b, clientIP...)
+	b := appendPolicyLineHead(arr[:0], "POLICY_BLOCK rule=", safeRule, priority, clientIP)
 	b = append(b, " -> "...)
 	b = appendQuotedLog(b, sanitizeLog(host))
-	b = append(b, " ["...)
-	b = append(b, sanitizeLog(matchedConditions)...)
-	b = append(b, "] {req_id="...)
-	b = append(b, reqID...)
-	b = append(b, " identity="...)
-	b = append(b, sanitizeLog(identity)...)
-	b = append(b, " rule="...)
-	b = append(b, safeRule...)
-	b = append(b, " action=block}"...)
+	b = appendPolicyLineTail(b, matchedConditions, reqID, identity, safeRule, "block")
 	emitDecisionLine(string(b))
 }
 
@@ -907,26 +905,12 @@ func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions
 func logPolicyRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
 	var arr [policyLineBufSize]byte
-	b := arr[:0]
-	b = append(b, "POLICY_REDIRECT rule="...)
-	b = appendQuotedLog(b, safeRule)
-	b = append(b, " pri="...)
-	b = strconv.AppendInt(b, int64(priority), 10)
-	b = append(b, ' ')
-	b = append(b, clientIP...)
+	b := appendPolicyLineHead(arr[:0], "POLICY_REDIRECT rule=", safeRule, priority, clientIP)
 	b = append(b, " -> "...)
 	b = appendQuotedLog(b, sanitizeLog(host))
 	b = append(b, " => "...)
 	b = appendQuotedLog(b, sanitizeLog(redirectURL))
-	b = append(b, " ["...)
-	b = append(b, sanitizeLog(matchedConditions)...)
-	b = append(b, "] {req_id="...)
-	b = append(b, reqID...)
-	b = append(b, " identity="...)
-	b = append(b, sanitizeLog(identity)...)
-	b = append(b, " rule="...)
-	b = append(b, safeRule...)
-	b = append(b, " action=redirect}"...)
+	b = appendPolicyLineTail(b, matchedConditions, reqID, identity, safeRule, "redirect")
 	emitDecisionLine(string(b))
 }
 
