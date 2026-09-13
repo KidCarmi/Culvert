@@ -1151,6 +1151,9 @@ export function RepairCeremony(
 export function ImportCeremony(
   p: CeremonyCommon & {
     legacy: LegacyLDAP & { present: true };
+    /** a re-send of an UNRESOLVED import: the SAME operation is dispatched
+     * again (the appliance's ledger replays or refuses it), never a new one */
+    boundOperationId?: string;
     onConfirm: () => void;
   },
 ): JSX.Element {
@@ -1160,14 +1163,24 @@ export function ImportCeremony(
       tier={2}
       title="Import the legacy YAML LDAP configuration"
       body={
-        <p>
-          Creates a managed LDAP provider from the config.yaml{" "}
-          <Mono>ldap:</Mono> block <Mono>{p.legacy.url}</Mono>. The managed
-          profile is <strong>created disabled</strong>: test it, then enable it
-          (enabling runs the authority cutover ceremony).
-        </p>
+        <>
+          <p>
+            Creates a managed LDAP provider from the config.yaml{" "}
+            <Mono>ldap:</Mono> block <Mono>{p.legacy.url}</Mono>. The managed
+            profile is <strong>created disabled</strong>: test it, then enable
+            it (enabling runs the authority cutover ceremony).
+          </p>
+          {p.boundOperationId !== undefined && (
+            <p>
+              Re-sends the unresolved operation{" "}
+              <Mono>{p.boundOperationId}</Mono>; the appliance replays a
+              committed import or refuses a changed one — nothing is imported
+              twice.
+            </p>
+          )}
+        </>
       }
-      impact="The legacy bind credential is copied server-side into the write-only profile material; it never transits this browser. The YAML file is not modified."
+      impact="The import is fenced on the loaded registry revision and identified by an operation id recorded before dispatch. The legacy bind credential is copied server-side into the write-only profile material; it never transits this browser. The YAML file is not modified."
       rollback="Delete the imported provider; the legacy block stays the authenticator until a cutover."
       confirmLabel="Import"
       destructive={false}
@@ -1245,6 +1258,8 @@ export function IdPFenceCallout({
 const REFUSAL_TITLE: Record<string, string> = {
   referenced: "Refused — the provider is referenced by authentication rules",
   provider_compile_failed: "Refused — the provider could not be constructed",
+  preflight_failed:
+    "Refused — the directory connection preflight failed; nothing was written",
   invalid_input: "Refused — the appliance rejected the candidate",
   vanished: "Refused — the provider no longer exists",
   not_found: "Refused — not found",
@@ -1291,6 +1306,12 @@ export function IdPRefusalCallout({
       role="alert"
     >
       <Mono>{refusal.code}</Mono> (HTTP {String(refusal.status)})
+      {f.step !== undefined && (
+        <span>
+          {" "}
+          · step <Mono>{f.step}</Mono>
+        </span>
+      )}
       {f.reason !== undefined && (
         <span>
           {" "}

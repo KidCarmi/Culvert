@@ -34,7 +34,10 @@ import type { IdPType } from "../../api/idp";
 export const IDP_RECOVERY_KEY = "culvert.idp.operation-recovery.v1";
 export const IDP_RECOVERY_VERSION = 1;
 
-export type IdPRecoveryAction = "create" | "update";
+/** import — FE-6A.2 correction (Blocker 1): the fenced, operation-identified
+ * legacy import rides the same non-secret, subject-bound marker. */
+export type IdPRecoveryAction = "create" | "update" | "import";
+const ACTIONS: readonly IdPRecoveryAction[] = ["create", "update", "import"];
 
 export interface IdPRecoveryMarker {
   operationId: string;
@@ -76,7 +79,7 @@ const FIELDS = [
 function grammarValid(m: IdPRecoveryMarker): boolean {
   return (
     UUID_RE.test(m.operationId) &&
-    (m.action === "create" || m.action === "update") &&
+    ACTIONS.includes(m.action) &&
     typeof m.profileId === "string" &&
     m.profileId.length <= 128 &&
     typeof m.name === "string" &&
@@ -135,7 +138,7 @@ function readRaw(): RawRead {
       version: typeof o["version"] === "number" ? o["version"] : -1,
       subject: typeof o["subject"] === "string" ? o["subject"] : "",
       operationId: typeof o["operationId"] === "string" ? o["operationId"] : "",
-      action: o["action"] === "update" ? "update" : "create",
+      action: ACTIONS.find((a) => a === o["action"]) ?? "create",
       profileId: typeof o["profileId"] === "string" ? o["profileId"] : "",
       name: typeof o["name"] === "string" ? o["name"] : "",
       type: IDP_TYPES.find((t) => t === o["type"]) ?? "oidc",
@@ -145,8 +148,7 @@ function readRaw(): RawRead {
       cutover: o["cutover"] === true,
       startedAt: typeof o["startedAt"] === "number" ? o["startedAt"] : -1,
     };
-    if (o["action"] !== "create" && o["action"] !== "update")
-      return { kind: "unreadable" };
+    if (!ACTIONS.some((a) => a === o["action"])) return { kind: "unreadable" };
     if (
       stored.version !== IDP_RECOVERY_VERSION ||
       stored.subject === "" ||

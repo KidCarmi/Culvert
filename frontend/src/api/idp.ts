@@ -138,7 +138,13 @@ export const IDP_OPERATION_STATES = [
 ] as const;
 export type IdPOperationState = (typeof IDP_OPERATION_STATES)[number];
 
-export const IDP_OPERATION_ACTIONS = ["idp.create", "idp.update"] as const;
+/** idp.import — FE-6A.2 correction (Blocker 1): the fenced, operation-
+ * identified legacy LDAP import. */
+export const IDP_OPERATION_ACTIONS = [
+  "idp.create",
+  "idp.update",
+  "idp.import",
+] as const;
 export type IdPOperationAction = (typeof IDP_OPERATION_ACTIONS)[number];
 
 /** The refusal codes writeIdPRefusal (ui_auth.go) can record on an aborted
@@ -1468,23 +1474,116 @@ export function discoverOIDC(
 /** POST /api/idp/legacy-ldap/import — bodiless; the appliance copies the
  * legacy block (bind credential included, server-side) into a DISABLED
  * managed profile. Bound: type ldap, enabled false. */
-export function importLegacyLDAP(signal?: AbortSignal): Promise<IdPProfile> {
-  const decoder: Decoder<IdPProfile> = (v, path = "$") => {
-    const p = decodeIdPProfile(v, path);
-    if (p.type !== "ldap")
-      throw new DecodeError(`${path}.type`, "ldap", p.type);
-    if (p.enabled)
+/** The fence + identity a legacy import is dispatched under (FE-6A.2
+ * correction, Blocker 1): the loaded registry document revision and the
+ * client-minted operationId the appliance records the intent under. */
+export interface IdPImportFence {
+  documentRevision: string;
+  operationId: string;
+}
+
+/** The action-bound outcome of an import: `imported` binds identity, entry
+ * revision, the RESULTING document revision, the echoed operationId and the
+ * legacy SOURCE identity (never its credential); `replayed` is the recorded
+ * outcome of an earlier dispatch of the same operation. */
+export type IdPImportOutcome =
+  | {
+      kind: "imported";
+      id: string;
+      name: string;
+      revision: number;
+      documentRevision: string;
+      operationId: string;
+      source: { url: string };
+      auditState?: "pending";
+    }
+  | { kind: "replayed"; id: string; operationId: string };
+
+/** POST /api/idp/legacy-ldap/import?documentRevision&operationId — bodiless;
+ * the appliance copies the legacy block server-side. A 2xx is a verdict
+ * ONLY when it proves THIS import: `imported:true`, a DISABLED ldap
+ * profile identity + entry revision, the dispatched operationId echoed, the
+ * RESULTING document revision, a source identity carrying no credential and
+ * the fleet publication facts. Anything else (an unrelated disabled profile
+ * included) is UNPROVEN. The decoder binds the ACTION facts — it does not
+ * require the full read-model projection, which the page re-reads from
+ * `GET /api/idp` (the read model is the only truth); the whole answer is
+ * swept for secret-bearing keys at every depth first. */
+export function importLegacyLDAP(
+  fence: IdPImportFence,
+  signal?: AbortSignal,
+): Promise<IdPImportOutcome> {
+  const decoder: Decoder<IdPImportOutcome> = (v, path = "$") => {
+    const o = readRecord(v, path);
+    refuseSecretKeys(o, path);
+    const echoed = field(o, "operationId", readString, path);
+    if (echoed !== fence.operationId)
+      throw new DecodeError(
+        `${path}.operationId`,
+        `the dispatched operation ${fence.operationId}`,
+        echoed,
+      );
+    const id = field(o, "id", readString, path);
+    if (o["replayed"] === true && o["imported"] === undefined) {
+      return { kind: "replayed", id, operationId: echoed };
+    }
+    if (field(o, "imported", readBoolean, path) !== true)
+      throw new DecodeError(`${path}.imported`, "true", o["imported"]);
+    const type = field(o, "type", readEnum(IDP_TYPES), path);
+    if (type !== "ldap") throw new DecodeError(`${path}.type`, "ldap", type);
+    if (field(o, "enabled", readBoolean, path))
       throw new DecodeError(
         `${path}.enabled`,
         "false (an import is created disabled)",
         true,
       );
-    return p;
+    const name = field(o, "name", readString, path);
+    const revision = field(o, "revision", readNumber, path);
+    const documentRevision = field(o, "documentRevision", readString, path);
+    if (!SAFE_TOKEN.test(documentRevision))
+      throw new DecodeError(`${path}.documentRevision`, "a token", "other");
+    const src = readRecord(o["source"], `${path}.source`);
+    const url = field(src, "url", readString, `${path}.source`);
+    field(o, "cluster", decodeIdPPublication, path);
+    const out: IdPImportOutcome = {
+      kind: "imported",
+      id,
+      name,
+      revision,
+      documentRevision,
+      operationId: echoed,
+      source: { url },
+    };
+    const audit = opt(o, "auditState", readEnum(["pending"] as const), path);
+    if (audit !== undefined) out.auditState = audit;
+    return out;
   };
-  return apiRequest("/api/idp/legacy-ldap/import", decoder, {
+  const q = new URLSearchParams({
+    documentRevision: fence.documentRevision,
+    operationId: fence.operationId,
+  });
+  return apiRequest(`/api/idp/legacy-ldap/import?${q.toString()}`, decoder, {
     method: "POST",
     ...(signal !== undefined ? { signal } : {}),
   });
+}
+
+/** The NON-SECRET identity of the legacy source an import copies (the same
+ * facts GET /api/idp/legacy-ldap publishes, minus the credential PRESENCE
+ * indicator — presence is not identity) for the recovery marker. */
+export function importCandidateDigest(l: LegacyLDAPPresentFacts): string {
+  return fnv1a64(
+    canonical({
+      url: l.url,
+      baseDn: l.baseDn,
+      bindDn: l.bindDn,
+      startTls: l.startTls,
+      tlsSkipVerify: l.tlsSkipVerify,
+      userFilter: l.userFilter,
+      requiredGroup: l.requiredGroup,
+      cacheTtlSeconds: l.cacheTtlSeconds,
+    }),
+  );
 }
 
 export interface IdPRepairResult {
@@ -1554,7 +1653,11 @@ export interface IdPReference {
 export interface IdPRefusalFacts {
   revision?: number;
   documentRevision?: string;
-  reason?: IdPCompileReason;
+  /** provider_compile_failed ⇒ a compile reason; preflight_failed ⇒ the
+   * directory test's bounded error class (FE-6A.2 correction, Blocker 3) */
+  reason?: IdPCompileReason | IdPTestStepError;
+  /** preflight_failed — the failed directory-test stage */
+  step?: IdPTestStepName;
   references?: readonly IdPReference[];
   confirmValue?: string;
   operationId?: string;
@@ -1577,6 +1680,7 @@ export const IDP_REFUSAL_CONTRACT = {
   precondition_required: { status: 428, required: ["fence"] },
   persistence_not_configured: { status: 503, required: [] },
   provider_compile_failed: { status: 502, required: ["reason"] },
+  preflight_failed: { status: 422, required: ["step", "reason"] },
   operation_id_required: { status: 428, required: [] },
   cutover_confirm_required: { status: 428, required: ["confirmValue"] },
   operation_mismatch: { status: 409, required: ["operationId", "state"] },
@@ -1663,8 +1767,12 @@ function refusalFacts(cur: Record<string, unknown>): IdPRefusalFacts {
   if (revision !== undefined) f.revision = revision;
   const documentRevision = safeString(cur["documentRevision"], SAFE_TOKEN);
   if (documentRevision !== undefined) f.documentRevision = documentRevision;
-  const reason = safeEnum(cur["reason"], IDP_COMPILE_REASONS);
+  const reason =
+    safeEnum(cur["reason"], IDP_COMPILE_REASONS) ??
+    safeEnum(cur["reason"], IDP_TEST_STEP_ERRORS);
   if (reason !== undefined) f.reason = reason;
+  const step = safeEnum(cur["step"], IDP_TEST_STEPS);
+  if (step !== undefined) f.step = step;
   const references = safeReferences(cur["references"]);
   if (references !== undefined) f.references = references;
   const confirmValue =
@@ -1724,6 +1832,17 @@ export function asIdPRefusal(err: unknown): IdPRefusal | null {
       return null;
     }
   }
+  // `reason` is one word for two vocabularies: bind it to the code.
+  if (
+    code === "preflight_failed" &&
+    !IDP_TEST_STEP_ERRORS.some((r) => r === facts.reason)
+  )
+    return null;
+  if (
+    code === "provider_compile_failed" &&
+    !IDP_COMPILE_REASONS.some((r) => r === facts.reason)
+  )
+    return null;
   return { status: err.status, code, facts };
 }
 

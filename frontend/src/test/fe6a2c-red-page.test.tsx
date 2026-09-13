@@ -13,6 +13,10 @@
 //   PC4  a 422 preflight_failed on an enabled-LDAP save is rendered as the
 //        bounded step + reason, never the server's text; nothing is retried
 //        and the marker is released (nothing was written).
+//   PC5  (found during the correction, verified failing on 64da0df0) a
+//        create re-send after a 404 lookup DISPATCHES the same operation:
+//        the recorded marker is adopted as-is (immutable evidence), never
+//        refused as "another unresolved operation".
 //
 // On 64da0df0 this file fails at type-check/import resolution together with
 // fe6a2c-red-api.test.ts (the import client has no fence/operation), and
@@ -257,6 +261,10 @@ const IMPORTED = (operationId: string | null): Record<string, unknown> => ({
   cluster: { publication: "published", version: 9 },
 });
 
+/** GET /api/idp count at the instant the import is confirmed — the
+ * read-back assertions count from here (the mock answers synchronously, so
+ * the answer and its read-back can land inside the confirm's act). */
+let getsAtConfirm = 0;
 async function runImportCeremony(): Promise<void> {
   await mount();
   await flushUntil(() => {
@@ -265,6 +273,7 @@ async function runImportCeremony(): Promise<void> {
   await click("Import legacy configuration");
   const dlg = openDialog();
   expect(dlg.textContent).toContain("disabled");
+  getsAtConfirm = gets("/api/idp");
   await click("Import", dlg);
 }
 
@@ -316,7 +325,7 @@ it("PC2 an unrelated disabled profile in the 2xx is UNPROVEN: latched, marker ke
     LEGACY_PRESENT,
   );
   await runImportCeremony();
-  const getsBefore = gets("/api/idp");
+  const getsBefore = getsAtConfirm;
   await flushUntil(() => {
     expect(text()).toContain("Outcome unproven");
   });
@@ -373,8 +382,15 @@ it("PC3 Recover settles an unproven import from the ledger; a 404 offers the sam
   await flushUntil(() => {
     expect(buttons("Re-send")).toHaveLength(1);
   });
-  // The re-send is the SAME import operation, never a new one.
+  // The re-send is the SAME import operation, never a new one: the import
+  // ceremony is re-opened (the editor re-send shape — the operator confirms
+  // the reviewed legacy facts again) bound to the recorded operation.
   await click("Re-send");
+  await flushUntil(() => {
+    expect(openDialog().textContent).toContain(String(op));
+  });
+  expect(importCalls).toBe(1);
+  await click("Import", openDialog());
   await flushUntil(() => {
     expect(importCalls).toBe(2);
   });
@@ -422,7 +438,10 @@ it("PC4 preflight_failed renders the bounded step + reason, closes the editor, r
   await type("Base DN", "dc=example", dlg);
   await check("Enabled", dlg);
   await click("Review and save", dlg);
-  await click("Save provider", openDialog());
+  // An LDAP candidate without a bind credential carries no secret material,
+  // so there is no T2 review step: "Review and save" dispatches directly.
+  if (document.querySelector("dialog[open]") !== null)
+    await click("Save provider", openDialog());
   await flushUntil(() => {
     expect(text()).toContain("preflight");
     expect(text()).toContain("reachable");
@@ -433,4 +452,64 @@ it("PC4 preflight_failed renders the bounded step + reason, closes the editor, r
   expect(text()).not.toContain("Outcome unproven");
   expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
   expect(marker()).toBeNull();
+});
+
+it("PC5 an editor re-send dispatches the SAME create operation under the recorded marker", async () => {
+  let posts = 0;
+  idpRoutes(
+    {
+      // prefix-matched in order: the lookup route must precede the create
+      "/api/idp/operations/": () =>
+        json({ error: RAW, code: "not_found" }, 404),
+      "/api/idp?": () => {
+        posts += 1;
+        return new Response("ok", {
+          status: 200,
+          headers: { "Content-Type": "text/plain" },
+        });
+      },
+    },
+    LEGACY_ABSENT,
+  );
+  await mount();
+  await flushUntil(() => {
+    expect(buttons("Add provider")).toHaveLength(1);
+  });
+  await click("Add provider");
+  const dlg = openDialog();
+  await type("Type", "ldap", dlg);
+  await type("Name", "Resent LDAP", dlg);
+  await type("Directory URL", "ldap://dc.example:389", dlg);
+  await type("Base DN", "dc=example", dlg);
+  await click("Review and save", dlg);
+  await flushUntil(() => {
+    expect(text()).toContain("Unresolved provider operation");
+  });
+  const m = rec(JSON.parse(marker() ?? "null"));
+  const op = String(m["operationId"]);
+  expect(posts).toBe(1);
+  await click("Recover");
+  await flushUntil(() => {
+    expect(buttons("Re-send")).toHaveLength(1);
+  });
+  await click("Re-send");
+  const again = openDialog();
+  await click("Review and save", again);
+  await flushUntil(() => {
+    expect(posts).toBe(2);
+  });
+  const sent = calls.filter(
+    (c) => c.method === "POST" && c.url.startsWith("/api/idp?"),
+  );
+  expect(sent).toHaveLength(2);
+  expect(
+    new URL(sent[1]?.url ?? "", "http://x").searchParams.get("operationId"),
+  ).toBe(op);
+  // The marker is the SAME evidence (same start instant), still unresolved.
+  const after = rec(JSON.parse(marker() ?? "null"));
+  expect(after["operationId"]).toBe(op);
+  expect(after["startedAt"]).toBe(m["startedAt"]);
+  expect(text()).not.toContain(
+    "Another provider operation is still unresolved",
+  );
 });

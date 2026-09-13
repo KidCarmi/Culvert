@@ -62,6 +62,7 @@ import {
   getIdPOperation,
   getIdPReferences,
   getLegacyLDAP,
+  importCandidateDigest,
   importLegacyLDAP,
   repairIdPRegistry,
   specCarriesSecret,
@@ -660,7 +661,12 @@ type Ceremony =
     }
   | { kind: "delete"; profile: IdPProfile }
   | { kind: "repair"; evidence: string }
-  | { kind: "import"; legacy: LegacyLDAP & { present: true } }
+  | {
+      kind: "import";
+      legacy: LegacyLDAP & { present: true };
+      /** a re-send of an unresolved import keeps its operation identity */
+      boundOperationId?: string;
+    }
   | { kind: "abandon"; marker: IdPRecoveryMarker };
 
 type RecoveryView =
@@ -687,6 +693,9 @@ const TERMINAL_NOTHING_WRITTEN: readonly IdPRefusalCode[] = [
   "operation_aborted",
   "operation_ledger_degraded",
   "operation_ledger_full",
+  // FE-6A.2 correction (Blocker 3): the write-boundary preflight is decided
+  // BEFORE the ledger intent, so a preflight refusal has no record to settle.
+  "preflight_failed",
   "operation_unsettled",
   "persist_failed",
   "registry_degraded",
@@ -809,6 +818,19 @@ export function IdentityProvidersPage(): JSX.Element {
     rereadRecovery();
   };
 
+  /** A re-send dispatches under the RECORDED marker (same start instant —
+   * the evidence is immutable, and a freshly stamped copy of it would be
+   * refused by the store as a second unresolved operation). A first dispatch
+   * records the fresh marker. */
+  const adoptOrRecordMarker = (fresh: IdPRecoveryMarker): boolean => {
+    const stored = readIdPRecovery(subject);
+    const marker =
+      stored.kind === "valid" && stored.marker.operationId === fresh.operationId
+        ? stored.marker
+        : fresh;
+    return writeIdPRecovery(subject, marker);
+  };
+
   // ── dispatch ──────────────────────────────────────────────────────────────
   const dispatchWrite = async (
     mode: "create" | "edit",
@@ -837,7 +859,7 @@ export function IdentityProvidersPage(): JSX.Element {
         cutover: cutoverConfirm !== undefined,
         startedAt: Date.now(),
       };
-      if (!writeIdPRecovery(subject, marker)) {
+      if (!adoptOrRecordMarker(marker)) {
         setResult("failed");
         setErrorText(
           readIdPRecovery(subject).kind === "valid"
@@ -983,18 +1005,64 @@ export function IdentityProvidersPage(): JSX.Element {
     }
   };
   const runImport = async (): Promise<void> => {
+    if (ceremony.kind !== "import" || snap === undefined) return;
     clearOutcome();
+    // FE-6A.2 correction (Blocker 1): the import is an operation-identified,
+    // fenced write and rides the recovery marker like a create — persisted
+    // BEFORE dispatch, so an unproven answer can never become a second import.
+    const operationId = ceremony.boundOperationId ?? mintOperationId();
+    const marker: IdPRecoveryMarker = {
+      operationId,
+      action: "import",
+      profileId: "",
+      name: "Imported legacy LDAP",
+      type: "ldap",
+      candidateDigest: importCandidateDigest(ceremony.legacy),
+      fence: snap.list.revision,
+      cutover: false,
+      startedAt: Date.now(),
+    };
+    if (
+      ceremony.boundOperationId !== undefined &&
+      recovery.kind === "valid" &&
+      recovery.marker.candidateDigest !== marker.candidateDigest
+    ) {
+      // The legacy block changed since the unresolved import was reviewed:
+      // the appliance would refuse it as operation_mismatch; say so first.
+      setResult("failed");
+      setErrorText(
+        "This re-send is bound to the unresolved import's legacy configuration, which has changed; abandon the operation first.",
+      );
+      return;
+    }
+    if (!adoptOrRecordMarker(marker)) {
+      setResult("failed");
+      setErrorText(
+        readIdPRecovery(subject).kind === "valid"
+          ? "Another provider operation is still unresolved in this browser; nothing was sent."
+          : "The operation identity could not be persisted in this browser; nothing was sent.",
+      );
+      rereadRecovery();
+      return;
+    }
     setResult("pending");
     const signal = page.owner.begin();
     try {
-      const p = await importLegacyLDAP(signal);
+      const out = await importLegacyLDAP(
+        { documentRevision: snap.list.revision, operationId },
+        signal,
+      );
+      clearIdPRecovery(operationId);
       close();
       setNotice(
-        `Legacy configuration imported as the disabled provider ${p.name}`,
+        out.kind === "replayed"
+          ? `Legacy import replayed from the appliance's ledger (operation ${out.operationId}); nothing was imported twice`
+          : `Legacy configuration imported as the disabled provider ${out.name} (revision ${String(out.revision)})${out.auditState === "pending" ? " — success audit still owed by the appliance" : ""}`,
       );
+      rereadRecovery();
       refreshAll();
     } catch (err) {
-      fail(err, "import legacy configuration", null);
+      fail(err, "import legacy configuration", marker);
     } finally {
       page.owner.settle(signal);
     }
@@ -1099,6 +1167,17 @@ export function IdentityProvidersPage(): JSX.Element {
     }
   };
   const resend = (marker: IdPRecoveryMarker): void => {
+    if (marker.action === "import") {
+      // The SAME import operation is re-sent (never a new one); it needs
+      // the legacy block that was reviewed to still be present.
+      if (legacy.data?.present === true)
+        setCeremony({
+          kind: "import",
+          legacy: legacy.data,
+          boundOperationId: marker.operationId,
+        });
+      return;
+    }
     const initial =
       marker.action === "update"
         ? (snap?.list.profiles.find((p) => p.id === marker.profileId) ?? null)
@@ -1234,8 +1313,10 @@ export function IdentityProvidersPage(): JSX.Element {
             role="alert"
           >
             <p>
-              A {recovery.marker.action} of{" "}
-              <strong>{recovery.marker.name}</strong> (
+              {recovery.marker.action === "import"
+                ? "An import"
+                : `A ${recovery.marker.action}`}{" "}
+              of <strong>{recovery.marker.name}</strong> (
               <Mono>{recovery.marker.type}</Mono>
               {recovery.marker.cutover ? ", carrying the legacy cutover" : ""})
               was dispatched as operation{" "}
@@ -1499,6 +1580,9 @@ export function IdentityProvidersPage(): JSX.Element {
       {ceremony.kind === "import" && (
         <ImportCeremony
           legacy={ceremony.legacy}
+          {...(ceremony.boundOperationId !== undefined
+            ? { boundOperationId: ceremony.boundOperationId }
+            : {})}
           result={result}
           {...(errorText !== undefined ? { errorText } : {})}
           onConfirm={() => void runImport()}

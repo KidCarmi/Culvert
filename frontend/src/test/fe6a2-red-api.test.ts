@@ -226,13 +226,23 @@ describe("A1 verbs, fences and bodies", () => {
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.url).toBe("/api/idp/repair");
     expect(calls[0]?.body).toEqual({ confirm: QUARANTINE });
+    // FE-6A.2 correction: the import is fenced + operation-identified and its
+    // answer is action-bound (see fe6a2c-red-api.test.ts).
     answer = () =>
-      jsonResponse(
-        ldapProfileAnswer("imp000000001", 1, { name: "Imported legacy LDAP" }),
-      );
-    await importLegacyLDAP();
+      jsonResponse({
+        ...ldapProfileAnswer("imp000000001", 1, {
+          name: "Imported legacy LDAP",
+        }),
+        imported: true,
+        documentRevision: "r-doc-2",
+        operationId: OP_ID,
+        source: { url: LEGACY_URL },
+      });
+    await importLegacyLDAP({ documentRevision: "r-doc-1", operationId: OP_ID });
     expect(calls[1]?.method).toBe("POST");
-    expect(calls[1]?.url).toBe("/api/idp/legacy-ldap/import");
+    expect(calls[1]?.url).toBe(
+      `/api/idp/legacy-ldap/import?documentRevision=r-doc-1&operationId=${OP_ID}`,
+    );
     expect(calls[1]?.rawBody).toBeUndefined();
     answer = () =>
       jsonResponse({ authorization_endpoint: "https://issuer.example/auth" });
@@ -688,15 +698,27 @@ describe("A7 discovery, import, repair", () => {
     expect(JSON.stringify(d)).not.toContain(RAW);
   });
   it("import is bound to a DISABLED ldap profile", async () => {
+    const fence = { documentRevision: "r-doc-1", operationId: OP_ID };
+    const bound = {
+      imported: true,
+      documentRevision: "r-doc-2",
+      operationId: OP_ID,
+      source: { url: LEGACY_URL },
+    };
     answer = () =>
-      jsonResponse(ldapProfileAnswer("imp000000001", 1, { enabled: true }));
-    await expect(importLegacyLDAP()).rejects.toBeInstanceOf(ApiError);
-    answer = () => jsonResponse(oidcProfileAnswer("imp000000001", 1));
-    await expect(importLegacyLDAP()).rejects.toBeInstanceOf(ApiError);
-    answer = () => jsonResponse(ldapProfileAnswer("imp000000001", 1));
-    const p = await importLegacyLDAP();
-    expect(p.enabled).toBe(false);
-    expect(p.type).toBe("ldap");
+      jsonResponse({
+        ...ldapProfileAnswer("imp000000001", 1, { enabled: true }),
+        ...bound,
+      });
+    await expect(importLegacyLDAP(fence)).rejects.toBeInstanceOf(ApiError);
+    answer = () =>
+      jsonResponse({ ...oidcProfileAnswer("imp000000001", 1), ...bound });
+    await expect(importLegacyLDAP(fence)).rejects.toBeInstanceOf(ApiError);
+    answer = () =>
+      jsonResponse({ ...ldapProfileAnswer("imp000000001", 1), ...bound });
+    const out = await importLegacyLDAP(fence);
+    expect(out.kind).toBe("imported");
+    if (out.kind === "imported") expect(out.source.url).toBe(LEGACY_URL);
   });
   it("repair is bound to ok+repaired+the confirmed evidence", async () => {
     answer = () =>
@@ -788,7 +810,11 @@ describe("A8 candidate identity and body hygiene", () => {
         expect(s).not.toContain(`"${k}"`);
       }
     }
-    expect(IDP_OPERATION_ACTIONS).toEqual(["idp.create", "idp.update"]);
+    expect(IDP_OPERATION_ACTIONS).toEqual([
+      "idp.create",
+      "idp.update",
+      "idp.import",
+    ]);
     expect(() => new DecodeError("$", "x", 1)).not.toThrow();
   });
 });

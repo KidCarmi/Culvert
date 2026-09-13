@@ -147,7 +147,11 @@ describe("C1 bounded classes are enums", () => {
       "wire_size_exceeded",
     ]);
     expect([...IDP_LEDGER_DEGRADED_REASONS]).toEqual(["unreadable", "corrupt"]);
-    expect([...IDP_OPERATION_ACTIONS]).toEqual(["idp.create", "idp.update"]);
+    expect([...IDP_OPERATION_ACTIONS]).toEqual([
+      "idp.create",
+      "idp.update",
+      "idp.import",
+    ]);
     // Refusal codes writeIdPRefusal can record on an aborted/unknown intent
     // + the three settlement families × three verdicts.
     for (const c of [
