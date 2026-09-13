@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -109,6 +110,21 @@ func adminUITLSCertExpiry() (notAfter time.Time, known bool) {
 	adminUITLSCertMu.RLock()
 	defer adminUITLSCertMu.RUnlock()
 	return adminUITLSCertNotAfter, adminUITLSCertKnown
+}
+
+// daysRemainingFloor differs from the shared daysUntil (cdr_ui.go) by
+// FLOORING rather than truncating toward zero: daysUntil's int() truncation
+// maps any duration in (-24h, 0) to 0, so a certificate that expired an
+// hour ago would report "0 days remaining" — indistinguishable from "expires
+// today" — for up to 24 hours after it actually expired (Codex review, PR
+// #1381). The GET /api/settings/network contract for
+// ui_tls_cert_days_remaining promises "negative once expired", and the
+// Certificates panel switches to its EXPIRED banner on days < 0, so the
+// value must go negative the instant NotAfter passes. Kept as a SEPARATE
+// helper rather than changing daysUntil's rounding, which also feeds the
+// already-shipped mTLS-client-cert and root-CA expiry displays.
+func daysRemainingFloor(t time.Time) int {
+	return int(math.Floor(time.Until(t).Hours() / 24))
 }
 
 func customUITLSCertPath() string { return filepath.Join(dataDir, customUITLSCertFile) }

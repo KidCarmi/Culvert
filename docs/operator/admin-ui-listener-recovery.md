@@ -137,14 +137,26 @@ would give the alert dedup key one distinct value per failure.
 | `address_unavailable` | the configured bind address is not on this host | fix the address; usually a stale static IP after a re-IP |
 | `descriptors_exhausted` | process/system FD exhaustion | this is a whole-node resource incident — see `docs/operator/socks5-listener-health.md`, same root cause |
 
-   A custom pair's `tls_certificate` failure is often an EXPIRED certificate
-   rather than a bad upload — check `GET /api/settings/network` →
+   **A note on expiry, which is NOT one of the reason classes above.**
+   Go's server-side TLS stack does not check a certificate's `NotAfter` at
+   load or bind time — that is purely a CLIENT-side check during the
+   handshake — so an admin-UI certificate that expires while it is
+   *already* bound produces none of the failures in this table: no
+   `tls_certificate` reason, no retry, nothing for the rebind loop to pick
+   up. The process keeps serving the expired certificate indefinitely;
+   only browsers start refusing it. Replacing the file therefore has **no
+   effect** until something forces a fresh bind — ordinarily a restart.
+   This is exactly why `GET /api/settings/network` →
    `ui_tls_cert_not_after`/`ui_tls_cert_days_remaining` (also shown on the
-   Certificates panel) *before* it fails, not just after: this is the
-   admin UI's own serving certificate, separate from the MITM inspection
-   root CA and the outbound upstream mTLS client cert, each of which has
-   its own expiry surface elsewhere in the product.
-3. **No restart is required for any of these.** The listener rebinds
+   Certificates panel) exists as a **proactive** signal — check it
+   *before* expiry, since there is no reactive detection for this cause
+   the way there is for the others above. This is the admin UI's own
+   serving certificate, separate from the MITM inspection root CA and the
+   outbound upstream mTLS client cert, each of which has its own expiry
+   surface elsewhere in the product.
+3. **No restart is required for any of the table's reason classes** (the
+   already-expired case above is the one exception — it needs a restart,
+   since nothing forces a rebind on its own). The listener rebinds
    automatically within 30 s of the fault clearing. Confirm with
    `culvert_admin_ui_up == 1`, or the `admin UI listener recovered` log line.
 4. If you must restart anyway, note that a restart is now strictly *worse* than

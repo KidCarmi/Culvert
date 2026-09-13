@@ -176,6 +176,45 @@ func TestApiNetworkSettings_ExposesUITLSCertExpiryWhenKnown(t *testing.T) {
 	}
 }
 
+// TestApiNetworkSettings_UITLSCertDaysRemainingGoesNegativeImmediately pins
+// the Codex-review fix (PR #1381): a certificate that expired minutes ago
+// must report a NEGATIVE ui_tls_cert_days_remaining, not 0. The shared
+// daysUntil helper (cdr_ui.go) truncates toward zero, so int(-0.04) == 0 —
+// a cert expired an hour ago would read identically to one expiring today,
+// and the Certificates panel (which switches to its EXPIRED banner on
+// days < 0) would keep saying "expires" for up to 24h after it already
+// didn't.
+func TestApiNetworkSettings_UITLSCertDaysRemainingGoesNegativeImmediately(t *testing.T) {
+	resetAdminUITLSCertExpiryForTest(t)
+
+	// Expired one hour ago: daysUntil would truncate this to 0.
+	wantNotAfter := time.Now().Add(-1 * time.Hour)
+	certPath, keyPath := writeCertKeyPairWithNotAfter(t, t.TempDir(), wantNotAfter)
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("load test pair: %v", err)
+	}
+	noteAdminUITLSCertExpiry(cert)
+
+	body := apiNetworkSettingsGET(t)
+	daysF, ok := body["ui_tls_cert_days_remaining"].(float64)
+	if !ok {
+		t.Fatalf("ui_tls_cert_days_remaining missing or not a number: %#v", body["ui_tls_cert_days_remaining"])
+	}
+	if days := int(daysF); days >= 0 {
+		t.Errorf("ui_tls_cert_days_remaining = %d; want negative for a certificate that already expired", days)
+	}
+}
+
+func TestDaysRemainingFloor_NegativeImmediatelyAfterExpiry(t *testing.T) {
+	if got := daysRemainingFloor(time.Now().Add(-time.Minute)); got >= 0 {
+		t.Errorf("daysRemainingFloor(1 minute past expiry) = %d; want negative", got)
+	}
+	if got := daysRemainingFloor(time.Now().Add(-25 * time.Hour)); got >= -1 {
+		t.Errorf("daysRemainingFloor(25 hours past expiry) = %d; want <= -2", got)
+	}
+}
+
 // TestAdminUIServeOnce_RecordsServingCertExpiry proves the production
 // wiring end to end: binding the REAL admin-UI listen path
 // (adminUIServeOnce, ui.go) against a custom cert/key pair records that

@@ -2042,7 +2042,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		// auto self-signed fallback, which is not operator-configured.
 		if notAfter, known := adminUITLSCertExpiry(); known {
 			resp["ui_tls_cert_not_after"] = notAfter.UTC().Format(time.RFC3339)
-			resp["ui_tls_cert_days_remaining"] = daysUntil(notAfter)
+			resp["ui_tls_cert_days_remaining"] = daysRemainingFloor(notAfter)
 		}
 		jsonOK(w, resp)
 	case http.MethodPost:
