@@ -73,6 +73,7 @@ const LDAP = {
   id: "ldap-dc",
   name: "DC LDAP",
   type: "ldap",
+  emailDomains: null,
   enabled: false,
   priority: 5,
   revision: 2,
@@ -158,6 +159,7 @@ const OP_UNKNOWN = {
   registryRevision: "r-abc123",
   cutover: true,
   startedAt: "2026-09-12T09:59:00Z",
+  finishedAt: "2026-09-12T09:59:02Z",
   audited: false,
   code: "outcome_unknown",
 };

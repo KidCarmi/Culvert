@@ -110,6 +110,7 @@ const LDAP = {
   id: "ldap-dc",
   name: "DC LDAP",
   type: "ldap",
+  emailDomains: null,
   enabled: true,
   priority: 5,
   revision: 2,
@@ -335,18 +336,28 @@ describe("A4 decodeIdPOperation", () => {
       auditState: "pending",
     });
     expect(owed.auditState).toBe("pending");
-    const p = decodeIdPOperation({ ...BASE, state: "pending", audited: false });
+    const intent = omit(
+      omit(omit(BASE, "finishedAt"), "committedRevision"),
+      "result",
+    );
+    const p = decodeIdPOperation({
+      ...intent,
+      state: "pending",
+      audited: false,
+    });
     expect(p.state).toBe("pending");
-    expect(p.finishedAt).toBe("2026-09-12T09:59:01Z");
+    expect(p.finishedAt).toBeUndefined();
+    const terminal = omit(omit(BASE, "committedRevision"), "result");
     const a = decodeIdPOperation({
-      ...BASE,
+      ...terminal,
       state: "aborted",
       audited: false,
       code: "stale",
     });
     expect(a.code).toBe("stale");
+    expect(a.finishedAt).toBe("2026-09-12T09:59:01Z");
     const u = decodeIdPOperation({
-      ...BASE,
+      ...terminal,
       state: "outcome_unknown",
       audited: false,
       code: "outcome_unknown",
@@ -567,6 +578,7 @@ describe("A8 rosterFacts", () => {
       total: 3,
       adminCount: 1,
       lastAdmin: "admin",
+      posture: "last_admin",
     });
     const two = decodeAdminRoster({
       ...ROSTER,
@@ -584,11 +596,13 @@ describe("A8 rosterFacts", () => {
       total: 4,
       adminCount: 2,
       lastAdmin: null,
+      posture: "multiple",
     });
     expect(rosterFacts(decodeAdminRoster({ ...ROSTER, users: [] }))).toEqual({
       total: 0,
       adminCount: 0,
       lastAdmin: null,
+      posture: "none",
     });
   });
 });
