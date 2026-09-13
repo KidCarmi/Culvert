@@ -42,7 +42,7 @@ import (
 const fe6a2LegacyURL = "ldap://legacy.corp.example:389"
 
 // fe6a2PutFenced PUTs body on /api/idp/{id} with the CURRENT entry revision.
-func fe6a2PutFenced(t *testing.T, id string, body map[string]any, extra ...string) (int, map[string]any) {
+func fe6a2PutFenced(t *testing.T, id string, body map[string]any, extra ...string) (status int, out map[string]any) {
 	t.Helper()
 	rev := int64(1)
 	if p := idpRegistry.Get(id); p != nil {
