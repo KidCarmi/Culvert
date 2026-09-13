@@ -4,10 +4,20 @@
 `config.yaml`). On a node without it, every surface below reports the feature as
 absent and no metrics are emitted.*
 
-Culvert's SOCKS5 listener runs its own accept loop. Since CHAOS-54 that loop
-backs off on accept failures instead of retrying at syscall speed, and reports
-its state on four surfaces. This page is what to do when one of them goes
-non-green.
+Culvert's SOCKS5 listener owns its whole lifecycle: bind, accept, rebind. Since
+CHAOS-54 the accept loop backs off on accept failures instead of retrying at
+syscall speed; since CHAOS-66 a **bind** failure is no longer fatal to the
+process and the listener rebinds on its own. This page is what to do when one of
+its surfaces goes non-green.
+
+> **Changed in CHAOS-66.** A SOCKS5 bind failure used to call `logFatalf`, which
+> exits the process — and it did so *before* the HTTP/HTTPS proxy listener and
+> the admin UI started. An occupied SOCKS5 port therefore took down the entire
+> appliance, and under `restart: unless-stopped` became an unattended crash
+> loop. It is now contained to the SOCKS5 service. **No accept- or bind-plane
+> SOCKS5 fault requires a node restart any more** — the one exception is the
+> supervisor itself stopping, which is reported as its own state (see the
+> table below) precisely so the two are not confused.
 
 ---
 
@@ -15,10 +25,17 @@ non-green.
 
 | State | Meaning | Recovers by itself? | What you do |
 |---|---|---|---|
-| **degraded** | `accept(2)` has been failing continuously for more than 30 s. The loop is still retrying, backed off to at most one attempt per second. | **Yes** — the moment the underlying condition clears | Raise or investigate the descriptor limit; no restart needed |
-| **down** | The listening socket itself is no longer valid. The loop has stopped and closed the socket, so clients now get connection-refused rather than hanging. | **No** | Restart the node; check the logs for the socket fault |
+| **degraded** (accept) | `accept(2)` has been failing continuously for more than 30 s. The loop is still retrying, backed off to at most one attempt per second. | **Yes** — the moment the underlying condition clears | Raise or investigate the descriptor limit; no restart needed |
+| **degraded** (bind) | The listener cannot bind its port and is retrying, backed off to at most one attempt per 30 s. Under 30 s old — usually a predecessor process still holding the port. | **Yes** — as soon as the port frees | Nothing, unless it persists |
+| **down** (bind) | The listener has been unable to bind for more than 30 s. SOCKS5 is unavailable. | **Yes**, once the cause clears | Find what owns the port, or whether the process may bind it — see below |
+| **down** (accept) | The listening socket itself became invalid. The loop closed it, so clients get connection-refused rather than hanging, and a rebind is pending. | **Yes** — the supervisor rebinds | Check the logs for the socket fault |
+| **down** (supervisor) | The supervisor itself stopped (a contained panic). Nothing will rebind the port. | **No** | Restart the node, then check the logs for the fault that stopped it |
 
-Do not collapse these. They point at opposite actions.
+Do not collapse these. They point at different actions.
+
+**The HTTP/HTTPS proxy and the admin UI are unaffected by every row in this
+table.** A node whose SOCKS5 listener is down is still proxying and still
+enforcing policy.
 
 ---
 
@@ -40,10 +57,14 @@ pool, point the probe at `/readyz?strict=1`.
 
 | Series | Meaning |
 |---|---|
-| `culvert_socks5_listener_up` | `1` while the accept loop is running; `0` once it has stopped |
+| `culvert_socks5_listener_up` | `1` while the listener is bound and accepting; `0` once the accept loop has stopped **or** the bind has been failing past the threshold |
 | `culvert_socks5_accept_errors_total` | Cumulative accept errors since startup |
-| `culvert_socks5_accept_degraded` | `1` while failing for longer than the threshold |
-| `culvert_socks5_accept_backoff_seconds` | Current retry backoff; `0` when accepts are succeeding |
+| `culvert_socks5_accept_degraded` | `1` while accepts have been failing for longer than the threshold |
+| `culvert_socks5_accept_backoff_seconds` | Current accept retry backoff; `0` when accepts are succeeding |
+| `culvert_socks5_unavailable` | `1` while the listener has been unable to **bind** for longer than 30 s |
+| `culvert_socks5_bind_failures_total` | Cumulative failed bind attempts since startup |
+| `culvert_socks5_binds_total` | Cumulative successful binds; a climbing value means the listener is flapping |
+| `culvert_socks5_bind_backoff_seconds` | Current rebind backoff; `0` while bound |
 
 **Alerts** — `socks5_listener_down`, fired **once per episode** (not once per
 retry) when the listener degrades or dies. Subscribe to it in the webhook
@@ -52,14 +73,20 @@ editor: *"SOCKS5 listener not accepting connections"*.
 ### Suggested paging rules
 
 ```
-# Dead listener — restart required.
+# SOCKS5 is not serving. No longer implies a restart: the listener is retrying.
 culvert_socks5_listener_up == 0
+
+# The listener cannot get its port at all.
+culvert_socks5_unavailable == 1
 
 # Sustained accept failure — usually descriptor exhaustion.
 culvert_socks5_accept_degraded == 1
 
 # Leading indicator: transient accept errors that keep coming back.
 rate(culvert_socks5_accept_errors_total[15m]) > 0
+
+# Flapping: the listener keeps having to rebind.
+increase(culvert_socks5_binds_total[1h]) > 3
 ```
 
 Note the gauges are **absent**, not zero, on a node without SOCKS5 — so
@@ -111,10 +138,29 @@ SOCKS5 accept recovered after backing off to 1s (2841 further error lines suppre
 ```
 
 The suppressed count is the magnitude — `culvert_socks5_accept_errors_total`
-carries the exact figure. A `FATAL` line means the loop stopped:
+carries the exact figure. A `FATAL` line means the accept loop stopped; the supervisor then rebinds, and
+the line says so:
 
 ```
-SOCKS5 accept FATAL (listener_socket_invalid): ... — listener closed, SOCKS5 is unavailable until restart
+SOCKS5 accept FATAL (listener_socket_invalid): ... — listener closed, the supervisor is rebinding; no restart required
+```
+
+**The one state that still requires a restart** is the supervisor itself
+stopping — today only its contained panic. That is reported distinctly, so the
+two are never confused:
+
+```
+socks5_listener contract row: "SOCKS5 listener supervisor stopped (bind loop panicked); nothing will rebind the port"
+alert: "... the port is closed and SOCKS5 is unavailable until this node restarts"
+```
+
+The bind-failure line is rate-limited the same way — first failure immediately,
+then at most one line per 60 s, then a recovery line carrying the suppressed
+count:
+
+```
+ERROR SOCKS5 listener on port 11080 could not bind (port_in_use): listen tcp :11080: bind: address already in use — retrying in 878ms; the HTTP/HTTPS proxy data plane and the admin UI are unaffected
+SOCKS5: listener on port 11080 bound and accepting again (4 suppressed bind-failure log line(s))
 ```
 
 ---
@@ -143,7 +189,50 @@ no `listener_up 0`.
 
 ---
 
+## When the listener cannot bind
+
+Reason classes for a bind failure (same vocabulary as the admin UI listener, so
+either runbook reads the same):
+
+| Reason | errno | What it usually is |
+|---|---|---|
+| `port_in_use` | EADDRINUSE | A predecessor container still draining, a host-network service, a second Culvert, or an operator port collision |
+| `permission_denied` | EACCES, EPERM | A privileged port (<1024) on a deployment that dropped `CAP_NET_BIND_SERVICE` or stopped running as root |
+| `address_unavailable` | EADDRNOTAVAIL | Binding before the interface is up — an ordinary host-boot race that clears itself |
+| `descriptors_exhausted` | EMFILE, ENFILE | See the descriptor section above |
+| `network_error` | — a genuine network timeout | Rare for a bind |
+| `listen_failed` | anything else | Check the log line for the raw error |
+
+What to do:
+
+1. **Find the owner of the port.**
+   ```
+   ss -ltnp 'sport = :1080'      # or: lsof -iTCP:1080 -sTCP:LISTEN
+   ```
+2. **If it is a predecessor Culvert**, it is still draining; the listener binds
+   on its own within 30 s. Nothing to do.
+3. **If the reason is `permission_denied`**, either move SOCKS5 to a port above
+   1024 (`-socks5-port`, or `proxy.socks5_port`) or grant the capability:
+   ```yaml
+   services:
+     proxy:
+       cap_add: [NET_BIND_SERVICE]
+   ```
+4. **Check `validatePortCollisions` is not the answer you are looking for.** It
+   only compares Culvert's own proxy / UI / SOCKS5 ports to each other. It
+   cannot see anything else on the host, which is why a collision with an
+   unrelated service surfaces here rather than at startup validation.
+
+Retries are bounded in **rate** (1 s doubling to 30 s, ±20% jitter), never in
+count: the listener keeps trying for the life of the process, and every attempt
+is accounted for by the counter even though only one line per minute is logged.
+
+---
+
 ## See also
 
 - `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-23.md` — the full finding
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §22, register rows PX-16 … PX-20
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §22 (accept loop, CHAOS-54) and §36
+  (bind, CHAOS-66), register rows PX-16 … PX-20
+- `docs/operator/admin-ui-listener-recovery.md` — the same finding on the admin
+  plane (CHAOS-57); the two listeners share a reason vocabulary

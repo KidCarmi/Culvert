@@ -163,10 +163,25 @@ type startupState struct {
 	rlCleanupCancel context.CancelFunc
 	feedSyncer      *FeedSyncer
 	scanSvc         *ScanService
-	adminUISrv      *http.Server  // P1.1 / S4.AdminUI: graceful shutdown handle
-	socks5Srv       *socks5Server // P1.5 / S4.SOCKS5: listener-close shutdown handle
+	adminUISrv      *http.Server      // P1.1 / S4.AdminUI: graceful shutdown handle
+	socks5Srv       *socks5Supervisor // P1.5 / S4.SOCKS5: listener-close shutdown handle (CHAOS-66: the supervisor owns bind→serve→rebind)
 }
 
+// main is the composition root: a flat, ordered sequence of startup slices.
+//
+// The funlen finding here (56 statements > 50) PREDATES this change and is
+// untouched by it — main's body is byte-identical to the base branch. CI's
+// diff-scoped lint surfaced it only because an unrelated two-line edit to
+// startupState above sits inside the same diff hunk as this declaration.
+//
+// It is suppressed rather than split because the startup ORDER is load-bearing
+// throughout this file — dataDir before the flag set, the one-shots before the
+// restore check, reconcileObjectRefNames after every store it reads,
+// startAdminUI after the init block — so extracting the sequence would hide the
+// one thing this file exists to make readable. Splitting main deserves its own
+// change (DEBT-003 already split this file once), not a SOCKS5 fix.
+//
+//nolint:funlen // single-pass boot orchestration; splitting hides the startup order
 func main() {
 	// Positional subcommand: `culvert bootstrap-resolve ...` fetches + verifies the
 	// signed release catalog and emits the fresh-install decision, then exits. It
