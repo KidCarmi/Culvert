@@ -53,6 +53,17 @@ fixed; they materially affect how safely CDR can be relied on today.
   initializes the client pool but does **not** start the poller, so none
   of the [certificate rotation](#certificate-rotation) behavior described
   below runs until the process is restarted with CDR enabled.
+- **A sanitized response whose size changed can be delivered broken.**
+  When CDR strips content in `ENFORCE` mode, `runCDRStage` swaps in the
+  sanitized bytes as the new `resp.Body`, but neither it nor
+  `scanInspectBody` updates `resp.ContentLength` or the response's
+  `Content-Length` header to match the new size (no assignment to either
+  exists in `proxy_tunnel.go`). If sanitization changed the byte count,
+  the client is served against the *original* length: on HTTP/1.1 this
+  can truncate the body or surface a length-mismatch error, and on
+  inspected HTTP/2 the stale header is forwarded as-is. This is
+  independent of the scan-window-prefix limitation above — it can happen
+  even when the whole file fit inside the scan window.
 - **Deleting one instance can take the whole pool offline.** In a
   multi-instance deployment, `DELETE /api/cdr/instances?name=` shuts down
   the *entire* client pool — not just the named instance — whenever any
@@ -70,12 +81,18 @@ material. The two communicate over a bidirectional-streaming `Sanitize`
 RPC plus unary `Health`, `Enroll`, `EnrollStatus`, `RenewCert`, and
 `RevokeClient` calls (`cdr.go`). Every call is per-file: the header frame
 (filename, content-type, profile, mode) goes first, then the body in
-64 KiB chunks (`cdrChunkSize`), then Sluice streams back the sanitized
-bytes plus a threat report (`cdr.go:47-62`, `376-459`). A single Sanitize
-call is bounded by a 35-second client-side deadline (`cdrDefaultTimeout`,
-`cdr.go:53`) and files above 50 MiB (or a lower Sluice-advertised
-per-profile cap) are rejected before any bytes cross the wire
-(`cdrMaxFileSize`, `cdr.go:61`; `cdr_proxy.go:248-265`).
+64 KiB chunks by default (`cdrChunkSize`, `cdr.go:47-62`, `376-459`) —
+overridable via `cdr.chunk_size_kb` in `config.yaml` (16–3072, YAML-only,
+no CLI flag; `config.go:382-384`, `620-622`) — then Sluice streams back
+the sanitized bytes plus a threat report. A single Sanitize call is
+bounded by a 35-second client-side deadline by default
+(`cdrDefaultTimeout`, `cdr.go:53`), overridable via `cdr.timeout_sec` in
+`config.yaml` or `-cdr-timeout-sec` on the CLI (must be `>= 30`, Sluice's
+own cap; `config.go:373-376`, `614-615`; `main.go:351`). Files above
+50 MiB (or a lower Sluice-advertised per-profile cap) are rejected before
+any bytes cross the wire (`cdrMaxFileSize`, `cdr.go:61`;
+`cdr_proxy.go:248-265`) — subject to the scan-window-prefix caveat in
+[Known limitations](#known-limitations-read-before-enabling-in-production).
 
 Culvert can enroll **multiple** Sluice instances. Each becomes a
 `cdrPooledClient` with its own gRPC connection and its own circuit
@@ -236,9 +253,12 @@ request, mirroring the syntax of ordinary Access Rules
 - **Schedule**: the same `PolicySchedule` type used by Access Rules.
 - **Action**: `profileName` (must match a profile Sluice's `Health`
   response advertises) and `mode` — `ENFORCE` (strip and forward
-  sanitized bytes), `REPORT_ONLY` (detect only, deliver the original
-  bytes), or `BYPASS_WITH_REPORT` (VIP carve-out: report threats but
-  still deliver the original) (`cdrpolicy.go:60-64`, `91-115`).
+  sanitized bytes — see the Content-Length caveat under
+  [Known limitations](#known-limitations-read-before-enabling-in-production)
+  if the sanitized size differs from the original), `REPORT_ONLY` (detect
+  only, deliver the original bytes), or `BYPASS_WITH_REPORT` (VIP
+  carve-out: report threats but still deliver the original)
+  (`cdrpolicy.go:60-64`, `91-115`).
 
 Rules are evaluated first-match by descending `priority`; an unmatched
 request falls through to the config's `default_profile` /
@@ -246,7 +266,12 @@ request falls through to the config's `default_profile` /
 used by `DELETE ?name=`, so duplicate or empty names put the store into
 a **degraded** state (reported via `integrity.ok` on `GET
 /api/cdr/policies`) in which new rules can't be added until the operator
-repairs the store by position (`cdrpolicy.go:167-246`, `280-311`).
+repairs it. `DELETE ?name=` cannot identify the affected rule once names
+collide or are empty, so the repair path is positional instead:
+`DELETE /api/cdr/policies?position=N&name=<verbatim name at that
+position>` — the verbatim name is a fence against removing the wrong
+entry if the store changed since it was listed (`cdrpolicy.go:167-246`,
+`280-311`; `cdr_ui.go:833-851`).
 
 ## Fail-open vs fail-closed behavior
 
@@ -317,6 +342,7 @@ states this drives (`enabled-healthy`, `enabled-degraded`,
 | GET | `/api/cdr/policies` | viewer | List CDR policy rules |
 | POST | `/api/cdr/policies` | admin | Add a CDR policy rule |
 | DELETE | `/api/cdr/policies?name=` | admin | Remove a CDR policy rule |
+| DELETE | `/api/cdr/policies?position=N&name=` | admin | Degraded-store repair: remove the rule at position `N`, fenced on its verbatim name |
 | GET | `/api/cdr/health` | viewer | Cached (or on-demand) Sluice `Health` result |
 | POST | `/api/cdr/test` | admin | Run an uploaded file through Sluice in REPORT_ONLY mode |
 
