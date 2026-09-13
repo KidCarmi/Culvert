@@ -2234,7 +2234,7 @@ usability.
 | The coherence gate is structural, and the behavioural one is labelled as a control | `TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation` proves liveness only — no deadlock, row not emptied. It is NOT the coherence gate: `mcpToolTrustReconcile` also takes `deriveMu`, so the PRE-FIX shape blocks identically. Measured, not assumed — the first version of it was written as the proof and PASSED against the reintroduced defect. The structural wall was verified to discriminate ("the resolver reads the inventory directly 2 time(s)") |
 | The read-path seams cannot be half-wired | `installToolTrustReadHooks` / `clearToolTrustReadHooks` install and clear BOTH seams together. Installing only the reconcile hook leaves the coherent seam at its fail-closed default, which does not error — it silently makes this row unsatisfiable. Test wiring mirrors production by calling these rather than assigning the vars |
 | An interrupted campaign restores its mutation | The harness records the file under mutation before the first edit and clears it after the revert, with an EXIT/INT/TERM trap restoring whatever is still recorded (Codex P2 round 8). Verified by killing a live run mid-mutation and watching the file come back clean. SIGKILL cannot be trapped, so the residual is bounded by the pre-existing dirty-tree refusal: a stranded mutation stops the NEXT run rather than being silently re-measured |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 26 mutations, 26 caught, 0 survived, 0 skipped |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 28 mutations, 28 caught, 0 survived, 0 skipped |
 
 **What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
 run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
@@ -2259,8 +2259,8 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores **26 caught, 0 survived, 0 skipped** on the closing head. M15 through
-M26 were added later, for the twelve defects adversarial review found on the PR itself (passive
+The repaired campaign scores **28 caught, 0 survived, 0 skipped** on the closing head. M15 through
+M28 were added later, for the fourteen defects adversarial review found on the PR itself (passive
 expiry; a decision straddling two snapshots; the registry repin window; a guard this ledger had
 wrongly written off as unreachable; a snapshot capture that left the derivation section; and a
 capture that unlocks before it captures) — all real, and none reachable by the twelve cases the
@@ -2300,7 +2300,27 @@ nonetheless right, and the engine's SECOND quarantine arm demonstrates it exactl
 `DriftPrivilegeExpansion` quarantines under `ReasonToolPrivilegeExpansion`, which the old assertion
 accepted (`ok`) and the new one refuses (`Got action=QUARANTINE reason=MCP.TOOL.PRIVILEGE_EXPANSION`).
 
-**Seven instances across four rounds, one defect.** The AST walls pinned a key name, a call count, a
+**Round 13 found the assumption UNDER the round-12 fix, which is the sharpest turn of the sweep.**
+The all-false gate is sound only if every accessor is a plain positive field read; without that,
+all-false is merely a THIRD vertex, and
+`f.ToolCatalogUsable || (!f.LiveExecutorComposed && !f.UpstreamCallerPresent && f.PolicyHealthy)`
+agrees at all-true, at every single-false and at all-false while suppressing the reason on a
+partially composed node with healthy policy. 2^23 combinations is not enumerable and any hand-picked
+subset is another proxy, so `TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact` asserts the
+accessor SHAPE — a single `return f.<Field>` — making the property true BY CONSTRUCTION instead of
+sampled. The same round closed the preflight fixture's remaining three axes (`ServerUsable`,
+`FingerprintCurrent`, `Budget` were still zero-valued, so `in.ToolCatalogUsable || in.ServerUsable`
+passed), with anti-vacuity checks that the other inputs really are valid. M27/M28.
+
+**And the round's P3 is the one to keep.** The test comment written in the round-12 fix still
+recorded `policy.DispReviewRequired` as a measured alternate quarantine — the very mutation that
+round had just established does NOT reproduce. The ledger and the review thread were corrected and
+the EXECUTABLE GATE was left carrying a false provenance claim, where the next maintainer would read
+it. *A gate whose comment names a mutation that proves nothing has a false provenance claim: the
+same defect as a gate asserting a proxy, one level up, in the documentation of the fix rather than
+the fix.* Corrected in place, naming the reproducing case and why the proposed one does not.
+
+**Nine instances across five rounds, one defect.** The AST walls pinned a key name, a call count, a
 callee's syntax and a method name; the behavioural gates pinned a fixture that could only vary one
 way, an input the fixture never supplied, and one reason standing in for an action. A wall that pins something CORRELATED with the
 invariant — a key name, a call count, a callee's syntax, a method name — rather than the invariant.
