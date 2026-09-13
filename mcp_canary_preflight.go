@@ -641,12 +641,33 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 	if len(scope.Tools) == 0 || len(scope.Tenants) == 0 {
 		return false
 	}
+	// Materialize current trust into the catalog BEFORE reading it. Expiry is PASSIVE: a
+	// grant past its ExpiresAt leaves its tool catalog.Usable until reconcile() runs, and
+	// that is a 30-second tick (mcpToolTrustReconcileInterval), so reading the catalog
+	// directly answers "usable" for trust that has already lapsed — the fail-OPEN direction,
+	// and the one this whole row exists to prevent. Revocation demotes inline and needs no
+	// help; expiry does. shadowScopeHasUsableTool already reconciles for exactly this reason
+	// (ADR-0034 D7), and an activation gate must not be weaker than the Shadow gate it
+	// follows (Codex P2, PR #1378).
+	//
+	// It is safe on a READ path because it is ONE-DIRECTIONAL: reconcile withdraws lapsed
+	// trust and re-affirms exact-match active trust, and can never make a tool Usable that
+	// the governed lifecycle had not already promoted — so this is not a promotion path and
+	// the §8 wall still holds. Pinned by TestCatalogUsable_ReconcilingToReadNeverPromotes.
+	//
+	// LOCK ORDER: the transition-commit call site holds the rollout coordinator's durableMu,
+	// so this adds durableMu → deriveMu. There is no cycle: nothing reachable under deriveMu
+	// touches the rollout coordinator (reconcile reads the trust store and mutates the
+	// catalog, neither of which calls back), and deriveMu remains outside every store/catalog
+	// lock. A no-op when the coordinator is not composed.
+	mcpToolTrustReconcile()
 	reg, cat := mcpInventory.sharedInventory()
 	if reg == nil || cat == nil {
 		return false
 	}
-	// ONE catalog snapshot for the whole decision: every tool is judged against the same
-	// published state, so a concurrent re-ingest cannot make the verdict internally inconsistent.
+	// ONE catalog snapshot for the whole decision, taken AFTER the reconcile: every tool is
+	// judged against the same published state, so a concurrent re-ingest cannot make the
+	// verdict internally inconsistent.
 	snap := cat.Current()
 	for _, tenant := range scope.Tenants {
 		for i := range scope.Tools {

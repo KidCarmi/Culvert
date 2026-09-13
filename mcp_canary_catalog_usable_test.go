@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +43,10 @@ type usableRig struct {
 	serverID string
 	toolName string
 	fpHex    string
+	// now is the injected coordinator clock. It is a pointer so a test can advance time
+	// across a grant's expiry WITHOUT triggering the periodic reconcile — which is the
+	// exact window the expiry gate below exercises.
+	now *atomic.Int64
 }
 
 func newUsableRig(t *testing.T) usableRig {
@@ -53,10 +58,17 @@ func newUsableRig(t *testing.T) usableRig {
 	// after a seeding test — a failure whose appearance depends only on -run filtering and
 	// -shuffle ordering. This file restores what it found.
 	restoreMCPInventory(t)
-	composeToolTrust(t, func() time.Time { return time.Unix(1_700_000_000, 0) })
+	now := &atomic.Int64{}
+	now.Store(1_700_000_000)
+	composeToolTrust(t, func() time.Time { return time.Unix(now.Load(), 0) })
 	_, cat, serverID, toolName, fpHex := seedToolTrustInventory(t)
-	return usableRig{cat: cat, serverID: serverID, toolName: toolName, fpHex: fpHex}
+	return usableRig{cat: cat, serverID: serverID, toolName: toolName, fpHex: fpHex, now: now}
 }
+
+// advance moves the injected coordinator clock forward. It deliberately does NOT reconcile:
+// the point of the gate that uses it is that a caller must not depend on the periodic tick
+// having run.
+func (r usableRig) advance(d time.Duration) { r.now.Add(int64(d / time.Second)) }
 
 // restoreMCPInventory snapshots the published inventory and re-publishes it verbatim when the
 // test ends, so a seeding test is hermetic with respect to the package's process globals.
@@ -427,6 +439,63 @@ func TestCatalogUsable_RevokingOneOfTwoPromotionsStaysUsable(t *testing.T) {
 	}
 	if !canaryScopedToolsCatalogUsable(r.scope()) {
 		t.Fatal("CONTROL: the usability fact must survive while any valid promotion remains")
+	}
+}
+
+// ── 10b. an EXPIRED promotion does not survive to the next reconcile tick ────
+//
+// Codex P2 on PR #1378, and a real gap in this file's own §7 coverage: case 9 proved a
+// REVOKED promotion demotes, but revoke calls into the coordinator and demotes inline,
+// whereas EXPIRY is passive. A grant past its `ExpiresAt` leaves the catalog record
+// `Usable` until `reconcile()` materializes the expiry, and that runs on a 30-second
+// tick. Read the catalog directly in that window and an already-expired promotion
+// answers "usable" — the fail-OPEN direction, on trust that has lapsed.
+//
+// `shadowScopeHasUsableTool` already solved this for the Shadow preflight by reconciling
+// before it reads, on the rule ADR-0034 D7 states: reconcile never widens usability, it
+// only withdraws expired trust and re-affirms exact-match active trust. This gate holds
+// the activation resolver to the same rule, and does it WITHOUT calling reconcile itself
+// — so it fails against a resolver that leans on the periodic tick.
+
+func TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick(t *testing.T) {
+	r := newUsableRig(t)
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("CONTROL: an unexpired promotion must satisfy the fact, or this gate proves nothing")
+	}
+
+	// Cross the grant's expiry. Nothing reconciles: the periodic tick has not run, which is
+	// precisely the window a caller must not be able to read through.
+	r.advance(2 * time.Hour)
+
+	if canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("SECURITY: an EXPIRED promotion must not satisfy the activation fact just " +
+			"because the periodic reconcile has not run yet — the resolver must reconcile " +
+			"before it reads, exactly as shadowScopeHasUsableTool does")
+	}
+}
+
+// ── 10c. reconciling to read never WIDENS usability ──────────────────────────
+//
+// The control for the gate above. Reconciling before the read is only safe because it is
+// one-directional: it withdraws lapsed trust and re-affirms exact-match active trust, and
+// can never turn a tool that was not usable into one that is. A resolver that reconciled
+// itself into a promotion would be a promotion path on the activation read path — the
+// thing §8 and the structural wall exist to forbid.
+
+func TestCatalogUsable_ReconcilingToReadNeverPromotes(t *testing.T) {
+	r := newUsableRig(t)
+	if got := r.eligibility(t); got != catalog.Quarantined {
+		t.Fatalf("premise: the seeded tool must be Quarantined, got %v", got)
+	}
+	for i := 0; i < 3; i++ {
+		if canaryScopedToolsCatalogUsable(r.scope()) {
+			t.Fatal("SECURITY: reading the fact must never promote — no number of reads may " +
+				"turn a Quarantined tool into a Usable one")
+		}
+	}
+	if got := r.eligibility(t); got != catalog.Quarantined {
+		t.Fatalf("SECURITY: the tool must still be Quarantined after repeated reads, got %v", got)
 	}
 }
 

@@ -25,6 +25,7 @@
 #   M12  a live_execution approval promotes to catalog.Usable (authority collapse)
 #   M13  the digest stops folding the fingerprint FORMAT version
 #   M14  a data-plane file gains a promotion call (structural wall)
+#   M15  the resolver reads the catalog without materializing expiry first
 #
 # A COMPILE FAILURE IS NOT PROOF unless the mutation targets a structural wall whose stated
 # purpose is compile-time prevention (those declare --compile-wall).
@@ -262,6 +263,16 @@ run_mutation M14 \
   'TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes' \
   . "$PREFLIGHT" \
   's/(func canaryScopedToolsCatalogUsable\(scope rollout\.ScopeSpec\) bool \{\n)/$1\tif false {\n\t\t_, c := mcpInventory.sharedInventory()\n\t\t_, _ = c.Promote(catalog.ToolKey{}, catalog.Fingerprint{})\n\t}\n/'
+
+# M15 — EXPIRY IS PASSIVE, so a read that does not reconcile first answers "usable" for a grant
+# that has already lapsed. Revocation demotes inline and hides this; only expiry exposes it.
+# (Codex P2, PR #1378 — a real finding, not a hypothetical: the gate below was written against the
+# defect and verified failing before the fix.)
+run_mutation M15 \
+  'the resolver reads the catalog without materializing expiry first' \
+  'TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick' \
+  . "$PREFLIGHT" \
+  's/\tmcpToolTrustReconcile\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)/\treg, cat := mcpInventory.sharedInventory()/'
 
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
