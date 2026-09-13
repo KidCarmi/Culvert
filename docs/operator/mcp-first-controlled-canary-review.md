@@ -1215,8 +1215,9 @@ before this work.
 
 **What this does NOT close.** A read-first-EXECUTABLE classification says nothing about whether a
 controlled upstream exists (blocker 1), the activation preflight can reach `Ready:true` (2), an
-operator can arm (3), the target is `catalog.Usable` (13), or the request resolves to an exact
-policy ALLOW with satisfiable obligations (14). Those remain open and untouched.
+operator can arm (3), the target is `catalog.Usable` (13 — **since CLOSED, §25b**), or the request
+resolves to an exact policy ALLOW with satisfiable obligations (14). Those remain open and untouched
+by THIS closure; blocker 13 was closed later, by its own PR and its own gates.
 
 **A SECOND, SEPARATE defect was closed in the same PR, and it is NOT part of this closure.** Codex
 round 2 found that the resolved SCOPE was never revalidated at the admission boundary — the same
@@ -2188,6 +2189,66 @@ while proving something other than what it claims.
 
 ---
 
+## §25b Blocker 13 closure (governed catalog usability as a First-Canary activation fact)
+
+This section records ONE status change: **blocker 13 is CLOSED**. Nothing else in the ledger moves.
+Blocker 8 remains OPEN (narrowed), blocker 14 remains OPEN, the baseline is still fifteen, and the
+§26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY TARGET`.
+
+**The defect.** `seedTools` lands every ingested tool `catalog.Quarantined`, and the policy engine
+hard-overrides a `DispQuarantined` tool to `ActionQuarantine` BEFORE any operator rule is consulted.
+Nothing in the activation preflight said so. A node could hold a valid four-eyes live approval, a
+reviewed target, an exact one-of-everything scope and a read-first classification, report
+`Ready:true`, and then have every single request die at that override. That is the worst shape a
+readiness verdict can take: not a wrong answer to a question that was asked, but a green light for
+an experiment nobody had asked the deciding question about.
+
+**The closure bar.** The machine — not a runbook, not an operator attestation — must refuse to
+report an activation ready when the exact scoped tool is not `catalog.Usable` at the exact
+fingerprint the activation binds, and it must do so without inventing a second authority over
+usability.
+
+| Clause | Evidence |
+|---|---|
+| A machine-visible activation fact, not a runbook step | `canary.Facts.ToolCatalogUsable` / `canary.ReasonToolNotCatalogUsable`, an `factActivation` row in the one readiness table. `TestCatalogUsable_ProductionPreflightCarriesTheRow` drives the whole production path — `productionCanaryActivationInputs` → `evaluateCanaryActivationPreflight` → the table — and requires the reason present for a Quarantined tool and absent after a governed promotion |
+| THE EXACT CURRENT SCOPED TARGET, never general catalog health | `ReasonCatalogUnhealthy` already answers "is the catalog readable". This answers "did THIS ONE governed target pass the trust lifecycle": a perfectly healthy catalog whose record for the scoped tool is Quarantined satisfies the first and fails this one (`TestCatalogUsable_SeededToolIsQuarantinedAndNotUsable`) |
+| Fingerprint-bound: F2 inherits nothing from F1 | `TestCatalogUsable_F2DoesNotInheritF1Usability` (the sticky Quarantined floor half) and `TestCatalogUsable_UsableRecordDoesNotSatisfyAScopePinnedElsewhere` (the other half — a genuinely Usable record whose digest is not the pinned one), so neither guard can hide behind the other |
+| Format-bound | Not by a second comparison, which against the same record would be a self-comparison no test could distinguish. `catalog.Fingerprint.Sum` writes `FormatVersion` before any other segment, so the digest comparison is format-bound by construction; the property is pinned directly by `TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest` |
+| Tenant-bound | `TestCatalogUsable_TenantThatDoesNotOwnTheServerIsNotUsable` — ownership is resolved from the REGISTRY through `loadTarget`, an independent source from the catalog record |
+| NO SECOND TRUST AUTHORITY (§2/§3) | The governed `shadow_evaluation` lifecycle (`ApproveShadow` → `promoteFor` → `catalog.Promote`) remains the only writer. `ApproveLive` still deliberately promotes nothing: `TestCatalogUsable_LiveApprovalAloneNeverPromotes`, with `TestCatalogUsable_ExactShadowApprovalPromotes` as its positive control and `TestCatalogUsable_ShadowAndLiveAreIndependentFacts` proving the two are separately satisfiable rather than one standing in for the other |
+| NO DATA-PLANE PROMOTION (§8), anti-vacuously | `TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes` is an AST wall by CALLER: every `catalog.Promote`/`Demote` reference in the root package must live in `mcp_tooltrust.go`. It additionally asserts the governed path IS still visible to the test, so a wall that found zero callers because the promotion lifecycle had been deleted fails instead of passing |
+| Blocker 7 is not bypassed (§6) | `TestCatalogUsable_UsableF2StillRefusedByAnF1ReviewedActivation` — a freshly promoted, live-approved F2 does NOT match an activation whose immutable reviewed snapshot binds F1. Usability is LIVE governance state and is deliberately never copied into that snapshot; F2 requires a new activation generation |
+| Revocation and expiry (§7) | `TestCatalogUsable_RevokingLastPromotionDemotes` (the last valid promotion going away demotes) paired with `TestCatalogUsable_RevokingOneOfTwoPromotionsStaysUsable` (another valid authority still qualifies, so the tool stays Usable) — the two directions of the same rule, each the other's control |
+| Restart durability without a second ledger (§9) | Usability is a PROJECTION of the durable tool-trust store, re-derived by the coordinator's reconcile. `TestCatalogUsable_RestartDoesNotResurrectStaleUsability` — a revoked promotion stays demoted across the reconcile a restart performs. No catalog-usability ledger was added |
+| TOCTOU: a preflight verdict is about its own instant | `TestCatalogUsable_WithdrawnAfterPreflightStillHardQuarantines` — a promotion withdrawn after a Ready verdict makes the fact false on re-observation (it is never cached), and the runtime consequence is delivered by the EXISTING policy hard-override, so closing this blocker did not move enforcement out of the policy engine |
+| Why it matters, end to end | `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion` — same policy, same rule, same request; the only variable is the governed catalog disposition. Before: `ActionQuarantine` / `MCP.TOOL.UNKNOWN`, no rule consulted. After: ordinary evaluation is reached |
+| Fail-closed on the degenerate inputs | `TestCatalogUsable_EmptyScopeIsNotVacuouslyUsable` (a scope admitting no tool must not satisfy a fact about its tools) and `TestCatalogUsable_AbsentInventoryFailsClosed` (the condition under which nothing is known about the tool is the condition under which the fact must not be claimed) |
+| The fact reaches every activation call site | `TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall` — an AST wall requiring every field of `canaryActivationInputs` to be forwarded at every `CanaryActivationInput` literal in `mcp_rollout.go` (the transition commit and the restart reconcile). It is deliberately WIDER than blocker 13: dropping any activation fact at a commit site is the same defect. It is structural because no behavioural test can reach either site in this build — the live tier is never armed, so the commit refuses at an earlier gate and a dropped field is invisible |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — CAMPAIGN_RESULT |
+
+**Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
+policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
+decision with satisfiable obligations is **blocker 14**, which remains OPEN. Reaching evaluation is
+a precondition for it, not a substitute: `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion`
+asserts only that the catalog-quarantine hard override stops pre-empting evaluation, never that a
+rule allows.
+
+**Two things this closure deliberately did not do.** It did not introduce a third promotion
+authority — §3's instruction was to reuse the governed `shadow_evaluation` lifecycle if it could
+safely serve this role, and re-derivation showed it already does: it is exact-fingerprint CAS-guarded
+against a rug-pull, it demotes on revocation, and its reconcile re-derives from the durable store, so
+the only thing missing was that the activation gate never asked. And it did not persist usability
+into the activation's immutable reviewed snapshot: a revoked or expired promotion must be able to
+make a node un-ready, which a frozen copy could not express.
+
+**One thing the work removed rather than added.** The first shape of the resolver cross-checked the
+catalog record's digest and format against `loadTarget`'s re-read of the same record. Both sides
+come from the same catalog, so no test could ever distinguish the check from its absence — a
+guard whose failure mode is silent rot. It was deleted and the property it was reaching for
+(`Sum` folds `FormatVersion` in) is pinned directly instead, where the reason is written down.
+
+---
+
 ## §26 Final verdict
 
 ### `FIRST CONTROLLED CANARY REVIEW: BLOCKED — NO SAFE FIRST CANARY TARGET`
@@ -2480,7 +2541,9 @@ experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no exp
 execute — nothing is reachable (1), the activation preflight cannot go Ready (2), no operator can arm
 (3), no admissible one-tool operation exists (4), the seeded tool is catalog-quarantined and hard-denied
 before any rule runs (13), and no operator-reachable path even transitions the node into Canary mode
-(12). Blockers 5–12, 14 and 15 are unmet *prerequisites*/defects, not a live
+(12). (Blockers 4 and 13 have since been CLOSED — §25a, §25b — which changes which of these reasons
+still bites, not the verdict: 1, 2 and 3 alone still mean no experiment can execute.) Blockers 5–12,
+14 and 15 are unmet *prerequisites*/defects, not a live
 unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA (blocker 11
 adds that even a reachable+usable target would carry a fingerprint bound to operator-declared JSON, not
 the observed peer). So the
