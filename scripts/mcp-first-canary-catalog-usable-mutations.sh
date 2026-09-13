@@ -340,6 +340,22 @@ run_mutation M18 \
   . "$PREFLIGHT" \
   's/\t\t\tif !srv\.Usable\(\) \{\n\t\t\t\treturn false\n\t\t\t\}\n//'
 
+# M19 — THE SNAPSHOT CAPTURE LEAVES THE DERIVATION SECTION. Reconciling and THEN reading is not
+# equivalent to doing both under one deriveMu hold. Revoke holds that lock across store.Revoke AND
+# the catalog demotion so the pair moves together; a reader that reconciles, releases, and only then
+# reads cat.Current() can be scheduled into the middle of that section and observe a durably-revoked
+# approval whose tool is still catalog.Usable — every other check passes and the row is reported met.
+#
+# The gate is STRUCTURAL because a behavioural one does not discriminate here: mcpToolTrustReconcile
+# also takes deriveMu, so the pre-fix shape blocks on the lock exactly as the fixed one does (that
+# was measured, not assumed — the first version of the behavioural test passed against the defect).
+# (Codex P2 round 8, PR #1378.)
+run_mutation M19 \
+  'the resolver reconciles, releases the derivation lock, then reads the snapshots' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$PREFLIGHT" \
+  's/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)\n\tif !ok \{\n\t\treturn false\n\t\}/\tmcpToolTrustReconcile()\n\treg, cat := mcpInventory.sharedInventory()\n\tif reg == nil || cat == nil {\n\t\treturn false\n\t}\n\tsnap := cat.Current()\n\tservers := reg.Current()/'
+
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ "$SKIPPED" -gt 0 ]; then

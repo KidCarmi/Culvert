@@ -662,9 +662,23 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 	// touches the rollout coordinator (reconcile reads the trust store and mutates the
 	// catalog, neither of which calls back), and deriveMu remains outside every store/catalog
 	// lock. A no-op when the coordinator is not composed.
-	mcpToolTrustReconcile()
-	reg, cat := mcpInventory.sharedInventory()
-	if reg == nil || cat == nil {
+	//
+	// COHERENCE WITH THE TRUST STORE. Reconciling and THEN reading is not equivalent to doing
+	// both under one lock, and the difference is a fail-open (Codex P2 round 8, PR #1378).
+	// Revoke holds deriveMu across store.Revoke AND the catalog demotion precisely so the pair
+	// moves together; a reader that reconciles, RELEASES deriveMu, and only then reads
+	// cat.Current() can be scheduled into the middle of that section and observe the
+	// durably-revoked store with its tool still catalog.Usable. Every check below would then
+	// pass and this row would report met for an approval that no longer exists. So the
+	// reconcile and BOTH snapshot captures happen under ONE hold (reconcileAndSnapshot).
+	//
+	// This is the same class as the repin window below, in the other pair: two publications
+	// that a reader can land between. The registry/catalog pair cannot be closed by locking —
+	// the inconsistency is in the published state — so it is DETECTED; the trust-store/catalog
+	// pair CAN be, because one writer owns both halves under one lock, so it is PREVENTED.
+	// Which remedy applies depends on whether a single writer owns the pair.
+	snap, servers, ok := mcpToolTrustReconcileSnapshotFor()
+	if !ok {
 		return false
 	}
 	// EXACTLY ONE SNAPSHOT OF EACH SOURCE for the whole decision, both taken AFTER the
@@ -685,8 +699,6 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 	// The root cause is the second read, so the second read is gone rather than guarded: the
 	// registry snapshot answers ownership directly. A cross-check between two reads would only
 	// DETECT the inconsistency; taking one read cannot produce it.
-	snap := cat.Current()
-	servers := reg.Current()
 	for _, tenant := range scope.Tenants {
 		for i := range scope.Tools {
 			st := scope.Tools[i]
@@ -764,4 +776,19 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 		}
 	}
 	return true
+}
+
+// mcpToolTrustReconcileSnapshotFor adapts the coordinator seam to the resolver's argument order
+// (catalog first, registry second) and fails CLOSED when the coordinator is not composed.
+//
+// Not composed means no store, so nothing can ever have been promoted and every record is still at
+// its seeded Quarantined floor — the row could only be unmet anyway. Returning false rather than
+// falling back to an uncoordinated read keeps ONE path into this decision, so the coherence
+// argument above cannot be bypassed by a future caller taking the other branch.
+func mcpToolTrustReconcileSnapshotFor() (*catalog.Snapshot, *registry.Snapshot, bool) {
+	reg, cat, ok := mcpToolTrustReconcileSnapshot()
+	if !ok {
+		return nil, nil, false
+	}
+	return cat, reg, true
 }

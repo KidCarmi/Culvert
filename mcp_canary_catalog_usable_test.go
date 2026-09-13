@@ -638,6 +638,15 @@ func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
 		if !ok {
 			return true
 		}
+		// The coherent capture is a package-level call — an Ident, not a SelectorExpr — so it must
+		// be matched separately. Counting only selectors silently scored it zero, which is the
+		// wall reporting a violation that did not exist.
+		if id, ok := call.Fun.(*ast.Ident); ok {
+			if id.Name == "mcpToolTrustReconcileSnapshotFor" {
+				counts["mcpToolTrustReconcileSnapshotFor"]++
+			}
+			return true
+		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
 			return true
@@ -661,13 +670,64 @@ func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
 			"snapshots and a mid-scan republish could pair an old Usable record with new "+
 			"ownership", n)
 	}
-	if n := counts["cat.Current"]; n != 1 {
-		t.Fatalf("SECURITY: the resolver reads cat.Current() %d time(s), want exactly 1 — "+
-			"every check must be derived from ONE catalog snapshot", n)
+	// The reads MOVED (Codex P2 round 8): they now happen inside the coordinator's
+	// reconcileAndSnapshot, under one hold of deriveMu, so the capture cannot straddle another
+	// writer's critical section. The invariant is unchanged — exactly one read of each source per
+	// decision — so the wall follows it into both functions rather than being relaxed.
+	if n := counts["cat.Current"] + counts["reg.Current"]; n != 0 {
+		t.Fatalf("SECURITY: the resolver reads the inventory directly %d time(s). Both snapshots "+
+			"must come from the ONE coherent capture (mcpToolTrustReconcileSnapshot), or the read "+
+			"can land inside Revoke's critical section and see a revoked approval still Usable", n)
 	}
-	if n := counts["reg.Current"]; n != 1 {
-		t.Fatalf("SECURITY: the resolver reads reg.Current() %d time(s), want exactly 1 — "+
-			"every check must be derived from ONE registry snapshot", n)
+	if n := counts["mcpToolTrustReconcileSnapshotFor"]; n != 1 {
+		t.Fatalf("SECURITY: the resolver performs %d coherent captures, want exactly 1 — two "+
+			"captures are two derivation sections and the decision could straddle them", n)
+	}
+
+	// And the capture itself still reads each source exactly once, under the lock. Without this
+	// half the wall could be satisfied by a helper that re-reads internally.
+	var cap *ast.FuncDecl
+	tfset := token.NewFileSet()
+	tfile, err := parser.ParseFile(tfset, "mcp_tooltrust.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp_tooltrust.go: %v", err)
+	}
+	for _, d := range tfile.Decls {
+		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "reconcileAndSnapshot" {
+			cap = f
+			break
+		}
+	}
+	if cap == nil {
+		t.Fatal("wall is vacuous: reconcileAndSnapshot not found (it was renamed or moved)")
+	}
+	capCounts := map[string]int{}
+	ast.Inspect(cap, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if sel.Sel.Name == "Current" {
+				if id, ok := sel.X.(*ast.Ident); ok {
+					capCounts[id.Name+".Current"]++
+				}
+			}
+			if sel.Sel.Name == "Lock" {
+				capCounts["Lock"]++
+			}
+		}
+		return true
+	})
+	if capCounts["cat.Current"] != 1 || capCounts["reg.Current"] != 1 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot reads cat.Current()=%d reg.Current()=%d, want 1 "+
+			"and 1 — the coherent capture must take exactly one snapshot of each source",
+			capCounts["cat.Current"], capCounts["reg.Current"])
+	}
+	if capCounts["Lock"] != 1 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot takes %d locks, want exactly 1 (deriveMu). "+
+			"Without holding it across the capture the snapshots can straddle a writer's section",
+			capCounts["Lock"])
 	}
 }
 
@@ -1075,5 +1135,60 @@ func TestCatalogUsable_ServerUsabilityGuardIsPresent(t *testing.T) {
 			"landing between the reconcile and the registry read leaves the record Usable, the tenant " +
 			"owning, the digest matching and the identity pin UNCHANGED — so every other check passes " +
 			"and this was the only one rejecting it")
+	}
+}
+
+// TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation is a LIVENESS control for the
+// trust-store/catalog coherence fix (Codex P2 round 8, PR #1378). It is deliberately NOT claimed
+// as the defect gate, because it does not discriminate — measured, not assumed.
+//
+// I first wrote it as the behavioural proof, reasoning that holding deriveMu and requiring the
+// resolver not to answer would demonstrate the read is inside the critical section. It does not:
+// mcpToolTrustReconcile ALSO takes deriveMu, so the PRE-FIX shape (reconcile, release, then read)
+// blocks here too. Verified by reintroducing that shape — this test passed against it. A check
+// that cannot fail is worse than no check, so it says what it proves and no more.
+//
+// What it does prove is worth keeping: moving the capture inside the lock did not introduce a
+// deadlock, and did not empty the row — the resolver still answers TRUE for a coherent,
+// governed-promoted target once the lock is released. A preflight that hung would block every
+// Canary activation.
+//
+// The coherence property itself is pinned STRUCTURALLY by
+// TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce, which DOES discriminate: against the
+// pre-fix shape it reports "the resolver reads the inventory directly 2 time(s)". It also checks
+// that reconcileAndSnapshot takes exactly one lock and reads each source exactly once, so the
+// guarantee cannot be satisfied by a helper that re-reads internally.
+func TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation(t *testing.T) {
+	r := newUsableRig(t)
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("premise: a governed promotion must make the exact scoped tool usable")
+	}
+
+	mcpToolTrust.deriveMu.Lock()
+	answered := make(chan bool, 1)
+	go func() { answered <- canaryScopedToolsCatalogUsable(r.scope()) }()
+
+	select {
+	case got := <-answered:
+		mcpToolTrust.deriveMu.Unlock()
+		t.Fatalf("the resolver answered %v while a writer held deriveMu — it reached neither the "+
+			"reconcile nor the coherent capture, so it is consulting trust state without taking "+
+			"the derivation lock at all", got)
+	case <-time.After(150 * time.Millisecond):
+		// Blocked on the lock, as BOTH the fixed and the pre-fix shapes are. This is why this
+		// test is a liveness control and not the coherence gate.
+	}
+
+	mcpToolTrust.deriveMu.Unlock()
+	select {
+	case got := <-answered:
+		if !got {
+			t.Fatal("CONTROL: once the lock is released the resolver must answer TRUE for a " +
+				"coherent, governed-promoted target — serializing the read must not empty the row")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the resolver never completed after deriveMu was released — it is deadlocked, " +
+			"which would hang every Canary activation preflight")
 	}
 }
