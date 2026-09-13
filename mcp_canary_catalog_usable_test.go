@@ -779,14 +779,7 @@ type captureShape struct {
 }
 
 func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
-	deferred := map[*ast.CallExpr]bool{}
-	ast.Inspect(fn, func(n ast.Node) bool {
-		if d, ok := n.(*ast.DeferStmt); ok && d.Call != nil {
-			deferred[d.Call] = true
-		}
-		return true
-	})
-
+	deferred := deferredCalls(fn)
 	var shape captureShape
 	ast.Inspect(fn, func(n ast.Node) bool {
 		switch n.(type) {
@@ -797,41 +790,61 @@ func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		switch sel.Sel.Name {
-		case "Current":
-			if id, ok := sel.X.(*ast.Ident); ok {
-				if id.Name == "cat" {
-					shape.catCurrent++
-					shape.catPos = call.Pos()
-				}
-				if id.Name == "reg" {
-					shape.regCurrent++
-					shape.regPos = call.Pos()
-				}
-			}
-		case "Lock":
-			if receiverFieldName(sel) == "deriveMu" {
-				shape.deriveLock++
-				shape.lockPos = call.Pos()
-			}
-		case "Unlock":
-			if receiverFieldName(sel) != "deriveMu" {
-				return true
-			}
-			if deferred[call] {
-				shape.deferredDeriveUnlock++
-				shape.deferPos = call.Pos()
-			} else {
-				shape.bareDeriveUnlock++
-			}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			shape.note(sel, call, deferred[call])
 		}
 		return true
 	})
 	return shape
+}
+
+// deferredCalls is the set of CallExprs that are the subject of a defer, so note can tell a
+// deferred unlock from a bare one. Collected in its own pass because ast.Inspect visits the
+// DeferStmt and its CallExpr separately.
+func deferredCalls(fn *ast.FuncDecl) map[*ast.CallExpr]bool {
+	out := map[*ast.CallExpr]bool{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if d, ok := n.(*ast.DeferStmt); ok && d.Call != nil {
+			out[d.Call] = true
+		}
+		return true
+	})
+	return out
+}
+
+// note records one selector call against the shape. Split out of inspectCaptureShape only to
+// keep that function under the cognitive-complexity bound; it is not independently meaningful.
+func (shape *captureShape) note(sel *ast.SelectorExpr, call *ast.CallExpr, isDeferred bool) {
+	switch sel.Sel.Name {
+	case "Current":
+		id, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return
+		}
+		if id.Name == "cat" {
+			shape.catCurrent++
+			shape.catPos = call.Pos()
+		}
+		if id.Name == "reg" {
+			shape.regCurrent++
+			shape.regPos = call.Pos()
+		}
+	case "Lock":
+		if receiverFieldName(sel) == "deriveMu" {
+			shape.deriveLock++
+			shape.lockPos = call.Pos()
+		}
+	case "Unlock":
+		if receiverFieldName(sel) != "deriveMu" {
+			return
+		}
+		if isDeferred {
+			shape.deferredDeriveUnlock++
+			shape.deferPos = call.Pos()
+		} else {
+			shape.bareDeriveUnlock++
+		}
+	}
 }
 
 // receiverFieldName names the field a method is called on — "deriveMu" for c.deriveMu.Lock().
