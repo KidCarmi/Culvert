@@ -708,6 +708,41 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 			if !sok || string(srv.OwnerScope) != tenant {
 				return false
 			}
+			// Defense-in-depth, and UNREACHABLE today — recorded rather than implied, because a
+			// check presented as load-bearing when it cannot fire is how a suite stops meaning
+			// what it claims. The reconcile above withdraws trust for a disabled server, so
+			// rec.Eligibility has already left catalog.Usable before the check above reads it;
+			// and Usable() is Enabled && VerifyVerified, while the registry's only transition
+			// into a mismatched verification (Registry.VerifyIdentity) clears Enabled in the
+			// same write — so no reachable state is !Usable() with Enabled still true.
+			// TestCatalogUsable_DisabledServerIsNotUsable measures that: it passes with and
+			// without this line. Kept because Usable() is the REGISTRY's own predicate, so a
+			// future !Usable state that does not clear Enabled would otherwise be accepted here
+			// silently, and the cost is one boolean on an admin-rate path.
+			if !srv.Usable() {
+				return false
+			}
+			// THE REPIN WINDOW. Registry.Repin and the catalog re-ingest that follows it are
+			// SEPARATE PUBLICATIONS, so between them the registry genuinely pins I2 while the
+			// catalog's record genuinely describes I1 — an inconsistency in the published state
+			// rather than in the reading of it. Taking one snapshot of each source (above) makes
+			// the decision internally consistent as a READ and cannot close this: no reader can
+			// read around a window that exists in the data. mcpToolTrust.loadTarget states that
+			// and answers it by DETECTING the pair; this row must do the same, with the same
+			// formula, or it reports met for a target whose requests the runtime then refuses as
+			// AnchorLost/RegistryPinDiverged (TestReviewedBinding_C18_RepinWindowIsDetectedAsDrift)
+			// — a Canary that activates and cannot execute (Codex P2 round 6, PR #1378).
+			//
+			// The reconcile above does not cover it: the active shadow grant still matches the
+			// OLD catalog record, so trust is re-affirmed and the record stays Usable.
+			//
+			// Identity is taken from the CATALOG RECORD, so it is atomic with the fingerprint
+			// checked above, and the registry's current pin is COMPARED against it rather than
+			// substituted for it. Both values come from the two snapshots already held, so this
+			// adds no read and the exactly-once invariant is unchanged.
+			if rec.Fingerprint.Identity != srv.PinnedIdentity {
+				return false
+			}
 		}
 	}
 	return true

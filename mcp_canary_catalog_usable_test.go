@@ -927,3 +927,95 @@ func mustSharedCatalog(t *testing.T) *catalog.Catalog {
 	}
 	return cat
 }
+
+// ---------------------------------------------------------------------------
+// Codex P2, round 6 (PR #1378): the repin window.
+//
+// Registry.Repin and the catalog re-ingest that follows it are SEPARATE publications, so
+// between them the registry pins I2 while the catalog record describes I1. That is an
+// inconsistency in the PUBLISHED STATE, not in the reading of it, so the round-2 fix — one
+// snapshot of each source — cannot close it: no reader can read around a window that exists
+// in the data. mcpToolTrust.loadTarget answers it by DETECTING the pair, and this row must
+// use the same formula or it reports met for a target whose requests the runtime refuses.
+// ---------------------------------------------------------------------------
+
+// TestCatalogUsable_RepinWindowIsNotUsable is the defect gate. It drives the real
+// Registry.Repin, leaving the catalog untouched, and requires the row to go unmet.
+func TestCatalogUsable_RepinWindowIsNotUsable(t *testing.T) {
+	r := newUsableRig(t)
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("premise: a governed promotion must make the exact scoped tool usable")
+	}
+
+	reg, _ := mcpInventory.sharedInventory()
+	if reg == nil {
+		t.Fatal("premise: a shared registry must be published")
+	}
+	if _, err := reg.Repin(registry.ServerID(r.serverID), registry.Identity("rotated"), time.Unix(r.now.Load(), 0)); err != nil {
+		t.Fatalf("repin: %v", err)
+	}
+
+	// The catalog record is untouched and still Usable — that is the whole point. If this
+	// premise ever stops holding, the gate is passing for the wrong reason.
+	if got := r.eligibility(t); got != catalog.Usable {
+		t.Fatalf("premise: the catalog record must still read Usable inside the window, got %v", got)
+	}
+	if canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("SECURITY: the row reported met inside the repin window. The registry now pins an " +
+			"identity the catalog record was not built against, so the runtime refuses these requests " +
+			"as AnchorLost/RegistryPinDiverged (C18) — the Canary would activate and be unable to execute")
+	}
+}
+
+// TestCatalogUsable_DisabledServerIsNotUsable pins the BEHAVIOUR that a server disabled in
+// the registry cannot satisfy the row. It is deliberately NOT claimed as a defect gate for the
+// srv.Usable() check, because it passes with or without it — measured, not assumed.
+//
+// The reason is the reconcile at the top of the resolver: it withdraws trust for a disabled
+// server, so rec.Eligibility has already left catalog.Usable by the time the eligibility check
+// reads it. srv.Usable() is therefore UNREACHABLE today, and the reason is structural rather
+// than lucky: Usable() is Enabled && VerifyVerified, and the registry's only transition into a
+// mismatched verification (VerifyIdentity) sets Enabled=false in the same write, so there is no
+// reachable !Usable-but-enabled state for the catalog to disagree about.
+//
+// It is kept as defense-in-depth anyway, with that fact recorded rather than implied: it costs
+// one boolean on an admin-rate path, and it is the registry's own predicate, so a future state
+// that is !Usable without clearing Enabled would otherwise be accepted silently. Saying so here
+// is the point — an unreachable check presented as load-bearing is how a suite stops meaning
+// what it claims, and this PR has already been wrong in BOTH directions on exactly that
+// question (a guard deleted as vacuous that was not, and a claim of checkability that was).
+func TestCatalogUsable_DisabledServerIsNotUsable(t *testing.T) {
+	r := newUsableRig(t)
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("premise: a governed promotion must make the exact scoped tool usable")
+	}
+
+	reg, _ := mcpInventory.sharedInventory()
+	if reg == nil {
+		t.Fatal("premise: a shared registry must be published")
+	}
+	if _, err := reg.SetEnabled(registry.ServerID(r.serverID), false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if got := r.eligibility(t); got != catalog.Usable {
+		t.Fatalf("premise: the catalog record must still read Usable before re-ingest, got %v", got)
+	}
+	if canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("SECURITY: the row reported met for a server the REGISTRY has disabled. " +
+			"rec.Eligibility is the catalog's last ingested opinion, not the registry's current one")
+	}
+}
+
+// TestCatalogUsable_CoherentPairStillUsable is the CONTROL. The cheapest way to pass both
+// gates above is to make the resolver refuse everything, which would silently delete the
+// capability this row exists to report. A coherent registry/catalog pair must still be met.
+func TestCatalogUsable_CoherentPairStillUsable(t *testing.T) {
+	r := newUsableRig(t)
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("CONTROL: a coherent, governed-promoted, same-identity, enabled target must be " +
+			"usable — the repin/disabled checks must narrow the row, never empty it")
+	}
+}

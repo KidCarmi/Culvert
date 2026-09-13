@@ -299,6 +299,21 @@ run_mutation M16 \
   's/\t\t\tsrv, sok := servers\.Get\(registry\.ServerID\(st\.Server\)\)\n\t\t\tif !sok \|\| string\(srv\.OwnerScope\) != tenant \{/\t\t\tti := mcpToolTrust.loadTarget(st.Server, st.Name)\n\t\t\tif !ti.found || ti.target.Tenant != tenant {/' \
   's/\tservers := reg\.Current\(\)\n//'
 
+# M17 — THE REPIN WINDOW IS NOT DETECTED. Registry.Repin and the catalog re-ingest that follows it
+# are SEPARATE publications, so between them the registry pins I2 while the catalog record describes
+# I1. Removing the comparison lets the row report met for a target whose requests the runtime then
+# refuses as AnchorLost/RegistryPinDiverged (C18) — a Canary that activates and cannot execute.
+#
+# Note what this mutation does NOT break: the single-snapshot invariant. The decision still reads
+# each source exactly once. That is the point — one read of each source is necessary and NOT
+# sufficient, because the inconsistency lives in the published state rather than in the reading of
+# it. (Codex P2 round 6, PR #1378.)
+run_mutation M17 \
+  'the resolver accepts a catalog record whose identity the registry no longer pins' \
+  'TestCatalogUsable_RepinWindowIsNotUsable' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif rec\.Fingerprint\.Identity != srv\.PinnedIdentity \{\n\t\t\t\treturn false\n\t\t\t\}\n//'
+
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ "$SKIPPED" -gt 0 ]; then
