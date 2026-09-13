@@ -28,6 +28,7 @@ func allTrueFacts() Facts {
 		LiveApprovalValid:            true,
 		ServerUsable:                 true,
 		ToolFingerprintCurrent:       true,
+		ToolCatalogUsable:            true,
 		RollbackPathHealthy:          true,
 		RollbackCoordinatorRehearsed: true,
 		BudgetConfigured:             true,
@@ -89,6 +90,7 @@ func TestEvaluate_EachFactIsIndependentlyLoadBearing(t *testing.T) {
 		{"LiveApprovalValid", ReasonLiveApprovalInvalid},
 		{"ServerUsable", ReasonServerNotUsable},
 		{"ToolFingerprintCurrent", ReasonToolFingerprintStale},
+		{"ToolCatalogUsable", ReasonToolNotCatalogUsable},
 		{"RollbackPathHealthy", ReasonRollbackPathUnhealthy},
 		{"RollbackCoordinatorRehearsed", ReasonRollbackCoordinatorRehearsalPending},
 		{"BudgetConfigured", ReasonBudgetNotConfigured},
@@ -134,7 +136,8 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 		"PolicyHealthy": ReasonPolicyUnhealthy, "EmergencyKillClear": ReasonEmergencyKillActive,
 		"KillBoundaryGuardPresent": ReasonKillBoundaryGuardAbsent, "ToolFreshnessGuardPresent": ReasonToolFreshnessGuardAbsent,
 		"LiveApprovalValid": ReasonLiveApprovalInvalid, "ServerUsable": ReasonServerNotUsable,
-		"ToolFingerprintCurrent": ReasonToolFingerprintStale, "RollbackPathHealthy": ReasonRollbackPathUnhealthy,
+		"ToolFingerprintCurrent": ReasonToolFingerprintStale, "ToolCatalogUsable": ReasonToolNotCatalogUsable,
+		"RollbackPathHealthy":          ReasonRollbackPathUnhealthy,
 		"RollbackCoordinatorRehearsed": ReasonRollbackCoordinatorRehearsalPending,
 		"BudgetConfigured":             ReasonBudgetNotConfigured,
 	}
@@ -165,19 +168,20 @@ func TestEvaluateNode_ExcludesActivationInputs(t *testing.T) {
 	activationReasons := map[Reason]bool{
 		ReasonScopeNotBounded: true, ReasonScopeNotReadFirst: true, ReasonScopeNotExactFirstCanary: true,
 		ReasonLiveApprovalInvalid: true, ReasonServerNotUsable: true, ReasonToolFingerprintStale: true,
-		ReasonBudgetNotConfigured: true,
+		ReasonToolNotCatalogUsable: true, ReasonBudgetNotConfigured: true,
 	}
-	// Node facts all true; the seven activation facts all false.
+	// Node facts all true; the eight activation facts all false.
 	f := allTrueFacts()
 	f.ScopeBounded, f.ScopeReadFirst, f.ScopeExactFirstCanary = false, false, false
 	f.LiveApprovalValid, f.ServerUsable = false, false
 	f.ToolFingerprintCurrent, f.BudgetConfigured = false, false
+	f.ToolCatalogUsable = false
 
 	node := EvaluateNode(f)
 	if !node.Ready || len(node.Unmet) != 0 {
 		t.Fatalf("node readiness must be Ready when every NODE fact holds regardless of activation inputs, got ready=%v unmet=%v", node.Ready, node.Unmet)
 	}
-	// The full verdict must surface exactly the seven activation reasons (nothing node-level).
+	// The full verdict must surface exactly the eight activation reasons (nothing node-level).
 	full := Evaluate(f)
 	if full.Ready {
 		t.Fatal("full readiness must not be ready with activation inputs unmet")

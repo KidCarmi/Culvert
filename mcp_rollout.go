@@ -393,6 +393,7 @@ func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg
 			Budget:             ai.Budget,
 			ServerUsable:       ai.ServerUsable,
 			FingerprintCurrent: ai.FingerprintCurrent,
+			ToolCatalogUsable:  ai.ToolCatalogUsable,
 			Now:                now,
 		})
 		if !rd.Ready {
@@ -629,7 +630,8 @@ func (r *mcpRollout) restore() {
 				rd := evaluateCanaryActivationPreflight(CanaryActivationInput{
 					Capability: st.Capability(), Scope: restored.Scope, ScopeRev: restored.ScopeRevision,
 					ToolApprovals: ai.ToolApprovals, Budget: ai.Budget,
-					ServerUsable: ai.ServerUsable, FingerprintCurrent: ai.FingerprintCurrent, Now: time.Now(),
+					ServerUsable: ai.ServerUsable, FingerprintCurrent: ai.FingerprintCurrent,
+					ToolCatalogUsable: ai.ToolCatalogUsable, Now: time.Now(),
 				})
 				if !rd.Ready {
 					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/hex"
+	"strings"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
+	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
+	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
 )
@@ -209,7 +213,11 @@ type CanaryActivationInput struct {
 	// pure w.r.t. inventory beyond the node scan).
 	ServerUsable       bool
 	FingerprintCurrent bool
-	Now                time.Time
+	// ToolCatalogUsable — every scoped tool is currently catalog.Usable at the exact
+	// fingerprint+format being bound (blocker #13). Resolved from authoritative inventory by
+	// canaryScopedToolsCatalogUsable, never supplied by a request.
+	ToolCatalogUsable bool
+	Now               time.Time
 }
 
 // evaluateCanaryNodeReadiness returns the scope-independent Canary node readiness verdict.
@@ -232,6 +240,7 @@ type canaryActivationInputs struct {
 	Budget             canary.Budget
 	ServerUsable       bool
 	FingerprintCurrent bool
+	ToolCatalogUsable  bool
 }
 
 // canaryActivationInputsProbe derives the authoritative activation-level inputs for a Canary
@@ -255,6 +264,10 @@ var canaryActivationInputsProbe = productionCanaryActivationInputs
 func productionCanaryActivationInputs(_ rollout.Capability, scope rollout.ScopeSpec, _ uint64) canaryActivationInputs {
 	return canaryActivationInputs{
 		ToolApprovals: buildLiveApprovalBindings(scope),
+		// Blocker #13: catalog usability is an ACTIVATION FACT, resolved here from the
+		// authoritative catalog rather than assumed by a runbook step. It is a pure read and
+		// promotes nothing — the governed shadow_evaluation lifecycle is the only writer.
+		ToolCatalogUsable: canaryScopedToolsCatalogUsable(scope),
 	}
 }
 
@@ -362,6 +375,7 @@ func evaluateActivationOnFacts(f canary.Facts, in CanaryActivationInput) canary.
 	f.LiveApprovalValid = canary.ValidateScopeApprovals(in.Scope, in.ToolApprovals, in.Now) == canary.ScopeApprovalOK
 	f.ServerUsable = in.ServerUsable
 	f.ToolFingerprintCurrent = in.FingerprintCurrent
+	f.ToolCatalogUsable = in.ToolCatalogUsable
 	f.BudgetConfigured = canary.ValidateBudget(in.Budget) == canary.BudgetOK
 	return canary.Evaluate(f)
 }
@@ -584,4 +598,77 @@ func firstCanaryScopeReasonStrings() []string {
 		out = append(out, string(r))
 	}
 	return out
+}
+
+// canaryScopedToolsCatalogUsable resolves the blocker-#13 activation fact: is EVERY (tenant × tool)
+// the scope admits currently `catalog.Usable` at the EXACT fingerprint and fingerprint FORMAT the
+// activation is binding?
+//
+// WHY THIS IS AN ACTIVATION FACT AND NOT A RUNBOOK STEP. Catalog usability is enforced by the
+// POLICY ENGINE, not here: a Quarantined tool is hard-overridden to ActionQuarantine before any
+// operator ALLOW rule is consulted. Without this fact a node could hold a valid live approval, a
+// valid reviewed target, an exact scope and a read-first class, report Ready:true, and then have
+// every request die at that override — readiness reported for an experiment that cannot execute a
+// single call.
+//
+// IT IS NOT CATALOG HEALTH. ReasonCatalogUnhealthy already answers "is the catalog readable"; this
+// answers "did THIS ONE governed target pass the trust lifecycle". A perfectly healthy catalog whose
+// record for the scoped tool is Quarantined satisfies the first and fails this one.
+//
+// IT PROMOTES NOTHING. This is a pure read on the request-free activation path. The only writer of
+// catalog.Usable is the governed shadow_evaluation lifecycle (ApproveShadow → promoteFor →
+// catalog.Promote) and its reconcile; a live_execution approval never reaches it (§15).
+//
+// EXACT-CURRENT BINDING (§5) comes from reading the CURRENT record and comparing three things:
+//
+//   - eligibility is exactly catalog.Usable — the sticky Quarantined floor means a republish to a
+//     new fingerprint re-enters review, so F2 can never inherit F1's usability;
+//   - the record's digest equals the scope's PINNED fingerprint, so a usable record for some other
+//     revision of the tool cannot satisfy a scope pinned to this one;
+//   - the record's fingerprint FORMAT VERSION equals the one the trust path observed for the same
+//     target. Format is part of the identity, not decoration: two records can carry the same digest
+//     under different format versions, and treating those as one target is the defect
+//     TestReadFirstClass_FingerprintFormatIsPartOfTheBinding pins one subsystem over.
+//
+// Fail-closed everywhere: an empty scope, absent inventory, a missing record, a tenant the scope
+// does not own, or any disagreement yields false, and the row stays unmet.
+func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
+	if len(scope.Tools) == 0 || len(scope.Tenants) == 0 {
+		return false
+	}
+	reg, cat := mcpInventory.sharedInventory()
+	if reg == nil || cat == nil {
+		return false
+	}
+	// ONE catalog snapshot for the whole decision: every tool is judged against the same
+	// published state, so a concurrent re-ingest cannot make the verdict internally inconsistent.
+	snap := cat.Current()
+	for _, tenant := range scope.Tenants {
+		for i := range scope.Tools {
+			st := scope.Tools[i]
+			rec, ok := snap.Get(catalog.ToolKey{Server: registry.ServerID(st.Server), Name: st.Name})
+			if !ok {
+				return false
+			}
+			if rec.Eligibility != catalog.Usable {
+				return false
+			}
+			sum := rec.Fingerprint.Sum()
+			if !strings.EqualFold(hex.EncodeToString(sum[:]), st.Fingerprint) {
+				return false
+			}
+			// The trust path's own observation of the same target. Requiring the two to agree on
+			// BOTH digest and format binds this fact to the identity the activation actually
+			// carries, rather than to whatever the catalog happens to say on its own.
+			ti := mcpToolTrust.loadTarget(st.Server, st.Name)
+			if !ti.found || ti.target.Tenant != tenant {
+				return false
+			}
+			if ti.target.Fingerprint != tooltrust.FingerprintDigest(sum) ||
+				ti.target.FingerprintFormatVersion != rec.Fingerprint.FormatVersion {
+				return false
+			}
+		}
+	}
+	return true
 }
