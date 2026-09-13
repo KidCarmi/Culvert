@@ -2234,7 +2234,7 @@ usability.
 | The coherence gate is structural, and the behavioural one is labelled as a control | `TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation` proves liveness only — no deadlock, row not emptied. It is NOT the coherence gate: `mcpToolTrustReconcile` also takes `deriveMu`, so the PRE-FIX shape blocks identically. Measured, not assumed — the first version of it was written as the proof and PASSED against the reintroduced defect. The structural wall was verified to discriminate ("the resolver reads the inventory directly 2 time(s)") |
 | The read-path seams cannot be half-wired | `installToolTrustReadHooks` / `clearToolTrustReadHooks` install and clear BOTH seams together. Installing only the reconcile hook leaves the coherent seam at its fail-closed default, which does not error — it silently makes this row unsatisfiable. Test wiring mirrors production by calling these rather than assigning the vars |
 | An interrupted campaign restores its mutation | The harness records the file under mutation before the first edit and clears it after the revert, with an EXIT/INT/TERM trap restoring whatever is still recorded (Codex P2 round 8). Verified by killing a live run mid-mutation and watching the file come back clean. SIGKILL cannot be trapped, so the residual is bounded by the pre-existing dirty-tree refusal: a stranded mutation stops the NEXT run rather than being silently re-measured |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 28 mutations, 28 caught, 0 survived, 0 skipped |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 30 mutations, 30 caught, 0 survived, 0 skipped |
 
 **What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
 run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
@@ -2259,8 +2259,8 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores **28 caught, 0 survived, 0 skipped** on the closing head. M15 through
-M28 were added later, for the fourteen defects adversarial review found on the PR itself (passive
+The repaired campaign scores **30 caught, 0 survived, 0 skipped** on the closing head. M15 through
+M30 were added later, for the fifteen defects adversarial review found on the PR itself (passive
 expiry; a decision straddling two snapshots; the registry repin window; a guard this ledger had
 wrongly written off as unreachable; a snapshot capture that left the derivation section; and a
 capture that unlocks before it captures) — all real, and none reachable by the twelve cases the
@@ -2320,7 +2320,24 @@ it. *A gate whose comment names a mutation that proves nothing has a false prove
 same defect as a gate asserting a proxy, one level up, in the documentation of the fix rather than
 the fix.* Corrected in place, naming the reproducing case and why the proposed one does not.
 
-**Nine instances across five rounds, one defect.** The AST walls pinned a key name, a call count, a
+**Round 14 found the THIRD level, and it is the one this sweep should be remembered for.** The
+coherence gate infers BEHAVIOUR — the captures are inside the critical section — from SYNTAX — one
+`deriveMu.Lock`, one deferred `Unlock`, one read of each source. That inference does not hold:
+reconciling, reading BOTH snapshots UNLOCKED, and only then taking `deriveMu` with a deferred unlock
+leaves every count unchanged (`ok, 0.104s`) while `Revoke` runs freely between the captures and the
+lock — the round-8 fail-open reopened from the side M20 never looked at. The gate now compares
+POSITIONS (the lock precedes both reads) and requires the capture to be STRAIGHT-LINE, since a read
+placed after the lock inside a closure or goroutine satisfies source order while a structural gate
+cannot prove when it runs. M29/M30, the second of which was found by asking the question of my own
+fix rather than waiting to be told.
+
+The same question was put to the OTHER structural gate and it survives with evidence:
+`TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact` infers "reads only its own fact" from the body
+shape, and the cheapest shape satisfying it while carrying a bug is a plain read of the WRONG field —
+which the single-flip tests catch. The two gates are complementary, not redundant: flips pin
+field-to-reason correspondence, the shape gate pins single-fact accessors.
+
+**Eleven instances across six rounds, one defect.** The AST walls pinned a key name, a call count, a
 callee's syntax and a method name; the behavioural gates pinned a fixture that could only vary one
 way, an input the fixture never supplied, and one reason standing in for an action. A wall that pins something CORRELATED with the
 invariant — a key name, a call count, a callee's syntax, a method name — rather than the invariant.
