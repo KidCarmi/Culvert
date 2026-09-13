@@ -401,6 +401,41 @@ run_mutation M20 \
   . "$TOOLTRUST" \
   's/\tc\.deriveMu\.Lock\(\)\n\tdefer c\.deriveMu\.Unlock\(\)\n\tc\.reconcileLocked\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)\n/\tc.deriveMu.Lock()\n\tc.reconcileLocked()\n\treg, cat := mcpInventory.sharedInventory()\n\tc.deriveMu.Unlock()\n/'
 
+# M21 — THE ACTIVATION FACT IS NAMED BUT NOT FORWARDED. The commit and restart call sites HAND-SPREAD
+# the probe result into a CanaryActivationInput, so a field can be present and carry something the
+# probe never resolved. `ToolCatalogUsable: true` type-checks, reads correctly at a glance, and lets
+# a quarantined tool through both preflights once the other facts hold. The wall used to record only
+# the KEYS in each literal, which is why this shape passed it. (Codex P2 round 11, PR #1378.)
+run_mutation M21 \
+  'an activation call site sets ToolCatalogUsable from a literal instead of the probe result' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' \
+  . "$ROLLOUT" \
+  's/ToolCatalogUsable: ai\.ToolCatalogUsable/ToolCatalogUsable: true/'
+
+# M22 — THE USABILITY VERDICT IS COMPUTED AND DISCARDED. Strictly weaker than M18's deletion and
+# strictly more plausible: the call is still there, so a reader — and a wall that looked only for a
+# selector named Usable — sees a guard. Nothing rejects, so a VerifyIdentity mismatch published after
+# the reconcile is accepted. Caught twice now: structurally (receiver + negation + `return false`)
+# and BEHAVIOURALLY, by driving the round-8 snapshot seam with a disabled server beside a still
+# Usable record — an interleaving round 7 called unreachable without a new production seam, which
+# stopped being true the moment round 8 added one. (Codex P2 round 11, PR #1378.)
+run_mutation M22 \
+  'the server-usability verdict is computed and thrown away instead of rejecting' \
+  'TestCatalogUsable_DisabledServerInTheRegistryWindowIsNotUsable' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif !srv\.Usable\(\) \{\n\t\t\t\treturn false\n\t\t\t\}\n/\t\t\t_ = srv.Usable()\n/'
+
+# M23 — THE DATA PLANE PROMOTES THROUGH A METHOD VALUE. M14 covers a direct c.Promote(...) call in a
+# request-path file; this is the same defect one indirection out. The ownership scan used to match
+# only calls whose callee is a selector, so binding the method to a variable first made the promotion
+# invisible while the governed call kept the anti-vacuity half satisfied. A method value is still a
+# selector, so the scan walks selectors rather than call callees. (Codex P2 round 11, PR #1378.)
+run_mutation M23 \
+  'a request-path file promotes through a method value rather than a direct call' \
+  'TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes' \
+  . "$PREFLIGHT" \
+  's/(func canaryScopedToolsCatalogUsable\(scope rollout\.ScopeSpec\) bool \{\n)/$1\tif false {\n\t\t_, c := mcpInventory.sharedInventory()\n\t\tpromote := c.Promote\n\t\t_, _ = promote(catalog.ToolKey{}, catalog.Fingerprint{})\n\t}\n/'
+
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ "$SKIPPED" -gt 0 ]; then

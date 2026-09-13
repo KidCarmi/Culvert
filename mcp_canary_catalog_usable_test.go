@@ -573,12 +573,15 @@ func catalogPromotionOwners(t *testing.T) map[string][]string {
 			if !ok {
 				continue
 			}
+			// ANY selector naming Promote/Demote, whether or not it is the callee of a
+			// call. Matching only call callees pinned SYNTAX rather than reachability:
+			// `promote := cat.Promote` followed by `promote(key, fp)` has an *ast.Ident
+			// callee, so a request-triggered promotion was invisible while the governed
+			// call kept the anti-vacuity check satisfied (Codex P2 round 11 — verified by
+			// adding exactly that file to the root package and watching this wall PASS).
+			// A method VALUE is still a selector, so taking one is caught here too.
 			ast.Inspect(fn, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
+				sel, ok := n.(*ast.SelectorExpr)
 				if !ok {
 					return true
 				}
@@ -895,15 +898,27 @@ func TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall(t *tes
 			if !ok {
 				continue
 			}
-			if k, ok := kv.Key.(*ast.Ident); ok {
+			k, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			// The VALUE must be the probe result's field OF THE SAME NAME. Recording only
+			// the key made this a proxy: `ToolCatalogUsable: true` — or, worse, a copy-paste
+			// `ToolCatalogUsable: ai.ServerUsable` — satisfied the wall at both sites while
+			// discarding the probe's catalog verdict, so a quarantined tool passes the commit
+			// and restart preflights once the other facts hold (Codex P2 round 11; verified by
+			// rewriting both sites to `true` and watching this wall PASS).
+			if vs, ok := kv.Value.(*ast.SelectorExpr); ok && vs.Sel.Name == k.Name {
 				set[k.Name] = true
 			}
 		}
 		for _, f := range want {
 			if !set[f] {
-				t.Errorf("mcp_rollout.go:%d builds a CanaryActivationInput that never sets %s — "+
-					"the probe resolves that activation fact and this call site throws it away, so "+
-					"the preflight decides without it", fset.Position(lit.Pos()).Line, f)
+				t.Errorf("mcp_rollout.go:%d builds a CanaryActivationInput whose %s is not "+
+					"forwarded from the probe result's field of the same name — the probe resolves "+
+					"that activation fact and this call site sets it from something else (a literal, "+
+					"or another field), so the preflight decides on a value nothing resolved",
+					fset.Position(lit.Pos()).Line, f)
 			}
 		}
 		return true
@@ -1194,13 +1209,33 @@ func TestCatalogUsable_ServerUsabilityGuardIsPresent(t *testing.T) {
 		t.Fatal("wall is vacuous: canaryScopedToolsCatalogUsable not found (it was renamed or moved)")
 	}
 
+	// The call must be srv.Usable(), NEGATED, guarding a `return false`. Merely finding a
+	// selector named Usable was a proxy: `_ = srv.Usable()` — or an unrelated object's
+	// Usable — satisfied it while accepting a VerifyIdentity mismatch published after the
+	// reconcile (Codex P2 round 11; verified by making exactly that edit and watching this
+	// wall PASS). M18 only deletes the guard, so it could not expose this.
 	found := false
 	ast.Inspect(fn, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
+		ifs, ok := n.(*ast.IfStmt)
 		if !ok {
 			return true
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Usable" {
+		unary, ok := ifs.Cond.(*ast.UnaryExpr)
+		if !ok || unary.Op != token.NOT {
+			return true
+		}
+		call, ok := unary.X.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Usable" {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "srv" {
+			return true
+		}
+		if returnsFalse(ifs.Body) {
 			found = true
 		}
 		return true
@@ -1267,4 +1302,89 @@ func TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation(t *testing.T) {
 		t.Fatal("the resolver never completed after deriveMu was released — it is deadlocked, " +
 			"which would hang every Canary activation preflight")
 	}
+}
+
+// returnsFalse reports whether a block's only effect is `return false` — the rejecting
+// control flow a fail-closed guard must carry. A guard that evaluates the right condition
+// and then does nothing with it is the proxy this helper exists to refuse.
+func returnsFalse(body *ast.BlockStmt) bool {
+	if body == nil || len(body.List) != 1 {
+		return false
+	}
+	ret, ok := body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	id, ok := ret.Results[0].(*ast.Ident)
+	return ok && id.Name == "false"
+}
+
+// ── the registry window, driven rather than asserted ─────────────────────────
+//
+// Round 7 argued this interleaving could only be pinned STRUCTURALLY, because reaching it
+// needed "a production seam interposing between the reconcile and the registry read, purely
+// to let a test drive a race". That argument EXPIRED in round 8: closing the trust-store /
+// catalog window added `mcpToolTrustReconcileSnapshot`, a seam that hands the resolver BOTH
+// snapshots. The pair it returns is the resolver's entire view of the world, so the divergent
+// state is now injectable with no new production surface at all (Codex P2 round 11 — which
+// also found the structural wall accepted `_ = srv.Usable()`).
+//
+// The state under test is what a registry publish landing AFTER the reconcile looks like: the
+// catalog record is still Usable at the pinned fingerprint, the tenant still owns the server,
+// and the pin is UNCHANGED — `VerifyIdentity`'s mismatch branch clears Enabled without
+// touching PinnedIdentity — so every other check passes and `srv.Usable()` is the only one
+// that can reject it.
+func TestCatalogUsable_DisabledServerInTheRegistryWindowIsNotUsable(t *testing.T) {
+	restoreMCPInventory(t)
+	now := &atomic.Int64{}
+	now.Store(1_700_000_000)
+	composeToolTrust(t, func() time.Time { return time.Unix(now.Load(), 0) })
+	reg, cat, serverID, toolName, fpHex := seedToolTrustInventory(t)
+
+	r := usableRig{cat: cat, serverID: serverID, toolName: toolName, fpHex: fpHex, now: now}
+	requestAndApprove(t, serverID, toolName, fpHex, r.catalogRev(t), time.Hour)
+
+	usableCatalog := mustReconcileSnapshotTools(t)
+	healthyServers := reg.Current()
+	if _, err := reg.SetEnabled(registry.ServerID(serverID), false); err != nil {
+		t.Fatalf("disable server: %v", err)
+	}
+	disabledServers := reg.Current()
+
+	// CONTROL first: the same catalog snapshot with a healthy registry must still answer true,
+	// so a failure below cannot be "the resolver stopped accepting anything".
+	swapReconcileSnapshot(t, healthyServers, usableCatalog)
+	if !canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("CONTROL: a governed promotion with a healthy registry must be catalog-usable")
+	}
+
+	swapReconcileSnapshot(t, disabledServers, usableCatalog)
+	if canaryScopedToolsCatalogUsable(r.scope()) {
+		t.Fatal("SECURITY: the registry says the server is NOT usable while the catalog record " +
+			"is still Usable at the pinned fingerprint — the state a registry publish landing " +
+			"after the reconcile produces. The resolver must reject it; srv.Usable() is the only " +
+			"check that can, since ownership, digest and the identity pin all still match")
+	}
+}
+
+// mustReconcileSnapshotTools takes the catalog half of a real coherent capture, so the test
+// asserts against the same materialized eligibility production would see.
+func mustReconcileSnapshotTools(t *testing.T) *catalog.Snapshot {
+	t.Helper()
+	servers, tools, ok := mcpToolTrustReconcileSnapshot()
+	if !ok || servers == nil || tools == nil {
+		t.Fatal("coherent capture must be composed in this rig")
+	}
+	return tools
+}
+
+// swapReconcileSnapshot injects one (registry, catalog) pair as the resolver's whole view and
+// restores the production seam afterwards.
+func swapReconcileSnapshot(t *testing.T, servers *registry.Snapshot, tools *catalog.Snapshot) {
+	t.Helper()
+	prev := mcpToolTrustReconcileSnapshot
+	mcpToolTrustReconcileSnapshot = func() (*registry.Snapshot, *catalog.Snapshot, bool) {
+		return servers, tools, true
+	}
+	t.Cleanup(func() { mcpToolTrustReconcileSnapshot = prev })
 }
