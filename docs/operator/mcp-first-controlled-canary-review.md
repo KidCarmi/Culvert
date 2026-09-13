@@ -2234,7 +2234,7 @@ usability.
 | The coherence gate is structural, and the behavioural one is labelled as a control | `TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation` proves liveness only — no deadlock, row not emptied. It is NOT the coherence gate: `mcpToolTrustReconcile` also takes `deriveMu`, so the PRE-FIX shape blocks identically. Measured, not assumed — the first version of it was written as the proof and PASSED against the reintroduced defect. The structural wall was verified to discriminate ("the resolver reads the inventory directly 2 time(s)") |
 | The read-path seams cannot be half-wired | `installToolTrustReadHooks` / `clearToolTrustReadHooks` install and clear BOTH seams together. Installing only the reconcile hook leaves the coherent seam at its fail-closed default, which does not error — it silently makes this row unsatisfiable. Test wiring mirrors production by calling these rather than assigning the vars |
 | An interrupted campaign restores its mutation | The harness records the file under mutation before the first edit and clears it after the revert, with an EXIT/INT/TERM trap restoring whatever is still recorded (Codex P2 round 8). Verified by killing a live run mid-mutation and watching the file come back clean. SIGKILL cannot be trapped, so the residual is bounded by the pre-existing dirty-tree refusal: a stranded mutation stops the NEXT run rather than being silently re-measured |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 30 mutations, 30 caught, 0 survived, 0 skipped |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 32 mutations, 32 caught, 0 survived, 0 skipped |
 
 **What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
 run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
@@ -2259,8 +2259,8 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores **30 caught, 0 survived, 0 skipped** on the closing head. M15 through
-M30 were added later, for the fifteen defects adversarial review found on the PR itself (passive
+The repaired campaign scores **32 caught, 0 survived, 0 skipped** on the closing head. M15 through
+M32 were added later, for the seventeen defects adversarial review found on the PR itself (passive
 expiry; a decision straddling two snapshots; the registry repin window; a guard this ledger had
 wrongly written off as unreachable; a snapshot capture that left the derivation section; and a
 capture that unlocks before it captures) — all real, and none reachable by the twelve cases the
@@ -2337,7 +2337,27 @@ shape, and the cheapest shape satisfying it while carrying a bug is a plain read
 which the single-flip tests catch. The two gates are complementary, not redundant: flips pin
 field-to-reason correspondence, the shape gate pins single-fact accessors.
 
-**Eleven instances across six rounds, one defect.** The AST walls pinned a key name, a call count, a
+**Round 15 found the FOURTH level — mutex aliasing — which is the exact assumption round 14's fix
+rested on.** `mu := &c.deriveMu`, unlock through the alias before both captures, re-lock after: one
+direct Lock, one deferred direct Unlock, zero bare direct unlocks, correct order, no closure
+(`ok, 0.105s`), and `Revoke` interleaving with the captures as before. **Following aliases was the
+offered remedy and is the wrong shape** — four rounds running, each escape has been a different
+syntax (unlock moved, captures moved, closure, alias), and an alias-tracking gate merely names the
+fifth. The mutex is now UNALIASABLE: mentioned exactly twice, in its two canonical statements, with
+no Lock/Unlock permitted on anything else. There is no syntax for releasing a lock you may not name.
+
+The FIFTH level was then found by asking the question of that fix rather than waiting: a HELPER
+METHOD can unlock `deriveMu` in a body the gate never parses (`ok, 0.099s`). The capture is allowed
+exactly one collaborator, `reconcileLocked`, so every lock operation is visible in the function the
+gate reads. M31/M32.
+
+**THE GENERAL LESSON OF THE LAST FOUR ROUNDS, which is the durable one:** a structural gate can only
+assert what the syntax it reads makes visible. Widening the gate until it can follow wherever the
+code went is an arms race it loses every round. **SHRINK WHAT THE FUNCTION IS PERMITTED TO DO until
+the invariant is readable from it** — that is what "unaliasable, straight-line, one collaborator"
+buys, and why it is total where "track aliases" would have been the next enumeration.
+
+**Thirteen instances across seven rounds, one defect.** The AST walls pinned a key name, a call count, a
 callee's syntax and a method name; the behavioural gates pinned a fixture that could only vary one
 way, an input the fixture never supplied, and one reason standing in for an action. A wall that pins something CORRELATED with the
 invariant — a key name, a call count, a callee's syntax, a method name — rather than the invariant.
