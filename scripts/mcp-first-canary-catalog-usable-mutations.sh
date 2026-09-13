@@ -215,11 +215,21 @@ run_mutation M08 \
 
 # M09 — TENANT OWNERSHIP IS NOT CHECKED. A scope naming any tenant satisfies the fact for a server
 # that tenant does not own.
+#
+# RE-ANCHORED after the round-2 fix replaced loadTarget with a direct registry-snapshot lookup. The
+# first run after that fix scored this mutation SKIPPED — its old pattern no longer matched — which
+# proves nothing, and is the same class of campaign defect M09 itself was repaired for once already:
+# a mutation is only evidence while its pattern still describes the code it targets.
+#
+# The replacement keeps BOTH `tenant` and `srv` used. Simply deleting the comparison leaves them
+# unused and the mutation fails to BUILD, which under this campaign's header rule proves nothing --
+# the same trap M08 was repaired for. The guard written here is never true for a real tenant, so
+# ownership goes unchecked while the tree still compiles.
 run_mutation M09 \
   'the resolver stops checking that the naming tenant owns the server' \
   'TestCatalogUsable_TenantThatDoesNotOwnTheServerIsNotUsable' \
   . "$PREFLIGHT" \
-  's/(scope naming a tenant that does not own this server resolves to no usable target\.\n\t\t\tti := mcpToolTrust\.loadTarget\(st\.Server, st\.Name\)\n)\t\t\tif !ti\.found \|\| ti\.target\.Tenant != tenant \{/$1\t\t\tif !ti.found \&\& tenant == "\\x00never" {/'
+  's/\t\t\tif !sok \|\| string\(srv\.OwnerScope\) != tenant \{/\t\t\tif !sok || (tenant == "\\x00never" \&\& string(srv.OwnerScope) != tenant) {/'
 
 # M10 — AN EMPTY SCOPE IS "USABLE". Vacuous truth: a scope admitting no tool satisfies a fact about
 # every tool it admits, so the row is met for an experiment with no reviewed target at all.
