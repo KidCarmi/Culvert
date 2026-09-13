@@ -471,6 +471,30 @@ run_mutation M26 \
   . "$POLICYENGINE" \
   's/case in\.Tool\.Drift == DriftUnknownTool \|\| in\.Tool\.Disposition == DispQuarantined:/case in.Tool.Drift == DriftUnknownTool:/'
 
+# M27 — CATALOG USABILITY IS DERIVED FROM ANOTHER REQUIRED INPUT. M25 closed the approval axis and
+# left three open: with ServerUsable, FingerprintCurrent and Budget at their zero values, a fixture
+# cannot tell `in.ToolCatalogUsable` from `in.ToolCatalogUsable || in.ServerUsable`. Every real
+# activation has ServerUsable true, so that wiring makes the row unreachable in production while
+# passing a zero-valued fixture. The preflight fixture now sets every other activation input VALID
+# (with anti-vacuity checks that they are) and re-asserts the row. (Codex P2 round 13, PR #1378.)
+run_mutation M27 \
+  'catalog usability is satisfied by another required activation input' \
+  'TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  . "$PREFLIGHT" \
+  's/\tf\.ToolCatalogUsable = in\.ToolCatalogUsable\n/\tf.ToolCatalogUsable = in.ToolCatalogUsable || in.ServerUsable\n/'
+
+# M28 — AN ACCESSOR AGREES AT EVERY VERTEX AND DISAGREES IN BETWEEN. The all-false gate (M24) is
+# sound only if each accessor is a plain positive field read; without that, all-false is merely a
+# THIRD vertex. This shape agrees at all-true, at every single-false, AND at all-false, while on a
+# partially composed node with healthy policy it suppresses the reason with the catalog fact false.
+# 2^23 combinations is not enumerable and any hand-picked subset is another proxy, so the gate
+# asserts the accessor SHAPE directly instead of sampling. (Codex P2 round 13, PR #1378.)
+run_mutation M28 \
+  'a readiness accessor agrees at every fixture vertex and disagrees in between' \
+  'TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact' \
+  ./internal/mcp/canary "$READINESS" \
+  's/\{func\(f Facts\) bool \{ return f\.ToolCatalogUsable \}/{func(f Facts) bool { return f.ToolCatalogUsable || (!f.LiveExecutorComposed \&\& !f.UpstreamCallerPresent \&\& f.PolicyHealthy) }/'
+
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ "$SKIPPED" -gt 0 ]; then

@@ -1,6 +1,9 @@
 package canary
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"testing"
 )
@@ -336,4 +339,88 @@ func TestEvaluate_EveryUnmetFactIsReportedTogether(t *testing.T) {
 	if got.Ready {
 		t.Fatal("CONTROL: a node with every prerequisite false must not be Ready")
 	}
+}
+
+// ── every accessor reads exactly ONE fact: its own ───────────────────────────
+//
+// Codex P2 round 13, and it lands on an assumption I stated in the gate above without
+// asserting it. TestEvaluate_EveryUnmetFactIsReportedTogether is only sound if every
+// accessor is a plain positive field read — otherwise all-false is just a third VERTEX,
+// and an accessor can be made to agree at all-true, every single-false, AND all-false
+// while disagreeing in between. Measured: replacing the catalog accessor with
+//
+//	f.ToolCatalogUsable || (!f.LiveExecutorComposed && !f.UpstreamCallerPresent && f.PolicyHealthy)
+//
+// passes the entire internal/mcp/canary package (ok, 0.018s), and on a partially composed
+// node with healthy policy it suppresses ReasonToolNotCatalogUsable even though the catalog
+// fact is false — a missing prerequisite silently dropped from Unmet on exactly the kind of
+// node a Canary would first meet.
+//
+// Vertex coverage cannot close this: 2^23 combinations is not enumerable and any hand-picked
+// subset is another proxy. So the SHAPE is asserted directly — each accessor body must be a
+// single `return f.<Field>` — which makes the property true by construction rather than
+// sampled, and makes the all-false gate's assumption load-bearing text instead of a hope.
+func TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "readiness.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse readiness.go: %v", err)
+	}
+	var table *ast.CompositeLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "readinessChecks" {
+			return true
+		}
+		if len(vs.Values) == 1 {
+			table, _ = vs.Values[0].(*ast.CompositeLit)
+		}
+		return false
+	})
+	if table == nil {
+		t.Fatal("gate is vacuous: readinessChecks table literal not found")
+	}
+	if len(table.Elts) != len(readinessChecks) {
+		t.Fatalf("gate is vacuous: found %d literal rows for %d table entries",
+			len(table.Elts), len(readinessChecks))
+	}
+
+	for i, el := range table.Elts {
+		lit, ok := el.(*ast.CompositeLit)
+		if !ok || len(lit.Elts) == 0 {
+			t.Errorf("row %d is not a composite literal", i)
+			continue
+		}
+		fn, ok := lit.Elts[0].(*ast.FuncLit)
+		if !ok {
+			t.Errorf("row %d's accessor is not a function literal — it may be a named function "+
+				"or a wrapper, and this gate cannot see what it reads", i)
+			continue
+		}
+		if field := soleFactFieldRead(fn); field == "" {
+			t.Errorf("SECURITY: row %d (%s) is not a plain `return f.<Field>`. An accessor that "+
+				"consults more than its own fact can agree with every fixture this package builds "+
+				"and still suppress its reason on a node in between — which is a missing "+
+				"prerequisite silently dropped from Unmet",
+				i, readinessChecks[i].reason)
+		}
+	}
+}
+
+// soleFactFieldRead returns the field name when the body is exactly `return f.<Field>`, else "".
+func soleFactFieldRead(fn *ast.FuncLit) string {
+	if fn.Body == nil || len(fn.Body.List) != 1 {
+		return ""
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return ""
+	}
+	sel, ok := ret.Results[0].(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "f" {
+		return ""
+	}
+	return sel.Sel.Name
 }

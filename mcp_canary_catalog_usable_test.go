@@ -853,6 +853,36 @@ func TestCatalogUsable_ProductionPreflightCarriesTheRow(t *testing.T) {
 			canary.ReasonToolNotCatalogUsable, before.Unmet)
 	}
 
+	// ...and the row must SURVIVE every OTHER activation input being valid (Codex P2 round 13).
+	// Holding the live approval constant closed one axis and left three open: with ServerUsable,
+	// FingerprintCurrent and Budget at their zero values, a wiring of
+	// `in.ToolCatalogUsable || in.ServerUsable` passed this test — measured — even though any real
+	// activation has ServerUsable true, so the row would be unreachable in production. Catalog
+	// usability must not be derivable from ANY other required input, so the fixture now sets them
+	// all valid and re-asserts, with anti-vacuity checks that they really are valid.
+	valid := in
+	valid.ServerUsable, valid.FingerprintCurrent = true, true
+	valid.Budget = runtimeTestBudget(1)
+	if canary.ValidateBudget(valid.Budget) != canary.BudgetOK {
+		t.Fatal("fixture is vacuous: the budget must be VALID, or the budget axis is untested")
+	}
+	otherInputsValid := evaluateCanaryActivationPreflight(valid)
+	for _, r := range []canary.Reason{
+		canary.ReasonServerNotUsable, canary.ReasonToolFingerprintStale,
+		canary.ReasonBudgetNotConfigured, canary.ReasonLiveApprovalInvalid,
+	} {
+		if hasReason(otherInputsValid, r) {
+			t.Fatalf("fixture is vacuous: %s is still unmet, so this leg does not model an "+
+				"otherwise-valid activation and cannot prove the catalog row is independent", r)
+		}
+	}
+	if !hasReason(otherInputsValid, canary.ReasonToolNotCatalogUsable) {
+		t.Fatalf("SECURITY: with every OTHER activation input valid, the Quarantined tool no "+
+			"longer reports %s — catalog usability is being derived from another required input, "+
+			"so the row is unreachable in any real activation. Unmet: %v",
+			canary.ReasonToolNotCatalogUsable, otherInputsValid.Unmet)
+	}
+
 	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
 	ai2 := productionCanaryActivationInputs(in.Capability, in.Scope, in.ScopeRev)
 	in.ToolCatalogUsable = ai2.ToolCatalogUsable
@@ -1030,11 +1060,16 @@ func TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion(t *t
 
 	after := policyQuarantineDecisionFor(t, catalogDispositionNow(t, r))
 	// EVERY quarantine is rejected, not just the one carrying ReasonToolUnknown. Pairing the
-	// action with one reason made this a proxy: mapping the promoted tool to
-	// policy.DispReviewRequired leaves the request quarantined under a DIFFERENT catalog
-	// override and the test still passed — measured (Codex P2 round 12). A quarantine from
-	// any catalog disposition means the override pre-empted ordinary evaluation, which is
-	// exactly what this E2E exists to disprove.
+	// action with one reason made this a proxy (Codex P2 round 12).
+	//
+	// The REPRODUCING alternate quarantine is DriftPrivilegeExpansion, which the engine answers
+	// with ReasonToolPrivilegeExpansion: measured, the old assertion accepted it (ok) and this one
+	// refuses it ("Got action=QUARANTINE reason=MCP.TOOL.PRIVILEGE_EXPANSION"). The review the
+	// finding came from proposed policy.DispReviewRequired instead, and that does NOT reproduce —
+	// serverToolOverride's arm is `DriftUnknownTool || DispQuarantined`, with no review-required
+	// disposition, so that value falls through to ordinary matching and passes this gate too.
+	// Recorded because a gate whose comment names a mutation that proves nothing is a gate with a
+	// false provenance claim, which is the same defect one level up (Codex P3 round 13).
 	//
 	// It still stops short of blocker #14: "not quarantined" says the hard override no longer
 	// fires and says NOTHING about whether the operator ALLOW rule matched. Ordinary
