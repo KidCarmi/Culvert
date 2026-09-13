@@ -2227,8 +2227,8 @@ usability.
 | Expiry is materialized before the read | `TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick` — expiry is PASSIVE, so a grant past its `ExpiresAt` leaves its tool `Usable` until the 30-second reconcile tick. The resolver reconciles before snapshotting, as `shadowScopeHasUsableTool` does under ADR-0034 D7, with `TestCatalogUsable_ReconcilingToReadNeverPromotes` as the control that a read path did not become a promotion path (Codex P2 round 1) |
 | ONE read of each source per decision | `TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` — the verdict is derived from exactly one catalog snapshot and one registry snapshot, and `loadTarget` (which re-reads both) is not called, so a republish landing mid-scan cannot pair an old Usable record with newer ownership (Codex P2 round 2) |
 | The registry/catalog PAIR is detected, not assumed | `TestCatalogUsable_RepinWindowIsNotUsable` — `Registry.Repin` and the catalog re-ingest that follows it are SEPARATE publications, so between them the registry pins I2 while the record describes I1. One snapshot of each source (row above) is NECESSARY AND NOT SUFFICIENT: it makes the decision consistent AS A READ and cannot reconcile two publications that disagree, because the inconsistency is in the published state rather than in the reading of it. The resolver therefore compares `rec.Fingerprint.Identity` against `srv.PinnedIdentity` — `loadTarget`'s own formula, over the two snapshots already held, so no read is added. Without it the row reports met for a target whose every request the runtime refuses as `AnchorLost`/`RegistryPinDiverged` (`TestReviewedBinding_C18`) — a Canary that activates and cannot execute (Codex P2 round 6). `TestCatalogUsable_CoherentPairStillUsable` is the control, since the cheapest way to pass is to refuse everything |
-| `srv.Usable()` — kept, and recorded as UNREACHABLE | Measured, not assumed: `TestCatalogUsable_DisabledServerIsNotUsable` passes WITH AND WITHOUT the line, so it is deliberately not claimed as a defect gate. The reconcile withdraws trust for a disabled server before the eligibility check reads the record, and `Usable()` is `Enabled && VerifyVerified` while the registry's only transition into a mismatched verification clears `Enabled` in the same write — so no reachable state is `!Usable` with `Enabled` still true. Kept as defense-in-depth because it is the REGISTRY's own predicate and a future `!Usable` state that does not clear `Enabled` would otherwise be accepted silently; the fact is stated in the resolver comment and the test rather than implied |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 17 mutations, 17 caught, 0 survived, 0 skipped |
+| `srv.Usable()` — LOAD-BEARING, and the only check rejecting one interleaving | This row previously said UNREACHABLE. That was WRONG (Codex P2 round 7). `TestCatalogUsable_DisabledServerIsNotUsable` does pass with and without the line, but it is SEQUENTIAL: its disable lands before the reconcile, which demotes the record, so the eligibility check rejects it and this guard is never reached. The registry publishes INDEPENDENTLY of the resolver, so a disable — or, sharply, a mismatching `Registry.VerifyIdentity`, whose branch clears `Enabled` but DOES NOT TOUCH `PinnedIdentity` (`registry.go:136-148`) — can instead land AFTER `mcpToolTrustReconcile()` returns and BEFORE `reg.Current()` is read three lines later. In that window the record is still `Usable`, the tenant still owns the server, the digest still matches, and the identity comparison above still passes because the pin never moved: `srv.Usable()` is the ONLY check that rejects it. Reaching it behaviourally needs a production seam interposing between the reconcile and the registry read purely to let a test drive a race — the worse trade, and the same call made for the snapshot race in round 2 — so it is pinned by `TestCatalogUsable_ServerUsabilityGuardIsPresent` and campaign M18 |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 18 mutations, 18 caught, 0 survived, 0 skipped |
 
 **What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
 run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
@@ -2253,10 +2253,11 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores **17 caught, 0 survived, 0 skipped** on the closing head. M15, M16 and
-M17 were added later, for the three defects adversarial review found on the PR itself (passive
-expiry; a decision straddling two snapshots; the registry repin window) — all real, and none
-reachable by the twelve cases the specification enumerated.
+The repaired campaign scores **18 caught, 0 survived, 0 skipped** on the closing head. M15 through
+M18 were added later, for the four defects adversarial review found on the PR itself (passive
+expiry; a decision straddling two snapshots; the registry repin window; and a guard this ledger had
+wrongly written off as unreachable) — all real, and none reachable by the twelve cases the
+specification enumerated.
 
 **That score was recorded here once before it had been measured, and it was wrong.** After M16 was
 added, this row was written as 16/16 by extrapolation — every prior run had been clean and the new
@@ -2285,6 +2286,22 @@ written to compile, which needed the M08 repair a second time. So: **three times
 change silently moved a mutation's target** — M08's unused-variable trap, M09 after the
 single-snapshot fix, M16 after the repin fix — and **a campaign result is never read through a pipe
 that discards its exit status.**
+
+**A fourth way, and the one that imitates the third.** Two later runs died — one mid-M12, leaving its
+mutation UNREVERTED in the working tree (a live `ApproveLive`-promotes defect, caught by `git status`
+rather than by the harness), and one reporting `NOT PROVEN` at M15. The second looked exactly like the
+M16 class and invited the same repair; it was neither. Both were `no space left on device`: the Go
+build cache had reached 21 GB against 124 MB free, so the linker could not map its output and a
+perfectly good mutation "did not compile". So: **when a campaign aborts without a summary, or reports
+NOT PROVEN with a linker or mapping error, check the disk before touching a mutation** — and after any
+abort, `git status` first, because a dead harness does not revert.
+
+**And the round-7 lesson, which is the same shape as round 2's and points the opposite way.**
+Reasoning sequentially about state that is PUBLISHED CONCURRENTLY is unsound in BOTH directions: it
+deleted a guard as vacuous that was not, and then declared `srv.Usable()` unreachable when it is the
+last line of defence for the reconcile/registry-read window. *"I measured it"* was true both times and
+still produced a false claim, because a measurement over one interleaving says nothing about the
+others.
 
 **Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
 policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
