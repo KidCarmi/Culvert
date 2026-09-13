@@ -717,6 +717,40 @@ func assertCoherentCaptureReadsEachSourceOnce(t *testing.T) {
 			"Without holding the DERIVATION lock (not merely some lock) across the capture, the "+
 			"snapshots can straddle Revoke's critical section", shape.deriveLock)
 	}
+	// ORDER, not just presence (Codex P2 round 14). One Lock and one deferred Unlock say
+	// nothing about WHERE the captures happen: reconciling, reading both snapshots UNLOCKED,
+	// and only then taking deriveMu with a deferred unlock satisfies every count above —
+	// measured, ok 0.104s — while leaving Revoke free to run between the captures and the
+	// lock, which is the exact fail-open the round-8 fix exists to close.
+	//
+	// This is the inference this gate rests on, made explicit: the lock precedes both reads,
+	// the unlock is deferred (below) and no bare unlock exists (below), so the reads are
+	// inside the critical section BY CONSTRUCTION. The straight-line check closes the last
+	// way around it — a read after the lock but inside a goroutine or closure would satisfy
+	// source order while running outside the section.
+	if shape.lockPos == 0 || shape.catPos == 0 || shape.regPos == 0 {
+		t.Fatalf("gate is vacuous: lock=%d cat.Current=%d reg.Current=%d — one of the three "+
+			"was not found, so nothing below is being compared",
+			shape.lockPos, shape.catPos, shape.regPos)
+	}
+	if shape.lockPos > shape.catPos || shape.lockPos > shape.regPos {
+		t.Fatalf("SECURITY: reconcileAndSnapshot reads a snapshot BEFORE taking deriveMu "+
+			"(lock at %d, cat.Current at %d, reg.Current at %d). The counts are unchanged and "+
+			"the captures are outside the critical section, so Revoke can durably revoke an "+
+			"approval between the reads and the lock and the resolver still returns the old "+
+			"Usable snapshot", shape.lockPos, shape.catPos, shape.regPos)
+	}
+	if shape.deferPos != 0 && shape.deferPos < shape.lockPos {
+		t.Fatalf("SECURITY: the deferred deriveMu.Unlock at %d precedes the Lock at %d",
+			shape.deferPos, shape.lockPos)
+	}
+	if shape.asyncStmts != 0 {
+		t.Fatalf("SECURITY: reconcileAndSnapshot contains %d goroutine/closure construct(s). "+
+			"The capture must be STRAIGHT-LINE: a read that is after the lock in source order "+
+			"but deferred into a goroutine or closure runs outside the section this gate "+
+			"claims it is inside", shape.asyncStmts)
+	}
+
 	if shape.deferredDeriveUnlock != 1 || shape.bareDeriveUnlock != 0 {
 		t.Fatalf("SECURITY: reconcileAndSnapshot has %d deferred and %d non-deferred "+
 			"deriveMu.Unlock, want 1 and 0. The unlock MUST be deferred: an unlock placed "+
@@ -734,6 +768,14 @@ type captureShape struct {
 	deriveLock           int
 	deferredDeriveUnlock int
 	bareDeriveUnlock     int
+	// Positions, so the gate can assert the lock PRECEDES both captures rather than merely
+	// coexisting with them, plus a count of constructs that would let a read escape the
+	// section while still following the lock in source order.
+	lockPos    token.Pos
+	deferPos   token.Pos
+	catPos     token.Pos
+	regPos     token.Pos
+	asyncStmts int
 }
 
 func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
@@ -747,6 +789,10 @@ func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
 
 	var shape captureShape
 	ast.Inspect(fn, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.GoStmt, *ast.FuncLit:
+			shape.asyncStmts++
+		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -760,14 +806,17 @@ func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
 			if id, ok := sel.X.(*ast.Ident); ok {
 				if id.Name == "cat" {
 					shape.catCurrent++
+					shape.catPos = call.Pos()
 				}
 				if id.Name == "reg" {
 					shape.regCurrent++
+					shape.regPos = call.Pos()
 				}
 			}
 		case "Lock":
 			if receiverFieldName(sel) == "deriveMu" {
 				shape.deriveLock++
+				shape.lockPos = call.Pos()
 			}
 		case "Unlock":
 			if receiverFieldName(sel) != "deriveMu" {
@@ -775,6 +824,7 @@ func inspectCaptureShape(fn *ast.FuncDecl) captureShape {
 			}
 			if deferred[call] {
 				shape.deferredDeriveUnlock++
+				shape.deferPos = call.Pos()
 			} else {
 				shape.bareDeriveUnlock++
 			}

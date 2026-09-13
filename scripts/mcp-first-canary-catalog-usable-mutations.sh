@@ -495,6 +495,30 @@ run_mutation M28 \
   ./internal/mcp/canary "$READINESS" \
   's/\{func\(f Facts\) bool \{ return f\.ToolCatalogUsable \}/{func(f Facts) bool { return f.ToolCatalogUsable || (!f.LiveExecutorComposed \&\& !f.UpstreamCallerPresent \&\& f.PolicyHealthy) }/'
 
+# M29 — THE CAPTURES HAPPEN BEFORE THE LOCK. M20 closed "unlock moved ahead of the captures"; this is
+# the same escape from the other side, and it defeated M20's gate: reconcile, read BOTH snapshots
+# unlocked, and only then take deriveMu with a deferred unlock. One Lock, one deferred Unlock, one
+# read of each source — every count M20 asserts is unchanged, and Revoke is free to run between the
+# captures and the lock. The gate now compares POSITIONS: the lock must precede both reads, which
+# with the deferred unlock and the no-bare-unlock rule puts them inside the section by construction.
+# (Codex P2 round 14, PR #1378 — the syntax-to-behaviour inference the gate rested on.)
+run_mutation M29 \
+  'the coherent capture reads both snapshots before it takes deriveMu' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tc\.deriveMu\.Lock\(\)\n\tdefer c\.deriveMu\.Unlock\(\)\n\tc\.reconcileLocked\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)\n\tif reg == nil \|\| cat == nil \{\n\t\treturn nil, nil, false\n\t\}\n\treturn reg\.Current\(\), cat\.Current\(\), true\n/\tc.reconcile()\n\treg, cat := mcpInventory.sharedInventory()\n\tif reg == nil || cat == nil {\n\t\treturn nil, nil, false\n\t}\n\ts, t := reg.Current(), cat.Current()\n\tc.deriveMu.Lock()\n\tdefer c.deriveMu.Unlock()\n\treturn s, t, true\n/'
+
+# M30 — THE READS FOLLOW THE LOCK AND STILL ESCAPE THE SECTION. Source order alone is not the
+# property: a read placed after the lock but inside a closure (or a goroutine) satisfies every
+# positional assertion while running outside the critical section — and a structural gate cannot
+# prove when such a body executes. The capture is therefore required to be STRAIGHT-LINE, which is
+# the honest form of the claim. (Codex P2 round 14's class, closed proactively in the same change.)
+run_mutation M30 \
+  'the coherent capture defers its reads into a closure' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\treturn reg\.Current\(\), cat\.Current\(\), true\n/\tgrab := func() (*registry.Snapshot, *catalog.Snapshot) { return reg.Current(), cat.Current() }\n\ts, t := grab()\n\treturn s, t, true\n/'
+
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ "$SKIPPED" -gt 0 ]; then
