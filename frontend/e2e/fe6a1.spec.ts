@@ -63,6 +63,26 @@ import {
 } from "./fixtures";
 import { expectNavLinkReachable } from "./nav-open";
 
+// FE-6A.2: the contracted admin control allowlists (mirrors
+// src/test/fe6a1-red-page.test.tsx). Viewer/operator rows are unchanged:
+// their surfaces still carry Refresh only.
+const IDP_ADMIN_CONTROLS: readonly string[] = [
+  "Refresh",
+  "Add provider",
+  "Edit",
+  "Delete",
+  "Import legacy configuration",
+  "Repair registry",
+];
+const ADMIN_PAGE_CONTROLS: readonly string[] = [
+  "Refresh",
+  "Add account",
+  "Change my password",
+  "Edit",
+  "Delete",
+  "Clear",
+];
+
 const IDP_ROUTE = "/app/objects/identity-providers";
 const ADMINS_ROUTE = "/app/administrators";
 // A FIXED suffix: Playwright re-evaluates this module (and re-runs beforeAll)
@@ -455,10 +475,14 @@ test("J1/J6/J8 admin: navigation reaches both surfaces; the roster, lock set and
   await expect(
     adminRow.getByText("not configured", { exact: true }),
   ).toBeVisible();
-  // Read-only: the only buttons in the main region are Refresh.
+  // FE-6A.1 pinned "the only buttons are Refresh"; FE-6A.2 supersedes that
+  // with the CONTRACTED admin control allowlist (the same list the vitest
+  // page matrix pins). No ceremony is open, so no dialog/form is mounted.
   const buttons = await main.getByRole("button").allTextContents();
   expect(buttons.length).toBeGreaterThan(0);
-  expect(buttons.every((b) => b.trim() === "Refresh")).toBe(true);
+  expect(buttons.every((b) => ADMIN_PAGE_CONTROLS.includes(b.trim()))).toBe(
+    true,
+  );
   expect(await main.locator("input,select,textarea,dialog,form").count()).toBe(
     0,
   );
@@ -473,7 +497,9 @@ test("J1/J6/J8 admin: navigation reaches both surfaces; the roster, lock set and
   await expect(main.getByText("Persisted", { exact: true })).toBeVisible();
   await expect(main.getByRole("cell", { name: SAML_NAME })).toBeVisible();
   const idpButtons = await main.getByRole("button").allTextContents();
-  expect(idpButtons.every((b) => b.trim() === "Refresh")).toBe(true);
+  expect(idpButtons.every((b) => IDP_ADMIN_CONTROLS.includes(b.trim()))).toBe(
+    true,
+  );
 
   expectOnlyGET(w);
   await expectNoLeak(page, w);
@@ -646,7 +672,9 @@ test.describe("J4 quarantined registry", () => {
       main.getByText("Operation ledger", { exact: false }).first(),
     ).toBeVisible();
     const buttons = await main.getByRole("button").allTextContents();
-    expect(buttons.every((b) => b.trim() === "Refresh")).toBe(true);
+    expect(buttons.every((b) => IDP_ADMIN_CONTROLS.includes(b.trim()))).toBe(
+      true,
+    );
     expectOnlyGET(w);
     // The quarantine file name is a server fact for the repair ceremony
     // (absent from this slice) — it never reaches the DOM, URL or storage.

@@ -330,7 +330,8 @@ export function AppShell(): JSX.Element {
             onClick={() => setPwOpen(true)}
             disabled={signingOut || pwOpen}
           >
-            Change password
+            <span className={styles.pwLabelFull}>Change password</span>
+            <span className={styles.pwLabelShort}>Password</span>
           </Button>
           <Button
             size="sm"

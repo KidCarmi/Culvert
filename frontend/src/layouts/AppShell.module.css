@@ -152,6 +152,26 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* FE-6A.2: the self-service password control lives in the topbar for every
+   role. At narrow widths (a 1280 desktop at 200% zoom = 640 CSS px) the
+   topbar is a single non-wrapping row, so the control takes its short label
+   and the role chip yields — the page must never gain horizontal overflow
+   (the fe2/fe4/policy-2a reflow gates). display:none also removes the hidden
+   label from the button's accessible name. */
+.pwLabelShort {
+  display: none;
+}
+@media (max-width: 760px) {
+  .pwLabelFull {
+    display: none;
+  }
+  .pwLabelShort {
+    display: inline;
+  }
+  .accountRole {
+    display: none;
+  }
+}
 .accountRole {
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
