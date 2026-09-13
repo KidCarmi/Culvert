@@ -665,10 +665,26 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 	if reg == nil || cat == nil {
 		return false
 	}
-	// ONE catalog snapshot for the whole decision, taken AFTER the reconcile: every tool is
-	// judged against the same published state, so a concurrent re-ingest cannot make the
-	// verdict internally inconsistent.
+	// EXACTLY ONE SNAPSHOT OF EACH SOURCE for the whole decision, both taken AFTER the
+	// reconcile. Every check below is derived from these two values and nothing re-reads
+	// cat.Current() or reg.Current(), so a re-ingest landing mid-scan cannot make the verdict
+	// internally inconsistent.
+	//
+	// That is a correctness requirement, not tidiness, and getting it wrong is how this
+	// function shipped a fail-open once already (Codex P2 round 2, PR #1378). The earlier
+	// shape resolved tenant ownership through mcpToolTrust.loadTarget, which re-reads BOTH
+	// current snapshots: a same-tenant republish between the two reads let an old Usable F1
+	// record satisfy eligibility and the F1-pinned digest while ownership came from the new
+	// snapshot, so the resolver answered "usable" for a target the current catalog had already
+	// re-quarantined at F2. The comment sitting here at the time asserted the single-snapshot
+	// invariant the code then broke — a reminder that "one snapshot" means one READ, not one
+	// source.
+	//
+	// The root cause is the second read, so the second read is gone rather than guarded: the
+	// registry snapshot answers ownership directly. A cross-check between two reads would only
+	// DETECT the inconsistency; taking one read cannot produce it.
 	snap := cat.Current()
+	servers := reg.Current()
 	for _, tenant := range scope.Tenants {
 		for i := range scope.Tools {
 			st := scope.Tools[i]
@@ -683,11 +699,11 @@ func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
 			if !strings.EqualFold(hex.EncodeToString(sum[:]), st.Fingerprint) {
 				return false
 			}
-			// Tenant ownership comes from the REGISTRY, through the same resolution the live
-			// approval bindings use — an independent source from the catalog record above, so a
-			// scope naming a tenant that does not own this server resolves to no usable target.
-			ti := mcpToolTrust.loadTarget(st.Server, st.Name)
-			if !ti.found || ti.target.Tenant != tenant {
+			// Tenant ownership from the REGISTRY snapshot taken above — an independent source
+			// from the catalog record, so a scope naming a tenant that does not own this server
+			// resolves to no usable target, and an unregistered server resolves to none at all.
+			srv, sok := servers.Get(registry.ServerID(st.Server))
+			if !sok || string(srv.OwnerScope) != tenant {
 				return false
 			}
 		}

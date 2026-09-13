@@ -2224,7 +2224,9 @@ usability.
 | Why it matters, end to end | `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion` — same policy, same rule, same request; the only variable is the governed catalog disposition. Before: `ActionQuarantine` / `MCP.TOOL.UNKNOWN`, no rule consulted. After: ordinary evaluation is reached |
 | Fail-closed on the degenerate inputs | `TestCatalogUsable_EmptyScopeIsNotVacuouslyUsable` (a scope admitting no tool must not satisfy a fact about its tools) and `TestCatalogUsable_AbsentInventoryFailsClosed` (the condition under which nothing is known about the tool is the condition under which the fact must not be claimed) |
 | The fact reaches every activation call site | `TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall` — an AST wall requiring every field of `canaryActivationInputs` to be forwarded at every `CanaryActivationInput` literal in `mcp_rollout.go` (the transition commit and the restart reconcile). It is deliberately WIDER than blocker 13: dropping any activation fact at a commit site is the same defect. It is structural because no behavioural test can reach either site in this build — the live tier is never armed, so the commit refuses at an earlier gate and a dropped field is invisible |
-| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 14 mutations, 14 caught, 0 survived, 0 skipped |
+| Expiry is materialized before the read | `TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick` — expiry is PASSIVE, so a grant past its `ExpiresAt` leaves its tool `Usable` until the 30-second reconcile tick. The resolver reconciles before snapshotting, as `shadowScopeHasUsableTool` does under ADR-0034 D7, with `TestCatalogUsable_ReconcilingToReadNeverPromotes` as the control that a read path did not become a promotion path (Codex P2 round 1) |
+| ONE read of each source per decision | `TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` — the verdict is derived from exactly one catalog snapshot and one registry snapshot, and `loadTarget` (which re-reads both) is not called, so a republish landing mid-scan cannot pair an old Usable record with newer ownership (Codex P2 round 2) |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 16 mutations, 16 caught, 0 survived, 0 skipped |
 
 **What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
 run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
@@ -2249,7 +2251,9 @@ same lesson as §25a's "four instances in one campaign", reached from the opposi
 a mutation looked caught while proving less than claimed; here, one looked survived while proving
 nothing at all.
 
-The repaired campaign scores 14/14 with no survivors and no skips.
+The repaired campaign scores 16/16 with no survivors and no skips. M15 and M16 were added later,
+for the two defects adversarial review found on the PR itself (passive expiry; a decision straddling
+two snapshots) — both real, and neither reachable by the twelve cases the specification enumerated.
 
 **Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
 policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
@@ -2266,11 +2270,34 @@ the only thing missing was that the activation gate never asked. And it did not 
 into the activation's immutable reviewed snapshot: a revoked or expired promotion must be able to
 make a node un-ready, which a frozen copy could not express.
 
-**One thing the work removed rather than added.** The first shape of the resolver cross-checked the
-catalog record's digest and format against `loadTarget`'s re-read of the same record. Both sides
-come from the same catalog, so no test could ever distinguish the check from its absence — a
-guard whose failure mode is silent rot. It was deleted and the property it was reaching for
-(`Sum` folds `FormatVersion` in) is pinned directly instead, where the reason is written down.
+**A removal that was WRONG, and the correction.** The first shape of the resolver cross-checked the
+catalog record's digest and format against `loadTarget`'s re-read. That check was deleted mid-PR on
+the reasoning that *"both sides come from the same catalog, so no test could ever distinguish the
+check from its absence"* — a guard whose only future is silent rot.
+
+**The reasoning was wrong, and adversarial review caught it** (Codex P2, round 2). Same catalog,
+DIFFERENT READS: `loadTarget` re-reads `cat.Current()` AND `reg.Current()`, so under a concurrent
+re-ingest the two sides genuinely differ. The deleted cross-check was the snapshot-consistency
+guard, and removing it opened a fail-open — an old `Usable` F1 record satisfying eligibility and the
+F1-pinned digest while ownership came from the newer snapshot, so the resolver answered "usable" for
+a target the current catalog had already re-quarantined at F2. The comment sitting above the loop at
+the time asserted the very single-snapshot invariant the code broke.
+
+The repair does not restore the cross-check. A cross-check between two reads can only DETECT an
+inconsistency that one read cannot produce, so the SECOND READ is gone instead: the registry
+snapshot taken alongside the catalog snapshot answers ownership directly, and
+`TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` pins that the function reads each source
+once and never calls `loadTarget`.
+
+The transferable lesson is the one the first reasoning missed: **"one snapshot" is a statement about
+one READ, not one source.** Two reads of the same authority are two snapshots, and a guard that
+looks redundant because both sides "come from the same place" may be the only thing making that true.
+Before deleting a check as vacuous, establish that no test could distinguish it *because the states
+cannot differ* — not merely because you could not think of a test.
+
+The format binding is genuinely not a second check, and that part stands: `Sum` folds
+`FormatVersion` in before any other segment, so the digest comparison is format-bound by
+construction, pinned by `TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest`.
 
 ---
 

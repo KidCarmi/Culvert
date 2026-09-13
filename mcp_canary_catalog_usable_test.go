@@ -592,6 +592,85 @@ func catalogPromotionOwners(t *testing.T) map[string][]string {
 	return owners
 }
 
+// ── the resolver reads each source exactly once ──────────────────────────────
+//
+// Codex P2 round 2, PR #1378, and a correction to a claim made earlier in this PR.
+//
+// The resolver must decide from ONE catalog snapshot and ONE registry snapshot. The
+// earlier shape took a catalog snapshot and then resolved tenant ownership through
+// mcpToolTrust.loadTarget, which re-reads BOTH current snapshots — so a republish landing
+// between the two reads let an old Usable F1 record satisfy eligibility and the F1-pinned
+// digest while ownership came from the newer snapshot, and the resolver answered "usable"
+// for a target the current catalog had already re-quarantined at F2.
+//
+// THE CLAIM THIS CORRECTS. An earlier commit deleted a cross-check between those two
+// resolutions on the reasoning that "both sides come from the same catalog, so no test
+// could ever distinguish the check from its absence." Same catalog, DIFFERENT READS: the
+// check was the snapshot-consistency guard, and the reasoning that removed it was wrong.
+//
+// The fix removes the second read rather than re-adding a guard over it, because a
+// cross-check can only DETECT an inconsistency that one read cannot produce. This gate is
+// therefore structural — it pins the property the fix rests on. A behavioural test cannot
+// reach it without a seam that interposes a republish mid-scan, and adding a production
+// seam whose only purpose is to let a test drive a race is a worse trade than asserting
+// the shape directly.
+
+func TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "mcp_canary_preflight.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp_canary_preflight.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "canaryScopedToolsCatalogUsable" {
+			fn = f
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("wall is vacuous: canaryScopedToolsCatalogUsable not found (it was renamed or moved)")
+	}
+
+	counts := map[string]int{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Current":
+			if id, ok := sel.X.(*ast.Ident); ok {
+				counts[id.Name+".Current"]++
+			}
+		case "loadTarget":
+			// loadTarget re-reads BOTH current snapshots internally, so one call reintroduces
+			// the whole defect however the surrounding reads are counted.
+			counts["loadTarget"]++
+		}
+		return true
+	})
+
+	if n := counts["loadTarget"]; n != 0 {
+		t.Fatalf("SECURITY: the resolver calls loadTarget %d time(s) — loadTarget re-reads "+
+			"cat.Current() AND reg.Current(), so the decision would again straddle two "+
+			"snapshots and a mid-scan republish could pair an old Usable record with new "+
+			"ownership", n)
+	}
+	if n := counts["cat.Current"]; n != 1 {
+		t.Fatalf("SECURITY: the resolver reads cat.Current() %d time(s), want exactly 1 — "+
+			"every check must be derived from ONE catalog snapshot", n)
+	}
+	if n := counts["reg.Current"]; n != 1 {
+		t.Fatalf("SECURITY: the resolver reads reg.Current() %d time(s), want exactly 1 — "+
+			"every check must be derived from ONE registry snapshot", n)
+	}
+}
+
 // ── the production preflight itself carries the row ──────────────────────────
 //
 // Every gate above drives the resolver directly. This one drives the whole production

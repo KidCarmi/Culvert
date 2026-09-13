@@ -26,6 +26,7 @@
 #   M13  the digest stops folding the fingerprint FORMAT version
 #   M14  a data-plane file gains a promotion call (structural wall)
 #   M15  the resolver reads the catalog without materializing expiry first
+#   M16  the resolver straddles two snapshots for one decision
 #
 # A COMPILE FAILURE IS NOT PROOF unless the mutation targets a structural wall whose stated
 # purpose is compile-time prevention (those declare --compile-wall).
@@ -273,6 +274,20 @@ run_mutation M15 \
   'TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick' \
   . "$PREFLIGHT" \
   's/\tmcpToolTrustReconcile\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)/\treg, cat := mcpInventory.sharedInventory()/'
+
+# M16 — THE DECISION STRADDLES TWO SNAPSHOTS. Resolving ownership through loadTarget re-reads
+# cat.Current() AND reg.Current(), so a republish landing mid-scan pairs an old Usable F1 record
+# with ownership from the new snapshot and the resolver answers "usable" for a target the current
+# catalog has already re-quarantined. (Codex P2 round 2, PR #1378 — a real finding, and one this PR
+# first created by DELETING the cross-check as "vacuous": same catalog, different reads.)
+#
+# --compile-wall is NOT used: the mutation compiles, and the structural gate is what rejects it.
+run_mutation M16 \
+  'the resolver resolves ownership through a second snapshot read' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$PREFLIGHT" \
+  's/\t\t\tsrv, sok := servers\.Get\(registry\.ServerID\(st\.Server\)\)\n\t\t\tif !sok \|\| string\(srv\.OwnerScope\) != tenant \{/\t\t\tti := mcpToolTrust.loadTarget(st.Server, st.Name)\n\t\t\tif !ti.found || ti.target.Tenant != tenant {/' \
+  's/\tservers := reg\.Current\(\)\n//'
 
 printf '\n===========================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
