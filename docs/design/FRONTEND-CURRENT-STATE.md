@@ -14,6 +14,10 @@
   server-confirmed legacy-LDAP cutover, registry repair and operation recovery for IdPs;
   roster create/update/delete, lockout clear and the self-service password change for
   administrators (every mutation admin-only; the shell's "Change password" for every role).
+  FE-6A.2 correction round (2026-09-13): the legacy import is fenced, operation-identified and
+  ledger-recorded (recovery marker + typed re-send); operations commit the exact secret
+  candidate; enabled-LDAP writes cross the non-bypassable commit-time preflight
+  (`422 preflight_failed`); a completed cutover emits no retirement audit on later boots.
   Operator runbooks: `docs/operator/idp-registry-recovery.md`,
   `docs/operator/administrator-account-recovery.md`.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`

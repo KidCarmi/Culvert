@@ -21,10 +21,13 @@ boundary.
 3. **Test connection** — staged feedback: reachability, TLS, service bind,
    Base DN search; optionally supply a test username/password for a full
    identity test (the test password is transient — never stored or logged).
-4. Enable and save. Enabling runs the same connection preflight server-side
-   (`?preflight=connection`): a failing candidate can never replace a working
-   configuration — on failure the API returns 422 with the staged report and
-   the current provider stays active.
+4. Enable and save. Enabling (or changing the connection settings of an
+   enabled provider) ALWAYS runs the connection preflight server-side at the
+   write boundary — it cannot be skipped by any request parameter — so a
+   failing candidate can never replace a working configuration: on failure
+   the API returns the bounded `422 preflight_failed` refusal (`current.step`
+   + `current.reason` + the staged report), nothing is written and the
+   current provider stays active. See `idp-registry-recovery.md` §9.
 
 Proxy users then authenticate with their directory username/password via
 proxy Basic authentication. No restart is required at any point.

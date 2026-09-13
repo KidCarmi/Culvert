@@ -105,12 +105,16 @@ it was bound to) and `cutoverDurability: durable`. The record carries its
 own identity; the ledger key the card joins it with is the enabling
 profile's provenance `operationId`.
 
-Known residual (pre-existing, recorded): on every later boot of a node
-that has cut over and still carries the YAML block, the startup observation
-runs before `admin_settings.json` is loaded, so one additional
-`idp.legacy_ldap.retired` audit entry (actor `system`, trigger `observed`,
-a fresh record identity) is emitted. The durable ADMIN record wins on load
-and is what the read model reports; the audit trail carries the extra line.
+Boot idempotence (FE-6A.2 correction, Blocker 4): on every later boot of a
+node that has cut over and still carries the YAML block, the startup slice
+only OBSERVES the shadow (fail-closed: the legacy authenticator stays
+retired); the durable record is reconciled when `admin_settings.json`
+loads. A completed admin cutover therefore keeps the same record identity
+(`cutover.operationId`, `trigger`, `registryRevision`, `actor`) and emits
+NO new `idp.legacy_ldap.retired` audit entry across any number of restarts.
+Only a boot on which no durable record exists mints the boot-observed record
+and its one-time audit. If the settings file is missing, corrupt or
+unreadable at boot, the retirement stays in force and nothing is invented.
 
 Break-glass revert is unchanged: see `ldap-identity-provider.md`.
 
@@ -133,9 +137,32 @@ beside the registry path, fix or restore it, and restart.
 
 ## 6. Legacy import
 
-**Import legacy configuration** creates a DISABLED registry profile from the
-YAML block and copies the bind credential server-side; the browser never
-receives it. Enabling that profile afterwards is the cutover in §4.
+**Import legacy configuration** (`POST /api/idp/legacy-ldap/import`) creates
+a DISABLED registry profile from the YAML block and copies the bind
+credential server-side; the browser never receives it. Since the FE-6A.2
+correction the import is an ordinary fenced, identified write:
+
+- `?documentRevision=` (the loaded registry document revision — `428
+  precondition_required` / `409 stale` with `current.documentRevision`) and
+  `?operationId=` (`428 operation_id_required`) are required; the fence is
+  decided inside the registry transaction.
+- The operation is ledger-recorded as `idp.import` with the same intent /
+  replay / mismatch / pending / lookup semantics as a create: a repeat of the
+  same operationId answers `replayed: true` and imports nothing twice; the
+  candidate commitment binds the legacy source identity (URL, base DN, bind
+  DN, credential presence, StartTLS, skip-verify, filter, group) — never the
+  credential.
+- The answer is action-bound: `imported: true`, the disabled ldap profile
+  (identity, entry revision, `operationId` provenance), the RESULTING
+  `documentRevision`, a credential-free `source` identity and the fleet
+  publication facts.
+- The frontend writes the recovery marker (action `import`) BEFORE the
+  request. An unproven answer keeps the marker, latches the page and
+  re-reads the registry once; **Recover** looks the operation up in the
+  ledger; a `404` offers a re-send of the SAME import operation; a changed
+  legacy block is refused locally and by the appliance (`operation_mismatch`).
+
+Enabling the imported profile afterwards is the cutover in §4.
 
 ## 7. Secrets
 
@@ -157,3 +184,22 @@ step by step with a closed error vocabulary (`timeout`, `tls_failed`,
 `unreachable`, `invalid_credentials`, `no_such_object`,
 `insufficient_access`, `directory_error`); an unverifiable answer is
 unproven, never "passed".
+
+## 9. Commit-time directory preflight (write boundary)
+
+Every create or update that introduces an ENABLED LDAP provider, or changes
+the connection spec (URL, StartTLS, skip-verify, bind DN, bind password, base
+DN) of an enabled one, crosses the authoritative directory test at the write
+boundary — before the ledger intent, after the replay and fence pre-checks —
+and no request parameter can skip it (`?preflight=` is accepted for
+compatibility and changes nothing). A label-only edit of an enabled provider
+does not re-dial.
+
+A failure is the bounded refusal `422 preflight_failed` with
+`current.step` (`reachable`, `tls`, `service_bind`, `base_dn`,
+`user_lookup`) and `current.reason` (the closed vocabulary in §8) plus the
+sanitized report. It is decided before anything is written: registry,
+ledger, cutover record, audit trail and fleet publication are untouched, and
+the frontend releases the recovery marker (nothing to settle). A directory
+that is down at save time therefore cannot become the enabled authenticator;
+fix the directory (or the candidate) and save again.
