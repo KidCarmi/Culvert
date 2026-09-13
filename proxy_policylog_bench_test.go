@@ -90,19 +90,41 @@ func plCurrentAllowLine(rule string, priority int) {
 }
 
 // plSwapLogger points the package logger at w and returns a restore func.
-// Benchmarks send it to io.Discard so they measure argument construction and
-// formatting — the work the request goroutine actually performs — without the
-// log sink's I/O, which is asynchronous in production anyway (internal/logsink).
+// Benchmarks send it to plNopWriter (NOT io.Discard — see below) so they
+// measure argument construction and formatting — the work the request goroutine
+// actually performs — without the log sink's I/O, which is asynchronous in
+// production anyway (internal/logsink).
 func plSwapLogger(w io.Writer) func() {
 	prev := logger
 	logger = log.New(w, "", 0)
 	return func() { logger = prev }
 }
 
+// plNopWriter is a no-op sink that is deliberately NOT the io.Discard sentinel.
+//
+// This distinction decides whether these benchmarks measure anything at all.
+// log.New records `isDiscard = (w == io.Discard)` and Logger.output returns
+// BEFORE invoking its append callback, so with io.Discard a logger.Printf call
+// evaluates and boxes its arguments and then formats NOTHING — no fmt.Appendf,
+// no %q, no header. A hand-assembled line, by contrast, is built by the caller
+// before Output is ever reached, so it is charged in full either way.
+//
+// Benchmarking the two shapes against io.Discard therefore excuses one arm's
+// formatter and charges the other's, and it reported the hand-assembled
+// emitters as a 24% win when they are a 66% one (Codex review, PR #1377). Every
+// benchmark and gate on this path uses this writer instead.
+type plNopWriter struct{}
+
+func (plNopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// plSilentLogger points the package logger at a real (non-sentinel) no-op sink,
+// so formatting runs but no I/O does.
+func plSilentLogger() func() { return plSwapLogger(plNopWriter{}) }
+
 // ── Before vs after ─────────────────────────────────────────────────────────
 
 func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSilentLogger()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -111,7 +133,7 @@ func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSilentLogger()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -128,7 +150,7 @@ func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
 // so the comparison stays honest.
 
 func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSilentLogger()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -139,7 +161,7 @@ func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSilentLogger()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -155,7 +177,7 @@ func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
 // beaconing flood, so they are measured too rather than assumed to match.
 
 func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSilentLogger()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -164,7 +186,7 @@ func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Drop(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSilentLogger()()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

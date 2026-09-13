@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -778,7 +779,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     sanitize-once decision inside the measured function, where reintroducing
 //     a second call fails the gate.
 //
-//   - The priority is rendered with %d. It was previously spelled
+//   - The priority is rendered as decimal digits. It was previously spelled
 //     strings.ReplaceAll(fmt.Sprintf("%d", …), "\n", ""), which formatted an int
 //     to a string and then scanned that string for newlines a decimal integer
 //     cannot contain — two heap allocations per proxied request (the Sprintf
@@ -786,40 +787,207 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     no-op. This is NOT the CWE-117 idiom the code conventions require: that
 //     rule covers STRING values reaching a log sink, whereas Priority is an int
 //     field of the admin-configured rulebase, carries no client-controlled data,
-//     and %d on an int can only ever emit [-0-9]. The rendered digits are
+//     and decimal digits can only ever be [-0-9]. The rendered digits are
 //     identical either way, so the emitted line is byte-for-byte what it was
 //     (pinned by TestPolicyDecisionLine_RenderIsByteIdentical). Every
 //     genuinely string-typed argument still goes through sanitizeLog.
+//
+// ── Why these are assembled by hand rather than with logger.Printf ──────────
+//
+// fmt is not free here and the saving is large: 1007 -> 340 ns serial and
+// 442 -> 321 ns at four cores, with 8 -> 1 allocations, measured against a real
+// log sink (see the MEASURING note below — measuring against io.Discard says
+// the opposite, and that is a trap, not a result). The line is a fixed shape
+// over eight values, so assembling it costs a handful of appends, whereas
+// Printf boxes every argument into an []any and then re-parses the format
+// string to decide what it already knew at compile time.
+//
+// The emitted bytes are IDENTICAL, which is the only thing that makes this
+// acceptable — these lines are consumed by SIEM forwarders and log parsers.
+// appendQuotedLog is strconv.AppendQuote (exactly what fmt's %q calls) with a
+// fast path for the printable-ASCII case, and decimal digits are
+// strconv.AppendInt (exactly what %d calls). Equivalence against the frozen
+// Printf shape is pinned by TestPolicyDecisionLine_RenderIsByteIdentical.
+//
+// The CWE-117 contract is UNCHANGED: every string-typed argument still passes
+// through sanitizeLog before it is appended, so the sanitiser still sits
+// between every client-controlled value and the log sink. Do not append a raw
+// string argument here.
+//
+// MEASURING THESE: never point the package logger at io.Discard. log.New
+// records `isDiscard = (w == io.Discard)` and Logger.output returns BEFORE
+// invoking its append callback, so the Printf arm silently skips ALL
+// formatting while a hand-assembled arm still builds its buffer — which made
+// the first measurement of this change report it as a 24% win when it is a
+// 66% one, and nearly got it rejected (Codex review, PR #1377). Benchmarks
+// here use plSwapLogger, which deliberately uses a no-op writer that is not
+// that sentinel.
 
 // logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
 // authority as the client sent it), not the port-stripped host the block
 // branches log — preserved from the pre-extraction call sites verbatim.
 func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}",
-		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	var arr [policyLineBufSize]byte
+	b := arr[:0]
+	b = append(b, "POLICY_ALLOW rule="...)
+	b = appendQuotedLog(b, safeRule)
+	b = append(b, " pri="...)
+	b = strconv.AppendInt(b, int64(priority), 10)
+	b = append(b, ' ')
+	b = append(b, clientIP...)
+	b = append(b, ' ')
+	b = append(b, method...)
+	b = append(b, ' ')
+	b = appendQuotedLog(b, sanitizeLog(host))
+	b = append(b, " ["...)
+	b = append(b, sanitizeLog(matchedConditions)...)
+	b = append(b, "] {req_id="...)
+	b = append(b, reqID...)
+	b = append(b, " identity="...)
+	b = append(b, sanitizeLog(identity)...)
+	b = append(b, " rule="...)
+	b = append(b, safeRule...)
+	b = append(b, " action=allow}"...)
+	emitDecisionLine(string(b))
 }
 
 // logPolicyDrop emits the POLICY_DROP decision line.
 func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	var arr [policyLineBufSize]byte
+	b := arr[:0]
+	b = append(b, "POLICY_DROP rule="...)
+	b = appendQuotedLog(b, safeRule)
+	b = append(b, " pri="...)
+	b = strconv.AppendInt(b, int64(priority), 10)
+	b = append(b, ' ')
+	b = append(b, clientIP...)
+	b = append(b, " -> "...)
+	b = appendQuotedLog(b, sanitizeLog(host))
+	b = append(b, " ["...)
+	b = append(b, sanitizeLog(matchedConditions)...)
+	b = append(b, "] {req_id="...)
+	b = append(b, reqID...)
+	b = append(b, " identity="...)
+	b = append(b, sanitizeLog(identity)...)
+	b = append(b, " rule="...)
+	b = append(b, safeRule...)
+	b = append(b, " action=drop}"...)
+	emitDecisionLine(string(b))
 }
 
 // logPolicyBlock emits the POLICY_BLOCK decision line.
 func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	var arr [policyLineBufSize]byte
+	b := arr[:0]
+	b = append(b, "POLICY_BLOCK rule="...)
+	b = appendQuotedLog(b, safeRule)
+	b = append(b, " pri="...)
+	b = strconv.AppendInt(b, int64(priority), 10)
+	b = append(b, ' ')
+	b = append(b, clientIP...)
+	b = append(b, " -> "...)
+	b = appendQuotedLog(b, sanitizeLog(host))
+	b = append(b, " ["...)
+	b = append(b, sanitizeLog(matchedConditions)...)
+	b = append(b, "] {req_id="...)
+	b = append(b, reqID...)
+	b = append(b, " identity="...)
+	b = append(b, sanitizeLog(identity)...)
+	b = append(b, " rule="...)
+	b = append(b, safeRule...)
+	b = append(b, " action=block}"...)
+	emitDecisionLine(string(b))
 }
 
 // logPolicyRedirect emits the POLICY_REDIRECT decision line. Reached only after
 // isSafeRedirectURL has accepted redirectURL.
 func logPolicyRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	var arr [policyLineBufSize]byte
+	b := arr[:0]
+	b = append(b, "POLICY_REDIRECT rule="...)
+	b = appendQuotedLog(b, safeRule)
+	b = append(b, " pri="...)
+	b = strconv.AppendInt(b, int64(priority), 10)
+	b = append(b, ' ')
+	b = append(b, clientIP...)
+	b = append(b, " -> "...)
+	b = appendQuotedLog(b, sanitizeLog(host))
+	b = append(b, " => "...)
+	b = appendQuotedLog(b, sanitizeLog(redirectURL))
+	b = append(b, " ["...)
+	b = append(b, sanitizeLog(matchedConditions)...)
+	b = append(b, "] {req_id="...)
+	b = append(b, reqID...)
+	b = append(b, " identity="...)
+	b = append(b, sanitizeLog(identity)...)
+	b = append(b, " rule="...)
+	b = append(b, safeRule...)
+	b = append(b, " action=redirect}"...)
+	emitDecisionLine(string(b))
+}
+
+// policyLineBufSize is the stack scratch a decision line is assembled in. The
+// representative line is ~170 bytes, so an ordinary request never touches the
+// heap for the buffer; a long rule name, host or identity grows onto the heap,
+// which costs one extra allocation on a shape that is not the common one.
+const policyLineBufSize = 256
+
+// emitDecisionLine writes one fully-assembled decision line through the package
+// logger, which owns the timestamp, the prefix and the mutex that keeps
+// concurrent lines from interleaving. Logger.Output and Logger.Printf funnel
+// into the same internal writer, so the framing is identical; the calldepth is
+// immaterial because the production logger carries no Lshortfile/Llongfile flag
+// (logger.go sets log.LstdFlags), and it is pinned that way by
+// TestPolicyDecisionLine_RenderIsByteIdentical.
+//
+// The caller converts its buffer to a string at the call site so the buffer
+// itself does not escape and can stay on the stack.
+func emitDecisionLine(line string) {
+	_ = logger.Output(2, line) //nolint:errcheck // parity with logger.Printf, which also discards the write error
+}
+
+// appendQuotedLog appends s to dst exactly as fmt's %q verb would, with a
+// single-pass fast path for the overwhelmingly common input: a short,
+// printable-ASCII rule name, hostname or URL carrying nothing that needs
+// escaping, whose quoted form is just the string between two quote bytes.
+//
+// Anything else falls through to strconv.AppendQuote — which is the same
+// function fmt's %q calls — so the output is strconv's by construction on every
+// input the fast path declines. That equivalence is the load-bearing property
+// here (these lines are a SIEM contract) and is pinned exhaustively over all
+// 256 byte values plus randomised boundary-weighted strings by
+// TestPolicyLineQuote_FastPathMatchesStrconv.
+//
+// It is worth the branch: strconv.AppendQuote decodes and IsPrint-tests rune by
+// rune and appends one rune at a time even when nothing needs escaping, which
+// measured 232 ns for the two quoted values on one decision line against 31 ns
+// for the fast path (7.4x).
+func appendQuotedLog(dst []byte, s string) []byte {
+	if logQuoteNeedsEscape(s) {
+		return strconv.AppendQuote(dst, s)
+	}
+	dst = append(dst, '"')
+	dst = append(dst, s...)
+	return append(dst, '"')
+}
+
+// logQuoteNeedsEscape reports whether strconv.AppendQuote would render any byte
+// of s as something other than itself — i.e. whether the fast path above is
+// unsafe. Any byte outside printable ASCII disqualifies the WHOLE string: a
+// non-ASCII byte may begin a multi-byte rune that AppendQuote escapes (or an
+// invalid sequence it renders as \xNN), and deciding that per rune is exactly
+// the work the fast path exists to skip.
+func logQuoteNeedsEscape(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c >= 0x7f || c == '"' || c == '\\' {
+			return true
+		}
+	}
+	return false
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:
