@@ -15,7 +15,13 @@
 //          logs in) → A5 delete (T3, typed username).
 import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, request, test } from "./test";
-import { AUTH_URL, EMPTY_STATE, IDPW_URL, USERS } from "./fixtures";
+import {
+  AUTH_URL,
+  EMPTY_STATE,
+  IDPW_URL,
+  LDAP_STUB_URL,
+  USERS,
+} from "./fixtures";
 
 const IDP_ROUTE = "/app/objects/identity-providers";
 const ADMINS_ROUTE = "/app/administrators";
@@ -178,11 +184,56 @@ test.describe("FE-6A.2 W — provider writes on the write appliance", () => {
     await expect(
       importedRow.getByText("Disabled", { exact: true }),
     ).toBeVisible();
+    // FE-6A.2 correction (Blocker 1): the import is FENCED on the loaded
+    // document revision and OPERATION-IDENTIFIED, and the marker it wrote
+    // before dispatch is released by the proven answer.
+    const importCall = w.apiCalls.find(
+      (c) =>
+        c.method === "POST" && c.url.startsWith("/api/idp/legacy-ldap/import"),
+    );
+    expect(importCall, "the import POST was sent").toBeTruthy();
+    const iq = new URL(importCall?.url ?? "/", "http://x").searchParams;
+    expect(iq.get("documentRevision")).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(iq.get("operationId")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(
+      await page.evaluate(() =>
+        sessionStorage.getItem("culvert.idp.operation-recovery.v1"),
+      ),
+    ).toBeNull();
 
-    // W3 cutover — enabling the imported profile runs the ceremony with the
-    // server's confirm value; the PUT binds operationId + revision + confirm.
+    // W3a cutover REFUSED at the write boundary (Blocker 3): the imported
+    // profile still points at the legacy `.invalid` directory, so enabling
+    // it crosses the connection preflight and is refused with the bounded
+    // step + reason; the profile stays Disabled, the legacy block stays
+    // live, nothing is retried.
+    await importedRow.getByRole("button", { name: "Edit" }).click();
+    const editor0 = page.getByRole("dialog");
+    await editor0.getByLabel("Enabled").check();
+    await editor0.getByRole("button", { name: "Review and save" }).click();
+    const cutover0 = page.getByRole("dialog");
+    await expect(
+      cutover0.getByText("Retire the legacy YAML LDAP authenticator"),
+    ).toBeVisible();
+    await typeConfirm(page, LEGACY_URL);
+    await cutover0.getByRole("button", { name: "Retire and enable" }).click();
+    await expect(main.getByText(/preflight/i).first()).toBeVisible();
+    await expect(main.getByText("unreachable", { exact: true })).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(
+      importedRow.getByText("Disabled", { exact: true }),
+    ).toBeVisible();
+    await expect(main.getByText("Retired", { exact: true })).toHaveCount(0);
+    const refusedPuts = w.apiCalls.filter(
+      (c) => c.method === "PUT" && c.url.startsWith("/api/idp/"),
+    );
+    expect(refusedPuts).toHaveLength(1);
+
+    // W3 cutover — pointed at the harness directory, enabling the imported
+    // profile runs the ceremony with the server's confirm value; the PUT
+    // binds operationId + revision + confirm and crosses the preflight.
     await importedRow.getByRole("button", { name: "Edit" }).click();
     const editor = page.getByRole("dialog");
+    await editor.getByLabel(/^Directory URL/).fill(LDAP_STUB_URL);
     await editor.getByLabel("Enabled").check();
     await editor.getByRole("button", { name: "Review and save" }).click();
     const cutover = page.getByRole("dialog");
@@ -199,9 +250,9 @@ test.describe("FE-6A.2 W — provider writes on the write appliance", () => {
     await expect(
       importedRow.getByText("Enabled", { exact: true }),
     ).toBeVisible();
-    const put = w.apiCalls.find(
-      (c) => c.method === "PUT" && c.url.startsWith("/api/idp/"),
-    );
+    const put = w.apiCalls
+      .filter((c) => c.method === "PUT" && c.url.startsWith("/api/idp/"))
+      .at(-1);
     expect(put, "the cutover PUT was sent").toBeTruthy();
     const q = new URL(put?.url ?? "/", "http://x").searchParams;
     expect(q.get("revision")).toMatch(/^\d+$/);
@@ -247,11 +298,9 @@ test.describe("FE-6A.2 W — provider writes on the write appliance", () => {
     // Every non-GET went to a contracted mutation path.
     for (const c of w.apiCalls.filter((c) => c.method !== "GET")) {
       expect(
-        [
-          "/api/auth/login",
-          "/api/idp/repair",
-          "/api/idp/legacy-ldap/import",
-        ].some((p) => c.url === p) || /^\/api\/idp\/[0-9a-f]{12}\?/.test(c.url),
+        ["/api/auth/login", "/api/idp/repair"].some((p) => c.url === p) ||
+          /^\/api\/idp\/legacy-ldap\/import\?documentRevision=/.test(c.url) ||
+          /^\/api\/idp\/[0-9a-f]{12}\?/.test(c.url),
         c.url,
       ).toBe(true);
     }

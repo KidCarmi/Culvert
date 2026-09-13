@@ -23,6 +23,10 @@ export const IDPQ_URL =
 /** FE-6A.2: the write-journey appliance (corrupt registry + legacy block). */
 export const IDPW_URL =
   process.env["CULVERT_E2E_IDPW_URL"] ?? "http://127.0.0.1:19095";
+/** FE-6A.2 correction: the harness's minimal LDAP responder (cmd/ldapstub) —
+ * the directory an ENABLED LDAP profile must reach at the write boundary. */
+export const LDAP_STUB_URL =
+  process.env["CULVERT_E2E_LDAP_STUB_URL"] ?? "ldap://127.0.0.1:19389";
 /** PR-C1: the AUTH appliance's per-instance data root (CULVERT_DATA_DIR,
  * exported by scripts/e2e-smoke.sh) — where its admin_settings.json lives
  * for the on-disk ciphertext needle checks. Defaults to the appliance's

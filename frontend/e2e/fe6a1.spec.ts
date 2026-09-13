@@ -60,6 +60,7 @@ import {
   TOTP_SECRET,
   USERS,
   YAML_URL,
+  LDAP_STUB_URL,
 } from "./fixtures";
 import { expectNavLinkReachable } from "./nav-open";
 
@@ -364,7 +365,10 @@ test.beforeAll(async () => {
         type: "ldap",
         enabled: true,
         ldap: {
-          url: `ldaps://cutover-${SUFFIX}.invalid:636`,
+          // FE-6A.2 correction: an ENABLED LDAP write crosses the directory
+          // preflight at the write boundary, so the cutover profile points
+          // at the harness stub (bind + base search answer).
+          url: LDAP_STUB_URL,
           baseDn: "dc=cutover,dc=invalid",
           bindDn: "cn=svc,dc=cutover,dc=invalid",
           bindPassword: BIND_CANARY,

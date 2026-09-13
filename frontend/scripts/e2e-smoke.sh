@@ -41,6 +41,7 @@ BIN="$WORK/culvert"
 
 cleanup() {
   [ -n "${SLUICE_PID:-}" ] && kill "$SLUICE_PID" 2>/dev/null || true
+  [ -n "${LDAP_STUB_PID:-}" ] && kill "$LDAP_STUB_PID" 2>/dev/null || true
   [ -n "${AUTH_PID:-}" ] && kill "$AUTH_PID" 2>/dev/null || true
   [ -n "${FRESH_PID:-}" ] && kill "$FRESH_PID" 2>/dev/null || true
   [ -n "${FAIL_PID:-}" ] && kill "$FAIL_PID" 2>/dev/null || true
@@ -97,6 +98,21 @@ done
 SLUICE_TOKEN="$(cat "$WORK/sl/enrollment_token")"
 SLUICE_FP="$(openssl x509 -in "$WORK/sl/server.pem" -noout -fingerprint -sha256 | sed 's/^.*=//; s/://g' | tr 'A-F' 'a-f')"
 echo "e2e-smoke: Sluice daemon ready on 127.0.0.1:$SLUICE_PORT (pin ${SLUICE_FP%????????????????????????????????????????????????}…)"
+
+# ── FE-6A.2 correction (Blocker 3): the appliance's enabled-LDAP writes cross
+# the directory connection preflight at the write boundary UNCONDITIONALLY,
+# so every journey that ENABLES an LDAP profile needs a directory that
+# answers. cmd/ldapstub is the minimal in-repo responder (bind + base search);
+# it is a harness fixture, never a production component. The YAMLUP/IDPW
+# legacy blocks keep their `.invalid` directory so a journey can also prove
+# the typed preflight refusal (zero mutation) before pointing at the stub.
+LDAP_STUB_PORT="${CULVERT_E2E_LDAP_STUB_PORT:-19389}"
+LDAP_STUB_BIN="$WORK/ldapstub"
+(cd "$ROOT" && CGO_ENABLED=0 go build -o "$LDAP_STUB_BIN" ./cmd/ldapstub)
+("$LDAP_STUB_BIN" -listen "127.0.0.1:$LDAP_STUB_PORT" >"$WORK/ldapstub.log" 2>&1) &
+LDAP_STUB_PID=$!
+LDAP_STUB_URL="ldap://127.0.0.1:$LDAP_STUB_PORT"
+echo "e2e-smoke: LDAP stub directory on $LDAP_STUB_URL"
 
 # ── AUTH instance: seeded roster ─────────────────────────────────────────
 # bcrypt hashes (hex, cost 10) for the fixture credentials in e2e/fixtures.ts;
@@ -393,5 +409,6 @@ CULVERT_E2E_AUTH_DATA_DIR="$WORK/run-AUTH" \
 CULVERT_E2E_SLUICE_ADDR="127.0.0.1:$SLUICE_PORT" \
 CULVERT_E2E_SLUICE_FP="$SLUICE_FP" \
 CULVERT_E2E_SLUICE_TOKEN="$SLUICE_TOKEN" \
+CULVERT_E2E_LDAP_STUB_URL="$LDAP_STUB_URL" \
   npx playwright test --config e2e/playwright.config.ts "$@"
 echo "e2e-smoke: PASS"
