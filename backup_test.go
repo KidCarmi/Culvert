@@ -659,3 +659,64 @@ func TestBackup_FileProfiles_IncludedWithContent(t *testing.T) {
 		t.Errorf("fileprofiles.json content mismatch in backup")
 	}
 }
+
+// TestBackup_CDRInstances_IncludedWithContent and
+// TestBackup_CDRPolicies_IncludedWithContent guard against the same drift
+// class as the tests above, for two more stores the earlier passes missed:
+// cdr_instances.json and cdr_policies.json (cdr_startup_config.go's
+// InstancesPath/PoliciesPath) are the CDR (Sluice content-disarm-and-
+// reconstruction) instance registry and sanitization-policy rule set.
+// Both are admin-configurable via their own API (cdr_ui.go's enroll/
+// remove-instance and policy CRUD handlers) and, per
+// cdr_startup_config.go's own comment, are "loaded UNCONDITIONALLY (even
+// when CDR is disabled) so GUI enrolls/toggles persist across restarts" —
+// the exact same first-class-config bar decryption_profiles.json,
+// alert_webhooks.json, fileblock.json and idp_profiles.json were added to
+// the backup surface at. Neither is in defaultBackupArtifacts, so a backup
+// taken today silently drops every enrolled CDR instance (name, endpoint,
+// TOFU-pinned server fingerprint, credential lineage metadata — no private
+// key material, which lives in separate PEM files under
+// <dataDir>/integrations/sluice and is deliberately out of scope here, see
+// cdr_client_keyatrest.go) and every sanitization policy rule; restoring
+// onto a fresh volume/host leaves CDR completely unconfigured with no
+// record that it ever was, and any policy rule referencing a CDR profile
+// by name can no longer resolve it.
+func TestBackup_CDRInstances_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"instances":[{"name":"sluice-us-east-01","endpoint":"sluice:8443","serverFingerprint":"` + strings.Repeat("ab", 32) + `"}]}`)
+	seedFile(t, dataDir, "cdr_instances.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/cdr_instances.json"]
+	if !ok {
+		t.Fatalf("data/cdr_instances.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("cdr_instances.json content mismatch in backup")
+	}
+}
+
+func TestBackup_CDRPolicies_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"rules":[{"id":"r1","profile":"default","mode":"ENFORCE"}]}`)
+	seedFile(t, dataDir, "cdr_policies.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/cdr_policies.json"]
+	if !ok {
+		t.Fatalf("data/cdr_policies.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("cdr_policies.json content mismatch in backup")
+	}
+}

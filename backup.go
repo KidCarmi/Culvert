@@ -131,6 +131,22 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		// completeness pass; a backup taken today silently drops every SSO
 		// integration, so restoring onto a fresh volume/host loses them all.
 		{SrcPath: p("idp_profiles.json"), TarPath: "data/idp_profiles.json"},
+		// CDR (Sluice content-disarm-and-reconstruction) instance registry +
+		// sanitization policy rules — cdr_startup_config.go's own comment
+		// documents both as "loaded UNCONDITIONALLY (even when CDR is
+		// disabled) so GUI enrolls/toggles persist across restarts", the
+		// same admin-configurable-store bar every entry above this line was
+		// added at, but neither ever joined this list. Contains no private
+		// key material (that lives in separate PEM files under
+		// <dataDir>/integrations/sluice, deliberately out of scope per
+		// cdr_client_keyatrest.go) — just instance metadata (name, endpoint,
+		// TOFU-pinned server fingerprint, credential lineage) and policy
+		// rules. Was missing from every prior nightly QA backup-completeness
+		// pass; a backup taken today silently drops every enrolled CDR
+		// instance and sanitization policy, so restoring onto a fresh
+		// volume/host leaves CDR unconfigured with no record it ever was.
+		{SrcPath: p("cdr_instances.json"), TarPath: "data/cdr_instances.json"},
+		{SrcPath: p("cdr_policies.json"), TarPath: "data/cdr_policies.json"},
 	}
 }
 
