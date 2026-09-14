@@ -150,14 +150,26 @@ func TestSecBasicAuthWall_EveryCredentialVerifierIsBounded(t *testing.T) {
 	}
 }
 
-// TestSecBasicAuthWall_EveryBasicAuthReaderUsesTheChokepoint is the second
-// wall: a function that reads r.BasicAuth() off an inbound request must be
-// allowlisted AND must actually call verifyUIBasicAuth. Declaring the intent in
-// the allowlist is not enough — the call has to be there.
-func TestSecBasicAuthWall_EveryBasicAuthReaderUsesTheChokepoint(t *testing.T) {
-	fset := token.NewFileSet()
-	readers := map[string]bool{}
+// isInboundBasicAuthRead reports whether call is an INBOUND `<ident>.BasicAuth()`
+// read.
+//
+// The outbound `req.SetBasicAuth(...)` calls (OIDC introspection, the proxy's
+// userinfo promotion) are a different selector and are deliberately out of
+// scope — they PRESENT credentials, they do not verify them.
+func isInboundBasicAuthRead(call *ast.CallExpr) bool {
+	se, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || se.Sel.Name != "BasicAuth" {
+		return false
+	}
+	_, isIdent := se.X.(*ast.Ident)
+	return isIdent
+}
 
+// collectBasicAuthReaders returns the set of functions that read inbound Basic
+// credentials, failing the test for any that is not allowlisted.
+func collectBasicAuthReaders(t *testing.T, fset *token.FileSet) map[string]bool {
+	t.Helper()
+	readers := map[string]bool{}
 	for _, path := range mainPackageFiles(t) {
 		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if err != nil {
@@ -165,18 +177,7 @@ func TestSecBasicAuthWall_EveryBasicAuthReaderUsesTheChokepoint(t *testing.T) {
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			se, ok := call.Fun.(*ast.SelectorExpr)
-			// Inbound read only: `<ident>.BasicAuth()`. The outbound
-			// req.SetBasicAuth(...) calls (OIDC introspection, the proxy's
-			// userinfo promotion) are a different selector and are not in
-			// scope — they present credentials, they do not verify them.
-			if !ok || se.Sel.Name != "BasicAuth" {
-				return true
-			}
-			if _, isIdent := se.X.(*ast.Ident); !isIdent {
+			if !ok || !isInboundBasicAuthRead(call) {
 				return true
 			}
 			fn := enclosingFuncName(f, fset, call.Pos())
@@ -189,13 +190,30 @@ func TestSecBasicAuthWall_EveryBasicAuthReaderUsesTheChokepoint(t *testing.T) {
 			return true
 		})
 	}
+	return readers
+}
 
-	if len(readers) < len(basicAuthReaderAllowlist) {
-		t.Fatalf("wall found %d BasicAuth readers, want at least %d — the selector has stopped matching",
-			len(readers), len(basicAuthReaderAllowlist))
-	}
+// callsChokepoint reports whether fd contains a call to verifyUIBasicAuth.
+func callsChokepoint(fd *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "verifyUIBasicAuth" {
+			found = true
+		}
+		return true
+	})
+	return found
+}
 
-	// Each allowlisted reader must actually reach the chokepoint.
+// assertReadersReachChokepoint fails for any allowlisted reader that does not
+// actually call verifyUIBasicAuth. Declaring the intent in the allowlist is not
+// enough — the call has to be there.
+func assertReadersReachChokepoint(t *testing.T, fset *token.FileSet, readers map[string]bool) {
+	t.Helper()
 	for _, path := range mainPackageFiles(t) {
 		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if err != nil {
@@ -209,23 +227,29 @@ func TestSecBasicAuthWall_EveryBasicAuthReaderUsesTheChokepoint(t *testing.T) {
 			if _, want := basicAuthReaderAllowlist[fd.Name.Name]; !want || !readers[fd.Name.Name] {
 				continue
 			}
-			uses := false
-			ast.Inspect(fd, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "verifyUIBasicAuth" {
-					uses = true
-				}
-				return true
-			})
-			if !uses {
+			if !callsChokepoint(fd) {
 				t.Errorf("%s: %s reads r.BasicAuth() but never calls verifyUIBasicAuth — the credentials it reads are unbounded",
 					fset.Position(fd.Pos()), fd.Name.Name)
 			}
 		}
 	}
+}
+
+// TestSecBasicAuthWall_EveryBasicAuthReaderUsesTheChokepoint is the second
+// wall: a function that reads r.BasicAuth() off an inbound request must be
+// allowlisted AND must actually call verifyUIBasicAuth.
+func TestSecBasicAuthWall_EveryBasicAuthReaderUsesTheChokepoint(t *testing.T) {
+	fset := token.NewFileSet()
+	readers := collectBasicAuthReaders(t, fset)
+
+	// Not vacuous: a selector that stopped matching would find nothing and
+	// pass every assertion above.
+	if len(readers) < len(basicAuthReaderAllowlist) {
+		t.Fatalf("wall found %d BasicAuth readers, want at least %d — the selector has stopped matching",
+			len(readers), len(basicAuthReaderAllowlist))
+	}
+
+	assertReadersReachChokepoint(t, fset, readers)
 }
 
 // TestSecBasicAuthWall_ControlRejectsAnUnboundedVerifier is the CONTROL: it
