@@ -659,3 +659,67 @@ func TestBackup_FileProfiles_IncludedWithContent(t *testing.T) {
 		t.Errorf("fileprofiles.json content mismatch in backup")
 	}
 }
+
+// TestBackup_CDRPolicies_IncludedWithContent guards against the same drift
+// class as the tests above, for one more store the earlier passes missed:
+// cdr_policies.json (cdr_startup_config.go's PoliciesPath) is the CDR
+// (Sluice content-disarm-and-reconstruction) sanitization-policy rule set.
+// It is admin-configurable via its own API (cdr_ui.go's policy CRUD
+// handlers) and, per cdr_startup_config.go's own comment, is "loaded
+// UNCONDITIONALLY (even when CDR is disabled) so GUI enrolls/toggles
+// persist across restarts" — the exact same first-class-config bar
+// decryption_profiles.json, alert_webhooks.json, fileblock.json and
+// idp_profiles.json were added to the backup surface at. It was not in
+// defaultBackupArtifacts, so a backup taken today silently dropped every
+// sanitization policy; restoring onto a fresh volume/host left CDR
+// completely unconfigured with no record that it ever was.
+func TestBackup_CDRPolicies_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"rules":[{"id":"r1","profile":"default","mode":"ENFORCE"}]}`)
+	seedFile(t, dataDir, "cdr_policies.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/cdr_policies.json"]
+	if !ok {
+		t.Fatalf("data/cdr_policies.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("cdr_policies.json content mismatch in backup")
+	}
+}
+
+// TestBackup_CDRInstances_DeliberatelyExcluded pins the opposite of the test
+// above: cdr_instances.json (the enrolled Sluice CDR instance registry) must
+// NOT be added to defaultBackupArtifacts alongside cdr_policies.json.
+//
+// An earlier version of this fix backed it up too (same admin-configurable-
+// store rationale), but review caught a restore-side defect: each entry's
+// mTLS credential bundle lives in separate PEM files under
+// <dataDir>/integrations/sluice, which are correctly never backed up
+// (cdr_client_keyatrest.go) — so a restored registration is inert
+// (loadCDRCertBundle fails to load the missing cert/key) AND unrecoverable
+// by the obvious path: apiCDREnroll refuses to re-enroll a name that's
+// already present ("name already enrolled", 409), so the operator can't
+// simply re-run enrollment under the restored name either. Backing up the
+// registry safely needs a restore-side "needs re-enrollment" state (the
+// same shape upstream v2 credentials already use — ui_upstream.go's
+// requiresReplacement) — a larger, separate change, not folded in here.
+func TestBackup_CDRInstances_DeliberatelyExcluded(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	seedFile(t, dataDir, "cdr_instances.json", []byte(`{"instances":[{"name":"sluice-us-east-01"}]}`), 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	if _, ok := files["data/cdr_instances.json"]; ok {
+		t.Fatalf("data/cdr_instances.json must NOT be backed up without its credential bundle (see comment); tarball: %v", sortedNames(files))
+	}
+}
