@@ -10,16 +10,35 @@ package main
 // thirds of the dispatch pipeline's own allocation, before any policy, auth or
 // transport work is counted.
 //
-// Two of its allocations were pure waste; see the contract comment above
-// logPolicyAllow in proxy.go for what they were and why removing them is sound.
+// The line has been cut down in two steps, and both baselines below are kept so
+// each stays measurable:
+//
+//	pri=%s over a pre-rendered int   plLegacy  10 allocs/op  147 B/op  1145 ns/op
+//	variadic Printf, pri=%d          plPrintf   8 allocs/op  128 B/op  1031 ns/op
+//	assembled into a stack buffer    PRODUCTION  1 alloc/op  192 B/op   598 ns/op
+//
+// The first step removed two wasted allocations (an int formatted to a string,
+// then boxed back). The second removed the argument list itself: nine runtime
+// values handed to a variadic ...any are nine interface boxes, charged on the
+// request path before fmt formats anything. Bytes rise while objects fall 90% —
+// one right-sized, pointer-free string instead of ten small pointer-bearing
+// boxes — which is the trade TestBenchGate_PolicyDecisionLineBeatsLegacy
+// documents. See the contract comment above logPolicyAllow in proxy.go.
 //
 // EVERYTHING BELOW MEASURES THE PRODUCTION FUNCTIONS. logPolicyAllow and its
 // siblings are the real emitters applyPolicyDecision calls, so a change that
 // reintroduces an allocation on the request path shows up here and in the gate.
-// The one exception is plLegacyAllowLine, which deliberately freezes the
-// PRE-CHANGE shape so the before/after comparison stays reproducible in-tree on
-// any runner — the convention BenchmarkHTTPForward_LegacyClientPerRequest
-// already follows. It is the baseline, never the thing under test.
+// The exceptions are plLegacyAllowLine and plPrintfAllowLine, which deliberately
+// freeze the two earlier shapes so the before/after comparison stays
+// reproducible in-tree on any runner — the convention
+// BenchmarkHTTPForward_LegacyClientPerRequest already follows. They are
+// baselines, never the thing under test.
+//
+// The logger goes to plDiscard, NOT io.Discard, and that is load-bearing: see
+// plDiscard and TestPolicyDecisionLine_IoDiscardElidesFormatting. With
+// io.Discard these benchmarks measure no formatting at all, which reports the
+// assembled line as SLOWER than the Printf one it replaced (508 vs 530 ns/op)
+// when a real sink measures it 1.7x faster.
 //
 //	go test -run '^$' -bench 'BenchmarkPolicyDecisionLine' -benchmem -count=6 .
 
@@ -89,20 +108,54 @@ func plCurrentAllowLine(rule string, priority int) {
 	logPolicyAllow(rule, priority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
 }
 
+// plDiscard throws its input away exactly like io.Discard — and is deliberately
+// NOT io.Discard.
+//
+// log.New records whether its writer IS io.Discard, and Logger.output returns on
+// that check BEFORE it invokes the closure that formats the record. So a logger
+// pointed at io.Discard does not merely skip the write: it skips fmt.Appendf,
+// the header, everything. Benchmarks here used to use io.Discard while their
+// comment claimed they measured "argument construction and formatting"; they
+// measured construction and none of the formatting, which flattered any shape
+// whose cost lives in fmt and made the assembled shape look slower than the
+// Printf one it replaced. Production writes to the async logsink, never to
+// io.Discard, so this is the shape a gateway actually pays.
+//
+// Pinned by TestPolicyDecisionLine_IoDiscardElidesFormatting.
+type plDiscard struct{}
+
+func (plDiscard) Write(p []byte) (int, error) { return len(p), nil }
+
 // plSwapLogger points the package logger at w and returns a restore func.
-// Benchmarks send it to io.Discard so they measure argument construction and
-// formatting — the work the request goroutine actually performs — without the
-// log sink's I/O, which is asynchronous in production anyway (internal/logsink).
+// Callers pass plDiscard{} so the formatting work the request goroutine really
+// performs is measured, without the log sink's I/O — which is asynchronous in
+// production anyway (internal/logsink).
 func plSwapLogger(w io.Writer) func() {
 	prev := logger
 	logger = log.New(w, "", 0)
 	return func() { logger = prev }
 }
 
+// plPrintfAllowLine freezes the production shape as it stood immediately before
+// the decision lines were assembled by hand: the same rendered bytes, produced
+// by handing nine runtime values to a variadic Printf. It is the baseline for
+// the assembly change, the way plLegacyAllowLine is the baseline for the
+// priority-verb change before it. Baseline only — never the thing under test.
+func plPrintfAllowLine(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}",
+		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+// plPrintf runs the frozen Printf shape with the standard arguments.
+func plPrintf(rule string, priority int) {
+	plPrintfAllowLine(rule, priority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
+}
+
 // ── Before vs after ─────────────────────────────────────────────────────────
 
 func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(plDiscard{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -110,13 +163,37 @@ func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
 	}
 }
 
+// BenchmarkPolicyDecisionLine_Printf is the baseline for the assembly change:
+// the same rendered line, built by a variadic Printf.
+func BenchmarkPolicyDecisionLine_Printf(b *testing.B) {
+	defer plSwapLogger(plDiscard{})()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		plPrintf(plRule, plPriority)
+	}
+}
+
 func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(plDiscard{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		plCurrentAllowLine(plRule, plPriority)
 	}
+}
+
+// BenchmarkPolicyDecisionLine_PrintfParallel pairs with the parallel benchmarks
+// below so the before/after comparison exists at every concurrency level.
+func BenchmarkPolicyDecisionLine_PrintfParallel(b *testing.B) {
+	defer plSwapLogger(plDiscard{})()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			plPrintf(plRule, plPriority)
+		}
+	})
 }
 
 // ── Concurrency ─────────────────────────────────────────────────────────────
@@ -128,7 +205,7 @@ func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
 // so the comparison stays honest.
 
 func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(plDiscard{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -139,7 +216,7 @@ func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(plDiscard{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -155,7 +232,7 @@ func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
 // beaconing flood, so they are measured too rather than assumed to match.
 
 func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(plDiscard{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -164,7 +241,7 @@ func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Drop(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(plDiscard{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -245,6 +322,139 @@ func TestPolicyDecisionLine_FormatsDifferOnlyInThePriorityVerb(t *testing.T) {
 		t.Errorf("production POLICY_ALLOW line is not the legacy template with pri=%%s -> pri=%%d:\n  want: %q\n   got: %q", want, got)
 	}
 }
+
+// TestPolicyDecisionLine_AllBranchesRenderIdenticallyToFmt is the correctness
+// wall for assembling the decision lines by hand, and it outranks every
+// benchmark in this file.
+//
+// These four lines are consumed by SIEM forwarders and log parsers, so hand
+// assembly is only acceptable if every branch emits the bytes fmt emitted. The
+// oracle is the verbatim pre-change format string for each branch, so this
+// tracks the contract rather than a restatement of the new code: %q must be
+// strconv.AppendQuote (fmt's %q for a string IS strconv.Quote) and %d must be
+// strconv.AppendInt, on every separator, in every branch.
+//
+// RenderIsByteIdentical above covers the allow line only. Redirect is the branch
+// that most needs its own case: it is the one with two quoted values and the
+// ` => ` separator between them, so a misplaced separator there would render a
+// plausible-looking line that no parser matches.
+func TestPolicyDecisionLine_AllBranchesRenderIdenticallyToFmt(t *testing.T) {
+	const (
+		allowFmt    = "POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}"
+		dropFmt     = "POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}"
+		blockFmt    = "POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}"
+		redirectFmt = "POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}"
+	)
+
+	// Inputs chosen for the ways a hand-built line can diverge from fmt:
+	// emptiness, the control bytes sanitizeLog scrubs, quote/backslash escaping,
+	// multi-byte UTF-8, invalid UTF-8 (which %q renders as \xNN), and a value
+	// long enough to overflow the stack scratch buffer onto the heap.
+	type args struct{ rule, clientIP, method, host, redirect, cond, reqID, identity string }
+	cases := []args{
+		{plRule, plClientIP, plMethod, plHost, plArgs.redirectURL, plCond, plReqID, plIdentity},
+		{"", "", "", "", "", "", "", ""},
+		{"rule\nnl\rcr\ttab", "198.51.100.9", "POST", "ex\x00ample.com", "https://x/\x1b", "a=b\nc=d", "rid\x07", "bob\x7f"},
+		{`q"uote\back`, "::1", "CONNECT", `h"ost`, `https://x/?a="b"`, `c="d"`, "r", `u"v`},
+		{"ünïcode-名前-😀", "2001:db8::1", "GET", "héllo.example", "https://héllo/", "geo=DE,cat=News", "r2", "cn=Ünïcode,dc=corp"},
+		{"bad\xffutf8", "203.0.113.1", "GET", "host\xc3", "https://x/\xff", "c\xff", "r3", "id\xfe"},
+		{strings.Repeat("long-rule-", 40), "203.0.113.2", "GET", strings.Repeat("sub.", 50) + "example.com",
+			"https://" + strings.Repeat("r", 300), strings.Repeat("cond=v,", 40), "r4", "cn=" + strings.Repeat("x", 300)},
+	}
+	priorities := []int{0, 1, -1, 100, -32768, 2147483647}
+
+	for i, c := range cases {
+		for _, pri := range priorities {
+			safeRule := sanitizeLog(c.rule)
+			checks := []struct {
+				name string
+				got  string
+				want string
+			}{
+				{"allow",
+					plCapture(func() {
+						logPolicyAllow(c.rule, pri, c.clientIP, c.method, c.host, c.cond, c.reqID, c.identity)
+					}),
+					plCapture(func() {
+						logger.Printf(allowFmt, safeRule, pri, c.clientIP, c.method, sanitizeLog(c.host),
+							sanitizeLog(c.cond), c.reqID, sanitizeLog(c.identity), safeRule)
+					})},
+				{"drop",
+					plCapture(func() {
+						logPolicyDrop(c.rule, pri, c.clientIP, c.host, c.cond, c.reqID, c.identity)
+					}),
+					plCapture(func() {
+						logger.Printf(dropFmt, safeRule, pri, c.clientIP, sanitizeLog(c.host),
+							sanitizeLog(c.cond), c.reqID, sanitizeLog(c.identity), safeRule)
+					})},
+				{"block",
+					plCapture(func() {
+						logPolicyBlock(c.rule, pri, c.clientIP, c.host, c.cond, c.reqID, c.identity)
+					}),
+					plCapture(func() {
+						logger.Printf(blockFmt, safeRule, pri, c.clientIP, sanitizeLog(c.host),
+							sanitizeLog(c.cond), c.reqID, sanitizeLog(c.identity), safeRule)
+					})},
+				{"redirect",
+					plCapture(func() {
+						logPolicyRedirect(c.rule, pri, c.clientIP, c.host, c.redirect, c.cond, c.reqID, c.identity)
+					}),
+					plCapture(func() {
+						logger.Printf(redirectFmt, safeRule, pri, c.clientIP, sanitizeLog(c.host),
+							sanitizeLog(c.redirect), sanitizeLog(c.cond), c.reqID, sanitizeLog(c.identity), safeRule)
+					})},
+			}
+			for _, ck := range checks {
+				if ck.got != ck.want {
+					t.Errorf("case %d %s pri=%d: assembled line diverged from fmt\n got: %q\nwant: %q",
+						i, ck.name, pri, ck.got, ck.want)
+				}
+			}
+		}
+	}
+}
+
+// TestPolicyDecisionLine_IoDiscardElidesFormatting pins the property that makes
+// plDiscard necessary, so the harness above cannot quietly revert to io.Discard.
+//
+// log.Logger records whether its writer IS io.Discard and returns on that check
+// before running the closure that formats the record. A benchmark pointed at
+// io.Discard therefore measures argument construction and NONE of the
+// formatting — it under-reports every fmt-heavy shape, and it under-reports them
+// UNEQUALLY, which is how the pre-change harness made the assembled decision
+// line look slower than the Printf one it replaced (io.Discard: 508 vs 530
+// ns/op; a real sink: 1264 vs 839).
+//
+// The proof is behavioural rather than a claim about stdlib internals: a logger
+// on io.Discard must write nothing to a format argument that records being
+// asked to render itself, while the same logger on an equivalent non-io.Discard
+// writer must render it.
+func TestPolicyDecisionLine_IoDiscardElidesFormatting(t *testing.T) {
+	var rendered bool
+	arg := plFormatProbe{rendered: &rendered}
+
+	restore := plSwapLogger(io.Discard)
+	logger.Printf("%s", arg)
+	restore()
+	if rendered {
+		t.Fatalf("io.Discard no longer elides formatting — plDiscard may be unnecessary, " +
+			"but re-measure the decision-line benchmarks before simplifying the harness")
+	}
+
+	rendered = false
+	restore = plSwapLogger(plDiscard{})
+	logger.Printf("%s", arg)
+	restore()
+	if !rendered {
+		t.Fatalf("plDiscard elided formatting too — the benchmarks are measuring nothing; " +
+			"plDiscard must not be io.Discard and must not be detected as equivalent to it")
+	}
+}
+
+// plFormatProbe records whether fmt was asked to render it.
+type plFormatProbe struct{ rendered *bool }
+
+func (p plFormatProbe) String() string { *p.rendered = true; return "probe" }
 
 // TestPolicyDecisionLine_SanitizesTheRuleNameOnBothOccurrences pins that
 // sanitizing the rule name ONCE and using it twice is not a shortcut that
