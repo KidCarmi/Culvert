@@ -60,14 +60,20 @@ package main
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // syslogFeedDegradedAfter and syslogFeedLogInterval are constants in spirit —
-// declared as vars ONLY so the chaos gates can compress a 60-second threshold
-// into a test that runs in milliseconds. Nothing in production writes them, and
-// there is deliberately no config surface: the only use for a knob here would be
-// widening the window in which a dead compliance feed looks healthy.
+// nothing in production writes them, and there is deliberately no config
+// surface: the only use for a knob here would be widening the window in which a
+// dead compliance feed looks healthy. They are declared as vars ONLY so the
+// chaos gates can compress a 60-second threshold into a test that runs in
+// milliseconds, and are read through the atomics below rather than directly,
+// because both are read from BACKGROUND goroutines — the engine's drain
+// goroutine and the degradation timer. A plain var that only tests write is
+// still a data race when a previous test's drain goroutine is reading it as the
+// next test's cleanup restores it (caught by `-race -shuffle=on -count=2`).
 var (
 	// syslogFeedDegradedAfter is how long delivery must have been failing
 	// UNINTERRUPTED before the feed is reported degraded (warn/fail row, alert,
@@ -93,6 +99,39 @@ var (
 	syslogFeedLogInterval = 60 * time.Second
 )
 
+// degradedAfterNanos/alertSink are the safely-published forms of the two knobs
+// above. Initialised from the vars at init so production behaviour is identical.
+var (
+	degradedAfterNanos atomic.Int64
+	alertSink          atomic.Pointer[func(string)]
+)
+
+func init() {
+	degradedAfterNanos.Store(int64(syslogFeedDegradedAfter))
+	f := defaultSyslogFeedAlert
+	alertSink.Store(&f)
+}
+
+// syslogDegradedAfter returns the live degradation threshold.
+func syslogDegradedAfter() time.Duration { return time.Duration(degradedAfterNanos.Load()) }
+
+// setSyslogDegradedAfterForTest compresses the threshold. Test isolation only;
+// callers restore the package default (syslogFeedDegradedAfter) in a cleanup
+// rather than threading a previous value back.
+func setSyslogDegradedAfterForTest(d time.Duration) { degradedAfterNanos.Store(int64(d)) }
+
+// setSyslogFeedAlertSinkForTest swaps the alert delivery function so a test can
+// observe transitions synchronously. Test isolation only; callers restore
+// defaultSyslogFeedAlert in a cleanup.
+func setSyslogFeedAlertSinkForTest(fn func(string)) { alertSink.Store(&fn) }
+
+// fireSyslogFeedAlert dispatches through the published sink.
+func fireSyslogFeedAlert(detail string) {
+	if p := alertSink.Load(); p != nil {
+		(*p)(detail)
+	}
+}
+
 // syslogFeedHealth holds only what cannot be derived from the engine's delivery
 // record: the log rate gate and the fire-once alert latch. Everything factual
 // (delivered, drops, consecutive failures, when the run started, the bounded
@@ -110,6 +149,26 @@ type syslogFeedHealth struct {
 	// feed has been dark past the threshold, not one per dropped line. Cleared
 	// only by an OBSERVED delivery, so a second outage pages again.
 	alerted bool
+
+	// degradeTimer re-evaluates the threshold when no further delivery event is
+	// coming (Codex review, PR #1384). The alert used to be decided ONLY inside
+	// the delivery observer, which runs only when a line is submitted — so a
+	// collector that dies and is followed by an IDLE node left the last failure
+	// event carrying a near-zero FailingFor and nothing ever looked again, while
+	// syslogFeedState (which derives degradation from the wall clock) started
+	// reporting the feed degraded at the threshold regardless. The contract row
+	// and the gauge said degraded; the page never fired.
+	//
+	// That is exactly the disagreement this file's design note claimed was
+	// impossible, and it is the MIRROR IMAGE of the rule the sweep got right on
+	// the other side: recovery must not be declared by silence, and degradation
+	// must not be suppressed by it. Measured pre-fix: degraded=true,
+	// failingFor=3s, zero alerts.
+	//
+	// One timer per EPISODE, not per failure. Its callback re-reads the live
+	// delivery record, so a feed that recovered while it was pending alerts
+	// nothing — the evidence rule is preserved, not bypassed.
+	degradeTimer *time.Timer
 
 	// addr is this record's OWN copy of the configured collector, published by
 	// armSyslogFeedHealth under this mutex.
@@ -135,11 +194,12 @@ var syslogFeed syslogFeedHealth
 // disk is failing" send an operator to different systems, so folding this into
 // `storage_write_failed` would be one page for two actions.
 //
-// Package-level seam so tests observe transitions SYNCHRONOUSLY instead of
-// racing the process-global alerts sink. HasSubscriber-gated for the reason
-// documented on fireStorageWriteAlert: with no webhook configured — the default
-// posture, and the state of every test binary — this must not spawn a goroutine.
-var fireSyslogFeedAlert = func(detail string) {
+// Swappable (see setSyslogFeedAlertSinkForTest) so tests observe transitions
+// SYNCHRONOUSLY instead of racing the process-global alerts sink.
+// HasSubscriber-gated for the reason documented on fireStorageWriteAlert: with
+// no webhook configured — the default posture, and the state of every test
+// binary — this must not spawn a goroutine at all.
+func defaultSyslogFeedAlert(detail string) {
 	if !globalAlertStore.HasSubscriber("siem_feed_degraded") {
 		return
 	}
@@ -171,7 +231,7 @@ func noteSyslogFeedFailure(out syslogDeliveryOutcome) {
 	// Degradation is judged from the ENGINE's own record, carried on the
 	// outcome, so the alert, the gauge and the contract row can never disagree
 	// about whether the feed is degraded.
-	degraded := out.FailingFor >= syslogFeedDegradedAfter
+	degraded := out.FailingFor >= syslogDegradedAfter()
 
 	syslogFeed.mu.Lock()
 	addr := syslogFeed.addr
@@ -189,6 +249,15 @@ func noteSyslogFeedFailure(out syslogDeliveryOutcome) {
 	alertNow := degraded && !syslogFeed.alerted
 	if alertNow {
 		syslogFeed.alerted = true
+	}
+	// Not degraded YET: arm a one-shot re-evaluation for the moment the
+	// threshold elapses, in case this is the last line the node ever submits.
+	if !degraded && !syslogFeed.alerted && syslogFeed.degradeTimer == nil {
+		remaining := syslogDegradedAfter() - out.FailingFor
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
+		syslogFeed.degradeTimer = time.AfterFunc(remaining, evaluateSyslogFeedDegradation)
 	}
 	syslogFeed.mu.Unlock()
 
@@ -208,7 +277,52 @@ func noteSyslogFeedFailure(out syslogDeliveryOutcome) {
 	if alertNow {
 		fireSyslogFeedAlert(fmt.Sprintf(
 			"SIEM syslog forwarding has been failing for over %s (reason: %s, %d events lost); security and audit events are NOT reaching the collector, and the local copy is this node's only record",
-			syslogFeedDegradedAfter, out.Reason, out.Drops))
+			syslogDegradedAfter(), out.Reason, out.Drops))
+	}
+}
+
+// evaluateSyslogFeedDegradation runs when the degradation threshold elapses with
+// no further delivery event. It re-reads the LIVE record rather than trusting
+// the state that armed it, so a feed that recovered in the meantime pages
+// nothing — degradation is still established by failure evidence, never by a
+// timer alone.
+//
+// Reads no plain process globals: the collector address comes from this
+// record's own mutex-protected copy and the evidence from the active Writer's
+// lock-free Stats(), for the same reason the observer does (see addr above).
+func evaluateSyslogFeedDegradation() {
+	sw := activeSyslog()
+	var degraded bool
+	var drops uint64
+	var reason string
+	if sw != nil {
+		st := sw.Stats()
+		if !st.FirstFail.IsZero() && time.Since(st.FirstFail) >= syslogDegradedAfter() {
+			degraded, drops, reason = true, st.Drops, st.LastReason
+		}
+	}
+
+	syslogFeed.mu.Lock()
+	syslogFeed.degradeTimer = nil
+	alertNow := degraded && syslogFeed.addr != "" && !syslogFeed.alerted
+	if alertNow {
+		syslogFeed.alerted = true
+	}
+	syslogFeed.mu.Unlock()
+
+	if alertNow {
+		fireSyslogFeedAlert(fmt.Sprintf(
+			"SIEM syslog forwarding has been failing for over %s (reason: %s, %d events lost); security and audit events are NOT reaching the collector, and the local copy is this node's only record",
+			syslogDegradedAfter(), reason, drops))
+	}
+}
+
+// stopDegradeTimerLocked cancels a pending threshold re-evaluation. Caller must
+// hold syslogFeed.mu.
+func stopDegradeTimerLocked() {
+	if syslogFeed.degradeTimer != nil {
+		syslogFeed.degradeTimer.Stop()
+		syslogFeed.degradeTimer = nil
 	}
 }
 
@@ -231,6 +345,7 @@ func noteSyslogFeedRecovered(out syslogDeliveryOutcome) {
 	syslogFeed.logAt = time.Time{}
 	syslogFeed.suppressed = 0
 	syslogFeed.alerted = false
+	stopDegradeTimerLocked()
 	syslogFeed.mu.Unlock()
 
 	if !hadEpisode && !wasAlerted {
@@ -305,7 +420,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	if !st.FirstFail.IsZero() {
 		snap.Failing = true
 		snap.FailingFor = time.Since(st.FirstFail)
-		snap.Degraded = snap.FailingFor >= syslogFeedDegradedAfter
+		snap.Degraded = snap.FailingFor >= syslogDegradedAfter()
 	}
 	return snap
 }
@@ -326,6 +441,7 @@ func armSyslogFeedHealth(addr string) {
 	syslogFeed.logAt = time.Time{}
 	syslogFeed.suppressed = 0
 	syslogFeed.alerted = false
+	stopDegradeTimerLocked()
 }
 
 // resetSyslogFeedHealth clears the record entirely (forwarding disabled, or

@@ -67,6 +67,35 @@ func activeSyslog() *syslogWriter { return activeSyslogPtr.Load() }
 // setActiveSyslog publishes a writer (nil disables forwarding).
 func setActiveSyslog(sw *syslogWriter) { activeSyslogPtr.Store(sw) }
 
+// retirePreviousSyslogWriter detaches and closes the writer being replaced
+// (Codex review, PR #1384).
+//
+// Nothing closed it before: `apiSyslogConfig`'s DISABLE branch did, but the
+// reconfigure path just overwrote the handle, so every re-save left a drain
+// goroutine and a collector socket behind. CHAOS-66 made that worse than a
+// leak. The old writer's delivery observer is the SAME process-wide health
+// record the new feed uses, so its backlog draining after the swap attributed
+// the old collector's failures to the new one — and a late degraded failure
+// could set the new episode's alert latch, which healthy deliveries never clear
+// (the observer is not called on the healthy path), so a genuine outage on the
+// new collector would never page. Measured pre-fix: the retired writer both
+// delivered lines and armed the new feed's log gate.
+//
+// The observer is detached SYNCHRONOUSLY — that is the correctness half, and it
+// takes effect immediately. The Close is backgrounded because it waits out the
+// flush window (up to closeWait, ~7 s against a wedged collector) and this runs
+// on the admin API goroutine; blocking a `POST /api/syslog` for seconds to
+// reclaim a socket would trade one fault for another. Close is idempotent, so
+// the shutdown hook closing the CURRENT writer is unaffected.
+func retirePreviousSyslogWriter() {
+	old := activeSyslog()
+	if old == nil {
+		return
+	}
+	old.SetDeliveryObserver(nil)
+	go func() { _ = old.Close() }()
+}
+
 // InitSyslog parses addr and initialises the global syslog writer.
 // Supported addr formats:
 //
@@ -91,6 +120,7 @@ func InitSyslog(addr, syslogFmt string) error {
 	if err != nil {
 		return err
 	}
+	retirePreviousSyslogWriter()
 	// Publish the target to the health record and clear its latches before the
 	// writer goes live, so the first delivery event already has somewhere to
 	// land (see armSyslogFeedHealth).

@@ -29,18 +29,20 @@ import (
 func withSyslogFeedIsolation(t *testing.T) {
 	t.Helper()
 	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, activeSyslog()
-	prevThreshold := syslogFeedDegradedAfter
-	prevAlert := fireSyslogFeedAlert
 	t.Cleanup(func() {
 		if cur := activeSyslog(); cur != nil && cur != prevSW {
 			_ = cur.Close()
 		}
 		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
 		setActiveSyslog(prevSW)
-		syslogFeedDegradedAfter = prevThreshold
-		fireSyslogFeedAlert = prevAlert
+		// Restored through the atomics, not by assigning the package vars: a
+		// writer retired by an earlier test in this binary may still be draining
+		// and reading them (caught by `-race -shuffle=on -count=2`, which is the
+		// Deep gate's determinism run).
 		resetSyslogFeedHealth()
 	})
+	t.Cleanup(func() { setSyslogDegradedAfterForTest(syslogFeedDegradedAfter) })
+	t.Cleanup(func() { setSyslogFeedAlertSinkForTest(defaultSyslogFeedAlert) })
 	resetSyslogFeedHealth()
 }
 
@@ -95,7 +97,7 @@ func driveFailures(t *testing.T, n int) {
 // event was dropped. Measured pre-fix: 19 audit events lost, row ok.
 func TestChaos66_TCPCollectorLostAfterBootIsReported(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	syslogFeedDegradedAfter = 20 * time.Millisecond
+	setSyslogDegradedAfterForTest(20 * time.Millisecond)
 	deadTCPCollector(t)
 	driveFailures(t, 20)
 
@@ -173,7 +175,7 @@ func TestChaos66_UDPDeliveryIsReportedAsUnverifiable(t *testing.T) {
 // syslog series at all, so no monitoring system could see a dead SIEM feed.
 func TestChaos66_MetricsExposeTheFeed(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	syslogFeedDegradedAfter = 20 * time.Millisecond
+	setSyslogDegradedAfterForTest(20 * time.Millisecond)
 	deadTCPCollector(t)
 	driveFailures(t, 20)
 	waitForSyslogFeed(t, func() bool { return syslogFeedState().Degraded })
@@ -230,9 +232,9 @@ func TestChaos66_MetricsAbsentWhenNoFeedConfigured(t *testing.T) {
 // a gateway drops one per proxied request.
 func TestChaos66_AlertFiresOncePerEpisode(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	syslogFeedDegradedAfter = 20 * time.Millisecond
+	setSyslogDegradedAfterForTest(20 * time.Millisecond)
 	fired := make(chan string, 64)
-	fireSyslogFeedAlert = func(detail string) { fired <- detail }
+	setSyslogFeedAlertSinkForTest(func(detail string) { fired <- detail })
 
 	deadTCPCollector(t)
 	driveFailures(t, 20)
@@ -329,7 +331,7 @@ func TestChaos66_Control_UnconfiguredFeedIsOKAndQuiet(t *testing.T) {
 // nothing.
 func TestChaos66_Control_RecoveryNeedsObservedDelivery(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	syslogFeedDegradedAfter = 20 * time.Millisecond
+	setSyslogDegradedAfterForTest(20 * time.Millisecond)
 	deadTCPCollector(t)
 	driveFailures(t, 20)
 	waitForSyslogFeed(t, func() bool { return syslogFeedState().Degraded })
@@ -347,9 +349,9 @@ func TestChaos66_Control_RecoveryNeedsObservedDelivery(t *testing.T) {
 // or a feed that was degraded before the change would never page again.
 func TestChaos66_ReconfigureClearsTheAlertLatch(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	syslogFeedDegradedAfter = 20 * time.Millisecond
+	setSyslogDegradedAfterForTest(20 * time.Millisecond)
 	fired := make(chan string, 64)
-	fireSyslogFeedAlert = func(detail string) { fired <- detail }
+	setSyslogFeedAlertSinkForTest(func(detail string) { fired <- detail })
 
 	deadTCPCollector(t)
 	driveFailures(t, 20)
@@ -404,9 +406,9 @@ func waitForSyslogFeed(t *testing.T, cond func() bool) {
 // other half.
 func TestChaos66_RecoveryClearsTheEpisodeAndASecondOutagePagesAgain(t *testing.T) {
 	withSyslogFeedIsolation(t)
-	syslogFeedDegradedAfter = 20 * time.Millisecond
+	setSyslogDegradedAfterForTest(20 * time.Millisecond)
 	fired := make(chan string, 64)
-	fireSyslogFeedAlert = func(detail string) { fired <- detail }
+	setSyslogFeedAlertSinkForTest(func(detail string) { fired <- detail })
 
 	// Stand a collector up so InitSyslog succeeds and a writer exists, then take
 	// it away — the shape the sweep is about. The address is kept so the
@@ -499,5 +501,158 @@ func TestChaos66_RecoveryClearsTheEpisodeAndASecondOutagePagesAgain(t *testing.T
 	}
 	if len(fired) == 0 {
 		t.Error("the second outage never paged; the alert latch survived recovery, so a process only ever reports its first SIEM outage")
+	}
+}
+
+// CODEX P1 REPRODUCTION (round 1): the alert is evaluated ONLY inside the
+// delivery observer, which is only called when a line is submitted. A collector
+// that dies and is followed by an IDLE node therefore leaves the last failure
+// event carrying FailingFor≈0, so nothing ever re-evaluates the threshold —
+// while syslogFeedState(), which derives degradation from the wall clock,
+// starts reporting the feed degraded at the threshold anyway.
+//
+// The contract row and the culvert_syslog_degraded gauge say degraded; the page
+// never fires. That is precisely the disagreement this file's own design note
+// claims is impossible, and it is the mirror image of the rule the sweep got
+// right on the other side: recovery must not be declared by silence, and
+// neither may degradation be suppressed by it.
+func TestChaos66_IdleNodePastTheThresholdStillPages(t *testing.T) {
+	withSyslogFeedIsolation(t)
+	setSyslogDegradedAfterForTest(150 * time.Millisecond)
+	fired := make(chan string, 8)
+	setSyslogFeedAlertSinkForTest(func(detail string) { fired <- detail })
+
+	deadTCPCollector(t)
+
+	// Get the feed into a failing run, then let the node go quiet — no more
+	// proxied requests, so no more syslog lines, so no more observer callbacks.
+	driveFailures(t, 1)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(fired) > 0 {
+			return // paged without further traffic: correct
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snap := syslogFeedState()
+	t.Errorf("no alert after %s of an idle degraded feed (degraded=%v, failingFor=%s); the contract row and the gauge report degraded while the page never fires",
+		time.Since(deadline.Add(-3*time.Second)).Round(time.Millisecond), snap.Degraded, snap.FailingFor.Round(time.Millisecond))
+}
+
+// CODEX P2 REPRODUCTION (round 1): a reconfigure publishes the new writer
+// without retiring the old one. The old drain goroutine keeps running with its
+// delivery observer still attached, so its callbacks land in the health record
+// AFTER armSyslogFeedHealth has reset it for the NEW collector — attributing
+// the old collector's failures to the new one and, worse, able to set the new
+// episode's alert latch so a real outage on the new feed never pages (healthy
+// deliveries do not invoke the observer, so nothing clears it).
+//
+// It is also a plain resource leak that predates this sweep: nothing closed the
+// previous writer on the reconfigure path, so every re-save left a drain
+// goroutine and a socket behind.
+func TestChaos66_ReconfigureRetiresThePreviousWriter(t *testing.T) {
+	withSyslogFeedIsolation(t)
+	setSyslogDegradedAfterForTest(20 * time.Millisecond)
+
+	// Feed one: a collector that is going away, with a deep backlog queued so
+	// its drain goroutine still has work when the reconfigure happens.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	addrOne := "tcp://" + ln.Addr().String()
+	if err := InitSyslog(addrOne, "rfc5424"); err != nil {
+		t.Fatalf("InitSyslog: %v", err)
+	}
+	syslogConfigured, syslogConfiguredAddr = addrOne, addrOne
+	_ = ln.Close()
+	old := activeSyslog()
+	for i := 0; i < 500; i++ {
+		old.WriteAudit(map[string]string{"event": "backlog"})
+	}
+
+	// Feed two: a healthy collector the operator moves to.
+	good, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer good.Close()
+	go func() {
+		for {
+			c, err := good.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(io.Discard, c) }()
+		}
+	}()
+	addrTwo := "tcp://" + good.Addr().String()
+	if err := InitSyslog(addrTwo, "rfc5424"); err != nil {
+		t.Fatalf("InitSyslog (second): %v", err)
+	}
+	syslogConfigured, syslogConfiguredAddr = addrTwo, addrTwo
+
+	if activeSyslog() == old {
+		t.Fatal("setup: the writer was not replaced")
+	}
+
+	// Drive the RETIRED writer directly. Racing its backlog against the
+	// reconfigure is not reproducible — a few hundred fast-drops complete in
+	// microseconds — so the property is pinned structurally instead: whatever
+	// the old writer does after being retired must not reach the health record,
+	// which is now reporting on a different collector.
+	for i := 0; i < 200; i++ {
+		old.WriteAudit(map[string]string{"event": "from-the-retired-writer"})
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	syslogFeed.mu.Lock()
+	latched := syslogFeed.alerted
+	gated := !syslogFeed.logAt.IsZero()
+	syslogFeed.mu.Unlock()
+	if latched || gated {
+		t.Errorf("the retired writer's delivery events reached the NEW feed's health record (alerted=%v, logGateArmed=%v); a real outage on the new collector could then never page, because healthy deliveries never invoke the observer that would clear it",
+			latched, gated)
+	}
+
+	// And it must actually be retired, not merely ignored: nothing closed the
+	// previous writer on this path before CHAOS-66, so every re-save left a
+	// drain goroutine and a socket behind.
+	//
+	// Note what is NOT asserted. A retired writer flushing the backlog it
+	// already holds is CORRECT — those lines were destined for the old
+	// collector, and discarding them would lose audit data on every re-save.
+	// What must stop is accepting NEW work, which is what being closed means.
+	closed := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		d0 := old.Stats().Delivered
+		old.WriteAudit(map[string]string{"event": "after-retirement"})
+		time.Sleep(20 * time.Millisecond)
+		if old.Stats().Delivered == d0 {
+			closed = true
+			break
+		}
+	}
+	if !closed {
+		t.Errorf("the retired writer is still accepting and delivering new lines; it was never closed, so every re-save leaks a drain goroutine and a socket")
+	}
+
+	// The new feed is healthy and says so.
+	waitForSyslogFeed(t, func() bool {
+		activeSyslog().WriteAudit(map[string]string{"event": "new-feed"})
+		return syslogFeedState().EverDelivered
+	})
+	if row := checkSyslogFeed(); row.Status != diagOK {
+		t.Errorf("the new, healthy feed does not report ok: %v %q", row.Status, row.Message)
 	}
 }
