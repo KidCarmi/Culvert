@@ -66,7 +66,7 @@ func readOnDiskIdPProfiles(t *testing.T, path string) []*IdPProfile {
 func TestIdPRegistry_UpsertPersistsAtomically(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "idp_profiles.json")
-	r := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	r := &IdPRegistry{live: make(map[string]*liveIdP)}
 	if err := r.Load(path); err != nil { // first run: records path, no file yet
 		t.Fatalf("Load: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestIdPRegistry_UpsertPersistsAtomically(t *testing.T) {
 
 	// A fresh registry loading the same file sees the profile — the
 	// restart/update path that used to lose all IdP config.
-	r2 := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	r2 := &IdPRegistry{live: make(map[string]*liveIdP)}
 	if err := r2.Load(path); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestIdPRegistry_UpsertPersistsAtomically(t *testing.T) {
 
 func TestIdPRegistry_DeletePersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "idp.json")
-	r := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	r := &IdPRegistry{live: make(map[string]*liveIdP)}
 	if err := r.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -122,11 +122,11 @@ func TestIdPRegistry_DeletePersists(t *testing.T) {
 }
 
 func TestIdPRegistry_Persisted(t *testing.T) {
-	mem := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	mem := &IdPRegistry{live: make(map[string]*liveIdP)}
 	if mem.Persisted() {
 		t.Error("in-memory registry reports Persisted() = true")
 	}
-	disk := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	disk := &IdPRegistry{live: make(map[string]*liveIdP)}
 	if err := disk.Load(filepath.Join(t.TempDir(), "idp.json")); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestIdPRegistry_Persisted(t *testing.T) {
 
 func TestAPIIdPListGet_ReportsPersistedTrue(t *testing.T) {
 	orig := idpRegistry
-	r := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	r := &IdPRegistry{live: make(map[string]*liveIdP)}
 	if err := r.Load(filepath.Join(t.TempDir(), "idp.json")); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

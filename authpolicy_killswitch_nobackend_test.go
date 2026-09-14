@@ -40,7 +40,7 @@ func setupNoBackendKillSwitchTest(t *testing.T) {
 	// Guarantee no interactive IdP (ssoCapable=false); restore the global
 	// registry on cleanup so we never leak into sibling tests.
 	origRegistry := idpRegistry
-	idpRegistry = &IdPRegistry{live: map[string]IdentityProvider{}}
+	idpRegistry = &IdPRegistry{live: map[string]*liveIdP{}}
 	t.Cleanup(func() { idpRegistry = origRegistry })
 
 	// Prove the no-backend precondition — the whole bug is scoped to it.

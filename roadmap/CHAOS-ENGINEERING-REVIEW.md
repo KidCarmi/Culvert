@@ -95,12 +95,47 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
-**2026-09-14 — CHAOS-66 sweep (the IdP registry's compile step) — ID CLAIMED,
-SWEEP IN PROGRESS.** Placeholder committed before any code was written, per the
-convention the header above reaches twice and §35 first honoured. Scope: what
-`compileIdPProfile` DOES, as opposed to how it is staged. Register rows: AU-6,
-AU-11 (re-scored), IDP-1…IDP-6. This entry is rewritten with the findings when
-the sweep lands.
+**2026-09-14 — CHAOS-66 sweep (the IdP registry's compile step). SECOND SWEEP TO
+CLAIM ITS ID BEFORE WRITING CODE** — placeholder committed as commit one, id
+never moved. Row **AU-11** has scored this path *"compile is isolated … ✓
+compile"* since the first sweep; the claim is true and answers how the compile
+is STAGED, never what it PERFORMS. `compileIdPProfile` performs blocking
+outbound HTTP to an origin the operator named in the profile — SAML metadata
+(15 s), OIDC discovery (10 s); only the LDAP arm is network-free. Exactly the
+CA-6 shape one subsystem over. Two defects, both measured against the real
+binary. **The registry WRITE LOCK was held across that fetch**, and
+`resolveRequestAuth` probes the registry on every proxied request, so against an
+origin that completes the handshake and then goes silent the per-request probe
+was **still blocked after 3 s while `Upsert` ran the full 10 s timeout** — one
+admin saving one IdP profile stalls the whole data plane, the admin plane
+killing the data plane that §33 exists to forbid; the persist (an fsync) was
+under the same lock and reached the same stall. And **every control-plane
+snapshot rebuilt every provider from scratch** — five byte-identical applies
+rebuilt the provider five times — so because any config mutation anywhere in the
+fleet advances the snapshot version, editing one policy rule made every node
+re-fetch every metadata and discovery document. That one is the finding that
+matters, because on the Data Plane poll path the IdP sync runs BEFORE
+`applyConfigSnapshot` and a failure returns: an unreachable IdP metadata
+endpoint therefore froze the node's **entire** config sync — no blocklist, no
+policy rules, no last-good persist, no version advance, retried every 30 s
+forever — so a block rule pushed during an incident silently never arrives while
+the log says only "IdP profile sync rejected". Shipped: compiles and the persist
+moved off the request-path lock onto a `writeMu` (the `importMu` shape); an
+unchanged profile reuses its live provider on the snapshot path, with the
+fingerprint covering the AMBIENT inputs too (`proxyBaseURL(nil)` becomes the
+SAML SP EntityID — omitting it would have made the fix introduce a defect, and
+that gate was verified failing) and excluding the OIDC discovery outputs (which
+would have made the fix a no-op); `Upsert` deliberately never reuses, because an
+unchanged re-save is the ONLY recovery this appliance has for a rotated IdP
+signing certificate (AU-6); one shared compile envelope instead of a per-profile
+allowance; counters only — the frozen-config state already has exactly one name
+(`dp_config_snapshot_apply`) and a second would be two pages for one action.
+18 gates; five defect gates plus the ambient-input gate each verified failing
+against their reintroduced pre-fix shapes, two permanent defect proofs and four
+controls. Deliberately left: the abort posture (IDP-3), the metadata refresh
+(AU-6), the ephemeral per-process SAML SP key (IDP-5). See §36, rows
+IDP-1…IDP-6, AU-6/AU-11 (re-scored), and
+`docs/operator/idp-registry-compile.md`.
 
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
@@ -1086,12 +1121,17 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-4 | Lockout store is bounded + fail-closed, and TOTP failures now feed it. But it is **not persisted** (resets on restart) and **per-node** (attacker gets MaxAttempts per node in a cluster). | ✓ (+2 gaps) | M | `lockout.go:111-126,102-110`; per-node note `roadmap/edge-case-audit.md:138` |
 | AU-5 | LDAP proxy auth fails closed, but the 10s timeout covers only the **dial** — `Bind`/`Search` have no per-op deadline, so a server that accepts then stalls hangs the request goroutine. | GAP → **CLOSED** (CHAOS-58 §26: one 10s round-trip envelope, two non-redundant layers; re-scored **H** on discovery — the stall is unbounded, not slow, and it made the CHAOS-47 cooldown structurally unreachable) | ~~M~~ H | `auth_ldap.go` `verify`; gates `auth_ldap_stall_chaos_test.go` (9) |
 | AU-14 | The CHAOS-47 provider-wide cooldown is armed only by an error that RETURNS, so any identity-backend fault that HANGS is invisible to it by construction. Closed for LDAP by CHAOS-58; the OIDC leg is bounded by `http.Client{Timeout}` on every call, and SAML is browser-mediated. Recorded so the next backend added to the credential chain inherits the rule rather than rediscovering it. | GAP → **CLOSED for the shipped backends** (CHAOS-58 §26) | M | `auth_backend_health.go` `authProbeGate`; `noteVerifyError` `auth_ldap.go` |
-| AU-6 | SAML metadata & OIDC discovery fetched **once** at compile — no periodic refresh. IdP SAML signing-cert rotation breaks assertion validation until re-save/restart. (OIDC JWKs *do* auto-refresh every 15 min + serve-stale.) | GAP | M | `auth_saml.go:54-57,249-294`; JWKs OK `auth_oidc_flow.go:129-157` |
+| AU-6 | SAML metadata & OIDC discovery fetched **once** at compile — no periodic refresh. IdP SAML signing-cert rotation breaks assertion validation until re-save/restart. (OIDC JWKs *do* auto-refresh every 15 min + serve-stale.) **Unchanged by CHAOS-66 and now load-bearing in the other direction:** the reuse rule §36 added is deliberately scoped to the control-plane snapshot path *because* an unchanged admin re-save is the only remedy this row has, and reusing there would delete it (pinned by `TestChaos66_Control_AdminUpsertAlwaysRecompiles`). The metadata document's own `validUntil` is also never consulted, so an expired one is trusted for the process lifetime. The fix is the shape the OIDC side already has — a refreshing resolver with a rate floor and a hard stale ceiling (SEC-JWKS-1) — which would also make IDP-3 nearly unreachable by taking the network out of the compile entirely. | GAP | M | `auth_saml.go` `NewSAMLProvider`/`fetchSAMLMetadata`; JWKs OK `auth_oidc_flow.go` `jwksCache`; remedy documented in `docs/operator/idp-registry-compile.md` §4 |
 | AU-7 | IdP 5xx / network error / expired token all collapse to fail-closed "auth fail" — correct posture, but an IdP outage is indistinguishable from a brute-force spike (no distinct `idp.unreachable` metric). | ✓ (obs gap) | L | `auth_oidc.go:152-162`, `auth_oidc_flow.go:623-636` |
 | AU-8 | Auth caches bounded at 5000 with eviction; HMAC-keyed keys (heap-dump safe); cached OK TTL capped at token `exp`. | ✓ | — | `store.go:236,241-258,268-285`, `auth_oidc.go:219-227` |
 | AU-9 | Session HMAC key change / per-node divergence logs everyone out (fail-closed) — no rotation grace window; cluster without shared key needs affinity. | GAP | M | `session.go:390-393`, `InitRandomKey` `session.go:80-86` |
 | AU-10 | TOTP: 30s step, ±1 window (~90s skew tolerance), replay closed via `counter <= lastCounter`, empty-secret fails closed. | ✓ | — | `totp.go:47-88` |
-| AU-11 | Multi-IdP registry: compile is isolated (all-or-nothing staging swap; bad profile dropped, not fatal). But the **request-time provider loop is sequential and unguarded** — one slow IdP adds latency to every request that reaches it. | ✓ compile / GAP request | M | `auth_idp.go:159-165,354-376` vs loop `proxy.go:209-220` |
+| AU-11 | Multi-IdP registry: compile is isolated (all-or-nothing staging swap; bad profile dropped, not fatal). But the **request-time provider loop is sequential and unguarded** — one slow IdP adds latency to every request that reaches it. | ~~✓ compile~~ → **RE-SCORED by CHAOS-66**: the staging claim was right; the ✓ was not. **The row asks how the compile is STAGED and never asks what it PERFORMS** — and `compileIdPProfile` performs blocking outbound HTTP to an operator-named third party (SAML metadata 15 s, OIDC discovery 10 s; only LDAP is network-free). Same governance shape as CA-6 one subsystem over: a verdict inherits the scope of its question, and the question is usually the row's title. Split into IDP-1 (the lock) and IDP-2 (the recompile). The request-loop half is unchanged and still open. | ~~M~~ → **H** | `auth_idp.go` `Upsert`/`ReplaceAll`, `auth_idp_compile.go`; request loop still `proxy.go:378`; see §36 |
+| IDP-1 | **The registry WRITE LOCK was held across a third-party fetch — and across the persist.** `Upsert` took `r.mu.Lock()` and then compiled under it; `sync.RWMutex` is writer-preferring, and `resolveRequestAuth` calls `HasEnabledInteractiveProvider()` on EVERY proxied request. Measured against an origin that completes the TCP handshake and then goes silent (the CHAOS-58 fault, one subsystem over): **the per-request probe was still blocked after 3 s and `Upsert` ran the full 10 s discovery timeout.** One admin saving one IdP profile stalls the entire data plane for 10 s (15 s for SAML), with no error, counter or health movement — the admin plane taking the data plane down, which §33 exists to forbid. `r.persist` (an `atomicWriteFile`: temp + fsync + rename) was under the same lock, reaching the same stall from a wedged or full volume. | NEW → **CLOSED** (CHAOS-66: mutations serialise on `writeMu` — the `importMu` shape — and `r.mu` is taken only to publish a built candidate) | **H** | was: `auth_idp.go` `Upsert`; see §36 |
+| IDP-2 | **Every control-plane snapshot rebuilt every live provider from scratch,** unchanged profiles included (measured: five byte-identical `ReplaceAll` calls, five rebuilds). A DP polls every 30 s and ANY config mutation in the fleet advances the snapshot version, so editing one policy rule made every node re-fetch every SAML metadata and OIDC discovery document — N nodes × M profiles at the IdP, from a change unrelated to identity. **And the failure is not contained to identity:** on the DP poll path `syncSnapshotIdPProfiles` runs BEFORE `applyConfigSnapshot` and a failure returns, so an unreachable metadata endpoint meant no blocklist, no policy rules, no rate limits, no last-good persist, and no version advance — retried every 30 s forever. A block rule pushed during an incident silently never arrives while the log says only "IdP profile sync rejected". | NEW → **CLOSED for unchanged profiles** (CHAOS-66: reuse keyed on a fingerprint covering the profile minus the discovery-derived OUTPUTS and plus the ambient `proxyBaseURL(nil)`; uncharacterisable ⇒ recompile, never worse. `culvert_idp_compile_{total,failures_total,reused_total}`) | **H** | was: `auth_idp.go` `ReplaceAll`; `controlplane_client.go:343`; see §36 |
+| IDP-3 | **A failed IdP compile aborts unrelated config, and three callers abort at three different points** — `fetchAndApply` applies nothing, `applyConfigSnapshot` has already applied policy and the blocklist, the delta path has applied everything but the extended state. One fault, three postures. CHAOS-66 deliberately did NOT relitigate this: partial application has its own hazard (a policy rule scoped to an `authSource` whose profile did not compile under-matches), so it is a security-semantics decision. The reuse rule narrows the window from "any config change in the fleet" to "somebody actually changed an IdP profile", but does not close it. | NEW (recorded, owner posture) | M/H | `controlplane_client.go:343`, `controlplane_snapshot.go:815`, `controlplane_delta.go:287`; see §36 |
+| IDP-5 | **The SAML SP key pair is EPHEMERAL — one per process, never persisted, never fleet-shared.** `ensureSPKeyPair` mints a fresh RSA key + self-signed cert under a `sync.Once`. Two consequences the code's own comment does not draw: a deployment whose IdP **encrypts assertions** to the SP certificate cannot decrypt anything after a restart until the IdP is reconfigured, and in a cluster **every node presents a different SP certificate**, so an IdP configured with one can only serve one node. Not exercised by the default configuration (crewjam/saml does not sign AuthnRequests unless a signature method is set), which is why it has gone unnoticed. Fix: persist beside the other node-local key material and sync it like the session HMAC. | NEW (recorded) | M | `auth_saml.go` `ensureSPKeyPair`; see §36 |
+| IDP-6 | **The boot path blocks on a third party.** `Load` compiles enabled profiles during the `ui_access_policy` startup slice, so an unreachable IdP delays startup — now by at most ONE 15 s envelope rather than profile-count × 15 s. Failures are logged and skipped, never fatal, so the node still comes up and still proxies. Recorded rather than closed: making the compile lazy is the AU-6 change. `Load` also wrote `r.live` with **no lock at all**, contradicting `compile`'s own stated contract — harmless only because `Load` runs before any reader exists; corrected in CHAOS-66 because a data race is not a posture decision. | NEW (bounded; residual recorded) | L/M | `auth_idp.go` `Load`, `ui_access_policy_startup.go:60`; see §36 |
 | AU-12 | All admin-configured IdP URLs dial through `ssrfSafeDialContext`; HTTPS+non-private pre-validated; response bodies `io.LimitReader`-capped. | ✓ | — | `auth_oidc_flow.go:64,300`, `auth_idp.go:556-565` |
 | AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP | M | `auth_oidc_flow.go:623-636`; breaker exists unused `internal/upstream/upstream.go:89-96` |
 | AU-15 | **The public admin-login endpoint accepted an UNBOUNDED username and copied it verbatim into durable state.** `apiAuthLogin` is on `uiAuthMiddleware`'s public allowlist; nothing between the 1 MiB body cap and the handler limited `body.User`, and every failed attempt wrote it into the two lockout maps (retained ≥ `lockout.Window`), the 500-entry audit ring, and the **durable audit JSONL** — a 50 MB rotating file keeping exactly ONE archive. At the endpoint's own rate limit (60 mutating POSTs/min/IP) one unauthenticated client commits ~60 MiB/min of chosen bytes, rotating the entire 100 MB retained compliance record away in **under two minutes**, with no disk fault and every write SUCCEEDING (so `writeErrors`/`storage_write_failed` never fire). Measured by the gate: **4,195,672 bytes into the audit file from 8 requests.** | NEW → **CLOSED** (CHAOS-63: bounded at the handler; `lockout.MaxUsernameKeyLen` is the structural half; `culvert_login_oversize_rejected_total`) | **H** | was: `ui_auth.go` `apiAuthLogin`; `internal/audit/audit.go:213` (`NewRotatingFile(path, 50)`); see §32 |
@@ -6409,3 +6449,256 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The IdP registry's compile step
+
+**Sweep date:** 2026-09-14 · **Register rows:** IDP-1…IDP-6, AU-6 (re-scored),
+AU-11 (re-scored) · **Runbook:** `docs/operator/idp-registry-compile.md`
+
+### Executive summary
+
+Row **AU-11** has said *"Multi-IdP registry: compile is isolated (all-or-nothing
+staging swap; bad profile dropped, not fatal) — ✓ compile"* since the first
+sweep. The claim is true and it answers a different question from the one that
+matters. It asks how the compile is **staged**; it never asks what the compile
+**performs**. `compileIdPProfile` performs blocking outbound HTTP to an origin
+the operator named in the profile: `fetchSAMLMetadata` (15 s) for a SAML profile
+carrying `metadata_url`, `fetchOIDCDiscovery` (10 s) for every OIDC profile.
+Only the LDAP arm is network-free.
+
+This is the CA-6 shape exactly, one subsystem over: a row whose evidence column
+names the property that makes the findings reachable, and a verdict that looks
+past it because the only question asked was the one the row's title poses.
+
+Two defects follow, both measured against the real binary.
+
+**IDP-1 — the registry write lock was held across that fetch.** `Upsert` took
+`r.mu.Lock()` and then compiled under it. `sync.RWMutex` is writer-preferring,
+so a writer blocked inside the fetch also blocks every subsequent `RLock` — and
+`resolveRequestAuth` (`proxy.go:349`) calls
+`idpRegistry.HasEnabledInteractiveProvider()` on **every proxied request**.
+Measured against an origin that completes the TCP handshake and then goes silent
+— the ordinary wedged-web-tier fault, and the same one CHAOS-58 bounded for LDAP
+— **the per-request probe was still blocked after 3 s and `Upsert` ran the full
+10 s discovery timeout.** One admin saving one IdP profile stalls the entire data
+plane for ten seconds (fifteen for SAML), with no error, no counter and no health
+movement. `r.persist` was under the same lock, so an `atomicWriteFile` (temp +
+fsync + rename) on a wedged or full volume reached the same stall by a second
+route. **This is the admin plane taking the data plane down — the posture §33
+(CHAOS-57, the admin UI listener) exists to forbid.**
+
+**IDP-2 — every snapshot apply rebuilt every provider from scratch,** including
+profiles that had not changed. Measured: five byte-identical `ReplaceAll` calls
+rebuilt the live provider **five times**. A Data Plane polls its control plane
+every 30 s (`dp_enrollment.go:306`) and **any** config mutation anywhere in the
+fleet advances the snapshot version, so editing one policy rule made every node
+re-fetch every SAML metadata document and every OIDC discovery document — N
+nodes × M profiles of outbound traffic at the identity provider, caused by a
+change that has nothing to do with identity.
+
+### Why IDP-2 is the finding that matters
+
+Because the compile's failure is not contained to identity. On the Data Plane
+poll path (`fetchAndApply`, `controlplane_client.go:343`)
+`syncSnapshotIdPProfiles` runs **before** `applyConfigSnapshot`, and a failure
+`return`s. So an IdP metadata endpoint that cannot be reached means:
+
+* no blocklist, no policy rules, no rate limits, no IP filter, no session HMAC —
+  `applyConfigSnapshot` is never called at all;
+* `persistDPLastGoodConfigSnapshot` never runs;
+* `lastVersion` is not advanced, so the next poll re-downloads the same snapshot
+  and re-attempts the same fetch, **every 30 s, forever**.
+
+**A third party's web server therefore decides whether the fleet's security
+policy updates.** A block rule pushed in response to an incident silently never
+arrives, while the proxy keeps serving on stale policy and the log says only
+`DataPlane: IdP profile sync rejected`. During the outage each node spends half
+its poll cycle blocked in a fetch to the dependency that is, by hypothesis,
+already down — a 50-node fleet with two SAML profiles sustains ~3.3 requests/s
+at that endpoint indefinitely, from a config sync that has nothing to do with
+SAML.
+
+**One fault, three postures.** The same failure reaches three callers and each
+applies a different amount of state: `fetchAndApply` applies nothing;
+`applyConfigSnapshot` (§`controlplane_snapshot.go:815`) has already applied
+policy and the blocklist and aborts only the extended state; the delta path
+(`controlplane_delta.go:287`) has applied everything but the extended state.
+Recorded as **IDP-3**, below.
+
+### What shipped
+
+**The fix removes the cause; it does not relitigate the abort posture.** Whether
+a failed IdP compile should abort unrelated config is a real question and a real
+owner decision — partial application has its own hazard, since a policy rule
+scoped to an `authSource` whose profile did not compile under-matches. What this
+change does is make the compile stop happening when nothing asked for it.
+
+1. **No third-party I/O under the registry lock, and no persist under it
+   either.** Registry mutations serialise on a new `writeMu` (the
+   `enrollment.go` `importMu` shape, CHAOS-50 §17.2); `r.mu` is taken only by
+   `liveSnapshot` and `publish`, so its hold time is a map swap. Lock order is
+   `writeMu → mu`.
+
+2. **A profile whose compile-relevant configuration is unchanged reuses its live
+   provider** on the `ReplaceAll` (control-plane snapshot) path. `live` became
+   `map[string]*liveIdP`, pairing each compiled provider with the fingerprint of
+   the profile it was compiled from — one value, so the two can never disagree.
+
+3. **The fingerprint covers the ambient inputs, not just the profile bytes**,
+   and getting that wrong would have made the fix introduce a defect.
+   `NewSAMLProvider` reads `proxyBaseURL(nil)` and turns it into the SP EntityID
+   and the ACS URL — and `applyExternalAuthSnapshotSettings` sets that value
+   *immediately before* the IdP sync, with a comment saying why. A fingerprint
+   over the marshalled profile alone would have reused a provider carrying the
+   wrong EntityID on any snapshot that changed only the base URL. The five OIDC
+   endpoint fields are excluded for the opposite reason: `NewOIDCFlowProvider`
+   writes them back from the discovery document, so they are **outputs** of a
+   compile, and counting them would make a freshly-compiled profile never match
+   the identical admin input — defeating every reuse and making the fix a no-op.
+   Anything uncharacterisable (a nil profile, a marshal failure, a field added
+   later) yields a fingerprint that cannot match, so the fallback is
+   **recompile** — the pre-change behaviour. Never worse.
+
+4. **`Upsert` deliberately does NOT reuse.** An admin saving a profile is
+   explicit operator intent toward that profile, and re-saving it unchanged is
+   the only recovery this appliance has for a rotated IdP signing certificate
+   (**AU-6**: SAML metadata and OIDC discovery are fetched once and never
+   refreshed). Reusing there would delete that remedy. The snapshot path carries
+   no per-profile operator intent — its trigger is somebody editing a policy
+   rule — which is precisely why reuse belongs there and nowhere else.
+
+5. **One envelope, not a per-profile allowance** (the CHAOS-58/CHAOS-65 rule).
+   `idpCompileBudget` is deliberately the old per-fetch SAML timeout (15 s), so
+   a single-profile deployment is byte-identical and only the fan-out case
+   shrinks — N profiles no longer serialise into N × 15 s on the poll goroutine
+   or on the boot path.
+
+6. **Counters only — no new contract row, no new alert.** The state an operator
+   acts on ("this node is not applying new policy/auth config") already has
+   exactly one name, the `dp_config_snapshot_apply` check (`diagnostics.go:269`),
+   and a second name for one root cause is two pages for one action (the
+   `storage_health.go` rule). What was missing is the magnitude and the cause:
+   `culvert_idp_compile_{total,failures_total,reused_total}`, emitted **only**
+   when at least one IdP profile is configured (the socks5/cluster_ca/dns
+   emission rule — a flat zero from an appliance with no identity provider is
+   indistinguishable from a registry that has stopped working).
+
+Alongside: `Load` wrote `r.live` **with no lock at all**, in contradiction of
+that method's own stated contract (*"Calling under r.mu.Lock is the caller's
+responsibility"*). Harmless only because `Load` runs before any reader exists;
+corrected rather than recorded, because a data race is not a posture decision.
+
+### Risk matrix
+
+| Row | Finding | Before | After |
+|---|---|---|---|
+| IDP-1 | Registry write lock held across a third-party fetch and across the persist; every proxied request stalls behind an admin save against a wedged IdP or a wedged volume | **H** | **CLOSED** |
+| IDP-2 | Every snapshot apply recompiled every provider, so an unreachable third party froze all Data Plane config sync and the fleet amplified onto it | **H** | **CLOSED** for unchanged profiles |
+| IDP-3 | A failed IdP compile aborts unrelated config, and three callers abort at three different points | **M/H** | **OPEN** (owner posture) |
+| AU-6 | SAML metadata / OIDC discovery fetched once, never refreshed; an IdP signing-cert rollover breaks SSO until re-save or restart | M | **OPEN**, now documented with its remedy |
+| IDP-5 | SAML SP key pair is ephemeral per process and per node | — | **OPEN** (recorded) |
+| AU-11 | "compile is isolated — ✓ compile" | ~~✓~~ | **re-scored H**, split into IDP-1/IDP-2 |
+
+### Residual risk (recorded, not fixed)
+
+* **IDP-3 — the abort posture.** A genuinely NEW or CHANGED profile that cannot
+  compile still rejects the whole IdP sync, and on the poll path that still
+  aborts the entire snapshot. The reuse rule means this is now reachable only
+  when someone actually changed an IdP profile — which is a far narrower window
+  than "any config change in the fleet" — but it is not zero. Closing it means
+  deciding whether to apply policy while the identity set is stale, which is a
+  security-semantics decision, not a resilience fix. The three callers aborting
+  at three different points should be settled in the same change.
+
+* **AU-6 — no metadata refresh.** The natural fix is the shape the OIDC side
+  already has: a cached, refreshing metadata resolver with a rate floor and a
+  hard stale ceiling, the way `jwksCache` works under SEC-JWKS-1. That would
+  close AU-6 *and* make IDP-3 nearly unreachable, since a compile would no
+  longer touch the network at all. It is deliberately out of scope here — it
+  changes when a rotated IdP certificate takes effect, which is a trust-window
+  decision and deserves its own review. The permanent defect proof
+  (`TestChaos66_CompilingAMetadataURLProfileBlocksOnTheThirdParty`) fails when
+  someone makes the compile network-free, so the claim gets updated in the same
+  change rather than leaving gates that guard nothing.
+
+* **IDP-5 — the SAML SP key pair is ephemeral.** `ensureSPKeyPair` generates a
+  fresh RSA key and self-signed certificate once per process and never persists
+  it. Two consequences the code's own comment does not draw: a deployment whose
+  IdP **encrypts assertions** to the SP certificate cannot decrypt anything
+  after a restart until the IdP is reconfigured, and in a cluster **every node
+  presents a different SP certificate**, so an IdP configured with one can only
+  serve one node. Not exercised by the default configuration (crewjam/saml does
+  not sign AuthnRequests unless a signature method is set), which is why it has
+  gone unnoticed; it is a restart-survival and fleet-consistency finding, and
+  the fix is to persist the pair beside the other node-local key material and
+  sync it like the session HMAC.
+
+* **IDP-6 — the boot path still blocks on a third party.** `Load` compiles
+  enabled profiles during the `ui_access_policy` startup slice, so an
+  unreachable IdP delays startup — now by at most one 15 s envelope rather than
+  profile-count × 15 s. Failures are logged and skipped, never fatal, so the
+  node still comes up and still proxies. Recorded rather than closed: making the
+  compile lazy is the AU-6 change above.
+
+* **SAML metadata `validUntil` is ignored.** `samlsp.ParseMetadata` is called
+  and the document's own expiry is never consulted, so an expired metadata
+  document is trusted for the process lifetime. Coupled to AU-6 — a refresh
+  mechanism is what would give `validUntil` something to mean.
+
+### Gates
+
+`idp_compile_chaos_test.go` — 18 gates.
+
+**Five defect gates, each verified failing against its reintroduced pre-fix
+shape** (the shape is named in each gate's comment):
+
+* `UpsertDoesNotHoldTheRegistryLockAcrossCompile` — against compile-under-`r.mu`,
+  the per-request probes never returned.
+* `PersistDoesNotHoldTheRegistryLock` — the same finding by the persist route.
+* `UnchangedProfilesAreNotRecompiledOnSnapshotApply` — against the unconditional
+  recompile, five identical applies performed six compiles.
+* `UnreachableIdPOriginDoesNotFreezeAnUnchangedSnapshot` — the headline
+  consequence; against the pre-fix shape the second apply inherited the
+  unreachable origin's error.
+* `CompilesShareOneEnvelope` — against a per-profile allowance, each profile got
+  its own deadline.
+
+**One gate that proves the fix would have introduced a defect without it:**
+`ProxyBaseURLChangeForcesRecompile`, verified failing against a fingerprint that
+omits the ambient `proxyBaseURL(nil)`.
+
+**Two permanent defect proofs** (the CHAOS-56 `BareGracefulStop` role):
+`CompilingAMetadataURLProfileBlocksOnTheThirdParty` pins the premise the whole
+sweep rests on, and `CompileEnvelopeBoundsTheFetch` pins that the envelope —
+not the client's own `Timeout` — is what ends the fetch.
+
+**Four controls,** because the cheapest way to pass the reuse gates is to stop
+compiling, which would freeze the identity set at whatever was first loaded:
+a CHANGED profile is still recompiled; an admin `Upsert` always recompiles
+(pinning the AU-6 remedy); a failed compile of a new profile still rejects the
+whole replacement and leaves the previous live set authoritative; a
+disable/enable cycle still refetches.
+
+**Three fingerprint-contract gates** (outputs excluded, every compile-relevant
+input separated, uncharacterisable input fails safe), one defense-in-depth gate
+that an empty stored fingerprint cannot satisfy the reuse check, one gate on the
+emit-only-when-configured metrics rule, and one `-race` gate running every
+mutation path against the per-request read path.
+
+### The process lesson
+
+This sweep is the third consecutive one to find that **a register row's verdict
+answered a narrower question than its own evidence raised.** CA-6 named the
+peer-controlled responder URL and scored ✓ because the question asked was "does
+it fail closed?". AU-11 named the staging and scored ✓ because the question
+asked was "is the compile isolated?". In both cases the row is *correct* and the
+score is *wrong*, and the gap is the same: **a verdict inherits the scope of the
+question, and the question is usually the row's title.**
+
+The practical form: when a row says a mechanism is safely *staged*, *bounded*,
+*isolated* or *retried*, that is a claim about the WRAPPER. Ask separately what
+the wrapped thing DOES — whether it touches the network, takes a lock, writes to
+disk, or waits on someone else's availability — because every one of those
+brings its own failure domain in through a door the wrapper does not guard.

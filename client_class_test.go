@@ -179,7 +179,7 @@ func TestDefaultPath_RedirectInvariance(t *testing.T) {
 	origReg := idpRegistry
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "corp-oidc", Name: "Corp", Type: IdPTypeOIDC, Enabled: true}},
-		live:     map[string]IdentityProvider{"corp-oidc": &testProxyIdentityProvider{}},
+		live:     liveIdPSet(map[string]IdentityProvider{"corp-oidc": &testProxyIdentityProvider{}}),
 	}
 	t.Cleanup(func() { idpRegistry = origReg })
 

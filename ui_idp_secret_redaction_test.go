@@ -50,7 +50,7 @@ func TestAPIIdPItemGet_RedactsClientSecret(t *testing.T) {
 		},
 	}
 	orig := idpRegistry
-	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]*liveIdP)}
 	t.Cleanup(func() { idpRegistry = orig })
 
 	w := httptest.NewRecorder()
@@ -84,7 +84,7 @@ func TestAPIIdPListGet_RedactsClientSecret(t *testing.T) {
 		},
 	}
 	orig := idpRegistry
-	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]*liveIdP)}
 	t.Cleanup(func() { idpRegistry = orig })
 
 	w := httptest.NewRecorder()
@@ -118,7 +118,7 @@ func TestAPIIdPListGet_RedactsClientSecret(t *testing.T) {
 
 func TestAPIIdPListPost_StoresAndRedactsClientSecret(t *testing.T) {
 	orig := idpRegistry
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	t.Cleanup(func() { idpRegistry = orig })
 
 	w := httptest.NewRecorder()
@@ -164,7 +164,7 @@ func TestAPIIdPListPost_StoresAndRedactsClientSecret(t *testing.T) {
 func TestAPIIdPAudit_RedactsWriteOnlyFields(t *testing.T) {
 	origRegistry := idpRegistry
 	restoreAudit := audit.SwapRingForTest()
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	t.Cleanup(func() {
 		idpRegistry = origRegistry
 		restoreAudit()
@@ -245,7 +245,7 @@ func TestAPIIdPItemPut_PreservesOIDCClientSecretWhenRedactedFromForm(t *testing.
 		},
 	}
 	orig := idpRegistry
-	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]*liveIdP)}
 	t.Cleanup(func() { idpRegistry = orig })
 
 	w := httptest.NewRecorder()
@@ -290,7 +290,7 @@ func TestAPIIdPItemPut_PreservesOIDCClientSecretWhenRedactedFromForm(t *testing.
 func TestAPIIdPItemPut_PreservesOIDCDiscoveryEndpointsWhenIssuerUnchanged(t *testing.T) {
 	p := oidcDiscoveryCacheProfile()
 	orig := idpRegistry
-	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]*liveIdP)}
 	t.Cleanup(func() { idpRegistry = orig })
 
 	w := httptest.NewRecorder()
@@ -355,7 +355,7 @@ func TestAPIIdPItemPut_MutatesOIDCClientSecretWhenProvided(t *testing.T) {
 				},
 			}
 			orig := idpRegistry
-			idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+			idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]*liveIdP)}
 			t.Cleanup(func() { idpRegistry = orig })
 
 			w := httptest.NewRecorder()
@@ -600,7 +600,7 @@ func TestAPIIdPGetAndList_RedactSAMLMetadataXML(t *testing.T) {
 		},
 	}
 	orig := idpRegistry
-	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]*liveIdP)}
 	t.Cleanup(func() { idpRegistry = orig })
 
 	getW := httptest.NewRecorder()

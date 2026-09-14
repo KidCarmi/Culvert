@@ -98,7 +98,7 @@ func TestP2S3_CRSuppressesBrowserRedirect(t *testing.T) {
 	origReg := idpRegistry
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "test-idp", Name: "Test IdP", Type: IdPTypeOIDC, Enabled: true}},
-		live:     map[string]IdentityProvider{"test-idp": &testProxyIdentityProvider{}},
+		live:     liveIdPSet(map[string]IdentityProvider{"test-idp": &testProxyIdentityProvider{}}),
 	}
 	t.Cleanup(func() { idpRegistry = origReg })
 	const host = "p2s3-browser.example.test"

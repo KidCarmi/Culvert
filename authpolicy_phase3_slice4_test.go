@@ -54,7 +54,7 @@ func withSSORegistry(t *testing.T, profiles ...*IdPProfile) {
 		}
 		live[p.ID] = &ssoTestProvider{name: prefix + p.ID}
 	}
-	idpRegistry = &IdPRegistry{profiles: profiles, live: live}
+	idpRegistry = &IdPRegistry{profiles: profiles, live: liveIdPSet(live)}
 }
 
 func idp(id string, typ IdPType, enabled bool) *IdPProfile {

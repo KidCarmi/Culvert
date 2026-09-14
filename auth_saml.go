@@ -44,7 +44,7 @@ type SAMLProvider struct {
 }
 
 // NewSAMLProvider builds a SAMLProvider from an IdPProfile.
-func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
+func NewSAMLProvider(ctx context.Context, p *IdPProfile) (*SAMLProvider, error) {
 	cfg := p.SAML
 	if cfg.MetadataURL == "" && cfg.MetadataXML == "" {
 		return nil, fmt.Errorf("saml[%s]: metadata_url or metadata_xml required", p.ID)
@@ -53,7 +53,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] name_id_format: %w", p.ID, err)
 	}
 
-	idpMeta, err := fetchSAMLMetadata(cfg)
+	idpMeta, err := fetchSAMLMetadata(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] metadata: %w", p.ID, err)
 	}
@@ -218,7 +218,7 @@ func newSAMLStateStore() *samlStateStore {
 // SAML metadata fetch + parse
 // ---------------------------------------------------------------------------
 
-func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
+func fetchSAMLMetadata(ctx context.Context, cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 	var xmlData []byte
 
 	if cfg.MetadataURL != "" {
@@ -234,15 +234,19 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 		// Use an SSRF-safe transport that rejects private/internal IPs at
 		// the dial level — even if DNS changes between validation and
 		// connection, the transport blocks the request.
+		// CHAOS-66: the deadline is the caller's ENVELOPE, shared with every
+		// other profile this registry mutation compiles, not a fresh 15 s
+		// allowance per profile. The client Timeout is kept as a backstop for
+		// a caller that hands over a context with no deadline.
 		client := &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: idpCompileBudget,
 			Transport: &http.Transport{
 				DialContext: ssrfSafeDialContext,
 			},
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		fetchCtx, cancel := idpFetchContext(ctx)
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
+		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, metaURL.String(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("metadata request: %w", err)
 		}

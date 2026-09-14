@@ -19,7 +19,7 @@ func installLegacyOIDCTestProvider(t *testing.T, provider *OIDCAuth) {
 	cfg.mu.RUnlock()
 	cfg.SetProvider(provider)
 	originalRegistry := idpRegistry
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	t.Cleanup(func() {
 		cfg.SetProvider(previousProvider)
 		idpRegistry = originalRegistry
@@ -169,7 +169,7 @@ func TestResolveRequestAuthRejectsEnabledOIDCWithoutLiveBackend(t *testing.T) {
 	oldRegistry := idpRegistry
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "uncompiled-oidc", Type: IdPTypeOIDC, Enabled: true}},
-		live:     make(map[string]IdentityProvider),
+		live:     make(map[string]*liveIdP),
 	}
 	t.Cleanup(func() {
 		idpRegistry = oldRegistry
@@ -200,9 +200,9 @@ func TestResolveRequestAuthRejectsRegistryIdentityWithoutSubject(t *testing.T) {
 	oldRegistry := idpRegistry
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "blank-subject", Type: IdPTypeOIDC, Enabled: true}},
-		live: map[string]IdentityProvider{"blank-subject": &testProxyIdentityProvider{
+		live: liveIdPSet(map[string]IdentityProvider{"blank-subject": &testProxyIdentityProvider{
 			idByToken: map[string]*Identity{"valid-token": {Provider: "blank-subject"}},
-		}},
+		}}),
 	}
 	t.Cleanup(func() {
 		idpRegistry = oldRegistry

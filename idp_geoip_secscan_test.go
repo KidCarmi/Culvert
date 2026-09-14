@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +18,7 @@ import (
 func TestIdPRegistry_Load_NonExistent2(t *testing.T) {
 	r := &IdPRegistry{
 		profiles: nil,
-		live:     make(map[string]IdentityProvider),
+		live:     make(map[string]*liveIdP),
 	}
 	if err := r.Load("/tmp/nonexistent_idp_registry_xyz2.json"); err != nil {
 		t.Errorf("Load nonexistent path should return nil, got %v", err)
@@ -35,7 +36,7 @@ func TestIdPRegistry_Load_BadJSON(t *testing.T) {
 
 	r := &IdPRegistry{
 		profiles: nil,
-		live:     make(map[string]IdentityProvider),
+		live:     make(map[string]*liveIdP),
 	}
 	if err := r.Load(f.Name()); err == nil {
 		t.Error("Load bad JSON should return error")
@@ -63,7 +64,7 @@ func TestIdPRegistry_Load_ValidProfiles(t *testing.T) {
 
 	r := &IdPRegistry{
 		profiles: nil,
-		live:     make(map[string]IdentityProvider),
+		live:     make(map[string]*liveIdP),
 	}
 	if err := r.Load(f.Name()); err != nil {
 		t.Fatalf("Load valid profiles: %v", err)
@@ -76,10 +77,6 @@ func TestIdPRegistry_Load_ValidProfiles(t *testing.T) {
 // ─── IdPRegistry.compile (via Upsert with unknown type) ───────────────────────
 
 func TestIdPRegistry_compile_UnknownType(t *testing.T) {
-	r := &IdPRegistry{
-		profiles: nil,
-		live:     make(map[string]IdentityProvider),
-	}
 	// Unknown type should fail in compile, which is called from Upsert if enabled
 	// But Upsert validates type before compile, so use compile directly
 	p := &IdPProfile{
@@ -88,17 +85,13 @@ func TestIdPRegistry_compile_UnknownType(t *testing.T) {
 		Type:    "unknown",
 		Enabled: false,
 	}
-	err := r.compile(p)
+	_, err := compileIdPProfileCtx(context.Background(), p)
 	if err == nil {
 		t.Error("compile with unknown type should return error")
 	}
 }
 
 func TestIdPRegistry_compile_OIDC_NilConfig(t *testing.T) {
-	r := &IdPRegistry{
-		profiles: nil,
-		live:     make(map[string]IdentityProvider),
-	}
 	p := &IdPProfile{
 		ID:      "compile-oidc-nil",
 		Name:    "compile-oidc-nil",
@@ -106,17 +99,13 @@ func TestIdPRegistry_compile_OIDC_NilConfig(t *testing.T) {
 		Enabled: false,
 		OIDC:    nil,
 	}
-	err := r.compile(p)
+	_, err := compileIdPProfileCtx(context.Background(), p)
 	if err == nil {
 		t.Error("compile OIDC with nil config should return error")
 	}
 }
 
 func TestIdPRegistry_compile_SAML_NilConfig(t *testing.T) {
-	r := &IdPRegistry{
-		profiles: nil,
-		live:     make(map[string]IdentityProvider),
-	}
 	p := &IdPProfile{
 		ID:      "compile-saml-nil",
 		Name:    "compile-saml-nil",
@@ -124,7 +113,7 @@ func TestIdPRegistry_compile_SAML_NilConfig(t *testing.T) {
 		Enabled: false,
 		SAML:    nil,
 	}
-	err := r.compile(p)
+	_, err := compileIdPProfileCtx(context.Background(), p)
 	if err == nil {
 		t.Error("compile SAML with nil config should return error")
 	}

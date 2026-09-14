@@ -31,7 +31,7 @@ func startAuthProxy(t *testing.T, provider IdentityProvider, rules []PolicyRule)
 	origReg := idpRegistry
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "test-idp", Name: "Test IdP", Type: IdPTypeOIDC, Enabled: true, EmailDomains: []string{"example.com"}}},
-		live:     map[string]IdentityProvider{"test-idp": provider},
+		live:     liveIdPSet(map[string]IdentityProvider{"test-idp": provider}),
 	}
 	t.Cleanup(func() { idpRegistry = origReg })
 

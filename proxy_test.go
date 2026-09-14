@@ -81,7 +81,7 @@ func setupProxyIdentityE2EWithRules(t *testing.T, provider IdentityProvider, rul
 			Enabled:      true,
 			EmailDomains: []string{"example.com"},
 		}},
-		live: map[string]IdentityProvider{"test-idp": provider},
+		live: liveIdPSet(map[string]IdentityProvider{"test-idp": provider}),
 	}
 	t.Cleanup(func() { idpRegistry = origRegistry })
 

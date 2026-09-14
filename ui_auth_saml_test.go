@@ -22,9 +22,9 @@ func TestAuthSAMLCallbackLogsProviderRejection(t *testing.T) {
 		profiles: []*IdPProfile{
 			{ID: "corp-saml", Type: IdPTypeSAML, Enabled: true},
 		},
-		live: map[string]IdentityProvider{
+		live: liveIdPSet(map[string]IdentityProvider{
 			"corp-saml": &SAMLProvider{profile: &IdPProfile{ID: "corp-saml", Type: IdPTypeSAML}},
-		},
+		}),
 	}
 	t.Cleanup(func() {
 		idpRegistry = origRegistry

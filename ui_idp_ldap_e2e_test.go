@@ -40,7 +40,7 @@ func TestUIE2E_LDAPProviderCreateEditSecretAndWarnings(t *testing.T) {
 
 	// Isolated in-memory registry for this test.
 	origReg := idpRegistry
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	t.Cleanup(func() { idpRegistry = origReg })
 
 	browser := uiE2EBrowser(t)

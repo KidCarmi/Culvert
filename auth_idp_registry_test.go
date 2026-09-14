@@ -30,7 +30,7 @@ func TestStringsEqualFold(t *testing.T) {
 // ─── IdPRegistry in-memory operations ────────────────────────────────────────
 
 func newTestRegistry() *IdPRegistry {
-	return &IdPRegistry{live: make(map[string]IdentityProvider)}
+	return &IdPRegistry{live: make(map[string]*liveIdP)}
 }
 
 // samlProfile creates a disabled SAML profile with no MetadataURL so URL

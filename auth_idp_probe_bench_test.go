@@ -36,7 +36,7 @@ import (
 // controls whether each profile gets a compiled provider instance (the
 // testProxyIdentityProvider stub from proxy_test.go).
 func buildProbeRegistry(n int, enabled, live bool) *IdPRegistry {
-	r := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	r := &IdPRegistry{live: make(map[string]*liveIdP)}
 	for i := 0; i < n; i++ {
 		p := &IdPProfile{
 			ID:           fmt.Sprintf("idp-%d", i),
@@ -54,7 +54,7 @@ func buildProbeRegistry(n int, enabled, live bool) *IdPRegistry {
 		}
 		r.profiles = append(r.profiles, p)
 		if live {
-			r.live[p.ID] = &testProxyIdentityProvider{}
+			r.live[p.ID] = &liveIdP{provider: &testProxyIdentityProvider{}}
 		}
 	}
 	return r

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -139,21 +140,38 @@ type SAMLProfileConfig struct {
 // IdPRegistry stores and manages IdP profiles.  It is the authoritative
 // source of truth for all configured identity providers.
 type IdPRegistry struct {
+	// writeMu serialises MUTATIONS (Load/Upsert/Delete/ReplaceAll) against each
+	// other. It is deliberately separate from mu, which guards the published
+	// state that the request path reads: a mutation builds its candidate —
+	// compiling providers, which means outbound HTTP to a third party, and
+	// persisting the file, which means an fsync — while holding ONLY writeMu,
+	// and takes mu just long enough to swap the two fields. Before CHAOS-66
+	// both of those ran under mu, and because sync.RWMutex is writer-preferring
+	// a wedged IdP origin or a wedged volume blocked every per-request
+	// HasEnabledInteractiveProvider() probe for the whole timeout. Same shape as
+	// enrollment.go's importMu (CHAOS-50 §17.2). Lock order is writeMu → mu;
+	// nothing under writeMu may wait on anything that takes mu for writing.
+	writeMu sync.Mutex
+
 	mu       sync.RWMutex
 	profiles []*IdPProfile
 	path     string // JSON file path (empty = in-memory only)
 
-	// live holds compiled/initialised provider instances keyed by profile ID.
-	live map[string]IdentityProvider
+	// live holds compiled/initialised provider instances keyed by profile ID,
+	// each paired with the fingerprint of the profile it was compiled from so a
+	// later snapshot can tell whether recompiling would change anything.
+	live map[string]*liveIdP
 }
 
-var idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+var idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 
 // Load reads IdP profiles from the JSON file.  Silent no-op when path is empty.
 func (r *IdPRegistry) Load(path string) error {
 	if path == "" {
 		return nil
 	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 	r.mu.Lock()
 	r.path = path
 	r.mu.Unlock()
@@ -186,13 +204,35 @@ func (r *IdPRegistry) Load(path string) error {
 	r.profiles = profiles
 	r.mu.Unlock()
 
-	// Initialise live providers for enabled profiles.
+	// Initialise live providers for enabled profiles. A failure is logged and
+	// skipped rather than fatal — deliberate, pre-existing, and the one entry
+	// point whose posture CHAOS-66 did not touch: a boot that cannot reach an
+	// IdP must still produce a serving gateway.
+	//
+	// The compiles share ONE bounded envelope. Before CHAOS-66 each SAML/OIDC
+	// profile spent its own 15 s/10 s here, on the boot path, so an unreachable
+	// IdP origin delayed startup by the profile count times the timeout.
+	//
+	// The live map is written under r.mu. It used to be written by r.compile
+	// with no lock at all, in contradiction of that method's own stated
+	// contract; harmless only because Load runs before any reader exists.
+	ctx, cancel := idpCompileContext()
+	defer cancel()
 	for _, p := range profiles {
-		if p.Enabled {
-			if err := r.compile(p); err != nil {
-				logger.Printf("IdP %q compile error: %v", p.ID, err)
-			}
+		if !p.Enabled {
+			continue
 		}
+		prov, err := compileIdPProfileFn(ctx, p)
+		if err != nil {
+			noteIdPCompileFailure()
+			logger.Printf("IdP %q compile error: %v", sanitizeLog(p.ID), err)
+			continue
+		}
+		noteIdPCompiled()
+		entry := &liveIdP{provider: prov, fingerprint: idpCompileFingerprint(p)}
+		r.mu.Lock()
+		r.live[p.ID] = entry
+		r.mu.Unlock()
 	}
 	return nil
 }
@@ -203,8 +243,13 @@ func (r *IdPRegistry) Load(path string) error {
 // valid — the appliance could not store it) rather than 400.
 var errIdPPersistFailed = errors.New("idp: persisting the profile registry failed; no change was applied")
 
-// persist writes the CANDIDATE profile set to the JSON file (called under
-// lock, BEFORE the candidate is published — see the mutation model below).
+// persist writes the CANDIDATE profile set to the JSON file, BEFORE the
+// candidate is published — see the mutation model below.
+//
+// CHAOS-66: called under writeMu and NOT under mu. atomicWriteFile is a temp
+// file + fsync + rename, so on a wedged or full volume it can block for as
+// long as the kernel takes; under mu that blocked every per-request registry
+// probe, by the same writer-preferring mechanism as the compile.
 // The write is atomic (temp file + fsync + rename) so a crash mid-write can
 // never truncate or corrupt the on-disk registry — Load fails startup on
 // corrupt JSON, so a torn write would brick the proxy at next boot.
@@ -221,7 +266,10 @@ var errIdPPersistFailed = errors.New("idp: persisting the profile registry faile
 // state that does not exist. In deliberate in-memory mode (path == "") the
 // warning is kept and the publish proceeds — explicit pre-existing behavior.
 func (r *IdPRegistry) persist(profiles []*IdPProfile) error {
-	if r.path == "" {
+	r.mu.RLock()
+	path := r.path
+	r.mu.RUnlock()
+	if path == "" {
 		logger.Printf("IdP: WARNING — profile change is in-memory only and will be LOST on restart; set -idp-profiles-file (or proxy.idp_profiles_file) to persist")
 		return nil
 	}
@@ -229,7 +277,7 @@ func (r *IdPRegistry) persist(profiles []*IdPProfile) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
 	}
-	if err := atomicWriteFile(r.path, data, 0o600); err != nil {
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
 	}
 	return nil
@@ -244,15 +292,27 @@ func (r *IdPRegistry) Persisted() bool {
 	return r.path != ""
 }
 
-// compile initialises a live IdentityProvider from a profile.
-// Calling under r.mu.Lock is the caller's responsibility.
-func (r *IdPRegistry) compile(p *IdPProfile) error {
-	prov, err := compileIdPProfile(p)
-	if err != nil {
-		return err
+// liveSnapshot copies the published live set. Mutation paths take it once,
+// under a short read lock, and then decide reuse and compile OUTSIDE every
+// lock; writeMu (held by the caller) is what makes the snapshot still
+// authoritative when the candidate is published.
+func (r *IdPRegistry) liveSnapshot() map[string]*liveIdP {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]*liveIdP, len(r.live))
+	for id, l := range r.live {
+		out[id] = l
 	}
-	r.live[p.ID] = prov
-	return nil
+	return out
+}
+
+// publish swaps in an already-built, already-persisted candidate. This is the
+// ONLY place a mutation takes the write lock, and it holds it for two
+// assignments — see the writeMu comment on IdPRegistry.
+func (r *IdPRegistry) publish(profiles []*IdPProfile, live map[string]*liveIdP) {
+	r.mu.Lock()
+	r.profiles, r.live = profiles, live
+	r.mu.Unlock()
 }
 
 // Upsert adds or replaces a profile and saves to disk.
@@ -314,22 +374,38 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		return err
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// CHAOS-66: writeMu serialises this against the other mutation paths; the
+	// compile and the persist below run OUTSIDE r.mu so a wedged IdP origin or
+	// a wedged volume cannot stall the per-request registry probes.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 
-	var compiled IdentityProvider
+	// Upsert deliberately ALWAYS compiles — it does not take the reuse path
+	// ReplaceAll uses. An admin saving a profile is explicit operator intent
+	// toward THIS profile, and re-saving an unchanged profile is the only
+	// recovery this appliance has for a rotated IdP signing certificate
+	// (register row AU-6: SAML metadata and OIDC discovery are fetched once and
+	// never refreshed). Reusing here would delete that remedy.
+	var compiled *liveIdP
 	if p.Enabled {
-		prov, err := compileIdPProfile(p)
+		ctx, cancel := idpCompileContext()
+		prov, err := compileIdPProfileFn(ctx, p)
+		cancel()
 		if err != nil {
+			noteIdPCompileFailure()
 			return fmt.Errorf("idp compile error: %w", err)
 		}
-		compiled = prov
+		noteIdPCompiled()
+		compiled = &liveIdP{provider: prov, fingerprint: idpCompileFingerprint(p)}
 	}
 
 	// Build the CANDIDATE state on copies — the published slice/map must not
 	// be touched until persistence succeeds (P1-3 transactional model).
+	current := r.liveSnapshot()
+	r.mu.RLock()
 	nextProfiles := make([]*IdPProfile, len(r.profiles))
 	copy(nextProfiles, r.profiles)
+	r.mu.RUnlock()
 	found := false
 	for i, existing := range nextProfiles {
 		if existing.ID == p.ID {
@@ -341,9 +417,9 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	if !found {
 		nextProfiles = append(nextProfiles, p)
 	}
-	nextLive := make(map[string]IdentityProvider, len(r.live)+1)
-	for id, prov := range r.live {
-		nextLive[id] = prov
+	nextLive := make(map[string]*liveIdP, len(current)+1)
+	for id, l := range current {
+		nextLive[id] = l
 	}
 	if p.Enabled {
 		nextLive[p.ID] = compiled
@@ -354,7 +430,7 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	if err := r.persist(nextProfiles); err != nil {
 		return err // old profiles + old live providers stay authoritative
 	}
-	r.profiles, r.live = nextProfiles, nextLive
+	r.publish(nextProfiles, nextLive)
 	return nil
 }
 
@@ -376,18 +452,22 @@ func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
 	return nil
 }
 
-func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
+// compileIdPProfileCtx builds a live provider from a profile. ctx bounds the
+// third-party work the OIDC and SAML arms perform (discovery / metadata); it is
+// the WHOLE operation's envelope, shared with every other profile compiled by
+// the same registry mutation. The LDAP arm is network-free.
+func compileIdPProfileCtx(ctx context.Context, p *IdPProfile) (IdentityProvider, error) {
 	switch p.Type {
 	case IdPTypeOIDC:
 		if p.OIDC == nil {
 			return nil, fmt.Errorf("oidc profile missing oidc config")
 		}
-		return NewOIDCFlowProvider(p)
+		return NewOIDCFlowProvider(ctx, p)
 	case IdPTypeSAML:
 		if p.SAML == nil {
 			return nil, fmt.Errorf("saml profile missing saml config")
 		}
-		return NewSAMLProvider(p)
+		return NewSAMLProvider(ctx, p)
 	case IdPTypeLDAP:
 		if p.LDAP == nil {
 			return nil, fmt.Errorf("ldap profile missing ldap config")
@@ -401,25 +481,31 @@ func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
 // Delete removes a profile by ID (transactional: persisted before published,
 // so a persist failure leaves the profile and its live provider active).
 func (r *IdPRegistry) Delete(id string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, p := range r.profiles {
+	// CHAOS-66: persist is an fsync; it runs under writeMu, never under r.mu.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	current := r.liveSnapshot()
+	r.mu.RLock()
+	profiles := make([]*IdPProfile, len(r.profiles))
+	copy(profiles, r.profiles)
+	r.mu.RUnlock()
+	for i, p := range profiles {
 		if p.ID != id {
 			continue
 		}
-		nextProfiles := make([]*IdPProfile, 0, len(r.profiles)-1)
-		nextProfiles = append(nextProfiles, r.profiles[:i]...)
-		nextProfiles = append(nextProfiles, r.profiles[i+1:]...)
-		nextLive := make(map[string]IdentityProvider, len(r.live))
-		for lid, prov := range r.live {
+		nextProfiles := make([]*IdPProfile, 0, len(profiles)-1)
+		nextProfiles = append(nextProfiles, profiles[:i]...)
+		nextProfiles = append(nextProfiles, profiles[i+1:]...)
+		nextLive := make(map[string]*liveIdP, len(current))
+		for lid, l := range current {
 			if lid != id {
-				nextLive[lid] = prov
+				nextLive[lid] = l
 			}
 		}
 		if err := r.persist(nextProfiles); err != nil {
 			return err // the profile stays stored AND live
 		}
-		r.profiles, r.live = nextProfiles, nextLive
+		r.publish(nextProfiles, nextLive)
 		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
@@ -450,8 +536,23 @@ func (r *IdPRegistry) All() []*IdPProfile {
 // published (P1-3): a persistence failure rejects the whole replacement and
 // the previous set — including on a DP applying a CP snapshot — stays live.
 func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
+	// CHAOS-66: writeMu, not r.mu. Everything below — validation, compiles
+	// (third-party HTTP) and the persist (fsync) — builds a candidate; r.mu is
+	// taken only by liveSnapshot and publish.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	current := r.liveSnapshot()
 	nextProfiles := cloneIdPProfiles(profiles)
-	nextLive := make(map[string]IdentityProvider)
+	nextLive := make(map[string]*liveIdP)
+
+	// ONE envelope for every compile this operation performs, not one per
+	// profile (the CHAOS-58/CHAOS-65 rule). A single-profile deployment is
+	// unchanged; N profiles no longer serialise into N × the per-fetch timeout
+	// on the Data Plane's poll goroutine.
+	ctx, cancel := idpCompileContext()
+	defer cancel()
+
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
@@ -460,20 +561,32 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		if !p.Enabled {
 			continue
 		}
-		prov, err := compileIdPProfile(p)
+		// Reuse when compiling again could not produce anything different.
+		// This is the whole point of the change: a control-plane snapshot is
+		// published for ANY config mutation in the fleet, so without this every
+		// policy-rule edit made every node re-fetch every SAML metadata
+		// document and every OIDC discovery document — and a third party that
+		// did not answer froze the node's entire config sync. An empty
+		// fingerprint is uncharacterisable, never equal, and recompiles.
+		fp := idpCompileFingerprint(p)
+		if cur, ok := current[p.ID]; ok && cur != nil && fp != "" && cur.fingerprint == fp {
+			nextLive[p.ID] = cur
+			noteIdPCompileReused()
+			continue
+		}
+		prov, err := compileIdPProfileFn(ctx, p)
 		if err != nil {
+			noteIdPCompileFailure()
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
 		}
-		nextLive[p.ID] = prov
+		noteIdPCompiled()
+		nextLive[p.ID] = &liveIdP{provider: prov, fingerprint: fp}
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if err := r.persist(nextProfiles); err != nil {
 		return err // the previous profile set + live providers stay authoritative
 	}
-	r.profiles = nextProfiles
-	r.live = nextLive
+	r.publish(nextProfiles, nextLive)
 	return nil
 }
 
@@ -666,10 +779,11 @@ func (r *IdPRegistry) RouteByDomain(domain string) IdentityProvider {
 			if !stringsEqualFold(d, domain) {
 				continue
 			}
-			prov, ok := r.live[p.ID]
-			if !ok {
+			live, ok := r.live[p.ID]
+			if !ok || live == nil {
 				continue
 			}
+			prov := live.provider
 			pri := p.effectivePriority()
 			if bestProfile == nil || pri < bestProfile.effectivePriority() {
 				bestProfile = p
@@ -692,8 +806,11 @@ func (p *IdPProfile) effectivePriority() int {
 func (r *IdPRegistry) LiveProvider(id string) (IdentityProvider, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	p, ok := r.live[id]
-	return p, ok
+	l, ok := r.live[id]
+	if !ok || l == nil {
+		return nil, false
+	}
+	return l.provider, true
 }
 
 // EnabledProviders returns all live (enabled+compiled) providers in profile order.
@@ -703,8 +820,8 @@ func (r *IdPRegistry) EnabledProviders() []IdentityProvider {
 	var out []IdentityProvider
 	for _, p := range r.profiles {
 		if p.Enabled {
-			if prov, ok := r.live[p.ID]; ok {
-				out = append(out, prov)
+			if l, ok := r.live[p.ID]; ok && l != nil {
+				out = append(out, l.provider)
 			}
 		}
 	}
@@ -742,8 +859,8 @@ func (r *IdPRegistry) EnabledInteractiveProviders() []IdentityProvider {
 	var out []IdentityProvider
 	for _, p := range r.profiles {
 		if p != nil && p.Enabled && p.Type.Interactive() {
-			if prov, ok := r.live[p.ID]; ok {
-				out = append(out, prov)
+			if l, ok := r.live[p.ID]; ok && l != nil {
+				out = append(out, l.provider)
 			}
 		}
 	}
@@ -761,8 +878,8 @@ func (r *IdPRegistry) EnabledCredentialProviders() []IdentityProvider {
 	var out []IdentityProvider
 	for _, p := range r.profiles {
 		if p != nil && p.Enabled && p.Type.CredentialCapable() {
-			if prov, ok := r.live[p.ID]; ok {
-				out = append(out, prov)
+			if l, ok := r.live[p.ID]; ok && l != nil {
+				out = append(out, l.provider)
 			}
 		}
 	}

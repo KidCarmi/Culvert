@@ -52,7 +52,7 @@ type oidcDiscoveryDoc struct {
 
 // fetchOIDCDiscovery fetches and validates the provider's well-known metadata.
 // The caller is responsible for ensuring issuer is a valid HTTPS URL.
-func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
+func fetchOIDCDiscovery(ctx context.Context, issuer string) (*oidcDiscoveryDoc, error) {
 	// Normalise: strip trailing slash.
 	issuer = strings.TrimRight(issuer, "/")
 	wellKnown := issuer + "/.well-known/openid-configuration"
@@ -62,13 +62,16 @@ func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
 
+	// CHAOS-66: bounded by the caller's compile ENVELOPE (shared across every
+	// profile in one registry mutation), with the client Timeout kept as the
+	// backstop for a deadline-less context.
 	client := &http.Client{
-		Timeout:   10 * time.Second,
+		Timeout:   idpCompileBudget,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	fetchCtx, cancel := idpFetchContext(ctx)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, wellKnown, nil)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}
@@ -566,7 +569,7 @@ func (p *OIDCFlowProvider) introspectCacheSet(key string, identity *Identity, ok
 
 // NewOIDCFlowProvider validates the profile, runs OIDC discovery, and returns
 // a ready-to-use OIDCFlowProvider.
-func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
+func NewOIDCFlowProvider(ctx context.Context, p *IdPProfile) (*OIDCFlowProvider, error) {
 	cfg := p.OIDC
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("oidc[%s]: client_id required", p.ID)
@@ -580,7 +583,7 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
-	disc, err := fetchOIDCDiscovery(cfg.Issuer)
+	disc, err := fetchOIDCDiscovery(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc[%s] discovery: %w", p.ID, err)
 	}

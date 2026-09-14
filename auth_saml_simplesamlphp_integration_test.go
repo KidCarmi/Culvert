@@ -42,7 +42,7 @@ func TestSimpleSAMLphpInterop_CompilesProviderFromMetadataURL(t *testing.T) {
 
 func newSimpleSAMLphpInteropProvider(t *testing.T, metadataURL string) *SAMLProvider {
 	t.Helper()
-	prov, err := NewSAMLProvider(&IdPProfile{
+	prov, err := NewSAMLProvider(context.Background(), &IdPProfile{
 		ID:      "simplesamlphp",
 		Name:    "SimpleSAMLphp",
 		Type:    IdPTypeSAML,

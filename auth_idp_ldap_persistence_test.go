@@ -270,7 +270,7 @@ func TestIdPRegistry_LDAPProfilePersistsAndReloads(t *testing.T) {
 
 	orig := idpRegistry
 	t.Cleanup(func() { idpRegistry = orig })
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	if err := idpRegistry.Load(path); err != nil {
 		t.Fatalf("Load(empty): %v", err)
 	}
@@ -287,7 +287,7 @@ func TestIdPRegistry_LDAPProfilePersistsAndReloads(t *testing.T) {
 		t.Errorf("idp_profiles.json mode = %v, want 0600", fi.Mode().Perm())
 	}
 
-	fresh := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	fresh := &IdPRegistry{live: make(map[string]*liveIdP)}
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("reload: %v", err)
 	}

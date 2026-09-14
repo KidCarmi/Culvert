@@ -700,7 +700,7 @@ func TestIdPRegistry_Save_WithPath(t *testing.T) {
 		profiles: []*IdPProfile{
 			{ID: "test-save-id", Name: "test-save", Type: IdPTypeSAML, Enabled: false},
 		},
-		live: make(map[string]IdentityProvider),
+		live: make(map[string]*liveIdP),
 		path: dir + "/idp.json",
 	}
 	if err := reg.persist(reg.profiles); err != nil {

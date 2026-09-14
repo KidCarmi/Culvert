@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -291,6 +292,34 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_login_oversize_rejected_total Admin login attempts refused because the submitted username exceeded the byte limit. Sustained growth means an unauthenticated source is probing /api/auth/login\n")
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
+
+	writeIdPCompileMetrics(w)
+}
+
+// writeIdPCompileMetrics exposes the CHAOS-66 compile counters.
+//
+// Emitted ONLY on a node that has at least one IdP profile configured. A flat
+// zero from every appliance that never configured an identity provider is
+// indistinguishable from one whose registry has stopped compiling, and the
+// paging rule for the failure series is "> 0" (the socks5/cluster_ca/dns
+// emission rule).
+//
+// Deliberately NOT accompanied by a new operator-contract row or alert. The
+// state an operator acts on — "this node is not applying new policy/auth
+// config" — already has exactly one name, the dp_config_snapshot_apply check
+// (diagnostics.go), and a second name for one root cause is two pages for one
+// action. These counters supply the magnitude and the cause that check lacks.
+func writeIdPCompileMetrics(w io.Writer) {
+	if idpRegistry == nil || len(idpRegistry.All()) == 0 {
+		return
+	}
+	compiled, failed, reused := idpCompileCounters()
+	fmt.Fprintf(w, "\n# HELP culvert_idp_compile_total IdP providers built from scratch, each of which performs an outbound fetch to the provider's metadata or discovery endpoint (OIDC/SAML; LDAP is network-free)\n")
+	fmt.Fprintf(w, "# TYPE culvert_idp_compile_total counter\nculvert_idp_compile_total %d\n", compiled)
+	fmt.Fprintf(w, "\n# HELP culvert_idp_compile_failures_total IdP provider builds that failed. On the control-plane snapshot path a failure rejects the whole IdP sync, so sustained growth means this node is not applying new config -- see the dp_config_snapshot_apply operator-contract check\n")
+	fmt.Fprintf(w, "# TYPE culvert_idp_compile_failures_total counter\nculvert_idp_compile_failures_total %d\n", failed)
+	fmt.Fprintf(w, "\n# HELP culvert_idp_compile_reused_total Control-plane snapshot applies that reused an already-compiled provider because the profile had not changed, skipping the third-party fetch. Expected to dominate culvert_idp_compile_total on a steady fleet\n")
+	fmt.Fprintf(w, "# TYPE culvert_idp_compile_reused_total counter\nculvert_idp_compile_reused_total %d\n", reused)
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

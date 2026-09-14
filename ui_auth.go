@@ -870,7 +870,9 @@ func apiIdPDiscover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "issuer: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	doc, err := fetchOIDCDiscovery(body.Issuer)
+	// The admin's own discovery probe: bounded by the request context so a
+	// wedged issuer cannot outlive the caller that asked about it.
+	doc, err := fetchOIDCDiscovery(r.Context(), body.Issuer)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

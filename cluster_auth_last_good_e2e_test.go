@@ -25,7 +25,7 @@ import (
 func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
 	fixture := newClusterAuthLiveSyncFixture(t)
 	setupProxyTest(t)
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	session.SetSigningKey(nil)
 
 	client := &DataPlaneClient{
@@ -125,7 +125,7 @@ func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
 	})
 
 	setupProxyTest(t)
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	session.SetSigningKey(nil)
 	loaded, err := applyDPLastGoodConfigSnapshot()
 	if err != nil {
@@ -173,7 +173,7 @@ func withClusterAuthLastGoodGlobals(t *testing.T) {
 	origClient := activeDPClient.Load()
 	origPollFailing := dpControlPlanePollFailing.Load()
 	withDPLastGoodConfigTestGlobals(t)
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	t.Cleanup(func() {
 		idpRegistry = origRegistry
 		globalConfigStore = origStore

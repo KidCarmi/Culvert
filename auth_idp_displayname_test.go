@@ -67,9 +67,9 @@ func TestAuthSelectProvider_RendersDisplayNameNotMachineKey(t *testing.T) {
 	profile := &IdPProfile{ID: "a1b2c3d4e5f6", Name: "Corporate Okta", Type: IdPTypeOIDC, Enabled: true}
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{profile},
-		live: map[string]IdentityProvider{
+		live: liveIdPSet(map[string]IdentityProvider{
 			profile.ID: &labeledTestProvider{machineKey: "oidc:" + profile.ID, label: profile.Name},
-		},
+		}),
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/select", nil)

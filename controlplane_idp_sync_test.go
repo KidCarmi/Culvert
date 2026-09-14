@@ -7,7 +7,7 @@ func withIdPSyncGlobals(t *testing.T) {
 	origRegistry := idpRegistry
 	origBaseURL := cfg.ProxyBaseURL()
 	origTrustForwarded := trustForwardedHeaders
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	t.Cleanup(func() {
 		idpRegistry = origRegistry
 		SetProxyBaseURL(origBaseURL)

@@ -47,7 +47,7 @@ func seedWritableLDAPRegistry(t *testing.T) (reg *IdPRegistry, liveBefore Identi
 	t.Helper()
 	orig := idpRegistry
 	t.Cleanup(func() { idpRegistry = orig })
-	reg = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	reg = &IdPRegistry{live: make(map[string]*liveIdP)}
 	idpRegistry = reg
 	if err := reg.Load(filepath.Join(t.TempDir(), "idp_profiles.json")); err != nil {
 		t.Fatalf("Load: %v", err)
@@ -187,7 +187,7 @@ func TestIdPRegistryTxn_InMemoryModeStillPublishesWithWarning(t *testing.T) {
 	// persistence — the explicit pre-existing contract, warning retained.
 	orig := idpRegistry
 	t.Cleanup(func() { idpRegistry = orig })
-	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	reg := &IdPRegistry{live: make(map[string]*liveIdP)}
 	idpRegistry = reg
 	if err := reg.Upsert(ldapTestProfile("ldap-mem", "In-memory AD")); err != nil {
 		t.Fatalf("in-memory Upsert: %v", err)

@@ -280,9 +280,9 @@ func TestApiDiagnostics_WarnsOnClusteredSAMLState(t *testing.T) {
 	clusterInsecure = false
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "saml-diag", Name: "SAML", Type: IdPTypeSAML, Enabled: true}},
-		live: map[string]IdentityProvider{
+		live: liveIdPSet(map[string]IdentityProvider{
 			"saml-diag": &SAMLProvider{profile: &IdPProfile{ID: "saml-diag", Type: IdPTypeSAML}},
-		},
+		}),
 	}
 	t.Cleanup(func() {
 		idpRegistry = prevRegistry
@@ -321,7 +321,7 @@ func withEnabledSAMLDiagnosticProfile(t *testing.T) {
 	prevBaseURL := cfg.ProxyBaseURL()
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "saml-diag", Name: "SAML", Type: IdPTypeSAML, Enabled: true}},
-		live:     map[string]IdentityProvider{},
+		live:     map[string]*liveIdP{},
 	}
 	t.Cleanup(func() {
 		idpRegistry = prevRegistry
@@ -397,7 +397,7 @@ func withEnabledOIDCDiagnosticProfile(t *testing.T) {
 	prevBaseURL := cfg.ProxyBaseURL()
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{{ID: "oidc-diag", Name: "OIDC", Type: IdPTypeOIDC, Enabled: true}},
-		live:     map[string]IdentityProvider{},
+		live:     map[string]*liveIdP{},
 	}
 	t.Cleanup(func() {
 		idpRegistry = prevRegistry
@@ -408,7 +408,7 @@ func withEnabledOIDCDiagnosticProfile(t *testing.T) {
 func TestOIDCBaseURLPostureOKWhenNoOIDCEnabled(t *testing.T) {
 	prevRegistry := idpRegistry
 	t.Cleanup(func() { idpRegistry = prevRegistry })
-	idpRegistry = &IdPRegistry{profiles: nil, live: map[string]IdentityProvider{}}
+	idpRegistry = &IdPRegistry{profiles: nil, live: map[string]*liveIdP{}}
 
 	found := checkOIDCBaseURLPosture()
 	if found.Status != diagOK {
@@ -1491,7 +1491,7 @@ func findOIDCJWKSTrustCheck(t *testing.T, c OperatorContract) OperatorContractCh
 func TestApiDiagnostics_OIDCJWKSTrustDefaultOK(t *testing.T) {
 	orig := idpRegistry
 	t.Cleanup(func() { idpRegistry = orig })
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1522,7 +1522,7 @@ func TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach(t *testing.T) {
 	}
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{profile},
-		live:     map[string]IdentityProvider{profile.ID: prov},
+		live:     liveIdPSet(map[string]IdentityProvider{profile.ID: prov}),
 	}
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))

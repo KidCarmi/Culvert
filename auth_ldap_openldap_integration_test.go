@@ -202,7 +202,7 @@ func TestOpenLDAPInterop_PreflightSucceedsThenPersistFails(t *testing.T) {
 
 	orig := idpRegistry
 	t.Cleanup(func() { idpRegistry = orig })
-	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	reg := &IdPRegistry{live: make(map[string]*liveIdP)}
 	idpRegistry = reg
 	if err := reg.Load(filepath.Join(t.TempDir(), "idp_profiles.json")); err != nil {
 		t.Fatalf("Load: %v", err)

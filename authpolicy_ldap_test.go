@@ -101,7 +101,7 @@ func installLDAPRegistry(t *testing.T, profileID string, stub *ldapStubProvider)
 	profile := ldapTestProfile(profileID, "Corporate AD")
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{profile},
-		live:     map[string]IdentityProvider{profileID: stub},
+		live:     liveIdPSet(map[string]IdentityProvider{profileID: stub}),
 	}
 }
 

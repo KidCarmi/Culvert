@@ -274,7 +274,7 @@ func TestAPIIdPItem_PutRejectsInvalidSAMLMetadataSourcesWithoutReplacingProfile(
 func withTestIdPRegistry(t *testing.T) {
 	t.Helper()
 	orig := idpRegistry
-	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = &IdPRegistry{live: make(map[string]*liveIdP)}
 	t.Cleanup(func() {
 		idpRegistry = orig
 	})
