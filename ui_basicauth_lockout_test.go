@@ -45,7 +45,7 @@ func basicAuthProbe(t *testing.T, ip, user, pass string) int {
 	h := uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	r := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	r.RemoteAddr = ip + ":51234"
 	r.SetBasicAuth(user, pass)
 	w := httptest.NewRecorder()
@@ -57,7 +57,7 @@ func basicAuthProbe(t *testing.T, ip, user, pass string) int {
 // endpoint and reports (status code, loggedIn).
 func authStatusProbe(t *testing.T, ip, user, pass string) (int, bool) {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 	r.RemoteAddr = ip + ":51234"
 	r.SetBasicAuth(user, pass)
 	w := httptest.NewRecorder()
@@ -253,7 +253,7 @@ func TestSecBasicAuth1_Control_UnauthenticatedStatusStillAnswers(t *testing.T) {
 	basicAuthTestCfg(t, "admin", "correct-horse-battery")
 
 	for i := 0; i < lockoutMaxAttempts*3; i++ {
-		r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 		r.RemoteAddr = "198.51.100.18:4444"
 		w := httptest.NewRecorder()
 		apiAuthStatus(w, r)
