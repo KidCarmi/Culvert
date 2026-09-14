@@ -1368,6 +1368,37 @@
         ],
         "type": "object"
       },
+      "ConfigRollbackScope": {
+        "additionalProperties": false,
+        "properties": {
+          "excluded": {
+            "description": "Operator-facing settings a config version rollback deliberately never captures, applies or diffs, with why. Empty when every setting participates in rollback.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Stable snake_case setting identifier.",
+                  "type": "string"
+                },
+                "note": {
+                  "description": "Why this setting is excluded by design.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "excluded"
+        ],
+        "type": "object"
+      },
       "ConfigVersionList": {
         "items": {
           "additionalProperties": true,
@@ -11623,6 +11654,45 @@
         "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/config/rollback-scope": {
+      "get": {
+        "description": "Lists operator-facing settings that a config version rollback deliberately never captures, applies or diffs (e.g. alert-webhook delivery config, block-page HTML, upstream proxy pools, connection-limit settings), plus why. Lets the admin UI's rollback confirmation accurately describe what will and will not change, instead of overclaiming that rollback replaces every setting.",
+        "operationId": "getConfigRollbackScope",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigRollbackScope"
+                }
+              }
+            },
+            "description": "Settings excluded from config version rollback."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Settings excluded from rollback",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

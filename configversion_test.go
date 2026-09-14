@@ -68,6 +68,55 @@ func TestApiConfigDiff_InvalidFrom(t *testing.T) {
 // produces a syntactically valid JSON envelope on disk after the writer
 // was converted to the hardened atomicWriteFile helper. Redirects
 // configVersionsDir to a temp dir to avoid touching /data.
+func TestApiConfigRollbackScope_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/config/rollback-scope", nil)
+	w := httptest.NewRecorder()
+	apiConfigRollbackScope(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+// TestApiConfigRollbackScope_ListsFindingTenThreeExclusions pins the
+// contract this endpoint exists for: an admin about to roll back must be
+// able to learn, from the API, that alert-webhook, block-page-HTML and
+// upstream-proxy settings are NOT touched by rollback — the same set
+// config_surfaces.go documents as "off the rollback surface by design"
+// (Finding 10.3). If a future registry edit removes one of these Notes or
+// flips Rollback to true, this test's failure is the signal to update the
+// admin UI copy in the same change, not silently let it go stale.
+func TestApiConfigRollbackScope_ListsFindingTenThreeExclusions(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/config/rollback-scope", nil)
+	w := httptest.NewRecorder()
+	apiConfigRollbackScope(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Excluded []rollbackExcludedSetting `json:"excluded"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	seen := make(map[string]bool, len(resp.Excluded))
+	for _, e := range resp.Excluded {
+		seen[e.ID] = true
+		if e.Note == "" {
+			t.Errorf("excluded setting %q has no explanatory note", e.ID)
+		}
+	}
+	for _, want := range []string{"alert_webhooks", "block_page_html", "upstream_proxies", "upstream_proxies_v2", "conn_limit_enabled"} {
+		if !seen[want] {
+			t.Errorf("expected %q in rollback-excluded settings, got %v", want, resp.Excluded)
+		}
+	}
+	// category_groups IS on the rollback surface (Rollback: true) and must
+	// never be reported as excluded.
+	if seen["category_groups"] {
+		t.Errorf("category_groups is rollback-capable and must not appear in the excluded list")
+	}
+}
+
 func TestSaveConfigVersion_WritesValidJSON(t *testing.T) {
 	tmp := t.TempDir()
 

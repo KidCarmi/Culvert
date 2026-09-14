@@ -2631,6 +2631,7 @@ Firefox (all platforms):
             <em style="color:var(--muted);font-size:.82rem">Loading versions...</em>
           </div>
           <div id="config-diff-result" style="display:none;margin-top:12px"></div>
+          <div id="config-rollback-scope-note" style="display:none;margin-top:10px;font-size:.78rem;color:var(--muted)"></div>
         </div>
       </div>
 
@@ -8103,8 +8104,34 @@ async function importConfig(input) {
 }
 
 // ── Config Versioning ────────────────────────────────────────────────────
+// configRollbackExcluded caches the settings a config-version rollback
+// deliberately never touches (Finding 10.3 — alert webhooks, block-page
+// HTML, upstream proxy pools, connection-limit settings). Fetched once per
+// panel load; used both for the persistent note under the versions table
+// and to keep the rollback confirm dialog from overclaiming "ALL current
+// settings".
+let configRollbackExcluded = null;
+
+async function loadConfigRollbackScope() {
+  const el = document.getElementById('config-rollback-scope-note');
+  try {
+    const data = await api('/api/config/rollback-scope');
+    configRollbackExcluded = (data && data.excluded) || [];
+    if (configRollbackExcluded.length === 0) { el.style.display = 'none'; return; }
+    const items = configRollbackExcluded.map(e =>
+      `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.note)}</li>`).join('');
+    el.innerHTML = `<details><summary>Rollback does not restore ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (by design)</summary>` +
+      `<ul style="margin:6px 0 0 18px;padding:0">${items}</ul></details>`;
+    el.style.display = 'block';
+  } catch (err) {
+    configRollbackExcluded = [];
+    el.style.display = 'none';
+  }
+}
+
 async function loadConfigVersions() {
   const el = document.getElementById('config-versions-list');
+  loadConfigRollbackScope();
   try {
     const versions = await api('/api/config/versions');
     if (!versions || versions.length === 0) {
@@ -8169,7 +8196,10 @@ function fmtDiffCell(v) {
 }
 
 async function rollbackConfigVersion(version) {
-  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`, 'Rollback')) return;
+  const scopeNote = (configRollbackExcluded && configRollbackExcluded.length > 0)
+    ? ` Note: ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (e.g. ${configRollbackExcluded.slice(0, 3).map(e => e.id).join(', ')}) are excluded by design and will keep their current values — see the list below the version table.`
+    : '';
+  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace most current settings with the snapshot from v${version}.${scopeNote} A new version will be created to record this rollback.`, 'Rollback')) return;
   try {
     const data = await api('/api/config/versions', {
       method: 'POST',

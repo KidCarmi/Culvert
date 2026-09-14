@@ -1440,3 +1440,25 @@ func apiConfigDiff(w http.ResponseWriter, r *http.Request) {
 		"changes": diffConfigs(fromCfg, toCfg),
 	})
 }
+
+// apiConfigRollbackScope reports which operator-facing settings a config
+// version rollback deliberately never captures, applies or diffs (Finding
+// 10.3's by-design exclusions — alert webhooks, block-page HTML, upstream
+// proxy pools, connection-limit settings). The admin UI's rollback confirm
+// dialog claims to replace "ALL current settings"; this endpoint is what
+// lets it say so accurately instead of leaving the gap discoverable only by
+// reading config_surfaces.go.
+// GET /api/config/rollback-scope
+func apiConfigRollbackScope(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"excluded": rollbackExcludedConfigSurfaces(),
+	})
+}

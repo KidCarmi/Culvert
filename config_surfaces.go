@@ -582,3 +582,35 @@ var configSurfaces = []configSurfaceRow{
 		ClusterSynced: true, SnapshotCap: maxSnapNodeGroups,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "NodeGroups", Apply: semNilSkipEmptyWipe}}},
 }
+
+// rollbackExcludedSetting names one operator-facing setting that the config
+// version rollback surface deliberately never captures, applies or diffs,
+// plus WHY (its registry Note).
+type rollbackExcludedSetting struct {
+	ID   string `json:"id"`
+	Note string `json:"note"`
+}
+
+// rollbackExcludedConfigSurfaces derives, from the registry above, every
+// operator-facing setting (kindConfig, on export and/or import) that is NOT
+// on the version-rollback surface. This is the single source of truth for
+// the "rollback replaces ALL current settings" claim the admin UI makes to
+// an operator about to roll back — a claim that has been false for these
+// rows since Finding 10.3 introduced the by-design exclusions, with nothing
+// telling the operator so short of reading this file. Deriving rather than
+// hand-listing means a future registry row can never drift out of sync with
+// what the UI tells the operator.
+func rollbackExcludedConfigSurfaces() []rollbackExcludedSetting {
+	out := make([]rollbackExcludedSetting, 0, len(configSurfaces))
+	for _, row := range configSurfaces {
+		if row.Kind != kindConfig || row.Rollback || (!row.Export && !row.Import) {
+			continue
+		}
+		note := row.Note
+		if note == "" {
+			note = "off the rollback surface by design"
+		}
+		out = append(out, rollbackExcludedSetting{ID: row.ID, Note: note})
+	}
+	return out
+}
