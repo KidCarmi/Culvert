@@ -305,6 +305,19 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_admin_basic_auth_lockout_refused_total Admin-plane HTTP Basic Auth attempts refused by the credential lockout without reaching verification\n")
 	fmt.Fprintf(w, "# TYPE culvert_admin_basic_auth_lockout_refused_total counter\nculvert_admin_basic_auth_lockout_refused_total %d\n",
 		basicAuthLockoutRefused.Load())
+
+	// SEC-BASICAUTH-2: credential failures dropped WITHOUT being recorded
+	// because the client was over its per-client failure budget, and the live
+	// size of the state that budget protects. The caller sees an ordinary 401,
+	// so the counter is the only signal that a source is flooding the admin
+	// plane with unusable credentials; the gauge is what an operator watches to
+	// confirm the bound is holding.
+	fmt.Fprintf(w, "\n# HELP culvert_admin_basic_auth_fail_shed_total Admin-plane credential failures dropped without being recorded because the client exceeded its failure budget\n")
+	fmt.Fprintf(w, "# TYPE culvert_admin_basic_auth_fail_shed_total counter\nculvert_admin_basic_auth_fail_shed_total %d\n",
+		basicAuthFailShed.Load())
+	fmt.Fprintf(w, "# HELP culvert_login_limiter_entries Live tier-1 pair + tier-2 account entries held by the admin credential lockout\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_limiter_entries gauge\nculvert_login_limiter_entries %d\n",
+		loginLimiter.EntryCount())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

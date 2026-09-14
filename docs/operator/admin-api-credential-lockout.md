@@ -54,9 +54,33 @@ A request with **no** `Authorization` header never consults the lockout and
 never creates a key, so the login overlay's anonymous `GET /api/auth/status`
 poll is unaffected.
 
+## The per-client failure budget (SEC-BASICAUTH-2)
+
+Recording a failure creates limiter state, and the state is keyed by a username
+the *caller* chooses. On a public GET with no rate limit that is a memory
+amplifier, so a client that has already burned its failure budget in the current
+window is **refused before its credentials are verified** — the same
+`lockout.Burst` / `lockout.RateWindow` budget the mutating admin API uses.
+
+Two properties matter operationally:
+
+- **Only failures are charged.** A client with valid credentials is never
+  budgeted, however many calls it makes.
+- **An over-budget client is refused identically for a right and a wrong
+  password**, so the refusal reveals nothing about the credential — and, because
+  the refusal happens *before* verification, an attacker cannot use it to keep
+  guessing without the account ever locking.
+
+Watch `culvert_login_limiter_entries` to confirm the bound is holding: it is the
+live count of tier-1 and tier-2 entries the lockout is carrying. Sustained
+growth with a climbing `culvert_admin_basic_auth_fail_shed_total` means a source
+is flooding the admin plane with unusable credentials and being shed.
+
 ## Signals
 
-- **Metric** — `culvert_admin_basic_auth_lockout_refused_total`. Sustained
+- **Metric** — `culvert_admin_basic_auth_lockout_refused_total` (lockout
+  refusals), `culvert_admin_basic_auth_fail_shed_total` (over-budget refusals)
+  and `culvert_login_limiter_entries` (the live lockout-state size). Sustained
   growth means a source is grinding credentials against the admin **API**
   rather than the login form. Pair it with
   `culvert_login_oversize_rejected_total` (CHAOS-63) when triaging a probe.

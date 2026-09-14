@@ -161,11 +161,77 @@ verified failing against a reintroduced direct call in `events.go`.
   login endpoint has always carried. Closing it fully needs the CHAOS-57
   `internal/authcost` governor extended to the admin plane — a larger change
   with its own fairness questions, recommended as follow-up.
-- An oversize username on the Basic Auth path now reaches the lockout maps. Key
-  size is bounded by `internal/lockout`'s injective `boundUsername` clamp, and
-  entry creation is bcrypt-rate-bounded because `RecordFailure` runs only after
-  a verification. CHAOS-63's entry-point rejection is not mirrored here and does
-  not need to be.
+- ~~An oversize username on the Basic Auth path now reaches the lockout maps.
+  Key size is bounded by `internal/lockout`'s injective `boundUsername` clamp,
+  and entry creation is bcrypt-rate-bounded because `RecordFailure` runs only
+  after a verification.~~ **This was WRONG and is corrected below as
+  SEC-BASICAUTH-2 (§1a).** `cfg.VerifyUIUser` bcrypts only for a *configured*
+  username; an unknown one returns in ~106 ns. Entry creation was therefore not
+  rate-bounded at all, and the fix as first written let an unauthenticated
+  caller grow the lockout maps without bound. Key *size* is still bounded by the
+  clamp; the *count* is now bounded by a per-client failure budget.
+
+---
+
+## 1a. SEC-BASICAUTH-2 — the fix for §1 opened a memory/audit hole on the same endpoint
+
+| | |
+| --- | --- |
+| **Severity** | HIGH (introduced by this PR, found in review, fixed in this PR) |
+| **CWE** | CWE-770 (allocation without limits), CWE-778 |
+| **Found by** | Codex automated review of PR #1399 (P1) |
+| **Status** | FIXED — `ui_basicauth_lockout.go` |
+
+Wiring `loginLimiter.RecordFailure` into a path with no rate limit means every
+failed attempt **creates state**: the tier-1 `(ip, user)` pair *and* the tier-2
+account entry, both keyed by an attacker-chosen username, both retained for at
+least `lockout.Window` (10 min). `/api/auth/status` is a public GET, so
+`securityMiddleware`'s mutating-only limiter never sees it. Measured against the
+real handler: **800 limiter entries from 400 unauthenticated requests.**
+
+### The rationale I recorded was false, and that is the transferable part
+
+§1's residual-risk note claimed entry creation was "bcrypt-rate-bounded because
+`RecordFailure` runs only after a verification". Measured:
+
+| username | `cfg.VerifyUIUser` cost |
+| --- | --- |
+| configured (`admin`) | **66.7 ms** (bcrypt) |
+| unknown | **106 ns** (map miss, no bcrypt) |
+
+629,518× cheaper. The admin path also has no `dummyBcryptHash` equaliser (the
+proxy path's RISK-008 control), so the cheap branch is both cheap *and*
+measurable. **A cost that applies only to the branch an attacker never takes
+bounds nothing** — a claim about a bound must name the branch the attacker
+actually walks.
+
+### The first fix was weaker than no fix on one axis
+
+The first version charged the budget on the failure and then declined to
+*record* it. The attempt was still verified and still answered, so the caller
+still learned "wrong" — while the account never accumulated failures and
+therefore **never locked**. An attacker could burn the budget on ghost
+usernames and then guess a real password indefinitely at the window rate:
+strictly weaker than the 5-then-15-minutes the lockout gives.
+
+**Shedding the *record* of an answered attempt weakens the bound it exists to
+protect; shedding the *attempt* does not.** The budget is therefore consulted
+*before* verification, via a new read-only `APIRateLimiter.Over` (`Allow`
+charges, so consulting it on every request would bill the requests we mean to
+admit), and charged by failures only, keyed on the client and never on the
+username — so an over-budget client is refused identically for a right and a
+wrong password, and no enumeration oracle appears.
+
+This flaw was caught by a **control test**, not by the defect gate — which is
+the argument for writing controls at all.
+
+### Tests
+
+`TestSecBasicAuth2_UniqueUsernameFloodDoesNotGrowLimiterState` (defect gate,
+verified failing at 800/120 entries against the pre-fix shape),
+`TestSecBasicAuth2_Control_OrdinaryFailuresStillLockOut`,
+`TestSecBasicAuth2_Control_OverBudgetRefusalCarriesNoOracle` (the control that
+caught the flaw above), `TestSecBasicAuth2_Control_ValidClientIsNeverBudgeted`.
 
 ---
 

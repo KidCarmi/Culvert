@@ -31,6 +31,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   answered with `429` + `Retry-After`. **Basic Auth still does not enforce
   TOTP** — a valid password alone reaches the full admin API — tracked as
   RISK-030; see `docs/operator/admin-api-credential-lockout.md`.
+- The first version of that lockout fix opened a different unauthenticated hole
+  on the same endpoint, found in review and closed in the same change
+  (SEC-BASICAUTH-2). Recording a failure creates two lockout map entries keyed
+  by a caller-chosen username, retained for ten minutes, on a public GET that no
+  rate limit covers — 800 entries from 400 requests, measured. The rationale
+  first recorded for leaving it unbounded ("entry creation is bcrypt-rate
+  bounded") was wrong: `VerifyUIUser` runs bcrypt only for a *configured*
+  username, so an unknown one costs ~106 ns rather than ~66.7 ms. A client that
+  has burned its per-client failure budget in the current window is now refused
+  **before** its credentials are verified — charged by failures only, keyed on
+  the client and never on the username, so a valid client is never throttled and
+  an over-budget one is refused identically for a right and a wrong password.
+  Surfaced as `culvert_admin_basic_auth_fail_shed_total` and
+  `culvert_login_limiter_entries`.
 - Removed a public-allowlist prefix that pre-authorised routes nobody had
   written (SEC-PUBLICPATH-1). `isPublicUIAuthPath` matched any path under
   `/api/auth/totp`, and no such route exists: TOTP is verified inside
