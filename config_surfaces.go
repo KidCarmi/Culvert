@@ -582,3 +582,37 @@ var configSurfaces = []configSurfaceRow{
 		ClusterSynced: true, SnapshotCap: maxSnapNodeGroups,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "NodeGroups", Apply: semNilSkipEmptyWipe}}},
 }
+
+// rollbackExcludedSetting names one operator-facing setting that the config
+// version rollback surface deliberately never captures, applies or diffs,
+// plus WHY (its registry Note).
+type rollbackExcludedSetting struct {
+	ID   string `json:"id"`
+	Note string `json:"note"`
+}
+
+// rollbackExcludedConfigSurfaces derives, from the registry above, EVERY
+// operator-facing setting (any kindConfig row) that is NOT on the
+// version-rollback surface — not just the Finding-10.3 export/import rows,
+// but also the AdminSettings-only operational settings (log level, syslog,
+// OTLP, session timeout, IP allowlists, etc.) that configBackup never even
+// binds. Both groups are equally invisible to a rollback: an operator about
+// to click "Rollback" has no way to tell them apart from the ones that DO
+// move, so both belong in one accurate answer to "what will this not
+// change?" Deriving rather than hand-listing means a future registry row
+// can never drift out of sync with what the UI tells the operator.
+func rollbackExcludedConfigSurfaces() []rollbackExcludedSetting {
+	out := make([]rollbackExcludedSetting, 0, len(configSurfaces))
+	for i := range configSurfaces {
+		row := &configSurfaces[i]
+		if row.Kind != kindConfig || row.Rollback {
+			continue
+		}
+		note := row.Note
+		if note == "" {
+			note = "off the rollback surface by design"
+		}
+		out = append(out, rollbackExcludedSetting{ID: row.ID, Note: note})
+	}
+	return out
+}
