@@ -59,7 +59,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- The SIEM syslog feed reported its health from the startup connection rather
+  than from delivery (CHAOS-66). The `syslog_feed` diagnostics row reported
+  exactly one fact — whether `InitSyslog` connected when it ran — which is
+  green for every way a collector can go away after boot. On UDP, which is the
+  default transport whenever the target has no `tcp://` prefix, it was green
+  unconditionally: a UDP "connect" resolves and binds without exchanging a
+  packet, so it cannot fail for any resolvable address. Measured against the
+  real binary, a TCP collector taken away after a successful boot dial dropped
+  19 audit events while the row still reported *"remote syslog/SIEM forwarding
+  is active"*, and a UDP target that had never existed reported the same with
+  a zero drop count. The drop counter itself reached only `GET /api/syslog` —
+  no metric, no `/healthz` field, no alert, and no log line even for the first
+  dropped event — so a dead compliance feed was invisible to monitoring
+  (CWE-778). Delivery is now the evidence: the forwarder records what the
+  collector socket accepted, how long the current failure run has lasted and a
+  bounded failure reason, and every surface derives its verdict from those.
+  Over UDP the row states plainly that receipt is not verifiable from this
+  node rather than claiming an active feed. See
+  `docs/operator/siem-feed-health.md`.
+
 ### Changed
+
+- Syslog forwarding now reconnects on a bounded exponential backoff with
+  jitter (1 s doubling to 60 s, ±20 %) instead of a flat 5 s window, so a fleet
+  no longer re-dials an overloaded collector in lockstep; the schedule is reset
+  only by a line the collector accepts. New surfaces, all emitted only on a
+  node with a configured feed: `culvert_syslog_up`,
+  `culvert_syslog_delivered_total`, `culvert_syslog_drops_total`,
+  `culvert_syslog_queue_full_total`, `culvert_syslog_degraded`,
+  `culvert_syslog_backoff_seconds` and `culvert_syslog_last_success_age_seconds`
+  (omitted until the first delivery, since a `0` there would read as
+  "delivered just now"); a `syslogFeed` field on `/healthz`; a
+  `siem_feed_degraded` alert fired once per episode; and
+  `SIEM_FEED_DEGRADED`/`SIEM_FEED_RECOVERED` log lines. `GET /api/syslog` gains
+  `delivered`, `queue_full`, `status`, `degraded`, `last_reason` and
+  `unverifiable` (additive; API contract unchanged). Deliberately **not** on
+  `/ready` — a node whose collector is unreachable is proxying perfectly, and
+  failing readiness would turn a monitoring outage into a traffic outage.
 
 - OCSP now reports which TLS handshakes it actually covers. Enabling it
   installs the check on the shared upstream transport only, which for a

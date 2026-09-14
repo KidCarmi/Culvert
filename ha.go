@@ -1129,6 +1129,19 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := logSinkWriteErrors(); n > 0 {
 		resp["processLogWriteErrors"] = n
 	}
+	// CHAOS-66: the OUTBOUND half of the same compliance record. Every field
+	// above describes a local store; this one describes the copy that leaves
+	// the node, which is the copy that survives the node. Added only when a
+	// feed is configured AND something is wrong with it, so the body is
+	// unchanged both for the majority of appliances that forward nowhere and
+	// for a healthy feed. The node stays "ok" for the same reason degraded
+	// local logging does: a dead SIEM must not eject a serving gateway.
+	if st := syslogFeedStatus(); st != "disabled" && st != "ready" {
+		resp["syslogFeed"] = st
+		if snap := syslogFeedState(); snap.Drops > 0 {
+			resp["syslogFeedDrops"] = snap.Drops
+		}
+	}
 }
 
 // apiHealthz is an unauthenticated health-check endpoint for load balancers.

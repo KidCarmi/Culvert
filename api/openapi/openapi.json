@@ -5053,14 +5053,45 @@
           "addr": {
             "type": "string"
           },
+          "degraded": {
+            "description": "Delivery has been failing past the degradation threshold.",
+            "type": "boolean"
+          },
+          "delivered": {
+            "description": "Lines the collector socket accepted since startup.",
+            "type": "integer"
+          },
           "drops": {
             "type": "integer"
           },
           "format": {
             "type": "string"
           },
+          "last_reason": {
+            "description": "Bounded failure class of the most recent delivery failure (connect_failed, connect_timeout, dns_failure, write_timeout, write_failed). Never a raw error string.",
+            "type": "string"
+          },
           "panics": {
             "type": "integer"
+          },
+          "queue_full": {
+            "description": "Subset of drops caused by the delivery queue overflowing rather than by the collector being unreachable.",
+            "type": "integer"
+          },
+          "status": {
+            "description": "Feed posture derived from observed delivery.",
+            "enum": [
+              "disabled",
+              "down",
+              "failing",
+              "degraded",
+              "ready"
+            ],
+            "type": "string"
+          },
+          "unverifiable": {
+            "description": "True for UDP targets: the protocol carries no acknowledgement, so receipt cannot be proven from this node.",
+            "type": "boolean"
           }
         },
         "required": [

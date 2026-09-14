@@ -784,8 +784,8 @@ func snapshotAdminEndpoints(s *AdminSettings) {
 	}
 	if syslogConfigured != "" {
 		s.SyslogAddr = syslogConfigured
-		if globalSyslog != nil {
-			s.SyslogFormat = globalSyslog.Format()
+		if sw := activeSyslog(); sw != nil {
+			s.SyslogFormat = sw.Format()
 		}
 	}
 	s.OTLPEndpoint = globalOTLP.Endpoint()

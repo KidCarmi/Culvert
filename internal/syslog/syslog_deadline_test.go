@@ -125,7 +125,7 @@ func TestWriteMsg_RetryWriteFailureArmsBackoff(t *testing.T) {
 	if w.conn != nil {
 		t.Error("conn not cleared after retry-write failure")
 	}
-	if w.lastReconnErr.IsZero() {
+	if w.retryAfter.IsZero() {
 		t.Fatal("backoff not armed after retry-write failure; every log call would pay the full write-timeout cycle")
 	}
 	if got := w.Drops(); got != 1 {
