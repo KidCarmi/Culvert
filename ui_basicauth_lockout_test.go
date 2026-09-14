@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ui_basicauth_lockout_test.go — SEC-BASICAUTH-1 defect gates + controls.
@@ -35,6 +37,12 @@ func basicAuthTestCfg(t *testing.T, user, pass string) {
 	cfg = testCfg
 	t.Cleanup(func() { cfg = orig })
 	t.Cleanup(loginLimiter.SnapshotAndClear())
+	// Every test starts with a FULL per-client failure budget. Without this the
+	// shared basicAuthFailLimiter carries charges across -count=N runs (60 per
+	// IP per minute), so a test's Nth repetition would silently exercise the
+	// shed path instead of the path it is asserting on — the same
+	// cross-run-state class as the audit-ring pitfall below.
+	swapBasicAuthFailLimiterForTest()
 	resetBasicAuthLockoutStateForTest()
 }
 
@@ -154,38 +162,47 @@ func TestSecBasicAuth1_PublicAuthStatusIsNotAnUnboundedOracle(t *testing.T) {
 	}
 }
 
+// uniqueAuditUser returns a username no other test or run has used, so an
+// audit assertion can name exactly its own entry.
+//
+// A timestamp baseline is NOT enough here and the first version of this test
+// proved it: under -count=2 the second run's "last entry before the test" IS
+// the first run's own auth.lockout entry when nothing else audited in between,
+// so an `e.TS < baseTS` guard does not exclude it and the count comes back 2.
+// The audit ring is bounded at maxAuditLogs and shared by the whole suite, so
+// the only reliable discriminator is one this invocation minted (CLAUDE.md,
+// "Test-authoring pitfalls").
+var auditUserSeq atomic.Int64
+
+func uniqueAuditUser(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf("sba1-%d-%d", time.Now().UnixNano(), auditUserSeq.Add(1))
+}
+
 // TestSecBasicAuth1_LockoutTripIsAudited proves the refusal leaves evidence.
 // Before the fix a full brute-force run against the Basic Auth paths produced
 // ZERO audit entries — the admin plane could be attacked with no record at all
 // (CWE-778). The trip is audited once, not once per attempt, so the record
 // cannot itself be flooded (the CHAOS-63 lesson).
 func TestSecBasicAuth1_LockoutTripIsAudited(t *testing.T) {
-	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+	user := uniqueAuditUser(t)
+	basicAuthTestCfg(t, user, "correct-horse-battery")
 
 	const ip = "198.51.100.14"
-	before := auditGet()
-	var baseTS int64
-	if len(before) > 0 {
-		baseTS = before[len(before)-1].TS
-	}
-
 	for i := 0; i < lockoutMaxAttempts; i++ {
-		_ = basicAuthProbe(t, ip, "admin", "guess")
+		_ = basicAuthProbe(t, ip, user, "guess")
 	}
 
-	// Scan by CONTENT, never by length delta: the audit ring is bounded at 500
-	// and a shuffled -count=2 run saturates it (see CLAUDE.md test pitfalls).
+	// Scan by CONTENT on a discriminator this invocation minted, never by
+	// length delta and never by timestamp alone — see uniqueAuditUser.
 	var found int
 	for _, e := range auditGet() {
-		if e.TS < baseTS {
-			continue
-		}
-		if e.Action == "auth.lockout" && strings.Contains(e.Actor, ip) {
+		if e.Action == "auth.lockout" && e.Object == user {
 			found++
 		}
 	}
 	if found != 1 {
-		t.Fatalf("auth.lockout entries naming %s: got %d, want exactly 1 (one per trip, never one per attempt)", ip, found)
+		t.Fatalf("auth.lockout entries for %q: got %d, want exactly 1 (one per trip, never one per attempt)", user, found)
 	}
 }
 
@@ -352,7 +369,6 @@ func TestSecBasicAuth2_Control_OrdinaryFailuresStillLockOut(t *testing.T) {
 // itself becomes the oracle.
 func TestSecBasicAuth2_Control_OverBudgetRefusalCarriesNoOracle(t *testing.T) {
 	basicAuthTestCfg(t, "admin", "correct-horse-battery")
-	swapBasicAuthFailLimiterForTest()
 
 	const ip = "198.51.100.32"
 	// Burn the budget with distinct UNKNOWN usernames: each is its own pair, so
@@ -381,7 +397,6 @@ func TestSecBasicAuth2_Control_OverBudgetRefusalCarriesNoOracle(t *testing.T) {
 // more than the window budget of successful calls is never refused.
 func TestSecBasicAuth2_Control_ValidClientIsNeverBudgeted(t *testing.T) {
 	basicAuthTestCfg(t, "admin", "correct-horse-battery")
-	swapBasicAuthFailLimiterForTest()
 
 	const ip = "198.51.100.34"
 	for i := 0; i < apiRateBurst+20; i++ {
