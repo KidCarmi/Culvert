@@ -6671,6 +6671,21 @@ requests, so the rule fires on every quiet period. Age alone cannot separate
 as the absent active probe (SL-2) reached from the other direction. `up` and
 `degraded` carry the failure evidence; the age is a diagnostic.
 
+**A clock-rollback edge the P1 fix introduced, found on an adversarial read of
+its own diff.** The threshold timer fires once and clears itself. `FirstFail` is
+reconstructed from stored nanoseconds, so it carries NO monotonic reading and
+`time.Since` on it reads the WALL clock — an NTP step backwards between arming
+and firing therefore lands in the callback with the threshold not yet elapsed,
+no alert, and the one shot spent. On an idle node the timer is the only thing
+that would ever look again, so a clock correction would silently cost the
+operator exactly the page the P1 fix exists to deliver. The callback now re-arms
+for the shortfall when the feed is still failing; only one timer is ever
+outstanding, and recovery or a reconfigure stops it. Gated
+(`TestChaos66_ThresholdTimerReArmsWhenItFiresEarly`, verified failing against
+the give-up shape). Worth noting as a pattern: a timer derived from a wall-clock
+instant needs the same "did it actually elapse?" re-check as any other
+time-derived verdict in this tree.
+
 Two of the three are the same underlying mistake in different costumes: **this
 feed's own traffic is the clock**, and any signal derived from it inherits the
 node's idleness. That property was reasoned about correctly for recovery and
@@ -6709,7 +6724,7 @@ flush loop's `default` branch) cannot be scheduled from a test, and removing the
 sweep leaves the accounting gate green. Claiming a verified-failing gate that
 does not fail is the error §24 records as pinning the defect.
 
-`syslog_feed_chaos_test.go` (13) — the two headline defect gates verified
+`syslog_feed_chaos_test.go` (14) — the two headline defect gates verified
 failing against the verbatim pre-fix contract row (reproducing the same
 19-dropped-events measurement), the metrics-exposure and emission-gating gates,
 the fire-once alert latch, and CONTROLS for the cheapest wrong fixes: a

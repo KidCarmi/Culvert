@@ -292,13 +292,19 @@ func noteSyslogFeedFailure(out syslogDeliveryOutcome) {
 // lock-free Stats(), for the same reason the observer does (see addr above).
 func evaluateSyslogFeedDegradation() {
 	sw := activeSyslog()
-	var degraded bool
+	var degraded, stillFailing bool
 	var drops uint64
 	var reason string
+	var shortBy time.Duration
 	if sw != nil {
 		st := sw.Stats()
-		if !st.FirstFail.IsZero() && time.Since(st.FirstFail) >= syslogDegradedAfter() {
-			degraded, drops, reason = true, st.Drops, st.LastReason
+		if !st.FirstFail.IsZero() {
+			stillFailing = true
+			if elapsed := time.Since(st.FirstFail); elapsed >= syslogDegradedAfter() {
+				degraded, drops, reason = true, st.Drops, st.LastReason
+			} else {
+				shortBy = syslogDegradedAfter() - elapsed
+			}
 		}
 	}
 
@@ -307,6 +313,19 @@ func evaluateSyslogFeedDegradation() {
 	alertNow := degraded && syslogFeed.addr != "" && !syslogFeed.alerted
 	if alertNow {
 		syslogFeed.alerted = true
+	}
+	// Still failing but the threshold has not actually elapsed: re-arm rather
+	// than give up. FirstFail is reconstructed from stored nanoseconds, so it
+	// carries NO monotonic reading and time.Since on it is wall-clock — an NTP
+	// step backwards between arming and firing lands here. Without the re-arm
+	// the one shot is spent and, on an idle node, nothing would ever look again:
+	// a clock correction would silently cost the operator the page. Only one
+	// timer is ever outstanding, and recovery or a reconfigure stops it.
+	if !degraded && stillFailing && syslogFeed.addr != "" && !syslogFeed.alerted && syslogFeed.degradeTimer == nil {
+		if shortBy < time.Millisecond {
+			shortBy = time.Millisecond
+		}
+		syslogFeed.degradeTimer = time.AfterFunc(shortBy, evaluateSyslogFeedDegradation)
 	}
 	syslogFeed.mu.Unlock()
 

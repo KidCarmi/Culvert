@@ -656,3 +656,52 @@ func TestChaos66_ReconfigureRetiresThePreviousWriter(t *testing.T) {
 		t.Errorf("the new, healthy feed does not report ok: %v %q", row.Status, row.Message)
 	}
 }
+
+// The threshold re-evaluation must RE-ARM when it fires without the threshold
+// having actually elapsed, instead of spending its one shot.
+//
+// This is reachable under clock rollback and is not theoretical: FirstFail is
+// reconstructed from stored nanoseconds, so it carries no monotonic reading and
+// `time.Since` on it reads the WALL clock. An NTP step backwards between arming
+// the timer and its firing lands exactly here — and on an idle node, where the
+// timer is the only thing that would ever look again, giving up would silently
+// cost the operator the page that the whole Codex-P1 fix exists to deliver.
+func TestChaos66_ThresholdTimerReArmsWhenItFiresEarly(t *testing.T) {
+	withSyslogFeedIsolation(t)
+	// A threshold far longer than the test: any fire is necessarily "early".
+	setSyslogDegradedAfterForTest(1 * time.Hour)
+	fired := make(chan string, 8)
+	setSyslogFeedAlertSinkForTest(func(detail string) { fired <- detail })
+
+	deadTCPCollector(t)
+	driveFailures(t, 1)
+
+	syslogFeed.mu.Lock()
+	armed := syslogFeed.degradeTimer != nil
+	syslogFeed.mu.Unlock()
+	if !armed {
+		t.Fatal("setup: no threshold timer was armed for a failing, not-yet-degraded feed")
+	}
+
+	// Fire it by hand, standing in for the early wake a clock step produces.
+	evaluateSyslogFeedDegradation()
+
+	syslogFeed.mu.Lock()
+	stillArmed := syslogFeed.degradeTimer != nil
+	syslogFeed.mu.Unlock()
+	if !stillArmed {
+		t.Error("the timer fired early and was not re-armed; on an idle node nothing would ever re-evaluate, so a clock correction silently costs the page")
+	}
+	if len(fired) != 0 {
+		t.Errorf("alerted before the threshold elapsed: %q", <-fired)
+	}
+
+	// And it must still stop on recovery rather than re-arming forever.
+	resetSyslogFeedHealth()
+	syslogFeed.mu.Lock()
+	leftover := syslogFeed.degradeTimer != nil
+	syslogFeed.mu.Unlock()
+	if leftover {
+		t.Error("a re-armed timer outlived the health record reset")
+	}
+}
