@@ -2972,7 +2972,11 @@ paths:
       operationId: getAuthStatus
       tags: [auth]
       summary: Current session authentication state
-      description: Returns whether the caller holds a valid session (or Basic credentials) and the resolved role.
+      description: >-
+        Returns whether the caller holds a valid session (or Basic credentials) and the resolved role.
+        A request that presents Basic credentials is subject to the same admin credential lockout as
+        POST /api/auth/login and answers 429 once that client is locked out; a request with no
+        Authorization header never consults the lockout.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -2991,6 +2995,7 @@ paths:
               schema: { $ref: '#/components/schemas/AuthStatus' }
               example: { loggedIn: true, user: admin, role: admin }
         '405': { $ref: '#/components/responses/PlainMethodNotAllowed' }
+        '429': { $ref: '#/components/responses/PlainTooManyRequests' }
 
   /api/auth/logout:
     post:

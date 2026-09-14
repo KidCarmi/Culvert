@@ -212,10 +212,20 @@ func TestAuditActor_BasicIdentityOriginatesOnlyFromVerifiedLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ui_middleware.go: %v", err)
 	}
-	verifyAt := bytes.Index(mw, []byte("cfg.VerifyUIUser(user, pass)"))
+	// SEC-BASICAUTH-1 moved the credential check itself into the one bounded
+	// chokepoint (verifyUIBasicAuth, ui_basicauth_lockout.go), so the anchor
+	// moved with it. The assertion is now STRICTLY STRONGER than the
+	// cfg.VerifyUIUser byte-index it replaces: the write must follow the
+	// verification AND sit behind the affirmative-only res.OK() guard, which is
+	// the sole predicate that means "these credentials were verified and are
+	// correct" (a locked-out attempt is neither valid nor invalid — see
+	// basicAuthResult).
+	verifyAt := bytes.Index(mw, []byte("verifyUIBasicAuth(r, user, pass)"))
+	okGuardAt := bytes.Index(mw, []byte("if res.OK() {"))
 	writeAt := bytes.Index(mw, []byte("uiUserKey{}"))
-	if verifyAt < 0 || writeAt < 0 || writeAt < verifyAt {
-		t.Fatalf("the uiUserKey write must follow cfg.VerifyUIUser (verify@%d, write@%d)", verifyAt, writeAt)
+	if verifyAt < 0 || okGuardAt < 0 || writeAt < 0 || okGuardAt < verifyAt || writeAt < okGuardAt {
+		t.Fatalf("the uiUserKey write must follow verifyUIBasicAuth and sit inside the res.OK() branch (verify@%d, okGuard@%d, write@%d)",
+			verifyAt, okGuardAt, writeAt)
 	}
 }
 
