@@ -95,6 +95,13 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-14 — CHAOS-66 sweep (the IdP registry's compile step) — ID CLAIMED,
+SWEEP IN PROGRESS.** Placeholder committed before any code was written, per the
+convention the header above reaches twice and §35 first honoured. Scope: what
+`compileIdPProfile` DOES, as opposed to how it is staged. Register rows: AU-6,
+AU-11 (re-scored), IDP-1…IDP-6. This entry is rewritten with the findings when
+the sweep lands.
+
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
 file as commit one, which is the remedy the header above reaches twice
