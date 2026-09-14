@@ -9,6 +9,39 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The admin plane had four credential entry points and a brute-force bound on
+  one of them (SEC-BASICAUTH-1). The two-tier account lockout guarded
+  `POST /api/auth/login`; `uiAuthMiddleware`'s HTTP Basic Auth fallback,
+  `GET /api/auth/status` and the SSE mid-stream revalidation each verified the
+  same credentials with no lockout check, no failure record, no audit entry and
+  no rate limit — `securityMiddleware`'s per-IP API limiter applies only to
+  mutating requests, and none of the three is one. `/api/auth/status` is on the
+  public allowlist, so an **unauthenticated** caller could present
+  `Authorization: Basic …` and read the verdict out of `loggedIn`: a password
+  oracle at line rate, costing one bcrypt of appliance CPU per probe, leaving
+  no audit trail. All three now share the login form's lockout through one
+  chokepoint (`verifyUIBasicAuth`) — same tiers, same window, same trusted-IP
+  bypass, same `auth.lockout` audit action and `auth_lockout` alert, no new
+  setting. The check runs *before* verification, so a locked attempt costs no
+  bcrypt; the state is shared with the login endpoint, so an attacker cannot
+  refresh a budget by alternating endpoints; and the audit entry is written
+  once per lockout trip rather than once per attempt. A successful call clears
+  its own counter, so a legitimate CLI or monitoring client is never throttled.
+  Refusals are surfaced as `culvert_admin_basic_auth_lockout_refused_total` and
+  answered with `429` + `Retry-After`. **Basic Auth still does not enforce
+  TOTP** — a valid password alone reaches the full admin API — tracked as
+  RISK-030; see `docs/operator/admin-api-credential-lockout.md`.
+- Removed a public-allowlist prefix that pre-authorised routes nobody had
+  written (SEC-PUBLICPATH-1). `isPublicUIAuthPath` matched any path under
+  `/api/auth/totp`, and no such route exists: TOTP is verified inside
+  `/api/auth/login`'s two-step exchange and there is no enrolment API. A prefix
+  authorises every future path beneath it, so the first
+  `/api/auth/totp/enroll` or `.../disable` handler would have been reachable
+  with no authentication, letting a caller bind their own second factor to an
+  admin account or strip an existing one. No behavioural change today (nothing
+  matched it); the class is now walled by a test requiring every allowlist
+  entry to cover at least one registered route.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
