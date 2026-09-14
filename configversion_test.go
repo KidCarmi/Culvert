@@ -79,12 +79,14 @@ func TestApiConfigRollbackScope_MethodNotAllowed(t *testing.T) {
 
 // TestApiConfigRollbackScope_ListsFindingTenThreeExclusions pins the
 // contract this endpoint exists for: an admin about to roll back must be
-// able to learn, from the API, that alert-webhook, block-page-HTML and
-// upstream-proxy settings are NOT touched by rollback — the same set
-// config_surfaces.go documents as "off the rollback surface by design"
-// (Finding 10.3). If a future registry edit removes one of these Notes or
-// flips Rollback to true, this test's failure is the signal to update the
-// admin UI copy in the same change, not silently let it go stale.
+// able to learn, from the API, both the Finding-10.3 export/import
+// exclusions (alert-webhook, block-page-HTML, upstream-proxy settings) AND
+// the AdminSettings-only operational settings (log level, syslog, session
+// timeout, ...) that configBackup never binds — every kindConfig row NOT on
+// the rollback surface, per config_surfaces.go. If a future registry edit
+// removes one of these Notes or flips Rollback to true, this test's failure
+// is the signal to update the admin UI copy in the same change, not
+// silently let it go stale.
 func TestApiConfigRollbackScope_ListsFindingTenThreeExclusions(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/config/rollback-scope", nil)
 	w := httptest.NewRecorder()
@@ -105,7 +107,10 @@ func TestApiConfigRollbackScope_ListsFindingTenThreeExclusions(t *testing.T) {
 			t.Errorf("excluded setting %q has no explanatory note", e.ID)
 		}
 	}
-	for _, want := range []string{"alert_webhooks", "block_page_html", "upstream_proxies", "upstream_proxies_v2", "conn_limit_enabled"} {
+	for _, want := range []string{
+		"alert_webhooks", "block_page_html", "upstream_proxies", "upstream_proxies_v2", "conn_limit_enabled",
+		"log_level", "syslog_addr", "session_timeout_hours", "ui_allow_ips", "metrics_token",
+	} {
 		if !seen[want] {
 			t.Errorf("expected %q in rollback-excluded settings, got %v", want, resp.Excluded)
 		}

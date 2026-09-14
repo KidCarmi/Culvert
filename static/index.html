@@ -8105,28 +8105,37 @@ async function importConfig(input) {
 
 // ── Config Versioning ────────────────────────────────────────────────────
 // configRollbackExcluded caches the settings a config-version rollback
-// deliberately never touches (Finding 10.3 — alert webhooks, block-page
-// HTML, upstream proxy pools, connection-limit settings). Fetched once per
-// panel load; used both for the persistent note under the versions table
-// and to keep the rollback confirm dialog from overclaiming "ALL current
-// settings".
+// deliberately never touches (Finding 10.3 exclusions plus AdminSettings-only
+// operational settings). null = not yet resolved, [] = known-empty, array =
+// known list. configRollbackScopePromise lets rollbackConfigVersion() await
+// an in-flight fetch instead of racing it (a click before the panel's own
+// background fetch resolves must not silently show an "everything moves"
+// dialog with no exclusion note).
 let configRollbackExcluded = null;
+let configRollbackScopeError = false;
+let configRollbackScopePromise = null;
 
-async function loadConfigRollbackScope() {
+function loadConfigRollbackScope() {
   const el = document.getElementById('config-rollback-scope-note');
-  try {
-    const data = await api('/api/config/rollback-scope');
-    configRollbackExcluded = (data && data.excluded) || [];
-    if (configRollbackExcluded.length === 0) { el.style.display = 'none'; return; }
-    const items = configRollbackExcluded.map(e =>
-      `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.note)}</li>`).join('');
-    el.innerHTML = `<details><summary>Rollback does not restore ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (by design)</summary>` +
-      `<ul style="margin:6px 0 0 18px;padding:0">${items}</ul></details>`;
-    el.style.display = 'block';
-  } catch (err) {
-    configRollbackExcluded = [];
-    el.style.display = 'none';
-  }
+  configRollbackScopePromise = (async () => {
+    try {
+      const data = await api('/api/config/rollback-scope');
+      configRollbackExcluded = (data && data.excluded) || [];
+      configRollbackScopeError = false;
+      if (configRollbackExcluded.length === 0) { el.style.display = 'none'; return; }
+      const items = configRollbackExcluded.map(e =>
+        `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.note)}</li>`).join('');
+      el.innerHTML = `<details><summary>Rollback does not restore ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (by design)</summary>` +
+        `<ul style="margin:6px 0 0 18px;padding:0">${items}</ul></details>`;
+      el.style.display = 'block';
+    } catch (err) {
+      configRollbackExcluded = null;
+      configRollbackScopeError = true;
+      el.innerHTML = '<em style="color:var(--red);font-size:.82rem">Could not determine which settings rollback excludes — treat the scope as unknown.</em>';
+      el.style.display = 'block';
+    }
+  })();
+  return configRollbackScopePromise;
 }
 
 async function loadConfigVersions() {
@@ -8196,9 +8205,19 @@ function fmtDiffCell(v) {
 }
 
 async function rollbackConfigVersion(version) {
-  const scopeNote = (configRollbackExcluded && configRollbackExcluded.length > 0)
-    ? ` Note: ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (e.g. ${configRollbackExcluded.slice(0, 3).map(e => e.id).join(', ')}) are excluded by design and will keep their current values — see the list below the version table.`
-    : '';
+  // Await rather than trust the cache: a click can arrive before the
+  // panel's own background fetch (loadConfigRollbackScope) resolves, and a
+  // stale/absent list must never be silently read as "nothing is excluded".
+  if (configRollbackScopePromise) { await configRollbackScopePromise; }
+  else { await loadConfigRollbackScope(); }
+  let scopeNote;
+  if (configRollbackScopeError) {
+    scopeNote = ' Note: could not determine which settings are excluded from rollback by design — treat the scope as unknown and check the list below the version table before relying on this rollback.';
+  } else if (configRollbackExcluded && configRollbackExcluded.length > 0) {
+    scopeNote = ` Note: ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (e.g. ${configRollbackExcluded.slice(0, 3).map(e => e.id).join(', ')}) are excluded by design and will keep their current values — see the list below the version table.`;
+  } else {
+    scopeNote = '';
+  }
   if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace most current settings with the snapshot from v${version}.${scopeNote} A new version will be created to record this rollback.`, 'Rollback')) return;
   try {
     const data = await api('/api/config/versions', {

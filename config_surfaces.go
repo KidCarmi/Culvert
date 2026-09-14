@@ -591,19 +591,21 @@ type rollbackExcludedSetting struct {
 	Note string `json:"note"`
 }
 
-// rollbackExcludedConfigSurfaces derives, from the registry above, every
-// operator-facing setting (kindConfig, on export and/or import) that is NOT
-// on the version-rollback surface. This is the single source of truth for
-// the "rollback replaces ALL current settings" claim the admin UI makes to
-// an operator about to roll back — a claim that has been false for these
-// rows since Finding 10.3 introduced the by-design exclusions, with nothing
-// telling the operator so short of reading this file. Deriving rather than
-// hand-listing means a future registry row can never drift out of sync with
-// what the UI tells the operator.
+// rollbackExcludedConfigSurfaces derives, from the registry above, EVERY
+// operator-facing setting (any kindConfig row) that is NOT on the
+// version-rollback surface — not just the Finding-10.3 export/import rows,
+// but also the AdminSettings-only operational settings (log level, syslog,
+// OTLP, session timeout, IP allowlists, etc.) that configBackup never even
+// binds. Both groups are equally invisible to a rollback: an operator about
+// to click "Rollback" has no way to tell them apart from the ones that DO
+// move, so both belong in one accurate answer to "what will this not
+// change?" Deriving rather than hand-listing means a future registry row
+// can never drift out of sync with what the UI tells the operator.
 func rollbackExcludedConfigSurfaces() []rollbackExcludedSetting {
 	out := make([]rollbackExcludedSetting, 0, len(configSurfaces))
-	for _, row := range configSurfaces {
-		if row.Kind != kindConfig || row.Rollback || (!row.Export && !row.Import) {
+	for i := range configSurfaces {
+		row := &configSurfaces[i]
+		if row.Kind != kindConfig || row.Rollback {
 			continue
 		}
 		note := row.Note
