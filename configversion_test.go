@@ -69,7 +69,7 @@ func TestApiConfigDiff_InvalidFrom(t *testing.T) {
 // was converted to the hardened atomicWriteFile helper. Redirects
 // configVersionsDir to a temp dir to avoid touching /data.
 func TestApiConfigRollbackScope_MethodNotAllowed(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/config/rollback-scope", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/config/rollback-scope", http.NoBody)
 	w := httptest.NewRecorder()
 	apiConfigRollbackScope(w, req)
 	if w.Code != http.StatusMethodNotAllowed {
@@ -88,7 +88,7 @@ func TestApiConfigRollbackScope_MethodNotAllowed(t *testing.T) {
 // is the signal to update the admin UI copy in the same change, not
 // silently let it go stale.
 func TestApiConfigRollbackScope_ListsFindingTenThreeExclusions(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/config/rollback-scope", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/config/rollback-scope", http.NoBody)
 	w := httptest.NewRecorder()
 	apiConfigRollbackScope(w, req)
 	if w.Code != http.StatusOK {
