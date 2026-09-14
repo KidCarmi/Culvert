@@ -131,21 +131,34 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		// completeness pass; a backup taken today silently drops every SSO
 		// integration, so restoring onto a fresh volume/host loses them all.
 		{SrcPath: p("idp_profiles.json"), TarPath: "data/idp_profiles.json"},
-		// CDR (Sluice content-disarm-and-reconstruction) instance registry +
-		// sanitization policy rules — cdr_startup_config.go's own comment
-		// documents both as "loaded UNCONDITIONALLY (even when CDR is
-		// disabled) so GUI enrolls/toggles persist across restarts", the
-		// same admin-configurable-store bar every entry above this line was
-		// added at, but neither ever joined this list. Contains no private
-		// key material (that lives in separate PEM files under
-		// <dataDir>/integrations/sluice, deliberately out of scope per
-		// cdr_client_keyatrest.go) — just instance metadata (name, endpoint,
-		// TOFU-pinned server fingerprint, credential lineage) and policy
-		// rules. Was missing from every prior nightly QA backup-completeness
-		// pass; a backup taken today silently drops every enrolled CDR
-		// instance and sanitization policy, so restoring onto a fresh
-		// volume/host leaves CDR unconfigured with no record it ever was.
-		{SrcPath: p("cdr_instances.json"), TarPath: "data/cdr_instances.json"},
+		// CDR (Sluice content-disarm-and-reconstruction) sanitization policy
+		// rules — cdr_startup_config.go's own comment documents this store
+		// as "loaded UNCONDITIONALLY (even when CDR is disabled) so GUI
+		// enrolls/toggles persist across restarts", the same admin-
+		// configurable-store bar every entry above this line was added at,
+		// but it never joined this list. Each rule matches on identity/
+		// destination/schedule and names a Sluice profile by string
+		// (ProfileName) — no path, credential, or hard dependency on any
+		// particular enrolled instance existing, so it restores cleanly on
+		// its own. Was missing from every prior nightly QA backup-
+		// completeness pass; a backup taken today silently drops every
+		// sanitization policy, so restoring onto a fresh volume/host leaves
+		// CDR unconfigured with no record it ever was.
+		//
+		// Deliberately NOT included here: cdr_instances.json (the enrolled-
+		// instance registry). A first version of this fix added it too, but
+		// its entries reference an mTLS credential bundle under
+		// <dataDir>/integrations/sluice that is (correctly) never backed up
+		// (cdr_client_keyatrest.go) — so a restored registration is inert
+		// (loadCDRCertBundle fails) AND unrecoverable by the obvious path:
+		// apiCDREnroll refuses to re-enroll a name that's already present
+		// (409 "name already enrolled"), so the operator can't simply
+		// re-run enrollment under the restored name either (caught in
+		// review, PR #1396). Backing up the registry needs a restore-side
+		// "needs re-enrollment" state (the same shape upstream v2 credentials
+		// already use, ui_upstream.go's requiresReplacement) to be safe;
+		// that is a deliberately separate, larger change, not folded into
+		// this backup-completeness fix.
 		{SrcPath: p("cdr_policies.json"), TarPath: "data/cdr_policies.json"},
 	}
 }
