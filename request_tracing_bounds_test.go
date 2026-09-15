@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // request_tracing_bounds_test.go — SEC-REQID-1.
@@ -340,6 +342,170 @@ func TestSecReqID1_Control_AbsentHeadersStillMint(t *testing.T) {
 	// signal fire on every ordinary request and be worth nothing.
 	if n := requestIDRejected.Load() + traceparentRejected.Load(); n != 0 {
 		t.Errorf("absent headers counted as %d rejections, want 0", n)
+	}
+}
+
+// ─── the rejection path does no unbounded work ──────────────────────────────
+
+// TestSecReqID1_RejectionDoesNotWalkXFF is the gate on the Codex P1 (PR #1406):
+// the first shape of this fix resolved realClientIP at the CALL SITE, so every
+// rejection paid for it.
+//
+// Behind a configured trusted proxy — Culvert's ordinary deployment behind a load
+// balancer — realClientIP joins every X-Forwarded-For field line into one string
+// and splits it on every comma, then parses each token. Against a near-1 MiB XFF
+// that is a ~1 MiB copy plus a slice with one header per comma, PER REJECTION,
+// twice when both tracing headers are hostile, running ahead of the connection
+// limiter, the IP filter and the rate limiter, from an unauthenticated request.
+// The bound that stopped bytes reaching the log opened a CPU-and-allocation
+// amplifier in front of every limiter.
+//
+// The gate measures ALLOCATED BYTES, deliberately NOT allocation COUNT and not a
+// timing ratio.
+//
+// The count is the wrong observable here, and this gate was written that way
+// first and passed against the defect: `strings.Split` allocates ONE []string
+// however many commas it finds, and `strings.Join` of a single field line returns
+// it without copying, so eager resolution costs a constant ~2 allocations and the
+// count is flat in hop count. The COST is in the bytes — one string header per
+// comma, so 50,000 hops is ~800 KiB per rejection. Bytes are deterministic for a
+// fixed workload, so this stays hardware-independent and cannot flake the way a
+// timing ratio would (the repo's standing rule: a gate that can flake gets muted).
+//
+// The property is INDEPENDENCE: the suppressed rejection path must allocate
+// about the same whether the request carries a 1-hop XFF or a 50,000-hop one.
+func TestSecReqID1_RejectionDoesNotWalkXFF(t *testing.T) {
+	// A trusted proxy must be configured, or realClientIP returns the peer
+	// without ever looking at XFF and the gate would pass vacuously.
+	if err := SetTrustedProxyCIDRs([]string{"192.0.2.0/24"}); err != nil {
+		t.Fatalf("SetTrustedProxyCIDRs: %v", err)
+	}
+	t.Cleanup(func() { _ = SetTrustedProxyCIDRs(nil) })
+
+	old := logger
+	logger = log.New(&safeDiscard{}, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	const iters = 20
+	measureBytes := func(hops int) uint64 {
+		resetTracingBoundsStateForTest()
+		xff := strings.TrimSuffix(strings.Repeat("203.0.113.9,", hops), ",")
+		build := func() *http.Request {
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
+			r.RemoteAddr = "192.0.2.10:4444" // inside the trusted CIDR
+			r.Header.Set("X-Forwarded-For", xff)
+			r.Header.Set(headerRequestID, strings.Repeat("A", maxClientRequestIDLen+1))
+			return r
+		}
+		// Prime the rate gate so every measured run is SUPPRESSED — that is the
+		// flood path, and the one that must not walk the header. The XFF string
+		// itself is built once, so per-iteration request construction costs the
+		// same in both arms.
+		setupRequestTracing(httptest.NewRecorder(), build())
+		w := httptest.NewRecorder()
+		reqs := make([]*http.Request, iters)
+		for i := range reqs {
+			reqs[i] = build()
+		}
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := 0; i < iters; i++ {
+			setupRequestTracing(w, reqs[i])
+		}
+		runtime.ReadMemStats(&after)
+		return (after.TotalAlloc - before.TotalAlloc) / iters
+	}
+
+	small := measureBytes(1)
+	large := measureBytes(50000)
+	t.Logf("suppressed rejection bytes/op: 1-hop XFF = %d, 50000-hop XFF = %d", small, large)
+
+	// Independence, with generous headroom for measurement noise. Pre-fix the
+	// large arm carries ~16 bytes per hop (~800 KiB), which is orders of
+	// magnitude above the small arm rather than a few hundred bytes above it.
+	if large > small+4096 {
+		t.Errorf("suppressed rejection allocates %d bytes/op with a 50000-hop XFF vs %d with 1 hop —"+
+			" the client IP is being resolved per rejection ahead of the limiters", large, small)
+	}
+}
+
+// TestSecReqID1_RejectionLogStillNamesTheRealClient is the CONTROL for the gate
+// above. Deferring the resolution must not silently downgrade the log to the
+// proxy's address: the operator hunting the source needs the client behind it.
+// The cheapest way to pass the allocation gate is to stop calling realClientIP at
+// all, which would pass it while making the one line a flood emits useless.
+func TestSecReqID1_RejectionLogStillNamesTheRealClient(t *testing.T) {
+	if err := SetTrustedProxyCIDRs([]string{"192.0.2.0/24"}); err != nil {
+		t.Fatalf("SetTrustedProxyCIDRs: %v", err)
+	}
+	t.Cleanup(func() { _ = SetTrustedProxyCIDRs(nil) })
+
+	resetTracingBoundsStateForTest()
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
+	r.RemoteAddr = "192.0.2.10:4444"
+	r.Header.Set("X-Forwarded-For", "198.51.100.44")
+	r.Header.Set(headerRequestID, strings.Repeat("A", maxClientRequestIDLen+1))
+	setupRequestTracing(httptest.NewRecorder(), r)
+
+	if !strings.Contains(buf.String(), "198.51.100.44") {
+		t.Errorf("rejection line does not name the real client behind the trusted proxy:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "192.0.2.10") {
+		t.Errorf("rejection line names the proxy rather than the client:\n%s", buf.String())
+	}
+}
+
+// TestSecReqID1_LogGateTakesNoLock pins that the rate gate is lock-free. It is
+// reached from the second statement of handleRequest, ahead of the connection
+// limiter and the per-IP rate limiter — both of which are SHARDED precisely
+// because an unsharded process-wide lock on the request path is a throughput
+// ceiling. A mutex here would reintroduce that ceiling in front of both, on
+// exactly the flood the gate exists to bound.
+//
+// Structural, not timing-based: the gate must answer while a concurrent caller is
+// in flight, and repeated calls inside one window must all suppress without
+// blocking. Combined with the allocation gate above, a return to a mutex shows up
+// as a compile change here rather than as a benchmark wobble.
+func TestSecReqID1_LogGateTakesNoLock(t *testing.T) {
+	resetTracingBoundsStateForTest()
+	if !noteTracingBoundsLog() {
+		t.Fatal("first call must arm the window and emit")
+	}
+	var wg sync.WaitGroup
+	const workers = 32
+	admitted := make([]bool, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); admitted[i] = noteTracingBoundsLog() }(i)
+	}
+	wg.Wait()
+	for i, a := range admitted {
+		if a {
+			t.Errorf("worker %d was admitted inside an armed window — the window is not being honoured", i)
+		}
+	}
+}
+
+// TestSecReqID1_LogGateReArmsOnClockRollback pins the CHAOS-61 direction: a clock
+// that went backwards must not silence the operator for however far back it went.
+func TestSecReqID1_LogGateReArmsOnClockRollback(t *testing.T) {
+	resetTracingBoundsStateForTest()
+	if !noteTracingBoundsLog() {
+		t.Fatal("first call must arm")
+	}
+	if noteTracingBoundsLog() {
+		t.Fatal("second call inside the window must suppress")
+	}
+	// Simulate the stamp being in the FUTURE (a rollback of the wall clock).
+	tracingBoundsLogLast.Store(time.Now().Add(time.Hour).UnixNano())
+	if !noteTracingBoundsLog() {
+		t.Error("a future stamp (clock rollback) must re-arm and report, not suppress")
 	}
 }
 

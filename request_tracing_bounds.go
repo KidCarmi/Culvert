@@ -1,7 +1,7 @@
 package main
 
 import (
-	"sync"
+	"net/http"
 	"sync/atomic"
 	"time"
 )
@@ -109,10 +109,20 @@ var (
 // the counters (the CHAOS-54/63 rule).
 const tracingBoundsLogWindow = time.Minute
 
-var (
-	tracingBoundsLogMu   sync.Mutex
-	tracingBoundsLogLast time.Time
-)
+// tracingBoundsLogLast is the last emission instant in Unix nanoseconds, held as
+// an ATOMIC rather than behind a mutex.
+//
+// The CHAOS-63 precedent (noteLoginOversizeLog) uses a sync.Mutex, and that is
+// correct THERE: the admin login endpoint sits behind the 60-mutating-POST/min
+// per-IP API limiter, so the gate is reachable about once a second. This gate is
+// reached from setupRequestTracing — the second statement in handleRequest,
+// ahead of the connection limiter, the IP filter and the rate limiter — so under
+// the very flood it exists to bound, an unsharded process-wide mutex would be
+// taken once per hostile request by every serving goroutine at once. That is the
+// throughput ceiling internal/connlimit and the per-IP rate limiter were sharded
+// to remove, reintroduced in front of both. The atomic keeps the suppressed path
+// — which is every path during a flood — to one uncontended load and a compare.
+var tracingBoundsLogLast atomic.Int64
 
 // acceptableTracingHeaderValue reports whether a client-supplied tracing header
 // value may be retained — logged, echoed and forwarded — as it stands.
@@ -163,43 +173,76 @@ func acceptClientTraceparent(v string) bool {
 // noteRejectedRequestID records a refused X-Request-Id: the counter always, a
 // log line at most once per window.
 //
+// IT TAKES THE REQUEST, NOT A RESOLVED CLIENT IP, AND THAT IS THE WHOLE POINT
+// (Codex P1, PR #1406). The first shape resolved realClientIP at the CALL SITE,
+// so every rejection paid for it. Behind a configured trusted proxy —
+// i.e. Culvert's ordinary deployment behind a load balancer — realClientIP joins
+// EVERY X-Forwarded-For field line into one string and splits it on every comma,
+// then parses each token. Against a near-1 MiB XFF that is a ~1 MiB copy plus a
+// slice with one header per comma (hundreds of thousands of them), per rejection,
+// TWICE when both tracing headers are hostile — and it ran ahead of the
+// connection limiter, the IP filter and the rate limiter, from an unauthenticated
+// request. This file's own rule ("a mitigation for a write-amplification defect
+// must not be one itself") was applied to the log LINE and not to the work that
+// produced its arguments: the bound stopped bytes reaching the log and opened a
+// CPU-and-allocation amplifier in front of every limiter.
+//
+// Resolution is therefore DEFERRED behind the rate gate: it happens at most once
+// per tracingBoundsLogWindow, on the one request in a flood that actually emits a
+// line. The operator still gets the real client IP rather than the proxy's, which
+// is the reason not to simply log the direct peer instead.
+//
 // The refused VALUE is never logged, in either the line or the counter. It is
 // attacker-chosen, unbounded and (by the fact that it was refused) carries bytes
 // this file exists to keep out of the log — echoing it to explain why it was
 // rejected would perform the exact amplification being prevented. The length and
 // the running count are what an operator needs.
-func noteRejectedRequestID(clientIP string, n int) {
+func noteRejectedRequestID(r *http.Request, n int) {
 	requestIDRejected.Add(1)
 	if noteTracingBoundsLog() {
 		logWarnf("Tracing: replaced an unusable client %s from %s (%d bytes, limit %d, visible-ASCII only); %d replaced since boot",
-			headerRequestID, sanitizeLog(clientIP), n, maxClientRequestIDLen, requestIDRejected.Load())
+			headerRequestID, sanitizeLog(realClientIP(r)), n, maxClientRequestIDLen, requestIDRejected.Load())
 	}
 }
 
 // noteRejectedTraceparent records a refused Traceparent. Same contract as
-// noteRejectedRequestID: counter always, value never.
-func noteRejectedTraceparent(clientIP string, n int) {
+// noteRejectedRequestID: counter always, value never, and the client IP resolved
+// only behind the rate gate.
+func noteRejectedTraceparent(r *http.Request, n int) {
 	traceparentRejected.Add(1)
 	if noteTracingBoundsLog() {
 		logWarnf("Tracing: replaced an unusable client %s from %s (%d bytes, limit %d, visible-ASCII only); %d replaced since boot",
-			headerTraceparent, sanitizeLog(clientIP), n, maxClientTraceparentLen, traceparentRejected.Load())
+			headerTraceparent, sanitizeLog(realClientIP(r)), n, maxClientTraceparentLen, traceparentRejected.Load())
 	}
 }
 
 // noteTracingBoundsLog reports whether a rejection may emit a log line, arming
-// the window when it does. The window is SHARED by both headers on purpose: a
-// source sending one hostile tracing header is overwhelmingly likely to be
-// sending the other, and two independent windows would double the log bandwidth
-// a flood can buy for no extra operator signal.
+// the window when it does.
+//
+// The window is SHARED by both headers on purpose: a source sending one hostile
+// tracing header is overwhelmingly likely to be sending the other, and two
+// independent windows would double the log bandwidth a flood can buy for no extra
+// operator signal.
+//
+// The suppressed path — every path during a flood — is one atomic load and a
+// compare, taking no lock; see tracingBoundsLogLast for why a mutex is wrong
+// HERE even though the CHAOS-63 precedent correctly uses one. The CAS makes
+// exactly one racing caller the winner of each window; the losers suppress, which
+// is the same answer they would have got from a mutex.
+//
+// A clock that went BACKWARDS re-arms rather than suppressing (a negative delta
+// falls through to the CAS). Suppressing would silence the operator for however
+// far back the clock went, and the CHAOS-61 rule is that a negative age fails
+// toward the safe answer — here, still reporting.
 func noteTracingBoundsLog() bool {
-	now := time.Now()
-	tracingBoundsLogMu.Lock()
-	defer tracingBoundsLogMu.Unlock()
-	if !tracingBoundsLogLast.IsZero() && now.Sub(tracingBoundsLogLast) < tracingBoundsLogWindow {
-		return false
+	now := time.Now().UnixNano()
+	last := tracingBoundsLogLast.Load()
+	if last != 0 {
+		if d := now - last; d >= 0 && d < int64(tracingBoundsLogWindow) {
+			return false
+		}
 	}
-	tracingBoundsLogLast = now
-	return true
+	return tracingBoundsLogLast.CompareAndSwap(last, now)
 }
 
 // resetTracingBoundsStateForTest clears the process-global counters and the log
@@ -207,7 +250,5 @@ func noteTracingBoundsLog() bool {
 func resetTracingBoundsStateForTest() {
 	requestIDRejected.Store(0)
 	traceparentRejected.Store(0)
-	tracingBoundsLogMu.Lock()
-	tracingBoundsLogLast = time.Time{}
-	tracingBoundsLogMu.Unlock()
+	tracingBoundsLogLast.Store(0)
 }

@@ -894,7 +894,10 @@ func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
 	// go/log-injection query recognises on this value.
 	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get(headerRequestID), "\n", ""), "\r", "") // sanitize for CWE-117
 	if reqID != "" && !acceptClientRequestID(reqID) {
-		noteRejectedRequestID(realClientIP(r), len(reqID))
+		// The REQUEST is handed over, never a resolved client IP: realClientIP
+		// walks every X-Forwarded-For hop and must not run per rejection ahead of
+		// the limiters. noteRejectedRequestID resolves it behind its rate gate.
+		noteRejectedRequestID(r, len(reqID))
 		reqID = "" // fall into the mint arm below, which also overwrites the header
 	}
 	// ── W3C Trace Context: propagate or generate traceparent ────────────
@@ -905,7 +908,7 @@ func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
 	clientTP := r.Header.Get(headerTraceparent)
 	needTraceparent := !acceptClientTraceparent(clientTP)
 	if needTraceparent && clientTP != "" {
-		noteRejectedTraceparent(realClientIP(r), len(clientTP))
+		noteRejectedTraceparent(r, len(clientTP))
 	}
 
 	switch {
