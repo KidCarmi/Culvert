@@ -10818,6 +10818,19 @@ async function saveUIAllowIPs() {
 // renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
 // forwarding state so a stale amber warning can't survive a reconfigure/disable
 // (a new collector starts a fresh writer at Drops()==0; disabling clears it).
+// warnIcon builds the alert-triangle <use> node programmatically so the callers
+// below can compose a message with textContent instead of innerHTML — the
+// house rule for any string that arrived from the server.
+function warnIcon() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'ico');
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS(NS, 'use');
+  use.setAttribute('href', '#i-alert-triangle');
+  svg.appendChild(use);
+  return svg;
+}
 // CHAOS-66: `st` carries the live delivery verdict from GET /api/syslog. The
 // cumulative drop count alone could not tell "a collector blip last Tuesday"
 // from "every record since 09:14 is being lost", so a CURRENT failure outranks
@@ -10831,21 +10844,27 @@ function renderSyslogDrops(drops, panics, st) {
   dropsEl.style.display = '';
   st = st || {};
   if (st.failing) {
-    const secs = st.failingSeconds || 0;
-    const reason = st.failingReason || 'unknown';
-    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
-      + (st.degraded ? 'SIEM forwarding is DOWN' : 'SIEM forwarding is failing')
-      + ' (' + reason + ', ' + secs + 's, ' + n + ' record' + (n === 1 ? '' : 's') + ' lost)'
-      + ' - records are not reaching the collector. The node-local audit log is unaffected'
-      + ' and is the recovery source; forwarding reconnects automatically.';
+    const secs = Number(st.failingSeconds) || 0;
+    // failingReason is a bounded server-side enum, but it still arrives over
+    // the wire, so it goes in via textContent and never through innerHTML.
+    const reason = String(st.failingReason || 'unknown');
+    dropsEl.replaceChildren(
+      warnIcon(),
+      document.createTextNode(' '
+        + (st.degraded ? 'SIEM forwarding is DOWN' : 'SIEM forwarding is failing')
+        + ' (' + reason + ', ' + secs + 's, ' + n + ' record' + (n === 1 ? '' : 's') + ' lost)'
+        + ' - records are not reaching the collector. The node-local audit log is unaffected'
+        + ' and is the recovery source; forwarding reconnects automatically.'));
     dropsEl.style.color = st.degraded ? 'var(--red,#c0392b)' : 'var(--warn,#b8860b)';
     return;
   }
   if (st.deliveryConfirmable === false) {
-    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
-      + 'UDP cannot confirm delivery: a dead collector accepts every line silently, so a zero drop'
-      + ' count is not proof that anything arrived. Use tcp:// if the audit trail needs delivery assurance.'
-      + (n > 0 ? ' (' + n + ' local drops)' : '');
+    dropsEl.replaceChildren(
+      warnIcon(),
+      document.createTextNode(' UDP cannot confirm delivery: a dead collector accepts every line'
+        + ' silently, so a zero drop count is not proof that anything arrived. Use tcp:// if the'
+        + ' audit trail needs delivery assurance.'
+        + (n > 0 ? ' (' + n + ' local drops)' : '')));
     dropsEl.style.color = 'var(--warn,#b8860b)';
     return;
   }

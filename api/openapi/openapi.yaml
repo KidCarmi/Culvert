@@ -2232,6 +2232,34 @@ components:
         format: { type: string }
         drops: { type: integer }
         panics: { type: integer }
+        # CHAOS-66 delivery health. The cumulative drop count alone could not
+        # distinguish a collector blip last week from an outage in progress,
+        # and said nothing at all on a UDP target.
+        failing:
+          type: boolean
+          description: True while a delivery failure episode is open (an observed failure with no observed success since).
+        degraded:
+          type: boolean
+          description: True once the episode has lasted longer than the degradation threshold; this is what the siem_feed_down alert fires on.
+        failingReason:
+          type: string
+          description: Bounded reason class for the current episode; empty when not failing.
+          enum: ["", collector_unreachable, write_failed, queue_full, writer_closed, delivery_panic]
+        failingSeconds:
+          type: integer
+          description: Length of the current failure episode in seconds (0 when delivering or idle).
+        lastDelivery:
+          type: integer
+          description: Unix time at which the transport last accepted a line (0 = never).
+        dropsByReason:
+          type: object
+          description: Per-class drop counts; every class is present even at zero, so a missing class never reads as an unreported fault.
+          additionalProperties: { type: integer }
+        deliveryConfirmable:
+          type: boolean
+          description: >-
+            False on UDP, where a delivery failure is structurally unobservable — a dead collector
+            accepts every line silently, so a zero drop count is not proof of delivery. True on TCP.
     SetSyslogBody:
       type: object
       additionalProperties: false
