@@ -605,7 +605,12 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 		}
 		// Full-URL check for non-CONNECT (plain HTTP) requests.
 		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
-			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
+			// CheckRequestURL, not CheckURL(r.URL.String()): net/http has
+			// already parsed this URL, and serialising it so the feed could
+			// parse it straight back cost ~490 ns and 3 allocations of pure
+			// re-derivation on every allowed plain-HTTP request. Same verdict —
+			// see the contract on threatfeed.Feed.CheckRequestURL.
+			if result := globalSecScanner.CheckRequestURL(r.URL); result != nil {
 				atomic.AddInt64(&statBlocked, 1)
 				recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
 				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
