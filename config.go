@@ -405,6 +405,27 @@ func (c CDRConfig) CDRFailOpen() bool {
 	return !strings.EqualFold(strings.TrimSpace(c.FailMode), "closed")
 }
 
+// validIPFilterMode reports whether m is a recognized security.ip_filter_mode
+// / -ip-filter-mode value: "" (unset — filter disabled), "allow", or "block".
+// Shared by FileConfig.validateEnums (the config.yaml path, which fails the
+// whole config load on an unrecognized value) and loadFileConfigAndFlags in
+// main.go (the CLI-flag path, resolved via firstStr(*s.ipMode,
+// fc.Security.IPFilterMode) — a CLI value always wins and so must be checked
+// independently of the YAML-only validateEnums pass above it).
+//
+// Without this gate on the CLI path, a typo'd -ip-filter-mode (e.g. "alow")
+// was stored verbatim via ipf.SetMode with no startup error, and
+// IPFilter.Allowed's documented fail-closed posture for any unrecognized mode
+// ("corrupt/unknown mode — deny all") then silently denied every request on
+// the proxy — a single fat-fingered flag turning into a total outage with
+// only an easy-to-miss INFO-level "IPFilter: mode=alow entries=N" log line
+// and no indication anything was wrong. The same typo in config.yaml already
+// refused to start (validateEnums). This mirrors the validCDRFailMode /
+// validCDRServerFingerprint CLI/YAML parity fix.
+func validIPFilterMode(m string) bool {
+	return m == "" || m == "allow" || m == "block"
+}
+
 // validCDRFailMode reports whether fm is a recognized cdr.fail_mode /
 // -cdr-fail-mode value: "" (unset — defaults to open), "open", or "closed".
 // Shared by FileConfig.validateCDR (the config.yaml path, which fails the
@@ -534,7 +555,7 @@ func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-
 	}
 
 	// ip_filter_mode
-	if m := fc.Security.IPFilterMode; m != "" && m != "allow" && m != "block" {
+	if m := fc.Security.IPFilterMode; !validIPFilterMode(m) {
 		errs = append(errs, fmt.Sprintf("security.ip_filter_mode: must be \"allow\" or \"block\", got %q", m))
 	}
 
