@@ -283,8 +283,12 @@ linked above is the only supported reference.
 
 * `ca.bundle` — encrypted root CA (passphrase required to use)
 * `policy.json[.meta]` — policy ruleset and version
-* `blocklist.txt`, `categories.json`, `category_groups.json`,
-  `cdr_policies.json` — content controls
+* `blocklist.txt`, `category_groups.json`, `cdr_policies.json` — content
+  controls. `categories.json` (Layer-1 URL categories) defaults to a path
+  relative to the working directory (`/app` in the shipped image), **not**
+  `/data` — set `url_categories_file` in `config.yaml` to an explicit
+  `/data/...` path if you need this store to survive a container
+  recreate or be captured by `--backup`.
 * `cluster.json`, `cluster-ca.crt/key` — cluster identity
 * `config_versions/v{N}.json` — automatic config snapshots (50 kept)
 * `ui_users.json` — admin accounts (bcrypt hashes)
