@@ -854,11 +854,24 @@ func checkSyslogFeed() OperatorContractCheck {
 			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
 		}
 	}
-	return OperatorContractCheck{
-		Code:    "syslog_feed",
-		Status:  diagOK,
-		Message: "remote syslog/SIEM forwarding is active",
-	}
+	// Everything above answers ONE question: did the collector we were told to
+	// use accept a connection at init? That was the whole row until CHAOS-66,
+	// and it is the smaller half.
+	//
+	// A collector that dies AFTER a successful connect leaves globalSyslog
+	// non-nil and both address fields unchanged forever — the Writer nils its
+	// own conn internally and never reports upward — so this row went on
+	// saying "remote syslog/SIEM forwarding is active" while every audit and
+	// request record was being dropped. Measured: 49 of 50 audit lines lost,
+	// row still ok (TestChaos66_DeadCollectorIsNotReportedHealthy). The
+	// runtime failure is also the COMMON one: SIEM restarts, firewall changes
+	// and collector redeploys all land here, not at boot.
+	//
+	// syslog_health.go owns that half and is evaluated on read, so the verdict
+	// can never be latched stale.
+	snap := syslogFeedState()
+	evaluateSyslogDegradation()
+	return checkSyslogFeedHealth(snap)
 }
 
 // checkCDR summarises Content-Disarm-and-Reconstruction state without

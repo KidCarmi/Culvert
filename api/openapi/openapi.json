@@ -5053,11 +5053,50 @@
           "addr": {
             "type": "string"
           },
+          "degraded": {
+            "description": "True once the episode has lasted longer than the degradation threshold; this is what the siem_feed_down alert fires on.",
+            "type": "boolean"
+          },
+          "deliveryConfirmable": {
+            "description": "False on UDP, where a delivery failure is structurally unobservable — a dead collector accepts every line silently, so a zero drop count is not proof of delivery. True on TCP.",
+            "type": "boolean"
+          },
           "drops": {
+            "type": "integer"
+          },
+          "dropsByReason": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Per-class drop counts; every class is present even at zero, so a missing class never reads as an unreported fault.",
+            "type": "object"
+          },
+          "failing": {
+            "description": "True while a delivery failure episode is open (an observed failure with no observed success since).",
+            "type": "boolean"
+          },
+          "failingReason": {
+            "description": "Bounded reason class for the current episode; empty when not failing.",
+            "enum": [
+              "",
+              "collector_unreachable",
+              "write_failed",
+              "queue_full",
+              "writer_closed",
+              "delivery_panic"
+            ],
+            "type": "string"
+          },
+          "failingSeconds": {
+            "description": "Length of the current failure episode in seconds (0 when delivering or idle).",
             "type": "integer"
           },
           "format": {
             "type": "string"
+          },
+          "lastDelivery": {
+            "description": "Unix time at which the transport last accepted a line (0 = never).",
+            "type": "integer"
           },
           "panics": {
             "type": "integer"
