@@ -229,12 +229,23 @@ func isSameOrigin(r *http.Request, origin string) bool {
 // credentials, so this must stay reachable even after cfg.IsConfigured() is
 // true.
 // NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
+//
+// SEC-PUBLICPATH-1: the list previously carried a `/api/auth/totp` PREFIX that
+// matched no registered route. TOTP has no admin API — enrollment is verified
+// inside apiAuthLogin's two-step flow (verifyLoginTOTP), and cfg.SetTOTPSecret/
+// ClearTOTP have no production callers at all — so the entry was dead today and
+// a landmine tomorrow: the first `/api/auth/totp/enroll` or `.../disable`
+// handler anyone adds would have been born UNAUTHENTICATED, letting any caller
+// enrol or strip the second factor of an admin account. A prefix pre-authorises
+// endpoints that do not exist yet, which is the one thing an allowlist must
+// never do. Removing it changes no behaviour today (nothing matches it) and
+// forces the next author to make the decision explicitly.
+// Pinned by TestPublicAllowlist_EveryEntryMatchesARegisteredRoute.
 func isPublicUIAuthPath(path string) bool {
 	return strings.HasPrefix(path, "/api/setup") ||
 		path == "/api/auth/login" ||
 		path == "/api/auth/logout" ||
 		path == "/api/auth/status" ||
-		strings.HasPrefix(path, "/api/auth/totp") ||
 		strings.HasPrefix(path, "/auth/") ||
 		path == "/proxy.pac" ||
 		strings.HasPrefix(path, "/pac/") ||
@@ -282,12 +293,25 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// Fallback: HTTP Basic Auth for programmatic / CLI access.
+		//
+		// SEC-BASICAUTH-1: routed through verifyUIBasicAuth, which applies the
+		// SAME two-tier lockout /api/auth/login uses. Before that this path
+		// called cfg.VerifyUIUser directly — one bcrypt per request, on every
+		// /api/ route, with no lockout, no failure record, no audit entry and
+		// no rate limit (securityMiddleware limits only mutating requests), so
+		// RISK-012's brute-force barrier was bypassed by choosing a different
+		// URL. See ui_basicauth_lockout.go.
 		user, pass, ok := r.BasicAuth()
 		if ok {
-			if role, valid := cfg.VerifyUIUser(user, pass); valid {
+			res := verifyUIBasicAuth(r, user, pass)
+			if res.Locked() {
+				writeBasicAuthLockout(w, res)
+				return
+			}
+			if res.OK() {
 				// Store the authenticated username too (no cookie exists on this path), so admin-action
 				// attribution resolves the real actor instead of "unknown" (Codex P2).
-				ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
+				ctx := context.WithValue(r.Context(), uiRoleKey{}, res.Role)
 				ctx = context.WithValue(ctx, uiUserKey{}, user)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return

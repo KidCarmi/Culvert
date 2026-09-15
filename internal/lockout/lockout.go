@@ -443,6 +443,22 @@ type LockedEntry struct {
 	SecondsRemaining int    `json:"seconds_remaining"`
 }
 
+// EntryCount returns the number of tier-1 pair and tier-2 account entries the
+// limiter is holding.
+//
+// Both maps are keyed by data an UNAUTHENTICATED caller chooses, so their SIZE
+// is a security observable, not a curiosity: MaxUsernameKeyLen bounds each
+// key's bytes (CHAOS-63) and Cleanup bounds how long an entry survives, but
+// nothing here bounds how many a caller may create — that is the callers' job
+// (SEC-BASICAUTH-2 rate-bounds its own failure path; see
+// ui_basicauth_lockout.go). This accessor is what lets a caller prove its bound
+// holds, and what lets an operator see the count on /metrics.
+func (l *LoginLimiter) EntryCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pairs) + len(l.accounts)
+}
+
 // Snapshot returns every currently-active lockout across both tiers, sorted
 // by username then IP for stable display. It is the read side of the
 // explicit unlock primitive (ResetUser) — without it, an operator has no way
@@ -562,6 +578,24 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	}
 	e.count++
 	return e.count <= Burst
+}
+
+// Over reports whether ip has already exhausted its budget in the current
+// window, WITHOUT charging an attempt.
+//
+// The read-only form exists because a caller that must refuse an over-budget
+// request BEFORE doing the work cannot use Allow: Allow charges, so consulting
+// it on every request would charge the requests the caller means to admit. See
+// ui_basicauth_lockout.go, where the budget gates credential verification but
+// is charged only by a failure.
+func (a *APIRateLimiter) Over(ip string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e := a.entries[ip]
+	if e == nil || time.Since(e.windowStart) > RateWindow {
+		return false
+	}
+	return e.count >= Burst
 }
 
 // Cleanup removes expired entries.

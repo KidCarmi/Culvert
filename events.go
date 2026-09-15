@@ -152,9 +152,13 @@ func sseAuthStillValid(r *http.Request) bool {
 		return true
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
+	//
+	// SEC-BASICAUTH-1: routed through the one chokepoint so this cannot become
+	// the surviving un-bounded credential path. Fail-closed on every non-OK
+	// verdict, lockout included: a stream whose client IP is under an active
+	// credential lockout for this username stops receiving live telemetry.
 	if user, pass, ok := r.BasicAuth(); ok {
-		_, valid := cfg.VerifyUIUser(user, pass)
-		return valid
+		return verifyUIBasicAuth(r, user, pass).OK()
 	}
 	return false
 }
@@ -291,6 +295,29 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_login_oversize_rejected_total Admin login attempts refused because the submitted username exceeded the byte limit. Sustained growth means an unauthenticated source is probing /api/auth/login\n")
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
+
+	// SEC-BASICAUTH-1: admin-plane HTTP Basic Auth attempts refused by the
+	// credential lockout before any verification. The caller only ever sees a
+	// 429, and these paths (the uiAuthMiddleware fallback and the PUBLIC
+	// /api/auth/status) are not mutating requests, so nothing else reports
+	// them. Sustained growth means a source is grinding credentials against
+	// the admin API rather than the login form.
+	fmt.Fprintf(w, "\n# HELP culvert_admin_basic_auth_lockout_refused_total Admin-plane HTTP Basic Auth attempts refused by the credential lockout without reaching verification\n")
+	fmt.Fprintf(w, "# TYPE culvert_admin_basic_auth_lockout_refused_total counter\nculvert_admin_basic_auth_lockout_refused_total %d\n",
+		basicAuthLockoutRefused.Load())
+
+	// SEC-BASICAUTH-2: credential failures dropped WITHOUT being recorded
+	// because the client was over its per-client failure budget, and the live
+	// size of the state that budget protects. The caller sees an ordinary 401,
+	// so the counter is the only signal that a source is flooding the admin
+	// plane with unusable credentials; the gauge is what an operator watches to
+	// confirm the bound is holding.
+	fmt.Fprintf(w, "\n# HELP culvert_admin_basic_auth_fail_shed_total Admin-plane credential failures dropped without being recorded because the client exceeded its failure budget\n")
+	fmt.Fprintf(w, "# TYPE culvert_admin_basic_auth_fail_shed_total counter\nculvert_admin_basic_auth_fail_shed_total %d\n",
+		basicAuthFailShed.Load())
+	fmt.Fprintf(w, "# HELP culvert_login_limiter_entries Live tier-1 pair + tier-2 account entries held by the admin credential lockout\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_limiter_entries gauge\nculvert_login_limiter_entries %d\n",
+		loginLimiter.EntryCount())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

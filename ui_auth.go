@@ -221,10 +221,26 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
+	//
+	// SEC-BASICAUTH-1: this endpoint is on isPublicUIAuthPath, so
+	// uiAuthMiddleware admits it with NO credentials, and it is a GET, so
+	// securityMiddleware's mutating-only rate limit never applies. Verifying
+	// caller-supplied credentials here and reporting the verdict in loggedIn
+	// therefore made it an unauthenticated, unthrottled, unaudited password
+	// oracle — one bcrypt per request, forever. It now shares the login
+	// endpoint's two-tier lockout via verifyUIBasicAuth. A caller that sends
+	// NO Authorization header never reaches the limiter at all, so the login
+	// overlay's anonymous poll is untouched (pinned by
+	// TestSecBasicAuth1_Control_UnauthenticatedStatusStillAnswers).
 	user, pass, ok := r.BasicAuth()
 	if ok {
-		if role, valid := cfg.VerifyUIUser(user, pass); valid {
-			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": user, "role": role})
+		res := verifyUIBasicAuth(r, user, pass)
+		if res.Locked() {
+			writeBasicAuthLockout(w, res)
+			return
+		}
+		if res.OK() {
+			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": user, "role": res.Role})
 			return
 		}
 	}
