@@ -25,6 +25,9 @@ import (
 	"testing"
 )
 
+// gateSink keeps the ratio gate's two arms symmetric — see its comment.
+var gateSink bool
+
 // benchProxyURL is the shape a forward proxy actually sees on the plain-HTTP
 // path: an absolute-form URL with a real path and a query string. The query is
 // present deliberately — NormaliseURL strips it, so it is bytes the legacy
@@ -152,14 +155,17 @@ func TestBenchGate_CheckRequestURLBeatsLegacy(t *testing.T) {
 	tf := benchFeed(1000)
 	u := benchProxyURL(t)
 
+	// Both arms assign into the same package-level sink so neither can be
+	// optimised away differently from the other; the verdict itself is not
+	// under test here (the differential covers it).
 	fast := testing.Benchmark(func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			tf.CheckRequestURL(u) //nolint:errcheck // verdict is not under test here
+			gateSink, _ = tf.CheckRequestURL(u)
 		}
 	})
 	legacy := testing.Benchmark(func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			tf.CheckURL(u.String()) //nolint:errcheck // verdict is not under test here
+			gateSink, _ = tf.CheckURL(u.String())
 		}
 	})
 	if fast.NsPerOp() >= legacy.NsPerOp() {

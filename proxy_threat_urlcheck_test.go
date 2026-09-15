@@ -66,7 +66,7 @@ func TestPreDispatch_URLThreatCheckBlocksThroughRequestPath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			r := httptest.NewRequest(http.MethodGet, tc.target, http.NoBody)
 			w := httptest.NewRecorder()
 			status, blocked := preDispatchBlocked(w, r, "203.0.113.7", r.URL.Hostname(), "req-1", "", AuthLogFields{})
 			switch {
@@ -95,7 +95,7 @@ func TestPreDispatch_URLThreatCheckBlocksThroughRequestPath(t *testing.T) {
 func TestPreDispatch_URLThreatCheckSkippedForCONNECT(t *testing.T) {
 	withURLThreatFeed(t, map[string]string{"http://evil.example.com/malware": "urlhaus"})
 
-	r := httptest.NewRequest(http.MethodConnect, "http://evil.example.com/malware", nil)
+	r := httptest.NewRequest(http.MethodConnect, "http://evil.example.com/malware", http.NoBody)
 	r.Method = http.MethodConnect
 	w := httptest.NewRecorder()
 	if status, blocked := preDispatchBlocked(w, r, "203.0.113.7", "evil.example.com", "req-2", "", AuthLogFields{}); blocked {
