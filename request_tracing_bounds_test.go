@@ -343,6 +343,60 @@ func TestSecReqID1_Control_AbsentHeadersStillMint(t *testing.T) {
 	}
 }
 
+// ─── recorded residual ──────────────────────────────────────────────────────
+
+// TestSecReqID1_Residual_DuplicateHeaderSecondValueIsForwarded PINS a residual
+// rather than asserting a fix, so a future reader finds it stated rather than
+// discovering it.
+//
+// A client may send X-Request-Id twice. Header.Get returns the FIRST value, so
+// that is the one Culvert validates, adopts, logs and mirrors — and when it is
+// acceptable the mint arm does not run, so the SECOND value is still on the
+// request map and is forwarded to the upstream.
+//
+// It is recorded and not fixed because it is bounded to exactly the place a
+// forward proxy is supposed to be transparent, and reaches nothing this change
+// is about:
+//
+//   - Culvert's own process log, response header and correlation identity all
+//     use reqID — the validated first value — so the log-forgery and
+//     log-amplification exposures are fully closed.
+//   - A client that can reach Culvert can generally reach the origin, and
+//     forwarding client headers is a forward proxy's defined behaviour; the
+//     value is not a framing header, so it enables no smuggling or desync.
+//   - net/http's own transport refuses to write a header value containing a
+//     control character (httpguts.ValidHeaderFieldValue), so the injection half
+//     fails the request rather than reaching the upstream.
+//
+// Collapsing duplicates would mean replacing Header.Get with a direct map index
+// on this path to see the slice, which is measurable work on the second
+// statement of handleRequest for a residual with no Culvert-side consequence.
+// If that is ever revisited, this test is where to start.
+func TestSecReqID1_Residual_DuplicateHeaderSecondValueIsForwarded(t *testing.T) {
+	resetTracingBoundsStateForTest()
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
+	r.Header.Add(headerRequestID, "good-id-1")
+	r.Header.Add(headerRequestID, "hostile id\x1b")
+	rec := httptest.NewRecorder()
+
+	got := setupRequestTracing(rec, r)
+
+	// The half that matters: what Culvert adopts, logs and mirrors is the
+	// validated first value, never the hostile second one.
+	if got != "good-id-1" {
+		t.Errorf("adopted request id = %q, want the validated first value", got)
+	}
+	if h := rec.Header().Get(headerRequestID); h != "good-id-1" {
+		t.Errorf("response header = %q, want the validated first value", h)
+	}
+	// The recorded residual. If a future change collapses duplicates, this
+	// assertion is the one to invert — deliberately, not by accident.
+	if n := len(r.Header.Values(headerRequestID)); n != 2 {
+		t.Errorf("forwarded header carries %d values, want the recorded 2 —"+
+			" if duplicates are now collapsed, update this test and the residual note", n)
+	}
+}
+
 // ─── defect proof ───────────────────────────────────────────────────────────
 
 // TestSecReqID1_DefectProof_PreFixShapeRetains rebuilds the pre-fix read inline
