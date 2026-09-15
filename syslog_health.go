@@ -331,9 +331,7 @@ func noteSyslogDeliveryRecovered(ev syslog.DeliveryEvent) {
 
 // syslogScheduleDegradeCheck is the timer seam. Tests substitute it to run the
 // scheduled evaluation synchronously instead of waiting out the threshold.
-var syslogScheduleDegradeCheck = func(d time.Duration, f func()) *time.Timer {
-	return time.AfterFunc(d, f)
-}
+var syslogScheduleDegradeCheck = time.AfterFunc
 
 // armSyslogDegradeCheck schedules ONE evaluation at the degradation threshold,
 // so the alert fires without anyone reading a surface.
@@ -701,7 +699,5 @@ func resetSyslogHealthForTest() {
 	}
 	syslogHealth.mu.Unlock()
 	setSyslogHealthClockForTest(nil)
-	syslogScheduleDegradeCheck = func(d time.Duration, f func()) *time.Timer {
-		return time.AfterFunc(d, f)
-	}
+	syslogScheduleDegradeCheck = time.AfterFunc
 }
