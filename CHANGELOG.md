@@ -9,6 +9,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Client-supplied tracing headers reached the process log unbounded
+  (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
+  second statement in `handleRequest`, ahead of the connection limiter, the IP
+  filter and authentication — and reads two headers the *client* chooses,
+  `X-Request-Id` and `Traceparent`. It bounded neither. The accepted request id
+  then reached roughly twenty process-log sites (every `POLICY_*` decision line
+  plus `AUTH_FAIL` / `IP_BLOCKED` / `RATE_LIMITED` / `BLOCKED` / `INVALID_HOST`)
+  as a bare `%s` inside the `{req_id=… identity=… action=…}` block, the response
+  header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
+  for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
+  but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
+  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
+  forensic log verbatim, and a space could inject extra `key=value` tokens into
+  the decision line's brace block. Nothing bounded the length at all: the proxy
+  listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
+  ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
+  into the process log — the same amplification CHAOS-63 measured against the
+  audit log, reached here through the unauthenticated data plane rather than the
+  admin API, and invisible to every storage-health surface because each of those
+  writes succeeds (CWE-778, OWASP A09:2021). Both headers are now bounded and
+  charset-checked where they are read: at most 128 bytes (request id) or 255
+  (traceparent), visible ASCII with no whitespace. A value that fails is treated
+  exactly as an absent one — a fresh id is minted and overwrites the hostile value
+  on the request, the response and the wire — so a tracing header can never decide
+  whether traffic flows. Rejections are counted as
+  `culvert_tracing_header_rejected_total{header=…}`, surfaced on `GET /api/stats`
+  and in the admin UI, and logged once per minute without ever echoing the
+  refused value.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
