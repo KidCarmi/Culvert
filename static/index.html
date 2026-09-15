@@ -10652,7 +10652,7 @@ async function loadSettings() {
       const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
       el.textContent = '✓ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
       el.style.color = 'var(--green)';
-      renderSyslogDrops(sl.drops, sl.panics);
+      renderSyslogDrops(sl.drops, sl.panics, sl);
     } else {
       // No forwarding configured - never leave a stale drop warning visible.
       hideSyslogDrops();
@@ -10818,11 +10818,37 @@ async function saveUIAllowIPs() {
 // renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
 // forwarding state so a stale amber warning can't survive a reconfigure/disable
 // (a new collector starts a fresh writer at Drops()==0; disabling clears it).
-function renderSyslogDrops(drops, panics) {
+// CHAOS-66: `st` carries the live delivery verdict from GET /api/syslog. The
+// cumulative drop count alone could not tell "a collector blip last Tuesday"
+// from "every record since 09:14 is being lost", so a CURRENT failure outranks
+// the historical count and is shown first. On a UDP target nothing here can
+// prove delivery at all, and the panel says so rather than letting a quiet
+// drop counter read as confirmation.
+function renderSyslogDrops(drops, panics, st) {
   const dropsEl = document.getElementById('s-syslog-drops');
   const n = drops || 0;
   const p = panics || 0;
   dropsEl.style.display = '';
+  st = st || {};
+  if (st.failing) {
+    const secs = st.failingSeconds || 0;
+    const reason = st.failingReason || 'unknown';
+    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
+      + (st.degraded ? 'SIEM forwarding is DOWN' : 'SIEM forwarding is failing')
+      + ' (' + reason + ', ' + secs + 's, ' + n + ' record' + (n === 1 ? '' : 's') + ' lost)'
+      + ' - records are not reaching the collector. The node-local audit log is unaffected'
+      + ' and is the recovery source; forwarding reconnects automatically.';
+    dropsEl.style.color = st.degraded ? 'var(--red,#c0392b)' : 'var(--warn,#b8860b)';
+    return;
+  }
+  if (st.deliveryConfirmable === false) {
+    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
+      + 'UDP cannot confirm delivery: a dead collector accepts every line silently, so a zero drop'
+      + ' count is not proof that anything arrived. Use tcp:// if the audit trail needs delivery assurance.'
+      + (n > 0 ? ' (' + n + ' local drops)' : '');
+    dropsEl.style.color = 'var(--warn,#b8860b)';
+    return;
+  }
   if (n > 0) {
     let msg = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started';
     // panics is a subset of drops - a recurring formatting bug reads very
@@ -10859,7 +10885,7 @@ async function saveSyslog() {
     el.style.color = 'var(--green)';
     // Reconfiguring points at a fresh writer whose drop counter starts at 0 -
     // reset the row rather than leaving a prior collector's stale warning up.
-    renderSyslogDrops(res.drops);
+    renderSyslogDrops(res.drops, res.panics, res);
     toast('Syslog configured', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -19292,6 +19318,12 @@ function resetBlockPage() {
              keep being enforced throughout — this is degraded freshness, not a dark
              control. Fires once per episode, cleared by an observed clean sync. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_feed_stale"> Threat feed stale (intelligence not refreshing)</label>
+        <!-- CHAOS-66: remote syslog/SIEM forwarding has been failing to deliver for
+             a sustained period, so the CENTRALIZED audit and request trail has a gap
+             for this node. The node-local audit log is unaffected and is the recovery
+             source. Fires once per episode, cleared by an observed delivery. Only
+             meaningful for tcp:// targets — UDP cannot detect a dead collector. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="siem_feed_down"> SIEM syslog feed not delivering (centralized audit gap)</label>
         <!-- CHAOS-57: the credential-verification cost governor has been refusing
              authentication attempts for a sustained period. bcrypt costs ~80 ms of a
              core and runs on the per-request proxy-auth path, so verification is

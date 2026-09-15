@@ -32,6 +32,12 @@ func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
 	sw.SetPanicObserver(func(recovered any) {
 		logger.Printf("ERROR syslog: recovered panic in delivery goroutine (line dropped): %q", sanitizeLog(fmt.Sprintf("%v", recovered)))
 	})
+	// CHAOS-66: the delivery-transition observer, wired at the same single
+	// construction chokepoint and for the same leaf-package-cannot-log reason.
+	// Without it a collector that dies after a successful connect drops every
+	// audit and request record with no log line, no metric movement and no
+	// alert — see syslog_health.go.
+	sw.SetDeliveryObserver(noteSyslogDelivery)
 	return sw, nil
 }
 
@@ -63,6 +69,18 @@ func InitSyslog(addr, syslogFmt string) error {
 		return err
 	}
 	globalSyslog = sw
+	// Arms the health plane for this Writer. A reconfigure builds a NEW Writer,
+	// so the episode gates are reset with it: the previous collector's episode
+	// says nothing about the new one.
+	noteSyslogConfigured(sw)
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
+	if !sw.DeliveryConfirmable() {
+		// Said once, at the one moment an operator is looking at this decision.
+		// A UDP feed cannot report a dead collector: NewWriter succeeds against
+		// one, and every line is written into the void with no error and no
+		// drop counted. The health plane reports this honestly rather than
+		// claiming a delivery guarantee it cannot make.
+		logger.Printf("Syslog: WARNING — UDP cannot confirm delivery; a dead collector accepts every line silently and no drop is counted. Use tcp:// if the audit trail needs delivery assurance.")
+	}
 	return nil
 }

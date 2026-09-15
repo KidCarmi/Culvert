@@ -1117,6 +1117,14 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
 	}
+	// CHAOS-66: the SIEM half of the same record. A collector that dies after a
+	// successful startup connect silently swallows every audit and request
+	// line, and before this was added no probe, metric or alert could see it.
+	// Reported, NEVER fatal — a node whose log feed is down is a fully serving
+	// gateway, and failing the probe would eject it over its logging pipeline.
+	if f, ok := syslogHealthzField(); ok {
+		resp["syslogFeed"] = f
+	}
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.
 	if n := reqlog.Backpressure(); n > 0 {
