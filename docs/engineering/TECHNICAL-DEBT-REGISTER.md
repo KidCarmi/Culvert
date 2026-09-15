@@ -607,3 +607,21 @@
   drift on `main`, all target files are unedited by any other pending PR in the set except the
   T-48 quintet which are mutually exclusive by design); `docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-05.md`
   (this pass's dated report) for the full audit trail.
+- **Update (2026-09-15):** Recurred. `main` has been static at `993b390` since before 2026-09-12, and
+  four `docs(governance)` PRs opened in that window are all still unmerged: #1372 (2026-09-12,
+  T-54 OCSP metric-name mismatches), #1373 (2026-09-12, CDR operator guide + doc-governance review),
+  #1380 (2026-09-13, T-55/T-56), #1395 (2026-09-14, T-21/T-32 risk-rating correction). All four report
+  `mergeable_state: clean` with green CI — but that alone is **not** sufficient evidence of
+  readiness, and checking only that would repeat this entry's own original mistake. Reading each PR's
+  actual review threads (`chatgpt-codex-connector` automated review) shows a real split: **#1372 and
+  #1373 have zero open threads — every one of 6 and 9 respectively was independently re-verified and
+  fixed in-PR — and are genuinely ready to merge now.** **#1380 (2 open threads) and #1395 (3 open
+  threads) are not ready**: on #1380, a claimed doc fix ("steering profile" terminology) is
+  demonstrably incomplete a few lines below the edited paragraph, and the report's "first frontend
+  terminology audit" premise is contradicted by two earlier, already-merged reports; on #1395, all
+  three of its own corrected risk-rating claims are independently disputed as inaccurate by the
+  reviewer. Recommended action, in order: merge #1372, then #1373 (disjoint files, no dependency
+  between them); leave #1380 and #1395 open pending one more edit pass addressing their respective
+  open threads. Full per-PR detail in `docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-15.md`.
+  This reconfirms the 2026-09-05 conclusion: the remaining step is a human merge/triage decision, not
+  another automated pass.
