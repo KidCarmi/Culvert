@@ -431,6 +431,6 @@ const (
 // thing under a mutex that already spans network operations.
 func jitteredReconnectWindow() time.Duration {
 	span := float64(reconnectWindow) * jitterFraction
-	delta := (rand.Float64()*2 - 1) * span
+	delta := (rand.Float64()*2 - 1) * span // #nosec G404 -- fleet spread, not crypto
 	return time.Duration(float64(reconnectWindow) + delta)
 }

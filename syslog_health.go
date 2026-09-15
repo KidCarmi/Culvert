@@ -168,6 +168,11 @@ type syslogHealthRecord struct {
 	// logAt / suppressed drive the rate-limited log line.
 	logAt      time.Time
 	suppressed int64
+
+	// degradeTimer fires once per episode, at the degradation threshold, so the
+	// alert does not depend on anyone reading a surface. See
+	// armSyslogDegradeCheck.
+	degradeTimer *time.Timer
 }
 
 var syslogHealth syslogHealthRecord
@@ -300,11 +305,16 @@ func noteSyslogDeliveryFailing(ev syslog.DeliveryEvent) {
 		logger.Printf("SYSLOG: SIEM forwarding is FAILING (reason=%q, %d lines lost so far) — audit and request records are not reaching the collector; the node-local audit log is unaffected",
 			sanitizeLog(string(ev.Reason)), ev.Drops)
 	}
+	// The episode has opened but is not degraded yet, so there is nothing to
+	// alert on now. Schedule the check that decides, so the page does not
+	// depend on someone scraping /metrics or opening the admin UI.
+	armSyslogDegradeCheck()
 }
 
 // noteSyslogDeliveryRecovered clears the episode on OBSERVED evidence — one
 // line the transport accepted.
 func noteSyslogDeliveryRecovered(ev syslog.DeliveryEvent) {
+	stopSyslogDegradeCheck()
 	syslogHealth.mu.Lock()
 	wasAlerted := syslogHealth.alerted
 	suppressed := syslogHealth.suppressed
@@ -319,14 +329,62 @@ func noteSyslogDeliveryRecovered(ev syslog.DeliveryEvent) {
 	}
 }
 
+// syslogScheduleDegradeCheck is the timer seam. Tests substitute it to run the
+// scheduled evaluation synchronously instead of waiting out the threshold.
+var syslogScheduleDegradeCheck = func(d time.Duration, f func()) *time.Timer {
+	return time.AfterFunc(d, f)
+}
+
+// armSyslogDegradeCheck schedules ONE evaluation at the degradation threshold,
+// so the alert fires without anyone reading a surface.
+//
+// This exists because the read-driven evaluation alone was not enough, and the
+// gap was the same shape as this whole sweep's finding (Codex review, P1). The
+// delivery observer fires once, at the START of an episode — before the
+// threshold, so nothing is degraded yet — and every other evaluation hung off a
+// /metrics scrape or a /api/diagnostics read. A deployment that configured the
+// `siem_feed_down` webhook but does not scrape Prometheus and does not have the
+// admin UI open would therefore have its SIEM feed down indefinitely with the
+// webhook never firing: the paging surface depended on unrelated HTTP traffic.
+//
+// Scheduling it removes that dependency entirely. The timer is armed once per
+// episode when it opens and stopped on recovery; if the feed recovers first,
+// the evaluation runs against a non-degraded snapshot and does nothing, so the
+// timer is safe to leave armed. The fire-once latch is unchanged, so a feed
+// that stays down still pages exactly once.
+//
+// A margin is added so the timer cannot land a hair before the threshold and
+// evaluate a snapshot that is one nanosecond short of degraded.
+func armSyslogDegradeCheck() {
+	syslogHealth.mu.Lock()
+	if syslogHealth.degradeTimer != nil {
+		syslogHealth.degradeTimer.Stop()
+	}
+	syslogHealth.degradeTimer = syslogScheduleDegradeCheck(
+		syslogDegradedAfter+time.Second, evaluateSyslogDegradation)
+	syslogHealth.mu.Unlock()
+}
+
+// stopSyslogDegradeCheck cancels a pending scheduled evaluation on recovery.
+func stopSyslogDegradeCheck() {
+	syslogHealth.mu.Lock()
+	if syslogHealth.degradeTimer != nil {
+		syslogHealth.degradeTimer.Stop()
+		syslogHealth.degradeTimer = nil
+	}
+	syslogHealth.mu.Unlock()
+}
+
 // evaluateSyslogDegradation fires the down alert at most once per episode,
 // once the feed has been failing for longer than syslogDegradedAfter.
 //
-// Called from the surfaces that read the state (metrics scrape, diagnostics,
-// /healthz) rather than from a timer: the degradation is a derived property of
-// two timestamps, so there is nothing to tick, and evaluating on read means the
-// verdict can never be latched stale. Same discipline as
-// clusterRateLimitFreshness (CHAOS-61) — freshness is EVALUATED, never latched.
+// Reached two ways, and it needs both. From the SCHEDULED check above, which is
+// what makes the alert independent of anyone looking; and from the surfaces
+// that read the state (metrics scrape, diagnostics, /healthz), which makes the
+// verdict immediate for a reader and means it can never be latched stale. Same
+// discipline as clusterRateLimitFreshness (CHAOS-61) — freshness is EVALUATED,
+// never latched — with the timer added so "evaluated" does not quietly mean
+// "evaluated only if observed".
 func evaluateSyslogDegradation() {
 	snap := syslogFeedState()
 	if !snap.Degraded {
@@ -613,6 +671,11 @@ func syslogHealthzField() (map[string]any, bool) {
 	if !snap.Failing && snap.Drops == 0 {
 		return nil, false
 	}
+	// Evaluate here too. The scheduled check is what makes the alert
+	// independent of readers, but a liveness probe polling /healthz is a
+	// reader that costs nothing to honour — and the comment on this plane used
+	// to claim /healthz evaluated when it did not (Codex review).
+	evaluateSyslogDegradation()
 	return map[string]any{
 		"failing":  snap.Failing,
 		"degraded": snap.Degraded,
@@ -632,6 +695,13 @@ func resetSyslogHealthForTest() {
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
+	if syslogHealth.degradeTimer != nil {
+		syslogHealth.degradeTimer.Stop()
+		syslogHealth.degradeTimer = nil
+	}
 	syslogHealth.mu.Unlock()
 	setSyslogHealthClockForTest(nil)
+	syslogScheduleDegradeCheck = func(d time.Duration, f func()) *time.Timer {
+		return time.AfterFunc(d, f)
+	}
 }

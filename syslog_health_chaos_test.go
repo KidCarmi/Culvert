@@ -47,7 +47,7 @@ type syslogTestCollector struct {
 
 func startSyslogCollector(t *testing.T) *syslogTestCollector {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestChaos66_RecoveryRequiresObservedDelivery(t *testing.T) {
 	setSyslogHealthClockForTest(nil)
 
 	// Bring the collector back at the SAME address and deliver.
-	ln, err := net.Listen("tcp", col.addr)
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", col.addr)
 	if err != nil {
 		t.Skipf("could not rebind %s to complete the recovery half: %v", col.addr, err)
 	}
@@ -491,7 +491,7 @@ func TestChaos66_HealthyFeedIsStillReportedHealthy(t *testing.T) {
 // that loss, and every surface must therefore say that "active" means the
 // socket is open, never that the collector received anything.
 func TestChaos66_UDPReportsDeliveryUnconfirmable(t *testing.T) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	pc, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,5 +576,245 @@ func TestChaos66_HealthStateDoesNotBlockOnAWedgedCollector(t *testing.T) {
 	case <-done:
 	case <-time.After(20 * time.Second):
 		t.Fatal("the health plane blocked; it must never wait on the delivery path")
+	}
+}
+
+// TestChaos66_AlertFiresWithoutAnyoneReadingASurface is the gate for the Codex
+// P1 finding, and it is this sweep's own defect committed one level up.
+//
+// The delivery observer fires once, at the START of an episode — before the
+// threshold, so nothing is degraded yet — and every other evaluation hung off a
+// /metrics scrape or a /api/diagnostics read. So a deployment that configured
+// the `siem_feed_down` webhook but does not scrape Prometheus and does not have
+// the admin UI open would have its SIEM feed down indefinitely with the webhook
+// never firing: the paging surface depended on unrelated HTTP traffic.
+//
+// That is precisely the class of defect this whole sweep exists to close — a
+// signal that only fires if someone happens to look — reintroduced inside the
+// fix for it.
+//
+// The gate therefore NEVER touches a read surface: no syslogWritePrometheus, no
+// checkSyslogFeed, no syslogHealthzField. Verified failing against the
+// unscheduled shape.
+func TestChaos66_AlertFiresWithoutAnyoneReadingASurface(t *testing.T) {
+	col := startSyslogCollector(t)
+	cleanup := armSyslogFeed(t, "tcp://"+col.addr)
+	defer cleanup()
+
+	// Capture the scheduled check instead of waiting out the threshold.
+	var mu sync.Mutex
+	var scheduled []func()
+	var delay time.Duration
+	prevSched := syslogScheduleDegradeCheck
+	syslogScheduleDegradeCheck = func(d time.Duration, f func()) *time.Timer {
+		mu.Lock()
+		delay = d
+		scheduled = append(scheduled, f)
+		mu.Unlock()
+		return time.NewTimer(time.Hour) // never fires on its own in the test
+	}
+	defer func() { syslogScheduleDegradeCheck = prevSched }()
+
+	var alerts []string
+	prevAlert := fireSyslogDownAlert
+	fireSyslogDownAlert = func(d string) {
+		mu.Lock()
+		alerts = append(alerts, d)
+		mu.Unlock()
+	}
+	defer func() { fireSyslogDownAlert = prevAlert }()
+
+	col.waitAccepted(t)
+	col.kill()
+	time.Sleep(50 * time.Millisecond)
+	if !pushUntilFailing(t, 20*time.Second) {
+		t.Fatal("inconclusive: no failure episode opened")
+	}
+
+	mu.Lock()
+	n, d := len(scheduled), delay
+	mu.Unlock()
+	if n == 0 {
+		t.Fatal("DEFECT: opening a failure episode scheduled no degradation check — the alert would only fire if someone scraped /metrics or opened the admin UI")
+	}
+	if d < syslogDegradedAfter {
+		t.Errorf("scheduled check at %v, before the %v threshold — it would evaluate a not-yet-degraded snapshot and never page", d, syslogDegradedAfter)
+	}
+
+	// The threshold passes. Run the scheduled check — and nothing else.
+	base := time.Now()
+	setSyslogHealthClockForTest(func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) })
+	defer setSyslogHealthClockForTest(nil)
+
+	mu.Lock()
+	fns := append([]func(){}, scheduled...)
+	mu.Unlock()
+	for _, f := range fns {
+		f()
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alerts) == 0 {
+		t.Error("DEFECT: the scheduled check fired no alert; a SIEM outage on a deployment that does not scrape Prometheus would page nobody")
+	}
+	if len(alerts) > 1 {
+		t.Errorf("alert fired %d times for one episode; the fire-once latch must survive the scheduled path", len(alerts))
+	}
+}
+
+// TestChaos66_RecoveryCancelsTheScheduledCheck is the CONTROL for the gate
+// above: scheduling must not become a second way to page a feed that recovered.
+func TestChaos66_RecoveryCancelsTheScheduledCheck(t *testing.T) {
+	col := startSyslogCollector(t)
+	cleanup := armSyslogFeed(t, "tcp://"+col.addr)
+	defer cleanup()
+
+	var mu sync.Mutex
+	var alerts []string
+	prevAlert := fireSyslogDownAlert
+	fireSyslogDownAlert = func(d string) { mu.Lock(); alerts = append(alerts, d); mu.Unlock() }
+	defer func() { fireSyslogDownAlert = prevAlert }()
+
+	var scheduled []func()
+	prevSched := syslogScheduleDegradeCheck
+	syslogScheduleDegradeCheck = func(d time.Duration, f func()) *time.Timer {
+		mu.Lock()
+		scheduled = append(scheduled, f)
+		mu.Unlock()
+		return time.NewTimer(time.Hour)
+	}
+	defer func() { syslogScheduleDegradeCheck = prevSched }()
+
+	col.waitAccepted(t)
+	col.kill()
+	time.Sleep(50 * time.Millisecond)
+	if !pushUntilFailing(t, 20*time.Second) {
+		t.Fatal("inconclusive: no failure episode opened")
+	}
+
+	// The collector comes back and a line is delivered: the episode is over.
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", col.addr)
+	if err != nil {
+		t.Skipf("could not rebind %s: %v", col.addr, err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && !globalSyslog.FailingSince().IsZero() {
+		globalSyslog.WriteAudit(map[string]string{"action": "admin.login"})
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !globalSyslog.FailingSince().IsZero() {
+		t.Skip("inconclusive: the feed did not recover in time")
+	}
+
+	// A late scheduled check must find nothing to page about.
+	mu.Lock()
+	fns := append([]func(){}, scheduled...)
+	mu.Unlock()
+	for _, f := range fns {
+		f()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alerts) != 0 {
+		t.Errorf("a recovered feed was paged by a late scheduled check: %v", alerts)
+	}
+}
+
+// TestChaos66_ReconfigureDetachesThePreviousWriter is the gate for the Codex P2
+// finding.
+//
+// InitSyslog used to overwrite globalSyslog and walk away — leaking the old
+// writer's drain goroutine and socket, which was a pre-existing bug, and which
+// CHAOS-66 made worse by giving that abandoned writer a callback into the
+// SHARED process-wide health record. An old recovery arriving while the NEW
+// target is failing would clear `syslogHealth.alerted`, re-arm the fire-once
+// latch and double-page; an old failure would be logged as the new target's.
+//
+// Verified failing against the shape that neither detached nor closed.
+func TestChaos66_ReconfigureDetachesThePreviousWriter(t *testing.T) {
+	colA := startSyslogCollector(t)
+	cleanup := armSyslogFeed(t, "tcp://"+colA.addr)
+	defer cleanup()
+	colA.waitAccepted(t)
+
+	// Open a failure episode on writer A.
+	colA.kill()
+	time.Sleep(50 * time.Millisecond)
+	if !pushUntilFailing(t, 20*time.Second) {
+		t.Fatal("inconclusive: no failure episode opened on the first writer")
+	}
+	old := globalSyslog
+
+	// Reconfigure to a different collector.
+	colB := startSyslogCollector(t)
+	defer colB.kill()
+	if err := InitSyslog("tcp://"+colB.addr, "rfc5424"); err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+	syslogConfigured, syslogConfiguredAddr = "tcp://"+colB.addr, "tcp://"+colB.addr
+	if old == globalSyslog {
+		t.Fatal("reconfigure did not build a new writer")
+	}
+
+	// The NEW target is now in a paged state.
+	syslogHealth.mu.Lock()
+	syslogHealth.alerted = true
+	syslogHealth.mu.Unlock()
+
+	// Collector A comes back and the ABANDONED writer gets a chance to deliver
+	// — which, pre-fix, fired DeliveryRecovered into the shared record.
+	lnA, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", colA.addr)
+	if err != nil {
+		t.Skipf("could not rebind %s: %v", colA.addr, err)
+	}
+	defer lnA.Close()
+	go func() {
+		for {
+			c, err := lnA.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	// Push for longer than the reconnect suppression window (~5s +/-20%), or
+	// the abandoned writer never attempts a reconnect and the gate proves
+	// nothing — it passed against the pre-fix shape on the first attempt for
+	// exactly this reason.
+	for i := 0; i < 160; i++ {
+		old.WriteAudit(map[string]string{"action": "stale"})
+		time.Sleep(75 * time.Millisecond)
+	}
+
+	syslogHealth.mu.Lock()
+	stillAlerted := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if !stillAlerted {
+		t.Error("DEFECT: the abandoned writer's recovery cleared the fire-once latch for the NEW target — the next evaluation would page a second time for one episode")
 	}
 }

@@ -6595,6 +6595,59 @@ one safe.* Here the existing safety came from an unwind path, not from the
 structure the comment appeared to describe — so the comment was a correct
 statement about the old observer and a false guarantee for the new one.
 
+### The review round: two more defects in the fix (Codex, PR #1405)
+
+**P1 — the alert only fired if somebody happened to look, which is this sweep's
+own finding one level up.** The delivery observer fires once, at the START of an
+episode — before the threshold, so nothing is degraded yet — and every other
+evaluation hung off a `/metrics` scrape or a `/api/diagnostics` read. So a
+deployment that configured the `siem_feed_down` webhook but does not scrape
+Prometheus and does not have the admin UI open would have had its SIEM feed down
+indefinitely with the webhook never firing: **the paging surface depended on
+unrelated HTTP traffic.** Worse, the comment on `evaluateSyslogDegradation`
+claimed `/healthz` was one of the surfaces that drove it, and `/healthz` did not
+call it at all — the same class of false claim this section opens by describing.
+
+Closed by scheduling ONE evaluation at the threshold when an episode opens
+(`armSyslogDegradeCheck`), cancelled on recovery, plus honouring the `/healthz`
+read so the comment becomes true. The fire-once latch is unchanged, so a feed
+that stays down still pages exactly once, and a feed that recovers first finds a
+non-degraded snapshot and does nothing.
+`TestChaos66_AlertFiresWithoutAnyoneReadingASurface` never touches a read
+surface and was verified failing against the unscheduled shape;
+`RecoveryCancelsTheScheduledCheck` is its control, because scheduling must not
+become a second way to page a feed that already recovered.
+
+**P2 — an abandoned writer kept a callback into shared state.** `InitSyslog`
+overwrote `globalSyslog` and walked away. That leaked the old writer's drain
+goroutine and socket on every reconfigure, which was PRE-EXISTING; CHAOS-66 made
+it worse by handing that abandoned writer a delivery observer into the
+process-wide health record. An old recovery arriving while the NEW target was
+failing would clear `syslogHealth.alerted`, re-arm the fire-once latch and
+double-page; an old failure would be logged as the new target's.
+
+Closed by detaching the observer FIRST — after which the old writer cannot reach
+any shared state whatever its drain goroutine does — and then closing it
+asynchronously, which also closes the pre-existing leak. Close is async because
+it waits up to `closeWait` (~7s) for the final flush, and neither a boot nor an
+admin API call should block on a wedged collector to change targets.
+
+**The P2 gate did not work on its first attempt, and the reason is worth
+keeping**: it pushed on the abandoned writer for 2 s, which is INSIDE the ~5 s
+reconnect suppression window, so that writer never attempted a reconnect, never
+recovered, and the gate passed against the very shape it was written to catch. A
+gate whose fault-injection window is shorter than the mechanism it is injecting
+into proves nothing while looking green. Widened past the backoff, it reproduces
+the defect (`DEFECT: the abandoned writer's recovery cleared the fire-once latch
+for the NEW target`).
+
+**Both findings share a shape with the sweep itself**: the first is a signal
+that only fires when observed, the second is state mutated by something nobody
+is still thinking about. Neither was reachable from the gates as originally
+written, because both gates asked "does the mechanism work?" and neither asked
+"does it work when nothing else is happening?" and "does it stop working when
+its owner is replaced?".
+
 ### What is deliberately NOT done
 
 **No `/readyz` row and no `/healthz` failure.** A node whose SIEM feed is down

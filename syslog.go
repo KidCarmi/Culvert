@@ -68,6 +68,29 @@ func InitSyslog(addr, syslogFmt string) error {
 	if err != nil {
 		return err
 	}
+	// Retire the PREVIOUS writer before installing the new one.
+	//
+	// InitSyslog used to overwrite globalSyslog and walk away, which leaked the
+	// old writer's drain goroutine and socket on every reconfigure. CHAOS-66
+	// made that worse rather than better: the abandoned writer still carried a
+	// delivery observer into the SHARED process-wide health record, so its
+	// queued or in-flight deliveries could log an old collector's failure as
+	// though it belonged to the new target, or — worse — clear
+	// `syslogHealth.alerted` on an old recovery while the NEW target was
+	// failing, re-arming the fire-once latch and double-paging (Codex review,
+	// P2).
+	//
+	// Detaching the observer FIRST is what makes this safe: after that the old
+	// writer cannot reach any shared state, whatever its drain goroutine does
+	// on the way out. Close is then asynchronous because it waits up to
+	// closeWait (~7s) for the final flush, and neither a boot nor an admin API
+	// call should block on a wedged collector to change targets. The panic
+	// observer is deliberately LEFT attached: a panic is a bug worth seeing
+	// whichever writer raised it, and it only logs.
+	if old := globalSyslog; old != nil {
+		old.SetDeliveryObserver(nil)
+		go func() { _ = old.Close() }()
+	}
 	globalSyslog = sw
 	// Arms the health plane for this Writer. A reconfigure builds a NEW Writer,
 	// so the episode gates are reset with it: the previous collector's episode
