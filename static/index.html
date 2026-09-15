@@ -2543,6 +2543,10 @@ Firefox (all platforms):
               <span class="info-key">Process Log I/O Backpressure</span>
               <span class="info-val" id="s-process-log-backpressure">-</span>
             </div>
+            <div class="info-item" title="Client-supplied X-Request-Id / Traceparent headers that were replaced with a generated value because they were over-long or carried bytes that must not reach a log line (control characters, whitespace). The request itself is never refused - only the correlation id is Culvert's instead of the client's. Sustained growth means a source is attempting log forgery or trying to flood the process log through the proxy data plane.">
+              <span class="info-key">Tracing Headers Replaced</span>
+              <span class="info-val" id="s-tracing-header-rejected">-</span>
+            </div>
           </div>
         </div>
 
@@ -8316,6 +8320,16 @@ async function fetchStats() {
       const pbp = s.processLogBackpressure || 0;
       splbp.textContent = pbp > 0 ? fmt(pbp) + ' lines delayed' : 'None';
       splbp.style.color = pbp > 0 ? 'var(--warn,#b8860b)' : '';
+    }
+    // Replaced client tracing headers (SEC-REQID-1): the request still succeeds,
+    // so nothing else an admin can see changes when a source feeds the data
+    // plane hostile X-Request-Id / Traceparent values. Shown beside the log I/O
+    // rows because what it protects is the integrity of the process log.
+    const sthr = document.getElementById('s-tracing-header-rejected');
+    if (sthr) {
+      const thr = s.tracingHeaderRejected || 0;
+      sthr.textContent = thr > 0 ? fmt(thr) + ' replaced' : 'None';
+      sthr.style.color = thr > 0 ? 'var(--warn,#b8860b)' : '';
     }
     // Oversized-username login attempts (CHAOS-63): each one is refused with a
     // plain 400 and otherwise leaves no trace an admin would see without a
