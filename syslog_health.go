@@ -113,6 +113,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/syslog"
@@ -171,9 +172,35 @@ type syslogHealthRecord struct {
 
 var syslogHealth syslogHealthRecord
 
-// syslogHealthNow is the clock seam. Tests drive the degradation threshold
+// syslogHealthClock is the clock seam. Tests drive the degradation threshold
 // deterministically instead of sleeping past a 60-second window.
-var syslogHealthNow = time.Now
+//
+// It is an atomic.Pointer rather than a plain `var f = time.Now`, which is the
+// shape the other health planes use, because THIS seam is read from a
+// BACKGROUND goroutine: noteSyslogDeliveryFailing runs on the engine's drain
+// goroutine via the delivery observer, so a test swapping the clock races it.
+// `-race` caught exactly that. Production never reassigns it, so the race was
+// test-only — but a seam that is read off-goroutine has to be published safely
+// or the gate that would catch a real regression gets muted as "the flaky one".
+var syslogHealthClock atomic.Pointer[func() time.Time]
+
+// syslogHealthNow reads the clock seam, defaulting to the real clock.
+func syslogHealthNow() time.Time {
+	if p := syslogHealthClock.Load(); p != nil {
+		return (*p)()
+	}
+	return time.Now()
+}
+
+// setSyslogHealthClockForTest installs a deterministic clock; nil restores the
+// real one. Test isolation only.
+func setSyslogHealthClockForTest(fn func() time.Time) {
+	if fn == nil {
+		syslogHealthClock.Store(nil)
+		return
+	}
+	syslogHealthClock.Store(&fn)
+}
 
 // fireSyslogDownAlert delivers the `siem_feed_down` alert.
 //
@@ -606,5 +633,5 @@ func resetSyslogHealthForTest() {
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
 	syslogHealth.mu.Unlock()
-	syslogHealthNow = time.Now
+	setSyslogHealthClockForTest(nil)
 }

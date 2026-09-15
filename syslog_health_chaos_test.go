@@ -27,11 +27,22 @@ import (
 )
 
 // syslogTestCollector is a TCP collector a test can kill.
+//
+// `killed` and `accepted` close a race that made the headline gate flaky under
+// full-suite load: kill() closes the listener and every conn it has REGISTERED,
+// but a connection accepted after that iteration would stay open and keep
+// absorbing writes, so the feed never observed a failure and the gate timed out
+// at 20s having proved nothing. Two halves fix it — the test waits for the
+// first accept before killing (so there is something to close), and the accept
+// loop closes anything that arrives after the kill.
 type syslogTestCollector struct {
-	ln    net.Listener
-	addr  string
-	mu    sync.Mutex
-	conns []net.Conn
+	ln       net.Listener
+	addr     string
+	mu       sync.Mutex
+	conns    []net.Conn
+	killed   bool
+	accepted chan struct{}
+	once     sync.Once
 }
 
 func startSyslogCollector(t *testing.T) *syslogTestCollector {
@@ -40,7 +51,7 @@ func startSyslogCollector(t *testing.T) *syslogTestCollector {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	c := &syslogTestCollector{ln: ln, addr: ln.Addr().String()}
+	c := &syslogTestCollector{ln: ln, addr: ln.Addr().String(), accepted: make(chan struct{})}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -48,8 +59,17 @@ func startSyslogCollector(t *testing.T) *syslogTestCollector {
 				return
 			}
 			c.mu.Lock()
+			if c.killed {
+				// Arrived after the kill — close it rather than registering it,
+				// or it would absorb writes from a feed that is supposed to be
+				// looking at a dead collector.
+				c.mu.Unlock()
+				conn.Close()
+				continue
+			}
 			c.conns = append(c.conns, conn)
 			c.mu.Unlock()
+			c.once.Do(func() { close(c.accepted) })
 			go func() {
 				buf := make([]byte, 4096)
 				for {
@@ -63,11 +83,25 @@ func startSyslogCollector(t *testing.T) *syslogTestCollector {
 	return c
 }
 
+// waitAccepted blocks until the collector has registered its first connection,
+// so a subsequent kill() has something to close. Without it, kill() can run
+// between the dial and the accept, leave the established conn open, and the
+// gate then watches a feed that is happily delivering to a "dead" collector.
+func (c *syslogTestCollector) waitAccepted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.accepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("collector never accepted a connection")
+	}
+}
+
 // kill closes the listener and every accepted connection: the collector is
 // gone, exactly as it is after a SIEM restart or a firewall change.
 func (c *syslogTestCollector) kill() {
 	c.ln.Close()
 	c.mu.Lock()
+	c.killed = true
 	for _, conn := range c.conns {
 		conn.Close()
 	}
@@ -125,6 +159,7 @@ func TestChaos66_DeadCollectorIsNotReportedHealthy(t *testing.T) {
 		t.Fatalf("a live collector must read healthy, got %v: %s", got.Status, got.Message)
 	}
 
+	col.waitAccepted(t)
 	col.kill()
 	time.Sleep(50 * time.Millisecond)
 
@@ -155,6 +190,7 @@ func TestChaos66_SIEMLossReachesPrometheus(t *testing.T) {
 	col := startSyslogCollector(t)
 	cleanup := armSyslogFeed(t, "tcp://"+col.addr)
 	defer cleanup()
+	col.waitAccepted(t)
 	col.kill()
 	time.Sleep(50 * time.Millisecond)
 	if !pushUntilFailing(t, 20*time.Second) {
@@ -217,8 +253,8 @@ func TestChaos66_IdleFeedIsNeverDegraded(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(24 * time.Hour) }
-	defer func() { syslogHealthNow = time.Now }()
+	setSyslogHealthClockForTest(func() time.Time { return base.Add(24 * time.Hour) })
+	defer func() { setSyslogHealthClockForTest(nil) }()
 
 	snap := syslogFeedState()
 	if snap.Failing || snap.Degraded {
@@ -236,6 +272,7 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 	col := startSyslogCollector(t)
 	cleanup := armSyslogFeed(t, "tcp://"+col.addr)
 	defer cleanup()
+	col.waitAccepted(t)
 	col.kill()
 	time.Sleep(50 * time.Millisecond)
 	if !pushUntilFailing(t, 20*time.Second) {
@@ -253,8 +290,8 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 
 	// Same episode, now past the threshold.
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) }
-	defer func() { syslogHealthNow = time.Now }()
+	setSyslogHealthClockForTest(func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) })
+	defer func() { setSyslogHealthClockForTest(nil) }()
 	if snap := syslogFeedState(); !snap.Degraded {
 		t.Errorf("not degraded after %v of continuous failure", snap.FailingFor)
 	}
@@ -268,6 +305,7 @@ func TestChaos66_RecoveryRequiresObservedDelivery(t *testing.T) {
 	col := startSyslogCollector(t)
 	cleanup := armSyslogFeed(t, "tcp://"+col.addr)
 	defer cleanup()
+	col.waitAccepted(t)
 	col.kill()
 	time.Sleep(50 * time.Millisecond)
 	if !pushUntilFailing(t, 20*time.Second) {
@@ -276,11 +314,11 @@ func TestChaos66_RecoveryRequiresObservedDelivery(t *testing.T) {
 
 	// Time passes. Nothing is sent. The episode must stay open.
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(2 * time.Hour) }
+	setSyslogHealthClockForTest(func() time.Time { return base.Add(2 * time.Hour) })
 	if snap := syslogFeedState(); !snap.Failing {
 		t.Error("the episode cleared on elapsed time alone — a wedged feed would report itself healthy by going quiet")
 	}
-	syslogHealthNow = time.Now
+	setSyslogHealthClockForTest(nil)
 
 	// Bring the collector back at the SAME address and deliver.
 	ln, err := net.Listen("tcp", col.addr)
@@ -342,6 +380,7 @@ func TestChaos66_AlertFiresOncePerEpisodeAndDetailIsBounded(t *testing.T) {
 	}
 	defer func() { fireSyslogDownAlert = prev }()
 
+	col.waitAccepted(t)
 	col.kill()
 	time.Sleep(50 * time.Millisecond)
 	if !pushUntilFailing(t, 20*time.Second) {
@@ -349,8 +388,8 @@ func TestChaos66_AlertFiresOncePerEpisodeAndDetailIsBounded(t *testing.T) {
 	}
 
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) }
-	defer func() { syslogHealthNow = time.Now }()
+	setSyslogHealthClockForTest(func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) })
+	defer func() { setSyslogHealthClockForTest(nil) }()
 
 	for i := 0; i < 25; i++ {
 		globalSyslog.WriteAudit(map[string]string{"action": "req"})
@@ -389,6 +428,7 @@ func TestChaos66_HealthzReportsButNeverFails(t *testing.T) {
 	col := startSyslogCollector(t)
 	cleanup := armSyslogFeed(t, "tcp://"+col.addr)
 	defer cleanup()
+	col.waitAccepted(t)
 	col.kill()
 	time.Sleep(50 * time.Millisecond)
 	if !pushUntilFailing(t, 20*time.Second) {
