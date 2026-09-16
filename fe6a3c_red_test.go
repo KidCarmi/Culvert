@@ -54,6 +54,7 @@ package main
 // non-readable path; the audit is not operation-keyed). K5 and B5 pass.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -69,10 +70,10 @@ import (
 )
 
 const (
-	fe6a3cLegacyURLA = "ldap://legacy-a.corp.example:389"
-	fe6a3cLegacyURLB = "ldap://legacy-b.corp.example:389"
-	fe6a3cSecretP1   = "LEGACY-BIND-P1-never-disclosed-3c"
-	fe6a3cSecretP2   = "LEGACY-BIND-P2-never-disclosed-3c"
+	fe6a3cLegacyURLA   = "ldap://legacy-a.corp.example:389"
+	fe6a3cLegacyURLB   = "ldap://legacy-b.corp.example:389"
+	fe6a3cLegacyBindP1 = "LEGACY-BIND-P1-never-disclosed-3c"
+	fe6a3cLegacyBindP2 = "LEGACY-BIND-P2-never-disclosed-3c"
 )
 
 // fe6a3cLegacyGET reads the legacy block read model.
@@ -175,7 +176,7 @@ func fe6a3cEnabledRegistryLDAP(t *testing.T) (regPath string) {
 	if code, m := fe6acCreateFenced(t, body, "operationId="+testOperationID()); code != http.StatusOK {
 		t.Fatalf("enabled create = %d %v", code, m)
 	}
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cSecretP1))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cLegacyBindP1))
 	prevProvider := cfg.snapshotAuthBackend().provider
 	t.Cleanup(func() { cfg.SetProvider(prevProvider) })
 	return regPath
@@ -202,9 +203,9 @@ func fe6a3cSettingsPath(t *testing.T, p string) {
 func TestFE6A3C_S1_ImportRefusesStaleReviewedSourceWithZeroMutation(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	reg, regPath := fe6aLegacyLDAPFixture(t, settings)
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cSecretP1))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cLegacyBindP1))
 	tokenA := fe6a3cSourceToken(t)
-	if strings.Contains(tokenA, fe6a3cSecretP1) || strings.Contains(tokenA, "legacy-a") {
+	if strings.Contains(tokenA, fe6a3cLegacyBindP1) || strings.Contains(tokenA, "legacy-a") {
 		t.Fatalf("the source token discloses source material: %q", tokenA)
 	}
 	docRev := fe6acDocRevision(t)
@@ -213,7 +214,7 @@ func TestFE6A3C_S1_ImportRefusesStaleReviewedSourceWithZeroMutation(t *testing.T
 
 	// The ceremony was opened on A; the YAML source is now B (a restart with
 	// an edited config.yaml, or a live reload).
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLB, fe6a3cSecretP1))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLB, fe6a3cLegacyBindP1))
 	tokenB := fe6a3cSourceToken(t)
 	if tokenB == tokenA {
 		t.Fatalf("a different source URL produced the same token %q", tokenA)
@@ -256,7 +257,7 @@ func TestFE6A3C_S1_ImportRefusesStaleReviewedSourceWithZeroMutation(t *testing.T
 func TestFE6A3C_S3_ExactSourceTokenImportsOnceAndReplaysAcrossRestart(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	_, regPath := fe6aLegacyLDAPFixture(t, settings)
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cSecretP1))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cLegacyBindP1))
 	token := fe6a3cSourceToken(t)
 	docRev := fe6acDocRevision(t)
 	since := fe6aSince()
@@ -273,13 +274,13 @@ func TestFE6A3C_S3_ExactSourceTokenImportsOnceAndReplaysAcrossRestart(t *testing
 
 	// The same operationId with a DIFFERENT reviewed source is a different
 	// candidate: refused, never replayed as if it were this import.
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLB, fe6a3cSecretP1))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLB, fe6a3cLegacyBindP1))
 	other := fe6a3cSourceToken(t)
 	code, m = fe6a2cImport(t, "documentRevision="+docRev, "operationId="+opID, "importSourceRevision="+other)
 	if code != http.StatusConflict || m["code"] != "operation_mismatch" {
 		t.Fatalf("same operation, different reviewed source = %d %v, want 409 operation_mismatch", code, m)
 	}
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cSecretP1))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cLegacyBindP1))
 
 	for _, phase := range []string{"before restart", "after restart"} {
 		if phase == "after restart" {
@@ -306,12 +307,12 @@ func TestFE6A3C_S3_ExactSourceTokenImportsOnceAndReplaysAcrossRestart(t *testing
 func TestFE6A3C_S4_CredentialOnlySourceChangeInvalidatesTokenWithoutDisclosure(t *testing.T) {
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	_, regPath := fe6aLegacyLDAPFixture(t, settings)
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cSecretP1))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cLegacyBindP1))
 	token1 := fe6a3cSourceToken(t)
 	docRev := fe6acDocRevision(t)
 
 	// Same URL, base DN, bind DN, filter — only the credential differs.
-	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cSecretP2))
+	withLegacyLDAPYAML(t, fe6a3cLegacyYAML(fe6a3cLegacyURLA, fe6a3cLegacyBindP2))
 	get := fe6a3cLegacyGET(t)
 	token2, _ := get["importSourceRevision"].(string)
 	if token2 == "" || token2 == token1 {
@@ -329,12 +330,12 @@ func TestFE6A3C_S4_CredentialOnlySourceChangeInvalidatesTokenWithoutDisclosure(t
 	raw, _ := json.Marshal(get)
 	rawRefusal, _ := json.Marshal(m)
 	for _, s := range []string{token1, token2, string(raw), string(rawRefusal)} {
-		if strings.Contains(s, fe6a3cSecretP1) || strings.Contains(s, fe6a3cSecretP2) {
+		if strings.Contains(s, fe6a3cLegacyBindP1) || strings.Contains(s, fe6a3cLegacyBindP2) {
 			t.Fatalf("credential material disclosed: %q", s)
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(filepath.Dir(regPath), idpOperationsFile)); err == nil {
-		if strings.Contains(string(b), fe6a3cSecretP1) || strings.Contains(string(b), fe6a3cSecretP2) {
+		if strings.Contains(string(b), fe6a3cLegacyBindP1) || strings.Contains(string(b), fe6a3cLegacyBindP2) {
 			t.Fatal("the ledger file carries a legacy credential")
 		}
 	}
@@ -451,7 +452,7 @@ func fe6a3cConcurrentMintTrial(t *testing.T) {
 		if errs[i] != nil {
 			t.Fatalf("caller %d: %v", i, errs[i])
 		}
-		if string(keys[i]) != string(published) {
+		if !bytes.Equal(keys[i], published) {
 			t.Fatalf("caller %d read a key that is NOT the published generation — a commitment it produced can never be verified", i)
 		}
 	}

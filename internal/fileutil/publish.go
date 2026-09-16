@@ -30,52 +30,11 @@ import (
 // the write/link steps through SetPublishIOHookForTest, so a caller's
 // fail-closed reaction to each fault is provable.
 func PublishExclusive(path string, data []byte, perm os.FileMode) (created bool, err error) {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	f, err := os.CreateTemp(dir, base+".tmp.*")
+	tmp, err := writeTempSynced(path, data, perm)
 	if err != nil {
-		return false, fmt.Errorf("publish %s: create temp: %w", path, err)
+		return false, err
 	}
-	tmp := f.Name()
 	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
-	if err := f.Chmod(perm); err != nil {
-		_ = f.Close()
-		cleanup()
-		return false, fmt.Errorf("publish %s: chmod: %w", path, err)
-	}
-	if err := publishHookStep("write"); err != nil {
-		_ = f.Close()
-		cleanup()
-		return false, fmt.Errorf("publish %s: write: %w", path, err)
-	}
-	toWrite := data
-	if publishHookStep("short_write") != nil {
-		toWrite = data[:len(data)/2] // injected: the kernel accepted fewer bytes
-	}
-	n, werr := f.Write(toWrite)
-	if werr == nil && n != len(data) {
-		werr = fmt.Errorf("%w: %d of %d bytes", errShortPublishWrite, n, len(data))
-	}
-	if werr != nil {
-		_ = f.Close()
-		cleanup()
-		return false, fmt.Errorf("publish %s: write: %w", path, werr)
-	}
-	if err := beforeSync("file", tmp); err != nil {
-		_ = f.Close()
-		cleanup()
-		return false, fmt.Errorf("publish %s: fsync: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		cleanup()
-		return false, fmt.Errorf("publish %s: fsync: %w", path, err)
-	}
-	noteSync("file", tmp)
-	if err := f.Close(); err != nil {
-		cleanup()
-		return false, fmt.Errorf("publish %s: close: %w", path, err)
-	}
 	if err := publishHookStep("link"); err != nil {
 		cleanup()
 		return false, fmt.Errorf("publish %s: link: %w", path, err)
@@ -88,12 +47,69 @@ func PublishExclusive(path string, data []byte, perm os.FileMode) (created bool,
 		return false, fmt.Errorf("publish %s: link: %w", path, err)
 	}
 	cleanup() // the content now lives under its published name only
+	if err := syncParentDir(path); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// writeTempSynced writes data to a unique temp file beside path (perm
+// applied), refuses a short write, fsyncs and closes it. On any failure
+// the temp file is removed and the error returned.
+func writeTempSynced(path string, data []byte, perm os.FileMode) (tmp string, err error) {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	f, err := os.CreateTemp(dir, base+".tmp.*")
+	if err != nil {
+		return "", fmt.Errorf("publish %s: create temp: %w", path, err)
+	}
+	tmp = f.Name()
+	fail := func(step string, e error) (string, error) {
+		_ = f.Close()
+		_ = os.Remove(tmp) // #nosec G104 -- best-effort cleanup
+		return "", fmt.Errorf("publish %s: %s: %w", path, step, e)
+	}
+	if err := f.Chmod(perm); err != nil {
+		return fail("chmod", err)
+	}
+	if err := publishHookStep("write"); err != nil {
+		return fail("write", err)
+	}
+	toWrite := data
+	if publishHookStep("short_write") != nil {
+		toWrite = data[:len(data)/2] // injected: the kernel accepted fewer bytes
+	}
+	n, werr := f.Write(toWrite)
+	if werr == nil && n != len(data) {
+		werr = fmt.Errorf("%w: %d of %d bytes", errShortPublishWrite, n, len(data))
+	}
+	if werr != nil {
+		return fail("write", werr)
+	}
+	if err := beforeSync("file", tmp); err != nil {
+		return fail("fsync", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail("fsync", err)
+	}
+	noteSync("file", tmp)
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp) // #nosec G104 -- best-effort cleanup
+		return "", fmt.Errorf("publish %s: close: %w", path, err)
+	}
+	return tmp, nil
+}
+
+// syncParentDir fsyncs path's directory so a freshly linked name survives a
+// crash; filesystems that cannot sync a directory are tolerated.
+func syncParentDir(path string) error {
+	dir := filepath.Dir(path)
 	if err := beforeSync("dir", dir); err != nil {
-		return true, fmt.Errorf("publish %s: parent dir fsync: %w", path, err)
+		return fmt.Errorf("publish %s: parent dir fsync: %w", path, err)
 	}
 	d, err := os.Open(dir)
 	if err != nil {
-		return true, fmt.Errorf("publish %s: open parent dir: %w", path, err)
+		return fmt.Errorf("publish %s: open parent dir: %w", path, err)
 	}
 	syncErr := d.Sync()
 	closeErr := d.Close()
@@ -101,13 +117,13 @@ func PublishExclusive(path string, data []byte, perm os.FileMode) (created bool,
 		!errors.Is(syncErr, syscall.EINVAL) &&
 		!errors.Is(syncErr, syscall.ENOTSUP) &&
 		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
-		return true, fmt.Errorf("publish %s: parent dir fsync: %w", path, syncErr)
+		return fmt.Errorf("publish %s: parent dir fsync: %w", path, syncErr)
 	}
 	if closeErr != nil && syncErr == nil {
-		return true, fmt.Errorf("publish %s: parent dir close: %w", path, closeErr)
+		return fmt.Errorf("publish %s: parent dir close: %w", path, closeErr)
 	}
 	noteSync("dir", dir)
-	return true, nil
+	return nil
 }
 
 // errShortPublishWrite: the kernel accepted fewer bytes than offered.

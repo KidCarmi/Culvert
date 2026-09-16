@@ -16,6 +16,7 @@ package main
 //	     leaves no temp residue
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -108,11 +109,11 @@ func TestFE6A3C_KF3_ExclusiveLoserReadsTheWinner(t *testing.T) {
 		t.Fatalf("second publication: created=%v err=%v, want created=false, nil", created, err)
 	}
 	got, err := os.ReadFile(path)
-	if err != nil || string(got) != string(winner) {
+	if err != nil || !bytes.Equal(got, winner) {
 		t.Fatalf("published bytes = %q (%v), want the winner's", got, err)
 	}
 	key, err := idpLoadOrMintCandidateKey(path)
-	if err != nil || string(key) != string(winner) {
+	if err != nil || !bytes.Equal(key, winner) {
 		t.Fatalf("loader = %q (%v), want the winner's key", key, err)
 	}
 	if res := fe6a3cDirResidue(t, dir); len(res) != 0 {
