@@ -195,6 +195,27 @@ test.describe("FE-6A.2 W — provider writes on the write appliance", () => {
     const iq = new URL(importCall?.url ?? "/", "http://x").searchParams;
     expect(iq.get("documentRevision")).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(iq.get("operationId")).toMatch(/^[0-9a-f-]{36}$/);
+    // Round 3 (Blocker 1): the import is bound to the legacy source the
+    // administrator REVIEWED — the server-owned importSourceRevision from
+    // GET /api/idp/legacy-ldap is echoed on the POST and in the answer.
+    const reviewedToken = iq.get("importSourceRevision") ?? "";
+    expect(reviewedToken).toMatch(/^isr1:[0-9a-f]{64}$/);
+    const legacyBody = w.bodies.find(
+      (b) =>
+        b.includes('"present":true') && b.includes('"importSourceRevision"'),
+    );
+    expect(
+      legacyBody,
+      "the legacy read model published the token",
+    ).toBeTruthy();
+    expect(legacyBody).toContain(`"importSourceRevision":"${reviewedToken}"`);
+    const importBody = w.bodies.find(
+      (b) => b.includes('"imported":true') && b.includes(reviewedToken),
+    );
+    expect(
+      importBody,
+      "the import answer echoes the reviewed token",
+    ).toBeTruthy();
     expect(
       await page.evaluate(() =>
         sessionStorage.getItem("culvert.idp.operation-recovery.v1"),

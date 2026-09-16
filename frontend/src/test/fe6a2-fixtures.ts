@@ -135,6 +135,11 @@ export const LIST = {
   },
 };
 
+/** FE-6A.2 round 3 — the server-owned, keyed, non-disclosing commitment
+ * over the legacy source the administrator reviews; the import echoes it. */
+export const SOURCE_TOKEN = "isr1:" + "a".repeat(64);
+export const OTHER_SOURCE_TOKEN = "isr1:" + "b".repeat(64);
+
 export const LEGACY_PRESENT = {
   present: true,
   active: true,
@@ -152,6 +157,7 @@ export const LEGACY_PRESENT = {
   cacheTtlSeconds: 300,
   cutoverConfirmValue: LEGACY_URL,
   cutoverDurability: "not_retired",
+  importSourceRevision: SOURCE_TOKEN,
 };
 
 export const LEGACY_ABSENT = {
