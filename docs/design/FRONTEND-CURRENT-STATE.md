@@ -22,6 +22,11 @@
   server-owned `importSourceRevision` token (required, stale-refused, echoed and decoder-
   verified); the candidate key is published durably/exclusively and never re-minted; boot
   reconciliation covers missing/unreadable/corrupt settings with a persist-first audit.
+  Round 4 (2026-09-16): storage recovery re-reads the authoritative settings file under the
+  save boundary (adopt a restored record / refuse while unreadable / mint only when nothing
+  durable exists); the operation lookup is action-discriminated (an `idp.import` record
+  exposes its token) and the lost-response Recover binds on operationId + action + token;
+  the candidate key is trusted only as a regular, non-symlink, owner-only file.
   Operator runbooks: `docs/operator/idp-registry-recovery.md`,
   `docs/operator/administrator-account-recovery.md`.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`

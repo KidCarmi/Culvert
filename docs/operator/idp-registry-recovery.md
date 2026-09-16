@@ -65,6 +65,17 @@ corrupt; the registry still serves and writes, but operation-identified
 creates/cutovers are refused until the file is repaired (see the GET's
 `operations.degradedReason`).
 
+**Recovery is action-bound (round 4, Blocker 2).** `GET
+/api/idp/operations/{id}` is an action-discriminated record: an
+`idp.import` record exposes the NON-SECRET `importSourceRevision` it was
+bound to and no other action does. The browser's Recover clears an import
+marker and reports the commit ONLY when the record's `operationId`, its
+`action` and its `importSourceRevision` all equal the marker's (the marker
+carries the exact reviewed token the POST was dispatched with); a record
+under the same id with another action or another token is rendered as
+"not bound — outcome unproven": the marker is kept, nothing is re-sent and
+no success is claimed.
+
 ## 3. Unproven outcomes
 
 A 2xx whose media type is not JSON, whose body does not decode, whose
@@ -123,10 +134,32 @@ routed through one state machine:
   stays PENDING. The legacy authenticator stays shadowed, nothing is minted
   or audited, `cutoverDurability` reports `pending_reconciliation`, a
   corrupt file is quarantined (`admin_settings.json.corrupt.<ns>`, never
-  overwritten), and NO save serialises the sentinel without its record. The
-  first successful save after storage recovers reconciles the pending
-  transition exactly once — the record travels with that save and its audit
-  follows it.
+  overwritten), and NO save serialises the sentinel without its record.
+
+**Storage recovery re-reads the file (round 4, Blocker 1).** While the
+observation is pending, EVERY admin save first re-reads and parses the
+authoritative `admin_settings.json` under the save boundary — the boot's
+outcome is never trusted as the truth about the file:
+
+- the file is readable again and carries a durable cutover ⇒ that EXACT
+  record and sentinel are adopted (same `operationId`, same trigger, same
+  actor), the observation is consumed, and NO new audit is emitted — a
+  restored file wins over the boot-time guess, with or without a restart;
+- the file is still unreadable, or readable but unparseable ⇒ the save is
+  **refused** (a persist failure on the API; the process log says
+  `save REFUSED — admin settings: the authoritative file is still
+  unreadable …`) with zero file and zero runtime mutation — the evidence is
+  never replaced by an unrelated write, and the observation stays pending
+  for a later recovery;
+- the file is missing (quarantined at boot, or removed since) or readable
+  with no sentinel ⇒ nothing durable exists: the observed transition is
+  minted, persisted by that save, and audited exactly once after it.
+
+The process log records the load posture the boot observed (`readable`,
+`missing`, `unreadable`, `corrupt_quarantined`) beside every recovery
+decision. Remedy for a refused save: restore readability of the original
+file (nothing else is needed — the next save adopts it), or deliberately
+remove it to start from an empty store.
 
 A completed admin cutover therefore keeps its record identity and emits no
 new audit on any later boot; an observed transition is audited once, after
@@ -210,6 +243,18 @@ refused until the ORIGINAL file is restored and the node restarted — a fresh
 key would verify none of the recorded intents, so every exact-candidate
 replay would answer `operation_mismatch`. Only a ledger with no
 commitment-bearing record (a fresh node) mints a key.
+
+**The confidentiality boundary is validated before the key is trusted
+(round 4, Blocker 3).** The key is inspected with non-following metadata
+on every load: it must be a regular file, not a symlink, with no group or
+world permission bit (`0600`). A symlink, a non-regular object or a
+group/world-readable mode is `operation_ledger_degraded` (reason
+`unreadable`, detail naming the boundary) — the key is **never** re-moded
+or replaced, with or without commitments beside it, because a key readable
+beyond the appliance would turn the published `importSourceRevision` into
+an offline guessing oracle for short bind passwords and a silent "fix"
+would hide that exposure. Remedy: restore a regular `0600` key file at the
+path (`chmod 600`, or replace the link with the original file) and restart.
 
 ## 7. Secrets
 
