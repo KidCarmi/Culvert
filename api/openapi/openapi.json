@@ -478,7 +478,7 @@
       },
       "AuthRefusal": {
         "additionalProperties": false,
-        "description": "FE-6A.0 typed refusal shared by the Identity Providers and Administrators surfaces. `code` is bounded: invalid_input (400), forbidden / invalid_credentials (403), not_found / vanished (404), stale / last_admin / user_exists / referenced / confirm_mismatch / not_degraded / repair_unavailable / operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown (409), precondition_required / operation_id_required / cutover_confirm_required (428), preflight_failed (422, `current.step`/`current.reason` — see IdPPreflightRefusal), persist_failed / outcome_unknown (500), provider_compile_failed (502), registry_degraded / persistence_not_configured / operation_ledger_degraded / operation_ledger_full / operation_unsettled (503), method_not_allowed (405). `current` carries typed facts for the retry (revision, documentRevision, generation, references, confirmValue, detail, reason, operationId, state, code). A refusal mutates nothing, audits no success and publishes no cluster snapshot.",
+        "description": "FE-6A.0 typed refusal shared by the Identity Providers and Administrators surfaces. `code` is bounded: invalid_input (400), forbidden / invalid_credentials (403), not_found / vanished (404), stale / last_admin / user_exists / referenced / confirm_mismatch / not_degraded / repair_unavailable / operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown / import_source_stale (409, `current.importSourceRevision`), precondition_required / operation_id_required / cutover_confirm_required / import_source_required (428), preflight_failed (422, `current.step`/`current.reason` — see IdPPreflightRefusal), persist_failed / outcome_unknown (500), provider_compile_failed (502), registry_degraded / persistence_not_configured / operation_ledger_degraded / operation_ledger_full / operation_unsettled (503), method_not_allowed (405). `current` carries typed facts for the retry (revision, documentRevision, generation, references, confirmValue, detail, reason, operationId, state, code). A refusal mutates nothing, audits no success and publishes no cluster snapshot.",
         "properties": {
           "code": {
             "type": "string"
@@ -3274,6 +3274,10 @@
                 "description": "The registry document revision AFTER the import.",
                 "type": "string"
               },
+              "importSourceRevision": {
+                "description": "Round 3 — the reviewed-source token this import (or replay) was bound to, echoed verbatim; the client accepts the answer only when it equals the token it reviewed.",
+                "type": "string"
+              },
               "imported": {
                 "enum": [
                   true
@@ -3362,6 +3366,10 @@
           "cutoverDurability": {
             "$ref": "#/components/schemas/LegacyLDAPCutoverDurability"
           },
+          "importSourceRevision": {
+            "description": "FE-6A.2 round 3 (Blocker 1) — the server-owned, keyed, NON-DISCLOSING commitment (`isr1:<64 hex>`, HMAC under the node-local candidate key) over EVERY security-effective field an import would copy — the bind credential VALUE included. POST /api/idp/legacy-ldap/import must echo it as ?importSourceRevision=; a source that changed since it was reviewed (any field, credential-only changes included) is refused 409 import_source_stale before anything is written. The literal `unavailable` means no usable ledger key exists on this node (the import is then refused as operation_ledger_degraded). Always emitted while the block is present.",
+            "type": "string"
+          },
           "present": {
             "enum": [
               true
@@ -3418,6 +3426,7 @@
           "tlsSkipVerify",
           "cacheTtlSeconds",
           "cutoverConfirmValue",
+          "importSourceRevision",
           "cutoverDurability"
         ],
         "type": "object"
@@ -16077,7 +16086,7 @@
     },
     "/api/idp/legacy-ldap/import": {
       "post": {
-        "description": "Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`\nblock, copying every security-effective field (including the stored\nbind credential, which never transits the browser). The administrator\nthen tests and enables the profile — the explicit, downgrade-safe\nmigration path into the IdP registry. The YAML file is never\nmodified. 404 when no legacy ldap block is configured.\n\nFE-6A.2 correction — the import is a FENCED, OPERATION-IDENTIFIED\nmutation with the create's durable-ledger semantics: `documentRevision`\n(the loaded IdPList.revision; absent ⇒ 428 precondition_required, moved ⇒\n409 stale, both with `current.documentRevision`, decided inside the\nregistry transaction) and a client UUID `operationId` (absent ⇒ 428\noperation_id_required) are REQUIRED. A known operationId replays its\nrecorded outcome (`replayed:true`, nothing written twice); a different\ncandidate under a known id is 409 operation_mismatch. The answer is\naction-bound: `imported:true`, the disabled profile's identity and entry\nrevision, the RESULTING `documentRevision`, the echoed `operationId`, the\nlegacy `source` identity (never its credential) and the fleet fact.\n",
+        "description": "Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`\nblock, copying every security-effective field (including the stored\nbind credential, which never transits the browser). The administrator\nthen tests and enables the profile — the explicit, downgrade-safe\nmigration path into the IdP registry. The YAML file is never\nmodified. 404 when no legacy ldap block is configured.\n\nFE-6A.2 correction — the import is a FENCED, OPERATION-IDENTIFIED\nmutation with the create's durable-ledger semantics: `documentRevision`\n(the loaded IdPList.revision; absent ⇒ 428 precondition_required, moved ⇒\n409 stale, both with `current.documentRevision`, decided inside the\nregistry transaction) and a client UUID `operationId` (absent ⇒ 428\noperation_id_required) are REQUIRED. A known operationId replays its\nrecorded outcome (`replayed:true`, nothing written twice); a different\ncandidate under a known id is 409 operation_mismatch. The answer is\naction-bound: `imported:true`, the disabled profile's identity and entry\nrevision, the RESULTING `documentRevision`, the echoed `operationId`, the\nlegacy `source` identity (never its credential) and the fleet fact.\n\nRound 3 (Blocker 1) — the import is bound to the source the administrator\nREVIEWED: `importSourceRevision` (the token GET /api/idp/legacy-ldap\npublished) is REQUIRED (absent ⇒ 428 import_source_required); a token that\nis not the CURRENT source's — the YAML changed, credential included, or the\nnode restarted on an edited config — is 409 import_source_stale carrying\n`current.importSourceRevision`, decided BEFORE any ledger intent or registry\nwrite. The operation record is bound to the token; a replay must name it\n(a different token under a known operationId ⇒ 409 operation_mismatch),\nand success/replay answers echo it.\n",
         "operationId": "importLegacyLDAP",
         "parameters": [
           {
@@ -16096,6 +16105,15 @@
             "required": true,
             "schema": {
               "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The reviewed legacy source's token (LegacyLDAPPresent.importSourceRevision). Absent ⇒ 428 import_source_required; not the current source ⇒ 409 import_source_stale (+ `current.importSourceRevision`), nothing written.",
+            "in": "query",
+            "name": "importSourceRevision",
+            "required": true,
+            "schema": {
               "type": "string"
             }
           }

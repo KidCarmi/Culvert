@@ -1247,6 +1247,31 @@ func idpReplayKnownOperation(w http.ResponseWriter, ops *idpOperationStore, opID
 	return true
 }
 
+// idpReplayKnownImport is the import's replay gate (round 3, Blocker 1): a
+// known operationId replays its recorded outcome ONLY when the re-dispatch
+// names the reviewed source token the intent was bound to; any other token
+// is a different candidate (409 operation_mismatch). The current YAML is
+// deliberately NOT consulted here — a committed import's answer is the
+// recorded truth even after the source moved on.
+func idpReplayKnownImport(w http.ResponseWriter, ops *idpOperationStore, opID, reviewed string) bool {
+	prev, err := ops.Get(opID)
+	if err != nil {
+		writeIdPRefusal(w, err)
+		return true
+	}
+	if prev == nil {
+		return false
+	}
+	if !prev.matchesImportSource(reviewed) {
+		writeRefusal(w, http.StatusConflict, refusalOperationMismatch,
+			"this operationId was already used for an import of a different reviewed source; generate a new operationId for a new import",
+			map[string]any{"operationId": prev.OperationID, "state": prev.State})
+		return true
+	}
+	apiIdPReplayOperation(w, prev, prev.SpecDigest, prev.CandidateCommitment)
+	return true
+}
+
 // idpRecordCommittedOperation persists the terminal record of a committed
 // create BEFORE success is reported (round 3, Blocker 1). A failed terminal
 // persist leaves the durable `pending` intent as the truth and answers the

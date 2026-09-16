@@ -172,7 +172,7 @@ func TestFE6A2C_R1_ImportRefusesStaleFenceWithZeroMutation(t *testing.T) {
 	since := fe6aSince()
 	op := testOperationID()
 
-	code, m := fe6a2cImport(t, "documentRevision="+stale, "operationId="+op)
+	code, m := fe6a2cImport(t, "documentRevision="+stale, "operationId="+op, "importSourceRevision="+fe6a3cSourceToken(t))
 	if code != http.StatusConflict || m["code"] != "stale" {
 		t.Fatalf("stale import = %d %v, want 409 stale", code, m)
 	}
@@ -188,7 +188,7 @@ func TestFE6A2C_R1_ImportRefusesStaleFenceWithZeroMutation(t *testing.T) {
 	}
 
 	// No fence at all ⇒ 428 precondition_required with the current value.
-	code, m = fe6a2cImport(t, "operationId="+testOperationID())
+	code, m = fe6a2cImport(t, "operationId="+testOperationID(), "importSourceRevision="+fe6a3cSourceToken(t))
 	if code != http.StatusPreconditionRequired || m["code"] != "precondition_required" {
 		t.Fatalf("unfenced import = %d %v, want 428 precondition_required", code, m)
 	}
@@ -197,7 +197,7 @@ func TestFE6A2C_R1_ImportRefusesStaleFenceWithZeroMutation(t *testing.T) {
 	}
 	// No operation identity ⇒ 428 operation_id_required (a lost response
 	// could otherwise only be "recovered" by a second import).
-	code, m = fe6a2cImport(t, "documentRevision="+fe6acDocRevision(t))
+	code, m = fe6a2cImport(t, "documentRevision="+fe6acDocRevision(t), "importSourceRevision="+fe6a3cSourceToken(t))
 	if code != http.StatusPreconditionRequired || m["code"] != "operation_id_required" {
 		t.Fatalf("unidentified import = %d %v, want 428 operation_id_required", code, m)
 	}
@@ -213,7 +213,7 @@ func TestFE6A2C_R2_LostImportRepeatIsOneProfileOneAudit(t *testing.T) {
 	op := testOperationID()
 	fence := fe6acDocRevision(t)
 
-	code, m := fe6a2cImport(t, "documentRevision="+fence, "operationId="+op)
+	code, m := fe6a2cImport(t, "documentRevision="+fence, "operationId="+op, "importSourceRevision="+fe6a3cSourceToken(t))
 	if code != http.StatusOK {
 		t.Fatalf("import = %d %v", code, m)
 	}
@@ -248,7 +248,7 @@ func TestFE6A2C_R2_LostImportRepeatIsOneProfileOneAudit(t *testing.T) {
 	}
 
 	// The response was lost: the SAME operation is re-sent (same fence).
-	code, m2 := fe6a2cImport(t, "documentRevision="+fence, "operationId="+op)
+	code, m2 := fe6a2cImport(t, "documentRevision="+fence, "operationId="+op, "importSourceRevision="+fe6a3cSourceToken(t))
 	if code != http.StatusOK || m2["replayed"] != true || m2["id"] != id {
 		t.Fatalf("repeat import = %d %v, want the replayed recorded result for %s", code, m2, id)
 	}
@@ -258,7 +258,7 @@ func TestFE6A2C_R2_LostImportRepeatIsOneProfileOneAudit(t *testing.T) {
 
 	// RESTART — the registry and its ledger reload from disk.
 	fe6a2cRestartRegistry(t, regPath)
-	code, m3 := fe6a2cImport(t, "documentRevision="+fence, "operationId="+op)
+	code, m3 := fe6a2cImport(t, "documentRevision="+fence, "operationId="+op, "importSourceRevision="+fe6a3cSourceToken(t))
 	if code != http.StatusOK || m3["replayed"] != true || m3["id"] != id {
 		t.Fatalf("repeat import after restart = %d %v, want replayed", code, m3)
 	}

@@ -342,9 +342,23 @@ func LoadAdminSettings(path string) {
 		// (2D-C final §7–§8): the finalize pass writes the minimal identity
 		// ledger, claiming ownership of nothing else.
 		finalizeRewriteSeedIdentities()
+		// Round 3 (Blocker 3): a MISSING file is a known durable truth — no
+		// completed cutover exists — so an observed legacy-LDAP transition
+		// is recorded now: the record is persisted WITH its sentinel first
+		// and the operation-keyed audit follows the successful save.
+		if reconcileLegacyLDAPBootObservation(false) {
+			legacyLDAPCutoverDurableFlag.Store(false)
+			adminSettingsSave()
+		}
+		enforceLegacyLDAPShadowing()
 		return
 	}
 	if err != nil {
+		// Round 3 (Blocker 3): an UNREADABLE file is an UNKNOWN truth — the
+		// boot observation stays pending (fail closed: the legacy
+		// authenticator stays shadowed, nothing is minted or audited, and no
+		// save serialises the sentinel without its record) until the first
+		// save after storage recovery reconciles it exactly once.
 		// Read error on an EXISTING file (EACCES/EIO): the content may be intact, so do
 		// NOT quarantine (a rename could move a healthy file aside on a transient
 		// permission blip — the documented state-corruption posture). Surface it
@@ -589,6 +603,13 @@ func applyLegacyLDAPRetirement(s *AdminSettings) {
 		if s.LegacyLDAPCutover != nil {
 			rec := *s.LegacyLDAPCutover
 			legacyLDAPCutoverRec.Store(&rec)
+			// Round 3 (Blocker 3): a durable record whose audit was never
+			// proven (crash between the record's save and the audit)
+			// completes the SAME identity's audit exactly once, then clears
+			// the flag durably.
+			if rec.AuditPending && completeLegacyLDAPRetirementAudit() {
+				adminSettingsSave()
+			}
 		}
 	}
 	// FE-6A.2 correction (Blocker 4): the boot observation is reconciled
@@ -999,6 +1020,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		return applyAdminSettingsOverridesUnpersisted(ov, rewriteApply, rewriteTarget, upstreamApply, upstreamDoc)
 	}
 
+	// (adminSettingsMu is held: read the path directly.)
+	if legacyLDAPBootReconcilePending() && legacyLDAPRetired() && legacyLDAPCutover() == nil && adminSettingsPath != "" {
+		if reconcileLegacyLDAPBootObservation(false) {
+			legacyLDAPCutoverDurableFlag.Store(false)
+		}
+	}
 	s := AdminSettings{
 		DefaultAction:          defaultPolicyAction(),
 		RequireCommit:          requireCommitEnabled(),
@@ -1016,8 +1043,13 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		TrustForwardedHeaders:  trustForwardedHeaders,
 		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
-		LegacyLDAPRetired:      legacyLDAPRetired(),
-		LegacyLDAPCutover:      legacyLDAPCutover(),
+		// Round 3 (Blocker 3): a boot observation still pending its durable
+		// reconciliation (unreadable/corrupt settings load) never serialises
+		// the sentinel without its record — this save IS the storage
+		// recovery, so the pending transition is reconciled here exactly
+		// once (record minted, audit after the write) and travels with it.
+		LegacyLDAPRetired: legacyLDAPRetired() && !legacyLDAPBootReconcilePending(),
+		LegacyLDAPCutover: legacyLDAPCutover(),
 	}
 	if ov.legacyCutover != nil {
 		rec := *ov.legacyCutover
@@ -1160,9 +1192,15 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		ov.applyOnSuccess()
 	}
 	// The file just written carries LegacyLDAPRetired == legacyLDAPRetired()
-	// (or the override that set it), so a runtime cutover is now durable.
-	if legacyLDAPRetired() {
+	// (or the override that set it), so a runtime cutover is now durable —
+	// and an observed transition's audit may now be completed (round 3,
+	// Blocker 3: persist-first; the flag it clears is persisted by the
+	// follow-up save, and a lost follow-up re-appends nothing).
+	if legacyLDAPRetired() && !legacyLDAPBootReconcilePending() {
 		legacyLDAPCutoverDurableFlag.Store(true)
+		if completeLegacyLDAPRetirementAudit() {
+			adminSettingsSave()
+		}
 	}
 	return nil
 }
@@ -1184,10 +1222,12 @@ func applyAdminSettingsOverridesUnpersisted(ov adminSaveOverrides, rewriteApply 
 	if ov.applyOnSuccess != nil {
 		ov.applyOnSuccess()
 	}
-	// The file just written carries LegacyLDAPRetired == legacyLDAPRetired()
-	// (or the override that set it), so a runtime cutover is now durable.
+	// No settings file is configured: nothing can be more durable than the
+	// process, so the cutover counts as "durable" for this node's posture
+	// and an observed transition's audit is completed here (once).
 	if legacyLDAPRetired() {
 		legacyLDAPCutoverDurableFlag.Store(true)
+		completeLegacyLDAPRetirementAudit()
 	}
 	return nil
 }

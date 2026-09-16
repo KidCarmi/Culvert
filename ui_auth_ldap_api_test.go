@@ -216,11 +216,13 @@ func withLegacyLDAPYAML(t *testing.T, c *LDAPConfig) {
 	// legacy_ldap_retired flag — snapshot/restore it too, or it leaks into
 	// every later test's cfg.IsConfigured().
 	prevRetired := legacyLDAPRetiredFlag.Load()
+	prevObserved := legacyLDAPBootObserved.Load()
 	t.Cleanup(func() {
 		legacyLDAPYAMLState.mu.Lock()
 		legacyLDAPYAMLState.cfg = prev
 		legacyLDAPYAMLState.mu.Unlock()
 		legacyLDAPRetiredFlag.Store(prevRetired)
+		legacyLDAPBootObserved.Store(prevObserved)
 	})
 }
 
@@ -270,7 +272,8 @@ func TestAPIIdPLegacyLDAPImport_CreatesDisabledProfilePreservingSecurityFields(t
 	w := httptest.NewRecorder()
 	// FE-6A.2 correction (Blocker 1): the import is fenced on the document
 	// revision and operation-identified.
-	apiIdPLegacyLDAPImport(w, jsonReq(http.MethodPost, "/api/idp/legacy-ldap/import?documentRevision="+idpRegistry.DocumentRevision()+"&operationId="+testOperationID(), nil))
+	// Round 3 (Blocker 1): … and bound to the REVIEWED source token.
+	apiIdPLegacyLDAPImport(w, jsonReq(http.MethodPost, "/api/idp/legacy-ldap/import?documentRevision="+idpRegistry.DocumentRevision()+"&operationId="+testOperationID()+"&importSourceRevision="+fe6a3cSourceToken(t), nil))
 	assertStatus(t, w, http.StatusOK)
 	body := w.Body.String()
 	if strings.Contains(body, "legacy-secret") {

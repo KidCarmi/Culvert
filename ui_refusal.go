@@ -47,6 +47,8 @@ const (
 	refusalCutoverConfirmRequired = "cutover_confirm_required"  // 428: ?cutoverConfirm= absent on a cutover-bearing write
 	refusalPreflightFailed        = "preflight_failed"          // 422: an ENABLED LDAP write did not pass the directory connection preflight at the write boundary (FE-6A.2 correction, Blocker 3): current.{step, reason} bounded, nothing written
 	refusalOperationMismatch      = "operation_mismatch"        // 409: operationId reused for a different candidate
+	refusalImportSourceRequired   = "import_source_required"    // 428: a legacy import names no reviewed source token (round 3, Blocker 1)
+	refusalImportSourceStale      = "import_source_stale"       // 409: the reviewed source token is not the CURRENT legacy source (current.importSourceRevision), decided before any write
 	refusalOperationInProgress    = "operation_in_progress"     // 409: the same operation is still being decided
 	refusalOperationAborted       = "operation_aborted"         // 409: replay of an operation that aborted
 	refusalOperationUnknown       = "operation_outcome_unknown" // 409: replay of a split outcome awaiting reconciliation

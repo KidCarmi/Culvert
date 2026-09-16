@@ -12,6 +12,7 @@ package main
 // logged, cached, or audited.
 
 import (
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -96,6 +97,12 @@ func apiIdPLegacyLDAP(w http.ResponseWriter, r *http.Request) {
 		// FE-6A.2: the SERVER-required confirmation value for the authority
 		// cutover — a cutover-bearing write must echo it as ?cutoverConfirm=.
 		"cutoverConfirmValue": c.URL,
+		// Round 3 (Blocker 1): the server-owned keyed commitment over the
+		// import source the administrator is reviewing — every security-
+		// effective field including the credential VALUE, disclosing none.
+		// The import must echo it; "unavailable" when the ledger key is
+		// unusable (the import is then refused as operation_ledger_degraded).
+		"importSourceRevision": legacyLDAPImportSourceToken(c),
 	}
 	// FE-6A.0 R7: the operation-identified cutover record (actor,
 	// operationId, the enabling profile + registry revision it was bound to)
@@ -164,17 +171,35 @@ func apiIdPLegacyLDAPImport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p := &IdPProfile{
-		Name:    "Imported legacy LDAP",
-		Type:    IdPTypeLDAP,
-		Enabled: false, // explicit test-then-enable; never activates blind
-		LDAP:    legacyLDAPToProfileConfig(c),
+	// Round 3 (Blocker 1): the import is bound to the source the
+	// administrator REVIEWED — the token GET /api/idp/legacy-ldap published —
+	// never to whatever YAML is current at dispatch time.
+	reviewed := strings.TrimSpace(r.URL.Query().Get("importSourceRevision"))
+	if reviewed == "" {
+		writeRefusal(w, http.StatusPreconditionRequired, refusalImportSourceRequired,
+			"supply importSourceRevision — the reviewed legacy source's token from GET /api/idp/legacy-ldap — so the import can only copy the source you reviewed", nil)
+		return
 	}
-	normalizeIdPProfileWriteInput(p)
-	specDigest := idpSpecDigest(p)
+	if !strings.HasPrefix(reviewed, idpImportSourcePrefix) || len(reviewed) != len(idpImportSourcePrefix)+64 {
+		writeRefusal(w, http.StatusBadRequest, refusalInvalidInput, "importSourceRevision must be the token published by GET /api/idp/legacy-ldap", nil)
+		return
+	}
 	ops := idpRegistry.operations()
+	if idpReplayKnownImport(w, ops, opID, reviewed) {
+		return
+	}
+	p := legacyLDAPImportCandidate(c)
+	specDigest := idpSpecDigest(p)
 	commitment := ops.CandidateCommitment(p)
-	if idpReplayKnownOperation(w, ops, opID, specDigest, commitment) {
+	current := ops.SourceCommitment(p)
+	if current == "" {
+		writeIdPRefusal(w, errIdPOperationLedgerDegraded) // no usable key: nothing can be bound
+		return
+	}
+	if !hmac.Equal([]byte(current), []byte(reviewed)) {
+		writeRefusal(w, http.StatusConflict, refusalImportSourceStale,
+			"the legacy source changed since it was reviewed; re-read it and review the current source before importing",
+			map[string]any{"importSourceRevision": current})
 		return
 	}
 	docRev, ok := idpCreateDocumentFence(w, r)
@@ -185,6 +210,7 @@ func apiIdPLegacyLDAPImport(w http.ResponseWriter, r *http.Request) {
 	if !idpBeginCreateIntent(w, ops, idpOperation{
 		OperationID: opID, Action: "idp.import", Actor: auditActor(r), ProfileName: p.Name,
 		ProfileID: p.ID, SpecDigest: specDigest, CandidateCommitment: commitment, RegistryRevision: docRev,
+		ImportSourceRevision: reviewed,
 	}) {
 		return
 	}
@@ -197,6 +223,7 @@ func apiIdPLegacyLDAPImport(w http.ResponseWriter, r *http.Request) {
 	result := idpWithFleet(publicIdPProfile(p), fleet)
 	result["imported"] = true
 	result["operationId"] = opID
+	result["importSourceRevision"] = reviewed
 	result["documentRevision"] = idpRegistry.DocumentRevision()
 	result["source"] = legacyLDAPImportSource(c)
 	detail := "imported legacy YAML LDAP configuration" + fleet.auditSuffix() + " operationId=" + opID
@@ -206,6 +233,34 @@ func apiIdPLegacyLDAPImport(w http.ResponseWriter, r *http.Request) {
 	idpCompleteOperationAudit(r, ops, opID, result)
 	logger.Printf("UI: legacy YAML LDAP imported as IdP profile id=%q (disabled; test-then-enable) operationId=%q", sanitizeLog(p.ID), sanitizeLog(opID))
 	jsonOK(w, result)
+}
+
+// legacyLDAPImportCandidate is the ONE candidate an import of the legacy
+// block produces (disabled; the profile shape the registry stores) — the
+// same construction the read model's source token commits to.
+func legacyLDAPImportCandidate(c *LDAPConfig) *IdPProfile {
+	p := &IdPProfile{
+		Name:    "Imported legacy LDAP",
+		Type:    IdPTypeLDAP,
+		Enabled: false, // explicit test-then-enable; never activates blind
+		LDAP:    legacyLDAPToProfileConfig(c),
+	}
+	normalizeIdPProfileWriteInput(p)
+	return p
+}
+
+// legacyLDAPImportSourceToken is the read model's reviewed-source token:
+// the keyed commitment over the import candidate (every security-effective
+// field, the credential value included), or "unavailable" when no usable
+// ledger key exists on this node.
+func legacyLDAPImportSourceToken(c *LDAPConfig) string {
+	if idpRegistry == nil {
+		return idpImportSourceUnavailable
+	}
+	if tok := idpRegistry.operations().SourceCommitment(legacyLDAPImportCandidate(c)); tok != "" {
+		return tok
+	}
+	return idpImportSourceUnavailable
 }
 
 // legacyLDAPImportSource is the NON-SECRET identity of the legacy block an

@@ -14186,13 +14186,24 @@ async function importLegacyLDAP() {
   // registry document revision and OPERATION-IDENTIFIED (a lost response
   // replays from the appliance's ledger instead of minting a second profile).
   if (!_idpDocumentRevision) { await loadIdPList(); }
+  // Round 3 (Blocker 1): the import is bound to the legacy source this
+  // console REVIEWED — the server-owned importSourceRevision token from
+  // GET /api/idp/legacy-ldap. A changed source is refused (409
+  // import_source_stale) and re-read, never imported unseen.
+  const reviewed = _legacyLDAPInfo && _legacyLDAPInfo.importSourceRevision;
+  if (!reviewed || reviewed === 'unavailable') {
+    toast('Import unavailable: the appliance cannot bind the import to the reviewed legacy source (operation ledger unavailable)', 'error');
+    return;
+  }
   const q = 'documentRevision=' + encodeURIComponent(_idpDocumentRevision || '') +
-    '&operationId=' + encodeURIComponent(newOperationId());
+    '&operationId=' + encodeURIComponent(newOperationId()) +
+    '&importSourceRevision=' + encodeURIComponent(reviewed);
   const res = await apiFetch('/api/idp/legacy-ldap/import?' + q, { method: 'POST' });
   if (!res.ok) {
     if (res.status === 409 || res.status === 428) {
-      toast('Import refused: ' + apiErrorText(await res.text()) + ' — the registry has been reloaded, please retry', 'error');
+      toast('Import refused: ' + apiErrorText(await res.text()) + ' — the registry and the legacy source have been reloaded, please review and retry', 'error');
       loadIdPList();
+      if (typeof loadLegacyLDAPBanner === 'function') loadLegacyLDAPBanner();
       return;
     }
     toast('Import failed: ' + apiErrorText(await res.text()), 'error');

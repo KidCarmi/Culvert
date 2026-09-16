@@ -393,11 +393,17 @@ func observeLegacyLDAPShadowAtBoot() {
 	legacyLDAPBootObserved.Store(true)
 }
 
-// reconcileLegacyLDAPBootObservation is called by the settings load once
-// the durable truth is known. durableRetired reports whether the READABLE
-// settings carry the sentinel (its record, if any, was adopted by the
-// caller). Returns true when THIS call recorded a new observed transition
-// (audited once) that the caller must now persist.
+// reconcileLegacyLDAPBootObservation is called once the durable truth is
+// known — by a READABLE settings load, by a MISSING settings file (nothing
+// durable exists, so the observed transition may be recorded), and by the
+// first successful settings save after an UNREADABLE/CORRUPT load (storage
+// recovery). durableRetired reports whether readable settings carry the
+// sentinel (its record, if any, was adopted by the caller). Returns true
+// when THIS call minted the observed record — PENDING its audit — that the
+// caller must now persist; the audit follows the durable save (round 3,
+// Blocker 3), never precedes it. Idempotent per boot observation: the latch
+// is consumed on the first call, so a pending transition is reconciled
+// exactly once.
 func reconcileLegacyLDAPBootObservation(durableRetired bool) bool {
 	if !legacyLDAPBootObserved.Swap(false) {
 		return false
@@ -405,10 +411,59 @@ func reconcileLegacyLDAPBootObservation(durableRetired bool) bool {
 	if durableRetired {
 		return false // a completed cutover: same identity, nothing new
 	}
-	rec := newLegacyLDAPCutover(nil, "", "system", "observed")
-	recordLegacyLDAPRetirement(rec, "enabled LDAP identity provider present in the IdP registry at startup")
+	mintPendingLegacyLDAPRetirement()
 	return true
 }
+
+// legacyLDAPObservedReason is the bounded reason the observed transition
+// carries into its audit entry.
+const legacyLDAPObservedReason = "enabled LDAP identity provider present in the IdP registry"
+
+// mintPendingLegacyLDAPRetirement records an OBSERVED transition in memory
+// with its audit pending: the sentinel is set, the record is minted ONCE,
+// and nothing is audited until a save proves the record durable.
+func mintPendingLegacyLDAPRetirement() {
+	rec := newLegacyLDAPCutover(nil, "", "system", "observed")
+	rec.AuditPending = true
+	legacyLDAPRetiredFlag.Store(true)
+	legacyLDAPCutoverRec.Store(&rec)
+}
+
+// completeLegacyLDAPRetirementAudit emits the success audit of a durable
+// observed transition EXACTLY ONCE through the operation-keyed boundary
+// (audit.AppendOperation appends only if the durable record does not
+// already hold the entry) and clears the pending flag in memory. Returns
+// true when the flag was cleared and the caller must persist it; a failed
+// append leaves the audit pending for the next save or boot. Never called
+// before the record is durable (or, without a settings file, at all —
+// see the unpersisted save path).
+func completeLegacyLDAPRetirementAudit() bool {
+	rec := legacyLDAPCutover()
+	if rec == nil || !rec.AuditPending {
+		return false
+	}
+	if _, err := audit.AppendOperation(audit.Entry{
+		TS:          time.Now().UnixMilli(),
+		Time:        time.Now().Format("2006-01-02 15:04:05"),
+		Actor:       rec.Actor,
+		Action:      "idp.legacy_ldap.retired",
+		Object:      "legacy-ldap",
+		ObjectID:    rec.ProfileID,
+		Detail:      "legacy YAML ldap block permanently retired as an operational authenticator (" + legacyLDAPObservedReason + "); registry is the sole LDAP authority; operationId=" + rec.OperationID,
+		OperationID: rec.OperationID,
+	}); err != nil {
+		logger.Printf("IdP: observed legacy-LDAP cutover %s is durable but its audit could not be recorded yet (%v) — retried at the next save/boot", sanitizeLog(rec.OperationID), err)
+		return false
+	}
+	rec.AuditPending = false
+	legacyLDAPCutoverRec.Store(rec)
+	return true
+}
+
+// legacyLDAPBootReconcilePending reports whether this boot's observation is
+// still awaiting its durable reconciliation (an unreadable/corrupt settings
+// load): the sentinel must not be serialised without its record until then.
+func legacyLDAPBootReconcilePending() bool { return legacyLDAPBootObserved.Load() }
 
 // LegacyLDAPCutover is the DURABLE, operation-identified record of the
 // legacy-YAML → registry LDAP authority cutover (FE-6A.0 R7). It binds the
@@ -425,6 +480,16 @@ type LegacyLDAPCutover struct {
 	Actor            string `json:"actor"`
 	Trigger          string `json:"trigger"` // admin_api | observed
 	At               string `json:"at"`
+	// AuditPending (round 3, Blocker 3) marks an OBSERVED transition whose
+	// record has been minted (and, once saved, made durable) but whose
+	// success audit has not yet been proven durable: the audit is emitted
+	// ONLY after the save that carries the record succeeds, through the
+	// operation-keyed audit boundary (audit.AppendOperation — idempotent on
+	// the record's operationId), and the flag is cleared durably afterwards.
+	// A crash between the durable record and the audit therefore completes
+	// the SAME identity's audit exactly once on the next boot; a crash after
+	// the audit and before the clearing save re-appends nothing.
+	AuditPending bool `json:"auditPending,omitempty"`
 }
 
 // legacyLDAPCutoverRec is the in-memory view of the durable cutover record.
@@ -464,21 +529,24 @@ func newLegacyLDAPCutover(profile *IdPProfile, registryRevision, actor, trigger 
 // it persists the sentinel BEFORE the registry publish and attributes the
 // record to the admin (markLegacyLDAPRetiredWith).
 func markLegacyLDAPRetired(reason string) {
-	rec := newLegacyLDAPCutover(nil, "", "system", "observed")
-	if !markLegacyLDAPRetiredWith(rec, reason) {
+	if legacyLDAPRetiredFlag.Swap(true) {
 		return
 	}
-	// Synchronous persist: cutover is a once-ever authority transition, so the
-	// one bounded disk write on this path is worth durable-before-return
-	// semantics. The OUTCOME is recorded, never assumed (Blocker 9): a failed
-	// save leaves the runtime cutover active (safety first) and the read model
-	// reporting pending_reconciliation until a later save lands.
+	_ = reason // bounded: the audit carries legacyLDAPObservedReason
+	// Round 3 (Blocker 3): the record is minted with its audit PENDING and
+	// persisted FIRST; the save's success path emits the operation-keyed
+	// audit once and clears the flag durably. Synchronous persist: cutover
+	// is a once-ever authority transition, so the one bounded disk write on
+	// this path is worth durable-before-return semantics. The OUTCOME is
+	// recorded, never assumed: a failed save leaves the runtime cutover
+	// active (safety first), the record pending its audit, and the read
+	// model reporting pending_reconciliation until a later save lands.
+	mintPendingLegacyLDAPRetirement()
 	legacyLDAPCutoverDurableFlag.Store(false)
 	if err := SaveAdminSettings(); err != nil {
 		logger.Printf("IdP: observed legacy-LDAP cutover is active at runtime but NOT yet durable — pending reconciliation")
 		return
 	}
-	legacyLDAPCutoverDurableFlag.Store(true)
 }
 
 // markLegacyLDAPRetiredWith flips the in-memory sentinel ONCE and records

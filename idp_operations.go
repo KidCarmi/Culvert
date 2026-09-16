@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // idp_operations.go — durable, operation-identified IdP write intents
@@ -83,6 +84,12 @@ const (
 	// from every backup archive by name (backup.go) and never restored.
 	idpCandidateKeyFileName = ".idp_candidate_key"
 	idpCandidateKeyLen      = 32
+	// idpImportSourcePrefix tags the reviewed-source token grammar
+	// (`isr1:<64 hex>`); idpImportSourceUnavailable is the read model's
+	// bounded value when the key is unusable (the import is then refused as
+	// operation_ledger_degraded).
+	idpImportSourcePrefix      = "isr1:"
+	idpImportSourceUnavailable = "unavailable"
 
 	idpOpPending        = "pending"
 	idpOpCommitted      = "committed"
@@ -108,13 +115,17 @@ type idpOperation struct {
 	// CandidateCommitment binds the EXACT submitted secret material to the
 	// intent (HMAC under the node-local candidate key); "" on records that
 	// predate the field. Never the secret, never reversible without the key.
-	CandidateCommitment string          `json:"candidateCommitment,omitempty"`
-	RegistryRevision    string          `json:"registryRevision"` // the document revision the caller fenced on
-	Cutover             bool            `json:"cutover"`          // the write carried the legacy-LDAP cutover
-	StartedAt           string          `json:"startedAt"`
-	FinishedAt          string          `json:"finishedAt,omitempty"`
-	Code                string          `json:"code,omitempty"`   // refusal code of an aborted/unknown outcome, or the settlement reason
-	Result              json.RawMessage `json:"result,omitempty"` // the recorded success response (replayed verbatim)
+	CandidateCommitment string `json:"candidateCommitment,omitempty"`
+	// ImportSourceRevision (idp.import only, round 3 — Blocker 1) is the
+	// server-owned keyed commitment over the legacy source the administrator
+	// REVIEWED; the intent is bound to it and a replay must name it.
+	ImportSourceRevision string          `json:"importSourceRevision,omitempty"`
+	RegistryRevision     string          `json:"registryRevision"` // the document revision the caller fenced on
+	Cutover              bool            `json:"cutover"`          // the write carried the legacy-LDAP cutover
+	StartedAt            string          `json:"startedAt"`
+	FinishedAt           string          `json:"finishedAt,omitempty"`
+	Code                 string          `json:"code,omitempty"`   // refusal code of an aborted/unknown outcome, or the settlement reason
+	Result               json.RawMessage `json:"result,omitempty"` // the recorded success response (replayed verbatim)
 	// CommittedRevision is the registry document revision AFTER the commit.
 	CommittedRevision string `json:"committedRevision,omitempty"`
 	// Audited records that the success audit for a committed operation has
@@ -197,31 +208,73 @@ func idpSpecDigest(p *IdPProfile) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// idpLoadOrMintCandidateKey reads the node-local candidate key, minting one
-// (0600) when none exists. A read error other than absence is returned:
-// the caller fails closed rather than committing under a key it cannot
-// verify later. A short/long file is treated as unreadable (never silently
-// re-minted over — that would orphan every commitment it produced).
+// errIdPCandidateKeyMissing: the ledger already holds commitment-bearing
+// records and its key is gone — a replacement key would verify none of
+// them (every exact-candidate replay would answer operation_mismatch), so
+// the store must fail CLOSED instead of re-keying (round 3, Blocker 2).
+var errIdPCandidateKeyMissing = errors.New("idp: candidate key missing beside a commitment-bearing ledger")
+
+// idpLoadOrMintCandidateKey reads the node-local candidate key, publishing
+// a fresh one when none exists (the mint-permitted path).
 func idpLoadOrMintCandidateKey(path string) ([]byte, error) {
-	key, err := os.ReadFile(path) // #nosec G304 -- beside the operator-configured registry file
-	switch {
-	case err == nil:
+	return idpLoadCandidateKey(path, true)
+}
+
+// idpLoadCandidateKey reads the node-local candidate key. A read error
+// other than absence is returned: the caller fails closed rather than
+// committing under a key it cannot verify later. A short/long file is
+// unreadable (never silently re-minted over — that would orphan every
+// commitment it produced). When the key is absent and mayMint is set, ONE
+// generation is published DURABLY and EXCLUSIVELY (fileutil.PublishExclusive:
+// temp + fsync + link(2) + directory fsync; a concurrent minter loses the
+// link and reads the winner's bytes); a failed publication is an error —
+// never a key of unknown durability. With mayMint false an absent key is
+// errIdPCandidateKeyMissing.
+func idpLoadCandidateKey(path string, mayMint bool) ([]byte, error) {
+	read := func() ([]byte, error) {
+		key, err := os.ReadFile(path) // #nosec G304 -- beside the operator-configured registry file
+		if err != nil {
+			return nil, err
+		}
 		if len(key) != idpCandidateKeyLen {
 			return nil, fmt.Errorf("candidate key: unexpected length %d", len(key))
 		}
 		return key, nil
-	case os.IsNotExist(err):
-		key = make([]byte, idpCandidateKeyLen)
-		if _, rerr := rand.Read(key); rerr != nil {
-			return nil, rerr
-		}
-		if werr := os.WriteFile(path, key, 0o600); werr != nil {
-			return nil, werr
-		}
-		return key, nil
-	default:
-		return nil, err
 	}
+	key, err := read()
+	switch {
+	case err == nil:
+		return key, nil
+	case !os.IsNotExist(err):
+		return nil, err
+	case !mayMint:
+		return nil, errIdPCandidateKeyMissing
+	}
+	fresh := make([]byte, idpCandidateKeyLen)
+	if _, rerr := rand.Read(fresh); rerr != nil {
+		return nil, rerr
+	}
+	created, perr := fileutil.PublishExclusive(path, fresh, 0o600)
+	if perr != nil {
+		return nil, perr
+	}
+	if created {
+		return fresh, nil
+	}
+	// Another generation won the publication: read it (it is complete —
+	// the winner linked only after its fsync).
+	return read()
+}
+
+// hasCandidateCommitments reports whether any record carries a keyed
+// commitment — the records a fresh key could never verify.
+func hasCandidateCommitments(ops []*idpOperation) bool {
+	for _, op := range ops {
+		if op != nil && op.CandidateCommitment != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // CandidateCommitment is the keyed commitment over the EXACT secret
@@ -266,6 +319,42 @@ func (s *idpOperationStore) CandidateCommitment(p *IdPProfile) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// SourceCommitment is the server-owned, keyed, NON-DISCLOSING identity of
+// a legacy import source (round 3, Blocker 1): "isr1:" + hex HMAC-SHA256
+// under the node-local candidate key over the import candidate's public
+// spec digest AND its exact secret material (the bind credential value).
+// Any change to any security-effective imported field — the credential
+// included — yields a different token; the token discloses nothing.
+// Empty when the key is unusable (the ledger is degraded).
+func (s *idpOperationStore) SourceCommitment(p *IdPProfile) string {
+	if p == nil {
+		return ""
+	}
+	s.mu.Lock()
+	key := s.commitKey
+	s.mu.Unlock()
+	if len(key) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	frame := func(v string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(v)))
+		mac.Write(n[:])
+		mac.Write([]byte(v))
+	}
+	frame("idp-import-source-v1")
+	frame(idpSpecDigest(p))
+	frame(s.CandidateCommitment(p))
+	return idpImportSourcePrefix + hex.EncodeToString(mac.Sum(nil))
+}
+
+// matchesImportSource reports whether a recorded import intent was bound
+// to the reviewed source token a re-dispatch names (constant time).
+func (op *idpOperation) matchesImportSource(reviewed string) bool {
+	return op.ImportSourceRevision != "" && hmac.Equal([]byte(op.ImportSourceRevision), []byte(reviewed))
+}
+
 // matchesCandidate reports whether a recorded intent names the same
 // candidate as the (digest, commitment) pair of a re-dispatch: the public
 // digest must match, and — for every record carrying a commitment — the
@@ -292,31 +381,38 @@ func newIdPOperationStore(registryPath string) *idpOperationStore {
 		return s
 	}
 	s.path = filepath.Join(filepath.Dir(registryPath), idpOperationsFile)
-	if key, kerr := idpLoadOrMintCandidateKey(filepath.Join(filepath.Dir(registryPath), idpCandidateKeyFileName)); kerr != nil {
-		s.degraded = &idpOpsDegradation{Reason: "unreadable",
-			Detail: "the operation ledger's node-local candidate key cannot be read; operation-identified writes and lookups are refused until the key file is restored (or removed, which mints a fresh key that verifies no earlier intent) and the node restarted"}
-		logger.Printf("IdP: candidate-commitment key UNREADABLE — operation ledger fail-closed (%s)", sanitizeLog(filepath.Base(idpCandidateKeyFileName)))
-		return s
-	} else {
-		s.commitKey = key
-	}
+	// The LEDGER is read first: whether its key may be minted depends on
+	// what the ledger already holds (round 3, Blocker 2).
+	var ops []*idpOperation
 	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &ops); err != nil {
+			s.degraded = &idpOpsDegradation{Reason: "corrupt",
+				Detail: "the operation ledger is corrupt; operation-identified writes and lookups are refused until the file is restored (or removed, which starts an empty ledger) and the node restarted"}
+			logger.Printf("IdP: operation ledger CORRUPT — fail-closed (evidence preserved at %s)", sanitizeLog(filepath.Base(s.path)))
 			return s
 		}
+	case os.IsNotExist(err):
+		// empty ledger
+	default:
 		s.degraded = &idpOpsDegradation{Reason: "unreadable",
 			Detail: "the operation ledger cannot be read; operation-identified writes and lookups are refused until the file is restored (or removed, which starts an empty ledger) and the node restarted"}
 		logger.Printf("IdP: operation ledger UNREADABLE — fail-closed (evidence preserved at %s)", sanitizeLog(filepath.Base(s.path)))
 		return s
 	}
-	var ops []*idpOperation
-	if err := json.Unmarshal(data, &ops); err != nil {
-		s.degraded = &idpOpsDegradation{Reason: "corrupt",
-			Detail: "the operation ledger is corrupt; operation-identified writes and lookups are refused until the file is restored (or removed, which starts an empty ledger) and the node restarted"}
-		logger.Printf("IdP: operation ledger CORRUPT — fail-closed (evidence preserved at %s)", sanitizeLog(filepath.Base(s.path)))
+	keyPath := filepath.Join(filepath.Dir(registryPath), idpCandidateKeyFileName)
+	key, kerr := idpLoadCandidateKey(keyPath, !hasCandidateCommitments(ops))
+	if kerr != nil {
+		detail := "the operation ledger's node-local candidate key cannot be read or published durably; operation-identified writes and lookups are refused until the key file is restored and the node restarted"
+		if errors.Is(kerr, errIdPCandidateKeyMissing) {
+			detail = "the operation ledger's node-local candidate key is MISSING beside a ledger that carries keyed commitments; a replacement key would verify none of them, so operation-identified writes and lookups are refused until the original key file is restored and the node restarted (evidence preserved)"
+		}
+		s.degraded = &idpOpsDegradation{Reason: "unreadable", Detail: detail}
+		logger.Printf("IdP: candidate-commitment key UNUSABLE — operation ledger fail-closed (%s: %v)", sanitizeLog(filepath.Base(idpCandidateKeyFileName)), kerr)
 		return s
 	}
+	s.commitKey = key
 	for _, op := range ops {
 		if op != nil {
 			s.ops = append(s.ops, op)
