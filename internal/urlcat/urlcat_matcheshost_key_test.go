@@ -85,8 +85,11 @@ func TestCategoryKey_DifferentialAgainstLegacy(t *testing.T) {
 	// the ASCII case range, the ASCII neighbours of it, and the 0x80+ range that
 	// forces the fallback, at lengths straddling maxInlineCategoryKey.
 	//
-	// #nosec G404 -- deterministic seeded generator for reproducible test data
-	rng := rand.New(rand.NewSource(20260916))
+	// A fixed seed, so the corpus is reproducible and this gate cannot flake.
+	// The suppression uses golangci-lint's own directive form rather than
+	// gosec's `#nosec` comment, which it does not reliably apply — same choice
+	// as proxy_sanitizelog_test.go and internal/obs/sanitize_test.go.
+	rng := rand.New(rand.NewSource(20260916)) //nolint:gosec // deterministic test corpus, not crypto
 	alphabet := []byte("AZaz@[`{ 0_\x00\x7f\x80\xc3\xa9\xff")
 	for i := 0; i < 20000; i++ {
 		n := rng.Intn(maxInlineCategoryKey + 8)
