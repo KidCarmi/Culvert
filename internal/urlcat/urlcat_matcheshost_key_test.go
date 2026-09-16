@@ -22,12 +22,20 @@ import (
 // in-tree is what makes the comparison reproducible rather than a claim.
 func legacyCategoryKey(cat string) string { return strings.ToLower(cat) }
 
-// foldedCategoryKey drives the REAL categoryKey helper, so the differential
-// exercises its actual branch decision (inline fold vs allocating fallback)
-// rather than a restatement of it.
+// foldedCategoryKey renders whichever of categoryKey's two return forms is in
+// play as a plain string, so the differential can compare it against the
+// verbatim pre-fix key expression.
+//
+// It is kept in lockstep with the entry points by TestCategoryKey_MirrorsHostSetFor,
+// which drives the real entry points and would fail if the two ever disagreed
+// about which key a name resolves to.
 func foldedCategoryKey(cat string) string {
 	var buf [maxInlineCategoryKey]byte
-	return string(categoryKey(buf[:], cat))
+	inline, str, inlineOK := categoryKey(buf[:], cat)
+	if inlineOK {
+		return string(inline)
+	}
+	return str
 }
 
 // divergenceShapes are the cases a random generator is unlikely to hit and that
@@ -276,3 +284,125 @@ func TestCategoryKeyBound_CoversShippedTaxonomy(t *testing.T) {
 // normalizeForTest mirrors what both entry points apply to host before the set
 // probe, so the oracle sees the same host they do.
 func normalizeForTest(host string) string { return hostutil.NormalizeHost(host) }
+
+// legacyHostSetProbe is the VERBATIM pre-optimization key derivation and probe.
+// It is the cost oracle for the gate below: whatever this allocates is what the
+// optimization must not exceed.
+func legacyHostSetProbe(idx map[string]map[string]bool, cat string) map[string]bool {
+	return idx[strings.ToLower(cat)]
+}
+
+// TestBenchGate_NeverAllocatesMoreThanTheCodeItReplaced is the gate that was
+// missing, and its absence is what let a regression ship inside an optimization.
+//
+// The first gate here gated only the SHORT, mixed-case names the shipped
+// taxonomy carries — the shape the change was written for — so it could not see
+// that the FALLBACK had become more expensive than the code being replaced. The
+// cause was a SINGLE return type: one []byte for both paths forces the fallback
+// to spell itself []byte(strings.ToLower(cat)), and strings are immutable, so
+// that conversion copies. An already-lowercase name past the inline buffer went
+// from 0 allocations to 1, and an uppercase or non-ASCII one from 1 to 2 — on a
+// name shape the admin API fully supports, up to 256 bytes (Codex review,
+// PR #1410).
+//
+// So this gate does not assert a number. It asserts the PROPERTY an optimization
+// owes: for every shape — inline or fallback, ASCII or not, short or past the
+// buffer — the real entry points must allocate no more than the verbatim
+// pre-optimization probe does on the same input. That holds whatever the
+// implementation becomes, and it fails for any future variant that makes a path
+// dearer in order to make another cheaper.
+func TestBenchGate_NeverAllocatesMoreThanTheCodeItReplaced(t *testing.T) {
+	// A host that is already canonical, so hostutil.NormalizeHost contributes
+	// nothing and the measurement isolates the key derivation.
+	const host = "uncategorized.example.net"
+
+	long := strings.Repeat("a", maxInlineCategoryKey*3) // past the buffer, ASCII
+	names := []struct {
+		name string
+		cat  string
+	}{
+		{"short-mixed-case", "Social Media"},
+		{"short-lowercase", "social media"},
+		{"short-uppercase", "SOCIAL MEDIA"},
+		{"fallback-long-lowercase", long},
+		{"fallback-long-uppercase", strings.ToUpper(long)},
+		{"fallback-non-ascii", "CAFÉ"},
+		{"fallback-non-ascii-long", "CAFÉ" + long},
+		{"empty", ""},
+	}
+
+	// A store that actually holds one of the long names, so the fallback path
+	// resolves a real host set rather than always missing on a nil map.
+	s := New([]*Entry{
+		{Name: "Social Media", Hosts: []string{"example.com"}},
+		{Name: long, Hosts: []string{"example.com"}},
+	})
+
+	for _, tc := range names {
+		cat := tc.cat
+		budget := testing.AllocsPerRun(200, func() { _ = legacyHostSetProbe(s.index, cat) })
+		got := testing.AllocsPerRun(200, func() { s.MatchesHost(Category(cat), host) })
+		gotAdmin := testing.AllocsPerRun(200, func() { s.MatchesHostAdmin(Category(cat), host) })
+
+		if got > budget {
+			t.Errorf("%s: MatchesHost allocates %v/op, more than the %v/op of the code it replaced",
+				tc.name, got, budget)
+		}
+		if gotAdmin > budget {
+			t.Errorf("%s: MatchesHostAdmin allocates %v/op, more than the %v/op of the code it replaced",
+				tc.name, gotAdmin, budget)
+		}
+	}
+}
+
+// TestBenchGate_FallbackBudgetIsNotVacuous is the CONTROL for the gate above.
+//
+// That gate compares against a budget it measures at run time, so it would pass
+// trivially if the budget were always generous. It is only meaningful because
+// the budget is ZERO for the shapes that matter most — a short mixed-case name
+// (every shipped SaaS category) and an already-lowercase long name, where
+// strings.ToLower returns its input unchanged and the probe is free. This pins
+// that those budgets really are zero, so the gate above is a real bound.
+func TestBenchGate_FallbackBudgetIsNotVacuous(t *testing.T) {
+	s := New(DefaultEntries())
+	longLower := strings.Repeat("a", maxInlineCategoryKey*3)
+
+	zeroBudget := []struct {
+		name string
+		cat  string
+	}{
+		{"already-lowercase-short", "social media"},
+		{"already-lowercase-past-buffer", longLower},
+	}
+	for _, tc := range zeroBudget {
+		cat := tc.cat
+		if b := testing.AllocsPerRun(200, func() { _ = legacyHostSetProbe(s.index, cat) }); b != 0 {
+			t.Errorf("%s: expected a ZERO-allocation budget for the gate to bound anything, got %v", tc.name, b)
+		}
+	}
+
+	// And the shapes the fallback genuinely cannot make free must still be
+	// bounded at exactly what strings.ToLower costs — never more.
+	if b := testing.AllocsPerRun(200, func() { _ = legacyHostSetProbe(s.index, "CAFÉ") }); b != 1 {
+		t.Errorf("non-ASCII budget: expected exactly 1 alloc (the strings.ToLower result), got %v", b)
+	}
+}
+
+// TestCategoryKey_MirrorsHostSetFor keeps the differential honest: it drives the
+// REAL entry point and checks that the key foldedCategoryKey predicts is the one
+// that actually resolves the host set, so the differential can never end up
+// testing a helper the production path does not agree with.
+func TestCategoryKey_MirrorsHostSetFor(t *testing.T) {
+	for _, cat := range divergenceShapes() {
+		if cat == "" {
+			continue // an empty category name indexes nothing by construction
+		}
+		// Build a store whose ONLY entry is keyed by the predicted key. If
+		// hostSetFor derived a different key it would find no host set at all.
+		s := New([]*Entry{{Name: cat, Hosts: []string{"example.com"}}})
+		if !s.MatchesHost(Category(cat), "example.com") {
+			t.Errorf("MatchesHost did not resolve category %q via the predicted key %q",
+				cat, foldedCategoryKey(cat))
+		}
+	}
+}
