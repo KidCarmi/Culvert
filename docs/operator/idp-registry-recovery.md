@@ -105,16 +105,32 @@ it was bound to) and `cutoverDurability: durable`. The record carries its
 own identity; the ledger key the card joins it with is the enabling
 profile's provenance `operationId`.
 
-Boot idempotence (FE-6A.2 correction, Blocker 4): on every later boot of a
-node that has cut over and still carries the YAML block, the startup slice
-only OBSERVES the shadow (fail-closed: the legacy authenticator stays
-retired); the durable record is reconciled when `admin_settings.json`
-loads. A completed admin cutover therefore keeps the same record identity
-(`cutover.operationId`, `trigger`, `registryRevision`, `actor`) and emits
-NO new `idp.legacy_ldap.retired` audit entry across any number of restarts.
-Only a boot on which no durable record exists mints the boot-observed record
-and its one-time audit. If the settings file is missing, corrupt or
-unreadable at boot, the retirement stays in force and nothing is invented.
+Boot idempotence (FE-6A.2 correction, Blocker 4; round 3, Blocker 3): on
+every boot of a node that carries the YAML block beside an enabled registry
+LDAP profile, the startup slice only OBSERVES the shadow (fail-closed: the
+legacy authenticator stays retired) and every settings-load outcome is
+routed through one state machine:
+
+- **Readable settings with a record** — the same identity is adopted; a
+  record whose audit was never proven (`auditPending`, a crash between the
+  record's save and its audit) completes exactly one operation-keyed audit
+  and clears the flag. No new record, no new audit, however many restarts.
+- **Missing settings** — a known truth: the observed transition is recorded
+  now. The record and the sentinel are saved TOGETHER first; the success
+  audit (`idp.legacy_ldap.retired`, keyed on the record's `operationId`
+  through the idempotent audit boundary) follows the successful save.
+- **Unreadable or corrupt settings** — an unknown truth: the observation
+  stays PENDING. The legacy authenticator stays shadowed, nothing is minted
+  or audited, `cutoverDurability` reports `pending_reconciliation`, a
+  corrupt file is quarantined (`admin_settings.json.corrupt.<ns>`, never
+  overwritten), and NO save serialises the sentinel without its record. The
+  first successful save after storage recovers reconciles the pending
+  transition exactly once — the record travels with that save and its audit
+  follows it.
+
+A completed admin cutover therefore keeps its record identity and emits no
+new audit on any later boot; an observed transition is audited once, after
+it is durable, and never twice.
 
 Break-glass revert is unchanged: see `ldap-identity-provider.md`.
 
@@ -161,8 +177,39 @@ correction the import is an ordinary fenced, identified write:
   re-reads the registry once; **Recover** looks the operation up in the
   ledger; a `404` offers a re-send of the SAME import operation; a changed
   legacy block is refused locally and by the appliance (`operation_mismatch`).
+- **The import is bound to the source the administrator REVIEWED** (round
+  3). `GET /api/idp/legacy-ldap` publishes `importSourceRevision`, a
+  server-owned keyed commitment (`isr1:<64 hex>`, HMAC under the node-local
+  candidate key) over every security-effective field an import would copy,
+  the bind credential VALUE included — it discloses nothing. The import
+  must echo it (`428 import_source_required`); if the YAML changed since it
+  was reviewed — a restart on an edited config, or a credential-only change
+  — the appliance answers `409 import_source_stale` with the CURRENT token
+  before the fence, the intent and any registry write, and the browser
+  re-reads the source for review. The operation record is bound to the
+  token: a replay must name it, and success/replay answers echo it — the
+  browser accepts an answer only for the exact source it reviewed. The
+  literal `unavailable` means the ledger key is unusable on this node (the
+  import is not offered).
 
 Enabling the imported profile afterwards is the cutover in §4.
+
+### 6.1 The candidate-commitment key
+
+`<data>/.idp_candidate_key` (0600, beside `idp_operations.json`) keys every
+candidate commitment and every reviewed-source token. It is created
+DURABLY and EXCLUSIVELY (temp file, fsync, `link(2)` publication, directory
+fsync — exactly one generation wins a concurrent start, and every process
+reads the published one); a failed publication leaves the ledger fail-closed
+for that boot rather than a key of unknown durability. It is node-local:
+never archived, never restored, never synced. **A ledger that already holds
+keyed commitments is never re-keyed**: if the key is missing, short or
+unreadable the ledger reports `operation_ledger_degraded` (reason
+`unreadable`, detail naming the key) and every identified write and lookup is
+refused until the ORIGINAL file is restored and the node restarted — a fresh
+key would verify none of the recorded intents, so every exact-candidate
+replay would answer `operation_mismatch`. Only a ledger with no
+commitment-bearing record (a fresh node) mints a key.
 
 ## 7. Secrets
 

@@ -18,6 +18,10 @@
   ledger-recorded (recovery marker + typed re-send); operations commit the exact secret
   candidate; enabled-LDAP writes cross the non-bypassable commit-time preflight
   (`422 preflight_failed`); a completed cutover emits no retirement audit on later boots.
+  Round 3 (2026-09-16): the import is bound to the REVIEWED legacy source through the
+  server-owned `importSourceRevision` token (required, stale-refused, echoed and decoder-
+  verified); the candidate key is published durably/exclusively and never re-minted; boot
+  reconciliation covers missing/unreadable/corrupt settings with a persist-first audit.
   Operator runbooks: `docs/operator/idp-registry-recovery.md`,
   `docs/operator/administrator-account-recovery.md`.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`
