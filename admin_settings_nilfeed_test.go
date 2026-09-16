@@ -13,7 +13,7 @@ import (
 // goroutine), under some test orderings the goroutine ran while blFeedSyncer
 // was still nil and panicked at blocklist_feed.go:114, crashing the whole test
 // binary. SaveAdminSettings must tolerate a nil blFeedSyncer (the same way it
-// already guards globalSyslog).
+// already guards the active writer).
 func TestSaveAdminSettings_NilBlFeedSyncerDoesNotPanic(t *testing.T) {
 	origSyncer := blFeedSyncer
 	adminSettingsMu.Lock()

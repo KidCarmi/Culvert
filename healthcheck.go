@@ -21,6 +21,12 @@ type healthReport struct {
 	ClusterCA     string `json:"cluster_ca" redact:"internal"`
 	SOCKS5        string `json:"socks5" redact:"internal"`
 	AdminUI       string `json:"admin_ui" redact:"internal"`
+	// SIEMFeed is the remote syslog/SIEM forwarding posture (CHAOS-66):
+	// "disabled" on a node with no collector configured, then
+	// connecting/ready/degraded/down. "ready" means events are ARRIVING, not
+	// merely that a connection exists — that distinction is the whole point of
+	// the field.
+	SIEMFeed string `json:"siem_feed" redact:"internal"`
 	// MCP is the MCP Agent Security Gateway capability state (RISK-027). It is
 	// omitted entirely on a node that never requested MCP: an always-present field
 	// would make every node look like it has the capability.
@@ -98,7 +104,14 @@ func computeHealth() healthReport {
 		// nothing at all. Same fixed-enum discipline as the socks5 field: the
 		// posture is public, the resolution (attempt count, reason class) is
 		// not.
-		AdminUI:           adminUIListenerStatus(),
+		AdminUI: adminUIListenerStatus(),
+		// CHAOS-66. "ready" is EVIDENCE-based: it means lines are reaching the
+		// collector, not that a socket is open. A collector that accepts and
+		// stops draining reads "down" here, where it previously reported a
+		// fully healthy feed on every surface. Same fixed-enum discipline as
+		// the socks5/admin_ui fields — the posture is public, the resolution
+		// (collector address, drop totals, failure counts) is not.
+		SIEMFeed:          syslogFeedStatus(),
 		ThreatFeedEntries: tfEntries,
 	}
 }

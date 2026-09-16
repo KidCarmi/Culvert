@@ -50,6 +50,15 @@ package alerts
 //                             means no threat-feed coverage at all and says so. Fired once per
 //                             episode, never per failed round; cleared only by an observed clean
 //                             sync. Detail carries a BOUNDED source class, never the fetch error.
+//   "siem_feed_down"       — remote syslog/SIEM forwarding has been failing to DELIVER for a sustained
+//                             period, or has never reached its collector since this node started
+//                             (CHAOS-66). The feed being CONNECTED is not the same as its being
+//                             delivering: a collector that accepts and stops draining keeps every
+//                             "configured" readback green while events are dropped. The proxy keeps
+//                             serving and the node's LOCAL audit/request logs are unaffected — only
+//                             the forwarded copy is lost. Fired once per episode, never per dropped
+//                             line; cleared only by an observed delivery. Detail carries a BOUNDED
+//                             posture, never the collector address or the transport error.
 //   "mcp_gateway_down"      — MCP enablement was requested but the capability is not serving:
 //                             activation failed, the listener degraded, or it stopped while still
 //                             configured (RISK-027). Fired once per episode, never per request.

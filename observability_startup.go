@@ -23,7 +23,7 @@ package main
 //     are unchanged — out of scope for the slice.
 //   - The audit-log file handle (internal/audit), the request-log
 //     file handle (internal/reqlog), and the syslog conn on
-//     globalSyslog continue to be released by the existing shutdown
+//     the active syslog writer continue to be released by the existing shutdown
 //     hooks (syslog-close, request-log-close, audit-log-close at
 //     orders 110 / 130 / 135). No carry to startupState.
 
@@ -36,8 +36,16 @@ func loadObservability(cfg observabilityStartupConfig) {
 		// so checkSyslogFeed can distinguish an intentional no-SIEM setup from a
 		// configured feed that silently failed to connect at startup.
 		syslogConfiguredAddr = cfg.SyslogAddr
+		noteSyslogConfigured()
 		if err := InitSyslog(cfg.SyslogAddr, cfg.SyslogFormat); err != nil {
-			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
+			logger.Printf("Syslog: connect failed (%v) — retrying in the background, continuing without syslog for now", err)
+			// CHAOS-66: a connect failure at BOOT used to be permanent for the
+			// life of the process, while the identical failure mid-life
+			// self-heals through the engine's own reconnect state machine. A
+			// collector that is down while the fleet boots (a shared restart,
+			// a SIEM maintenance window, DNS not yet up) left the compliance
+			// feed dark until somebody noticed and re-saved the target.
+			armSyslogReconnect(cfg.SyslogAddr, cfg.SyslogFormat)
 		} else {
 			syslogConfigured = cfg.SyslogAddr
 		}

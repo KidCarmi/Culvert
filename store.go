@@ -413,8 +413,8 @@ const maxAuditLogs = audit.MaxRing
 
 func init() {
 	audit.SetSIEM(func(e audit.Entry) {
-		if globalSyslog != nil {
-			globalSyslog.WriteAudit(e)
+		if sw := activeSyslog(); sw != nil {
+			sw.WriteAudit(e)
 		}
 	})
 }
@@ -1870,8 +1870,8 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	auth.applyTo(&entry)
 	logAdd(entry)
 	// Forward request log entry to syslog/SIEM if configured (Finding 17.2).
-	if globalSyslog != nil {
-		globalSyslog.WriteRequest(entry)
+	if sw := activeSyslog(); sw != nil {
+		sw.WriteRequest(entry)
 	}
 }
 

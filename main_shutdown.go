@@ -446,8 +446,11 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	// the original behaviour exactly.
 	reg.Register("tunnel-drain", shutdownOrderTunnelDrain, drainActiveTunnels)
 	reg.Register("syslog-close", shutdownOrderSyslogClose, func(context.Context) error {
-		if globalSyslog != nil {
-			_ = globalSyslog.Close() // best-effort flush
+		// CHAOS-66: stop the reconnect campaign before the flush, so a node on
+		// its way out never dials a collector it is about to stop forwarding to.
+		stopSyslogReconnect()
+		if sw := activeSyslog(); sw != nil {
+			_ = sw.Close() // best-effort flush
 		}
 		return nil
 	})

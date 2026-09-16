@@ -671,7 +671,7 @@ func initSession(s *startupState) {
 // observability_startup.go + observability_startup_config.go; this is
 // a thin shim that resolves the slice config and hands it to the
 // loader. No carry to startupState — the file handles stay on their
-// owning packages' state (globalSyslog, internal/audit, internal/reqlog)
+// owning packages' state (the syslog owner, internal/audit, internal/reqlog)
 // and continue to be released by the existing syslog-close / audit-log-
 // close / request-log-close shutdown hooks.
 func initObservability(s *startupState) {

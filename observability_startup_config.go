@@ -8,7 +8,7 @@ package main
 
 // observabilityStartupConfig carries the resolved inputs for the
 // four observability subsystems configured at startup. The loader
-// consumes this struct and owns the side effects on globalSyslog,
+// consumes this struct and owns the side effects on the syslog owner,
 // syslogConfigured, globalOTLP, globalOTLPTraces, and the persistent
 // audit / request log file handles.
 type observabilityStartupConfig struct {

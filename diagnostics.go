@@ -820,7 +820,7 @@ func checkOIDCJWKSTrust() OperatorContractCheck {
 
 // checkSyslogFeed reports whether the operator-configured syslog/SIEM feed is
 // actually delivering. A silent connect failure at startup (unreachable
-// collector, bad host/port, TCP refused) leaves globalSyslog nil while the
+// collector, bad host/port, TCP refused) leaves the active writer nil while the
 // /api/syslog readback reports the feed as "not configured" — indistinguishable
 // from an intentional no-op — so a compliance/SIEM feed can be down with only a
 // single startup log line ("Syslog: connect failed …") as signal. This surfaces
@@ -840,18 +840,65 @@ func checkSyslogFeed() OperatorContractCheck {
 	// Healthy only when the target we actually connected to (syslogConfigured,
 	// set SOLELY on a successful InitSyslog) matches the operator's current
 	// intent (syslogConfiguredAddr, recorded regardless of outcome). A bare
-	// globalSyslog != nil check is not enough: observability inits from
+	// activeSyslog() != nil check is not enough: observability inits from
 	// YAML/flags BEFORE admin settings apply a persisted override, so if the
 	// first target connects and a later re-init to a new target fails,
-	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
+	// the active writer stays non-nil pointing at the PREVIOUS collector while intent
 	// has moved on — the persisted SIEM target is silently down but a nil-check
 	// would still report OK.
-	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+	if activeSyslog() == nil || syslogConfigured != syslogConfiguredAddr {
+		snap := syslogFeedState()
+		action := "Verify the collector host/port and network path; the proxy retries the connection automatically with backoff, so no restart is required once the fault clears. Use POST /api/syslog/test to confirm connectivity."
+		if !snap.Reconnecting {
+			action = "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity."
+		}
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,
 			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector",
-			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
+			OperatorAction: action,
+		}
+	}
+	// CHAOS-66: connected is NOT delivering. A collector that accepts the
+	// connection and then stops draining — or goes away after a successful
+	// boot connect — leaves the writer non-nil and the target matching intent
+	// while every event is dropped. Before this branch existed that state
+	// reported "forwarding is active" (reproduced: drops=1, status=ok).
+	snap := syslogFeedState()
+	if snap.Degraded {
+		posture := "has never delivered an event since this node started"
+		if snap.EverDelivered {
+			posture = "has stopped delivering events"
+		}
+		return OperatorContractCheck{
+			Code:   "syslog_feed",
+			Status: diagFail,
+			Message: fmt.Sprintf("connected but NOT delivering — the SIEM feed %s for %s (%d consecutive failed deliveries, %d events dropped); the collector is not receiving audit or request events",
+				posture, snap.DarkFor.Round(time.Second), snap.Consecutive, snap.Drops),
+			OperatorAction: "Check that the collector is accepting and DRAINING the connection (a SIEM that accepts and stops reading looks connected from here). Delivery resumes automatically once it does — no restart is needed. The local audit log and request log are unaffected, so nothing is lost on this node; only the forwarded copy is.",
+		}
+	}
+	if snap.Failing {
+		return OperatorContractCheck{
+			Code:           "syslog_feed",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("remote syslog/SIEM forwarding is connected but the last %d deliveries failed; retrying", snap.Consecutive),
+			OperatorAction: "No action yet — the forwarder retries automatically and a collector restart or failover clears this within seconds. If it persists it is raised to a failure.",
+		}
+	}
+	if snap.QueueDrops > 0 {
+		return OperatorContractCheck{
+			Code:           "syslog_feed",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("remote syslog/SIEM forwarding is active but %d events were dropped because the delivery queue overflowed — the collector is slower than this node's event rate", snap.QueueDrops),
+			OperatorAction: "The collector is accepting events more slowly than this node produces them; events are being lost at the queue, not at the network. Give the collector more capacity, or reduce what is forwarded. The local audit log and request log are unaffected.",
+		}
+	}
+	if snap.Drops > 0 {
+		return OperatorContractCheck{
+			Code:    "syslog_feed",
+			Status:  diagOK,
+			Message: fmt.Sprintf("remote syslog/SIEM forwarding is active (%d events dropped during earlier outages)", snap.Drops),
 		}
 	}
 	return OperatorContractCheck{

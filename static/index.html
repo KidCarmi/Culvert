@@ -19292,6 +19292,7 @@ function resetBlockPage() {
              keep being enforced throughout — this is degraded freshness, not a dark
              control. Fires once per episode, cleared by an observed clean sync. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_feed_stale"> Threat feed stale (intelligence not refreshing)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="siem_feed_down"> SIEM feed down (events not reaching the syslog collector)</label>
         <!-- CHAOS-57: the credential-verification cost governor has been refusing
              authentication attempts for a sustained period. bcrypt costs ~80 ms of a
              core and runs on the per-request proxy-auth path, so verification is

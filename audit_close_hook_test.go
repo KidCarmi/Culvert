@@ -39,7 +39,7 @@ func snapshotLateShutdownGlobals(t *testing.T) {
 	restoreReqlog := reqlog.SwapPersistenceForTest()
 
 	// Syslog (syslog.go).
-	oldSyslog := globalSyslog
+	oldSyslog := activeSyslog()
 
 	// Community feed DB (catdb.go).
 	oldCommunityDB := communityDB
@@ -49,7 +49,7 @@ func snapshotLateShutdownGlobals(t *testing.T) {
 	// what other tests left behind.
 	oldActiveConns := atomic.LoadInt64(&activeConns)
 
-	globalSyslog = nil
+	publishSyslogWriter(nil)
 	communityDB = nil
 	atomic.StoreInt64(&activeConns, 0)
 
@@ -57,7 +57,7 @@ func snapshotLateShutdownGlobals(t *testing.T) {
 		restoreAudit()
 		restoreReqlog()
 
-		globalSyslog = oldSyslog
+		publishSyslogWriter(oldSyslog)
 		communityDB = oldCommunityDB
 		atomic.StoreInt64(&activeConns, oldActiveConns)
 	})

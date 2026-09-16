@@ -20,6 +20,16 @@
 // blocks on a socket — a slow or wedged TCP collector costs the caller a
 // channel send, with overflow counted in Drops rather than propagated as
 // proxy latency. Ordering is preserved (one drain goroutine).
+//
+// Delivery is also BEST-EFFORT, which makes the loss counters load-bearing
+// rather than decorative: this feed is a customer's compliance and forensic
+// record, so a line that does not reach the collector must be countable
+// (CWE-778). Drops() is the cumulative total, QueueDrops() the subset lost to
+// queue overflow, Delivered() the lines that actually landed, and
+// SetDeliveryObserver reports each outcome as it happens. A Writer whose
+// collector accepts connections and then stops draining keeps every
+// "configured" readback green while delivering nothing — telling those two
+// states apart is what Delivered() and the observer exist for (CHAOS-66).
 package syslog
 
 import (
@@ -51,9 +61,12 @@ type Writer struct {
 	pid           string    // cached PID string for RFC 5424 PROCID
 	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
 	drops         atomic.Uint64
+	queueDrops    atomic.Uint64
+	delivered     atomic.Uint64
 	panics        atomic.Uint64
-	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
-	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
+	panicObserver atomic.Pointer[func(recovered any)]  // optional; see SetPanicObserver
+	deliveryObs   atomic.Pointer[func(delivered bool)] // optional; see SetDeliveryObserver
+	dialFunc      func() (net.Conn, error)             // test seam; nil = real dialer
 
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
 	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
@@ -141,6 +154,7 @@ func (s *Writer) drainLoop() {
 						s.deliverGuarded(line)
 					} else {
 						s.drops.Add(1)
+						s.queueDrops.Add(1)
 					}
 				default:
 					return
@@ -163,12 +177,14 @@ func (s *Writer) send(pri int, msg string) {
 	}
 	if s.closed.Load() {
 		s.drops.Add(1)
+		s.queueDrops.Add(1)
 		return
 	}
 	select {
 	case s.queue <- s.formatMsg(pri, msg):
 	default:
 		s.drops.Add(1)
+		s.queueDrops.Add(1)
 	}
 }
 
@@ -250,7 +266,7 @@ func (s *Writer) writeLine(line string) error {
 // reaches deliverLine via the drain goroutine instead; this remains the
 // zero-value-Writer path and the unit under the deadline/backoff tests.
 func (s *Writer) writeMsg(pri int, msg string) {
-	s.deliverLine(s.formatMsg(pri, msg))
+	s.notifyDelivery(s.deliverLine(s.formatMsg(pri, msg)))
 }
 
 // deliverLine sends one pre-formatted line, holding s.mu across the write and
@@ -286,9 +302,52 @@ func (s *Writer) deliverGuarded(line string) {
 					(*p)(r)
 				}()
 			}
+			// A panicked line never reached the collector, so it is a FAILED
+			// delivery for the health plane as much as it is a drop. Reporting
+			// it keeps a recurring formatting bug from reading as a healthy
+			// feed on every surface except Panics().
+			s.notifyDelivery(false)
 		}
 	}()
-	s.deliverLine(line)
+	s.notifyDelivery(s.deliverLine(line))
+}
+
+// notifyDelivery reports one delivery outcome to the optional observer. Called
+// ONLY from the drain goroutine (or a zero-value Writer's own caller), never
+// from send() — a per-line callback on the request path is exactly the coupling
+// the async design exists to remove, so queue-overflow drops are accounted by
+// QueueDrops() instead and read by the health plane on demand.
+//
+// Panic-contained for the SetPanicObserver reason: a bad observer must never be
+// able to take delivery down.
+func (s *Writer) notifyDelivery(ok bool) {
+	p := s.deliveryObs.Load()
+	if p == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	(*p)(ok)
+}
+
+// SetDeliveryObserver publishes an optional observer notified synchronously, on
+// the drain goroutine, with the outcome of every delivery ATTEMPT — true when
+// the line reached the collector, false when it did not.
+//
+// This is the seam that makes the difference between a CONNECTED feed and a
+// DELIVERING one observable. Without it the only loss signal is the cumulative
+// Drops() counter, which a reader has to poll and difference to learn anything;
+// package main wires this to the SIEM health plane (syslog_health.go), where
+// the transition — not the total — is what an operator is paged on.
+//
+// Mirrors SetPanicObserver: this package is a stdlib-only leaf per its header
+// contract and cannot log, alert or expose metrics for itself. A nil fn clears
+// the observer.
+func (s *Writer) SetDeliveryObserver(fn func(delivered bool)) {
+	if fn == nil {
+		s.deliveryObs.Store(nil)
+		return
+	}
+	s.deliveryObs.Store(&fn)
 }
 
 // SetPanicObserver publishes an optional observer notified synchronously, on
@@ -309,19 +368,19 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 	s.panicObserver.Store(&fn)
 }
 
-func (s *Writer) deliverLine(line string) {
+func (s *Writer) deliverLine(line string) (delivered bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {
 		// Backoff: don't retry more often than every 5 seconds.
 		if time.Since(s.lastReconnErr) < 5*time.Second {
 			s.drops.Add(1)
-			return
+			return false
 		}
 		if err := s.connect(); err != nil {
 			s.lastReconnErr = time.Now()
 			s.drops.Add(1)
-			return // syslog down — swallow, never block the proxy
+			return false // syslog down — swallow, never block the proxy
 		}
 		s.lastReconnErr = time.Time{} // reset on success
 	}
@@ -330,12 +389,12 @@ func (s *Writer) deliverLine(line string) {
 		s.conn = nil
 		if time.Since(s.lastReconnErr) < 5*time.Second {
 			s.drops.Add(1)
-			return
+			return false
 		}
 		if err2 := s.connect(); err2 != nil {
 			s.lastReconnErr = time.Now()
 			s.drops.Add(1)
-			return
+			return false
 		}
 		if err3 := s.writeLine(line); err3 != nil {
 			// A collector that ACCEPTS connections but never drains would
@@ -348,10 +407,12 @@ func (s *Writer) deliverLine(line string) {
 			s.conn = nil
 			s.lastReconnErr = time.Now()
 			s.drops.Add(1)
-			return
+			return false
 		}
 		s.lastReconnErr = time.Time{}
 	}
+	s.delivered.Add(1)
+	return true
 }
 
 // Drops reports the number of messages dropped because the collector was
@@ -359,6 +420,20 @@ func (s *Writer) deliverLine(line string) {
 // was already closed. Monotonic per Writer; delivery is otherwise
 // silent-best-effort, so this is the only loss signal.
 func (s *Writer) Drops() uint64 { return s.drops.Load() }
+
+// Delivered reports how many lines reached the collector. Paired with Drops()
+// this is what distinguishes a feed that is CONNECTED from one that is
+// DELIVERING: a collector that accepts connections and then stops draining
+// leaves the Writer non-nil and every readback reporting "configured" while
+// this counter stops advancing and Drops() climbs.
+func (s *Writer) Delivered() uint64 { return s.delivered.Load() }
+
+// QueueDrops reports the subset of Drops() lost because the delivery QUEUE
+// overflowed (or the Writer was already closed) rather than because the
+// collector was unreachable. The two have different operator actions — a
+// collector that is slower than this node's event rate needs capacity, an
+// unreachable one needs a network path — so they are counted apart.
+func (s *Writer) QueueDrops() uint64 { return s.queueDrops.Load() }
 
 // Panics reports how many lines were lost to a recovered panic in the drain
 // goroutine (CHAOS-24). Always 0 in a healthy process; a non-zero value means

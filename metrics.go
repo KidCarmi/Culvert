@@ -1310,6 +1310,13 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-66: SIEM forwarding health. Emitted only when a syslog target is
+	// configured, for the reason the socks5 block states. The alertable pair is
+	// `culvert_syslog_up == 0` sustained, or `culvert_syslog_degraded == 1`
+	// (latched only past the degradation threshold, so an ordinary collector
+	// restart does not page).
+	syslogWritePrometheus(w)
+
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
 	// only for a DestCountry rule on a node with a GeoIP database, and a block
