@@ -388,7 +388,7 @@ func TestFE6A4C_C1_WorldReadableKeyIsDegradedNeverRemodedOrReplaced(t *testing.T
 	for _, withCommitments := range []bool{true, false} {
 		regPath, keyPath := fe6a4cKeyFixture(t, withCommitments)
 		key := []byte(strings.Repeat("k", idpCandidateKeyLen))
-		if err := os.WriteFile(keyPath, key, 0o644); err != nil {
+		if err := os.WriteFile(keyPath, key, 0o644); err != nil { // #nosec G306 -- the exposed mode IS the fault under test
 			t.Fatal(err)
 		}
 		if err := os.Chmod(keyPath, 0o644); err != nil { // umask-proof
