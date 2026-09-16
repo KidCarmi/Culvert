@@ -39,9 +39,8 @@ export const IDP_RECOVERY_VERSION = 1;
 export type IdPRecoveryAction = "create" | "update" | "import";
 const ACTIONS: readonly IdPRecoveryAction[] = ["create", "update", "import"];
 
-export interface IdPRecoveryMarker {
+interface IdPRecoveryMarkerBase {
   operationId: string;
-  action: IdPRecoveryAction;
   /** "" for a create (the appliance mints the id); the target id for an update */
   profileId: string;
   name: string;
@@ -54,6 +53,18 @@ export interface IdPRecoveryMarker {
   startedAt: number;
 }
 
+/** FE-6A.2 round 4 (Blocker 2) — the marker is ACTION-discriminated: an
+ * import marker carries the EXACT reviewed-source token the POST was
+ * dispatched with (`isr1:<64 hex>` — a keyed, non-disclosing commitment,
+ * never a source fact or a credential); a create/update marker never
+ * carries one. Recovery binds a ledger record to the marker on operationId,
+ * action AND (for an import) this token. */
+export type IdPRecoveryMarker = IdPRecoveryMarkerBase &
+  (
+    | { action: "create" | "update" }
+    | { action: "import"; importSourceRevision: string }
+  );
+
 export type IdPRecoveryRead =
   | { kind: "none" }
   | { kind: "valid"; marker: IdPRecoveryMarker }
@@ -64,6 +75,7 @@ export type IdPRecoveryRead =
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DIGEST_RE = /^[0-9a-f]{16,64}$/;
+const SOURCE_TOKEN_RE = /^isr1:[0-9a-f]{64}$/;
 const FIELDS = [
   "action",
   "candidateDigest",
@@ -76,10 +88,23 @@ const FIELDS = [
   "type",
 ] as const;
 
+/** The import marker's reviewed-source token, or undefined for any other
+ * action (the field never exists there). */
+export function markerImportSource(m: IdPRecoveryMarker): string | undefined {
+  return m.action === "import" ? m.importSourceRevision : undefined;
+}
+
+function sourceBindingValid(m: IdPRecoveryMarker): boolean {
+  if (m.action === "import")
+    return SOURCE_TOKEN_RE.test(m.importSourceRevision);
+  return !("importSourceRevision" in m);
+}
+
 function grammarValid(m: IdPRecoveryMarker): boolean {
   return (
     UUID_RE.test(m.operationId) &&
     ACTIONS.includes(m.action) &&
+    sourceBindingValid(m) &&
     typeof m.profileId === "string" &&
     m.profileId.length <= 128 &&
     typeof m.name === "string" &&
@@ -97,13 +122,16 @@ function grammarValid(m: IdPRecoveryMarker): boolean {
 }
 
 function sameMarker(a: IdPRecoveryMarker, b: IdPRecoveryMarker): boolean {
-  return FIELDS.every((k) => a[k] === b[k]);
+  return (
+    FIELDS.every((k) => a[k] === b[k]) &&
+    markerImportSource(a) === markerImportSource(b)
+  );
 }
 
-interface Stored extends IdPRecoveryMarker {
+type Stored = IdPRecoveryMarker & {
   version: number;
   subject: string;
-}
+};
 
 function store(): Storage | null {
   try {
@@ -134,11 +162,12 @@ function readRaw(): RawRead {
     const v: unknown = JSON.parse(raw);
     if (!isRecord(v)) return { kind: "unreadable" };
     const o = v;
-    const stored: Stored = {
+    const action = ACTIONS.find((a) => a === o["action"]);
+    if (action === undefined) return { kind: "unreadable" };
+    const base = {
       version: typeof o["version"] === "number" ? o["version"] : -1,
       subject: typeof o["subject"] === "string" ? o["subject"] : "",
       operationId: typeof o["operationId"] === "string" ? o["operationId"] : "",
-      action: ACTIONS.find((a) => a === o["action"]) ?? "create",
       profileId: typeof o["profileId"] === "string" ? o["profileId"] : "",
       name: typeof o["name"] === "string" ? o["name"] : "",
       type: IDP_TYPES.find((t) => t === o["type"]) ?? "oidc",
@@ -148,7 +177,25 @@ function readRaw(): RawRead {
       cutover: o["cutover"] === true,
       startedAt: typeof o["startedAt"] === "number" ? o["startedAt"] : -1,
     };
-    if (!ACTIONS.some((a) => a === o["action"])) return { kind: "unreadable" };
+    // Action-discriminated (round 4): an import marker MUST carry its
+    // token; any other marker must NOT (a tampered store is unreadable).
+    if (action === "import") {
+      if (typeof o["importSourceRevision"] !== "string")
+        return { kind: "unreadable" };
+    } else if ("importSourceRevision" in o) {
+      return { kind: "unreadable" };
+    }
+    const stored: Stored =
+      action === "import"
+        ? {
+            ...base,
+            action,
+            importSourceRevision:
+              typeof o["importSourceRevision"] === "string"
+                ? o["importSourceRevision"]
+                : "",
+          }
+        : { ...base, action };
     if (
       stored.version !== IDP_RECOVERY_VERSION ||
       stored.subject === "" ||
@@ -162,9 +209,8 @@ function readRaw(): RawRead {
 }
 
 function strip(s: Stored): IdPRecoveryMarker {
-  return {
+  const base: IdPRecoveryMarkerBase = {
     operationId: s.operationId,
-    action: s.action,
     profileId: s.profileId,
     name: s.name,
     type: s.type,
@@ -173,6 +219,13 @@ function strip(s: Stored): IdPRecoveryMarker {
     cutover: s.cutover,
     startedAt: s.startedAt,
   };
+  return s.action === "import"
+    ? {
+        ...base,
+        action: s.action,
+        importSourceRevision: s.importSourceRevision,
+      }
+    : { ...base, action: s.action };
 }
 
 /** Persist the marker BEFORE dispatch. false ⇒ NOTHING may be sent. */

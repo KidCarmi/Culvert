@@ -168,6 +168,7 @@ describe("LA2 the import marker binds the exact reviewed token", () => {
     const back = readIdPRecovery("admin");
     expect(back.kind).toBe("valid");
     if (back.kind !== "valid") throw new Error("narrowing");
+    if (back.marker.action !== "import") throw new Error("narrowing");
     expect(back.marker.importSourceRevision).toBe(SOURCE_TOKEN);
   });
   it("an import marker with a malformed token is refused (nothing may be sent)", () => {

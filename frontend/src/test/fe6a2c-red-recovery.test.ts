@@ -20,6 +20,7 @@ it("CM1 an import marker is written, read back by its owner and never carries a 
   const ok = writeIdPRecovery(OWNER, {
     operationId: OP,
     action: "import",
+    importSourceRevision: "isr1:" + "a".repeat(64),
     profileId: "",
     name: "Imported legacy LDAP",
     type: "ldap",
@@ -45,6 +46,7 @@ it("CM2 a stored import marker survives the grammar check on read", () => {
       subject: OWNER,
       operationId: OP,
       action: "import",
+      importSourceRevision: "isr1:" + "a".repeat(64),
       profileId: "",
       name: "Imported legacy LDAP",
       type: "ldap",

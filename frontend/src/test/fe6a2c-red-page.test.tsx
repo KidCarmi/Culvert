@@ -362,6 +362,7 @@ it("PC3 Recover settles an unproven import from the ledger; a 404 offers the sam
           operationId: id,
           state: "committed",
           action: "idp.import",
+          importSourceRevision: SOURCE_TOKEN, // round 4: the record is bound to the reviewed source
           actor: "admin@10.0.0.9",
           profileId: "imp000000001",
           registryRevision: "r-doc-1",

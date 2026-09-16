@@ -365,7 +365,6 @@ export interface IdPList {
 
 interface IdPOperationBase {
   operationId: string;
-  action: IdPOperationAction;
   actor: string;
   profileId: string;
   registryRevision: string;
@@ -373,8 +372,18 @@ interface IdPOperationBase {
   startedAt: string;
 }
 
+/** FE-6A.2 round 4 (Blocker 2) — the record is ACTION-discriminated: an
+ * `idp.import` record carries the NON-SECRET reviewed-source token it was
+ * bound to (`isr1:<64 hex>`, never `unavailable`); no other action does. A
+ * lost-response recovery treats a record as the dispatched operation ONLY
+ * when operationId, action AND this token all match its marker. */
+export type IdPOperationActionFacts =
+  | { action: "idp.create" | "idp.update" }
+  | { action: "idp.import"; importSourceRevision: string };
+
 /** The discriminated union the ledger record actually takes. */
 export type IdPOperation = IdPOperationBase &
+  IdPOperationActionFacts &
   (
     | { state: "pending"; audited: false }
     | {
@@ -698,17 +707,51 @@ function forbid(
   }
 }
 
+/** The reviewed-source COMMITMENT grammar only — an import record is bound
+ * to a real token, never to the `unavailable` posture. */
+const readImportSourceCommitment: Decoder<string> = (v, path = "$") => {
+  const s = readString(v, path);
+  if (!IMPORT_SOURCE_TOKEN_RE.test(s))
+    throw new DecodeError(path, "an isr1 reviewed-source commitment", s);
+  return s;
+};
+
+const decodeIdPOperationActionFacts = (
+  o: Record<string, unknown>,
+  path: string,
+): IdPOperationActionFacts => {
+  const action = field(o, "action", readEnum(IDP_OPERATION_ACTIONS), path);
+  if (action === "idp.import") {
+    return {
+      action,
+      importSourceRevision: field(
+        o,
+        "importSourceRevision",
+        readImportSourceCommitment,
+        path,
+      ),
+    };
+  }
+  if ("importSourceRevision" in o)
+    throw new DecodeError(
+      `${path}.importSourceRevision`,
+      `absent on an ${action} record`,
+      "[present]",
+    );
+  return { action };
+};
+
 export const decodeIdPOperation: Decoder<IdPOperation> = (v, path = "$") => {
   const o = readRecord(v, path);
   refuseSecretKeys(o, path);
-  const base: IdPOperationBase = {
+  const base: IdPOperationBase & IdPOperationActionFacts = {
     operationId: field(o, "operationId", readString, path),
-    action: field(o, "action", readEnum(IDP_OPERATION_ACTIONS), path),
     actor: field(o, "actor", readString, path),
     profileId: field(o, "profileId", readString, path),
     registryRevision: field(o, "registryRevision", readString, path),
     cutover: field(o, "cutover", readBoolean, path),
     startedAt: field(o, "startedAt", readString, path),
+    ...decodeIdPOperationActionFacts(o, path),
   };
   const state = field(o, "state", readEnum(IDP_OPERATION_STATES), path);
   const audited = field(o, "audited", readBoolean, path);

@@ -674,6 +674,9 @@ type RecoveryView =
   | { kind: "none" }
   | { kind: "looking" }
   | { kind: "op"; op: IdPOperation }
+  /** round 4: the record under this operationId is NOT the dispatched
+   * candidate (another action, or another reviewed source) — UNPROVEN */
+  | { kind: "unbound"; op: IdPOperation }
   | { kind: "never_recorded" }
   | { kind: "refused"; code: string }
   | { kind: "unproven" };
@@ -1029,6 +1032,9 @@ export function IdentityProvidersPage(): JSX.Element {
     const marker: IdPRecoveryMarker = {
       operationId,
       action: "import",
+      // Round 4 (Blocker 2): the EXACT reviewed token the POST carries, so
+      // a lost-response recovery can bind the ledger record to THIS import.
+      importSourceRevision: ceremony.legacy.importSourceRevision,
       profileId: "",
       name: "Imported legacy LDAP",
       type: "ldap",
@@ -1163,10 +1169,35 @@ export function IdentityProvidersPage(): JSX.Element {
   };
 
   // ── recovery ──────────────────────────────────────────────────────────────
+  /** Round 4 (Blocker 2): a ledger record is THIS marker's operation only
+   * when operationId, action AND (for an import) the exact reviewed-source
+   * token all match. Anything else is UNPROVEN: the marker is kept, nothing
+   * is re-sent, no outcome is claimed. */
+  const operationBoundToMarker = (
+    op: IdPOperation,
+    marker: IdPRecoveryMarker,
+  ): boolean => {
+    if (op.operationId !== marker.operationId) return false;
+    switch (marker.action) {
+      case "create":
+        return op.action === "idp.create";
+      case "update":
+        return op.action === "idp.update";
+      case "import":
+        return (
+          op.action === "idp.import" &&
+          op.importSourceRevision === marker.importSourceRevision
+        );
+    }
+  };
   const recover = async (marker: IdPRecoveryMarker): Promise<void> => {
     setRecoveryView({ kind: "looking" });
     try {
       const op = await getIdPOperation(marker.operationId);
+      if (!operationBoundToMarker(op, marker)) {
+        setRecoveryView({ kind: "unbound", op });
+        return;
+      }
       setRecoveryView({ kind: "op", op });
       if (op.state === "committed") {
         clearIdPRecovery(marker.operationId);
@@ -1390,6 +1421,17 @@ export function IdentityProvidersPage(): JSX.Element {
                   start. The same candidate may be re-sent under the same
                   operation identity, or the marker abandoned.
                 </span>
+              )}
+              {recoveryView.kind === "unbound" && (
+                <StatusBadge status="unknown">
+                  The appliance's record under this operation id is not bound to
+                  the dispatched candidate (
+                  {recoveryView.op.action === "idp.import"
+                    ? "its reviewed legacy source differs"
+                    : `it is an ${recoveryView.op.action} record`}
+                  ) — outcome unproven; the marker is kept and nothing is
+                  re-sent
+                </StatusBadge>
               )}
               {recoveryView.kind === "refused" && (
                 <StatusBadge status="unknown">
