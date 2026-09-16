@@ -1,0 +1,278 @@
+package urlcat
+
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+
+	"github.com/KidCarmi/Culvert/internal/hostutil"
+)
+
+// Equivalence + allocation gates for the category index key.
+//
+// MatchesHost/MatchesHostAdmin resolve a category's host set through an index
+// keyed by strings.ToLower(name) (see rebuildIndex). Both used to materialise
+// that key per call with strings.ToLower; they now fold it into a stack buffer
+// and probe the map with idx[string(b)], which the compiler resolves without
+// allocating. These tests pin that the KEY is byte-identical either way — this
+// is a policy MEMBERSHIP matcher, so a divergence is a silently mis-enforced
+// (or silently unenforced) Allow/Deny rule, not a cosmetic difference.
+//
+// legacyCategoryKey is the VERBATIM pre-fix key expression. Keeping the oracle
+// in-tree is what makes the comparison reproducible rather than a claim.
+func legacyCategoryKey(cat string) string { return strings.ToLower(cat) }
+
+// foldedCategoryKey drives the REAL categoryKey helper, so the differential
+// exercises its actual branch decision (inline fold vs allocating fallback)
+// rather than a restatement of it.
+func foldedCategoryKey(cat string) string {
+	var buf [maxInlineCategoryKey]byte
+	return string(categoryKey(buf[:], cat))
+}
+
+// divergenceShapes are the cases a random generator is unlikely to hit and that
+// decide correctness: the ASCII/non-ASCII branch boundary, the inline-buffer
+// length boundary, and the Unicode foldings that are NOT byte-wise +32.
+func divergenceShapes() []string {
+	long := strings.Repeat("A", maxInlineCategoryKey)
+	return []string{
+		"",
+		"a",
+		"A",
+		"Social Media",
+		"SOCIAL MEDIA",
+		"social media",
+		"Automation & Integration", // longest shipped name
+		"MiXeD-123_/&.",
+		"@[`{",                   // ASCII neighbours of A-Z / a-z: must NOT shift
+		"\x00\x01\x7f",           // ASCII control + DEL
+		long,                     // exactly the inline bound
+		long + "A",               // one past it -> fallback
+		strings.Repeat("A", 200), // far past it -> fallback
+		"Café",                   // non-ASCII, already lower
+		"CAFÉ",                   // non-ASCII uppercase -> Unicode fold
+		"SOCIÁL",                 // non-ASCII after ASCII uppercase (partial write, then bail)
+		"ÅNGSTRÖM",               // multi-byte uppercase
+		"K",                      // KELVIN SIGN -> ASCII 'k' (NOT byte-wise)
+		"KKK",                    // mixed ASCII + Kelvin
+		"İ",                      // LATIN CAPITAL I WITH DOT ABOVE
+		"ẞ",                      // CAPITAL SHARP S -> ß
+		"ĲSSELMEER",              // ligature
+		"ΣΊΣΥΦΟΣ",                // Greek: final-sigma rules
+		"\xff\xfe",               // invalid UTF-8 -> must still agree
+		"A\xffB",                 // invalid UTF-8 after ASCII uppercase
+		"K" + strings.Repeat("A", maxInlineCategoryKey), // non-ASCII AND over the bound
+	}
+}
+
+func TestCategoryKey_DifferentialAgainstLegacy(t *testing.T) {
+	for _, s := range divergenceShapes() {
+		if got, want := foldedCategoryKey(s), legacyCategoryKey(s); got != want {
+			t.Fatalf("key divergence for %q: folded=%q legacy=%q", s, got, want)
+		}
+	}
+
+	// Randomised sweep, weighted toward the branch boundaries: bytes drawn from
+	// the ASCII case range, the ASCII neighbours of it, and the 0x80+ range that
+	// forces the fallback, at lengths straddling maxInlineCategoryKey.
+	alphabet := []byte("AZaz@[`{ 0_\x00\x7f\x80\xc3\xa9\xff")
+	seed := uint64(0x9E3779B97F4A7C15)
+	next := func() uint64 { // splitmix64 — deterministic, no test flake
+		seed += 0x9E3779B97F4A7C15
+		z := seed
+		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+		z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+		return z ^ (z >> 31)
+	}
+	for i := 0; i < 20000; i++ {
+		n := int(next() % uint64(maxInlineCategoryKey+8))
+		b := make([]byte, n)
+		for j := range b {
+			b[j] = alphabet[next()%uint64(len(alphabet))]
+		}
+		s := string(b)
+		if got, want := foldedCategoryKey(s), legacyCategoryKey(s); got != want {
+			t.Fatalf("key divergence for %q (len %d): folded=%q legacy=%q", s, n, got, want)
+		}
+	}
+}
+
+// TestCategoryKey_DifferentialIsNotVacuous proves the sweep actually exercises
+// BOTH branches. A shape set that only ever took the fallback would agree with
+// the oracle trivially and pin nothing.
+func TestCategoryKey_DifferentialIsNotVacuous(t *testing.T) {
+	var inline, fallback int
+	for _, s := range divergenceShapes() {
+		if len(s) <= maxInlineCategoryKey && isASCIIString(s) {
+			inline++
+		} else {
+			fallback++
+		}
+	}
+	if inline < 5 || fallback < 5 {
+		t.Fatalf("shape set does not exercise both branches: inline=%d fallback=%d", inline, fallback)
+	}
+}
+
+func isASCIIString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+func FuzzCategoryKey(f *testing.F) {
+	for _, s := range divergenceShapes() {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, cat string) {
+		if got, want := foldedCategoryKey(cat), legacyCategoryKey(cat); got != want {
+			t.Fatalf("key divergence for %q: folded=%q legacy=%q", cat, got, want)
+		}
+	})
+}
+
+// TestMatchesHost_VerdictUnchangedAcrossKeyShapes drives the real entry points
+// rather than the key helper, so the differential covers the map probe too —
+// including the case that matters most in practice: a mixed-case category name,
+// which is what every shipped SaaS category carries.
+func TestMatchesHost_VerdictUnchangedAcrossKeyShapes(t *testing.T) {
+	names := []string{
+		"Social Media",
+		"SOCIAL MEDIA",
+		"social media",
+		"Automation & Integration",
+		"CAFÉ",
+		"K", // Kelvin
+		strings.Repeat("A", maxInlineCategoryKey+3),
+	}
+	hosts := []string{"example.com", "a.b.example.com", "notexample.com", "", "EXAMPLE.COM"}
+
+	for _, name := range names {
+		s := New([]*Entry{{Name: name, Hosts: []string{"example.com"}}})
+		for _, probe := range names { // probe every name against every store
+			for _, h := range hosts {
+				// Oracle: resolve the host set exactly as the pre-fix body did.
+				s.mu.RLock()
+				legacySet := s.index[legacyCategoryKey(probe)]
+				legacyAdmin := s.adminIndex[legacyCategoryKey(probe)]
+				s.mu.RUnlock()
+				wantAny := legacyHostSetMatch(legacySet, h)
+				wantAdmin := legacyHostSetMatch(legacyAdmin, h)
+
+				if got := s.MatchesHost(Category(probe), h); got != wantAny {
+					t.Fatalf("MatchesHost(store=%q, cat=%q, host=%q) = %v, want %v", name, probe, h, got, wantAny)
+				}
+				if got := s.MatchesHostAdmin(Category(probe), h); got != wantAdmin {
+					t.Fatalf("MatchesHostAdmin(store=%q, cat=%q, host=%q) = %v, want %v", name, probe, h, got, wantAdmin)
+				}
+			}
+		}
+	}
+}
+
+// legacyHostSetMatch is the verbatim exact-then-suffix probe both entry points
+// run once the host set is resolved. Unchanged by this work; reproduced here so
+// the oracle above is complete.
+func legacyHostSetMatch(hostSet map[string]bool, host string) bool {
+	if hostSet == nil {
+		return false
+	}
+	host = normalizeForTest(host)
+	if hostSet[host] {
+		return true
+	}
+	for i, ch := range host {
+		if ch == '.' && hostSet[host[i+1:]] {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBenchGate_MatchesHostIsAllocationFree is the regression gate. It is
+// deterministic (testing.AllocsPerRun, not a timing ratio) so it cannot flake
+// on a loaded runner, under -race, or on different hardware — the repo's
+// standing rule for hot-path gates.
+//
+// The bound is 0: this runs once per category-scoped access rule per proxied
+// request, so any allocation here is multiplied by the rule count on 100% of
+// traffic. Every shipped SaaS category name carries an uppercase letter, so a
+// return to strings.ToLower fails this immediately rather than only on an
+// operator's particular taxonomy.
+func TestBenchGate_MatchesHostIsAllocationFree(t *testing.T) {
+	s := New(DefaultEntries())
+	mixed := ""
+	for _, e := range DefaultEntries() {
+		if e.Name != strings.ToLower(e.Name) {
+			mixed = e.Name
+			break
+		}
+	}
+	if mixed == "" {
+		t.Fatal("shipped taxonomy has no mixed-case category name; gate would be vacuous")
+	}
+
+	// Hoisted: folding the name is the TEST's allocation, not the code path's.
+	lowered := Category(strings.ToLower(mixed))
+
+	// A HIT exercises the rest of the body too — the exact probe and, for a
+	// subdomain, the suffix walk — so the gate covers the path a matching rule
+	// takes, not only the miss that clean traffic takes.
+	hitStore := New([]*Entry{{Name: "Social Media", Hosts: []string{"example.com"}}})
+
+	cases := []struct {
+		name string
+		fn   func()
+	}{
+		{"MatchesHost/miss", func() { s.MatchesHost(Category(mixed), "uncategorized.example.net") }},
+		{"MatchesHost/lowercase-name", func() { s.MatchesHost(lowered, "uncategorized.example.net") }},
+		{"MatchesHostAdmin/miss", func() { s.MatchesHostAdmin(Category(mixed), "uncategorized.example.net") }},
+		{"MatchesHost/unknown-category", func() { s.MatchesHost("No Such Category", "uncategorized.example.net") }},
+		{"MatchesHost/hit-exact", func() { hitStore.MatchesHost("Social Media", "example.com") }},
+		{"MatchesHost/hit-subdomain", func() { hitStore.MatchesHost("Social Media", "a.b.example.com") }},
+	}
+	for _, tc := range cases {
+		if got := testing.AllocsPerRun(200, tc.fn); got != 0 {
+			t.Errorf("%s: %v allocs/op, want 0", tc.name, got)
+		}
+	}
+}
+
+// TestBenchGate_OversizeCategoryNameStillAnswers is the CONTROL for the gate
+// above. The cheapest way to pass an allocation gate is to stop doing the work,
+// and the second cheapest is to silently drop names the inline buffer cannot
+// hold. A name past maxInlineCategoryKey must still match correctly (it takes
+// the allocating fallback, which is why it is excluded from the 0-alloc gate).
+func TestBenchGate_OversizeCategoryNameStillAnswers(t *testing.T) {
+	long := strings.Repeat("A", maxInlineCategoryKey*2)
+	s := New([]*Entry{{Name: long, Hosts: []string{"example.com"}}})
+	if !s.MatchesHost(Category(long), "a.example.com") {
+		t.Fatal("oversize category name must still match via the fallback")
+	}
+	if !s.MatchesHost(Category(strings.ToLower(long)), "a.example.com") {
+		t.Fatal("oversize category name must still match case-insensitively")
+	}
+	if s.MatchesHost(Category(long), "other.invalid") {
+		t.Fatal("oversize category name must not match an unrelated host")
+	}
+}
+
+// TestCategoryKeyBound_CoversShippedTaxonomy pins the inline buffer against the
+// data it exists for: if a future taxonomy adds a name longer than the bound,
+// this fails and asks for the bound to be reconsidered rather than silently
+// moving that category onto the allocating path.
+func TestCategoryKeyBound_CoversShippedTaxonomy(t *testing.T) {
+	for _, e := range DefaultEntries() {
+		if len(e.Name) > maxInlineCategoryKey {
+			t.Errorf("shipped category %q is %d bytes, past maxInlineCategoryKey=%d",
+				e.Name, len(e.Name), maxInlineCategoryKey)
+		}
+	}
+}
+
+// normalizeForTest mirrors what both entry points apply to host before the set
+// probe, so the oracle sees the same host they do.
+func normalizeForTest(host string) string { return hostutil.NormalizeHost(host) }
