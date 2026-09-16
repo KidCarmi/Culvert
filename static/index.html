@@ -5181,7 +5181,7 @@ Firefox (all platforms):
               <option value="4">L4</option>
             </select>
             <input id="support-case" class="input sm" type="text" placeholder="case id (optional)" data-min-role="admin" maxlength="64" style="width:140px" title="Bind this bundle to a support case (letters/digits/._-, ≤64)">
-            <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
+            <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic support bundle">＋ Create bundle</button>
             <button class="btn ghost sm" data-click="loadSupport"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button>
           </div>
         </div>
@@ -6116,7 +6116,7 @@ const viewMeta = {
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
   governance:     { title: 'Governance',      meta: 'Control-plane route metadata, RBAC enforcement counters and parity-test health' },
-  support:        { title: 'Support',         meta: 'Collect redacted diagnostic bundles and review the collector inventory' },
+  support:        { title: 'Support',         meta: 'Collect redacted diagnostic support bundles and review the collector inventory' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -16202,7 +16202,7 @@ async function supportCreateBundle() {
   if (caseID && !/^[A-Za-z0-9._-]{1,64}$/.test(caseID)) { toast('Invalid case id (letters/digits/._-, ≤64)', 'error'); return; }
   const ok = await confirmAction(
     'Create support bundle?',
-    'A redacted diagnostic bundle (scope: ' + scope + ', level: ' + levelLabel + (caseID ? ', case: ' + caseID : '') + ') will be collected and written to disk - internal, non-secret operational detail.',
+    'A redacted diagnostic support bundle (scope: ' + scope + ', level: ' + levelLabel + (caseID ? ', case: ' + caseID : '') + ') will be collected and written to disk - internal, non-secret operational detail.',
     'Create bundle',
     { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
   if (!ok) return;
