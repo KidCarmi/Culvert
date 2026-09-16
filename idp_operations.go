@@ -232,6 +232,12 @@ func idpLoadOrMintCandidateKey(path string) ([]byte, error) {
 // errIdPCandidateKeyMissing.
 func idpLoadCandidateKey(path string, mayMint bool) ([]byte, error) {
 	read := func() ([]byte, error) {
+		// Round 4 (Blocker 3): the key is trusted ONLY inside its declared
+		// node-local boundary — a regular, non-symlink, owner-only file —
+		// inspected with NON-following metadata before a byte is read.
+		if err := idpInspectCandidateKey(path); err != nil {
+			return nil, err
+		}
 		key, err := os.ReadFile(path) // #nosec G304 -- beside the operator-configured registry file
 		if err != nil {
 			return nil, err
@@ -264,6 +270,34 @@ func idpLoadCandidateKey(path string, mayMint bool) ([]byte, error) {
 	// Another generation won the publication: read it (it is complete —
 	// the winner linked only after its fsync).
 	return read()
+}
+
+// errIdPCandidateKeyExposed: a key object exists at the path but is outside
+// the node-local confidentiality boundary (a symlink, a non-regular object,
+// or a mode granting group/world access). It is NEVER re-moded or replaced
+// — a key readable beyond the appliance turns the published source token
+// into an offline guessing oracle for short bind passwords, and silently
+// "fixing" it would hide that exposure; the ledger fails closed instead.
+var errIdPCandidateKeyExposed = errors.New("candidate key: outside the node-local confidentiality boundary")
+
+// idpInspectCandidateKey validates the key's confidentiality boundary from
+// non-following metadata: regular file, not a symlink, no group/world bits.
+// A missing path is reported as-is (the mint decision belongs to the caller).
+func idpInspectCandidateKey(path string) error {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	mode := st.Mode()
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return fmt.Errorf("%w: symlink", errIdPCandidateKeyExposed)
+	case !mode.IsRegular():
+		return fmt.Errorf("%w: not a regular file (%s)", errIdPCandidateKeyExposed, mode.Type())
+	case mode.Perm()&0o077 != 0:
+		return fmt.Errorf("%w: mode %04o grants group/world access", errIdPCandidateKeyExposed, mode.Perm())
+	}
+	return nil
 }
 
 // hasCandidateCommitments reports whether any record carries a keyed
@@ -407,6 +441,9 @@ func newIdPOperationStore(registryPath string) *idpOperationStore {
 		detail := "the operation ledger's node-local candidate key cannot be read or published durably; operation-identified writes and lookups are refused until the key file is restored and the node restarted"
 		if errors.Is(kerr, errIdPCandidateKeyMissing) {
 			detail = "the operation ledger's node-local candidate key is MISSING beside a ledger that carries keyed commitments; a replacement key would verify none of them, so operation-identified writes and lookups are refused until the original key file is restored and the node restarted (evidence preserved)"
+		}
+		if errors.Is(kerr, errIdPCandidateKeyExposed) {
+			detail = "the operation ledger's node-local candidate key is outside its confidentiality boundary (it must be a regular, non-symlink, owner-only 0600 file); it is never re-moded or replaced — operation-identified writes and lookups are refused until the operator restores a regular 0600 key file at the path and the node restarts"
 		}
 		s.degraded = &idpOpsDegradation{Reason: "unreadable", Detail: detail}
 		logger.Printf("IdP: candidate-commitment key UNUSABLE — operation ledger fail-closed (%s: %v)", sanitizeLog(filepath.Base(idpCandidateKeyFileName)), kerr)
@@ -697,6 +734,13 @@ func (op *idpOperation) lookupReadModel() map[string]any {
 	}
 	if op.State == idpOpCommitted && !op.Audited {
 		out["auditState"] = "pending" // committed; the durable success audit is still owed
+	}
+	// Round 4 (Blocker 2): an idp.import record is ACTION-discriminated —
+	// it exposes the NON-SECRET reviewed-source token it was bound to, so
+	// a lost-response recovery can bind the record to its marker; every
+	// other action carries none.
+	if op.Action == "idp.import" && op.ImportSourceRevision != "" {
+		out["importSourceRevision"] = op.ImportSourceRevision
 	}
 	if op.FinishedAt != "" {
 		out["finishedAt"] = op.FinishedAt

@@ -12,6 +12,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -319,10 +320,104 @@ func snapshotOverriddenSurfaces(s AdminSettings) {
 // LoadAdminSettings reads the settings file and applies each field to its
 // respective component. Called once in main() after all components init.
 // Missing file = first run; each component keeps its config/default value.
+// adminSettingsLoadPosture is the EXPLICIT outcome of this boot's settings
+// load (round 4, Blocker 1): the save boundary consults it, and the
+// legacy-LDAP boot observation is reconciled against the durable file
+// itself — never against a guess about it.
+type adminSettingsLoadPosture int32
+
+const (
+	loadPostureUnknown            adminSettingsLoadPosture = iota
+	loadPostureReadable                                    // parsed and applied
+	loadPostureMissing                                     // no file: a known truth (nothing durable)
+	loadPostureUnreadable                                  // exists, cannot be read: an UNKNOWN truth
+	loadPostureCorruptQuarantined                          // unparseable, moved aside: evidence preserved
+)
+
+var adminSettingsPosture atomic.Int32
+
+func setAdminSettingsLoadPosture(p adminSettingsLoadPosture) { adminSettingsPosture.Store(int32(p)) }
+
+// adminSettingsLoadPostureNow reports this boot's settings-load outcome.
+func adminSettingsLoadPostureNow() adminSettingsLoadPosture {
+	return adminSettingsLoadPosture(adminSettingsPosture.Load())
+}
+
+func (p adminSettingsLoadPosture) String() string {
+	switch p {
+	case loadPostureReadable:
+		return "readable"
+	case loadPostureMissing:
+		return "missing"
+	case loadPostureUnreadable:
+		return "unreadable"
+	case loadPostureCorruptQuarantined:
+		return "corrupt_quarantined"
+	default:
+		return "unknown"
+	}
+}
+
+// Round 4 (Blocker 1): a save while the boot observation is still pending
+// is REFUSED unless the authoritative file's truth can be established.
+var (
+	errAdminSettingsRecoveryUnreadable = errors.New("admin settings: the authoritative file is still unreadable — the save is refused so the durable evidence is never replaced (restore readability, or remove the file to start from an empty store)")
+	errAdminSettingsRecoveryCorrupt    = errors.New("admin settings: the authoritative file became readable but does not parse — the save is refused so the evidence is never replaced (repair the file, or restart the node to quarantine it)")
+)
+
+// reconcilePendingLegacyLDAPUnderSave runs under adminSettingsMu immediately
+// before a save while the legacy-LDAP boot observation is still PENDING
+// (an unreadable or corrupt load). It re-reads and parses the AUTHORITATIVE
+// file rather than trusting the boot's outcome:
+//
+//   - readable + a durable cutover ⇒ that EXACT record and sentinel are
+//     adopted, the observation consumed, and NO new audit is emitted;
+//   - still unreadable, or readable but unparseable ⇒ the save is REFUSED
+//     with zero file/runtime mutation (the evidence is never replaced);
+//   - missing (quarantined at boot, or removed) or readable without a
+//     sentinel ⇒ no durable record exists: the observed transition is
+//     minted now, persisted by this save, and audited exactly once after
+//     the write.
+func reconcilePendingLegacyLDAPUnderSave(path string) error {
+	data, err := os.ReadFile(path) // #nosec G304 -- the operator-configured settings path
+	switch {
+	case err == nil:
+		var s AdminSettings
+		if jerr := json.Unmarshal(data, &s); jerr != nil {
+			return fmt.Errorf("%w (load posture %s)", errAdminSettingsRecoveryCorrupt, adminSettingsLoadPostureNow())
+		}
+		if s.LegacyLDAPRetired {
+			legacyLDAPRetiredFlag.Store(true)
+			if s.LegacyLDAPCutover != nil {
+				rec := *s.LegacyLDAPCutover
+				legacyLDAPCutoverRec.Store(&rec)
+			}
+			legacyLDAPCutoverDurableFlag.Store(true) // read from the durable file
+			reconcileLegacyLDAPBootObservation(true) // consumed: same identity, nothing new
+			id := ""
+			if rec := legacyLDAPCutover(); rec != nil {
+				id = rec.OperationID
+			}
+			logger.Printf("AdminSettings: storage recovered (load posture %s) — adopted the durable legacy-LDAP cutover %s; no new transition recorded", adminSettingsLoadPostureNow(), sanitizeLog(id))
+			return nil
+		}
+		// Readable, no sentinel: nothing durable exists — a legitimate recovery.
+	case os.IsNotExist(err):
+		// Missing: quarantined at boot, or removed since — a known truth.
+	default:
+		return fmt.Errorf("%w (load posture %s)", errAdminSettingsRecoveryUnreadable, adminSettingsLoadPostureNow())
+	}
+	if reconcileLegacyLDAPBootObservation(false) {
+		legacyLDAPCutoverDurableFlag.Store(false)
+	}
+	return nil
+}
+
 func LoadAdminSettings(path string) {
 	adminSettingsMu.Lock()
 	adminSettingsPath = path
 	adminSettingsMu.Unlock()
+	setAdminSettingsLoadPosture(loadPostureUnknown)
 
 	// Rewrite management-identity durability is re-evaluated by THIS load
 	// (2D-C recovery correction §5): the latch reflects the current boot's
@@ -336,6 +431,7 @@ func LoadAdminSettings(path string) {
 
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		setAdminSettingsLoadPosture(loadPostureMissing)
 		// First run — no settings file yet; components keep their config
 		// defaults. YAML-seeded rewrite rules still need their minted stable
 		// identities made durable BEFORE the admin listeners expose them
@@ -354,11 +450,15 @@ func LoadAdminSettings(path string) {
 		return
 	}
 	if err != nil {
+		setAdminSettingsLoadPosture(loadPostureUnreadable)
 		// Round 3 (Blocker 3): an UNREADABLE file is an UNKNOWN truth — the
 		// boot observation stays pending (fail closed: the legacy
 		// authenticator stays shadowed, nothing is minted or audited, and no
-		// save serialises the sentinel without its record) until the first
-		// save after storage recovery reconciles it exactly once.
+		// save serialises the sentinel without its record). Round 4
+		// (Blocker 1): every save while it is pending re-reads THIS file
+		// under the save boundary — adopting a recovered durable record
+		// verbatim, or refusing the save while the file stays unreadable —
+		// so the evidence is never replaced by a guess.
 		// Read error on an EXISTING file (EACCES/EIO): the content may be intact, so do
 		// NOT quarantine (a rename could move a healthy file aside on a transient
 		// permission blip — the documented state-corruption posture). Surface it
@@ -382,11 +482,13 @@ func LoadAdminSettings(path string) {
 		// ui_users.json / cluster.json): rename the corrupt file aside so no save can
 		// clobber it, fire the state_file_corrupt alert, and record a /readyz fail row.
 		quarantineCorruptStateFile("admin_settings", path, err)
+		setAdminSettingsLoadPosture(loadPostureCorruptQuarantined)
 		// The corrupt file was moved aside, so the targeted ledger writer can
 		// safely create a fresh minimal file for the YAML-seeded identities.
 		finalizeRewriteSeedIdentities()
 		return
 	}
+	setAdminSettingsLoadPosture(loadPostureReadable)
 
 	// F3a-1: initialize the SaaS feed-config schema boundary before applying admin
 	// services. Idempotent (marker-guarded), backed up before mutation, atomic, and
@@ -1020,10 +1122,15 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		return applyAdminSettingsOverridesUnpersisted(ov, rewriteApply, rewriteTarget, upstreamApply, upstreamDoc)
 	}
 
-	// (adminSettingsMu is held: read the path directly.)
-	if legacyLDAPBootReconcilePending() && legacyLDAPRetired() && legacyLDAPCutover() == nil && adminSettingsPath != "" {
-		if reconcileLegacyLDAPBootObservation(false) {
-			legacyLDAPCutoverDurableFlag.Store(false)
+	// Round 4 (Blocker 1): a boot observation still pending its durable
+	// reconciliation is settled against the AUTHORITATIVE file, re-read
+	// here under the save boundary (adminSettingsMu is held) — adopt a
+	// recovered durable record, refuse while the file is still
+	// unreadable/unparseable, mint only when nothing durable exists.
+	if legacyLDAPBootReconcilePending() {
+		if err := reconcilePendingLegacyLDAPUnderSave(path); err != nil {
+			logger.Printf("AdminSettings: save REFUSED — %v", err)
+			return err
 		}
 	}
 	s := AdminSettings{

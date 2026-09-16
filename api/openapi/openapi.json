@@ -2608,7 +2608,7 @@
         "description": "Durable, non-secret record of an operation-identified IdP write (FE-6A.0 correction, Blocker 9).",
         "properties": {
           "action": {
-            "description": "idp.update — FE-6A.2: an operation-identified update (a cutover through PUT); idp.import — FE-6A.2 correction: the fenced, operation-identified legacy LDAP import.",
+            "description": "idp.update — FE-6A.2: an operation-identified update (a cutover through PUT); idp.import — FE-6A.2 correction: the fenced, operation-identified legacy LDAP import. The record is ACTION-discriminated (round 4): an idp.import record carries `importSourceRevision`; no other action does.",
             "enum": [
               "idp.create",
               "idp.update",
@@ -2665,6 +2665,11 @@
           },
           "finishedAt": {
             "format": "date-time",
+            "type": "string"
+          },
+          "importSourceRevision": {
+            "description": "idp.import ONLY (FE-6A.2 round 4, Blocker 2): the server-owned, NON-SECRET reviewed-source commitment the import was bound to (`isr1:<64 hex>` — the token GET /api/idp/legacy-ldap published and the POST carried). Absent on every other action. A lost-response recovery may treat this record as the dispatched import ONLY when operationId, action AND this token all match its marker; a missing, contradictory or different token/action is UNPROVEN.",
+            "pattern": "^isr1:[0-9a-f]{64}$",
             "type": "string"
           },
           "operationId": {
