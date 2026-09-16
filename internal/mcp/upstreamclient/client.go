@@ -97,6 +97,17 @@ type CallOptions struct {
 	//
 	// It is deliberately OPAQUE: this package learns nothing about generations, scopes, approvals
 	// or kill state — it runs a predicate the executor owns and reports the error verbatim.
+	//
+	// ITS LIFETIME IS NOT Call's, AND A CALLER THAT ASSUMES OTHERWISE HAS A DATA RACE. The dialer
+	// site runs on whatever goroutine net/http dials on (Transport.queueForDial -> go
+	// dialConnFor), and that goroutine is not joined to the request: when the caller's context is
+	// cancelled while a dial is in flight — a client disconnect, a request timeout — getConn
+	// returns at once and Call unwinds, while the dial goroutine completes its handshake and
+	// calls this hook. So the hook may run CONCURRENTLY with, and FINISH AFTER, Call's return.
+	// Anything it records for the caller must be synchronised; the refusal itself needs no
+	// hand-off, since it rides out through Call's error. Pinned by
+	// TestPreSend_MayStillBeRunningAfterCallReturns, and by the executor's own synchronised
+	// hand-off in internal/mcp/execution/presend_refusal_record.go.
 	PreSend func() error
 	// AttemptID names the ONE potential physical tool invocation this call carries
 	// (review §5). It is emitted as a request header so the controlled recording

@@ -242,13 +242,19 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// established (CallOptions.PreSend). "The last authoritative state read before the send" is
 		// now literally true rather than nearly true.
 		// Refusals are classified through the SAME applyBoundaryRefusal as the guard above.
-		var preSendErr error
-		var preSendDrift bool
+		//
+		// The refusal is handed back through a SYNCHRONISED record, not through captured
+		// locals, because the hook does not always run on this goroutine: net/http dials on
+		// its own (Transport.queueForDial -> go dialConnFor), and when this goroutine stops
+		// waiting for that dial — an ordinary context cancellation — Call unwinds while the
+		// dial goroutine keeps going and calls the hook. Plain captured variables were then a
+		// data race between that write and the read below, reproduced under -race and proved
+		// deterministically by TestPreSend_MayStillBeRunningAfterCallReturns. See
+		// presend_refusal_record.go for why the block record is worth synchronising.
+		var preSendRefusal preSendRefusalRecord
 		preSend := func() error {
 			perr, drift := e.preCallGuard(in, admKillGen, revalidate)
-			if perr != nil {
-				preSendErr, preSendDrift = perr, drift
-			}
+			preSendRefusal.record(perr, drift)
 			return perr
 		}
 
@@ -265,7 +271,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
 			AttemptID: attemptIDOf(attempt), PreSend: preSend,
 		})
-		if preSendErr != nil {
+		if preSendErr, preSendDrift := preSendRefusal.taken(); preSendErr != nil {
 			// A pre-send refusal is a BOUNDARY refusal that happened to be detected inside the
 			// client. Classify it exactly as the pre-call guard's, so the Canary still hears about
 			// a drift observed there and the client still reads the gate's own bounded reason.

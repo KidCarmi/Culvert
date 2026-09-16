@@ -2126,6 +2126,64 @@ Demonstrated in all three directions rather than asserted: the defect shape (dri
 pattern + failing spool) scored CAUGHT before and is rejected now, and a genuine two-sided
 demonstration still scores CAUGHT.
 
+### Round 21: the pre-send hook's lifetime is not the call's
+
+Round 6 closed the connect/TLS window by giving `CallOptions.PreSend` a second re-ask site inside
+`pinnedDialTLS`, after the TLS handshake and before anything is written. That is the right place
+for the check. It also moved the check onto a goroutine this executor does not own, and the
+caller was not told.
+
+**net/http dials on its own goroutine** (`Transport.queueForDial` → `go dialConnFor`), and that
+goroutine is not joined to the request. When the request goroutine stops waiting for the dial —
+an ordinary context cancellation, which is what a client disconnect or a request timeout produces
+— `getConn` returns at once and `Call` unwinds, while the dial goroutine finishes its handshake
+and calls the hook. So the hook can still be RUNNING after `Call` has returned. This is not an
+argument about scheduling likelihood: it is pinned deterministically, against the real transport,
+by `TestPreSend_MayStillBeRunningAfterCallReturns` — the hook is parked on a channel at the exact
+moment the test needs it parked, the context is cancelled, `Call` returns, and the test observes
+that the hook has not finished.
+
+`runExecute` recorded each pre-send refusal into two plain captured variables and read them
+immediately after `Call` returned, so that read raced the abandoned dial goroutine's write.
+Reproduced under `-race`, with the write attributed to `pinnedDialTLS` on net/http's dial
+goroutine and the read to the request goroutine.
+
+**What it is not, and what it is.** It is NOT a fail-open: the refusal still closes the socket
+with nothing written, and the physical send is still refused by the dialer itself — the security
+decision was correct in every interleaving. What it corrupts is the BLOCK RECORD: whether this
+attempt is classified as a boundary refusal at all, under which bounded reason, and whether a
+drift observed at that re-ask reaches `Safety.Breach`. Two rounds of this review exist to make a
+refusal read the same whether admission or the boundary caught it (round 4's reason plumbing,
+round 5's ordering); a racy hand-off puts the same question back in play one layer down. **A
+security control's telemetry is part of the control**, and under `-race` this is also a red CI
+run waiting for the first cancellation that lands in the window.
+
+The fix is synchronisation, not a change of source. The refusal the client returns is the same
+fact — the boundary sentinel rides out through `Call`'s error — but classifying from the record
+keeps the drift observation, which the error does not carry. `preSendRefusalRecord`
+(`presend_refusal_record.go`) is a mutex-guarded hand-off with LAST-WRITE-WINS preserved exactly
+as the captured variables had it, so this is a race fix and nothing else. `CallOptions.PreSend`
+now states the lifetime contract where the next caller will read it.
+
+Three gates, and the first was verified failing against the reintroduced captured-variable shape
+(two `DATA RACE` reports, one per variable):
+
+- `TestPreSendRefusal_HandoffIsRaceFreeWhenTheHookOutlivesTheCall` (execution) drives the real
+  `runExecute` against an upstream double that models net/http's abandoned dialer exactly —
+  `PreSend` on a goroutine that is NOT joined to `Call`. It returns as soon as that goroutine
+  EXISTS, never once it has finished, because waiting would create the happens-before edge the
+  production path does not have and the gate would prove nothing.
+- `TestPreSendRefusalRecord_Semantics` pins the semantics the captured variables had, so the race
+  fix cannot quietly become a behaviour change: a successful re-ask never erases a recorded
+  refusal, last refusal wins, and concurrent writers and readers agree.
+- `TestPreSend_MayStillBeRunningAfterCallReturns` (upstreamclient) pins the PROPERTY that makes
+  the record necessary, so the contract cannot stop being true without something going red.
+
+The lesson generalises past this hook: **a predicate handed across a package boundary inherits
+that package's concurrency, not the caller's.** Round 6 reasoned carefully about WHERE the check
+had to run and not at all about WHICH GOROUTINE would run it — and the answer was one net/http
+owns and can abandon.
+
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **110 mutations** (M61–M78 are the blocker-7

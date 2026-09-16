@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The MCP live side-effect boundary's pre-send re-ask handed its refusal back
+  through a data race. PR #1370 added a second authority re-ask inside the
+  upstream client's TLS dialer, after the handshake and before anything is
+  written — the right place for the check, but net/http runs a dial on its own
+  goroutine (`Transport.queueForDial` → `go dialConnFor`), and that goroutine is
+  not joined to the request. When the caller's context is cancelled while a dial
+  is in flight — an ordinary client disconnect or request timeout — `Call`
+  unwinds at once while the dial goroutine completes its handshake and invokes
+  the hook, so the hook can still be running after `Call` has returned (now
+  pinned deterministically by `TestPreSend_MayStillBeRunningAfterCallReturns`).
+  The executor recorded each pre-send refusal into plain captured variables and
+  read them immediately after `Call` returned, racing that write. It was never a
+  fail-open — the dialer still closes the socket with nothing written, and the
+  physical send is refused in every interleaving — but it corrupted the block
+  record: whether the attempt is classified as a boundary refusal, under which
+  bounded reason, and whether a drift observed at that re-ask reaches
+  `Safety.Breach`. The hand-off is now a synchronised record with last-write-wins
+  preserved exactly, and `CallOptions.PreSend` states the lifetime contract.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
