@@ -2158,31 +2158,62 @@ round 5's ordering); a racy hand-off puts the same question back in play one lay
 security control's telemetry is part of the control**, and under `-race` this is also a red CI
 run waiting for the first cancellation that lands in the window.
 
-The fix is synchronisation, not a change of source. The refusal the client returns is the same
-fact — the boundary sentinel rides out through `Call`'s error — but classifying from the record
-keeps the drift observation, which the error does not carry. `preSendRefusalRecord`
-(`presend_refusal_record.go`) is a mutex-guarded hand-off with LAST-WRITE-WINS preserved exactly
-as the captured variables had it, so this is a race fix and nothing else. `CallOptions.PreSend`
-now states the lifetime contract where the next caller will read it.
+**A MUTEX WAS THE FIRST FIX AND IT WAS NOT ENOUGH.** Guarding the two variables makes the read
+well-defined and stops the detector firing, and it still does not establish a HAND-OFF: nothing
+orders the hook's write before the reader's `taken()`, so a late hook records after the only
+reader has gone and the classification — and the `Safety.Breach` signal — stay
+scheduling-dependent. Race-free is not the same property as *the observation arrives* (Codex P2,
+PR #1411). The right question is not "how do I make this variable safe to share" but "is a shared
+variable a hand-off at all", and between a goroutine that may be abandoned and one that has
+already returned, it is not.
 
-Three gates, and the first was verified failing against the reintroduced captured-variable shape
-(two `DATA RACE` reports, one per variable):
+**So the hook is a PURE PREDICATE and the verdict comes back on the error.** That is a real
+hand-off in the memory-model sense — an error that reached the request goroutine happened-before
+that goroutine reads it — and the client already provides it: `roundTrip` returns a refusal
+directly, and the dialer site rides out through `preSendRefusalErr`, so `Call` returns the
+executor's own error verbatim through `errors.Is`-transparent wrappers. `isBoundaryRefusal(err)`
+now decides whether to classify, using the same `errors.Is` chain `classifyBoundaryError` uses so
+the two cannot disagree about what counts.
 
-- `TestPreSendRefusal_HandoffIsRaceFreeWhenTheHookOutlivesTheCall` (execution) drives the real
-  `runExecute` against an upstream double that models net/http's abandoned dialer exactly —
-  `PreSend` on a goroutine that is NOT joined to `Call`. It returns as soon as that goroutine
-  EXISTS, never once it has finished, because waiting would create the happens-before edge the
-  production path does not have and the gate would prove nothing.
-- `TestPreSendRefusalRecord_Semantics` pins the semantics the captured variables had, so the race
-  fix cannot quietly become a behaviour change: a successful re-ask never erases a recorded
-  refusal, last refusal wins, and concurrent writers and readers agree.
-- `TestPreSend_MayStillBeRunningAfterCallReturns` (upstreamclient) pins the PROPERTY that makes
-  the record necessary, so the contract cannot stop being true without something going red.
+One bit was not on the error and had to be put there. Three of the four refusals imply their own
+drift observation — `errToolDriftedBeforeCall` always means drifted, a withdrawal never does —
+but the kill OUTRANKS a drift seen in the same pass, and round 15 exists because that drift must
+still latch the experiment. `killedErr` now carries it beside the sentinel, exactly as
+`withdrawnErr` carries its reason, and `driftObservedAtBoundary` is the single decoder so no call
+site re-derives the rule. `preCallGuard` returns one self-describing error instead of a pair, and
+both sites classify through the same `applyBoundaryRefusal(err)` — which is what that function's
+own comment already claimed ("one classification") and was not quite true while one site read a
+bool the other could not see.
 
-The lesson generalises past this hook: **a predicate handed across a package boundary inherits
-that package's concurrency, not the caller's.** Round 6 reasoned carefully about WHERE the check
-had to run and not at all about WHICH GOROUTINE would run it — and the answer was one net/http
-owns and can abandon.
+**What is deliberately given up.** A hook whose connection was abandoned mid-cancellation now
+classifies nothing, because it stopped nothing — the call was already terminal for another
+reason and no bytes were ever sent. That loses no signal the experiment needs: the pre-call guard
+runs on the request goroutine before EVERY call, so a kill, a drift or a withdrawal that persists
+is caught there, deterministically, on the very next request.
+
+Four gates, each verified failing against its own reintroduced defect:
+
+- `TestPreSendRefusal_DriftAtTheReSendSiteStillReachesSafetyBreach` — the tool is current at the
+  pre-call guard and drifts, with the kill engaged in the same pass, only once the call is under
+  way. Dropping the drift bit from `killedAtBoundary` fails it, and fails round 15's
+  `TestBreach_DriftIsReportedEvenWhenTheKillWinsTheRefusal` with it.
+- `TestPreSendRefusal_AbandonedHookClassifiesNothingAndDoesNotRace` — drives the real
+  `runExecute` against an upstream double that models net/http's abandoned dialer exactly:
+  `PreSend` on a goroutine NOT joined to `Call`, returning as soon as that goroutine EXISTS,
+  never once it has finished, because waiting would create the happens-before edge the production
+  path does not have. Reintroducing the captured locals fails it under `-race` with two reports.
+- `TestBoundaryRefusalError_CarriesItsOwnDiagnosis` — the error is now the only carrier, so it
+  must carry the whole diagnosis: the sentinel chain is unchanged, each refusal reports its drift
+  truthfully, and a transport or cancellation fault is never read as a boundary refusal.
+- `TestPreSend_MayStillBeRunningAfterCallReturns` (upstreamclient) — pins the PROPERTY that makes
+  all of this necessary, so the contract cannot stop being true without something going red.
+
+The lesson generalises past this hook, and it is two lessons rather than one. **A predicate handed
+across a package boundary inherits that package's concurrency, not the caller's** — round 6
+reasoned carefully about WHERE the check had to run and not at all about WHICH GOROUTINE would run
+it, and the answer was one net/http owns and can abandon. And **"race-free" is not "delivered"**:
+a mutex answers a question about memory, not about causality, and a callback that may be abandoned
+can never hand anything back through shared state.
 
 ### Campaign state
 

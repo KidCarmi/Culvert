@@ -98,16 +98,21 @@ type CallOptions struct {
 	// It is deliberately OPAQUE: this package learns nothing about generations, scopes, approvals
 	// or kill state — it runs a predicate the executor owns and reports the error verbatim.
 	//
-	// ITS LIFETIME IS NOT Call's, AND A CALLER THAT ASSUMES OTHERWISE HAS A DATA RACE. The dialer
-	// site runs on whatever goroutine net/http dials on (Transport.queueForDial -> go
-	// dialConnFor), and that goroutine is not joined to the request: when the caller's context is
-	// cancelled while a dial is in flight — a client disconnect, a request timeout — getConn
-	// returns at once and Call unwinds, while the dial goroutine completes its handshake and
-	// calls this hook. So the hook may run CONCURRENTLY with, and FINISH AFTER, Call's return.
-	// Anything it records for the caller must be synchronised; the refusal itself needs no
-	// hand-off, since it rides out through Call's error. Pinned by
-	// TestPreSend_MayStillBeRunningAfterCallReturns, and by the executor's own synchronised
-	// hand-off in internal/mcp/execution/presend_refusal_record.go.
+	// IT MUST BE A PURE PREDICATE: ITS LIFETIME IS NOT Call's. The dialer site runs on whatever
+	// goroutine net/http dials on (Transport.queueForDial -> go dialConnFor), and that goroutine
+	// is not joined to the request: when the caller's context is cancelled while a dial is in
+	// flight — a client disconnect, a request timeout — getConn returns at once and Call unwinds,
+	// while the dial goroutine completes its handshake and calls this hook. So the hook may run
+	// CONCURRENTLY with, and FINISH AFTER, Call's return (pinned by
+	// TestPreSend_MayStillBeRunningAfterCallReturns).
+	//
+	// A caller must therefore NOT write anything it intends to read back after Call returns.
+	// Captured variables are a data race; synchronising them removes the race and still is not a
+	// hand-off, because a late hook can write after the only reader has gone. There is no need
+	// for one: a refusal that GOVERNED the leg comes back as Call's own error, verbatim
+	// (roundTrip returns it directly; the dialer site rides out through preSendRefusalErr), and
+	// an error that reached the caller's goroutine happened-before the caller reads it. Put
+	// everything the verdict needs to be diagnosed ON the error.
 	PreSend func() error
 	// AttemptID names the ONE potential physical tool invocation this call carries
 	// (review §5). It is emitted as a request header so the controlled recording

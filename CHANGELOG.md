@@ -25,8 +25,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   physical send is refused in every interleaving — but it corrupted the block
   record: whether the attempt is classified as a boundary refusal, under which
   bounded reason, and whether a drift observed at that re-ask reaches
-  `Safety.Breach`. The hand-off is now a synchronised record with last-write-wins
-  preserved exactly, and `CallOptions.PreSend` states the lifetime contract.
+  `Safety.Breach`. Synchronising the variables would have removed the race
+  without establishing a hand-off, since a late hook can still write after the
+  only reader has gone; the hook is therefore now a pure predicate, and the
+  verdict is read back from `Call`'s own error, which the client already returns
+  verbatim. The one fact the error did not carry — a tool drift observed in the
+  same pass as an emergency kill, which the kill outranks in the reported reason
+  but which must still latch the experiment — now rides on the kill error beside
+  the sentinel.
 
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own

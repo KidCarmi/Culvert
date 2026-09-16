@@ -19,12 +19,13 @@ import (
 // what a client disconnect or a request timeout produces — getConn returns at once and Call
 // unwinds, while the dial goroutine completes its handshake and calls the hook.
 //
-// The executor's caller records each refusal for the block record, so it reads what the hook
-// wrote immediately after Call returns. With plain captured variables that read races the
-// abandoned dial goroutine's write (reproduced under -race, the write attributed to
-// pinnedDialTLS); internal/mcp/execution therefore hands the refusal back through a synchronised
-// record (presend_refusal_record.go). This test is the reason that record exists — it pins the
-// PROPERTY, against the real transport, so the contract cannot quietly stop being true.
+// The executor needs each refusal for its block record. Reading it from captured variables after
+// Call returns races the abandoned dial goroutine's write (reproduced under -race, the write
+// attributed to pinnedDialTLS), and synchronising those variables removes the race without
+// establishing a hand-off — a late hook can still write after the only reader has gone. So
+// internal/mcp/execution keeps the hook a PURE PREDICATE and reads the verdict off Call's own
+// error instead. This test is the reason it must: it pins the PROPERTY, against the real
+// transport, so the contract cannot quietly stop being true.
 //
 // It is DETERMINISTIC rather than timing-based: the hook is parked on a channel at the exact
 // moment the test needs it parked, so "the hook has not finished" is observed, never sampled.
