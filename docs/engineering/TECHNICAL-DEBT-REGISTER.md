@@ -607,3 +607,22 @@
   drift on `main`, all target files are unedited by any other pending PR in the set except the
   T-48 quintet which are mutually exclusive by design); `docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-05.md`
   (this pass's dated report) for the full audit trail.
+- **Status update (2026-09-16):** Recurred a third time, and this time the routine itself already
+  did the triage the remediation list above asks for — and it *still* didn't produce a merge.
+  `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-15.md` (PR #1402, opened 2026-09-15) individually read the
+  review threads (not just CI/`mergeable_state`) on every open `docs(governance)` PR and correctly
+  split them: **#1372 and #1373 (both opened 2026-09-12) are genuinely merge-ready** — every Codex
+  review thread on both is resolved with a verified follow-up commit, they touch disjoint files, and
+  neither has an open question — while **#1380 and #1395 (2026-09-13/14) are correctly held**, since
+  their own review threads dispute the accuracy of the content they add. This pass (2026-09-16)
+  re-verified that recommendation against the live PR list rather than trusting the prior report's
+  age: `main` is still at the same tip (`993b390`) it was when #1402 was opened, and none of #1372,
+  #1373, #1380, #1395, or #1402 itself has received a new commit or been merged since. So the two
+  ready PRs have now sat merge-ready, correctly identified as such, for **4 days**, and the PR that
+  did the identifying has sat unactioned for a day on top of that — reproducing this entry's own
+  "even the meta-finding about the backlog joined the backlog" observation from 2026-09-05 a second
+  time, at one level further removed (the finding *that the meta-finding is stuck* is now also
+  stuck). No further automated pass can fix this: the fixes and the triage are both already written
+  and already correct. This is flagged directly to the repository owner outside the PR queue for
+  this reason — recommend merging #1372 and #1373 now, and leaving #1380/#1395 open pending the
+  content-accuracy fixes their own review threads already specify.
