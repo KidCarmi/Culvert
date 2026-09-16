@@ -678,7 +678,11 @@ func TestFE6A3C_B3_CorruptSettingsPreserveEvidenceAndReconcileOnce(t *testing.T)
 func TestFE6A3C_B4_DurableRecordWithPendingAuditCompletesOnceOnRestart(t *testing.T) {
 	fe6a3cEnabledRegistryLDAP(t)
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
-	const opID = "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+	// A per-run identity: the audit boundary is EXACTLY-ONCE per
+	// (action, operationId) across the process-global ring, so a constant id
+	// would be found already recorded on a repeated run (-count>1) and the
+	// second run would — correctly — append nothing.
+	opID := mustRandHex(16)
 	// The record was made durable, then the process died BEFORE the audit.
 	if err := os.WriteFile(settings, []byte(`{"legacy_ldap_retired":true,"legacy_ldap_cutover":{"operationId":"`+opID+`","actor":"system","trigger":"observed","at":"2026-09-16T00:00:00Z","auditPending":true}}`), 0o600); err != nil {
 		t.Fatal(err)
