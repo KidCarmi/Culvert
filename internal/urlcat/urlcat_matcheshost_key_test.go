@@ -1,6 +1,7 @@
 package urlcat
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -83,20 +84,15 @@ func TestCategoryKey_DifferentialAgainstLegacy(t *testing.T) {
 	// Randomised sweep, weighted toward the branch boundaries: bytes drawn from
 	// the ASCII case range, the ASCII neighbours of it, and the 0x80+ range that
 	// forces the fallback, at lengths straddling maxInlineCategoryKey.
+	//
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
+	rng := rand.New(rand.NewSource(20260916))
 	alphabet := []byte("AZaz@[`{ 0_\x00\x7f\x80\xc3\xa9\xff")
-	seed := uint64(0x9E3779B97F4A7C15)
-	next := func() uint64 { // splitmix64 — deterministic, no test flake
-		seed += 0x9E3779B97F4A7C15
-		z := seed
-		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
-		z = (z ^ (z >> 27)) * 0x94D049BB133111EB
-		return z ^ (z >> 31)
-	}
 	for i := 0; i < 20000; i++ {
-		n := int(next() % uint64(maxInlineCategoryKey+8))
+		n := rng.Intn(maxInlineCategoryKey + 8)
 		b := make([]byte, n)
 		for j := range b {
-			b[j] = alphabet[next()%uint64(len(alphabet))]
+			b[j] = alphabet[rng.Intn(len(alphabet))]
 		}
 		s := string(b)
 		if got, want := foldedCategoryKey(s), legacyCategoryKey(s); got != want {
