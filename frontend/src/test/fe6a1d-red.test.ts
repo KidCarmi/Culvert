@@ -38,6 +38,7 @@ const PRESENT_ONLY_FIELDS = [
   "tlsSkipVerify",
   "cacheTtlSeconds",
   "cutoverConfirmValue",
+  "importSourceRevision",
 ] as const;
 
 const NEWLY_REQUIRED = [

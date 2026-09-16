@@ -59,6 +59,7 @@ import {
   OP_ID,
   QUARANTINE,
   RAW,
+  SOURCE_TOKEN,
   SAML_SPEC,
   TEST_PASSWORD,
   jsonResponse,
@@ -236,12 +237,17 @@ describe("A1 verbs, fences and bodies", () => {
         imported: true,
         documentRevision: "r-doc-2",
         operationId: OP_ID,
+        importSourceRevision: SOURCE_TOKEN,
         source: { url: LEGACY_URL },
       });
-    await importLegacyLDAP({ documentRevision: "r-doc-1", operationId: OP_ID });
+    await importLegacyLDAP({
+      documentRevision: "r-doc-1",
+      operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
+    });
     expect(calls[1]?.method).toBe("POST");
     expect(calls[1]?.url).toBe(
-      `/api/idp/legacy-ldap/import?documentRevision=r-doc-1&operationId=${OP_ID}`,
+      `/api/idp/legacy-ldap/import?documentRevision=r-doc-1&operationId=${OP_ID}&importSourceRevision=${encodeURIComponent(SOURCE_TOKEN)}`,
     );
     expect(calls[1]?.rawBody).toBeUndefined();
     answer = () =>
@@ -698,11 +704,16 @@ describe("A7 discovery, import, repair", () => {
     expect(JSON.stringify(d)).not.toContain(RAW);
   });
   it("import is bound to a DISABLED ldap profile", async () => {
-    const fence = { documentRevision: "r-doc-1", operationId: OP_ID };
+    const fence = {
+      documentRevision: "r-doc-1",
+      operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
+    };
     const bound = {
       imported: true,
       documentRevision: "r-doc-2",
       operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
       source: { url: LEGACY_URL },
     };
     answer = () =>

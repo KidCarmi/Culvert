@@ -32,6 +32,7 @@ import {
   LEGACY_URL,
   OP_ID,
   RAW,
+  SOURCE_TOKEN,
   jsonResponse,
   ldapProfileAnswer,
 } from "./fe6a2-fixtures";
@@ -77,6 +78,7 @@ const IMPORTED = {
   revision: 1,
   documentRevision: "r-doc-2",
   operationId: OP_ID,
+  importSourceRevision: SOURCE_TOKEN,
   source: { url: LEGACY_URL, baseDn: "DC=legacy", bindDn: "cn=svc,dc=legacy" },
   cluster: { publication: "published", version: 9 },
 };
@@ -84,11 +86,15 @@ const IMPORTED = {
 describe("CA1 fenced, operation-identified import", () => {
   it("POSTs bodiless with the document fence and the operationId in the query", async () => {
     answer = () => jsonResponse(IMPORTED);
-    await importLegacyLDAP({ documentRevision: "r-doc-1", operationId: OP_ID });
+    await importLegacyLDAP({
+      documentRevision: "r-doc-1",
+      operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
+    });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.url).toBe(
-      `/api/idp/legacy-ldap/import?documentRevision=r-doc-1&operationId=${OP_ID}`,
+      `/api/idp/legacy-ldap/import?documentRevision=r-doc-1&operationId=${OP_ID}&importSourceRevision=${encodeURIComponent(SOURCE_TOKEN)}`,
     );
     expect(calls[0]?.rawBody).toBeUndefined();
   });
@@ -100,6 +106,7 @@ describe("CA2 action-bound import outcome", () => {
     const out = await importLegacyLDAP({
       documentRevision: "r-doc-1",
       operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
     });
     expect(out).toEqual({
       kind: "imported",
@@ -108,6 +115,7 @@ describe("CA2 action-bound import outcome", () => {
       revision: 1,
       documentRevision: "r-doc-2",
       operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
       source: { url: LEGACY_URL },
     });
   });
@@ -119,6 +127,7 @@ describe("CA2 action-bound import outcome", () => {
     const err = await importLegacyLDAP({
       documentRevision: "r-doc-1",
       operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(idpUnproven(err)).toBe(true);
@@ -134,7 +143,11 @@ describe("CA2 action-bound import outcome", () => {
     ]) {
       answer = () => jsonResponse(bad);
       await expect(
-        importLegacyLDAP({ documentRevision: "r-doc-1", operationId: OP_ID }),
+        importLegacyLDAP({
+          documentRevision: "r-doc-1",
+          operationId: OP_ID,
+          importSourceRevision: SOURCE_TOKEN,
+        }),
       ).rejects.toBeInstanceOf(ApiError);
     }
   });
@@ -146,16 +159,19 @@ describe("CA3 replay", () => {
       jsonResponse({
         id: "imp000000001",
         operationId: OP_ID,
+        importSourceRevision: SOURCE_TOKEN,
         settled: true,
         replayed: true,
       });
     const out = await importLegacyLDAP({
       documentRevision: "r-doc-1",
       operationId: OP_ID,
+      importSourceRevision: SOURCE_TOKEN,
     });
     expect(out).toEqual({
       kind: "replayed",
       id: "imp000000001",
+      importSourceRevision: SOURCE_TOKEN,
       operationId: OP_ID,
     });
   });

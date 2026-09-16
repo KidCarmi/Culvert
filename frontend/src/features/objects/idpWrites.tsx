@@ -1260,6 +1260,10 @@ const REFUSAL_TITLE: Record<string, string> = {
   provider_compile_failed: "Refused — the provider could not be constructed",
   preflight_failed:
     "Refused — the directory connection preflight failed; nothing was written",
+  import_source_required:
+    "Refused — the import named no reviewed legacy source; nothing was written",
+  import_source_stale:
+    "Refused — the legacy source changed since it was reviewed; nothing was written (re-read and review the current source)",
   invalid_input: "Refused — the appliance rejected the candidate",
   vanished: "Refused — the provider no longer exists",
   not_found: "Refused — not found",

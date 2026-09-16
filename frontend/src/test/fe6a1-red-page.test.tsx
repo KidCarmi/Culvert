@@ -144,6 +144,7 @@ const LEGACY_CUTOVER = {
   tlsSkipVerify: false,
   cacheTtlSeconds: 300,
   cutoverConfirmValue: "ldaps://legacy.example:636",
+  importSourceRevision: "isr1:" + "a".repeat(64),
   cutoverDurability: "pending_reconciliation",
   cutover: {
     operationId: CUTOVER_ID,

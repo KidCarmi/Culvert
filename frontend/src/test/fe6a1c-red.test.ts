@@ -314,6 +314,7 @@ describe("C2 missing evidence fails closed", () => {
       tlsSkipVerify: false,
       cacheTtlSeconds: 300,
       cutoverConfirmValue: "ldaps://x:636",
+      importSourceRevision: "isr1:" + "a".repeat(64),
     };
     const l = decodeLegacyLDAP(present);
     expect(l.present ? l.bindCredentialConfigured : null).toBe(true);

@@ -62,6 +62,7 @@ import {
   getIdPOperation,
   getIdPReferences,
   getLegacyLDAP,
+  IMPORT_SOURCE_UNAVAILABLE,
   importCandidateDigest,
   importLegacyLDAP,
   repairIdPRegistry,
@@ -696,6 +697,10 @@ const TERMINAL_NOTHING_WRITTEN: readonly IdPRefusalCode[] = [
   // FE-6A.2 correction (Blocker 3): the write-boundary preflight is decided
   // BEFORE the ledger intent, so a preflight refusal has no record to settle.
   "preflight_failed",
+  // Round 3 (Blocker 1): the reviewed-source check is decided before the
+  // fence and the intent — nothing to settle, the source is re-read.
+  "import_source_required",
+  "import_source_stale",
   "operation_unsettled",
   "persist_failed",
   "registry_degraded",
@@ -1010,6 +1015,16 @@ export function IdentityProvidersPage(): JSX.Element {
     // FE-6A.2 correction (Blocker 1): the import is an operation-identified,
     // fenced write and rides the recovery marker like a create — persisted
     // BEFORE dispatch, so an unproven answer can never become a second import.
+    if (ceremony.legacy.importSourceRevision === IMPORT_SOURCE_UNAVAILABLE) {
+      // The appliance cannot bind the import to the reviewed source (no
+      // usable ledger key): nothing is sent — the server would refuse it as
+      // operation_ledger_degraded anyway.
+      setResult("failed");
+      setErrorText(
+        "The appliance cannot bind this import to the reviewed legacy source (operation ledger unavailable); nothing was sent.",
+      );
+      return;
+    }
     const operationId = ceremony.boundOperationId ?? mintOperationId();
     const marker: IdPRecoveryMarker = {
       operationId,
@@ -1049,7 +1064,14 @@ export function IdentityProvidersPage(): JSX.Element {
     const signal = page.owner.begin();
     try {
       const out = await importLegacyLDAP(
-        { documentRevision: snap.list.revision, operationId },
+        {
+          documentRevision: snap.list.revision,
+          operationId,
+          // Round 3 (Blocker 1): the token of the source the operator
+          // REVIEWED in this ceremony — the appliance refuses a changed
+          // source and the decoder refuses an answer for another one.
+          importSourceRevision: ceremony.legacy.importSourceRevision,
+        },
         signal,
       );
       clearIdPRecovery(operationId);
@@ -1467,7 +1489,10 @@ export function IdentityProvidersPage(): JSX.Element {
             isAdmin={isAdmin}
             ledgerKey={ledgerKeyFor(legacy.data)}
             onImport={
-              isAdmin && legacy.data.present && canMutate
+              isAdmin &&
+              legacy.data.present &&
+              canMutate &&
+              legacy.data.importSourceRevision !== IMPORT_SOURCE_UNAVAILABLE
                 ? () => {
                     clearOutcome();
                     if (legacy.data?.present === true)

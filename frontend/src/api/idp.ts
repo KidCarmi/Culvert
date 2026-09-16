@@ -447,6 +447,12 @@ export interface LegacyLDAPPresentFacts {
   /** FE-6A.2 — the SERVER-required confirmation value a cutover-bearing
    * write must echo as ?cutoverConfirm= (the legacy directory URL) */
   cutoverConfirmValue: string;
+  /** FE-6A.2 round 3 (Blocker 1) — the server-owned, keyed, NON-DISCLOSING
+   * commitment over every security-effective field an import would copy
+   * (credential value included): `isr1:<64 hex>`, or the literal
+   * `unavailable` when the appliance has no usable ledger key (an import
+   * cannot be bound and is not offered). The import echoes it. */
+  importSourceRevision: string;
 }
 
 /** The keys that may appear ONLY on a present block. */
@@ -463,7 +469,19 @@ export const LEGACY_PRESENT_ONLY_KEYS = [
   "tlsSkipVerify",
   "cacheTtlSeconds",
   "cutoverConfirmValue",
+  "importSourceRevision",
 ] as const satisfies readonly (keyof LegacyLDAPPresentFacts)[];
+
+/** The reviewed-source token grammar (a keyed commitment, never a source
+ * fact), or the bounded "unavailable" posture. */
+export const IMPORT_SOURCE_TOKEN_RE = /^isr1:[0-9a-f]{64}$/;
+export const IMPORT_SOURCE_UNAVAILABLE = "unavailable";
+const readImportSourceToken: Decoder<string> = (v, path = "$") => {
+  const s = readString(v, path);
+  if (s === IMPORT_SOURCE_UNAVAILABLE || IMPORT_SOURCE_TOKEN_RE.test(s))
+    return s;
+  throw new DecodeError(path, "an import source token", "other");
+};
 
 /** A RUNTIME discriminated union: `present:false` carries none of the
  * present-only facts (a record that does is refused whole), `present:true`
@@ -831,6 +849,12 @@ export const decodeLegacyLDAP: Decoder<LegacyLDAP> = (v, path = "$") => {
     tlsSkipVerify: field(o, "tlsSkipVerify", readBoolean, path),
     cacheTtlSeconds: field(o, "cacheTtlSeconds", readNumber, path),
     cutoverConfirmValue: field(o, "cutoverConfirmValue", readString, path),
+    importSourceRevision: field(
+      o,
+      "importSourceRevision",
+      readImportSourceToken,
+      path,
+    ),
   };
 };
 
@@ -1480,6 +1504,9 @@ export function discoverOIDC(
 export interface IdPImportFence {
   documentRevision: string;
   operationId: string;
+  /** the reviewed source's token (round 3, Blocker 1) — the import is
+   * bound to it server-side and the answer must echo it exactly */
+  importSourceRevision: string;
 }
 
 /** The action-bound outcome of an import: `imported` binds identity, entry
@@ -1494,10 +1521,16 @@ export type IdPImportOutcome =
       revision: number;
       documentRevision: string;
       operationId: string;
+      importSourceRevision: string;
       source: { url: string };
       auditState?: "pending";
     }
-  | { kind: "replayed"; id: string; operationId: string };
+  | {
+      kind: "replayed";
+      id: string;
+      operationId: string;
+      importSourceRevision: string;
+    };
 
 /** POST /api/idp/legacy-ldap/import?documentRevision&operationId — bodiless;
  * the appliance copies the legacy block server-side. A 2xx is a verdict
@@ -1523,9 +1556,24 @@ export function importLegacyLDAP(
         `the dispatched operation ${fence.operationId}`,
         echoed,
       );
+    // Round 3 (Blocker 1): the answer is proven ONLY for the source the
+    // administrator reviewed — a different (or absent) token means the
+    // appliance imported something else: UNPROVEN, never a success.
+    const echoedSource = field(o, "importSourceRevision", readString, path);
+    if (echoedSource !== fence.importSourceRevision)
+      throw new DecodeError(
+        `${path}.importSourceRevision`,
+        "the reviewed source token",
+        "another token",
+      );
     const id = field(o, "id", readString, path);
     if (o["replayed"] === true && o["imported"] === undefined) {
-      return { kind: "replayed", id, operationId: echoed };
+      return {
+        kind: "replayed",
+        id,
+        operationId: echoed,
+        importSourceRevision: echoedSource,
+      };
     }
     if (field(o, "imported", readBoolean, path) !== true)
       throw new DecodeError(`${path}.imported`, "true", o["imported"]);
@@ -1552,6 +1600,7 @@ export function importLegacyLDAP(
       revision,
       documentRevision,
       operationId: echoed,
+      importSourceRevision: echoedSource,
       source: { url },
     };
     const audit = opt(o, "auditState", readEnum(["pending"] as const), path);
@@ -1561,6 +1610,7 @@ export function importLegacyLDAP(
   const q = new URLSearchParams({
     documentRevision: fence.documentRevision,
     operationId: fence.operationId,
+    importSourceRevision: fence.importSourceRevision,
   });
   return apiRequest(`/api/idp/legacy-ldap/import?${q.toString()}`, decoder, {
     method: "POST",
@@ -1582,6 +1632,9 @@ export function importCandidateDigest(l: LegacyLDAPPresentFacts): string {
       userFilter: l.userFilter,
       requiredGroup: l.requiredGroup,
       cacheTtlSeconds: l.cacheTtlSeconds,
+      // Round 3: the reviewed source's keyed token (non-secret) — the same
+      // facts under a rotated credential are a DIFFERENT candidate.
+      importSourceRevision: l.importSourceRevision,
     }),
   );
 }
@@ -1665,6 +1718,9 @@ export interface IdPRefusalFacts {
   code?: string;
   detail?: IdPOutcomeUnknownDetail;
   id?: string;
+  /** import_source_stale — the CURRENT source's token (a keyed commitment,
+   * never a source fact); the operator re-reads and reviews the source */
+  importSourceRevision?: string;
 }
 
 type IdPFact = keyof IdPRefusalFacts;
@@ -1682,6 +1738,8 @@ export const IDP_REFUSAL_CONTRACT = {
   provider_compile_failed: { status: 502, required: ["reason"] },
   preflight_failed: { status: 422, required: ["step", "reason"] },
   operation_id_required: { status: 428, required: [] },
+  import_source_required: { status: 428, required: [] },
+  import_source_stale: { status: 409, required: ["importSourceRevision"] },
   cutover_confirm_required: { status: 428, required: ["confirmValue"] },
   operation_mismatch: { status: 409, required: ["operationId", "state"] },
   operation_in_progress: { status: 409, required: ["operationId", "state"] },
@@ -1792,6 +1850,12 @@ function refusalFacts(cur: Record<string, unknown>): IdPRefusalFacts {
   if (detail !== undefined) f.detail = detail;
   const id = safeString(cur["id"], SAFE_ID);
   if (id !== undefined) f.id = id;
+  const importSourceRevision = safeString(
+    cur["importSourceRevision"],
+    IMPORT_SOURCE_TOKEN_RE,
+  );
+  if (importSourceRevision !== undefined)
+    f.importSourceRevision = importSourceRevision;
   return f;
 }
 

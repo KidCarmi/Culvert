@@ -37,6 +37,7 @@ import {
   LEGACY_ABSENT,
   LEGACY_PRESENT,
   LEGACY_URL,
+  SOURCE_TOKEN,
   LIST,
   RAW,
   ldapProfileAnswer,
@@ -257,6 +258,7 @@ const IMPORTED = (operationId: string | null): Record<string, unknown> => ({
   revision: 1,
   documentRevision: "r-doc-2",
   operationId,
+  importSourceRevision: SOURCE_TOKEN,
   source: { url: LEGACY_URL },
   cluster: { publication: "published", version: 9 },
 });

@@ -421,6 +421,7 @@ describe("A5 decodeLegacyLDAP", () => {
       tlsSkipVerify: false,
       cacheTtlSeconds: 300,
       cutoverConfirmValue: "ldaps://legacy.example:636",
+      importSourceRevision: "isr1:" + "a".repeat(64),
       cutoverDurability: "pending_reconciliation",
       cutover: {
         operationId: "0b6f9a1e-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
