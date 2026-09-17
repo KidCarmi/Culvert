@@ -27,6 +27,13 @@
   durable exists); the operation lookup is action-discriminated (an `idp.import` record
   exposes its token) and the lost-response Recover binds on operationId + action + token;
   the candidate key is trusted only as a regular, non-symlink, owner-only file.
+  Round 5 (2026-09-17): storage recovery refuses every save while a settings file exists
+  at the authoritative path (readable ⇒ restart required; the restart adopts the COMPLETE
+  file — no partial adoption, no rewrite from a defaulted runtime); a retired sentinel
+  without its record is the bounded degraded word `record_missing` (never `durable`,
+  nothing invented); the candidate key is validated and read on ONE opened descriptor
+  (`O_NOFOLLOW` + `fstat` + exact-length read); the admin-API cutover audit is
+  operation-keyed, pending until durable, exactly once, and absent on a refused cutover.
   Operator runbooks: `docs/operator/idp-registry-recovery.md`,
   `docs/operator/administrator-account-recovery.md`.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`

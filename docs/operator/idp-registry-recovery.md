@@ -136,30 +136,63 @@ routed through one state machine:
   corrupt file is quarantined (`admin_settings.json.corrupt.<ns>`, never
   overwritten), and NO save serialises the sentinel without its record.
 
-**Storage recovery re-reads the file (round 4, Blocker 1).** While the
-observation is pending, EVERY admin save first re-reads and parses the
-authoritative `admin_settings.json` under the save boundary — the boot's
-outcome is never trusted as the truth about the file:
+**Storage recovery refuses every save until the node restarts (round 4,
+Blocker 1, corrected in round 5).** While the observation is pending, EVERY
+admin save first consults the authoritative `admin_settings.json` under the
+save boundary — the boot's outcome is never trusted as the truth about the
+file — and a file that EXISTS there refuses the save in every shape:
 
-- the file is readable again and carries a durable cutover ⇒ that EXACT
-  record and sentinel are adopted (same `operationId`, same trigger, same
-  actor), the observation is consumed, and NO new audit is emitted — a
-  restored file wins over the boot-time guess, with or without a restart;
+- the file is readable again (with or without a sentinel) ⇒ the save is
+  **refused**, restart required (`save REFUSED — admin settings: the
+  authoritative file is readable again but this node booted without it …
+  restart the node to adopt the file`). The file is the COMPLETE durable
+  truth and this runtime booted on defaults, so nothing it could write is
+  the truth: the round-4 shape adopted only the two cutover fields and then
+  rewrote every OTHER durable setting — and every unknown-compatible field
+  — from those defaults. The restart's load adopts the whole file, the same
+  cutover identity included, and emits nothing new;
 - the file is still unreadable, or readable but unparseable ⇒ the save is
-  **refused** (a persist failure on the API; the process log says
-  `save REFUSED — admin settings: the authoritative file is still
-  unreadable …`) with zero file and zero runtime mutation — the evidence is
-  never replaced by an unrelated write, and the observation stays pending
-  for a later recovery;
-- the file is missing (quarantined at boot, or removed since) or readable
-  with no sentinel ⇒ nothing durable exists: the observed transition is
-  minted, persisted by that save, and audited exactly once after it.
+  **refused** with zero file and zero runtime mutation — the evidence is
+  never replaced by an unrelated write (a corrupt file is repaired by the
+  operator or quarantined at boot, never by a save);
+- the file is missing (quarantined at boot, or removed since) ⇒ nothing
+  durable exists: the observed transition is minted, persisted by that save,
+  and audited exactly once after it.
 
 The process log records the load posture the boot observed (`readable`,
-`missing`, `unreadable`, `corrupt_quarantined`) beside every recovery
-decision. Remedy for a refused save: restore readability of the original
-file (nothing else is needed — the next save adopts it), or deliberately
-remove it to start from an empty store.
+`missing`, `unreadable`, `corrupt_quarantined`) beside every refusal.
+Remedy for a refused save: restore readability of the original file and
+**restart the node** (the restart adopts it), or deliberately remove it to
+start from an empty store. Admin handlers that persist best-effort still
+answer 2xx for their own runtime change while the durable save is refused
+and logged (the recorded FE-6E backend-truth debt); handlers that persist
+synchronously return the refusal.
+
+**A sentinel without its record is degraded evidence, never healthy truth
+(round 5, Blocker 1).** A settings file carrying `legacy_ldap_retired: true`
+WITHOUT `legacy_ldap_cutover` (a partial restore, a hand edit) is loaded
+fail-closed: the legacy authenticator stays retired, NO record is invented,
+no audit is emitted, later saves carry the file's evidence verbatim
+(sentinel kept, still no record) and never promote it, and the read model
+reports `cutoverDurability: record_missing` — the legacy card shows
+"Record missing" and never "Durable". The process log names the posture
+(`legacy_ldap_retired is set WITHOUT its cutover record — degraded evidence
+(record_missing)`). Remedy: restore `admin_settings.json` from a backup that
+carries the record and restart, or accept the degraded posture (the
+authority cutover itself is not in doubt — only its operation identity is
+lost).
+
+**The admin-API cutover is audited through the same operation-keyed
+boundary (round 5, Blocker 3).** The cutover record is minted audit-pending,
+the persist-before-publish save makes sentinel + record durable, and the
+`idp.legacy_ldap.retired` entry is appended only after that — with the
+structural `operationId` of the record (the SIEM/JSONL field, not free
+text), exactly once against the durable audit record. A failed append
+leaves the record `auditPending`; the next save or boot completes it once.
+A crash after the append but before the cleared marker persisted appends
+nothing at the next boot (the boundary finds the entry in the JSONL). A
+refused cutover — a sentinel that could not be persisted, or a candidate
+refused by the preflight or a fence — emits no retirement audit.
 
 A completed admin cutover therefore keeps its record identity and emits no
 new audit on any later boot; an observed transition is audited once, after
@@ -244,10 +277,14 @@ key would verify none of the recorded intents, so every exact-candidate
 replay would answer `operation_mismatch`. Only a ledger with no
 commitment-bearing record (a fresh node) mints a key.
 
-**The confidentiality boundary is validated before the key is trusted
-(round 4, Blocker 3).** The key is inspected with non-following metadata
-on every load: it must be a regular file, not a symlink, with no group or
-world permission bit (`0600`). A symlink, a non-regular object or a
+**The confidentiality boundary is validated on the descriptor the key is
+read from (round 4, Blocker 3; round 5, Blocker 2).** On every load the key
+is opened WITHOUT following a symlink (`O_NOFOLLOW`; a symlink at the path
+is refused), validated on that OPENED descriptor (`fstat`: a regular file
+with no group or world permission bit, i.e. `0600`), and exactly the key
+length is read from that same descriptor — the path is consulted once, at
+the open, so a replacement between the validation and the read cannot make
+a symlink target's bytes a key. A symlink, a non-regular object or a
 group/world-readable mode is `operation_ledger_degraded` (reason
 `unreadable`, detail naming the boundary) — the key is **never** re-moded
 or replaced, with or without commitments beside it, because a key readable
