@@ -25,3 +25,6 @@ const oNoFollow = 0
 // oNoFollow above — the appliance ships as a Linux container; the Windows
 // binary is a build-matrix convenience only.
 const oNonBlock = 0
+
+// isNoFollowRefusal: no O_NOFOLLOW on Windows, so no refusal to classify.
+func isNoFollowRefusal(error) bool { return false }

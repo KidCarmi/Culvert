@@ -186,49 +186,9 @@ func TestFE6A5C_R1_RecoveredSettingsAreNeverPartiallyAdoptedThenOverwritten(t *t
 		t.Fatalf("a retirement audit was emitted for an already-completed cutover: %d %v", n, ids)
 	}
 	if saveErr != nil {
-		// Refused: zero mutation, restart required — the complete file is
-		// adopted by the next boot.
-		if !bytes.Equal(after, original) {
-			t.Fatalf("the refused save still changed the file:\n got %s\nwant %s", after, original)
-		}
-		if !strings.Contains(saveErr.Error(), "restart") {
-			t.Fatalf("a refused recovery save must name the remedy (restart): %v", saveErr)
-		}
-		if !legacyLDAPBootReconcilePending() {
-			t.Fatal("the refused save consumed the observation")
-		}
-		if rec := legacyLDAPCutover(); rec != nil {
-			t.Fatalf("the refused save minted/adopted a record on a defaulted runtime: %+v", rec)
-		}
-		if legacyLDAPCutoverDurability() == "durable" {
-			t.Fatal("a refused save must not report the cutover durable")
-		}
+		fe6a5cAssertRefusedRecovery(t, saveErr, after, original)
 	} else {
-		// Accepted: only a COMPLETE rehydration is acceptable — every
-		// seeded field, the unknown field and the same identity survive.
-		m := fe6a5cSettingsMap(t, settings)
-		rec, _ := m["legacy_ldap_cutover"].(map[string]any)
-		if m["legacy_ldap_retired"] != true || rec == nil || rec["operationId"] != opID {
-			t.Fatalf("cutover identity not preserved by the accepted save: %v", m["legacy_ldap_cutover"])
-		}
-		if ttl, _ := m["session_timeout_hours"].(float64); ttl != 3 {
-			t.Fatalf("PARTIAL ADOPTION: session_timeout_hours rewritten from the defaulted runtime: %v (want 3)", m["session_timeout_hours"])
-		}
-		if cidrs, _ := m["ui_allow_ips"].([]any); len(cidrs) != 1 || cidrs[0] != "203.0.113.0/24" {
-			t.Fatalf("PARTIAL ADOPTION: ui_allow_ips rewritten from the defaulted runtime: %v", m["ui_allow_ips"])
-		}
-		if ex, _ := m["rate_limit_exemptions"].([]any); len(ex) != 1 || ex[0] != "198.51.100.7" {
-			t.Fatalf("PARTIAL ADOPTION: rate_limit_exemptions rewritten: %v", m["rate_limit_exemptions"])
-		}
-		if m["log_level"] != "DEBUG" {
-			t.Fatalf("PARTIAL ADOPTION: log_level rewritten: %v", m["log_level"])
-		}
-		if unknownSurvivedBoot1 && m["fe6a5c_unknown_compatible_field"] != "kept-verbatim" {
-			t.Fatalf("PARTIAL ADOPTION: the unknown-compatible field was dropped: %v", m["fe6a5c_unknown_compatible_field"])
-		}
-		if getSessionTTL() != 3*time.Hour {
-			t.Fatalf("an accepted recovery save must have rehydrated the runtime (TTL %v)", getSessionTTL())
-		}
+		fe6a5cAssertCompleteRehydration(t, settings, opID, unknownSurvivedBoot1)
 	}
 
 	// Boot 3 (readable again): the COMPLETE file is the truth.
@@ -248,6 +208,57 @@ func TestFE6A5C_R1_RecoveredSettingsAreNeverPartiallyAdoptedThenOverwritten(t *t
 	}
 	if n, _ := fe6a3cRetirementAudits(since); n != 0 {
 		t.Fatalf("boot 3 audited: %d", n)
+	}
+}
+
+// fe6a5cAssertRefusedRecovery: the refused branch of R1 — zero mutation,
+// restart required; the complete file is adopted by the next boot.
+func fe6a5cAssertRefusedRecovery(t *testing.T, saveErr error, after, original []byte) {
+	t.Helper()
+	if !bytes.Equal(after, original) {
+		t.Fatalf("the refused save still changed the file:\n got %s\nwant %s", after, original)
+	}
+	if !strings.Contains(saveErr.Error(), "restart") {
+		t.Fatalf("a refused recovery save must name the remedy (restart): %v", saveErr)
+	}
+	if !legacyLDAPBootReconcilePending() {
+		t.Fatal("the refused save consumed the observation")
+	}
+	if rec := legacyLDAPCutover(); rec != nil {
+		t.Fatalf("the refused save minted/adopted a record on a defaulted runtime: %+v", rec)
+	}
+	if legacyLDAPCutoverDurability() == "durable" {
+		t.Fatal("a refused save must not report the cutover durable")
+	}
+}
+
+// fe6a5cAssertCompleteRehydration: the accepted branch of R1 — only a
+// COMPLETE rehydration is acceptable: every seeded field, the unknown field
+// and the same identity survive, and the runtime carries the file's values.
+func fe6a5cAssertCompleteRehydration(t *testing.T, settings, opID string, unknownSurvivedBoot1 bool) {
+	t.Helper()
+	m := fe6a5cSettingsMap(t, settings)
+	rec, _ := m["legacy_ldap_cutover"].(map[string]any)
+	if m["legacy_ldap_retired"] != true || rec == nil || rec["operationId"] != opID {
+		t.Fatalf("cutover identity not preserved by the accepted save: %v", m["legacy_ldap_cutover"])
+	}
+	if ttl, _ := m["session_timeout_hours"].(float64); ttl != 3 {
+		t.Fatalf("PARTIAL ADOPTION: session_timeout_hours rewritten from the defaulted runtime: %v (want 3)", m["session_timeout_hours"])
+	}
+	if cidrs, _ := m["ui_allow_ips"].([]any); len(cidrs) != 1 || cidrs[0] != "203.0.113.0/24" {
+		t.Fatalf("PARTIAL ADOPTION: ui_allow_ips rewritten from the defaulted runtime: %v", m["ui_allow_ips"])
+	}
+	if ex, _ := m["rate_limit_exemptions"].([]any); len(ex) != 1 || ex[0] != "198.51.100.7" {
+		t.Fatalf("PARTIAL ADOPTION: rate_limit_exemptions rewritten: %v", m["rate_limit_exemptions"])
+	}
+	if m["log_level"] != "DEBUG" {
+		t.Fatalf("PARTIAL ADOPTION: log_level rewritten: %v", m["log_level"])
+	}
+	if unknownSurvivedBoot1 && m["fe6a5c_unknown_compatible_field"] != "kept-verbatim" {
+		t.Fatalf("PARTIAL ADOPTION: the unknown-compatible field was dropped: %v", m["fe6a5c_unknown_compatible_field"])
+	}
+	if getSessionTTL() != 3*time.Hour {
+		t.Fatalf("an accepted recovery save must have rehydrated the runtime (TTL %v)", getSessionTTL())
 	}
 }
 
@@ -330,12 +341,13 @@ func TestFE6A5C_R3_SentinelWithoutRecordRestoredAfterUnreadableBootIsNeverDurabl
 
 // ── Blocker 2 ────────────────────────────────────────────────────────────────
 
-// idpCandidateKeyPreReadHook is the ROUND-5 test seam between the key's
-// boundary validation and its read (nil in production). On a56ac527 it is
-// declared HERE and never called — K1/K2 fail on that fact alone; against
-// a temporarily seamed a56ac527 they fail on the defect itself. The product
-// correction moves the declaration beside the key loader.
-var idpCandidateKeyPreReadHook func()
+// idpCandidateKeyPreReadHook (idp_operations.go) is the ROUND-5 test seam
+// between the key's boundary validation and its read. On a56ac527 it was
+// declared in THIS file and never called — K1/K2 failed on that fact alone;
+// against a temporarily seamed a56ac527 they failed on the defect itself
+// (the symlink target's bytes were loaded). The product correction moved
+// the declaration beside the loader, where the seam sits between the
+// descriptor-bound validation and the read from that same descriptor.
 
 // fe6a5cKeyDir lays out a validated 0600 regular key K and a decoy target
 // with different bytes under mode, returning both paths and K's bytes.

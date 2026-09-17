@@ -351,11 +351,24 @@ func legacyLDAPCutoverReadModel(rec *LegacyLDAPCutover) map[string]any {
 	}
 }
 
+// legacyLDAPCutoverRecordMissing reports the DEGRADED evidence posture
+// (round 5, Blocker 1): the durable file carried `legacy_ldap_retired:true`
+// WITHOUT its operation record. The sentinel stays in force (fail closed —
+// a missing record never re-arms the legacy authenticator), nothing is
+// invented, and the read model says so explicitly. Derived, never latched:
+// an unreadable boot (observation pending) is a different, KNOWN-unknown
+// posture and reports pending_reconciliation as before.
+func legacyLDAPCutoverRecordMissing() bool {
+	return legacyLDAPRetired() && legacyLDAPCutover() == nil && !legacyLDAPBootReconcilePending()
+}
+
 // legacyLDAPCutoverDurability is the bounded posture word for the read model.
 func legacyLDAPCutoverDurability() string {
 	switch {
 	case !legacyLDAPRetired():
 		return "not_retired"
+	case legacyLDAPCutoverRecordMissing():
+		return "record_missing"
 	case legacyLDAPCutoverDurable():
 		return "durable"
 	default:
@@ -425,12 +438,24 @@ const legacyLDAPObservedReason = "enabled LDAP identity provider present in the 
 func mintPendingLegacyLDAPRetirement() {
 	rec := newLegacyLDAPCutover(nil, "", "system", "observed")
 	rec.AuditPending = true
-	legacyLDAPRetiredFlag.Store(true)
+	// Record BEFORE sentinel: a reader never observes "retired without a
+	// record" (the record_missing posture) for a transition that has one.
 	legacyLDAPCutoverRec.Store(&rec)
+	legacyLDAPRetiredFlag.Store(true)
+}
+
+// legacyLDAPRetirementReason is the bounded reason text of a cutover's
+// retirement audit, derived from the DURABLE record (so a completion at a
+// later save or boot emits the same line the transition would have).
+func legacyLDAPRetirementReason(rec *LegacyLDAPCutover) string {
+	if rec.Trigger == "admin_api" {
+		return "enabled LDAP identity provider " + rec.ProfileID + " committed through the admin API"
+	}
+	return legacyLDAPObservedReason
 }
 
 // completeLegacyLDAPRetirementAudit emits the success audit of a durable
-// observed transition EXACTLY ONCE through the operation-keyed boundary
+// transition — observed OR admin-triggered (round 5, Blocker 3) — EXACTLY ONCE through the operation-keyed boundary
 // (audit.AppendOperation appends only if the durable record does not
 // already hold the entry) and clears the pending flag in memory. Returns
 // true when the flag was cleared and the caller must persist it; a failed
@@ -449,10 +474,10 @@ func completeLegacyLDAPRetirementAudit() bool {
 		Action:      "idp.legacy_ldap.retired",
 		Object:      "legacy-ldap",
 		ObjectID:    rec.ProfileID,
-		Detail:      "legacy YAML ldap block permanently retired as an operational authenticator (" + legacyLDAPObservedReason + "); registry is the sole LDAP authority; operationId=" + rec.OperationID,
+		Detail:      "legacy YAML ldap block permanently retired as an operational authenticator (" + legacyLDAPRetirementReason(rec) + "); registry is the sole LDAP authority; operationId=" + rec.OperationID,
 		OperationID: rec.OperationID,
 	}); err != nil {
-		logger.Printf("IdP: observed legacy-LDAP cutover %s is durable but its audit could not be recorded yet (%v) — retried at the next save/boot", sanitizeLog(rec.OperationID), err)
+		logger.Printf("IdP: legacy-LDAP cutover %s (%s) is durable but its audit could not be recorded yet (%v) — retried at the next save/boot", sanitizeLog(rec.OperationID), sanitizeLog(rec.Trigger), err)
 		return false
 	}
 	rec.AuditPending = false
@@ -549,35 +574,21 @@ func markLegacyLDAPRetired(reason string) {
 	}
 }
 
-// markLegacyLDAPRetiredWith flips the in-memory sentinel ONCE and records
-// rec + the audit entry (actor = rec.Actor). Reports whether this call
-// performed the transition (false ⇒ already retired: at-most-once, nothing
-// re-emitted). Durability is the CALLER's contract: the admin API persists
-// the sentinel before calling this (inside the save's applyOnSuccess), the
-// observed path saves afterwards.
-func markLegacyLDAPRetiredWith(rec LegacyLDAPCutover, reason string) bool {
-	if legacyLDAPRetiredFlag.Swap(true) {
+// markLegacyLDAPRetiredWith installs the admin-attributed record and flips
+// the in-memory sentinel ONCE (record first, so no reader sees a retired
+// sentinel without its record). Reports whether this call performed the
+// transition (false ⇒ already retired: at-most-once). It emits NO audit
+// (round 5, Blocker 3): the record arrives with AuditPending set, the
+// caller's save has already made sentinel + record durable, and the save's
+// success path completes the operation-keyed audit exactly once
+// (completeLegacyLDAPRetirementAudit) and persists the cleared marker; a
+// failed append leaves the marker pending for the next save or boot.
+func markLegacyLDAPRetiredWith(rec LegacyLDAPCutover) bool {
+	if legacyLDAPRetiredFlag.Load() {
 		return false
 	}
-	recordLegacyLDAPRetirement(rec, reason)
-	return true
-}
-
-// recordLegacyLDAPRetirement stores the cutover record and emits the ONE
-// retirement audit for a transition that has been decided (the runtime
-// Swap above, or the boot reconciliation).
-func recordLegacyLDAPRetirement(rec LegacyLDAPCutover, reason string) {
 	legacyLDAPCutoverRec.Store(&rec)
-	audit.Add(audit.Entry{
-		TS:       time.Now().UnixMilli(),
-		Time:     time.Now().Format("2006-01-02 15:04:05"),
-		Actor:    rec.Actor,
-		Action:   "idp.legacy_ldap.retired",
-		Object:   "legacy-ldap",
-		ObjectID: rec.ProfileID,
-		Detail: "legacy YAML ldap block permanently retired as an operational authenticator (" + reason +
-			"); registry is the sole LDAP authority; operationId=" + rec.OperationID,
-	})
+	return !legacyLDAPRetiredFlag.Swap(true)
 }
 
 // enforceLegacyLDAPShadowing enforces the single-authority rule at every

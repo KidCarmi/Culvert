@@ -2,7 +2,10 @@
 
 package main
 
-import "syscall"
+import (
+	"errors"
+	"syscall"
+)
 
 // oNoFollow is the open(2) O_NOFOLLOW flag on Unix-like platforms (Linux,
 // darwin, the BSDs), where syscall defines it. Callers OR it into os.OpenFile
@@ -25,3 +28,8 @@ const oNoFollow = syscall.O_NOFOLLOW
 //
 // Windows counterpart is a no-op (nofollow_windows.go).
 const oNonBlock = syscall.O_NONBLOCK
+
+// isNoFollowRefusal reports whether an O_NOFOLLOW open failed BECAUSE the
+// path is a symlink (ELOOP on Unix). Windows has no O_NOFOLLOW, so its
+// counterpart never reports one.
+func isNoFollowRefusal(err error) bool { return errors.Is(err, syscall.ELOOP) }

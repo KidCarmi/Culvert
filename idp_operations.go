@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -231,22 +232,12 @@ func idpLoadOrMintCandidateKey(path string) ([]byte, error) {
 // never a key of unknown durability. With mayMint false an absent key is
 // errIdPCandidateKeyMissing.
 func idpLoadCandidateKey(path string, mayMint bool) ([]byte, error) {
-	read := func() ([]byte, error) {
-		// Round 4 (Blocker 3): the key is trusted ONLY inside its declared
-		// node-local boundary — a regular, non-symlink, owner-only file —
-		// inspected with NON-following metadata before a byte is read.
-		if err := idpInspectCandidateKey(path); err != nil {
-			return nil, err
-		}
-		key, err := os.ReadFile(path) // #nosec G304 -- beside the operator-configured registry file
-		if err != nil {
-			return nil, err
-		}
-		if len(key) != idpCandidateKeyLen {
-			return nil, fmt.Errorf("candidate key: unexpected length %d", len(key))
-		}
-		return key, nil
-	}
+	// Round 4 (Blocker 3): the key is trusted ONLY inside its declared
+	// node-local boundary — a regular, non-symlink, owner-only file. Round 5
+	// (Blocker 2): the boundary is validated on the SAME opened descriptor
+	// the bytes are read from, so there is no path lookup between the check
+	// and the use.
+	read := func() ([]byte, error) { return idpReadValidatedCandidateKey(path) }
 	key, err := read()
 	switch {
 	case err == nil:
@@ -280,18 +271,64 @@ func idpLoadCandidateKey(path string, mayMint bool) ([]byte, error) {
 // "fixing" it would hide that exposure; the ledger fails closed instead.
 var errIdPCandidateKeyExposed = errors.New("candidate key: outside the node-local confidentiality boundary")
 
-// idpInspectCandidateKey validates the key's confidentiality boundary from
-// non-following metadata: regular file, not a symlink, no group/world bits.
-// A missing path is reported as-is (the mint decision belongs to the caller).
-func idpInspectCandidateKey(path string) error {
-	st, err := os.Lstat(path)
+// idpCandidateKeyPreReadHook is a TEST seam between the key's boundary
+// validation and its read (nil in production; round 5, Blocker 2). The
+// check and the use are bound to ONE opened descriptor, so a path swap in
+// this window can only change what a LATER open sees — the gate
+// (TestFE6A5C_K1/K2) swaps the path here and must still receive the
+// already-validated bytes, never the replacement's.
+var idpCandidateKeyPreReadHook func()
+
+// idpReadValidatedCandidateKey opens the key WITHOUT following a symlink
+// (O_NOFOLLOW; O_NONBLOCK so a FIFO at the path cannot hang the open — the
+// list_backups.go precedent), validates the confidentiality boundary on
+// the OPENED descriptor (fstat: a regular file with no group/world bit),
+// then reads EXACTLY idpCandidateKeyLen bytes from that same descriptor.
+// The path is consulted once, at the open: a replacement between the
+// validation and the read is invisible by construction (round 5, Blocker
+// 2 — the previous Lstat-then-ReadFile shape looked the path up twice, and
+// a symlink swapped in between made its target's bytes a healthy key). A
+// symlink at the path is errIdPCandidateKeyExposed; a missing path is
+// reported as-is (the mint decision belongs to the caller); a file that is
+// not exactly the key length is refused (never silently re-minted over).
+func idpReadValidatedCandidateKey(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow|oNonBlock, 0) // #nosec G304 -- beside the operator-configured registry file
 	if err != nil {
-		return err
+		if isNoFollowRefusal(err) {
+			return nil, fmt.Errorf("%w: symlink", errIdPCandidateKeyExposed)
+		}
+		return nil, err
 	}
-	mode := st.Mode()
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := idpCandidateKeyBoundary(st.Mode()); err != nil {
+		return nil, err
+	}
+	if idpCandidateKeyPreReadHook != nil {
+		idpCandidateKeyPreReadHook()
+	}
+	buf := make([]byte, idpCandidateKeyLen+1)
+	n, rerr := io.ReadFull(f, buf)
 	switch {
-	case mode&os.ModeSymlink != 0:
-		return fmt.Errorf("%w: symlink", errIdPCandidateKeyExposed)
+	case rerr == nil:
+		return nil, fmt.Errorf("candidate key: unexpected length >%d", idpCandidateKeyLen)
+	case errors.Is(rerr, io.ErrUnexpectedEOF) && n == idpCandidateKeyLen:
+		return buf[:idpCandidateKeyLen], nil
+	case errors.Is(rerr, io.EOF), errors.Is(rerr, io.ErrUnexpectedEOF):
+		return nil, fmt.Errorf("candidate key: unexpected length %d", n)
+	default:
+		return nil, rerr
+	}
+}
+
+// idpCandidateKeyBoundary is the confidentiality boundary of an OPENED key
+// object: a regular file with no group/world permission bit. (A symlink
+// never reaches it — the open refuses one.)
+func idpCandidateKeyBoundary(mode os.FileMode) error {
+	switch {
 	case !mode.IsRegular():
 		return fmt.Errorf("%w: not a regular file (%s)", errIdPCandidateKeyExposed, mode.Type())
 	case mode.Perm()&0o077 != 0:

@@ -250,14 +250,20 @@ func TestFE6A4C_U2_StillUnreadableSettingsRefuseTheSaveWithZeroMutation(t *testi
 	if b, err := os.ReadFile(settings + ".aside"); err != nil || !bytes.Equal(b, fe6a4cCompletedSettings(opID)) {
 		t.Fatalf("original evidence changed: %v", err)
 	}
-	// Recovery afterwards still adopts the durable record (U1's contract).
+	// ROUND-5 ASSERTION CORRECTION (see U1): a save after readability is
+	// restored is STILL refused on this defaulted runtime (restart
+	// required); the restart adopts the durable record.
 	restore()
-	if err := SaveAdminSettings(); err != nil {
-		t.Fatalf("save after recovery: %v", err)
+	if err := SaveAdminSettings(); err == nil {
+		t.Fatal("the save after recovery was accepted on a defaulted runtime (partial adoption)")
 	}
 	adminSettingsSaveWG.Wait()
+	if rec := legacyLDAPCutover(); rec != nil {
+		t.Fatalf("the refused save adopted a record: %+v", rec)
+	}
+	fe6a3cSimulateBoot(t, settings)
 	if rec := legacyLDAPCutover(); rec == nil || rec.OperationID != opID {
-		t.Fatalf("recovery after the refused save did not adopt %s: %+v", opID, rec)
+		t.Fatalf("the restart after the refused save did not adopt %s: %+v", opID, rec)
 	}
 	if n, _ := fe6a3cRetirementAudits(since); n != 0 {
 		t.Fatalf("audits = %d, want 0", n)

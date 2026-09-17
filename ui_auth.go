@@ -1062,6 +1062,15 @@ var errAdminSettingsPersist = errors.New("legacy-ldap cutover sentinel could not
 // YAML ldap block: the cutover sentinel + operation record are persisted
 // (persist-before-publish) and the runtime flag flips only inside the
 // save's applyOnSuccess. nil when no cutover is due.
+//
+// Round 5 (Blocker 3): the record is minted AUDIT-PENDING and the
+// retirement audit is emitted by the save's success path through the
+// operation-keyed boundary (structural Entry.OperationID, exactly once
+// against the durable JSONL record) only after sentinel + record are
+// durable; the cleared marker is persisted by the follow-up save, and a
+// crash or append failure in between is completed exactly once at the
+// next save or boot. A refused cutover (persist failure, or the
+// preflight/fence refusals decided before this hook) emits nothing.
 func idpLegacyCutoverHook(r *http.Request, p *IdPProfile) func(next []*IdPProfile) error {
 	if p == nil || !p.Enabled || p.Type != IdPTypeLDAP || legacyLDAPYAMLConfig() == nil || legacyLDAPRetired() {
 		return nil
@@ -1069,10 +1078,11 @@ func idpLegacyCutoverHook(r *http.Request, p *IdPProfile) func(next []*IdPProfil
 	actor := auditActor(r)
 	return func(next []*IdPProfile) error {
 		rec := newLegacyLDAPCutover(p, idpDocumentRevisionOf(next), actor, "admin_api")
+		rec.AuditPending = true
 		err := saveAdminSettingsWithOverrides(adminSaveOverrides{
 			legacyCutover: &rec,
 			applyOnSuccess: func() {
-				markLegacyLDAPRetiredWith(rec, "enabled LDAP identity provider "+p.ID+" committed through the admin API")
+				markLegacyLDAPRetiredWith(rec)
 			},
 		})
 		if err != nil {

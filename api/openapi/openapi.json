@@ -3260,11 +3260,12 @@
         "type": "object"
       },
       "LegacyLDAPCutoverDurability": {
-        "description": "not_retired = no cutover; durable = the cutover sentinel + record are persisted; pending_reconciliation = the cutover is active at runtime but its sentinel save failed (reconciled at the next restart).",
+        "description": "not_retired = no cutover; durable = the cutover sentinel + record are persisted; pending_reconciliation = the cutover is active at runtime but its durable truth is not yet established (a failed sentinel save, or a settings file that could not be read at boot — reconciled at the next save or restart); record_missing = the durable file carries the retired sentinel WITHOUT its operation record: degraded recovery evidence, kept verbatim and never promoted to durable (the legacy authenticator stays retired; restore admin_settings.json from a backup that carries the record).",
         "enum": [
           "not_retired",
           "durable",
-          "pending_reconciliation"
+          "pending_reconciliation",
+          "record_missing"
         ],
         "type": "string"
       },

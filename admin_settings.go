@@ -358,26 +358,40 @@ func (p adminSettingsLoadPosture) String() string {
 	}
 }
 
-// Round 4 (Blocker 1): a save while the boot observation is still pending
-// is REFUSED unless the authoritative file's truth can be established.
+// Round 4 (Blocker 1) + round 5 (Blocker 1): a save while the boot
+// observation is still pending is REFUSED whenever an authoritative file
+// EXISTS at the path — the runtime booted without it, so nothing it could
+// write is the truth. Only a MISSING file is a known truth that permits
+// the save.
 var (
-	errAdminSettingsRecoveryUnreadable = errors.New("admin settings: the authoritative file is still unreadable — the save is refused so the durable evidence is never replaced (restore readability, or remove the file to start from an empty store)")
-	errAdminSettingsRecoveryCorrupt    = errors.New("admin settings: the authoritative file became readable but does not parse — the save is refused so the evidence is never replaced (repair the file, or restart the node to quarantine it)")
+	errAdminSettingsRecoveryUnreadable      = errors.New("admin settings: the authoritative file is still unreadable — the save is refused so the durable evidence is never replaced (restore readability and restart the node, or remove the file to start from an empty store)")
+	errAdminSettingsRecoveryCorrupt         = errors.New("admin settings: the authoritative file became readable but does not parse — the save is refused so the evidence is never replaced (repair the file and restart the node, or restart to quarantine it)")
+	errAdminSettingsRecoveryRestartRequired = errors.New("admin settings: the authoritative file is readable again but this node booted without it — the save is refused so the complete durable state is never replaced by this runtime's defaults; restart the node to adopt the file")
 )
 
 // reconcilePendingLegacyLDAPUnderSave runs under adminSettingsMu immediately
 // before a save while the legacy-LDAP boot observation is still PENDING
-// (an unreadable or corrupt load). It re-reads and parses the AUTHORITATIVE
-// file rather than trusting the boot's outcome:
+// (an unreadable or corrupt load). It consults the AUTHORITATIVE path rather
+// than trusting the boot's outcome, and a file that EXISTS there refuses
+// the save in every shape (round 5, Blocker 1):
 //
-//   - readable + a durable cutover ⇒ that EXACT record and sentinel are
-//     adopted, the observation consumed, and NO new audit is emitted;
-//   - still unreadable, or readable but unparseable ⇒ the save is REFUSED
-//     with zero file/runtime mutation (the evidence is never replaced);
-//   - missing (quarantined at boot, or removed) or readable without a
-//     sentinel ⇒ no durable record exists: the observed transition is
-//     minted now, persisted by this save, and audited exactly once after
-//     the write.
+//   - readable (with or without a sentinel) ⇒ REFUSED, restart required:
+//     the file is the complete durable truth and this runtime booted on
+//     defaults — the round-4 shape adopted only the two cutover fields and
+//     then rewrote every OTHER durable setting (and every
+//     unknown-compatible field) from those defaults; the restart's load
+//     adopts the whole file, the same cutover identity included, and
+//     emits nothing new;
+//   - still unreadable, or readable but unparseable ⇒ REFUSED with zero
+//     file/runtime mutation (the evidence is never replaced; a corrupt
+//     file is quarantined or repaired at boot, never by a save);
+//   - missing (quarantined at boot, or removed since) ⇒ no durable record
+//     exists: the observed transition is minted now, persisted by this
+//     save, and audited exactly once after the write.
+//
+// Nothing here ever adopts a `legacy_ldap_retired` sentinel: a sentinel
+// WITHOUT its record is degraded evidence the boot reports as
+// `record_missing` (applyLegacyLDAPRetirement), never healthy truth.
 func reconcilePendingLegacyLDAPUnderSave(path string) error {
 	data, err := os.ReadFile(path) // #nosec G304 -- the operator-configured settings path
 	switch {
@@ -386,22 +400,7 @@ func reconcilePendingLegacyLDAPUnderSave(path string) error {
 		if jerr := json.Unmarshal(data, &s); jerr != nil {
 			return fmt.Errorf("%w (load posture %s)", errAdminSettingsRecoveryCorrupt, adminSettingsLoadPostureNow())
 		}
-		if s.LegacyLDAPRetired {
-			legacyLDAPRetiredFlag.Store(true)
-			if s.LegacyLDAPCutover != nil {
-				rec := *s.LegacyLDAPCutover
-				legacyLDAPCutoverRec.Store(&rec)
-			}
-			legacyLDAPCutoverDurableFlag.Store(true) // read from the durable file
-			reconcileLegacyLDAPBootObservation(true) // consumed: same identity, nothing new
-			id := ""
-			if rec := legacyLDAPCutover(); rec != nil {
-				id = rec.OperationID
-			}
-			logger.Printf("AdminSettings: storage recovered (load posture %s) — adopted the durable legacy-LDAP cutover %s; no new transition recorded", adminSettingsLoadPostureNow(), sanitizeLog(id))
-			return nil
-		}
-		// Readable, no sentinel: nothing durable exists — a legitimate recovery.
+		return fmt.Errorf("%w (load posture %s)", errAdminSettingsRecoveryRestartRequired, adminSettingsLoadPostureNow())
 	case os.IsNotExist(err):
 		// Missing: quarantined at boot, or removed since — a known truth.
 	default:
@@ -700,18 +699,29 @@ func applyBlocklistFeeds(s *AdminSettings) {
 // known) persists now.
 func applyLegacyLDAPRetirement(s *AdminSettings) {
 	if s.LegacyLDAPRetired {
-		legacyLDAPRetiredFlag.Store(true)
-		legacyLDAPCutoverDurableFlag.Store(true) // read from the file: durable by definition
 		if s.LegacyLDAPCutover != nil {
 			rec := *s.LegacyLDAPCutover
 			legacyLDAPCutoverRec.Store(&rec)
+			legacyLDAPRetiredFlag.Store(true)
+			legacyLDAPCutoverDurableFlag.Store(true) // read from the file: durable by definition
 			// Round 3 (Blocker 3): a durable record whose audit was never
 			// proven (crash between the record's save and the audit)
 			// completes the SAME identity's audit exactly once, then clears
-			// the flag durably.
+			// the flag durably. Round 5: the admin-API cutover rides the
+			// same boundary (its record is minted audit-pending too).
 			if rec.AuditPending && completeLegacyLDAPRetirementAudit() {
 				adminSettingsSave()
 			}
+		} else {
+			// Round 5 (Blocker 1): a sentinel WITHOUT its record is
+			// degraded recovery evidence, not healthy truth. The sentinel
+			// stays in force (fail closed — a missing record never re-arms
+			// the legacy authenticator), NO record is invented, the file is
+			// carried verbatim by later saves, and the read model reports
+			// `record_missing` instead of `durable`.
+			legacyLDAPRetiredFlag.Store(true)
+			legacyLDAPCutoverDurableFlag.Store(false)
+			logger.Printf("AdminSettings: legacy_ldap_retired is set WITHOUT its cutover record — degraded evidence (record_missing): the legacy authenticator stays retired, no record is invented, the file is carried verbatim; restore admin_settings.json from a backup that carries the record, or accept the degraded posture")
 		}
 	}
 	// FE-6A.2 correction (Blocker 4): the boot observation is reconciled
@@ -1303,7 +1313,9 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// and an observed transition's audit may now be completed (round 3,
 	// Blocker 3: persist-first; the flag it clears is persisted by the
 	// follow-up save, and a lost follow-up re-appends nothing).
-	if legacyLDAPRetired() && !legacyLDAPBootReconcilePending() {
+	// A sentinel without its record (record_missing) is carried verbatim
+	// and never promoted to durable by a save.
+	if legacyLDAPRetired() && !legacyLDAPBootReconcilePending() && legacyLDAPCutover() != nil {
 		legacyLDAPCutoverDurableFlag.Store(true)
 		if completeLegacyLDAPRetirementAudit() {
 			adminSettingsSave()

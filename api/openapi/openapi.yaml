@@ -2752,8 +2752,8 @@ components:
         cutover: { $ref: '#/components/schemas/LegacyLDAPCutover' }
     LegacyLDAPCutoverDurability:
       type: string
-      enum: [not_retired, durable, pending_reconciliation]
-      description: "not_retired = no cutover; durable = the cutover sentinel + record are persisted; pending_reconciliation = the cutover is active at runtime but its sentinel save failed (reconciled at the next restart)."
+      enum: [not_retired, durable, pending_reconciliation, record_missing]
+      description: "not_retired = no cutover; durable = the cutover sentinel + record are persisted; pending_reconciliation = the cutover is active at runtime but its durable truth is not yet established (a failed sentinel save, or a settings file that could not be read at boot — reconciled at the next save or restart); record_missing = the durable file carries the retired sentinel WITHOUT its operation record: degraded recovery evidence, kept verbatim and never promoted to durable (the legacy authenticator stays retired; restore admin_settings.json from a backup that carries the record)."
     LegacyLDAPCutover:
       type: object
       description: The durable, operation-identified legacy→registry LDAP authority cutover record (FE-6A.0 R7). Its `operationId` is the cutover's OWN identity; the enabling create's ledger key is that profile's `operationId` provenance on IdPProfileRead.

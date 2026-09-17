@@ -538,11 +538,11 @@ func TestFE6A0_Green_CutoverMarkIsAtMostOnce(t *testing.T) {
 	legacyLDAPCutoverRec.Store(nil)
 	t.Cleanup(func() { legacyLDAPRetiredFlag.Store(prev); legacyLDAPCutoverRec.Store(prevRec) })
 	first := newLegacyLDAPCutover(&IdPProfile{ID: "a", Name: "A"}, "r1", "admin@10.0.0.1", "admin_api")
-	if !markLegacyLDAPRetiredWith(first, "test") {
+	if !markLegacyLDAPRetiredWith(first) {
 		t.Fatal("first mark must perform the transition")
 	}
 	second := newLegacyLDAPCutover(&IdPProfile{ID: "b", Name: "B"}, "r2", "other@10.0.0.2", "admin_api")
-	if markLegacyLDAPRetiredWith(second, "test") {
+	if markLegacyLDAPRetiredWith(second) {
 		t.Fatal("second mark must be a no-op")
 	}
 	if got := legacyLDAPCutover(); got == nil || got.OperationID != first.OperationID {
