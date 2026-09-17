@@ -284,7 +284,9 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// Fallback: HTTP Basic Auth for programmatic / CLI access.
 		user, pass, ok := r.BasicAuth()
 		if ok {
-			if role, valid := cfg.VerifyUIUser(user, pass); valid {
+			// SEC-BASIC-1: verifyUIBasicAuth applies the login path's lockout,
+			// TOTP and audit controls. Never call cfg.VerifyUIUser here.
+			if role, valid := verifyUIBasicAuth(r, user, pass); valid {
 				// Store the authenticated username too (no cookie exists on this path), so admin-action
 				// attribution resolves the real actor instead of "unknown" (Codex P2).
 				ctx := context.WithValue(r.Context(), uiRoleKey{}, role)

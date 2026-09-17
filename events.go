@@ -153,7 +153,8 @@ func sseAuthStillValid(r *http.Request) bool {
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
 	if user, pass, ok := r.BasicAuth(); ok {
-		_, valid := cfg.VerifyUIUser(user, pass)
+		// SEC-BASIC-1: same controls as every other admin-plane Basic site.
+		_, valid := verifyUIBasicAuth(r, user, pass)
 		return valid
 	}
 	return false

@@ -223,7 +223,10 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
 	if ok {
-		if role, valid := cfg.VerifyUIUser(user, pass); valid {
+		// SEC-BASIC-1: this endpoint is on the PUBLIC allowlist, so an
+		// unauthenticated caller reaches it — the bare verifier here was a
+		// lockout-free, unaudited password oracle.
+		if role, valid := verifyUIBasicAuth(r, user, pass); valid {
 			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": user, "role": role})
 			return
 		}
