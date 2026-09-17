@@ -25,18 +25,27 @@ type rootCAStartupConfig struct {
 // resolveRootCAStartupConfig applies the CLI-over-config path precedence.
 // Pure and deterministic; safe on a zero-value *FileConfig.
 func resolveRootCAStartupConfig(fc *FileConfig, cliPath, passphraseEnvVal string) rootCAStartupConfig {
-	// TrimSpace the CLI value BEFORE the emptiness check: firstStr treats any
-	// non-empty string as "the flag was set", and a whitespace-only -ca-path
-	// would otherwise count as set and silently override (discard) a valid
-	// config.yaml proxy.ca_path pin with a value that is not a usable path.
-	// certMgr.LoadOrInitCA then either creates a bogus bundle at a
-	// nonsensical location or fails to load — and a load failure is
-	// non-fatal by design (rootca_startup.go initInspectionCA), so it
-	// silently disables SSL inspection fail-open with nothing pointing at
-	// the cause (same defect class fixed for -cdr-server-fingerprint, see
-	// cdr_startup_config.go).
+	// TrimSpace is used ONLY to decide whether the CLI flag was "set": a
+	// whitespace-only -ca-path (e.g. from a wrapper script that always
+	// passes -ca-path="$MAYBE_EMPTY_VAR") must not count as set and silently
+	// override (discard) a valid config.yaml proxy.ca_path pin. The RAW,
+	// untrimmed cliPath is what gets stored once it is chosen — a filename
+	// is legally allowed to begin or end with whitespace on supported
+	// filesystems (quotable on the CLI), and silently trimming a genuinely
+	// intended path would redirect certMgr.LoadOrInitCA to a different,
+	// likely-absent path: LoadOrInitCA mints and persists a brand-new root
+	// in that case rather than loading the configured trust anchor,
+	// breaking inspection for every client that already trusts the
+	// original CA (Codex review, PR #1415). This mirrors the
+	// -cdr-server-fingerprint fix (cdr_startup_config.go) in spirit — CLI
+	// wins only when it is genuinely non-blank — but a fingerprint is
+	// safely normalized by trimming, while a filesystem path is not.
+	path := fc.Proxy.CAPath
+	if strings.TrimSpace(cliPath) != "" {
+		path = cliPath
+	}
 	return rootCAStartupConfig{
-		Path:       firstStr(strings.TrimSpace(cliPath), fc.Proxy.CAPath),
+		Path:       path,
 		Passphrase: passphraseEnvVal,
 	}
 }

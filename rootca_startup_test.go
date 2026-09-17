@@ -65,3 +65,24 @@ func TestResolveRootCAStartupConfig_NonBlankCLIPathStillWins(t *testing.T) {
 		t.Errorf("Path = %q, want the CLI value %q to win", got.Path, "/from/cli/ca.bundle")
 	}
 }
+
+// TestResolveRootCAStartupConfig_SurroundingWhitespaceInAGenuinePathIsPreservedVerbatim
+// guards the other direction of the whitespace fix (Codex review, PR #1415):
+// a filename is legally allowed to begin or end with whitespace on
+// supported filesystems (quotable on the CLI), so TrimSpace must be used
+// ONLY to decide whether the CLI flag counts as "set" — never applied to
+// the stored value itself. Silently trimming a genuinely intended path
+// would redirect certMgr.LoadOrInitCA to a different, likely-absent path,
+// which mints and persists a brand-new root instead of loading the
+// configured trust anchor — breaking inspection for every client that
+// already trusts the original CA.
+func TestResolveRootCAStartupConfig_SurroundingWhitespaceInAGenuinePathIsPreservedVerbatim(t *testing.T) {
+	const padded = "  /from/cli/ ca.bundle  "
+	fc := &FileConfig{}
+	fc.Proxy.CAPath = "/from/config/ca.bundle"
+
+	got := resolveRootCAStartupConfig(fc, padded, "pass")
+	if got.Path != padded {
+		t.Errorf("Path = %q, want the CLI value preserved verbatim (including surrounding whitespace) %q", got.Path, padded)
+	}
+}
