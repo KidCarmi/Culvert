@@ -143,6 +143,15 @@ type MetricsReport struct {
 	Epoch          int64  `json:"epoch,omitempty"`           // highest fencing epoch the node has observed
 	CulvertVersion string `json:"culvert_version,omitempty"` // build version string on the node
 	SyncedFP       string `json:"synced_fp,omitempty"`       // T3 P1: blocklist synced fingerprint (drift detection)
+	// AuditClusterPushDrops is CHAOS-61's DP->CP audit push-queue drop count
+	// (auditPendingDrops(), process-lifetime, never reset) as observed on THIS
+	// node when the report was built. It only ever moves on a Data Plane node
+	// (the counter is charged by internal/audit's DP push-queue path, which a
+	// Control Plane never exercises). Carried in the heartbeat, rather than left
+	// as a purely local /healthz/metrics fact, so the CP's own dashboard can
+	// aggregate it across the fleet instead of requiring an admin to open every
+	// DP's admin UI individually to learn the centralized audit trail has a gap.
+	AuditClusterPushDrops int64 `json:"audit_cluster_push_drops,omitempty"`
 }
 
 // nodeMetrics aggregates metrics from all connected Data Plane nodes.
@@ -150,6 +159,25 @@ var (
 	nodeMetricsMu sync.RWMutex
 	nodeMetrics   = map[string]MetricsReport{}
 )
+
+// auditClusterPushDropsTotal is the CHAOS-61 counter an admin should actually
+// look at: this node's own drops (non-zero only when this process is itself a
+// Data Plane) plus the drops most recently reported by every Data Plane node
+// heartbeating to it (non-zero only on a Control Plane). A standalone or DP
+// node has no entries in nodeMetrics and this degrades to auditPendingDrops()
+// alone; a Control Plane node's own auditPendingDrops() is always zero, so
+// this degrades to the fleet sum. Either way, GET /api/stats reports the
+// number that actually answers "is our centralized audit trail complete?"
+// from whichever node the admin happens to be looking at.
+func auditClusterPushDropsTotal() int64 {
+	total := auditPendingDrops()
+	nodeMetricsMu.RLock()
+	for _, m := range nodeMetrics {
+		total += m.AuditClusterPushDrops
+	}
+	nodeMetricsMu.RUnlock()
+	return total
+}
 
 // ─── Distributed rate limit aggregation ──────────────────────────────────────
 //

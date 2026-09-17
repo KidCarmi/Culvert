@@ -153,8 +153,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// remedy is restoring the CP link, not freeing disk — previously visible
 		// only via /healthz or the culvert_audit_cluster_push_drops_total
 		// Prometheus metric, invisible to an operator without a metrics scraper
-		// or a manual health-probe curl.
-		"auditClusterPushDrops": auditPendingDrops(),
+		// or a manual health-probe curl. auditClusterPushDropsTotal aggregates
+		// every DP's latest heartbeat-reported count when this node is a Control
+		// Plane, so the documented single-pane-of-glass dashboard reflects the
+		// whole fleet rather than reading zero forever on the node an admin
+		// actually looks at (a DP's own /api/stats still reports its own count).
+		"auditClusterPushDrops": auditClusterPushDropsTotal(),
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),
