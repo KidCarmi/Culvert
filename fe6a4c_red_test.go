@@ -10,6 +10,8 @@ package main
 // without re-reading it.
 //
 //	U1  a COMPLETED cutover record → an injected unreadable boot →
+//	    [ROUND-5 ASSERTION CORRECTION: the save is REFUSED until restart;
+//	    the restart adopts — see fe6a5c_red_test.go R1]
 //	    readability restored → an UNRELATED save: the SAME operationId is
 //	    adopted (record + sentinel), the observation consumed, no new audit
 //	U2  the file STAYS unreadable → the unrelated save is REFUSED with zero
@@ -83,7 +85,7 @@ func fe6a4cMakeUnreadable(t *testing.T, path string) (restore func()) {
 
 // ── U1 — restored evidence is ADOPTED, never replaced ───────────────────────
 
-func TestFE6A4C_U1_RestoredCompletedRecordIsAdoptedOnTheFirstSave(t *testing.T) {
+func TestFE6A4C_U1_RestoredCompletedRecordIsAdoptedByTheRestartNeverByTheFirstSave(t *testing.T) {
 	fe6a3cEnabledRegistryLDAP(t)
 	settings := filepath.Join(t.TempDir(), "admin_settings.json")
 	opID := mustRandHex(16)
@@ -115,46 +117,64 @@ func TestFE6A4C_U1_RestoredCompletedRecordIsAdoptedOnTheFirstSave(t *testing.T) 
 
 	// Storage recovers: the ORIGINAL file is readable again at the SAME path,
 	// and an UNRELATED admin save lands.
+	//
+	// ROUND-5 ASSERTION CORRECTION (recorded): round 4 asserted that this
+	// save SUCCEEDS and adopts the record without a restart. That premise
+	// was only safe for the two cutover fields — the save then rewrote
+	// every OTHER durable setting from a runtime that booted on defaults
+	// (TestFE6A5C_R1). The corrected contract: the save is REFUSED with
+	// the file byte-identical, the observation still pending and no record
+	// adopted on this defaulted runtime; the restart adopts the COMPLETE
+	// file with the same identity and no new audit.
 	restore()
-	if err := SaveAdminSettings(); err != nil {
-		t.Fatalf("unrelated save after recovery: %v", err)
-	}
+	err = SaveAdminSettings()
 	adminSettingsSaveWG.Wait()
+	if err == nil {
+		t.Fatal("the first save after recovery was ACCEPTED on a defaulted runtime — partial adoption (round-5 Blocker 1); it must be refused until the node restarts")
+	}
+	if !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("the refusal must name the remedy (restart): %v", err)
+	}
+	if after, rerr := os.ReadFile(settings); rerr != nil || !bytes.Equal(after, original) {
+		t.Fatalf("the refused save changed the file (%v):\n got %s\nwant %s", rerr, after, original)
+	}
+	if rec := legacyLDAPCutover(); rec != nil {
+		t.Fatalf("a record was adopted/minted by the refused save: %+v", rec)
+	}
+	if !legacyLDAPBootReconcilePending() {
+		t.Fatal("the refused save consumed the observation")
+	}
+	if n, ids := fe6a3cRetirementAudits(since); n != 0 {
+		t.Fatalf("a NEW retirement audit was emitted for an already-completed cutover: %d %v", n, ids)
+	}
+	// Boot 3: the restart adopts the complete file — the SAME identity.
+	fe6a3cSimulateBoot(t, settings)
 	rec := legacyLDAPCutover()
 	if rec == nil || rec.OperationID != opID {
-		t.Fatalf("the unrelated save REPLACED the cutover identity: got %+v, want the restored record %s", rec, opID)
+		t.Fatalf("boot 3 identity = %+v, want the restored record %s", rec, opID)
 	}
 	if rec.Trigger != "admin_api" || rec.Actor != "admin@10.0.0.9" || rec.ProfileID != "p-corp" {
 		t.Fatalf("the adopted record is not the durable one verbatim: %+v", rec)
 	}
 	if legacyLDAPBootReconcilePending() {
-		t.Fatal("the observation was not consumed by the adoption")
-	}
-	retired, frec, present := fe6a3cSettingsFile(t, settings)
-	if !present || !retired || frec == nil || frec["operationId"] != opID {
-		t.Fatalf("file after the save: retired=%v record=%v present=%v, want the same record %s", retired, frec, present, opID)
-	}
-	if n, ids := fe6a3cRetirementAudits(since); n != 0 {
-		t.Fatalf("a NEW retirement audit was emitted for an already-completed cutover: %d %v", n, ids)
+		t.Fatal("the observation was not consumed by the restart")
 	}
 	if legacyLDAPCutoverDurability() != "durable" {
 		t.Fatalf("durability = %q after adopting a durable record", legacyLDAPCutoverDurability())
 	}
-	// Boot 3: the truth is stable.
-	fe6a3cSimulateBoot(t, settings)
-	if got := legacyLDAPCutover(); got == nil || got.OperationID != opID {
-		t.Fatalf("boot 3 identity = %+v, want %s", got, opID)
+	retired, frec, present := fe6a3cSettingsFile(t, settings)
+	if !present || !retired || frec == nil || frec["operationId"] != opID {
+		t.Fatalf("file after boot 3: retired=%v record=%v present=%v, want the same record %s", retired, frec, present, opID)
 	}
 	if n, _ := fe6a3cRetirementAudits(since); n != 0 {
 		t.Fatalf("boot 3 audited: %d", n)
 	}
-	_ = original
 }
 
 // TestFE6A4C_U1b is the review's exact shape — a regular file made
 // unreadable by MODE — which a root-run process cannot observe (root reads
 // through 0000); it runs where the harness is unprivileged (CI).
-func TestFE6A4C_U1b_RestoredCompletedRecordIsAdopted_ModeUnreadable(t *testing.T) {
+func TestFE6A4C_U1b_RestoredCompletedRecordIsAdoptedByTheRestart_ModeUnreadable(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission-based unreadability is invisible to root; U1 covers the shape with an unreadable object")
 	}
@@ -177,10 +197,15 @@ func TestFE6A4C_U1b_RestoredCompletedRecordIsAdopted_ModeUnreadable(t *testing.T
 	if err := os.Chmod(settings, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveAdminSettings(); err != nil {
-		t.Fatalf("save after recovery: %v", err)
+	// ROUND-5 ASSERTION CORRECTION: refused until restart (see U1).
+	if err := SaveAdminSettings(); err == nil {
+		t.Fatal("the first save after recovery was accepted on a defaulted runtime (partial adoption)")
 	}
 	adminSettingsSaveWG.Wait()
+	if rec := legacyLDAPCutover(); rec != nil {
+		t.Fatalf("a record was adopted by the refused save: %+v", rec)
+	}
+	fe6a3cSimulateBoot(t, settings)
 	if rec := legacyLDAPCutover(); rec == nil || rec.OperationID != opID {
 		t.Fatalf("identity replaced: %+v, want %s", rec, opID)
 	}
