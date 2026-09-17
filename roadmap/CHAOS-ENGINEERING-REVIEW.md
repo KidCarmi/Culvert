@@ -6402,3 +6402,206 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The CDR plane when the Sluice backend goes away
+
+**Date:** 2026-09-17 · **Closes:** CDR-1 (leaked half-open reservation),
+CDR-2 (`fail_mode` not applied to an unavailable backend), CDR-3 (ungated
+alert with an unbounded dedup key). **Files:** `cdr_breaker.go`,
+`cdr_pool.go`, `cdrstore.go`, `cdr_proxy.go`, `cdr_availability.go` (new),
+`cdr_metrics.go`, `diagnostics.go`.
+
+CDR is an in-path security control on the SSL-inspected response path, and
+it is the one control in this tree that already had the mature posture the
+register keeps recommending elsewhere: an admin-selectable
+`fail_mode: open | closed`. This sweep asked the only question that matters
+about such a toggle — *is it actually reached on the path that matters?* —
+and found three defects that compose into one outcome: **a Sluice outage
+silently and permanently switched CDR off, regardless of `fail_mode`, with
+every surface reporting the node healthy.**
+
+### D1 — the half-open probe budget was a reservation nobody gave back
+
+`cdrCircuitBreaker.Allow()` does two things: it reports permission, and in
+half-open it **reserves** one of `HalfOpenProbes` (default 1) slots via
+`halfOpenTried.Add(1)`. The only things that give a slot back are
+`OnSuccess` and `OnFailure`, which `Store(0)`. So `Allow()` carries an
+implicit contract — *whoever is granted must report an outcome* — and
+**eight of the nine call sites violated it.**
+
+`cdrPool.Pick()` calls `Allow()`. `cdrActiveClient()` was
+`cdrPool.Pick()`, and `cdrActiveClient()` is called from **seven places in
+`cdr_ui.go`** — the admin CDR panels and status endpoints — plus
+`runCDRStage`'s pre-flight nil-check. Five of those use the result only as
+a boolean "is CDR live?". Every one of them took a probe slot and threw it
+away.
+
+On a single-instance pool this is not a race but a **certainty**, because
+the request path itself picked twice:
+
+```
+runCDRStage:      cdrActiveClient()  → Pick → Allow → reserves slot, client DISCARDED
+safeCDRSanitize:  cdrPickPooled()    → Pick → Allow → budget exhausted → nil
+                                     → cdrPassSkipped("SKIPPED") → file delivered
+```
+
+No RPC is made, so no outcome is reported, so `halfOpenTried` stays at 1
+**forever**. Every later request finds the budget exhausted. The breaker can
+never close. Reproduced against the pre-fix tree: after 50 simulated hours
+of a fully healthy Sluice, `cdrPickPooled()` still returned nil with
+`state=half_open, halfOpenTried=1`. **Recovery required a process restart.**
+
+An **admin opening the CDR status panel was sufficient to trigger it** —
+a pure read, on the observability surface, permanently killing the recovery
+of the control it was observing. That is the sharpest form of a rule this
+register keeps rediscovering: *observing a control must never change it.*
+
+Three further leak paths existed **inside** the request path, all reached
+after a successful reservation and all returning without reporting an
+outcome: a hash-cache hit, the oversize skip, and the `file_too_large`
+branch (which deliberately does not charge the breaker). During recovery, a
+single cache hit was enough.
+
+**The fix is two rules.** (1) `Permits()` is a pure read — no reservation,
+no open→half-open CAS, no `totalTrips` charge — and every observer
+(`cdrActiveClient`, the panels, the diagnostics row) goes through
+`PeekAvailable()`, which uses it. It is deliberately **not** round-robin: an
+observer asks "is anything live?", and advancing the shared cursor from a
+status read would perturb request-path balancing. (2) `cdrPickForCall()` is
+the **only** reserving picker and returns a `sync.Once`-guarded release the
+request path defers, so every exit path — including a recovered panic —
+gives the slot back. `ReleaseProbe()` uses a CAS loop that never drives the
+counter below zero: a release racing an `OnSuccess` that already zeroed it
+is a no-op, not an over-release that would hand out more concurrent probes
+than the configured budget.
+
+**The status reads also inflated `culvert_cdr_pool_breaker_trips_total`**,
+whose help text says "Allow() denials while open" — it was counting admin
+page views. `Permits()` does not charge it.
+
+### D2 — `fail_mode` was not applied to an unavailable backend
+
+`Pick() == nil` returned `cdrPassSkipped("SKIPPED")`, which is
+`Outcome: cdrPass` **unconditionally**. `fail_mode` lives in
+`cdrErrorOutcome`, reached only from a call that was actually made and
+failed. The in-code comment claimed *"the caller's fail_mode then decides"*;
+it did not.
+
+So the posture inverted exactly when it mattered: a node configured
+`fail_mode: closed` failed **closed** for the first five transient errors,
+and then — the instant its own circuit breaker concluded the backend was
+down — failed **open** for the entire rest of the outage. The security
+control switched itself off at the moment its own health logic said the
+backend was gone.
+
+And it was **silent on every surface**: `recordCDRTerminal` has no case for
+`"SKIPPED"`, so no counter moved; `runCDRStage` logs only on `"ERROR"`, so
+no line was written; no alert fired.
+
+`cdrUnavailableOutcome` now splits the two events the picker had collapsed:
+
+- **Pool EMPTY** → `SKIPPED_NOT_DEPLOYED`, counted, still passes. CDR was
+  never deployed on this node; blocking every download over a provisioning
+  gap would be a self-inflicted outage, and the `cdr` diagnostics row
+  already reports it as a hard FAIL with the enrolment action attached.
+- **Pool NON-EMPTY, nothing serviceable** → the CDR backend is down. This is
+  the condition `fail_mode` exists to govern, so it routes through the same
+  `cdrErrorOutcome` an in-flight failure takes — one posture for one fault,
+  no second dialect.
+
+**This is a behaviour change for `fail_mode: closed` operators**, and the
+correct direction: the setting now does what it says. It is called out in
+the runbook.
+
+### D3 — the alert was ungated and its dedup key was unbounded
+
+```go
+go fireAlert("cdr_unavailable", AlertPayload{
+    Source: "cdr",
+    Detail: fmt.Sprintf("sluice call failed: %v", err),
+})
+```
+
+This is the **only** `fireAlert` in the CDR plane and it broke both halves
+of the standing per-request alert contract. It sits on the per-response-body
+inspect path, so ungated it paid a goroutine spawn, a payload build, an
+RFC3339 format and a round trip through the process-wide dedup mutex on
+every file — on the default posture of **no webhooks configured at all** —
+and landed hardest during exactly the outage that produces it. Measured: 3
+allocations per call with no subscriber, 0 after gating.
+
+Worse, `Store.Dispatch` dedups on `event + ":" + Detail`, and a gRPC
+transport error embeds the peer address **and the ephemeral local port**, so
+every single failure minted a distinct dedup key that the 30-second window
+could not suppress by construction — fanning out into the 500-entry retry
+queue where it evicts real threat alerts. This is WK-12/RS-5 verbatim, the
+same defect CHAOS-64 closed for `fireDNSFailureAlert`, in a subsystem that
+had never been swept. `cdrErrorReasonClass` now maps the error to a closed
+vocabulary of eleven classes; the full cause reaches a rate-limited log line
+and nowhere else.
+
+### The green dashboard
+
+`checkCDR()` keyed on `cdrPool.Len()`. A node with one enrolled instance
+whose breaker was permanently wedged had `poolSize == 1` and therefore fell
+through to `enabled-healthy` — on a node delivering every file undisarmed.
+The row now reports `enabled-dark` (FAIL) when instances are enrolled but
+none can currently serve, because availability is what the request path
+actually consults and so is what the row must report.
+
+### Surfaces
+
+`culvert_cdr_backend_available` (gauge, **emitted only when CDR is enabled
+AND at least one instance is enrolled** — the socks5/cluster_ca/dns
+emission rule: a flat `0` from an appliance that never turned CDR on is
+indistinguishable from one whose backend is dark, and the paging rule is
+`== 0`), `culvert_cdr_unavailable_total`, `culvert_cdr_not_deployed_total`,
+the `enabled-dark` diagnostics row, and a rate-limited log pair (onset
+immediately, then ≤1 line per minute per reason class, magnitude in the
+counters). **No new alert event** — `cdr_unavailable` already existed and a
+second name for one root cause is two pages for one action.
+
+### Gates
+
+`cdr_availability_chaos_test.go` (15). Every defect gate was verified
+**failing** against its reintroduced pre-fix shape: the two D1 gates against
+the reserving observer + non-releasing picker, the five D2 gates against the
+bare `cdrPassSkipped("SKIPPED")` and the length-keyed diagnostics row, and
+the D3 allocation gate against the ungated producer (3 allocs vs 0).
+
+Three **CONTROLS**, because the cheapest ways to pass the defect gates are
+all worse than the defect:
+
+- `Control_HalfOpenBudgetStillBoundsConcurrentProbes` — deleting the budget
+  passes every leak gate while aiming the full request rate at a recovering
+  Sluice.
+- `Control_ObserverStillReportsAnOpenBreaker` — making `PeekAvailable`
+  always true passes every observer gate while deleting the outage signal.
+- `Control_HealthyBackendIsUntouched` — a working CDR must be byte-identical.
+
+`TestSafeCDRSanitize_BreakerOpenReturnsSkipped` (`cdr_pool_test.go`) was
+**INVERTED**: it asserted `Status == "SKIPPED"` on an all-open pool, which
+pinned D2 as correct behaviour. Same class as CHAOS-64's
+`TestResolveHost_TTLExpiry`. It now asserts that `fail_mode` is applied in
+both directions.
+
+### Deliberately left, and recorded
+
+- **`fail_mode: open` remains a real exposure window** during an outage —
+  the documented availability trade-off (the WK-1b/WK-2b posture), mitigated
+  by the alert and the counter, not eliminated.
+- **The hash cache is still served during an outage.** Identical content
+  keeps its earlier verdict without contacting Sluice. Intended.
+- **The health poller still does not drive the breaker** (`cdr_health.go`
+  touches it nowhere), so a breaker only ever learns from proxy-path
+  traffic. On an idle node the reset timer fires and nothing probes until
+  the next file arrives — benign, but it means the breaker is not a
+  liveness check and should not be read as one. Recorded as **CDR-4**.
+- **`cdr_health.go`'s 15s poller still has no jitter** (WK-13/HA-11, fleet
+  herd) — untouched, one concern per change.
+
+See `docs/operator/cdr-backend-availability.md` for the operator runbook
+(posture table, the `enabled-dark` row, the metric vocabulary and the
+recovery walkthrough).

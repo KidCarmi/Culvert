@@ -9,13 +9,16 @@ package main
 //   - A per-instance circuit breaker
 //   - Last-known health response + timestamp
 //
-// safeCDRSanitize (cdr_proxy.go) calls cdrPickPooled() to get the best
+// safeCDRSanitize (cdr_proxy.go) calls cdrPickForCall() to get the best
 // available instance.  The picker ignores clients whose breaker is open
 // and round-robins across the rest.  All-open → nil → safeCDRSanitize
-// applies fail-mode.
+// applies fail-mode via cdrUnavailableOutcome (cdr_availability.go).
 //
-// Backwards compatibility: cdrActiveClient() still returns a *CDRClient
-// (or nil), so code paths that only need "is CDR live?" keep working.
+// Pick() RESERVES a half-open probe slot, so cdrPickForCall is the ONE
+// reserving call site in the tree and it always releases.  Everything that
+// only needs "is CDR live?" -- cdrActiveClient(), the admin panels, the
+// diagnostics row -- goes through PeekAvailable(), which reserves nothing
+// and changes no breaker state (CHAOS-66).
 
 import (
 	"errors"
@@ -154,12 +157,12 @@ func (p *cdrClientPool) Get(name string) *cdrPooledClient {
 // Strategy: start from the rr cursor; the first client whose breaker
 // Allow() returns true wins.  Advances the cursor before returning so
 // subsequent calls on a stable pool spread load.
-func (p *cdrClientPool) Pick() *cdrPooledClient {
+func (p *cdrClientPool) Pick() (*cdrPooledClient, bool, int64) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	n := len(p.clients)
 	if n == 0 {
-		return nil
+		return nil, false, 0
 	}
 	// Reserve the starting cursor once so concurrent Pick() calls
 	// don't all probe the same client.
@@ -169,8 +172,28 @@ func (p *cdrClientPool) Pick() *cdrPooledClient {
 	}
 	for i := 0; i < n; i++ {
 		candidate := p.clients[(start+i)%n]
-		if candidate.Breaker.Allow() {
-			return candidate
+		if allowed, reserved, gen := candidate.Breaker.allowReserve(); allowed {
+			return candidate, reserved, gen
+		}
+	}
+	return nil, false, 0
+}
+
+// PeekAvailable returns an instance that is currently permitted, WITHOUT
+// reserving a half-open probe slot, advancing the open->half-open timer,
+// or charging the breaker's trip counter.  Observers only -- see
+// cdrCircuitBreaker.Permits().  Returns nil when the pool is empty or
+// every instance is currently unavailable.
+//
+// Deliberately NOT round-robin: an observer is asking "is anything live?",
+// not "which instance should serve this request", and advancing the
+// shared cursor from a status read would perturb request-path balancing.
+func (p *cdrClientPool) PeekAvailable() *cdrPooledClient {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, c := range p.clients {
+		if c.Breaker.Permits() {
+			return c
 		}
 	}
 	return nil
@@ -220,8 +243,26 @@ func (p *cdrClientPool) shutdown() {
 // per-instance state (profileCap, breaker, health).  Returns nil when
 // no instance is available — callers treat nil as "skip CDR" and apply
 // fail_mode.  This is the proxy hot path's selector.
-func cdrPickPooled() *cdrPooledClient {
-	return cdrPool.Pick()
+// cdrPickForCall reserves an instance for exactly ONE Sanitize call.
+//
+// It is the ONLY reserving picker in the tree.  Every other consumer --
+// admin-UI status reads, the diagnostics row, the proxy's pre-flight
+// short-circuit -- goes through cdrPool.PeekAvailable(), which reserves
+// nothing.  The caller MUST invoke the returned release exactly once on
+// every path (defer it), including the paths that never reach the wire:
+// a cache hit, an oversize skip, or a recovered panic.  Releasing after a
+// reported outcome is a harmless no-op; NOT releasing leaks the half-open
+// probe budget permanently (CHAOS-66).
+func cdrPickForCall() (*cdrPooledClient, func()) {
+	pc, reserved, gen := cdrPool.Pick()
+	if pc == nil || !reserved {
+		// Nothing picked, or picked in the CLOSED state where no slot was
+		// taken. Releasing in the latter case would decrement a slot
+		// another goroutine is holding.
+		return pc, func() {}
+	}
+	var once sync.Once
+	return pc, func() { once.Do(func() { pc.Breaker.releaseProbeForGeneration(gen) }) }
 }
 
 // cdrPoolInstallSingleForTest registers `c` as the sole pool member
