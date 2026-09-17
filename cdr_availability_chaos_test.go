@@ -20,6 +20,7 @@ package main
 // status surface that never reports an outage).
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -35,18 +36,18 @@ import (
 // openBreakerPastReset builds a pooled instance whose breaker has opened
 // and whose reset timeout has already elapsed — i.e. the exact moment the
 // breaker is willing to issue one recovery probe.
-func openBreakerPastReset(t *testing.T, name string) (*cdrPooledClient, func(time.Duration)) {
+func openBreakerPastReset(t *testing.T, name string) (pc *cdrPooledClient, advance func(time.Duration)) {
 	t.Helper()
-	pc := &cdrPooledClient{
+	client := &cdrPooledClient{
 		Name:    name,
 		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 10 * time.Second}),
 	}
 	current := time.Unix(0, 0)
-	pc.Breaker.setNowFn(func() time.Time { return current })
-	pc.Breaker.OnFailure()
-	advance := func(d time.Duration) { current = current.Add(d) }
-	advance(11 * time.Second)
-	return pc, advance
+	client.Breaker.setNowFn(func() time.Time { return current })
+	client.Breaker.OnFailure()
+	step := func(d time.Duration) { current = current.Add(d) }
+	step(11 * time.Second)
+	return client, step
 }
 
 // ─── D1: the leaked half-open reservation ──────────────────────────────────
@@ -527,7 +528,8 @@ func checkCDRStatusFor(t *testing.T, cfg CDRConfig) string {
 
 func runCDRStageForTest(t *testing.T, br blockResponder) cdrStageDecision {
 	t.Helper()
-	r, err := http.NewRequest(http.MethodGet, "https://example.com/file.pdf", nil)
+	r, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"https://example.com/file.pdf", http.NoBody)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
