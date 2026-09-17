@@ -141,9 +141,9 @@ func BenchmarkDecryptionProjection_SessionMetricLegacy(b *testing.B) {
 	o := decBenchInspected
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		strSink = decEnumOrLegacy(o.Outcome, decryptobs.OutcomeNotDecrypted)
-		strSink = decEnumOrLegacy(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
-		strSink = decEnumOrLegacy(o.TLSVersion, decryptobs.TLSVersionUnknown)
+		strSinks[0] = decEnumOrLegacy(o.Outcome, decryptobs.OutcomeNotDecrypted)
+		strSinks[1] = decEnumOrLegacy(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
+		strSinks[2] = decEnumOrLegacy(o.TLSVersion, decryptobs.TLSVersionUnknown)
 	}
 }
 
@@ -151,9 +151,9 @@ func BenchmarkDecryptionProjection_SessionMetric(b *testing.B) {
 	o := decBenchInspected
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		strSink = decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted)
-		strSink = decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
-		strSink = decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown)
+		strSinks[0] = decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted)
+		strSinks[1] = decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
+		strSinks[2] = decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown)
 	}
 }
 
@@ -184,7 +184,16 @@ func BenchmarkDecryptionProjection_ToBlockParallel(b *testing.B) {
 	})
 }
 
+// Benchmark sinks. strSinks is an ARRAY with one slot per call, not a single
+// string, and that is load-bearing rather than a lint workaround: the metric
+// arms make THREE decEnumOr calls because recordDecryptSession makes three, and
+// writing all three into one variable makes the first two assignments
+// ineffectual — a dead store the compiler is free to eliminate along with the
+// call that produced it, which would silently reduce the benchmark to measuring
+// ONE call in both arms and understate the very cost being compared. Distinct
+// package-level slots keep every result live. (Caught by golangci-lint's
+// ineffassign on PR #1416.)
 var (
-	decSink *logstore.DecryptionBlock
-	strSink string
+	decSink  *logstore.DecryptionBlock
+	strSinks [3]string
 )

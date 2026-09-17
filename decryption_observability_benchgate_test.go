@@ -53,11 +53,15 @@ func TestBenchGate_DecryptionProjectionAllocs(t *testing.T) {
 		{"toBlock/inspected", 1, func() { decSink = decBenchInspected.toBlock(false) }},
 		{"toBlock/bypassed", 1, func() { decSink = decBenchBypassed.toBlock(false) }},
 		{"toBlock/inspected+redacted", 1, func() { decSink = decBenchInspected.toBlock(true) }},
+		// Three calls because recordDecryptSession makes three, each into its own
+		// strSinks slot — writing them all into one variable would make the first
+		// two dead stores the compiler may drop along with their calls, quietly
+		// reducing this row to a one-call measurement.
 		{"sessionMetricLabels", 0, func() {
 			o := decBenchInspected
-			strSink = decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted)
-			strSink = decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
-			strSink = decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown)
+			strSinks[0] = decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted)
+			strSinks[1] = decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
+			strSinks[2] = decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown)
 		}},
 	}
 
