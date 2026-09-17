@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // rootca_startup_config.go — resolved config for the Root-CA slice (the CA
 // used for SSL inspection). Pure DTO + a single side-effect-free resolver
 // invoked from the initRootCA shim. The passphrase env value is passed IN by
@@ -23,8 +25,18 @@ type rootCAStartupConfig struct {
 // resolveRootCAStartupConfig applies the CLI-over-config path precedence.
 // Pure and deterministic; safe on a zero-value *FileConfig.
 func resolveRootCAStartupConfig(fc *FileConfig, cliPath, passphraseEnvVal string) rootCAStartupConfig {
+	// TrimSpace the CLI value BEFORE the emptiness check: firstStr treats any
+	// non-empty string as "the flag was set", and a whitespace-only -ca-path
+	// would otherwise count as set and silently override (discard) a valid
+	// config.yaml proxy.ca_path pin with a value that is not a usable path.
+	// certMgr.LoadOrInitCA then either creates a bogus bundle at a
+	// nonsensical location or fails to load — and a load failure is
+	// non-fatal by design (rootca_startup.go initInspectionCA), so it
+	// silently disables SSL inspection fail-open with nothing pointing at
+	// the cause (same defect class fixed for -cdr-server-fingerprint, see
+	// cdr_startup_config.go).
 	return rootCAStartupConfig{
-		Path:       firstStr(cliPath, fc.Proxy.CAPath),
+		Path:       firstStr(strings.TrimSpace(cliPath), fc.Proxy.CAPath),
 		Passphrase: passphraseEnvVal,
 	}
 }
