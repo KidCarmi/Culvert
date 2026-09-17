@@ -157,7 +157,7 @@ func (p *cdrClientPool) Get(name string) *cdrPooledClient {
 // Strategy: start from the rr cursor; the first client whose breaker
 // Allow() returns true wins.  Advances the cursor before returning so
 // subsequent calls on a stable pool spread load.
-func (p *cdrClientPool) Pick() (*cdrPooledClient, bool, int64) {
+func (p *cdrClientPool) Pick() (client *cdrPooledClient, reserved bool, gen int64) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	n := len(p.clients)
@@ -172,8 +172,8 @@ func (p *cdrClientPool) Pick() (*cdrPooledClient, bool, int64) {
 	}
 	for i := 0; i < n; i++ {
 		candidate := p.clients[(start+i)%n]
-		if allowed, reserved, gen := candidate.Breaker.allowReserve(); allowed {
-			return candidate, reserved, gen
+		if allowed, took, atGen := candidate.Breaker.allowReserve(); allowed {
+			return candidate, took, atGen
 		}
 	}
 	return nil, false, 0
@@ -253,7 +253,7 @@ func (p *cdrClientPool) shutdown() {
 // a cache hit, an oversize skip, or a recovered panic.  Releasing after a
 // reported outcome is a harmless no-op; NOT releasing leaks the half-open
 // probe budget permanently (CHAOS-66).
-func cdrPickForCall() (*cdrPooledClient, func()) {
+func cdrPickForCall() (client *cdrPooledClient, release func()) {
 	pc, reserved, gen := cdrPool.Pick()
 	if pc == nil || !reserved {
 		// Nothing picked, or picked in the CLOSED state where no slot was
