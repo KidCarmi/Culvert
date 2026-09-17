@@ -48,16 +48,39 @@ func TestBenchGate_DecryptionProjectionAllocs(t *testing.T) {
 	cases := []struct {
 		name      string
 		maxAllocs int64
-		run       func()
+		// setup installs any process state the case needs and returns a restore
+		// func. Only the redacted case needs one; see its comment.
+		setup func(t *testing.T)
+		run   func()
 	}{
-		{"toBlock/inspected", 1, func() { decSink = decBenchInspected.toBlock(false) }},
-		{"toBlock/bypassed", 1, func() { decSink = decBenchBypassed.toBlock(false) }},
-		{"toBlock/inspected+redacted", 1, func() { decSink = decBenchInspected.toBlock(true) }},
+		{"toBlock/inspected", 1, nil, func() { decSink = decBenchInspected.toBlock(false) }},
+		{"toBlock/bypassed", 1, nil, func() { decSink = decBenchBypassed.toBlock(false) }},
+		// The redacted row MUST run with a real pseudonym key installed, and its
+		// bound is 2 rather than 1 for that reason.
+		//
+		// pseudonymizeHost fails CLOSED to the constant redactedSentinel when no
+		// key is provisioned — before any HMAC and without allocating. The test
+		// binary has no key by default, so this row originally measured the
+		// sentinel path, reported 1 alloc/op, and proved nothing about the posture
+		// it names: on a real keyed node the Host token is a fresh string
+		// (BenchmarkPseudonymizeHost: 1 alloc/op), so production allocates the
+		// block PLUS one token here. A gate that measures a path production never
+		// takes manufactures confidence, which is exactly what the design note
+		// above forbids (caught by Codex review on PR #1416).
+		//
+		// The bound is 2 = the returned *logstore.DecryptionBlock + ONE token.
+		// One, not two, because only Host is tokenized: toBlock also routes SNI
+		// through redactHost, but no production constructor populates
+		// DecryptionOutcome.SNI today, so decBenchInspected leaves it empty and
+		// redactHost returns "" for it without hashing. If a constructor ever
+		// starts setting SNI, this row will report 3 and fail — correctly, because
+		// the per-session cost really will have grown.
+		{"toBlock/inspected+redacted", 2, benchgateInstallPseudonymKey, func() { decSink = decBenchInspected.toBlock(true) }},
 		// Three calls because recordDecryptSession makes three, each into its own
 		// strSinks slot — writing them all into one variable would make the first
 		// two dead stores the compiler may drop along with their calls, quietly
 		// reducing this row to a one-call measurement.
-		{"sessionMetricLabels", 0, func() {
+		{"sessionMetricLabels", 0, nil, func() {
 			o := decBenchInspected
 			strSinks[0] = decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted)
 			strSinks[1] = decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
@@ -66,6 +89,9 @@ func TestBenchGate_DecryptionProjectionAllocs(t *testing.T) {
 	}
 
 	for _, tc := range cases {
+		if tc.setup != nil {
+			tc.setup(t)
+		}
 		res := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -122,4 +148,17 @@ func TestBenchGate_DecryptionProjectionBeatsLegacy(t *testing.T) {
 		t.Errorf("REGRESSION: the production projection allocates %d B/op, not fewer than the frozen "+
 			"interface shape's %d B/op.", current.AllocedBytesPerOp(), legacy.AllocedBytesPerOp())
 	}
+}
+
+// benchgateInstallPseudonymKey provisions the traffic pseudonym key for the
+// duration of the calling test, so a redaction-posture case exercises the real
+// keyed HMAC path instead of pseudonymizeHost's no-key fail-closed sentinel.
+// It mirrors benchTrafficPostureOn (traffic_redaction_bench_test.go), including
+// restoring the previous key — the key is process-global, so leaking a test one
+// would silently change what every later redaction case measures.
+func benchgateInstallPseudonymKey(t *testing.T) {
+	t.Helper()
+	prevKey := getTrafficPseudonymKey()
+	setTrafficPseudonymKey([]byte(testTrafficKey))
+	t.Cleanup(func() { setTrafficPseudonymKey(prevKey) })
 }
