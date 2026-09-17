@@ -399,7 +399,17 @@ type cdrStageDecision struct {
 //nolint:gocognit // orchestration splits poorly; already extracted from handleTunnelInspect
 func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, ce string,
 	br blockResponder, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
-	if cdrActiveClient() == nil {
+	// The ONLY thing this pre-flight may short-circuit on is CDR being
+	// switched off.  It used to short-circuit on `cdrActiveClient() == nil`,
+	// which is ALSO the all-instances-down state -- so the fail_mode
+	// decision, the counters, the log line and the alert that
+	// cdrUnavailableOutcome exists to produce were all skipped on the one
+	// path that carries production traffic, and a node configured
+	// `fail_mode: closed` still delivered every file during an outage.
+	// Availability is decided in safeCDRSanitize, once, where fail_mode is.
+	// Do not reintroduce an availability test here (CHAOS-66, Codex P1).
+	cfg := cdrActiveConfig()
+	if !cfg.Enabled {
 		return cdrStageDecision{body: body, scanBody: scanBody}
 	}
 	res := safeCDRSanitize(r.Context(), cdrRequestContext{
@@ -407,7 +417,7 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 		URL:         req.URL.Path,
 		RequestID:   req.Header.Get(headerRequestID),
 		TraceParent: req.Header.Get(headerTraceparent),
-	}, body, ct, id, cdrActiveConfig())
+	}, body, ct, id, cfg)
 	recordCDRTerminal(res.Status)
 	recordThreatDetections(res.Threats)
 

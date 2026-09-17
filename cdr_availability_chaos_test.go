@@ -21,6 +21,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -335,6 +337,51 @@ func TestChaos66_CallFailureLogIsRateLimited(t *testing.T) {
 	}
 }
 
+func TestChaos66_AlternatingReasonsCannotBypassTheRateLimit(t *testing.T) {
+	// An unhealthy backend routinely alternates classes — a load-balanced
+	// pool answering Unavailable from one node and Internal from another.
+	// With one shared timestamp plus a last-reason field, every alternation
+	// counts as "the reason changed" and logs, restoring the per-file
+	// amplification the gate exists to stop (Codex P2).
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	reasons := []string{"unavailable", "backend_internal"}
+	logged := 0
+	for i := 0; i < 600; i++ {
+		now = now.Add(time.Second)
+		if noteCDRCallFailure(reasons[i%len(reasons)], now) {
+			logged++
+		}
+	}
+	// 600s, two classes, one line per class per minute ⇒ ~20 plus onsets.
+	if logged > 24 {
+		t.Fatalf("%d lines in 600s while alternating two reason classes; want <= 24 — "+
+			"alternation reset the gate and reproduced the amplification", logged)
+	}
+	if logged == 0 {
+		t.Fatal("rate limit suppressed everything — the outage must stay visible")
+	}
+}
+
+func TestChaos66_RateLimitTableIsBounded(t *testing.T) {
+	// The reason vocabulary is closed, but the table must not be a memory
+	// leak if a future caller passes an unbounded string.
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	for i := 0; i < 5000; i++ {
+		now = now.Add(time.Second)
+		noteCDRCallFailure(fmt.Sprintf("unbounded_%d", i), now)
+	}
+	cdrCallFailureGate.mu.Lock()
+	n := len(cdrCallFailureGate.lastLogged)
+	cdrCallFailureGate.mu.Unlock()
+	// cap distinct reason classes plus the one shared overflow bucket.
+	if n > cdrFailureReasonCap+1 {
+		t.Fatalf("rate-limit table grew to %d entries; bound is %d",
+			n, cdrFailureReasonCap+1)
+	}
+}
+
 func TestChaos66_AlertIsGatedOnSubscriber(t *testing.T) {
 	// No webhook subscribes to cdr_unavailable — the default posture. The
 	// producer must not spawn a goroutine or build a payload.
@@ -466,4 +513,86 @@ func checkCDRStatusFor(t *testing.T, cfg CDRConfig) string {
 	setCDRConfigForTest(t, cfg)
 	t.Cleanup(func() { setCDRConfigForTest(t, prev) })
 	return checkCDR().Status
+}
+
+// ─── Entry-point gates (Codex P1) ──────────────────────────────────────────
+//
+// The D2 gates above exercise cdrUnavailableOutcome and safeCDRSanitize
+// directly, and they passed while the PRODUCTION entry point still bypassed
+// both: runCDRStage short-circuited on `cdrActiveClient() == nil`, which is
+// exactly the all-breakers-open state, so fail_mode was never consulted and
+// the counters/log/alert never fired.  Testing the helper is not testing the
+// path — the same altitude mistake CHAOS-65 recorded as "the control is not
+// on the path that handshakes".  These gates drive runCDRStage itself.
+
+func runCDRStageForTest(t *testing.T, br blockResponder) cdrStageDecision {
+	t.Helper()
+	r, err := http.NewRequest(http.MethodGet, "https://example.com/file.pdf", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	body := []byte("%PDF-1.4 test")
+	return runCDRStage(r, r, body, body, "application/pdf", "", br, "example.com", "10.0.0.1", sampleID)
+}
+
+func TestChaos66_EntryPointAppliesFailModeClosedWhenBackendIsDown(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+	if p, _ := cdrPickForCall(); p == nil {
+		t.Fatal("setup: expected one probe")
+	}
+	setCDRConfigForTest(t, CDRConfig{Enabled: true, FailMode: "closed", DefaultProfile: "default"})
+	t.Cleanup(func() { setCDRConfigForTest(t, CDRConfig{}) })
+
+	spy := &spyResponder{}
+	dec := runCDRStageForTest(t, spy)
+	if !dec.blocked {
+		t.Fatal("runCDRStage delivered the file with fail_mode=closed and every " +
+			"instance down — the production entry point bypassed cdrUnavailableOutcome")
+	}
+	if spy.calls == 0 {
+		t.Fatal("no block page was emitted")
+	}
+	if got := loadCDRStat(&statCDRUnavailable); got == 0 {
+		t.Fatal("culvert_cdr_unavailable_total did not move from the entry point")
+	}
+}
+
+func TestChaos66_EntryPointCountsTheBypassWhenFailModeIsOpen(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+	if p, _ := cdrPickForCall(); p == nil {
+		t.Fatal("setup: expected one probe")
+	}
+	setCDRConfigForTest(t, CDRConfig{Enabled: true, FailMode: "open", DefaultProfile: "default"})
+	t.Cleanup(func() { setCDRConfigForTest(t, CDRConfig{}) })
+
+	dec := runCDRStageForTest(t, &spyResponder{})
+	if dec.blocked {
+		t.Fatal("fail_mode=open blocked")
+	}
+	if got := loadCDRStat(&statCDRUnavailable); got == 0 {
+		t.Fatal("the fail-open bypass was not counted at the entry point — " +
+			"it stayed silent on every surface")
+	}
+}
+
+func TestChaos66_Control_EntryPointStillSkipsWhenCDRIsDisabled(t *testing.T) {
+	// The cheapest wrong fix is to stop short-circuiting at all, which would
+	// run the CDR stage on every inspected response of every appliance that
+	// never enabled CDR.
+	resetCDRAvailabilityForTest()
+	withTempPool(t)
+	setCDRConfigForTest(t, CDRConfig{Enabled: false})
+	t.Cleanup(func() { setCDRConfigForTest(t, CDRConfig{}) })
+
+	dec := runCDRStageForTest(t, &spyResponder{})
+	if dec.blocked {
+		t.Fatal("a disabled CDR blocked a response")
+	}
+	if loadCDRStat(&statCDRUnavailable) != 0 || loadCDRStat(&statCDRNotDeployed) != 0 {
+		t.Fatal("a disabled CDR charged an availability counter")
+	}
 }

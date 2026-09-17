@@ -6587,6 +6587,40 @@ pinned D2 as correct behaviour. Same class as CHAOS-64's
 `TestResolveHost_TTLExpiry`. It now asserts that `fail_mode` is applied in
 both directions.
 
+### Codex review round — two defects INSIDE the fix
+
+**P1 — the fix was not on the path that carries traffic.** `runCDRStage` is
+the production entry point (`proxy_tunnel.go`), and its pre-flight
+short-circuited on `cdrActiveClient() == nil` — which, after the observer
+was repointed at `PeekAvailable`, is ALSO the all-instances-down state. So
+`safeCDRSanitize` was never entered during an outage and `cdrUnavailableOutcome`
+never ran: `fail_mode: closed` still delivered every file, and the new
+counter, log line and alert were all skipped. **The D2 gates passed
+throughout**, because they drove `cdrUnavailableOutcome` and
+`safeCDRSanitize` directly — the helper, not the path. This is §35's own
+finding (8) reproduced one subsystem over: *a control that is not on the
+path that handshakes is not a control*, and the way it hides is a gate
+written at the wrong altitude. The pre-flight may now short-circuit on
+ONE thing, CDR being switched off; availability is decided once, in
+`safeCDRSanitize`, where `fail_mode` is. Pinned by three ENTRY-POINT gates
+that drive `runCDRStage` itself, plus a control that a disabled CDR still
+short-circuits.
+
+**P2 — the rate limiter reset on a change of reason class.** The gate held
+one shared timestamp plus the last reason seen, and logged immediately
+whenever the reason differed. An unhealthy backend routinely alternates
+classes (a load-balanced pool answering `Unavailable` from one node and
+`Internal` from another), so every alternation reset the gate: measured
+against that shape, **600 log lines in 600 s — one per request** — i.e. the
+per-file amplification the gate exists to prevent, restored in full. The
+timestamp is now PER REASON CLASS (≤24 lines for the same input). The table
+is capped at `cdrFailureReasonCap+1` with overflow folded into one shared
+bucket — unreachable today because `cdrErrorReasonClass`'s vocabulary is
+closed, present so a future caller passing an unbounded string cannot turn
+the rate limiter into the memory leak it is meant to prevent.
+
+Both were verified failing against the exact shapes they replace.
+
 ### Deliberately left, and recorded
 
 - **`fail_mode: open` remains a real exposure window** during an outage —

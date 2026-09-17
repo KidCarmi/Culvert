@@ -115,28 +115,51 @@ func cdrGRPCCodeClass(c codes.Code) string {
 	}
 }
 
+// cdrFailureReasonCap bounds the per-reason rate-limit table.  The reason
+// vocabulary is closed by cdrErrorReasonClass, so this is unreachable
+// today; it exists so a future caller passing an unbounded string cannot
+// turn the rate limiter into the memory leak it is meant to prevent.
+// Overflow folds into one shared bucket (the capped-label-set convention),
+// so the table holds at most cdrFailureReasonCap+1 entries.
+const cdrFailureReasonCap = 32
+
+const cdrFailureReasonOverflow = "_other_"
+
 // cdrFailureLogGate carries the rate-limit state for the failure log.
+//
+// The timestamp is PER REASON CLASS, not one shared timestamp plus the last
+// reason seen.  A single last-reason field looks equivalent and is not: an
+// unhealthy backend routinely alternates classes (a load-balanced pool
+// answering Unavailable from one node and Internal from another), and every
+// alternation then satisfies "the reason changed" and logs immediately --
+// which restores the per-file log amplification this gate exists to stop,
+// while still passing a test that only ever drives ONE reason (Codex P2).
 type cdrFailureLogGate struct {
 	mu         sync.Mutex
-	lastLogged time.Time
+	lastLogged map[string]time.Time
 	suppressed int64
-	lastReason string
 }
 
 var cdrCallFailureGate cdrFailureLogGate
 
-// noteCDRCallFailure reports whether this failure should be logged.  Onset
-// (and any change of reason class) logs immediately; otherwise at most one
-// line per cdrUnavailableLogInterval.  The magnitude lives in the counter.
+// noteCDRCallFailure reports whether this failure should be logged.  The
+// first sighting of a reason class logs immediately; after that, at most one
+// line per cdrUnavailableLogInterval FOR THAT CLASS.  The magnitude lives in
+// the counters.
 func noteCDRCallFailure(reason string, now time.Time) bool {
 	cdrCallFailureGate.mu.Lock()
 	defer cdrCallFailureGate.mu.Unlock()
-	if cdrCallFailureGate.lastLogged.IsZero() ||
-		reason != cdrCallFailureGate.lastReason ||
-		now.Sub(cdrCallFailureGate.lastLogged) >= cdrUnavailableLogInterval {
-		cdrCallFailureGate.lastLogged = now
-		cdrCallFailureGate.lastReason = reason
-		cdrCallFailureGate.suppressed = 0
+	if cdrCallFailureGate.lastLogged == nil {
+		cdrCallFailureGate.lastLogged = make(map[string]time.Time, cdrFailureReasonCap)
+	}
+	key := reason
+	if _, known := cdrCallFailureGate.lastLogged[key]; !known &&
+		len(cdrCallFailureGate.lastLogged) >= cdrFailureReasonCap {
+		key = cdrFailureReasonOverflow
+	}
+	last, seen := cdrCallFailureGate.lastLogged[key]
+	if !seen || now.Sub(last) >= cdrUnavailableLogInterval {
+		cdrCallFailureGate.lastLogged[key] = now
 		return true
 	}
 	cdrCallFailureGate.suppressed++
@@ -147,9 +170,8 @@ func noteCDRCallFailure(reason string, now time.Time) bool {
 // tests do not inherit each other's rate-limit state.
 func resetCDRAvailabilityForTest() {
 	cdrCallFailureGate.mu.Lock()
-	cdrCallFailureGate.lastLogged = time.Time{}
+	cdrCallFailureGate.lastLogged = nil
 	cdrCallFailureGate.suppressed = 0
-	cdrCallFailureGate.lastReason = ""
 	cdrCallFailureGate.mu.Unlock()
 	atomic.StoreInt64(&statCDRUnavailable, 0)
 	atomic.StoreInt64(&statCDRNotDeployed, 0)

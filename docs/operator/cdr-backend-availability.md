@@ -74,10 +74,15 @@ culvert_cdr_backend_available == 0 for 5m
 - `CDR: all N enrolled instance(s) unavailable — applying fail_mode (failOpen=…)`
 - `CDR: call error reason="…": <full error>`
 
-Both are **rate-limited to one line per minute per reason class**: onset is
-logged immediately, a change of reason class logs immediately, and the
-magnitude lives in the counters. A mitigation for a log-amplification
-problem must not be one itself.
+Both are **rate-limited to one line per minute, independently per reason
+class**: the first sighting of a class logs immediately, then at most one
+line per minute for that class, and the magnitude lives in the counters.
+The per-class timestamp matters — a single shared one plus "did the reason
+change?" logs on every request as soon as an unhealthy backend alternates
+classes (a load-balanced pool answering `unavailable` from one node and
+`backend_internal` from another), which is the amplification the limit
+exists to prevent. A mitigation for a log-amplification problem must not be
+one itself.
 
 ### Alerts
 
