@@ -146,6 +146,15 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// in-memory ring keeps only the newest 500 entries and is wiped on
 		// restart, so this is the only way an operator can see the gap.
 		"auditLogWriteErrors": auditWriteErrors(),
+		// CHAOS-61: the CLUSTER half of the same compliance record. A Data Plane
+		// node whose Control Plane link is down drops the oldest unsent audit
+		// events once its bounded push queue fills, so the CENTRALIZED trail has
+		// a gap even though this node's own local audit file is complete. The
+		// remedy is restoring the CP link, not freeing disk — previously visible
+		// only via /healthz or the culvert_audit_cluster_push_drops_total
+		// Prometheus metric, invisible to an operator without a metrics scraper
+		// or a manual health-probe curl.
+		"auditClusterPushDrops": auditPendingDrops(),
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),

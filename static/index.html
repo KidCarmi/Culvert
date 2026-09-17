@@ -8364,6 +8364,13 @@ async function fetchStats() {
     // non-zero count means admin actions have already vanished for good.
     if ((s.auditLogWriteErrors || 0) > 0) {
       setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
+    } else if ((s.auditClusterPushDrops || 0) > 0) {
+      // CHAOS-61: this node's local audit file is fine, but its DP->CP push
+      // queue dropped entries while the Control Plane was unreachable, so the
+      // CENTRALIZED audit trail has a gap. Distinct remedy from the branches
+      // above/below (restore the CP link, not disk space or local I/O), so it
+      // gets its own message rather than folding into "write errors".
+      setPosture('logging', 'warn', fmt(s.auditClusterPushDrops) + ' audit entries dropped syncing to Control Plane (centralized record incomplete)');
     } else if ((s.logWriteErrors || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
     } else if ((s.processLogWriteErrors || 0) > 0) {
