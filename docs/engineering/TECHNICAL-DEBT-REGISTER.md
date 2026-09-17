@@ -607,3 +607,18 @@
   drift on `main`, all target files are unedited by any other pending PR in the set except the
   T-48 quintet which are mutually exclusive by design); `docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-05.md`
   (this pass's dated report) for the full audit trail.
+- **Status update (2026-09-17):** Still OPEN, and worsening rather than improving. Live GitHub API
+  check at this date: **39 total open PRs** on the repository; **6 of them are this program's own
+  dated-report PRs** (#1372 open 5 days, #1373 open 5 days, #1380 open 4 days, #1395 open 3 days,
+  #1402 open 2 days, #1407 open 1 day) and **none have merged since #1380 landed on 2026-09-11**. Per
+  #1402's and #1407's own re-verified triage, #1372 and #1373 are genuinely merge-ready (all review
+  threads resolved, disjoint files); #1380 and #1395 are correctly held pending their own threads'
+  content disputes. The mechanism has also generalized past `docs(governance)` PRs: three functionally
+  identical fix PRs — #1383, #1403, #1409, all titled `fix(config): validate -ip-filter-mode on the CLI
+  path, not just config.yaml` — are open simultaneously against the same underlying defect, the same
+  independent-parallel-rediscovery pattern this entry first named for T-48/ADR-0034, now appearing in a
+  functional code PR rather than a documentation one. The 2026-09-17 terminology review
+  (`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-17.md`) deliberately did not open a competing PR to re-propose
+  work already correctly captured in #1407, on the reasoning that doing so would itself add to this
+  entry's count rather than resolve it. **No further automated pass can substitute for the merge
+  action below; the fixes already exist.**
