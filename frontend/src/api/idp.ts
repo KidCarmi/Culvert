@@ -201,10 +201,14 @@ export const IDP_LOOKUP_REFUSAL_CODES = [
 ] as const;
 export type IdPLookupRefusalCode = (typeof IDP_LOOKUP_REFUSAL_CODES)[number];
 
+// record_missing (FE-6A.2 round 5): the durable file carries the retired
+// sentinel WITHOUT its operation record — degraded recovery evidence the
+// server reports explicitly; never rendered as a durable cutover.
 export const LEGACY_CUTOVER_DURABILITY = [
   "not_retired",
   "durable",
   "pending_reconciliation",
+  "record_missing",
 ] as const;
 export type LegacyCutoverDurability =
   (typeof LEGACY_CUTOVER_DURABILITY)[number];

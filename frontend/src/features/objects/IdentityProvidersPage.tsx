@@ -374,6 +374,14 @@ function durabilityBadge(l: LegacyLDAP): JSX.Element {
           Pending reconciliation — active at runtime, not yet durable
         </StatusBadge>
       );
+    case "record_missing":
+      return (
+        <StatusBadge status="warn">
+          Record missing — retired sentinel without its operation record
+          (degraded evidence; restore the settings file from a backup that
+          carries the record)
+        </StatusBadge>
+      );
     case "not_retired":
       return <StatusBadge status="neutral">Not retired</StatusBadge>;
   }

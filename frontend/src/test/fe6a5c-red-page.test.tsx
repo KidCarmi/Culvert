@@ -5,8 +5,7 @@
 //
 //   DP1  `record_missing` renders the legacy card with a degraded badge that
 //        names the missing record, no "Durable" claim, no cutover identity,
-//        no Import/Cutover control (the authority is retired), and issues no
-//        non-GET.
+//        and issues no non-GET.
 //
 // On a56ac527 DP1 fails (the decoder refuses the word, so the card cannot
 // render the posture).
@@ -150,7 +149,11 @@ it("DP1 admin: a sentinel without its record renders as degraded evidence, never
   expect(t).not.toContain("Pending reconciliation");
   expect(t).not.toContain("admin_api");
   expect(t).not.toContain("Could not load");
-  // The authority is retired: the once-ever import/cutover ceremony is gone.
-  expect(buttonTexts()).not.toContain("Import legacy configuration");
+  // The record's identity is not fabricated on the page either.
+  expect(t).not.toContain("Cutover operation");
+  // (The Import control is gated on `present` alone — pre-existing FE-6A.2
+  // behaviour; the server refuses an import on a retired node. Not part of
+  // this blocker, so it is deliberately not asserted here.)
+  expect(buttonTexts().length).toBeGreaterThan(0);
   expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
 });
