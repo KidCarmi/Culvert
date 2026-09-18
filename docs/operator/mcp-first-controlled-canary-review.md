@@ -2776,10 +2776,40 @@ nothing revalidates "the policy is still the one the permit certified" at the si
 to a credential-bearing rule produces a decision the permit never certified. What that can cause is
 bounded and asserted: `Broker.Plan` — metadata only, against a profile store with nothing in it —
 fails, and the request is blocked with the upstream never reached, no provider touched and no
-Authorization constructed. The readiness row then reports the node un-ready on the next read,
-because the credential fact is LIVE state rather than a frozen copy. This is the same
-activation-time-vs-execution-path seam §25c named for blocker 14; it is narrowed here to "planning
-can be entered, nothing else can" and is NOT claimed closed.
+Authorization constructed, and the block is METERED with its reason (`Metrics.ObserveBlock`,
+`executor.go`), so the execution plane does carry the evidence.
+
+**WHAT IS NOT OBSERVABLE, corrected (Codex P2, round 2).** This paragraph previously said "the
+readiness row then reports the node un-ready on the next read". **That was FALSE**, and the way it
+was reached is the finding worth keeping. The evidence behind it,
+`TestCredDrift_ReadinessIsReEvaluatedNotFrozen`, proves something NARROWER: the credential FACT is
+re-observed from authoritative state rather than frozen into the reviewed snapshot. It says nothing
+about WHICH READ SURFACE exposes it — and the operator-facing one does not. `mcpCanaryStatus`
+(`GET /api/mcp/rollout`, the "canary" sub-view) reports `evaluateCanaryNodeReadiness` →
+`canary.EvaluateNode` → `evaluate(f, nodeOnly=true)`, whose loop SKIPS every `factActivation` row;
+`FirstCanaryCredentialFree` is one, so `credential_path_required` can never appear in that surface's
+`unmet`. It appears only in the static `all_prerequisites` vocabulary — which is precisely why the
+distinction misleads: an operator sees the prerequisite advertised and may infer the surface would
+report it unmet. The only non-test caller of the full `canary.Evaluate` is the activation preflight,
+reached from the rollout commit gate and the startup restore reconcile. So the drift is observable
+at the NEXT TRANSITION or restart, and as a metered block on the execution plane — **not on a status
+read**.
+
+This is the same defect shape as campaign M17: a gate proves one proposition and the prose claims a
+stronger one built on it. The rule to carry forward is that **an observability claim names the
+SURFACE, and the surface is checked** — so the boundary is now asserted rather than described, by
+`TestCredWall_NodeStatusSurfaceCannotReportActivationReasons` (campaign M19), which derives the
+activation set from exported evaluator behaviour and fails in BOTH directions: if `EvaluateNode`
+stops excluding activation rows, and if the status surface starts reporting them.
+
+`EvaluateNode`'s exclusion is deliberate and is NOT changed here: it exists because activation facts
+default false, so a node-level surface that included them would report every node permanently
+not-ready (Codex P2, PR #1249). Making this drift visible on a read therefore needs a separate
+activation-scoped status field, which is new surface for a build where no Canary is ever armed —
+out of scope for blocker 9 and recorded rather than done.
+
+This is the same activation-time-vs-execution-path seam §25c named for blocker 14; it is narrowed
+here to "planning can be entered, nothing else can" and is NOT claimed closed.
 
 **"Can policy say no credential while authoritative server/tool state says one is required and
 still reach `Ready:true`?"** — No. `TestCredFreeE2E_PolicyNoneServerRequiresIsNotReady` drives the
@@ -2807,8 +2837,7 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **18 caught, 0 survived,
-0 skipped**, measured on the closing head `7825faf1`. M14 is the anti-vacuity mutation: a
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **CAMPAIGN_RESULT**. M14 is the anti-vacuity mutation: a
 constant-false resolver passes every negative gate while making the First Canary permanently
 impossible, and is rejected by a POSITIVE control rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
 `mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
@@ -2830,6 +2859,15 @@ seven live wrong pointers beside it, so the class is closed by machine —
 row's number AND reason to match what the engine's own `Evaluate`/`EvaluateNode` behaviour reports,
 so a future renumbering that touches the table without the prose fails the build. It was verified
 failing against the exact pre-fix prose, naming both halves.
+
+M19 covers the SECOND review-found defect, recorded in the residual paragraph above: an
+observability claim that named no surface. It guards the boundary that paragraph now depends on —
+`mcpCanaryStatus` reports `EvaluateNode`, which skips every `factActivation` row, so the status read
+can never carry `credential_path_required`. The mutation makes `EvaluateNode` stop excluding those
+rows; the gate fails in BOTH directions (the derived activation set going empty, and the surface
+reporting an activation reason), because checking only "no activation reason appears" would pass
+VACUOUSLY under exactly that mutation — the derived set would be empty and the check would inspect
+nothing.
 
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN

@@ -192,6 +192,7 @@ FINGERPRINT=internal/mcp/catalog/fingerprint.go
 DISCOVERY=internal/mcp/execution/discovery.go
 ROLLOUT=mcp_rollout.go
 MATRIXDOC=docs/design/mcp/CANARY-READINESS-MATRIX.md
+READINESS=internal/mcp/canary/readiness.go
 
 # ── the three authoritative layers ────────────────────────────────────────────
 
@@ -342,6 +343,18 @@ run_mutation M18 \
   "the matrix doc's activation row list drifts from the table" \
   'TestCredWall_MatrixDocActivationRowsMatchTheTable' . "$MATRIXDOC" \
   's/Rows 3, 4, 4a, 16, 17, 18, 19, 20, 21, 24 \(scope/Rows 3, 4, 4a, 16, 17, 18, 19, 20, 23 (scope/'
+
+# M19 — THE OBSERVABILITY BOUNDARY MOVES AND §25d's RESIDUAL PARAGRAPH STOPS BEING TRUE. That
+# paragraph states the mid-window drift is NOT visible on a status read, because mcpCanaryStatus
+# reports EvaluateNode, which skips every factActivation row. If EvaluateNode stops excluding them
+# the claim inverts silently. Found by review (Codex P2, round 2) after the paragraph claimed the
+# OPPOSITE — the gate behind it proved only that the FACT is live, never which SURFACE shows it.
+# The gate fails in both directions and is anti-vacuous: this mutation empties the derived
+# activation set, which a naive containment check would pass over.
+run_mutation M19 \
+  "EvaluateNode stops excluding activation facts, so the node status surface reports them" \
+  'TestCredWall_NodeStatusSurfaceCannotReportActivationReasons' . "$READINESS" \
+  's/if nodeOnly \&\& c.scope == factActivation {/if false \&\& nodeOnly \&\& c.scope == factActivation {/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"

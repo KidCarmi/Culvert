@@ -435,3 +435,78 @@ func matrixProseActivationRows(t *testing.T, doc string) []string {
 	}
 	return out
 }
+
+// TestCredWall_NodeStatusSurfaceCannotReportActivationReasons pins the OBSERVABILITY BOUNDARY
+// that §25d's residual paragraph depends on, and it exists because that paragraph originally
+// got it WRONG (Codex P2, round 2).
+//
+// The claim made was: after a mid-window policy edit "the readiness row then reports the node
+// un-ready on the next read". The evidence behind it,
+// TestCredDrift_ReadinessIsReEvaluatedNotFrozen, proves something NARROWER — that the credential
+// FACT is re-observed from authoritative state rather than frozen into the reviewed snapshot.
+// It says nothing about WHICH READ SURFACE exposes it, and the operator-facing one does not:
+// mcpCanaryStatus (GET /api/mcp/rollout, the "canary" sub-view) reports evaluateCanaryNodeReadiness
+// -> canary.EvaluateNode -> evaluate(f, nodeOnly=true), whose loop SKIPS every factActivation row.
+// FirstCanaryCredentialFree is a factActivation row, so `credential_path_required` can never
+// appear in that surface's `unmet`. The only non-test caller of the full canary.Evaluate is the
+// activation preflight, reached from the rollout commit gate and the startup restore reconcile.
+//
+// This is the same defect shape as campaign M17: a gate proves one proposition and the prose
+// claims a stronger one built on it. The rule to carry forward is that an observability claim
+// names the SURFACE, and the surface is checked — so the boundary is asserted here rather than
+// described.
+//
+// Both directions are asserted on purpose. Checking only "no activation reason appears in
+// unmet" is VACUOUS under the very mutation that would break the boundary: if EvaluateNode
+// stopped excluding activation rows, derivedActivationReasons — which derives the set from
+// exported behaviour, by construction — would return EMPTY and the containment check would
+// pass over nothing. So the derived set must be non-empty AND must contain this PR's own row.
+func TestCredWall_NodeStatusSurfaceCannotReportActivationReasons(t *testing.T) {
+	activation := derivedActivationReasons(t)
+	if len(activation) == 0 {
+		t.Fatal("derived activation set is EMPTY: canary.EvaluateNode no longer excludes " +
+			"activation facts, so the node status surface now reports them. The observability " +
+			"boundary §25d relies on has moved and that paragraph must be re-derived.")
+	}
+	if !activation[string(canary.ReasonCredentialPathRequired)] {
+		t.Fatalf("%q must be an ACTIVATION-level reason (Evaluate reports it, EvaluateNode does "+
+			"not); derived activation set: %v", canary.ReasonCredentialPathRequired, activation)
+	}
+
+	status := mcpCanaryStatus()
+	unmet, ok := status["unmet"].([]string)
+	if !ok {
+		t.Fatalf("status surface has no []string unmet field, got %T", status["unmet"])
+	}
+	// Positive control: the surface must actually be reporting state. A surface that returned
+	// nothing would satisfy the containment check below while telling an operator nothing.
+	if len(unmet) == 0 {
+		t.Fatal("control: the node status surface reported NO unmet prerequisites. On a build " +
+			"where no Canary is armed it must report the unmet NODE prerequisites, else this " +
+			"gate passes by seeing nothing.")
+	}
+	for _, r := range unmet {
+		if activation[r] {
+			t.Fatalf("the node status surface reported ACTIVATION-level reason %q in unmet. "+
+				"That contradicts EvaluateNode's contract; if this is now intended, §25d's "+
+				"residual paragraph must be updated — it states the opposite.", r)
+		}
+	}
+
+	// The vocabulary IS advertised on the same surface, which is why the distinction matters:
+	// an operator sees credential_path_required listed as a prerequisite and could reasonably
+	// infer the surface would report it as unmet when it fails. It will not.
+	all, ok := status["all_prerequisites"].([]string)
+	if !ok {
+		t.Fatalf("status surface has no []string all_prerequisites field, got %T", status["all_prerequisites"])
+	}
+	found := false
+	for _, r := range all {
+		if r == string(canary.ReasonCredentialPathRequired) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("%q must appear in the advertised prerequisite vocabulary", canary.ReasonCredentialPathRequired)
+	}
+}
