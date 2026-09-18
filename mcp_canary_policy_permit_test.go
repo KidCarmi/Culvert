@@ -708,3 +708,65 @@ func parsePermitResolver(t *testing.T) *ast.FuncDecl {
 	t.Fatal("buildExactPermitInput not found — the walls in this file are checking nothing")
 	return nil
 }
+
+// TestPermitWall_ResolverTakesOneCoherentCapture pins that the permit resolver reads the
+// authoritative inventory EXACTLY ONCE, through the coherent capture seam.
+//
+// It exists because mutation M27 survived without it. The resolver's correctness argument is the
+// same one the blocker-#13 row had to learn twice: reconciling and then reading across two lock
+// acquisitions can observe a durably-revoked trust store with its tool still catalog.Usable, and
+// re-reading the inventory for a second fact can straddle a re-ingest so the decision is
+// internally inconsistent — a registry record from one publication judged against a catalog
+// record from another. One read of each source, under one hold, is what makes that impossible;
+// a cross-check between two reads could only DETECT an inconsistency that one read cannot
+// produce.
+//
+// The behavioural gates cannot see this: every one of them passes against a two-read resolver on
+// a quiescent fixture, because nothing changes between the reads. That is precisely why the
+// invariant needs a structural gate.
+func TestPermitWall_ResolverTakesOneCoherentCapture(t *testing.T) {
+	f := parsePermitResolver(t)
+	captures := 0
+	forbidden := map[string]string{
+		"mcpInventory.sharedInventory":  "reads the inventory OUTSIDE the reconciled capture",
+		"mcpToolTrust.loadTarget":       "re-reads BOTH current snapshots, putting the decision across two reads",
+		"mcpCurrentAuthoritativeTarget": "re-reads the live inventory (it calls loadTarget)",
+		"mcpToolTrustReconcile":         "reconciles without capturing, leaving the read outside the hold",
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			switch fn.Name {
+			case "mcpToolTrustReconcileSnapshotFor":
+				captures++
+			case "mcpCurrentAuthoritativeTarget", "mcpToolTrustReconcile":
+				t.Errorf("SECURITY: the permit resolver calls %s, which %s. Every fact must come "+
+					"from the ONE coherent capture.", fn.Name, forbidden[fn.Name])
+			}
+		case *ast.SelectorExpr:
+			pkg, isIdent := fn.X.(*ast.Ident)
+			if !isIdent {
+				return true
+			}
+			name := pkg.Name + "." + fn.Sel.Name
+			if why, bad := forbidden[name]; bad {
+				t.Errorf("SECURITY: the permit resolver calls %s, which %s. Every fact must come "+
+					"from the ONE coherent capture.", name, why)
+			}
+		}
+		return true
+	})
+	// The CONTROL, and the reason M27 survived: counting is the assertion, not the absence of
+	// forbidden names. A second call to the SAME seam is two reads just as surely as a call to a
+	// different one, and no allow/deny list can express that.
+	if captures != 1 {
+		t.Fatalf("SECURITY: the permit resolver must take EXACTLY ONE coherent capture "+
+			"(mcpToolTrustReconcileSnapshotFor), saw %d. Two captures are two reads: the registry "+
+			"record and the catalog record could then come from different publications, and the "+
+			"reconcile+read pair could be straddled by a revocation.", captures)
+	}
+}
