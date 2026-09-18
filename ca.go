@@ -151,11 +151,24 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan 
 // the loop could replace the bundle and the live CA that were the only
 // evidence a committed-but-unrecorded operation had. The secondary-CA
 // cleanup is the same writer's housekeeping and rides the same boundary.
+//
+// The round is a WRITER only when a rotation is DUE (round 4, E11): the
+// writer settlement supersedes every intent whose evidence is invalid, and
+// a round that rotates nothing replaces no evidence — taking the writer
+// posture anyway turned every boot with a load failure into a superseding
+// event that stripped the operator's pending repair of its recoverable
+// state before the repair could happen. A not-due round leaves the ledger
+// alone (lookups, boot reconciliation and real writers settle it) and runs
+// only the memory-only overlap cleanup, which touches no evidence.
 func runInspectionCARotationRound(caPath, passphrase string) {
 	certOpsMu.Lock()
 	defer certOpsMu.Unlock()
 	caMutationMu.Lock()
 	defer caMutationMu.Unlock()
+	if !certMgr.RotationDue() {
+		certMgr.CleanupSecondaryCA()
+		return
+	}
 	if err := settleCertTarget(certOpsStore(), "root_ca", "writer", certWriterAutoRotation); err != nil {
 		logger.Printf("CA auto-rotation: round deferred — an outstanding certificate operation could not be settled durably (%s); nothing written, retried at the next check", certBoundedLedgerClass(err))
 		return

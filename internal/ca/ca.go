@@ -477,10 +477,7 @@ func (cm *Manager) CAExpiry() time.Time {
 // describing a rotation that was NOT applied rather than one that was).
 func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	expiry := cm.CAExpiry()
-	if expiry.IsZero() {
-		return false
-	}
-	if time.Until(expiry) > caRotationOverlap {
+	if !rotationDue(expiry) {
 		return false
 	}
 
@@ -525,6 +522,22 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 		RotationObserver(expiry, newExpiry)
 	}
 	return true
+}
+
+// RotationDue reports whether RotateIfNeeded WOULD rotate now: a CA is
+// loaded and inside the rotation window. It is the single predicate both
+// RotateIfNeeded and its caller consult, so a caller can tell a round that
+// will write from one that will not (FE-6B.0 round 4: a round that writes
+// nothing takes no writer posture against the operation ledger). A CA that
+// is due stays due — time only moves forward — so a decision taken from
+// this predicate under the caller's lock is not invalidated before the
+// rotation runs.
+func (cm *Manager) RotationDue() bool {
+	return rotationDue(cm.CAExpiry())
+}
+
+func rotationDue(expiry time.Time) bool {
+	return !expiry.IsZero() && time.Until(expiry) <= caRotationOverlap
 }
 
 // SecondaryCAActive returns whether a secondary (old) CA is still in the

@@ -240,6 +240,10 @@ durable — nothing is written. Consequences an operator can rely on:
   rotation, import or replace changed the object;
 - an operation that never wrote is never credited with a later writer's
   identical content or with the object's absence;
+- the automatic rotation round takes the writer posture (settle, supersede,
+  then write) **only when a rotation is due**; a round that would write
+  nothing leaves the operation ledger untouched, so a boot with a load
+  failure never strips a pending repair of its recoverable state;
 - the OCSP posture in `admin_settings.json` records the operationId that
   wrote it (`ocsp_settings_write_id`) in the same atomic write; a posture
   written by anyone else is a refusal for the intent, and a posture without a
