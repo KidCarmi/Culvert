@@ -921,6 +921,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <span id="topbar-username" style="color:var(--muted)"></span>
         <span id="topbar-role-badge" style="padding:2px 8px;border-radius:99px;font-size:.7rem;font-weight:700;text-transform:uppercase"></span>
       </span>
+      <button class="btn ghost sm" id="change-pw-btn" data-click="openChangePasswordModal" style="display:none" title="Change your own password">Change Password</button>
       <button class="btn ghost sm" id="logout-btn" data-click="doLogout" style="display:none">Sign Out</button>
     </div>
   </div>
@@ -5510,6 +5511,9 @@ document.addEventListener('click', e => {
     case 'toggleTheme':       toggleTheme(); break;
     case 'toggleSidebar':     document.getElementById('sidebar').classList.toggle('open'); break;
     case 'doLogout':          doLogout(); break;
+    case 'openChangePasswordModal':  openChangePasswordModal(); break;
+    case 'closeChangePasswordModal': closeChangePasswordModal(); break;
+    case 'submitChangePassword':     submitChangePassword(); break;
     case 'switchView':        e.preventDefault(); switchView(arg); break;
     case 'dismissParent':     el.parentElement.parentElement.style.display='none'; break;
 
@@ -6424,8 +6428,10 @@ function applySession(user, role) {
     el.style.display = myLevel >= required ? '' : 'none';
   });
 
-  // Logout button
+  // Logout button + self-service password change (any authenticated role —
+  // change-password-modal below hits /api/auth/change-password, viewer floor).
   document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';
+  document.getElementById('change-pw-btn').style.display = (user || role) ? '' : 'none';
 }
 
 function showLoginOverlay() {
@@ -6441,6 +6447,57 @@ async function doLogout() {
   await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
   applySession('', '');
   showLoginOverlay();
+}
+
+// ── Self-service password change ─────────────────────────────────────────
+// Every authenticated role (viewer/operator/admin) can rotate their own
+// password from POST /api/auth/change-password (server verifies the current
+// password and audits the change as "auth.password_change"). This is
+// distinct from the admin-only User Management "Edit User" flow above, which
+// lets an admin reset ANY user's password without knowing the old one — the
+// only prior GUI path, and one operators/viewers can never reach.
+function openChangePasswordModal() {
+  document.getElementById('cp-current').value = '';
+  document.getElementById('cp-new').value = '';
+  document.getElementById('cp-confirm').value = '';
+  document.getElementById('cp-err').style.display = 'none';
+  document.getElementById('cp-err').textContent = '';
+  const modal = document.getElementById('change-password-modal');
+  modal.classList.add('open');
+  modalActivate(modal, '#cp-current', closeChangePasswordModal);
+}
+function closeChangePasswordModal() {
+  const modal = document.getElementById('change-password-modal');
+  modalDeactivate(modal);
+  modal.classList.remove('open');
+}
+function showChangePasswordErr(msg) {
+  const el = document.getElementById('cp-err');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+async function submitChangePassword() {
+  const current = document.getElementById('cp-current').value;
+  const next    = document.getElementById('cp-new').value;
+  const confirm = document.getElementById('cp-confirm').value;
+  if (!current || !next) return showChangePasswordErr('Current and new password are required.');
+  if (next.length < 8) return showChangePasswordErr('New password must be at least 8 characters.');
+  if (!meetsPasswordComplexity(next)) return showChangePasswordErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
+  if (next !== confirm) return showChangePasswordErr('New password and confirmation do not match.');
+
+  const btn = document.getElementById('cp-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await api('/api/auth/change-password', {
+      method: 'POST',
+      body: { current_password: current, new_password: next }
+    });
+    closeChangePasswordModal();
+    toast('Password changed.');
+  } catch (err) {
+    showChangePasswordErr(err.message || 'Password change failed.');
+  }
+  btn.disabled = false; btn.textContent = 'Save';
 }
 
 // ── Users & Roles ────────────────────────────────────────────────────────
@@ -19352,6 +19409,31 @@ function resetBlockPage() {
   </div>
 </div>
 
+<!-- ── Self-service "Change my password" modal (topbar, any role) ──────── -->
+<div id="change-password-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+  <div class="setup-card" style="width:360px;max-width:94vw">
+    <h2 style="font-size:1.15rem;margin-bottom:4px">Change Password</h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-bottom:18px">Update the password for your own account.</p>
+    <div class="form-group">
+      <label class="form-label">Current password</label>
+      <input id="cp-current" type="password" class="input" style="width:100%" autocomplete="current-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label">New password <span style="color:var(--muted)">(min 8 chars, incl. uppercase, lowercase &amp; a digit)</span></label>
+      <input id="cp-new" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Confirm new password</label>
+      <input id="cp-confirm" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="setup-err" id="cp-err" style="margin-bottom:10px;display:none"></div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn" id="cp-save-btn" data-click="submitChangePassword">Save</button>
+      <button class="btn ghost" data-click="closeChangePasswordModal">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── PAC DIRECT-exception governance modal (PEI P2) ───────────────────── -->
 <div id="pac-gov-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
   <div class="setup-card" style="width:440px;max-width:94vw">
@@ -19411,6 +19493,8 @@ function resetBlockPage() {
 .role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
 #user-modal { display:none }
 #user-modal.open { display:flex }
+#change-password-modal { display:none }
+#change-password-modal.open { display:flex }
 .sched-day-lbl {
   display:inline-flex;align-items:center;gap:4px;cursor:pointer;
   padding:3px 8px;border-radius:6px;font-size:.78rem;border:1px solid var(--border);
