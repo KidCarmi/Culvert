@@ -510,3 +510,103 @@ func TestChaos66_Wall_DeliveryObserverCannotRecurse(t *testing.T) {
 		t.Fatalf("wall matched %d observer functions, want 2 — the selector has drifted and is proving nothing", checked)
 	}
 }
+
+// TestChaos66_SupersededWriterCannotDriveTheHealthPlane — DEFECT gate for a
+// bug this sweep's own observer would otherwise have introduced.
+//
+// InitSyslog used to overwrite globalSyslog without releasing the previous
+// writer. As a leak that was minor and admin-rate; with a delivery observer
+// attached it is a CORRECTNESS bug, because a superseded writer still pointed
+// at a DEAD collector keeps failing, keeps calling noteSyslogDelivery, and
+// drives the health plane — which now describes the NEW writer — into a
+// permanent failure episode. The operator fixes their SIEM target and the
+// appliance reports the new, working feed as down.
+//
+// Reachable on an ordinary boot, not just an admin edit: observability
+// initialises from YAML/flags and admin settings then applies a persisted
+// override, so a node with a saved target builds two writers.
+//
+// A DIFFERENTIAL, so neither arm can pass vacuously: the first arm reproduces
+// the hazard (an un-retired writer DOES move the plane — if this ever stops
+// being true the second arm is proving nothing), the second shows retirement
+// closing it.
+func TestChaos66_SupersededWriterCannotDriveTheHealthPlane(t *testing.T) {
+	// Arm A — the hazard is real: an un-retired writer whose collector died
+	// drives the health plane.
+	t.Run("unretired writer moves the plane", func(t *testing.T) {
+		withSyslogTestState(t)
+		old, stopOld := newLiveCollector(t, "tcp")
+		arm(old, "tcp://old.test:601")
+		// Deliver one line first: it forces the collector to ACCEPT, so severing
+		// actually severs an established connection rather than discarding a
+		// backlog entry the writer has not noticed yet.
+		old.Write([]byte("pre-outage")) //nolint:errcheck
+		waitForDelivery(t, old, 1)
+		noteSyslogConfigured() // clear the episode the successful delivery left
+
+		stopOld()
+		driveUntilFailing(t, old)
+
+		syslogHealth.mu.Lock()
+		failing := !syslogHealth.failingSince.IsZero()
+		syslogHealth.mu.Unlock()
+		if !failing {
+			t.Fatal("an un-retired writer pointed at a dead collector did NOT move the health plane — " +
+				"the hazard this gate exists to close is not reachable, so the paired arm proves nothing")
+		}
+	})
+
+	// Arm B — retirement closes it.
+	t.Run("retired writer cannot", func(t *testing.T) {
+		withSyslogTestState(t)
+		old, stopOld := newLiveCollector(t, "tcp")
+		arm(old, "tcp://old.test:601")
+
+		// The operator re-points at a working collector.
+		old.Write([]byte("pre-outage")) //nolint:errcheck
+		waitForDelivery(t, old, 1)
+
+		retireSyslogWriter(old)
+		fresh, _ := newLiveCollector(t, "tcp")
+		arm(fresh, "tcp://new.test:601")
+		fresh.Write([]byte("on the new feed")) //nolint:errcheck
+		waitForDelivery(t, fresh, 1)
+
+		// The OLD collector now dies. None of that may reach the health plane,
+		// which describes the new feed.
+		stopOld()
+		for i := 0; i < 50; i++ {
+			old.Write([]byte("into the void")) //nolint:errcheck
+		}
+		time.Sleep(50 * time.Millisecond)
+
+		syslogHealth.mu.Lock()
+		failing := !syslogHealth.failingSince.IsZero()
+		syslogHealth.mu.Unlock()
+		if failing {
+			t.Error("a superseded writer drove the health plane into a failure episode — " +
+				"the live feed is healthy and would be reported as down")
+		}
+		if row := checkSyslogFeed(); row.Status != diagOK {
+			t.Errorf("live feed reported as %q because a retired writer was still failing: %+v", row.Status, row)
+		}
+	})
+}
+
+// driveUntilFailing writes until the health plane records a failure episode, so
+// the gate depends on observed state rather than on how fast the OS notices a
+// severed connection.
+func driveUntilFailing(t *testing.T, w *syslog.Writer) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		w.Write([]byte("post-outage")) //nolint:errcheck
+		syslogHealth.mu.Lock()
+		failing := !syslogHealth.failingSince.IsZero()
+		syslogHealth.mu.Unlock()
+		if failing {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

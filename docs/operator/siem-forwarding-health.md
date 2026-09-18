@@ -136,6 +136,18 @@ re-save it through `POST /api/syslog` (no restart needed), or restart the proxy.
 This asymmetry — a boot failure is terminal, a runtime failure retries forever —
 is recorded as an open posture item (§36.4, SL-7).
 
+### Re-pointing at a different collector
+
+`POST /api/syslog` with a new address builds a fresh writer and retires the old
+one — its observers are detached immediately and its socket is released in the
+background. Counters restart at zero for the new target, which is why the panel
+row resets rather than carrying a prior collector's warning forward.
+
+Lines still queued for the old collector are delivered on a best-effort basis
+during the retirement window and are otherwise dropped. If you are re-pointing
+*because* the old collector is down, assume the queued lines are lost and use
+the local audit log for that window.
+
 ## What this feed is not
 
 - **Not the audit trail.** It is a forwarded *copy*. The durable record is this

@@ -35,6 +35,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   alert, delivery fields on `GET /api/syslog`, and a rate-limited failure and
   recovery log pair. See `docs/operator/siem-forwarding-health.md`.
 
+- `InitSyslog` no longer replaces the active syslog writer without releasing
+  the previous one, which leaked its drain goroutine, its collector socket and
+  up to a queue's worth of pending lines on every re-point — reachable on an
+  ordinary boot, since observability initialises from YAML/flags and admin
+  settings then applies a persisted override. With the new delivery observer
+  attached this stopped being merely a leak: a superseded writer still pointed
+  at a dead collector keeps failing and would drive the health plane that now
+  describes the *new* writer, reporting a healthy feed as down.
+
 - `syslog.Writer.Format()` no longer takes the connection mutex, which
   `deliverLine` holds across as much as two dials and two writes against a
   wedged collector. Its callers are `GET /api/syslog` and, by way of the

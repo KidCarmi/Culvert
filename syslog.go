@@ -44,6 +44,36 @@ func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
 // globalSyslog is the active syslog writer; nil when syslog is not configured.
 var globalSyslog *syslogWriter
 
+// retireSyslogWriter releases a writer that is being REPLACED.
+//
+// InitSyslog used to overwrite globalSyslog without closing the previous
+// writer, leaking its drain goroutine, its collector socket and up to queueCap
+// queued lines on every re-point. That is reachable on an ordinary boot, not
+// just an admin edit: observability initialises from YAML/flags and admin
+// settings then applies a persisted override, so a node with a saved SIEM
+// target constructed two writers and kept both.
+//
+// With CHAOS-66's delivery observer that stopped being merely a leak and became
+// a CORRECTNESS bug: a superseded writer still pointed at a dead collector keeps
+// failing, keeps calling noteSyslogDelivery, and would drive the health plane —
+// which now describes the NEW writer — into a permanent failure episode,
+// reporting a healthy feed as down. So the observers are cleared FIRST, and
+// clearing them is the load-bearing half; closing the socket is hygiene.
+//
+// Close is asynchronous because it blocks for up to closeWait (~7s) draining
+// against a collector that may be exactly the wedged one being replaced, and
+// the caller here is an admin request. Nothing depends on the old writer's
+// flush completing: its lines are best-effort by contract, and the operator has
+// just asked for a different destination.
+func retireSyslogWriter(old *syslogWriter) {
+	if old == nil {
+		return
+	}
+	old.SetDeliveryObserver(nil)
+	old.SetPanicObserver(nil)
+	go old.Close() //nolint:errcheck // best-effort release; the new writer is already live
+}
+
 // InitSyslog parses addr and initialises the global syslog writer.
 // Supported addr formats:
 //
@@ -68,6 +98,7 @@ func InitSyslog(addr, syslogFmt string) error {
 	if err != nil {
 		return err
 	}
+	retireSyslogWriter(globalSyslog)
 	globalSyslog = sw
 	// Arm the delivery health plane before announcing success: the writer is
 	// already draining, so a collector that fails on the very first line must

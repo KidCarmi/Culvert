@@ -1118,6 +1118,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | SL-5 | One undifferentiated drop counter conflated a DEAD collector with one that is merely too SLOW (queue overflow) — different remedies, one number, and the slow case would have paged as an outage. | GAP → **CLOSED** (bounded per-reason enum) | M | pre-fix `s.drops.Add(1)` at six sites |
 | SL-6 | **The management plane could stall on the log sink.** `Format()` took `s.mu`, which `deliverLine` holds across up to two dials and two writes (~15s); callers are `GET /api/syslog` and, via the settings snapshot, `adminSettingsSave()` — reached by every mutating admin handler. The field is immutable after construction, so the lock protected nothing. | GAP → **CLOSED** (lock-free, structurally pinned) | M | pre-fix `internal/syslog/syslog.go` `Format`; `admin_settings.go:788` |
 | SL-7 | **One fault, two postures**: a target that fails to connect at BOOT is never retried (forwarding off for the process lifetime), while the same collector dying one second later reconnects forever. Every other subsystem in the tree retries (admin UI listener, CA load, feeds, HA lease). | **GAP (open — posture, owner decision)**; not silent: the row returns `fail` and states that it is not retried automatically | M | `syslog.go` `InitSyslog` (single shot); `observability_startup.go:39` |
+| SL-8 | **`InitSyslog` replaced `globalSyslog` without releasing the previous writer**, leaking its drain goroutine, its collector socket and up to `queueCap` queued lines on every re-point — reachable on an ORDINARY boot, since observability inits from YAML/flags and admin settings then applies a persisted override. Minor as a leak; with CHAOS-66's delivery observer attached it becomes a CORRECTNESS bug: a superseded writer still pointed at a dead collector keeps failing and drives the health plane that now describes the NEW writer into a permanent failure episode, reporting a healthy feed as down. | **Found and CLOSED inside this sweep's own fix** (`retireSyslogWriter`) | M | `syslog.go` `InitSyslog`; contrast the disable branch in `ui_config.go`, which did close |
 | WK-10 | Webhook alert delivery: never blocks the producer, 30s dedup, bounded semaphore (10) → enqueue not spawn, bounded retry (3× exp backoff), 500-cap queue drop-on-full, SSRF-guarded, atomic persist. | ✓ **for delivery**; the two bounds MISSING in front of delivery are CHAOS-27 → **CLOSED** (§15) | — | `internal/alerts/store.go` |
 | WK-11 | Alert **socket** cost: the delivery client was built per attempt, abandoning an `http.Transport` whose zero-value `IdleConnTimeout` never expires — one FD + two goroutines leaked per delivered alert. The semaphore bounds concurrent deliveries, not cumulative sockets. Terminal state: `accept: too many open files` in the PROXY plane. | GAP → **CLOSED** (CHAOS-27, shared pooled `deliveryClient`) | **H** | was: `internal/alerts/store.go` `deliverAttempt`; see §15 |
 | WK-12 | Alert **dedup bookkeeping**: unbounded map on an attacker-controlled key space (key embeds the requested host, same input `topHosts` is capped for), rescanned `O(n)` under a process-wide mutex on every dispatch (230,603 ns/op at the flood steady state, growing). Dedup runs *before* the semaphore and the retry queue, so neither bounds it. | GAP → **CLOSED** (CHAOS-27, 4096 cap + amortised prune + eviction counter) | **H** | was: `internal/alerts/store.go` `dedupSuppressed`; see §15 |
@@ -6487,6 +6488,7 @@ transport on which loss cannot be observed at all.**
 | SL-5 | One undifferentiated drop counter: a dead collector and a collector that is merely too SLOW (queue overflow) were the same number, with different remedies. | **M** | CLOSED (bounded per-reason classes) |
 | SL-6 | `Format()` took `s.mu`, which `deliverLine` holds across up to two dials and two writes (~15s). Its callers are `GET /api/syslog` and, via the settings snapshot, `adminSettingsSave()` — reached by every mutating admin handler. **The management plane could stall on a log sink.** | **M** | CLOSED |
 | SL-7 | A target that fails to connect at BOOT is never retried — forwarding is off for the process lifetime — while the same collector dying one second later reconnects forever. One fault, two postures. | **M** | **OPEN** (posture, recorded below) |
+| SL-8 | `InitSyslog` replaced the writer without releasing the old one. A leak on its own; with the new delivery observer attached, a superseded writer pointed at a dead collector drives the health plane that now describes the NEW writer — a healthy feed reported as down. | **M** | CLOSED (found inside this sweep's own fix) |
 
 ### 36.3 What shipped
 
@@ -6540,6 +6542,26 @@ construction, or atomics), so no admin read can block behind a wedged collector.
 Pinned STRUCTURALLY, not by timing: the gate HOLDS the writer mutex and requires
 all three accessors to answer anyway, so a regression deadlocks the gate on any
 hardware, at any load, with or without `-race`.
+
+**A seventh finding came out of reviewing the fix itself.** `InitSyslog`
+overwrote `globalSyslog` without releasing the previous writer — a minor,
+admin-rate leak of a goroutine, a socket and up to `queueCap` queued lines, and
+reachable on an ordinary boot (observability inits from YAML/flags, then admin
+settings apply a persisted override, so a node with a saved target built two
+writers). Attaching a delivery observer turned that leak into a CORRECTNESS bug:
+a superseded writer still pointed at the dead collector keeps failing, keeps
+calling the observer, and drives the health plane — which now describes the NEW
+writer — into a permanent failure episode, so the operator fixes their SIEM
+target and the appliance reports the new, working feed as down.
+`retireSyslogWriter` clears the observers FIRST (the load-bearing half) and then
+closes asynchronously (hygiene; `Close` blocks up to ~7s against exactly the
+wedged collector being replaced, and the caller is an admin request). The gate
+is a DIFFERENTIAL so neither arm can pass vacuously: the first arm requires an
+un-retired writer to move the plane — if that ever stops being true the second
+arm is proving nothing — and the second requires a retired one not to. The
+lesson is the one §35 recorded four times over: *a mechanism added at one layer
+governs values that outlive it* — here, the observer outlived the writer it was
+installed on.
 
 Surfaces: `culvert_syslog_{up,delivering,delivery_verifiable,delivered_total,
 drops_total{reason},last_delivery_timestamp_seconds,consecutive_failures}` —
