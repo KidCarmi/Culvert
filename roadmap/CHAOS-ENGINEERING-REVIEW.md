@@ -6477,6 +6477,26 @@ remedy there was to count it, name the reason, and put it on `/metrics`. This is
 that remedy for the SIEM feed, plus the part CHAOS-61 never had to face: **a
 transport on which loss cannot be observed at all.**
 
+### 36.1b Verified against the real binary
+
+Built from this branch and run three ways, reading `/metrics` on the PROXY
+port:
+
+| Posture | `_up` | `_delivery_verifiable` | `_delivering` | `_delivered_total` |
+|---|---|---|---|---|
+| No SIEM target configured | *(no `culvert_syslog_*` series at all)* | — | — | — |
+| `udp://192.0.2.77:514` — a blackhole the dial "succeeded" against | 1 | **0** | **not emitted** | 0 |
+| Live TCP collector on loopback | 1 | 1 | 1 | 0 → **3** once traffic flowed |
+
+Three things this pins that no unit test can. The unconfigured node exports
+NOTHING, so `== 0` stays a safe paging rule (the CHAOS-54 rule, honoured). The
+UDP node reports `up 1` — it IS connected, that part was never a lie — beside
+`delivery_verifiable 0`, and the liveness gauge is simply absent rather than
+green; the startup log carries the one-line warning at the moment the operator
+chose the transport. And `delivered_total` climbing 0 → 3 as requests flow is
+the direct proof that delivery is now OBSERVABLE, which is the whole thing that
+did not exist before this change.
+
 ### 36.2 Findings
 
 | # | Finding | Sev | Status |
