@@ -397,7 +397,7 @@ func derivedActivationReasons(t *testing.T) map[string]bool {
 func matrixTableRows(t *testing.T, doc string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	row := regexp.MustCompile(`^\|\s*([0-9]+[a-z]?)\s*\|[^|]*\|\s*` + "`" + `([a-z0-9_]+)` + "`" + `\s*\|`)
+	row := regexp.MustCompile(`^\|\s*(\d+[a-z]?)\s*\|[^|]*\|\s*` + "`" + `([a-z0-9_]+)` + "`" + `\s*\|`)
 	for _, line := range strings.Split(doc, "\n") {
 		if m := row.FindStringSubmatch(line); m != nil {
 			out[m[1]] = m[2]
