@@ -2807,10 +2807,10 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **CAMPAIGN_RESULT**, measured on
-the closing head. M14 is the anti-vacuity mutation: a constant-false resolver passes every negative
-gate while making the First Canary permanently impossible, and is rejected by a POSITIVE control
-rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **18 caught, 0 survived,
+0 skipped**, measured on the closing head `7825faf1`. M14 is the anti-vacuity mutation: a
+constant-false resolver passes every negative gate while making the First Canary permanently
+impossible, and is rejected by a POSITIVE control rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
 `mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
 they are caught by the PRE-EXISTING
 `TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall`, whose field list is derived
@@ -2821,10 +2821,23 @@ reported as credential-free. It was defended by "the permit row refuses that tup
 true today and is exactly the wrong shape of argument — it makes this row's soundness depend on
 another row staying required. `Resolved` is now `err == nil`.
 
+M18 covers a defect a REVIEW found rather than a test, and the fix it named was too small. Codex
+flagged ONE stale cross-reference to the renumbered activation rows in
+`docs/design/mcp/CANARY-READINESS-MATRIX.md`. Checking the whole document found EIGHT: the table had
+been renumbered without the prose that points into it. Fixing only the reported line would have left
+seven live wrong pointers beside it, so the class is closed by machine —
+`TestCredWall_MatrixDocActivationRowsMatchTheTable` parses the table and requires every activation
+row's number AND reason to match what the engine's own `Evaluate`/`EvaluateNode` behaviour reports,
+so a future renumbering that touches the table without the prose fails the build. It was verified
+failing against the exact pre-fix prose, naming both halves.
+
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
 > rather than caught: the mutation left a variable unused, the package did not build, and no gate
 > ran. A build failure proves nothing, so the mutation was corrected to compile and re-measured.
+> The campaign then grew twice — to 17, and to 18 when M18 was added for the review finding above —
+> so each earlier score described a campaign that no longer existed. The score recorded here is the
+> one measured on `7825faf1`, the head this section closes on.
 
 ## §26 Final verdict
 
