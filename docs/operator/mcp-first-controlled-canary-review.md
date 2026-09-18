@@ -2756,10 +2756,46 @@ that the request got to the boundary at all.
 3. **"A blocker closed as a side effect inherits another PR's evidence."** Answered procedurally:
    this is blocker 9's own change, with its own matrix, walls and campaign.
 
+### The §14 answers, including the one residual
+
+**"Can any request eligible under the exact First-Canary activation cause credential planning,
+materialization, provider access, or an Authorization header?"** — Materialization, provider access
+and an Authorization header: **no**, on any path, proven by
+`TestCredZeroUse_CanonicalPathNeverTouchesTheCredentialMachinery` and its credential-required
+control. Credential PLANNING: **not for any request the certified policy admits** — the permit's
+invariance requirement means the same no-`CredentialProfile` rule wins for every such request — but
+there is ONE way to enter it, recorded rather than hidden.
+
+**THE RESIDUAL — a mid-window policy edit.** The permit is an ACTIVATION-time fact over the policy
+as it stood. The runtime re-evaluates per request against whatever snapshot is then current, and
+nothing revalidates "the policy is still the one the permit certified" at the side-effect boundary
+(`SnapshotHash` is carried into evidence, never compared). So an operator editing policy mid-window
+to a credential-bearing rule produces a decision the permit never certified. What that can cause is
+bounded and asserted: `Broker.Plan` — metadata only, against a profile store with nothing in it —
+fails, and the request is blocked with the upstream never reached, no provider touched and no
+Authorization constructed. The readiness row then reports the node un-ready on the next read,
+because the credential fact is LIVE state rather than a frozen copy. This is the same
+activation-time-vs-execution-path seam §25c named for blocker 14; it is narrowed here to "planning
+can be entered, nothing else can" and is NOT claimed closed.
+
+**"Can policy say no credential while authoritative server/tool state says one is required and
+still reach `Ready:true`?"** — No. `TestCredFreeE2E_PolicyNoneServerRequiresIsNotReady` drives the
+production probe into exactly that state and asserts the readiness verdict is unmet for exactly
+`credential_path_required`.
+
+**"Can a credential requirement appear after activation without being caught by the existing
+immutable reviewed-target / fingerprint drift path?"** — No, for a structural reason:
+`registry.ServerRecord.CredentialProfile` has no mutator, so it can only change by republishing the
+whole inventory, which replaces the catalog in the same publication and therefore changes the
+fingerprint. The reviewed binding then stops matching. A POLICY-side credential appearing after
+activation is the residual above, not a drift-path gap.
+
 ### What this does NOT close
 
 - **No production credential provider exists.** Any FUTURE experiment that needs a credential is
   blocked on work this PR does not do.
+- **The mid-window policy-edit residual above.** Bounded to credential planning, fail-closed, and
+  not claimed closed.
 - Blocker 8 stays OPEN (narrowed); blockers 1, 2, 3, 10, 11, 12, 15 are untouched.
 - No upstream is contacted outside the controlled test composition, no Canary is activated, and
   enforcement did not move.

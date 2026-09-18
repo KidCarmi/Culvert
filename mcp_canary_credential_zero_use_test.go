@@ -149,6 +149,18 @@ func TestCredZeroUse_CanonicalPathNeverTouchesTheCredentialMachinery(t *testing.
 // SAME composition: a decision carrying a CredentialProfile obligation, forced through the real
 // executor, must fail closed with the upstream never reached.
 //
+// IT IS ALSO THE MID-WINDOW POLICY-EDIT CASE, which is the one residual in the §14 answer and is
+// recorded rather than hidden. The activation-time permit certifies the policy AS IT STOOD; the
+// runtime re-evaluates per request against whatever snapshot is then current, and nothing
+// revalidates "the policy is still the one the permit certified" at the side-effect boundary
+// (SnapshotHash is recorded as evidence, not compared). So an operator editing policy mid-window
+// to a credential-bearing rule produces exactly the decision this test forces.
+//
+// What that can and cannot cause is the precise claim: credential PLANNING can be entered (a
+// metadata-only Broker.Plan against an empty profile store, which fails), while MATERIALIZATION,
+// PROVIDER ACCESS and an AUTHORIZATION HEADER cannot — asserted below. The readiness row then
+// reports the node un-ready on the next read, because the credential fact is live state.
+//
 // It is the defense-in-depth half of the readiness fact: even if a credential-requiring
 // experiment somehow reached execution, no request escapes unauthenticated. And it is what makes
 // the zero-use gate above non-vacuous from the other direction — this composition CAN block, so
