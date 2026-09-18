@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -463,7 +464,7 @@ func forceFailureEpisode(t *testing.T, w *syslog.Writer, _ time.Time) {
 // break from an unrelated file.
 func TestChaos66_Wall_DeliveryObserverCannotRecurse(t *testing.T) {
 	// (1) The process logger's composition must not reference the syslog writer.
-	src, err := os.ReadFile("logger.go")
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "logger.go"))
 	if err != nil {
 		t.Fatalf("read logger.go: %v", err)
 	}
@@ -475,7 +476,7 @@ func TestChaos66_Wall_DeliveryObserverCannotRecurse(t *testing.T) {
 
 	// (2) The observer itself must not call back into the writer.
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "syslog_health.go", nil, 0)
+	f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "syslog_health.go"), nil, 0)
 	if err != nil {
 		t.Fatalf("parse syslog_health.go: %v", err)
 	}
