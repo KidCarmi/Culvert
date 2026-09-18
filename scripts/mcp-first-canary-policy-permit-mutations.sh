@@ -214,7 +214,7 @@ run_mutation M02 \
 run_mutation M03 \
   'an unmatched rule is treated as a permit (the test is inverted)' \
   'TestPermitE2E_RejectionMatrix' \
-  ./internal/mcp/canary "$PERMIT" \
+  . "$PERMIT" \
   's/\tif in\.Decision\.MatchedRule == "" \{\n\t\treturn PermitNoMatchedRule\n\t\}/\tif in.Decision.MatchedRule != "" \&\& false {\n\t\treturn PermitNoMatchedRule\n\t}/'
 
 # M04 — "ALLOW-CLASS ENOUGH". The single most likely wrong turn: Action.IsAllowClass() reads as
@@ -262,9 +262,9 @@ run_mutation M09 \
 
 run_mutation M10 \
   'a credential obligation is treated as satisfied' \
-  'TestPermit_EveryRefusedObligationActuallyRefuses|TestPermitE2E_CredentialFreeRuleIsRequired' \
-  ./internal/mcp/canary "$PERMIT" \
-  's/\t\to\.CredentialProfile != "",\n//'
+  'TestPermitE2E_CredentialFreeRuleIsRequired' \
+  . "$PERMIT" \
+  's/\tcase o\.CredentialProfile != "",\n\t\t/\tcase /'
 
 run_mutation M11 \
   'a rate-limit obligation is treated as satisfied (no runtime consumer exists)' \
@@ -289,13 +289,13 @@ run_mutation M13 \
 run_mutation M14 \
   'the exact principal is dropped from the evaluated tuple' \
   'TestPermitE2E_WrongPrincipalAndWrongToolAreNotPermits' \
-  ./internal/mcp/runtime "$TUPLE" \
+  . "$TUPLE" \
   's/\t\t\tSubjectID: in\.SubjectID,/\t\t\tSubjectID: "any-principal",/'
 
 run_mutation M15 \
   'the exact tool name is dropped from the evaluated tuple' \
   'TestPermitE2E_RejectionMatrix|TestPermitE2E_ExactPlainAllowIsAPermit' \
-  ./internal/mcp/runtime "$TUPLE" \
+  . "$TUPLE" \
   's/\top\.Operand = in\.ToolName/\top.Operand = "other-tool"/'
 
 # ── the invariance proof (§4 "proof, not sample") ─────────────────────────────
@@ -327,7 +327,7 @@ run_mutation M19 \
 run_mutation M20 \
   'the class check moves back behind the hard override' \
   'TestPermitE2E_WriteClassIsNotAPermit' \
-  ./internal/mcp/canary "$PERMIT" \
+  . "$PERMIT" \
   's/\tif !permitReadFirstClass\(in\.OperationClass\) \{\n\t\treturn PermitOperationClassNotReadFirst\n\t\}\n\t\/\/ A hard override dominates/\t\/\/ A hard override dominates/;s/\tif in\.Decision\.MatchedRule == "" \{/\tif !permitReadFirstClass(in.OperationClass) {\n\t\treturn PermitOperationClassNotReadFirst\n\t}\n\tif in.Decision.MatchedRule == "" {/'
 
 # ── the readiness row and its wiring ──────────────────────────────────────────
@@ -348,7 +348,7 @@ run_mutation M23 \
   'the production probe stops resolving the fact' \
   'TestPermitE2E_ProductionPreflightCarriesTheRow' \
   . "$PREFLIGHT" \
-  's/\t\tExactPolicyPermit: permit,/\t\tExactPolicyPermit: false,/'
+  's/\t\tExactPolicyPermit: permit,/\t\tExactPolicyPermit: permit \&\& false,/'
 
 run_mutation M24 \
   'the transition-commit path drops the resolved fact' \
@@ -372,11 +372,11 @@ run_mutation M26 \
 
 run_mutation M27 \
   'the resolver straddles two inventory reads for one decision' \
-  'TestPermitWall_ResolverUsesTheSharedEvaluator' \
+  'TestPermitWall_ResolverTakesOneCoherentCapture' \
   . "$RESOLVER" \
   's/\tcat, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)/\tcat, _, ok := mcpToolTrustReconcileSnapshotFor()\n\t_, servers2, _ := mcpToolTrustReconcileSnapshotFor()\n\tservers := servers2/'
 
-run_mutation M28 --compile-wall \
+run_mutation M28 \
   'the resolver evaluates with a second engine of its own' \
   'TestPermitWall_ResolverUsesTheSharedEvaluator' \
   . "$RESOLVER" \
