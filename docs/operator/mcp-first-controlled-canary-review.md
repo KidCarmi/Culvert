@@ -2804,7 +2804,7 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **14 mutations, CAMPAIGN_RESULT**,
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **14 mutations, 14 caught, 0 survived, 0 skipped**,
 measured on the closing head. M14 is the anti-vacuity mutation: a constant-false resolver passes
 every negative gate while making the First Canary permanently impossible, and is rejected by a
 POSITIVE control rather than by a negative.
