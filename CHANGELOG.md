@@ -29,9 +29,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   refuses to reopen without `--allow-counter-rollback`. Every credential write
   now goes through one constructor that carries the enrolment across;
   de-enrolment stays the job of the explicit `ClearTOTP` primitive. The
-  `--reset-password` break-glass keeps its behaviour unchanged — an operator
-  who lost the authenticator as well as the password depends on it — but now
-  clears deliberately and prints that the account became single-factor.
+  `--reset-password` break-glass keeps its outcome — an operator who lost the
+  authenticator as well as the password depends on it — but now clears
+  deliberately and prints that the account became single-factor. The replay
+  counter is part of the enrolment, not a separate durable fact: `ClearTOTP`
+  now clears it too, and `SetTOTPSecret` resets it when the secret changes
+  (but not when backup codes are re-issued for the same secret, which would
+  reopen the replay window for a live secret). Without that, the counter
+  outlived de-enrolment and refused the re-enrolment the break-glass warning
+  instructs the operator to perform — it had been zeroed only as a side effect
+  of the record replacement this change removes.
 
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own

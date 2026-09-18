@@ -540,3 +540,106 @@ func TestWall_PublicAllowlistRoutesAreDeclaredPublic(t *testing.T) {
 		t.Fatal("wall inspected no routes — isPublicUIAuthPath no longer matches any registered path")
 	}
 }
+
+// ── Replay counter lifecycle (Codex review, PR #1429) ─────────────────────
+//
+// The counter belongs to the SECRET. Preserving it across a credential write
+// is the whole point of SEC-TOTP-1, but preserving it across DE-ENROLMENT is a
+// lockout: VerifyTOTPReturnCounter skips every candidate with
+// `candidate <= lastCounter`, so a counter left behind by the previous
+// authenticator refuses the next one until wall-clock time passes it — and
+// indefinitely after a clock rollback. These gates pin both halves.
+
+// TestClearTOTP_ResetsReplayCounter is the store-level gate.
+func TestClearTOTP_ResetsReplayCounter(t *testing.T) {
+	c := newTestConfig()
+	enrolTOTPUser(t, c, "mallory", "Passw0rd1", RoleAdmin)
+
+	if !c.ClearTOTP("mallory") {
+		t.Fatal("ClearTOTP returned false for an existing user")
+	}
+	if c.UserHasTOTP("mallory") {
+		t.Error("secret survived ClearTOTP")
+	}
+	if got := c.GetTOTPLastCounter("mallory"); got != 0 {
+		t.Errorf("totpLastCounter = %d after ClearTOTP, want 0 — a counter that outlives its "+
+			"secret refuses the next authenticator enrolled for this account", got)
+	}
+}
+
+// TestSetTOTPSecret_NewSecretResetsCounter covers re-enrolment: a different
+// secret must start from a clean counter, or its first code is refused.
+func TestSetTOTPSecret_NewSecretResetsCounter(t *testing.T) {
+	c := newTestConfig()
+	enrolTOTPUser(t, c, "niaj", "Passw0rd1", RoleAdmin)
+
+	if !c.SetTOTPSecret("niaj", "KRSXG5CTMVRXEZLU", []string{"new-1"}) {
+		t.Fatal("SetTOTPSecret returned false")
+	}
+	if got := c.GetTOTPLastCounter("niaj"); got != 0 {
+		t.Errorf("totpLastCounter = %d after installing a DIFFERENT secret, want 0 — the new "+
+			"device's codes would be refused until wall-clock time passed the old counter", got)
+	}
+}
+
+// TestSetTOTPSecret_SameSecretKeepsCounter is the CONTROL, and it is the
+// security half: re-issuing backup codes for the SAME secret must not zero the
+// replay guard. The cheapest way to pass the gate above is to reset the
+// counter unconditionally, which would reopen the replay window for a live
+// secret — strictly worse than the lockout it fixes.
+func TestSetTOTPSecret_SameSecretKeepsCounter(t *testing.T) {
+	c := newTestConfig()
+	enrolTOTPUser(t, c, "olivia", "Passw0rd1", RoleAdmin)
+
+	if !c.SetTOTPSecret("olivia", "JBSWY3DPEHPK3PXP", []string{"regenerated-1", "regenerated-2"}) {
+		t.Fatal("SetTOTPSecret returned false")
+	}
+	if got := c.GetTOTPLastCounter("olivia"); got != 987654 {
+		t.Errorf("totpLastCounter = %d after re-issuing backup codes for the SAME secret, want "+
+			"987654 — zeroing it here reopens the OTP replay window for a live secret", got)
+	}
+}
+
+// TestRunResetPasswordCommand_LeavesNoStaleReplayCounter is the end-to-end
+// gate on the break-glass path: the account must be ready to re-enrol, which
+// is exactly what the warning the command prints tells the operator to do.
+func TestRunResetPasswordCommand_LeavesNoStaleReplayCounter(t *testing.T) {
+	restoreGlobalRosterPath(t)
+	snapshotAuthGlobals(t)
+	ensureAuthStartupTestLogger(t)
+
+	path := filepath.Join(t.TempDir(), "ui_users.json")
+	seed := newTestConfig()
+	seed.SetUIUsersFile(path)
+	enrolTOTPUser(t, seed, "peggy", "Passw0rd1", RoleAdmin)
+	if err := seed.SaveUIUsersFile(); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
+	cfg.cache.clear()
+
+	creds := "peggy:BrandNewPass1"
+	uiUsersFile := path
+	s := &startupState{resetPwUser: &creds, uiUsersFile: &uiUsersFile}
+	if _, err := captureStdout(t, func() error { return runResetPasswordCommand(s) }); err != nil {
+		t.Fatalf("runResetPasswordCommand: %v", err)
+	}
+
+	if got := cfg.GetTOTPLastCounter("peggy"); got != 0 {
+		t.Errorf("totpLastCounter = %d after the break-glass reset, want 0 — the account cannot "+
+			"re-enrol an authenticator until wall-clock time passes a counter from the device the "+
+			"operator no longer has", got)
+	}
+	// And durably: the stale counter must not come back from disk.
+	reloaded := newTestConfig()
+	reloaded.SetUIUsersFile(path)
+	if err := reloaded.LoadUIUsersFile(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := reloaded.GetTOTPLastCounter("peggy"); got != 0 {
+		t.Errorf("persisted totpLastCounter = %d after the break-glass reset, want 0", got)
+	}
+}

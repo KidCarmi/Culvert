@@ -1566,6 +1566,19 @@ func (c *Config) GetTOTPSecret(username string) string {
 }
 
 // SetTOTPSecret stores a TOTP secret and backup codes for a user.
+//
+// SEC-TOTP-1: the replay counter belongs to the SECRET, so installing a
+// DIFFERENT secret resets it. Codes for a new secret start at the current time
+// step, and a counter left over from the previous authenticator sits at or
+// above it — VerifyTOTPReturnCounter skips every candidate with
+// `candidate <= lastCounter`, so the freshly-enrolled device would be refused
+// until wall-clock time passed the stale value, and indefinitely after a clock
+// rollback.
+//
+// The reset is deliberately conditional on the secret actually changing. A
+// caller that re-issues BACKUP CODES for the same secret must keep the
+// counter: zeroing it there would reopen the replay window for the live
+// secret, which is the opposite of what this field is for.
 func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1573,12 +1586,25 @@ func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bo
 	if !ok {
 		return false
 	}
+	if u.totpSecret != secret {
+		u.totpLastCounter = 0
+	}
 	u.totpSecret = secret
 	u.backupCodes = backupCodes
 	return true
 }
 
-// ClearTOTP removes TOTP enrollment for a user.
+// ClearTOTP removes TOTP enrollment for a user — secret, backup codes AND the
+// replay counter.
+//
+// SEC-TOTP-1: the counter is part of the enrolment, not a separate durable
+// fact. It used to be left behind, which was harmless only because SetUIUser
+// replaced the whole record on the very next credential write and zeroed it as
+// a side effect. Now that a credential write PRESERVES the enrolment, a
+// counter left here survives de-enrolment and locks out the re-enrolment the
+// `--reset-password` break-glass explicitly tells the operator to perform
+// (Codex review, PR #1429). With no secret installed the value protects
+// nothing, so keeping it can only cost availability.
 func (c *Config) ClearTOTP(username string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1588,6 +1614,7 @@ func (c *Config) ClearTOTP(username string) bool {
 	}
 	u.totpSecret = ""
 	u.backupCodes = nil
+	u.totpLastCounter = 0
 	return true
 }
 

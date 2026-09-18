@@ -27,7 +27,7 @@ that outranks it.
 Fixed by carrying the enrolment across the credential write through a single constructor,
 `newUIAdminUserPreservingTOTP`. De-enrolment stays the job of the explicit `ClearTOTP` primitive.
 The one path that legitimately still removes a second factor — the `--reset-password` break-glass —
-keeps its behaviour byte-for-byte, but now does it deliberately and says so on stdout.
+keeps its outcome, but now does it deliberately and says so on stdout.
 
 ## 2. Finding SEC-TOTP-1 — credential write silently de-enrols the second factor
 
@@ -102,17 +102,49 @@ copy-construct shape preserves the existing publication contract exactly.
 
 `main.go` (`runResetPasswordCommand`): `--reset-password` is the documented sole admin-recovery
 break-glass (GAP-IAM-01) and an operator who has lost the authenticator as well as the password
-depends on it dropping the enrolment. That behaviour is **unchanged** — but it is now an explicit
+depends on it dropping the enrolment. That **outcome** is unchanged — but it is now an explicit
 `ClearTOTP` call rather than a side effect, and it prints a warning naming the account and stating
 that it is now single-factor. This is the one place a second factor may be removed without proving
 possession of it; it requires host access, and it now says so.
+
+### Correction round — the replay counter belongs to the secret (Codex review, PR #1429)
+
+The first version of this fix claimed the break-glass path was "byte-for-byte unchanged". **That was
+wrong on one field, and the review caught it.**
+
+`ClearTOTP` cleared `totpSecret` and `backupCodes` but not `totpLastCounter`. That omission was
+harmless only because the very next credential write replaced the whole record and zeroed the
+counter as a side effect — the exact side effect this change removes. Once a credential write
+PRESERVES the enrolment, the counter outlives de-enrolment, and `verifyTOTPAt` skips every candidate
+with `candidate <= lastCounter` (`internal/totp/totp.go`). So the re-enrolment the break-glass
+warning explicitly instructs the operator to perform is **refused** until wall-clock time passes a
+counter belonging to the authenticator they no longer have — and indefinitely after a clock
+rollback. A fix for a security defect had introduced an availability defect on the one path that
+exists to restore availability.
+
+Two changes close it, and the second is the security half:
+
+- `ClearTOTP` clears the counter too. With no secret installed the value protects nothing, so
+  keeping it can only cost availability.
+- `SetTOTPSecret` resets the counter **only when the secret actually changes**. A caller re-issuing
+  BACKUP CODES for the same secret must keep it: zeroing it there would reopen the replay window for
+  a *live* secret. Resetting unconditionally is the cheapest way to pass the first gate and is
+  strictly worse than the lockout it fixes, so it is pinned as a CONTROL
+  (`TestSetTOTPSecret_SameSecretKeepsCounter`, verified failing against the unconditional shape).
+
+**The lesson, recorded because it generalises:** a field that was only ever cleared as a *side
+effect* has no owner, and the change that removes the side effect inherits it. When a fix makes
+state survive where it used to be destroyed, enumerate every field that now survives and ask which
+of them was relying on the destruction. Here `totpSecret` and `backupCodes` had an explicit owner
+(`ClearTOTP`) and `totpLastCounter` did not — and that asymmetry is invisible until something
+preserves the record.
 
 **No new configuration surface, no new flag, no GUI-parity obligation, no change to any
 authentication decision.**
 
 ### Required tests — all present
 
-`auth_totp_preservation_test.go` (13 gates). Every defect gate was verified **failing** against the
+`auth_totp_preservation_test.go` (17 gates). Every defect gate was verified **failing** against the
 unfixed tree before the fix, and the fix was then mutated twice to prove the gates are not
 decorative:
 
@@ -127,6 +159,8 @@ decorative:
 | Concurrency (`-race`) | `TestSetUIUser_ConcurrentWithTOTPMutators` (credential writer × counter advance × reader × `VerifyUIUser`) |
 | Break-glass | `TestRunResetPasswordCommand_ClearsTOTPExplicitlyAndSaysSo` + its silent-when-unenrolled control |
 | Structural wall | `TestWall_CredentialWritesGoThroughTOTPPreservingConstructor` |
+| Counter lifecycle (correction round) | `TestClearTOTP_ResetsReplayCounter`, `TestSetTOTPSecret_NewSecretResetsCounter`, `TestRunResetPasswordCommand_LeavesNoStaleReplayCounter` |
+| Counter lifecycle — CONTROL | `TestSetTOTPSecret_SameSecretKeepsCounter` (an unconditional reset reopens the replay window for a live secret) |
 
 **Mutation evidence.**
 Reintroducing the bare `&uiAdminUser{passHash, role}` literal in `SetUIUser` fails the wall **and**
@@ -207,8 +241,9 @@ holds, not merely that it was looked at.
 - Deployments that already performed a password change on an enrolled account have **already lost**
   that enrolment; this fix prevents recurrence but cannot restore what is gone. Operators who
   provisioned 2FA out of band should re-check `totpEnabled` on `GET /api/auth/users`.
-- `--reset-password` still removes a second factor. That is deliberate and required for recovery;
-  it is host-access-gated and now announced.
+- `--reset-password` still removes a second factor, now including the replay counter so the account
+  is immediately re-enrollable. That is deliberate and required for recovery; it is host-access-gated
+  and now announced.
 - There is no in-band TOTP enrolment surface (§3). Until there is, the `totpEnabled` flag on the
   user list is the only in-band signal that an account is enrolled.
 - The HTTP Basic fallback in `uiAuthMiddleware` does not consult `verifyLoginTOTP`. That is tracked
