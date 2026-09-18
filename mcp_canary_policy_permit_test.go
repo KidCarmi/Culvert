@@ -770,3 +770,89 @@ func TestPermitWall_ResolverTakesOneCoherentCapture(t *testing.T) {
 			"reconcile+read pair could be straddled by a revocation.", captures)
 	}
 }
+
+// TestPermitE2E_EveryBoundFieldCarriesTheExactTarget is the general closure for mutation M15,
+// which SURVIVED the first campaign: the tuple's `operation.operand` could be replaced with a
+// literal and nothing noticed, because no fixture rule read that field.
+//
+// The lesson generalises past the one field. PermitBoundFields() is the set the invariance proof
+// rests on: a rule may read any of them and still be certified. That guarantee is worth nothing
+// unless every one of them actually CARRIES the exact target's value — a bound field populated
+// from the wrong source would be certified just as confidently, and the permit would describe a
+// request that does not exist.
+//
+// So this drives the REAL engine once per bound field, with a rule conditioned on THAT field
+// alone at the value the exact target should produce. A permit means the tuple carried it; a
+// PermitNoMatchedRule means the field is mis-populated. Checking through the engine rather than
+// by reading the struct is deliberate: it is the engine's view of the tuple that decides a real
+// request, and a struct assertion would compare the builder against itself.
+func TestPermitE2E_EveryBoundFieldCarriesTheExactTarget(t *testing.T) {
+	// The value each bound field must carry for the canonical experiment, and the operator each
+	// is matched with. Literals, so a change to a projection fails here and a human looks.
+	type probe struct{ op, value string }
+	want := map[string]probe{
+		"capability":          {"exact", "gateway"},
+		"operation.class":     {"exact", "read"},
+		"operation.method":    {"exact", "tools/call"},
+		"operation.namespace": {"exact", "gateway_tool"},
+		"operation.operand":   {"exact", "t"},
+		"operation.point":     {"exact", "policy_engine"},
+		"principal.subject":   {"exact", "agent-1"},
+		"principal.tenant":    {"exact", ttTenant},
+		"server.enabled":      {"bool", "true"},
+		"server.id":           {"exact", "controlled"},
+		"server.owner":        {"exact", ttTenant},
+		"server.verification": {"exact", "verified"},
+		"tool.destination":    {"exact", "unknown"},
+		"tool.disposition":    {"exact", "usable"},
+		"tool.drift":          {"exact", "no_material_change"},
+		"tool.name":           {"exact", "t"},
+	}
+	// DECLARED EXCLUSIONS, each with the reason it cannot be probed this way.
+	skip := map[string]string{
+		// The seeded server carries no environment, and the policy field accessor reports an
+		// absent optional field as present=false — so no `exact` condition can match it. There
+		// is nothing to bind wrongly: the value is empty on both the tuple and every request.
+		"server.environment": "empty on the seeded server; an absent optional field never matches",
+		// The fingerprint is per-fixture rather than a literal, so it is probed below with the
+		// value read from the authoritative catalog record.
+		"tool.fingerprint": "probed separately against the record's own digest",
+	}
+	// COMPLETENESS: every bound field must be probed or explicitly excluded. A new bound field
+	// therefore fails the build until someone proves the tuple carries it.
+	for _, f := range canary.PermitBoundFields() {
+		_, probed := want[f]
+		_, excluded := skip[f]
+		if probed == excluded {
+			t.Fatalf("bound field %q must be either probed or declared excluded (probed=%v excluded=%v) — "+
+				"the invariance proof rests on every bound field carrying the exact target's value", f, probed, excluded)
+		}
+	}
+	for field, p := range want {
+		t.Run(field, func(t *testing.T) {
+			doc := `{"schema_version":1,"capability":"gateway","policy_revision":1,"default_action":"DENY",` +
+				`"rules":[{"id":"BIND_PROBE","priority":1,"action":"ALLOW","reason":"MCP.POLICY.RESOURCE_SCOPE",` +
+				`"remediation":"none","conditions":[{"field":"` + field + `","op":"` + p.op + `","value":"` + p.value + `"}],` +
+				`"obligations":{"logging":"standard"}}]}`
+			r := newPermitRig(t, doc)
+			ok, reason := r.permit(t, r.reviewedReadOnly(t))
+			if !ok {
+				t.Fatalf("the exact tuple must carry %s=%q, but the rule keyed on it did not win (%q). "+
+					"A bound field the tuple populates wrongly would still be certified by the "+
+					"invariance proof, so the permit would describe a request that does not exist.",
+					field, p.value, reason)
+			}
+		})
+	}
+	t.Run("tool.fingerprint", func(t *testing.T) {
+		base := newPermitRig(t, plainAllowDoc())
+		doc := `{"schema_version":1,"capability":"gateway","policy_revision":1,"default_action":"DENY",` +
+			`"rules":[{"id":"BIND_PROBE","priority":1,"action":"ALLOW","reason":"MCP.POLICY.RESOURCE_SCOPE",` +
+			`"remediation":"none","conditions":[{"field":"tool.fingerprint","op":"exact","value":"` + base.fpHex + `"}],` +
+			`"obligations":{"logging":"standard"}}]}`
+		r := newPermitRig(t, doc)
+		if ok, reason := r.permit(t, r.reviewedReadOnly(t)); !ok {
+			t.Fatalf("the exact tuple must carry the catalog record's own fingerprint digest, got %q", reason)
+		}
+	})
+}

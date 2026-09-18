@@ -294,7 +294,7 @@ run_mutation M14 \
 
 run_mutation M15 \
   'the exact tool name is dropped from the evaluated tuple' \
-  'TestPermitE2E_RejectionMatrix|TestPermitE2E_ExactPlainAllowIsAPermit' \
+  'TestPermitE2E_EveryBoundFieldCarriesTheExactTarget' \
   . "$TUPLE" \
   's/\top\.Operand = in\.ToolName/\top.Operand = "other-tool"/'
 
