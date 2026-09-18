@@ -86,6 +86,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -141,9 +142,47 @@ type syslogHealthRecord struct {
 
 var syslogHealth syslogHealthRecord
 
-// syslogNow is the clock seam. Tests drive the degradation threshold
-// deterministically instead of sleeping past it.
-var syslogNow = time.Now
+// syslogNow is the clock seam, and syslogAlertFn the alert seam. Both are
+// ATOMIC rather than the plain package vars the other health planes use, and
+// that difference is load-bearing rather than stylistic.
+//
+// noteSyslogDelivery runs on the syslog DRAIN goroutine — it is invoked by the
+// writer's delivery observer, not by the goroutine under test — so a test that
+// swaps either seam races a live writer. The plain-var seams elsewhere in this
+// tree (threatFeedNow, fireThreatFeedStaleAlert) are only ever read on the same
+// goroutine that swaps them, which is why they can stay plain. Caught by -race;
+// a plain var here passes every functional gate and fails CI.
+var (
+	syslogNowFn   atomic.Pointer[func() time.Time]
+	syslogAlertFn atomic.Pointer[func(detail string)]
+)
+
+// syslogNow reports the current time through the seam, defaulting to the real
+// clock when no test clock is installed.
+func syslogNow() time.Time {
+	if p := syslogNowFn.Load(); p != nil {
+		return (*p)()
+	}
+	return time.Now()
+}
+
+// setSyslogNow installs a test clock (nil restores the real one).
+func setSyslogNow(fn func() time.Time) {
+	if fn == nil {
+		syslogNowFn.Store(nil)
+		return
+	}
+	syslogNowFn.Store(&fn)
+}
+
+// setSyslogAlert installs a test alert sink (nil restores the real one).
+func setSyslogAlert(fn func(detail string)) {
+	if fn == nil {
+		syslogAlertFn.Store(nil)
+		return
+	}
+	syslogAlertFn.Store(&fn)
+}
 
 // fireSyslogFailingAlert delivers the `siem_forwarding_failing` alert.
 //
@@ -166,7 +205,11 @@ var syslogNow = time.Now
 // the nearest candidate, storage_write_failed, names a LOCAL volume fault with
 // an entirely different remedy. The name is added to the webhook event picker
 // in the same change so it is subscribable from the GUI.
-var fireSyslogFailingAlert = func(detail string) {
+func fireSyslogFailingAlert(detail string) {
+	if p := syslogAlertFn.Load(); p != nil {
+		(*p)(detail)
+		return
+	}
 	if !globalAlertStore.HasSubscriber("siem_forwarding_failing") {
 		return
 	}

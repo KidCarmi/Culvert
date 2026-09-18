@@ -34,7 +34,6 @@ import (
 func withSyslogTestState(t *testing.T) {
 	t.Helper()
 	prevWriter, prevCfg, prevAddr := globalSyslog, syslogConfigured, syslogConfiguredAddr
-	prevNow, prevAlert := syslogNow, fireSyslogFailingAlert
 	// Copy the FIELDS, never the record: syslogHealthRecord embeds a mutex, and
 	// copying it by value is a vet error (and would restore a snapshot of lock
 	// state, which is meaningless).
@@ -44,7 +43,8 @@ func withSyslogTestState(t *testing.T) {
 	syslogHealth.mu.Unlock()
 	t.Cleanup(func() {
 		globalSyslog, syslogConfigured, syslogConfiguredAddr = prevWriter, prevCfg, prevAddr
-		syslogNow, fireSyslogFailingAlert = prevNow, prevAlert
+		setSyslogNow(nil)
+		setSyslogAlert(nil)
 		syslogHealth.mu.Lock()
 		syslogHealth.configured = prevConfigured
 		syslogHealth.failingSince = prevFailing
@@ -182,9 +182,9 @@ func TestChaos66_RuntimeCollectorLossTurnsTheRowRed(t *testing.T) {
 	// to be a real outage rather than a blip.
 	stop()
 	base := time.Now()
-	syslogNow = func() time.Time { return base }
+	setSyslogNow(func() time.Time { return base })
 	forceFailureEpisode(t, w, base)
-	syslogNow = func() time.Time { return base.Add(2 * syslogDeliveryDegradedAfter) }
+	setSyslogNow(func() time.Time { return base.Add(2 * syslogDeliveryDegradedAfter) })
 
 	row := checkSyslogFeed()
 	if row.Status != diagFail {
@@ -214,10 +214,10 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 	stop()
 
 	base := time.Now()
-	syslogNow = func() time.Time { return base }
+	setSyslogNow(func() time.Time { return base })
 
 	var paged int
-	fireSyslogFailingAlert = func(string) { paged++ }
+	setSyslogAlert(func(string) { paged++ })
 
 	// A large burst of losses, all inside the window.
 	for i := 0; i < 5000; i++ {
@@ -231,7 +231,7 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 	}
 
 	// One more failure, now past the window.
-	syslogNow = func() time.Time { return base.Add(syslogDeliveryDegradedAfter + time.Second) }
+	setSyslogNow(func() time.Time { return base.Add(syslogDeliveryDegradedAfter + time.Second) })
 	noteSyslogDelivery(false, "write_failed", 5001)
 	if paged != 1 {
 		t.Fatalf("pages = %d after crossing the duration threshold, want exactly 1", paged)
@@ -252,11 +252,11 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 func TestChaos66_RecoveryRequiresObservedDelivery(t *testing.T) {
 	withSyslogTestState(t)
 	base := time.Now()
-	syslogNow = func() time.Time { return base }
-	fireSyslogFailingAlert = func(string) {}
+	setSyslogNow(func() time.Time { return base })
+	setSyslogAlert(func(string) {})
 
 	noteSyslogDelivery(false, "dial_failed", 1)
-	syslogNow = func() time.Time { return base.Add(2 * syslogDeliveryDegradedAfter) }
+	setSyslogNow(func() time.Time { return base.Add(2 * syslogDeliveryDegradedAfter) })
 	noteSyslogDelivery(false, "dial_failed", 2)
 
 	syslogHealth.mu.Lock()
@@ -267,7 +267,7 @@ func TestChaos66_RecoveryRequiresObservedDelivery(t *testing.T) {
 	}
 
 	// Hours pass with no further failures — that is NOT recovery.
-	syslogNow = func() time.Time { return base.Add(6 * time.Hour) }
+	setSyslogNow(func() time.Time { return base.Add(6 * time.Hour) })
 	syslogHealth.mu.Lock()
 	stillFailing := !syslogHealth.failingSince.IsZero()
 	syslogHealth.mu.Unlock()
@@ -349,7 +349,7 @@ func TestChaos66_DisablingClearsThePlane(t *testing.T) {
 	withSyslogTestState(t)
 	w, _ := newLiveCollector(t, "tcp")
 	arm(w, "tcp://collector.test:601")
-	fireSyslogFailingAlert = func(string) {}
+	setSyslogAlert(func(string) {})
 	noteSyslogDelivery(false, "write_failed", 1)
 
 	globalSyslog, syslogConfigured, syslogConfiguredAddr = nil, "", ""
