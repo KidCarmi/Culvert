@@ -61,7 +61,7 @@ func withSyslogTestState(t *testing.T) {
 // returns a Writer pointed at it, wired exactly as production wires one.
 // Deliberately a real socket rather than a mock: the property under test is
 // what the TRANSPORT can and cannot tell us, which a mock would define away.
-func newLiveCollector(t *testing.T, network string) (*syslog.Writer, func()) {
+func newLiveCollector(t *testing.T, network string) (writer *syslog.Writer, stop func()) {
 	t.Helper()
 	var addr string
 	var closeFn func()

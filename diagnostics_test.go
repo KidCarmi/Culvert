@@ -1420,7 +1420,7 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 	withSyslogTestState(t)
 	sw, _ := newLiveCollector(t, "tcp")
 	arm(sw, "tcp://collector.test:601")
-	sw.Write([]byte("one line")) //nolint:errcheck
+	sw.Write([]byte("one line")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	waitForDelivery(t, sw, 1)
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
