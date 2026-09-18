@@ -394,6 +394,7 @@ func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg
 			ServerUsable:       ai.ServerUsable,
 			FingerprintCurrent: ai.FingerprintCurrent,
 			ToolCatalogUsable:  ai.ToolCatalogUsable,
+			ExactPolicyPermit:  ai.ExactPolicyPermit,
 			Now:                now,
 		})
 		if !rd.Ready {
@@ -631,7 +632,8 @@ func (r *mcpRollout) restore() {
 					Capability: st.Capability(), Scope: restored.Scope, ScopeRev: restored.ScopeRevision,
 					ToolApprovals: ai.ToolApprovals, Budget: ai.Budget,
 					ServerUsable: ai.ServerUsable, FingerprintCurrent: ai.FingerprintCurrent,
-					ToolCatalogUsable: ai.ToolCatalogUsable, Now: time.Now(),
+					ToolCatalogUsable: ai.ToolCatalogUsable, ExactPolicyPermit: ai.ExactPolicyPermit,
+					Now: time.Now(),
 				})
 				if !rd.Ready {
 					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())

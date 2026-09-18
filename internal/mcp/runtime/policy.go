@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"time"
 
@@ -273,10 +272,11 @@ func (p *pipeline) buildPolicyInput(req Request, msg jsonrpc.Message, ctx *ident
 func (p *pipeline) attachGatewayRefs(in *policy.DecisionInput, serverID string, msg jsonrpc.Message, op *policy.Operation) {
 	if p.deps.Registry != nil {
 		if rec, ok := p.deps.Registry.Current().Get(registry.ServerID(serverID)); ok {
-			in.Server = &policy.Server{
-				ServerID: string(rec.ID), Owner: string(rec.OwnerScope),
-				Enabled: rec.Enabled, Verification: policyVerification(rec.Verification),
-			}
+			// SHARED PROJECTION. GatewayServerRef is also what the Canary activation permit
+			// (blocker #14) uses to build its request-free tuple, so the server half of the two
+			// tuples is identical by construction. Do not inline it back here: a second
+			// projection would let the preflight certify a tuple this path never produces.
+			in.Server = GatewayServerRef(rec)
 		}
 	}
 	if msg.Method != "tools/call" {
@@ -290,12 +290,11 @@ func (p *pipeline) attachGatewayRefs(in *policy.DecisionInput, serverID string, 
 	tl := &policy.Tool{Name: name, ServerID: serverID}
 	if p.deps.Catalog != nil {
 		if rec, ok := p.deps.Catalog.Current().Get(catalog.ToolKey{Server: registry.ServerID(serverID), Name: name}); ok {
-			sum := rec.Fingerprint.Sum()
-			tl.FingerprintHash = hex.EncodeToString(sum[:])
-			tl.Disposition, tl.Drift = policyDisposition(rec.Eligibility)
-			tl.Destination = policyDestination(rec.Fingerprint.Destination)
-			in.Tool = tl
-			p.classifyReadFirstToolCall(op, serverID, name)
+			// SHARED PROJECTION — see GatewayServerRef above. GatewayToolRef populates exactly
+			// the fields this path populated inline, and the Canary permit builds its Tool with
+			// the same call.
+			in.Tool = GatewayToolRef(serverID, name, rec)
+			classifyReadFirstToolCall(op, p.capability, p.deps.canaryReviewedReadFirst, serverID, name)
 			return
 		}
 	}
@@ -327,14 +326,35 @@ func (p *pipeline) attachGatewayRefs(in *policy.DecisionInput, serverID string, 
 //
 // Note what is NOT passed: no fingerprint, no catalog record, no annotation, no argument. The
 // root resolves those from its own authoritative inventory. See Deps.CanaryOperationClass.
-func (p *pipeline) classifyReadFirstToolCall(op *policy.Operation, serverID, toolName string) {
-	if p.capability != protocol.Gateway {
+// It is a FREE FUNCTION, not a pipeline method, for one reason: the Canary ACTIVATION PREFLIGHT
+// must classify the same call, and it has no pipeline. Two call sites sharing this one body is
+// what keeps "exactly one classification site" literally true — TestReadFirstWall_
+// OperationClassHasExactlyOneClassificationSite names this function, and both callers reach the
+// promotion through it. Giving the preflight its own promotion would be the second authority
+// this whole file exists to prevent.
+//
+// The two callers differ ONLY in which reviewed set answers, and that difference is correct:
+// the request path asks the ARMED activation's immutable record, while the preflight asks the
+// CANDIDATE record the activation is about to bind — because at preflight time nothing is armed
+// yet, which is precisely the question being decided. Both go through the same four-eyes
+// ReviewedTargetSet comparison; neither can invent a class.
+//
+// A nil reviewed predicate never promotes, so an uncomposed caller leaves the conservative
+// OpWrite default in place.
+func classifyReadFirstToolCall(op *policy.Operation, capability protocol.Capability, reviewed ReviewedReadFirstFn, serverID, toolName string) {
+	if capability != protocol.Gateway || reviewed == nil {
 		return
 	}
-	if p.deps.canaryReviewedReadFirst(p.capability.String(), serverID, toolName) {
+	if reviewed(capability.String(), serverID, toolName) {
 		op.Class = policy.OpRead
 	}
 }
+
+// ReviewedReadFirstFn answers whether an exact named tool is bound to a four-eyes reviewed
+// READ-ONLY class by the reviewed record that governs the caller. It carries
+// (capability, serverID, toolName) and nothing else — see Deps.CanaryOperationClass for why
+// that signature is the structural half of the guarantee.
+type ReviewedReadFirstFn func(capability, serverID, toolName string) bool
 
 // --- translation helpers ---------------------------------------------------
 
