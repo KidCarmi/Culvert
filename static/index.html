@@ -10827,16 +10827,23 @@ async function saveUIAllowIPs() {
 function renderSyslogDelivery(sl) {
   const dropsEl = document.getElementById('s-syslog-drops');
   sl = sl || {};
-  const n = sl.drops || 0;
-  const p = sl.panics || 0;
-  const delivered = sl.delivered || 0;
+  // These are interpolated into innerHTML (the row carries an <svg> icon), so
+  // every value from the server is coerced or escaped rather than trusted to be
+  // the type the contract says it is. lastFailureReason is a bounded enum in
+  // the engine and cannot carry markup, but defence-in-depth here costs
+  // nothing and keeps the rule "never interpolate a server string raw" true
+  // without exception.
+  const num = (v) => Number(v) || 0;
+  const n = num(sl.drops);
+  const p = num(sl.panics);
+  const delivered = num(sl.delivered);
   dropsEl.style.display = '';
 
   // Failing now outranks everything else: events are being lost as we render.
   if (sl.connected && sl.deliveryVerifiable && sl.delivering === false) {
     dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not delivering</strong> - forwarding has been failing for '
-      + (sl.failingForSeconds || 0) + 's (' + (sl.lastFailureReason || 'unknown') + '), '
-      + (sl.consecutiveFailures || 0) + ' lines lost since the last successful delivery. '
+      + num(sl.failingForSeconds) + 's (' + escHtml(sl.lastFailureReason || 'unknown') + '), '
+      + num(sl.consecutiveFailures) + ' lines lost since the last successful delivery. '
       + 'The local audit log is unaffected. Forwarding reconnects every 5s and recovers on its own.';
     dropsEl.style.color = 'var(--red,#c0392b)';
     return;
