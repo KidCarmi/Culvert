@@ -5053,10 +5053,51 @@
           "addr": {
             "type": "string"
           },
+          "connected": {
+            "description": "A live connection to the configured target exists.",
+            "type": "boolean"
+          },
+          "consecutiveFailures": {
+            "type": "integer"
+          },
+          "delivered": {
+            "description": "Lines the collector socket accepted.",
+            "type": "integer"
+          },
+          "delivering": {
+            "description": "Delivery is not failing past the degraded threshold. Meaningful only when deliveryVerifiable is true.",
+            "type": "boolean"
+          },
+          "deliveryVerifiable": {
+            "description": "False on UDP, where a write to an unreachable collector succeeds forever and loss therefore cannot be observed or counted. A healthy reading is not evidence of receipt when this is false.",
+            "type": "boolean"
+          },
           "drops": {
             "type": "integer"
           },
+          "dropsCollectorDown": {
+            "type": "integer"
+          },
+          "dropsQueueFull": {
+            "description": "Lines lost because the collector is slower than this node's log rate.",
+            "type": "integer"
+          },
+          "failingForSeconds": {
+            "type": "integer"
+          },
           "format": {
+            "type": "string"
+          },
+          "lastDelivery": {
+            "description": "Unix seconds of the last accepted line (0 = never).",
+            "type": "integer"
+          },
+          "lastFailureReason": {
+            "description": "Bounded class of the most recent loss; empty when none. Never carries a collector address or a raw error.",
+            "type": "string"
+          },
+          "network": {
+            "description": "Transport in effect (\"udp\" or \"tcp\").",
             "type": "string"
           },
           "panics": {

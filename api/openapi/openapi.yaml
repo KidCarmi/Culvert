@@ -2232,6 +2232,34 @@ components:
         format: { type: string }
         drops: { type: integer }
         panics: { type: integer }
+        network:
+          type: string
+          description: Transport in effect ("udp" or "tcp").
+        connected:
+          type: boolean
+          description: A live connection to the configured target exists.
+        deliveryVerifiable:
+          type: boolean
+          description: >-
+            False on UDP, where a write to an unreachable collector succeeds
+            forever and loss therefore cannot be observed or counted. A healthy
+            reading is not evidence of receipt when this is false.
+        delivering:
+          type: boolean
+          description: >-
+            Delivery is not failing past the degraded threshold. Meaningful only
+            when deliveryVerifiable is true.
+        delivered: { type: integer, description: Lines the collector socket accepted. }
+        dropsCollectorDown: { type: integer }
+        dropsQueueFull: { type: integer, description: Lines lost because the collector is slower than this node's log rate. }
+        consecutiveFailures: { type: integer }
+        lastFailureReason:
+          type: string
+          description: >-
+            Bounded class of the most recent loss; empty when none. Never
+            carries a collector address or a raw error.
+        lastDelivery: { type: integer, description: Unix seconds of the last accepted line (0 = never). }
+        failingForSeconds: { type: integer }
     SetSyslogBody:
       type: object
       additionalProperties: false

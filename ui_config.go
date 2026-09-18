@@ -1819,7 +1819,26 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			panics = globalSyslog.Panics()
 			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
+		// CHAOS-66: drops alone answered "how many lines were lost" and nothing
+		// else — no denominator, no reason, and on UDP it never moves at all.
+		// The delivery snapshot is what tells an admin whether the feed is
+		// actually working, and `verifiable` is the honest caveat when it
+		// cannot be known.
+		snap := syslogState()
+		jsonOK(w, map[string]any{
+			"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics,
+			"network":             snap.Network,
+			"connected":           snap.Connected,
+			"deliveryVerifiable":  snap.Verifiable,
+			"delivering":          snap.Connected && !snap.Degraded,
+			"delivered":           snap.Delivered,
+			"dropsCollectorDown":  snap.DropsCollectorDown,
+			"dropsQueueFull":      snap.DropsQueueFull,
+			"consecutiveFailures": snap.ConsecutiveFailures,
+			"lastFailureReason":   snap.LastFailureReason,
+			"lastDelivery":        unixOrZero(snap.LastDelivery),
+			"failingForSeconds":   int64(snap.FailingFor.Seconds()),
+		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1846,6 +1865,10 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
+			// Clear the delivery health plane too, or a disabled feed keeps
+			// exporting culvert_syslog_* series and holding a latched alert
+			// episode for a collector nobody is forwarding to any more.
+			noteSyslogUnconfigured()
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})

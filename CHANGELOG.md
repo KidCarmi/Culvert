@@ -9,6 +9,40 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Remote syslog/SIEM forwarding reported that it was connected and let that
+  stand for delivering (CHAOS-66). `InitSyslog` selects UDP when the operator
+  omits a scheme, and a UDP "dial" sends nothing — it binds a socket and
+  succeeds whether or not a collector exists, after which every write to an
+  unreachable collector also succeeds, indefinitely. On that transport a
+  gateway could discard its entire audit and request feed while the
+  `syslog_feed` diagnostics row read *"remote syslog/SIEM forwarding is
+  active"*, the drop counter read zero because no write had failed, and
+  `/metrics` carried no syslog series at all. On TCP the loss was countable but
+  equally unreported: a collector that went away after startup left the
+  configured-and-connected checks passing, so the row stayed green while every
+  line was discarded and the writer silently re-dialled every five seconds,
+  forever, without ever logging. Delivery is now recorded as evidence and is
+  the only thing that clears a failure episode; losses are attributed to
+  bounded reason classes (`collector_down`, `queue_full`, `closed`,
+  `flush_timeout`, `panic`) so a dead collector is distinguishable from one
+  that is merely too slow; degradation is judged on a duration rather than a
+  drop count, which would page on a busy node and stay silent on a quiet one
+  for the same fault; and the UDP case is now stated outright rather than
+  rendered as success — the contract row is a permanent warning naming
+  `tcp://` as the remedy, and the liveness gauge is deliberately not emitted
+  where it could only be a fiction. New surfaces: `culvert_syslog_*` metrics
+  (emitted only when a SIEM target is configured), the `siem_forwarding_failing`
+  alert, delivery fields on `GET /api/syslog`, and a rate-limited failure and
+  recovery log pair. See `docs/operator/siem-forwarding-health.md`.
+
+- `syslog.Writer.Format()` no longer takes the connection mutex, which
+  `deliverLine` holds across as much as two dials and two writes against a
+  wedged collector. Its callers are `GET /api/syslog` and, by way of the
+  settings snapshot, `adminSettingsSave()` — reached by every mutating admin
+  handler — so the management plane could stall for roughly fifteen seconds
+  behind a log sink. The field is immutable after construction, so the lock
+  protected nothing.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party

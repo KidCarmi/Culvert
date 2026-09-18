@@ -32,6 +32,12 @@ func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
 	sw.SetPanicObserver(func(recovered any) {
 		logger.Printf("ERROR syslog: recovered panic in delivery goroutine (line dropped): %q", sanitizeLog(fmt.Sprintf("%v", recovered)))
 	})
+	// CHAOS-66: the delivery observer is wired for the same leaf-package-cannot-
+	// log reason as the panic observer, and on every Writer this process builds
+	// (startup and runtime reconfigure alike) so a reconfigure never silently
+	// drops the health plane. It is edge-triggered, so a healthy feed pays
+	// nothing; see internal/syslog.SetDeliveryObserver.
+	sw.SetDeliveryObserver(noteSyslogDelivery)
 	return sw, nil
 }
 
@@ -63,6 +69,18 @@ func InitSyslog(addr, syslogFmt string) error {
 		return err
 	}
 	globalSyslog = sw
+	// Arm the delivery health plane before announcing success: the writer is
+	// already draining, so a collector that fails on the very first line must
+	// find the episode state initialised.
+	noteSyslogConfigured()
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
+	// A UDP dial sends nothing and succeeds against an address where nothing is
+	// listening, so "connected" is not evidence of anything on the default
+	// transport (CHAOS-66). Say so once, at the point the operator chose it,
+	// rather than letting every later surface imply a delivery guarantee the
+	// transport cannot provide. Same shape as the OCSP coverage warning.
+	if network == "udp" {
+		logger.Printf("WARN syslog: the collector is addressed over UDP — delivery is UNVERIFIABLE (a write to an unreachable collector succeeds forever, so loss cannot be counted). Use tcp:// for a feed whose health this appliance can actually report; confirm receipt at the collector after POST /api/syslog/test.")
+	}
 	return nil
 }
