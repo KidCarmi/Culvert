@@ -14,7 +14,7 @@ production MCP server, and arms no production node.
 **Verdict (see §26): `BLOCKED — NO SAFE FIRST CANARY TARGET`.** The Canary CORE is fail-closed on
 several axes (scope validation, shadow≠live trust firewall, budget ceiling / N-allowed-N+1-impossible,
 per-request kill re-read, restart re-arm/allowance, no-secret evidence). But a safe first experiment
-cannot be assembled today on **FIFTEEN independent blockers** (this review's set — together they cover
+cannot be assembled today on **FIFTEEN independent blockers** (five since CLOSED — 4, 5, 6, 7, 13; this review's set — together they cover
 every mandatory NO/CONDITIONAL row in §25, though the mapping is grouped, not strictly 1:1: the
 witness-reconciliation row folds under blocker 7 and also depends on blockers 1 and 6). **The fifteen
 are what THIS review found against §25; they are not the complete set of what must be closed before a
@@ -42,9 +42,10 @@ peer, so exact-current fingerprint + rug-pull invalidation bind only the seeded 
 no operator-reachable governed Canary ACTIVATION entry point — `apiMCPRolloutTransition` returns
 `distribution_not_configured` and no non-test code constructs/`Publish`es the distribution publication
 coordinator, so even with arming + activation inputs closed nothing transitions the node into Canary
-mode (§13/§17); and (13) the seeded controlled tool is `catalog.Quarantined` and nothing promotes it —
-the policy engine hard-quarantines it BEFORE any user rule and `ApproveLive` deliberately never calls
-`catalog.Promote`, so every exact-tool request is denied even with 1–12 closed (§6/§7); and (14) the
+mode (§13/§17); and (13) **CLOSED** — the seeded controlled tool was `catalog.Quarantined` with
+nothing in the activation gate saying so; catalog usability is now a machine-checked activation
+fact bound to the exact scoped target and pinned fingerprint, satisfied only by the governed
+`shadow_evaluation` promotion lifecycle (§25b); and (14) the
 exact request must resolve to an ALLOW-class decision with satisfiable obligations — a
 no-`CredentialProfile` rule may still be DENY, an unmatched request default-denies, and `PolicyHealthy`
 only proves a snapshot exists (§4/§13); and (15) the one-NODE bound is not enforced by anything —
@@ -1106,7 +1107,7 @@ BLOCKED-vs-FAILED note in §26).
 | Witness distinguishes side-effect-bearing tool invocations from auxiliary lifecycle/discovery traffic | **NO — no such controlled recording server exists; without the partition a correct run's `initialize`/`tools/list` POSTs misclassify as a breach (§9/§14)** |
 | Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **YES — `sample_floor = 2`, error rate trips at ≥ 50% (`2 × failures ≥ samples`) over the current activation generation, hard per-attempt latency ≥ 15s trips with NO floor, mean ≥ 10s trips at the floor; `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` fails if the floor drifts beyond the corpus (§16, blocker 7 CLOSED)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
-| The exact tool is `catalog.Usable` (not Quarantined) at request time | **NO — `seedTools` lands it Quarantined; the engine hard-quarantines before any rule; `ApproveLive` never promotes (§6/§7, blocker 13)** |
+| The exact tool is `catalog.Usable` (not Quarantined) at request time | ~~**NO**~~ **YES (blocker 13 CLOSED, §25b)** — usability is now a MACHINE-CHECKED ACTIVATION FACT (`canary.ReasonToolNotCatalogUsable`), resolved from the authoritative catalog for the exact scoped target at the exact pinned fingerprint. It is satisfied only by the governed `shadow_evaluation` promotion lifecycle; `ApproveLive` still never promotes, and a structural wall proves no data-plane caller can (§6/§7) |
 | The exact request resolves to an ALLOW-class rule with satisfiable obligations | **NO — a no-`CredentialProfile` rule may be DENY; an unmatched request default-denies; `PolicyHealthy` only proves a snapshot exists (§4/§13, blocker 14)** |
 | Operator-reachable governed path to TRANSITION the node into Canary mode | **NO — `apiMCPRolloutTransition` returns `distribution_not_configured`; no non-test `publication.New`/`Publish` caller (§13/§17, blocker 12)** |
 | Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
@@ -1119,8 +1120,9 @@ BLOCKED-vs-FAILED note in §26).
 | Unresolved P0/P1 finding | **YES — the durable-outcome-evidence prerequisite remains, narrowed to the authoritative production witness adapter (blocker 8). The auto-abort wiring prerequisite is CLOSED (blocker 7, §25a) (§21/§24/§25a)** |
 
 Multiple mandatory criteria are NO and P1 product-defect work remains open. A GO is therefore
-forbidden. (§25a records the only post-adoption status changes: blockers 5, 6 and 7 CLOSED,
-blocker 8 narrowed but still OPEN. The other eleven are untouched and the §26 verdict is unchanged.)
+forbidden. (§25a and §25b record the only post-adoption status changes: blockers 4, 5, 6, 7 and 13
+CLOSED, blocker 8 narrowed but still OPEN. The other nine are untouched and the §26 verdict is
+unchanged.)
 
 ---
 
@@ -1213,8 +1215,9 @@ before this work.
 
 **What this does NOT close.** A read-first-EXECUTABLE classification says nothing about whether a
 controlled upstream exists (blocker 1), the activation preflight can reach `Ready:true` (2), an
-operator can arm (3), the target is `catalog.Usable` (13), or the request resolves to an exact
-policy ALLOW with satisfiable obligations (14). Those remain open and untouched.
+operator can arm (3), the target is `catalog.Usable` (13 — **since CLOSED, §25b**), or the request
+resolves to an exact policy ALLOW with satisfiable obligations (14). Those remain open and untouched
+by THIS closure; blocker 13 was closed later, by its own PR and its own gates.
 
 **A SECOND, SEPARATE defect was closed in the same PR, and it is NOT part of this closure.** Codex
 round 2 found that the resolved SCOPE was never revalidated at the admission boundary — the same
@@ -2186,6 +2189,296 @@ while proving something other than what it claims.
 
 ---
 
+## §25b Blocker 13 closure (governed catalog usability as a First-Canary activation fact)
+
+This section records ONE status change: **blocker 13 is CLOSED**. Nothing else in the ledger moves.
+Blocker 8 remains OPEN (narrowed), blocker 14 remains OPEN, the baseline is still fifteen, and the
+§26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY TARGET`.
+
+**The defect.** `seedTools` lands every ingested tool `catalog.Quarantined`, and the policy engine
+hard-overrides a `DispQuarantined` tool to `ActionQuarantine` BEFORE any operator rule is consulted.
+Nothing in the activation preflight said so. A node could hold a valid four-eyes live approval, a
+reviewed target, an exact one-of-everything scope and a read-first classification, report
+`Ready:true`, and then have every single request die at that override. That is the worst shape a
+readiness verdict can take: not a wrong answer to a question that was asked, but a green light for
+an experiment nobody had asked the deciding question about.
+
+**The closure bar.** The machine — not a runbook, not an operator attestation — must refuse to
+report an activation ready when the exact scoped tool is not `catalog.Usable` at the exact
+fingerprint the activation binds, and it must do so without inventing a second authority over
+usability.
+
+| Clause | Evidence |
+|---|---|
+| A machine-visible activation fact, not a runbook step | `canary.Facts.ToolCatalogUsable` / `canary.ReasonToolNotCatalogUsable`, an `factActivation` row in the one readiness table. `TestCatalogUsable_ProductionPreflightCarriesTheRow` drives the whole production path — `productionCanaryActivationInputs` → `evaluateCanaryActivationPreflight` → the table — and requires the reason present for a Quarantined tool and absent after a governed promotion |
+| THE EXACT CURRENT SCOPED TARGET, never general catalog health | `ReasonCatalogUnhealthy` already answers "is the catalog readable". This answers "did THIS ONE governed target pass the trust lifecycle": a perfectly healthy catalog whose record for the scoped tool is Quarantined satisfies the first and fails this one (`TestCatalogUsable_SeededToolIsQuarantinedAndNotUsable`) |
+| Fingerprint-bound: F2 inherits nothing from F1 | `TestCatalogUsable_F2DoesNotInheritF1Usability` (the sticky Quarantined floor half) and `TestCatalogUsable_UsableRecordDoesNotSatisfyAScopePinnedElsewhere` (the other half — a genuinely Usable record whose digest is not the pinned one), so neither guard can hide behind the other |
+| Format-bound | Not by a second comparison, which against the same record would be a self-comparison no test could distinguish. `catalog.Fingerprint.Sum` writes `FormatVersion` before any other segment, so the digest comparison is format-bound by construction; the property is pinned directly by `TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest` |
+| Tenant-bound | `TestCatalogUsable_TenantThatDoesNotOwnTheServerIsNotUsable` — ownership is read DIRECTLY from the single registry snapshot the resolver already holds (`servers.Get(...).OwnerScope`), an independent source from the catalog record. It is deliberately NOT resolved through `loadTarget`, which re-reads both current snapshots and would put the decision back across two reads — see the one-read row below |
+| NO SECOND TRUST AUTHORITY (§2/§3) | The governed `shadow_evaluation` lifecycle (`ApproveShadow` → `promoteFor` → `catalog.Promote`) remains the only writer. `ApproveLive` still deliberately promotes nothing: `TestCatalogUsable_LiveApprovalAloneNeverPromotes`, with `TestCatalogUsable_ExactShadowApprovalPromotes` as its positive control and `TestCatalogUsable_ShadowAndLiveAreIndependentFacts` proving the two are separately satisfiable rather than one standing in for the other |
+| NO DATA-PLANE PROMOTION (§8), anti-vacuously | `TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes` is an AST wall by CALLER: every `catalog.Promote`/`Demote` reference in the root package must live in `mcp_tooltrust.go`. It additionally asserts the governed path IS still visible to the test, so a wall that found zero callers because the promotion lifecycle had been deleted fails instead of passing |
+| Blocker 7 is not bypassed (§6) | `TestCatalogUsable_UsableF2StillRefusedByAnF1ReviewedActivation` — a freshly promoted, live-approved F2 does NOT match an activation whose immutable reviewed snapshot binds F1. Usability is LIVE governance state and is deliberately never copied into that snapshot; F2 requires a new activation generation |
+| Revocation and expiry (§7) | `TestCatalogUsable_RevokingLastPromotionDemotes` (the last valid promotion going away demotes) paired with `TestCatalogUsable_RevokingOneOfTwoPromotionsStaysUsable` (another valid authority still qualifies, so the tool stays Usable) — the two directions of the same rule, each the other's control |
+| Restart durability without a second ledger (§9) | Usability is a PROJECTION of the durable tool-trust store, re-derived by the coordinator's reconcile. `TestCatalogUsable_RestartDoesNotResurrectStaleUsability` — a revoked promotion stays demoted across the reconcile a restart performs. No catalog-usability ledger was added |
+| TOCTOU: a preflight verdict is about its own instant | `TestCatalogUsable_WithdrawnAfterPreflightStillHardQuarantines` — a promotion withdrawn after a Ready verdict makes the fact false on re-observation (it is never cached), and the runtime consequence is delivered by the EXISTING policy hard-override, so closing this blocker did not move enforcement out of the policy engine |
+| Why it matters, end to end | `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion` — same policy, same rule, same request; the only variable is the governed catalog disposition. Before: `ActionQuarantine` / `MCP.TOOL.UNKNOWN`, no rule consulted. After: ordinary evaluation is reached |
+| Fail-closed on the degenerate inputs | `TestCatalogUsable_EmptyScopeIsNotVacuouslyUsable` (a scope admitting no tool must not satisfy a fact about its tools) and `TestCatalogUsable_AbsentInventoryFailsClosed` (the condition under which nothing is known about the tool is the condition under which the fact must not be claimed) |
+| The fact reaches every activation call site | `TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall` — an AST wall requiring every field of `canaryActivationInputs` to be forwarded at every `CanaryActivationInput` literal in `mcp_rollout.go` (the transition commit and the restart reconcile). It is deliberately WIDER than blocker 13: dropping any activation fact at a commit site is the same defect. It is structural because no behavioural test can reach either site in this build — the live tier is never armed, so the commit refuses at an earlier gate and a dropped field is invisible |
+| Expiry is materialized before the read | `TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick` — expiry is PASSIVE, so a grant past its `ExpiresAt` leaves its tool `Usable` until the 30-second reconcile tick. The resolver reconciles before snapshotting, as `shadowScopeHasUsableTool` does under ADR-0034 D7, with `TestCatalogUsable_ReconcilingToReadNeverPromotes` as the control that a read path did not become a promotion path (Codex P2 round 1) |
+| ONE read of each source per decision | `TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` — the verdict is derived from exactly one catalog snapshot and one registry snapshot, and `loadTarget` (which re-reads both) is not called, so a republish landing mid-scan cannot pair an old Usable record with newer ownership (Codex P2 round 2) |
+| The registry/catalog PAIR is detected, not assumed | `TestCatalogUsable_RepinWindowIsNotUsable` — `Registry.Repin` and the catalog re-ingest that follows it are SEPARATE publications, so between them the registry pins I2 while the record describes I1. One snapshot of each source (row above) is NECESSARY AND NOT SUFFICIENT: it makes the decision consistent AS A READ and cannot reconcile two publications that disagree, because the inconsistency is in the published state rather than in the reading of it. The resolver therefore compares `rec.Fingerprint.Identity` against `srv.PinnedIdentity` — `loadTarget`'s own formula, over the two snapshots already held, so no read is added. Without it the row reports met for a target whose every request the runtime refuses as `AnchorLost`/`RegistryPinDiverged` (`TestReviewedBinding_C18`) — a Canary that activates and cannot execute (Codex P2 round 6). `TestCatalogUsable_CoherentPairStillUsable` is the control, since the cheapest way to pass is to refuse everything |
+| The registry window is DRIVEN, not asserted | `TestCatalogUsable_DisabledServerInTheRegistryWindowIsNotUsable` + M22. **The round-7 claim that this could only be pinned structurally — "reaching it needs a production seam purely to let a test drive a race" — EXPIRED in round 8**, which added `mcpToolTrustReconcileSnapshot` for the coherence fix. That seam hands the resolver BOTH snapshots, i.e. its entire view of the world, so the divergent state is injectable with no new production surface: promote under governance, `SetEnabled(false)` on the REGISTRY only, then inject (disabled registry, still-Usable catalog) and require `false`, with the healthy pair as the control. Recorded because the reasoning generalises — **an "unreachable without a new seam" argument is only valid until some other change adds the seam, and nothing re-examines it automatically** (Codex P2 round 11) |
+| `srv.Usable()` — LOAD-BEARING, and the only check rejecting one interleaving | This row previously said UNREACHABLE. That was WRONG (Codex P2 round 7). `TestCatalogUsable_DisabledServerIsNotUsable` does pass with and without the line, but it is SEQUENTIAL: its disable lands before the reconcile, which demotes the record, so the eligibility check rejects it and this guard is never reached. The registry publishes INDEPENDENTLY of the resolver, so a disable — or, sharply, a mismatching `Registry.VerifyIdentity`, whose branch clears `Enabled` but DOES NOT TOUCH `PinnedIdentity` (`registry.go:136-148`) — can instead land AFTER `mcpToolTrustReconcile()` returns and BEFORE `reg.Current()` is read three lines later. In that window the record is still `Usable`, the tenant still owns the server, the digest still matches, and the identity comparison above still passes because the pin never moved: `srv.Usable()` is the ONLY check that rejects it. Reaching it behaviourally needs a production seam interposing between the reconcile and the registry read purely to let a test drive a race — the worse trade, and the same call made for the snapshot race in round 2 — so it is pinned by `TestCatalogUsable_ServerUsabilityGuardIsPresent` and campaign M18 |
+| The trust-store/catalog pair is PREVENTED, not detected | `TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` (structural) + M19. `Revoke` holds `deriveMu` across `store.Revoke` AND the catalog demotion so the pair moves together; a reader that reconciles, RELEASES the lock, then reads `cat.Current()` can be scheduled into the middle of that section and see a durably-revoked approval whose tool is still `catalog.Usable` — every other check passes and the row reports met (Codex P2 round 8). `mcpToolTrust.reconcileAndSnapshot()` now reconciles and captures BOTH snapshots under ONE hold. **TWO PAIRS, TWO REMEDIES:** the registry/catalog pair CANNOT be closed by locking — the inconsistency is in the published state — so it is DETECTED; this pair CAN be, because one writer owns both halves, so it is PREVENTED. Which remedy applies depends on whether a single writer owns the pair |
+| The gate asserts the CRITICAL SECTION, not the lock call count | `TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` + M20. The round-8 gate counted any selector named `Lock` and any `Current()`. That shape PASSES against a `reconcileAndSnapshot` whose unlock is moved AHEAD of the two captures — one lock, one read of each source, gate green — while `Revoke` can persist a revoked approval in the window between the unlock and the captures, restoring exactly the interleaving the round-8 fix exists to prevent (Codex P2 round 10, raised against my own gate; verified by building that function and running the gate against it: `ok, 0.096s`). The gate now requires the lock to be `deriveMu` BY NAME, its unlock to be DEFERRED, and no bare `deriveMu.Unlock` to appear — a deferred unlock runs after the return expression is evaluated, so both captures are inside the section BY CONSTRUCTION rather than by reading statement order. **This is the SECOND wall on this PR that pinned something weaker than the invariant it advertised** (the first counted `Current()` by receiver identifier and scored zero against a mutation reading through `rg`), so the standing rule is: a structural wall must assert the PROPERTY the fix rests on — call counts are a proxy for it, not the thing itself |
+| The coherence gate is structural, and the behavioural one is labelled as a control | `TestCatalogUsable_ResolverDoesNotDeadlockUnderDerivation` proves liveness only — no deadlock, row not emptied. It is NOT the coherence gate: `mcpToolTrustReconcile` also takes `deriveMu`, so the PRE-FIX shape blocks identically. Measured, not assumed — the first version of it was written as the proof and PASSED against the reintroduced defect. The structural wall was verified to discriminate ("the resolver reads the inventory directly 2 time(s)") |
+| The read-path seams cannot be half-wired | `installToolTrustReadHooks` / `clearToolTrustReadHooks` install and clear BOTH seams together. Installing only the reconcile hook leaves the coherent seam at its fail-closed default, which does not error — it silently makes this row unsatisfiable. Test wiring mirrors production by calling these rather than assigning the vars |
+| An interrupted campaign restores its mutation | The harness records the file under mutation before the first edit and clears it after the revert, with an EXIT/INT/TERM trap restoring whatever is still recorded (Codex P2 round 8). Verified by killing a live run mid-mutation and watching the file come back clean. SIGKILL cannot be trapped, so the residual is bounded by the pre-existing dirty-tree refusal: a stranded mutation stops the NEXT run rather than being silently re-measured |
+| Campaign | `scripts/mcp-first-canary-catalog-usable-mutations.sh` — 32 mutations, 32 caught, 0 survived, 0 skipped |
+
+**What the campaign taught, recorded because it changes how a first run should be read.** The FIRST
+run scored 7 caught, 5 survived, 2 not-proven, and every one of those seven was worth having.
+
+Three survivors were genuine missing gates. Two were degenerate-input cases nothing covered — an
+empty scope satisfying "every tool the scope admits is Usable" by vacuous truth, and an absent
+inventory failing OPEN on the exact condition under which nothing is known about the tool. The third
+was structural and would not have been found any other way: the production path resolves activation
+facts once and HAND-SPREADS them into a `CanaryActivationInput` at two call sites, and dropping a
+field at either was invisible to every behavioural test, because in this build the live tier is never
+armed and the commit refuses at an earlier gate. That is the shape a survivor is most valuable in —
+not a gate that was weak, but a site no gate could reach.
+
+Two were defects in the campaign itself, and the second is the one worth carrying forward. M08 left
+two imports unused, so it failed to BUILD, which under this campaign's own header rule proves
+nothing. M09 targeted a line that also occurs, IDENTICALLY AND EARLIER IN THE SAME FILE, inside
+`buildLiveApprovalBindings`: an unanchored substitution mutated that function instead, the gate
+passed for an entirely correct reason, and the result read as a hole in the gates. A pattern that is
+not unique in its file mutates whichever occurrence comes first, which may be code the named gate
+does not watch — so a survivor whose mutation is not anchored is re-read before it is believed. The
+same lesson as §25a's "four instances in one campaign", reached from the opposite direction: there,
+a mutation looked caught while proving less than claimed; here, one looked survived while proving
+nothing at all.
+
+The repaired campaign scores **32 caught, 0 survived, 0 skipped** on the closing head. M15 through
+M32 were added later, for the seventeen defects adversarial review found on the PR itself (passive
+expiry; a decision straddling two snapshots; the registry repin window; a guard this ledger had
+wrongly written off as unreachable; a snapshot capture that left the derivation section; and a
+capture that unlocks before it captures) — all real, and none reachable by the twelve cases the
+specification enumerated.
+
+**Round 11 found the same defect in three more walls, and the count is the finding.** Asked to take
+an adversarial pass over the OTHER structural walls this PR relies on, it returned three P2s, each
+reproduced by building the evading shape and watching the wall PASS: the activation-input wall
+recorded only the KEYS in each literal, so `ToolCatalogUsable: true` satisfied it at both call sites
+while discarding the probe's verdict; the server-usability wall required only some selector named
+`Usable`, so `_ = srv.Usable()` satisfied it while rejecting nothing; and the promotion-ownership
+scan matched only calls whose callee is a selector, so `promote := cat.Promote` followed by
+`promote(key, fp)` was invisible. Fixes: the value must be the probe field of the same name; the call
+must be on `srv`, negated, guarding a `return false` (plus the behavioural test above); the scan
+walks selectors rather than call callees. M21/M22/M23 cover the three shapes.
+
+**Round 12 found the same defect in the BEHAVIOURAL gates, which is the answer to whether the
+pattern stopped at the AST walls: it did not.** Three more P2s, each reproduced: the pure-package
+tests flip ONE fact off an all-true fixture, so an accessor reading
+`f.ToolCatalogUsable || !f.LiveExecutorComposed` passes the whole package while reporting the tool
+usable on any node where the executor is absent — i.e. the shipped one; the preflight fixture carried
+no live approval on either side, so a wiring of `in.ToolCatalogUsable || len(in.ToolApprovals) > 0`
+passed it while letting any real activation bypass catalog usability via the approval it already
+carries; and the policy E2E paired `ActionQuarantine` with ONE reason, so a quarantine under any
+other reason read as "ordinary evaluation was reached". Fixes: a DERIVED all-false gate reading its
+expected reason set off `readinessChecks`; a valid live approval issued first and held constant, with
+an anti-vacuity check that it reaches the inputs; and rejection of EVERY `ActionQuarantine` — which
+still stops short of blocker #14, since ordinary evaluation reaching default-DENY satisfies it too.
+M24/M25/M26 cover the three.
+
+**One correction to that round, recorded because agreeing with a finding is not the same as
+accepting its demonstration.** Codex proposed proving (3) by mapping the promoted tool to
+`policy.DispReviewRequired`. That mutant does NOT reproduce: `engine.go`'s quarantine arm is
+`DriftUnknownTool || DispQuarantined`, there is no review-required override, and a review-required
+disposition falls through to ordinary matching — so it passes the FIXED gate too. The finding is
+nonetheless right, and the engine's SECOND quarantine arm demonstrates it exactly:
+`DriftPrivilegeExpansion` quarantines under `ReasonToolPrivilegeExpansion`, which the old assertion
+accepted (`ok`) and the new one refuses (`Got action=QUARANTINE reason=MCP.TOOL.PRIVILEGE_EXPANSION`).
+
+**Round 13 found the assumption UNDER the round-12 fix, which is the sharpest turn of the sweep.**
+The all-false gate is sound only if every accessor is a plain positive field read; without that,
+all-false is merely a THIRD vertex, and
+`f.ToolCatalogUsable || (!f.LiveExecutorComposed && !f.UpstreamCallerPresent && f.PolicyHealthy)`
+agrees at all-true, at every single-false and at all-false while suppressing the reason on a
+partially composed node with healthy policy. 2^23 combinations is not enumerable and any hand-picked
+subset is another proxy, so `TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact` asserts the
+accessor SHAPE — a single `return f.<Field>` — making the property true BY CONSTRUCTION instead of
+sampled. The same round closed the preflight fixture's remaining three axes (`ServerUsable`,
+`FingerprintCurrent`, `Budget` were still zero-valued, so `in.ToolCatalogUsable || in.ServerUsable`
+passed), with anti-vacuity checks that the other inputs really are valid. M27/M28.
+
+**And the round's P3 is the one to keep.** The test comment written in the round-12 fix still
+recorded `policy.DispReviewRequired` as a measured alternate quarantine — the very mutation that
+round had just established does NOT reproduce. The ledger and the review thread were corrected and
+the EXECUTABLE GATE was left carrying a false provenance claim, where the next maintainer would read
+it. *A gate whose comment names a mutation that proves nothing has a false provenance claim: the
+same defect as a gate asserting a proxy, one level up, in the documentation of the fix rather than
+the fix.* Corrected in place, naming the reproducing case and why the proposed one does not.
+
+**Round 14 found the THIRD level, and it is the one this sweep should be remembered for.** The
+coherence gate infers BEHAVIOUR — the captures are inside the critical section — from SYNTAX — one
+`deriveMu.Lock`, one deferred `Unlock`, one read of each source. That inference does not hold:
+reconciling, reading BOTH snapshots UNLOCKED, and only then taking `deriveMu` with a deferred unlock
+leaves every count unchanged (`ok, 0.104s`) while `Revoke` runs freely between the captures and the
+lock — the round-8 fail-open reopened from the side M20 never looked at. The gate now compares
+POSITIONS (the lock precedes both reads) and requires the capture to be STRAIGHT-LINE, since a read
+placed after the lock inside a closure or goroutine satisfies source order while a structural gate
+cannot prove when it runs. M29/M30, the second of which was found by asking the question of my own
+fix rather than waiting to be told.
+
+The same question was put to the OTHER structural gate and it survives with evidence:
+`TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact` infers "reads only its own fact" from the body
+shape, and the cheapest shape satisfying it while carrying a bug is a plain read of the WRONG field —
+which the single-flip tests catch. The two gates are complementary, not redundant: flips pin
+field-to-reason correspondence, the shape gate pins single-fact accessors.
+
+**Round 15 found the FOURTH level — mutex aliasing — which is the exact assumption round 14's fix
+rested on.** `mu := &c.deriveMu`, unlock through the alias before both captures, re-lock after: one
+direct Lock, one deferred direct Unlock, zero bare direct unlocks, correct order, no closure
+(`ok, 0.105s`), and `Revoke` interleaving with the captures as before. **Following aliases was the
+offered remedy and is the wrong shape** — four rounds running, each escape has been a different
+syntax (unlock moved, captures moved, closure, alias), and an alias-tracking gate merely names the
+fifth. The mutex is now UNALIASABLE: mentioned exactly twice, in its two canonical statements, with
+no Lock/Unlock permitted on anything else. There is no syntax for releasing a lock you may not name.
+
+The FIFTH level was then found by asking the question of that fix rather than waiting: a HELPER
+METHOD can unlock `deriveMu` in a body the gate never parses (`ok, 0.099s`). The capture is allowed
+exactly one collaborator, `reconcileLocked`, so every lock operation is visible in the function the
+gate reads. M31/M32.
+
+**THE GENERAL LESSON OF THE LAST FOUR ROUNDS, which is the durable one:** a structural gate can only
+assert what the syntax it reads makes visible. Widening the gate until it can follow wherever the
+code went is an arms race it loses every round. **SHRINK WHAT THE FUNCTION IS PERMITTED TO DO until
+the invariant is readable from it** — that is what "unaliasable, straight-line, one collaborator"
+buys, and why it is total where "track aliases" would have been the next enumeration.
+
+**Thirteen instances across seven rounds, one defect.** The AST walls pinned a key name, a call count, a
+callee's syntax and a method name; the behavioural gates pinned a fixture that could only vary one
+way, an input the fixture never supplied, and one reason standing in for an action. A wall that pins something CORRELATED with the
+invariant — a key name, a call count, a callee's syntax, a method name — rather than the invariant.
+Every one passed its own tests and would have shipped. The question that finds them is not *"does
+this fail against the defect I just fixed"* but ***"what is the cheapest shape that satisfies these
+assertions and still has the bug"*** — and it should be asked of a wall when it is written, not
+three rounds later.
+
+**M20's own verification reproduced the mis-anchoring trap, one run after it was written down.** The
+three shapes the hardened gate claims to catch were each built and run; the middle one — dropping
+the derivation lock entirely — PASSED. That was not a gate gap: `reconcile()` carries the identical
+three lines (`Lock` / `defer Unlock` / `reconcileLocked()`), so a first-occurrence replace landed
+there instead of on the function under test. Re-anchored to `reconcileAndSnapshot`'s body, it fails
+with `takes deriveMu 0 time(s), want exactly 1`. A mutation that does not describe its target proves
+nothing, whether the harness reports it as a skip or a human writes it by hand.
+
+**That score was recorded here once before it had been measured, and it was wrong.** After M16 was
+added, this row was written as 16/16 by extrapolation — every prior run had been clean and the new
+gate had been verified by hand — and the first actual run returned **15 caught, 0 survived, 1
+SKIPPED**. M09 had stopped matching: the round-2 fix replaced the `loadTarget` ownership lookup with
+a direct registry-snapshot read, so the mutation no longer described the code it targeted, and the
+tenant-ownership check had no working proof at that head. It was re-anchored (and written to COMPILE
+— the naive deletion leaves two variables unused, which under the campaign's header rule proves
+nothing) and re-run to the score above.
+
+Two things are worth keeping from that. **A campaign score is a measurement, not a property of the
+suite**: it must be re-run after any change to the code OR the campaign, because the thing that
+silently breaks is the mutation's grip on its target, not the gate. And **the failure mode is a SKIP,
+not a survivor** — a skipped mutation is scored as "nothing to see" by a reader skimming for
+survivors, so `skipped: 0` is as load-bearing as `survived: 0`, which is why the harness exits
+non-zero on either.
+
+**It happened a third time, and taught the rest of the rule.** The round-6 repin fix added two
+further uses of `srv`, which stopped M16's mutation from COMPILING — reported as `NOT PROVEN`, a
+third silent outcome alongside `SKIPPED`, and the one that can also ABORT the run before later
+mutations execute: that run never reached M17 and printed no summary at all. It was missed for a
+worse reason than the miss itself — the invocation piped the script through `| tail -8`, and a
+pipeline's exit status is the LAST command's, so `tail`'s `0` was read as the campaign's. M16 is
+re-anchored to express its defect directly (a per-iteration `reg.Current()` IS the second read) and
+written to compile, which needed the M08 repair a second time. So: **three times on this PR a code
+change silently moved a mutation's target** — M08's unused-variable trap, M09 after the
+single-snapshot fix, M16 after the repin fix — and **a campaign result is never read through a pipe
+that discards its exit status.**
+
+**A fourth way, and the one that imitates the third.** Two later runs died — one mid-M12, leaving its
+mutation UNREVERTED in the working tree (a live `ApproveLive`-promotes defect, caught by `git status`
+rather than by the harness), and one reporting `NOT PROVEN` at M15. The second looked exactly like the
+M16 class and invited the same repair; it was neither. Both were `no space left on device`: the Go
+build cache had reached 21 GB against 124 MB free, so the linker could not map its output and a
+perfectly good mutation "did not compile". So: **when a campaign aborts without a summary, or reports
+NOT PROVEN with a linker or mapping error, check the disk before touching a mutation** — and after any
+abort, `git status` first, because a dead harness does not revert.
+
+**And the round-7 lesson, which is the same shape as round 2's and points the opposite way.**
+Reasoning sequentially about state that is PUBLISHED CONCURRENTLY is unsound in BOTH directions: it
+deleted a guard as vacuous that was not, and then declared `srv.Usable()` unreachable when it is the
+last line of defence for the reconcile/registry-read window. *"I measured it"* was true both times and
+still produced a false claim, because a measurement over one interleaving says nothing about the
+others.
+
+**A wall can pin a SPELLING instead of an invariant, and only a mutation found it.** Re-anchoring
+M16 after the round-8 fix produced a form that reads the inventory through a variable named `rg`
+rather than `reg` — and the snapshot wall, which counted `Current()` calls keyed on the RECEIVER'S
+IDENTIFIER, scored ZERO violations against a mutation that reintroduces exactly the defect it exists
+to reject. It now counts every `Current()` inside the resolver regardless of receiver name, and any
+`sharedInventory()` call. The weaker wall passed its own tests and would have shipped; what exposed
+it was being forced to re-express a mutation whose target had moved.
+
+**Sweep the whole campaign after a code change, not one run at a time.** Two consecutive runs each
+burned a full campaign to surface a single SKIP (M11, then M15). Checking every mutation's pattern
+against the current source at once found both remaining drifts plus one false positive in a few
+seconds. The running tally of targets silently moved is M08, M09, M16, M11, M15 and M16 again —
+**five of six moved by this PR's own fixes**, which is why the rule is to re-run everything after any
+change to the code OR the campaign.
+
+**Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
+policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
+decision with satisfiable obligations is **blocker 14**, which remains OPEN. Reaching evaluation is
+a precondition for it, not a substitute: `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion`
+asserts only that the catalog-quarantine hard override stops pre-empting evaluation, never that a
+rule allows.
+
+**Two things this closure deliberately did not do.** It did not introduce a third promotion
+authority — §3's instruction was to reuse the governed `shadow_evaluation` lifecycle if it could
+safely serve this role, and re-derivation showed it already does: it is exact-fingerprint CAS-guarded
+against a rug-pull, it demotes on revocation, and its reconcile re-derives from the durable store, so
+the only thing missing was that the activation gate never asked. And it did not persist usability
+into the activation's immutable reviewed snapshot: a revoked or expired promotion must be able to
+make a node un-ready, which a frozen copy could not express.
+
+**A removal that was WRONG, and the correction.** The first shape of the resolver cross-checked the
+catalog record's digest and format against `loadTarget`'s re-read. That check was deleted mid-PR on
+the reasoning that *"both sides come from the same catalog, so no test could ever distinguish the
+check from its absence"* — a guard whose only future is silent rot.
+
+**The reasoning was wrong, and adversarial review caught it** (Codex P2, round 2). Same catalog,
+DIFFERENT READS: `loadTarget` re-reads `cat.Current()` AND `reg.Current()`, so under a concurrent
+re-ingest the two sides genuinely differ. The deleted cross-check was the snapshot-consistency
+guard, and removing it opened a fail-open — an old `Usable` F1 record satisfying eligibility and the
+F1-pinned digest while ownership came from the newer snapshot, so the resolver answered "usable" for
+a target the current catalog had already re-quarantined at F2. The comment sitting above the loop at
+the time asserted the very single-snapshot invariant the code broke.
+
+The repair does not restore the cross-check. A cross-check between two reads can only DETECT an
+inconsistency that one read cannot produce, so the SECOND READ is gone instead: the registry
+snapshot taken alongside the catalog snapshot answers ownership directly, and
+`TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce` pins that the function reads each source
+once and never calls `loadTarget`.
+
+The transferable lesson is the one the first reasoning missed: **"one snapshot" is a statement about
+one READ, not one source.** Two reads of the same authority are two snapshots, and a guard that
+looks redundant because both sides "come from the same place" may be the only thing making that true.
+Before deleting a check as vacuous, establish that no test could distinguish it *because the states
+cannot differ* — not merely because you could not think of a test.
+
+The format binding is genuinely not a second check, and that part stands: `Sum` folds
+`FormatVersion` in before any other segment, so the digest comparison is format-bound by
+construction, pinned by `TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest`.
+
+---
+
 ## §26 Final verdict
 
 ### `FIRST CONTROLLED CANARY REVIEW: BLOCKED — NO SAFE FIRST CANARY TARGET`
@@ -2206,12 +2499,12 @@ would let them inherit a neighbour's closure) and NOT filed as a sixteenth block
 fifteen are preserved exactly as adopted). A First Canary requires the fifteen closed AND every such
 §24 finding closed.
 
-**Post-adoption status (see §25a).** The baseline remains **fifteen**; the list below is preserved
-as adopted, and nothing is renumbered or deleted. Five entries have changed status since:
+**Post-adoption status (see §25a, §25b).** The baseline remains **fifteen**; the list below is
+preserved as adopted, and nothing is renumbered or deleted. Six entries have changed status since:
 **blocker 4 is CLOSED**, **blocker 5 is CLOSED**, **blocker 6 is CLOSED**, **blocker 7 is CLOSED**,
-and **blocker 8 is narrowed but still OPEN**. Ten are untouched, and the verdict above is unchanged
-— closing blockers 4, 5, 6 and 7 removes four of fifteen reasons a GO is forbidden, not the
-prohibition.
+**blocker 13 is CLOSED**, and **blocker 8 is narrowed but still OPEN**. Nine are untouched, and the
+verdict above is unchanged — closing blockers 4, 5, 6, 7 and 13 removes five of fifteen reasons a GO
+is forbidden, not the prohibition.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -2424,7 +2717,7 @@ prohibition.
    twin of blocker 10 (which is the same unwired path in the rollback direction), and it means the
    §25 checklist — wire arming + activation inputs — is NOT sufficient to start the Canary. A governed
    operator-reachable forward-transition/publication entry point must be wired.
-13. **The seeded controlled tool is `catalog.Quarantined` and nothing promotes it (§6/§7).** `seedTools`
+13. **[CLOSED — see §25b] The seeded controlled tool is `catalog.Quarantined` and nothing promotes it (§6/§7).** `seedTools`
    lands every inventory tool Quarantined (`mcp_inventory.go:15-17`) — the correct record-only Observe
    disposition — and the policy engine hard-overrides a `DispQuarantined` tool to `ActionQuarantine`
    BEFORE any user rule is evaluated (`internal/mcp/policy/engine.go:132-135`). `ApproveLive`
@@ -2436,6 +2729,14 @@ prohibition.
    and the classifier deliberately declines to speak for an unusable target rather than substituting
    for this control. Catalog USABILITY must be a mandatory criterion: a `shadow_evaluation` approval (which
    promotes) or another governed promotion path must make the exact tool `catalog.Usable`.
+   **CLOSED (§25b).** It is now a mandatory MACHINE-CHECKED activation criterion rather than a
+   runbook step: the activation preflight carries `canary.ReasonToolNotCatalogUsable`, resolved from
+   the authoritative catalog for the exact scoped target at the exact pinned fingerprint. No new
+   trust authority was introduced — the governed `shadow_evaluation` lifecycle remains the only
+   writer of `catalog.Usable`, `ApproveLive` still deliberately promotes nothing, and a structural
+   wall proves no data-plane caller can. ENFORCEMENT is unchanged and still lives in the policy
+   engine; what changed is that a node can no longer report Ready for an experiment every request
+   would die in.
 14. **The exact request must resolve to an ALLOW-class decision with satisfiable obligations (§4/§13).**
    Closing the credential condition (blocker 9) by choosing a rule with no `CredentialProfile` does not
    make the request executable: that rule may itself be DENY-class, and if NO enabled rule matches,
@@ -2470,7 +2771,9 @@ experiment judged unsafe; BLOCKED is "no safe first canary target." Here, no exp
 execute — nothing is reachable (1), the activation preflight cannot go Ready (2), no operator can arm
 (3), no admissible one-tool operation exists (4), the seeded tool is catalog-quarantined and hard-denied
 before any rule runs (13), and no operator-reachable path even transitions the node into Canary mode
-(12). Blockers 5–12, 14 and 15 are unmet *prerequisites*/defects, not a live
+(12). (Blockers 4 and 13 have since been CLOSED — §25a, §25b — which changes which of these reasons
+still bites, not the verdict: 1, 2 and 3 alone still mean no experiment can execute.) Blockers 5–12,
+14 and 15 are unmet *prerequisites*/defects, not a live
 unsafe path, precisely because 1–4 mean zero real side effects are possible from this SHA (blocker 11
 adds that even a reachable+usable target would carry a fingerprint bound to operator-declared JSON, not
 the observed peer). So the
@@ -2500,12 +2803,14 @@ verdict FAILED.)
   implement a working credential provider/path — the production broker composes zero providers, so a
   credential-requiring rule fails closed. This is NOT sufficient alone: the same rule must also be
   ALLOW-class with satisfiable obligations (blocker 14);
-- make the exact tool **`catalog.Usable`** (blocker 13, §6/§7) — `seedTools` lands it Quarantined and
-  the engine hard-overrides a quarantined tool to `ActionQuarantine` before any user rule runs, while
-  `ApproveLive` deliberately never promotes ("live trust never materializes `catalog.Usable`"). Issue a
-  `shadow_evaluation` approval (the promoting path) or wire another governed promotion path, and treat
-  catalog usability as a MANDATORY criterion — without it every exact-tool request is denied even with
-  all other blockers closed;
+- ~~make the exact tool **`catalog.Usable`**, and treat catalog usability as a MANDATORY
+  criterion~~ **DONE AS A MACHINE CRITERION (blocker 13 CLOSED, §25b)** — it is no longer an
+  external prerequisite anyone could forget or attest to by hand. The activation preflight resolves
+  usability for the exact scoped target and reports `tool_not_catalog_usable` when it does not hold,
+  so a Quarantined tool yields `Ready:false` instead of a green light for an experiment the policy
+  engine would hard-quarantine. The OPERATOR step that remains is the one the gate now enforces:
+  issue a `shadow_evaluation` approval (the only promoting path) for the exact tool at the exact
+  fingerprint. `ApproveLive` still never promotes;
 - require the exact request to resolve to an **ALLOW-class policy decision with every execution
   obligation satisfiable** (blocker 14, §4/§13) — verify the exact (principal, tenant, server, tool,
   operation) matches an enabled ALLOW-class rule; an unmatched request default-denies

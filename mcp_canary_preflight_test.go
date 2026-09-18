@@ -95,7 +95,7 @@ func validCanaryActivationInput(now time.Time) CanaryActivationInput {
 			MaxTotalExecutions: 50, MaxExecutionsPerMinute: 5, MaxConcurrentExecutions: 1,
 			MaxPrincipals: 1, MaxTools: 1, MaxServers: 1, Window: time.Hour,
 		},
-		ServerUsable: true, FingerprintCurrent: true, Now: now,
+		ServerUsable: true, FingerprintCurrent: true, ToolCatalogUsable: true, Now: now,
 	}
 }
 
