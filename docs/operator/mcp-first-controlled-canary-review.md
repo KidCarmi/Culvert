@@ -2702,6 +2702,9 @@ credential for it.
   state that ever existed. Pinned structurally by
   `TestCredFreeWall_BothFactsComeFromOneCapture`.
 
+An engine error is reported as NOT ESTABLISHED (`credential_facts_unavailable`), never as
+credential-free, and that is self-contained rather than resting on the permit row also refusing.
+
 **The reviewed layer is structural, not a fourth field.** `CredentialProfile` is a hashed
 `catalog.Fingerprint` field, so "the reviewed target needs no credential" IS the catalog statement,
 given the digest match the reviewed-target binding already enforces. There is deliberately no
@@ -2811,7 +2814,12 @@ rather than by a negative. M15/M16 target the two `CanaryActivationInput` call s
 `mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
 they are caught by the PRE-EXISTING
 `TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall`, whose field list is derived
-from the struct — so the new row was covered at both sites the moment it was declared.
+from the struct — so the new row was covered at both sites the moment it was declared. M17 covers a
+defect SELF-REVIEW found rather than a test: an engine error left the credential input marked
+resolved with an empty POLICY statement, so a tuple whose policy verdict could not be computed
+reported as credential-free. It was defended by "the permit row refuses that tuple anyway", which is
+true today and is exactly the wrong shape of argument — it makes this row's soundness depend on
+another row staying required. `Resolved` is now `err == nil`.
 
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN

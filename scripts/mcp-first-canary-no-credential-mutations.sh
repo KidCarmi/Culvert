@@ -34,6 +34,7 @@
 #   M14  the resolver is constant-false (anti-vacuity: the positive control must fail)
 #   M15  the transition commit forwards the wrong probe field
 #   M16  the restart reconcile forwards the wrong probe field
+#   M17  an engine error is reported as a credential-free answer
 #
 # M14 is the anti-vacuity mutation §13 requires. A resolver returning constant false passes every
 # negative gate above while making the First Canary permanently impossible, so the campaign is
@@ -321,6 +322,14 @@ run_mutation M14 \
   'the resolver is constant-false (anti-vacuity: a POSITIVE control must reject it)' \
   'TestCredFree_CanonicalCredentialFreePathIsOK' ./internal/mcp/canary "$CREDFREE" \
   's/func EvaluateCredentialFree\(in CredentialFreeInput\) CredentialFreeReason \{\n/func EvaluateCredentialFree(in CredentialFreeInput) CredentialFreeReason {\n\treturn CredFreeUnavailable\n/'
+
+# M17 — AN ENGINE ERROR READS AS CREDENTIAL-FREE. On that path the Decision is the zero value, so
+# the POLICY statement is "" and an empty inventory yields CredFreeOK: "provably credential-free"
+# for a tuple whose policy verdict could not be computed. Found in self-review, not by a test.
+run_mutation M17 \
+  'an engine error is reported as a credential-free answer' \
+  'TestCredWall_EngineErrorIsNotACredentialFreeAnswer' . "$RESOLVER" \
+  's/Resolved:                 err == nil,/Resolved:                 true,/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"

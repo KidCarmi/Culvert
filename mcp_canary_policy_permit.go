@@ -166,15 +166,19 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 	}
 	// Blocker #9. The three authoritative credential statements, taken from the SAME decision and
 	// the SAME two snapshots the permit was decided on, so the two facts can never disagree about
-	// which state they describe. Resolved is true because all three were read from authoritative
-	// state — NOT because they turned out empty; every early return above leaves it false.
+	// which state they describe. Resolved is true only when all three were actually established;
+	// every early return above leaves it false.
 	//
-	// An engine error still yields Resolved:true and an EMPTY policy statement, which is correct
-	// and not a hole: the permit row refuses that tuple outright (PermitEvaluationFailed), so a
-	// credential-free verdict on it can never contribute to a Ready node. Reporting the inventory
-	// truth here keeps the operator surface honest about which layer objected.
+	// AN ENGINE ERROR IS NOT A CREDENTIAL-FREE ANSWER, and getting this wrong is subtle. On that
+	// path `dec` is the zero Decision, so the POLICY statement reads "" — and against an empty
+	// inventory the verdict would be CredFreeOK: "provably credential-free" for a tuple whose
+	// policy verdict could not be computed at all. The tempting defence is that the permit row
+	// refuses the same tuple (PermitEvaluationFailed) so the node cannot be Ready anyway. That is
+	// true today and is exactly the wrong shape of argument: it makes THIS row's soundness depend
+	// on ANOTHER row staying required, and it overstates what was established on a surface an
+	// operator reads. So an engine error is reported as NOT ESTABLISHED, self-contained.
 	cf := canary.CredentialFreeInput{
-		Resolved:                 true,
+		Resolved:                 err == nil,
 		PolicyCredentialProfile:  dec.Obligations.CredentialProfile,
 		ServerCredentialProfile:  string(srv.CredentialProfile),
 		CatalogCredentialProfile: string(rec.Fingerprint.CredentialProfile),

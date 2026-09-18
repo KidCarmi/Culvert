@@ -86,7 +86,12 @@ func TestCredMatrix_EveryRequiredCaseHasALivingGate(t *testing.T) {
 func rootTestFuncNames(t *testing.T) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
-	entries, err := os.ReadDir(".")
+	// Anchored to the package source dir, never the CWD: a concurrent os.Chdir would
+	// otherwise make this enumerate the wrong directory and silently find no gates at all —
+	// the failure mode TestTestFileReadsAreCWDIndependent exists to prevent, and which would
+	// turn this wall into one that passes by seeing nothing.
+	dir := pkgSourceDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
@@ -95,7 +100,7 @@ func rootTestFuncNames(t *testing.T) map[string]bool {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, e.Name(), nil, parser.AllErrors)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, parser.AllErrors)
 		if err != nil {
 			continue // a file that does not parse cannot be hiding a gate we rely on
 		}
@@ -159,7 +164,7 @@ func TestCredWall_ReadinessConsumesTheResolvedFactNotALiteral(t *testing.T) {
 // asserts every bool on canaryActivationInputs is both produced by the production resolver and
 // consumed into canary.Facts, so a row cannot be added and left dangling.
 func TestCredWall_EveryActivationInputFieldIsWired(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(".", "mcp_canary_preflight.go"))
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "mcp_canary_preflight.go"))
 	if err != nil {
 		t.Fatalf("read preflight: %v", err)
 	}
@@ -209,7 +214,7 @@ func TestCredWall_EveryActivationInputFieldIsWired(t *testing.T) {
 func parseRootFunc(t *testing.T, file, name string) *ast.FuncDecl {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filepath.Join(".", file), nil, parser.AllErrors)
+	f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), file), nil, parser.AllErrors)
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
 	}
@@ -221,4 +226,76 @@ func parseRootFunc(t *testing.T, file, name string) *ast.FuncDecl {
 	}
 	t.Fatalf("%s not found in %s — this wall is checking nothing", name, file)
 	return nil
+}
+
+// TestCredWall_EngineErrorIsNotACredentialFreeAnswer pins the fail-closed direction at the
+// resolver: the credential input's Resolved flag must be derived from the engine's error, never
+// asserted true unconditionally.
+//
+// WHY THIS IS A WALL AND NOT A BEHAVIOURAL GATE. An engine error is not reachable through the
+// production resolver today — mcpruntime.ExactPermitTuple validates the tuple and returns
+// built=false on anything malformed, so buildExactPermitInput returns `unavailable` before
+// Evaluate is ever called. The guard is therefore defense-in-depth against a future change to the
+// tuple builder or the engine's contract, and a behavioural test would have to fabricate a state
+// the production path cannot produce.
+//
+// WHY IT MATTERS ANYWAY. On an engine-error path `dec` is the zero Decision, so the POLICY
+// credential statement reads "" — and against an empty inventory the verdict would be CredFreeOK:
+// "provably credential-free" for a tuple whose policy verdict could not be computed at all. The
+// tempting defence is that the permit row refuses the same tuple (PermitEvaluationFailed) so the
+// node cannot be Ready regardless. That is true today and is exactly the wrong shape of argument:
+// it makes THIS row's soundness depend on ANOTHER row staying required. The pure verdict's own
+// half — that an unresolved capture reads as unavailable rather than credential-free — is pinned
+// by TestCredFree_UnresolvedIsUnavailableNotCredentialFree.
+func TestCredWall_EngineErrorIsNotACredentialFreeAnswer(t *testing.T) {
+	fn := parseRootFunc(t, "mcp_canary_policy_permit.go", "buildExactPermitInput")
+	var found bool
+	ast.Inspect(fn, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := lit.Type.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "CredentialFreeInput" {
+			return true
+		}
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok || key.Name != "Resolved" {
+				continue
+			}
+			// EXACTLY TWO spellings are admissible, and both are fail-closed:
+			//   Resolved: false      — the explicit unavailable value the early returns use
+			//   Resolved: err == nil — the established case, gated on the engine succeeding
+			// Anything else (notably a bare `true`) lets an engine error be reported as
+			// credential-free on the strength of a zero Decision.
+			if id, isIdent := kv.Value.(*ast.Ident); isIdent && id.Name == "false" {
+				continue // the fail-closed literal; admissible, and not a condition to check
+			}
+			found = true
+			bin, ok := kv.Value.(*ast.BinaryExpr)
+			if !ok {
+				t.Errorf("SECURITY: CredentialFreeInput.Resolved is set to %T rather than derived "+
+					"from the engine error. An engine error would then report the tuple as "+
+					"credential-free on the strength of a zero Decision.", kv.Value)
+				continue
+			}
+			x, _ := bin.X.(*ast.Ident)
+			y, _ := bin.Y.(*ast.Ident)
+			if x == nil || x.Name != "err" || bin.Op != token.EQL || y == nil || y.Name != "nil" {
+				t.Errorf("SECURITY: CredentialFreeInput.Resolved must be `err == nil`, got a " +
+					"different condition — an engine error must read as NOT ESTABLISHED")
+			}
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("buildExactPermitInput no longer builds a CredentialFreeInput whose Resolved is a " +
+			"CONDITION — only fail-closed `false` literals remain, so either the resolver stopped " +
+			"establishing the fact at all or this wall is checking nothing")
+	}
 }

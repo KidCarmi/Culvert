@@ -252,7 +252,7 @@ func TestCredFreeE2E_PolicyRequiresServerAnonymousIsNotReady(t *testing.T) {
 // again, instead of silently opening a window the empty checks were never designed to cover.
 func TestCredFreeWall_CatalogCredentialDerivesFromTheRegistryRecord(t *testing.T) {
 	// (1) The fingerprint field is assigned from the registry record, in the ingest parser.
-	src, err := os.ReadFile(filepath.Join("internal", "mcp", "catalog", "ingest_parse.go"))
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "internal", "mcp", "catalog", "ingest_parse.go"))
 	if err != nil {
 		t.Fatalf("read ingest parser: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestCredFreeWall_CatalogCredentialDerivesFromTheRegistryRecord(t *testing.T
 			"and the credential-free proof must be re-derived.")
 	}
 	// (2) The registry exposes no credential-profile mutator.
-	regSrc, err := os.ReadFile(filepath.Join("internal", "mcp", "registry", "registry.go"))
+	regSrc, err := os.ReadFile(filepath.Join(pkgSourceDir(), "internal", "mcp", "registry", "registry.go"))
 	if err != nil {
 		t.Fatalf("read registry: %v", err)
 	}
@@ -428,7 +428,7 @@ func recvTypeName(recv *ast.FieldList) string {
 func parseNamedResolver(t *testing.T, name string) *ast.FuncDecl {
 	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join(".", "mcp_canary_policy_permit.go"), nil, parser.AllErrors)
+	file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "mcp_canary_policy_permit.go"), nil, parser.AllErrors)
 	if err != nil {
 		t.Fatalf("parse resolver: %v", err)
 	}
