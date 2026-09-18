@@ -6623,14 +6623,36 @@ plus CONTROLS (`HealthyFeedStaysGreen`, `QueueOverflowIsNotACollectorOutage`),
 because the cheapest way to pass a loss-visibility suite is to report everything
 as broken — which would page every healthy deployment.
 
-`syslog_health_chaos_test.go` — 8 gates in `package main`, driving a REAL
+`syslog_health_chaos_test.go` — 10 gates in `package main`, driving a REAL
 loopback collector rather than a mock (the property under test is what the
 TRANSPORT can and cannot tell us, which a mock would define away). The two
 headline defect gates were verified failing against the verbatim pre-fix
 `checkSyslogFeed`, producing the green-row-on-a-dead-collector output quoted in
-§36.1. Controls: a healthy TCP feed stays green with no operator action; a
-disabled feed exports nothing and holds no latched episode; and the pre-existing
-never-connected `fail` verdict is pinned so this change cannot regress it.
+§36.1. The SL-8 gate is a DIFFERENTIAL whose first arm requires an un-retired
+writer to move the plane, so the second arm cannot pass vacuously; it was
+verified failing by making `retireSyslogWriter` a no-op. A STRUCTURAL WALL pins
+the invariant that makes it safe for the observer to log at all — the process
+logger must never write to the collector, or a dropped line logs, the log line
+is enqueued, the drain fails it, and a collector outage becomes an unbounded
+feedback loop (the rule `internal/audit` states for `SetWriteFailureObserver`);
+it was verified to catch that loop when injected into `logger.go`. Controls: a
+healthy TCP feed stays green with no operator action; a disabled feed exports
+nothing and holds no latched episode; and the pre-existing never-connected
+`fail` verdict is pinned so this change cannot regress it.
+
+**Two failures the full suite caught, both introduced by this sweep.**
+`TestApiDiagnostics_SyslogFeedOK` stood a UDP writer up as *"a live feed
+without a real collector"*, on the recorded reasoning that UDP construction
+never blocks on a handshake — and asserted that meant `ok`. That reasoning is
+this section's defect stated out loud: UDP was chosen precisely BECAUSE it
+cannot fail, and the inability to fail was then read as health. The test was
+pinning the defect and is inverted, per the `TestResolveHost_TTLExpiry`
+precedent in §34. And `-race` found a genuine seam race that every functional
+gate passes through: `noteSyslogDelivery` runs on the syslog DRAIN goroutine,
+so a test swapping the clock or alert seam races a live writer. The plain
+package-var seams elsewhere in this tree (`threatFeedNow`,
+`fireThreatFeedStaleAlert`) are only ever read on the goroutine that swaps
+them, which is why they can stay plain; these two are `atomic.Pointer`.
 
 One harness note worth keeping: the first version of the runtime-loss gate closed
 only the LISTENER and the feed kept delivering, because an established connection
