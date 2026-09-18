@@ -494,10 +494,27 @@ func runResetPasswordCommand(s *startupState) error {
 	if err := cfg.SetUIUser(parts[0], parts[1], RoleAdmin); err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
+	// SEC-TOTP-1: --reset-password is the documented break-glass for a lost
+	// admin credential (GAP-IAM-01: host/container shell is the ONLY admin
+	// recovery path), and it has always dropped the account's TOTP enrolment as
+	// a side effect of SetUIUser replacing the roster record. An operator who
+	// has lost the authenticator as well as the password needs that, so the
+	// behaviour is kept EXACTLY — but SetUIUser no longer removes a second
+	// factor on any path, so the removal is now explicit here and, unlike
+	// before, ANNOUNCED. This is the one place a second factor may be dropped
+	// without proving possession of it; it requires host access and it says so.
+	clearedTOTP := cfg.UserHasTOTP(parts[0])
+	if clearedTOTP {
+		cfg.ClearTOTP(parts[0])
+	}
 	if err := cfg.SaveUIUsersFile(); err != nil {
 		return fmt.Errorf("error saving: %w", err)
 	}
 	fmt.Printf("Password reset for %q (role=admin). You can now start the proxy.\n", parts[0])
+	if clearedTOTP {
+		fmt.Printf("WARNING: TOTP two-factor enrolment for %q was removed by this break-glass reset. "+
+			"The account is now single-factor — re-enrol it before returning the appliance to service.\n", parts[0])
+	}
 	return nil
 }
 
