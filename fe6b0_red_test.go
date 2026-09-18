@@ -1043,7 +1043,7 @@ func TestFE6B0_R16_NodeLocalVersusClusterPublicationFacts(t *testing.T) {
 // ── R17 legacy console ──────────────────────────────────────────────────────
 
 func TestFE6B0_R17_LegacyConsoleSpeaksTheCorrectedContract(t *testing.T) {
-	src, err := os.ReadFile("static/index.html")
+	src, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Skip("legacy console not present")
 	}
