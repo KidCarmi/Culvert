@@ -186,10 +186,9 @@ func TestAPIChangePassword_PreservesTOTP(t *testing.T) {
 		"current_password": "Passw0rd1",
 		"new_password":     "Passw0rd2",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", bytes.NewReader(body))
-	ctx := context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin)
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
 	ctx = context.WithValue(ctx, uiUserKey{}, "grace")
-	req = req.WithContext(ctx)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/auth/change-password", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	apiAuthChangePassword(rec, req)
@@ -222,8 +221,8 @@ func TestAPIAuthUsers_AdminPasswordSetPreservesTOTP(t *testing.T) {
 		"password": "Passw0rd2",
 		"role":     string(RoleOperator),
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/users", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/auth/users", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	apiAuthUsers(rec, req)
@@ -417,7 +416,7 @@ func TestWall_CredentialWritesGoThroughTOTPPreservingConstructor(t *testing.T) {
 
 	// Fields that carry the second factor. A literal that omits ANY of them is
 	// only acceptable inside the preserving constructor.
-	totpFields := map[string]bool{"totpSecret": true, "backupCodes": true, "totpLastCounter": true}
+	totpFields := []string{"totpSecret", "backupCodes", "totpLastCounter"}
 
 	var checked int
 	for _, decl := range file.Decls {
@@ -425,46 +424,63 @@ func TestWall_CredentialWritesGoThroughTOTPPreservingConstructor(t *testing.T) {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		name := fn.Name.Name
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			lit, ok := n.(*ast.CompositeLit)
-			if !ok {
-				return true
-			}
-			ident, ok := lit.Type.(*ast.Ident)
-			if !ok || ident.Name != "uiAdminUser" {
-				return true
-			}
+		for _, lit := range uiAdminUserLiterals(fn) {
 			checked++
-			if name == "newUIAdminUserPreservingTOTP" {
-				return true // the sanctioned constructor
+			if fn.Name.Name == "newUIAdminUserPreservingTOTP" {
+				continue // the sanctioned constructor
 			}
-			set := map[string]bool{}
-			for _, elt := range lit.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
+			set := compositeLitFieldNames(lit)
+			for _, f := range totpFields {
+				if set[f] {
 					continue
 				}
-				if k, ok := kv.Key.(*ast.Ident); ok {
-					set[k.Name] = true
-				}
+				t.Errorf("%s constructs a uiAdminUser without %s at %s — a credential write "+
+					"that does not go through newUIAdminUserPreservingTOTP silently destroys the "+
+					"account's second factor (SEC-TOTP-1)", fn.Name.Name, f, fset.Position(lit.Pos()))
+				break
 			}
-			for f := range totpFields {
-				if !set[f] {
-					t.Errorf("%s constructs a uiAdminUser without %s at %s — a credential write "+
-						"that does not go through newUIAdminUserPreservingTOTP silently destroys the "+
-						"account's second factor (SEC-TOTP-1)", name, f, fset.Position(lit.Pos()))
-					break
-				}
-			}
-			return true
-		})
+		}
 	}
 	// Not-vacuous check: if the selector stops matching, the wall proves nothing.
 	if checked < 2 {
 		t.Fatalf("wall inspected only %d uiAdminUser literals — the selector no longer matches "+
 			"the code it is meant to guard", checked)
 	}
+}
+
+// uiAdminUserLiterals returns every `uiAdminUser{…}` composite literal in fn's
+// body. Split out of the wall above so the wall stays a flat loop (gocognit).
+func uiAdminUserLiterals(fn *ast.FuncDecl) []*ast.CompositeLit {
+	var out []*ast.CompositeLit
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		if ident, ok := lit.Type.(*ast.Ident); ok && ident.Name == "uiAdminUser" {
+			out = append(out, lit)
+		}
+		return true
+	})
+	return out
+}
+
+// compositeLitFieldNames returns the set of field names a keyed composite
+// literal assigns. Positional elements are ignored: uiAdminUser is only ever
+// built with keys, and a positional literal would not compile against a struct
+// whose field set this wall exists to police.
+func compositeLitFieldNames(lit *ast.CompositeLit) map[string]bool {
+	set := map[string]bool{}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if k, ok := kv.Key.(*ast.Ident); ok {
+			set[k.Name] = true
+		}
+	}
+	return set
 }
 
 // TestWall_TOTPPublicPrefixIsInert guards the OTHER half of the TOTP
