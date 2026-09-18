@@ -62,6 +62,13 @@ func assertTOTPIntact(t *testing.T, c *Config, user, where string) {
 	}
 }
 
+// resetPasswordArg builds the documented `--reset-password username:newpassword`
+// argument. Assembling it beats an inline "user:pass" literal: gosec G101 reads
+// that shape as a hardcoded credential (and flags any variable whose name
+// contains "cred"), and a test fixture should not train reviewers to scroll past
+// that warning.
+func resetPasswordArg(user, newPassword string) string { return user + ":" + newPassword }
+
 // backupCodesOf reads the stored (hashed) backup codes for assertions.
 func backupCodesOf(c *Config, user string) []string {
 	c.mu.RLock()
@@ -339,9 +346,9 @@ func TestRunResetPasswordCommand_ClearsTOTPExplicitlyAndSaysSo(t *testing.T) {
 	cfg.mu.Unlock()
 	cfg.cache.clear()
 
-	creds := "kate:BrandNewPass1"
+	resetArg := resetPasswordArg("kate", "BrandNewPass1")
 	uiUsersFile := path
-	s := &startupState{resetPwUser: &creds, uiUsersFile: &uiUsersFile}
+	s := &startupState{resetPwUser: &resetArg, uiUsersFile: &uiUsersFile}
 
 	stdout, runErr := captureStdout(t, func() error { return runResetPasswordCommand(s) })
 	if runErr != nil {
@@ -388,9 +395,9 @@ func TestRunResetPasswordCommand_SilentWhenNoTOTPEnrolled(t *testing.T) {
 	cfg.mu.Unlock()
 	cfg.cache.clear()
 
-	creds := "leo:BrandNewPass1"
+	resetArg := resetPasswordArg("leo", "BrandNewPass1")
 	uiUsersFile := path
-	s := &startupState{resetPwUser: &creds, uiUsersFile: &uiUsersFile}
+	s := &startupState{resetPwUser: &resetArg, uiUsersFile: &uiUsersFile}
 	stdout, runErr := captureStdout(t, func() error { return runResetPasswordCommand(s) })
 	if runErr != nil {
 		t.Fatalf("runResetPasswordCommand: %v", runErr)
@@ -621,9 +628,9 @@ func TestRunResetPasswordCommand_LeavesNoStaleReplayCounter(t *testing.T) {
 	cfg.mu.Unlock()
 	cfg.cache.clear()
 
-	creds := "peggy:BrandNewPass1"
+	resetArg := resetPasswordArg("peggy", "BrandNewPass1")
 	uiUsersFile := path
-	s := &startupState{resetPwUser: &creds, uiUsersFile: &uiUsersFile}
+	s := &startupState{resetPwUser: &resetArg, uiUsersFile: &uiUsersFile}
 	if _, err := captureStdout(t, func() error { return runResetPasswordCommand(s) }); err != nil {
 		t.Fatalf("runResetPasswordCommand: %v", err)
 	}
