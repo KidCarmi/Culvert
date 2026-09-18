@@ -49,6 +49,18 @@ func ensureAuthStartupTestLogger(t *testing.T) {
 // mutate the live map freely; restoration replaces the map
 // wholesale. cfg.cache is cleared after restore because passHash
 // changes invalidate cached verify results.
+//
+// defaultAuthOutcome is captured too, and that is not optional: the
+// slice reaches it through cfg.LoadUIUsersFile, which sets the field
+// from the roster envelope on EVERY successful load. A test that
+// drives a successful load therefore rewrites the global
+// authentication posture for every test the shuffle happens to run
+// after it — a determinism failure whose reported location has
+// nothing to do with its cause, which is exactly what the sibling
+// helper restoreGlobalRosterPath exists to prevent. It was latent
+// only because no test had driven a load to success; SEC-TOTP-1's
+// --reset-password gates are the first, and CI's shuffled double run
+// found it (PR #1429).
 func snapshotAuthGlobals(t *testing.T) {
 	t.Helper()
 	cfg.mu.Lock()
@@ -57,6 +69,7 @@ func snapshotAuthGlobals(t *testing.T) {
 	oldUser := cfg.user
 	oldPassHash := append([]byte(nil), cfg.passHash...)
 	oldUIUsersFile := cfg.uiUsersFile
+	oldDefaultAuthOutcome := cfg.defaultAuthOutcome
 	var oldUIUsers map[string]*uiAdminUser
 	if cfg.uiUsers != nil {
 		oldUIUsers = make(map[string]*uiAdminUser, len(cfg.uiUsers))
@@ -76,6 +89,7 @@ func snapshotAuthGlobals(t *testing.T) {
 		cfg.user = oldUser
 		cfg.passHash = oldPassHash
 		cfg.uiUsersFile = oldUIUsersFile
+		cfg.defaultAuthOutcome = oldDefaultAuthOutcome
 		cfg.uiUsers = oldUIUsers
 		cfg.mu.Unlock()
 		cfg.cache.clear()

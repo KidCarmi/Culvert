@@ -650,3 +650,74 @@ func TestRunResetPasswordCommand_LeavesNoStaleReplayCounter(t *testing.T) {
 		t.Errorf("persisted totpLastCounter = %d after the break-glass reset, want 0", got)
 	}
 }
+
+// TestRunResetPasswordCommand_LeavesNoGlobalAuthPostureBehind is a
+// test-hygiene gate, not a product gate, and it earned its place: CI's
+// shuffled double run (Deep · determinism) failed on this PR because the
+// break-glass gates above are the FIRST tests in the tree to drive
+// runResetPasswordCommand to SUCCESS, and success reaches
+// cfg.LoadUIUsersFile, which rewrites the process-global
+// cfg.defaultAuthOutcome from the roster envelope. snapshotAuthGlobals did
+// not capture that field, so the global authentication posture leaked into
+// whichever test the shuffle ran next — a failure whose reported location has
+// nothing to do with its cause.
+//
+// The fix is in snapshotAuthGlobals (it now restores the field, as its own
+// "every cfg field the loadAuth slice touches" contract always required).
+// This gate pins the property directly so the next person to add a test that
+// loads a roster does not have to rediscover it from a shuffle seed.
+func TestRunResetPasswordCommand_LeavesNoGlobalAuthPostureBehind(t *testing.T) {
+	// Park the global on the value the default-Default load would overwrite,
+	// so a regression is visible rather than accidentally matching.
+	cfg.mu.Lock()
+	cfg.defaultAuthOutcome = OutcomeExempt
+	cfg.mu.Unlock()
+	t.Cleanup(func() {
+		cfg.mu.Lock()
+		cfg.defaultAuthOutcome = OutcomeDefault
+		cfg.mu.Unlock()
+	})
+	before := cfg.DefaultAuthOutcome()
+
+	// A SUBTEST, not a closure: the helpers register their restoration with
+	// t.Cleanup, which runs when the test they were given finishes. Asserting
+	// inside the same test would read the globals BEFORE restoration and prove
+	// nothing. The subtest boundary is also the real shape of the bug — one
+	// test ends, its cleanups run, the next test observes what was left.
+	t.Run("scoped break-glass reset", func(t *testing.T) {
+		restoreGlobalRosterPath(t)
+		snapshotAuthGlobals(t)
+		ensureAuthStartupTestLogger(t)
+
+		path := filepath.Join(t.TempDir(), "ui_users.json")
+		seed := newTestConfig()
+		seed.SetUIUsersFile(path)
+		if err := seed.SetUIUser("quinn", "Passw0rd1", RoleAdmin); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := seed.SaveUIUsersFile(); err != nil {
+			t.Fatalf("seed save: %v", err)
+		}
+		cfg.mu.Lock()
+		cfg.uiUsers = map[string]*uiAdminUser{}
+		cfg.mu.Unlock()
+		cfg.cache.clear()
+
+		resetArg := resetPasswordArg("quinn", "BrandNewPass1")
+		uiUsersFile := path
+		s := &startupState{resetPwUser: &resetArg, uiUsersFile: &uiUsersFile}
+		if _, err := captureStdout(t, func() error { return runResetPasswordCommand(s) }); err != nil {
+			t.Fatalf("runResetPasswordCommand: %v", err)
+		}
+		// Sanity: the reset really did run (otherwise the gate is vacuous).
+		if !cfg.UIUserExists("quinn") {
+			t.Fatal("reset did not populate the roster — the gate would be vacuous")
+		}
+	})
+
+	if got := cfg.DefaultAuthOutcome(); got != before {
+		t.Errorf("global defaultAuthOutcome = %q after a scoped break-glass reset, want %q — a test "+
+			"that rewrites the process-wide authentication posture breaks whichever test the shuffle "+
+			"runs next, and names the wrong one when it does", got, before)
+	}
+}
