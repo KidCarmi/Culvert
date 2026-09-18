@@ -186,10 +186,12 @@ func setSyslogAlert(fn func(detail string)) {
 
 // fireSyslogFailingAlert delivers the `siem_forwarding_failing` alert.
 //
-// Package-level seam so tests observe transitions synchronously rather than
-// racing the process-global alerts sink (the -count/-shuffle determinism class
-// the CI gate catches). HasSubscriber-gated for the reason documented on
-// fireStorageWriteAlert: with no webhook configured — the default posture, and
+// Overridable through setSyslogAlert so tests observe transitions synchronously
+// rather than racing the process-global alerts sink (the -count/-shuffle
+// determinism class the CI gate catches). The override lives in an atomic, not
+// a plain var, because this function is reached from the syslog DRAIN
+// goroutine — see the seam declaration above. HasSubscriber-gated for the
+// reason documented on fireStorageWriteAlert: with no webhook configured — the default posture, and
 // the state of every test binary — this must not spawn a goroutine at all.
 //
 // The Detail carries the BOUNDED reason class from internal/syslog, never a
