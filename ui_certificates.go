@@ -249,8 +249,8 @@ func certTransitionIncomplete(w http.ResponseWriter, opID string) {
 // caller writes it (the writer protocol, inside certOpsMu). An intent that
 // cannot be settled durably refuses the write: 503 operation_unsettled with
 // the bounded class; nothing is written.
-func certSettleTargetOrRefuse(w http.ResponseWriter, s *certOperationStore, target string) bool {
-	if err := settleCertTarget(s, target, "writer"); err != nil {
+func certSettleTargetOrRefuse(w http.ResponseWriter, s *certOperationStore, target, opID string) bool {
+	if err := settleCertTarget(s, target, "writer", opID); err != nil {
 		writeRefusal(w, http.StatusServiceUnavailable, refusalOperationUnsettled,
 			"an outstanding operation on this object could not be settled durably; retry once the operation ledger is writable (GET /api/ca/operations/{id} settles it)",
 			map[string]any{"reason": certBoundedLedgerClass(err)})
@@ -647,7 +647,7 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 			"no CA bundle path is configured (-ca-path / proxy.ca_path); a rotation would exist in memory only, so it is refused", nil)
 		return
 	}
-	if !certSettleTargetOrRefuse(w, s, "root_ca") {
+	if !certSettleTargetOrRefuse(w, s, "root_ca", opID) {
 		return
 	}
 	cand, err := ca.NewRotationCandidate()
@@ -886,7 +886,7 @@ func apiCertsImportMITM(w http.ResponseWriter, r *http.Request, certPEM, keyPEM 
 			"no CA bundle path is configured (-ca-path / proxy.ca_path); an imported CA would exist in memory only, so it is refused", nil)
 		return
 	}
-	if !certSettleTargetOrRefuse(w, s, "root_ca") {
+	if !certSettleTargetOrRefuse(w, s, "root_ca", opID) {
 		return
 	}
 	op := certOperation{OperationID: opID, Action: certActionImport, Actor: actor, Target: "root_ca",
@@ -951,7 +951,7 @@ func apiCertsReplaceUI(w http.ResponseWriter, r *http.Request, certPEM, keyPEM [
 			map[string]any{"uiCertRevision": current})
 		return
 	}
-	if !certSettleTargetOrRefuse(w, s, "ui_cert") {
+	if !certSettleTargetOrRefuse(w, s, "ui_cert", opID) {
 		return
 	}
 	op := certOperation{OperationID: opID, Action: certActionUIReplace, Actor: actor, Target: "ui_cert",
@@ -1054,7 +1054,7 @@ func apiCertsUI(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, http.StatusNotFound, refusalNotFound, "no custom UI certificate is persisted on this node", nil)
 		return
 	}
-	if !certSettleTargetOrRefuse(w, s, "ui_cert") {
+	if !certSettleTargetOrRefuse(w, s, "ui_cert", opID) {
 		return
 	}
 	op := certOperation{OperationID: opID, Action: certActionUIDelete, Actor: actor, Target: "ui_cert", Fence: current, WasActive: uiCustomTLSActive}
@@ -1253,7 +1253,7 @@ func apiOCSPSet(w http.ResponseWriter, r *http.Request) {
 	if !certFenceMatches(w, "ocspRevision", echoed, current) {
 		return
 	}
-	if !certSettleTargetOrRefuse(w, s, "ocsp") {
+	if !certSettleTargetOrRefuse(w, s, "ocsp", opID) {
 		return
 	}
 	d := ocspDesiredSnapshot()

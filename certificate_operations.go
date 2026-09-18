@@ -74,6 +74,15 @@ package main
 // before it can decide. A commit decided from the bundle on disk builds its
 // action-bound result from THAT bundle, never from a different live CA.
 //
+// A REPAIRING WRITER NEVER DECIDES HISTORICAL AUTHORSHIP (round 4, B1). An
+// intent whose evidence is INVALID does not block the writer that repairs
+// the object, but before that writer writes, the intent is settled DURABLY
+// as writer_evidence_superseded — outcome_unknown, carrying the writer's
+// identity (SupersededBy), never recoverable — so neither a commit nor a
+// non-commit can later be inferred from the content the repairing writer
+// produced; a superseding record that cannot be persisted refuses the
+// writer (errCertTargetUnsettled) with nothing written.
+//
 // A REFUSAL IS TERMINAL ONLY ONCE DURABLE (Blocker 3): an aborted record
 // that cannot be persisted leaves the pending intent as the durable truth,
 // the caller gets the NON-terminal 500 outcome_unknown
@@ -143,6 +152,17 @@ const (
 	certCodeCleanupIncomplete   = "cleanup_incomplete"
 	certCodeEvidenceInvalid     = "evidence_invalid"
 	certCodeUnproven            = "unproven"
+	// certCodeEvidenceSuperseded (round 4, B1): a writer replaced the
+	// INVALID evidence an intent was still waiting on. Recorded durably —
+	// with the writer's identity — BEFORE the writer writes, and never
+	// re-decided: the repairing writer's content can decide neither a
+	// commit nor a non-commit for the earlier intent.
+	certCodeEvidenceSuperseded = "evidence_superseded"
+
+	// Bounded writer identities for the automatic writers (the handlers
+	// pass their operationId).
+	certWriterAutoRotation = "auto_rotation"
+	certWriterCARecovery   = "ca_recovery"
 
 	certCleanupComplete     = "complete"
 	certCleanupAtSettlement = "completed_at_settlement"
@@ -245,6 +265,11 @@ type certOperation struct {
 	Previous  map[string]any `json:"previous,omitempty"`
 	Candidate map[string]any `json:"candidate,omitempty"`
 	WasActive bool           `json:"wasActive,omitempty"`
+	// SupersededBy (round 4, B1) names the writer — an operationId, or a
+	// bounded automatic-writer identity — that replaced this intent's
+	// still-invalid evidence; set with the terminal
+	// writer_evidence_superseded record and never by content.
+	SupersededBy string `json:"supersededBy,omitempty"`
 }
 
 func (op *certOperation) unresolved() bool {
@@ -569,6 +594,35 @@ func (s *certOperationStore) MarkAudited(id string) error {
 	return nil
 }
 
+// Supersede records DURABLY that writerID replaced the evidence op was
+// still waiting on: the terminal outcome_unknown writer_evidence_superseded,
+// never re-decided (round 4, B1). A persist failure leaves the record as it
+// was and is errCertOperationPersist.
+func (s *certOperationStore) Supersede(id, writerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.degraded != nil {
+		return errCertOperationLedgerDegraded
+	}
+	op := s.findLocked(id)
+	if op == nil {
+		return nil
+	}
+	rec := *op
+	rec.State = certOpOutcomeUnknown
+	rec.Code = "writer_" + certCodeEvidenceSuperseded
+	rec.SupersededBy = writerID
+	rec.CommittedRevision = ""
+	rec.Result = nil
+	rec.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	candidate := s.cloneWith(id, &rec)
+	if err := s.persistCandidate(candidate); err != nil {
+		return fmt.Errorf("%w: %v", errCertOperationPersist, err)
+	}
+	s.ops = candidate
+	return nil
+}
+
 // emitOperationAudit completes the success audit of a committed operation
 // EXACTLY ONCE (audit.AppendOperation is idempotent on action+operationId)
 // and marks it durably after; any failure leaves the operation
@@ -621,6 +675,9 @@ func (op *certOperation) lookupReadModel() map[string]any {
 	}
 	if op.CommittedRevision != "" {
 		out["committedRevision"] = op.CommittedRevision
+	}
+	if op.SupersededBy != "" {
+		out["supersededBy"] = op.SupersededBy
 	}
 	if len(op.Result) > 0 {
 		out["result"] = op.Result
@@ -710,7 +767,7 @@ func settleCertOperation(s *certOperationStore, op certOperation, why string) er
 // defer with nothing written, because writing would destroy the evidence
 // that decides the intent. Audit completion failures are not fatal here
 // (the record is durable; the audit is retried by the next lookup/boot).
-func settleCertTarget(s *certOperationStore, target, why string) error {
+func settleCertTarget(s *certOperationStore, target, why, writerID string) error {
 	if d := s.Degraded(); d != nil {
 		return fmt.Errorf("%w: ledger %s", errCertTargetUnsettled, d.Reason)
 	}
@@ -727,6 +784,15 @@ func settleCertTarget(s *certOperationStore, target, why string) error {
 		rec, err := s.Get(op.OperationID)
 		if err != nil || rec == nil || rec.blocksWriters() {
 			return fmt.Errorf("%w: operation %s", errCertTargetUnsettled, op.OperationID)
+		}
+		// An intent still recoverable but not blocking (its evidence is
+		// INVALID) is about to lose that evidence to this writer: record
+		// the superseding decision durably FIRST — the writer's content
+		// must never decide the earlier intent (round 4, B1).
+		if why == "writer" && rec.recoverable() {
+			if err := s.Supersede(op.OperationID, writerID); err != nil {
+				return fmt.Errorf("%w: operation %s (%s)", errCertTargetUnsettled, op.OperationID, certBoundedLedgerClass(err))
+			}
 		}
 	}
 	return nil
@@ -882,8 +948,11 @@ func caBundleEvidenceNow() caBundleEvidence {
 func uiCertOperationVerdict(op certOperation) certVerdict {
 	rec := recoverUITLSTransition()
 	if rec.Err != nil {
-		if errors.Is(rec.Err, errUITLSTransitionIncomplete) {
+		switch {
+		case errors.Is(rec.Err, errUITLSTransitionIncomplete):
 			return certVerdictUnknown(certCodeCleanupIncomplete)
+		case errors.Is(rec.Err, errUITLSDurabilityUnproven):
+			return certVerdictUnknown(certCodeDurabilityUnproven)
 		}
 		return certVerdictUnknown(certCodeEvidenceUnavailable)
 	}
@@ -908,17 +977,17 @@ func uiCertOperationVerdict(op certOperation) certVerdict {
 
 func uiDeleteVerdict(op certOperation, ev uiPairEvidence, rec uiTLSRecovery) certVerdict {
 	cleanup := certCleanupComplete
-	if rec.Completed && rec.Kind == uiTLSTransitionDelete {
+	if rec.Completed && rec.Kind == uiTLSTransitionDelete && rec.Acted {
 		cleanup = certCleanupAtSettlement
 	}
 	switch ev.class {
 	case uiPairIncomplete:
 		// The key or the certificate was removed and the process died before
 		// the other: finish the cleanup the intent committed to.
-		if err := removeIfExists(customUITLSKeyPath()); err != nil {
+		if _, err := removeIfExists(customUITLSKeyPath()); err != nil {
 			return certVerdictUnknown(certCodeCleanupIncomplete)
 		}
-		if err := removeIfExists(customUITLSCertPath()); err != nil {
+		if _, err := removeIfExists(customUITLSCertPath()); err != nil {
 			return certVerdictUnknown(certCodeCleanupIncomplete)
 		}
 		cleanup = certCleanupAtSettlement

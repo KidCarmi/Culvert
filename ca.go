@@ -156,7 +156,7 @@ func runInspectionCARotationRound(caPath, passphrase string) {
 	defer certOpsMu.Unlock()
 	caMutationMu.Lock()
 	defer caMutationMu.Unlock()
-	if err := settleCertTarget(certOpsStore(), "root_ca", "writer"); err != nil {
+	if err := settleCertTarget(certOpsStore(), "root_ca", "writer", certWriterAutoRotation); err != nil {
 		logger.Printf("CA auto-rotation: round deferred — an outstanding certificate operation could not be settled durably (%s); nothing written, retried at the next check", certBoundedLedgerClass(err))
 		return
 	}

@@ -135,19 +135,33 @@ func uiPairEvidenceNow() uiPairEvidence {
 		return uiPairEvidence{class: uiPairUnavailable}
 	}
 	ev := uiPairEvidence{certPresent: certPresent, keyPresent: keyPresent}
+	var certData, keyData []byte
 	if ev.certPresent {
 		data, err := os.ReadFile(customUITLSCertPath())
 		if err != nil {
 			return uiPairEvidence{class: uiPairUnavailable}
 		}
+		certData = data
 		ev.certDigest = hexDigest(data)
+	}
+	// The key is READ, not merely stat-ed (round 4, B3): a present key that
+	// cannot be read is unavailable evidence — never "an invalid pair".
+	// Validity is then decided from the bytes actually read, so it means
+	// readable-but-not-a-matching-pair and nothing else.
+	if ev.keyPresent {
+		data, err := os.ReadFile(customUITLSKeyPath())
+		if err != nil {
+			return uiPairEvidence{class: uiPairUnavailable}
+		}
+		keyData = data
 	}
 	switch {
 	case !ev.certPresent && !ev.keyPresent:
 		ev.class = uiPairAbsent
 	case ev.certPresent && ev.keyPresent:
 		ev.class = uiPairComplete
-		ev.valid = customUITLSPairValid()
+		_, perr := tls.X509KeyPair(certData, keyData)
+		ev.valid = perr == nil
 	default:
 		ev.class = uiPairIncomplete
 	}
@@ -215,18 +229,27 @@ func readUITLSTransition() (*uiTLSTransition, error) {
 	return &tr, nil
 }
 
-func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+// removeIfExists removes path; did reports whether something was removed.
+func removeIfExists(path string) (did bool, err error) {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
-func renameIfExists(from, to string) error {
+// renameIfExists renames from over to when from exists; did reports whether
+// a rename happened.
+func renameIfExists(from, to string) (did bool, err error) {
 	if _, err := os.Stat(from); errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return false, nil
 	}
-	return os.Rename(from, to)
+	if err := os.Rename(from, to); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // abandonUITLSStage removes staged files that never reached the commit
@@ -236,46 +259,65 @@ func abandonUITLSStage() {
 	_ = os.Remove(customUITLSKeyStagePath())  // #nosec G104 -- best-effort cleanup
 }
 
-// completeUITLSTransition finishes a committed transition: the remaining
-// renames (replace) or removals (delete), then the marker, then the
-// directory sync. It is idempotent — a step already done is skipped — so a
-// recovery can call it as often as needed. durable reports whether the
-// final directory sync proved the result; err is a step that could not be
-// done (the marker is left for the next recovery).
-func completeUITLSTransition(tr uiTLSTransition) (durable bool, err error) {
+// completeUITLSTransition finishes a committed transition with TWO
+// durability barriers (round 4, B2):
+//
+//	renames (replace) / removals (delete)
+//	→ BARRIER 1: sync the directory — the completed pair (or its absence) is durable
+//	→ remove the marker
+//	→ BARRIER 2: sync the directory — the marker's removal is durable
+//
+// The marker is the recovery evidence, so it is deleted only once what it
+// describes is durable: a crash after barrier 1 leaves a marker beside a
+// complete pair (recovery re-completes idempotently and consumes it), and a
+// crash between the renames and barrier 1 leaves the marker beside whatever
+// landed (recovery finishes the renames) — never a marker-less half
+// transition that recovery would abandon. Every step is idempotent.
+//
+// acted reports whether a rename/removal actually changed the live paths;
+// durable whether BOTH barriers held (false ⇒ the marker is retained, or its
+// removal is unproven — the next recovery re-runs the sequence); err is a
+// rename/removal that could not be done (the marker stays for the next
+// recovery).
+func completeUITLSTransition(tr uiTLSTransition) (acted, durable bool, err error) {
 	switch tr.Kind {
 	case uiTLSTransitionReplace:
-		if err := renameIfExists(customUITLSKeyStagePath(), customUITLSKeyPath()); err != nil {
-			return false, fmt.Errorf("key: %w", err)
-		}
-		if err := renameIfExists(customUITLSCertStagePath(), customUITLSCertPath()); err != nil {
-			return false, fmt.Errorf("cert: %w", err)
+		for _, pair := range [][2]string{{customUITLSKeyStagePath(), customUITLSKeyPath()}, {customUITLSCertStagePath(), customUITLSCertPath()}} {
+			did, rerr := renameIfExists(pair[0], pair[1])
+			if rerr != nil {
+				return acted, false, fmt.Errorf("%s: %w", filepath.Base(pair[1]), rerr)
+			}
+			acted = acted || did
 		}
 	case uiTLSTransitionDelete:
-		if err := removeIfExists(customUITLSKeyPath()); err != nil {
-			return false, fmt.Errorf("key: %w", err)
-		}
-		if err := removeIfExists(customUITLSCertPath()); err != nil {
-			return false, fmt.Errorf("cert: %w", err)
+		for _, path := range []string{customUITLSKeyPath(), customUITLSCertPath()} {
+			did, rerr := removeIfExists(path)
+			if rerr != nil {
+				return acted, false, fmt.Errorf("%s: %w", filepath.Base(path), rerr)
+			}
+			acted = acted || did
 		}
 		abandonUITLSStage()
 	}
-	if err := removeIfExists(customUITLSTransitionPath()); err != nil {
-		return false, fmt.Errorf("marker: %w", err)
+	if serr := fileutil.SyncParentDir(customUITLSCertPath()); serr != nil {
+		return acted, false, nil // barrier 1 failed: the marker stays
 	}
-	if err := fileutil.SyncParentDir(customUITLSCertPath()); err != nil {
-		return false, nil
+	if _, rerr := removeIfExists(customUITLSTransitionPath()); rerr != nil {
+		return acted, false, nil // the marker could not be removed: retried by the next recovery
 	}
-	return true, nil
+	if serr := fileutil.SyncParentDir(customUITLSCertPath()); serr != nil {
+		return acted, false, nil // barrier 2 failed: the removal is unproven (a reappeared marker is harmless)
+	}
+	return acted, true, nil
 }
 
 // uiTLSRecovery is what recoverUITLSTransition found and did.
 type uiTLSRecovery struct {
 	Kind        string // the completed transition's kind, "" when none
 	OperationID string
-	Completed   bool // a committed transition was finished by this call
+	Completed   bool // a committed transition was finished durably by this call (marker consumed)
+	Acted       bool // a rename or removal actually changed the live paths
 	Abandoned   bool // staged files that never reached the commit point were removed
-	Durable     bool // the completed transition's directory sync succeeded
 	Err         error
 }
 
@@ -302,13 +344,17 @@ func recoverUITLSTransition() uiTLSRecovery {
 		return rec
 	}
 	rec := uiTLSRecovery{Kind: tr.Kind, OperationID: tr.OperationID}
-	durable, cerr := completeUITLSTransition(*tr)
+	acted, durable, cerr := completeUITLSTransition(*tr)
+	rec.Acted = acted
 	if cerr != nil {
 		rec.Err = fmt.Errorf("%w: %w", errUITLSTransitionIncomplete, cerr)
 		return rec
 	}
+	if !durable {
+		rec.Err = fmt.Errorf("%w: a durability barrier failed; the marker is retained for the next recovery", errUITLSDurabilityUnproven)
+		return rec
+	}
 	rec.Completed = true
-	rec.Durable = durable
 	return rec
 }
 
@@ -352,7 +398,7 @@ func persistCustomUITLSOp(certPEM, keyPEM []byte, opID string) error {
 		}
 		unproven = err
 	}
-	durable, err := completeUITLSTransition(tr)
+	_, durable, err := completeUITLSTransition(tr)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errUITLSTransitionIncomplete, err)
 	}
@@ -378,7 +424,7 @@ func deleteCustomUITLSOp(opID string) error {
 		}
 		unproven = err
 	}
-	durable, err := completeUITLSTransition(tr)
+	_, durable, err := completeUITLSTransition(tr)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errUITLSTransitionIncomplete, err)
 	}
@@ -425,6 +471,8 @@ func resolveUITLSCertKey(cert, key string) (certPath, keyPath string) {
 		return cert, key
 	}
 	switch rec := recoverUITLSTransition(); {
+	case errors.Is(rec.Err, errUITLSDurabilityUnproven):
+		fmt.Printf("[Culvert] UITLS: an interrupted custom UI certificate transition was completed at boot but its durability could not be proven; the marker is retained and retried at the next settlement\n")
 	case rec.Err != nil:
 		fmt.Printf("[Culvert] UITLS: an interrupted custom UI certificate transition could not be completed at boot (%s); the persisted pair is left as found\n", ca.PersistFailureClass(rec.Err))
 	case rec.Completed:

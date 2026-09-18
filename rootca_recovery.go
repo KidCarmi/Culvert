@@ -244,7 +244,7 @@ func tryInspectionCARecovery(cfg rootCAStartupConfig, attempt int) (attempted bo
 	// intents on the target are settled from the recovered evidence after.
 	writes := cfg.Path == "" || certMgr.Ready()
 	if writes {
-		if serr := settleCertTarget(certOpsStore(), "root_ca", "writer"); serr != nil {
+		if serr := settleCertTarget(certOpsStore(), "root_ca", "writer", certWriterCARecovery); serr != nil {
 			return true, fmt.Errorf("recovery deferred: %w", serr)
 		}
 	}
@@ -253,7 +253,7 @@ func tryInspectionCARecovery(cfg rootCAStartupConfig, attempt int) (attempted bo
 	}
 	noteSSLInspectionRecovered(fmt.Sprintf("automatic recovery succeeded on attempt %d", attempt))
 	if !writes {
-		if serr := settleCertTarget(certOpsStore(), "root_ca", "reconciled"); serr != nil {
+		if serr := settleCertTarget(certOpsStore(), "root_ca", "reconciled", ""); serr != nil {
 			logger.Printf("Root CA recovery: loaded, but an outstanding certificate operation is still unsettled (%s); settled by the next lookup/boot", certBoundedLedgerClass(serr))
 		}
 	}

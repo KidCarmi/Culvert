@@ -705,9 +705,10 @@ components:
       description: >-
         The persisted admin-UI certificate pair's public projection. `present` — a COMPLETE pair (both files)
         is on disk; `pairState` — complete / absent / incomplete (exactly one of the two files exists: an
-        interrupted cleanup or an old-binary crash) / unavailable (a path cannot be examined — not readable, or
-        a directory); `active` — the RUNNING listener loaded it at boot; `corrupt` — the persisted pair does
-        not parse as a matching pair.
+        interrupted cleanup or an old-binary crash) / unavailable (a path cannot be examined or READ — the
+        certificate or the private key is not readable, or a path is a directory; a present but unreadable key
+        is unavailable evidence, never an invalid pair); `active` — the RUNNING listener loaded it at boot;
+        `corrupt` — the persisted pair was readable at boot but does not parse as a matching pair.
       required: [present, pairState, revision, active, corrupt]
       additionalProperties: false
       properties:
@@ -783,8 +784,14 @@ components:
         could not be re-synchronised or a UI cleanup that could not be finished is a RECOVERABLE
         outcome_unknown (code suffix _evidence_unavailable / _durability_unproven / _cleanup_incomplete —
         these also block every writer of the object; _evidence_invalid is recoverable but does not block),
-        re-decided by every later settlement; only positive absence aborts. A commit decided from the bundle
-        on disk names THAT bundle in `result.ca` and `committedRevision`, never a different live CA.
+        re-decided by every later settlement; only positive absence aborts. A writer that REPAIRS an object
+        whose evidence an intent is still waiting on (invalid bundle) first records the intent DURABLY as
+        writer_evidence_superseded with `supersededBy` = the writer's identity (its operationId, or
+        auto_rotation / ca_recovery) — a terminal outcome_unknown that no later settlement re-decides, so the
+        repairing writer's content can decide neither a commit nor a non-commit for the earlier intent; a
+        superseding record that cannot be persisted refuses the writer (503 operation_unsettled). A commit
+        decided from the bundle on disk names THAT bundle in `result.ca` and `committedRevision`, never a
+        different live CA.
       required: [operationId, state, action, actor, target, fence, startedAt, audited]
       additionalProperties: false
       properties:
@@ -808,8 +815,10 @@ components:
             `<why>_evidence_unavailable` / `<why>_evidence_invalid` / `<why>_durability_unproven` /
             `<why>_cleanup_incomplete` with why = lookup (this GET), reconciled (boot, or a recovered CA
             load) or writer (a later writer of the same object, which settles every recoverable intent on it
-            durably before it writes).
+            durably before it writes); `writer_evidence_superseded` is the terminal, never re-decided record
+            of an intent whose invalid evidence a repairing writer replaced (see `supersededBy`).
         committedRevision: { type: string }
+        supersededBy: { type: string, description: "writer_evidence_superseded only — the identity of the writer that replaced this intent's invalid evidence: its operationId, or the bounded automatic-writer identity auto_rotation / ca_recovery. Recorded durably BEFORE that writer wrote; the intent is never decided from that writer's content." }
         result:
           type: object
           additionalProperties: true

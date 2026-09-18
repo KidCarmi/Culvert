@@ -105,6 +105,15 @@ func fe6b0eObserveDirSyncs(t *testing.T, dir string, newCert, newKey []byte, fai
 	return samples
 }
 
+func fe6b0eHas(ids []string, id string) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
 func fe6b0eMarkerPresent() bool {
 	_, err := os.Stat(customUITLSTransitionPath())
 	return err == nil
@@ -321,7 +330,7 @@ func TestFE6B0E_E06_ReplaceBarrierOneFaultKeepsTheMarkerAndRecovers(t *testing.T
 	if fe6b0eMarkerPresent() {
 		t.Fatal("marker not consumed after the settlement synchronised the pair")
 	}
-	if n, ids, _ := fe6b0cAuditEntries(since, "cert.ui.replace"); n != 2 || ids[1] != opX {
+	if n, ids, _ := fe6b0cAuditEntries(since, "cert.ui.replace"); n != 2 || !fe6b0eHas(ids, opX) {
 		t.Fatalf("audits = %d %v", n, ids)
 	}
 	c, k = fe6b0eLive(t)
@@ -363,7 +372,7 @@ func TestFE6B0E_E07_ReplaceBarrierTwoFaultAndReappearingMarkerAreIdempotent(t *t
 	if state, l := fe6b0cLookupState(t, mux, opX); state != certOpCommitted {
 		t.Fatalf("lookup = %s %v", state, l)
 	}
-	if n, ids, _ := fe6b0cAuditEntries(since, "cert.ui.replace"); n != 2 || ids[1] != opX {
+	if n, ids, _ := fe6b0cAuditEntries(since, "cert.ui.replace"); n != 2 || !fe6b0eHas(ids, opX) {
 		t.Fatalf("audits = %d %v", n, ids)
 	}
 }

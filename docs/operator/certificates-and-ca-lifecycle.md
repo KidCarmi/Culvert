@@ -17,7 +17,7 @@ the config-version rollback surface, and `GET /api/certificates` says so
 | Object | Revision token | Read from | Echoed on |
 |---|---|---|---|
 | Root CA | `caRevision` = `car1:<sha256 hex of the live CA DER>` (`car1:none` without a CA) | `GET /api/ca/status`, `GET /api/certificates`, `GET /api/ca-cert` (JSON) | `?caRevision=` on the rotation challenge, the rotation confirm and a MITM import |
-| Admin-UI certificate pair | `uiCertRevision` = `uic1:<sha256 hex of the persisted cert file>` (`uic1:none` when nothing is persisted; `uic1:incomplete` when only one of the two files exists; `uic1:unavailable` when the pair cannot be examined — a path that is not readable or is a directory) | `GET /api/certificates` (`uiCert.revision`, with `uiCert.pairState` = `complete` / `absent` / `incomplete` / `unavailable`), the dry run's `current` | `?uiCertRevision=` on a UI replace and a UI delete (a mutation against `uic1:unavailable` is `503 evidence_unavailable`) |
+| Admin-UI certificate pair | `uiCertRevision` = `uic1:<sha256 hex of the persisted cert file>` (`uic1:none` when nothing is persisted; `uic1:incomplete` when only one of the two files exists; `uic1:unavailable` when the pair cannot be examined or read — the certificate or the private key is not readable, or a path is a directory; a present but unreadable key is unavailable evidence, never an invalid pair) | `GET /api/certificates` (`uiCert.revision`, with `uiCert.pairState` = `complete` / `absent` / `incomplete` / `unavailable`), the dry run's `current` | `?uiCertRevision=` on a UI replace and a UI delete (a mutation against `uic1:unavailable` is `503 evidence_unavailable`) |
 | OCSP desired posture | `ocspRevision` = `ocr1:<hex>` over the durable posture AND its generation (a toggle never returns to an earlier token) | `GET /api/ocsp`, `GET /api/certificates` | `?ocspRevision=` on `POST /api/ocsp` |
 
 A fenced mutation without its token is `428 precondition_required` (the
@@ -75,7 +75,15 @@ intents are never evicted; a corrupt or unreadable file is fail-closed
   Restore access (the passphrase, the path, the permissions) without
   changing the bytes and the next settlement commits or aborts from the
   real evidence. A bundle that reads but is not a CA bundle is
-  `<why>_evidence_invalid` (recoverable, does not block a repairing writer);
+  `<why>_evidence_invalid` (recoverable, does not block a repairing writer —
+  but the repairing writer never decides the earlier intent: before it
+  writes, the intent is recorded durably as `writer_evidence_superseded`
+  with `supersededBy` naming the writer (its operationId, or
+  `auto_rotation` / `ca_recovery`), a terminal `outcome_unknown` that no
+  lookup, boot or later writer re-decides — the same candidate imported by
+  the repair is NOT a commit of the earlier intent, and a different one is
+  NOT its refusal; a superseding record that cannot be persisted refuses the
+  repair with `503 operation_unsettled` and nothing written);
   `<why>_durability_unproven` and `<why>_cleanup_incomplete` are the same
   recoverable, writer-blocking shape for a directory that could not be
   re-synchronised and a UI cleanup that could not be finished. Only a
@@ -145,7 +153,14 @@ unpersisted.
   `ui_tls_key.pem.next`, the transition marker `ui_tls_transition.json`
   (kind, operationId, certificate digest — never a key digest) is the commit
   point, then the staged files are renamed over `ui_tls_cert.pem` +
-  `ui_tls_key.pem`, the marker is removed and the directory synchronised.
+  `ui_tls_key.pem`, the directory is synchronised (**barrier 1**: the
+  completed pair is durable), only then is the marker removed, and the
+  directory is synchronised again (**barrier 2**: the marker's removal is
+  durable). The marker is the recovery evidence and is deleted only once what
+  it describes is durable: a crash after barrier 1 leaves a marker beside a
+  complete pair, which the next boot or settlement completes idempotently
+  and consumes; a failed barrier keeps the marker and answers
+  `durability_unproven`; a marker that reappears after a crash is harmless.
   The live pair is therefore only ever the previous complete pair or the new
   complete pair — a process killed at any instant is repaired at the next
   boot and at the next settlement from the marker (a committed transition
@@ -157,7 +172,7 @@ unpersisted.
   proven by the pair parsing). Audited `cert.ui.replace`.
 - `DELETE /api/certs/ui?operationId=…&uiCertRevision=…` removes the pair
   through the same committed transition (marker first, then key, then
-  certificate). `404 not_found` when nothing is persisted. The result and
+  certificate, then the same two barriers). `404 not_found` when nothing is persisted. The result and
   the recovered record state the cleanup fact: `cleanup: complete` (the
   delete removed both files) or `cleanup: completed_at_settlement` (the
   process died after one removal — a remnant of one file — and the
@@ -233,9 +248,13 @@ durable — nothing is written. Consequences an operator can rely on:
   changes a certificate object — the automatic rotation round logs one line
   per check and waits; repair the ledger (or move it aside to start empty)
   and restart;
-- while an intent's evidence is unavailable, its durability unproven or its
-  cleanup incomplete (§2), no writer changes that object either: restore
-  access to the evidence and the next settlement decides it. The CA
+- while an intent's evidence is unavailable (an unreadable bundle,
+  certificate or private key), its durability unproven or its cleanup
+  incomplete (§2), no writer changes that object either: restore access to
+  the evidence and the next settlement decides it. A writer that repairs an
+  object whose evidence is INVALID is admitted, but only after the waiting
+  intent is durably recorded as superseded by that writer (§2) — the
+  repair's content never becomes the earlier intent's verdict. The CA
   recovery loop's LOAD branch is the one exception by design — reading the
   bundle is what makes the evidence available again, so the load runs first
   and the waiting intents are settled from the recovered bundle right after

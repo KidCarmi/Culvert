@@ -115,7 +115,12 @@ func TestFE6B0D_G02_RecoveryLoadBranchSettlesUnavailableEvidence(t *testing.T) {
 
 // G03 — a bundle that reads but is not a CA bundle is INVALID evidence:
 // recorded as recoverable evidence_invalid (never absence, never a commit),
-// and it does not block a repairing import.
+// and it does not block a repairing import. Round 4 (B1) changed what the
+// repair does to the intent: the writer's content decides NOTHING for it —
+// the intent is superseded durably (writer_evidence_superseded, naming the
+// writer) before the repair writes, and stays so across lookups. The
+// round-3 expectation ("aborted lookup_absent against B's bundle") inferred
+// a non-commit from the repairing writer's content and was wrong.
 func TestFE6B0D_G03_InvalidBundleIsRecoverableAndDoesNotBlockRepair(t *testing.T) {
 	dir, _ := fe6b0cNode(t)
 	mux := fe6b0Mux()
@@ -132,7 +137,8 @@ func TestFE6B0D_G03_InvalidBundleIsRecoverableAndDoesNotBlockRepair(t *testing.T
 		t.Fatalf("invalid bundle = %s %v, want outcome_unknown lookup_evidence_invalid", state, l)
 	}
 	certB, keyB, fpB := fe6b0CAPair(t, "B", true)
-	code, m, _ := fe6b0Upload(t, mux, "?target=mitm&operationId="+fe6b0OpID()+"&caRevision="+fe6b0Revision(t),
+	opY := fe6b0OpID()
+	code, m, _ := fe6b0Upload(t, mux, "?target=mitm&operationId="+opY+"&caRevision="+fe6b0Revision(t),
 		map[string]string{"target": "mitm", "cert": string(certB), "key": string(keyB)})
 	if code != http.StatusOK || m["imported"] != true {
 		t.Fatalf("a repairing import was refused beside an invalid bundle: %d %v", code, m)
@@ -140,17 +146,14 @@ func TestFE6B0D_G03_InvalidBundleIsRecoverableAndDoesNotBlockRepair(t *testing.T
 	if certMgr.LiveCertificateHex() != fpB {
 		t.Fatal("the import did not install B")
 	}
-	// The writer settled X BEFORE it wrote: the bundle was still invalid at
-	// that instant, so X stayed recoverable — the same verdict the lookup
-	// recorded, which is NOT rewritten under the writer's name — and the
-	// writer's own write is never evidence for an earlier intent. The next
-	// settlement reads the bundle B wrote: readable, not A ⇒ aborted, never
-	// credited with B.
-	if rec := fe6b0cRecord(t, opX); rec == nil || rec.State != certOpOutcomeUnknown || rec.Code != "lookup_"+certCodeEvidenceInvalid {
+	// The writer superseded X BEFORE it wrote: X is durably
+	// writer_evidence_superseded, naming Y, and no later settlement decides
+	// it from the bundle Y produced.
+	if rec := fe6b0cRecord(t, opX); rec == nil || rec.State != certOpOutcomeUnknown || rec.Code != "writer_"+certCodeEvidenceSuperseded || rec.SupersededBy != opY {
 		t.Fatalf("X right after the repairing writer = %+v", rec)
 	}
-	if state, l := fe6b0cLookupState(t, mux, opX); state != certOpAborted || l["code"] != "lookup_absent" {
-		t.Fatalf("X decided against B's bundle = %s %v", state, l)
+	if state, l := fe6b0cLookupState(t, mux, opX); state != certOpOutcomeUnknown || l["supersededBy"] != opY {
+		t.Fatalf("X after a further lookup = %s %v", state, l)
 	}
 }
 
