@@ -690,11 +690,10 @@ func settleCertOperation(s *certOperationStore, op certOperation, why string) er
 		}
 		return s.Finish(op.OperationID, certOpAborted, code, "", nil, "")
 	default:
-		code := why + "_" + v.code
-		if op.State == certOpOutcomeUnknown && op.Code == code {
-			return nil // the same non-terminal verdict; nothing new to record
+		if op.State == certOpOutcomeUnknown && strings.HasSuffix(op.Code, "_"+v.code) {
+			return nil // the same non-terminal verdict (whoever first recorded it); nothing new to record
 		}
-		return s.Finish(op.OperationID, certOpOutcomeUnknown, code, "", nil, "")
+		return s.Finish(op.OperationID, certOpOutcomeUnknown, why+"_"+v.code, "", nil, "")
 	}
 	settled, err := s.Get(op.OperationID)
 	if err != nil || settled == nil {

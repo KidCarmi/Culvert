@@ -141,11 +141,12 @@ func TestFE6B0D_G03_InvalidBundleIsRecoverableAndDoesNotBlockRepair(t *testing.T
 		t.Fatal("the import did not install B")
 	}
 	// The writer settled X BEFORE it wrote: the bundle was still invalid at
-	// that instant, so X stayed recoverable (writer_evidence_invalid) — the
+	// that instant, so X stayed recoverable — the same verdict the lookup
+	// recorded, which is NOT rewritten under the writer's name — and the
 	// writer's own write is never evidence for an earlier intent. The next
 	// settlement reads the bundle B wrote: readable, not A ⇒ aborted, never
 	// credited with B.
-	if rec := fe6b0cRecord(t, opX); rec == nil || rec.State != certOpOutcomeUnknown || rec.Code != "writer_"+certCodeEvidenceInvalid {
+	if rec := fe6b0cRecord(t, opX); rec == nil || rec.State != certOpOutcomeUnknown || rec.Code != "lookup_"+certCodeEvidenceInvalid {
 		t.Fatalf("X right after the repairing writer = %+v", rec)
 	}
 	if state, l := fe6b0cLookupState(t, mux, opX); state != certOpAborted || l["code"] != "lookup_absent" {
