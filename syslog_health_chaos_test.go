@@ -120,7 +120,12 @@ func newLiveCollector(t *testing.T, network string) (*syslog.Writer, func()) {
 		closeFn()
 		t.Fatalf("NewWriter(%s): %v", network, err)
 	}
-	w.SetDeliveryObserver(noteSyslogDelivery)
+	// Wire the observer exactly as newSyslogWriter does — a closure binding
+	// this writer's identity — so the gates exercise the production fence
+	// rather than a shape only tests use.
+	w.SetDeliveryObserver(func(ok bool, reason string, consecutive int64) {
+		noteSyslogDelivery(w, ok, reason, consecutive)
+	})
 	t.Cleanup(func() { w.Close(); closeFn() })
 	return w, closeFn
 }
@@ -129,7 +134,7 @@ func newLiveCollector(t *testing.T, network string) (*syslog.Writer, func()) {
 func arm(w *syslog.Writer, addr string) {
 	globalSyslog = w
 	syslogConfigured, syslogConfiguredAddr = addr, addr
-	noteSyslogConfigured()
+	noteSyslogConfigured(w)
 }
 
 // TestChaos66_UnverifiableFeedIsNotReportedActive — THE defect gate.
@@ -221,7 +226,7 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 
 	// A large burst of losses, all inside the window.
 	for i := 0; i < 5000; i++ {
-		noteSyslogDelivery(false, "write_failed", int64(i+1))
+		noteSyslogDelivery(w, false, "write_failed", int64(i+1))
 	}
 	if paged != 0 {
 		t.Fatalf("paged %d times on volume alone, inside the degradation window", paged)
@@ -232,14 +237,14 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 
 	// One more failure, now past the window.
 	setSyslogNow(func() time.Time { return base.Add(syslogDeliveryDegradedAfter + time.Second) })
-	noteSyslogDelivery(false, "write_failed", 5001)
+	noteSyslogDelivery(w, false, "write_failed", 5001)
 	if paged != 1 {
 		t.Fatalf("pages = %d after crossing the duration threshold, want exactly 1", paged)
 	}
 
 	// Still failing: the latch must hold, or a down collector re-pages per line.
 	for i := 0; i < 100; i++ {
-		noteSyslogDelivery(false, "write_failed", int64(5002+i))
+		noteSyslogDelivery(w, false, "write_failed", int64(5002+i))
 	}
 	if paged != 1 {
 		t.Errorf("pages = %d — the fire-once latch did not hold for the episode", paged)
@@ -251,13 +256,15 @@ func TestChaos66_DegradationIsADurationNotACount(t *testing.T) {
 // logged looks identical to a healthy one.
 func TestChaos66_RecoveryRequiresObservedDelivery(t *testing.T) {
 	withSyslogTestState(t)
+	w, _ := newLiveCollector(t, "tcp")
+	arm(w, "tcp://collector.test:601")
 	base := time.Now()
 	setSyslogNow(func() time.Time { return base })
 	setSyslogAlert(func(string) {})
 
-	noteSyslogDelivery(false, "dial_failed", 1)
+	noteSyslogDelivery(w, false, "dial_failed", 1)
 	setSyslogNow(func() time.Time { return base.Add(2 * syslogDeliveryDegradedAfter) })
-	noteSyslogDelivery(false, "dial_failed", 2)
+	noteSyslogDelivery(w, false, "dial_failed", 2)
 
 	syslogHealth.mu.Lock()
 	failing, alerted := !syslogHealth.failingSince.IsZero(), syslogHealth.alerted
@@ -276,7 +283,7 @@ func TestChaos66_RecoveryRequiresObservedDelivery(t *testing.T) {
 	}
 
 	// A delivered line is the only thing that clears it.
-	noteSyslogDelivery(true, "", 0)
+	noteSyslogDelivery(w, true, "", 0)
 	syslogHealth.mu.Lock()
 	cleared := syslogHealth.failingSince.IsZero() && !syslogHealth.alerted
 	syslogHealth.mu.Unlock()
@@ -350,7 +357,7 @@ func TestChaos66_DisablingClearsThePlane(t *testing.T) {
 	w, _ := newLiveCollector(t, "tcp")
 	arm(w, "tcp://collector.test:601")
 	setSyslogAlert(func(string) {})
-	noteSyslogDelivery(false, "write_failed", 1)
+	noteSyslogDelivery(w, false, "write_failed", 1)
 
 	globalSyslog, syslogConfigured, syslogConfiguredAddr = nil, "", ""
 	noteSyslogUnconfigured()
@@ -543,7 +550,7 @@ func TestChaos66_SupersededWriterCannotDriveTheHealthPlane(t *testing.T) {
 		// backlog entry the writer has not noticed yet.
 		old.Write([]byte("pre-outage")) //nolint:errcheck
 		waitForDelivery(t, old, 1)
-		noteSyslogConfigured() // clear the episode the successful delivery left
+		noteSyslogConfigured(old) // clear the episode the successful delivery left
 
 		stopOld()
 		driveUntilFailing(t, old)
@@ -610,4 +617,176 @@ func driveUntilFailing(t *testing.T, w *syslog.Writer) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// ─── Codex review gates (PR #1430) ─────────────────────────────────────────
+
+// TestChaos66_RetiredWriterCallbackIsFenced — DEFECT gate for the RACE half of
+// SL-8, which clearing the observer pointer does not close.
+//
+// retireSyslogWriter stores nil into the old writer's observer pointer, but a
+// drain goroutine already past notifyDelivery's Load holds the old function
+// and can be descheduled there arbitrarily long — past the swap, past
+// noteSyslogConfigured. When it resumes it writes into a record that now
+// describes a DIFFERENT writer.
+//
+// The window is nanoseconds wide and cannot be hit reliably by racing
+// goroutines, so the gate reproduces it deterministically: capture the
+// callback the way a descheduled goroutine holds it, reconfigure, then let it
+// land. The fence must make it a no-op in BOTH directions — a stale failure
+// must not mark a healthy feed down, and a stale recovery must not clear a
+// real outage.
+func TestChaos66_RetiredWriterCallbackIsFenced(t *testing.T) {
+	withSyslogTestState(t)
+	setSyslogAlert(func(string) {})
+
+	oldW, _ := newLiveCollector(t, "tcp")
+	arm(oldW, "tcp://old.test:601")
+
+	// The callback a descheduled drain goroutine of oldW would be holding.
+	stale := func(ok bool, reason string, consecutive int64) {
+		noteSyslogDelivery(oldW, ok, reason, consecutive)
+	}
+
+	// The operator re-points at a working collector.
+	retireSyslogWriter(oldW)
+	fresh, _ := newLiveCollector(t, "tcp")
+	arm(fresh, "tcp://new.test:601")
+
+	// Direction 1: a stale FAILURE must not mark the healthy new feed down.
+	stale(false, "write_failed", 7)
+	syslogHealth.mu.Lock()
+	failing := !syslogHealth.failingSince.IsZero()
+	syslogHealth.mu.Unlock()
+	if failing {
+		t.Error("a retired writer's in-flight failure callback opened an episode on the live feed")
+	}
+	if row := checkSyslogFeed(); row.Status != diagOK {
+		t.Errorf("live healthy feed reported as %q by a retired writer's callback: %+v", row.Status, row)
+	}
+
+	// Direction 2: a stale RECOVERY must not clear a real outage on the live
+	// feed. This is the direction a one-way fence would miss.
+	base := time.Now()
+	setSyslogNow(func() time.Time { return base })
+	noteSyslogDelivery(fresh, false, "dial_failed", 1)
+	syslogHealth.mu.Lock()
+	realOutage := !syslogHealth.failingSince.IsZero()
+	syslogHealth.mu.Unlock()
+	if !realOutage {
+		t.Fatal("the live feed's own failure did not open an episode — the gate cannot prove anything")
+	}
+
+	stale(true, "", 0)
+	syslogHealth.mu.Lock()
+	stillFailing := !syslogHealth.failingSince.IsZero()
+	syslogHealth.mu.Unlock()
+	if !stillFailing {
+		t.Error("a retired writer's in-flight recovery callback cleared a REAL outage on the live feed")
+	}
+}
+
+// TestChaos66_SparseGatewayStillPages — DEFECT gate. `alertNow` used to be
+// evaluated only while processing another failed line, so a gateway that loses
+// one line and then produces no further syslog traffic — a standby node, a
+// quiet night — crossed the threshold with /metrics and /api/diagnostics both
+// reporting the episode as degraded while the webhook never fired. Two
+// surfaces disagreeing about one condition is the defect CHAOS-61 rule (2)
+// names by hand.
+//
+// The episode timer drives the evaluation instead. The gate invokes what the
+// timer invokes, because arming a real 60s timer in a unit test would trade a
+// determinism defect for a slow one.
+func TestChaos66_SparseGatewayStillPages(t *testing.T) {
+	withSyslogTestState(t)
+	w, stop := newLiveCollector(t, "tcp")
+	arm(w, "tcp://collector.test:601")
+	stop()
+
+	base := time.Now()
+	setSyslogNow(func() time.Time { return base })
+	var paged int
+	var detail string
+	setSyslogAlert(func(d string) { paged++; detail = d })
+
+	// ONE failure, and then the gateway goes completely quiet.
+	noteSyslogDelivery(w, false, "write_failed", 1)
+	if paged != 0 {
+		t.Fatalf("paged %d times immediately — the threshold is a duration", paged)
+	}
+
+	// The threshold passes with no further traffic at all.
+	setSyslogNow(func() time.Time { return base.Add(syslogDeliveryDegradedAfter + time.Second) })
+
+	// Both surfaces already call this degraded; the page must agree.
+	if !syslogState().Degraded {
+		t.Fatal("the episode is not reported degraded — the gate is not testing the disagreement")
+	}
+	if row := checkSyslogFeed(); row.Status != diagFail {
+		t.Fatalf("contract row = %q while degraded: %+v", row.Status, row)
+	}
+
+	fireArmedEpisodeTimer(t) // only fires if a timer was actually armed
+	if paged != 1 {
+		t.Fatalf("pages = %d — a quiet gateway crossed the threshold with every read-surface red and no webhook", paged)
+	}
+	if !strings.Contains(detail, "write_failed") {
+		t.Errorf("the timer-driven page did not carry the bounded reason it never observed itself: %q", detail)
+	}
+
+	// Still latched: the timer must not re-page an episode it already paged.
+	evaluateSyslogEpisode()
+	if paged != 1 {
+		t.Errorf("pages = %d — the fire-once latch did not hold across timer re-evaluation", paged)
+	}
+}
+
+// TestChaos66_EpisodeTimerIsDisarmedOnRecovery — CONTROL for the timer. A timer
+// that outlived its episode would page for an outage that has ended, which is
+// worse than the silence it replaces.
+func TestChaos66_EpisodeTimerIsDisarmedOnRecovery(t *testing.T) {
+	withSyslogTestState(t)
+	w, _ := newLiveCollector(t, "tcp")
+	arm(w, "tcp://collector.test:601")
+	setSyslogAlert(func(string) {})
+
+	noteSyslogDelivery(w, false, "write_failed", 1)
+	syslogHealth.mu.Lock()
+	armed := syslogHealth.alertTimer != nil
+	syslogHealth.mu.Unlock()
+	if !armed {
+		t.Fatal("no episode timer was armed on the first failure")
+	}
+
+	noteSyslogDelivery(w, true, "", 0) // observed recovery
+	syslogHealth.mu.Lock()
+	stillArmed := syslogHealth.alertTimer != nil
+	syslogHealth.mu.Unlock()
+	if stillArmed {
+		t.Error("the episode timer survived recovery — it would page for an outage that has ended")
+	}
+
+	// And a page evaluated after recovery decides nothing.
+	var paged int
+	setSyslogAlert(func(string) { paged++ })
+	base := time.Now()
+	setSyslogNow(func() time.Time { return base.Add(10 * syslogDeliveryDegradedAfter) })
+	evaluateSyslogEpisode()
+	if paged != 0 {
+		t.Errorf("paged %d times for a recovered feed", paged)
+	}
+}
+
+// fireArmedEpisodeTimer invokes the evaluation ONLY if an episode timer is
+// actually armed, so the gate measures whether the timer exists rather than
+// calling the evaluation unconditionally.
+func fireArmedEpisodeTimer(t *testing.T) {
+	t.Helper()
+	syslogHealth.mu.Lock()
+	armed := syslogHealth.alertTimer != nil
+	syslogHealth.mu.Unlock()
+	if !armed {
+		return
+	}
+	evaluateSyslogEpisode()
 }

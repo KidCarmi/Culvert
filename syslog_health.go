@@ -126,6 +126,24 @@ type syslogHealthRecord struct {
 	// the socks5/cluster_ca/dns gauges are all emitted conditionally.
 	configured bool
 
+	// owner is the writer this record describes, and it is the FENCE against a
+	// callback from a retired one (Codex review, PR #1430).
+	//
+	// retireSyslogWriter clears the old writer's observer pointer, but that
+	// only stops callbacks that have not yet LOADED it. A drain goroutine
+	// already inside notifyDelivery holds the old pointer and can be
+	// descheduled there arbitrarily long — past the swap, past
+	// noteSyslogConfigured — and then write into the record that now describes
+	// the NEW writer: a healthy replacement reported as failing, or a real
+	// outage silently cleared by a stale recovery edge.
+	//
+	// Identity is the fence rather than a generation counter because it cannot
+	// be spoofed, needs no plumbing (the writer is in scope where the observer
+	// is installed), and is checked INSIDE the same critical section that
+	// mutates — a check in a separate lock acquisition would be the same race
+	// one level up.
+	owner *syslogWriter
+
 	// failingSince anchors the degradation DURATION. Zero means not currently
 	// failing. Set on the first collector-attributable failure of an episode
 	// and cleared only by an observed delivery.
@@ -134,6 +152,25 @@ type syslogHealthRecord struct {
 	// alerted latches the page for the duration of one episode so a collector
 	// that stays down does not re-page per dropped line.
 	alerted bool
+
+	// lastReason is the bounded class of the most recent failure, kept so the
+	// threshold timer can name a cause it did not observe itself.
+	lastReason string
+
+	// alertTimer fires the page when an episode crosses the threshold with no
+	// further traffic to carry it (Codex review, PR #1430). Without it,
+	// `alertNow` was only ever evaluated while processing ANOTHER failed line,
+	// so a gateway that loses one line and then goes quiet — a standby node, a
+	// quiet night — would cross the threshold with /metrics and
+	// /api/diagnostics both reporting the episode as degraded while the
+	// webhook never fired. Two surfaces disagreeing about one condition is the
+	// defect CHAOS-61 rule (2) names by hand.
+	//
+	// It is armed once per episode and stopped by recovery, reconfiguration or
+	// disable. It only TRIGGERS a re-evaluation; the decision still reads
+	// syslogNow(), so a test clock governs the verdict and a real-clock timer
+	// firing under a frozen test clock correctly decides nothing.
+	alertTimer *time.Timer
 
 	// logAt / suppressed drive the rate-limited log line.
 	logAt      time.Time
@@ -221,16 +258,35 @@ func fireSyslogFailingAlert(detail string) {
 	})
 }
 
-// noteSyslogConfigured records that a SIEM target is in effect and resets the
-// episode state. Called from every path that installs a Writer.
-func noteSyslogConfigured() {
+// noteSyslogConfigured records that a SIEM target is in effect, takes ownership
+// for sw, and resets the episode state. Called from every path that installs a
+// Writer.
+//
+// Taking ownership is what makes a retired writer's in-flight callback
+// harmless: from here on, only sw may move this record.
+func noteSyslogConfigured(sw *syslogWriter) {
 	syslogHealth.mu.Lock()
 	syslogHealth.configured = true
+	syslogHealth.owner = sw
 	syslogHealth.failingSince = time.Time{}
 	syslogHealth.alerted = false
+	syslogHealth.lastReason = ""
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
+	stopSyslogAlertTimerLocked()
 	syslogHealth.mu.Unlock()
+}
+
+// stopSyslogAlertTimerLocked disarms the threshold timer. Caller holds mu.
+//
+// Stop() may return false for a timer whose callback has already started; that
+// is harmless here, because the callback re-reads the episode state under the
+// lock and a reset episode decides nothing.
+func stopSyslogAlertTimerLocked() {
+	if syslogHealth.alertTimer != nil {
+		syslogHealth.alertTimer.Stop()
+		syslogHealth.alertTimer = nil
+	}
 }
 
 // noteSyslogUnconfigured clears the plane when forwarding is disabled, so a
@@ -238,43 +294,55 @@ func noteSyslogConfigured() {
 func noteSyslogUnconfigured() {
 	syslogHealth.mu.Lock()
 	syslogHealth.configured = false
+	syslogHealth.owner = nil
 	syslogHealth.failingSince = time.Time{}
 	syslogHealth.alerted = false
+	syslogHealth.lastReason = ""
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
+	stopSyslogAlertTimerLocked()
 	syslogHealth.mu.Unlock()
 }
 
 // noteSyslogDelivery is the delivery observer: called on every
 // collector-attributable failure and on the recovery edge. It runs on the
-// syslog drain goroutine.
+// syslog drain goroutine of the writer w it was installed on.
+//
+// w is FENCED against the record's current owner, inside the same critical
+// section that mutates it. A retired writer's callback — one already past
+// notifyDelivery's pointer load when the swap happened — therefore returns
+// having touched nothing, instead of driving the episode state of the writer
+// that replaced it (Codex review, PR #1430; the non-racy half is SL-8).
 //
 // It must never write to the process log through a path that reaches the
 // syslog writer, and it never calls back into the Writer — the same rule
 // audit.SetWriteFailureObserver carries, for the same unbounded-recursion
-// reason.
-func noteSyslogDelivery(ok bool, reason string, consecutive int64) {
+// reason, and walled by TestChaos66_Wall_DeliveryObserverCannotRecurse.
+func noteSyslogDelivery(w *syslogWriter, ok bool, reason string, consecutive int64) {
 	if ok {
-		noteSyslogDeliveryRecovered()
+		noteSyslogDeliveryRecovered(w)
 		return
 	}
 	now := syslogNow()
 
 	syslogHealth.mu.Lock()
+	if syslogHealth.owner != w {
+		// A superseded writer speaks for nobody.
+		syslogHealth.mu.Unlock()
+		return
+	}
 	if syslogHealth.failingSince.IsZero() {
 		syslogHealth.failingSince = now
+		// Arm the threshold timer ONCE per episode, so the page does not
+		// depend on more traffic arriving to carry it.
+		syslogHealth.alertTimer = time.AfterFunc(syslogDeliveryDegradedAfter, evaluateSyslogEpisode)
 	}
-	failingFor := now.Sub(syslogHealth.failingSince)
+	syslogHealth.lastReason = reason
 	shouldLog := syslogHealth.logAt.IsZero() || now.Sub(syslogHealth.logAt) >= syslogLogInterval
 	if shouldLog {
 		syslogHealth.logAt = now
 	} else {
 		syslogHealth.suppressed++
-	}
-	// The page is gated on the DURATION, and latched so one episode pages once.
-	alertNow := failingFor >= syslogDeliveryDegradedAfter && !syslogHealth.alerted
-	if alertNow {
-		syslogHealth.alerted = true
 	}
 	syslogHealth.mu.Unlock()
 
@@ -282,11 +350,39 @@ func noteSyslogDelivery(ok bool, reason string, consecutive int64) {
 		logger.Printf("WARN syslog: SIEM forwarding failing (reason=%q, %d consecutive lines lost) — events are NOT reaching the collector; the local audit log is unaffected; reconnecting every 5s",
 			sanitizeLog(reason), consecutive)
 	}
-	if alertNow {
-		fireSyslogFailingAlert(fmt.Sprintf(
-			"remote syslog/SIEM forwarding has been failing for over %s (reason: %s); audit and request events are not reaching the collector and are being discarded after the local write",
-			syslogDeliveryDegradedAfter, reasonOrUnknown(reason)))
+	// Evaluate immediately too: on a busy gateway the threshold is crossed by a
+	// later failed line long before any timer would fire, and that is the
+	// common case.
+	evaluateSyslogEpisode()
+}
+
+// evaluateSyslogEpisode pages if the current failure episode has run past the
+// degraded threshold and has not already paged.
+//
+// Reached from two places that must agree: the failure path (the common case —
+// a busy gateway crosses the threshold on a later failed line) and the
+// per-episode timer (the sparse case — a gateway that loses a line and then
+// goes quiet). Both read syslogNow(), so a frozen test clock decides nothing
+// however the real-clock timer fires.
+func evaluateSyslogEpisode() {
+	syslogHealth.mu.Lock()
+	if syslogHealth.failingSince.IsZero() || syslogHealth.alerted {
+		syslogHealth.mu.Unlock()
+		return
 	}
+	failingFor := syslogNow().Sub(syslogHealth.failingSince)
+	if failingFor < syslogDeliveryDegradedAfter {
+		syslogHealth.mu.Unlock()
+		return
+	}
+	syslogHealth.alerted = true
+	reason := syslogHealth.lastReason
+	stopSyslogAlertTimerLocked()
+	syslogHealth.mu.Unlock()
+
+	fireSyslogFailingAlert(fmt.Sprintf(
+		"remote syslog/SIEM forwarding has been failing for over %s (reason: %s); audit and request events are not reaching the collector and are being discarded after the local write",
+		syslogDeliveryDegradedAfter, reasonOrUnknown(reason)))
 }
 
 // noteSyslogDeliveryRecovered clears the episode on OBSERVED evidence — one
@@ -295,14 +391,23 @@ func noteSyslogDelivery(ok bool, reason string, consecutive int64) {
 // Elapsed time never clears it. A feed that has stopped reporting failures
 // because nothing is being logged looks identical to a healthy one, which is
 // the mistake ca_health.go and storage_health.go both call out by name.
-func noteSyslogDeliveryRecovered() {
+//
+// Fenced on w for the same reason as the failure path: a stale recovery edge
+// from a retired writer must not clear a real outage on the live one.
+func noteSyslogDeliveryRecovered(w *syslogWriter) {
 	syslogHealth.mu.Lock()
+	if syslogHealth.owner != w {
+		syslogHealth.mu.Unlock()
+		return
+	}
 	wasFailing := !syslogHealth.failingSince.IsZero()
 	suppressed := syslogHealth.suppressed
 	syslogHealth.failingSince = time.Time{}
 	syslogHealth.alerted = false
+	syslogHealth.lastReason = ""
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
+	stopSyslogAlertTimerLocked()
 	syslogHealth.mu.Unlock()
 
 	if wasFailing && logger != nil {

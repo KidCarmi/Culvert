@@ -35,6 +35,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   alert, delivery fields on `GET /api/syslog`, and a rate-limited failure and
   recovery log pair. See `docs/operator/siem-forwarding-health.md`.
 
+- The SIEM delivery health plane now fences callbacks on writer identity and
+  arms a per-episode threshold timer (review findings on the change above).
+  Clearing a retired writer's observer pointer stops only the callbacks that
+  have not yet loaded it, so a drain goroutine descheduled past the swap could
+  still drive the record that had come to describe its replacement — marking a
+  healthy feed down, or clearing a real outage. And the page used to be
+  evaluated only while processing another failed line, so a gateway that lost
+  one line and then went quiet crossed the alert threshold with the metrics and
+  the diagnostics row both reporting the episode as degraded while the webhook
+  never fired.
+
 - `InitSyslog` no longer replaces the active syslog writer without releasing
   the previous one, which leaked its drain goroutine, its collector socket and
   up to a queue's worth of pending lines on every re-point — reachable on an

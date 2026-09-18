@@ -37,7 +37,15 @@ func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
 	// (startup and runtime reconfigure alike) so a reconfigure never silently
 	// drops the health plane. It is edge-triggered, so a healthy feed pays
 	// nothing; see internal/syslog.SetDeliveryObserver.
-	sw.SetDeliveryObserver(noteSyslogDelivery)
+	//
+	// The closure binds THIS writer's identity into every callback, which is
+	// what lets the health plane fence out a callback from a writer it has
+	// since retired (Codex review, PR #1430). Clearing the observer pointer
+	// alone cannot do that: a drain goroutine already past notifyDelivery's
+	// pointer load still holds the old function.
+	sw.SetDeliveryObserver(func(ok bool, reason string, consecutive int64) {
+		noteSyslogDelivery(sw, ok, reason, consecutive)
+	})
 	return sw, nil
 }
 
@@ -103,7 +111,7 @@ func InitSyslog(addr, syslogFmt string) error {
 	// Arm the delivery health plane before announcing success: the writer is
 	// already draining, so a collector that fails on the very first line must
 	// find the episode state initialised.
-	noteSyslogConfigured()
+	noteSyslogConfigured(sw)
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
 	// A UDP dial sends nothing and succeeds against an address where nothing is
 	// listening, so "connected" is not evidence of anything on the default

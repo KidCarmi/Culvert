@@ -6509,6 +6509,8 @@ did not exist before this change.
 | SL-6 | `Format()` took `s.mu`, which `deliverLine` holds across up to two dials and two writes (~15s). Its callers are `GET /api/syslog` and, via the settings snapshot, `adminSettingsSave()` — reached by every mutating admin handler. **The management plane could stall on a log sink.** | **M** | CLOSED |
 | SL-7 | A target that fails to connect at BOOT is never retried — forwarding is off for the process lifetime — while the same collector dying one second later reconnects forever. One fault, two postures. | **M** | **OPEN** (posture, recorded below) |
 | SL-8 | `InitSyslog` replaced the writer without releasing the old one. A leak on its own; with the new delivery observer attached, a superseded writer pointed at a dead collector drives the health plane that now describes the NEW writer — a healthy feed reported as down. | **M** | CLOSED (found inside this sweep's own fix) |
+| SL-9 | **Clearing the observer pointer does not fence a callback already past the pointer LOAD.** A retired writer's drain goroutine descheduled inside `notifyDelivery` resumes after the swap and writes into the record that now describes the NEW writer — in both directions: a stale failure marks a healthy feed down, a stale recovery clears a real outage. | **M** | CLOSED (Codex review) |
+| SL-10 | **The page depended on more traffic arriving to carry it.** `alertNow` was evaluated only while processing another failed line, so a gateway that loses one line and then goes quiet crossed the threshold with `/metrics` and `/api/diagnostics` both reporting the episode as degraded while the webhook never fired — two surfaces disagreeing about one condition. | **M** | CLOSED (Codex review) |
 
 ### 36.3 What shipped
 
@@ -6627,6 +6629,39 @@ deserves its own review. It is **not silent**: `checkSyslogFeed` returns `fail`
 for exactly this state and now says outright that it is *not retried
 automatically*.
 
+### 36.4b The Codex round — two ways the fix was still one layer short
+
+Both findings are the same shape as §35's recurring lesson, and both were
+verified failing against the shape they replace.
+
+**SL-9 — identity, not a cleared pointer.** `retireSyslogWriter` stores nil into
+the old writer's observer pointer, which stops every callback that has not yet
+LOADED it. A drain goroutine already past `notifyDelivery`'s load holds the old
+function and can be descheduled there arbitrarily long — past the swap, past
+`noteSyslogConfigured` — and then writes into the record that now describes a
+DIFFERENT writer. The health plane therefore FENCES on writer IDENTITY
+(`syslogHealth.owner`), checked INSIDE the same critical section that mutates:
+a check in a separate lock acquisition would be the same race one level up.
+Identity rather than a generation counter because it cannot be spoofed and
+needs no plumbing — the writer is in scope where the observer is installed. The
+gate reproduces the window deterministically (capture the callback the way a
+descheduled goroutine holds it, reconfigure, then let it land) rather than
+racing goroutines, and it checks BOTH directions: a one-way fence would miss a
+stale recovery clearing a real outage.
+
+**SL-10 — a threshold nobody was left to cross.** `alertNow` was evaluated only
+while processing another failed line, so the page depended on more traffic
+arriving to carry it. A gateway that loses one line and then goes quiet — a
+standby node, a quiet night — crossed the 60 s threshold with `syslogState()`
+reporting `Degraded`, the contract row `fail`, and the webhook silent. That is
+two surfaces disagreeing about one condition, which is the defect §30's rule (2)
+names by hand. An episode now arms a `time.AfterFunc` once, stopped by
+recovery, reconfiguration or disable, and both callers route through one
+`evaluateSyslogEpisode`. The timer only TRIGGERS the evaluation; the decision
+still reads `syslogNow()`, so a frozen test clock decides nothing however the
+real-clock timer fires — which is what keeps the gates deterministic without
+sleeping out a real minute.
+
 ### 36.5 Gates
 
 `internal/syslog/syslog_delivery_chaos_test.go` — 8 gates. Four DEFECT gates
@@ -6638,12 +6673,14 @@ were each verified failing against a reintroduced pre-fix shape:
 | UDP reported as verifiable | `UDPDeliveryIsReportedUnverifiable` |
 | All losses in one counter, all advancing the run | `QueueOverflowIsNotACollectorOutage` |
 | Recovery not edge-detected | `ObserverIsEdgeTriggered` |
+| Ownership fence removed (SL-9) | `RetiredWriterCallbackIsFenced` — fails in BOTH directions |
+| Episode timer removed (SL-10) | `SparseGatewayStillPages` |
 
 plus CONTROLS (`HealthyFeedStaysGreen`, `QueueOverflowIsNotACollectorOutage`),
 because the cheapest way to pass a loss-visibility suite is to report everything
 as broken — which would page every healthy deployment.
 
-`syslog_health_chaos_test.go` — 10 gates in `package main`, driving a REAL
+`syslog_health_chaos_test.go` — 13 gates in `package main`, driving a REAL
 loopback collector rather than a mock (the property under test is what the
 TRANSPORT can and cannot tell us, which a mock would define away). The two
 headline defect gates were verified failing against the verbatim pre-fix
