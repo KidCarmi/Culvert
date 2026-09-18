@@ -47,6 +47,7 @@ func (tb *traceBuilder) finishWinner(d Decision, winner RuleID) ExplainTrace {
 func (tb *traceBuilder) assemble(d Decision, winner RuleID, decisive string) ExplainTrace {
 	return ExplainTrace{
 		Entries:         tb.entries,
+		Truncated:       tb.truncated,
 		Winner:          winner,
 		Decisive:        decisive,
 		Final:           d.Reason,

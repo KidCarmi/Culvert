@@ -45,10 +45,10 @@ coordinator, so even with arming + activation inputs closed nothing transitions 
 mode (§13/§17); and (13) **CLOSED** — the seeded controlled tool was `catalog.Quarantined` with
 nothing in the activation gate saying so; catalog usability is now a machine-checked activation
 fact bound to the exact scoped target and pinned fingerprint, satisfied only by the governed
-`shadow_evaluation` promotion lifecycle (§25b); and (14) the
-exact request must resolve to an ALLOW-class decision with satisfiable obligations — a
-no-`CredentialProfile` rule may still be DENY, an unmatched request default-denies, and `PolicyHealthy`
-only proves a snapshot exists (§4/§13); and (15) the one-NODE bound is not enforced by anything —
+`shadow_evaluation` promotion lifecycle (§25b); and (14) **CLOSED** — the exact request had to
+resolve to a decision that can actually execute and nothing checked it; the activation preflight now
+runs the REAL shared policy engine over the exact First-Canary tuple and requires a plain ALLOW with
+satisfiable obligations and a verdict invariant over every unbound policy field (§25c); and (15) the one-NODE bound is not enforced by anything —
 `ScopeSpec` has no node dimension and the publication coordinator pushes the signed envelope to EVERY
 `Dist.Nodes()` entry, so closing blocker 12 generically could activate every armed DP while the
 checklist still reads "nodes = 1" (§3/§13). Blockers 1–6 and 9–15 are gaps/prerequisites; 7–8 are
@@ -1108,7 +1108,7 @@ BLOCKED-vs-FAILED note in §26).
 | Rate-based abort thresholds are REACHABLE within the 3-execution corpus (or fail closed below the floor) | **YES — `sample_floor = 2`, error rate trips at ≥ 50% (`2 × failures ≥ samples`) over the current activation generation, hard per-attempt latency ≥ 15s trips with NO floor, mean ≥ 10s trips at the floor; `TestHealth_SampleFloorFitsTheFirstCanaryCorpus` fails if the floor drifts beyond the corpus (§16, blocker 7 CLOSED)** |
 | Activation preflight returns `Ready:true, Unmet:[]` on a real node | **NO** (§13) |
 | The exact tool is `catalog.Usable` (not Quarantined) at request time | ~~**NO**~~ **YES (blocker 13 CLOSED, §25b)** — usability is now a MACHINE-CHECKED ACTIVATION FACT (`canary.ReasonToolNotCatalogUsable`), resolved from the authoritative catalog for the exact scoped target at the exact pinned fingerprint. It is satisfied only by the governed `shadow_evaluation` promotion lifecycle; `ApproveLive` still never promotes, and a structural wall proves no data-plane caller can (§6/§7) |
-| The exact request resolves to an ALLOW-class rule with satisfiable obligations | **NO — a no-`CredentialProfile` rule may be DENY; an unmatched request default-denies; `PolicyHealthy` only proves a snapshot exists (§4/§13, blocker 14)** |
+| The exact request resolves to an ALLOW-class rule with satisfiable obligations | ~~**NO**~~ **YES (blocker 14 CLOSED, §25c)** — a MACHINE-CHECKED ACTIVATION FACT (`canary.ReasonExactPolicyNotExecutable`), decided by the REAL shared policy engine over the exact First-Canary tuple. The bar is stricter than this row's wording: a plain `policy.ActionAllow`, never `Action.IsAllowClass()`, because MONITOR reaches `EffectExecute` and ALLOW_ONCE / ALLOW_FOR_SESSION / ALLOW_WITH_REDACTION are gated by runtime state no preflight can observe. Obligations are judged satisfiable-HERE against a closed allow-list, and the verdict must be invariant over every unbound policy field |
 | Operator-reachable governed path to TRANSITION the node into Canary mode | **NO — `apiMCPRolloutTransition` returns `distribution_not_configured`; no non-test `publication.New`/`Publish` caller (§13/§17, blocker 12)** |
 | Governed production arming entry point exists (operator can arm) | **NO — `armLiveTier` has no production caller (§12)** |
 | Independent upstream witness reconcilable AND auto-stops on divergence | **NO — no reconciliation/auto-trip; retry amplification; §5 server absent (§14)** |
@@ -2435,10 +2435,11 @@ change to the code OR the campaign.
 
 **Deliberately NOT closed here, and the boundary is exact.** The policy E2E above stops at "ordinary
 policy evaluation became reachable". Whether the exact request then resolves to an ALLOW-class
-decision with satisfiable obligations is **blocker 14**, which remains OPEN. Reaching evaluation is
-a precondition for it, not a substitute: `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion`
-asserts only that the catalog-quarantine hard override stops pre-empting evaluation, never that a
-rule allows.
+decision with satisfiable obligations was **blocker 14**, which remained OPEN at the time of this
+section and has **since been closed in §25c**. Reaching evaluation is a precondition for it, not a
+substitute: `TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion` asserts only
+that the catalog-quarantine hard override stops pre-empting evaluation, never that a rule allows —
+that second question is answered by `canary.ReasonExactPolicyNotExecutable`, a separate row.
 
 **Two things this closure deliberately did not do.** It did not introduce a third promotion
 authority — §3's instruction was to reuse the governed `shadow_evaluation` lifecycle if it could
@@ -2479,6 +2480,152 @@ construction, pinned by `TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBound
 
 ---
 
+## §25c Blocker 14 closure (the exact First-Canary policy permit)
+
+This section records ONE status change: **blocker 14 is CLOSED**. Nothing else in the ledger moves.
+Blocker 8 remains OPEN (narrowed), **blocker 9 remains OPEN** (see the overlap note below), the
+baseline is still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY
+TARGET`.
+
+**The defect.** The readiness table's only policy row was `PolicyHealthy`, which is
+`mcpPolicy.composed()` — a snapshot EXISTS. Nothing asked what the exact request RESOLVES to. A
+node could hold an exact one-of-everything scope, a reviewed read-first target, a four-eyes live
+approval, a `catalog.Usable` tool (blocker 13) and a valid budget, report `Ready:true`, and then
+have every request answered by default deny because no enabled rule matched the tuple at all.
+Blocker 13 stopped the request dying at the catalog hard override; it said nothing about whether an
+operator rule then ALLOWs it.
+
+**The closure bar.** The machine must refuse to report an activation ready unless the exact
+First-Canary request, evaluated by the REAL shared policy engine against the CURRENT snapshot,
+resolves to a decision that can actually execute — and that verdict must be a statement about the
+EXPERIMENT, not about one imagined request.
+
+### What was re-derived rather than inherited from prose
+
+Two things current `main` does that the earlier review text would have gotten wrong, and both
+changed the design:
+
+- **`ActionMonitor` maps to `rollout.ActionKindAllow` and DOES resolve to `EffectExecute`**
+  (`internal/mcp/execution/mapping.go`), despite `action.go` documenting MONITOR as "non-blocking
+  policy intent; still no upstream execution in PR-6". A first experiment must not rest on a
+  documented/behavioural divergence.
+- **`resolveDisposition` passes `obligationsSatisfied = true` unconditionally**
+  (`internal/mcp/execution/executor.go`), so `resolve.go`'s `!ObligationsSatisfied` branch is dead
+  from the production call site. `ALLOW_ONCE`/`ALLOW_FOR_SESSION` reach `EffectExecute` and are
+  gated only afterwards by a RUNTIME-ONLY allowance store; `ALLOW_WITH_REDACTION` reaches
+  `EffectExecute` and is then unconditionally blocked (`ReasonRedactionFailed`).
+
+Neither is preflightable. That is why the permit demands exactly `policy.ActionAllow` and
+deliberately NOT `Action.IsAllowClass()` — the single most plausible wrong turn, and campaign
+mutation M04.
+
+### What closes it
+
+| Clause | Evidence |
+|---|---|
+| A machine-visible activation fact | `canary.Facts.ExactPolicyPermit` / `canary.ReasonExactPolicyNotExecutable`, a `factActivation` row; the activation set is now **nine** facts |
+| `PolicyHealthy` stays separate | The two rows fail for opposite reasons: a healthy snapshot in which no rule matches satisfies the first and fails this one. Campaign M01 rebuilds the substitution |
+| The REAL shared engine decides | `mcpruntime.EvaluateExactPermitTuple` builds the engine with the same `newPolicyEngine` and `Limits` the live pipeline uses. No second evaluator, no hand-written rule matching — walled by `TestPermitWall_ResolverUsesTheSharedEvaluator` |
+| The tuple is the one the runtime would build | `GatewayServerRef` / `GatewayToolRef` are now SHARED by `attachGatewayRefs` and `ExactPermitTuple`, so the server and tool halves are identical by construction |
+| One classification authority | `classifyReadFirstToolCall` became a free function both callers route through, so "exactly one site writes `Operation.Class`" stays literally true (`TestReadFirstWall_OperationClassHasExactlyOneClassificationSite` caught the first attempt to add a second) |
+| The positive verdict is explicit | `HardOverride == false` AND `MatchedRule != ""` AND `Action == policy.ActionAllow`. Campaign M02–M09 |
+| Obligations are satisfiable, not merely well-formed | A CLOSED allow-list: only `Logging` and `Observation` may ride the permit. `RateLimitProfile`, `Destination` and `TicketRequired` are refused because they have **no runtime consumer at all** — "satisfied" would mean "not enforced". `TestPermit_EveryObligationFieldIsClassified` derives the field list by reflection, so a new obligation fails the build until someone decides |
+| One coherent capture | The resolver reads the authoritative inventory exactly once, through the same reconciled seam blocker 13 uses; `TestPermitWall_ResolverTakesOneCoherentCapture` |
+| The policy decides which rule wins | No rule id appears in product logic; `TestPermitWall_NoHardCodedRuleIdentity` |
+| Not persisted into the reviewed snapshot | The permit is LIVE governance state, re-observed at every evaluation — the same decision blocker 13 made for catalog usability, for the same reason. `TestPermitWall_FactIsNotPersistedIntoTheReviewedSnapshot` |
+
+### The part that makes it a proof rather than a sample
+
+A preflight has no request, so the tuple must CHOOSE values for the fields a real request would
+carry. A verdict computed over those choices is evidence about one imagined request and nothing
+else — unless the verdict does not depend on them.
+
+So the permit additionally requires the verdict to be INVARIANT over every field the activation
+does not bind (`canary.PermitBoundFields`). The engine's own `ExplainTrace` makes this decidable:
+it names the decisive condition of every rule it rejected, so the permit requires
+
+- the WINNER to read only bound fields (`Snapshot.Rule(id).ConditionFields()`), and
+- every rule rejected before it to have been rejected ON a bound field (the engine reports the
+  FIRST failing condition, so naming a bound field means a bound field decided it), and
+- the trace not to be truncated — a truncated trace is silent about the rules it dropped, so "no
+  entry says otherwise" stops being evidence.
+
+Given all three, the same rule wins with the same action for every request the scope admits.
+
+**The check ORDER is load-bearing, and it was found by running the engine rather than by reading
+it.** `permitVerdictInvariant` covers only the RULE LOOP. The hard-override band runs first and is
+not a rule; almost all of its inputs are bound, but `subjectOverride` denies a WRITE-or-higher
+operation whose principal assurance is unknown (MCP-ID-005), and `principal.assurance` is
+request-variable. Requiring the class to be read-first BEFORE the hard-override test makes that
+branch unreachable — and with it unreachable, every remaining hard override is decided by bound
+fields alone. `TestPermitE2E_WriteClassIsNotAPermit` fails against the other order, and campaign
+mutation M20 restores it.
+
+### Two holes the campaign found, not the review
+
+Recorded because both survived a run and neither was visible to any behavioural gate:
+
+- **M27** — the resolver could take two inventory captures instead of one. Every behavioural gate
+  passes against a two-read resolver on a quiescent fixture, because nothing changes between the
+  reads. The invariant needed a structural gate, and counting is the assertion: a second call to
+  the SAME seam is two reads just as surely as a call to a different one, which no allow/deny list
+  can express.
+- **M15** — `operation.operand` could be replaced with a literal and nothing noticed, because no
+  fixture rule read that field. The lesson generalises past the one field: `PermitBoundFields()` is
+  the set the invariance proof rests on, so that guarantee is worth nothing unless every one of
+  them actually CARRIES the exact target's value.
+  `TestPermitE2E_EveryBoundFieldCarriesTheExactTarget` now drives the real engine once per bound
+  field, with a completeness declaration so a new bound field cannot arrive unproven.
+
+### The blocker-9 OVERLAP — reported, NOT acted on
+
+Blocker 9's recorded closure criterion is *"verifying a no-`CredentialProfile` matched rule OR
+implementing a working credential provider/path"*. This PR's fact **does** machine-check the first
+disjunct: the permit refuses any matched rule carrying a `CredentialProfile`, at activation time,
+re-evaluated on every read, which is strictly stronger than the runbook verification the criterion
+describes.
+
+**How strong the overlap actually is, stated plainly rather than minimised.** Because the permit
+additionally requires INVARIANCE, the credential-free finding is not merely a statement about one
+constructed tuple: a rule that reads any request-variable field yields `PermitVerdictNotInvariant`
+instead of a permit, so a certified permit means the SAME rule wins — carrying no
+`CredentialProfile` — for every request the exact scope admits. On a literal reading of blocker 9's
+first disjunct, that is the verification it asks for, done by machine and re-evaluated on every
+read.
+
+**Blocker 9 is nevertheless left OPEN, and its ledger status is unchanged.** Three reasons, the
+first two substantive and the third procedural:
+
+1. **The permit is an ACTIVATION-time fact; blocker 9 is about the EXECUTION path.** The permit is
+   not consulted per request. If policy is edited mid-window to a credential-bearing rule, the
+   request fails closed at `executePreconditionFailure` (`ReasonCredentialProfileMissing`, because
+   the production broker composes ZERO providers) — safe, but it means the Canary silently stops
+   executing rather than the credential path having been resolved.
+2. **Blocker 9 also names the broker/provider path itself**, which nothing in this PR exercises:
+   `mcp_live_production_deps.go` still constructs the broker with no provider registered, which is
+   the truthful pre-Canary posture and the second half of what blocker 9 describes. The node-level
+   `CredentialPathReady` row remains tied to live-tier composition, not to "no credential needed".
+3. **A blocker closed as a side effect of another PR inherits that PR's evidence instead of being
+   held to its own.** Whether (1) and (2) are acceptable for the first experiment is an owner
+   decision about the credential path, not a consequence of this one.
+
+`TestPermitE2E_CredentialFreeRuleIsRequired` records the overlap executably, with its positive
+control. **If the owner judges the first disjunct satisfied, closing blocker 9 is a one-line ledger
+change with this section as its evidence — but it is deliberately not taken here.**
+
+### What this does NOT close
+
+- **Blocker 9 stays OPEN** (above).
+- The end-to-end proof stops at *"policy ALLOW ⇒ rollout `EffectExecute`"* under controlled test
+  composition (`TestPermitE2E_AllowResolvesToEffectExecute`). **No upstream is contacted, no
+  executor is composed, no Canary is activated.** Blockers 1, 2, 3, 8, 10, 11, 12 and 15 are
+  untouched.
+- Enforcement did not move. The policy engine still decides every real request; this row only stops
+  a node reporting Ready for an experiment whose every call would be refused.
+
+**Campaign:** `scripts/mcp-first-canary-policy-permit-mutations.sh` — **30 mutations, 30 caught,
+0 survived, 0 skipped**, measured on the closing head.
+
 ## §26 Final verdict
 
 ### `FIRST CONTROLLED CANARY REVIEW: BLOCKED — NO SAFE FIRST CANARY TARGET`
@@ -2499,12 +2646,12 @@ would let them inherit a neighbour's closure) and NOT filed as a sixteenth block
 fifteen are preserved exactly as adopted). A First Canary requires the fifteen closed AND every such
 §24 finding closed.
 
-**Post-adoption status (see §25a, §25b).** The baseline remains **fifteen**; the list below is
-preserved as adopted, and nothing is renumbered or deleted. Six entries have changed status since:
+**Post-adoption status (see §25a, §25b, §25c).** The baseline remains **fifteen**; the list below is
+preserved as adopted, and nothing is renumbered or deleted. Seven entries have changed status since:
 **blocker 4 is CLOSED**, **blocker 5 is CLOSED**, **blocker 6 is CLOSED**, **blocker 7 is CLOSED**,
-**blocker 13 is CLOSED**, and **blocker 8 is narrowed but still OPEN**. Nine are untouched, and the
-verdict above is unchanged — closing blockers 4, 5, 6, 7 and 13 removes five of fifteen reasons a GO
-is forbidden, not the prohibition.
+**blocker 13 is CLOSED**, **blocker 14 is CLOSED**, and **blocker 8 is narrowed but still OPEN**.
+Eight are untouched, and the verdict above is unchanged — closing blockers 4, 5, 6, 7, 13 and 14
+removes six of fifteen reasons a GO is forbidden, not the prohibition.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -2737,7 +2884,7 @@ is forbidden, not the prohibition.
    wall proves no data-plane caller can. ENFORCEMENT is unchanged and still lives in the policy
    engine; what changed is that a node can no longer report Ready for an experiment every request
    would die in.
-14. **The exact request must resolve to an ALLOW-class decision with satisfiable obligations (§4/§13).**
+14. **[CLOSED — see §25c] The exact request must resolve to an ALLOW-class decision with satisfiable obligations (§4/§13).**
    Closing the credential condition (blocker 9) by choosing a rule with no `CredentialProfile` does not
    make the request executable: that rule may itself be DENY-class, and if NO enabled rule matches,
    `matchRules` falls through to default-deny (`engine.go:170-173`); `resolveEnforcing`
@@ -2746,6 +2893,17 @@ is forbidden, not the prohibition.
    snapshot EXISTS, never that the exact request resolves to an allow. The authorization must therefore
    require the exact (principal, tenant, server, tool, operation) to resolve to an ALLOW-class rule with
    every execution obligation satisfiable.
+   **CLOSED (§25c).** It is now a mandatory MACHINE-CHECKED activation criterion: the preflight carries
+   `canary.ReasonExactPolicyNotExecutable`, resolved by running the REAL shared policy engine over the
+   exact First-Canary tuple built from authoritative state. The bar is deliberately STRICTER than the
+   finding's own wording — a plain `policy.ActionAllow`, never `Action.IsAllowClass()` — because
+   re-derivation against current code showed MONITOR reaches `EffectExecute` and ALLOW_ONCE /
+   ALLOW_FOR_SESSION / ALLOW_WITH_REDACTION are gated afterwards by runtime state no preflight can
+   observe. Obligations are judged SATISFIABLE-HERE against a closed allow-list, not merely
+   well-formed, and the verdict must be invariant over every policy field the activation does not
+   bind — so it is a statement about the experiment rather than about one imagined request.
+   Enforcement is unchanged and still lives in the policy engine. The credential clause's overlap with
+   blocker 9 is recorded in §25c and deliberately NOT acted on; **blocker 9 stays OPEN.**
 15. **The one-NODE bound is not enforced by anything (§3/§13).** `ScopeSpec` has no node dimension at all
    (`internal/mcp/rollout/scope.go:100-119`: tenants/servers/tools/principals/agents/clients/groups/
    percent + exclusions — no node selector), and the publication coordinator's `pushAll` delivers the
@@ -2802,7 +2960,10 @@ verdict FAILED.)
   attaches NO `CredentialProfile` (so the no-credential branch is proven for this exact request), OR
   implement a working credential provider/path — the production broker composes zero providers, so a
   credential-requiring rule fails closed. This is NOT sufficient alone: the same rule must also be
-  ALLOW-class with satisfiable obligations (blocker 14);
+  ALLOW-class with satisfiable obligations — which blocker 14 (CLOSED, §25c) now machine-checks,
+  including that the matched rule carries no `CredentialProfile`. **That overlap is recorded, not
+  acted on: blocker 9 stays OPEN**, because the permit binds the tuple the preflight can construct
+  and says nothing about the broker/provider path (see §25c);
 - ~~make the exact tool **`catalog.Usable`**, and treat catalog usability as a MANDATORY
   criterion~~ **DONE AS A MACHINE CRITERION (blocker 13 CLOSED, §25b)** — it is no longer an
   external prerequisite anyone could forget or attest to by hand. The activation preflight resolves
@@ -2811,11 +2972,16 @@ verdict FAILED.)
   engine would hard-quarantine. The OPERATOR step that remains is the one the gate now enforces:
   issue a `shadow_evaluation` approval (the only promoting path) for the exact tool at the exact
   fingerprint. `ApproveLive` still never promotes;
-- require the exact request to resolve to an **ALLOW-class policy decision with every execution
-  obligation satisfiable** (blocker 14, §4/§13) — verify the exact (principal, tenant, server, tool,
-  operation) matches an enabled ALLOW-class rule; an unmatched request default-denies
-  (`engine.go:170-173`) and `resolveEnforcing` blocks every non-allow-class decision. The preflight's
-  `PolicyHealthy` fact (`mcpPolicy.composed()`) does NOT prove this;
+- ~~require the exact request to resolve to an **ALLOW-class policy decision with every execution
+  obligation satisfiable**~~ **DONE AS A MACHINE CRITERION (blocker 14 CLOSED, §25c)** — it is no
+  longer an external prerequisite anyone could forget or attest to by hand. The activation preflight
+  runs the REAL shared policy engine over the exact First-Canary tuple and reports
+  `exact_policy_not_executable` unless the verdict is a plain `policy.ActionAllow` with no hard
+  override, a matched rule, a read-first class, satisfiable obligations, and invariance over every
+  unbound policy field. `PolicyHealthy` (`mcpPolicy.composed()`) remains a separate row and still
+  proves only that a snapshot exists. The OPERATOR step that remains is the one the gate now
+  enforces: author an enabled plain-ALLOW rule matching the exact target on BOUND fields only, with
+  no obligation beyond logging/observation;
 - ~~impose the exact one-of-everything identity shape as an authorization prerequisite~~ **DONE
   (blocker 5 CLOSED, §25a)** — it is no longer an external prerequisite. `canary.ValidateFirstCanaryScope`
   enforces exactly one `Principals` entry, zero `Clients`/`Agents`/`Groups`, and exactly one tool (plus

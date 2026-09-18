@@ -83,6 +83,24 @@ const (
 	// approval NEVER satisfies it: live trust is orthogonal to catalog usability (§15), and that
 	// separation is the reason this is its own fact rather than a clause on LiveApprovalValid.
 	ReasonToolNotCatalogUsable Reason = "tool_not_catalog_usable"
+	// ReasonExactPolicyNotExecutable — the EXACT First-Canary request does not resolve, through
+	// the real shared policy engine, to a decision that can actually execute (blocker #14).
+	//
+	// It is deliberately SEPARATE from ReasonPolicyUnhealthy, and the two fail for opposite
+	// reasons: PolicyHealthy is `mcpPolicy.composed()` — a snapshot EXISTS — and a perfectly
+	// healthy snapshot in which no rule matches the exact tuple satisfies it while leaving every
+	// request answered by default deny. A snapshot existing is not an authorization.
+	//
+	// MET requires all of: no hard override; a rule actually matched; that rule's action is a
+	// PLAIN policy.ActionAllow (never merely Action.IsAllowClass() — see
+	// FirstCanaryRequiresPlainAllow); the evaluated operation class is read-first; every
+	// obligation on the matched rule is satisfiable on this node; and the verdict is INVARIANT
+	// over every policy field the activation does not bind (PermitBoundFields), so it is a
+	// statement about the experiment rather than about one imagined request.
+	//
+	// Enforcement does not move: the policy engine still decides every real request. This row
+	// only stops a node reporting Ready for an experiment whose every call would be refused.
+	ReasonExactPolicyNotExecutable Reason = "exact_policy_not_executable"
 	// ReasonRollbackPathUnhealthy — the deterministic Canary→Shadow/Observe rollback path is
 	// not healthy (an emergency demotion could not be performed). Driven by the executable
 	// persist/restore rehearsal — rollback MECHANICS evidence.
@@ -148,7 +166,15 @@ type Facts struct {
 	// LIVE governance state, deliberately re-observed at each evaluation and never copied into
 	// the activation's immutable reviewed snapshot: a revoked or expired promotion must be able
 	// to make a node un-ready, which a frozen copy could not express. See ReasonToolNotCatalogUsable.
-	ToolCatalogUsable   bool
+	ToolCatalogUsable bool
+	// ExactPolicyPermit — the EXACT First-Canary decision tuple, evaluated by the REAL shared
+	// policy engine against the CURRENT snapshot, is a plain executable ALLOW with satisfiable
+	// obligations and a verdict invariant over every unbound field. Like ToolCatalogUsable it is
+	// LIVE governance state, re-observed at each evaluation and never copied into the
+	// activation's immutable reviewed snapshot: a policy change that removes the permit must be
+	// able to make a node un-ready, which a frozen copy could not express.
+	// See ReasonExactPolicyNotExecutable and EvaluateExactPermit.
+	ExactPolicyPermit   bool
 	RollbackPathHealthy bool // the persist/restore rollback MECHANICS were executably rehearsed
 	// RollbackCoordinatorRehearsed — the AUTHORITATIVE rollback path was rehearsed through the real
 	// commitRolloutTransitionAt coordinator. It is a SEPARATE hard prerequisite from RollbackPathHealthy
@@ -189,7 +215,7 @@ type readinessCheck struct {
 }
 
 // readinessChecks is the canonical-ordered prerequisite table (matches the Reason declaration
-// order) and the SINGLE source of truth for both Evaluate and EvaluateNode. The eight
+// order) and the SINGLE source of truth for both Evaluate and EvaluateNode. The nine
 // activation-level rows are exactly the facts a caller resolves from a requested scope/
 // approval/budget/target; every other row is node-level.
 var readinessChecks = []readinessCheck{
@@ -212,6 +238,7 @@ var readinessChecks = []readinessCheck{
 	{func(f Facts) bool { return f.ServerUsable }, ReasonServerNotUsable, factActivation},
 	{func(f Facts) bool { return f.ToolFingerprintCurrent }, ReasonToolFingerprintStale, factActivation},
 	{func(f Facts) bool { return f.ToolCatalogUsable }, ReasonToolNotCatalogUsable, factActivation},
+	{func(f Facts) bool { return f.ExactPolicyPermit }, ReasonExactPolicyNotExecutable, factActivation},
 	{func(f Facts) bool { return f.RollbackPathHealthy }, ReasonRollbackPathUnhealthy, factNode},
 	{func(f Facts) bool { return f.RollbackCoordinatorRehearsed }, ReasonRollbackCoordinatorRehearsalPending, factNode},
 	{func(f Facts) bool { return f.BudgetConfigured }, ReasonBudgetNotConfigured, factActivation},
@@ -230,10 +257,10 @@ func Evaluate(f Facts) Readiness { return evaluate(f, false) }
 // EvaluateNode returns the SCOPE-INDEPENDENT node readiness verdict: it evaluates only the
 // node-level prerequisites and NEVER reports an activation-input fact (scope bounded,
 // read-first, exact first-Canary scope, live approval, server usability, tool fingerprint,
-// exact scoped tool catalog-usable, budget) as unmet. This is the operator dry-run surface
+// exact scoped tool catalog-usable, exact policy permit, budget) as unmet. This is the operator dry-run surface
 // consumed before any scope is chosen — a node that has satisfied every node-level
 // prerequisite reports node_ready true even though no activation input has been supplied yet,
-// instead of being permanently not-ready because the eight activation facts default false
+// instead of being permanently not-ready because the nine activation facts default false
 // (Codex P2, PR #1249). The count and membership live in readinessChecks (the factActivation
 // rows); this comment restates them and TestEvaluateNode_ExcludesActivationInputs derives them
 // from that table, so a new row cannot leave this list quietly stale. The complete verdict is Evaluate, driven by the
@@ -281,6 +308,7 @@ func AllReasons() []Reason {
 		ReasonServerNotUsable,
 		ReasonToolFingerprintStale,
 		ReasonToolNotCatalogUsable,
+		ReasonExactPolicyNotExecutable,
 		ReasonRollbackPathUnhealthy,
 		ReasonRollbackCoordinatorRehearsalPending,
 		ReasonBudgetNotConfigured,
