@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -66,7 +67,8 @@ func newLiveCollector(t *testing.T, network string) (*syslog.Writer, func()) {
 	var closeFn func()
 	switch network {
 	case "tcp":
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		// (*net.ListenConfig).Listen, not net.Listen — repo lint policy (noctx).
+		ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Skipf("no loopback TCP in this environment: %v", err)
 		}
@@ -109,7 +111,8 @@ func newLiveCollector(t *testing.T, network string) (*syslog.Writer, func()) {
 			accepted.mu.Unlock()
 		}
 	default:
-		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		// (*net.ListenConfig).ListenPacket, not net.ListenPacket — same policy.
+		pc, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 		if err != nil {
 			t.Skipf("no loopback UDP in this environment: %v", err)
 		}
