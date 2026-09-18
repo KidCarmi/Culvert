@@ -36,7 +36,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -135,6 +134,16 @@ type caBundle struct {
 // NOTE: The bytes 'P','S','C','A' are a legacy format identifier (originally
 // "ProxyShield CA"). Do NOT change — existing encrypted CA bundles on disk
 // use this magic and would fail to load if the value changes.
+// ErrBundleDecrypt marks a bundle that carries the PSCA envelope but could
+// not be unsealed with the supplied passphrase (wrong passphrase, or a
+// damaged envelope). ErrBundleMalformed marks a bundle whose plaintext is not
+// a CERTIFICATE + EC PRIVATE KEY pair. Both are matched with errors.Is by the
+// admin surfaces, which publish a bounded class instead of the wrapped text.
+var (
+	ErrBundleDecrypt   = errors.New("CA bundle: decrypt failed")
+	ErrBundleMalformed = errors.New("CA bundle: malformed")
+)
+
 var caMagic = [4]byte{'P', 'S', 'C', 'A'}
 
 const (
@@ -144,66 +153,39 @@ const (
 	aesGCMNonceLen = 12
 )
 
-// InitCA generates a fresh in-memory Root CA key pair. Call once at startup
-// when no persisted CA is available.
+// InitCA generates a fresh Root CA and installs it. It is the in-memory path
+// (no bundle configured, tests); every path that HAS a bundle goes through
+// NewRotationCandidate → PersistCandidate → Install so the trust anchor is
+// durable before it is live (FE-6B.0).
 func (cm *Manager) InitCA() error {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c, err := NewRotationCandidate()
 	if err != nil {
 		return err
 	}
-	// RFC 5280 requires unique serial numbers per CA. Use 128-bit random
-	// serial to avoid collisions across CA rotations and multiple instances.
-	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return fmt.Errorf("ca: serial generation: %w", err)
-	}
-	template := &x509.Certificate{
-		SerialNumber: caSerial,
-		Subject: pkix.Name{
-			Organization: []string{"Culvert"},
-			CommonName:   "Culvert Root CA",
-		},
-		NotBefore:             time.Now().Add(-time.Minute),
-		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-	}
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		return err
-	}
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		return err
-	}
-	cm.mu.Lock()
-	cm.caCert = cert
-	cm.caKey = key
-	cm.cache = map[string]*certCacheEntry{}
-	cm.cacheOrder = nil // clear leaf cache on CA change
-	cm.mu.Unlock()
-	if CAChangedObserver != nil {
-		CAChangedObserver()
-	}
+	cm.Install(c)
 	return nil
 }
 
 // LoadOrInitCA loads an existing CA bundle from path (decrypting with
-// passphrase) or, if the file does not exist, generates a fresh CA and saves
-// it. An empty passphrase disables encryption (development/testing only).
+// passphrase) or, if the file does not exist, generates a fresh CA, PERSISTS
+// it and only then installs it. An empty passphrase disables encryption
+// (development/testing only).
 //
 // The env var CULVERT_CA_PASSPHRASE is the recommended way to supply the
 // passphrase so it never appears in CLI history or process listings.
 func (cm *Manager) LoadOrInitCA(path, passphrase string) error {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		// No existing bundle — generate and persist.
-		if err := cm.InitCA(); err != nil {
+		// No existing bundle — generate, persist, then publish (FE-6B.0: a
+		// first boot whose bundle write fails must not run on a CA the next
+		// boot cannot load).
+		c, err := NewRotationCandidate()
+		if err != nil {
 			return fmt.Errorf("CA init: %w", err)
 		}
-		if err := cm.SaveCA(path, passphrase); err != nil {
+		if err := PersistCandidate(c, path, passphrase); err != nil {
 			return fmt.Errorf("CA save: %w", err)
 		}
+		cm.Install(c)
 		return nil
 	}
 	return cm.LoadCA(path, passphrase)
@@ -260,7 +242,7 @@ func (cm *Manager) LoadCA(path, passphrase string) error {
 	} else {
 		plaintext, err = DecryptBundle(data, []byte(passphrase))
 		if err != nil {
-			return fmt.Errorf("CA decrypt: %w", err)
+			return fmt.Errorf("CA decrypt: %w: %w", ErrBundleDecrypt, err)
 		}
 	}
 	return cm.ImportBundle(plaintext)
@@ -302,15 +284,15 @@ func (cm *Manager) ImportBundle(data []byte) error {
 		}
 	}
 	if certDER == nil || keyDER == nil {
-		return errors.New("CA bundle: missing CERTIFICATE or EC PRIVATE KEY block")
+		return fmt.Errorf("%w: missing CERTIFICATE or EC PRIVATE KEY block", ErrBundleMalformed)
 	}
 	cert, err := x509.ParseCertificate(certDER)
 	if err != nil {
-		return fmt.Errorf("CA bundle: parse cert: %w", err)
+		return fmt.Errorf("%w: parse cert: %w", ErrBundleMalformed, err)
 	}
 	key, err := x509.ParseECPrivateKey(keyDER)
 	if err != nil {
-		return fmt.Errorf("CA bundle: parse key: %w", err)
+		return fmt.Errorf("%w: parse key: %w", ErrBundleMalformed, err)
 	}
 	// Validate cert has not expired.
 	if time.Now().After(cert.NotAfter) {
@@ -439,51 +421,27 @@ func (cm *Manager) CACertInfo() map[string]any {
 	if cm.caCert == nil {
 		return map[string]any{"ready": false}
 	}
-	fp := sha256.Sum256(cm.caCert.Raw)
-	// Format fingerprint as XX:XX:XX:... without rune→byte conversion (G115).
-	fpParts := make([]string, len(fp))
-	for i, b := range fp {
-		fpParts[i] = fmt.Sprintf("%02X", b)
-	}
-	fingerprint := strings.Join(fpParts, ":")
 	return map[string]any{
 		"ready":       true,
 		"subject":     cm.caCert.Subject.CommonName,
 		"issuer":      cm.caCert.Issuer.CommonName,
 		"notBefore":   cm.caCert.NotBefore.Format("2006-01-02"),
 		"notAfter":    cm.caCert.NotAfter.Format("2006-01-02"),
-		"fingerprint": fingerprint,
+		"fingerprint": FingerprintOf(cm.caCert),
 	}
 }
 
-// LoadCustomCA loads a PEM-encoded CA certificate and private key supplied by
-// the user (e.g. an enterprise intermediate CA). Private key is never stored in
-// cleartext memory beyond the parsing step.
+// LoadCustomCA validates and installs a PEM-encoded CA certificate and
+// private key supplied by the user (e.g. an enterprise intermediate CA). It
+// is ParseCACandidate + Install with no persistence step — the admin API
+// persists the candidate FIRST (FE-6B.0); this remains for in-memory callers
+// and tests. A refusal is a bounded *CandidateError.
 func (cm *Manager) LoadCustomCA(certPEM, keyPEM []byte) error {
-	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	c, err := ParseCACandidate(certPEM, keyPEM)
 	if err != nil {
-		return fmt.Errorf("key pair mismatch: %w", err)
+		return err
 	}
-	x509Cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
-	if err != nil {
-		return fmt.Errorf("invalid certificate: %w", err)
-	}
-	if !x509Cert.IsCA {
-		return errors.New("certificate is not a CA (BasicConstraints.IsCA must be true)")
-	}
-	ecKey, ok := tlsCert.PrivateKey.(*ecdsa.PrivateKey)
-	if !ok {
-		return errors.New("only ECDSA private keys are supported for MITM CA")
-	}
-	cm.mu.Lock()
-	cm.caCert = x509Cert
-	cm.caKey = ecKey
-	cm.cache = map[string]*certCacheEntry{}
-	cm.cacheOrder = nil
-	cm.mu.Unlock()
-	if CAChangedObserver != nil {
-		CAChangedObserver()
-	}
+	cm.Install(c)
 	return nil
 }
 
@@ -508,6 +466,15 @@ func (cm *Manager) CAExpiry() time.Time {
 // a new one with dual-CA overlap: the old CA is kept as secondary for the
 // remaining lifetime of its certificate, so leaf certs signed by either CA
 // remain valid during the transition. Returns true if rotation occurred.
+//
+// PERSIST BEFORE PUBLISH (FE-6B.0): when a bundle path is configured the
+// replacement is written FIRST and installed only once the write landed. A
+// write failure therefore leaves the CURRENT CA active — still valid for up
+// to the 30-day overlap window — and the attempt is repeated at the next
+// check; it never produces a memory-only CA that the next restart discards
+// and re-mints differently. The failure is reported through
+// RotationPersistFailureObserver with a bounded class (CHAOS-28 / CA-2, now
+// describing a rotation that was NOT applied rather than one that was).
 func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	expiry := cm.CAExpiry()
 	if expiry.IsZero() {
@@ -517,69 +484,44 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 		return false
 	}
 
-	// Preserve the current CA as secondary for dual-CA overlap.
-	cm.mu.Lock()
-	oldCert := cm.caCert
-	oldKey := cm.caKey
-	cm.mu.Unlock()
-
 	obs.Printf("CA auto-rotation: cert expires %s (<%d days) — generating new CA with dual-CA overlap",
 		expiry.Format("2006-01-02"), int(caRotationOverlap.Hours()/24))
-	if err := cm.InitCA(); err != nil {
+	c, err := NewRotationCandidate()
+	if err != nil {
 		obs.Printf("CA auto-rotation: init failed: %v", err)
 		return false
 	}
-
-	// Install old CA as secondary, valid until its original expiry.
-	cm.mu.Lock()
-	cm.secondaryCACert = oldCert
-	cm.secondaryCAKey = oldKey
-	cm.secondaryExpiry = expiry
-	cm.mu.Unlock()
-
-	// Persistence is what makes rotation a RECOVERY rather than a reprieve. If
-	// the bundle does not land (disk full, read-only remount, permission
-	// denied), the replacement CA lives only in RAM: the next restart reloads
-	// the OLD near-expiry bundle, rotates again, and mints a DIFFERENT root —
-	// so every reboot re-breaks the trust an operator just finished
-	// distributing. Reporting that as a clean rotation is the silent-failure
-	// pattern this register exists to eliminate, so it gets its own observer and
-	// its own log wording (CHAOS-28, register row CA-2).
-	persisted := true
 	if caPath != "" {
-		if err := cm.SaveCA(caPath, passphrase); err != nil {
-			persisted = false
-			obs.Printf("CA auto-rotation: save failed: %v", err)
+		if err := PersistCandidate(c, caPath, passphrase); err != nil {
+			class := PersistFailureClass(err)
+			obs.Printf("CA auto-rotation: bundle write failed (%s) — rotation NOT applied; the current CA stays active "+
+				"and the attempt is repeated at the next check", class)
 			if RotationPersistFailureObserver != nil {
-				RotationPersistFailureObserver(err.Error())
+				RotationPersistFailureObserver(class)
 			}
-		} else if RotationPersistSuccessObserver != nil {
-			RotationPersistSuccessObserver()
+			return false
 		}
 	}
-	newExpiry := cm.CAExpiry()
-	if persisted {
-		obs.Printf("CA auto-rotation: new CA generated (expires %s), old CA retained until %s",
-			newExpiry.Format("2006-01-02"), expiry.Format("2006-01-02"))
-	} else {
-		obs.Printf("CA auto-rotation: new CA generated (expires %s) but NOT PERSISTED — it exists in memory only; "+
-			"the next restart will reload the old bundle and rotate to a different CA",
-			newExpiry.Format("2006-01-02"))
+
+	// Preserve the current CA as secondary for dual-CA overlap and publish
+	// the (now durable) replacement in one swap.
+	cm.mu.RLock()
+	oldCert, oldKey := cm.caCert, cm.caKey
+	cm.mu.RUnlock()
+	cm.installLocked(c, oldCert, oldKey, expiry)
+
+	if caPath != "" && RotationPersistSuccessObserver != nil {
+		RotationPersistSuccessObserver()
 	}
+	newExpiry := cm.CAExpiry()
+	obs.Printf("CA auto-rotation: new CA generated (expires %s), old CA retained until %s",
+		newExpiry.Format("2006-01-02"), expiry.Format("2006-01-02"))
 	// Observability crosses the boundary via the publish-once hook: main
 	// fires the cert-rotation alert and bumps culvert_ca_rotations_total.
-	// Keeping this on RotateIfNeeded itself (not the loop) preserves the
-	// contract that a direct RotateIfNeeded call counts as a rotation.
-	//
-	// GATED ON PERSISTENCE. A rotation that could not be written is not a
-	// successful rotation: firing the success observer here would send the
-	// operator a "Root CA rotated (dual-CA overlap active)" alert alongside the
-	// "NOT PERSISTED" one from the branch above — two contradictory pages for
-	// one event — and would advance culvert_ca_rotations_total, which is
-	// documented as counting successful rotations, for a CA that the next
-	// restart will discard. The in-memory CA IS now the active one, so the
-	// function still returns true; only the success SIGNAL is withheld.
-	if persisted && RotationObserver != nil {
+	// Only a rotation that is durable (or had nothing to persist) reaches
+	// this line, so the success signal is gated on persistence by
+	// construction.
+	if RotationObserver != nil {
 		RotationObserver(expiry, newExpiry)
 	}
 	return true

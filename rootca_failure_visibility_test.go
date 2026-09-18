@@ -59,8 +59,13 @@ func TestCALoadFailure_AlertQueuedUntilWebhooksLoad(t *testing.T) {
 	if len(*captured) != 0 {
 		t.Fatalf("alert fired before webhook store loaded — it would fan out to an empty list and vanish (got %d)", len(*captured))
 	}
-	if got := sslInspectionLoadFailure(); !strings.Contains(got, "/data/ca.bundle") || !strings.Contains(got, "bundle decrypt failed") {
-		t.Fatalf("recorded failure missing path/cause: %q", got)
+	// FE-6B.0: the recorded detail carries the BOUNDED class and never the
+	// bundle path or the loader's text (it reaches a viewer-role response).
+	if got := sslInspectionLoadFailure(); got == "" || strings.Contains(got, "/data/ca.bundle") || strings.Contains(got, "bundle decrypt failed") {
+		t.Fatalf("recorded failure must be bounded (no path, no raw cause): %q", got)
+	}
+	if got := sslInspectionLoadFailureClass(); got != "load_failed" {
+		t.Fatalf("recorded class = %q, want load_failed for an unclassified cause", got)
 	}
 
 	flushStartupAlerts()
@@ -177,30 +182,44 @@ func TestHandleHealth_SurfacesSSLInspectionState(t *testing.T) {
 // TestCALoadFailure_SurfacedEvenWhenReady is the follow-up regression: the
 // recorded load failure must win over Ready() on BOTH /healthz and /readyz.
 // LoadOrInitCA calls InitCA() (Ready()→true) BEFORE SaveCA(), so a SaveCA
-// failure (missing parent dir) leaves initInspectionCA having recorded a
-// failure while certMgr.Ready() stays true. Reporting "ready"/"ok" there would
-// hide a configured CA bundle that never persisted — the reporting must reflect
-// the recorded failure first, without touching the CA manager's Ready()
-// semantics or the proxy's degrade-to-tunnel behavior.
+// failure leaves a failure recorded while certMgr.Ready() is true. Reporting
+// "ready"/"ok" there would hide a configured CA bundle that never persisted —
+// the reporting must reflect the recorded failure first, without touching the
+// CA manager's Ready() semantics or the proxy's degrade-to-tunnel behavior.
+//
+// FE-6B.0 changed how the window is REACHED, not that it exists: the first boot
+// now persists the fresh root BEFORE installing it, so an unwritable bundle path
+// leaves Ready() false (nothing installed) — the recovery loop's "CA loaded, the
+// SaveCA half failed" branch (rootca_recovery.go) is the remaining way to hold a
+// live CA beside a recorded failure, and that is the state built here directly.
 func TestCALoadFailure_SurfacedEvenWhenReady(t *testing.T) {
 	captureStartupAlerts(t)
 	prevMgr := certMgr
 	certMgr = ca.New()
 	t.Cleanup(func() { certMgr = prevMgr })
 
-	// Drive the real load path: a bundle whose PARENT directory does not exist.
-	// LoadOrInitCA sees no file → InitCA() (Ready()→true) → SaveCA() fails.
+	// First, the FE-6B.0 boot contract itself: a bundle whose PARENT directory
+	// does not exist must NOT leave a memory-only CA installed.
 	sslInspectionLoadError.Store("")
 	badPath := filepath.Join(t.TempDir(), "no-such-dir", "ca.bundle")
 	initInspectionCA(rootCAStartupConfig{Path: badPath})
-
-	// Preconditions that make this the exact bug window: Ready() true AND a
-	// failure recorded.
-	if !certMgr.Ready() {
-		t.Fatal("precondition: InitCA should leave certMgr Ready() true (the bug only bites when Ready() is true)")
+	if certMgr.Ready() {
+		t.Fatal("a first boot whose bundle write failed installed a memory-only Root CA (install preceded the durable commit)")
 	}
 	if sslInspectionLoadFailure() == "" {
-		t.Fatal("precondition: a SaveCA failure must record a load failure")
+		t.Fatal("precondition: a bundle-write failure must record a load failure")
+	}
+	if got := sslInspectionLoadFailureClass(); got != "not_found" {
+		t.Fatalf("recorded class = %q, want not_found for a missing parent directory", got)
+	}
+
+	// Now the bug window: a live CA beside a recorded failure (the recovery
+	// loop's persist-half shape).
+	if err := certMgr.InitCA(); err != nil {
+		t.Fatal(err)
+	}
+	if !certMgr.Ready() {
+		t.Fatal("precondition: InitCA should leave certMgr Ready() true (the bug only bites when Ready() is true)")
 	}
 
 	// /healthz ssl_inspection must be load_failed, not "ready".

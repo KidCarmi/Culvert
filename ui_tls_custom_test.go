@@ -203,7 +203,9 @@ func TestAPICertsUpload_UI_Persists(t *testing.T) {
 	_ = mw.Close()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload", strings.NewReader(body.String()))
+	// FE-6B.0: the replace is fenced on the UI-cert revision (none persisted
+	// yet) and identified by a client operationId.
+	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload?operationId="+fe6b0OpID()+"&uiCertRevision=uic1:none", strings.NewReader(body.String()))
 	r.Header.Set("Content-Type", mw.FormDataContentType())
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
@@ -211,17 +213,18 @@ func TestAPICertsUpload_UI_Persists(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 
 	var resp struct {
-		Persisted bool   `json:"persisted"`
-		Note      string `json:"note"`
+		Replaced   bool   `json:"replaced"`
+		Persisted  bool   `json:"persisted"`
+		Activation string `json:"activation"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !resp.Persisted {
-		t.Fatalf("expected persisted:true, got response %s", w.Body.String())
+	if !resp.Persisted || !resp.Replaced {
+		t.Fatalf("expected replaced:true persisted:true, got response %s", w.Body.String())
 	}
-	if resp.Note == "" {
-		t.Error("expected a non-empty activation note")
+	if resp.Activation != "restart_required" {
+		t.Errorf("activation = %q, want restart_required", resp.Activation)
 	}
 
 	gotCert, err := os.ReadFile(filepath.Join(dataDir, customUITLSCertFile))
@@ -315,7 +318,7 @@ func TestAPICertsUpload_UI_ClearsCorruptLatch(t *testing.T) {
 	_ = mw.Close()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload", strings.NewReader(body.String()))
+	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload?operationId="+fe6b0OpID()+"&uiCertRevision="+uiCertRevisionToken(), strings.NewReader(body.String()))
 	r.Header.Set("Content-Type", mw.FormDataContentType())
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)

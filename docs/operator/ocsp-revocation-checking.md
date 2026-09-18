@@ -145,11 +145,27 @@ climbing, `culvert_ocsp_revoked_total` flat.
    so connections resume within that window once responders answer again. There
    is nothing to clear by hand.
 
-**Break-glass:** turning the toggle off (admin UI, or `POST /api/ocsp`
-`{"enabled": false}`) takes effect immediately for new handshakes. It is
-audited as `ocsp.toggle`. It is deliberately **not** on the config-version
+**Break-glass:** turning the toggle off (admin UI, or
+`POST /api/ocsp?operationId=<uuid>&ocspRevision=<revision from GET /api/ocsp>`
+with `{"enabled": false}`) takes effect for new handshakes as soon as it is
+DURABLE: since FE-6B.0 the desired posture is written to `admin_settings.json`
+first and the checker is flipped only after the write landed, so a `200`
+(`durable: true`) always survives a restart and wins over `proxy.ocsp_check`;
+a persist failure is `500 persist_failed` with the running posture unchanged.
+The set is fenced (`428 precondition_required` / `409 stale` with
+`current.ocspRevision`), replay-safe on the operationId, and audited
+`ocsp.set` (operation-keyed, after the durable record). `GET /api/ocsp` reports
+`desired` (with its `source`: default / yaml / admin), `runtime`, `durable`
+and `scope: node-local`. It is deliberately **not** on the config-version
 rollback surface — a rollback must never silently re-permit traffic to
-certificates an admin tightened against.
+certificates an admin tightened against — and it is never synced CP→DP.
+
+The upstream mTLS client certificate rides the same GET: `mtlsClientCertConfigured`,
+`mtlsClientCertLoaded`, and when not loaded a BOUNDED `mtlsClientCertReason`
+(`cert_file_missing`, `key_file_missing`, `load_failed`). The configured file
+path and the loader's error text are never on this viewer-role response
+(FE-6B.0 closed that finding at the source); the startup log line names the
+reason class and the file's base name.
 
 ---
 

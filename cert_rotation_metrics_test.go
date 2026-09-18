@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,48 +43,15 @@ func TestCARotationCounter_InitCADoesNotIncrement(t *testing.T) {
 	}
 }
 
-// TestCARotationCounter_ManualRotateIncrements: the two-step apiCARotate admin
-// flow bumps culvert_ca_rotations_total on confirmed rotation.
+// TestCARotationCounter_ManualRotateIncrements: the fenced, challenge-bound
+// apiCARotate admin flow (FE-6B.0) bumps culvert_ca_rotations_total on a
+// DURABLE rotation, and only then.
 func TestCARotationCounter_ManualRotateIncrements(t *testing.T) {
-	oldMgr := certMgr
-	oldPath := caRuntime.path
-	t.Cleanup(func() {
-		certMgr = oldMgr
-		caRuntime.path = oldPath
-	})
-	cm := ca.New()
-	if err := cm.InitCA(); err != nil {
-		t.Fatalf("InitCA: %v", err)
-	}
-	certMgr = cm
-	caRuntime.path = "" // skip SaveCA → no disk
-
-	admin := func(body string) *http.Request {
-		r := httptest.NewRequestWithContext(
-			context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin),
-			http.MethodPost, "/api/ca/rotate", bytes.NewReader([]byte(body)))
-		return r
-	}
-
-	// Step 1: request a confirmation token (no rotation yet).
-	w1 := httptest.NewRecorder()
-	apiCARotate(w1, admin("{}"))
-	if w1.Code != http.StatusOK {
-		t.Fatalf("step 1 status = %d, want 200", w1.Code)
-	}
-	var resp struct {
-		Token string `json:"confirmation_token"`
-	}
-	if err := json.Unmarshal(w1.Body.Bytes(), &resp); err != nil || resp.Token == "" {
-		t.Fatalf("step 1 did not return a confirmation_token: err=%v body=%s", err, w1.Body.String())
-	}
-
-	// Step 2: confirm → rotation should occur and increment the counter.
+	fe6b0Node(t)
+	mux := fe6b0Mux()
 	before := statCARotations.Load()
-	w2 := httptest.NewRecorder()
-	apiCARotate(w2, admin(`{"confirm":true,"confirmation_token":"`+resp.Token+`"}`))
-	if w2.Code != http.StatusOK {
-		t.Fatalf("step 2 status = %d, want 200 (body=%s)", w2.Code, w2.Body.String())
+	if _, m := fe6b0RotateOK(t, mux, fe6b0OpID()); m["persisted"] != true {
+		t.Fatalf("rotation result = %v", m)
 	}
 	if got := statCARotations.Load(); got != before+1 {
 		t.Errorf("culvert_ca_rotations_total = %d, want %d after manual rotation", got, before+1)

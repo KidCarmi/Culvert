@@ -18,6 +18,8 @@ import (
 	crand "crypto/rand"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // ── uiAuthMiddleware Tests ─────────────────────────────────────────────────
@@ -422,8 +424,9 @@ func TestCertManager_LoadCustomCA_RejectsRSA(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for RSA key — only ECDSA supported")
 	}
-	if !strings.Contains(err.Error(), "ECDSA") {
-		t.Fatalf("error should mention ECDSA, got: %v", err)
+	// FE-6B.0: the refusal is a bounded candidate class, never free text.
+	if !strings.Contains(err.Error(), ca.CandidateUnsupportedKey) {
+		t.Fatalf("error should carry the bounded reason %q, got: %v", ca.CandidateUnsupportedKey, err)
 	}
 }
 

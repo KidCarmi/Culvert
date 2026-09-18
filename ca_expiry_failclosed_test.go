@@ -480,49 +480,62 @@ func TestCARotationPersistWarning_ClearsOnEvidence(t *testing.T) {
 // TestForceRotate_UnpersistedRotationDoesNotReportSuccess pins the manual half
 // of CA-2. The force-rotate handler carried the same swallowed-save defect as
 // auto-rotation: it logged the error, then answered 200 and bumped
-// culvert_ca_rotations_total for a CA that lives only in RAM. The operator
-// running this command is very often the one trying to RECOVER from an expiry
-// outage, so a false success here costs them the whole incident.
+// culvert_ca_rotations_total for a CA that lives only in RAM. FE-6B.0 goes
+// further: the bundle is written BEFORE the candidate is installed, so a
+// failed write is a typed 500 persist_failed, the live CA is unchanged, the
+// counter does not move and the persistence state is degraded until a write
+// lands.
 func TestForceRotate_UnpersistedRotationDoesNotReportSuccess(t *testing.T) {
-	installCAWithWindow(t, time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour))
+	dir := fe6b0Node(t)
+	mux := fe6b0Mux()
+	fp := fe6b0Fingerprint()
 
 	// A path whose parent is a regular file — every write fails ENOTDIR.
-	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	blocker := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed blocker: %v", err)
 	}
-	prevPath, prevPass := caRuntime.path, caRuntime.passphrase
-	caRuntime.path, caRuntime.passphrase = filepath.Join(blocker, "ca.bundle"), "pw"
-	t.Cleanup(func() { caRuntime.path, caRuntime.passphrase = prevPath, prevPass })
+	good := caRuntime.path
+	caRuntime.path = filepath.Join(blocker, "ca.bundle")
 
 	before := statCARotations.Load()
-	if persistRotatedCA() {
-		t.Fatal("persistRotatedCA reported success writing through a regular file")
+	op := fe6b0OpID()
+	rev := fe6b0Revision(t)
+	ch, _ := fe6b0Challenge(t, mux, op, rev)
+	code, m, _ := fe6b0Rotate(mux, op, rev, ch)
+	if code != http.StatusInternalServerError || m["code"] != refusalPersistFailed {
+		t.Fatalf("rotate through a regular file = %d %v, want 500 persist_failed", code, m)
 	}
 	if statCARotations.Load() != before {
 		t.Fatal("an unpersisted rotation advanced culvert_ca_rotations_total")
 	}
+	if fe6b0Fingerprint() != fp {
+		t.Fatal("the live CA changed although the bundle could not be written")
+	}
 	if !caRotationPersistDegraded() {
-		t.Fatal("a failed force-rotate save did not degrade the persistence state")
+		t.Fatal("a failed force-rotate write did not degrade the persistence state")
 	}
 
 	// A writable path recovers it.
-	caRuntime.path = filepath.Join(t.TempDir(), "ca.bundle")
-	if !persistRotatedCA() {
-		t.Fatal("persistRotatedCA failed on a writable path")
+	caRuntime.path = good
+	if _, m := fe6b0RotateOK(t, mux, fe6b0OpID()); m["persisted"] != true {
+		t.Fatalf("rotation on a writable path = %v", m)
 	}
 	if caRotationPersistDegraded() {
-		t.Fatal("persistence state stayed degraded after a successful save")
+		t.Fatal("persistence state stayed degraded after a successful write")
+	}
+	if statCARotations.Load() != before+1 {
+		t.Fatal("a durable rotation did not advance culvert_ca_rotations_total exactly once")
 	}
 
-	// No bundle path configured: nothing is written, so there is no durability
-	// claim to fail and neither observer should fire.
-	resetCAUsabilityHealthForTest()
+	// No bundle path configured: refused BEFORE anything is minted (a
+	// rotation that could only exist in memory is not offered).
 	caRuntime.path = ""
-	if !persistRotatedCA() {
-		t.Fatal("persistRotatedCA reported failure with no bundle path configured")
+	op2 := fe6b0OpID()
+	rev2 := fe6b0Revision(t)
+	ch2, _ := fe6b0Challenge(t, mux, op2, rev2)
+	if code, m, _ := fe6b0Rotate(mux, op2, rev2, ch2); code != http.StatusServiceUnavailable || m["code"] != refusalPersistenceNotConfigured {
+		t.Fatalf("rotate with no bundle path = %d %v, want 503 persistence_not_configured", code, m)
 	}
-	if caRotationPersistDegraded() {
-		t.Fatal("no-bundle-path invented a degraded persistence state")
-	}
+	caRuntime.path = good
 }

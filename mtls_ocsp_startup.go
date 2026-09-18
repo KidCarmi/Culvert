@@ -18,11 +18,26 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 )
+
+// ocspTransportUpdate attaches the OCSP verify callbacks to the operator's
+// TLS template inside a swapUpstreamTransport closure (P5.3 ownership).
+// Shared by the startup slice's admin-restore path and the fenced POST
+// /api/ocsp — one publication shape, never two.
+func ocspTransportUpdate(old *http.Transport) *http.Transport {
+	if upstreamOpTLSCfg == nil {
+		upstreamOpTLSCfg = &tls.Config{MinVersion: tls.VersionTLS13}
+	}
+	if upstreamOpTLSCfg.MinVersion == 0 {
+		upstreamOpTLSCfg.MinVersion = tls.VersionTLS13
+	}
+	ConfigureTLSConfigOCSP(upstreamOpTLSCfg)
+	return cloneTransport(old)
+}
 
 // mtlsClientCertMu guards mtlsClientCertState, which mirrors the outcome of
 // the last upstream-mTLS client-cert load for the admin API. Without this,
@@ -33,23 +48,28 @@ import (
 var mtlsClientCertMu sync.RWMutex
 var mtlsClientCertState mtlsClientCertStatus
 
+// mtlsClientCertStatus is what the admin surface may learn about the
+// upstream mTLS client certificate. FE-6B.0 closed the recorded finding
+// that GET /api/ocsp — a VIEWER route — published the configured file PATH
+// and the loader's RAW error text: the record now carries a BOUNDED reason
+// (cert_file_missing | key_file_missing | load_failed) and neither the path
+// nor the error ever enters it. The startup log line names the reason class
+// and the file's base name only.
 type mtlsClientCertStatus struct {
 	configured bool
 	loaded     bool
-	file       string
 	notAfter   time.Time
-	lastError  string
+	reason     string
 }
 
-func recordMTLSClientCertStatus(file string, loaded bool, notAfter time.Time, lastErr string) {
+func recordMTLSClientCertStatus(loaded bool, notAfter time.Time, reason string) {
 	mtlsClientCertMu.Lock()
 	defer mtlsClientCertMu.Unlock()
 	mtlsClientCertState = mtlsClientCertStatus{
 		configured: true,
 		loaded:     loaded,
-		file:       file,
 		notAfter:   notAfter,
-		lastError:  lastErr,
+		reason:     reason,
 	}
 }
 
@@ -71,15 +91,16 @@ func loadMTLSClientCert(cfg mtlsOCSPStartupConfig) *tls.Certificate {
 	case cfg.ClientCertFile != "" && cfg.ClientKeyFile != "":
 		c, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
 		if err != nil {
-			logger.Printf("mTLS: failed to load client cert: %v", err)
-			recordMTLSClientCertStatus(cfg.ClientCertFile, false, time.Time{}, err.Error())
+			reason := mtlsClientCertReasonOf(cfg.ClientCertFile, cfg.ClientKeyFile)
+			logger.Printf("mTLS: failed to load client cert %q (reason=%s)", sanitizeLog(filepath.Base(cfg.ClientCertFile)), reason)
+			recordMTLSClientCertStatus(false, time.Time{}, reason)
 			return nil
 		}
 		var notAfter time.Time
 		if leaf, perr := x509.ParseCertificate(c.Certificate[0]); perr == nil {
 			notAfter = leaf.NotAfter
 		}
-		recordMTLSClientCertStatus(cfg.ClientCertFile, true, notAfter, "")
+		recordMTLSClientCertStatus(true, notAfter, "")
 		return &c
 	case cfg.ClientCertFile != "" || cfg.ClientKeyFile != "":
 		// One-sided config: FileConfig.validate doesn't reject a lone
@@ -88,13 +109,9 @@ func loadMTLSClientCert(cfg mtlsOCSPStartupConfig) *tls.Certificate {
 		// attempted to configure mTLS — rather than silently reporting "not
 		// configured", which would hide a broken config behind the same
 		// state as "never touched this setting".
-		missing, file := "client_key_file", cfg.ClientCertFile
-		if cfg.ClientCertFile == "" {
-			missing, file = "client_cert_file", cfg.ClientKeyFile
-		}
-		errMsg := fmt.Sprintf("%s is not set (both client_cert_file and client_key_file are required)", missing)
-		logger.Printf("mTLS: client cert not loaded: %s", errMsg)
-		recordMTLSClientCertStatus(file, false, time.Time{}, errMsg)
+		reason := mtlsClientCertReasonOf(cfg.ClientCertFile, cfg.ClientKeyFile)
+		logger.Printf("mTLS: client cert not loaded (reason=%s; both client_cert_file and client_key_file are required)", reason)
+		recordMTLSClientCertStatus(false, time.Time{}, reason)
 		return nil
 	default:
 		return nil
@@ -123,6 +140,7 @@ func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 
 	if cfg.OCSPCheck {
 		globalOCSP.Enable()
+		noteOCSPYAMLDesired(true) // FE-6B.0: the YAML-sourced desired state (an admin-saved one replaces it at load)
 	}
 
 	swapUpstreamTransport(func(old *http.Transport) *http.Transport {
@@ -149,7 +167,7 @@ func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 	})
 
 	if clientCert != nil {
-		logger.Printf("mTLS: client cert loaded (%s)", cfg.ClientCertFile)
+		logger.Printf("mTLS: client cert loaded (%s)", sanitizeLog(filepath.Base(cfg.ClientCertFile)))
 	}
 	if cfg.OCSPCheck {
 		logger.Printf("OCSP: upstream certificate revocation checking enabled")

@@ -35,6 +35,7 @@ to do instead.
 10. [Runtime vs offline matrix](#10-runtime-vs-offline-matrix)
 11. [Where to find backups and logs](#11-where-to-find-backups-and-logs)
 12. [What NOT to do](#12-what-not-to-do)
+13. [Certificates, the CA and OCSP in a backup](#13-certificates-the-ca-and-ocsp-in-a-backup)
 
 ---
 
@@ -540,3 +541,33 @@ shown in § 2.
   host-side, not inside this container.
 - **Don't mount `/backup` into `proxy`.** The proxy must not be able
   to read its own prior backups. `/backup` is `cli`-only by contract.
+
+---
+
+## 13. Certificates, the CA and OCSP in a backup
+
+The FE-6B.0 backend-truth gate recorded exactly what a backup, a restore, a
+config-version rollback and a downgrade do to every certificate object.
+`GET /api/certificates` publishes the same facts under `backup`.
+
+| Object | In the archive? | After a restore | Config-version rollback | CP→DP |
+|---|---|---|---|---|
+| Inspection Root CA (`data/ca.bundle`) | **Yes** (Tier 1; the private key travels — sealed in the PSCA envelope only when `CULVERT_CA_PASSPHRASE` was set at write time; pre-existing, unchanged) | Loaded at boot; the restore refuses an archive whose bundle cannot be decrypted with the current passphrase | **Never** (rotation and import are forward-only trust decisions) | Never (node-local; only the CLUSTER CA fingerprint travels) |
+| Admin-UI certificate pair (`ui_tls_cert.pem` / `ui_tls_key.pem`) | **No** (never archived) | Absent — the UI falls back to the auto self-signed certificate; re-upload it (`POST /api/certs/upload` target=ui) | Never | Never |
+| Certificate operation ledger (`certificate_operations.json`) | **No** (node-local evidence) | Starts empty; an operation dispatched before the restore is unknown to the restored node (`404 not_found` on lookup) | Never | Never |
+| OCSP desired posture (`ocsp_settings_saved` / `ocsp_check_enabled` in `admin_settings.json`) | Yes (inside the sanitized settings file) | Restored and applied at boot, winning over `proxy.ocsp_check` | **Never** | Never |
+| Upstream mTLS client certificate (`client_cert_file` / `client_key_file`) | Only if the operator's paths point inside `/data` | Reloaded from its configured paths | n/a (YAML) | Never |
+
+**Downgrade.** A binary predating FE-6B.0 ignores `ocsp_settings_saved` /
+`ocsp_check_enabled` / `ocsp_settings_generation` (unknown keys are dropped
+on its next save) and never reads `certificate_operations.json`; the CA
+bundle format is unchanged (the frozen PSCA envelope), so the CA loads as
+before. Re-upgrading re-reads the ledger and settles any intent that was
+still pending.
+
+**Secrets.** The archive still carries the CA private key inside
+`data/ca.bundle` — encrypted at rest only when a passphrase is configured.
+FE-6B.0 did not introduce secret-inclusive backup support for anything else:
+the UI key and the ledger are excluded, and no passphrase or key ever appears
+on an API response, in the audit trail or in the process log.
+

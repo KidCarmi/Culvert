@@ -4437,8 +4437,8 @@ Firefox (all platforms):
           Rotate the Root CA below and redistribute it to your clients.
         </div>
         <div id="ca-persist-banner" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:6px;background:rgba(255,193,7,.12);border:1px solid var(--yellow,#ffc107);font-size:.86rem">
-          <strong>Root CA rotated but not saved.</strong> <span id="ca-persist-reason"></span>
-          The replacement CA exists in memory only — a restart will discard it and rotate again to a different CA.
+          <strong>The last Root CA rotation could not be saved and was NOT applied.</strong> <span id="ca-persist-reason"></span>
+          The current CA stays active; auto-rotation retries at its next check.
           Fix the data volume, then force a rotation.
         </div>
         <div id="ca-load-banner" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.86rem">
@@ -13453,6 +13453,10 @@ function copyCAInstallInstructions() {
   document.getElementById('ca-instructions-modal').style.display = 'flex';
 }
 
+// FE-6B.0: an upload is fenced (caRevision for the MITM CA, uiCertRevision
+// for the admin-UI pair), identified by a client-generated UUID operationId
+// and answered with typed JSON — a refusal is rendered from its bounded code,
+// never from server prose.
 async function uploadCustomCert() {
   const target  = document.getElementById('cert-target').value;
   const certPEM = document.getElementById('cert-pem').value.trim();
@@ -13463,16 +13467,21 @@ async function uploadCustomCert() {
   fd.append('cert', certPEM);
   fd.append('key', keyPEM);
   try {
-    const resp = await fetch('/api/certs/upload', { method: 'POST', body: fd });
-    if (!resp.ok) { const t = await resp.text(); throw new Error(t); }
-    const d = await resp.json();
-    // persisted:false means the upload was validated but NOT saved — the
-    // generic success toast would be a false "it worked" signal, so surface
-    // the server's own warning instead of guessing.
-    if (d.persisted === false) {
-      toast(d.warning || 'Uploaded but not saved — see server log', 'error');
+    const inv = await api('/api/certificates');
+    const fence = target === 'mitm'
+      ? '&caRevision=' + encodeURIComponent((inv && inv.ca && inv.ca.revision) || '')
+      : '&uiCertRevision=' + encodeURIComponent((inv && inv.uiCert && inv.uiCert.revision) || '');
+    const q = '?target=' + target + '&operationId=' + encodeURIComponent(crypto.randomUUID()) + fence;
+    const resp = await fetch('/api/certs/upload' + q, { method: 'POST', body: fd });
+    const d = await resp.json().catch(() => null);
+    if (!resp.ok) { throw new Error(certRefusalText(d)); }
+    if (target === 'mitm' && d.imported === true) {
+      toast('Root CA imported and saved (fingerprint ' + ((d.ca && d.ca.fingerprint) || '') + ')', 'success');
+    } else if (target === 'ui' && d.replaced === true) {
+      toast('UI certificate saved. Restart the proxy to activate it.', 'success');
     } else {
-      toast(d.note ? d.note : 'Certificate uploaded & activated', 'success');
+      toast('Upload answered without an action-bound result', 'error');
+      return;
     }
     document.getElementById('cert-pem').value = '';
     document.getElementById('cert-key').value = '';
@@ -17607,7 +17616,7 @@ async function loadCAMgmt() {
   const unusableBanner = document.getElementById('ca-unusable-banner');
   unusableBanner.style.display = caUnusable ? '' : 'none';
   if (caUnusable) {
-    document.getElementById('ca-unusable-reason').textContent = ca.unusableReason || '';
+    document.getElementById('ca-unusable-reason').textContent = caClassText(ca.unusableClass);
     document.getElementById('ca-unusable-counts').textContent =
       ' (' + (ca.inspectBlocked ?? 0) + ' connections blocked since boot.)';
   }
@@ -17616,7 +17625,7 @@ async function loadCAMgmt() {
   const persistBanner = document.getElementById('ca-persist-banner');
   persistBanner.style.display = ca.rotationPersistDegraded ? '' : 'none';
   if (ca.rotationPersistDegraded) {
-    document.getElementById('ca-persist-reason').textContent = ca.rotationPersistError || '';
+    document.getElementById('ca-persist-reason').textContent = caClassText(ca.rotationPersistClass);
   }
   // CHAOS-50: a CONFIGURED CA that failed to load is the fail-OPEN state — the
   // opposite of the fail-closed banner above, and the one with security
@@ -17626,7 +17635,8 @@ async function loadCAMgmt() {
   const loadBanner = document.getElementById('ca-load-banner');
   loadBanner.style.display = ca.loadFailed ? '' : 'none';
   if (ca.loadFailed) {
-    document.getElementById('ca-load-reason').textContent = ca.loadFailureReason || '';
+    document.getElementById('ca-load-reason').textContent = caClassText(ca.loadFailureClass) +
+      (ca.loadRecoveryClass ? ' Last recovery attempt: ' + caClassText(ca.loadRecoveryClass) : '');
     document.getElementById('ca-load-counts').textContent =
       (ca.inspectBypassed ?? 0) + ' connection(s) forwarded uninspected since boot.';
     document.getElementById('ca-load-recovery').textContent = ca.loadRecoveryGaveUp
@@ -17697,7 +17707,7 @@ async function loadCAMgmt() {
     } else if (ocsp.mtlsClientCertLoaded) {
       const days = ocsp.mtlsClientCertDaysRemaining;
       const expired = typeof days === 'number' && days < 0;
-      mtlsStatus.textContent = (expired ? 'Expired' : 'Loaded') + ' (' + (ocsp.mtlsClientCertFile || '') + ')';
+      mtlsStatus.textContent = expired ? 'Expired' : 'Loaded';
       mtlsStatus.style.color = expired ? 'var(--red,#dc3545)' : (typeof days === 'number' && days < 14) ? 'var(--yellow)' : 'var(--green)';
       mtlsExpiryWrap.style.display = '';
       document.getElementById('mtls-client-cert-expiry').textContent =
@@ -17710,7 +17720,7 @@ async function loadCAMgmt() {
       mtlsExpiryWrap.style.display = 'none';
       mtlsErrBanner.style.display = '';
       mtlsExpiredBanner.style.display = 'none';
-      document.getElementById('mtls-client-cert-error-detail').textContent = ocsp.mtlsClientCertLastError || '';
+      document.getElementById('mtls-client-cert-error-detail').textContent = caClassText(ocsp.mtlsClientCertReason);
     }
   }
   // Dual-CA overlap status.
@@ -17745,28 +17755,101 @@ async function clearCACache() {
   loadCAMgmt();
 }
 
-async function forceRotateCA() {
-  try {
-    // Step 1: request confirmation token from server.
-    const pending = await api('/api/ca/rotate', {method:'POST', body:{confirm:false}});
-    if (!pending || !pending.confirmation_token) {
-      toast('Failed to initiate CA rotation','error');
-      return;
-    }
-    // Step 2: show warning and ask for confirmation.
-    if (!await confirmAction('Rotate Root CA', pending.warning, 'Rotate')) return;
-    // Step 3: confirm rotation with token.
-    const r = await api('/api/ca/rotate', {method:'POST', body:{confirm:true, confirmation_token:pending.confirmation_token}});
-    if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
-    else toast('Rotation failed: '+(r?.error||'unknown'),'error');
-  } catch(e) {
-    toast('Rotation failed: '+e.message,'error');
+// caClassText renders a server-published BOUNDED class (FE-6B.0) as a short
+// phrase. The server never sends a raw error, a path or key material; an
+// unknown class is shown verbatim so nothing is silently hidden.
+function caClassText(cls) {
+  const t = {
+    expired: 'The certificate is past its NotAfter.',
+    not_yet_valid: 'The certificate is not yet valid (system clock may have rolled back).',
+    no_ca: 'No Root CA is loaded.',
+    permission_denied: 'The data volume refused the write (permission denied).',
+    not_found: 'The configured bundle path does not exist.',
+    read_only: 'The data volume is read-only.',
+    no_space: 'The data volume is full.',
+    not_a_file: 'The configured bundle path is not a writable file.',
+    io_error: 'An I/O error occurred on the data volume.',
+    write_failed: 'The bundle could not be written.',
+    decrypt_failed: 'The bundle could not be decrypted (wrong CULVERT_CA_PASSPHRASE?).',
+    bundle_malformed: 'The bundle is not a CA certificate + key pair.',
+    load_failed: 'The file could not be loaded.',
+    init_failed: 'A fresh Root CA could not be generated.',
+    cert_file_missing: 'The client certificate file is missing.',
+    key_file_missing: 'The client key file is missing.',
+  };
+  return cls ? (t[cls] || cls) : '';
+}
+
+// certRefusalText renders a typed refusal {error, code, current} from the
+// FE-6B.0 certificate surface without echoing any server prose beyond the
+// bounded facts the contract publishes.
+function certRefusalText(r) {
+  if (!r) return 'unknown';
+  const cur = r.current || {};
+  switch (r.code) {
+    case 'stale': return 'The object changed since this page loaded — refresh and retry.';
+    case 'precondition_required': return 'A fence token is required — refresh and retry.';
+    case 'operation_id_required': return 'An operation id is required.';
+    case 'challenge_required': return 'A rotation challenge is required.';
+    case 'challenge_stale': return 'The rotation challenge no longer binds this confirmation (' + (cur.changed || []).join(', ') + ') — start again.';
+    case 'candidate_invalid': return 'The certificate candidate was refused: ' + (cur.reason || 'invalid') + '.';
+    case 'candidate_duplicate': return 'This certificate is already installed.';
+    case 'persist_failed': return 'The change could not be written to disk' + (cur.class ? ' (' + caClassText(cur.class) + ')' : '') + '; nothing was changed.';
+    case 'persistence_not_configured': return 'No CA bundle path is configured (-ca-path); the change was refused.';
+    case 'operation_ledger_degraded': return 'The certificate operation ledger is degraded; repair it and restart.';
+    case 'operation_mismatch': return 'This operation id was already used for a different change.';
+    case 'operation_in_progress': return 'This operation is still being decided.';
+    case 'outcome_unknown': return 'The outcome is unproven; check the operation record before retrying.';
+    case 'forbidden': return 'Insufficient role.';
+    case 'ca_not_ready': return 'No Root CA is installed.';
+    default: return r.code || 'unknown';
   }
 }
 
+// FE-6B.0: a rotation is fenced on the CA revision, identified by a
+// client-generated UUID operationId and bound to a server-issued challenge
+// (actor + operation + revision + expiry, single use). A lost response is
+// recovered by re-sending the SAME operation, which replays the recorded
+// outcome instead of rotating twice.
+async function forceRotateCA() {
+  try {
+    const status = await api('/api/ca/status');
+    if (!status || !status.revision) { toast('Failed to read the CA revision', 'error'); return; }
+    const operationId = crypto.randomUUID();
+    const q = '?operationId=' + encodeURIComponent(operationId) + '&caRevision=' + encodeURIComponent(status.revision);
+    const pending = await api('/api/ca/rotate/challenge' + q, {method: 'POST'});
+    if (!pending || !pending.challenge) {
+      toast('Failed to initiate CA rotation: ' + certRefusalText(pending), 'error');
+      return;
+    }
+    if (!await confirmAction('Rotate Root CA', pending.warning + ' Current fingerprint: ' + (pending.fingerprint || ''), 'Rotate')) return;
+    const r = await api('/api/ca/rotate' + q, {method: 'POST', body: {challenge: pending.challenge}});
+    if (r && r.rotated === true) {
+      toast(r.recordState === 'pending_reconciliation'
+        ? 'Root CA rotated and saved; the operation record is pending reconciliation'
+        : 'Root CA rotated successfully', 'success');
+      loadCAMgmt();
+    } else {
+      toast('Rotation failed: ' + certRefusalText(r), 'error');
+      loadCAMgmt();
+    }
+  } catch(e) {
+    toast('Rotation failed: ' + e.message, 'error');
+  }
+}
+
+// FE-6B.0: the toggle is fenced on ocspRevision, identified by an operationId
+// and DURABLE (persisted before applied) — a 200 always survives a restart.
 async function toggleOCSP(enabled) {
-  await api('/api/ocsp', {method:'POST', body:{enabled}});
-  toast('OCSP checking '+(enabled?'enabled':'disabled'),'success');
+  const cur = await api('/api/ocsp');
+  if (!cur || !cur.revision) { toast('Failed to read the OCSP revision', 'error'); loadCAMgmt(); return; }
+  const q = '?operationId=' + encodeURIComponent(crypto.randomUUID()) + '&ocspRevision=' + encodeURIComponent(cur.revision);
+  const r = await api('/api/ocsp' + q, {method: 'POST', body: {enabled}});
+  if (r && r.ok === true && r.durable === true) {
+    toast('OCSP checking ' + (r.enabled ? 'enabled' : 'disabled') + ' (saved)', 'success');
+  } else {
+    toast('OCSP change refused: ' + certRefusalText(r), 'error');
+  }
   loadCAMgmt();
 }
 

@@ -220,6 +220,17 @@ type AdminSettings struct {
 	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
 	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
 
+	// Upstream OCSP revocation-check DESIRED state (FE-6B.0). OCSPSettingsSaved
+	// is a sentinel (like YARASettingsSaved): when false the fields below are
+	// not applied on load and the YAML/default runtime posture stands. When
+	// true the admin-saved posture WINS over proxy.ocsp_check at boot.
+	// OCSPSettingsGeneration advances on every durable set and is part of the
+	// ocspRevision fence, so an A→B→A toggle never returns to an earlier
+	// token. Node-local: OFF export/import, version-rollback and CP→DP.
+	OCSPSettingsSaved      bool  `json:"ocsp_settings_saved"`
+	OCSPCheckEnabled       bool  `json:"ocsp_check_enabled"`
+	OCSPSettingsGeneration int64 `json:"ocsp_settings_generation,omitempty"`
+
 	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
 	// sentinel (like YARASettingsSaved): when false the values below are not applied
 	// on load, so a zero-value field can't override the engine defaults on settings
@@ -312,6 +323,7 @@ func snapshotOverriddenSurfaces(s AdminSettings) {
 	add(s.BlocklistFeedsSaved, "blocklist feeds")
 	add(s.UpstreamProxiesSaved, "upstream proxy pool")
 	add(s.YARASettingsSaved, "YARA engine settings")
+	add(s.OCSPSettingsSaved, "OCSP revocation-check posture")
 	add(s.AutoExcludeTunablesSaved, "decryption auto-exclusion tunables")
 	add(s.SupportRetentionSaved, "support-bundle retention")
 	adminSettingsOverriddenSurfaces.Store(&out)
@@ -515,12 +527,19 @@ func LoadAdminSettings(path string) {
 	applyLegacyLDAPRetirement(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
+	applyAdminOCSP(&s) // FE-6B.0: the durable desired OCSP posture wins over the YAML/default runtime
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	applyAdminPolicyLearning(&s)               // ADR-0025 M5A: record governed desired state (materialized by loadPolicyLearning)
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	snapshotOverriddenSurfaces(s)
+
+	// FE-6B.0: settle every pending certificate/CA/OCSP operation intent from
+	// its object's own evidence now that the CA, the UI-cert store and the
+	// durable OCSP posture are all loaded; complete any owed success audit
+	// exactly once. Never mutates an object.
+	reconcileCertificateOperations()
 
 	// Rewrite stable-identity durability (2D-C final §7–§9): one pass that
 	// (a) persists the one-time in-file legacy backfill for a settings-owned
@@ -1009,6 +1028,11 @@ type adminSaveOverrides struct {
 	// failure leaves the running posture untouched (never a 200 over a
 	// change that silently reverts on restart).
 	yaraSettings *yaraSettingsTarget
+	// ocspSettings carries the TARGET desired OCSP posture for the fenced,
+	// operation-identified POST /api/ocsp (FE-6B.0): the durable file records
+	// the target while the live checker still runs the old posture;
+	// applyOnSuccess publishes it only after the write landed.
+	ocspSettings *ocspDesiredState
 	// decRedaction carries the TARGET destination-privacy state (posture + key
 	// + non-secret generation id) for the persist-before-apply redaction PUT
 	// (2E-B §A/§B/§C): the durable file records the target while the live
@@ -1256,6 +1280,10 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		s.YARAOnSaturation = yaraGetOnSaturation()
 		s.YARAAlertDegraded = yaraGetAlertDegraded()
 	}
+
+	// OCSP desired posture (FE-6B.0): the TARGET when a fenced set is in
+	// flight, else the live durable record; absent until an admin set it.
+	snapshotOCSPDesired(&s, ov.ocspSettings)
 
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps

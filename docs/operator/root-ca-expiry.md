@@ -48,17 +48,29 @@ Any one of these is conclusive:
 1. **Check the clock first.** If the log says `not valid until <timestamp> (system clock may
    have rolled back)`, this is an NTP/RTC problem, not a certificate problem. Fix time sync;
    inspection resumes on its own with no certificate work at all.
-2. **Otherwise, rotate the Root CA** — Admin UI → *CA Management* → *Force Rotation*, or
-   `POST /api/ca/rotate` (admin role, confirmation-token flow). Culvert also checks for a
-   needed rotation at every startup and every 24 hours, and rotates automatically inside the
-   30-day pre-expiry window.
-3. **Confirm the rotation persisted.** If you see an amber banner *"Root CA rotated but not
-   saved"* — or the `root_ca` row on `/api/diagnostics` warns, or `POST /api/ca/rotate`
-   answered with `"persisted": false` — the replacement CA exists **in memory only** and will
-   be lost on the next restart, which will then rotate again to a *different* CA. Fix the data
-   volume (space, mount flags, permissions on the `-ca-path` bundle) and force another rotation
-   before doing anything else. Those three surfaces clear as soon as a rotation actually
-   writes; `culvert_ca_rotation_persist_failures_total` is a cumulative counter and does not.
+2. **Otherwise, rotate the Root CA** — Admin UI → *CA Management* → *Force Rotation*, or the
+   FE-6B.0 API ceremony (admin role): read `revision` from `GET /api/ca/status`, generate a
+   UUID `operationId`, `POST /api/ca/rotate/challenge?operationId=…&caRevision=…` to obtain
+   a challenge bound to you, that operation and that revision (expires in 120 s), then
+   `POST /api/ca/rotate?operationId=…&caRevision=…` with `{"challenge": "…"}`. A lost
+   response is recovered by re-sending the SAME operationId — it replays the recorded result
+   and never rotates twice — or by `GET /api/ca/operations/{operationId}`. See
+   [`certificates-and-ca-lifecycle.md`](certificates-and-ca-lifecycle.md). Culvert also
+   checks for a needed rotation at every startup and every 24 hours, and rotates
+   automatically inside the 30-day pre-expiry window.
+3. **A rotation is applied only once it is on disk.** The replacement bundle is written to the
+   `-ca-path` bundle BEFORE the new CA is installed — a rotation that cannot be written is
+   **not applied**: the manual API answers `500 persist_failed` with a bounded `class`
+   (`permission_denied`, `read_only`, `no_space`, `not_a_file`, …) and the current CA stays
+   active; auto-rotation logs the class, fires `cert_expiry`, keeps the current CA and retries
+   at its next check. The amber banner *"The last Root CA rotation could not be saved and was
+   NOT applied"* (`rotationPersistDegraded` + `rotationPersistClass` on `GET /api/ca/status`)
+   and the `root_ca` row on `/api/diagnostics` say the same. Fix the data volume (space, mount
+   flags, permissions on the bundle) and rotate again before the current CA expires. Those
+   surfaces clear as soon as a bundle write lands; `culvert_ca_rotation_persist_failures_total`
+   is a cumulative counter and does not. With no bundle path configured at all, a manual
+   rotation or import is refused (`503 persistence_not_configured`) rather than producing a CA
+   that would exist in memory only.
 4. **Redistribute the new Root CA to clients.** This step cannot be automated from inside the
    gateway: a new root is untrusted by definition. Download it from *CA Management → Download
    CA*, or `GET /api/ca/download`, and push it through your existing trust-store channel
@@ -122,11 +134,17 @@ configured bundle**. Watch it on `GET /api/ca/status`:
 
 ```
 "loadFailed": true,
-"loadFailureReason": "Root CA load/init failed for /data/ca.bundle: ...",
+"loadFailureClass": "decrypt_failed",
 "loadRecoveryAttempts": 4,
 "loadRecoveryGaveUp": false,
+"loadRecoveryClass": "decrypt_failed",
 "inspectBypassed": 137
 ```
+
+The classes are bounded (`permission_denied`, `not_found`, `read_only`, `no_space`,
+`not_a_file`, `io_error`, `decrypt_failed`, `bundle_malformed`, `load_failed`, `init_failed`,
+`expired`); the bundle path and the loader's exact text stay in the process log (FE-6B.0 —
+`/api/ca/status` is a viewer-role response).
 
 If the underlying fault was transient (the volume attached late, you fixed ownership, you
 freed disk), inspection comes back on its own — `loadFailed` clears, `/healthz` returns to

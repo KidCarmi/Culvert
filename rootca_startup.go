@@ -20,19 +20,43 @@ import (
 // alert fires once webhooks are loaded.
 var sslInspectionLoadError atomic.Value // string
 
+// sslInspectionLoadClass is the BOUNDED class of the recorded failure
+// (FE-6B.0): what the admin surfaces publish instead of the detail, which
+// used to embed the bundle path and the raw OS/decrypt error and reached a
+// viewer-role response on GET /api/ca/status.
+var sslInspectionLoadClass atomic.Value // string
+
 // sslInspectionLoadFailure returns the recorded startup CA failure, or "".
 func sslInspectionLoadFailure() string {
 	s, _ := sslInspectionLoadError.Load().(string)
 	return s
 }
 
-// noteSSLInspectionUnavailable records the failure and queues the alert
-// (delivered after the webhook store loads — see deferStartupAlert).
-func noteSSLInspectionUnavailable(path string, err error) {
-	detail := fmt.Sprintf("Root CA load/init failed: %v — SSL inspection DISABLED (TLS traffic is tunnel-only: no scanning/DLP/CDR)", err)
-	if path != "" {
-		detail = fmt.Sprintf("Root CA load/init failed for %s: %v — SSL inspection DISABLED (TLS traffic is tunnel-only: no scanning/DLP/CDR)", path, err)
+// sslInspectionLoadFailureClass returns the bounded class of the recorded
+// failure ("" when none; load_failed when a detail was recorded without a
+// class — a test seam storing the detail directly).
+func sslInspectionLoadFailureClass() string {
+	if sslInspectionLoadFailure() == "" {
+		return ""
 	}
+	if c, _ := sslInspectionLoadClass.Load().(string); c != "" {
+		return c
+	}
+	return "load_failed"
+}
+
+// noteSSLInspectionUnavailable records the failure and queues the alert
+// (delivered after the webhook store loads — see deferStartupAlert). The
+// recorded detail and the alert carry the bounded class — never the bundle
+// path, never the loader's text (those stay in the startup log line the
+// caller already emitted).
+func noteSSLInspectionUnavailable(path string, err error) {
+	class := caFaultClass(err)
+	if path == "" && class == "load_failed" {
+		class = "init_failed"
+	}
+	detail := fmt.Sprintf("Root CA load/init failed (%s) — SSL inspection DISABLED (TLS traffic is tunnel-only: no scanning/DLP/CDR)", class)
+	sslInspectionLoadClass.Store(class)
 	sslInspectionLoadError.Store(detail)
 	deferStartupAlert("ca_load_failed", AlertPayload{Detail: detail, Source: "ca"})
 }

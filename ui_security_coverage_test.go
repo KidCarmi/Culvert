@@ -4,8 +4,8 @@ package main
 // security-sensitive handlers in ui_security.go flagged for coverage
 // improvement: apiCARotate, apiCAKeyProvider, apiOCSPConfig, apiSecYARARules.
 //
-// Every test snapshots the globals it touches (pendingCARotation,
-// globalOCSP, globalYARA, globalSecScanner) and restores them via
+// Every test snapshots the globals it touches (the OCSP checker, the CA
+// fixtures via fe6b0Node, globalYARA, globalSecScanner) and restores them via
 // t.Cleanup so parallel / shuffled runs stay isolated. This is the same
 // discipline qa-determinism exists to enforce — if any of these leaks,
 // the gate catches it before CI.
@@ -25,120 +25,52 @@ import (
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
-// ─── apiCARotate ────────────────────────────────────────────────────────────
+// ─── apiCARotate (FE-6B.0: fenced, operation-identified, challenge-bound) ───
 
 func TestAPICARotate_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
 	apiCARotate(w, getReq("/api/ca/rotate"))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
-}
-
-// Step 1 of the two-step flow: POST without confirm=true must return a
-// short-lived confirmation token and a warning payload but NOT rotate the CA.
-func TestAPICARotate_Step1IssuesToken(t *testing.T) {
-	// Snapshot the pending-rotation slot — it's a package-global.
-	pendingCARotation.Lock()
-	origToken, origExp := pendingCARotation.token, pendingCARotation.expires
-	pendingCARotation.Unlock()
-	t.Cleanup(func() {
-		pendingCARotation.Lock()
-		pendingCARotation.token = origToken
-		pendingCARotation.expires = origExp
-		pendingCARotation.Unlock()
-	})
-
-	w := httptest.NewRecorder()
-	apiCARotate(w, jsonReq(http.MethodPost, "/api/ca/rotate", map[string]any{}))
-	assertStatus(t, w, http.StatusOK)
-
-	m := assertJSON(t, w)
-	if m["status"] != "pending_confirmation" {
-		t.Fatalf("status = %v, want pending_confirmation", m["status"])
-	}
-	tok, _ := m["confirmation_token"].(string)
-	if len(tok) != 32 { // 16 random bytes → 32 hex chars
-		t.Fatalf("confirmation_token length = %d, want 32", len(tok))
-	}
-	if m["warning"] == "" {
-		t.Error("step 1 response must include a warning string")
-	}
-
-	// The token must now be the pending value.
-	pendingCARotation.Lock()
-	stored := pendingCARotation.token
-	pendingCARotation.Unlock()
-	if stored != tok {
-		t.Fatalf("pending token = %q, want %q", stored, tok)
+	if m := assertJSON(t, w); m["code"] != refusalMethodNotAllowed {
+		t.Fatalf("method refusal must be typed: %v", m)
 	}
 }
 
-// Step 2 must 403 when the supplied token does not match the pending one.
-func TestAPICARotate_Step2WrongToken(t *testing.T) {
-	pendingCARotation.Lock()
-	origToken, origExp := pendingCARotation.token, pendingCARotation.expires
-	pendingCARotation.token = "correct-token"
-	pendingCARotation.expires = time.Now().Add(60 * time.Second)
-	pendingCARotation.Unlock()
-	t.Cleanup(func() {
-		pendingCARotation.Lock()
-		pendingCARotation.token = origToken
-		pendingCARotation.expires = origExp
-		pendingCARotation.Unlock()
-	})
-
-	w := httptest.NewRecorder()
-	apiCARotate(w, jsonReq(http.MethodPost, "/api/ca/rotate", map[string]any{
-		"confirm":            true,
-		"confirmation_token": "bogus",
-	}))
-	assertStatus(t, w, http.StatusForbidden)
+// The challenge is issued only for an identified operation against the
+// current CA revision, and states every fact it binds.
+func TestAPICARotateChallenge_IssuesBoundToken(t *testing.T) {
+	fe6b0Node(t)
+	mux := fe6b0Mux()
+	rev := fe6b0Revision(t)
+	if code, m, _ := fe6b0Do(mux, http.MethodPost, "/api/ca/rotate/challenge?caRevision="+rev, nil); code != http.StatusPreconditionRequired || m["code"] != refusalOperationIDRequired {
+		t.Fatalf("challenge without operationId = %d %v", code, m)
+	}
+	op := fe6b0OpID()
+	ch, issued := fe6b0Challenge(t, mux, op, rev)
+	if len(ch) != 64 { // 32 random bytes → 64 hex chars
+		t.Fatalf("challenge length = %d, want 64", len(ch))
+	}
+	if issued["operationId"] != op || issued["caRevision"] != rev || issued["action"] != certActionRotate || issued["warning"] == "" {
+		t.Fatalf("challenge must state the facts it binds: %v", issued)
+	}
+	if secs, _ := issued["expiresInSeconds"].(float64); int(secs) != int(caChallengeTTL/time.Second) {
+		t.Fatalf("expiresInSeconds = %v, want %d", issued["expiresInSeconds"], int(caChallengeTTL/time.Second))
+	}
 }
 
-// Step 2 must 400 when no token has been issued (or it has expired). The
-// handler one-shot-consumes the token regardless of outcome, so the test
-// must restore the previous slot.
-func TestAPICARotate_Step2NoPendingToken(t *testing.T) {
-	pendingCARotation.Lock()
-	origToken, origExp := pendingCARotation.token, pendingCARotation.expires
-	pendingCARotation.token = ""
-	pendingCARotation.expires = time.Time{}
-	pendingCARotation.Unlock()
-	t.Cleanup(func() {
-		pendingCARotation.Lock()
-		pendingCARotation.token = origToken
-		pendingCARotation.expires = origExp
-		pendingCARotation.Unlock()
-	})
-
-	w := httptest.NewRecorder()
-	apiCARotate(w, jsonReq(http.MethodPost, "/api/ca/rotate", map[string]any{
-		"confirm":            true,
-		"confirmation_token": "whatever",
-	}))
-	assertStatus(t, w, http.StatusBadRequest)
-}
-
-// Step 2 must 400 when the stored token has already expired. Exercises the
-// "storedToken != \"\" but time.Now().After(expires)" branch specifically.
-func TestAPICARotate_Step2ExpiredToken(t *testing.T) {
-	pendingCARotation.Lock()
-	origToken, origExp := pendingCARotation.token, pendingCARotation.expires
-	pendingCARotation.token = "expired-token"
-	pendingCARotation.expires = time.Now().Add(-1 * time.Second) // already elapsed
-	pendingCARotation.Unlock()
-	t.Cleanup(func() {
-		pendingCARotation.Lock()
-		pendingCARotation.token = origToken
-		pendingCARotation.expires = origExp
-		pendingCARotation.Unlock()
-	})
-
-	w := httptest.NewRecorder()
-	apiCARotate(w, jsonReq(http.MethodPost, "/api/ca/rotate", map[string]any{
-		"confirm":            true,
-		"confirmation_token": "expired-token",
-	}))
-	assertStatus(t, w, http.StatusBadRequest)
+// A confirm without a challenge is 428 challenge_required and consumes nothing.
+func TestAPICARotate_ConfirmWithoutChallenge(t *testing.T) {
+	fe6b0Node(t)
+	mux := fe6b0Mux()
+	rev := fe6b0Revision(t)
+	op := fe6b0OpID()
+	ch, _ := fe6b0Challenge(t, mux, op, rev)
+	if code, m, _ := fe6b0Rotate(mux, op, rev, ""); code != http.StatusPreconditionRequired || m["code"] != refusalChallengeRequired {
+		t.Fatalf("confirm without challenge = %d %v", code, m)
+	}
+	if code, m, _ := fe6b0Rotate(mux, op, rev, ch); code != http.StatusOK || m["rotated"] != true {
+		t.Fatalf("the bound confirm was consumed by the unrelated attempt: %d %v", code, m)
+	}
 }
 
 // ─── apiCAStatus / apiCADownload / apiCACacheClear ─────────────────────────
@@ -260,42 +192,23 @@ func TestAPIOCSPConfig_GETShape(t *testing.T) {
 	}
 }
 
-// POST toggles enabled on and off. Snapshots the globals the toggle mutates
-// so the test restores both OCSP state AND the upstreamTransport TLS config,
-// since Enable calls ConfigureTransportOCSP which mutates the shared transport.
+// POST sets the durable desired posture on and off (FE-6B.0: fenced on
+// ocspRevision, operation-identified, persist-before-apply). fe6b0Node
+// snapshots the OCSP checker + the upstream transport template + the settings
+// path, since Enable swaps the shared transport.
 func TestAPIOCSPConfig_POSTTogglesEnabled(t *testing.T) {
-	origEnabled := globalOCSP.Enabled()
-	// P5.3: snapshot the entire transport pointer + operator TLS
-	// template. apiOCSPConfig now installs OCSP via
-	// swapUpstreamTransport, which publishes a NEW transport with a
-	// Clone of the operator template attached.
-	origPtr := upstreamTransportPtr.Load()
-	upstreamTransportWriteMu.Lock()
-	origOpTLS := upstreamOpTLSCfg
-	upstreamOpTLSCfg = nil
-	upstreamTransportWriteMu.Unlock()
-	t.Cleanup(func() {
-		if origEnabled {
-			globalOCSP.Enable()
-		} else {
-			globalOCSP.Disable()
-		}
-		upstreamTransportPtr.Store(origPtr)
-		upstreamTransportWriteMu.Lock()
-		upstreamOpTLSCfg = origOpTLS
-		upstreamTransportWriteMu.Unlock()
-	})
-
-	// Start from disabled + a fresh transport (no TLS config) so the
-	// OCSP swap path takes the "create with MinVersion=TLS13" branch
-	// deterministically regardless of what an earlier test may have
-	// left installed on the shared upstream transport.
+	fe6b0Node(t)
+	mux := fe6b0Mux()
 	globalOCSP.Disable()
 	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 
 	w := httptest.NewRecorder()
-	apiOCSPConfig(w, jsonReq(http.MethodPost, "/api/ocsp", map[string]any{"enabled": true}))
-	assertStatus(t, w, http.StatusOK)
+	mux.ServeHTTP(w, viewerCtx(getReq("/api/ocsp")))
+	rev, _ := fe6b0Decode(w)["revision"].(string)
+	code, m, w2 := fe6b0Do(mux, http.MethodPost, "/api/ocsp?operationId="+fe6b0OpID()+"&ocspRevision="+rev, map[string]any{"enabled": true})
+	if code != http.StatusOK || m["enabled"] != true || m["durable"] != true {
+		t.Fatalf("POST enabled=true = %d %s", code, w2.Body.String())
+	}
 	if !globalOCSP.Enabled() {
 		t.Fatal("POST enabled=true did not enable OCSP")
 	}
@@ -314,10 +227,12 @@ func TestAPIOCSPConfig_POSTTogglesEnabled(t *testing.T) {
 		t.Error("POST enabled=true must install VerifyConnection (resumed-session path)")
 	}
 
-	// And toggle back off — Disable branch.
-	w2 := httptest.NewRecorder()
-	apiOCSPConfig(w2, jsonReq(http.MethodPost, "/api/ocsp", map[string]any{"enabled": false}))
-	assertStatus(t, w2, http.StatusOK)
+	// And toggle back off — Disable branch, fenced on the moved revision.
+	rev2, _ := m["revision"].(string)
+	code, m, _ = fe6b0Do(mux, http.MethodPost, "/api/ocsp?operationId="+fe6b0OpID()+"&ocspRevision="+rev2, map[string]any{"enabled": false})
+	if code != http.StatusOK || m["enabled"] != false {
+		t.Fatalf("POST enabled=false = %d %v", code, m)
+	}
 	if globalOCSP.Enabled() {
 		t.Fatal("POST enabled=false did not disable OCSP")
 	}
@@ -355,8 +270,7 @@ func TestAPIOCSPConfig_GETSurfacesMTLSLoadFailure(t *testing.T) {
 	mtlsClientCertState = mtlsClientCertStatus{
 		configured: true,
 		loaded:     false,
-		file:       "/etc/culvert/client.crt",
-		lastError:  "x509: malformed certificate",
+		reason:     "load_failed",
 	}
 	mtlsClientCertMu.Unlock()
 	t.Cleanup(func() {
@@ -375,8 +289,14 @@ func TestAPIOCSPConfig_GETSurfacesMTLSLoadFailure(t *testing.T) {
 	if loaded, _ := m["mtlsClientCertLoaded"].(bool); loaded {
 		t.Error("mtlsClientCertLoaded should be false")
 	}
-	if m["mtlsClientCertLastError"] != "x509: malformed certificate" {
-		t.Errorf("mtlsClientCertLastError = %v, want the recorded load error", m["mtlsClientCertLastError"])
+	if m["mtlsClientCertReason"] != "load_failed" {
+		t.Errorf("mtlsClientCertReason = %v, want the bounded class load_failed", m["mtlsClientCertReason"])
+	}
+	if _, ok := m["mtlsClientCertFile"]; ok {
+		t.Error("a viewer response must never carry the client-certificate file path")
+	}
+	if _, ok := m["mtlsClientCertLastError"]; ok {
+		t.Error("a viewer response must never carry the raw loader error")
 	}
 	if _, ok := m["mtlsClientCertNotAfter"]; ok {
 		t.Error("mtlsClientCertNotAfter should be omitted when the cert never loaded")
@@ -392,7 +312,6 @@ func TestAPIOCSPConfig_GETSurfacesMTLSExpiry(t *testing.T) {
 	mtlsClientCertState = mtlsClientCertStatus{
 		configured: true,
 		loaded:     true,
-		file:       "/etc/culvert/client.crt",
 		notAfter:   notAfter,
 	}
 	mtlsClientCertMu.Unlock()
@@ -417,8 +336,8 @@ func TestAPIOCSPConfig_GETSurfacesMTLSExpiry(t *testing.T) {
 	if days, ok := m["mtlsClientCertDaysRemaining"].(float64); !ok || (int(days) != 2 && int(days) != 3) {
 		t.Errorf("mtlsClientCertDaysRemaining = %v, want 2 or 3", m["mtlsClientCertDaysRemaining"])
 	}
-	if _, ok := m["mtlsClientCertLastError"]; ok {
-		t.Error("mtlsClientCertLastError should be omitted on a healthy load")
+	if _, ok := m["mtlsClientCertReason"]; ok {
+		t.Error("mtlsClientCertReason should be omitted on a healthy load")
 	}
 }
 
@@ -433,7 +352,6 @@ func TestAPIOCSPConfig_GETSurfacesMTLSExpired(t *testing.T) {
 	mtlsClientCertState = mtlsClientCertStatus{
 		configured: true,
 		loaded:     true,
-		file:       "/etc/culvert/client.crt",
 		notAfter:   notAfter,
 	}
 	mtlsClientCertMu.Unlock()
@@ -458,7 +376,7 @@ func TestAPIOCSPConfig_GETSurfacesMTLSExpired(t *testing.T) {
 
 func TestAPIOCSPConfig_POSTBadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/ocsp", strings.NewReader("not json"))
+	r := httptest.NewRequest(http.MethodPost, "/api/ocsp?operationId="+fe6b0OpID(), strings.NewReader("not json"))
 	r.Header.Set("Content-Type", "application/json")
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiOCSPConfig(w, adminCtx(r))

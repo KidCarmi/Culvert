@@ -178,6 +178,7 @@ func noteSSLInspectionRecovered(how string) {
 		return
 	}
 	sslInspectionLoadError.Store("")
+	sslInspectionLoadClass.Store("")
 	caLoadRecovery.mu.Lock()
 	caLoadRecovery.recovered = true
 	caLoadRecovery.gaveUp = false
@@ -280,7 +281,9 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 		caLoadRecovery.mu.Lock()
 		caLoadRecovery.attempts++
 		if err != nil {
-			caLoadRecovery.lastErr = sanitizeLog(err.Error())
+			// The bounded class (FE-6B.0): the admin surface publishes it
+			// as loadRecoveryClass; the path and the OS text stay off it.
+			caLoadRecovery.lastErr = caFaultClass(err)
 		}
 		caLoadRecovery.mu.Unlock()
 
@@ -288,8 +291,8 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 			return
 		}
 		if logger != nil {
-			logger.Printf("SSLCA: Root CA recovery attempt %d/%d failed: %q — retrying in %s",
-				attempt, sched.budget, sanitizeLog(err.Error()), backoff)
+			logger.Printf("SSLCA: Root CA recovery attempt %d/%d failed (%s) — retrying in %s",
+				attempt, sched.budget, caFaultClass(err), backoff)
 		}
 
 		backoff *= 2

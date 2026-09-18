@@ -81,6 +81,86 @@
         },
         "description": "FE-6A.0 correction — the profile validated but the live identity provider could not be constructed from it (`code: provider_compile_failed`): OIDC discovery, SAML metadata fetch/parse or LDAP provider construction failed. `current.reason` is a BOUNDED class (oidc_discovery, saml_metadata, ldap_provider, unsupported); the dependency's own error text (hostnames, TLS, transport) never crosses this boundary — not in the response, the process log or the audit trail. Nothing was changed."
       },
+      "CertRefusalBadRequest": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 typed refusal — malformed body, parameter or form (`code: invalid_input`), or the certificate candidate was refused as a whole (`code: candidate_invalid`, `current.reason` bounded: malformed_pem, chain_invalid, key_mismatch, not_ca, unsupported_key, encrypted_key_unsupported, expired, not_yet_valid). Nothing was changed; no key material, parser text or path is echoed."
+      },
+      "CertRefusalConflict": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 typed refusal — `code` is bounded: stale (the echoed fence moved; `current.caRevision` / `current.uiCertRevision` / `current.ocspRevision`), challenge_stale (the rotation challenge binds different facts; `current.changed` lists bounded classes: actor, operation, ca_revision, challenge, expired), candidate_duplicate (already installed), operation_mismatch (a known operationId re-sent for a different action or candidate), operation_in_progress, operation_aborted, operation_outcome_unknown. Nothing was changed, no audit event was recorded and no revision advanced."
+      },
+      "CertRefusalDegraded": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 — the mutation cannot be accepted: `operation_ledger_degraded` (corrupt/unreadable certificate_operations.json left in place as evidence — restore or remove it and restart), `operation_ledger_full` (every slot holds an unresolved intent — look them up and let them settle), `persistence_not_configured` (no CA bundle path: a CA that could exist only in memory is refused BEFORE anything is minted — there is no `persisted:false` success), `ca_not_ready` (no Root CA is installed). Nothing was changed."
+      },
+      "CertRefusalForbidden": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 typed refusal — role below the route's floor (`code: forbidden`)."
+      },
+      "CertRefusalMethodNotAllowed": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 typed refusal — the method is not served on this route (`code: method_not_allowed`)."
+      },
+      "CertRefusalNotFound": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 typed refusal — no such operation record, or no persisted UI certificate to delete (`code: not_found`)."
+      },
+      "CertRefusalPersistFailed": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 — the durable write failed BEFORE anything was published (`code: persist_failed`, `current.class` bounded: permission_denied, not_found, read_only, no_space, not_a_file, io_error, write_failed; the live object is unchanged and the operation record is aborted), or `code: outcome_unknown` on a UI-cert write/delete whose compensating step also failed (`current.detail`: rollback_failed or certificate_file_remains) — non-terminal; GET /api/ca/operations/{operationId} settles it. `code: ca_generation_failed` — a fresh root could not be minted; nothing was changed."
+      },
+      "CertRefusalPreconditionRequired": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CertRefusal"
+            }
+          }
+        },
+        "description": "FE-6B.0 fence — the mutation carried no fence (`code: precondition_required`; `current` carries the token to echo under its own name), no client `operationId` (`code: operation_id_required`) or no rotation challenge (`code: challenge_required`). Nothing was changed."
+      },
       "PACPreconditionRequired": {
         "content": {
           "application/json": {
@@ -667,6 +747,138 @@
         ],
         "type": "object"
       },
+      "CACertificateInfo": {
+        "additionalProperties": false,
+        "description": "Public projection of a certificate (no key material).",
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "isCA": {
+            "type": "boolean"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "keyAlgorithm": {
+            "type": "string"
+          },
+          "notAfter": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "notBefore": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "issuer",
+          "isCA",
+          "keyAlgorithm",
+          "notBefore",
+          "notAfter",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "CAFaultClass": {
+        "description": "FE-6B.0 bounded fault class published in place of a path or raw error text.",
+        "enum": [
+          "permission_denied",
+          "not_found",
+          "read_only",
+          "no_space",
+          "not_a_file",
+          "io_error",
+          "write_failed",
+          "decrypt_failed",
+          "bundle_malformed",
+          "load_failed",
+          "init_failed",
+          "expired"
+        ],
+        "type": "string"
+      },
+      "CAImportResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CAOperationOutcome"
+          },
+          {
+            "properties": {
+              "ca": {
+                "$ref": "#/components/schemas/CAInfoWithRevision"
+              },
+              "imported": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "persisted": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "previous": {
+                "$ref": "#/components/schemas/CAPrevious"
+              },
+              "target": {
+                "enum": [
+                  "mitm"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "imported",
+              "persisted",
+              "target",
+              "ca",
+              "previous"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CAInfoWithRevision": {
+        "additionalProperties": false,
+        "description": "The live Root CA's public projection plus its revision token.",
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "notAfter": {
+            "type": "string"
+          },
+          "notBefore": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ready",
+          "revision"
+        ],
+        "type": "object"
+      },
       "CAKeyProvider": {
         "additionalProperties": false,
         "properties": {
@@ -691,9 +903,315 @@
         ],
         "type": "object"
       },
-      "CAStatus": {
+      "CAOperationOutcome": {
         "additionalProperties": true,
-        "description": "Internal CA state (opaque superset; fields depend on rotation/dual-CA mode).",
+        "description": "Fields every FE-6B.0 mutation result carries.",
+        "properties": {
+          "action": {
+            "enum": [
+              "ca.rotate",
+              "ca.import",
+              "cert.ui.replace",
+              "cert.ui.delete",
+              "ocsp.set"
+            ],
+            "type": "string"
+          },
+          "auditState": {
+            "description": "Present when the operation-keyed success audit could not be made durable yet; completed exactly once by the lookup or at boot.",
+            "enum": [
+              "pending"
+            ],
+            "type": "string"
+          },
+          "operationId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "recordState": {
+            "description": "committed — the durable terminal record exists; pending_reconciliation — the mutation is durable and live but its terminal record could not be persisted; GET /api/ca/operations/{operationId} settles it exactly once.",
+            "enum": [
+              "committed",
+              "pending_reconciliation"
+            ],
+            "type": "string"
+          },
+          "replayed": {
+            "description": "The recorded result of an earlier dispatch of the same operationId; nothing was done again.",
+            "type": "boolean"
+          },
+          "scope": {
+            "enum": [
+              "node-local"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CAPrevious": {
+        "additionalProperties": false,
+        "description": "The superseded CA's identity.",
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CARotateChallenge": {
+        "additionalProperties": false,
+        "description": "FE-6B.0 C4 — the server-issued rotation challenge. It is bound to the actor who requested it, the `operationId`, the `caRevision` it was issued against and `expiresAt`; single-use; consumed ONLY by a fully valid confirm (an unrelated, malformed or mismatched attempt consumes nothing). Process-local: a restart requires a fresh challenge.",
+        "properties": {
+          "action": {
+            "enum": [
+              "ca.rotate"
+            ],
+            "type": "string"
+          },
+          "caRevision": {
+            "type": "string"
+          },
+          "challenge": {
+            "description": "64 hex characters.",
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expiresInSeconds": {
+            "type": "integer"
+          },
+          "fingerprint": {
+            "description": "The CURRENT CA's fingerprint — what the ceremony shows the administrator they are replacing.",
+            "type": "string"
+          },
+          "operationId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "warning": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge",
+          "operationId",
+          "action",
+          "caRevision",
+          "fingerprint",
+          "expiresInSeconds",
+          "expiresAt",
+          "warning"
+        ],
+        "type": "object"
+      },
+      "CARotateConfirm": {
+        "additionalProperties": false,
+        "description": "The confirm body — the challenge issued for this operationId.",
+        "properties": {
+          "challenge": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CARotateResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CAOperationOutcome"
+          },
+          {
+            "properties": {
+              "ca": {
+                "$ref": "#/components/schemas/CAInfoWithRevision"
+              },
+              "persisted": {
+                "description": "Always true: the bundle is written BEFORE the candidate is installed; a write failure is 500 persist_failed with the current CA unchanged.",
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "previous": {
+                "$ref": "#/components/schemas/CAPrevious"
+              },
+              "rotated": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "rotated",
+              "persisted",
+              "ca",
+              "previous"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CAStatus": {
+        "additionalProperties": false,
+        "description": "Internal CA state (FE-6B.0: CLOSED). `revision` is the server-owned fence for every CA mutation (`car1:<sha256 hex of the live CA DER>` or `car1:none`). Every fault is a BOUNDED class — never a path, never the loader's or the OS's text: `unusableClass` (expired, not_yet_valid, no_ca), `rotationPersistClass` / `loadFailureClass` / `loadRecoveryClass` (permission_denied, not_found, read_only, no_space, not_a_file, io_error, write_failed, decrypt_failed, bundle_malformed, load_failed, init_failed, expired). `rotationPersistDegraded` means the LAST rotation attempt could not be written and was therefore NOT applied (nothing is ever installed unpersisted).",
+        "properties": {
+          "autoRotation": {
+            "type": "boolean"
+          },
+          "cacheMax": {
+            "type": "integer"
+          },
+          "cacheSize": {
+            "type": "integer"
+          },
+          "cacheTTL": {
+            "type": "string"
+          },
+          "dualCAActive": {
+            "type": "boolean"
+          },
+          "expiresIn": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "description": "SHA-256 of the CA DER, upper-case colon hex.",
+            "type": "string"
+          },
+          "inspectBlocked": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "inspectBypassed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "keyProvider": {
+            "type": "string"
+          },
+          "leafValidity": {
+            "type": "string"
+          },
+          "loadFailed": {
+            "type": "boolean"
+          },
+          "loadFailureClass": {
+            "$ref": "#/components/schemas/CAFaultClass"
+          },
+          "loadRecoveryAttempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "loadRecoveryClass": {
+            "$ref": "#/components/schemas/CAFaultClass"
+          },
+          "loadRecoveryGaveUp": {
+            "type": "boolean"
+          },
+          "notAfter": {
+            "type": "string"
+          },
+          "notBefore": {
+            "type": "string"
+          },
+          "persistenceConfigured": {
+            "description": "A CA bundle path is configured; without one every rotation/import is refused (persistence_not_configured).",
+            "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "revision": {
+            "description": "car1:<64 hex> | car1:none",
+            "type": "string"
+          },
+          "rotationOverlapDays": {
+            "type": "integer"
+          },
+          "rotationPersistClass": {
+            "$ref": "#/components/schemas/CAFaultClass"
+          },
+          "rotationPersistDegraded": {
+            "type": "boolean"
+          },
+          "rotationPersistFailures": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "node-local"
+            ],
+            "type": "string"
+          },
+          "secondaryCA": {
+            "additionalProperties": false,
+            "properties": {
+              "expiresIn": {
+                "type": "string"
+              },
+              "notAfter": {
+                "type": "string"
+              },
+              "overlapEnd": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "signRefused": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "unusableClass": {
+            "enum": [
+              "expired",
+              "not_yet_valid",
+              "no_ca"
+            ],
+            "type": "string"
+          },
+          "usable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ready",
+          "revision",
+          "scope",
+          "cacheSize",
+          "cacheMax",
+          "cacheTTL",
+          "leafValidity",
+          "autoRotation",
+          "rotationOverlapDays",
+          "keyProvider",
+          "persistenceConfigured",
+          "usable",
+          "inspectBlocked",
+          "signRefused",
+          "rotationPersistFailures",
+          "rotationPersistDegraded",
+          "loadFailed",
+          "inspectBypassed",
+          "loadRecoveryAttempts",
+          "loadRecoveryGaveUp",
+          "dualCAActive"
+        ],
         "type": "object"
       },
       "CDRConfig": {
@@ -1201,6 +1719,413 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "CertDryRunResult": {
+        "additionalProperties": false,
+        "description": "FE-6B.0 — the candidate's public facts, nothing written, no fence or operationId consumed. `candidate` is CACertificateInfo for target=mitm and UICertCandidate for target=ui.",
+        "properties": {
+          "action": {
+            "enum": [
+              "ca.import",
+              "cert.ui.replace"
+            ],
+            "type": "string"
+          },
+          "candidate": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "current": {
+            "additionalProperties": true,
+            "description": "The fence to echo on the real upload: caRevision (mitm) or uiCertRevision (ui).",
+            "type": "object"
+          },
+          "dryRun": {
+            "enum": [
+              true
+            ],
+            "type": "boolean"
+          },
+          "target": {
+            "enum": [
+              "mitm",
+              "ui"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "dryRun",
+          "target",
+          "action",
+          "candidate",
+          "current"
+        ],
+        "type": "object"
+      },
+      "CertOperation": {
+        "additionalProperties": false,
+        "description": "FE-6B.0 — durable, non-secret record of an operation-identified certificate/CA/OCSP mutation. A terminal state is reported ONLY once its durable record exists; a pending record is settled by this lookup or at boot from the object's own evidence (the live CA or bundle fingerprint, the persisted UI cert digest, the durable OCSP posture at the intent's generation), never from a guess.",
+        "properties": {
+          "action": {
+            "enum": [
+              "ca.rotate",
+              "ca.import",
+              "cert.ui.replace",
+              "cert.ui.delete",
+              "ocsp.set"
+            ],
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "auditState": {
+            "enum": [
+              "pending"
+            ],
+            "type": "string"
+          },
+          "audited": {
+            "type": "boolean"
+          },
+          "candidateFingerprint": {
+            "description": "The certificate the operation installs (hex SHA-256); absent on a UI delete and an OCSP set.",
+            "type": "string"
+          },
+          "code": {
+            "description": "aborted / outcome_unknown carry the refusal code; a settled record carries `<why>_committed` / `<why>_absent` / `<why>_unproven` with why = lookup or reconciled.",
+            "type": "string"
+          },
+          "committedRevision": {
+            "type": "string"
+          },
+          "fence": {
+            "description": "The revision the caller echoed.",
+            "type": "string"
+          },
+          "finishedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "operationId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": true,
+            "description": "committed — the response the client received.",
+            "type": "object"
+          },
+          "startedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "committed",
+              "aborted",
+              "outcome_unknown"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "enum": [
+              "root_ca",
+              "ui_cert",
+              "ocsp"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "operationId",
+          "state",
+          "action",
+          "actor",
+          "target",
+          "fence",
+          "startedAt",
+          "audited"
+        ],
+        "type": "object"
+      },
+      "CertRefusal": {
+        "additionalProperties": false,
+        "description": "FE-6B.0 typed refusal of the Certificates / CA / OCSP surface. `code` is bounded: invalid_input / candidate_invalid (400), forbidden (403), not_found (404), method_not_allowed (405), stale / challenge_stale / candidate_duplicate / operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown (409), precondition_required / operation_id_required / challenge_required (428), persist_failed / outcome_unknown / ca_generation_failed (500), operation_ledger_degraded / operation_ledger_full / persistence_not_configured / ca_not_ready (503). `current` carries typed facts for the retry (caRevision, uiCertRevision, ocspRevision, changed, reason, class, detail, operationId, action, state, code, fingerprint). A refusal mutates nothing, audits no success and advances no revision.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "current": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ],
+        "type": "object"
+      },
+      "CertUploadResult": {
+        "description": "The action-bound result of POST /api/certs/upload — by target and dryRun.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CertDryRunResult"
+          },
+          {
+            "$ref": "#/components/schemas/CAImportResult"
+          },
+          {
+            "$ref": "#/components/schemas/UICertReplaceResult"
+          }
+        ]
+      },
+      "CertificateInventory": {
+        "additionalProperties": false,
+        "description": "FE-6B.0 viewer read model of every certificate object on THIS node (scope node-local: the inspection CA, the admin-UI certificate, the upstream mTLS client certificate and the OCSP posture are never synced CP→DP — only the cluster CA fingerprint travels in the ConfigSnapshot). Bounded classes only.",
+        "properties": {
+          "backup": {
+            "additionalProperties": false,
+            "description": "What a backup archive carries and what a config-version rollback can touch — the recorded FE-6B.0 facts.",
+            "properties": {
+              "caBundleArchived": {
+                "description": "data/ca.bundle is a Tier-1 backup artifact (private key included; sealed only when a passphrase is set — pre-existing, unchanged).",
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "caBundleEncrypted": {
+                "type": "boolean"
+              },
+              "configVersionRollback": {
+                "description": "CA rotation, certificate import/replace/delete and the OCSP posture are OFF the config-version rollback surface (forward-only trust decisions).",
+                "enum": [
+                  false
+                ],
+                "type": "boolean"
+              },
+              "operationsArchived": {
+                "description": "The operation ledger is node-local evidence and is never archived.",
+                "enum": [
+                  false
+                ],
+                "type": "boolean"
+              },
+              "uiCertArchived": {
+                "description": "The UI cert/key pair is never archived; re-upload after a restore.",
+                "enum": [
+                  false
+                ],
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "caBundleArchived",
+              "caBundleEncrypted",
+              "uiCertArchived",
+              "operationsArchived",
+              "configVersionRollback"
+            ],
+            "type": "object"
+          },
+          "ca": {
+            "additionalProperties": false,
+            "properties": {
+              "dualCAActive": {
+                "type": "boolean"
+              },
+              "encryptedAtRest": {
+                "description": "The bundle is sealed in the PSCA envelope (CULVERT_CA_PASSPHRASE set).",
+                "type": "boolean"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "issuer": {
+                "type": "string"
+              },
+              "keyProvider": {
+                "type": "string"
+              },
+              "loadFailed": {
+                "type": "boolean"
+              },
+              "loadFailureClass": {
+                "$ref": "#/components/schemas/CAFaultClass"
+              },
+              "notAfter": {
+                "type": "string"
+              },
+              "notBefore": {
+                "type": "string"
+              },
+              "persistClass": {
+                "$ref": "#/components/schemas/CAFaultClass"
+              },
+              "persistDegraded": {
+                "type": "boolean"
+              },
+              "persistenceConfigured": {
+                "type": "boolean"
+              },
+              "present": {
+                "type": "boolean"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              },
+              "unusableClass": {
+                "enum": [
+                  "expired",
+                  "not_yet_valid",
+                  "no_ca"
+                ],
+                "type": "string"
+              },
+              "usable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "present",
+              "revision",
+              "keyProvider",
+              "dualCAActive",
+              "persistenceConfigured",
+              "encryptedAtRest",
+              "usable",
+              "persistDegraded",
+              "loadFailed"
+            ],
+            "type": "object"
+          },
+          "mtlsClientCert": {
+            "additionalProperties": false,
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "daysRemaining": {
+                "type": "integer"
+              },
+              "loaded": {
+                "type": "boolean"
+              },
+              "notAfter": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "cert_file_missing",
+                  "key_file_missing",
+                  "load_failed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "configured",
+              "loaded"
+            ],
+            "type": "object"
+          },
+          "ocsp": {
+            "additionalProperties": false,
+            "properties": {
+              "desired": {
+                "$ref": "#/components/schemas/OCSPDesired"
+              },
+              "durable": {
+                "type": "boolean"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "runtime": {
+                "$ref": "#/components/schemas/OCSPRuntime"
+              }
+            },
+            "required": [
+              "revision",
+              "desired",
+              "runtime",
+              "durable"
+            ],
+            "type": "object"
+          },
+          "operations": {
+            "additionalProperties": false,
+            "properties": {
+              "auditSink": {
+                "enum": [
+                  "memory",
+                  "file"
+                ],
+                "type": "string"
+              },
+              "capacity": {
+                "type": "integer"
+              },
+              "degraded": {
+                "type": "boolean"
+              },
+              "degradedDetail": {
+                "type": "string"
+              },
+              "degradedReason": {
+                "enum": [
+                  "corrupt",
+                  "unreadable"
+                ],
+                "type": "string"
+              },
+              "retained": {
+                "type": "integer"
+              },
+              "unresolved": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "degraded",
+              "retained",
+              "unresolved",
+              "capacity",
+              "auditSink"
+            ],
+            "type": "object"
+          },
+          "scope": {
+            "enum": [
+              "node-local"
+            ],
+            "type": "string"
+          },
+          "uiCert": {
+            "$ref": "#/components/schemas/UICertRead"
+          }
+        },
+        "required": [
+          "scope",
+          "ca",
+          "uiCert",
+          "mtlsClientCert",
+          "ocsp",
+          "operations",
+          "backup"
+        ],
         "type": "object"
       },
       "ChangePasswordRequest": {
@@ -3717,6 +4642,85 @@
         "description": "Node group definitions and selectors.",
         "type": "object"
       },
+      "OCSPDesired": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "source": {
+            "description": "Who set the desired posture — nothing (default), proxy.ocsp_check (yaml), or a durable admin set (admin, which wins at boot).",
+            "enum": [
+              "default",
+              "yaml",
+              "admin"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "source"
+        ],
+        "type": "object"
+      },
+      "OCSPRuntime": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "OCSPSetResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CAOperationOutcome"
+          },
+          {
+            "properties": {
+              "desired": {
+                "$ref": "#/components/schemas/OCSPDesired"
+              },
+              "durable": {
+                "description": "Always true: the posture is persisted BEFORE it is applied; a persist failure is 500 persist_failed with the running posture unchanged.",
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "ok": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "runtime": {
+                "$ref": "#/components/schemas/OCSPRuntime"
+              }
+            },
+            "required": [
+              "ok",
+              "enabled",
+              "durable",
+              "revision",
+              "desired",
+              "runtime"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "OCSPStatus": {
         "additionalProperties": false,
         "properties": {
@@ -3753,6 +4757,13 @@
             },
             "type": "array"
           },
+          "desired": {
+            "$ref": "#/components/schemas/OCSPDesired"
+          },
+          "durable": {
+            "description": "The desired posture is recorded in admin_settings.json (an admin set it); false while the posture comes from YAML or the default.",
+            "type": "boolean"
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -3776,14 +4787,6 @@
             "description": "Days until the loaded client certificate expires (negative if already expired). Present only when mtlsClientCertLoaded is true.",
             "type": "integer"
           },
-          "mtlsClientCertFile": {
-            "description": "Configured client-certificate file path. Present only when mtlsClientCertConfigured is true.",
-            "type": "string"
-          },
-          "mtlsClientCertLastError": {
-            "description": "Most recent client-certificate load failure. Present only when the configured certificate failed to load.",
-            "type": "string"
-          },
           "mtlsClientCertLoaded": {
             "description": "True when the configured client certificate loaded successfully and is active on the upstream transport. Present only when mtlsClientCertConfigured is true.",
             "type": "boolean"
@@ -3791,6 +4794,15 @@
           "mtlsClientCertNotAfter": {
             "description": "Expiry (RFC 3339) of the loaded client certificate. Present only when mtlsClientCertLoaded is true.",
             "format": "date-time",
+            "type": "string"
+          },
+          "mtlsClientCertReason": {
+            "description": "FE-6B.0 — the BOUNDED reason a configured client certificate is not loaded. This viewer response never carries the file path or the loader's text (the recorded finding, closed at the source).",
+            "enum": [
+              "cert_file_missing",
+              "key_file_missing",
+              "load_failed"
+            ],
             "type": "string"
           },
           "notForCertificateTotal": {
@@ -3808,9 +4820,22 @@
             "format": "int64",
             "type": "integer"
           },
+          "revision": {
+            "description": "FE-6B.0 — the fence for POST /api/ocsp (`ocr1:<64 hex>`, derived from the durable desired posture AND its generation, so a toggle never returns to an earlier token).",
+            "type": "string"
+          },
           "revokedTotal": {
             "format": "int64",
             "type": "integer"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/OCSPRuntime"
+          },
+          "scope": {
+            "enum": [
+              "node-local"
+            ],
+            "type": "string"
           },
           "staleResponseTotal": {
             "description": "OCSP responses discarded as outside their ThisUpdate/NextUpdate window (replay, or clock skew).",
@@ -3837,6 +4862,11 @@
         },
         "required": [
           "enabled",
+          "revision",
+          "scope",
+          "desired",
+          "runtime",
+          "durable",
           "cacheLen",
           "failClosedTotal",
           "revokedTotal",
@@ -6327,6 +7357,173 @@
           "ips"
         ],
         "type": "object"
+      },
+      "UICertCandidate": {
+        "additionalProperties": false,
+        "description": "The reviewed UI certificate candidate's public facts (T2 material).",
+        "properties": {
+          "chainLength": {
+            "type": "integer"
+          },
+          "dnsNames": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "notAfter": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "notBefore": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fingerprint",
+          "subject",
+          "issuer",
+          "notBefore",
+          "notAfter",
+          "chainLength"
+        ],
+        "type": "object"
+      },
+      "UICertDeleteResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CAOperationOutcome"
+          },
+          {
+            "properties": {
+              "activation": {
+                "description": "Present when the deleted pair is the one the running listener loaded.",
+                "enum": [
+                  "restart_required"
+                ],
+                "type": "string"
+              },
+              "deleted": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "target": {
+                "enum": [
+                  "ui"
+                ],
+                "type": "string"
+              },
+              "uiCert": {
+                "$ref": "#/components/schemas/UICertRead"
+              }
+            },
+            "required": [
+              "deleted",
+              "target",
+              "uiCert"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "UICertRead": {
+        "additionalProperties": false,
+        "description": "The persisted admin-UI certificate pair's public projection. `active` — the RUNNING listener loaded it at boot; `corrupt` — the persisted pair does not parse as a matching pair.",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "corrupt": {
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "notAfter": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "revision": {
+            "description": "uic1:<64 hex> | uic1:none",
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "present",
+          "revision",
+          "active",
+          "corrupt"
+        ],
+        "type": "object"
+      },
+      "UICertReplaceResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CAOperationOutcome"
+          },
+          {
+            "properties": {
+              "activation": {
+                "enum": [
+                  "restart_required"
+                ],
+                "type": "string"
+              },
+              "candidate": {
+                "$ref": "#/components/schemas/UICertCandidate"
+              },
+              "persisted": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "replaced": {
+                "enum": [
+                  true
+                ],
+                "type": "boolean"
+              },
+              "target": {
+                "enum": [
+                  "ui"
+                ],
+                "type": "string"
+              },
+              "uiCert": {
+                "$ref": "#/components/schemas/UICertRead"
+              }
+            },
+            "required": [
+              "replaced",
+              "persisted",
+              "activation",
+              "target",
+              "uiCert",
+              "candidate"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "URLCatFeedStatus": {
         "additionalProperties": false,
@@ -9901,31 +11098,32 @@
     },
     "/api/ca-cert": {
       "get": {
-        "description": "Returns the PEM-encoded internal CA certificate as an attachment.",
+        "description": "Returns the PEM-encoded internal CA certificate as an attachment, or (Accept: application/json) its public projection with the FE-6B.0 `revision` fence. 503 ca_not_ready (typed) when no CA is installed.",
         "operationId": "getCACert",
         "responses": {
           "200": {
             "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CAInfoWithRevision"
+                }
+              },
               "application/x-pem-file": {
                 "schema": {
                   "type": "string"
                 }
               }
             },
-            "description": "PEM-encoded CA certificate (attachment)."
+            "description": "PEM-encoded CA certificate (attachment), or the JSON projection when requested."
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
           },
-          "404": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "No CA certificate available. Body is plain text."
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
           }
         },
         "security": [
@@ -9957,7 +11155,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
+                  "additionalProperties": false,
+                  "properties": {
+                    "ok": {
+                      "enum": [
+                        true
+                      ],
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ],
                   "type": "object"
                 }
               }
@@ -9965,7 +11174,10 @@
             "description": "Clear leaf-cert cache completed."
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
           }
         },
         "security": [
@@ -10006,17 +11218,13 @@
             "description": "PEM-encoded CA certificate (attachment)."
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
           },
-          "404": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "No CA certificate available. Body is plain text."
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
           }
         },
         "security": [
@@ -10055,7 +11263,10 @@
             "description": "CA key provider status."
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
           }
         },
         "security": [
@@ -10078,64 +11289,35 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
-    "/api/ca/rotate": {
-      "post": {
-        "description": "Forces a CA rotation using a two-step confirmation-token flow: the first\nPOST returns `{status:\"pending_confirmation\", confirmation_token}` and\nemits a `ca.rotate_requested` audit event; re-POSTing with the token\napplies the rotation and emits `ca.rotate`. Re-signs future leaf\ncertificates under a new root; clients that pinned the previous root will\nfail until they re-trust. Admin-only and audited.\n",
-        "operationId": "rotateCA",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "example": {
-                "confirm": true,
-                "confirmation_token": "abc123"
-              },
-              "schema": {
-                "additionalProperties": false,
-                "properties": {
-                  "confirm": {
-                    "description": "Set true on the second step to apply the rotation.",
-                    "type": "boolean"
-                  },
-                  "confirmation_token": {
-                    "description": "Token returned by the first (request) step.",
-                    "type": "string"
-                  }
-                },
-                "type": "object"
-              }
-            }
-          },
-          "description": "Omit (or send `{}`) on the first step to request rotation and receive a\ntoken. On the second step send `{confirm:true, confirmation_token}` with\nthe token from the first response to apply the rotation.\n",
-          "required": false
-        },
+    "/api/ca/operations/{operationId}": {
+      "get": {
+        "description": "FE-6B.0 — the authoritative record of an operation-identified mutation: pending (dispatched, not yet decided), committed (`result` is the response the client received, `committedRevision` the object's revision after the commit), aborted (`code` names the refusal) or outcome_unknown (unproven). A pending record is SETTLED by this lookup (or at boot) from the object's own evidence — the live CA or the bundle on disk carrying the candidate fingerprint, the persisted UI cert carrying the candidate digest, the durable OCSP posture at the intent's generation — and the owed success audit is completed exactly once (`audited`). A degraded ledger refuses the lookup (503). Admin-only: the record names the actor. Never carries a secret.",
+        "operationId": "getCertificateOperation",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "example": {
-                  "confirmation_token": "abc123",
-                  "status": "pending_confirmation"
-                },
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CertOperation"
                 }
               }
             },
-            "description": "Rotation requested (`status:pending_confirmation` with a token) or\napplied, depending on whether a valid confirmation token was supplied.\n"
+            "description": "The recorded operation."
+          },
+          "400": {
+            "$ref": "#/components/responses/CertRefusalBadRequest"
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
           },
-          "500": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "Rotation failed. Body is plain text."
+          "404": {
+            "$ref": "#/components/responses/CertRefusalNotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
           }
         },
         "security": [
@@ -10146,14 +11328,194 @@
             "basicAuth": []
           }
         ],
-        "summary": "Force rotation of the internal CA (DESTRUCTIVE)",
+        "summary": "Look up a durable certificate/CA/OCSP operation intent",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.3.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/ca/rotate": {
+      "post": {
+        "description": "FE-6B.0 — replaces the Root CA with a freshly minted one. The confirm is\nFENCED on `caRevision` (absent ⇒ 428 precondition_required, moved ⇒ 409\nstale, decided inside the serialized mutation boundary), IDENTIFIED by a\nclient UUID `operationId` (absent ⇒ 428 operation_id_required; a known\nid replays its recorded outcome with `replayed:true` — also across a\nrestart — and never rotates twice) and BOUND to the challenge issued by\nPOST /api/ca/rotate/challenge for the same actor, operationId and\nrevision (absent ⇒ 428 challenge_required; another actor, another\noperation, a moved revision, a wrong value or an expired challenge ⇒ 409\nchallenge_stale with `current.changed`, and the challenge is NOT\nconsumed — only a fully valid confirm consumes it).\n\nPERSIST BEFORE PUBLISH: the new bundle is written atomically to the\nconfigured path first; only then is the candidate installed. A write\nfailure is 500 persist_failed with the current CA unchanged and the\noperation aborted. No bundle path ⇒ 503 persistence_not_configured,\nrefused before anything is minted (there is no `persisted:false`\nsuccess). The success audit (`ca.rotate`) is operation-keyed and\nemitted exactly once AFTER the durable terminal record; `recordState`\nand `auditState` tell the truth when either is still owed.\n",
+        "operationId": "rotateCA",
+        "parameters": [
+          {
+            "description": "Client-generated UUID identifying this rotation intent.",
+            "in": "query",
+            "name": "operationId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The loaded CA revision (CAStatus.revision).",
+            "in": "query",
+            "name": "caRevision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "challenge": "6f3a…(64 hex)"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CARotateConfirm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CARotateResult"
+                }
+              }
+            },
+            "description": "The rotation's action-bound result (or the replayed recorded result of the same operationId)."
+          },
+          "400": {
+            "$ref": "#/components/responses/CertRefusalBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/CertRefusalConflict"
+          },
+          "428": {
+            "$ref": "#/components/responses/CertRefusalPreconditionRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/CertRefusalPersistFailed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Rotate the internal CA (DESTRUCTIVE; fenced, operation-identified, challenge-bound)",
         "tags": [
           "security"
         ],
         "x-culvert-audit-event": "ca.rotate",
         "x-culvert-danger-level": "high",
-        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/ca/rotate/challenge": {
+      "post": {
+        "description": "FE-6B.0 C4 — mints the server-owned challenge a rotation confirm must\necho. Requires `operationId` (428 operation_id_required) and the\ncurrent `caRevision` (428 precondition_required / 409 stale with\n`current.caRevision`); an operationId the ledger already knows ⇒ 409\noperation_mismatch; a degraded ledger ⇒ 503. The challenge is bound to\nthe requesting actor, the operationId, the revision and `expiresAt`,\nis single-use, and is consumed only by a fully valid confirm. Nothing\ndurable is changed; the request is audited as `ca.rotate_requested`\n(an admin action, not a success claim).\n",
+        "operationId": "requestCARotationChallenge",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "operationId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "caRevision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CARotateChallenge"
+                }
+              }
+            },
+            "description": "The challenge and every fact it binds."
+          },
+          "400": {
+            "$ref": "#/components/responses/CertRefusalBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/CertRefusalConflict"
+          },
+          "428": {
+            "$ref": "#/components/responses/CertRefusalPreconditionRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/CertRefusalPersistFailed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Issue a bound CA-rotation challenge",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "ca.rotate_requested",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.3.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
@@ -10162,7 +11524,7 @@
     },
     "/api/ca/status": {
       "get": {
-        "description": "Returns internal CA state — root info, leaf cache, rotation, and dual-CA status.",
+        "description": "Returns internal CA state — root info, leaf cache, rotation, and dual-CA status. FE-6B.0: carries the server-owned `revision` fence and reports every fault as a bounded class (never a path or raw error).",
         "operationId": "getCAStatus",
         "responses": {
           "200": {
@@ -10176,7 +11538,10 @@
             "description": "CA state."
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
           }
         },
         "security": [
@@ -11500,10 +12865,187 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/certificates": {
+      "get": {
+        "description": "FE-6B.0 — every certificate object on this node with its revision fence and bounded fault classes: the inspection CA, the persisted admin-UI certificate, the upstream mTLS client certificate, the OCSP desired/runtime posture, the operation-ledger posture and the backup/rollback facts. Viewer floor.",
+        "operationId": "getCertificateInventory",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CertificateInventory"
+                }
+              }
+            },
+            "description": "The inventory."
+          },
+          "403": {
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Certificate inventory (node-local read model)",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.3.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/certs/ui": {
+      "delete": {
+        "description": "FE-6B.0 — removes the persisted UI certificate pair (the private key\nfirst, so an interrupted delete never leaves a usable half-pair).\nFenced on `uiCertRevision` (428 / 409 stale with\n`current.uiCertRevision`), identified by `operationId` (replay-safe),\n404 not_found when nothing is persisted. The running listener keeps\nthe pair it loaded at boot — `activation: restart_required` and\n`uiCert.active` are the T3 facts — and the next restart falls back to\nthe auto self-signed certificate. Audited `cert.ui.delete`,\noperation-keyed, after the durable record.\n",
+        "operationId": "deleteUICert",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "operationId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "uiCertRevision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UICertDeleteResult"
+                }
+              }
+            },
+            "description": "The delete's action-bound result (or the replayed recorded result)."
+          },
+          "400": {
+            "$ref": "#/components/responses/CertRefusalBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/CertRefusalNotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/CertRefusalConflict"
+          },
+          "428": {
+            "$ref": "#/components/responses/CertRefusalPreconditionRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/CertRefusalPersistFailed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete the persisted admin-UI certificate (fenced, operation-identified)",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "cert.ui.delete",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.3.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/certs/upload": {
       "post": {
-        "description": "Uploads a TLS certificate and key via multipart form (fields cert, key, target).",
+        "description": "FE-6B.0 — multipart form (fields `cert`, `key`, `target`). The COMPLETE\ncandidate is validated before anything is decided: a malformed PEM, a\nbroken chain, a key that does not belong to the certificate, a non-CA\ncertificate (mitm), an unsupported or passphrase-protected key, or a\ncertificate outside its validity window is 400 candidate_invalid with a\nbounded `current.reason` — atomically, nothing written, no key material\nor parser text echoed. `?dryRun=1` answers the candidate's public facts\n(CertDryRunResult) without a fence, an operationId or a write — the T2\nreview material.\n\ntarget=mitm: fenced on `caRevision`, PERSIST BEFORE PUBLISH (the bundle\nis written first; 500 persist_failed leaves the current CA unchanged;\nno bundle path ⇒ 503 persistence_not_configured); the same certificate\nas the installed CA ⇒ 409 candidate_duplicate. Audited `ca.import`.\ntarget=ui: fenced on `uiCertRevision`; the pair is persisted atomically\n(cert then key, with a compensating rollback) and takes effect at the\nnext restart (`activation: restart_required`). Audited\n`cert.ui.replace`. Both are operation-identified and replay-safe.\nPassphrases and private keys are write-only: never echoed, logged or\naudited.\n",
         "operationId": "uploadCerts",
+        "parameters": [
+          {
+            "description": "May also be sent as the `target` form field.",
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "enum": [
+                "mitm",
+                "ui"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "dryRun",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "REQUIRED unless dryRun=1 (428 operation_id_required).",
+            "in": "query",
+            "name": "operationId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "target=mitm — REQUIRED unless dryRun=1 (428 precondition_required / 409 stale).",
+            "in": "query",
+            "name": "caRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "target=ui — REQUIRED unless dryRun=1 (428 precondition_required / 409 stale).",
+            "in": "query",
+            "name": "uiCertRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "multipart/form-data": {
@@ -11518,9 +13060,18 @@
                     "type": "string"
                   },
                   "target": {
+                    "enum": [
+                      "mitm",
+                      "ui"
+                    ],
                     "type": "string"
                   }
                 },
+                "required": [
+                  "cert",
+                  "key",
+                  "target"
+                ],
                 "type": "object"
               }
             }
@@ -11532,18 +13083,32 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CertUploadResult"
                 }
               }
             },
-            "description": "Uploaded."
+            "description": "The action-bound result (dry run, import, or replace), or the replayed recorded result."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "$ref": "#/components/responses/CertRefusalBadRequest"
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/CertRefusalConflict"
+          },
+          "428": {
+            "$ref": "#/components/responses/CertRefusalPreconditionRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/CertRefusalPersistFailed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
           }
         },
         "security": [
@@ -11554,11 +13119,11 @@
             "basicAuth": []
           }
         ],
-        "summary": "Upload TLS certificate/key",
+        "summary": "Import a MITM CA or replace the admin-UI certificate (fenced, operation-identified)",
         "tags": [
           "security"
         ],
-        "x-culvert-audit-event": "certs.upload",
+        "x-culvert-audit-event": "ca.import",
         "x-culvert-danger-level": "high",
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
@@ -19566,7 +21131,7 @@
     },
     "/api/ocsp": {
       "get": {
-        "description": "Returns OCSP revocation-check status and counters, plus the upstream mTLS client-certificate's load/expiry status (both are loaded together at startup).",
+        "description": "Returns OCSP revocation-check status and counters, plus the upstream mTLS client-certificate's load/expiry status (both are loaded together at startup). FE-6B.0: publishes the DESIRED (durable) posture beside the RUNTIME one, the `revision` fence, the node-local scope and a BOUNDED `mtlsClientCertReason` — never the configured file path or the loader's error text.",
         "operationId": "getOCSP",
         "responses": {
           "200": {
@@ -19580,7 +21145,10 @@
             "description": "OCSP status."
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
           }
         },
         "security": [
@@ -19603,8 +21171,27 @@
         "x-culvert-visibility": "admin-supported"
       },
       "post": {
-        "description": "Enables or disables OCSP revocation checking.",
+        "description": "FE-6B.0 — sets the DESIRED upstream revocation-check posture. Fenced on\n`ocspRevision` (428 precondition_required / 409 stale with\n`current.ocspRevision`), identified by `operationId` (replay-safe).\nPERSIST BEFORE APPLY: the posture is recorded in admin_settings.json\nunder the settings save lock first and the checker is flipped only\nafter the write landed, so a 200 (`durable:true`) always describes a\nposture that survives a restart and wins over `proxy.ocsp_check`; a\npersist failure is 500 persist_failed with the running posture\nunchanged. Node-local; OFF export/import, config-version rollback and\nCP→DP. Audited `ocsp.set`, operation-keyed, after the durable record.\n",
         "operationId": "setOCSP",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "operationId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ocspRevision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -19620,18 +21207,32 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/OCSPSetResult"
                 }
               }
             },
-            "description": "Updated."
+            "description": "The set's action-bound result (or the replayed recorded result)."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "$ref": "#/components/responses/CertRefusalBadRequest"
           },
           "403": {
-            "$ref": "#/components/responses/PlainForbidden"
+            "$ref": "#/components/responses/CertRefusalForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/CertRefusalMethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/CertRefusalConflict"
+          },
+          "428": {
+            "$ref": "#/components/responses/CertRefusalPreconditionRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/CertRefusalPersistFailed"
+          },
+          "503": {
+            "$ref": "#/components/responses/CertRefusalDegraded"
           }
         },
         "security": [
@@ -19642,7 +21243,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Toggle OCSP",
+        "summary": "Set the OCSP posture (fenced, operation-identified, durable)",
         "tags": [
           "security"
         ],

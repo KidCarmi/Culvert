@@ -154,10 +154,14 @@ func recordCAUsabilityFault(safeReason string, engineRefusal bool) {
 	}
 }
 
-// noteCARotationPersistFailure records a rotation that produced a new CA but
-// could not persist it (register row CA-2). Always logged and always alerted:
-// unlike the per-connection fault above it fires at most once per rotation
-// attempt (a 24h cadence), so it is bounded by construction and needs no gate.
+// noteCARotationPersistFailure records a rotation attempt whose bundle write
+// failed (register row CA-2). Since FE-6B.0 the engine persists BEFORE it
+// publishes, so the failed attempt was NOT applied: the current CA stays
+// active and the next check retries. reason is the engine's bounded class
+// (ca.PersistFailureClass) — never a path or the OS text — and is what the
+// status row, the log line and the alert carry. Always logged and always
+// alerted: it fires at most once per rotation attempt (a 24h cadence), so it
+// is bounded by construction and needs no gate.
 func noteCARotationPersistFailure(reason string) {
 	safe := sanitizeLog(reason)
 	now := time.Now()
@@ -169,14 +173,14 @@ func noteCARotationPersistFailure(reason string) {
 	caUsability.mu.Unlock()
 
 	if logger != nil {
-		logger.Printf("CA: auto-rotation generated a new Root CA but could NOT persist it (%d since boot): %q "+
-			"— the new CA is in memory only and will be LOST on restart", n, safe)
+		logger.Printf("CA: auto-rotation could NOT write the replacement Root CA bundle (%d since boot, class=%q) "+
+			"— the rotation was NOT applied; the current CA stays active until the next successful check", n, safe)
 	}
 	if globalAlertStore.HasSubscriber("cert_expiry") {
 		go fireAlert("cert_expiry", AlertPayload{
 			Host: "culvert-ca",
-			Detail: fmt.Sprintf("Root CA rotated but NOT persisted (%d failures since boot): %s — "+
-				"the replacement CA exists in memory only and the next restart will rotate again", n, safe),
+			Detail: fmt.Sprintf("Root CA rotation NOT applied (%d bundle-write failures since boot, class %s) — "+
+				"the near-expiry CA stays active; restore write access to the CA bundle path before it expires", n, safe),
 			Source: "ca",
 		})
 	}
@@ -194,9 +198,10 @@ func noteCARotationPersisted() {
 	caUsability.mu.Unlock()
 }
 
-// caRotationPersistDegraded reports whether the CURRENTLY-active Root CA may be
-// memory-only: a bundle write has failed and no successful one has been observed
-// since. This is what the diagnostics row, /api/ca/status and the admin panel
+// caRotationPersistDegraded reports whether the last rotation attempt could
+// not be written and no successful bundle write has been observed since — the
+// active CA is the one the rotation meant to REPLACE (FE-6B.0: nothing is ever
+// installed unpersisted). This is what the diagnostics row, /api/ca/status and the admin panel
 // key on — not the cumulative counter, which would latch the warning for the
 // life of the process even after the operator fixed the volume and re-rotated.
 func caRotationPersistDegraded() bool {

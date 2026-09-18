@@ -50,8 +50,9 @@ var staticFiles embed.FS
 // Middleware (CSP nonce, IP guard, security headers, auth) lives in
 // ui_middleware.go. Session cookie helpers live in ui_session.go. RBAC
 // helpers live in ui_rbac.go. The SPA shell + cachedIndexHTML live in
-// ui_static.go. CA rotation state (pendingCARotation) lives in
-// ui_security.go.
+// ui_static.go. The Certificates / CA / OCSP admin surface (rotation
+// challenge, operation ledger, fenced mutations) lives in ui_certificates.go
+// + certificate_operations.go (FE-6B.0).
 var (
 	uiCfgGeoIPDB   string
 	uiCfgLogFile   string

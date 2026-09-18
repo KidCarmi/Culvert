@@ -8,12 +8,12 @@ package main
 // partial mutation (live CA fingerprint + bundle bytes + UI cert files),
 // ZERO success audit and NO revision advancement.
 //
-// Seams this file declares (nil, never called on the baseline — the
-// correction moves them beside the code they instrument, the FE-6A.2
-// round-5 precedent): caOpsBeforeFinishHook (between the durable CA commit
-// and the terminal operation record), reopenCertificateOperationsForTest
-// (a "restart" of the operation ledger from its file), caChallengeClock
-// (the challenge's clock).
+// Seams this file declared on the baseline (nil, never called) and the
+// correction moved beside the code they instrument (the FE-6A.2 round-5
+// precedent): caOpsBeforeFinishHook (between the durable CA commit and the
+// terminal operation record), reopenCertificateOperationsForTest (a
+// "restart" of the operation ledger from its file), caChallengeClock (the
+// challenge's clock).
 //
 // Rows (the directive's 18):
 //
@@ -67,18 +67,10 @@ import (
 	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
-// ── seams (declared here on the baseline; the correction owns them) ─────────
-
-// caOpsBeforeFinishHook runs after the CA bundle is durably committed and
-// installed and BEFORE the operation's terminal record is persisted.
-var caOpsBeforeFinishHook func()
-
-// reopenCertificateOperationsForTest re-reads the certificate operation
-// ledger from its file (a process restart, as far as the ledger is concerned).
-var reopenCertificateOperationsForTest func()
-
-// caChallengeClock is the rotation challenge's clock (nil ⇒ time.Now).
-var caChallengeClock func() time.Time
+// ── seams ───────────────────────────────────────────────────────────────────
+// caOpsBeforeFinishHook, reopenCertificateOperationsForTest and
+// caChallengeClock were declared here on the baseline (nil, never called) and
+// now live in certificate_operations.go beside the code they instrument.
 
 const fe6b0LedgerFile = "certificate_operations.json"
 
@@ -100,6 +92,8 @@ func fe6b0Node(t *testing.T) (dir string) {
 		t.Fatal(err)
 	}
 	resetMTLSOCSPGlobals(t)
+	resetOCSPDesiredForTest()
+	t.Cleanup(resetOCSPDesiredForTest)
 	fe6a3cSettingsPath(t, filepath.Join(dir, "admin_settings.json"))
 	prevHook, prevClock := caOpsBeforeFinishHook, caChallengeClock
 	caOpsBeforeFinishHook, caChallengeClock = nil, nil
@@ -134,14 +128,14 @@ func fe6b0Decode(w *httptest.ResponseRecorder) map[string]any {
 }
 
 // fe6b0Do sends a JSON request (admin context) through the mux.
-func fe6b0Do(mux *http.ServeMux, method, path string, body any) (int, map[string]any, *httptest.ResponseRecorder) {
-	w := httptest.NewRecorder()
+func fe6b0Do(mux *http.ServeMux, method, path string, body any) (status int, m map[string]any, w *httptest.ResponseRecorder) {
+	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, jsonReq(method, path, body))
 	return w.Code, fe6b0Decode(w), w
 }
 
 // fe6b0DoAs is fe6b0Do with a different peer address (a different actor).
-func fe6b0DoAs(mux *http.ServeMux, addr, method, path string, body any) (int, map[string]any) {
+func fe6b0DoAs(mux *http.ServeMux, addr, method, path string, body any) (status int, m map[string]any) {
 	r := jsonReq(method, path, body)
 	r.RemoteAddr = addr
 	w := httptest.NewRecorder()
@@ -197,7 +191,7 @@ func fe6b0CAPair(t *testing.T, cn string, isCA bool) (certPEM, keyPEM []byte, fi
 }
 
 // fe6b0Upload POSTs a multipart certificate upload through the mux.
-func fe6b0Upload(t *testing.T, mux *http.ServeMux, query string, fields map[string]string) (int, map[string]any, *httptest.ResponseRecorder) {
+func fe6b0Upload(t *testing.T, mux *http.ServeMux, query string, fields map[string]string) (status int, m map[string]any, w *httptest.ResponseRecorder) {
 	t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -209,7 +203,7 @@ func fe6b0Upload(t *testing.T, mux *http.ServeMux, query string, fields map[stri
 	r.Header.Set("Content-Type", mw.FormDataContentType())
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	return w.Code, fe6b0Decode(w), w
 }
@@ -230,20 +224,20 @@ func fe6b0Audits(since int64, action string) (n int, opIDs []string) {
 }
 
 // fe6b0Challenge obtains the server-issued rotation challenge for opID at rev.
-func fe6b0Challenge(t *testing.T, mux *http.ServeMux, opID, rev string) (string, map[string]any) {
+func fe6b0Challenge(t *testing.T, mux *http.ServeMux, opID, rev string) (challenge string, issued map[string]any) {
 	t.Helper()
 	code, m, w := fe6b0Do(mux, http.MethodPost, "/api/ca/rotate/challenge?operationId="+opID+"&caRevision="+rev, nil)
 	if code != http.StatusOK {
 		t.Fatalf("challenge = %d %s", code, w.Body.String())
 	}
-	ch, _ := m["challenge"].(string)
-	if ch == "" {
+	challenge, _ = m["challenge"].(string)
+	if challenge == "" {
 		t.Fatalf("no challenge in %v", m)
 	}
-	return ch, m
+	return challenge, m
 }
 
-func fe6b0Rotate(mux *http.ServeMux, opID, rev, challenge string) (int, map[string]any, *httptest.ResponseRecorder) {
+func fe6b0Rotate(mux *http.ServeMux, opID, rev, challenge string) (status int, m map[string]any, w *httptest.ResponseRecorder) {
 	return fe6b0Do(mux, http.MethodPost, "/api/ca/rotate?operationId="+opID+"&caRevision="+rev, map[string]any{"challenge": challenge})
 }
 
@@ -278,7 +272,7 @@ func fe6b0AssertUnchanged(t *testing.T, fp, rev string, bundle []byte, since int
 	}
 }
 
-func fe6b0Lookup(mux *http.ServeMux, opID string) (int, map[string]any) {
+func fe6b0Lookup(mux *http.ServeMux, opID string) (status int, m map[string]any) {
 	code, m, _ := fe6b0Do(mux, http.MethodGet, "/api/ca/operations/"+opID, nil)
 	return code, m
 }

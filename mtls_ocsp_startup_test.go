@@ -242,11 +242,8 @@ func TestLoadMTLSAndOCSP_RecordsClientCertHealthOnSuccess(t *testing.T) {
 	if !health.configured || !health.loaded {
 		t.Fatalf("expected configured+loaded, got %+v", health)
 	}
-	if health.file != certPath {
-		t.Errorf("file: got %q, want %q", health.file, certPath)
-	}
-	if health.lastError != "" {
-		t.Errorf("lastError: expected empty, got %q", health.lastError)
+	if health.reason != "" {
+		t.Errorf("reason: expected empty on a successful load, got %q", health.reason)
 	}
 	if health.notAfter.IsZero() {
 		t.Error("notAfter should be populated from the leaf certificate")
@@ -278,8 +275,8 @@ func TestLoadMTLSAndOCSP_RecordsClientCertHealthOnFailure(t *testing.T) {
 	if health.loaded {
 		t.Error("expected loaded=false for an unparsable cert")
 	}
-	if health.lastError == "" {
-		t.Error("expected lastError to be populated")
+	if health.reason != "load_failed" {
+		t.Errorf("reason = %q, want the bounded class load_failed", health.reason)
 	}
 	if !health.notAfter.IsZero() {
 		t.Errorf("notAfter should stay zero on a failed load, got %v", health.notAfter)
@@ -315,8 +312,8 @@ func TestLoadMTLSAndOCSP_OneSidedConfigIsRecordedAsFailure(t *testing.T) {
 	if health.loaded {
 		t.Error("expected loaded=false when client_key_file is missing")
 	}
-	if health.lastError == "" {
-		t.Error("expected lastError to explain the missing key file")
+	if health.reason != "key_file_missing" {
+		t.Errorf("reason = %q, want key_file_missing", health.reason)
 	}
 	if getUpstreamTransport().TLSClientConfig != nil {
 		t.Error("TLSClientConfig should remain nil — no cert was actually loaded")
@@ -334,8 +331,8 @@ func TestLoadMTLSAndOCSP_OneSidedConfigKeyOnlyIsRecordedAsFailure(t *testing.T) 
 	if !health.configured || health.loaded {
 		t.Fatalf("expected configured+not-loaded, got %+v", health)
 	}
-	if health.file != "/etc/culvert/client.key" {
-		t.Errorf("file: got %q, want the one path that was actually set", health.file)
+	if health.reason != "cert_file_missing" {
+		t.Errorf("reason = %q, want cert_file_missing", health.reason)
 	}
 }
 

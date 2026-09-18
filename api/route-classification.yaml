@@ -477,6 +477,27 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/ca/rotate/challenge"
+    method: "POST"
+    handler: "apiCARotateChallenge"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/ca/operations/"
+    method: "GET"
+    handler: "apiCAOperations"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: false
+    audit_expected: false
+    danger_level: medium
+    documented: true
+    openapi_path: "/api/ca/operations/{operationId}"
   - route: "/api/ca/status"
     method: "GET"
     handler: "apiCAStatus"
@@ -675,6 +696,26 @@ routes:
     min_role: "admin"
     mutating: true
     audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/certs/ui"
+    method: "DELETE"
+    handler: "apiCertsUI"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/certificates"
+    method: "GET"
+    handler: "apiCertificates"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
     danger_level: medium
     documented: true
   - route: "/api/cluster/audit"

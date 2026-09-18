@@ -449,6 +449,17 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "yara_alert_degraded", Kind: kindConfig, Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAAlertDegraded"}}},
 
+	// Upstream OCSP revocation-check desired posture (FE-6B.0). AdminDurable-only
+	// like yara_*: node-local trust posture, OFF export/import, OFF version-rollback
+	// (a rollback must never silently relax revocation checking — the recorded
+	// D-sec classification), OFF CP→DP. Gated by the ocsp_settings_saved sentinel.
+	{ID: "ocsp_check_enabled", Kind: kindConfig, Owner: "ocsp", AdminDurable: true,
+		Note:     "gated by ocsp_settings_saved sentinel; the admin-saved posture wins over proxy.ocsp_check at boot",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "OCSPCheckEnabled"}}},
+	{ID: "ocsp_settings_generation", Kind: kindMeta, Owner: "ocsp", AdminDurable: true,
+		Note:     "monotonic generation folded into the ocspRevision fence so an A→B→A toggle never returns to an earlier token",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "OCSPSettingsGeneration"}}},
+
 	// Adaptive decryption-exclusion tunables (F10). AdminDurable-only — mirroring
 	// metrics_token / syslog_addr / yara_*: OFF export/import, OFF version-rollback,
 	// OFF CP→DP (ClusterSynced), not Sensitive. These are node-local OPERATIONAL
@@ -541,6 +552,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LegacyLDAPRetired"}, {Struct: "AdminSettings", Field: "LegacyLDAPCutover"}}},
 	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
+	{ID: "ocsp_settings_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "OCSPSettingsSaved"}}},
 	{ID: "autoexclude_tunables_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTunablesSaved"}}},
 	{ID: "policy_learning_saved", Kind: kindSentinel, AdminDurable: true,

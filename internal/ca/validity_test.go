@@ -255,7 +255,10 @@ func TestGetCert_CacheOrderTracksDistinctHosts(t *testing.T) {
 // bundle write fails is NOT a successful rotation. Pre-fix the failure was
 // logged and swallowed, so the operator was told the CA had rotated while the
 // replacement existed only in RAM — and the next restart silently rotated to a
-// different root again.
+// different root again. FE-6B.0 tightened it further: the replacement is
+// persisted BEFORE it is published, so a failed write leaves the current CA
+// active and the observer reports a rotation that was NOT applied, with a
+// bounded class.
 func TestRotateIfNeeded_PersistFailureIsReported(t *testing.T) {
 	cm := New()
 	// Near-expiry CA (inside the 30-day overlap) so rotation triggers.
@@ -273,12 +276,22 @@ func TestRotateIfNeeded_PersistFailureIsReported(t *testing.T) {
 	}
 	badPath := filepath.Join(blocker, "ca.bundle")
 
-	if !cm.RotateIfNeeded(badPath, "passphrase") {
-		t.Fatal("near-expiry CA should still rotate in memory")
+	before := cm.LiveCertificateHex()
+	if cm.RotateIfNeeded(badPath, "passphrase") {
+		t.Fatal("a rotation whose bundle write failed must NOT be applied (FE-6B.0: persist before publish)")
+	}
+	if cm.LiveCertificateHex() != before {
+		t.Fatal("the live CA changed although the bundle could not be written — install preceded the durable commit")
+	}
+	if cm.SecondaryCAActive() {
+		t.Fatal("a refused rotation must not arm the dual-CA overlap")
 	}
 	if len(persistErrs) != 1 {
 		t.Fatalf("RotationPersistFailureObserver fired %d times, want 1 — a swallowed save failure "+
-			"reports a rotation that will not survive restart", len(persistErrs))
+			"hides a rotation that was not applied", len(persistErrs))
+	}
+	if persistErrs[0] != "not_a_file" {
+		t.Fatalf("observer received %q, want the bounded class not_a_file (never a path or the OS text)", persistErrs[0])
 	}
 }
 
@@ -323,8 +336,8 @@ func TestRotateIfNeeded_SuccessSignalIsGatedOnPersistence(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed blocker: %v", err)
 	}
-	if !cm.RotateIfNeeded(filepath.Join(blocker, "ca.bundle"), "passphrase") {
-		t.Fatal("rotation should still happen in memory")
+	if cm.RotateIfNeeded(filepath.Join(blocker, "ca.bundle"), "passphrase") {
+		t.Fatal("a rotation whose bundle write failed must not be reported as applied")
 	}
 	if failure != 1 {
 		t.Fatalf("persist-failure observer fired %d times, want 1", failure)

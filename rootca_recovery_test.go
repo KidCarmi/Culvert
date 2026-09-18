@@ -405,7 +405,7 @@ func TestChaos50_CAStatusSurfacesLoadPosture(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`"loadFailed":true`, `"loadFailureReason"`, `"inspectBypassed":1`} {
+	for _, want := range []string{`"loadFailed":true`, `"loadFailureClass":"permission_denied"`, `"inspectBypassed":1`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in /api/ca/status:\n%s", want, body)
 		}
@@ -446,9 +446,19 @@ func TestChaos50_ManualRecoveryIsNotOverwrittenByRetry(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, _, err := installAndPersistRotatedCA(); err != nil {
-				t.Errorf("installAndPersistRotatedCA: %v", err)
+			// The admin force-rotate through its real handler chain (FE-6B.0:
+			// challenge + fence + persist-before-publish). A stale fence or a
+			// lost race is an ordinary typed refusal here — the invariant under
+			// test is only that live and disk never diverge.
+			mux := fe6b0Mux()
+			op := fe6b0OpID()
+			rev := caRevisionToken()
+			code, m, _ := fe6b0Do(mux, http.MethodPost, "/api/ca/rotate/challenge?operationId="+op+"&caRevision="+rev, nil)
+			if code != http.StatusOK {
+				return
 			}
+			ch, _ := m["challenge"].(string)
+			fe6b0Rotate(mux, op, rev, ch)
 		}()
 	}
 	wg.Wait()
