@@ -96,7 +96,7 @@ func validCanaryActivationInput(now time.Time) CanaryActivationInput {
 			MaxPrincipals: 1, MaxTools: 1, MaxServers: 1, Window: time.Hour,
 		},
 		ServerUsable: true, FingerprintCurrent: true, ToolCatalogUsable: true,
-		ExactPolicyPermit: true, Now: now,
+		ExactPolicyPermit: true, FirstCanaryCredentialFree: true, Now: now,
 	}
 }
 

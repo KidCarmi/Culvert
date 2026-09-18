@@ -101,6 +101,24 @@ const (
 	// Enforcement does not move: the policy engine still decides every real request. This row
 	// only stops a node reporting Ready for an experiment whose every call would be refused.
 	ReasonExactPolicyNotExecutable Reason = "exact_policy_not_executable"
+	// ReasonCredentialPathRequired — the exact First-Canary request is not provably
+	// CREDENTIAL-FREE: at least one authoritative layer says this tool needs a credential
+	// (blocker #9, first disjunct).
+	//
+	// It is deliberately SEPARATE from ReasonCredentialPathNotReady, and they are near
+	// opposites. That row is NODE-level and asks whether this node COULD do credentials at all
+	// (the broker Plan→gate→Materialize path is composed). This row is ACTIVATION-level and
+	// asks whether this EXPERIMENT needs one — which the First Canary forbids outright, because
+	// no production credential Provider adapter exists yet.
+	//
+	// It is also not implied by ReasonExactPolicyNotExecutable. The permit refuses a matched
+	// rule carrying a CredentialProfile OBLIGATION, which is the only credential statement any
+	// enforcement path reads; the authoritative registry server record and the reviewed
+	// fingerprint are two further statements no enforcement path consults. Policy saying "no
+	// credential" while the server record requires one is precisely the state in which
+	// execution takes the no-broker branch and reaches a credential-required upstream with NO
+	// Authorization header. See EvaluateCredentialFree.
+	ReasonCredentialPathRequired Reason = "credential_path_required" // #nosec G101 -- a reason code, not a credential
 	// ReasonRollbackPathUnhealthy — the deterministic Canary→Shadow/Observe rollback path is
 	// not healthy (an emergency demotion could not be performed). Driven by the executable
 	// persist/restore rehearsal — rollback MECHANICS evidence.
@@ -174,8 +192,16 @@ type Facts struct {
 	// activation's immutable reviewed snapshot: a policy change that removes the permit must be
 	// able to make a node un-ready, which a frozen copy could not express.
 	// See ReasonExactPolicyNotExecutable and EvaluateExactPermit.
-	ExactPolicyPermit   bool
-	RollbackPathHealthy bool // the persist/restore rollback MECHANICS were executably rehearsed
+	ExactPolicyPermit bool
+	// FirstCanaryCredentialFree — every authoritative credential statement for the exact
+	// First-Canary request is empty, so the execution path can perform no credential planning,
+	// no materialization, no provider access and can send no Authorization header. Like
+	// ExactPolicyPermit it is LIVE state, re-observed at each evaluation and never copied into
+	// the activation's immutable reviewed snapshot: a credential profile ADDED to the server
+	// after activation must be able to make a node un-ready, which a frozen copy could not
+	// express. See ReasonCredentialPathRequired and EvaluateCredentialFree.
+	FirstCanaryCredentialFree bool
+	RollbackPathHealthy       bool // the persist/restore rollback MECHANICS were executably rehearsed
 	// RollbackCoordinatorRehearsed — the AUTHORITATIVE rollback path was rehearsed through the real
 	// commitRolloutTransitionAt coordinator. It is a SEPARATE hard prerequisite from RollbackPathHealthy
 	// (which is mechanics-only) and is FALSE in this build (CANARY-ROLLBACK-COORDINATOR-REHEARSAL open),
@@ -215,7 +241,7 @@ type readinessCheck struct {
 }
 
 // readinessChecks is the canonical-ordered prerequisite table (matches the Reason declaration
-// order) and the SINGLE source of truth for both Evaluate and EvaluateNode. The nine
+// order) and the SINGLE source of truth for both Evaluate and EvaluateNode. The ten
 // activation-level rows are exactly the facts a caller resolves from a requested scope/
 // approval/budget/target; every other row is node-level.
 var readinessChecks = []readinessCheck{
@@ -239,6 +265,7 @@ var readinessChecks = []readinessCheck{
 	{func(f Facts) bool { return f.ToolFingerprintCurrent }, ReasonToolFingerprintStale, factActivation},
 	{func(f Facts) bool { return f.ToolCatalogUsable }, ReasonToolNotCatalogUsable, factActivation},
 	{func(f Facts) bool { return f.ExactPolicyPermit }, ReasonExactPolicyNotExecutable, factActivation},
+	{func(f Facts) bool { return f.FirstCanaryCredentialFree }, ReasonCredentialPathRequired, factActivation},
 	{func(f Facts) bool { return f.RollbackPathHealthy }, ReasonRollbackPathUnhealthy, factNode},
 	{func(f Facts) bool { return f.RollbackCoordinatorRehearsed }, ReasonRollbackCoordinatorRehearsalPending, factNode},
 	{func(f Facts) bool { return f.BudgetConfigured }, ReasonBudgetNotConfigured, factActivation},
@@ -260,7 +287,7 @@ func Evaluate(f Facts) Readiness { return evaluate(f, false) }
 // exact scoped tool catalog-usable, exact policy permit, budget) as unmet. This is the operator dry-run surface
 // consumed before any scope is chosen — a node that has satisfied every node-level
 // prerequisite reports node_ready true even though no activation input has been supplied yet,
-// instead of being permanently not-ready because the nine activation facts default false
+// instead of being permanently not-ready because the ten activation facts default false
 // (Codex P2, PR #1249). The count and membership live in readinessChecks (the factActivation
 // rows); this comment restates them and TestEvaluateNode_ExcludesActivationInputs derives them
 // from that table, so a new row cannot leave this list quietly stale. The complete verdict is Evaluate, driven by the
@@ -309,6 +336,7 @@ func AllReasons() []Reason {
 		ReasonToolFingerprintStale,
 		ReasonToolNotCatalogUsable,
 		ReasonExactPolicyNotExecutable,
+		ReasonCredentialPathRequired,
 		ReasonRollbackPathUnhealthy,
 		ReasonRollbackCoordinatorRehearsalPending,
 		ReasonBudgetNotConfigured,
