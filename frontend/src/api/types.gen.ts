@@ -7083,8 +7083,27 @@ export interface components {
         };
         SyslogConfig: {
             addr: string;
+            /** @description A live connection to the configured target exists. */
+            connected?: boolean;
+            consecutiveFailures?: number;
+            /** @description Lines the collector socket accepted. */
+            delivered?: number;
+            /** @description Delivery is not failing past the degraded threshold. Meaningful only when deliveryVerifiable is true. */
+            delivering?: boolean;
+            /** @description False on UDP, where a write to an unreachable collector succeeds forever and loss therefore cannot be observed or counted. A healthy reading is not evidence of receipt when this is false. */
+            deliveryVerifiable?: boolean;
             drops?: number;
+            dropsCollectorDown?: number;
+            /** @description Lines lost because the collector is slower than this node's log rate. */
+            dropsQueueFull?: number;
+            failingForSeconds?: number;
             format: string;
+            /** @description Unix seconds of the last accepted line (0 = never). */
+            lastDelivery?: number;
+            /** @description Bounded class of the most recent loss; empty when none. Never carries a collector address or a raw error. */
+            lastFailureReason?: string;
+            /** @description Transport in effect ("udp" or "tcp"). */
+            network?: string;
             panics?: number;
         };
         /** @description One TAC recipient trust key (public material only). */
