@@ -2483,7 +2483,8 @@ construction, pinned by `TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBound
 ## §25c Blocker 14 closure (the exact First-Canary policy permit)
 
 This section records ONE status change: **blocker 14 is CLOSED**. Nothing else in the ledger moves.
-Blocker 8 remains OPEN (narrowed), **blocker 9 remains OPEN** (see the overlap note below), the
+Blocker 8 remains OPEN (narrowed), **blocker 9 remained OPEN at the time of this section** (see the
+overlap note below; it was closed later on its own evidence in §25d), the
 baseline is still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY
 TARGET`.
 
@@ -2613,6 +2614,16 @@ first two substantive and the third procedural:
 control. **If the owner judges the first disjunct satisfied, closing blocker 9 is a one-line ledger
 change with this section as its evidence — but it is deliberately not taken here.**
 
+> **SUPERSEDED BY §25d.** Blocker 9 was subsequently closed on its own evidence, and NOT by adopting
+> this overlap. Re-deriving the credential path found that the reading above was too generous: the
+> policy obligation is one of THREE authoritative credential statements and the only one any
+> enforcement path reads, so the permit can be satisfied while the authoritative server record
+> requires a credential. §25d records what that actually took — a separate activation row over all
+> three layers, plus an execution-side proof — and keeps the closure scoped to *the First Canary
+> requires no production credential*. This section is left as written because the reasoning it
+> records, including the part that turned out to be incomplete, is the reason the follow-up looked
+> at the code instead of adopting it.
+
 ### What this does NOT close
 
 - **Blocker 9 stays OPEN** (above).
@@ -2625,6 +2636,142 @@ change with this section as its evidence — but it is deliberately not taken he
 
 **Campaign:** `scripts/mcp-first-canary-policy-permit-mutations.sh` — **30 mutations, 30 caught,
 0 survived, 0 skipped**, measured on the closing head.
+
+## §25d Blocker 9 closure (the credential-free First-Canary path)
+
+This section records ONE status change: **blocker 9 is CLOSED**. Nothing else in the ledger moves.
+Blocker 8 remains OPEN (narrowed), blockers 1, 2, 3, 10, 11, 12 and 15 are untouched, the baseline
+is still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY TARGET`.
+
+**The closure is narrow and its wording matters: *the First Canary requires no production
+credential*.** This does NOT claim a production credential provider exists, that the broker path is
+production-ready, or that Culvert cannot support authenticated MCP servers. It closes blocker 9's
+FIRST disjunct — "the exact executable policy path requires no credential" — and leaves the second
+("a real production credential provider/materialization path exists and is safe") unimplemented and
+unclaimed. `mcp_live_production_deps.go` still composes the broker with ZERO providers, which
+remains the truthful pre-Canary posture.
+
+### Why §25c's overlap note was not sufficient, and what changed
+
+§25c recorded that blocker 14's `ExactPolicyPermit` already refuses a matched rule carrying a
+`CredentialProfile` obligation, and — because of the permit's invariance requirement — that the
+refusal holds for every request the exact scope admits. It then left blocker 9 OPEN for three
+stated reasons. All three are now answered, and the FIRST of them turned out to be understated.
+
+**Re-deriving the credential path from the code found the real gap: the policy obligation is one of
+THREE authoritative credential statements, and it is the only one any enforcement path reads.**
+
+| layer | source | read by enforcement? |
+|---|---|---|
+| policy | `Decision.Obligations.CredentialProfile` | YES — `run.go` `profileRef`, `executePreconditionFailure`, the shadow evaluator |
+| registry | `registry.ServerRecord.CredentialProfile` | **NO. Zero enforcement readers.** |
+| catalog | `catalog.Fingerprint.CredentialProfile` | only through fingerprint equality/drift; it is a COPY of the registry value taken at ingest |
+
+So a snapshot in which policy says "no credential" while the authoritative server record says one
+is required is not a contradiction the engine can see. Execution reads the obligation, finds it
+empty, takes the no-broker branch (`useBroker := Broker != nil && profileRef != ""`) and reaches a
+credential-REQUIRED upstream with NO Authorization header — which either fails (an activation that
+cannot execute) or, the case that matters, succeeds against an upstream that accepts ambient
+access, performing a credential-required operation with no planning, no broker gate and no
+`CREDENTIAL_SELECT` event.
+
+`TestCredFreeE2E_ServerCredentialProfileIsRefused` asserts exactly this as its PREMISE: in that
+state the policy permit is still **satisfied**. That assertion is what makes this a separate
+readiness row rather than a duplicate of blocker 14's, and it is why §25c's "proven by the permit"
+reading would have been too generous.
+
+### The closure bar
+
+A node must not report an activation ready unless the exact First-Canary request is provably
+credential-free at EVERY authoritative layer — and the runtime must be unable to acquire or send a
+credential for it.
+
+### What was built
+
+- **`canary.EvaluateCredentialFree`** — the pure verdict over the three layers, with a bounded
+  reason naming which one objected (`policy_requires_credential` / `server_requires_credential` /
+  `reviewed_target_requires_credential`). No profile reference, tenant or host ever appears; an
+  opaque profile id is still a name an operator chose.
+- **`canary.ReasonCredentialPathRequired` / `Facts.FirstCanaryCredentialFree`** — a `factActivation`
+  row. The activation set is now **ten**. It is deliberately distinct from the node-level
+  `ReasonCredentialPathNotReady`, which asks whether this node COULD do credentials at all; this row
+  asks whether this EXPERIMENT needs one, which the First Canary forbids outright.
+- **`canaryExactRequestFacts`** — resolves the permit and the credential fact from ONE coherent
+  capture. Two captures would let each verdict be individually true about a DIFFERENT inventory,
+  since the registry and catalog publish independently; their conjunction would then describe no
+  state that ever existed. Pinned structurally by
+  `TestCredFreeWall_BothFactsComeFromOneCapture`.
+
+**The reviewed layer is structural, not a fourth field.** `CredentialProfile` is a hashed
+`catalog.Fingerprint` field, so "the reviewed target needs no credential" IS the catalog statement,
+given the digest match the reviewed-target binding already enforces. There is deliberately no
+separate reviewed-credential authority that could drift against the fingerprint.
+
+### §10 — the credential profile IS fingerprint-relevant, and that is the whole runtime guarantee
+
+`Fingerprint.CredentialProfile` is declared, hashed into `Sum()` and compared in `Equal()`, and
+`catalog/drift.go` classifies a change as `expansion` ("unprovable as narrowing"). So
+`none -> profile-X` produces a DIFFERENT tool identity: the scope pin, the governed promotion and
+the four-eyes live approval all stop matching, and the existing reviewed-target drift machinery
+refuses the stale activation. **No separate credential-drift authority was invented and no
+request-local check was added.** Campaign mutation M09 removes the field from the hash and is
+caught, so the dependency is executable rather than asserted.
+
+`TestCredFreeWall_CatalogCredentialDerivesFromTheRegistryRecord` records the other half: the
+fingerprint's credential profile is DERIVED from the registry record (never from the upstream's
+own `tools/list` response, which is attacker-influenced data), and the registry exposes no mutator
+for it. That is why the registry and catalog cannot disagree today — and the wall fails if a
+credential-profile mutator is ever added, forcing the divergence question to be answered again
+instead of silently opening a window.
+
+### The execution-side proof (§6/§7/§8)
+
+Everything runs through the REAL composed live executor, the REAL side-effect gate, and a REAL
+broker — **never a nil broker**, because production composes a real one and a proof against a
+composition production does not use would be vacuous. The broker's profile store is EMPTY, so ANY
+consultation of the credential path fails and blocks the request; the canonical request still
+reaching the upstream IS the zero-use proof, with the upstream call count as the positive control
+that the request got to the boundary at all.
+
+- `TestCredZeroUse_CanonicalPathNeverTouchesTheCredentialMachinery` — upstream reached exactly once,
+  no Authorization header, provider calls 0.
+- `TestCredZeroUse_CredentialRequiredFailsClosedWithUpstreamZero` — the control that this
+  composition CAN block, which is what makes the gate above a signal rather than a tautology.
+- `TestCredZeroUse_CredentialRequiredWithNoBrokerFailsClosed` — the pre-existing
+  `ReasonCredentialProfileMissing` guard is intact for the other composition shape.
+- `TestCredZeroUse_AuxiliaryTrafficCarriesNoAuthorization` — lifecycle methods are kernel-terminal
+  (asserted through the production `protocol.Admit`, so they never reach `upstreamclient` at all),
+  and `tools/list` discovery sends no `AuthHeader`. Discovery runs OUTSIDE the policy decision, so
+  a credential there would ride no decision and be covered by no obligation.
+
+### §25c's three reasons, answered
+
+1. **"Activation-time fact vs execution path."** Answered by §6/§7/§8 above: the execution path is
+   now proven to send no credential on the canonical path and to fail closed on a credential-
+   required one, under both composition shapes.
+2. **"Blocker 9 also names the broker/provider path."** NOT implemented, and deliberately not
+   claimed. The closure statement is scoped to *the First Canary requires no production
+   credential*; a provider remains future work and is not a First-Canary prerequisite precisely
+   because the experiment needs none.
+3. **"A blocker closed as a side effect inherits another PR's evidence."** Answered procedurally:
+   this is blocker 9's own change, with its own matrix, walls and campaign.
+
+### What this does NOT close
+
+- **No production credential provider exists.** Any FUTURE experiment that needs a credential is
+  blocked on work this PR does not do.
+- Blocker 8 stays OPEN (narrowed); blockers 1, 2, 3, 10, 11, 12, 15 are untouched.
+- No upstream is contacted outside the controlled test composition, no Canary is activated, and
+  enforcement did not move.
+
+**Matrix:** the §11 twelve-case matrix is indexed and machine-checked by
+`TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
+negative's positive control — to exist.
+
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **14 mutations, CAMPAIGN_RESULT**,
+measured on the closing head. M14 is the anti-vacuity mutation: a constant-false resolver passes
+every negative gate while making the First Canary permanently impossible, and is rejected by a
+POSITIVE control rather than by a negative.
 
 ## §26 Final verdict
 
@@ -2832,13 +2979,29 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    typed witness reconciliation) is complete and proven against the real spool; the AUTHORITATIVE
    PRODUCTION WITNESS ADAPTER remains unwired, and until it is, a post-send crash resolves to
    `reconciliation_required` rather than to a determinate answer.
-9. **Credential path unresolved (§4).** Credential selection comes from the tool's matched policy
-   RULE, not from provisioning a server/tool, and the production broker has ZERO providers, so a
-   `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning a target
-   (blocker 1) does NOT by itself establish no-credential status; it must be closed explicitly by
-   verifying a no-`CredentialProfile` matched rule OR implementing a working credential provider/path.
-   A no-`CredentialProfile` rule is NOT sufficient on its own — see blocker 14: the matched rule must
-   also be ALLOW-class with satisfiable obligations, or the request is denied anyway.
+9. **[CLOSED — see §25d] Credential path unresolved (§4).** Credential selection comes from the tool's
+   matched policy RULE, not from provisioning a server/tool, and the production broker has ZERO
+   providers, so a `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning
+   a target (blocker 1) does NOT by itself establish no-credential status; it must be closed explicitly
+   by verifying a no-`CredentialProfile` matched rule OR implementing a working credential
+   provider/path. A no-`CredentialProfile` rule is NOT sufficient on its own — see blocker 14: the
+   matched rule must also be ALLOW-class with satisfiable obligations, or the request is denied anyway.
+   **CLOSED (§25d) on the FIRST disjunct only, and the closure statement is narrow: *the First Canary
+   requires no production credential*.** The second disjunct is NOT claimed — no production credential
+   Provider adapter exists and the broker still composes zero providers. Re-derivation found that the
+   finding's own wording understates the problem: a "no-`CredentialProfile` matched rule" is a
+   statement about the POLICY layer, which is the only one of three authoritative credential
+   statements any enforcement path reads, so it is satisfiable while the authoritative
+   `registry.ServerRecord.CredentialProfile` requires one — the state in which execution takes the
+   no-broker branch and reaches a credential-required upstream with NO Authorization header. The
+   preflight therefore carries `canary.ReasonCredentialPathRequired`, MET only when the policy
+   obligation, the registry record and the reviewed catalog fingerprint are ALL empty, resolved from
+   the same coherent capture as blocker 14's permit. Runtime drift is answered by the EXISTING
+   reviewed-target machinery, because `CredentialProfile` is a hashed fingerprint field; and the
+   execution path is separately proven to touch no broker, reach no provider and send no
+   Authorization on the canonical path, while failing closed with upstream=0 on a credential-required
+   one. **Any FUTURE experiment that needs a credential remains blocked on the unimplemented provider
+   path.**
 10. **No operator-reachable graceful rollback (§17).** §17's contract bar is "no GO unless rollback
    AND kill are available." Only the emergency kill is reachable: `quiesceLiveTier` has no production
    caller, and the operator-facing `apiMCPRolloutTransition` returns `distribution_not_configured` for

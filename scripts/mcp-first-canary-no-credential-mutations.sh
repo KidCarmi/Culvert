@@ -265,7 +265,7 @@ run_mutation M09 \
 run_mutation M10 \
   'a stale reviewed set is accepted after the credential change' \
   'TestCredDrift_CredentialChangeBreaksTheReviewedBinding' . "$RESOLVER" \
-  's/\t\treturn set\.ReviewedReadFirst\(cur\)/\t\treturn true/'
+  's/\t\treturn set\.ReviewedReadFirst\(cur\)/\t\t_ = set\n\t\treturn true/'
 
 # ── auxiliary traffic ─────────────────────────────────────────────────────────
 
