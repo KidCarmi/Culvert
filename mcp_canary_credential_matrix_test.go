@@ -6,8 +6,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 )
 
 // ---------------------------------------------------------------------------
@@ -298,4 +302,136 @@ func TestCredWall_EngineErrorIsNotACredentialFreeAnswer(t *testing.T) {
 			"CONDITION — only fail-closed `false` literals remain, so either the resolver stopped " +
 			"establishing the fact at all or this wall is checking nothing")
 	}
+}
+
+// TestCredWall_MatrixDocActivationRowsMatchTheTable is the ROOT-CAUSE gate for a defect this
+// document has now produced three times: prose that names readiness rows by NUMBER, and a table
+// whose numbers shift when a row is inserted.
+//
+// Its own §"Node vs activation readiness" paragraph carries the history — "CANARY-READINESS-MATRIX.md
+// drifted to an undercount by exactly this route and stayed wrong across two reviews" — and this PR
+// produced it again: inserting the credential-free row as 21 pushed budget from 23 to 24 and the
+// rollback rows from 21/22 to 22/23, leaving EIGHT stale references behind. Codex caught one of
+// them. A reviewer catching one instance of a systematic drift is not a fix.
+//
+// So the numbers are no longer trusted to prose review. This derives the activation set from the
+// EXPORTED evaluator behaviour (a fact is activation-level exactly when Evaluate reports its reason
+// and EvaluateNode does not), maps it through the document's own table, and requires the paragraph's
+// row list to name precisely those rows.
+//
+// It deliberately does NOT restate the expected numbers: a test that hard-coded "3, 4, 4a, …" would
+// need editing by the same hand that edits the paragraph, and would drift with it.
+func TestCredWall_MatrixDocActivationRowsMatchTheTable(t *testing.T) {
+	activationReasons := derivedActivationReasons(t)
+	if len(activationReasons) == 0 {
+		t.Fatal("derived no activation reasons — this wall is checking nothing")
+	}
+
+	doc, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "design", "mcp", "CANARY-READINESS-MATRIX.md"))
+	if err != nil {
+		t.Fatalf("read matrix doc: %v", err)
+	}
+	rowReason := matrixTableRows(t, string(doc))
+	listed := matrixProseActivationRows(t, string(doc))
+
+	got := map[string]bool{}
+	for _, row := range listed {
+		reason, ok := rowReason[row]
+		if !ok {
+			t.Errorf("the activation paragraph names row %q, which the table does not define", row)
+			continue
+		}
+		got[reason] = true
+	}
+	for reason := range activationReasons {
+		if !got[reason] {
+			t.Errorf("readiness reason %q is ACTIVATION-level but the matrix doc's activation "+
+				"paragraph does not list its row — an operator reading the paragraph would "+
+				"misclassify it as node-level", reason)
+		}
+	}
+	for reason := range got {
+		if !activationReasons[reason] {
+			t.Errorf("the matrix doc's activation paragraph lists the row for %q, which is "+
+				"NODE-level — the row numbers have drifted from the table", reason)
+		}
+	}
+}
+
+// derivedActivationReasons returns the reasons Evaluate reports but EvaluateNode does not, which is
+// the definition of an activation-level row. It is derived by flipping one prerequisite at a time
+// from the all-true baseline, so a row added to readinessChecks is picked up with no edit here.
+func derivedActivationReasons(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	base := credAllTrueFacts()
+	v := reflect.ValueOf(&base).Elem()
+	ty := v.Type()
+	for i := range ty.NumField() {
+		if v.Field(i).Kind() != reflect.Bool || ty.Field(i).Name == "CapabilityGateway" {
+			continue // CapabilityGateway is the short-circuit, not a prerequisite row
+		}
+		f := credAllTrueFacts()
+		reflect.ValueOf(&f).Elem().Field(i).SetBool(false)
+		full := canary.Evaluate(f)
+		if len(full.Unmet) != 1 {
+			t.Fatalf("flipping %s must yield exactly one unmet reason, got %v",
+				ty.Field(i).Name, full.Unmet)
+		}
+		reason := string(full.Unmet[0])
+		nodeSees := false
+		for _, r := range canary.EvaluateNode(f).Unmet {
+			if string(r) == reason {
+				nodeSees = true
+			}
+		}
+		if !nodeSees {
+			out[reason] = true
+		}
+	}
+	return out
+}
+
+// matrixTableRows parses the readiness table into row-label -> reason-code. The table's rows look
+// like `| 21 | Title | ` + "`reason_code`" + ` | … |`, and row labels are not all numeric ("4a").
+func matrixTableRows(t *testing.T, doc string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	row := regexp.MustCompile(`^\|\s*([0-9]+[a-z]?)\s*\|[^|]*\|\s*` + "`" + `([a-z0-9_]+)` + "`" + `\s*\|`)
+	for _, line := range strings.Split(doc, "\n") {
+		if m := row.FindStringSubmatch(line); m != nil {
+			out[m[1]] = m[2]
+		}
+	}
+	if len(out) < 10 {
+		t.Fatalf("parsed only %d table rows — the table format changed and this wall is checking "+
+			"nothing", len(out))
+	}
+	return out
+}
+
+// matrixProseActivationRows extracts the row labels the "Node vs activation readiness" paragraph
+// declares activation-level.
+func matrixProseActivationRows(t *testing.T, doc string) []string {
+	t.Helper()
+	const anchor = "**Node vs activation readiness (two evaluators).** Rows "
+	i := strings.Index(doc, anchor)
+	if i < 0 {
+		t.Fatal("the activation paragraph's anchor text changed — this wall is checking nothing")
+	}
+	rest := doc[i+len(anchor):]
+	end := strings.Index(rest, "(")
+	if end < 0 {
+		t.Fatal("could not find the end of the activation row list")
+	}
+	var out []string
+	for _, tok := range strings.Split(rest[:end], ",") {
+		if tok = strings.TrimSpace(strings.ReplaceAll(tok, "\n", " ")); tok != "" {
+			out = append(out, tok)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("the activation paragraph lists no rows — this wall is checking nothing")
+	}
+	return out
 }

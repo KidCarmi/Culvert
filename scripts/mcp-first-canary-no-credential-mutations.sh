@@ -35,6 +35,7 @@
 #   M15  the transition commit forwards the wrong probe field
 #   M16  the restart reconcile forwards the wrong probe field
 #   M17  an engine error is reported as a credential-free answer
+#   M18  the matrix doc's activation row list drifts from the table
 #
 # M14 is the anti-vacuity mutation §13 requires. A resolver returning constant false passes every
 # negative gate above while making the First Canary permanently impossible, so the campaign is
@@ -190,6 +191,7 @@ RUN=internal/mcp/execution/run.go
 FINGERPRINT=internal/mcp/catalog/fingerprint.go
 DISCOVERY=internal/mcp/execution/discovery.go
 ROLLOUT=mcp_rollout.go
+MATRIXDOC=docs/design/mcp/CANARY-READINESS-MATRIX.md
 
 # ── the three authoritative layers ────────────────────────────────────────────
 
@@ -330,6 +332,16 @@ run_mutation M17 \
   'an engine error is reported as a credential-free answer' \
   'TestCredWall_EngineErrorIsNotACredentialFreeAnswer' . "$RESOLVER" \
   's/Resolved:                 err == nil,/Resolved:                 true,/'
+
+# M18 — THE MATRIX DOC'S ROW LIST DRIFTS. Inserting a row renumbers every row after it, and the
+# prose that names rows by NUMBER silently stops describing the table. This document has produced
+# that defect three times (its own paragraph records the first two); this PR produced it again in
+# EIGHT places, of which review caught one. The gate derives the activation set from the exported
+# evaluator behaviour and maps it through the table, so no hand-maintained number is trusted.
+run_mutation M18 \
+  "the matrix doc's activation row list drifts from the table" \
+  'TestCredWall_MatrixDocActivationRowsMatchTheTable' . "$MATRIXDOC" \
+  's/Rows 3, 4, 4a, 16, 17, 18, 19, 20, 21, 24 \(scope/Rows 3, 4, 4a, 16, 17, 18, 19, 20, 23 (scope/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
