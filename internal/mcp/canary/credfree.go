@@ -61,7 +61,7 @@ const (
 	// CredFreeUnavailable — the authoritative facts could not be resolved (no policy snapshot,
 	// no coherent inventory capture, no exact tuple). Nothing was established, so the fact is
 	// unmet. Distinct from a resolved answer that a credential IS required.
-	CredFreeUnavailable CredentialFreeReason = "credential_facts_unavailable"
+	CredFreeUnavailable CredentialFreeReason = "credential_facts_unavailable" // #nosec G101 -- a reason code, not a credential
 	// CredFreePolicyObligation — the matched policy decision carries a CredentialProfile
 	// obligation, so execution would plan and materialize a credential (run.go: profileRef !=
 	// "" ⇒ Broker.Plan → Broker.Materialize → Authorization).
@@ -80,7 +80,7 @@ const (
 	// independently, so this is published-state inconsistency, not a stale read: one of the two
 	// is describing a credential requirement the other has not caught up with, and which of them
 	// is right is not decidable here. Refused rather than guessed.
-	CredFreeInventoryDisagrees CredentialFreeReason = "credential_inventory_disagrees"
+	CredFreeInventoryDisagrees CredentialFreeReason = "credential_inventory_disagrees" // #nosec G101 -- a reason code, not a credential
 )
 
 // CredentialFreeInput carries the three authoritative credential statements for the exact
