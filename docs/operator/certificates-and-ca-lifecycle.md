@@ -17,7 +17,7 @@ the config-version rollback surface, and `GET /api/certificates` says so
 | Object | Revision token | Read from | Echoed on |
 |---|---|---|---|
 | Root CA | `caRevision` = `car1:<sha256 hex of the live CA DER>` (`car1:none` without a CA) | `GET /api/ca/status`, `GET /api/certificates`, `GET /api/ca-cert` (JSON) | `?caRevision=` on the rotation challenge, the rotation confirm and a MITM import |
-| Admin-UI certificate pair | `uiCertRevision` = `uic1:<sha256 hex of the persisted cert file>` (`uic1:none` when nothing is persisted) | `GET /api/certificates` (`uiCert.revision`), the dry run's `current` | `?uiCertRevision=` on a UI replace and a UI delete |
+| Admin-UI certificate pair | `uiCertRevision` = `uic1:<sha256 hex of the persisted cert file>` (`uic1:none` when nothing is persisted; `uic1:incomplete` when only one of the two files exists; `uic1:unavailable` when the pair cannot be examined — a path that is not readable or is a directory) | `GET /api/certificates` (`uiCert.revision`, with `uiCert.pairState` = `complete` / `absent` / `incomplete` / `unavailable`), the dry run's `current` | `?uiCertRevision=` on a UI replace and a UI delete (a mutation against `uic1:unavailable` is `503 evidence_unavailable`) |
 | OCSP desired posture | `ocspRevision` = `ocr1:<hex>` over the durable posture AND its generation (a toggle never returns to an earlier token) | `GET /api/ocsp`, `GET /api/certificates` | `?ocspRevision=` on `POST /api/ocsp` |
 
 A fenced mutation without its token is `428 precondition_required` (the
@@ -52,6 +52,34 @@ intents are never evicted; a corrupt or unreadable file is fail-closed
   `deleted`, `activation`, `uiCert`, `candidate`; OCSP: `ok`, `enabled`,
   `durable`, `revision`, `desired`, `runtime`), rebuilt from the non-secret
   facts recorded with the intent.
+- **A post-rename synchronisation failure is not a refusal.** When the
+  bundle (or a UI pair file) was renamed into place but the data directory
+  could not be synchronised afterwards, the replacement IS on disk: the node
+  installs it (a split live/disk state is never published), keeps the intent
+  **pending**, and answers the non-terminal `500 outcome_unknown` with
+  `current.detail: durability_unproven` and `current.state: pending`. Do not
+  re-send with a new operationId — poll the lookup (or re-send the SAME
+  operationId): the settlement re-synchronises the directory, and only then
+  credits, audits and reports the durable success. A UI pair transition that
+  reached its commit point but could not be finished answers
+  `current.detail: transition_incomplete` the same way and is completed by
+  the next settlement.
+- **Unavailable evidence is never absence.** A pending intent whose evidence
+  cannot be read — the bundle path is unreadable or is a directory, the
+  bundle cannot be decrypted under the passphrase the node booted with, the
+  UI pair's path cannot be examined — is settled as the recoverable
+  `outcome_unknown` with `code: <why>_evidence_unavailable`, re-decided by
+  every later settlement (the lookup, a boot, a recovered CA load, a later
+  writer), and it **blocks every writer of that object** (`503
+  operation_unsettled`) so the evidence is not destroyed before it decides.
+  Restore access (the passphrase, the path, the permissions) without
+  changing the bytes and the next settlement commits or aborts from the
+  real evidence. A bundle that reads but is not a CA bundle is
+  `<why>_evidence_invalid` (recoverable, does not block a repairing writer);
+  `<why>_durability_unproven` and `<why>_cleanup_incomplete` are the same
+  recoverable, writer-blocking shape for a directory that could not be
+  re-synchronised and a UI cleanup that could not be finished. Only a
+  **positively absent** bundle, or one carrying something else, aborts.
 - A refusal is **terminal only once it is durable**: `500 persist_failed` is
   answered only after the operation's aborted record landed. If that record
   cannot be written, the answer is the non-terminal `500 outcome_unknown`
@@ -111,15 +139,34 @@ unpersisted.
 - `target=mitm`: fenced on `caRevision`, persist-before-publish as in §3;
   the installed CA's own certificate is `409 candidate_duplicate`. Audited
   `ca.import`.
-- `target=ui`: fenced on `uiCertRevision`; the pair is written atomically
-  (cert then key, with a compensating rollback) under `<dataDir>/ui_tls_cert.pem`
-  + `ui_tls_key.pem` (0600) and takes effect at the next restart
-  (`activation: restart_required`). Audited `cert.ui.replace`.
-- `DELETE /api/certs/ui?operationId=…&uiCertRevision=…` removes the pair (the
-  private key first, so an interrupted delete never leaves a usable
-  half-pair). `404 not_found` when nothing is persisted. The running listener
-  keeps what it loaded at boot (`uiCert.active`, `activation`); the next restart
-  falls back to the auto self-signed certificate. Audited `cert.ui.delete`.
+- `target=ui`: fenced on `uiCertRevision`; the pair is written as a
+  **staged, marker-committed transition** under `<dataDir>`: the certificate
+  and the key (0600) are staged as `ui_tls_cert.pem.next` /
+  `ui_tls_key.pem.next`, the transition marker `ui_tls_transition.json`
+  (kind, operationId, certificate digest — never a key digest) is the commit
+  point, then the staged files are renamed over `ui_tls_cert.pem` +
+  `ui_tls_key.pem`, the marker is removed and the directory synchronised.
+  The live pair is therefore only ever the previous complete pair or the new
+  complete pair — a process killed at any instant is repaired at the next
+  boot and at the next settlement from the marker (a committed transition
+  is completed; staged files without a marker are abandoned, the previous
+  pair untouched). A failure before the commit point changes nothing
+  (`500 persist_failed`). The pair takes effect at the next restart
+  (`activation: restart_required`). A replace is credited only for a
+  **complete, valid pair whose certificate is the candidate** (the key is
+  proven by the pair parsing). Audited `cert.ui.replace`.
+- `DELETE /api/certs/ui?operationId=…&uiCertRevision=…` removes the pair
+  through the same committed transition (marker first, then key, then
+  certificate). `404 not_found` when nothing is persisted. The result and
+  the recovered record state the cleanup fact: `cleanup: complete` (the
+  delete removed both files) or `cleanup: completed_at_settlement` (the
+  process died after one removal — a remnant of one file — and the
+  settlement finished the cleanup before crediting the intent). A remnant
+  without a delete intent is left in place and reported as
+  `uiCert.pairState: incomplete` / `uic1:incomplete` (delete or replace it
+  with that fence). The running listener keeps what it loaded at boot
+  (`uiCert.active`, `activation`); the next restart falls back to the auto
+  self-signed certificate. Audited `cert.ui.delete`.
 
 Passphrases and private keys are write-only: never echoed, logged, audited or
 recorded in the ledger.
@@ -185,7 +232,19 @@ durable — nothing is written. Consequences an operator can rely on:
 - while the operation ledger is corrupt, unreadable or unwritable, no writer
   changes a certificate object — the automatic rotation round logs one line
   per check and waits; repair the ledger (or move it aside to start empty)
-  and restart.
+  and restart;
+- while an intent's evidence is unavailable, its durability unproven or its
+  cleanup incomplete (§2), no writer changes that object either: restore
+  access to the evidence and the next settlement decides it. The CA
+  recovery loop's LOAD branch is the one exception by design — reading the
+  bundle is what makes the evidence available again, so the load runs first
+  and the waiting intents are settled from the recovered bundle right after
+  it; the loop's writing branches (minting a root, re-persisting a loaded
+  one) still settle first;
+- a commit that the lookup or the boot decided from the **bundle on disk**
+  (the process died between the durable write and its record) names that
+  bundle's CA in its `result.ca` and `committedRevision` — never a different
+  CA the live manager happens to hold at settlement time.
 
 **Boot order is explicit.** The auto-rotation loop's first round waits for
 the certificate-lifecycle boot gate; `LoadAdminSettings` reconciles the

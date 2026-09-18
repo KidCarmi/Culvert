@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -178,6 +179,21 @@ func fe6b0cUIReplace(t *testing.T, mux *http.ServeMux, opID, rev string, certPEM
 	status, m, _ = fe6b0Upload(t, mux, "?target=ui&operationId="+opID+"&uiCertRevision="+rev,
 		map[string]string{"target": "ui", "cert": string(certPEM), "key": string(keyPEM)})
 	return status, m
+}
+
+// fe6b0cFailKeyStaging makes the UI key STAGING write fail with an ordinary
+// error for the test's duration (the round-3 pre-commit persistence fault;
+// the certificate staging and every other write stay real).
+func fe6b0cFailKeyStaging(t *testing.T) {
+	t.Helper()
+	prev := uiTLSAtomicWrite
+	uiTLSAtomicWrite = func(path string, data []byte, perm os.FileMode) error {
+		if strings.HasPrefix(filepath.Base(path), customUITLSKeyFile) {
+			return errors.New("injected: key staging write failed")
+		}
+		return fileutil.AtomicWrite(path, data, perm)
+	}
+	t.Cleanup(func() { uiTLSAtomicWrite = prev })
 }
 
 func fe6b0cUIDelete(mux *http.ServeMux, opID, rev string) (status int, m map[string]any) {
@@ -697,12 +713,18 @@ func TestFE6B0C_R07_NonDurableRefusalIsNonTerminal(t *testing.T) {
 		_ = bundle
 	})
 
+	// Round 3 moved the UI pair's persistence boundary: the live paths are
+	// never written directly (staged files + a transition marker), and a
+	// directory at a live path is unavailable evidence that the handler
+	// refuses BEFORE any intent (uic1:unavailable). The pre-commit persist
+	// failure is therefore injected at the new boundary — the key staging
+	// seam (replace) and the transition marker path (delete); every
+	// assertion of the row is unchanged.
 	t.Run("ui_replace_persist_failure", func(t *testing.T) {
 		_, br := fe6b0cNode(t)
 		mux := fe6b0Mux()
 		leaf, key, _ := fe6b0CAPair(t, "ui-x", false)
-		restoreCert := fe6b0cMakeDir(t, customUITLSCertPath())
-		defer restoreCert()
+		fe6b0cFailKeyStaging(t)
 		opX := fe6b0OpID()
 		br.armed.Store(true)
 		code, m := fe6b0cUIReplace(t, mux, opX, uiCertRevisionNone, leaf, key)
@@ -712,6 +734,9 @@ func TestFE6B0C_R07_NonDurableRefusalIsNonTerminal(t *testing.T) {
 		fe6b0cAssertRefusalNotDurable(t, code, m, opX)
 		if _, err := os.Stat(customUITLSKeyPath()); err == nil {
 			t.Fatal("a refused replace wrote the key")
+		}
+		if _, err := os.Stat(customUITLSCertPath()); err == nil {
+			t.Fatal("a refused replace wrote the certificate")
 		}
 	})
 
@@ -723,8 +748,8 @@ func TestFE6B0C_R07_NonDurableRefusalIsNonTerminal(t *testing.T) {
 			t.Fatalf("seed = %d %v", code, m)
 		}
 		rev := fe6b0cUIRevision(t, mux)
-		restoreKey := fe6b0cMakeDir(t, customUITLSKeyPath())
-		defer restoreKey()
+		restoreMarker := fe6b0cMakeDir(t, customUITLSTransitionPath())
+		defer restoreMarker()
 		opX := fe6b0OpID()
 		br.armed.Store(true)
 		code, m := fe6b0cUIDelete(mux, opX, rev)
@@ -803,12 +828,14 @@ func TestFE6B0C_R08_RefusalBecomesDurableAfterLedgerRecoveryAndReplaysTerminal(t
 			t.Fatalf("seed = %d %v", code, m)
 		}
 		rev := fe6b0cUIRevision(t, mux)
-		restoreKey := fe6b0cMakeDir(t, customUITLSKeyPath())
+		// Round 3: the delete's pre-commit failure is the transition marker
+		// (see R07); the row's assertions are unchanged.
+		restoreMarker := fe6b0cMakeDir(t, customUITLSTransitionPath())
 		opX := fe6b0OpID()
 		br.armed.Store(true)
 		code, m := fe6b0cUIDelete(mux, opX, rev)
 		fe6b0cAssertRefusalNotDurable(t, code, m, opX)
-		restoreKey()
+		restoreMarker()
 		fe6b0cRestoreLedger(t, filepath.Join(dir, fe6b0LedgerFile))
 		// Restart: boot reconciliation records the refusal durably.
 		reopenCertificateOperationsForTest()

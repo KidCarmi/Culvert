@@ -4,33 +4,34 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
-// TestPersistCustomUITLS_KeyWriteFailureDoesNotCorruptExistingCert is the
-// regression test for a gap in the CHAOS-50-style durability fix:
-// persistCustomUITLS writes the cert and the key as two SEPARATE
-// fileutil.AtomicWrite calls. customUITLSPairValid's doc comment already
-// calls out that a process killed BETWEEN the two writes can leave a NEW
-// cert paired with the OLD key — but the SAME hazard also fires on an
-// ordinary, non-crash error return: if the cert write succeeds and the
-// SECOND (key) write then fails (ENOSPC, a permissions change mid-upload,
-// a wedged volume), persistCustomUITLS returns an error and
-// apiCertsUpload (ui_security.go) tells the admin:
-//
-//	"...the current UI certificate is unchanged."
-//
-// That is false whenever a PREVIOUSLY VALID custom pair was already on
-// disk: the cert half has just been overwritten with the new (rejected)
-// upload, corrupting what used to be a working, persisted pair. On the
-// next restart, resolveUITLSCertKey's customUITLSPairValid check (rightly)
-// refuses the now-mismatched pair and falls back to a freshly generated
-// self-signed certificate — silently discarding the admin's previously
-// working custom UI certificate, exactly the kind of "restart changed
-// nothing" -> "restart changed everything" surprise this whole file exists
-// to prevent, triggered by an upload the admin was told had NO effect.
+// The persisted UI cert/key pair is a STAGED, MARKER-COMMITTED transition
+// (ui_tls_custom.go, FE-6B.0 round 3): the live paths are never written
+// directly, so no failure before the commit point can touch the previous
+// pair, a post-rename synchronisation failure leaves the NEW complete pair
+// live and is reported as unproven durability (never "unchanged"), and a
+// transition interrupted after its commit point is completed by
+// recoverUITLSTransition from the marker — at boot or at the next
+// settlement — without a guess.
+
+func uiTLSNoTransitionRemnants(t *testing.T) {
+	t.Helper()
+	for _, p := range []string{customUITLSCertStagePath(), customUITLSKeyStagePath(), customUITLSTransitionPath()} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("transition remnant left behind: %s", filepath.Base(p))
+		}
+	}
+}
+
+// A key STAGING failure (before the commit point) leaves the previous pair
+// intact and valid — the certificate is never overwritten first — and
+// leaves no staged file or marker behind.
 func TestPersistCustomUITLS_KeyWriteFailureDoesNotCorruptExistingCert(t *testing.T) {
 	withTempDataDirForUITLS(t)
 
@@ -38,52 +39,38 @@ func TestPersistCustomUITLS_KeyWriteFailureDoesNotCorruptExistingCert(t *testing
 	if err := persistCustomUITLS(cert1, key1); err != nil {
 		t.Fatalf("initial persist: %v", err)
 	}
-	gotCert, err := os.ReadFile(customUITLSCertPath())
-	if err != nil || !bytes.Equal(gotCert, cert1) {
-		t.Fatalf("sanity: initial cert not persisted as expected (err=%v)", err)
+	uiTLSNoTransitionRemnants(t)
+
+	keyErr := errors.New("simulated: no space left on device")
+	prev := uiTLSAtomicWrite
+	t.Cleanup(func() { uiTLSAtomicWrite = prev })
+	uiTLSAtomicWrite = func(path string, data []byte, perm os.FileMode) error {
+		if strings.HasPrefix(filepath.Base(path), customUITLSKeyFile) {
+			return keyErr
+		}
+		return fileutil.AtomicWrite(path, data, perm)
 	}
 
-	// Force the SECOND write (the key) to fail without touching the first:
-	// replace the key path with a directory, so fileutil.AtomicWrite's
-	// os.Rename(tmp, path) fails with EISDIR renaming a file onto an
-	// existing directory.
-	if err := os.Remove(customUITLSKeyPath()); err != nil {
-		t.Fatalf("remove key to stage failure: %v", err)
+	cert2, key2, _ := generateSelfSignedECDSA(t)
+	err := persistCustomUITLS(cert2, key2)
+	if !errors.Is(err, keyErr) || errors.Is(err, errUITLSDurabilityUnproven) || errors.Is(err, errUITLSTransitionIncomplete) {
+		t.Fatalf("a pre-commit failure must be an ordinary error carrying the cause, got %v", err)
 	}
-	if err := os.Mkdir(customUITLSKeyPath(), 0o750); err != nil {
-		t.Fatalf("mkdir over key path: %v", err)
+	gotCert, _ := os.ReadFile(customUITLSCertPath())
+	gotKey, _ := os.ReadFile(customUITLSKeyPath())
+	if !bytes.Equal(gotCert, cert1) || !bytes.Equal(gotKey, key1) || !customUITLSPairValid() {
+		t.Fatalf("the previous pair was touched by a failed replacement (cert1=%v key1=%v valid=%v)",
+			bytes.Equal(gotCert, cert1), bytes.Equal(gotKey, key1), customUITLSPairValid())
 	}
-
-	cert2, key2, _ := generateSelfSignedECDSA(t) // a distinct replacement pair
-	if err := persistCustomUITLS(cert2, key2); err == nil {
-		t.Fatal("expected persistCustomUITLS to fail when the key write fails")
-	}
-
-	// The bug: the cert half was already overwritten with cert2 before the
-	// key write failed, so the previously-valid (cert1, key1) pair on disk
-	// is now corrupted even though the call reported failure and the admin
-	// API told the caller "the current UI certificate is unchanged".
-	gotCert, err = os.ReadFile(customUITLSCertPath())
-	if err != nil {
-		t.Fatalf("read cert after failed persist: %v", err)
-	}
-	if !bytes.Equal(gotCert, cert1) {
-		t.Fatalf("persistCustomUITLS corrupted the previously-persisted cert on a failed key write: "+
-			"on-disk cert changed from the original upload to the rejected one (got %d bytes matching cert2=%v, cert1=%v)",
-			len(gotCert), bytes.Equal(gotCert, cert2), bytes.Equal(gotCert, cert1))
-	}
+	uiTLSNoTransitionRemnants(t)
 }
 
-// TestPersistCustomUITLS_KeyReplacedNotSyncedDoesNotRollback is the
-// regression test for the Codex P1 finding on this PR (#1297): when the key
-// write fails with fileutil.ErrReplacedNotSynced, the key RENAME has already
-// landed — the new key is live and visible on disk, only the best-effort
-// parent-directory fsync afterward failed. Rolling the cert back to its
-// previous value in this case would pair the OLD cert with the NEW key,
-// producing exactly the mismatched-pair hazard this whole rollback exists to
-// prevent — just inverted. persistCustomUITLS must leave the (new cert, new
-// key) pair that was actually uploaded in place.
-func TestPersistCustomUITLS_KeyReplacedNotSyncedDoesNotRollback(t *testing.T) {
+// A post-rename synchronisation failure on the key write means the staged
+// key LANDED: the transition completes, the new pair is live and valid, and
+// the caller learns that the durability is unproven — never that nothing
+// changed, and never a rollback that would pair the old certificate with
+// the new key.
+func TestPersistCustomUITLS_KeyReplacedNotSyncedCompletesThePair(t *testing.T) {
 	withTempDataDirForUITLS(t)
 
 	cert1, key1, _ := generateSelfSignedECDSA(t)
@@ -95,90 +82,130 @@ func TestPersistCustomUITLS_KeyReplacedNotSyncedDoesNotRollback(t *testing.T) {
 	prev := uiTLSAtomicWrite
 	t.Cleanup(func() { uiTLSAtomicWrite = prev })
 	uiTLSAtomicWrite = func(path string, data []byte, perm os.FileMode) error {
-		if path != customUITLSKeyPath() {
-			t.Fatalf("rollback must not run on ErrReplacedNotSynced — unexpected write to %s", path)
+		if !strings.HasPrefix(filepath.Base(path), customUITLSKeyFile) {
+			t.Fatalf("unexpected write through the key seam: %s", path)
 		}
-		// Simulate the rename having actually landed: the new key content
-		// is genuinely on disk, and only the post-rename parent-dir fsync
-		// is reported as failed.
-		if err := os.WriteFile(path, data, perm); err != nil {
+		if err := fileutil.AtomicWrite(path, data, perm); err != nil {
 			return err
 		}
 		return fileutil.ErrReplacedNotSynced
 	}
 
 	err := persistCustomUITLS(cert2, key2)
-	if !errors.Is(err, fileutil.ErrReplacedNotSynced) {
-		t.Fatalf("expected fileutil.ErrReplacedNotSynced, got %v", err)
+	if !errors.Is(err, errUITLSDurabilityUnproven) || !errors.Is(err, fileutil.ErrReplacedNotSynced) {
+		t.Fatalf("expected errUITLSDurabilityUnproven wrapping ErrReplacedNotSynced, got %v", err)
 	}
-
-	gotCert, rerr := os.ReadFile(customUITLSCertPath())
-	if rerr != nil || !bytes.Equal(gotCert, cert2) {
-		t.Fatalf("cert must NOT be rolled back on ErrReplacedNotSynced (the new key already landed): "+
-			"read err=%v, matches cert2=%v, matches cert1=%v", rerr, bytes.Equal(gotCert, cert2), bytes.Equal(gotCert, cert1))
+	gotCert, _ := os.ReadFile(customUITLSCertPath())
+	gotKey, _ := os.ReadFile(customUITLSKeyPath())
+	if !bytes.Equal(gotCert, cert2) || !bytes.Equal(gotKey, key2) || !customUITLSPairValid() {
+		t.Fatalf("the NEW complete pair must be live after a post-rename failure (cert2=%v key2=%v valid=%v)",
+			bytes.Equal(gotCert, cert2), bytes.Equal(gotKey, key2), customUITLSPairValid())
 	}
-	gotKey, rerr := os.ReadFile(customUITLSKeyPath())
-	if rerr != nil || !bytes.Equal(gotKey, key2) {
-		t.Fatalf("key must reflect the landed write: read err=%v, matches key2=%v", rerr, bytes.Equal(gotKey, key2))
+	if bytes.Equal(gotCert, cert1) {
+		t.Fatal("the certificate was rolled back beside the new key")
 	}
+	uiTLSNoTransitionRemnants(t)
 }
 
-// TestPersistCustomUITLS_RollbackFailureIsSurfaced is the regression test
-// for the Codex P2 finding on this PR (#1297): when the key write fails for
-// an ordinary reason (not ErrReplacedNotSynced) AND the compensating cert
-// rollback ALSO fails — the same wedged/full/read-only volume plausibly
-// fails both — persistCustomUITLS must not silently discard the rollback
-// error. The caller (apiCertsUpload) needs to distinguish this from a clean
-// rollback so it stops claiming "the current certificate is unchanged" when
-// the on-disk cert may now be the rejected upload.
-func TestPersistCustomUITLS_RollbackFailureIsSurfaced(t *testing.T) {
+// A transition that reached its commit point but could not be completed
+// (the certificate rename fails) is reported as incomplete with the marker
+// left in place, and recoverUITLSTransition completes it once the fault is
+// gone — the pair is then the new complete pair, never a mixture.
+func TestPersistCustomUITLS_IncompleteCommitIsRecoveredFromTheMarker(t *testing.T) {
 	withTempDataDirForUITLS(t)
 
 	cert1, key1, _ := generateSelfSignedECDSA(t)
 	if err := persistCustomUITLS(cert1, key1); err != nil {
 		t.Fatalf("initial persist: %v", err)
 	}
+	// The certificate's live path becomes a NON-EMPTY directory, so the
+	// commit-phase rename of the staged certificate fails after the key was
+	// already renamed.
+	if err := os.Remove(customUITLSCertPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(customUITLSCertPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(customUITLSCertPath(), "occupant"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cert2, key2, _ := generateSelfSignedECDSA(t)
-	keyErr := errors.New("simulated wedged volume: key write")
-	rollbackErr := errors.New("simulated wedged volume: rollback write")
-	prev := uiTLSAtomicWrite
-	t.Cleanup(func() { uiTLSAtomicWrite = prev })
-	uiTLSAtomicWrite = func(path string, _ []byte, _ os.FileMode) error {
-		switch path {
-		case customUITLSKeyPath():
-			return keyErr
-		case customUITLSCertPath():
-			return rollbackErr
-		default:
-			t.Fatalf("unexpected write to %s", path)
-			return nil
-		}
-	}
-
 	err := persistCustomUITLS(cert2, key2)
-	if !errors.Is(err, errUITLSRollbackFailed) {
-		t.Fatalf("expected errUITLSRollbackFailed, got %v", err)
+	if !errors.Is(err, errUITLSTransitionIncomplete) {
+		t.Fatalf("expected errUITLSTransitionIncomplete, got %v", err)
 	}
-	if !errors.Is(err, keyErr) {
-		t.Fatalf("expected the original key-write error to still be wrapped, got %v", err)
+	tr, terr := readUITLSTransition()
+	if terr != nil || tr == nil || tr.Kind != uiTLSTransitionReplace || tr.CertDigest != hexDigest(cert2) {
+		t.Fatalf("the marker must stay for the next recovery: %+v %v", tr, terr)
 	}
-	if !errors.Is(err, rollbackErr) {
-		t.Fatalf("expected the rollback error to be wrapped, got %v", err)
+	if _, serr := os.Stat(customUITLSCertStagePath()); serr != nil {
+		t.Fatal("the staged certificate must stay until the rename can be done")
 	}
 
-	// The cert half was actually replaced with cert2 on disk (a real,
-	// unstubbed write) before the stubbed rollback failed to restore it —
-	// exactly the indeterminate on-disk state errUITLSRollbackFailed exists
-	// to make callers aware of, rather than reporting "unchanged".
-	gotCert, rerr := os.ReadFile(customUITLSCertPath())
-	if rerr != nil || !bytes.Equal(gotCert, cert2) {
-		t.Fatalf("sanity: expected the rejected cert2 to be left on disk after a failed rollback, "+
-			"read err=%v, matches cert2=%v", rerr, bytes.Equal(gotCert, cert2))
+	// Fault gone: the recovery completes the transition from the marker.
+	if err := os.RemoveAll(customUITLSCertPath()); err != nil {
+		t.Fatal(err)
 	}
-	gotKey, rerr := os.ReadFile(customUITLSKeyPath())
-	if rerr != nil || !bytes.Equal(gotKey, key1) {
-		t.Fatalf("sanity: key write was stubbed to fail before any write, key should still be key1: "+
-			"read err=%v, matches key1=%v", rerr, bytes.Equal(gotKey, key1))
+	rec := recoverUITLSTransition()
+	if rec.Err != nil || !rec.Completed || rec.Kind != uiTLSTransitionReplace {
+		t.Fatalf("recovery = %+v", rec)
 	}
+	gotCert, _ := os.ReadFile(customUITLSCertPath())
+	gotKey, _ := os.ReadFile(customUITLSKeyPath())
+	if !bytes.Equal(gotCert, cert2) || !bytes.Equal(gotKey, key2) || !customUITLSPairValid() {
+		t.Fatalf("recovery did not complete the new pair (cert2=%v key2=%v valid=%v)",
+			bytes.Equal(gotCert, cert2), bytes.Equal(gotKey, key2), customUITLSPairValid())
+	}
+	uiTLSNoTransitionRemnants(t)
+	_ = key1
+}
+
+// Staged files WITHOUT a marker never committed: the recovery abandons them
+// and the previous pair is untouched; a marker with both files still staged
+// is a committed transition and is completed.
+func TestRecoverUITLSTransition_AbandonsUncommittedAndCompletesCommitted(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	cert1, key1, _ := generateSelfSignedECDSA(t)
+	if err := persistCustomUITLS(cert1, key1); err != nil {
+		t.Fatal(err)
+	}
+	cert2, key2, _ := generateSelfSignedECDSA(t)
+
+	// Uncommitted: staged certificate only (the process died before the key
+	// was staged).
+	if err := os.WriteFile(customUITLSCertStagePath(), cert2, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := recoverUITLSTransition()
+	if rec.Err != nil || rec.Completed || !rec.Abandoned {
+		t.Fatalf("recovery = %+v", rec)
+	}
+	if got, _ := os.ReadFile(customUITLSCertPath()); !bytes.Equal(got, cert1) || !customUITLSPairValid() {
+		t.Fatal("an abandoned staging touched the previous pair")
+	}
+	uiTLSNoTransitionRemnants(t)
+
+	// Committed: both files staged and the marker written (the process died
+	// before the renames).
+	if err := os.WriteFile(customUITLSCertStagePath(), cert2, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(customUITLSKeyStagePath(), key2, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUITLSTransition(uiTLSTransition{Kind: uiTLSTransitionReplace, OperationID: "op-x", CertDigest: hexDigest(cert2)}); err != nil {
+		t.Fatal(err)
+	}
+	rec = recoverUITLSTransition()
+	if rec.Err != nil || !rec.Completed || rec.OperationID != "op-x" {
+		t.Fatalf("recovery = %+v", rec)
+	}
+	gotCert, _ := os.ReadFile(customUITLSCertPath())
+	gotKey, _ := os.ReadFile(customUITLSKeyPath())
+	if !bytes.Equal(gotCert, cert2) || !bytes.Equal(gotKey, key2) || !customUITLSPairValid() {
+		t.Fatal("a committed transition was not completed")
+	}
+	uiTLSNoTransitionRemnants(t)
 }

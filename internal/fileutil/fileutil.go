@@ -121,11 +121,24 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 		cleanup()
 		return noteWriteFailure(path, fmt.Errorf("atomic write %s: chmod: %w", path, err))
 	}
+	// Test seam (FE-6B.0 round 3): the two synchronisation steps of an
+	// atomic write are the persistence boundaries a caller's durability
+	// reaction has to be provable against — a failure BEFORE the rename
+	// (kind "atomic-file", the temp path) means nothing landed, a failure
+	// AFTER it (kind "atomic-dir", the target path) means the replacement is
+	// visible but its durability is unproven (ErrReplacedNotSynced).
+	// Behaviour-neutral when no hook is installed.
+	if err := beforeSync("atomic-file", tmp); err != nil {
+		_ = f.Close()
+		cleanup()
+		return noteWriteFailure(path, fmt.Errorf("atomic write %s: fsync: %w", path, err))
+	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		cleanup()
 		return noteWriteFailure(path, fmt.Errorf("atomic write %s: fsync: %w", path, err))
 	}
+	noteSync("atomic-file", tmp)
 	if err := f.Close(); err != nil {
 		cleanup()
 		return noteWriteFailure(path, fmt.Errorf("atomic write %s: close: %w", path, err))
@@ -135,6 +148,9 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 		return noteWriteFailure(path, fmt.Errorf("atomic write %s: rename: %w", path, err))
 	}
 
+	if err := beforeSync("atomic-dir", path); err != nil {
+		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", path, err, ErrReplacedNotSynced))
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		// Best-effort: opening a directory for sync is not portable. The data
@@ -156,6 +172,19 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	if closeErr != nil && syncErr == nil {
 		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w: %w", path, closeErr, ErrReplacedNotSynced))
 	}
+	noteSync("atomic-dir", path)
 	noteWriteSuccess(path)
 	return nil
+}
+
+// SyncParentDir fsyncs the directory that holds path, so a caller can
+// RESOLVE the durability an earlier ErrReplacedNotSynced left unproven
+// before it reports a durable success (FE-6B.0 round 3): the replacement was
+// already visible, only the name's survival across a crash was in doubt, and
+// a later successful directory sync settles exactly that doubt. Filesystems
+// that cannot sync a directory are tolerated (as in AtomicWrite); any other
+// failure is returned and the doubt stands. Runs through the package's sync
+// hook under kind "dir" with the directory path.
+func SyncParentDir(path string) error {
+	return syncParentDir(path)
 }

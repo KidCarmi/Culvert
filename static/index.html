@@ -17800,8 +17800,11 @@ function certRefusalText(r) {
     case 'operation_mismatch': return 'This operation id was already used for a different change.';
     case 'operation_in_progress': return 'This operation is still being decided.';
     case 'operation_unsettled': return 'An earlier operation on this object is still unsettled (' + (cur.reason || 'ledger') + '); make the operation ledger writable and retry.';
+    case 'evidence_unavailable': return 'The persisted certificate pair cannot be examined (its path is not readable); repair the data directory and retry.';
     case 'outcome_unknown':
       if (cur.detail === 'refusal_not_durable') return 'The change was refused (nothing changed) but the refusal could not be recorded yet; it will be settled as a refusal — check the operation record before retrying.';
+      if (cur.detail === 'durability_unproven') return 'The change is on disk but its durability could not be proven yet; it stays pending and the operation record settles it — do not re-send with a new operation id.';
+      if (cur.detail === 'transition_incomplete') return 'The certificate pair change was committed but not completed; it stays pending and the operation record completes it — do not re-send with a new operation id.';
       return 'The outcome is unproven; check the operation record before retrying.';
     case 'forbidden': return 'Insufficient role.';
     case 'ca_not_ready': return 'No Root CA is installed.';

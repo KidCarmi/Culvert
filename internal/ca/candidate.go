@@ -302,7 +302,13 @@ func (c *Candidate) Bundle(passphrase string) ([]byte, error) {
 }
 
 // PersistCandidate writes the candidate's bundle atomically (0600) to path.
-// Nothing is installed; a returned error means the bundle did not land.
+// Nothing is installed. A returned error that wraps
+// fileutil.ErrReplacedNotSynced means the bundle DID land — the rename is
+// complete and every reader sees the candidate — but the parent directory
+// could not be synchronised, so its durability across an immediate crash is
+// unproven; the caller must treat the candidate as the bundle on disk and
+// resolve the durability before it reports a durable success. Any other
+// error means the bundle did not land (the previous bundle is intact).
 func PersistCandidate(c *Candidate, path, passphrase string) error {
 	data, err := c.Bundle(passphrase)
 	if err != nil {

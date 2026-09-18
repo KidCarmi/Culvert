@@ -50,6 +50,30 @@ package main
 // intent's non-secret facts and the object's state, before the competitor
 // replaces it.
 //
+// EVIDENCE IS NEVER GUESSED (round 3). Three rules close the round-3
+// blockers. (B1) A POST-RENAME synchronisation failure of the CA bundle or
+// of a UI pair file means the replacement IS on disk (fileutil.
+// ErrReplacedNotSynced): the writer installs/completes it — a split
+// live/disk state is never published — and answers the NON-terminal 500
+// outcome_unknown with current.detail durability_unproven and the intent
+// still pending; every settlement of a CA or UI intent RE-SYNCHRONISES the
+// object's directory before it credits a commit (a resync that fails is
+// <why>_durability_unproven, recoverable). (B2) The UI pair is a staged,
+// marker-committed transition (ui_tls_custom.go) recovered at boot and at
+// every settlement; a replace is credited only for a COMPLETE, VALID pair
+// whose certificate is the candidate, and a delete credited from an
+// incomplete cleanup completes the cleanup first and says so
+// (result.cleanup = completed_at_settlement, else complete). (B3) Evidence
+// that is UNAVAILABLE (unreadable path, undecodable bundle) or INVALID
+// (malformed bundle) is distinguished from POSITIVE ABSENCE: only absence
+// aborts; the others are recorded as the recoverable outcome_unknown codes
+// <why>_evidence_unavailable / <why>_evidence_invalid, re-evaluated by every
+// later settlement (lookup, boot, a recovered CA load, a writer), and an
+// unavailable-evidence or unproven-durability intent BLOCKS every writer of
+// its target (errCertTargetUnsettled) so the evidence is never destroyed
+// before it can decide. A commit decided from the bundle on disk builds its
+// action-bound result from THAT bundle, never from a different live CA.
+//
 // A REFUSAL IS TERMINAL ONLY ONCE DURABLE (Blocker 3): an aborted record
 // that cannot be persisted leaves the pending intent as the durable truth,
 // the caller gets the NON-terminal 500 outcome_unknown
@@ -81,6 +105,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 const (
@@ -102,6 +127,25 @@ const (
 	uiCertRevisionNone = "uic1:none"
 	caRevisionNone     = "car1:none"
 	certScopeNodeLocal = "node-local"
+
+	// Round-3 UI-cert revision tokens that are NOT identities: the pair
+	// could not be examined, or only one of its two files exists. Neither
+	// ever equals uic1:none, so unavailable evidence can never prove a
+	// pending delete.
+	uiCertRevisionUnavailable = "uic1:unavailable"
+	uiCertRevisionIncomplete  = "uic1:incomplete"
+
+	// Recoverable outcome_unknown code suffixes (round 3). A record carrying
+	// one is re-evaluated by every later settlement; the first two also
+	// BLOCK writers of the target.
+	certCodeEvidenceUnavailable = "evidence_unavailable"
+	certCodeDurabilityUnproven  = "durability_unproven"
+	certCodeCleanupIncomplete   = "cleanup_incomplete"
+	certCodeEvidenceInvalid     = "evidence_invalid"
+	certCodeUnproven            = "unproven"
+
+	certCleanupComplete     = "complete"
+	certCleanupAtSettlement = "completed_at_settlement"
 
 	// caChallengeTTL bounds a rotation challenge's life; the issue response
 	// states it and an expired confirm is refused with changed:[expired].
@@ -140,16 +184,24 @@ func caRevisionToken() string {
 
 // uiCertRevisionToken identifies the PERSISTED admin-UI certificate by the
 // digest of its certificate file; the key never contributes to a public
-// token.
+// token. Evidence that cannot be examined is uic1:unavailable and a single
+// remnant file is uic1:incomplete — distinct from uic1:none, which is
+// positive absence (round 3, Blocker 3).
 func uiCertRevisionToken() string {
-	if !customUITLSFilesPresent() {
+	return uiCertRevisionTokenOf(uiPairEvidenceNow())
+}
+
+func uiCertRevisionTokenOf(ev uiPairEvidence) string {
+	switch ev.class {
+	case uiPairAbsent:
 		return uiCertRevisionNone
+	case uiPairComplete:
+		return "uic1:" + ev.certDigest
+	case uiPairIncomplete:
+		return uiCertRevisionIncomplete
+	default:
+		return uiCertRevisionUnavailable
 	}
-	data, err := os.ReadFile(customUITLSCertPath())
-	if err != nil {
-		return uiCertRevisionNone
-	}
-	return "uic1:" + hexDigest(data)
 }
 
 func hexDigest(b []byte) string {
@@ -197,6 +249,46 @@ type certOperation struct {
 
 func (op *certOperation) unresolved() bool {
 	return op.State == certOpPending || op.State == certOpOutcomeUnknown
+}
+
+// recoverable reports whether a later settlement may still decide the
+// record: pending, or outcome_unknown for a reason that new evidence, a
+// resync or a completed cleanup can resolve. A handler-recorded
+// outcome_unknown (persist_failed) is not re-decided.
+func (op *certOperation) recoverable() bool {
+	if op.State == certOpPending {
+		return true
+	}
+	if op.State != certOpOutcomeUnknown {
+		return false
+	}
+	for _, suffix := range []string{certCodeEvidenceUnavailable, certCodeDurabilityUnproven, certCodeCleanupIncomplete, certCodeEvidenceInvalid} {
+		if strings.HasSuffix(op.Code, "_"+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// blocksWriters reports whether a writer of the record's target must wait:
+// the intent is undecided (pending), or its evidence is temporarily
+// unavailable, its durability unproven or its cleanup incomplete — states a
+// later write would destroy the evidence of. An invalid bundle does NOT
+// block (only a writer can repair it) and neither does a plain unproven
+// verdict (out-of-band content that no evidence will ever decide).
+func (op *certOperation) blocksWriters() bool {
+	if op.State == certOpPending {
+		return true
+	}
+	if op.State != certOpOutcomeUnknown {
+		return false
+	}
+	for _, suffix := range []string{certCodeEvidenceUnavailable, certCodeDurabilityUnproven, certCodeCleanupIncomplete} {
+		if strings.HasSuffix(op.Code, "_"+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (op *certOperation) decided() bool {
@@ -554,26 +646,41 @@ func (s *certOperationStore) readModel() map[string]any {
 
 // ── settlement ──────────────────────────────────────────────────────────────
 
-// settleCertOperation decides one unresolved intent DURABLY from the
+// certVerdict is one settlement decision: the durable state to record, the
+// bounded code suffix for an outcome_unknown, the object's revision and the
+// ACTION-BOUND result of a commit, built from the evidence that decided it.
+type certVerdict struct {
+	state    string
+	code     string // outcome_unknown only: one of the certCode* suffixes
+	revision string
+	result   map[string]any
+	cleanup  string // UI delete: complete | completed_at_settlement
+}
+
+func certVerdictUnknown(code string) certVerdict {
+	return certVerdict{state: certOpOutcomeUnknown, code: code}
+}
+
+// settleCertOperation decides one recoverable intent DURABLY from the
 // object's own evidence (see the file header) and completes its audit. why
-// is "lookup", "reconciled" (boot) or "writer" (a later writer of the same
-// target, before it writes). Errors leave the record as it was.
+// is "lookup", "reconciled" (boot, or a recovered CA load) or "writer" (a
+// later writer of the same target, before it writes). Errors leave the
+// record as it was; a record that already carries the same non-terminal
+// verdict is not rewritten.
 //
-// A committed verdict reconstructs the ACTION-BOUND result from the intent's
-// recorded facts and the object's current state — which IS the state the
-// commit produced, because no writer of the target has run since (every
-// writer settles first). An aborted verdict records the refusal the
-// operation stood for when its own refusal record could not be persisted
-// (certRefusalMemo), else the bounded <why>_absent.
+// A committed verdict carries the ACTION-BOUND result built from the
+// evidence that decided it (the live CA, the bundle on disk, the settled
+// pair) — never from a different live object. An aborted verdict records
+// the refusal the operation stood for when its own refusal record could not
+// be persisted (certRefusalMemo), else the bounded <why>_absent.
 func settleCertOperation(s *certOperationStore, op certOperation, why string) error {
-	if op.State != certOpPending {
+	if !op.recoverable() {
 		return nil
 	}
-	verdict, revision := certOperationVerdict(op)
-	switch verdict {
+	v := certOperationVerdict(op)
+	switch v.state {
 	case certOpCommitted:
-		result := certRecoveredResult(op)
-		if err := s.Finish(op.OperationID, certOpCommitted, why+"_committed", revision, result, certAuditDetail(op)); err != nil {
+		if err := s.Finish(op.OperationID, certOpCommitted, why+"_committed", v.revision, v.result, certAuditDetail(op)); err != nil {
 			return err
 		}
 	case certOpAborted:
@@ -583,7 +690,11 @@ func settleCertOperation(s *certOperationStore, op certOperation, why string) er
 		}
 		return s.Finish(op.OperationID, certOpAborted, code, "", nil, "")
 	default:
-		return s.Finish(op.OperationID, certOpOutcomeUnknown, why+"_unproven", "", nil, "")
+		code := why + "_" + v.code
+		if op.State == certOpOutcomeUnknown && op.Code == code {
+			return nil // the same non-terminal verdict; nothing new to record
+		}
+		return s.Finish(op.OperationID, certOpOutcomeUnknown, code, "", nil, "")
 	}
 	settled, err := s.Get(op.OperationID)
 	if err != nil || settled == nil {
@@ -592,14 +703,14 @@ func settleCertOperation(s *certOperationStore, op certOperation, why string) er
 	return s.emitOperationAudit(*settled)
 }
 
-// settleCertTarget settles EVERY pending intent on target durably before a
-// writer changes it (the writer protocol; caller holds certOpsMu). An
-// intent still pending afterwards — its record could not be persisted, or
-// the ledger is degraded — is errCertTargetUnsettled: the writer must
-// refuse or defer with nothing written, because writing would destroy the
-// evidence that decides the intent. Audit completion failures are not
-// fatal here (the record is durable; the audit is retried by the next
-// lookup/boot).
+// settleCertTarget settles EVERY recoverable intent on target durably before
+// a writer changes it (the writer protocol; caller holds certOpsMu). An
+// intent that still blocks afterwards — undecided, its evidence
+// unavailable, its durability unproven, its cleanup incomplete, or the
+// ledger degraded — is errCertTargetUnsettled: the writer must refuse or
+// defer with nothing written, because writing would destroy the evidence
+// that decides the intent. Audit completion failures are not fatal here
+// (the record is durable; the audit is retried by the next lookup/boot).
 func settleCertTarget(s *certOperationStore, target, why string) error {
 	if d := s.Degraded(); d != nil {
 		return fmt.Errorf("%w: ledger %s", errCertTargetUnsettled, d.Reason)
@@ -607,14 +718,15 @@ func settleCertTarget(s *certOperationStore, target, why string) error {
 	pending := s.Unresolved()
 	for i := range pending {
 		op := pending[i]
-		if op.Target != target || op.State != certOpPending {
+		if op.Target != target || !op.recoverable() {
 			continue
 		}
 		if err := settleCertOperation(s, op, why); err != nil && !errors.Is(err, errCertOperationAuditPending) {
 			return fmt.Errorf("%w: operation %s (%s)", errCertTargetUnsettled, op.OperationID, certBoundedLedgerClass(err))
 		}
 		// The durable truth decides, never the settler's return value.
-		if rec, err := s.Get(op.OperationID); err != nil || rec == nil || rec.State == certOpPending {
+		rec, err := s.Get(op.OperationID)
+		if err != nil || rec == nil || rec.blocksWriters() {
 			return fmt.Errorf("%w: operation %s", errCertTargetUnsettled, op.OperationID)
 		}
 	}
@@ -648,52 +760,179 @@ func takeCertRefusalMemo(opID string) string {
 	return code
 }
 
-// certOperationVerdict is the pure evidence check behind settlement.
-func certOperationVerdict(op certOperation) (verdict, revision string) {
+// certOperationVerdict is the evidence check behind settlement. It may
+// REPAIR (never guess): a UI settlement first completes or abandons an
+// interrupted pair transition and completes an interrupted cleanup.
+func certOperationVerdict(op certOperation) certVerdict {
 	switch op.Action {
 	case certActionRotate, certActionImport:
 		return caOperationVerdict(op)
 	case certActionUIReplace, certActionUIDelete:
 		return uiCertOperationVerdict(op)
 	case certActionOCSPSet:
-		return ocspOperationVerdict(op)
+		verdict, revision := ocspOperationVerdict(op)
+		v := certVerdict{state: verdict, revision: revision, code: certCodeUnproven}
+		if verdict == certOpCommitted {
+			v.result = ocspOperationResult(op)
+		}
+		return v
 	}
-	return certOpOutcomeUnknown, ""
+	return certVerdictUnknown(certCodeUnproven)
 }
 
-// caOperationVerdict: committed iff the LIVE CA — or the bundle on disk, for a
-// crash between the durable write and the install that the next boot's load
-// finishes — carries the candidate's fingerprint.
-func caOperationVerdict(op certOperation) (verdict, revision string) {
+// caOperationVerdict: committed iff the LIVE CA — or the bundle on disk, for
+// a crash between the durable write and the install that the next boot's
+// load finishes — carries the candidate's fingerprint, AND the bundle's
+// directory can be re-synchronised (a commit is credited only once its
+// durability is resolved). An unavailable or invalid bundle beside a live CA
+// that is not the candidate is NOT absence: the verdict is the recoverable
+// outcome_unknown, decided again once the evidence can be read. Only a
+// positively absent bundle (or a readable bundle carrying something else)
+// aborts. A commit decided from the bundle names THAT bundle in its result.
+func caOperationVerdict(op certOperation) certVerdict {
 	if op.CandidateDigest == "" {
-		return certOpOutcomeUnknown, ""
+		return certVerdictUnknown(certCodeUnproven)
 	}
 	if live := certMgr.LiveCertificateHex(); live == op.CandidateDigest {
-		return certOpCommitted, caRevisionPrefix + live
+		if !caBundleDirDurable() {
+			return certVerdictUnknown(certCodeDurabilityUnproven)
+		}
+		return certVerdict{state: certOpCommitted, revision: caRevisionPrefix + live, result: caOperationResult(op, caInfoWithRevision())}
 	}
-	if onDisk := bundleFingerprintHex(); onDisk == op.CandidateDigest {
-		return certOpCommitted, caRevisionPrefix + onDisk
+	ev := caBundleEvidenceNow()
+	switch ev.class {
+	case caBundleReadable:
+		if ev.digest != op.CandidateDigest {
+			return certVerdict{state: certOpAborted}
+		}
+		if !caBundleDirDurable() {
+			return certVerdictUnknown(certCodeDurabilityUnproven)
+		}
+		info := ev.probe.CACertInfo()
+		info["revision"] = caRevisionPrefix + ev.digest
+		return certVerdict{state: certOpCommitted, revision: caRevisionPrefix + ev.digest, result: caOperationResult(op, info)}
+	case caBundleUnavailable:
+		return certVerdictUnknown(certCodeEvidenceUnavailable)
+	case caBundleInvalid:
+		return certVerdictUnknown(certCodeEvidenceInvalid)
+	default:
+		return certVerdict{state: certOpAborted}
 	}
-	return certOpAborted, ""
 }
 
-// uiCertOperationVerdict: a replace is committed iff the persisted cert
-// carries the candidate digest, a delete iff no pair is persisted; the
-// fenced-on revision still present ⇒ aborted; anything else is unproven.
-func uiCertOperationVerdict(op certOperation) (verdict, revision string) {
-	cur := uiCertRevisionToken()
-	committed := cur == "uic1:"+op.CandidateDigest
-	if op.Action == certActionUIDelete {
-		committed = cur == uiCertRevisionNone
+// caBundleDirDurable re-synchronises the configured bundle's directory so a
+// replacement whose post-rename sync failed is proven before it is credited.
+func caBundleDirDurable() bool {
+	if caRuntime.path == "" {
+		return true
 	}
+	return fileutil.SyncParentDir(caRuntime.path) == nil
+}
+
+// caBundleClass is the bounded state of the configured bundle on disk.
+const (
+	caBundleAbsent      = "absent"      // no path configured, or the file does not exist
+	caBundleReadable    = "readable"    // decoded; digest and probe carry it
+	caBundleUnavailable = "unavailable" // cannot be read (permissions, a directory at the path, I/O) or decrypted under the node's passphrase
+	caBundleInvalid     = "invalid"     // readable and decodable but not a CA bundle
+)
+
+type caBundleEvidence struct {
+	class  string
+	digest string
+	probe  *ca.Manager
+}
+
+// caBundleEvidenceNow examines the configured bundle WITHOUT installing it.
+// A decrypt failure is unavailability (the bytes may be intact; the node
+// booted with a different passphrase), a malformed plaintext is invalid, a
+// missing file is absent — three states that used to collapse into "".
+func caBundleEvidenceNow() caBundleEvidence {
+	if caRuntime.path == "" {
+		return caBundleEvidence{class: caBundleAbsent}
+	}
+	if _, err := os.Stat(caRuntime.path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return caBundleEvidence{class: caBundleAbsent}
+		}
+		return caBundleEvidence{class: caBundleUnavailable}
+	}
+	probe := ca.New()
+	err := probe.LoadCA(caRuntime.path, caRuntime.passphrase)
 	switch {
-	case committed:
-		return certOpCommitted, cur
-	case cur == op.Fence:
-		return certOpAborted, ""
+	case err == nil:
+		return caBundleEvidence{class: caBundleReadable, digest: probe.LiveCertificateHex(), probe: probe}
+	case errors.Is(err, ca.ErrBundleMalformed):
+		return caBundleEvidence{class: caBundleInvalid}
+	case errors.Is(err, fs.ErrNotExist):
+		return caBundleEvidence{class: caBundleAbsent}
 	default:
-		return certOpOutcomeUnknown, ""
+		return caBundleEvidence{class: caBundleUnavailable}
 	}
+}
+
+// uiCertOperationVerdict settles a UI-cert intent from the SETTLED pair:
+// an interrupted transition is completed or abandoned first, then a replace
+// is committed iff the pair is COMPLETE, VALID and its certificate is the
+// candidate (the key is proven by the pair parsing, never by a key digest),
+// and a delete iff nothing is persisted — an incomplete cleanup (one remnant
+// file) is completed here and credited as completed_at_settlement. Both
+// re-synchronise the directory before crediting. Unavailable evidence is
+// the recoverable outcome_unknown; the fenced-on revision still present is
+// aborted; anything else is unproven.
+func uiCertOperationVerdict(op certOperation) certVerdict {
+	rec := recoverUITLSTransition()
+	if rec.Err != nil {
+		if errors.Is(rec.Err, errUITLSTransitionIncomplete) {
+			return certVerdictUnknown(certCodeCleanupIncomplete)
+		}
+		return certVerdictUnknown(certCodeEvidenceUnavailable)
+	}
+	ev := uiPairEvidenceNow()
+	if ev.class == uiPairUnavailable {
+		return certVerdictUnknown(certCodeEvidenceUnavailable)
+	}
+	if op.Action == certActionUIDelete {
+		return uiDeleteVerdict(op, ev, rec)
+	}
+	if ev.class == uiPairComplete && ev.valid && ev.certDigest == op.CandidateDigest {
+		if fileutil.SyncParentDir(customUITLSCertPath()) != nil {
+			return certVerdictUnknown(certCodeDurabilityUnproven)
+		}
+		return certVerdict{state: certOpCommitted, revision: uiCertRevisionTokenOf(ev), result: uiCertOperationResult(op, "")}
+	}
+	if uiCertRevisionTokenOf(ev) == op.Fence {
+		return certVerdict{state: certOpAborted}
+	}
+	return certVerdictUnknown(certCodeUnproven)
+}
+
+func uiDeleteVerdict(op certOperation, ev uiPairEvidence, rec uiTLSRecovery) certVerdict {
+	cleanup := certCleanupComplete
+	if rec.Completed && rec.Kind == uiTLSTransitionDelete {
+		cleanup = certCleanupAtSettlement
+	}
+	switch ev.class {
+	case uiPairIncomplete:
+		// The key or the certificate was removed and the process died before
+		// the other: finish the cleanup the intent committed to.
+		if err := removeIfExists(customUITLSKeyPath()); err != nil {
+			return certVerdictUnknown(certCodeCleanupIncomplete)
+		}
+		if err := removeIfExists(customUITLSCertPath()); err != nil {
+			return certVerdictUnknown(certCodeCleanupIncomplete)
+		}
+		cleanup = certCleanupAtSettlement
+	case uiPairComplete:
+		if uiCertRevisionTokenOf(ev) == op.Fence {
+			return certVerdict{state: certOpAborted}
+		}
+		return certVerdictUnknown(certCodeUnproven)
+	}
+	if fileutil.SyncParentDir(customUITLSCertPath()) != nil {
+		return certVerdictUnknown(certCodeDurabilityUnproven)
+	}
+	return certVerdict{state: certOpCommitted, revision: uiCertRevisionNone, result: uiCertOperationResult(op, cleanup), cleanup: cleanup}
 }
 
 // ocspOperationVerdict: committed iff the durable posture carries the target
@@ -722,22 +961,10 @@ func ocspOperationVerdict(op certOperation) (verdict, revision string) {
 	}
 }
 
-// bundleFingerprintHex reads the configured bundle (never installs) and
-// returns its certificate fingerprint, or "" when unreadable/undecodable.
-func bundleFingerprintHex() string {
-	if caRuntime.path == "" {
-		return ""
-	}
-	probe := ca.New()
-	if err := probe.LoadCA(caRuntime.path, caRuntime.passphrase); err != nil {
-		return ""
-	}
-	return probe.LiveCertificateHex()
-}
-
-// reconcileCertificateOperations settles every pending intent at boot
+// reconcileCertificateOperations settles every recoverable intent at boot
 // (called once the CA, the UI-cert store and the admin settings are loaded)
-// and completes owed audits. Never mutates an object.
+// and completes owed audits. Never mutates an object beyond completing an
+// interrupted UI pair transition or cleanup the intent already committed to.
 func reconcileCertificateOperations() {
 	s := certOpsStore()
 	if s.Degraded() != nil {
@@ -874,30 +1101,22 @@ func certAuditDetail(op certOperation) string {
 	return ""
 }
 
-// certRecoveredResult builds the action-bound result of a COMMITTED
-// operation from the intent's recorded facts and the object's current state.
-// The live handlers call the same builders right after their write, so a
-// replayed or recovered result is byte-for-byte the response the client
-// would have received.
-func certRecoveredResult(op certOperation) map[string]any {
-	switch op.Action {
-	case certActionRotate, certActionImport:
-		return caOperationResult(op)
-	case certActionUIReplace, certActionUIDelete:
-		return uiCertOperationResult(op)
-	case certActionOCSPSet:
-		return ocspOperationResult(op)
-	}
-	return map[string]any{"operationId": op.OperationID, "action": op.Action}
-}
+// The action-bound result of a COMMITTED operation is built from the
+// intent's recorded facts and the EVIDENCE that decided the commit. The live
+// handlers call the same builders right after their write, so a replayed or
+// recovered result is byte-for-byte the response the client would have
+// received — and a commit decided from the bundle on disk names that
+// bundle's CA, never a different live one (round 3, Blocker 3).
 
-func caOperationResult(op certOperation) map[string]any {
+// caOperationResult builds a rotate/import result; caInfo is the deciding
+// CA's public projection with its revision token.
+func caOperationResult(op certOperation, caInfo map[string]any) map[string]any {
 	res := map[string]any{
 		"persisted":   true,
 		"operationId": op.OperationID,
 		"action":      op.Action,
 		"scope":       certScopeNodeLocal,
-		"ca":          caInfoWithRevision(),
+		"ca":          caInfo,
 		"previous":    map[string]any{"fingerprint": op.Previous["fingerprint"], "revision": op.Previous["revision"]},
 	}
 	if op.Action == certActionRotate {
@@ -909,7 +1128,9 @@ func caOperationResult(op certOperation) map[string]any {
 	return res
 }
 
-func uiCertOperationResult(op certOperation) map[string]any {
+// uiCertOperationResult builds a replace/delete result; cleanup is the
+// delete's bounded cleanup fact (complete | completed_at_settlement).
+func uiCertOperationResult(op certOperation, cleanup string) map[string]any {
 	res := map[string]any{
 		"operationId": op.OperationID,
 		"action":      op.Action,
@@ -925,6 +1146,10 @@ func uiCertOperationResult(op certOperation) map[string]any {
 		return res
 	}
 	res["deleted"] = true
+	if cleanup == "" {
+		cleanup = certCleanupComplete
+	}
+	res["cleanup"] = cleanup
 	if op.WasActive {
 		res["activation"] = "restart_required"
 	}

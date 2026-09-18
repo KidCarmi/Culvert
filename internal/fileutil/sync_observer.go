@@ -10,7 +10,8 @@ import "sync/atomic"
 var syncObserver atomic.Pointer[func(kind, path string)]
 
 // SetSyncObserverForTest installs fn as the synchronisation observer and
-// returns a restore func. kind is "file" or "dir".
+// returns a restore func. kind is "file", "dir", "atomic-file" or
+// "atomic-dir" (see SetSyncHookForTest).
 func SetSyncObserverForTest(fn func(kind, path string)) (restore func()) {
 	var old *func(kind, path string)
 	if fn == nil {
@@ -37,8 +38,11 @@ func noteSync(kind, path string) {
 var syncHook atomic.Pointer[func(kind, path string) error]
 
 // SetSyncHookForTest installs fn and returns a restore func. kind is the
-// synchronisation about to run: "file", "dir", or "path" (SyncPath, before
-// the path is examined).
+// synchronisation about to run: "file", "dir", "path" (SyncPath, before
+// the path is examined), "atomic-file" (AtomicWrite's temp-file fsync, path
+// = the temp file — a failure lands BEFORE the rename) or "atomic-dir"
+// (AtomicWrite's post-rename parent-directory fsync, path = the TARGET —
+// a failure is ErrReplacedNotSynced).
 func SetSyncHookForTest(fn func(kind, path string) error) (restore func()) {
 	var old *func(kind, path string) error
 	if fn == nil {

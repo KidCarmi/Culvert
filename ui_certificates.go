@@ -22,6 +22,16 @@ package main
 // refusal is TERMINAL (persist_failed) only once its aborted record is
 // durable; otherwise it is the NON-terminal 500 outcome_unknown with
 // current.detail refusal_not_durable (correction round, Blocker 3).
+//
+// A write whose RENAME landed but whose directory sync failed is NOT a
+// refusal (round 3, Blocker 1): the replacement is on disk, the writer
+// publishes it (never a split live/disk state), the intent stays PENDING and
+// the answer is the NON-terminal 500 outcome_unknown with current.detail
+// durability_unproven — the next settlement (the lookup, the boot, a later
+// writer) re-synchronises the directory and only then credits, audits and
+// reports the durable success. A UI pair transition that reached its commit
+// point but could not be finished answers current.detail
+// transition_incomplete the same way (the next settlement completes it).
 
 import (
 	"bytes"
@@ -37,6 +47,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // FE-6B.0 refusal codes (beside the shared ones in ui_refusal.go).
@@ -47,6 +58,7 @@ const (
 	refusalCandidateDup      = "candidate_duplicate"  // 409: the candidate is already the installed object
 	refusalCANotReady        = "ca_not_ready"         // 503: no Root CA is installed
 	refusalCAGenerationFail  = "ca_generation_failed" // 500: the fresh root could not be minted
+	refusalEvidenceUnavail   = "evidence_unavailable" // 503: the persisted object cannot be examined (round 3)
 )
 
 // ── shared helpers ──────────────────────────────────────────────────────────
@@ -212,6 +224,27 @@ func certRefusalNotDurable(w http.ResponseWriter, opID string) {
 		map[string]any{"detail": "refusal_not_durable", "state": certOpPending, "operationId": opID})
 }
 
+// certDurabilityUnproven answers a mutation whose replacement IS on disk
+// (the rename landed) but whose durability could not be proven: 500
+// outcome_unknown, current.detail durability_unproven, current.state
+// pending, the operationId. Nothing terminal is recorded — the intent stays
+// pending and the next settlement resolves the durability before crediting.
+func certDurabilityUnproven(w http.ResponseWriter, opID string) {
+	writeRefusal(w, http.StatusInternalServerError, refusalOutcomeUnknown,
+		"the replacement is on disk but its durability could not be proven (the directory could not be synchronised); the operation stays pending and GET /api/ca/operations/{operationId} settles it once the directory can be synchronised",
+		map[string]any{"detail": certCodeDurabilityUnproven, "state": certOpPending, "operationId": opID})
+}
+
+// certTransitionIncomplete answers a UI pair transition that reached its
+// commit point but could not be finished (a rename or removal failed): the
+// marker stays, the intent stays pending, and the next settlement completes
+// the transition before deciding it.
+func certTransitionIncomplete(w http.ResponseWriter, opID string) {
+	writeRefusal(w, http.StatusInternalServerError, refusalOutcomeUnknown,
+		"the certificate pair transition was committed but could not be completed; the operation stays pending and is completed by the next settlement (GET /api/ca/operations/{operationId})",
+		map[string]any{"detail": "transition_incomplete", "state": certOpPending, "operationId": opID})
+}
+
 // certSettleTargetOrRefuse settles every pending intent on target before the
 // caller writes it (the writer protocol, inside certOpsMu). An intent that
 // cannot be settled durably refuses the write: 503 operation_unsettled with
@@ -259,11 +292,13 @@ func caInfoWithRevision() map[string]any {
 
 // uiCertReadModel is the persisted admin-UI certificate's public projection.
 func uiCertReadModel() map[string]any {
+	ev := uiPairEvidenceNow()
 	out := map[string]any{
-		"present":  customUITLSFilesPresent(),
-		"revision": uiCertRevisionToken(),
-		"active":   uiCustomTLSActive,
-		"corrupt":  uiCustomTLSCorrupt,
+		"present":   ev.class == uiPairComplete,
+		"pairState": ev.class,
+		"revision":  uiCertRevisionTokenOf(ev),
+		"active":    uiCustomTLSActive,
+		"corrupt":   uiCustomTLSCorrupt,
 	}
 	if leaf := persistedUICertLeaf(); leaf != nil {
 		out["fingerprint"] = ca.FingerprintOf(leaf)
@@ -627,14 +662,19 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	consumeCAChallenge(opID)
-	if !persistCACandidate(w, s, opID, cand, "CA force-rotate") {
+	outcome := persistCACandidate(w, s, opID, cand, "CA force-rotate")
+	if outcome == caPersistFailed {
 		return
 	}
 	certMgr.Install(cand)
 	noteCARotationPersisted()
 	noteSSLInspectionRecovered("force rotation via admin API")
 	statCARotations.Add(1)
-	result := caOperationResult(op)
+	if outcome == caPersistUnproven {
+		certDurabilityUnproven(w, opID)
+		return
+	}
+	result := caOperationResult(op, caInfoWithRevision())
 	certCommit(s, opID, caRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
 }
@@ -667,24 +707,41 @@ func confirmCAChallenge(w http.ResponseWriter, opID, actor, current, challenge s
 	return false
 }
 
+// caPersistOutcome is what persistCACandidate established about the bundle.
+type caPersistOutcome int
+
+const (
+	caPersistFailed   caPersistOutcome = iota // nothing landed; the refusal was answered
+	caPersistDurable                          // the candidate is on disk and synchronised
+	caPersistUnproven                         // the candidate is on disk (the rename landed); its durability is unproven
+)
+
 // persistCACandidate writes the candidate's bundle to the configured path
-// BEFORE anything is installed; a failure aborts the operation durably and
-// answers 500 persist_failed with the bounded class, live CA unchanged.
-func persistCACandidate(w http.ResponseWriter, s *certOperationStore, opID string, cand *ca.Candidate, what string) bool {
+// BEFORE anything is installed. A failure BEFORE the rename aborts the
+// operation durably and answers 500 persist_failed with the bounded class,
+// live CA unchanged. A failure AFTER the rename (fileutil.ErrReplacedNotSynced)
+// is caPersistUnproven: the bundle on disk IS the candidate, so the caller
+// installs it (a split live/disk state is never published) and answers the
+// non-terminal durability_unproven; nothing is recorded as refused.
+func persistCACandidate(w http.ResponseWriter, s *certOperationStore, opID string, cand *ca.Candidate, what string) caPersistOutcome {
 	err := ca.PersistCandidate(cand, caRuntime.path, caRuntime.passphrase)
 	if err == nil {
-		return true
+		return caPersistDurable
+	}
+	if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+		logger.Printf("%s: bundle written but its directory could not be synchronised — installed, durability resolved by the next settlement (operation %s)", what, sanitizeLog(opID))
+		return caPersistUnproven
 	}
 	class := ca.PersistFailureClass(err)
 	logger.Printf("%s: bundle write failed (%s) — NOT applied", what, class)
 	noteCARotationPersistFailure(class)
 	if !certAbort(s, opID) {
 		certRefusalNotDurable(w, opID)
-		return false
+		return caPersistFailed
 	}
 	writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
 		"the Root CA bundle could not be written; the current CA is unchanged", map[string]any{"class": class, "operationId": opID})
-	return false
+	return caPersistFailed
 }
 
 // readChallengeBody decodes the optional {challenge} body: absent/empty ⇒
@@ -838,13 +895,18 @@ func apiCertsImportMITM(w http.ResponseWriter, r *http.Request, certPEM, keyPEM 
 	if !certBegin(w, s, op) {
 		return
 	}
-	if !persistCACandidate(w, s, opID, cand, "CA import") {
+	outcome := persistCACandidate(w, s, opID, cand, "CA import")
+	if outcome == caPersistFailed {
 		return
 	}
 	certMgr.Install(cand)
 	noteCARotationPersisted()
 	noteSSLInspectionRecovered("custom MITM CA imported via admin API")
-	result := caOperationResult(op)
+	if outcome == caPersistUnproven {
+		certDurabilityUnproven(w, opID)
+		return
+	}
+	result := caOperationResult(op, caInfoWithRevision())
 	certCommit(s, opID, caRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
 }
@@ -881,6 +943,9 @@ func apiCertsReplaceUI(w http.ResponseWriter, r *http.Request, certPEM, keyPEM [
 	if !certFenceMatches(w, "uiCertRevision", echoed, current) {
 		return
 	}
+	if !uiCertEvidenceAvailable(w, current) {
+		return
+	}
 	if current == "uic1:"+digest && uiKeyOnDiskEquals(keyPEM) {
 		writeRefusal(w, http.StatusConflict, refusalCandidateDup, "this certificate pair is already persisted",
 			map[string]any{"uiCertRevision": current})
@@ -895,16 +960,29 @@ func apiCertsReplaceUI(w http.ResponseWriter, r *http.Request, certPEM, keyPEM [
 	if !certBegin(w, s, op) {
 		return
 	}
-	if err := persistCustomUITLS(certPEM, keyPEM); err != nil {
+	if err := persistCustomUITLSOp(certPEM, keyPEM, opID); err != nil {
 		uiCertPersistRefusal(w, s, opID, err)
 		return
 	}
 	// The pair just written passed validation, so any PRIOR corruption latch
 	// no longer describes what is on disk.
 	uiCustomTLSCorrupt = false
-	result := uiCertOperationResult(op)
+	result := uiCertOperationResult(op, "")
 	certCommit(s, opID, uiCertRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
+}
+
+// uiCertEvidenceAvailable refuses a UI-pair mutation while the persisted
+// pair cannot be examined (503 evidence_unavailable): a write against
+// evidence nobody can read would neither prove nor disprove anything.
+func uiCertEvidenceAvailable(w http.ResponseWriter, current string) bool {
+	if current != uiCertRevisionUnavailable {
+		return true
+	}
+	writeRefusal(w, http.StatusServiceUnavailable, refusalEvidenceUnavail,
+		"the persisted UI certificate pair cannot be examined (its path is not readable); repair the data directory and retry",
+		map[string]any{"uiCertRevision": current})
+	return false
 }
 
 func uiKeyOnDiskEquals(keyPEM []byte) bool {
@@ -912,29 +990,35 @@ func uiKeyOnDiskEquals(keyPEM []byte) bool {
 	return err == nil && bytes.Equal(onDisk, keyPEM)
 }
 
-// uiCertPersistRefusal answers a failed UI-pair write: a compensating
-// rollback that also failed leaves neither pair provably on disk
-// (non-terminal 500 outcome_unknown); anything else aborted the operation
-// with the previous pair intact (500 persist_failed).
+// uiCertPersistRefusal answers a UI-pair transition that did not end in a
+// proven durable result. The pair on disk is the NEW pair when the
+// transition completed with an unproven directory sync
+// (errUITLSDurabilityUnproven ⇒ non-terminal durability_unproven, intent
+// pending, the corruption latch cleared — the pair passed validation); it
+// may be either generation when the commit point was reached but a later
+// step failed (errUITLSTransitionIncomplete ⇒ non-terminal
+// transition_incomplete, intent pending); and it is the PREVIOUS pair,
+// untouched, for any failure before the commit point (terminal
+// persist_failed once the aborted record is durable).
 func uiCertPersistRefusal(w http.ResponseWriter, s *certOperationStore, opID string, err error) {
 	class := ca.PersistFailureClass(err)
-	if errors.Is(err, errUITLSRollbackFailed) {
-		logger.Printf("certs upload UI: persist failed AND the previous certificate could not be restored (%s)", class)
-		if ferr := s.Finish(opID, certOpOutcomeUnknown, refusalPersistFailed, "", nil, ""); ferr != nil {
-			logger.Printf("Certificates: operation %s outcome record not durable (%s)", sanitizeLog(opID), certBoundedLedgerClass(ferr))
+	switch {
+	case errors.Is(err, errUITLSDurabilityUnproven):
+		logger.Printf("certs upload UI: pair replaced but its directory could not be synchronised — durability resolved by the next settlement (operation %s)", sanitizeLog(opID))
+		uiCustomTLSCorrupt = false
+		certDurabilityUnproven(w, opID)
+	case errors.Is(err, errUITLSTransitionIncomplete):
+		logger.Printf("certs upload UI: pair transition committed but not completed (%s) — completed by the next settlement (operation %s)", class, sanitizeLog(opID))
+		certTransitionIncomplete(w, opID)
+	default:
+		logger.Printf("certs upload UI: persist failed (%s) — the current UI certificate is unchanged", class)
+		if !certAbort(s, opID) {
+			certRefusalNotDurable(w, opID)
+			return
 		}
-		writeRefusal(w, http.StatusInternalServerError, refusalOutcomeUnknown,
-			"the certificate could not be saved and the previous certificate could not be restored; do not restart until the data directory is repaired, then re-upload a known-good pair",
-			map[string]any{"detail": "rollback_failed", "operationId": opID})
-		return
+		writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
+			"the certificate could not be saved; the current UI certificate is unchanged", map[string]any{"class": class, "operationId": opID})
 	}
-	logger.Printf("certs upload UI: persist failed (%s) — the current UI certificate is unchanged", class)
-	if !certAbort(s, opID) {
-		certRefusalNotDurable(w, opID)
-		return
-	}
-	writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
-		"the certificate could not be saved; the current UI certificate is unchanged", map[string]any{"class": class, "operationId": opID})
 }
 
 // ── DELETE /api/certs/ui (admin) ────────────────────────────────────────────
@@ -963,6 +1047,9 @@ func apiCertsUI(w http.ResponseWriter, r *http.Request) {
 	if !certFenceMatches(w, "uiCertRevision", echoed, current) {
 		return
 	}
+	if !uiCertEvidenceAvailable(w, current) {
+		return
+	}
 	if current == uiCertRevisionNone {
 		writeRefusal(w, http.StatusNotFound, refusalNotFound, "no custom UI certificate is persisted on this node", nil)
 		return
@@ -979,37 +1066,37 @@ func apiCertsUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uiCustomTLSCorrupt = false
-	result := uiCertOperationResult(op)
+	result := uiCertOperationResult(op, certCleanupComplete)
 	certCommit(s, opID, uiCertRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
 }
 
-// removeUICertPair removes the private key FIRST (a crash between the two
-// removes leaves a cert-only remnant that customUITLSFilesPresent reads as
-// ABSENT), then the certificate. A key-removal failure aborts with nothing
-// changed; a certificate-removal failure after the key is gone is the
-// non-terminal outcome_unknown.
+// removeUICertPair removes the pair through the committed transition
+// (ui_tls_custom.go): a failure to write the marker changes nothing and
+// aborts; a transition committed but not completed, or completed with an
+// unproven directory sync, is the non-terminal outcome_unknown that the
+// next settlement completes or proves. A live delete that completes
+// answers cleanup:complete.
 func removeUICertPair(w http.ResponseWriter, s *certOperationStore, opID string) bool {
-	if err := os.Remove(customUITLSKeyPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	err := deleteCustomUITLSOp(opID)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, errUITLSDurabilityUnproven):
+		logger.Printf("certs delete UI: pair removed but its directory could not be synchronised — durability resolved by the next settlement (operation %s)", sanitizeLog(opID))
+		certDurabilityUnproven(w, opID)
+	case errors.Is(err, errUITLSTransitionIncomplete):
+		logger.Printf("certs delete UI: deletion committed but not completed (%s) — completed by the next settlement (operation %s)", ca.PersistFailureClass(err), sanitizeLog(opID))
+		certTransitionIncomplete(w, opID)
+	default:
 		if !certAbort(s, opID) {
 			certRefusalNotDurable(w, opID)
 			return false
 		}
 		writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
-			"the private key file could not be removed; nothing was changed", map[string]any{"class": ca.PersistFailureClass(err), "operationId": opID})
-		return false
+			"the deletion could not be committed; nothing was changed", map[string]any{"class": ca.PersistFailureClass(err), "operationId": opID})
 	}
-	if err := os.Remove(customUITLSCertPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Printf("certs delete UI: key removed but the certificate file could not be removed (%s)", ca.PersistFailureClass(err))
-		if ferr := s.Finish(opID, certOpOutcomeUnknown, refusalPersistFailed, "", nil, ""); ferr != nil {
-			logger.Printf("Certificates: operation %s outcome record not durable (%s)", sanitizeLog(opID), certBoundedLedgerClass(ferr))
-		}
-		writeRefusal(w, http.StatusInternalServerError, refusalOutcomeUnknown,
-			"the private key was removed but the certificate file remains; the pair is no longer usable and the next boot falls back to the self-signed certificate",
-			map[string]any{"detail": "certificate_file_remains", "operationId": opID})
-		return false
-	}
-	return true
+	return false
 }
 
 // ── GET /api/ca/operations/{id} (admin) ─────────────────────────────────────
@@ -1045,7 +1132,7 @@ func apiCAOperations(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, http.StatusNotFound, refusalNotFound, "no such operation", nil)
 		return
 	}
-	if rec.State == certOpPending {
+	if rec.recoverable() {
 		if err := settleCertOperation(s, *rec, "lookup"); err != nil {
 			logger.Printf("Certificates: operation %s could not be settled by the lookup (%s)", sanitizeLog(id), certBoundedLedgerClass(err))
 		}

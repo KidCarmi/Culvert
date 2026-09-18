@@ -235,13 +235,28 @@ func tryInspectionCARecovery(cfg rootCAStartupConfig, attempt int) (attempted bo
 	if sslInspectionLoadFailure() == "" {
 		return false, nil
 	}
-	if serr := settleCertTarget(certOpsStore(), "root_ca", "writer"); serr != nil {
-		return true, fmt.Errorf("recovery deferred: %w", serr)
+	// Round 3 (Blocker 3): only the WRITING branches of the attempt (InitCA
+	// mints a root; SaveCA re-persists the loaded one) settle first. The
+	// LOAD branch reads the very bundle an unavailable-evidence intent is
+	// waiting on — settling before it would defer the recovery forever
+	// (the intent blocks writers until the evidence can be read, and the
+	// load is what makes it readable), so the load runs first and the
+	// intents on the target are settled from the recovered evidence after.
+	writes := cfg.Path == "" || certMgr.Ready()
+	if writes {
+		if serr := settleCertTarget(certOpsStore(), "root_ca", "writer"); serr != nil {
+			return true, fmt.Errorf("recovery deferred: %w", serr)
+		}
 	}
 	if err := attemptInspectionCARecovery(cfg); err != nil {
 		return true, err
 	}
 	noteSSLInspectionRecovered(fmt.Sprintf("automatic recovery succeeded on attempt %d", attempt))
+	if !writes {
+		if serr := settleCertTarget(certOpsStore(), "root_ca", "reconciled"); serr != nil {
+			logger.Printf("Root CA recovery: loaded, but an outstanding certificate operation is still unsettled (%s); settled by the next lookup/boot", certBoundedLedgerClass(serr))
+		}
+	}
 	return true, nil
 }
 

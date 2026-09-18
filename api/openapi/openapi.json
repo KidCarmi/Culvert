@@ -149,7 +149,7 @@
             }
           }
         },
-        "description": "FE-6B.0 — the durable write failed BEFORE anything was published (`code: persist_failed`, `current.class` bounded: permission_denied, not_found, read_only, no_space, not_a_file, io_error, write_failed; the live object is unchanged and the operation record is aborted), or `code: outcome_unknown` on a UI-cert write/delete whose compensating step also failed (`current.detail`: rollback_failed or certificate_file_remains) — non-terminal; GET /api/ca/operations/{operationId} settles it. `code: ca_generation_failed` — a fresh root could not be minted; nothing was changed."
+        "description": "FE-6B.0 — the durable write failed BEFORE anything was published (`code: persist_failed`, `current.class` bounded: permission_denied, not_found, read_only, no_space, not_a_file, io_error, write_failed; the live object is unchanged and the operation record is aborted), or the NON-terminal `code: outcome_unknown` with `current.detail` durability_unproven (the replacement IS on disk and installed; the data directory could not be synchronised; the intent stays pending), transition_incomplete (a UI pair transition reached its commit point but could not be finished; the intent stays pending) or refusal_not_durable (nothing was changed; the refusal could not be recorded yet) — GET /api/ca/operations/{operationId} settles each. `code: ca_generation_failed` — a fresh root could not be minted; nothing was changed."
       },
       "CertRefusalPreconditionRequired": {
         "content": {
@@ -1031,7 +1031,7 @@
                 "$ref": "#/components/schemas/CAInfoWithRevision"
               },
               "persisted": {
-                "description": "Always true: the bundle is written BEFORE the candidate is installed; a write failure is 500 persist_failed with the current CA unchanged.",
+                "description": "Always true: the bundle is written BEFORE the candidate is installed; a write failure before the rename is 500 persist_failed with the current CA unchanged; a directory-sync failure after the rename is the non-terminal 500 outcome_unknown (durability_unproven) with the candidate installed and the intent pending.",
                 "enum": [
                   true
                 ],
@@ -1766,7 +1766,7 @@
       },
       "CertOperation": {
         "additionalProperties": false,
-        "description": "FE-6B.0 — durable, non-secret record of an operation-identified certificate/CA/OCSP mutation. A terminal state is reported ONLY once its durable record exists; a pending record is settled by this lookup or at boot from the object's own evidence (the live CA or bundle fingerprint, the persisted UI cert digest, the durable OCSP posture at the intent's generation), never from a guess.",
+        "description": "FE-6B.0 — durable, non-secret record of an operation-identified certificate/CA/OCSP mutation. A terminal state is reported ONLY once its durable record exists; a pending record is settled by this lookup or at boot from the object's own evidence (the live CA or bundle fingerprint, the persisted UI cert digest of a COMPLETE and VALID pair, the durable OCSP posture at the intent's generation), never from a guess. Evidence that is UNAVAILABLE (unreadable path, undecodable bundle), a directory that could not be re-synchronised or a UI cleanup that could not be finished is a RECOVERABLE outcome_unknown (code suffix _evidence_unavailable / _durability_unproven / _cleanup_incomplete — these also block every writer of the object; _evidence_invalid is recoverable but does not block), re-decided by every later settlement; only positive absence aborts. A commit decided from the bundle on disk names THAT bundle in `result.ca` and `committedRevision`, never a different live CA.",
         "properties": {
           "action": {
             "enum": [
@@ -1795,7 +1795,7 @@
             "type": "string"
           },
           "code": {
-            "description": "aborted / outcome_unknown carry the refusal code (a refusal whose own record could not be persisted is recorded with that refusal's code — persist_failed — by the next settlement in the same process); a settled record carries `<why>_committed` / `<why>_absent` / `<why>_unproven` with why = lookup (this GET), reconciled (boot) or writer (a later writer of the same object, which settles every pending intent on it durably before it writes).",
+            "description": "aborted / outcome_unknown carry the refusal code (a refusal whose own record could not be persisted is recorded with that refusal's code — persist_failed — by the next settlement in the same process); a settled record carries `<why>_committed` / `<why>_absent` / `<why>_unproven` / `<why>_evidence_unavailable` / `<why>_evidence_invalid` / `<why>_durability_unproven` / `<why>_cleanup_incomplete` with why = lookup (this GET), reconciled (boot, or a recovered CA load) or writer (a later writer of the same object, which settles every recoverable intent on it durably before it writes).",
             "type": "string"
           },
           "committedRevision": {
@@ -1815,7 +1815,7 @@
           },
           "result": {
             "additionalProperties": true,
-            "description": "committed — the complete ACTION-BOUND result: identical to the response the client would have received (rotated / imported + ca + previous; replaced / deleted + activation + uiCert + candidate; ok + enabled + durable + revision + desired + runtime), reconstructed at settlement from the intent's recorded non-secret facts and the object's state when the client's response was lost. Never key material, a passphrase or raw certificate input.",
+            "description": "committed — the complete ACTION-BOUND result: identical to the response the client would have received (rotated / imported + ca + previous; replaced / deleted + activation + uiCert + candidate / cleanup; ok + enabled + durable + revision + desired + runtime), reconstructed at settlement from the intent's recorded non-secret facts and the EVIDENCE that decided the commit when the client's response was lost. Never key material, a passphrase or raw certificate input.",
             "type": "object"
           },
           "startedAt": {
@@ -1854,7 +1854,7 @@
       },
       "CertRefusal": {
         "additionalProperties": false,
-        "description": "FE-6B.0 typed refusal of the Certificates / CA / OCSP surface. `code` is bounded: invalid_input / candidate_invalid (400), forbidden (403), not_found (404), method_not_allowed (405), stale / challenge_stale / candidate_duplicate / operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown (409), precondition_required / operation_id_required / challenge_required (428), persist_failed / outcome_unknown / ca_generation_failed (500), operation_ledger_degraded / operation_ledger_full / operation_unsettled / persistence_not_configured / ca_not_ready (503). `current` carries typed facts for the retry (caRevision, uiCertRevision, ocspRevision, changed, reason, class, detail, operationId, action, state, code, fingerprint). A refusal mutates nothing, audits no success and advances no revision. persist_failed is TERMINAL and is answered only once the operation's aborted record is durable; when that record cannot be persisted the answer is the NON-terminal 500 outcome_unknown with `current.detail: refusal_not_durable`, `current.state: pending` and the operationId — the intent stays pending, nothing was changed, and the next settlement (lookup, boot, or a later writer of the same object) records the refusal; a repeat of the same operationId then replays it (409 operation_aborted) without executing anything. operation_unsettled (503): an outstanding intent on this object could not be settled durably before the write (every writer of a CA / UI-certificate / OCSP target settles the target's pending intents first); `current.reason` is the bounded ledger class; nothing was written.",
+        "description": "FE-6B.0 typed refusal of the Certificates / CA / OCSP surface. `code` is bounded: invalid_input / candidate_invalid (400), forbidden (403), not_found (404), method_not_allowed (405), stale / challenge_stale / candidate_duplicate / operation_mismatch / operation_in_progress / operation_aborted / operation_outcome_unknown (409), precondition_required / operation_id_required / challenge_required (428), persist_failed / outcome_unknown / ca_generation_failed (500), operation_ledger_degraded / operation_ledger_full / operation_unsettled / persistence_not_configured / ca_not_ready / evidence_unavailable (503). `current` carries typed facts for the retry (caRevision, uiCertRevision, ocspRevision, changed, reason, class, detail, operationId, action, state, code, fingerprint). A refusal mutates nothing, audits no success and advances no revision. persist_failed is TERMINAL and is answered only once the operation's aborted record is durable; when that record cannot be persisted the answer is the NON-terminal 500 outcome_unknown with `current.detail: refusal_not_durable`, `current.state: pending` and the operationId — the intent stays pending, nothing was changed, and the next settlement (lookup, boot, or a later writer of the same object) records the refusal; a repeat of the same operationId then replays it (409 operation_aborted) without executing anything. operation_unsettled (503): an outstanding intent on this object could not be settled durably before the write (every writer of a CA / UI-certificate / OCSP target settles the target's pending intents first — including an intent whose evidence is unavailable, whose durability is unproven or whose cleanup is incomplete); `current.reason` is the bounded ledger class; nothing was written. outcome_unknown with `current.detail: durability_unproven` (500) is NOT a refusal: the replacement IS on disk (its rename landed) and is installed, but the data directory could not be synchronised, so the intent stays pending (`current.state: pending`) and the next settlement re-synchronises the directory before it credits, audits and reports the durable success — poll the lookup or re-send the SAME operationId, never a new one. `current.detail: transition_incomplete` is the same non-terminal shape for a UI pair transition that reached its commit point but could not be finished (the next settlement completes it). evidence_unavailable (503): the persisted UI certificate pair cannot be examined (`current.uiCertRevision: uic1:unavailable`); nothing was written.",
         "properties": {
           "code": {
             "type": "string"
@@ -7414,6 +7414,14 @@
                 ],
                 "type": "string"
               },
+              "cleanup": {
+                "description": "complete — the delete removed both files; completed_at_settlement — the process died after one removal and the settlement (lookup, boot or a later writer) finished the cleanup before crediting the intent.",
+                "enum": [
+                  "complete",
+                  "completed_at_settlement"
+                ],
+                "type": "string"
+              },
               "deleted": {
                 "enum": [
                   true
@@ -7433,7 +7441,8 @@
             "required": [
               "deleted",
               "target",
-              "uiCert"
+              "uiCert",
+              "cleanup"
             ],
             "type": "object"
           }
@@ -7441,7 +7450,7 @@
       },
       "UICertRead": {
         "additionalProperties": false,
-        "description": "The persisted admin-UI certificate pair's public projection. `active` — the RUNNING listener loaded it at boot; `corrupt` — the persisted pair does not parse as a matching pair.",
+        "description": "The persisted admin-UI certificate pair's public projection. `present` — a COMPLETE pair (both files) is on disk; `pairState` — complete / absent / incomplete (exactly one of the two files exists: an interrupted cleanup or an old-binary crash) / unavailable (a path cannot be examined — not readable, or a directory); `active` — the RUNNING listener loaded it at boot; `corrupt` — the persisted pair does not parse as a matching pair.",
         "properties": {
           "active": {
             "type": "boolean"
@@ -7456,11 +7465,20 @@
             "format": "date-time",
             "type": "string"
           },
+          "pairState": {
+            "enum": [
+              "complete",
+              "absent",
+              "incomplete",
+              "unavailable"
+            ],
+            "type": "string"
+          },
           "present": {
             "type": "boolean"
           },
           "revision": {
-            "description": "uic1:<64 hex> | uic1:none",
+            "description": "uic1:<64 hex> | uic1:none (positively absent) | uic1:incomplete | uic1:unavailable — the last two are never identities: unavailable evidence can never prove a pending delete.",
             "type": "string"
           },
           "subject": {
@@ -7469,6 +7487,7 @@
         },
         "required": [
           "present",
+          "pairState",
           "revision",
           "active",
           "corrupt"
