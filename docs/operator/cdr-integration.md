@@ -17,10 +17,13 @@ and does not describe current behavior.
 
 > **CDR only ever sees traffic that SSL inspection has already decrypted.**
 > Plain HTTP and un-inspected (bypassed) HTTPS never reach CDR — there is no
-> separate "does CDR apply here" toggle beyond that. If the root CA becomes
-> unusable, inspection silently falls back to bypass and CDR (along with
-> DLP/AV/YARA/DPI) stops running fleet-wide; see
-> [`root-ca-expiry.md`](root-ca-expiry.md).
+> separate "does CDR apply here" toggle beyond that. The root CA's two
+> failure modes affect CDR differently: if it fails to **load** entirely,
+> inspection bypasses and CDR (along with DLP/AV/YARA/DPI) is silently
+> skipped fleet-wide; if it **expires** (or isn't yet valid) while still
+> loaded, inspect-matched connections fail closed with a 502 instead —
+> CDR isn't reached, but the request doesn't sail through uninspected
+> either. See [`root-ca-expiry.md`](root-ca-expiry.md).
 
 ## 1. Configuration
 
@@ -64,17 +67,23 @@ explicitly:
 3. Culvert TOFU-verifies the Sluice server cert against the pasted
    fingerprint, receives a client certificate + key, persists them under
    `<dataDir>/integrations/sluice/<name>/`, and re-initializes the CDR pool
-   immediately — no restart needed. A failure partway through this flow
-   tears down any partial state so the enrollment can be retried cleanly.
+   immediately — no restart needed. A failure **before** Sluice issues a
+   credential tears down any partial local state and can be retried
+   cleanly.
 
-Because the token exchange happens in one round trip, a lost or timed-out
-response can leave Culvert unable to tell whether Sluice actually issued a
-credential. If enrollment appears to fail but you are unsure whether it
-landed, use the recovery-receipt surface (`GET`/`DELETE
+**A failure *after* Sluice has already issued a credential is not a clean
+retry — check recovery first.** Because the token exchange happens in one
+round trip, a failure or timeout on the way back (including a local
+certificate/registry write failure right after a successful `Enroll` RPC)
+can leave a credential that Sluice already trusts but Culvert never stored;
+this is recorded as its own durable `issued_not_stored` receipt state, not
+folded into an ordinary failure. Before starting a new enrollment for the
+same name, check the recovery-receipt surface (`GET`/`DELETE
 /api/cdr/instances/enroll/receipts`, or `POST
 /api/cdr/instances/enroll/recover`, both reachable from the CDR panel's
-**Instances** tab) rather than retrying blindly — it re-queries Sluice for
-the authoritative outcome instead of guessing.
+**Instances** tab) — it re-queries Sluice for the authoritative outcome and
+tells you whether to resolve/revoke the orphaned credential first, rather
+than retrying blindly and leaving it trusted on the Sluice side.
 
 **Revoke vs. Delete are different operations, and only one of them is
 reversible-in-practice:**
@@ -130,9 +139,13 @@ handled.
 ## 4. Fail-open vs. fail-closed
 
 `cdr.fail_mode` governs only what happens when a Sluice call **errors or the
-engine is unreachable** — it is never consulted for an actual
-threat-detected verdict, which always blocks the file regardless of
-fail_mode.
+engine is unreachable** — it never overrides a verdict Sluice actually
+returned. A successful `BLOCKED` status always blocks the file regardless of
+`fail_mode`; but `fail_mode` was never in a position to override the other
+outcomes either, since `SANITIZED` already delivers the (modified) file and
+`REPORT_ONLY`/`BYPASS_WITH_REPORT` already deliver the original — see the
+mode table in [§3](#3-policy-what-gets-sanitized). `fail_mode` only ever
+decides what happens when Sluice **could not answer** at all.
 
 - **`open`** (default, any value other than the literal string `closed`):
   the original file is delivered, a `cdr_unavailable` alert fires, and
@@ -156,22 +169,36 @@ fail_mode.
 
 **`GET /api/diagnostics`** (and the admin Diagnostics panel) carries a `cdr`
 operator-contract row: `disabled` (OK) when off, `enabled-healthy` (OK) when
-at least one pool member is reachable and both `fail_mode` and
-`default_profile` are set, `enabled-degraded` (WARN) when connected but
-missing one of those two settings, and `enabled-broken` (FAIL) when enabled
-with zero connected instances. **CDR does not appear on the unauthenticated
+at least one instance is **connected** (has a pool entry) and both
+`fail_mode` and `default_profile` are set, `enabled-degraded` (WARN) when
+connected but missing one of those two settings, and `enabled-broken` (FAIL)
+when enabled with zero connected instances. This is a connected-client and
+configuration check, **not a live reachability probe** — it does not look
+at recent health-probe results, so a pool member that has gone unreachable
+after being dialed can still read `enabled-healthy` here. For the live
+reachability signal, use `culvert_cdr_instance_healthy` or
+`GET /api/cdr/health` below. **CDR does not appear on the unauthenticated
 proxy-port `/health` or `/ready` endpoints** — those are reserved for data-
 plane-serving signals, so an operator who only watches `/health` will not
-see a broken CDR pool; watch `/api/diagnostics` or `/metrics` instead.
+see a broken CDR pool.
 
 **`GET /api/cdr/health`** serves a background-polled cache (refreshed every
-15s, one 5s probe per pool member) of each Sluice instance's own reported
-health, falling back to a synchronous probe only if no cache exists yet. The
-cache is deliberately dropped — not served stale — after 3 consecutive
+15s, one 5s probe per pool member), falling back to a synchronous probe only
+if no cache exists yet. This is a **single aggregate response, not a
+per-instance breakdown** — the poller keeps only the first healthy result it
+sees across all members, so one unhealthy instance behind a healthy one is
+not visible here. For a per-instance inventory, use `GET /api/cdr/instances`
+or the pool's per-instance Prometheus metrics. The aggregate cache is
+deliberately dropped — not served stale — after 3 consecutive
 all-members-failed polls, so a `503` here means "no data," not "old data."
 
-**Metrics** (`/metrics`, all present only once CDR has processed at least
-one relevant event):
+**Metrics** (`/metrics`). The terminal/operational/cache/byte/aggregate-health
+families below are emitted unconditionally on every scrape, at zero, from
+process start — an absent series is not a "nothing happened yet" signal, it
+means CDR metrics aren't being emitted at all. Two families are the
+exception: `culvert_cdr_threats_detected_total` appears only once at least
+one threat type has been seen, and per-instance pool metrics appear only
+once at least one pool member exists.
 
 | Metric | Meaning |
 |---|---|
