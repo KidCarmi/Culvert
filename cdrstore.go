@@ -488,8 +488,23 @@ func setCDREnabledRuntime(on bool) error {
 // Backwards-compat: callers that just want "is CDR live?" treat nil as
 // "no" and keep working.  The proxy hot path should call cdrPickPooled()
 // instead to pick a healthy instance with circuit-breaker awareness.
+// cdrActiveClient returns a live client, or nil when none is currently
+// available.  NON-RESERVING: it goes through PeekAvailable, never Pick.
+//
+// Every caller of this function is an OBSERVER or an admin-triggered
+// one-off (status panels, the diagnostics row, the manual health probe,
+// the admin test upload).  Before CHAOS-66 it called Pick(), whose
+// Allow() RESERVES the breaker's half-open probe budget -- so an admin
+// refreshing the CDR panel consumed the single probe the breaker uses to
+// discover that Sluice recovered, then discarded the client without ever
+// reporting an outcome.  The reservation is released only by a reported
+// outcome, so one status read wedged the breaker in half-open permanently:
+// the observability surface killed the recovery of the control it observes.
+//
+// Reserving the probe budget belongs to exactly one call site, the request
+// path's cdrPickForCall (cdr_pool.go), which always releases it.
 func cdrActiveClient() *CDRClient {
-	if pc := cdrPool.Pick(); pc != nil {
+	if pc := cdrPool.PeekAvailable(); pc != nil {
 		return pc.Client
 	}
 	return nil

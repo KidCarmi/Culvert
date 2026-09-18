@@ -104,15 +104,41 @@ func (b *cdrCircuitBreaker) State() int32 {
 // advances the state machine when the open→half-open timer has elapsed,
 // and enforces the half-open probe budget.
 func (b *cdrCircuitBreaker) Allow() bool {
+	allowed, _, _ := b.allowReserve()
+	return allowed
+}
+
+// allowReserve is Allow plus the bookkeeping a releasing caller needs:
+// whether THIS call reserved a half-open slot, and the open-generation the
+// reservation belongs to.
+//
+// Only a caller that actually reserved may release, and only while the
+// breaker is still in the generation it reserved under.  A caller admitted
+// in the CLOSED state reserves nothing, so releasing on its behalf would
+// decrement a slot some other goroutine is holding -- handing out more
+// concurrent probes than the configured budget, which is the opposite of
+// the defect this budget exists to prevent.
+func (b *cdrCircuitBreaker) allowReserve() (allowed, reserved bool, gen int64) {
+	// The generation is captured BEFORE the state is read, and that order
+	// is deliberate.  Capturing it AFTER the reservation would let a
+	// breaker that re-opened in between hand back a generation NEWER than
+	// the one the slot was taken in -- and since OnFailure zeroes the
+	// counter on its way to open, the later release would then decrement
+	// a slot belonging to a fresh cycle: an over-release, which is the
+	// failure direction that matters.  Capturing it first can only err the
+	// other way (a release declined for a slot we did hold), which costs
+	// one slot for one cycle and is cleared by the next reported outcome.
+	// Do not move this load below the switch.
+	gen = b.totalOpens.Load()
 	switch b.state.Load() {
 	case cbStateClosed:
-		return true
+		return true, false, gen
 	case cbStateOpen:
 		// Check if the reset timeout has elapsed.
 		elapsed := b.now().UnixNano() - b.openedAt.Load()
 		if elapsed < int64(b.cfg.ResetTimeout) {
 			b.totalTrips.Add(1)
-			return false
+			return false, false, gen
 		}
 		// Try to transition to half-open (racy with other goroutines; CAS
 		// makes exactly one succeed).
@@ -126,11 +152,70 @@ func (b *cdrCircuitBreaker) Allow() bool {
 		if b.halfOpenTried.Add(1) > b.cfg.HalfOpenProbes {
 			b.halfOpenTried.Add(-1) // undo the reservation
 			b.totalTrips.Add(1)
-			return false
+			return false, false, gen
 		}
+		return true, true, gen
+	default:
+		return true, false, gen
+	}
+}
+
+// Permits reports whether Allow() would currently permit a call, WITHOUT
+// reserving a half-open probe slot, WITHOUT advancing the open->half-open
+// timer, and WITHOUT charging totalTrips.
+//
+// This is the accessor every OBSERVER must use: the admin-UI status reads,
+// the diagnostics row, and the proxy's cheap "is CDR live at all?"
+// short-circuit.  Allow()'s half-open budget is a RESERVATION that only a
+// reported outcome gives back, so an observer that called Allow() would
+// consume the single probe the breaker uses to discover that the backend
+// recovered and then throw it away -- leaving the breaker wedged in
+// half-open forever (CHAOS-66).  Observing a control must never change it.
+func (b *cdrCircuitBreaker) Permits() bool {
+	switch b.state.Load() {
+	case cbStateClosed:
 		return true
+	case cbStateOpen:
+		return b.now().UnixNano()-b.openedAt.Load() >= int64(b.cfg.ResetTimeout)
+	case cbStateHalfOpen:
+		return b.halfOpenTried.Load() < b.cfg.HalfOpenProbes
 	default:
 		return true
+	}
+}
+
+// ReleaseProbe returns an unused half-open reservation taken by Allow().
+//
+// Allow() reserves a slot; only OnSuccess/OnFailure (which Store(0)) or
+// this call give it back.  Any caller that receives true from Allow() and
+// then does NOT report an outcome -- a cache hit, an oversize skip, a
+// file_too_large error that is deliberately not charged to the breaker, a
+// recovered panic -- MUST release, or the reservation leaks and the
+// breaker can never issue another probe.
+//
+// Never drives the counter below zero: a release racing an OnSuccess that
+// already zeroed it is a no-op, not an over-release that would hand out
+// more concurrent probes than the configured budget.
+func (b *cdrCircuitBreaker) releaseProbeForGeneration(gen int64) {
+	// A newer open cycle owns the budget now: OnFailure bumps totalOpens on
+	// every transition into open, so an unchanged generation means the slot
+	// still in the counter is the one we took.  OnSuccess/OnFailure both
+	// Store(0), so a settled breaker leaves nothing to release.
+	if b.totalOpens.Load() != gen {
+		return
+	}
+	b.ReleaseProbe()
+}
+
+func (b *cdrCircuitBreaker) ReleaseProbe() {
+	for {
+		cur := b.halfOpenTried.Load()
+		if cur <= 0 {
+			return
+		}
+		if b.halfOpenTried.CompareAndSwap(cur, cur-1) {
+			return
+		}
 	}
 }
 

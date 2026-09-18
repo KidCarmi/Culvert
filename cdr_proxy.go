@@ -195,17 +195,26 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 		}
 	}()
 
-	// Gate + pool pick.  Pool picker returns nil when every instance's
-	// circuit breaker is open OR no clients are enrolled.  Either way
-	// we skip CDR for this request — the caller's fail_mode then
-	// decides whether to still deliver the file.
+	// Gate + pool pick.  The picker returns nil when every instance's
+	// circuit breaker is open OR no clients are enrolled.  Those two are
+	// NOT the same event and must not share an outcome: an empty pool
+	// means CDR was never deployed on this node, while an enrolled pool
+	// that can serve nothing means the CDR backend is DOWN -- which is
+	// precisely the condition fail_mode governs.  cdrUnavailableOutcome
+	// makes that split (CHAOS-66).
 	if !cfg.Enabled {
 		return cdrPassSkipped("SKIPPED")
 	}
-	pooled := cdrPickPooled()
+	pooled, releaseProbe := cdrPickForCall()
 	if pooled == nil {
-		return cdrPassSkipped("SKIPPED")
+		return cdrUnavailableOutcome(cfg)
 	}
+	// The pick RESERVED a half-open probe slot.  Release it on every exit
+	// path -- including the ones that never reach the wire (cache hit,
+	// oversize skip, file_too_large, recovered panic).  Releasing after a
+	// reported outcome is a no-op; not releasing wedges the breaker in
+	// half-open forever.  Deferred BEFORE any early return below.
+	defer releaseProbe()
 	client := pooled.Client
 	instanceName := pooled.Name
 
@@ -390,7 +399,17 @@ type cdrStageDecision struct {
 //nolint:gocognit // orchestration splits poorly; already extracted from handleTunnelInspect
 func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, ce string,
 	br blockResponder, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
-	if cdrActiveClient() == nil {
+	// The ONLY thing this pre-flight may short-circuit on is CDR being
+	// switched off.  It used to short-circuit on `cdrActiveClient() == nil`,
+	// which is ALSO the all-instances-down state -- so the fail_mode
+	// decision, the counters, the log line and the alert that
+	// cdrUnavailableOutcome exists to produce were all skipped on the one
+	// path that carries production traffic, and a node configured
+	// `fail_mode: closed` still delivered every file during an outage.
+	// Availability is decided in safeCDRSanitize, once, where fail_mode is.
+	// Do not reintroduce an availability test here (CHAOS-66, Codex P1).
+	cfg := cdrActiveConfig()
+	if !cfg.Enabled {
 		return cdrStageDecision{body: body, scanBody: scanBody}
 	}
 	res := safeCDRSanitize(r.Context(), cdrRequestContext{
@@ -398,7 +417,7 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 		URL:         req.URL.Path,
 		RequestID:   req.Header.Get(headerRequestID),
 		TraceParent: req.Header.Get(headerTraceparent),
-	}, body, ct, id, cdrActiveConfig())
+	}, body, ct, id, cfg)
 	recordCDRTerminal(res.Status)
 	recordThreatDetections(res.Threats)
 
@@ -442,15 +461,19 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 func cdrHandleCallError(err error, profile, mode string, ms int64, cfg CDRConfig) *cdrRunResult {
 	if IsFileTooLarge(err) {
 		atomic.AddInt64(&statCDROversizeSkipped, 1)
-		logger.Printf("CDR: sluice rejected oversize — %v", err)
+		// The error text can carry origin-supplied material (Sluice echoes
+		// the filename it was handed, which comes from the response's
+		// Content-Disposition — attacker-chosen for a forward proxy), so
+		// it is sanitised like any other untrusted log value (CWE-117).
+		logger.Printf("CDR: sluice rejected oversize — %q", sanitizeLog(err.Error()))
 		return cdrPassSkipped("SKIPPED_OVERSIZE")
 	}
-	logger.Printf("CDR: call error: %v", err)
-	go fireAlert("cdr_unavailable", AlertPayload{
-		Source: "cdr",
-		Detail: fmt.Sprintf("sluice call failed: %v", err),
-	})
-	return cdrErrorOutcome(err.Error(), profile, mode, ms, cfg)
+	reason := cdrErrorReasonClass(err)
+	if noteCDRCallFailure(reason, time.Now()) {
+		logger.Printf("CDR: call error reason=%q: %q", reason, sanitizeLog(err.Error()))
+	}
+	fireCDRUnavailableAlert(reason)
+	return cdrErrorOutcome(reason, profile, mode, ms, cfg)
 }
 
 // cdrErrorOutcome applies the configured fail_mode to an error event.
