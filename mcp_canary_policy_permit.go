@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"strings"
 	"time"
 
@@ -219,12 +218,4 @@ func canaryExactPolicyPermitStatus() map[string]any {
 		"refused_obligations":     canary.PermitRefusedObligationFields(),
 		"evaluated_by":            "shared_policy_engine",
 	}
-}
-
-// exactPermitFingerprintHex renders a catalog record's composite fingerprint the way the policy
-// tuple carries it. It exists only for the read-only surfaces and tests; the tuple itself gets
-// its fingerprint from the shared GatewayToolRef projection.
-func exactPermitFingerprintHex(rec catalog.ToolRecord) string {
-	sum := rec.Fingerprint.Sum()
-	return hex.EncodeToString(sum[:])
 }
