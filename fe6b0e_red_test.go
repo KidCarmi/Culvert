@@ -567,3 +567,52 @@ func TestFE6B0E_E10c_RecoveryFromEveryStateBeforeEachBarrier(t *testing.T) {
 	_ = cert1
 	_ = key1
 }
+
+// ── B1, found by the round-4 real-binary journey ────────────────────────────
+//
+// E11 — a writer that does NOT write must not supersede. The auto-rotation
+// round is a writer only when a rotation is DUE; on every boot with a
+// load failure its immediate round ran the writer settlement anyway, so an
+// invalid-evidence intent was superseded by "auto_rotation" although nothing
+// was written and the operator's repair had not happened. The intent must
+// stay recoverable until an actual writer replaces its evidence; the control
+// (E11b) keeps the due round under the writer protocol.
+func TestFE6B0E_E11a_ARotationRoundThatDoesNotRotateNeverSupersedes(t *testing.T) {
+	dir, _ := fe6b0cNode(t)
+	mux := fe6b0Mux()
+	fpLive := certMgr.LiveCertificateHex()
+	opX, _, _, _ := fe6b0eInvalidBundleWithPendingImport(t, dir, mux)
+	// A fresh CA: the round is not due and writes nothing.
+	fe6b0cRotationRound(t, true)
+	if got := certMgr.LiveCertificateHex(); got != fpLive {
+		t.Fatalf("precondition: the round rotated a fresh CA (%s → %s)", fpLive, got)
+	}
+	rec := fe6b0cRecord(t, opX)
+	if rec == nil || rec.State != certOpOutcomeUnknown || rec.Code != "lookup_"+certCodeEvidenceInvalid || rec.SupersededBy != "" {
+		t.Fatalf("a non-writing rotation round changed the unresolved intent: %+v (want it still recoverable, lookup_evidence_invalid, superseded by nobody)", rec)
+	}
+	// The actual repair is the writer that supersedes it.
+	certB, keyB, _ := fe6b0CAPair(t, "B", true)
+	opY := fe6b0OpID()
+	if code, m := fe6b0eImport(t, mux, opY, certB, keyB); code != http.StatusOK {
+		t.Fatalf("repair = %d %v", code, m)
+	}
+	fe6b0eAssertSuperseded(t, mux, opX, opY, "after the repair")
+}
+
+// E11b — control: a DUE rotation is a writer and supersedes before it writes.
+func TestFE6B0E_E11b_ADueRotationRoundSupersedesBeforeItWrites(t *testing.T) {
+	dir, _ := fe6b0cNode(t)
+	mux := fe6b0Mux()
+	fpLive := certMgr.LiveCertificateHex()
+	opX, _, _, _ := fe6b0eInvalidBundleWithPendingImport(t, dir, mux)
+	fe6b0cNearExpiry()
+	fe6b0cRotationRound(t, true)
+	if got := certMgr.LiveCertificateHex(); got == fpLive {
+		t.Fatal("control: the due round did not rotate")
+	}
+	fe6b0eAssertSuperseded(t, mux, opX, certWriterAutoRotation, "after the due round")
+	if ev := caBundleEvidenceNow(); ev.class != caBundleReadable {
+		t.Fatalf("control: the rotation did not replace the invalid bundle (%v)", ev.class)
+	}
+}
