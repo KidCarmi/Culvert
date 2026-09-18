@@ -63,6 +63,26 @@ const (
 	// ReasonToolFingerprintStale — the target tool's current observed fingerprint does not
 	// match the approved fingerprint (a rug-pull; fail closed).
 	ReasonToolFingerprintStale Reason = "tool_fingerprint_stale"
+	// ReasonToolNotCatalogUsable — the exact scoped tool is not catalog.Usable at the exact
+	// fingerprint and fingerprint FORMAT the activation binds (blocker #13).
+	//
+	// This is a statement about ONE governed target, never about catalog health: a reachable,
+	// perfectly healthy catalog whose record for this tool is Quarantined leaves this row unmet
+	// while ReasonCatalogUnhealthy stays satisfied. The two are separate rows precisely because
+	// they fail for opposite reasons and point at opposite remedies.
+	//
+	// It exists because usability is enforced by the POLICY ENGINE, not by this preflight:
+	// a quarantined tool is hard-overridden to ActionQuarantine before any operator ALLOW rule
+	// is consulted (policy/engine.go). Without this row a node could hold a valid live approval,
+	// a valid reviewed target, an exact scope and a read-first class, report Ready:true, and then
+	// have every request die at that hard override — the activation would be reporting readiness
+	// for an experiment that cannot execute a single call.
+	//
+	// The only way to satisfy it is the existing governed shadow_evaluation promotion lifecycle
+	// (an exact, four-eyes, fingerprint-bound approval → catalog.Promote). A live_execution
+	// approval NEVER satisfies it: live trust is orthogonal to catalog usability (§15), and that
+	// separation is the reason this is its own fact rather than a clause on LiveApprovalValid.
+	ReasonToolNotCatalogUsable Reason = "tool_not_catalog_usable"
 	// ReasonRollbackPathUnhealthy — the deterministic Canary→Shadow/Observe rollback path is
 	// not healthy (an emergency demotion could not be performed). Driven by the executable
 	// persist/restore rehearsal — rollback MECHANICS evidence.
@@ -123,7 +143,13 @@ type Facts struct {
 	LiveApprovalValid      bool // a valid live_execution approval satisfies the scope
 	ServerUsable           bool
 	ToolFingerprintCurrent bool
-	RollbackPathHealthy    bool // the persist/restore rollback MECHANICS were executably rehearsed
+	// ToolCatalogUsable — every tool the scope admits is currently catalog.Usable at the exact
+	// fingerprint+format being bound, reached through the governed promotion lifecycle. It is
+	// LIVE governance state, deliberately re-observed at each evaluation and never copied into
+	// the activation's immutable reviewed snapshot: a revoked or expired promotion must be able
+	// to make a node un-ready, which a frozen copy could not express. See ReasonToolNotCatalogUsable.
+	ToolCatalogUsable   bool
+	RollbackPathHealthy bool // the persist/restore rollback MECHANICS were executably rehearsed
 	// RollbackCoordinatorRehearsed — the AUTHORITATIVE rollback path was rehearsed through the real
 	// commitRolloutTransitionAt coordinator. It is a SEPARATE hard prerequisite from RollbackPathHealthy
 	// (which is mechanics-only) and is FALSE in this build (CANARY-ROLLBACK-COORDINATOR-REHEARSAL open),
@@ -163,7 +189,7 @@ type readinessCheck struct {
 }
 
 // readinessChecks is the canonical-ordered prerequisite table (matches the Reason declaration
-// order) and the SINGLE source of truth for both Evaluate and EvaluateNode. The seven
+// order) and the SINGLE source of truth for both Evaluate and EvaluateNode. The eight
 // activation-level rows are exactly the facts a caller resolves from a requested scope/
 // approval/budget/target; every other row is node-level.
 var readinessChecks = []readinessCheck{
@@ -185,6 +211,7 @@ var readinessChecks = []readinessCheck{
 	{func(f Facts) bool { return f.LiveApprovalValid }, ReasonLiveApprovalInvalid, factActivation},
 	{func(f Facts) bool { return f.ServerUsable }, ReasonServerNotUsable, factActivation},
 	{func(f Facts) bool { return f.ToolFingerprintCurrent }, ReasonToolFingerprintStale, factActivation},
+	{func(f Facts) bool { return f.ToolCatalogUsable }, ReasonToolNotCatalogUsable, factActivation},
 	{func(f Facts) bool { return f.RollbackPathHealthy }, ReasonRollbackPathUnhealthy, factNode},
 	{func(f Facts) bool { return f.RollbackCoordinatorRehearsed }, ReasonRollbackCoordinatorRehearsalPending, factNode},
 	{func(f Facts) bool { return f.BudgetConfigured }, ReasonBudgetNotConfigured, factActivation},
@@ -201,12 +228,15 @@ var readinessChecks = []readinessCheck{
 func Evaluate(f Facts) Readiness { return evaluate(f, false) }
 
 // EvaluateNode returns the SCOPE-INDEPENDENT node readiness verdict: it evaluates only the
-// node-level prerequisites and NEVER reports an activation-input fact (scope, read-first,
-// live approval, server usability, tool fingerprint, budget) as unmet. This is the operator
-// dry-run surface consumed before any scope is chosen — a node that has satisfied every
-// node-level prerequisite reports node_ready true even though no activation input has been
-// supplied yet, instead of being permanently not-ready because the seven activation facts
-// default false (Codex P2, PR #1249). The complete verdict is Evaluate, driven by the
+// node-level prerequisites and NEVER reports an activation-input fact (scope bounded,
+// read-first, exact first-Canary scope, live approval, server usability, tool fingerprint,
+// exact scoped tool catalog-usable, budget) as unmet. This is the operator dry-run surface
+// consumed before any scope is chosen — a node that has satisfied every node-level
+// prerequisite reports node_ready true even though no activation input has been supplied yet,
+// instead of being permanently not-ready because the eight activation facts default false
+// (Codex P2, PR #1249). The count and membership live in readinessChecks (the factActivation
+// rows); this comment restates them and TestEvaluateNode_ExcludesActivationInputs derives them
+// from that table, so a new row cannot leave this list quietly stale. The complete verdict is Evaluate, driven by the
 // activation preflight once a scope/approval/budget exist.
 func EvaluateNode(f Facts) Readiness { return evaluate(f, true) }
 
@@ -250,6 +280,7 @@ func AllReasons() []Reason {
 		ReasonLiveApprovalInvalid,
 		ReasonServerNotUsable,
 		ReasonToolFingerprintStale,
+		ReasonToolNotCatalogUsable,
 		ReasonRollbackPathUnhealthy,
 		ReasonRollbackCoordinatorRehearsalPending,
 		ReasonBudgetNotConfigured,
