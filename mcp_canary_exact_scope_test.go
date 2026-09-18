@@ -134,6 +134,7 @@ func TestExactScope_WiderScopeCannotBeReadyEvenWithEverythingElseSatisfied(t *te
 		KillBoundaryGuardPresent: true, ToolFreshnessGuardPresent: true,
 		LiveApprovalValid: true, ServerUsable: true, ToolFingerprintCurrent: true,
 		ToolCatalogUsable:   true,
+		ExactPolicyPermit:   true,
 		RollbackPathHealthy: true, RollbackCoordinatorRehearsed: true, BudgetConfigured: true,
 	}
 	// Positive control: with the EXACT scope and everything else true, the verdict IS ready.

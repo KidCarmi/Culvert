@@ -136,6 +136,7 @@ func armCanaryActivationInputs(t *testing.T, in CanaryActivationInput) {
 			ServerUsable:       in.ServerUsable,
 			FingerprintCurrent: in.FingerprintCurrent,
 			ToolCatalogUsable:  in.ToolCatalogUsable,
+			ExactPolicyPermit:  in.ExactPolicyPermit,
 		}
 	}
 	t.Cleanup(func() { canaryActivationInputsProbe = prev })

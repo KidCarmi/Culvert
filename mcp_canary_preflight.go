@@ -217,6 +217,11 @@ type CanaryActivationInput struct {
 	// fingerprint+format being bound (blocker #13). Resolved from authoritative inventory by
 	// canaryScopedToolsCatalogUsable, never supplied by a request.
 	ToolCatalogUsable bool
+	// ExactPolicyPermit — the exact First-Canary request resolves, through the REAL shared
+	// policy engine, to a plain executable ALLOW with satisfiable obligations and a verdict
+	// invariant over every unbound field (blocker #14). Resolved from authoritative state by
+	// canaryExactPolicyPermit, never supplied by a request.
+	ExactPolicyPermit bool
 	Now               time.Time
 }
 
@@ -241,6 +246,7 @@ type canaryActivationInputs struct {
 	ServerUsable       bool
 	FingerprintCurrent bool
 	ToolCatalogUsable  bool
+	ExactPolicyPermit  bool
 }
 
 // canaryActivationInputsProbe derives the authoritative activation-level inputs for a Canary
@@ -262,12 +268,20 @@ var canaryActivationInputsProbe = productionCanaryActivationInputs
 // still never be satisfied and no Canary transition can occur (§0/§22). Wiring live approvals is a
 // pure READ (the tool-trust store + the catalog observation); it arms nothing.
 func productionCanaryActivationInputs(_ rollout.Capability, scope rollout.ScopeSpec, _ uint64) canaryActivationInputs {
+	bindings := buildLiveApprovalBindings(scope)
+	permit, _ := canaryExactPolicyPermit(scope, reviewedTargetsFromBindings(bindings), mcpToolTrust.now())
 	return canaryActivationInputs{
-		ToolApprovals: buildLiveApprovalBindings(scope),
+		ToolApprovals: bindings,
 		// Blocker #13: catalog usability is an ACTIVATION FACT, resolved here from the
 		// authoritative catalog rather than assumed by a runbook step. It is a pure read and
 		// promotes nothing — the governed shadow_evaluation lifecycle is the only writer.
 		ToolCatalogUsable: canaryScopedToolsCatalogUsable(scope),
+		// Blocker #14: the exact request must RESOLVE to a decision that can execute. It is
+		// resolved against the CANDIDATE reviewed targets these same bindings project — the set
+		// the activation would bind — because at preflight time no activation is armed, which is
+		// the question being decided. Also a pure read: it runs the engine, which is I/O-free and
+		// decides nothing outside its own return value.
+		ExactPolicyPermit: permit,
 	}
 }
 
@@ -376,6 +390,7 @@ func evaluateActivationOnFacts(f canary.Facts, in CanaryActivationInput) canary.
 	f.ServerUsable = in.ServerUsable
 	f.ToolFingerprintCurrent = in.FingerprintCurrent
 	f.ToolCatalogUsable = in.ToolCatalogUsable
+	f.ExactPolicyPermit = in.ExactPolicyPermit
 	f.BudgetConfigured = canary.ValidateBudget(in.Budget) == canary.BudgetOK
 	return canary.Evaluate(f)
 }
