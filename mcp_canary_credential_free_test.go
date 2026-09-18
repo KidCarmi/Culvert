@@ -476,3 +476,150 @@ func credAllTrueFacts() canary.Facts {
 	}
 	return f
 }
+
+// ── §9 / §10 — runtime drift after the preflight proved credential-free ──────
+
+// TestCredDrift_CredentialChangeBreaksTheReviewedBinding is the §9 TOCTOU case, answered by the
+// EXISTING reviewed-target machinery rather than by a new credential-drift authority.
+//
+// The sequence: an activation is prepared against a tool that needs no credential, the
+// authoritative metadata then changes to credential-required, and a stale request resumes. Because
+// CredentialProfile is a hashed fingerprint field (pinned by
+// TestCredFreeE2E_CredentialProfileChangesTheFingerprint), the change produces a DIFFERENT tool
+// identity — so the reviewed set the activation bound no longer describes the current target and
+// the permit refuses before anything executes.
+//
+// This is why §10's answer matters so much: had the credential profile been outside the
+// fingerprint, the reviewed binding would have kept matching across the change and the credential
+// requirement could have appeared under a live activation unnoticed. Nothing here is a
+// request-local check.
+func TestCredDrift_CredentialChangeBreaksTheReviewedBinding(t *testing.T) {
+	// Phase 1: the credential-free world. Capture the reviewed set an activation would bind.
+	free := newCredRig(t, "")
+	reviewedBefore := free.reviewedReadOnly(t)
+	if f := canaryExactRequestFacts(free.scope(), reviewedBefore, free.now); !f.Permit || !f.CredentialFree {
+		t.Fatalf("premise: the credential-free world must satisfy both facts (permit=%q cred=%q)",
+			f.PermitReason, f.CredentialFreeReason)
+	}
+
+	// Phase 2: the authoritative metadata now says a credential is required.
+	bound := newCredRig(t, "cred-a")
+
+	// A stale activation still carrying the OLD reviewed set must not resolve. Both halves refuse,
+	// for their own reasons, and BOTH are asserted: the reviewed binding no longer matches the
+	// current target, and the credential layer objects on its own terms.
+	stale := canaryExactRequestFacts(bound.scope(), reviewedBefore, bound.now)
+	if stale.Permit {
+		t.Fatal("SECURITY: a reviewed set bound to the pre-change fingerprint must not still permit")
+	}
+	if stale.CredentialFree {
+		t.Fatal("SECURITY: a credential requirement that appeared after the reviewed binding must " +
+			"not read as credential-free")
+	}
+	if stale.CredentialFreeReason != canary.CredFreeServerRequires {
+		t.Fatalf("must name the server layer, got %q", stale.CredentialFreeReason)
+	}
+
+	// CONTROL: the refusal is caused by the CHANGE, not by newCredRig being unable to produce a
+	// working world. A reviewed set taken AFTER the change still refuses on the credential layer
+	// while the policy permit is satisfied — the exact state the new row exists to catch.
+	fresh := canaryExactRequestFacts(bound.scope(), bound.reviewedReadOnly(t), bound.now)
+	if !fresh.Permit {
+		t.Fatalf("control: a freshly reviewed credential-required target must still satisfy the "+
+			"POLICY permit (that is why this row is not implied by blocker #14), got %q", fresh.PermitReason)
+	}
+	if fresh.CredentialFree {
+		t.Fatal("control: a freshly reviewed credential-required target must still not be credential-free")
+	}
+}
+
+// TestCredDrift_ReadinessIsReEvaluatedNotFrozen pins that the credential fact is LIVE state.
+//
+// A credential profile added to the server AFTER activation must be able to make the node
+// un-ready. If the fact were copied into the activation's immutable reviewed snapshot — which is
+// the natural way to implement "the reviewed target needs no credential" — a post-activation
+// credential requirement would be invisible for the life of the Canary.
+func TestCredDrift_ReadinessIsReEvaluatedNotFrozen(t *testing.T) {
+	free := newCredRig(t, "")
+	before := productionCanaryActivationInputs(rollout.CapabilityGateway, free.scope(), 1)
+	if !before.FirstCanaryCredentialFree {
+		t.Fatal("premise: the credential-free world must resolve as credential-free")
+	}
+	bound := newCredRig(t, "cred-a")
+	after := productionCanaryActivationInputs(rollout.CapabilityGateway, bound.scope(), 1)
+	if after.FirstCanaryCredentialFree {
+		t.Fatal("SECURITY: the credential fact did not re-observe authoritative state. A credential " +
+			"requirement that appears after activation must be able to make the node un-ready; a " +
+			"value frozen into the reviewed snapshot could never express that.")
+	}
+}
+
+// ── §11 case 11 — restart durability ─────────────────────────────────────────
+
+// TestCredFreeE2E_RestartPreservesTheCredentialFreeReviewedState drives a real restart — a fresh
+// inventory seed plus a coordinator recomposed against the SAME durable trust store — and
+// asserts the credential-free determination survives it, in both directions.
+//
+// Two things must hold across the restart, and they are different claims. (1) A credential-free
+// reviewed target is re-promoted and still resolves as credential-free, so a node does not lose a
+// prepared experiment to a reboot. (2) Re-seeding does not launder a credential requirement: when
+// the re-seeded inventory declares one, the restored state refuses, because the durable approval
+// binds a FINGERPRINT and the credential profile is inside it.
+//
+// (2) is the one worth having. A restart re-derives eligibility from the durable store against a
+// freshly seeded catalog, and that is exactly the moment a stale approval could be re-applied to
+// changed metadata.
+func TestCredFreeE2E_RestartPreservesTheCredentialFreeReviewedState(t *testing.T) {
+	restoreMCPInventory(t)
+	dir := t.TempDir()
+	setDataDirForTest(t, dir)
+	resetMCPToolTrustForTest()
+	t.Cleanup(resetMCPToolTrustForTest)
+
+	// initMCPToolTrust (NOT composeToolTrust) is what a boot runs, and it is what binds the
+	// durable store to dataDir. composeToolTrust points the store at its own temp dir, so a
+	// "restart" through it would read an empty store and prove nothing. It also requires the
+	// inventory to be published first, exactly as boot ordering does.
+	_, cat, fpHex := seedCredentialInventory(t, "")
+	initMCPToolTrust(nil)
+	now := &atomic.Int64{}
+	now.Store(mcpToolTrust.now().Unix())
+	r := usableRig{cat: cat, serverID: "controlled", toolName: "t", fpHex: fpHex, now: now}
+	requestAndApprove(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t), time.Hour)
+	requestAndApproveLive(t, r.serverID, r.toolName, r.fpHex, r.catalogRev(t))
+	publishPermitPolicy(t, plainAllowDoc())
+	rig := permitRig{usableRig: r, now: mcpToolTrust.now()}
+	if f := rig.facts(t); !f.Permit || !f.CredentialFree {
+		t.Fatalf("premise: both facts must hold before the restart (permit=%q cred=%q)",
+			f.PermitReason, f.CredentialFreeReason)
+	}
+
+	// (1) RESTART with the SAME credential-free inventory: the durable approval re-promotes and
+	// the credential-free determination is intact.
+	_, cat2, fp2 := seedCredentialInventory(t, "")
+	resetMCPToolTrustForTest()
+	initMCPToolTrust(nil)
+	rig2 := permitRig{usableRig: usableRig{cat: cat2, serverID: r.serverID, toolName: r.toolName, fpHex: fp2, now: now}, now: rig.now}
+	if f := rig2.facts(t); !f.Permit || !f.CredentialFree {
+		t.Fatalf("a restart must preserve a credential-free prepared experiment (permit=%q cred=%q)",
+			f.PermitReason, f.CredentialFreeReason)
+	}
+
+	// (2) RESTART into an inventory that now declares a credential. The durable approval binds a
+	// fingerprint that does not describe this tool any more, and the credential layer objects.
+	_, cat3, fp3 := seedCredentialInventory(t, "cred-a")
+	if fp3 == fp2 {
+		t.Fatal("premise: the credential-bearing inventory must carry a different fingerprint")
+	}
+	resetMCPToolTrustForTest()
+	initMCPToolTrust(nil)
+	rig3 := permitRig{usableRig: usableRig{cat: cat3, serverID: r.serverID, toolName: r.toolName, fpHex: fp3, now: now}, now: rig.now}
+	f3 := rig3.facts(t)
+	if f3.CredentialFree {
+		t.Fatal("SECURITY: a restart must not launder a credential requirement into a " +
+			"credential-free verdict")
+	}
+	if f3.CredentialFreeReason != canary.CredFreeServerRequires {
+		t.Fatalf("must name the server layer after the restart, got %q", f3.CredentialFreeReason)
+	}
+}
