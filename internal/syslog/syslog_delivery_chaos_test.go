@@ -95,8 +95,8 @@ func TestChaos66_DeliveryIsCountedAsEvidence(t *testing.T) {
 	if h := w.Health(); h.Delivered != 0 || !h.LastDelivery.IsZero() {
 		t.Fatalf("fresh writer already claims delivery: %+v", h)
 	}
-	w.Write([]byte("one")) //nolint:errcheck
-	w.Write([]byte("two")) //nolint:errcheck
+	w.Write([]byte("one")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
+	w.Write([]byte("two")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 
 	h := w.Health()
 	if h.Delivered != 2 {
@@ -120,11 +120,11 @@ func TestChaos66_DeliveryIsCountedAsEvidence(t *testing.T) {
 func TestChaos66_CollectorLossIsAttributedAndBounded(t *testing.T) {
 	conn := &failConn{}
 	w := newTestWriter("tcp", conn)
-	w.Write([]byte("delivered")) //nolint:errcheck
+	w.Write([]byte("delivered")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 
 	conn.setFailing(true)
 	for i := 0; i < 3; i++ {
-		w.Write([]byte("lost")) //nolint:errcheck
+		w.Write([]byte("lost")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	}
 
 	h := w.Health()
@@ -159,7 +159,7 @@ func TestChaos66_RecoveryIsObservedNeverAssumed(t *testing.T) {
 	w := newTestWriter("tcp", conn)
 
 	conn.setFailing(true)
-	w.Write([]byte("lost")) //nolint:errcheck
+	w.Write([]byte("lost")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	if w.Health().ConsecutiveFailures == 0 {
 		t.Fatal("failure run did not start")
 	}
@@ -172,7 +172,7 @@ func TestChaos66_RecoveryIsObservedNeverAssumed(t *testing.T) {
 
 	conn.setFailing(false)
 	clearBackoff(w)
-	w.Write([]byte("recovered")) //nolint:errcheck
+	w.Write([]byte("recovered")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	h := w.Health()
 	if h.ConsecutiveFailures != 0 {
 		t.Errorf("ConsecutiveFailures = %d after an observed delivery, want 0", h.ConsecutiveFailures)
@@ -210,7 +210,7 @@ func TestChaos66_ObserverIsEdgeTriggered(t *testing.T) {
 
 	// Healthy steady state: no notifications at all.
 	for i := 0; i < 5; i++ {
-		w.Write([]byte("ok")) //nolint:errcheck
+		w.Write([]byte("ok")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	}
 	mu.Lock()
 	if oks != 0 || fails != 0 {
@@ -220,7 +220,7 @@ func TestChaos66_ObserverIsEdgeTriggered(t *testing.T) {
 
 	conn.setFailing(true)
 	for i := 0; i < 3; i++ {
-		w.Write([]byte("lost")) //nolint:errcheck
+		w.Write([]byte("lost")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	}
 	mu.Lock()
 	if fails != 3 {
@@ -230,8 +230,8 @@ func TestChaos66_ObserverIsEdgeTriggered(t *testing.T) {
 
 	conn.setFailing(false)
 	clearBackoff(w)
-	w.Write([]byte("back")) //nolint:errcheck
-	w.Write([]byte("back")) //nolint:errcheck
+	w.Write([]byte("back")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
+	w.Write([]byte("back")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	mu.Lock()
 	if oks != 1 {
 		t.Errorf("recovery notifications = %d, want exactly 1 (the edge, not one per line)", oks)
@@ -247,10 +247,10 @@ func TestChaos66_ObserverPanicCannotStopDelivery(t *testing.T) {
 	w.SetDeliveryObserver(func(bool, string, int64) { panic("observer is broken") })
 
 	conn.setFailing(true)
-	w.Write([]byte("lost")) //nolint:errcheck
+	w.Write([]byte("lost")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	conn.setFailing(false)
 	clearBackoff(w)
-	w.Write([]byte("delivered")) //nolint:errcheck
+	w.Write([]byte("delivered")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 
 	if got := w.Health().Delivered; got != 1 {
 		t.Fatalf("Delivered = %d after a panicking observer, want 1 — delivery must survive a bad observer", got)
@@ -265,7 +265,7 @@ func TestChaos66_ObserverPanicCannotStopDelivery(t *testing.T) {
 // the defect; Health must state the limit.
 func TestChaos66_UDPDeliveryIsReportedUnverifiable(t *testing.T) {
 	udp := newTestWriter("udp", &failConn{})
-	udp.Write([]byte("into the void")) //nolint:errcheck
+	udp.Write([]byte("into the void")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	h := udp.Health()
 	if h.DeliveryVerifiable {
 		t.Error("UDP reported as verifiable — a green reading on this transport is not evidence of receipt")
@@ -292,7 +292,7 @@ func TestChaos66_QueueOverflowIsNotACollectorOutage(t *testing.T) {
 	w.done = make(chan struct{})
 
 	for i := 0; i < 5; i++ {
-		w.Write([]byte("burst")) //nolint:errcheck
+		w.Write([]byte("burst")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	}
 	h := w.Health()
 	if h.DropsQueueFull == 0 {
@@ -313,7 +313,7 @@ func TestChaos66_HealthyFeedStaysGreen(t *testing.T) {
 	conn := &failConn{}
 	w := newTestWriter("tcp", conn)
 	for i := 0; i < 20; i++ {
-		w.Write([]byte("routine")) //nolint:errcheck
+		w.Write([]byte("routine")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	}
 	h := w.Health()
 	if h.Drops != 0 || h.ConsecutiveFailures != 0 || h.LastFailureReason != "" {

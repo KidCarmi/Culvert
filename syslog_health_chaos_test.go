@@ -180,7 +180,7 @@ func TestChaos66_RuntimeCollectorLossTurnsTheRowRed(t *testing.T) {
 
 	// Healthy first — the row must be green before the outage, or the gate
 	// proves nothing about the transition.
-	w.Write([]byte("pre-outage")) //nolint:errcheck
+	w.Write([]byte("pre-outage")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	waitForDelivery(t, w, 1)
 	if row := checkSyslogFeed(); row.Status != diagOK {
 		t.Fatalf("healthy TCP feed not green: %+v", row)
@@ -191,7 +191,7 @@ func TestChaos66_RuntimeCollectorLossTurnsTheRowRed(t *testing.T) {
 	stop()
 	base := time.Now()
 	setSyslogNow(func() time.Time { return base })
-	forceFailureEpisode(t, w, base)
+	forceFailureEpisode(t, w)
 	setSyslogNow(func() time.Time { return base.Add(2 * syslogDeliveryDegradedAfter) })
 
 	row := checkSyslogFeed()
@@ -311,7 +311,7 @@ func TestChaos66_MetricsAreEmittedOnlyWhenConfigured(t *testing.T) {
 
 	w, _ := newLiveCollector(t, "tcp")
 	arm(w, "tcp://collector.test:601")
-	w.Write([]byte("line")) //nolint:errcheck
+	w.Write([]byte("line")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	waitForDelivery(t, w, 1)
 
 	b.Reset()
@@ -389,7 +389,7 @@ func TestChaos66_HealthyTCPFeedStaysGreen(t *testing.T) {
 	w, _ := newLiveCollector(t, "tcp")
 	arm(w, "tcp://collector.test:601")
 	for i := 0; i < 10; i++ {
-		w.Write([]byte("routine")) //nolint:errcheck
+		w.Write([]byte("routine")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 	}
 	waitForDelivery(t, w, 10)
 
@@ -439,11 +439,11 @@ func waitForDelivery(t *testing.T, w *syslog.Writer, want uint64) {
 // forceFailureEpisode drives lines until the writer reports a
 // collector-attributable failure, so the gate depends on observed state rather
 // than on how fast the OS notices a closed listener.
-func forceFailureEpisode(t *testing.T, w *syslog.Writer, _ time.Time) {
+func forceFailureEpisode(t *testing.T, w *syslog.Writer) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		w.Write([]byte("post-outage")) //nolint:errcheck
+		w.Write([]byte("post-outage")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 		if w.Health().ConsecutiveFailures > 0 {
 			return
 		}
@@ -551,7 +551,7 @@ func TestChaos66_SupersededWriterCannotDriveTheHealthPlane(t *testing.T) {
 		// Deliver one line first: it forces the collector to ACCEPT, so severing
 		// actually severs an established connection rather than discarding a
 		// backlog entry the writer has not noticed yet.
-		old.Write([]byte("pre-outage")) //nolint:errcheck
+		old.Write([]byte("pre-outage")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 		waitForDelivery(t, old, 1)
 		noteSyslogConfigured(old) // clear the episode the successful delivery left
 
@@ -574,20 +574,20 @@ func TestChaos66_SupersededWriterCannotDriveTheHealthPlane(t *testing.T) {
 		arm(old, "tcp://old.test:601")
 
 		// The operator re-points at a working collector.
-		old.Write([]byte("pre-outage")) //nolint:errcheck
+		old.Write([]byte("pre-outage")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 		waitForDelivery(t, old, 1)
 
 		retireSyslogWriter(old)
 		fresh, _ := newLiveCollector(t, "tcp")
 		arm(fresh, "tcp://new.test:601")
-		fresh.Write([]byte("on the new feed")) //nolint:errcheck
+		fresh.Write([]byte("on the new feed")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 		waitForDelivery(t, fresh, 1)
 
 		// The OLD collector now dies. None of that may reach the health plane,
 		// which describes the new feed.
 		stopOld()
 		for i := 0; i < 50; i++ {
-			old.Write([]byte("into the void")) //nolint:errcheck
+			old.Write([]byte("into the void")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 		}
 		time.Sleep(50 * time.Millisecond)
 
@@ -611,7 +611,7 @@ func driveUntilFailing(t *testing.T, w *syslog.Writer) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		w.Write([]byte("post-outage")) //nolint:errcheck
+		w.Write([]byte("post-outage")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
 		syslogHealth.mu.Lock()
 		failing := !syslogHealth.failingSince.IsZero()
 		syslogHealth.mu.Unlock()
