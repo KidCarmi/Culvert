@@ -221,11 +221,22 @@ func attemptInspectionCARecovery(cfg rootCAStartupConfig) error {
 // Returns attempted=false when the fault was already resolved by an operator, so
 // the caller stops rather than burning its budget on a problem that is gone.
 func tryInspectionCARecovery(cfg rootCAStartupConfig, attempt int) (attempted bool, err error) {
+	// Correction round (Blocker 2): the recovery attempt is a WRITER of the
+	// root_ca target (InitCA mints, SaveCA re-persists), so it enters the
+	// same boundary as the handlers and the rotation round — certOpsMu
+	// outer, then caMutationMu — and settles every pending root_ca intent
+	// durably first; an unsettleable intent defers the attempt (retried by
+	// the campaign) with nothing written.
+	certOpsMu.Lock()
+	defer certOpsMu.Unlock()
 	caMutationMu.Lock()
 	defer caMutationMu.Unlock()
 
 	if sslInspectionLoadFailure() == "" {
 		return false, nil
+	}
+	if serr := settleCertTarget(certOpsStore(), "root_ca", "writer"); serr != nil {
+		return true, fmt.Errorf("recovery deferred: %w", serr)
 	}
 	if err := attemptInspectionCARecovery(cfg); err != nil {
 		return true, err

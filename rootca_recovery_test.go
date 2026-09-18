@@ -151,6 +151,9 @@ func TestChaos50_RotationLoopStartsDespiteInspectionCAFailure(t *testing.T) {
 	cca.mu.Unlock()
 
 	loadRootCA(rootCAStartupConfig{Path: writeCorruptBundle(t)}, t.Context())
+	// The loop's first round waits for the certificate-lifecycle boot gate
+	// (FE-6B.0 correction round); stand in for the admin-settings slice.
+	releaseCertLifecycleBootGate()
 
 	if certMgr.Ready() {
 		t.Fatal("precondition: the corrupt bundle must fail to load")

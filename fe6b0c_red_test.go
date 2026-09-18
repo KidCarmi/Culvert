@@ -41,20 +41,11 @@ import (
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
-// ── seams declared on the baseline (nil, never called) ─────────────────────
-// The correction moves them into product code beside the boot gate they
-// instrument (the FE-6B.0 R03/R04 precedent).
-
-var (
-	// caRotationBootGateObserver is invoked by the auto-rotation loop when its
-	// first round starts WAITING for the certificate-lifecycle boot gate.
-	caRotationBootGateObserver func()
-	// certLifecycleBootGateArmForTest re-arms the boot gate (a fresh boot).
-	certLifecycleBootGateArmForTest func()
-	// certLifecycleBootGateReleaseForTest releases it (what LoadAdminSettings
-	// does after reconciling the operation ledger).
-	certLifecycleBootGateReleaseForTest func()
-)
+// ── seams ───────────────────────────────────────────────────────────────────
+// caRotationBootGateObserver, certLifecycleBootGateArmForTest and
+// certLifecycleBootGateReleaseForTest were declared here on the baseline
+// (nil, never called) and now live in certificate_operations.go beside the
+// boot gate they instrument.
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 

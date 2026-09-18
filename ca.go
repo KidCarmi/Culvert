@@ -104,8 +104,7 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan 
 			// Each CA is guarded separately so a fault in one still lets the
 			// other rotate.
 			runGuarded("ca_rotation", func() {
-				certMgr.RotateIfNeeded(caPath, passphrase)
-				certMgr.CleanupSecondaryCA()
+				runInspectionCARotationRound(caPath, passphrase)
 			})
 			runGuarded("cluster_ca_rotation", func() {
 				globalClusterCA.RotateIfNeeded()
@@ -114,6 +113,15 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan 
 			if roundDone != nil {
 				roundDone()
 			}
+		}
+		// Correction round (Blocker 2): the IMMEDIATE round is ordered behind
+		// the certificate-lifecycle boot gate, released by LoadAdminSettings
+		// once the operation ledger is reconciled — so the round can never
+		// replace the evidence of a pending operation that boot
+		// reconciliation has not yet classified. Explicit, not a timing
+		// property of the init order.
+		if !awaitCertLifecycleBootGate(ctx) {
+			return
 		}
 		checkRound()
 		for {
@@ -132,4 +140,26 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan 
 		}
 	}()
 	return done
+}
+
+// runInspectionCARotationRound is the auto-rotation WRITER of the
+// inspection CA under the same target-writer protocol as the admin handlers
+// and the recovery loop (correction round, Blocker 2): certOpsMu (outer)
+// then caMutationMu, every pending root_ca intent settled durably BEFORE
+// anything is written, and the round DEFERRED — nothing written, retried at
+// the next check — when a settlement cannot be made durable. Without this
+// the loop could replace the bundle and the live CA that were the only
+// evidence a committed-but-unrecorded operation had. The secondary-CA
+// cleanup is the same writer's housekeeping and rides the same boundary.
+func runInspectionCARotationRound(caPath, passphrase string) {
+	certOpsMu.Lock()
+	defer certOpsMu.Unlock()
+	caMutationMu.Lock()
+	defer caMutationMu.Unlock()
+	if err := settleCertTarget(certOpsStore(), "root_ca", "writer"); err != nil {
+		logger.Printf("CA auto-rotation: round deferred — an outstanding certificate operation could not be settled durably (%s); nothing written, retried at the next check", certBoundedLedgerClass(err))
+		return
+	}
+	certMgr.RotateIfNeeded(caPath, passphrase)
+	certMgr.CleanupSecondaryCA()
 }

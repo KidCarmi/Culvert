@@ -14,10 +14,14 @@ package main
 //	fence (?caRevision= …)                    428 precondition_required / 409 stale
 //	── certOpsMu ──────────────────────────────────────────────────────────
 //	fence re-checked against the live object
-//	intent (Begin)                            durable before the first write
+//	SETTLE every pending intent on the target 503 operation_unsettled if one cannot be made durable
+//	intent (Begin, with the non-secret recovery facts) durable before the first write
 //	persist → publish → terminal record → operation-keyed audit
 //
-// A refusal mutates nothing, audits no success and advances no revision.
+// A refusal mutates nothing, audits no success and advances no revision. A
+// refusal is TERMINAL (persist_failed) only once its aborted record is
+// durable; otherwise it is the NON-terminal 500 outcome_unknown with
+// current.detail refusal_not_durable (correction round, Blocker 3).
 
 import (
 	"bytes"
@@ -184,13 +188,42 @@ func certBegin(w http.ResponseWriter, s *certOperationStore, op certOperation) b
 	return false
 }
 
-// certAbort records a persist-failure refusal durably (best effort: the
-// refusal is reported either way, and the ledger's pending record is settled
-// by the next lookup).
-func certAbort(s *certOperationStore, opID string) {
+// certAbort records a persist-failure refusal DURABLY and reports whether it
+// did. A refusal whose record could not be persisted is NOT terminal: the
+// pending intent stays the durable truth, the refusal it stood for is
+// memorised for the next settlement, and the caller answers
+// certRefusalNotDurable instead of persist_failed.
+func certAbort(s *certOperationStore, opID string) (durable bool) {
 	if err := s.Finish(opID, certOpAborted, refusalPersistFailed, "", nil, ""); err != nil {
-		logger.Printf("Certificates: operation %s refusal not recorded durably (%s)", sanitizeLog(opID), certBoundedLedgerClass(err))
+		logger.Printf("Certificates: operation %s refusal not recorded durably (%s) — answered non-terminal; settled by the next lookup/boot/writer", sanitizeLog(opID), certBoundedLedgerClass(err))
+		noteCertRefusalNotDurable(opID, refusalPersistFailed)
+		return false
 	}
+	return true
+}
+
+// certRefusalNotDurable answers a refusal whose aborted record is not
+// durable: 500 outcome_unknown, current.detail refusal_not_durable,
+// current.state pending, the operationId. The product mutation is absent;
+// a repeat of the same operationId replays the refusal once it is durable.
+func certRefusalNotDurable(w http.ResponseWriter, opID string) {
+	writeRefusal(w, http.StatusInternalServerError, refusalOutcomeUnknown,
+		"the operation was refused (nothing was changed) but the refusal could not be recorded durably; the operation is retained as pending and will be settled as this refusal",
+		map[string]any{"detail": "refusal_not_durable", "state": certOpPending, "operationId": opID})
+}
+
+// certSettleTargetOrRefuse settles every pending intent on target before the
+// caller writes it (the writer protocol, inside certOpsMu). An intent that
+// cannot be settled durably refuses the write: 503 operation_unsettled with
+// the bounded class; nothing is written.
+func certSettleTargetOrRefuse(w http.ResponseWriter, s *certOperationStore, target string) bool {
+	if err := settleCertTarget(s, target, "writer"); err != nil {
+		writeRefusal(w, http.StatusServiceUnavailable, refusalOperationUnsettled,
+			"an outstanding operation on this object could not be settled durably; retry once the operation ledger is writable (GET /api/ca/operations/{id} settles it)",
+			map[string]any{"reason": certBoundedLedgerClass(err)})
+		return false
+	}
+	return true
 }
 
 // certCommit records the durable terminal record and completes the
@@ -579,17 +612,21 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 			"no CA bundle path is configured (-ca-path / proxy.ca_path); a rotation would exist in memory only, so it is refused", nil)
 		return
 	}
+	if !certSettleTargetOrRefuse(w, s, "root_ca") {
+		return
+	}
 	cand, err := ca.NewRotationCandidate()
 	if err != nil {
 		writeRefusal(w, http.StatusInternalServerError, refusalCAGenerationFail, "a fresh Root CA could not be generated; nothing was changed", nil)
 		return
 	}
-	if !certBegin(w, s, certOperation{OperationID: opID, Action: certActionRotate, Actor: actor, Target: "root_ca",
-		CandidateDigest: cand.FingerprintHex(), Fence: current}) {
+	op := certOperation{OperationID: opID, Action: certActionRotate, Actor: actor, Target: "root_ca",
+		CandidateDigest: cand.FingerprintHex(), Fence: current, Previous: caPreviousFacts()}
+	op.AuditDetail = certAuditDetail(op)
+	if !certBegin(w, s, op) {
 		return
 	}
 	consumeCAChallenge(opID)
-	previous := caInfoWithRevision()
 	if !persistCACandidate(w, s, opID, cand, "CA force-rotate") {
 		return
 	}
@@ -597,17 +634,16 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 	noteCARotationPersisted()
 	noteSSLInspectionRecovered("force rotation via admin API")
 	statCARotations.Add(1)
-	result := map[string]any{
-		"rotated":     true,
-		"persisted":   true,
-		"operationId": opID,
-		"action":      certActionRotate,
-		"scope":       certScopeNodeLocal,
-		"ca":          caInfoWithRevision(),
-		"previous":    map[string]any{"fingerprint": previous["fingerprint"], "revision": previous["revision"]},
-	}
-	certCommit(s, opID, caRevisionToken(), result, "force rotation via admin API (challenge-bound)")
+	result := caOperationResult(op)
+	certCommit(s, opID, caRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
+}
+
+// caPreviousFacts records the CA identity a rotate/import replaces (the
+// non-secret recovery fact a committed result names as previous).
+func caPreviousFacts() map[string]any {
+	prev := caInfoWithRevision()
+	return map[string]any{"fingerprint": prev["fingerprint"], "revision": prev["revision"]}
 }
 
 // confirmCAChallenge verifies the presented challenge inside the boundary
@@ -642,7 +678,10 @@ func persistCACandidate(w http.ResponseWriter, s *certOperationStore, opID strin
 	class := ca.PersistFailureClass(err)
 	logger.Printf("%s: bundle write failed (%s) — NOT applied", what, class)
 	noteCARotationPersistFailure(class)
-	certAbort(s, opID)
+	if !certAbort(s, opID) {
+		certRefusalNotDurable(w, opID)
+		return false
+	}
 	writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
 		"the Root CA bundle could not be written; the current CA is unchanged", map[string]any{"class": class, "operationId": opID})
 	return false
@@ -790,28 +829,23 @@ func apiCertsImportMITM(w http.ResponseWriter, r *http.Request, certPEM, keyPEM 
 			"no CA bundle path is configured (-ca-path / proxy.ca_path); an imported CA would exist in memory only, so it is refused", nil)
 		return
 	}
-	if !certBegin(w, s, certOperation{OperationID: opID, Action: certActionImport, Actor: actor, Target: "root_ca",
-		CandidateDigest: cand.FingerprintHex(), Fence: current}) {
+	if !certSettleTargetOrRefuse(w, s, "root_ca") {
 		return
 	}
-	previous := caInfoWithRevision()
+	op := certOperation{OperationID: opID, Action: certActionImport, Actor: actor, Target: "root_ca",
+		CandidateDigest: cand.FingerprintHex(), Fence: current, Previous: caPreviousFacts()}
+	op.AuditDetail = certAuditDetail(op)
+	if !certBegin(w, s, op) {
+		return
+	}
 	if !persistCACandidate(w, s, opID, cand, "CA import") {
 		return
 	}
 	certMgr.Install(cand)
 	noteCARotationPersisted()
 	noteSSLInspectionRecovered("custom MITM CA imported via admin API")
-	result := map[string]any{
-		"imported":    true,
-		"persisted":   true,
-		"operationId": opID,
-		"action":      certActionImport,
-		"target":      "mitm",
-		"scope":       certScopeNodeLocal,
-		"ca":          caInfoWithRevision(),
-		"previous":    map[string]any{"fingerprint": previous["fingerprint"], "revision": previous["revision"]},
-	}
-	certCommit(s, opID, caRevisionToken(), result, "custom MITM CA imported via admin API")
+	result := caOperationResult(op)
+	certCommit(s, opID, caRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
 }
 
@@ -852,8 +886,13 @@ func apiCertsReplaceUI(w http.ResponseWriter, r *http.Request, certPEM, keyPEM [
 			map[string]any{"uiCertRevision": current})
 		return
 	}
-	if !certBegin(w, s, certOperation{OperationID: opID, Action: certActionUIReplace, Actor: actor, Target: "ui_cert",
-		CandidateDigest: digest, Fence: current}) {
+	if !certSettleTargetOrRefuse(w, s, "ui_cert") {
+		return
+	}
+	op := certOperation{OperationID: opID, Action: certActionUIReplace, Actor: actor, Target: "ui_cert",
+		CandidateDigest: digest, Fence: current, Candidate: candidate}
+	op.AuditDetail = certAuditDetail(op)
+	if !certBegin(w, s, op) {
 		return
 	}
 	if err := persistCustomUITLS(certPEM, keyPEM); err != nil {
@@ -863,18 +902,8 @@ func apiCertsReplaceUI(w http.ResponseWriter, r *http.Request, certPEM, keyPEM [
 	// The pair just written passed validation, so any PRIOR corruption latch
 	// no longer describes what is on disk.
 	uiCustomTLSCorrupt = false
-	result := map[string]any{
-		"replaced":    true,
-		"persisted":   true,
-		"activation":  "restart_required",
-		"operationId": opID,
-		"action":      certActionUIReplace,
-		"target":      "ui",
-		"scope":       certScopeNodeLocal,
-		"uiCert":      uiCertReadModel(),
-		"candidate":   candidate,
-	}
-	certCommit(s, opID, uiCertRevisionToken(), result, "custom UI certificate replaced (restart required to activate)")
+	result := uiCertOperationResult(op)
+	certCommit(s, opID, uiCertRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
 }
 
@@ -900,7 +929,10 @@ func uiCertPersistRefusal(w http.ResponseWriter, s *certOperationStore, opID str
 		return
 	}
 	logger.Printf("certs upload UI: persist failed (%s) — the current UI certificate is unchanged", class)
-	certAbort(s, opID)
+	if !certAbort(s, opID) {
+		certRefusalNotDurable(w, opID)
+		return
+	}
 	writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
 		"the certificate could not be saved; the current UI certificate is unchanged", map[string]any{"class": class, "operationId": opID})
 }
@@ -935,26 +967,20 @@ func apiCertsUI(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, http.StatusNotFound, refusalNotFound, "no custom UI certificate is persisted on this node", nil)
 		return
 	}
-	wasActive := uiCustomTLSActive
-	if !certBegin(w, s, certOperation{OperationID: opID, Action: certActionUIDelete, Actor: actor, Target: "ui_cert", Fence: current}) {
+	if !certSettleTargetOrRefuse(w, s, "ui_cert") {
+		return
+	}
+	op := certOperation{OperationID: opID, Action: certActionUIDelete, Actor: actor, Target: "ui_cert", Fence: current, WasActive: uiCustomTLSActive}
+	op.AuditDetail = certAuditDetail(op)
+	if !certBegin(w, s, op) {
 		return
 	}
 	if !removeUICertPair(w, s, opID) {
 		return
 	}
 	uiCustomTLSCorrupt = false
-	result := map[string]any{
-		"deleted":     true,
-		"operationId": opID,
-		"action":      certActionUIDelete,
-		"target":      "ui",
-		"scope":       certScopeNodeLocal,
-		"uiCert":      uiCertReadModel(),
-	}
-	if wasActive {
-		result["activation"] = "restart_required"
-	}
-	certCommit(s, opID, uiCertRevisionToken(), result, "custom UI certificate deleted (self-signed fallback at the next restart)")
+	result := uiCertOperationResult(op)
+	certCommit(s, opID, uiCertRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
 }
 
@@ -965,7 +991,10 @@ func apiCertsUI(w http.ResponseWriter, r *http.Request) {
 // non-terminal outcome_unknown.
 func removeUICertPair(w http.ResponseWriter, s *certOperationStore, opID string) bool {
 	if err := os.Remove(customUITLSKeyPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		certAbort(s, opID)
+		if !certAbort(s, opID) {
+			certRefusalNotDurable(w, opID)
+			return false
+		}
 		writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
 			"the private key file could not be removed; nothing was changed", map[string]any{"class": ca.PersistFailureClass(err), "operationId": opID})
 		return false
@@ -1137,39 +1166,38 @@ func apiOCSPSet(w http.ResponseWriter, r *http.Request) {
 	if !certFenceMatches(w, "ocspRevision", echoed, current) {
 		return
 	}
+	if !certSettleTargetOrRefuse(w, s, "ocsp") {
+		return
+	}
 	d := ocspDesiredSnapshot()
-	target := ocspDesiredState{saved: true, enabled: body.Enabled, generation: d.generation + 1, source: "admin"}
-	if !certBegin(w, s, certOperation{OperationID: opID, Action: certActionOCSPSet, Actor: actor, Target: "ocsp",
-		CandidateDigest: want, Fence: current, Expect: "gen=" + itoa64(target.generation)}) {
+	// The target posture carries THIS operation as its writer: the
+	// provenance lands in the same atomic settings write as the posture.
+	target := ocspDesiredState{saved: true, enabled: body.Enabled, generation: d.generation + 1, source: "admin", writeID: opID}
+	op := certOperation{OperationID: opID, Action: certActionOCSPSet, Actor: actor, Target: "ocsp",
+		CandidateDigest: want, Fence: current, Expect: "gen=" + itoa64(target.generation)}
+	op.AuditDetail = certAuditDetail(op)
+	if !certBegin(w, s, op) {
 		return
 	}
 	err := saveAdminSettingsWithOverrides(adminSaveOverrides{
 		ocspSettings: &target,
 		applyOnSuccess: func() {
-			setOCSPDesiredAdmin(target.enabled, target.generation)
+			setOCSPDesiredAdmin(target.enabled, target.generation, target.writeID)
 			ocspApplyRuntime(target.enabled)
 		},
 	})
 	if err != nil {
 		logger.Printf("OCSP set: durable write failed (%s) — runtime unchanged", ca.PersistFailureClass(err))
-		certAbort(s, opID)
+		if !certAbort(s, opID) {
+			certRefusalNotDurable(w, opID)
+			return
+		}
 		writeRefusal(w, http.StatusInternalServerError, refusalPersistFailed,
 			"the OCSP posture could not be persisted; the running posture is unchanged", map[string]any{"operationId": opID})
 		return
 	}
-	nd := ocspDesiredSnapshot()
-	result := map[string]any{
-		"ok":          true,
-		"enabled":     globalOCSP.Enabled(),
-		"durable":     true,
-		"revision":    ocspRevisionToken(),
-		"scope":       certScopeNodeLocal,
-		"operationId": opID,
-		"action":      certActionOCSPSet,
-		"desired":     map[string]any{"enabled": nd.enabled, "source": nd.source},
-		"runtime":     map[string]any{"enabled": globalOCSP.Enabled()},
-	}
-	certCommit(s, opID, ocspRevisionToken(), result, "enabled="+want)
+	result := ocspOperationResult(op)
+	certCommit(s, opID, ocspRevisionToken(), result, op.AuditDetail)
 	jsonOK(w, result)
 }
 

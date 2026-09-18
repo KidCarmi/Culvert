@@ -230,6 +230,12 @@ type AdminSettings struct {
 	OCSPSettingsSaved      bool  `json:"ocsp_settings_saved"`
 	OCSPCheckEnabled       bool  `json:"ocsp_check_enabled"`
 	OCSPSettingsGeneration int64 `json:"ocsp_settings_generation,omitempty"`
+	// OCSPSettingsWriteID is the operationId of the fenced set that produced
+	// the posture above — per-target writer PROVENANCE, co-written in the
+	// same atomic write (FE-6B.0 correction round, Blocker 1), so an
+	// operation is credited with a posture only when it is the writer the
+	// file names, never because the content matches.
+	OCSPSettingsWriteID string `json:"ocsp_settings_write_id,omitempty"`
 
 	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
 	// sentinel (like YARASettingsSaved): when false the values below are not applied
@@ -429,6 +435,14 @@ func LoadAdminSettings(path string) {
 	adminSettingsPath = path
 	adminSettingsMu.Unlock()
 	setAdminSettingsLoadPosture(loadPostureUnknown)
+	// FE-6B.0 correction round (Blocker 2): on EVERY load path — missing,
+	// unreadable, corrupt-quarantined or readable — settle every pending
+	// certificate/CA/OCSP operation intent from its object's own evidence
+	// (the CA, the UI-cert store and whatever durable OCSP posture this load
+	// established), complete owed audits exactly once, and only then release
+	// the certificate-lifecycle boot gate the auto-rotation loop's first
+	// round waits on. Deferred so no early return can skip it.
+	defer finishCertificateLifecycleBoot()
 
 	// Rewrite management-identity durability is re-evaluated by THIS load
 	// (2D-C recovery correction §5): the latch reflects the current boot's
@@ -534,12 +548,6 @@ func LoadAdminSettings(path string) {
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	snapshotOverriddenSurfaces(s)
-
-	// FE-6B.0: settle every pending certificate/CA/OCSP operation intent from
-	// its object's own evidence now that the CA, the UI-cert store and the
-	// durable OCSP posture are all loaded; complete any owed success audit
-	// exactly once. Never mutates an object.
-	reconcileCertificateOperations()
 
 	// Rewrite stable-identity durability (2D-C final §7–§9): one pass that
 	// (a) persists the one-time in-file legacy backfill for a settings-owned

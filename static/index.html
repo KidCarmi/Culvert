@@ -17799,7 +17799,10 @@ function certRefusalText(r) {
     case 'operation_ledger_degraded': return 'The certificate operation ledger is degraded; repair it and restart.';
     case 'operation_mismatch': return 'This operation id was already used for a different change.';
     case 'operation_in_progress': return 'This operation is still being decided.';
-    case 'outcome_unknown': return 'The outcome is unproven; check the operation record before retrying.';
+    case 'operation_unsettled': return 'An earlier operation on this object is still unsettled (' + (cur.reason || 'ledger') + '); make the operation ledger writable and retry.';
+    case 'outcome_unknown':
+      if (cur.detail === 'refusal_not_durable') return 'The change was refused (nothing changed) but the refusal could not be recorded yet; it will be settled as a refusal — check the operation record before retrying.';
+      return 'The outcome is unproven; check the operation record before retrying.';
     case 'forbidden': return 'Insufficient role.';
     case 'ca_not_ready': return 'No Root CA is installed.';
     default: return r.code || 'unknown';

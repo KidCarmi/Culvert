@@ -581,9 +581,17 @@ components:
         challenge_stale / candidate_duplicate / operation_mismatch / operation_in_progress / operation_aborted /
         operation_outcome_unknown (409), precondition_required / operation_id_required / challenge_required
         (428), persist_failed / outcome_unknown / ca_generation_failed (500), operation_ledger_degraded /
-        operation_ledger_full / persistence_not_configured / ca_not_ready (503). `current` carries typed facts
-        for the retry (caRevision, uiCertRevision, ocspRevision, changed, reason, class, detail, operationId,
-        action, state, code, fingerprint). A refusal mutates nothing, audits no success and advances no revision.
+        operation_ledger_full / operation_unsettled / persistence_not_configured / ca_not_ready (503). `current`
+        carries typed facts for the retry (caRevision, uiCertRevision, ocspRevision, changed, reason, class,
+        detail, operationId, action, state, code, fingerprint). A refusal mutates nothing, audits no success and
+        advances no revision. persist_failed is TERMINAL and is answered only once the operation's aborted record
+        is durable; when that record cannot be persisted the answer is the NON-terminal 500 outcome_unknown with
+        `current.detail: refusal_not_durable`, `current.state: pending` and the operationId — the intent stays
+        pending, nothing was changed, and the next settlement (lookup, boot, or a later writer of the same object)
+        records the refusal; a repeat of the same operationId then replays it (409 operation_aborted) without
+        executing anything. operation_unsettled (503): an outstanding intent on this object could not be settled
+        durably before the write (every writer of a CA / UI-certificate / OCSP target settles the target's
+        pending intents first); `current.reason` is the bounded ledger class; nothing was written.
       required: [error, code]
       additionalProperties: false
       properties:
@@ -767,9 +775,22 @@ components:
         auditState: { type: string, enum: [pending] }
         code:
           type: string
-          description: aborted / outcome_unknown carry the refusal code; a settled record carries `<why>_committed` / `<why>_absent` / `<why>_unproven` with why = lookup or reconciled.
+          description: >-
+            aborted / outcome_unknown carry the refusal code (a refusal whose own record could not be
+            persisted is recorded with that refusal's code — persist_failed — by the next settlement in the
+            same process); a settled record carries `<why>_committed` / `<why>_absent` / `<why>_unproven`
+            with why = lookup (this GET), reconciled (boot) or writer (a later writer of the same object,
+            which settles every pending intent on it durably before it writes).
         committedRevision: { type: string }
-        result: { type: object, additionalProperties: true, description: "committed — the response the client received." }
+        result:
+          type: object
+          additionalProperties: true
+          description: >-
+            committed — the complete ACTION-BOUND result: identical to the response the client would have
+            received (rotated / imported + ca + previous; replaced / deleted + activation + uiCert +
+            candidate; ok + enabled + durable + revision + desired + runtime), reconstructed at settlement
+            from the intent's recorded non-secret facts and the object's state when the client's response
+            was lost. Never key material, a passphrase or raw certificate input.
     OCSPDesired:
       type: object
       required: [enabled, source]

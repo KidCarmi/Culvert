@@ -31,9 +31,39 @@ package main
 // the candidate's fingerprint; a UI-cert replace iff the persisted cert has
 // the candidate's digest; a UI-cert delete iff no pair is persisted; an OCSP
 // set iff the durable settings carry the target at the generation the intent
-// advanced to. Anything else is aborted, or unproven ⇒ outcome_unknown.
+// advanced to AND record the intent as the writer (per-target provenance
+// co-written atomically with the posture). Anything else is aborted, or
+// unproven ⇒ outcome_unknown.
+//
+// CURRENT CONTENT IS EVIDENCE ONLY UNTIL SOMEONE ELSE WRITES (correction
+// round, Blocker 1). Content equality proves an intent's commit only while
+// no later writer has changed that target, so EVERY writer of a target —
+// the admin handlers, automatic rotation, the CA recovery loop — settles
+// each pending intent on that target DURABLY before it writes
+// (settleCertTarget, under certOpsMu), and is refused or deferred with
+// nothing written when the settlement cannot be made durable
+// (errCertTargetUnsettled). A pending intent therefore never outlives the
+// evidence that decides it, a competitor's identical content is never
+// credited to an earlier intent (the earlier intent was settled — absent —
+// before the competitor wrote), and a commit whose terminal record failed is
+// settled committed, with its action-bound result reconstructed from the
+// intent's non-secret facts and the object's state, before the competitor
+// replaces it.
+//
+// A REFUSAL IS TERMINAL ONLY ONCE DURABLE (Blocker 3): an aborted record
+// that cannot be persisted leaves the pending intent as the durable truth,
+// the caller gets the NON-terminal 500 outcome_unknown
+// (current.detail refusal_not_durable, current.state pending) and the next
+// settlement — lookup, boot, or a later writer of the target — records the
+// refusal it stood for (certRefusalMemo) or the bounded absent verdict.
+//
+// THE BOOT IS ORDERED (Blocker 2): the auto-rotation loop's first round
+// waits for the certificate-lifecycle boot gate, which LoadAdminSettings
+// releases on every load path after reconciling the ledger — never by
+// startup timing.
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -153,6 +183,16 @@ type certOperation struct {
 	CommittedRevision string `json:"committedRevision,omitempty"`
 	Audited           bool   `json:"audited"`
 	AuditDetail       string `json:"auditDetail,omitempty"`
+	// Recovery facts (correction round, Blocker 4): every NON-secret fact a
+	// committed result needs beyond the object's own state, recorded with
+	// the intent so a commit whose terminal record failed replays the same
+	// action-bound result the client would have received. Previous is the
+	// CA identity before a rotate/import; Candidate the public facts of a
+	// UI-cert candidate; WasActive whether the running listener used the
+	// UI pair a delete removed. Never a key, a passphrase or raw PEM input.
+	Previous  map[string]any `json:"previous,omitempty"`
+	Candidate map[string]any `json:"candidate,omitempty"`
+	WasActive bool           `json:"wasActive,omitempty"`
 }
 
 func (op *certOperation) unresolved() bool {
@@ -187,6 +227,7 @@ var (
 	errCertOperationLedgerDegraded = errors.New("certificates: operation ledger degraded")
 	errCertOperationLedgerFull     = errors.New("certificates: operation ledger full of unresolved intents")
 	errCertOperationAuditPending   = errors.New("certificates: operation success audit is pending durability")
+	errCertTargetUnsettled         = errors.New("certificates: an outstanding intent on the target could not be settled durably")
 )
 
 var certOpsGlobal struct {
@@ -404,7 +445,9 @@ func (s *certOperationStore) Finish(id, state, code, committedRevision string, r
 				rec.Result = b
 			}
 		}
-		rec.AuditDetail = auditDetail
+		if auditDetail != "" {
+			rec.AuditDetail = auditDetail
+		}
 	}
 	candidate := s.cloneWith(id, &rec)
 	if err := s.persistCandidate(candidate); err != nil {
@@ -513,7 +556,15 @@ func (s *certOperationStore) readModel() map[string]any {
 
 // settleCertOperation decides one unresolved intent DURABLY from the
 // object's own evidence (see the file header) and completes its audit. why
-// is "lookup" or "reconciled". Errors leave the record as it was.
+// is "lookup", "reconciled" (boot) or "writer" (a later writer of the same
+// target, before it writes). Errors leave the record as it was.
+//
+// A committed verdict reconstructs the ACTION-BOUND result from the intent's
+// recorded facts and the object's current state — which IS the state the
+// commit produced, because no writer of the target has run since (every
+// writer settles first). An aborted verdict records the refusal the
+// operation stood for when its own refusal record could not be persisted
+// (certRefusalMemo), else the bounded <why>_absent.
 func settleCertOperation(s *certOperationStore, op certOperation, why string) error {
 	if op.State != certOpPending {
 		return nil
@@ -521,11 +572,16 @@ func settleCertOperation(s *certOperationStore, op certOperation, why string) er
 	verdict, revision := certOperationVerdict(op)
 	switch verdict {
 	case certOpCommitted:
-		if err := s.Finish(op.OperationID, certOpCommitted, why+"_committed", revision, op.Result, op.AuditDetail); err != nil {
+		result := certRecoveredResult(op)
+		if err := s.Finish(op.OperationID, certOpCommitted, why+"_committed", revision, result, certAuditDetail(op)); err != nil {
 			return err
 		}
 	case certOpAborted:
-		return s.Finish(op.OperationID, certOpAborted, why+"_absent", "", nil, "")
+		code := takeCertRefusalMemo(op.OperationID)
+		if code == "" {
+			code = why + "_absent"
+		}
+		return s.Finish(op.OperationID, certOpAborted, code, "", nil, "")
 	default:
 		return s.Finish(op.OperationID, certOpOutcomeUnknown, why+"_unproven", "", nil, "")
 	}
@@ -534,6 +590,62 @@ func settleCertOperation(s *certOperationStore, op certOperation, why string) er
 		return err
 	}
 	return s.emitOperationAudit(*settled)
+}
+
+// settleCertTarget settles EVERY pending intent on target durably before a
+// writer changes it (the writer protocol; caller holds certOpsMu). An
+// intent still pending afterwards — its record could not be persisted, or
+// the ledger is degraded — is errCertTargetUnsettled: the writer must
+// refuse or defer with nothing written, because writing would destroy the
+// evidence that decides the intent. Audit completion failures are not
+// fatal here (the record is durable; the audit is retried by the next
+// lookup/boot).
+func settleCertTarget(s *certOperationStore, target, why string) error {
+	if d := s.Degraded(); d != nil {
+		return fmt.Errorf("%w: ledger %s", errCertTargetUnsettled, d.Reason)
+	}
+	pending := s.Unresolved()
+	for i := range pending {
+		op := pending[i]
+		if op.Target != target || op.State != certOpPending {
+			continue
+		}
+		if err := settleCertOperation(s, op, why); err != nil && !errors.Is(err, errCertOperationAuditPending) {
+			return fmt.Errorf("%w: operation %s (%s)", errCertTargetUnsettled, op.OperationID, certBoundedLedgerClass(err))
+		}
+		// The durable truth decides, never the settler's return value.
+		if rec, err := s.Get(op.OperationID); err != nil || rec == nil || rec.State == certOpPending {
+			return fmt.Errorf("%w: operation %s", errCertTargetUnsettled, op.OperationID)
+		}
+	}
+	return nil
+}
+
+// certRefusalMemo remembers, in this process only, the refusal an operation
+// stood for when its aborted record could not be persisted: the next
+// settlement records THAT code instead of the bounded absent verdict. A
+// restart loses the memo (the record then carries reconciled_absent — still
+// terminal, still a refusal).
+var certRefusalMemo struct {
+	mu    sync.Mutex
+	codes map[string]string
+}
+
+func noteCertRefusalNotDurable(opID, code string) {
+	certRefusalMemo.mu.Lock()
+	if certRefusalMemo.codes == nil {
+		certRefusalMemo.codes = map[string]string{}
+	}
+	certRefusalMemo.codes[opID] = code
+	certRefusalMemo.mu.Unlock()
+}
+
+func takeCertRefusalMemo(opID string) string {
+	certRefusalMemo.mu.Lock()
+	defer certRefusalMemo.mu.Unlock()
+	code := certRefusalMemo.codes[opID]
+	delete(certRefusalMemo.codes, opID)
+	return code
 }
 
 // certOperationVerdict is the pure evidence check behind settlement.
@@ -585,13 +697,24 @@ func uiCertOperationVerdict(op certOperation) (verdict, revision string) {
 }
 
 // ocspOperationVerdict: committed iff the durable posture carries the target
-// at the generation the intent advanced to.
+// at the generation the intent advanced to AND names this operation as its
+// writer (the provenance admin_settings.json co-writes with the posture).
+// The same target state written by ANOTHER writer is the refusal, never a
+// commit; a posture with no recorded writer (a file that predates the
+// provenance) is unproven.
 func ocspOperationVerdict(op certOperation) (verdict, revision string) {
 	d := ocspDesiredSnapshot()
 	want := op.CandidateDigest == "enabled"
 	switch {
 	case d.saved && d.generation == parseGenerationExpect(op.Expect) && d.enabled == want:
-		return certOpCommitted, ocspRevisionToken()
+		switch d.writeID {
+		case op.OperationID:
+			return certOpCommitted, ocspRevisionToken()
+		case "":
+			return certOpOutcomeUnknown, ""
+		default:
+			return certOpAborted, ""
+		}
 	case ocspRevisionToken() == op.Fence:
 		return certOpAborted, ""
 	default:
@@ -649,8 +772,177 @@ func certBoundedLedgerClass(err error) string {
 		return "ledger_not_durable"
 	case errors.Is(err, errCertOperationAuditPending):
 		return "audit_pending"
+	case errors.Is(err, errCertTargetUnsettled):
+		return "target_unsettled"
 	default:
 		return "settle_failed"
+	}
+}
+
+// ── certificate-lifecycle boot gate ─────────────────────────────────────────
+
+// certLifecycleBootGate orders the boot explicitly (correction round,
+// Blocker 2): the auto-rotation loop's IMMEDIATE round — started by the
+// root-CA slice, which runs before the admin-settings slice — waits here
+// until LoadAdminSettings has reconciled the operation ledger, on EVERY of
+// its load paths (finishCertificateLifecycleBoot is deferred). Armed at
+// process start and re-armed by loadRootCA (a fresh boot); released exactly
+// once per arming. Nothing else waits on it: a released gate is a closed
+// channel, and a rotation round that also settles its own target before
+// writing is correct with or without the gate — the gate is what makes the
+// ORDER a stated contract rather than a timing accident.
+var certLifecycleBootGate struct {
+	mu       sync.Mutex
+	ch       chan struct{}
+	released bool
+}
+
+func init() { armCertLifecycleBootGate() }
+
+func armCertLifecycleBootGate() {
+	certLifecycleBootGate.mu.Lock()
+	certLifecycleBootGate.ch = make(chan struct{})
+	certLifecycleBootGate.released = false
+	certLifecycleBootGate.mu.Unlock()
+}
+
+func releaseCertLifecycleBootGate() {
+	certLifecycleBootGate.mu.Lock()
+	if !certLifecycleBootGate.released {
+		certLifecycleBootGate.released = true
+		close(certLifecycleBootGate.ch)
+	}
+	certLifecycleBootGate.mu.Unlock()
+}
+
+// awaitCertLifecycleBootGate blocks until the gate is released or ctx ends;
+// it returns false when ctx ended first. caRotationBootGateObserver (a test
+// seam, nil in production) is invoked once when the caller actually has to
+// wait.
+func awaitCertLifecycleBootGate(ctx context.Context) bool {
+	certLifecycleBootGate.mu.Lock()
+	ch, released := certLifecycleBootGate.ch, certLifecycleBootGate.released
+	certLifecycleBootGate.mu.Unlock()
+	if released {
+		return true
+	}
+	if caRotationBootGateObserver != nil {
+		caRotationBootGateObserver()
+	}
+	select {
+	case <-ch:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// finishCertificateLifecycleBoot is LoadAdminSettings' deferred tail:
+// reconcile the ledger (the CA, the UI-cert store and the durable OCSP
+// posture are loaded by then, or known unloadable), then release the gate.
+func finishCertificateLifecycleBoot() {
+	reconcileCertificateOperations()
+	releaseCertLifecycleBootGate()
+}
+
+// Test seams (nil-safe in production): the loop reports when it waits; a
+// test re-arms or releases the gate to stand in for a boot.
+var (
+	caRotationBootGateObserver          func()
+	certLifecycleBootGateArmForTest     = armCertLifecycleBootGate
+	certLifecycleBootGateReleaseForTest = releaseCertLifecycleBootGate
+)
+
+// ── action-bound results and bounded audit details ──────────────────────────
+
+// certAuditDetail is the bounded success-audit detail of an action; recorded
+// with the intent and emitted verbatim by the live commit and by a recovered
+// one.
+func certAuditDetail(op certOperation) string {
+	switch op.Action {
+	case certActionRotate:
+		return "force rotation via admin API (challenge-bound)"
+	case certActionImport:
+		return "custom MITM CA imported via admin API"
+	case certActionUIReplace:
+		return "custom UI certificate replaced (restart required to activate)"
+	case certActionUIDelete:
+		return "custom UI certificate deleted (self-signed fallback at the next restart)"
+	case certActionOCSPSet:
+		return "enabled=" + op.CandidateDigest
+	}
+	return ""
+}
+
+// certRecoveredResult builds the action-bound result of a COMMITTED
+// operation from the intent's recorded facts and the object's current state.
+// The live handlers call the same builders right after their write, so a
+// replayed or recovered result is byte-for-byte the response the client
+// would have received.
+func certRecoveredResult(op certOperation) map[string]any {
+	switch op.Action {
+	case certActionRotate, certActionImport:
+		return caOperationResult(op)
+	case certActionUIReplace, certActionUIDelete:
+		return uiCertOperationResult(op)
+	case certActionOCSPSet:
+		return ocspOperationResult(op)
+	}
+	return map[string]any{"operationId": op.OperationID, "action": op.Action}
+}
+
+func caOperationResult(op certOperation) map[string]any {
+	res := map[string]any{
+		"persisted":   true,
+		"operationId": op.OperationID,
+		"action":      op.Action,
+		"scope":       certScopeNodeLocal,
+		"ca":          caInfoWithRevision(),
+		"previous":    map[string]any{"fingerprint": op.Previous["fingerprint"], "revision": op.Previous["revision"]},
+	}
+	if op.Action == certActionRotate {
+		res["rotated"] = true
+	} else {
+		res["imported"] = true
+		res["target"] = "mitm"
+	}
+	return res
+}
+
+func uiCertOperationResult(op certOperation) map[string]any {
+	res := map[string]any{
+		"operationId": op.OperationID,
+		"action":      op.Action,
+		"target":      "ui",
+		"scope":       certScopeNodeLocal,
+		"uiCert":      uiCertReadModel(),
+	}
+	if op.Action == certActionUIReplace {
+		res["replaced"] = true
+		res["persisted"] = true
+		res["activation"] = "restart_required"
+		res["candidate"] = op.Candidate
+		return res
+	}
+	res["deleted"] = true
+	if op.WasActive {
+		res["activation"] = "restart_required"
+	}
+	return res
+}
+
+func ocspOperationResult(op certOperation) map[string]any {
+	nd := ocspDesiredSnapshot()
+	return map[string]any{
+		"ok":          true,
+		"enabled":     globalOCSP.Enabled(),
+		"durable":     true,
+		"revision":    ocspRevisionToken(),
+		"scope":       certScopeNodeLocal,
+		"operationId": op.OperationID,
+		"action":      op.Action,
+		"desired":     map[string]any{"enabled": nd.enabled, "source": nd.source},
+		"runtime":     map[string]any{"enabled": globalOCSP.Enabled()},
 	}
 }
 
@@ -751,6 +1043,11 @@ type ocspDesiredState struct {
 	enabled    bool
 	generation int64
 	source     string
+	// writeID is the operationId of the fenced set that produced this
+	// posture — per-target writer provenance, co-written atomically with
+	// the posture in admin_settings.json (correction round, Blocker 1).
+	// Empty on a posture that predates the provenance.
+	writeID string
 }
 
 var ocspDesired struct {
@@ -782,9 +1079,9 @@ func noteOCSPYAMLDesired(enabled bool) {
 	}
 }
 
-func setOCSPDesiredAdmin(enabled bool, generation int64) {
+func setOCSPDesiredAdmin(enabled bool, generation int64, writeID string) {
 	ocspDesired.mu.Lock()
-	ocspDesired.state = ocspDesiredState{saved: true, enabled: enabled, generation: generation, source: "admin"}
+	ocspDesired.state = ocspDesiredState{saved: true, enabled: enabled, generation: generation, source: "admin", writeID: writeID}
 	ocspDesired.mu.Unlock()
 }
 
@@ -835,7 +1132,7 @@ func applyAdminOCSP(s *AdminSettings) {
 	if !s.OCSPSettingsSaved {
 		return
 	}
-	setOCSPDesiredAdmin(s.OCSPCheckEnabled, s.OCSPSettingsGeneration)
+	setOCSPDesiredAdmin(s.OCSPCheckEnabled, s.OCSPSettingsGeneration, s.OCSPSettingsWriteID)
 	ocspApplyRuntime(s.OCSPCheckEnabled)
 }
 
@@ -852,6 +1149,7 @@ func snapshotOCSPDesired(s *AdminSettings, target *ocspDesiredState) {
 	s.OCSPSettingsSaved = true
 	s.OCSPCheckEnabled = d.enabled
 	s.OCSPSettingsGeneration = d.generation
+	s.OCSPSettingsWriteID = d.writeID
 }
 
 // ── mTLS client-cert bounded reason ─────────────────────────────────────────

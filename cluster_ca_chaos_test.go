@@ -874,6 +874,9 @@ func TestChaos50_ClusterRotationSurvivesInspectionCALoadFailure(t *testing.T) {
 		}
 	})
 	loadRootCA(rootCAStartupConfig{Path: caPath, Passphrase: "wrong-passphrase"}, ctx)
+	// The loop's first round waits for the certificate-lifecycle boot gate
+	// (FE-6B.0 correction round); stand in for the admin-settings slice.
+	releaseCertLifecycleBootGate()
 
 	if certMgr.Ready() {
 		t.Skip("inspection CA loaded despite a corrupt bundle — the premise of this gate no longer holds")

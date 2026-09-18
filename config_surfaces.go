@@ -459,6 +459,9 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "ocsp_settings_generation", Kind: kindMeta, Owner: "ocsp", AdminDurable: true,
 		Note:     "monotonic generation folded into the ocspRevision fence so an A→B→A toggle never returns to an earlier token",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "OCSPSettingsGeneration"}}},
+	{ID: "ocsp_settings_write_id", Kind: kindMeta, Owner: "ocsp", AdminDurable: true,
+		Note:     "per-target writer provenance (the operationId of the set that produced the posture), co-written atomically with it; attribution is by writer identity, never by content equality",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "OCSPSettingsWriteID"}}},
 
 	// Adaptive decryption-exclusion tunables (F10). AdminDurable-only — mirroring
 	// metrics_token / syslog_addr / yara_*: OFF export/import, OFF version-rollback,

@@ -41,10 +41,25 @@ intents are never evicted; a corrupt or unreadable file is fail-closed
   `409 operation_mismatch`.
 - `GET /api/ca/operations/{operationId}` (admin) is the authoritative lookup:
   `pending`, `committed`, `aborted` or `outcome_unknown`. A pending intent is
-  **settled by the lookup or at boot from the object's own evidence** — the
-  live CA or the bundle on disk carrying the candidate fingerprint, the
-  persisted UI certificate carrying the candidate digest, the durable OCSP
-  posture at the intent's generation — never from a guess.
+  **settled by the lookup, at boot, or by the next writer of the same object
+  before it writes** (§8) from the object's own evidence — the live CA or the
+  bundle on disk carrying the candidate fingerprint, the persisted UI
+  certificate carrying the candidate digest, the durable OCSP posture at the
+  intent's generation naming the intent as its writer — never from a guess.
+  A recovered commit carries the **complete action-bound `result`** the
+  client would have received (rotation: `rotated`, `ca`, `previous`; import:
+  `imported`, `target`, `ca`, `previous`; UI replace/delete: `replaced` /
+  `deleted`, `activation`, `uiCert`, `candidate`; OCSP: `ok`, `enabled`,
+  `durable`, `revision`, `desired`, `runtime`), rebuilt from the non-secret
+  facts recorded with the intent.
+- A refusal is **terminal only once it is durable**: `500 persist_failed` is
+  answered only after the operation's aborted record landed. If that record
+  cannot be written, the answer is the non-terminal `500 outcome_unknown`
+  with `current.detail: refusal_not_durable` and `current.state: pending` —
+  nothing was changed, the intent stays pending, and the next settlement
+  records the refusal (`code: persist_failed` in the same process,
+  `reconciled_absent` after a restart). A repeat of the same operationId
+  then answers `409 operation_aborted` and executes nothing.
 - The success audit (`ca.rotate`, `ca.import`, `cert.ui.replace`,
   `cert.ui.delete`, `ocsp.set`) is **operation-keyed and emitted exactly once
   after the durable terminal record**. A refused, aborted or ambiguous
@@ -144,3 +159,37 @@ the CA bundle is archived (Tier 1), the UI pair and the operation ledger are
 not, the OCSP posture travels inside the sanitized settings file, none of them
 is on the config-version rollback surface, and a pre-FE-6B.0 binary ignores
 the new settings keys and the ledger.
+
+## 8. Who may change a certificate object, and in which order
+
+Every writer of a lifecycle target — the admin handlers, the automatic CA
+rotation round and the CA recovery loop — runs under one boundary
+(`certOpsMu`, then `caMutationMu` for the CA) and **settles every pending
+intent on that target durably before it writes**. Current content proves an
+operation's commit only while nobody has written the object since, so the
+settlement happens first, and a competitor is refused (`503
+operation_unsettled`, `current.reason` a bounded ledger class) or deferred
+(rotation: the round is skipped and retried at the next check; recovery:
+the attempt is retried by the campaign) when a settlement cannot be made
+durable — nothing is written. Consequences an operator can rely on:
+
+- an operation that committed but could not record its terminal state stays
+  `committed` — exactly once, with its success audit — even after a later
+  rotation, import or replace changed the object;
+- an operation that never wrote is never credited with a later writer's
+  identical content or with the object's absence;
+- the OCSP posture in `admin_settings.json` records the operationId that
+  wrote it (`ocsp_settings_write_id`) in the same atomic write; a posture
+  written by anyone else is a refusal for the intent, and a posture without a
+  writer is unproven;
+- while the operation ledger is corrupt, unreadable or unwritable, no writer
+  changes a certificate object — the automatic rotation round logs one line
+  per check and waits; repair the ledger (or move it aside to start empty)
+  and restart.
+
+**Boot order is explicit.** The auto-rotation loop's first round waits for
+the certificate-lifecycle boot gate; `LoadAdminSettings` reconciles the
+operation ledger on every load path (missing, unreadable, quarantined or
+readable settings file) and releases the gate afterwards. A pending intent is
+therefore classified before anything can replace its evidence, whatever the
+startup timing.
