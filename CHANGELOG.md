@@ -9,6 +9,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- An ordinary password change silently destroyed the account's TOTP second
+  factor (SEC-TOTP-1 / RISK-029). `apiAuthLogin` refuses to issue a session for
+  an enrolled account until `verifyLoginTOTP` accepts a code, so the enrolment
+  is a real second factor whose purpose is to survive a password compromise —
+  but `Config.SetUIUser` and `Config.SetAuth` assigned a freshly-built
+  `uiAdminUser` record over the stored one, so every credential write dropped
+  `totpSecret`, `backupCodes` and `totpLastCounter`. The removal was durable
+  (the next roster save persisted it), carried no audit entry naming the
+  de-enrolment, gave the account holder no signal, and required no proof of
+  possession of the authenticator. Whoever held the current password could
+  therefore permanently remove the control that outranks it, turning a
+  temporary session or credential compromise into durable password-only access
+  to the admin plane. Reachable from `POST /api/auth/change-password` (any
+  principal from viewer up, for its own account), `POST /api/auth/users`
+  (admin, any account) and `POST /api/settings/auth`. Resetting
+  `totpLastCounter` to zero was a second defect on the same line: it reopens
+  the one-time-password replay window (RFC 6238 §5.2) that the restore path
+  refuses to reopen without `--allow-counter-rollback`. Every credential write
+  now goes through one constructor that carries the enrolment across;
+  de-enrolment stays the job of the explicit `ClearTOTP` primitive. The
+  `--reset-password` break-glass keeps its outcome — an operator who lost the
+  authenticator as well as the password depends on it — but now clears
+  deliberately and prints that the account became single-factor. The replay
+  counter is part of the enrolment, not a separate durable fact: `ClearTOTP`
+  now clears it too, and `SetTOTPSecret` resets it when the secret changes
+  (but not when backup codes are re-issued for the same secret, which would
+  reopen the replay window for a live secret). Without that, the counter
+  outlived de-enrolment and refused the re-enrolment the break-glass warning
+  instructs the operator to perform — it had been zeroed only as a side effect
+  of the record replacement this change removes.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
