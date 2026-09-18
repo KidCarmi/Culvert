@@ -2804,10 +2804,19 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **14 mutations, 14 caught, 0 survived, 0 skipped**,
-measured on the closing head. M14 is the anti-vacuity mutation: a constant-false resolver passes
-every negative gate while making the First Canary permanently impossible, and is rejected by a
-POSITIVE control rather than by a negative.
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **CAMPAIGN_RESULT**, measured on
+the closing head. M14 is the anti-vacuity mutation: a constant-false resolver passes every negative
+gate while making the First Canary permanently impossible, and is rejected by a POSITIVE control
+rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
+`mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
+they are caught by the PRE-EXISTING
+`TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall`, whose field list is derived
+from the struct — so the new row was covered at both sites the moment it was declared.
+
+> A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
+> change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
+> rather than caught: the mutation left a variable unused, the package did not build, and no gate
+> ran. A build failure proves nothing, so the mutation was corrected to compile and re-measured.
 
 ## §26 Final verdict
 

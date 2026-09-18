@@ -32,6 +32,8 @@
 #   M12  readiness consumes the POLICY fact, ignoring the authoritative inventory
 #   M13  the readiness row is hard-coded true at the wiring step
 #   M14  the resolver is constant-false (anti-vacuity: the positive control must fail)
+#   M15  the transition commit forwards the wrong probe field
+#   M16  the restart reconcile forwards the wrong probe field
 #
 # M14 is the anti-vacuity mutation §13 requires. A resolver returning constant false passes every
 # negative gate above while making the First Canary permanently impossible, so the campaign is
@@ -186,6 +188,7 @@ PREFLIGHT=mcp_canary_preflight.go
 RUN=internal/mcp/execution/run.go
 FINGERPRINT=internal/mcp/catalog/fingerprint.go
 DISCOVERY=internal/mcp/execution/discovery.go
+ROLLOUT=mcp_rollout.go
 
 # ── the three authoritative layers ────────────────────────────────────────────
 
@@ -292,6 +295,22 @@ run_mutation M13 \
   'the readiness row is hard-coded true at the wiring step' \
   'TestCredWall_ReadinessConsumesTheResolvedFactNotALiteral' . "$PREFLIGHT" \
   's/FirstCanaryCredentialFree: exact\.CredentialFree/FirstCanaryCredentialFree: true/'
+
+# M15 — THE TRANSITION COMMIT DROPS THE FACT. The commit path builds its own
+# CanaryActivationInput; forwarding a different probe field there discards the credential verdict
+# while every behavioural gate — which calls the resolver directly — keeps passing.
+run_mutation M15 \
+  'the transition commit forwards the wrong probe field' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' . "$ROLLOUT" \
+  's/FirstCanaryCredentialFree: ai\.FirstCanaryCredentialFree,\n\t\t\tNow:/FirstCanaryCredentialFree: ai.ServerUsable,\n\t\t\tNow:/'
+
+# M16 — THE RESTART RECONCILE DROPS THE FACT. Same defect at the other call site: a node that
+# restarts into a Canary re-derives readiness there, so a discarded verdict re-arms an activation
+# whose credential requirement reappeared while the node was down.
+run_mutation M16 \
+  'the restart reconcile forwards the wrong probe field' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' . "$ROLLOUT" \
+  's/FirstCanaryCredentialFree: ai\.FirstCanaryCredentialFree,\n\t\t\t\t\tNow:/FirstCanaryCredentialFree: ai.ServerUsable,\n\t\t\t\t\tNow:/'
 
 # ── anti-vacuity ──────────────────────────────────────────────────────────────
 
