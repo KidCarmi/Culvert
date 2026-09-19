@@ -467,6 +467,65 @@ export const OP_COMMITTED = {
   },
 };
 
+/** FE-6B.1 correction round 2 — committed records of the other actions, each
+ * exactly what the authoritative builder emits (certificate_operations.go
+ * caOperationResult / uiCertOperationResult), so a RED row can change ONE
+ * fact and expect the whole record to be refused. */
+export const OP_ROTATE_COMMITTED = {
+  ...OP_BASE,
+  action: "ca.rotate",
+  state: "committed",
+  audited: true,
+  finishedAt: "2026-09-18T10:00:02Z",
+  committedRevision: `car1:${HEX64_B}`,
+  result: {
+    rotated: true,
+    persisted: true,
+    operationId: OP_ID,
+    action: "ca.rotate",
+    scope: "node-local",
+    ca: {
+      ready: true,
+      revision: `car1:${HEX64_B}`,
+      fingerprint: colonForm(HEX64_B),
+    },
+    previous: { fingerprint: colonForm(HEX64), revision: `car1:${HEX64}` },
+  },
+};
+
+export const OP_UI_REPLACE_COMMITTED = {
+  operationId: OP_ID,
+  state: "committed",
+  action: "cert.ui.replace",
+  actor: ACTOR,
+  target: "ui_cert",
+  fence: "uic1:none",
+  candidateFingerprint: HEX64_B,
+  startedAt: "2026-09-18T10:00:00Z",
+  finishedAt: "2026-09-18T10:00:01Z",
+  audited: true,
+  committedRevision: `uic1:${HEX64_B}`,
+  result: {
+    replaced: true,
+    persisted: true,
+    activation: "restart_required",
+    target: "ui",
+    operationId: OP_ID,
+    action: "cert.ui.replace",
+    scope: "node-local",
+    uiCert: UI_PERSISTED_NOT_ACTIVE,
+    candidate: {
+      fingerprint: UI_FP,
+      subject: "ui.example",
+      issuer: "ui.example",
+      notBefore: "2026-09-01T00:00:00Z",
+      notAfter: "2027-09-01T00:00:00Z",
+      dnsNames: ["ui.example"],
+      chainLength: 1,
+    },
+  },
+};
+
 export const OP_COMMITTED_SETTLED = {
   ...OP_COMMITTED,
   code: "lookup_committed",
@@ -527,7 +586,15 @@ export const OP_UI_DELETE_COMMITTED = {
   finishedAt: "2026-09-18T10:00:01Z",
   audited: true,
   committedRevision: "uic1:none",
-  result: { deleted: true, cleanup: "complete", uiCert: UI_ABSENT },
+  // FE-6B.1 correction round 2, recorded fixture correction: the frozen
+  // UICertDeleteResult REQUIRES `target: ui` and the builder always emits
+  // it; the original fixture omitted it.
+  result: {
+    deleted: true,
+    target: "ui",
+    cleanup: "complete",
+    uiCert: UI_ABSENT,
+  },
 };
 
 export function okJSON(body: unknown, status = 200): Promise<Response> {

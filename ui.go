@@ -292,6 +292,13 @@ func serveAdminUIWithRetry(srv *http.Server, port int, certFile, keyFile string,
 // makes a rotation that briefly leaves the pair unreadable self-healing: the
 // attempt that runs after the rotation completes picks up the new material with
 // no restart.
+// adminUIBeforeServeHook is a TEST SEAM (FE-6B.1 correction round 2): it runs
+// after the served identity is recorded and immediately before the serve
+// call, so a test can change the pair files at exactly that instant and
+// compare what the appliance publishes with what a TLS client receives. nil
+// in production.
+var adminUIBeforeServeHook func()
+
 func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	// Load the operator-supplied pair BEFORE binding, for two reasons.
 	//
@@ -347,6 +354,9 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	// be asserted between a serve ending and the next observed bind.
 	recordAdminListenerServing(adminListenerPostureFor(certFile, customTLS, srv.TLSConfig != nil), servedLeaf)
 	defer recordAdminListenerLost()
+	if adminUIBeforeServeHook != nil {
+		adminUIBeforeServeHook()
+	}
 
 	// Serve closes ln on return; the extra Close is a deterministic backstop for
 	// the ServeTLS path, which can return a certificate error without closing
