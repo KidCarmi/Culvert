@@ -439,26 +439,29 @@ run_mutation M22 \
   'TestCredWall_EveryClaimedSurfaceIsScanned' . "$READINESS" \
   's/only stops the next FULL ACTIVATION PREFLIGHT admitting an experiment whose every call/only stops a node reporting Ready for an experiment whose every call/'
 
-# M23 — THE EXEMPTION BECOMES A HOLE. nodeReadyIndependence exists so the CORRECTED wording ("node
-# status can still report Ready") is not flagged alongside the defect it corrects. An exemption
-# that also swallowed the defect would leave the wall green while the claim came back, which is a
-# hole with a reason attached — the shape this campaign exists to reject. Broadening it to any
-# mention of "report ... ready" is the realistic way that happens.
+# M23 — THE EXEMPTION BECOMES A HOLE. nodeReadyIndependence exists so the CORRECTED wording
+# ("node status can still report Ready") is not flagged alongside the defect it corrects. Its first
+# form matched any "still <verb> ... ready", and Codex round 6 showed that swallows ordinary
+# negated documentation: "This activation prerequisite PREVENTS the node from STILL REPORTING
+# Ready" asserts exactly the forbidden claim and was exempted. This mutation restores that broad
+# form.
 run_mutation M23 \
-  "the corrected-wording exemption is broadened until it swallows the defect" \
+  "the corrected-wording exemption is broadened until it swallows a negated claim" \
   'TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect' . "$CREDMATRIX" \
-  's{\\bstill\\s\+}{\\b(still\\s+)?}'
+  's/\\bnode status can still\\s\+/\\bstill\\s+/'
 
-# M24 — THE QUOTATION RULE BECOMES A WHOLE-LINE PASS. promiseOutsideQuotes lets the ledger QUOTE
-# the false claims it documents, and its entire safety argument is that it is NARROWER than an
-# allowlist entry: it strips the quoted span and re-tests the remainder, so a claim ASSERTED beside
-# a quotation is still caught. Widening it to skip any line that contains a quotation turns it into
-# the whole-line permission it claims not to be — and §25d is dense with quotations, so that hands
-# the ledger a standing exemption.
+
+# M24 — A CLAIM INSIDE QUOTES STOPS BEING A CLAIM. An earlier wall stripped every quoted span
+# before testing a line. In Markdown that was meant to let the ledger cite the claims it documents;
+# in GO SOURCE "quoted span" means STRING LITERAL, so it silently exempted the contents of every
+# error message, log line and test-failure string in the repository — three real lines among them.
+# The rule is gone and those lines are named in the allowlist instead. This mutation reintroduces
+# "quoted means cited" in the reachability predicate, which strands every quoted entry.
 run_mutation M24 \
-  "the quotation rule is widened into a whole-line exemption" \
-  'TestCredWall_QuotationRuleDoesNotExemptAnAssertionBesideIt' . "$CREDMATRIX" \
-  's/return nodeReadyPromise\.MatchString\(quotedSpan\.ReplaceAllString\(line, ""\)\)/return !quotedSpan.MatchString(line) \&\& nodeReadyPromise.MatchString(line)/'
+  "quoted text is treated as citation again, stranding the allowlist entries that need it" \
+  'TestCredWall_AllowlistIsNotStale' . "$CREDMATRIX" \
+  's/if !nodeReadyPromise\.MatchString\(line\) \|\| nodeReadyIndependence\.MatchString\(line\) \{\n\t\t\tcontinue/if !nodeReadyPromise.MatchString(line) || nodeReadyIndependence.MatchString(line) || strings.Contains(line, "\\"") {\n\t\t\tcontinue/'
+
 
 # M25 — A PERMISSION NOTHING EXERCISES. The allowlist staleness check originally asked only
 # whether an entry's needle still appeared in the file. That cannot see an entry whose every line

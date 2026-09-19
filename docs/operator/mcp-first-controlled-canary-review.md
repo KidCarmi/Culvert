@@ -2839,8 +2839,9 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 25 mutations, **25 caught,
-0 survived, 0 skipped**, measured on `2406423b` from a baseline the campaign verified itself.
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 25 mutations,
+**CAMPAIGN_RESULT_PENDING**. (M23 and M24 were REPOINTED for the round-6 findings, so the previous
+25/0/0 on `2406423b` describes a campaign that no longer exists.)
 
 > **The previously recorded score here — "21 caught, 0 survived, 0 skipped, measured on
 > `5d0e8055`" — was VOID, and the way it was void is the most important thing in this section.**
@@ -2964,9 +2965,16 @@ Asking the round-5 question *"is there a seventh?"* against the whole repository
 against that list found one immediately: `mcp_canary_policy_permit.go`, ROOT PRODUCTION SOURCE,
 carrying the same sentence as `readiness.go` — a file no version of the wall had ever read. So the
 scan is now INVERTED: it walks every Go and Markdown file in the repository and names its
-exceptions (`nodeReadyScanExcluded`, currently one entry — the wall's own file, which defines the
-matcher). A new file is covered the moment it exists. Campaign scripts are out of scope by
-extension, because a mutation payload contains the claim BY CONSTRUCTION.
+exceptions — `nodeReadyScanExcluded` (one entry: the wall's own file, which defines the matcher)
+and `nodeReadyScanExcludedDirs` (`.git`, `node_modules`). A new file is covered the moment it
+exists. Campaign scripts are out of scope by extension, because a mutation payload contains the
+claim BY CONSTRUCTION.
+
+The DIRECTORY axis was itself an unrecorded gap for one round. The first inverted scan also skipped
+`frontend`, `dist` and `testdata` and wrote none of them down, while this paragraph claimed every
+Go and Markdown file was covered — the same overclaim, on the axis introduced to close it, invisible
+to every staleness check because nothing represented it. Codex round 6 found it. Those three are now
+SCANNED (2,555 files), and the two that remain excluded are named with a reason each.
 
 The allowlist got the same treatment for the same reason. `TestCredWall_AllowlistIsNotStale` used
 to ask whether an entry's needle still appeared in the file; it now asks whether the scan REACHES
@@ -2976,6 +2984,26 @@ session, made unreachable by the quotation rule written just after it. Present i
 The P1 of that round was separate and is recorded with the campaign score above: the wall was RED
 on the unmodified head, so the recorded 21/0/0 measured nothing. That is now a campaign
 precondition rather than a thing a reviewer has to notice.
+
+**Round 6 found three more, and the second was larger than reported.** All three landed on
+mechanisms built during round 5, which is what a review is for.
+
+1. **The `still` exemption swallowed a negated claim.** *"This activation prerequisite PREVENTS the
+   node from STILL REPORTING Ready"* matched both the promise pattern and the exemption, so the
+   scan skipped it. The residual had been recorded here as contrived; it was one rephrasing away
+   from ordinary documentation. The exemption now anchors on the full corrective subject
+   (*"node status can still …"*), which is self-limiting: a sentence containing it asserts the node
+   surface is UNAFFECTED.
+2. **A quoted claim is still a claim — and in Go, "quoted" means STRING LITERAL.** Codex reported
+   the scare-quote case (subject outside the quotes, predicate inside). Measuring which lines the
+   rule actually exempted found six, and **three were not citations at all**: an `errors.New`, a
+   `t.Fatal` and a `t.Fatalf`. The rule was exempting the contents of every error message, log line
+   and test-failure string in the repository — so a false claim shipped to an operator in an error
+   string was invisible to the wall. No syntactic rule can separate citing a claim from asserting
+   one, so there is no general rule any more: the ledger's three quotations and the three genuine
+   node-level Go strings are each named in the allowlist with a reason, kept honest by the
+   reachability check.
+3. **The directory axis, above.**
 
 **M25 SURVIVED its first run, and that is the most useful result of the round.** The mutation
 weakens the allowlist staleness check from REACHED back to merely present. With every entry
