@@ -24,12 +24,16 @@ const (
 	srcGateProbeCIDR = "203.0.113.0/24" // TEST-NET-3
 	srcGateProbeIP   = "203.0.113.7"
 
-	// srcGateDecoyCIDR is DISJOINT from srcGateProbeCIDR, and srcGateDecoyIP
-	// sits inside the decoy and outside the probe network. The pair is what
-	// lets TestBenchGate_PolicySourceCIDRUsesPrefix tell the two matchers
-	// apart by the verdict they produce.
-	srcGateDecoyCIDR = "198.51.100.0/24" // TEST-NET-2
-	srcGateDecoyIP   = "198.51.100.7"
+	// The two decoy networks are DISJOINT from srcGateProbeCIDR and from each
+	// other, each with an address inside it and outside the other two. They are
+	// what lets TestBenchGate_PolicySourceCIDRUsesPrefix tell the THREE source
+	// matchers apart by the verdict they produce: srcPrefix keeps the probe
+	// network, srcIPNet is pointed at the IPNet decoy, and the SourceIP string
+	// every re-parsing path would read is pointed at the string decoy.
+	srcGateIPNetDecoyCIDR  = "198.51.100.0/24" // TEST-NET-2
+	srcGateIPNetDecoyIP    = "198.51.100.7"
+	srcGateStringDecoyCIDR = "192.0.2.0/24" // TEST-NET-1
+	srcGateStringDecoyIP   = "192.0.2.7"
 
 	// srcGateProbeHost is the destination every gate Evaluate()s against. The
 	// two rulebases relate to it DELIBERATELY oppositely: buildSrcMatchStore's
@@ -147,11 +151,17 @@ func buildSrcMatchStore(t *testing.T) *PolicyStore {
 //     differential test uses as its correctness oracle — so a passing gate can
 //     never mean "the source check stopped happening", which is the coupling
 //     the ratio form also carried.
-//  3. The matcher must DECIDE with srcPrefix. The published rule's srcIPNet is
-//     then pointed at a DISJOINT network, so the two precomputes disagree, and
-//     the real scan is run through ps.Evaluate: the probe address is inside
-//     srcPrefix only and the decoy address inside srcIPNet only, so each
-//     verdict names which matcher ran.
+//  3. The matcher must DECIDE with srcPrefix. There are THREE sources a source
+//     check could read — srcPrefix, srcIPNet, and the SourceIP string any
+//     re-parsing path would use — so after publication the latter two are
+//     pointed at networks disjoint from the prefix AND from each other, and the
+//     real scan is run through ps.Evaluate. One address sits in each, so every
+//     verdict names the source that decided. Giving the string its own network
+//     is what catches a per-rule netip.ParsePrefix: it agrees with srcPrefix on
+//     every address while reintroducing exactly the per-rule parse the
+//     precompute removed, and it is allocation-free, so neither a two-way
+//     discriminator nor the alloc gate beside it would see it (Codex review,
+//     PR #1431).
 //
 // The old -short skip is gone with the timing loops: the gate is now a handful
 // of map-free comparisons, so there is nothing left to skip. Do not re-add it.
@@ -188,7 +198,8 @@ func TestBenchGate_PolicySourceCIDRUsesPrefix(t *testing.T) {
 	// (2) Same verdicts as the pre-change matcher, on the CONSISTENT rule.
 	var sawMatch, sawMiss bool
 	for _, probe := range []string{
-		srcGateProbeIP, srcGateDecoyIP, "203.0.113.0", "203.0.113.255",
+		srcGateProbeIP, srcGateIPNetDecoyIP, srcGateStringDecoyIP,
+		"203.0.113.0", "203.0.113.255",
 		"10.0.0.1", "::ffff:203.0.113.7", "fe80::1", "not-an-ip", "",
 	} {
 		want := legacySourceIPMatch(rule, probe, net.ParseIP(probe))
@@ -207,13 +218,18 @@ func TestBenchGate_PolicySourceCIDRUsesPrefix(t *testing.T) {
 			"a matcher stuck on one answer would satisfy step 2 vacuously", sawMatch, sawMiss)
 	}
 
-	// (3) Point srcIPNet at a disjoint network and run the REAL scan: whichever
-	// precompute decided is now named by the verdict.
-	_, decoy, err := net.ParseCIDR(srcGateDecoyCIDR)
+	// (3) Point the two NON-prefix sources at disjoint networks and run the REAL
+	// scan: whichever source decided is now named by the verdict. All three must
+	// differ — srcPrefix keeps the probe network, srcIPNet takes one decoy, and
+	// the SourceIP string takes the other, because a path that re-parses
+	// SourceIP per rule would otherwise agree with srcPrefix on every address
+	// and pass unnoticed.
+	_, ipnetDecoy, err := net.ParseCIDR(srcGateIPNetDecoyCIDR)
 	if err != nil {
-		t.Fatalf("parsing the decoy network %q: %v", srcGateDecoyCIDR, err)
+		t.Fatalf("parsing the IPNet decoy network %q: %v", srcGateIPNetDecoyCIDR, err)
 	}
-	rule.srcIPNet = decoy
+	rule.srcIPNet = ipnetDecoy
+	rule.SourceIP = srcGateStringDecoyCIDR
 	// The discriminator rests entirely on the scan evaluating THIS object:
 	// evaluationSnapshot hands out the published pointers, so it does. A
 	// snapshot that instead re-derived the precompute, or handed back one
@@ -222,19 +238,27 @@ func TestBenchGate_PolicySourceCIDRUsesPrefix(t *testing.T) {
 	// would quietly stop proving anything. (A copy taken AFTER this line is
 	// harmless: it carries the mutation. Verified by injecting both shapes.)
 	// Pin the assumption rather than rely on it.
-	if got := ps.evaluationSnapshot()[0]; got.srcIPNet != decoy {
-		t.Fatalf("the scan does not observe this test's srcIPNet mutation (sees %v, set %v) — "+
-			"the assertions below would pass whichever matcher decided, i.e. prove nothing", got.srcIPNet, decoy)
+	if got := ps.evaluationSnapshot()[0]; got.srcIPNet != ipnetDecoy || got.SourceIP != srcGateStringDecoyCIDR {
+		t.Fatalf("the scan does not observe this test's mutations (srcIPNet=%v SourceIP=%q; set %v / %q) — "+
+			"the assertions below would pass whichever source decided, i.e. prove nothing",
+			got.srcIPNet, got.SourceIP, ipnetDecoy, srcGateStringDecoyCIDR)
 	}
 
 	if m := ps.Evaluate(srcGateProbeIP, "", "unauth", srcGateProbeHost, nil); m == nil {
 		t.Errorf("client %s matched no rule although it is inside the rule's srcPrefix (%s) — "+
-			"the scan decided with srcIPNet (%s), so the srcPrefix fast path is bypassed",
-			srcGateProbeIP, rule.srcPrefix, decoy)
+			"the scan decided with srcIPNet (%s) or by re-parsing SourceIP (%s), "+
+			"so the srcPrefix fast path is bypassed",
+			srcGateProbeIP, rule.srcPrefix, ipnetDecoy, rule.SourceIP)
 	}
-	if m := ps.Evaluate(srcGateDecoyIP, "", "unauth", srcGateProbeHost, nil); m != nil {
+	if m := ps.Evaluate(srcGateIPNetDecoyIP, "", "unauth", srcGateProbeHost, nil); m != nil {
 		t.Errorf("client %s matched rule %q although only srcIPNet (%s) contains it, not srcPrefix (%s) — "+
 			"the scan decided with srcIPNet, so the srcPrefix fast path is bypassed",
-			srcGateDecoyIP, m.Rule.Name, decoy, rule.srcPrefix)
+			srcGateIPNetDecoyIP, m.Rule.Name, ipnetDecoy, rule.srcPrefix)
+	}
+	if m := ps.Evaluate(srcGateStringDecoyIP, "", "unauth", srcGateProbeHost, nil); m != nil {
+		t.Errorf("client %s matched rule %q although only the SourceIP string (%s) contains it, "+
+			"not srcPrefix (%s) — the scan RE-PARSED SourceIP per rule, which is the per-rule "+
+			"parse the precompute exists to remove (and a zero-alloc re-parse the alloc gate cannot see)",
+			srcGateStringDecoyIP, m.Rule.Name, rule.SourceIP, rule.srcPrefix)
 	}
 }
