@@ -3014,6 +3014,13 @@ precondition rather than a thing a reviewer has to notice.
 3. **The file count was wrong by one, and measured with the observer in the sample** — see above.
 4. **The quotation-permission count understated itself** — see above.
 
+**M24 then scored SKIPPED for the same root cause, one mutation later.** Its perl still matched a
+line mentioning `nodeReadyIndependence` — deleted in this very round — so it changed nothing and
+proved nothing. M23 had been repointed for that deletion and M24 had not, which is the recurring
+shape again at the smallest possible scale: **a change that removes a symbol has to be carried to
+everything naming it, and a campaign's own payloads are part of the tree.** SKIPPED is deliberately
+not CAUGHT for exactly this reason — a mutation that does not apply is a gate nobody ran.
+
 **M23 was NOT PROVEN, then SURVIVED, and the campaign found what review had not.** Its first
 form replaced the span-containment test with `if true {`, which orphaned two loop variables and did
 not compile — the M10 verdict, recorded in this very section, walked into again: a mutation that

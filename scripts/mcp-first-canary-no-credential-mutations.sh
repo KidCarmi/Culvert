@@ -458,11 +458,16 @@ run_mutation M23 \
 # in GO SOURCE "quoted span" means STRING LITERAL, so it silently exempted the contents of every
 # error message, log line and test-failure string in the repository — three real lines among them.
 # The rule is gone and those lines are named in the allowlist instead. This mutation reintroduces
-# "quoted means cited" in the reachability predicate, which strands every quoted entry.
+# "quoted means cited" in the reachability predicate, which strands every entry that needs it.
+#
+# Repointed in round 7: the previous form matched a line mentioning nodeReadyIndependence, which was
+# DELETED that round, so the mutation stopped applying and scored SKIPPED — proving nothing, which
+# is exactly why SKIPPED is not CAUGHT.
 run_mutation M24 \
   "quoted text is treated as citation again, stranding the allowlist entries that need it" \
   'TestCredWall_AllowlistIsNotStale' . "$CREDMATRIX" \
-  's/if !nodeReadyPromise\.MatchString\(line\) \|\| nodeReadyIndependence\.MatchString\(line\) \{\n\t\t\tcontinue/if !nodeReadyPromise.MatchString(line) || nodeReadyIndependence.MatchString(line) || strings.Contains(line, "\\"") {\n\t\t\tcontinue/'
+  's/if needleCoversAClaim\(line, needle\) \{/if strings.Contains(line, "\\"") {\n\t\t\tcontinue\n\t\t}\n\t\tif needleCoversAClaim(line, needle) {/'
+
 
 
 # M25 — A PERMISSION NOTHING EXERCISES. The allowlist staleness check originally asked only
