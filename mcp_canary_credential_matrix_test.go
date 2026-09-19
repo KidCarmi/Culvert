@@ -816,6 +816,14 @@ func TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration(t *testing.T) {
 	for _, n := range seen {
 		enumerated[n] = true
 	}
+	if bad := roundsUnparsedConnectors(doc); len(bad) > 0 {
+		t.Errorf("§25d joins round numbers with connector(s) %q that the parser does not "+
+			"recognise, so the list is truncated there and a named round can go unchecked. "+
+			"Add the connector to roundPhrase (with a control case), or reword. This check "+
+			"exists because rounds 12, 13 and 14 were each one more form that truncated "+
+			"SILENTLY.", bad)
+	}
+
 	var unlisted []int
 	for _, n := range roundsNamedIn(doc) {
 		if !enumerated[n] {
@@ -875,10 +883,37 @@ func TestCredWall_LedgerStatesTheCampaignSize(t *testing.T) {
 var (
 	// A separator is a SEQUENCE of tokens, not one: an Oxford comma writes `, and`, and a parser
 	// that accepts only a single token stops at the comma. Codex round 13.
-	roundPhrase = regexp.MustCompile(`(?i)\brounds?\s+(\d+(?:(?:\s*(?:,|and|to|\x{2013}|\x{2014}|-)\s*)+\d+)*)`)
-	roundRange  = regexp.MustCompile(`(\d+)\s*(?:[\x{2013}\x{2014}-]|\bto\b)\s*(\d+)`)
-	roundNumber = regexp.MustCompile(`\d+`)
+	roundPhrase = regexp.MustCompile(`(?i)\brounds?\s+(\d+(?:(?:\s*(?:,|and|or|to|through|&|\x{2013}|\x{2014}|-)\s*)+\d+)*)`)
+	// An UNRECOGNISED connector joining two small numbers after `round(s)`. The parser would
+	// silently truncate the list there, so this makes it a loud failure instead -- see
+	// roundsNamedIn's note. The trailing number is bounded to two digits because round numbers in
+	// this ledger are small; that keeps ordinary prose like "round 9 in 2026" out of it.
+	roundDangling = regexp.MustCompile(`^[\s,]*([\pL&/+]{1,8})[\s,]*\d{1,2}\b`)
+	roundRange    = regexp.MustCompile(`(\d+)\s*(?:[\x{2013}\x{2014}-]|\bto\b|\bthrough\b)\s*(\d+)`)
+	roundNumber   = regexp.MustCompile(`\d+`)
 )
+
+// roundsUnparsedConnectors returns the connectors §25d uses between round numbers that the parser
+// does NOT recognise, so the caller can fail rather than under-report.
+//
+// This exists because rounds 12, 13 and 14 were each ONE more natural-language form -- plural,
+// then the Oxford comma, then a serial `or` -- and every one of them truncated the list SILENTLY,
+// which is the same defect three times with a different word in it. Adding a fourth token would
+// have invited a fifth round on `&` or `through` (both measured as silently truncating). The
+// treadmill ends by changing the failure MODE: an unknown connector is now a build failure that
+// names itself, so the next form is reported instead of quietly dropping a round.
+func roundsUnparsedConnectors(doc string) []string {
+	var out []string
+	for _, loc := range roundPhrase.FindAllStringIndex(doc, -1) {
+		if m := roundDangling.FindStringSubmatch(doc[loc[1]:]); m != nil {
+			if !slices.Contains(out, m[1]) {
+				out = append(out, m[1])
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 func roundsNamedIn(doc string) []int {
 	seen := map[int]bool{}
@@ -1405,6 +1440,10 @@ func TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses(t *testing.T) {
 		{"en dash range", "rounds 11–13 covered the apparatus", []int{11, 12, 13}},
 		{"hyphen range", "rounds 4-6 were about scope", []int{4, 5, 6}},
 		{"oxford comma", "rounds 7, 8, and 98 each found one", []int{7, 8, 98}},
+		{"serial or", "rounds 7, 8, or 98 each found one", []int{7, 8, 98}},
+		{"plain or", "rounds 7 or 98 found it", []int{7, 98}},
+		{"ampersand", "rounds 7 & 98 found it", []int{7, 98}},
+		{"through range", "rounds 5 through 7 were about scope", []int{5, 6, 7}},
 		{"comma list no and", "rounds 7, 8, 98 each found one", []int{7, 8, 98}},
 		{"to range", "rounds 5 to 7 were about scope", []int{5, 6, 7}},
 		{"several phrases", "round 2 and later round 9", []int{2, 9}},

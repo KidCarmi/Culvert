@@ -676,6 +676,23 @@ run_mutation M33 \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
   's/in rounds 7 and 8/in rounds 7, 8, and 97/'
 
+# M34/M35 close the SEPARATOR treadmill, and they are two different gates, not one twice.
+#
+# M34 is the serial-`or` form (Codex round 14) -- the third natural-language separator in three
+# rounds, after the plural `and` and the Oxford comma, each of which truncated the list SILENTLY.
+# M35 is the answer to that pattern: an UNRECOGNISED connector must now FAIL rather than truncate,
+# so the next form is reported instead of quietly dropping a round. M34 proves the parser reads the
+# form; M35 proves the parser SAYS SO when it cannot.
+run_mutation M34 \
+  "§25d names an unenumerated round after a serial OR" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/in rounds 7 and 8/in rounds 7, 8, or 97/'
+
+run_mutation M35 \
+  "§25d joins round numbers with a connector the parser cannot read" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/in rounds 7 and 8/in rounds 7 plus 97/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then

@@ -2839,8 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 33 mutations,
-**33 caught, 0 survived, 0 skipped, measured on `9f5717b1`**. A run that reaches its summary has
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 35 mutations,
+**CAMPAIGN_RESULT_PENDING**. A run that reaches its summary has
 necessarily passed `selfcheck_site_counter`, which refuses before anything else prints.
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
@@ -3181,8 +3181,14 @@ would not move, and a deleted entry would not shrink).
   one, which is the clearest demonstration available that it now reads the form.) Round 12's
   own rule, unapplied to itself: "comma list" and "comma list with a serial `and`" are different
   syntaxes. A separator is now a SEQUENCE, which is what `, and` is. Gated by M33.
+- **Round 14** — a serial `or` was a third separator the parser could not read, after the plural
+  `and` and the Oxford comma, and every one of the three truncated the list SILENTLY. Measured:
+  `or`, `&` and `through` all dropped everything after the first number. Adding a fourth token
+  would have invited a fifth round, so the FAILURE MODE changed instead: an unrecognised connector
+  between two round numbers is now a build failure that names the connector, and the next form is
+  reported rather than quietly dropping a round. Gated by M34 (the form) and M35 (the refusal).
 
-**13 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**14 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
 baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
@@ -3192,7 +3198,9 @@ the list it claimed to check (round 9), a guard whose counter could not fail bec
 expected the same answer (round 10), and a list and a total that agreed with each other while both
 understated the section they described (round 11), and a rule stated over several syntaxes that
 was only ever tested in one of them (round 12), and that same rule left unapplied to the rule
-itself one round later (round 13).
+itself one round later (round 13), and three separators in three rounds that each truncated a list
+without saying so (round 14, where the fix was to stop truncating silently rather than to learn a
+fourth word).
 
 The gates get stronger every round; what keeps failing is the accounting around them, so the
 discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no
