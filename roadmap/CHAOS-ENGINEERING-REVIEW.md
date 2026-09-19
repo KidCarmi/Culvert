@@ -95,6 +95,34 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-15 — CHAOS-66 sweep (the SIEM syslog feed under a collector that dies
+after startup).** Id claimed in this file before any code was written, per
+CHAOS-65's precedent; it did not move. The finding is not in the delivery
+engine — that is good, and nothing in it changed — but in what the engine could
+SAY. A collector that dies after a successful startup connect leaves
+`globalSyslog` non-nil forever, so `checkSyslogFeed`, the row whose own
+doc-comment says it exists to catch "configured but silently down", could only
+ever detect the BOOT failure: measured, **49 of 50 audit lines lost and the row
+still reading `ok: "remote syslog/SIEM forwarding is active"`**. Behind it,
+`Drops()` had exactly ONE reader in the tree — an admin-only JSON blob — so
+there was no metric, no `/healthz` field, no alert and no log line on the sink
+that carries the audit trail and the request log OFF the appliance. Third
+instance of one pattern (ST-8 for the local file, CL-21 for the cluster path);
+the sink that had neither was the one that leaves the node. Also: four
+unrelated faults sharing one counter (reachability vs capacity — different
+remediations), and a flat unjittered reconnect window aimed by a whole fleet at
+one recovering collector. Closed: WK-19/WK-20/WK-21/WK-23. Reported and NOT
+closed: **WK-22** — UDP, the DEFAULT transport, accepts every write to a dead
+collector (measured: 200 audit lines into the void, `Drops()` at zero), which no
+signal at this layer can detect; made honest with
+`culvert_syslog_delivery_confirmable 0`, a contract row that says in words that
+"active" means the socket is open, a startup warning and a runbook naming
+`tcp://` as the remedy. The process lesson, recorded because this subsystem had
+already been swept three times: *for every bounded best-effort sink, name the
+surface that reports its loss and the rule an operator would page on — and if
+the answer is a counter with one reader, the sink is silent.* See §36 and
+`docs/operator/siem-feed-health.md`.
+
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
 file as commit one, which is the remedy the header above reaches twice
@@ -1121,6 +1149,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-16 | **`ScanBody` stopped WAITING without stopping the WORK.** The abandoned scan goroutine held a ClamAV slot (1 of 4) and a copy of the body until the client's own 30 s timeout — 3x the budget that had already given up on it — unbounded in count and invisible in every surface. Four abandoned scans occupy every slot, pushing live requests onto WK-15's fail-open path: the failure sustains itself under load. Measured 30.006 s against a 150 ms deadline. | GAP → **CLOSED** (CHAOS-52: the budget is a context; cancellation reaches the dial, the conn deadline and a close-watcher; `culvert_scan_inflight`) | **H** | was: `internal/secscan/secscan.go` `ScanBody` `time.After`; now `context.WithTimeout` + `clamav.effectiveDeadline`/`watchCancel` — see §20 |
 | WK-17 | **The fail-closed scan-timeout refusal was cached with the CONTENT TTL** (1 h default), so seconds of scanner slowness blocked that exact object node-wide, for every user, for an hour after recovery — manual cache flush the only recourse. The ClamAV-error branch two lines above already refuses to cache for exactly this reason. | GAP → **CLOSED** (CHAOS-52: `hashcache.SetTTL` + `scanTimeoutCooldown` 30 s) | M | was: `internal/secscan/secscan.go` `ScanBody` timeout arm; now `SetTTL` — see §20 |
 | WK-18 | **An abandoned scan could overturn the fail-closed verdict.** On finishing, the abandoned goroutine wrote `Clean:true` over the refusal the user had just been served — a cached admission for the rest of the TTL, no counter, no log; whether an object was blocked or served was decided by a race. | GAP → **CLOSED** (CHAOS-52: `publishVerdict` tighten-only — a late BLOCK still publishes, a late CLEAN is discarded and counted; budget enforced from both sides so the `select` coin flip cannot launder an overrun) | **H** | was: `internal/secscan/secscan.go` `scanBodyInner` `cache.Set`; now `publishVerdict`/`noteLateCleanDiscarded` — see §20 |
+| WK-19 | **A SIEM collector that dies AFTER a successful startup connect is reported HEALTHY forever, while every audit and request record is dropped.** `checkSyslogFeed` keys on `globalSyslog == nil`, and the Writer nils only its own internal conn — the global stays non-nil for the life of the process and both address fields are unchanged — so the row could detect the BOOT failure and never the RUNTIME one, which is the common one (SIEM restart, firewall change, collector redeploy). The row's own doc-comment says it exists to distinguish "configured but silently down". Measured against the real binary: **49 of 50 audit lines lost, row still `ok: "remote syslog/SIEM forwarding is active"`.** | NEW → **CLOSED** (CHAOS-66: the runtime half in `syslog_health.go`, evaluated on read so the verdict can never latch stale; `syslog_feed` escalates warn→fail past a 60 s duration threshold) | **H** | was: `diagnostics.go` `checkSyslogFeed`; gate `TestChaos66_DeadCollectorIsNotReportedHealthy`; see §36 |
+| WK-20 | **SIEM delivery loss was invisible to every monitoring surface.** `Drops()` had exactly ONE reader in the tree — the admin-only `GET /api/syslog` JSON blob. No `/metrics` series, no `/healthz` field, no alert, and not one log line, on the sink carrying BOTH the audit trail and the request log OFF the appliance. Prometheus could not see SIEM loss under any circumstances. Third instance of one pattern: `internal/audit` closed it for the local file (ST-8), the DP→CP push queue for the cluster path (CL-21/CHAOS-61); the sink that had none of it was the one that leaves the node. CWE-778 / A09:2021. | NEW → **CLOSED** (CHAOS-66: `culvert_syslog_{up,degraded,failing_seconds,last_delivery_timestamp_seconds,drops_total{reason},delivery_confirmable,queue_capacity}`, a `/healthz syslogFeed` field, a rate-limited log pair and the fire-once `siem_feed_down` alert — all emitted ONLY when a target is configured) | **H** | was: `internal/syslog/syslog.go` `Drops()`, `ui_config.go:1820`; see §36 |
+| WK-21 | **One counter for four unrelated faults.** Collector-unreachable, write-failed, queue-overflow and post-Close drops were all `drops.Add(1)`. "The collector is unreachable" and "the collector is slower than this gateway's line rate" are different faults with different remediations — reachability vs capacity — and an operator was handed one number. CHAOS-65's rule (6b/6e): a counter an operator is told to act on is charged only from evidence supporting the specific claim its runbook makes. | NEW → **CLOSED** (CHAOS-66: bounded `DropReason` classes; only the two REACHABILITY classes open a failure episode — a full queue is a capacity fact, not evidence about the collector, pinned as a control) | M/H | was: `internal/syslog/syslog.go`; see §36 |
+| WK-22 | **UDP — the DEFAULT transport — cannot report loss at all, and every surface claimed otherwise.** A connected UDP socket to a nonexistent collector accepts every write: measured, `NewWriter` SUCCEEDS against a dead UDP collector and **200 audit lines go into the void with `Drops()` at zero**, no ICMP error surfacing on later sends. So the majority posture reported a healthy feed with maximum confidence and zero evidence. | NEW → **REPORTED, not closed** (CHAOS-66: unfixable at this layer — it is a property of UDP. Made HONEST instead: `culvert_syslog_delivery_confirmable 0`, a contract row that states in words that "active" means the socket is open rather than that the collector received anything, a once-at-startup WARNING, and a runbook that names `tcp://` as the remedy) | M | `internal/syslog/observability.go` `DeliveryConfirmable`; gate `TestChaos66_UDPReportsDeliveryUnconfirmable`; see §36 |
+| WK-23 | Reconnect suppression was a FLAT 5 s window with no jitter. A SIEM outage is a fleet event — every node's collector goes away at the same instant — so the whole estate retried in lockstep and met the recovering collector with one synchronised burst. | NEW → **CLOSED** (CHAOS-66: ±20% jitter re-drawn on every arming, the `feedsched`/HA-lease precedent; the DIRECTION of the bound is unchanged — it is still a rate limit on attempts) | L/M | `internal/syslog/observability.go` `jitteredReconnectWindow`; see §36 |
 | WK-14 | Release-catalog autoseed: stage → read-only verify+freshness+rollback → atomic swap with move-aside `.bak` restore-on-failure; fail-closed, no unsigned auto-download. | ✓ | — | `release_autoseed.go:49-122,100-116` |
 
 ---
@@ -6402,3 +6435,307 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The SIEM syslog feed under a collector that dies after startup
+
+*(Numbered CHAOS-66/§36 and, following CHAOS-65's precedent, the id was claimed
+in this file before any code was written. It did not move.)*
+
+### Executive summary
+
+Culvert forwards two records to the customer's SIEM over the syslog feed: the
+**admin audit trail** and the **request log**. The engine behind it is good —
+bounded queue, single drain goroutine owning the socket, write deadline,
+reconnect backoff, panic containment per line. Every one of those was added by
+an earlier sweep and none of them is changed here.
+
+What was missing is the other half of "best-effort": **the effort that failed
+was invisible.**
+
+Two findings, both reproduced against the real binary before any code changed.
+
+**(1) A collector that dies AFTER a successful startup connect is reported
+healthy forever.** `checkSyslogFeed` — the operator-contract row whose own
+doc-comment says it exists to distinguish *"configured but silently down"* —
+decides on `globalSyslog == nil || syslogConfigured != syslogConfiguredAddr`.
+The Writer nils only its own internal `conn`; the global stays non-nil for the
+life of the process and neither address field moves. So the row could detect
+the **boot** failure and structurally could not detect the **runtime** one —
+which is the common one. A SIEM restart, a firewall change, a collector
+redeploy all land there. Measured: **49 of 50 audit lines lost, row still
+`ok: "remote syslog/SIEM forwarding is active"`.**
+
+**(2) The loss reached no monitoring surface at all.** `Drops()` had exactly one
+reader in the whole tree: the admin-only `GET /api/syslog` JSON blob. No
+`/metrics` series, no `/healthz` field, no alert, and not one log line — on the
+sink that carries the compliance record **off** the appliance. Prometheus could
+not see SIEM loss under any circumstances.
+
+That is CWE-778 / A09:2021 and it is the **third instance of one pattern** in
+this register. `internal/audit` closed it for the local file (ST-8). The DP→CP
+audit push queue closed it for the cluster path (CL-21, CHAOS-61). Both notes
+say, in almost the same words, that a bounded best-effort sink must charge what
+it discards. The one sink that had neither a counter anyone reads nor a health
+verdict anyone can act on was the one whose whole job is to leave the node.
+
+### Why this domain, and why the verdict looked fine
+
+The same governance trap CA-6 recorded in §35, in a new place. The feed had
+been swept before — CHAOS-24 gave it panic containment, a later change made
+delivery async with a bounded queue and a drop counter — and each of those
+sweeps asked *"does a slow collector cost proxy latency?"* The answer was no,
+correctly, and the work stopped there. Nobody asked *"and when it drops, who
+finds out?"*
+
+The `Drops()` doc comment even says: *"delivery is otherwise
+silent-best-effort, so this is the only loss signal."* It was accurate. It was
+also the finding, sitting in the code as a sentence, for as long as the counter
+existed.
+
+### Failure scenarios
+
+| # | Scenario | Pre-fix behaviour | Post-fix behaviour |
+|---|---|---|---|
+| 1 | TCP collector restarts | Lines dropped silently; row `ok` | Episode opens, warn row, log line; recovers automatically on the first delivered line |
+| 2 | TCP collector down >60s | Same, indefinitely | `degraded`, fail row, `siem_feed_down` fires once |
+| 3 | Collector accepts, stops draining | Write deadline fires; drop counted, invisible | Charged `write_failed`; episode opens |
+| 4 | Gateway outruns collector | Queue overflow; drop counted, invisible | Charged `queue_full`; deliberately does NOT page as an outage — different remediation |
+| 5 | UDP collector never existed | `NewWriter` succeeds, 200 lines into the void, `Drops()==0`, row `ok` | Unchanged loss (unfixable), but `delivery_confirmable 0` + a row that says so + a startup warning |
+| 6 | Fleet-wide collector outage | Every node retries in lockstep at a flat 5 s | ±20% jitter, re-drawn per arming |
+| 7 | Idle gateway, healthy collector | n/a | Still healthy — see the control below |
+| 8 | Shutdown race | Drop counted, invisible | Charged `writer_closed`; benign, does not page |
+
+### Four rules the fix holds
+
+**(1) Degradation is a DURATION, and it is keyed on an OBSERVED FAILURE, never
+on silence.** The obvious metric is "time since the last successful delivery"
+and it is **wrong**: a gateway with no traffic sends no lines, so that clock
+advances with no fault present and every quiet appliance eventually pages. The
+engine arms `FailingSince` on an observed failure and clears it on an observed
+success, so an idle feed reports nothing in either direction. This is CHAOS-57's
+lesson — *the evidence must match the claim* — applied before it could be made
+again, and it is pinned as a control (`TestChaos66_IdleFeedIsNeverDegraded`
+fast-forwards the clock 24 hours over a silent, healthy feed).
+
+**(2) Recovery is declared on OBSERVED evidence only.** One line the transport
+accepted clears the episode. Elapsed time never does — a feed that stopped
+reporting failures by going quiet looks identical to a healthy one, the mistake
+`ca_health.go` and `storage_health.go` both name.
+
+**(3) Every series is emitted ONLY when a target is configured.** A
+`culvert_syslog_up 0` from the large majority of deployments — which forward to
+no SIEM at all — is indistinguishable from a broken feed, and the documented
+paging rule is `== 0`. The SOCKS5 / cluster-CA / DNS rule.
+
+**(4) The alert Detail carries a BOUNDED reason class**, never the collector
+address or a raw transport error. `Dispatch` dedups on `event + Detail`; an
+error string embeds the ephemeral local port, so a per-failure-unique Detail
+defeats the dedup window by construction and evicts real threat alerts from the
+500-entry retry queue — the WK-12/RS-5 defect. Pinned by a gate that asserts the
+collector's own address and port are absent from the Detail while a bounded
+class is present.
+
+### The structural property everything else rests on
+
+`s.mu` is held by the drain goroutine across the **whole** reconnect/backoff
+state machine: `writeTimeout` + dial + `writeTimeout`, about **15 seconds**
+against a collector that accepts and never drains. If any accessor the health
+plane reads took that mutex, a `/metrics` scrape or a `/healthz` probe would
+block for fifteen seconds **on precisely the fault it exists to report** —
+turning a SIEM outage into a monitoring outage.
+
+So every field added here is an atomic and every accessor is an atomic read.
+That is not a performance choice, it is the correctness of the plane: it must
+be readable when the delivery path is wedged, which is the only time anyone
+needs to read it. `TestObservability_AccessorsDoNotTakeTheDeliveryMutex` holds
+the lock and requires the accessors to answer anyway — structural, so a
+regression fails deterministically on any hardware, at any load, with or
+without `-race` (a ratio gate was rejected for the reason `connlimit`'s and the
+histogram's were: a gate that can flake gets muted). Verified failing by
+reintroducing a single `s.mu.Lock()` in one accessor.
+
+### The defect the fix itself introduced
+
+Caught in self-review, before the change left the branch, and recorded because
+the mechanism by which it was missed is more interesting than the bug.
+
+The new delivery observer was invoked **inline**, from `noteDeliverySuccess`
+and from the reachability branches of `noteDrop`. Both are reached from
+`deliverLine`, which holds `s.mu` across the entire reconnect/backoff state
+machine. So the observer — arbitrary caller code, in production a function that
+logs — ran with the delivery mutex held, and an observer doing something
+entirely ordinary (asking the Writer what format it is using, to put in the log
+line it is building) **deadlocked the drain goroutine permanently**, taking down
+all SIEM delivery for the life of the process. Proven with a probe before it was
+fixed; the first probe was itself wrong (a shared `done` channel is already
+closed on the second call and hides the deadlock), which is why the permanent
+gate makes a fresh channel per invocation and says so.
+
+**The invariant was already written down, for the observer right next to it.**
+`SetPanicObserver`'s comment says its callback *"runs AFTER deliverLine's own
+deferred mutex unlock has already fired during unwind, so it never needs
+`s.mu`"*. That is true — because a panic unwinds **through** the unlock. A
+normal return does not, so the same file, the same function and the same
+sentence gave the new observer no protection at all. The property that made the
+old one safe was incidental to panics, and it read like a general rule.
+
+The fix is structural rather than conventional: transitions are STAGED under the
+lock and flushed by a `defer` registered **before** the unlock defer, so LIFO
+ordering runs it strictly after. Documenting "observers must not take the mutex"
+would have been cheaper and wrong — the constraint is invisible at the call
+site and the failure mode is a permanently wedged delivery goroutine.
+`TestDeliveryObserver_NeverRunsUnderTheDeliveryMutex` pins it and was verified
+failing against the inline shape, on both transitions.
+
+**The lesson, which generalises past this file:** *when you add a second
+callback to a path that already has one, check what actually makes the first
+one safe.* Here the existing safety came from an unwind path, not from the
+structure the comment appeared to describe — so the comment was a correct
+statement about the old observer and a false guarantee for the new one.
+
+### The review round: two more defects in the fix (Codex, PR #1405)
+
+**P1 — the alert only fired if somebody happened to look, which is this sweep's
+own finding one level up.** The delivery observer fires once, at the START of an
+episode — before the threshold, so nothing is degraded yet — and every other
+evaluation hung off a `/metrics` scrape or a `/api/diagnostics` read. So a
+deployment that configured the `siem_feed_down` webhook but does not scrape
+Prometheus and does not have the admin UI open would have had its SIEM feed down
+indefinitely with the webhook never firing: **the paging surface depended on
+unrelated HTTP traffic.** Worse, the comment on `evaluateSyslogDegradation`
+claimed `/healthz` was one of the surfaces that drove it, and `/healthz` did not
+call it at all — the same class of false claim this section opens by describing.
+
+Closed by scheduling ONE evaluation at the threshold when an episode opens
+(`armSyslogDegradeCheck`), cancelled on recovery, plus honouring the `/healthz`
+read so the comment becomes true. The fire-once latch is unchanged, so a feed
+that stays down still pages exactly once, and a feed that recovers first finds a
+non-degraded snapshot and does nothing.
+`TestChaos66_AlertFiresWithoutAnyoneReadingASurface` never touches a read
+surface and was verified failing against the unscheduled shape;
+`RecoveryCancelsTheScheduledCheck` is its control, because scheduling must not
+become a second way to page a feed that already recovered.
+
+**P2 — an abandoned writer kept a callback into shared state.** `InitSyslog`
+overwrote `globalSyslog` and walked away. That leaked the old writer's drain
+goroutine and socket on every reconfigure, which was PRE-EXISTING; CHAOS-66 made
+it worse by handing that abandoned writer a delivery observer into the
+process-wide health record. An old recovery arriving while the NEW target was
+failing would clear `syslogHealth.alerted`, re-arm the fire-once latch and
+double-page; an old failure would be logged as the new target's.
+
+Closed by detaching the observer FIRST — after which the old writer cannot reach
+any shared state whatever its drain goroutine does — and then closing it
+asynchronously, which also closes the pre-existing leak. Close is async because
+it waits up to `closeWait` (~7s) for the final flush, and neither a boot nor an
+admin API call should block on a wedged collector to change targets.
+
+**The P2 gate did not work on its first attempt, and the reason is worth
+keeping**: it pushed on the abandoned writer for 2 s, which is INSIDE the ~5 s
+reconnect suppression window, so that writer never attempted a reconnect, never
+recovered, and the gate passed against the very shape it was written to catch. A
+gate whose fault-injection window is shorter than the mechanism it is injecting
+into proves nothing while looking green. Widened past the backoff, it reproduces
+the defect (`DEFECT: the abandoned writer's recovery cleared the fire-once latch
+for the NEW target`).
+
+**Both findings share a shape with the sweep itself**: the first is a signal
+that only fires when observed, the second is state mutated by something nobody
+is still thinking about. Neither was reachable from the gates as originally
+written, because both gates asked "does the mechanism work?" and neither asked
+"does it work when nothing else is happening?" and "does it stop working when
+its owner is replaced?".
+
+### What is deliberately NOT done
+
+**No `/readyz` row and no `/healthz` failure.** A node whose SIEM feed is down
+is a fully serving gateway — policy, inspection, scanning and egress are all
+unaffected, and the audit trail is still being written to local disk. Failing
+readiness would eject a healthy gateway from the load balancer over its
+**logging** pipeline, converting a monitoring outage into a traffic outage:
+the exact trade §19 refused for the category store and §25 refused for the
+admin UI listener. Pinned as a control.
+
+**No fail-closed toggle.** Refusing to serve because a log collector is
+unreachable would convert the SIEM's outage into the customer's. Unlike a
+scanner verdict on content in flight (WK-1b/WK-2b), nothing about a SIEM gap
+compromises the decision the gateway is making — and the record still exists
+locally.
+
+**No retransmission.** There is no replay buffer beyond the bounded queue, and
+adding one would put unbounded memory behind an unreachable dependency. The
+recovery path is the node-local audit log, and the recovery log line says so in
+those words rather than leaving the operator to infer it.
+
+### Residual risk (recorded, owner-visible)
+
+- **WK-22 — UDP cannot report loss, and it is the default transport.** Not
+  closable at this layer. Made honest rather than papered over: the gauge, the
+  contract row, the startup warning and the runbook all say that on UDP
+  "active" means the socket is open, never that the collector received
+  anything, and all four name `tcp://` as the remedy. An operator who reads any
+  one of them is not misled; an operator who reads none is in exactly the
+  position they were in before, which is the most this layer can do.
+- **Lines lost during an episode are gone from the SIEM.** Bounded by the
+  outage and recoverable from local state; the runbook gives the procedure.
+- **`GET /api/syslog` can still block briefly** against a wedged collector,
+  because it reads `Format()`, which takes the engine mutex. Left alone: it is
+  an admin-rate call, and the surfaces that must stay responsive during the
+  fault (`/metrics`, `/healthz`, diagnostics) provably do not take it.
+- **A new alert event name is silently unsubscribed on webhooks configured
+  before this release.** The standing caution applies; it is why the metric and
+  the contract row — which need no subscription — are the primary surfaces and
+  the alert is the third. Named in the runbook.
+
+### Gates
+
+`internal/syslog/observability_test.go` (10) and `syslog_health_chaos_test.go`
+(12).
+
+Defect gates verified failing against the reintroduced pre-fix shape:
+`DeadCollectorIsNotReportedHealthy` (the row returns the old unconditional
+"active"), `SIEMLossReachesPrometheus` and `UDPReportsDeliveryUnconfirmable`
+(the metrics emitter stubbed back to nothing), and
+`AccessorsDoNotTakeTheDeliveryMutex` (one accessor re-guarded with `s.mu`).
+
+Controls, because the cheapest way to pass every "does it notice a dead
+collector" assertion is to report the feed as degraded more or less always —
+which would page every deployment, train operators to ignore the row, and be
+strictly worse than the silence it replaces:
+
+- `HealthyFeedIsStillReportedHealthy` — a live collector reads `ok` and exports
+  `up 1`.
+- `IdleFeedIsNeverDegraded` — 24 h of silence on a healthy feed degrades
+  nothing.
+- `QueueFullDoesNotArmADeliveryEpisode` — capacity loss is counted but never
+  paged as an outage, and "not arming an episode" must not become "not
+  counting".
+- `HealthzReportsButNeverFails` — no readiness surface references the feed.
+- `MetricsAbsentWhenUnconfigured` — rule (3).
+
+Plus two anti-drift walls: `TestDropReasons_AreExhaustive` (a reason declared
+without a counter slot would be counted and never reported — this sweep's own
+finding one level down) and `TestChaos66_ReportedReasonsMatchTheEngine` (the
+same, one level up, between the engine's classes and what the operator surfaces
+render).
+
+### The process lesson
+
+**A subsystem can be swept, improved, and still never asked the question that
+matters.** This feed had a bounded queue, a write deadline, backoff and panic
+containment — four resilience properties, each added deliberately — and no way
+for anyone to learn that it had stopped working. Every one of those sweeps
+asked *"does this fault cost proxy latency?"*, got the right answer, and
+stopped.
+
+The question that was never asked is the one this register keeps arriving at
+from different directions: **when this degrades, who finds out, and what does
+the thing they look at say?** For this feed the answer was "nobody" and
+"active". The counter that would have told them existed the whole time and had
+one reader behind an admin login.
+
+So the rule to carry forward: *for every bounded best-effort sink, name the
+surface that reports its loss and the rule an operator would page on — and if
+the answer is a counter with one reader, the sink is silent.*

@@ -50,6 +50,17 @@ package alerts
 //                             means no threat-feed coverage at all and says so. Fired once per
 //                             episode, never per failed round; cleared only by an observed clean
 //                             sync. Detail carries a BOUNDED source class, never the fetch error.
+//   "siem_feed_down"        — remote syslog/SIEM forwarding has been failing to deliver for a
+//                             sustained period, so the CENTRALIZED audit and request trail has a
+//                             gap for this node (CHAOS-66). The node-local audit log is
+//                             unaffected and is the recovery source, so this is a gap in the
+//                             copy that leaves the appliance, never a loss of the record. Fired
+//                             once per episode, never per dropped line; cleared only by an
+//                             observed delivery. Detail carries a BOUNDED reason class and the
+//                             loss count, never the collector address (which would defeat this
+//                             store's event+Detail dedup). NOTE: a UDP target cannot detect a
+//                             dead collector at all, so this alert is meaningful only for
+//                             tcp:// targets — see docs/operator/siem-feed-health.md.
 //   "mcp_gateway_down"      — MCP enablement was requested but the capability is not serving:
 //                             activation failed, the listener degraded, or it stopped while still
 //                             configured (RISK-027). Fired once per episode, never per request.

@@ -49,11 +49,23 @@ type Writer struct {
 	tag           string
 	format        string    // "rfc3164" (default) or "rfc5424"
 	pid           string    // cached PID string for RFC 5424 PROCID
-	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
+	lastReconnErr time.Time // backoff: suppress reconnect attempts after a failure
+	// reconnectWait is the length of the CURRENT suppression window, re-drawn
+	// with ±20% jitter by armReconnectBackoff on every failed reconnect. Zero
+	// until the first failure, which is why a healthy Writer never suppresses.
+	reconnectWait time.Duration
 	drops         atomic.Uint64
 	panics        atomic.Uint64
 	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
 	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
+
+	// deliveryObs carries the per-reason drop classification and the
+	// delivery-state evidence the health plane reads (observability.go).
+	// Embedded by value; every field is an atomic, deliberately NOT guarded by
+	// mu — mu is held across the whole reconnect/backoff state machine, so a
+	// /metrics scrape that took it would block for ~15s on exactly the fault it
+	// exists to report.
+	deliveryObs
 
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
 	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
@@ -140,7 +152,11 @@ func (s *Writer) drainLoop() {
 					if time.Now().Before(deadline) {
 						s.deliverGuarded(line)
 					} else {
-						s.drops.Add(1)
+						// Past the flush window on the way out: the line is
+						// lost to shutdown, not to the collector, so it is
+						// charged as a closed-writer drop and does not arm a
+						// delivery episode.
+						s.noteDrop(DropWriterClosed)
 					}
 				default:
 					return
@@ -162,13 +178,13 @@ func (s *Writer) send(pri int, msg string) {
 		return
 	}
 	if s.closed.Load() {
-		s.drops.Add(1)
+		s.noteDrop(DropWriterClosed)
 		return
 	}
 	select {
 	case s.queue <- s.formatMsg(pri, msg):
 	default:
-		s.drops.Add(1)
+		s.noteDrop(DropQueueFull)
 	}
 }
 
@@ -279,7 +295,7 @@ func (s *Writer) deliverGuarded(line string) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.panics.Add(1)
-			s.drops.Add(1)
+			s.noteDrop(DropDeliveryPanic)
 			if p := s.panicObserver.Load(); p != nil {
 				func() {
 					defer func() { _ = recover() }() // an observer must never crash the drain goroutine
@@ -310,17 +326,24 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 }
 
 func (s *Writer) deliverLine(line string) {
+	// Defer ordering is load-bearing: deferred calls run LIFO, so registering
+	// the flush FIRST makes it run LAST — strictly after the unlock below.
+	// A delivery observer must never be invoked while s.mu is held; this
+	// function holds it across the whole reconnect/backoff state machine, so an
+	// observer that touched any mutex-guarded API would deadlock the drain
+	// goroutine permanently. See stageDelivery.
+	defer s.flushPendingDelivery()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {
-		// Backoff: don't retry more often than every 5 seconds.
-		if time.Since(s.lastReconnErr) < 5*time.Second {
-			s.drops.Add(1)
+		// Backoff: don't retry more often than the (jittered) reconnect window.
+		if time.Since(s.lastReconnErr) < s.reconnectWait {
+			s.noteDrop(DropCollectorUnreachable)
 			return
 		}
 		if err := s.connect(); err != nil {
-			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.armReconnectBackoff()
+			s.noteDrop(DropCollectorUnreachable)
 			return // syslog down — swallow, never block the proxy
 		}
 		s.lastReconnErr = time.Time{} // reset on success
@@ -328,13 +351,13 @@ func (s *Writer) deliverLine(line string) {
 	if err := s.writeLine(line); err != nil {
 		s.conn.Close()
 		s.conn = nil
-		if time.Since(s.lastReconnErr) < 5*time.Second {
-			s.drops.Add(1)
+		if time.Since(s.lastReconnErr) < s.reconnectWait {
+			s.noteDrop(DropWriteFailed)
 			return
 		}
 		if err2 := s.connect(); err2 != nil {
-			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.armReconnectBackoff()
+			s.noteDrop(DropCollectorUnreachable)
 			return
 		}
 		if err3 := s.writeLine(line); err3 != nil {
@@ -346,12 +369,28 @@ func (s *Writer) deliverLine(line string) {
 			// subsequent calls fast-drop for the window instead.
 			s.conn.Close()
 			s.conn = nil
-			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.armReconnectBackoff()
+			s.noteDrop(DropWriteFailed)
 			return
 		}
 		s.lastReconnErr = time.Time{}
 	}
+	// The transport accepted the line. This is the ONLY evidence that clears a
+	// failure episode anywhere in this feed's health plane — see
+	// noteDeliverySuccess.
+	s.noteDeliverySuccess()
+}
+
+// armReconnectBackoff opens a fresh, independently-jittered suppression window
+// after a failed reconnect. Caller must hold s.mu.
+//
+// The window is re-jittered on EVERY arming rather than drawn once per Writer:
+// a per-Writer draw fixes this node's phase for the life of the process, so a
+// fleet that restarted together would still retry in lockstep, just at a
+// per-node offset. Re-drawing spreads the attempts across the outage.
+func (s *Writer) armReconnectBackoff() {
+	s.lastReconnErr = time.Now()
+	s.reconnectWait = jitteredReconnectWindow()
 }
 
 // Drops reports the number of messages dropped because the collector was

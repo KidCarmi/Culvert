@@ -1819,7 +1819,26 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			panics = globalSyslog.Panics()
 			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
+		// CHAOS-66: the cumulative drop count alone could not distinguish "a
+		// collector blip last Tuesday" from "every record since 09:14 has been
+		// lost", and said nothing at all on a UDP target, where a dead
+		// collector is undetectable. The derived state answers both on the
+		// panel the operator opens first, rather than only in Diagnostics.
+		//
+		// Read from the health plane's snapshot, which touches only atomics —
+		// deliberately not Format()/Close(), which take the engine mutex the
+		// drain goroutine holds across a wedged collector's write+dial cycle.
+		snap := syslogFeedState()
+		jsonOK(w, map[string]any{
+			"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics,
+			"failing":             snap.Failing,
+			"degraded":            snap.Degraded,
+			"failingReason":       string(snap.Reason),
+			"failingSeconds":      int64(snap.FailingFor.Seconds()),
+			"lastDelivery":        unixOrZero(snap.LastDelivery),
+			"dropsByReason":       syslogDropsByReasonJSON(snap),
+			"deliveryConfirmable": snap.DeliveryConfirmable,
+		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1846,6 +1865,10 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
+			// Every surface goes back to reporting the feature as absent
+			// rather than as healthy or broken: a deliberately disabled feed
+			// must not leave a degraded row or a `culvert_syslog_up 0` behind.
+			noteSyslogUnconfigured()
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1859,7 +1882,14 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		syslogConfiguredAddr = body.Addr
 		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
+		// deliveryConfirmable rides the save response so a freshly-configured
+		// UDP target carries its "this cannot confirm delivery" caveat
+		// immediately, at the moment the operator chose the transport, rather
+		// than only after the next page load.
+		jsonOK(w, map[string]any{
+			"ok": true, "addr": body.Addr, "format": globalSyslog.Format(),
+			"deliveryConfirmable": globalSyslog.DeliveryConfirmable(),
+		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

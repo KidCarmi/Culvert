@@ -1628,6 +1628,7 @@ culvert_decrypt_autoexclude_surge_total %d
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	threatFeedWritePrometheus(&ruleMetBuf) // culvert_threat_feed_* freshness (WK-5 staleness plane)
+	syslogWritePrometheus(&ruleMetBuf)     // culvert_syslog_* SIEM delivery (CHAOS-66; emitted only when configured)
 	caWritePrometheus(&ruleMetBuf)
 	ocspWritePrometheus(&ruleMetBuf) // culvert_ocsp_* (CHAOS-65 revocation plane; emitted only when enabled)
 	certSignHist.WritePrometheus(&ruleMetBuf)
