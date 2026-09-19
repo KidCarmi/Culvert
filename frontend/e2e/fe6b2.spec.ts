@@ -195,12 +195,16 @@ async function expectNoLeak(
     );
   }
 }
+/** The operationId of the first IDENTIFIED mutation on `path` (a dry run
+ * carries none by contract and is skipped). */
 function opIdOf(w: Watch, path: string): string {
-  const m = w.mutations.find((x) => new URL(x.url).pathname === path);
-  if (m === undefined) throw new Error(`no mutation on ${path}`);
-  const id = new URL(m.url).searchParams.get("operationId");
-  if (id === null) throw new Error(`no operationId on ${path}`);
-  return id;
+  for (const x of w.mutations) {
+    const u = new URL(x.url);
+    if (u.pathname !== path) continue;
+    const id = u.searchParams.get("operationId");
+    if (id !== null) return id;
+  }
+  throw new Error(`no identified mutation on ${path}`);
 }
 
 test.describe("FE-6B.2 CERTW write journeys", () => {

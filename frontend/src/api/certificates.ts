@@ -2268,11 +2268,25 @@ function sig(signal?: AbortSignal): { signal?: AbortSignal } {
   return signal !== undefined ? { signal } : {};
 }
 
+/** The pair rides as FILE parts, never string fields: the multipart
+ * encoding of a string entry normalises its newlines to CRLF, so the bytes
+ * the appliance receives — and hashes into the persisted pair's revision
+ * `uic1:<sha256 of the certificate bytes>` — would differ from the bytes the
+ * browser digested. A Blob part is byte-exact, which is what makes
+ * pemDigest(cert) the revision the appliance records. */
 function pairForm(target: "mitm" | "ui", pem: PEMPair): FormData {
   const fd = new FormData();
   fd.set("target", target);
-  fd.set("cert", pem.cert);
-  fd.set("key", pem.key);
+  fd.set(
+    "cert",
+    new Blob([pem.cert], { type: "application/x-pem-file" }),
+    "cert.pem",
+  );
+  fd.set(
+    "key",
+    new Blob([pem.key], { type: "application/x-pem-file" }),
+    "key.pem",
+  );
   return fd;
 }
 

@@ -97,10 +97,12 @@ interface Call {
  * not an assertion). */
 const OP_UUID: `${string}-${string}-${string}-${string}-${string}` =
   "6b1c0000-fe6b-4e2e-9f00-00000000c001";
-function formField(body: unknown, name: string): string | null {
+async function formField(body: unknown, name: string): Promise<string | null> {
   if (!(body instanceof FormData)) return null;
   const v = body.get(name);
-  return typeof v === "string" ? v : null;
+  if (typeof v === "string") return v;
+  if (v instanceof Blob) return v.text();
+  return null;
 }
 let container: HTMLDivElement;
 let root: Root;
@@ -514,8 +516,8 @@ it("P07 import: dry run first, reviewed facts + fence, then the SAME candidate c
   expect(query(commit, "operationId")).toBe(OP_ID);
   expect(query(commit, "caRevision")).toBe(`car1:${HEX64}`);
   expect(commit?.body instanceof FormData).toBe(true);
-  expect(formField(commit?.body, "cert")).toBe(CERT_PEM_CANARY);
-  expect(formField(commit?.body, "target")).toBe("mitm");
+  expect(await formField(commit?.body, "cert")).toBe(CERT_PEM_CANARY);
+  expect(await formField(commit?.body, "target")).toBe("mitm");
   expect(storageRaw()).toBe("");
   expect(text()).not.toContain("KEY-CANARY");
 });

@@ -120,10 +120,17 @@ function stub(answer: Response | (() => Response)): Call[] {
   return calls;
 }
 
-function formField(body: unknown, name: string): string | null {
+/** A multipart field's content: a string entry, or the bytes of a FILE
+ * part (the pair rides as file parts — byte-exact, no CRLF normalisation). */
+async function formField(body: unknown, name: string): Promise<string | null> {
   if (!(body instanceof FormData)) return null;
   const v = body.get(name);
-  return typeof v === "string" ? v : null;
+  if (typeof v === "string") return v;
+  if (v instanceof Blob) return v.text();
+  return null;
+}
+function isFilePart(body: unknown, name: string): boolean {
+  return body instanceof FormData && body.get(name) instanceof Blob;
 }
 
 const FENCE = `car1:${HEX64}`;
@@ -314,9 +321,12 @@ describe("A05/A06 — dry run and commit are the same multipart candidate", () =
     expect(u.searchParams.has("operationId")).toBe(false);
     expect(u.searchParams.has("caRevision")).toBe(false);
     expect(c?.contentType).toBeUndefined(); // the browser sets the multipart boundary
-    expect(formField(c?.body, "cert")).toBe(CERT_PEM_CANARY);
-    expect(formField(c?.body, "key")).toBe(KEY_PEM_CANARY);
-    expect(formField(c?.body, "target")).toBe("mitm");
+    expect(await formField(c?.body, "cert")).toBe(CERT_PEM_CANARY);
+    expect(await formField(c?.body, "key")).toBe(KEY_PEM_CANARY);
+    expect(await formField(c?.body, "target")).toBe("mitm");
+    // byte-exact FILE parts, never string entries (CRLF normalisation)
+    expect(isFilePart(c?.body, "cert")).toBe(true);
+    expect(isFilePart(c?.body, "key")).toBe(true);
     expect(c?.url).not.toContain("KEY-CANARY");
   });
   it("A06 commit request: the SAME fields, plus operationId and the reviewed fence", async () => {
@@ -334,8 +344,9 @@ describe("A05/A06 — dry run and commit are the same multipart candidate", () =
     expect(u.searchParams.get("target")).toBe("mitm");
     expect(u.searchParams.get("operationId")).toBe(OP_ID);
     expect(u.searchParams.get("caRevision")).toBe(FENCE);
-    expect(formField(c?.body, "cert")).toBe(CERT_PEM_CANARY);
-    expect(formField(c?.body, "key")).toBe(KEY_PEM_CANARY);
+    expect(await formField(c?.body, "cert")).toBe(CERT_PEM_CANARY);
+    expect(await formField(c?.body, "key")).toBe(KEY_PEM_CANARY);
+    expect(isFilePart(c?.body, "cert")).toBe(true);
     expect(c?.url).not.toContain("KEY-CANARY");
 
     const calls2 = stub(json(REPLACE_RESULT));
@@ -351,7 +362,8 @@ describe("A05/A06 — dry run and commit are the same multipart candidate", () =
     expect(ru.searchParams.get("target")).toBe("ui");
     expect(ru.searchParams.get("uiCertRevision")).toBe(UI_FENCE);
     expect(ru.searchParams.get("operationId")).toBe(OP_ID);
-    expect(formField(r?.body, "target")).toBe("ui");
+    expect(await formField(r?.body, "target")).toBe("ui");
+    expect(isFilePart(r?.body, "cert")).toBe(true);
   });
 });
 
