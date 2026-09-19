@@ -25,8 +25,11 @@
 //   P11 reload with a marker under this subject: Recover ⇒ committed ⇒ the
 //       marker is cleared and the mutations unblock.
 //   P12 Recover distinctions: pending kept; aborted ⇒ nothing written + Abandon;
-//       superseded ⇒ TERMINAL UNKNOWN, no Re-send; 404 ⇒ Re-send offered;
-//       a record not bound to the marker ⇒ unbound, kept.
+//       superseded ⇒ TERMINAL UNKNOWN, no Re-send; 404 ⇒ UNKNOWN (no record
+//       retained), no Re-send, marker kept (re-expressed by the correction
+//       round, record 6B2C-B1 — the candidate read a 404 as "never recorded"
+//       and offered a re-send; fe6b2c_red_test.go proves the re-send can
+//       execute twice); a record not bound to the marker ⇒ unbound, kept.
 //   P13 delete is T3: the persisted identity and the served identity are
 //       stated, the typed word is the persisted fingerprint's first 8 bytes,
 //       the DELETE carries the loaded fence.
@@ -404,7 +407,10 @@ it("P04 rotate: server challenge bound to the minted id + loaded fence; typed wo
   const ch = posts("/api/ca/rotate/challenge")[0];
   expect(query(ch, "operationId")).toBe(OP_ID);
   expect(query(ch, "caRevision")).toBe(`car1:${HEX64}`);
-  expect(marker()["action"]).toBe("rotate"); // written before the ceremony can confirm
+  // 6B2C-B2: the challenge stage never touches the marker store; the marker
+  // is armed at the confirm dispatch (the candidate wrote it here and then
+  // cleared it on every challenge refusal and on cancel).
+  expect(storageRaw()).toBe("");
   expect(dialogText()).toContain("cannot be undone");
   expect(button("Rotate", openDialog()).disabled).toBe(true);
   // Enter with an empty word does not confirm.
@@ -656,7 +662,7 @@ for (const [name, rec, check] of RECOVER_ROWS) {
     check(text());
   });
 }
-it("P12 Recover: 404 ⇒ never recorded ⇒ Re-send offered (same operation)", async () => {
+it("P12 Recover: 404 ⇒ UNKNOWN (no record retained) ⇒ no Re-send; marker kept; Abandon offered", async () => {
   seedMarker(ROTATE_MARKER);
   withMutations({
     [`/api/ca/operations/${OP_ID}`]: () => json(refusalBody("not_found"), 404),
@@ -664,9 +670,10 @@ it("P12 Recover: 404 ⇒ never recorded ⇒ Re-send offered (same operation)", a
   await mount("admin");
   await click("Recover");
   await flushUntil(() => {
-    expect(text()).toContain("never recorded");
+    expect(text()).toContain("retains no record");
   });
-  expect(buttons("Re-send")).toHaveLength(1);
+  expect(text()).not.toContain("never recorded");
+  expect(buttons("Re-send")).toEqual([]);
   expect(buttons("Abandon")).toHaveLength(1);
   expect(storageRaw()).not.toBe("");
 });

@@ -15,16 +15,21 @@
 //   W3 import: dry-run review → Import; the live CA is the reviewed
 //      candidate; a mismatched key is a bounded candidate_invalid refusal.
 //   W4 replace the UI pair with B: persisted B, listener still serves A (a
-//      REAL TLS handshake), "Activation requires a restart".
+//      REAL TLS handshake), "Activation requires a restart"; the outcome
+//      promises nothing about what the next start serves (6B2C-B3).
 //   W5 delete (T3, typed first 8 fingerprint bytes): persisted pair gone,
-//      listener still serves A.
+//      listener still serves A; no self-signed fallback promised (6B2C-B3).
 //   W6 OCSP: the T2 ceremony states desired/runtime/coverage; Apply; the
 //      durable desired posture is admin-owned.
 //   W7 a LOST response (the server executed, the browser never saw the
 //      answer): ceremony closed, marker retained, mutations blocked; reload;
 //      Recover ⇒ committed ⇒ cleared.
-//   W8 a request that NEVER reached the appliance: Recover ⇒ never recorded
-//      ⇒ Re-send of the SAME operation lands.
+//   W8 a request that NEVER reached the appliance: Recover ⇒ 404 ⇒ UNKNOWN
+//      (the appliance retains no record; no Re-send is offered — re-expressed
+//      by the correction round, record 6B2C-B1: fe6b2c_red_test.go proves a
+//      re-sent operation can execute twice after ledger eviction + an
+//      identical reinstall); the typed Abandon discards the marker; a NEW
+//      operation under a NEW id then lands.
 //   W9 leak sweep across every journey: no private key, no passphrase, no
 //      challenge in the DOM, the URL, storage or any response body; the
 //      marker carries only its allowlisted fields.
@@ -56,6 +61,10 @@ const MARKER_FIELDS = [
   "subject",
   "version",
 ];
+
+/** 6B2C-B3: no ceremony or outcome may promise what the next start serves. */
+const CLAIMS =
+  /self-signed|falls back|takes effect|next restart serves|serves this one|restart, which/i;
 
 const VIEWER_CONTROLS: readonly string[] = [
   "Certificates",
@@ -335,6 +344,12 @@ test.describe("FE-6B.2 CERTW write journeys", () => {
     await dialog.getByRole("button", { name: "Replace", exact: true }).click();
     await expect(main.getByText("UI certificate replaced")).toBeVisible();
     await expect(main.getByText("Activation requires a restart")).toBeVisible();
+    const replaced = await main
+      .getByRole("status")
+      .filter({ hasText: "UI certificate replaced" })
+      .textContent();
+    expect(replaced).toContain("depends on the startup configuration");
+    expect(replaced).not.toMatch(CLAIMS);
     await expect(
       main.getByText("Active on the running listener", { exact: true }),
     ).toHaveCount(0);
@@ -368,12 +383,21 @@ test.describe("FE-6B.2 CERTW write journeys", () => {
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByText(fp)).toBeVisible();
     await expect(dialog.getByText(/keeps serving/)).toBeVisible();
+    const dialogCopy = await dialog.textContent();
+    expect(dialogCopy).toContain("depends on the startup configuration");
+    expect(dialogCopy).not.toMatch(CLAIMS);
     const word = fp.slice(0, 23);
     const confirm = dialog.getByRole("button", { name: "Delete", exact: true });
     await expect(confirm).toBeDisabled();
     await dialog.getByLabel(`Type ${word} to confirm`).fill(word);
     await confirm.click();
     await expect(main.getByText("UI certificate deleted")).toBeVisible();
+    const deleted = await main
+      .getByRole("status")
+      .filter({ hasText: "UI certificate deleted" })
+      .textContent();
+    expect(deleted).toContain("depends on the startup configuration");
+    expect(deleted).not.toMatch(CLAIMS);
     const after = await inventory(api);
     expect(sub(after, "uiCert")["pairState"]).toBe("absent");
     expect(sub(sub(after, "listener"), "servedCertificate")["subject"]).toBe(
@@ -488,7 +512,7 @@ test.describe("FE-6B.2 CERTW write journeys", () => {
     await api.dispose();
   });
 
-  test("W8 a request that never reached the appliance: Recover ⇒ never recorded ⇒ Re-send lands", async ({
+  test("W8 a request that never reached the appliance: Recover ⇒ 404 ⇒ UNKNOWN, no Re-send; typed Abandon; a NEW operation lands", async ({
     page,
   }) => {
     const api = await adminClient("10.68.0.8");
@@ -512,24 +536,54 @@ test.describe("FE-6B.2 CERTW write journeys", () => {
     ).toBeVisible();
     const opId = opIdOf(w, "/api/ocsp");
     await page.unroute("**/api/ocsp?*");
+    // The appliance really has no record of it.
+    const missing = await api.get(`/api/ca/operations/${opId}`);
+    expect(missing.status()).toBe(404);
     await main.getByRole("button", { name: "Recover" }).click();
-    await expect(main.getByText(/never recorded/)).toBeVisible();
-    await main.getByRole("button", { name: "Re-send" }).click();
+    await expect(main.getByText(/retains no record/)).toBeVisible();
+    await expect(main.getByText(/never recorded/)).toHaveCount(0);
+    await expect(main.getByRole("button", { name: "Re-send" })).toHaveCount(0);
+    await expect(
+      main.getByRole("button", { name: "Set OCSP posture…" }),
+    ).toBeDisabled();
+    // The marker survives the lookup; only the typed Abandon discards it.
+    expect(await storageDump(page)).toContain(MARKER_KEY);
+    await main.getByRole("button", { name: "Abandon" }).click();
     dialog = page.getByRole("dialog");
-    await expect(dialog.getByText(opId)).toBeVisible();
+    await expect(
+      dialog.getByText("Abandon the unresolved operation"),
+    ).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    expect(await storageDump(page)).toContain(MARKER_KEY);
+    await main.getByRole("button", { name: "Abandon" }).click();
+    dialog = page.getByRole("dialog");
+    await dialog.getByLabel(`Type ${opId} to confirm`).fill(opId);
+    await dialog.getByRole("button", { name: "Abandon" }).click();
+    expect(await storageDump(page)).not.toContain(MARKER_KEY);
+    await expect(
+      main.getByRole("button", { name: "Set OCSP posture…" }),
+    ).toBeEnabled();
+    // A NEW operation (a new id) is the only way forward.
+    await main.getByRole("button", { name: "Set OCSP posture…" }).click();
+    dialog = page.getByRole("dialog");
+    await expect(dialog.getByText(opId)).toHaveCount(0);
+    await dialog.getByLabel("Enable OCSP revocation checking").check();
     await dialog.getByRole("button", { name: "Apply" }).click();
     await expect(main.getByText("OCSP posture set")).toBeVisible();
-    const resent = w.mutations.filter(
+    const sets = w.mutations.filter(
       (m) => new URL(m.url).pathname === "/api/ocsp",
     );
-    expect(resent).toHaveLength(2);
-    expect(
-      new URL(resent[1]?.url ?? "http://x").searchParams.get("operationId"),
-    ).toBe(opId);
+    expect(sets).toHaveLength(2);
+    const newId = new URL(sets[1]?.url ?? "http://x").searchParams.get(
+      "operationId",
+    );
+    expect(newId).not.toBeNull();
+    expect(newId).not.toBe(opId);
     const after = await inventory(api);
     expect(sub(sub(after, "ocsp"), "desired")["enabled"]).toBe(true);
-    const rec = await lookup(api, opId);
+    const rec = await lookup(api, newId ?? "");
     expect(rec["state"]).toBe("committed");
+    expect((await api.get(`/api/ca/operations/${opId}`)).status()).toBe(404);
     expect(await storageDump(page)).not.toContain(MARKER_KEY);
     await expectNoLeak(page, w);
     await api.dispose();

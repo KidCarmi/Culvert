@@ -18,40 +18,37 @@
 //      only for a rotate; the fence prefix matches the action's object.
 //   M7 a ledger record is THIS marker's operation only when operationId,
 //      action, fence AND (import/replace) the candidate all match.
-//   M8 an explicit re-send is offered ONLY after an authoritative 404
-//      (never recorded); pending, recoverable unknown, unproven unknown,
-//      superseded (TERMINAL UNKNOWN), committed and aborted never offer it.
+//   M8 (INVERTED by the FE-6B.2 correction round, record 6B2C-B1) no view
+//      authorises a re-send: the module exports no re-send predicate. The
+//      candidate offered Re-send after an authoritative 404; the review's
+//      counterexample (a decided record evicted from the 256-slot ledger, then
+//      the identical object reinstalled, so the ORIGINAL fence matches again)
+//      is proved on the real handlers by fe6b2c_red_test.go — a re-sent
+//      delete executes twice. An absent operation is therefore UNKNOWN.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { isRecord } from "../api/decode";
 import { runAuthTeardown } from "../auth/teardown";
 import { decodeCertOperation } from "../api/certificates";
+import * as certRecoveryModule from "../features/security/certRecovery";
 import {
   CERT_RECOVERY_KEY,
-  certResendAllowed,
   clearCertRecovery,
   operationBoundToCertMarker,
   purgeCertRecovery,
   readCertRecovery,
   writeCertRecovery,
 } from "../features/security/certRecovery";
-import type {
-  CertRecoveryMarker,
-  CertRecoveryView,
-} from "../features/security/certRecovery";
+import type { CertRecoveryMarker } from "../features/security/certRecovery";
 import {
   HEX64,
   HEX64_B,
-  OP_ABORTED,
   OP_COMMITTED,
   OP_ID,
   OP_PENDING,
   OP_ROTATE_COMMITTED,
-  OP_SUPERSEDED,
   OP_UI_DELETE_COMMITTED,
   OP_UI_REPLACE_COMMITTED,
-  OP_UNKNOWN_RECOVERABLE,
-  OP_UNKNOWN_UNPROVEN,
 } from "./fe6b1-fixtures";
 import { CHALLENGE, KEY_PEM_CANARY, OP_ID_2 } from "./fe6b2-fixtures";
 
@@ -387,22 +384,8 @@ describe("M7 binding a ledger record to the marker", () => {
   });
 });
 
-describe("M8 re-send is offered only after an authoritative 404", () => {
-  it("never_recorded ⇒ allowed; every recorded state ⇒ not", () => {
-    const views: Array<[CertRecoveryView, boolean]> = [
-      [{ kind: "never_recorded" }, true],
-      [{ kind: "none" }, false],
-      [{ kind: "looking" }, false],
-      [{ kind: "unproven" }, false],
-      [{ kind: "refused", code: "operation_ledger_degraded" }, false],
-      [{ kind: "op", op: decodeCertOperation(OP_PENDING) }, false],
-      [{ kind: "op", op: decodeCertOperation(OP_COMMITTED) }, false],
-      [{ kind: "op", op: decodeCertOperation(OP_ABORTED) }, false],
-      [{ kind: "op", op: decodeCertOperation(OP_UNKNOWN_RECOVERABLE) }, false],
-      [{ kind: "op", op: decodeCertOperation(OP_UNKNOWN_UNPROVEN) }, false],
-      [{ kind: "op", op: decodeCertOperation(OP_SUPERSEDED) }, false],
-      [{ kind: "unbound", op: decodeCertOperation(OP_COMMITTED) }, false],
-    ];
-    for (const [v, want] of views) expect(certResendAllowed(v)).toBe(want);
+describe("M8 (6B2C-B1) no view authorises a re-send", () => {
+  it("the module exports no re-send predicate: an absent operation is UNKNOWN, never a licence to re-dispatch", () => {
+    expect(Object.keys(certRecoveryModule)).not.toContain("certResendAllowed");
   });
 });
