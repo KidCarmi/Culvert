@@ -597,6 +597,17 @@ run_mutation M27 \
   'TestCredWall_LedgerCountsItsOwnQuotationPermissions' . "$OPERDOC" \
   's/\*\*6 allowlist entries name ledger lines\*\*/**3 allowlist entries name ledger lines**/'
 
+# NOTE ON PAYLOAD DURABILITY, THIRD INSTANCE (M31, round 12). M31 renamed a mention to `round 12`
+# to model "a round the enumeration does not contain" -- and the same round ADDED Round 12 to the
+# enumeration, so the payload still applied but no longer described a defect and the gate rightly
+# passed. It scored SURVIVED: a reported hole that does not exist. M32 carried the same bomb with
+# `13`. Both now name 97/98, which the enumeration (contiguous from 1, and at 12) cannot reach.
+#
+# The rule is broader than "do not hardcode today's text": A PAYLOAD MUST NOT NAME A VALUE THE
+# DOCUMENT'S OWN GROWTH CAN MAKE VALID. The earlier two instances were payloads that stopped
+# APPLYING; this one kept applying and stopped MEANING anything, which is harder to notice because
+# the file really does change.
+#
 # NOTE ON PAYLOAD DURABILITY (learned twice: M24 in round 7, M28 in round 9). A payload that
 # hardcodes the CURRENT text of a document stops applying the moment that document changes, and a
 # mutation that does not apply scores SKIPPED — which proves nothing while looking like progress.
@@ -638,7 +649,7 @@ run_mutation M30 \
 run_mutation M31 \
   "§25d discusses a round its enumeration does not contain" \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
-  's/which Codex round 10 found/which Codex round 12 found/'
+  's/which Codex round 10 found/which Codex round 97 found/'
 
 # M32 is M31's PLURAL twin, and it exists because M31 alone did not exercise what the gate claims.
 # The first version of the round-name extractor matched only `round N`, so `rounds 7 and 8` -- a
@@ -648,7 +659,7 @@ run_mutation M31 \
 run_mutation M32 \
   "§25d names an unenumerated round in the PLURAL form the gate used to miss" \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
-  's/in rounds 7 and 8/in rounds 7 and 13/'
+  's/in rounds 7 and 8/in rounds 7 and 98/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
