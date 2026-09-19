@@ -29,11 +29,18 @@
 //   • the auth boundary purges unconditionally;
 //   • a ledger record is THIS marker's operation only when operationId,
 //     action, fence AND (import / replace) the candidate identity all match;
-//   • an explicit re-send is offered ONLY after an authoritative 404 — the
-//     contract makes it safe by construction (a known id replays, a moved
-//     fence is refused, the same content is candidate_duplicate) — never on
-//     pending, recoverable unknown, unproven unknown, superseded (TERMINAL
-//     UNKNOWN), committed or aborted.
+//   • an operation the lookup answers 404 for is ABSENT and therefore
+//     UNKNOWN — never "never recorded" and never a licence to re-dispatch.
+//     A decided ledger record can be evicted (256 slots) and a
+//     content-derived fence is re-armed by an identical reinstall, so the
+//     three protections a re-send relied on (replay by id, 409 stale,
+//     409 candidate_duplicate) can all be absent at once and the re-sent
+//     operation executes a second time (proved on the real handlers by
+//     fe6b2c_red_test.go; review blocker 6B2C-B1). The marker is kept and the
+//     typed Abandon is the only exit; a re-send would need an explicitly
+//     labelled backend durable identity / continuity contract, which does
+//     not exist. Nothing the node holds now is evidence about an absent
+//     operation.
 import { registerAuthCleanup } from "../../auth/teardown";
 import { isRecord } from "../../api/decode";
 import type {
@@ -324,15 +331,8 @@ export type CertRecoveryView =
   | { kind: "op"; op: CertOperation }
   /** the record under this operationId is NOT the dispatched intent */
   | { kind: "unbound"; op: CertOperation }
-  | { kind: "never_recorded" }
+  /** the authoritative lookup answered 404: the node retains no record —
+   * UNKNOWN (an evicted record and a never-started write are the same 404) */
+  | { kind: "absent" }
   | { kind: "refused"; code: CertLookupRefusalCode }
   | { kind: "unproven" };
-
-/** Re-send is offered ONLY after the authoritative lookup answered 404: the
- * write never started (or the node's ledger no longer holds it), and the
- * contract makes re-dispatching the SAME operation, candidate and ORIGINAL
- * fence safe by construction — a known id replays, a moved fence is refused
- * (409 stale), the same content is refused (409 candidate_duplicate). */
-export function certResendAllowed(view: CertRecoveryView): boolean {
-  return view.kind === "never_recorded";
-}

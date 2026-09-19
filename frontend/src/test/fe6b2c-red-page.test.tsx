@@ -447,7 +447,17 @@ it("C04 the challenge stage never touches the marker store: in flight, on operat
     ).toHaveLength(1);
   });
   expect(storageRaw()).toBe(""); // nothing durable is at stake at the challenge
-  release(json(refusalBody("operation_mismatch"), 409));
+  // The contracted shape: 409 + current.operationId + current.state (a known
+  // id — the refusal the candidate cleared the ORIGINAL marker on).
+  release(
+    json(
+      refusalBody("operation_mismatch", {
+        operationId: OP_ID,
+        state: "committed",
+      }),
+      409,
+    ),
+  );
   await flushUntil(() => {
     expect(text()).toContain("Root CA rotation refused");
   });

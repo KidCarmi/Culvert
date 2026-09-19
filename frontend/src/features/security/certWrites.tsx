@@ -10,26 +10,39 @@
 //      caRevision, the loaded inventory revision); a fence refusal renders
 //      the authoritative current token and nothing retries;
 //   2. the operationId is minted BEFORE dispatch and retained through the
-//      challenge, the confirm and recovery (a re-send is the SAME operation);
+//      challenge, the confirm and recovery; every dispatch is the FIRST
+//      dispatch of its operation (there is no re-send);
 //   3. a 2xx is a verdict only when action-bound (src/api/certificates.ts);
 //      a malformed or contradictory answer is UNPROVEN;
 //   4. ONE outstanding operation lives in the non-secret, subject-bound
-//      marker written before dispatch; an unavailable store refuses dispatch;
+//      marker written at the confirm dispatch — never at the challenge step,
+//      which is not a mutation and touches no storage; an unavailable store
+//      refuses dispatch; an existing unresolved marker is cleared ONLY by a
+//      bound authoritative resolution (committed), the typed Abandon or the
+//      auth boundary (6B2C-B2) — the ownership-matched clears on a terminal
+//      refusal can only ever name this attempt's own, first-dispatched id;
 //   5. a lost or unproven answer closes the ceremony (dropping every typed
 //      secret with the dialog tree), keeps the marker and blocks every
 //      mutation until recovery or explicit abandonment;
 //   6. recovery is the authoritative lookup, preserving pending / committed /
 //      audit-pending / aborted / recoverable-unknown / TERMINAL-unknown; a
-//      404 alone is never proof of non-commit — it is "never recorded";
-//   7. no automatic retry; an explicit Re-send only after a 404 (the
-//      contract makes re-dispatching the same operation, candidate and
-//      ORIGINAL fence safe: replay / 409 stale / 409 candidate_duplicate);
+//      404 is ABSENT = UNKNOWN: the node retains no record, so nothing the
+//      node holds now is evidence about the operation (6B2C-B1);
+//   7. no retry of any kind — automatic or explicit. A re-send after a 404
+//      was withdrawn: a decided ledger record can be evicted and an identical
+//      reinstall re-arms a content-derived fence, so the re-sent operation
+//      can execute a second time (fe6b2c_red_test.go); the typed Abandon is
+//      the only exit and a new intent is a NEW operation;
 //   8. writer_evidence_superseded stays TERMINAL UNKNOWN; abandoning a
 //      marker discards this browser's marker only, never a server operation;
 //   9. private keys exist only in the OPEN ceremony's textareas and the
 //      request body — never a URL, storage, the marker or a summary;
 //  10. persisted ≠ served: a replace is not activation; a delete does not
-//      stop the running listener; nothing restarts the appliance.
+//      stop the running listener; nothing restarts the appliance; and no
+//      copy promises what the NEXT start serves — an explicitly configured
+//      -tls-cert/-tls-key pair or a -ui-no-tls start take precedence over the
+//      persisted pair, so the mutation proves only that the persisted
+//      material changed (6B2C-B3).
 import { useEffect, useRef, useState } from "react";
 import type { JSX, ReactNode } from "react";
 import { ConfirmationDialog } from "../../design-system/dialog";
@@ -77,7 +90,6 @@ import { createRequestRunOwner } from "../../shared/runOwner";
 import { registerAuthCleanup } from "../../auth/teardown";
 import { useDirtyGuard } from "../../shared/dirtyGuard";
 import {
-  certResendAllowed,
   clearCertRecovery,
   operationBoundToCertMarker,
   readCertRecovery,
@@ -128,7 +140,6 @@ type Ceremony =
       current: string;
       challenge: CARotateChallenge | null;
       expired: boolean;
-      resend: boolean;
     }
   | {
       kind: "pair";
@@ -136,8 +147,6 @@ type Ceremony =
       operationId: string;
       pem: PEMPair;
       review: CADryRun | UIDryRun | null;
-      /** re-send: the marker's fence + candidate identity the review must match */
-      bound: { fence: string; candidate: string } | null;
     }
   | {
       kind: "delete";
@@ -146,7 +155,6 @@ type Ceremony =
       fingerprint: string;
       subject: string;
       posture: ActivationPosture;
-      resend: boolean;
     }
   | {
       kind: "ocsp";
@@ -156,7 +164,6 @@ type Ceremony =
       runtime: { enabled: boolean };
       unchecked: number;
       enabled: boolean;
-      resend: boolean;
     }
   | { kind: "abandon"; marker: CertRecoveryMarker };
 
@@ -280,8 +287,9 @@ export function useCertMutations(args: {
 
   /** Persist (or re-adopt, field for field) the marker BEFORE dispatch. */
   const armMarker = (m: CertRecoveryMarker): boolean => {
-    // The SAME operation (the challenge step, then the confirm; a re-send)
-    // keeps its recorded start instant — the marker is immutable evidence.
+    // The SAME operation confirmed again (a new challenge after an expired
+    // one) keeps its recorded start instant — the marker is immutable
+    // evidence. A DIFFERENT outstanding operation makes the write refuse.
     const stored = readCertRecovery(subject);
     const marker =
       stored.kind === "valid" && stored.marker.operationId === m.operationId
@@ -318,6 +326,9 @@ export function useCertMutations(args: {
       const r = asCertRefusal(err);
       if (r !== null) {
         if (CERT_TERMINAL_NOTHING_WRITTEN.includes(r.code)) {
+          // Ownership-matched: this names the id THIS dispatch armed a moment
+          // ago (every dispatch is a first dispatch — there is no re-send),
+          // so no earlier unresolved marker can be cleared here.
           clearCertRecovery(marker.operationId);
           if (
             action === "rotate" &&
@@ -384,34 +395,23 @@ export function useCertMutations(args: {
   };
 
   // ── rotate ────────────────────────────────────────────────────────────
-  const openRotate = (
-    operationId = mintOperationId(),
-    /** a re-send keeps the marker's ORIGINAL fence (never the current one) */
-    boundFence?: string,
-  ): void => {
+  const openRotate = (): void => {
     if (inv === undefined) return;
     clearOutcome();
     setCeremony({
       kind: "rotate",
-      operationId,
-      fence: boundFence ?? inv.ca.revision,
+      operationId: mintOperationId(),
+      fence: inv.ca.revision,
       current: inv.ca.fingerprint ?? "",
       challenge: null,
       expired: false,
-      resend: boundFence !== undefined,
     });
   };
+  /** The challenge is not a mutation: nothing durable is at stake and this
+   * step touches the marker store in NO branch (6B2C-B2) — the marker is
+   * armed by the confirm dispatch. */
   const requestChallenge = async (): Promise<void> => {
     if (ceremony.kind !== "rotate" || inFlight.current) return;
-    const marker: CertRecoveryMarker = {
-      operationId: ceremony.operationId,
-      action: "rotate",
-      fence: ceremony.fence,
-      candidate: "",
-      previousFingerprint: fenceDigest(ceremony.fence),
-      startedAt: Date.now(),
-    };
-    if (!armMarker(marker)) return;
     inFlight.current = true;
     setResult("pending");
     setErrorText(undefined);
@@ -430,21 +430,14 @@ export function useCertMutations(args: {
     } catch (err: unknown) {
       if (err instanceof ApiError && err.kind === "aborted") return;
       const r = asCertRefusal(err);
-      if (r !== null && CERT_TERMINAL_NOTHING_WRITTEN.includes(r.code)) {
-        // Nothing durable is involved in a challenge: the marker is cleared
-        // and the refusal (a stale fence, a CA-less node, a known id) is
-        // rendered on the page with the authoritative current facts.
-        clearCertRecovery(marker.operationId);
-        close();
-        setRefusal({ action: "Root CA rotation", refusal: r });
-      } else if (r !== null) {
-        clearCertRecovery(marker.operationId);
+      if (r !== null) {
+        // The refusal (a stale fence, a CA-less node, a known id) ends the
+        // ceremony and is rendered with the authoritative current facts.
         close();
         setRefusal({ action: "Root CA rotation", refusal: r });
       } else {
-        // The challenge itself is not a mutation: stay in the ceremony and
-        // let the operator request it again explicitly.
-        clearCertRecovery(marker.operationId);
+        // Stay in the ceremony and let the operator request it again
+        // explicitly; nothing is retried on its own.
         setResult("failed");
         setErrorText(
           "The challenge request was not answered; nothing was changed. Request the challenge again.",
@@ -453,7 +446,6 @@ export function useCertMutations(args: {
     } finally {
       ownerRef.current.settle(signal);
       inFlight.current = false;
-      rereadRecovery();
     }
   };
   const confirmRotate = (): void => {
@@ -501,31 +493,22 @@ export function useCertMutations(args: {
       ),
     );
   };
+  /** Cancelling before the confirm touches no storage: no marker exists for
+   * this ceremony (a dispatched confirm closes the ceremony itself). */
   const cancelRotate = (): void => {
     if (ceremony.kind !== "rotate") return;
-    // No mutation was dispatched (a dispatched one closes the ceremony
-    // itself): the marker written for the challenge is this browser's only.
-    clearCertRecovery(ceremony.operationId);
     close();
-    rereadRecovery();
   };
 
   // ── import / replace (one editor, two targets) ────────────────────────
-  const openPair = (
-    target: "mitm" | "ui",
-    bound: { operationId: string; fence: string; candidate: string } | null,
-  ): void => {
+  const openPair = (target: "mitm" | "ui"): void => {
     clearOutcome();
     setCeremony({
       kind: "pair",
       target,
-      operationId: bound?.operationId ?? mintOperationId(),
+      operationId: mintOperationId(),
       pem: { cert: "", key: "" },
       review: null,
-      bound:
-        bound !== null
-          ? { fence: bound.fence, candidate: bound.candidate }
-          : null,
     });
   };
   const setPem = (patch: Partial<PEMPair>): void => {
@@ -553,20 +536,6 @@ export function useCertMutations(args: {
         ceremony.target === "mitm"
           ? await dryRunCAImport(ceremony.pem, signal)
           : await dryRunUIReplace(ceremony.pem, signal);
-      // A re-send must present the SAME candidate the marker recorded.
-      if (ceremony.bound !== null) {
-        const id =
-          r.target === "mitm"
-            ? digestOf(r.candidate.fingerprint)
-            : await pemDigest(ceremony.pem.cert);
-        if (id !== ceremony.bound.candidate) {
-          setResult("failed");
-          setErrorText(
-            "This is not the candidate the unresolved operation was dispatched with; a different candidate needs a new operation once the outstanding one is resolved or abandoned.",
-          );
-          return;
-        }
-      }
       setCeremony((c) => (c.kind === "pair" ? { ...c, review: r } : c));
       setResult("idle");
     } catch (err: unknown) {
@@ -595,7 +564,7 @@ export function useCertMutations(args: {
     const rev = c.review;
     if (rev === null) return;
     if (rev.target === "mitm") {
-      const fence = c.bound?.fence ?? rev.caRevision;
+      const fence = rev.caRevision;
       const marker: CertRecoveryMarker = {
         operationId: c.operationId,
         action: "import",
@@ -632,7 +601,7 @@ export function useCertMutations(args: {
       return;
     }
     const certDigest = await pemDigest(c.pem.cert);
-    const fence = c.bound?.fence ?? rev.uiCertRevision;
+    const fence = rev.uiCertRevision;
     const marker: CertRecoveryMarker = {
       operationId: c.operationId,
       action: "replace",
@@ -664,9 +633,12 @@ export function useCertMutations(args: {
             ]}
           />
           <p>
-            The pair is persisted, not active: the running listener keeps
-            serving the pair it loaded, and the next restart serves this one.
-            Nothing restarts on its own.
+            The persisted material changed; the pair is persisted, not active.
+            The running listener is unaffected and keeps serving what it loaded.
+            The appliance reports activation as <Mono>{out.activation}</Mono>:
+            what the next start serves depends on the startup configuration (an
+            explicitly configured certificate pair or a no-TLS start takes
+            precedence over the persisted pair). Nothing restarts on its own.
           </p>
         </OutcomeNotice>
       ),
@@ -674,20 +646,16 @@ export function useCertMutations(args: {
   };
 
   // ── delete ────────────────────────────────────────────────────────────
-  const openDelete = (
-    operationId = mintOperationId(),
-    fence?: string,
-  ): void => {
+  const openDelete = (): void => {
     if (inv === undefined) return;
     clearOutcome();
     setCeremony({
       kind: "delete",
-      operationId,
-      fence: fence ?? inv.uiCert.revision,
+      operationId: mintOperationId(),
+      fence: inv.uiCert.revision,
       fingerprint: inv.uiCert.fingerprint ?? "",
       subject: inv.uiCert.subject ?? "",
       posture: activationPosture(inv),
-      resend: fence !== undefined,
     });
   };
   const confirmDelete = (): void => {
@@ -712,10 +680,13 @@ export function useCertMutations(args: {
       (out) => (
         <OutcomeNotice title="UI certificate deleted" out={out}>
           <p>
-            Cleanup: <Mono>{out.cleanup}</Mono>.{" "}
+            Cleanup: <Mono>{out.cleanup}</Mono>. The persisted material changed:
+            the pair is no longer persisted on this node.{" "}
             {out.activation === "restart_required"
-              ? "The running listener keeps serving the pair it loaded until the next restart, which falls back to the automatic self-signed certificate."
-              : "The running listener was not serving this pair; the next restart falls back to the automatic self-signed certificate."}
+              ? "The running listener was serving this pair and keeps serving what it loaded (the appliance reports activation: restart_required); it is unaffected."
+              : "The running listener was not serving this pair and is unaffected."}{" "}
+            What the next start serves depends on the startup configuration;
+            this deletion selects no replacement.
           </p>
         </OutcomeNotice>
       ),
@@ -723,21 +694,17 @@ export function useCertMutations(args: {
   };
 
   // ── OCSP ──────────────────────────────────────────────────────────────
-  const openOCSP = (
-    operationId = mintOperationId(),
-    bound?: { fence: string; enabled: boolean },
-  ): void => {
+  const openOCSP = (): void => {
     if (inv === undefined) return;
     clearOutcome();
     setCeremony({
       kind: "ocsp",
-      operationId,
-      fence: bound?.fence ?? inv.ocsp.revision,
+      operationId: mintOperationId(),
+      fence: inv.ocsp.revision,
       desired: inv.ocsp.desired,
       runtime: inv.ocsp.runtime,
       unchecked: ocsp?.uncheckedEnforcingPaths.length ?? -1,
-      enabled: bound?.enabled ?? inv.ocsp.desired.enabled,
-      resend: bound !== undefined,
+      enabled: inv.ocsp.desired.enabled,
     });
   };
   const confirmOCSP = (): void => {
@@ -815,40 +782,10 @@ export function useCertMutations(args: {
     } catch (err: unknown) {
       const code = certLookupRefusal(err);
       if (code === "not_found") {
-        setView({ kind: "never_recorded" });
+        setView({ kind: "absent" });
         return;
       }
       setView(code !== null ? { kind: "refused", code } : { kind: "unproven" });
-    }
-  };
-  const resend = (marker: CertRecoveryMarker): void => {
-    switch (marker.action) {
-      case "rotate":
-        openRotate(marker.operationId, marker.fence);
-        return;
-      case "import":
-        openPair("mitm", {
-          operationId: marker.operationId,
-          fence: marker.fence,
-          candidate: marker.candidate,
-        });
-        return;
-      case "replace":
-        openPair("ui", {
-          operationId: marker.operationId,
-          fence: marker.fence,
-          candidate: marker.candidate,
-        });
-        return;
-      case "delete":
-        openDelete(marker.operationId, marker.fence);
-        return;
-      case "ocsp":
-        openOCSP(marker.operationId, {
-          fence: marker.fence,
-          enabled: marker.candidate === "enabled",
-        });
-        return;
     }
   };
   const abandon = (marker: CertRecoveryMarker): void => {
@@ -883,7 +820,6 @@ export function useCertMutations(args: {
           view={view}
           unproven={unproven}
           onRecover={() => void recover(recovery.marker)}
-          onResend={() => resend(recovery.marker)}
           onAbandon={() =>
             setCeremony({ kind: "abandon", marker: recovery.marker })
           }
@@ -983,11 +919,11 @@ export function useCertMutations(args: {
     blocked: !canMutate,
     can: { rotate: canRotate, deleteUI: canDelete },
     open: {
-      rotate: () => openRotate(),
-      importCA: () => openPair("mitm", null),
-      replaceUI: () => openPair("ui", null),
-      deleteUI: () => openDelete(),
-      ocsp: () => openOCSP(),
+      rotate: openRotate,
+      importCA: () => openPair("mitm"),
+      replaceUI: () => openPair("ui"),
+      deleteUI: openDelete,
+      ocsp: openOCSP,
     },
     notices,
     dialog: (
@@ -1159,18 +1095,16 @@ function RecoveryCard({
   view,
   unproven,
   onRecover,
-  onResend,
   onAbandon,
 }: {
   marker: CertRecoveryMarker;
   view: CertRecoveryView;
   unproven: UnprovenNote | null;
   onRecover: () => void;
-  onResend: () => void;
   onAbandon: () => void;
 }): JSX.Element {
   const abandonable =
-    view.kind === "never_recorded" ||
+    view.kind === "absent" ||
     view.kind === "unbound" ||
     (view.kind === "op" &&
       (view.op.state === "aborted" ||
@@ -1195,8 +1129,8 @@ function RecoveryCard({
         ) : unproven !== null && unproven.status !== undefined ? (
           <> (HTTP {String(unproven.status)}, not a verdict)</>
         ) : null}
-        . Every mutation stays blocked until the appliance's ledger settles it;
-        nothing is re-sent automatically.
+        . Every mutation stays blocked until the appliance's ledger settles it
+        or the marker is abandoned; nothing is ever re-sent.
       </p>
       <div>
         <Button
@@ -1207,13 +1141,6 @@ function RecoveryCard({
         >
           Recover
         </Button>{" "}
-        {certResendAllowed(view) && (
-          <>
-            <Button size="sm" variant="secondary" onClick={onResend}>
-              Re-send
-            </Button>{" "}
-          </>
-        )}
         {abandonable && (
           <Button size="sm" variant="danger-quiet" onClick={onAbandon}>
             Abandon
@@ -1223,15 +1150,15 @@ function RecoveryCard({
       <div>
         {view.kind === "looking" && "Looking the operation up…"}
         {view.kind === "op" && <RecoveredState op={view.op} />}
-        {view.kind === "never_recorded" && (
-          <span>
-            The appliance never recorded this operation: the write did not
-            start, or this node's ledger no longer holds it (a 404 alone is not
-            proof of non-commit — the current object state above is). The same
-            operation may be re-sent under its identity and original fence (a
-            known id replays, a moved fence is refused), or the marker
-            abandoned.
-          </span>
+        {view.kind === "absent" && (
+          <StatusBadge status="unknown">
+            UNKNOWN: the appliance retains no record of this operation. Whether
+            it committed cannot be known from the ledger — a decided record can
+            be evicted, and what the node holds now proves nothing about it. The
+            marker is kept, nothing is re-sent (a new intent is a new
+            operation), and every mutation stays blocked until the marker is
+            abandoned, which cancels or reverses nothing on the appliance.
+          </StatusBadge>
         )}
         {view.kind === "unbound" && (
           <StatusBadge status="unknown">
@@ -1345,13 +1272,6 @@ function RotateCeremony(
                 : []),
             ]}
           />
-          {c.resend && (
-            <p>
-              Re-sends the unresolved operation <Mono>{c.operationId}</Mono>{" "}
-              under its original fence; the appliance replays a committed
-              rotation or refuses a moved revision.
-            </p>
-          )}
           {step1 ? (
             <p>
               The appliance issues a server-owned challenge bound to your
@@ -1452,9 +1372,6 @@ function PairCeremony(
         <>
           <p>
             <Mono>{c.operationId}</Mono>
-            {c.bound !== null
-              ? " — re-sends the unresolved operation under its original fence; the review must present the same candidate."
-              : ""}
           </p>
           {reviewed && c.review !== null ? (
             <KeyValue items={candidateItems(c.review)} />
@@ -1492,12 +1409,12 @@ function PairCeremony(
       impact={
         mitm
           ? "The reviewed certificate becomes this node's inspection Root CA: the bundle is written to disk before it is installed; every client must trust it; the previous root is replaced under the fence shown."
-          : "The reviewed pair is persisted only: the running listener keeps serving the pair it loaded, and the pair takes effect at the next restart (activation: restart_required). Nothing restarts on its own."
+          : "The reviewed pair is persisted only: the running listener is unaffected and keeps serving what it loaded; the appliance reports activation as restart_required. What the next start serves depends on the startup configuration (an explicitly configured pair or a no-TLS start takes precedence over the persisted pair). Nothing restarts on its own."
       }
       rollback={
         mitm
           ? "Import the previous root again, or rotate."
-          : "Replace the pair again, or delete it (the next restart falls back to self-signed)."
+          : "Replace the pair again, or delete it; neither changes the running listener, and what the next start serves depends on the startup configuration."
       }
       confirmLabel={
         reviewed ? (mitm ? "Import" : "Replace") : "Review candidate"
@@ -1511,22 +1428,29 @@ function PairCeremony(
   );
 }
 
+/** What the deletion proves and what it does not: the persisted material
+ * changes; the running listener is unaffected (a fact stated per posture,
+ * from bind evidence); what the NEXT start serves depends on the startup
+ * configuration — never promised here (6B2C-B3). */
+const NEXT_START =
+  "What the next start serves depends on the startup configuration; this deletion selects no replacement.";
 function servedWords(posture: ActivationPosture, fingerprint: string): string {
   switch (posture.kind) {
     case "custom_matches":
-      return "The running listener serves THIS pair; deleting it does not stop the listener — it keeps serving the pair it loaded until the next restart, which falls back to the automatic self-signed certificate.";
+      return `The running listener serves THIS pair (${fingerprint}) and keeps serving what it loaded; the deletion does not stop or restart the listener. ${NEXT_START}`;
     case "custom_differs":
     case "custom_not_persisted":
-      return `The running listener serves a different pair (${posture.served.fingerprint}); it keeps serving it and is not affected by this deletion.`;
+      return `The running listener serves a different pair (${posture.served.fingerprint}); it keeps serving it and is unaffected by this deletion. ${NEXT_START}`;
     case "custom_persisted_unusable":
-      return `The running listener serves ${posture.served.fingerprint}; it keeps serving it and is not affected by this deletion.`;
+      return `The running listener serves ${posture.served.fingerprint}; it keeps serving it and is unaffected by this deletion. ${NEXT_START}`;
     case "self_signed":
+      return `The running listener serves the automatically generated certificate (${posture.served.fingerprint}), not the persisted pair; it keeps serving it and is unaffected by this deletion. ${NEXT_START}`;
     case "tls_configured":
-      return `The running listener serves ${posture.served.fingerprint} (not the persisted pair); it keeps serving it and is not affected by this deletion.`;
+      return `The running listener serves an explicitly configured pair (${posture.served.fingerprint}) selected by the startup configuration, not the persisted pair; it keeps serving it and is unaffected by this deletion. ${NEXT_START}`;
     case "plain_http":
-      return "The running listener serves plain HTTP and keeps serving it; the deletion affects only what a restart would load.";
+      return `The running listener serves plain HTTP and keeps doing so; the deletion changes only the persisted material. ${NEXT_START}`;
     case "unknown":
-      return `The running listener's served pair is not observed; whatever it loaded, it keeps serving it (persisted ${fingerprint} is what a restart would have loaded).`;
+      return `The running listener's served certificate is not observed (no bind evidence); whatever it loaded, it keeps serving it and is unaffected by this deletion (persisted: ${fingerprint}). ${NEXT_START}`;
   }
 }
 
@@ -1563,16 +1487,9 @@ function DeleteCeremony(
             ]}
           />
           <p>{servedWords(c.posture, c.fingerprint)}</p>
-          {c.resend && (
-            <p>
-              Re-sends the unresolved operation under its original fence; the
-              appliance replays a committed deletion or refuses a moved
-              revision.
-            </p>
-          )}
         </>
       }
-      impact="The persisted pair is removed from this node (the private key first). This does not stop the running listener and does not restart the appliance."
+      impact="The persisted pair is removed from this node (the private key first). This does not stop the running listener and does not restart the appliance; what the next start serves depends on the startup configuration."
       rollback="Replace the pair again from your own copy; the appliance keeps none."
       confirmLabel="Delete"
       confirmWord={word}
@@ -1632,13 +1549,6 @@ function OCSPCeremony(
             onChange={(e) => p.onToggle(e.target.checked)}
             disabled={p.result === "pending"}
           />
-          {c.resend && (
-            <p>
-              Re-sends the unresolved operation under its original fence with
-              the same target posture; the appliance replays a committed set or
-              refuses a moved revision.
-            </p>
-          )}
         </>
       }
       impact="The DESIRED posture is persisted first and the running checker is flipped only after the write landed; the runtime posture is reported separately and never inferred."
