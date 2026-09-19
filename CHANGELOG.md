@@ -35,6 +35,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   alert, delivery fields on `GET /api/syslog`, and a rate-limited failure and
   recovery log pair. See `docs/operator/siem-forwarding-health.md`.
 
+- The SIEM delivery health plane derives "is a target configured" from the
+  operator's configured address alone. An earlier form of this change also
+  consulted a flag the plane set from InitSyslog, which gave one condition two
+  sources of truth: anything that initialised syslog left the flag set, so a
+  later reader that cleared only the address still saw the feed as configured
+  and the diagnostics row reported a failure where it should have reported
+  "not configured".
+
 - The SIEM delivery health plane now fences callbacks on writer identity and
   arms a per-episode threshold timer (review findings on the change above).
   Clearing a retired writer's observer pointer stops only the callbacks that

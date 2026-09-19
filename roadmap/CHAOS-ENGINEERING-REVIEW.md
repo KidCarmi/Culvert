@@ -6510,6 +6510,7 @@ did not exist before this change.
 | SL-7 | A target that fails to connect at BOOT is never retried — forwarding is off for the process lifetime — while the same collector dying one second later reconnects forever. One fault, two postures. | **M** | **OPEN** (posture, recorded below) |
 | SL-8 | `InitSyslog` replaced the writer without releasing the old one. A leak on its own; with the new delivery observer attached, a superseded writer pointed at a dead collector drives the health plane that now describes the NEW writer — a healthy feed reported as down. | **M** | CLOSED (found inside this sweep's own fix) |
 | SL-9 | **Clearing the observer pointer does not fence a callback already past the pointer LOAD.** A retired writer's drain goroutine descheduled inside `notifyDelivery` resumes after the swap and writes into the record that now describes the NEW writer — in both directions: a stale failure marks a healthy feed down, a stale recovery clears a real outage. | **M** | CLOSED (Codex review) |
+| SL-11 | **One condition, two sources of truth — committed inside the fix for exactly that.** `syslogState` OR-ed a health-plane `configured` flag with the operator's intent. `InitSyslog` sets the flag; six pre-existing test files reach `InitSyslog` and none know to clear a global this plane added, so under `-shuffle` a later test that cleared only the intent still read as configured and `syslog_feed` returned `fail` where it must return `ok`. | **M** | CLOSED (the flag is gone, not merely reset; intent is the single authority) |
 | SL-10 | **The page depended on more traffic arriving to carry it.** `alertNow` was evaluated only while processing another failed line, so a gateway that loses one line and then goes quiet crossed the threshold with `/metrics` and `/api/diagnostics` both reporting the episode as degraded while the webhook never fired — two surfaces disagreeing about one condition. | **M** | CLOSED (Codex review) |
 
 ### 36.3 What shipped
@@ -6661,6 +6662,38 @@ recovery, reconfiguration or disable, and both callers route through one
 still reads `syslogNow()`, so a frozen test clock decides nothing however the
 real-clock timer fires — which is what keeps the gates deterministic without
 sleeping out a real minute.
+
+### 36.4c The determinism round — the thesis broken in its own file
+
+The Deep determinism gate (`-shuffle`, `-count=2`) had been cancelled on every
+head by this sweep's own rapid pushes, so it ran for the first time on the
+fourth attempt — and failed, seed `1789774890106508497`.
+
+The cause is the one this section spends three pages on. `syslogState` computed
+
+```go
+Configured: syslogHealth.configured || syslogConfiguredAddr != ""
+```
+
+which gives ONE condition TWO sources of truth that can disagree. `InitSyslog`
+sets the health-plane flag as a side effect; SIX pre-existing test files reach
+`InitSyslog`, and none of them know to clear a global this sweep added. So under
+shuffle a later test that reset only the operator's intent — all the
+pre-existing diagnostics tests know about — still read as configured, and the
+`syslog_feed` row returned `fail` where it must return `ok`.
+
+**Two answers to one question is the defect** — §30's rule (2), which §36.4b
+cites by name while fixing SL-10, broken one field over inside the same change.
+The remedy is not to reset the flag from more places: it is that the flag should
+never have existed. Operator INTENT (`syslogConfiguredAddr`) was already the
+single authority the pre-existing `checkSyslogFeed` used, and it is again.
+
+Two lessons worth carrying, both about process rather than code. A new
+process-global is a change to every test in the package, not only to the tests
+that know its name; the blast radius is "everything that can set it", which here
+was six files written long before this plane existed. And a gate that keeps
+being cancelled is not a gate that keeps passing — five cancellations in a row
+read, at a glance, exactly like five greens.
 
 ### 36.5 Gates
 

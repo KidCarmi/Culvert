@@ -120,12 +120,6 @@ const (
 type syslogHealthRecord struct {
 	mu sync.Mutex
 
-	// configured is false until a SIEM target is in effect. Every surface
-	// reports the feature as absent then, rather than exporting a zero that is
-	// indistinguishable from a broken feed — the CHAOS-54 rule, and the reason
-	// the socks5/cluster_ca/dns gauges are all emitted conditionally.
-	configured bool
-
 	// owner is the writer this record describes, and it is the FENCE against a
 	// callback from a retired one (Codex review, PR #1430).
 	//
@@ -266,7 +260,6 @@ func fireSyslogFailingAlert(detail string) {
 // harmless: from here on, only sw may move this record.
 func noteSyslogConfigured(sw *syslogWriter) {
 	syslogHealth.mu.Lock()
-	syslogHealth.configured = true
 	syslogHealth.owner = sw
 	syslogHealth.failingSince = time.Time{}
 	syslogHealth.alerted = false
@@ -293,7 +286,6 @@ func stopSyslogAlertTimerLocked() {
 // disabled feed never keeps exporting series or holding a latched alert.
 func noteSyslogUnconfigured() {
 	syslogHealth.mu.Lock()
-	syslogHealth.configured = false
 	syslogHealth.owner = nil
 	syslogHealth.failingSince = time.Time{}
 	syslogHealth.alerted = false
@@ -452,14 +444,24 @@ type syslogSnapshot struct {
 // same coupling Format() shed in this change.
 func syslogState() syslogSnapshot {
 	syslogHealth.mu.Lock()
-	configured := syslogHealth.configured
 	failingSince := syslogHealth.failingSince
 	syslogHealth.mu.Unlock()
 
-	// Intent is the authority for "is this feature in use": syslogConfiguredAddr
-	// is recorded regardless of whether the dial succeeded, which is what lets
-	// a silently-down feed be distinguished from an intentional no-op.
-	snap := syslogSnapshot{Configured: configured || syslogConfiguredAddr != ""}
+	// Operator INTENT is the SINGLE authority for "is this feature in use".
+	// syslogConfiguredAddr is recorded regardless of whether the dial
+	// succeeded, which is what lets a silently-down feed be distinguished from
+	// an intentional no-op — the pre-existing checkSyslogFeed rule, kept.
+	//
+	// This deliberately does NOT also consult a health-plane flag. An earlier
+	// shape OR-ed in a `configured` bool set by noteSyslogConfigured, which
+	// gave one condition two sources of truth that could disagree: InitSyslog
+	// sets the flag, six pre-existing test files reach InitSyslog, and none of
+	// them know to clear a global this plane added — so under -shuffle a later
+	// test that cleared only the intent still read as configured and the
+	// `syslog_feed` row returned fail where it should return ok. That is this
+	// section's own defect (two answers to one question) committed inside the
+	// fix for it; the flag is gone rather than merely reset.
+	snap := syslogSnapshot{Configured: syslogConfiguredAddr != ""}
 	if !snap.Configured {
 		return snap
 	}

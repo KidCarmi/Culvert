@@ -39,7 +39,7 @@ func withSyslogTestState(t *testing.T) {
 	// copying it by value is a vet error (and would restore a snapshot of lock
 	// state, which is meaningless).
 	syslogHealth.mu.Lock()
-	prevConfigured, prevFailing := syslogHealth.configured, syslogHealth.failingSince
+	prevFailing := syslogHealth.failingSince
 	prevAlerted, prevLogAt, prevSuppressed := syslogHealth.alerted, syslogHealth.logAt, syslogHealth.suppressed
 	syslogHealth.mu.Unlock()
 	t.Cleanup(func() {
@@ -47,13 +47,16 @@ func withSyslogTestState(t *testing.T) {
 		setSyslogNow(nil)
 		setSyslogAlert(nil)
 		syslogHealth.mu.Lock()
-		syslogHealth.configured = prevConfigured
 		syslogHealth.failingSince = prevFailing
 		syslogHealth.alerted = prevAlerted
 		syslogHealth.logAt = prevLogAt
 		syslogHealth.suppressed = prevSuppressed
 		syslogHealth.mu.Unlock()
 	})
+	// Clear the INTENT globals too, not just the record: a gate that asserts
+	// "no SIEM target configured" must not inherit one from whatever ran before
+	// it under -shuffle.
+	globalSyslog, syslogConfigured, syslogConfiguredAddr = nil, "", ""
 	noteSyslogUnconfigured()
 }
 
@@ -792,4 +795,53 @@ func fireArmedEpisodeTimer(t *testing.T) {
 		return
 	}
 	evaluateSyslogEpisode()
+}
+
+// TestChaos66_ConfiguredHasExactlyOneSourceOfTruth — DEFECT gate for the
+// determinism failure this sweep introduced (CI seed 1789774890106508497).
+//
+// An earlier shape of syslogState() computed
+//
+//	Configured: syslogHealth.configured || syslogConfiguredAddr != ""
+//
+// giving ONE condition TWO sources of truth. InitSyslog sets the health-plane
+// flag; six pre-existing test files reach InitSyslog, and none of them know to
+// clear a global this plane added. So under -shuffle, a later test that reset
+// only the operator intent still read as configured, and the `syslog_feed` row
+// returned `fail` where it must return `ok`.
+//
+// That is this section's own thesis — two answers to one question is the defect
+// — committed inside the fix for it. The flag is gone rather than merely reset,
+// and intent is the single authority.
+//
+// The gate reproduces the leak deterministically instead of relying on shuffle
+// luck: arm a feed (as InitSyslog does), then clear ONLY the intent, exactly as
+// the pre-existing diagnostics tests do.
+func TestChaos66_ConfiguredHasExactlyOneSourceOfTruth(t *testing.T) {
+	withSyslogTestState(t)
+
+	// A feed is configured and the health plane takes ownership — what
+	// InitSyslog does, and what any test touching it leaves behind.
+	w, _ := newLiveCollector(t, "tcp")
+	arm(w, "tcp://collector.test:601")
+	if !syslogState().Configured {
+		t.Fatal("an armed feed does not read as configured — the gate is not exercising the leak")
+	}
+
+	// A later test clears ONLY the operator intent, which is all the
+	// pre-existing diagnostics tests know about.
+	globalSyslog, syslogConfigured, syslogConfiguredAddr = nil, "", ""
+
+	if syslogState().Configured {
+		t.Error("the feed still reads as configured after intent was cleared — " +
+			"a health-plane global is acting as a second source of truth")
+	}
+	if row := checkSyslogFeed(); row.Status != diagOK {
+		t.Errorf("syslog_feed = %q after intent was cleared, want ok: %+v", row.Status, row)
+	}
+	var b strings.Builder
+	syslogWritePrometheus(&b)
+	if b.Len() != 0 {
+		t.Errorf("metrics still exported after intent was cleared:\n%s", b.String())
+	}
 }
