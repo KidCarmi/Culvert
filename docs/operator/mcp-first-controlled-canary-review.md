@@ -3266,6 +3266,120 @@ finding unbacked.
 > runs — this paragraph used to carry its own enumeration and stopped at M21 while the script
 > reached M28, giving §25d two incompatible accounts of the same history (Codex round 9).
 
+## §25e Blocker 11 — peer-observed First-Canary freshness (activation-time half)
+
+**This section changes NO ledger status. Blocker 11 stays OPEN**, and so does everything else:
+blocker 8 remains OPEN (narrowed), blockers 1, 2, 3, 10, 12 and 15 are untouched, the baseline is
+still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY TARGET`.
+
+It records what the peer-observation work established, and — more usefully — exactly what is left
+before the blocker may be closed. The reason for splitting it is stated plainly below: an
+activation-time check alone does not close blocker 11, because freshness is the one prerequisite
+that becomes false with no state change at all.
+
+### What blocker 11 actually said, re-derived from the code
+
+The ledger entry is that the reviewed fingerprint is operator-DECLARED, not peer-OBSERVED. Two
+facts made that true, and both were confirmed against the tree before anything was written:
+
+- `seedServer`/`seedTools`/`Ingest` (`mcp_inventory.go`) compute the fingerprint from operator
+  JSON, re-encoded into a tools/list shaped exactly like a real one. The bytes cannot tell you
+  where they came from.
+- `execution.Discovery.Discover` — the one function that talks to a peer and ingests what it says
+  — had NO non-test caller anywhere in the tree.
+
+So `ToolStillCurrent`, "exact reviewed fingerprint" and "rug-pull invalidates the approval" all
+validated an unchanged LOCAL record. They bound the seed. A seeded record's digest matches the
+reviewed target exactly, and — because nothing ever re-observed the peer — it would keep matching
+forever, including on a node whose upstream had advertised something else since the day it was
+provisioned.
+
+### What this work established
+
+**1. Provenance is DERIVED, not declared** (`internal/mcp/catalog/provenance.go`). A record's
+`Provenance()` reads its `Observed` evidence; there is no `Source` field to set, so no caller can
+claim peer provenance without carrying an observation. `OperatorSeeded` is the zero value.
+
+**2. Two semantic ingest entrypoints over one private implementation.** `Ingest` is the operator
+seed and attaches no observation; `IngestObserved` requires complete evidence whose identity
+matches the ingest identity. Which one a caller reaches is the only difference between a seed and
+an observation, and that is pinned structurally rather than by convention
+(`TestPeerWall_ObservedIngestHasExactlyOneProducer`,
+`TestPeerWall_SeedReachesOnlyTheSeededEntrypoint`).
+
+**3. The evidence is AUTHENTICATED, and the identity is the transport's, not the payload's.**
+`Discovery.Discover` refuses a server with no pinned identity, dials through the production
+upstream client — destination policy, pinned destination, TLS >= 1.2, SPKI verification — and
+stamps the identity the transport was told to verify. A real-HTTPS end-to-end proof
+(`mcp_peer_refresh_https_e2e_test.go`) drives the seeded-F1/real-peer-F2 case over a loopback TLS
+server, with an agreeing peer as the positive control and a wrong-SPKI peer as the negative one
+(which records zero requests — the refusal happens in the handshake).
+
+**4. There is a governed production caller** (`POST /api/mcp/servers/refresh`, admin-only). It
+takes a server id and NOTHING else: endpoint, pin, tenant, tool set, provenance and the
+observation timestamp all come from authoritative state or from the peer. There is no field an
+operator can fill in to make the catalog say something the peer did not. It holds no activation,
+rollout or durable-state lock across the dial, single-flights per server, and confers no authority
+— pinned by identifier-reach walls rather than by behaviour, because "cannot invoke" is a claim
+behavioural tests can only make about the paths someone thought to drive.
+
+**5. Freshness is a bounded, named security interval** (`FirstCanaryPeerObservationMaxAge`, 30
+min) and a new ACTIVATION-level readiness row, `peer_observation_not_fresh` (matrix row 21a). It
+is deliberately not expressed in terms of the approval TTL, the tool-trust TTL or the Canary
+window: those bound how long a HUMAN DECISION stays valid, this bounds how long a MEASUREMENT of
+a third party stays believable, and the two must move independently.
+
+**6. Freshness is bound to the EXACT target, never to a server.** A fresh observation of F2 says
+nothing about an activation reviewed against F1, and reports `peer_observation_target_moved`
+rather than `..._stale` — the two name different remedies, and refreshing cannot fix a mismatch.
+Tenant comes from the REGISTRY, never from the observation: the peer has no authority over who
+owns it, which is why `catalog.PeerObservation` carries no tenant field at all.
+
+**7. The timestamp attests when the question was ASKED.** It is taken before the request goes out,
+so a call that stalls past the whole bound and then succeeds lands already stale. That is the
+conservative direction — an observation can read as older than it truly is, never newer.
+
+**8. A reseed does not renew freshness, and a restart forgets it.** The observation is written
+from the ingest's own evidence and never inherited, so a byte-identical operator reseed of a
+previously-observed tool clears it while a peer re-observation of an unchanged tool refreshes it.
+The catalog is not durable, so a restart returns every record to seeded — accepted deliberately:
+persisting a measurement of a third party across a process that was not running to see it would
+let a restart move an observation forward.
+
+### Why blocker 11 is NOT closed by any of that
+
+**An activation-time check is not sufficient, and the reason is specific to this fact.** Every
+other activation prerequisite becomes false only when some state changes — an approval is revoked,
+a policy is edited, a fingerprint moves. Freshness becomes false with NO state change at all,
+purely by the clock advancing. So an observation that satisfies the preflight can expire while the
+Canary window is still open, and nothing in this slice re-checks it before a physical send.
+
+Closing blocker 11 therefore additionally requires the runtime to re-check peer freshness in the
+existing live authority revalidation path, immediately before the upstream call — the same seam
+that already revalidates kill state and live trust. `PeerObservationFresh` is exported and
+separate from the binding verdict precisely so both call sites share ONE definition of fresh; an
+activation-time bound and a send-time bound that could drift apart would be two answers to one
+question.
+
+Two further limits are recorded rather than papered over:
+
+- **The refresh is SESSIONLESS.** It issues a single `tools/list` with no `initialize` handshake
+  and no session lifecycle, which is blocker 1's territory. That is enough to obtain an
+  authenticated statement of what the peer advertises, and it is NOT a claim that Culvert
+  implements the MCP session lifecycle. **Blocker 1 is untouched by this work and is not
+  absorbed into it.** A peer that requires an initialized session before answering `tools/list`
+  will simply fail the refresh — bounded, counted and reported, leaving the previous record
+  aging on its own clock.
+- **A failed refresh is never read as "the peer is unchanged."** It stamps nothing, erases
+  nothing and stops no clock. The existing observation keeps aging, so an outage expires
+  freshness by the passage of time rather than by a fabricated verdict.
+
+### Status
+
+Blocker 11 stays **OPEN**. The activation-time half is in place and proven; the send-time re-check
+is the remaining work, and until it exists an observation that expires after preflight could still
+back a later request.
+
 ## §26 Final verdict
 
 ### `FIRST CONTROLLED CANARY REVIEW: BLOCKED — NO SAFE FIRST CANARY TARGET`
