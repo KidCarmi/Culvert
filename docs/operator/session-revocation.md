@@ -1,0 +1,196 @@
+# Session revocation — durability, cluster reach, and recovery
+
+**Applies to:** every Culvert deployment. **Introduced by:** CHAOS-66
+(`roadmap/CHAOS-ENGINEERING-REVIEW.md` §36).
+
+---
+
+## 1. Why this plane matters more than it looks
+
+A Culvert session cookie is **self-contained**. It carries the subject, the
+groups and the admin role, and it is trusted on the strength of its HMAC
+signature alone (`internal/session.Decode`). Nothing re-consults the user roster
+on a request:
+
+* the admin UI reads the role **out of the cookie** (`ui_middleware.go`);
+* the proxy's identity arm reads the subject and groups **out of the cookie**
+  (`proxy.go`), and those feed identity- and group-scoped policy rules.
+
+So deleting an account, or disabling a user, does **not** by itself stop that
+user's live session. The **revocation list** is the only mechanism that does,
+and the window it would otherwise run to is the session TTL — default 8 hours,
+maximum 7 days (`internal/session`'s `maxTTL`).
+
+That makes the revocation list a security control whose *durability* and
+*cluster reach* are part of its correctness, not an optimisation.
+
+---
+
+## 2. What is revoked, by what, and where
+
+| Action | Revocation kind | Where it is applied |
+|---|---|---|
+| Admin or user logs out | **token** — that one cookie | The node serving the logout, then the fleet |
+| `DELETE /api/auth/users?username=…` | **account** — every session for that user | The node serving the delete, then the fleet |
+
+Both kinds are now persisted to the revocations file and both ride the CP↔DP
+gossip. Before CHAOS-66 only the token kind did either.
+
+**Not revoked by anything** (see §7): changing a user's **role** or **password**
+via `POST /api/auth/users`. A demoted admin keeps `role: admin` in their
+existing cookie until it expires, and a password change does not invalidate a
+stolen session. Delete-and-recreate the account if you need either to take
+effect immediately.
+
+---
+
+## 3. Enabling durability — the one setting that matters
+
+Revocation persistence is **opt-in and off by default**:
+
+```
+--revocations-file /data/revocations.json
+```
+
+With it unset, every revocation — logout and account deletion alike — is lost
+on the next restart.
+
+**This interacts with the session signing key, and the combination is what makes
+it dangerous.** If the signing key is random per restart (the single-node
+default), a restart invalidates every cookie anyway, so losing the revocation
+list costs nothing. But the shipped `docker-compose.yml` sets
+`CULVERT_SESSION_SECRET`, and **every clustered deployment must** so that admin
+sessions stay valid fleet-wide. A stable key means a cookie survives the
+restart that discards its revocation.
+
+> **Rule of thumb:** if you set `CULVERT_SESSION_SECRET` (or `session_secret`),
+> you must also set `--revocations-file`. One without the other is the
+> configuration in which a revoked session comes back.
+
+The `session_revocation` diagnostics row warns whenever persistence is
+unconfigured and states this coupling.
+
+---
+
+## 4. Surfaces
+
+### Diagnostics — `GET /api/diagnostics`, row `session_revocation`
+
+| Status | Meaning | Action |
+|---|---|---|
+| `ok` | Revocations are durable; counts of tokens and accounts in force | none |
+| `warn` | No revocations file configured — revocations are lost on restart | Set `--revocations-file` (§3) |
+| `fail` | A revocation could not be **written** | §5 |
+| `fail` | The persisted list did not **load** | §6 |
+
+The row carries counts and a remedy only. It never names a revoked username or
+token — it is reachable at viewer role.
+
+### Metrics — `/metrics`
+
+| Series | Type | Meaning |
+|---|---|---|
+| `culvert_session_revocation_durable` | gauge | `1` when a revocation applied here survives a restart |
+| `culvert_session_revocation_tokens` | gauge | Logout revocations in force on this node |
+| `culvert_session_revocation_users` | gauge | Deleted-account revocations in force on this node |
+| `culvert_session_revocation_persist_failures_total` | counter | Revocations applied in memory that could not be written |
+
+These are emitted **unconditionally**, which is the deliberate exception to
+Culvert's usual "omit the series when the feature is off" rule. Elsewhere a flat
+`0` from a node that never enabled a feature is indistinguishable from a broken
+one. Here the two causes mean the same thing to you — *a revocation applied on
+this node does not survive a restart* — and that is exactly the condition worth
+watching. The contract row tells you which cause applies.
+
+Suggested rules:
+
+```
+# Page: an admin was told a session was withdrawn and it was not written down.
+culvert_session_revocation_persist_failures_total > 0
+
+# Warn: revocations on this node do not survive a restart.
+culvert_session_revocation_durable == 0
+```
+
+### Cluster status — `GET /api/cluster/status`
+
+`local_revoked` (tokens), `local_user_revoked` (accounts), `revocations_durable`.
+
+### Alerts and `/readyz`
+
+A **corrupt** revocations file fires the existing `state_file_corrupt` alert and
+produces the existing `state_file_session_revocations` readiness row — the same
+response `ui_users.json` and `cluster.json` already get. No new alert event was
+introduced, so an existing webhook subscription picks this up without a config
+change.
+
+There is deliberately **no `/readyz` row of its own** for a non-durable
+revocation list. A node whose revocations are not durable is proxying and
+authenticating perfectly; failing readiness would eject a healthy gateway from
+its load balancer over a management-plane degradation.
+
+---
+
+## 5. Recovery: `session_revocation` is `fail`, persist failures non-zero
+
+**Meaning:** a logout or an account deletion was reported to the admin as
+complete, and the only durable record of it does not exist. After the next
+restart those sessions are live again.
+
+1. Check the volume backing the revocations file: free space, permissions,
+   mount state. `AtomicWrite` needs to create a temp file in the same directory
+   and `fsync` it.
+2. Fix the volume. The gauge clears on the next successful write — the counter
+   is cumulative and deliberately does not reset, so the incident stays visible.
+3. **Re-apply the affected revocations.** Re-delete the accounts, and treat any
+   session revoked on this node during the window as still live. There is no
+   way to recover the list of what was lost; that is why the counter pages.
+
+Until the volume is fixed, a restart is a security event, not a maintenance one.
+
+## 6. Recovery: the persisted list did not load
+
+If the file was **corrupt** (read fine, would not parse), Culvert has already
+moved it aside to `<path>.corrupt.<unixnano>`, fired `state_file_corrupt`, and
+booted with an empty list. The move is what stops the next save from
+overwriting your evidence.
+
+1. Inspect the quarantined file. If it is intact enough to repair, repair it,
+   move it back, and restart.
+2. Otherwise restore a backup and restart.
+3. If neither is possible, **re-apply every revocation you rely on** — the node
+   is currently honouring every cookie that was revoked before the restart.
+4. Remove the `.corrupt.*` file once reconciled. It is re-surfaced on every
+   boot until you do, deliberately: a later save writes a fresh empty list that
+   parses cleanly, so without that reminder probes go green over a lost
+   revocation list.
+
+If the file could **not be read** (permissions, I/O), it is *not* quarantined —
+the content may be perfectly intact behind a transient fault, and moving a
+healthy security-critical file aside is the worse error. Fix the permission or
+the mount and restart.
+
+---
+
+## 7. Known limits (deliberate, recorded)
+
+* **Role and password changes do not revoke.** `POST /api/auth/users` changing a
+  role or password leaves existing cookies untouched — a demotion does not take
+  effect until the session expires, and a password change does not invalidate a
+  stolen session. Delete and recreate the account to force it. Recorded as
+  register row **AU-23**; closing it changes an admin workflow and needs its own
+  review.
+* **Persistence is opt-in.** Defaulting `--revocations-file` to
+  `<dataDir>/revocations.json` is the obvious improvement and is recorded as
+  **AU-22**; it starts writing a new file on every appliance, which is a default
+  change deserving owner sign-off rather than a side effect of this sweep.
+* **Cluster propagation is eventually consistent**, bounded by the DP sync
+  interval (3 s) plus one hop through the CP. A revocation applied on one node
+  is enforced fleet-wide within a few seconds, not instantly.
+* **A Data Plane that cannot reach its Control Plane stops receiving
+  revocations** for the duration of the outage. It keeps enforcing the ones it
+  already has (and, with `--revocations-file` set, across a restart). This is
+  the same posture as every other CP-sourced state and is covered by the
+  existing CP-link alerting.
+* **In-flight SSO sessions survive IdP deletion** — a separate, still-open gap
+  (register row **AU-2**), not addressed here.

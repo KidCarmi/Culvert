@@ -129,10 +129,44 @@ OCSP-1…OCSP-10, and `docs/operator/ocsp-revocation-checking.md`.
 
 **2026-09-19 — CHAOS-66 sweep (the session revocation plane). ID CLAIMED BEFORE ANY CODE
 WAS WRITTEN,** as the header above recommends after ten collisions and as the CHAOS-65 sweep
-first did. This row is commit one of the sweep; nothing else had been written when it landed.
+first did. This row was commit one of the sweep; the id never moved. That is now two sweeps in
+a row for which the remedy worked exactly as the header predicts, at a cost of one line each.
 Scope: the one mechanism in Culvert that can withdraw authority from a session that is already
 issued — `internal/session`'s `RevocationList`, its persistence, its CP↔DP gossip, and the two
-admin actions that reach it. Findings and outcome are recorded in §36 when the sweep completes.
+admin actions that reach it.
+
+The property everything turns on: a Culvert cookie is **self-contained** and is trusted on its
+HMAC alone. Nothing re-consults the roster on a request — `ui_middleware.go` reads the admin
+role *out of the cookie*, and `proxy.go`'s identity arm reads the subject and groups out of it,
+where they feed identity- and group-scoped policy on the **data plane**. So the revocation list
+is not one control among many; it is the only way to take authority away from something already
+issued, and the window it otherwise runs to is up to **seven days**. Four defects, all closed,
+and the shape they share is that the list was treated as a cache. **An account-level revocation
+was never persisted and never gossiped** — `RevokeUser` wrote to a `users` map that
+`ExportRevocations` did not walk, two functions ninety lines apart in one file — so deleting a
+compromised account revoked its live sessions in the memory of one process, on one node, until
+that process exited. **The Control Plane was isolated from the plane in both directions**, and
+that is the sharpest one: `globalRevAggregator` had exactly one writer in the whole tree, a Data
+Plane push, and `SyncRevocations` never merged what it received. The admin UI runs on the
+Control Plane — that is what a control plane is for — so the node where logouts and deletions
+actually happen was the one node whose revocations went nowhere, while the direction that did
+work is the one nobody uses. **A corrupt revocations file resurrected every revocation behind
+one log line**, and the next save atomically overwrote the evidence; `quarantineCorruptStateFile`
+has handled exactly this for `ui_users.json` and `cluster.json` since CHAOS-05/07 and this file
+was simply never wired in. And **none of it was reachable by a dashboard**: no metric, no health
+row, no alert, one role-gated JSON field that counts tokens only — the §1 theme, and the same
+blind spot CHAOS-59 found in the feed plane.
+
+One finding is **reported, not changed**: `-revocations-file` ships empty, and the danger is the
+COUPLING rather than the default. With a per-restart signing key every cookie breaks on restart
+anyway — but `docker-compose.yml` sets `CULVERT_SESSION_SECRET` and every clustered deployment
+must, so the stable key that makes sessions survive a restart is exactly what lets a cookie
+outlive the restart that discards its revocation. The dangerous configuration is the documented
+one. Defaulting the path starts writing a new file on every appliance, which is an owner
+decision, so what shipped is the warning that names the coupling. 26 gates; every defect gate
+verified failing against its reintroduced pre-fix shape, with two controls (revoking everything
+passes every gate while locking every operator out; a row that always fails trains operators to
+ignore it). See rows AU-18…AU-23, §36, and `docs/operator/session-revocation.md`.
 
 **2026-09-02 — CHAOS-58 sweep (the directory that accepts and then stops answering).**
 CHAOS-47 solved the *unreachable* directory: fail closed, arm a provider-wide cooldown, deny
@@ -1096,6 +1130,12 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP | M | `auth_oidc_flow.go:623-636`; breaker exists unused `internal/upstream/upstream.go:89-96` |
 | AU-15 | **The public admin-login endpoint accepted an UNBOUNDED username and copied it verbatim into durable state.** `apiAuthLogin` is on `uiAuthMiddleware`'s public allowlist; nothing between the 1 MiB body cap and the handler limited `body.User`, and every failed attempt wrote it into the two lockout maps (retained ≥ `lockout.Window`), the 500-entry audit ring, and the **durable audit JSONL** — a 50 MB rotating file keeping exactly ONE archive. At the endpoint's own rate limit (60 mutating POSTs/min/IP) one unauthenticated client commits ~60 MiB/min of chosen bytes, rotating the entire 100 MB retained compliance record away in **under two minutes**, with no disk fault and every write SUCCEEDING (so `writeErrors`/`storage_write_failed` never fire). Measured by the gate: **4,195,672 bytes into the audit file from 8 requests.** | NEW → **CLOSED** (CHAOS-63: bounded at the handler; `lockout.MaxUsernameKeyLen` is the structural half; `culvert_login_oversize_rejected_total`) | **H** | was: `ui_auth.go` `apiAuthLogin`; `internal/audit/audit.go:213` (`NewRotatingFile(path, 50)`); see §32 |
 | AU-16 | **`internal/lockout` bounded its maps by ENTRY COUNT but not by KEY SIZE.** `Cleanup`'s own doc claims the maps are bounded "against an unbounded-memory DoS" — true on the count axis, and the janitor cannot sweep an entry before its `Window` elapses, so the SIZE axis was the whole exposure: one caller retained (rate × Window × username size) bytes in a leaf package whose stated contract is to be bounded. | NEW → **CLOSED** (CHAOS-63: `boundUsername` applied at every public entry point; consistency pinned so `Check` and `RecordFailure` cannot disagree on the key) | M/H | was: `internal/lockout/lockout.go`; see §32 |
+| AU-18 | **An account-level revocation was never persisted.** A Culvert cookie is self-contained and trusted on its HMAC alone — nothing re-consults the roster on a request — so the revocation list is the ONLY way to withdraw a live session's authority, and the TTL it otherwise runs to is up to 7 days. `RevokeUser` wrote to an in-memory `users` map that `SaveRevocations` did not export, so deleting a compromised or departing account revoked its live sessions in the memory of one process and no longer. An ordinary redeploy, an OOM or a SIGKILL resurrected them. | NEW → **CLOSED** (CHAOS-66: both maps reach disk; `DELETE /api/auth/users` persists like a logout does) | **H** | was: `internal/session/session.go` `ExportRevocations` (tokens only), `ui_auth.go` DELETE branch (no save); see §36 |
+| AU-19 | **An account-level revocation was never gossiped**, for the same reason: `ExportRevocations`/`MergeRevocations` handled only the token map. On a cluster, deleting an account revoked its sessions on the ONE node that served the DELETE; every other node kept honouring the cookie — including for identity- and group-scoped **proxy policy**, not just the admin UI. | NEW → **CLOSED** (CHAOS-66: user entries ride the existing CP↔DP sync; downgrade-parseable array preserved) | **H** | was: `internal/session/session.go`; see §36 |
+| AU-20 | **The Control Plane was isolated from the revocation plane in BOTH directions.** `globalRevAggregator` had exactly one writer — a Data Plane push — so the CP contributed nothing to the fleet-wide merge, and `SyncRevocations` never merged what it received, so it consumed nothing either. The admin UI runs on the CP, which makes it the node where logouts and account deletions actually happen: the direction that propagated (DP→fleet) is the one nobody uses, and the direction an operator uses did not exist. | NEW → **CLOSED** (CHAOS-66: the handler contributes the CP's live list and merges the DP's, on the sync tick that already runs; the CP slot is a dedicated field, not a reserved map key) | **H** | was: `controlplane.go` `revocationAggregator`, `controlplane_server.go` `SyncRevocations`; see §36 |
+| AU-21 | **A corrupt revocations file resurrected every revocation, silently.** `initSession` logged the parse error and booted with an EMPTY list, and the next `SaveRevocations` atomically OVERWROTE the evidence. `state_corruption.go` has handled exactly this for `ui_users.json` and `cluster.json` since CHAOS-05/07; the revocations file — the one whose loss is a security-control failure rather than a roster inconvenience — was simply never wired into it. | NEW → **CLOSED** (CHAOS-66: `ErrRevocationsCorrupt` + `quarantineCorruptStateFile("session_revocations", …)`; a READ failure is deliberately NOT quarantined) | **H** | was: `session_startup.go`, `main.go` `initSession`; see §36 |
+| AU-22 | **Revocation persistence is opt-in and ships OFF** (`-revocations-file` defaults to `""`), and the danger is the COUPLING rather than the default alone: with a per-restart signing key every cookie breaks on restart anyway, but the shipped `docker-compose.yml` sets `CULVERT_SESSION_SECRET` and every clustered deployment MUST — so the stable key that makes sessions survive a restart is exactly what lets a cookie outlive the restart that discards its revocation. Defaulting the path to `<dataDir>/revocations.json` is the obvious fix and starts writing a new file on every appliance, so it is an OWNER decision, not a side effect of this sweep. Made VISIBLE rather than changed: the `session_revocation` row warns and names the coupling. | NEW, **REPORTED not changed** (CHAOS-66) | M/H | `main.go:320`, `docker-compose.yml` `CULVERT_SESSION_SECRET`; see §36 |
+| AU-23 | **A role or password change revokes nothing.** `POST /api/auth/users` re-writes the roster, but the role lives IN the cookie (`ui_middleware.go` reads `sess.Role`, it does not re-resolve), so a demoted admin keeps admin authority until the session expires, and the classic "my password was stolen, I changed it" action does not invalidate the stolen session. Only DELETE revokes. Closing it means revoking on a role/password edit, which changes an admin workflow and deserves its own review. | NEW, **REPORTED not changed** (CHAOS-66) | M | `ui_auth.go` POST branch; `ui_middleware.go:276`; see §36 |
 
 ### 2.6 Background Workers / Feeds / Scanning / Alerting
 
@@ -6409,3 +6449,251 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The session revocation plane
+
+**Date:** 2026-09-19. **Scope:** `internal/session`'s `RevocationList`, its
+persistence, its CP↔DP gossip, and the two admin actions that reach it.
+**Id claimed before any code was written** (see the revision log).
+
+### 36.1 Why this plane is load-bearing
+
+A Culvert session cookie is **self-contained**. `internal/session.Decode`
+verifies an HMAC and returns the payload; nothing re-consults the user roster on
+a request. `ui_middleware.go:276` reads the admin role *out of the cookie*
+(`role := UIRole(sess.Role)`), and `proxy.go:355`'s identity arm reads the
+subject and groups out of it, where they feed identity- and group-scoped policy
+rules on the **data plane**.
+
+So deleting an account does not by itself stop that account's live session, on
+the admin plane or the proxy. The revocation list is the only thing that does,
+and the window it would otherwise run to is the session TTL — 8 hours by
+default, **7 days** at `maxTTL`.
+
+That is the property every finding below turns on: this is not one control among
+many whose degradation costs coverage. It is the single mechanism by which an
+operator can take authority away from something already issued, and its
+*durability* and *cluster reach* are part of its correctness.
+
+### 36.2 What was found
+
+Four defects, and the shape they share is that **the list was treated as a
+cache**. Every one of them was survivable-looking in isolation and none of them
+moved a number an operator could watch.
+
+**AU-18 — an account revocation was never written down.** `RevokeUser` wrote to
+`r.users`; `SaveRevocations` exported `r.tokens`. The two lines are ninety apart
+in one file. So `DELETE /api/auth/users` revoked the account's live sessions in
+the memory of one process, and a restart — a redeploy, an OOM, a SIGKILL, a
+`docker compose up -d` — brought them back for the remainder of their TTL. The
+admin was told the deletion succeeded, and it had: the *account* was durable
+(`SaveUIUsersFile`), the *revocation* was not. Reproduced:
+`TestChaos66_UserRevocationSurvivesARestart`, failing against the pre-fix tree.
+
+**AU-19 — and it was never gossiped**, for the identical reason. Culvert has a
+working cluster-wide revocation path (DP → CP aggregator → other DPs, every 3 s)
+and the user map was invisible to it. Deleting an account revoked it on the one
+node that served the request. Every other node in the fleet kept authenticating
+the cookie — and, because the proxy path reads identity out of the same cookie,
+kept applying that user's policy rules to live traffic.
+
+**AU-20 — the Control Plane was isolated from the plane in both directions, and
+this is the sharpest of the four.** `globalRevAggregator` had exactly one writer
+in the entire tree:
+
+```
+controlplane_server.go:362:  globalRevAggregator.Update(req.NodeID, req.Entries)
+```
+
+— a Data Plane push. The CP never contributed its own list, and
+`SyncRevocations` never merged what it received into its own. **The admin UI
+runs on the Control Plane.** That is what a control plane is for. So the node
+where logouts and account deletions actually happen was the one node whose
+revocations went nowhere, while the direction that worked — a DP's own logouts
+reaching the fleet — is the one nobody uses. Both halves failed silently and in
+opposite directions at once: an admin logging out on the CP stayed logged in
+everywhere else, and a session revoked on a DP stayed valid on the CP.
+
+**AU-21 — a corrupt file resurrected everything, quietly.** `initSession`
+(`main.go:664`) logged the load error and continued with an empty list; the next
+`SaveRevocations` then atomically **overwrote** the corrupt file. Every revoked
+cookie and every deleted account's session worked again, and the evidence was
+destroyed by the recovery. The repository has had exactly the right machinery
+for this since CHAOS-05/07 — `quarantineCorruptStateFile` moves the file aside,
+fires `state_file_corrupt`, and records a `/readyz` row, and `ui_users.json` and
+`cluster.json` both use it. The revocations file, whose loss is a
+security-control failure rather than a roster inconvenience, was never wired in.
+
+**AU-22 — and none of this was reachable by a dashboard.** The plane had *no*
+metric, *no* health row and *no* alert. Its only surface was `local_revoked` on
+a role-gated cluster endpoint, which counts tokens — so a node holding a hundred
+deleted-account revocations and a node holding none serialised identically. This
+is the §1 theme exactly, and the same blind spot CHAOS-59 found in the feed
+plane: *the sole surviving difference reached one role-gated admin JSON field
+nothing scrapes.*
+
+### 36.3 The coupling that makes the default dangerous (AU-22)
+
+`-revocations-file` defaults to `""`. Persistence is off.
+
+Read alone that looks defensible, because the session signing key is also random
+per restart by default — and with a random key every cookie breaks on restart
+anyway, so losing the revocation list costs nothing. **The two defaults are only
+safe together, and the shipped configuration breaks the pair.**
+`docker-compose.yml` sets `CULVERT_SESSION_SECRET`, and the operations guide
+requires it on every node of a cluster so admin sessions stay valid fleet-wide.
+A stable signing key is precisely what makes a cookie survive the restart that
+discards its revocation.
+
+So the dangerous configuration is not an unusual one. It is the documented one.
+
+This sweep **did not change the default** — defaulting the path to
+`<dataDir>/revocations.json` starts writing a new file on every appliance, which
+is an owner decision rather than a side effect of a resilience sweep. What
+shipped is visibility: the `session_revocation` row warns whenever persistence
+is unconfigured and states the coupling in its operator action.
+
+### 36.4 What shipped
+
+**The engine.** Both maps now reach disk and the fleet by the paths a logout
+already used. Three constraints shaped the wire format and each is load-bearing:
+
+1. **The document stays a JSON array.** Promoting it to an object would make a
+   binary predating this change fail the whole parse and lose the *token*
+   revocations it does understand — trading a gap for a regression. A user entry
+   is an array element with an added `omitempty` field.
+2. **A user entry carries a namespaced `Token`**
+   (`user:<name>`), because `MergedExcluding` de-duplicates the fleet-wide merge
+   on `e.Token` alone. An empty token would collapse **every** user revocation in
+   the cluster into one entry, and the fleet would learn about a single deleted
+   account. Pinned by `TestChaos66_UserEntriesHaveDistinctTokens`.
+3. **The prefix contains a byte outside base64url**, so it can never equal a
+   cookie's payload segment. That is a security property, not a convenience: a
+   downgraded node files the entry under `tokens[]` and must never match a live
+   session with it, and `MergeRevocations` classifies by the prefix and must
+   never swallow a genuine token revocation. Pinned in both directions by
+   `TestChaos66_UserRevocationTokenCannotCollideWithACookiePayload`, which
+   asserts the property against a real `Encode`d session rather than by
+   inspection.
+
+Recovering the username from the prefix also means a hop through an old node
+degrades nothing (`TestChaos66_UserRevocationSurvivesAHopThroughAnOldNode`).
+
+**The Control Plane.** `SyncRevocations` now contributes the CP's live list and
+consumes the reporting node's, on the sync tick that already runs — no new loop,
+no new cadence, and a node with no enrolled DPs pays nothing because the handler
+is never reached.
+
+**The CP's aggregator slot is a dedicated field, not a reserved map key.** The
+first draft used a reserved node id, which is only as safe as the guarantee that
+no enrolled node is ever named it — and node ids reach that map from an
+enrollment. A field cannot be addressed by `Update(nodeID, …)` at all, so a node
+can neither overwrite the CP's slot nor be excluded from its own merge,
+*regardless of what it is called*. Collision is structurally absent rather than
+merely unlikely, and `TestChaos66_CPSlotIsNotAddressableByANodeID` drives the
+hostile names to prove it.
+
+**Corruption.** A file that was READ and could not be PARSED is wrapped in
+`ErrRevocationsCorrupt` and quarantined through the existing helper. A file that
+could not be READ is deliberately **not** quarantined — the content may be
+intact behind a transient permission or I/O fault, and moving a healthy
+security-critical file aside is the worse error. Same rule, and the same
+reasoning, as `state_corruption.go`'s own; pinned as a control.
+
+**Observability**, all reusing vocabulary that already exists so no second
+dialect is introduced: a `session_revocation` operator-contract row,
+`culvert_session_revocation_{durable,tokens,users,persist_failures_total}`, and
+for the corrupt case the existing `state_file_corrupt` alert plus the existing
+`state_file_session_revocations` readiness row — which means an existing webhook
+subscription picks this up with no config change.
+
+Two decisions inside that worth keeping:
+
+* **The series are emitted unconditionally**, the deliberate exception to the
+  socks5/cluster_ca/geo rule. Those are omitted because a flat `0` from a node
+  that never enabled the feature is indistinguishable from a broken one. Here
+  the reasoning inverts: `durable 0` from an unconfigured node and `durable 0`
+  from a node with a full volume mean the *same thing* to the operator, and it
+  is the condition worth watching. Omitting on the unconfigured node would hide
+  the default posture, which is the one most deployments are in.
+* **The row FAILS, rather than warns, on a persist failure.** It is the one
+  state in the sweep where the operator's belief and the node's state actively
+  disagree — the admin action reported success. Everything else degrades
+  honestly.
+
+**Deliberately NOT on `/readyz` as a row of its own.** A node whose revocations
+are not durable is proxying and authenticating perfectly. Failing readiness
+would eject a healthy gateway from its load balancer over a management-plane
+degradation — the trade §19 refused for the category store and §25 for the admin
+UI listener.
+
+### 36.5 Gates
+
+26 in total: 14 in `internal/session/revocation_chaos_test.go`, 12 in
+`session_revocation_chaos_test.go`.
+
+Every defect gate was verified **failing against its reintroduced pre-fix
+shape** — six in the engine (persistence, gossip, distinct tokens, old-node hop,
+expiry pruning, later-expiry merge) and three at root (CP contribution, CP slot
+addressability, handler wiring) — with the controls confirmed still passing in
+the same run, since they are not statements about that half.
+
+Two controls exist because the cheapest ways to pass everything above are both
+worse than the defect:
+
+* `TestChaos66_UnrevokedSessionsStillDecode` — revoking everything satisfies
+  every assertion about revocations being enforced, while locking every operator
+  out of their own gateway.
+* `TestChaos66_HealthyNodeReadsOK` — a row that always fails satisfies every
+  assertion about the degradation being visible, and trains an operator to
+  ignore it.
+
+`TestChaos66_SyncRevocationsWiresBothDirections` is a **structural wall**, not a
+behavioural gate: `SyncRevocations` cannot be reached without an mTLS peer
+context, an enrolled node and an unfenced HA lease, so the wiring is pinned by
+shape — the same instrument, and the same reason, as
+`TestSOCKS5_EveryDestinationSinkIsAudited`. It requires *both* directions,
+because a Control Plane that contributes but does not consume still fails to
+enforce a logout performed on a Data Plane.
+
+`TestChaos66_ContractRowDoesNotLeakRevokedIdentities` pins the viewer-role
+contract: the row carries counts and a remedy, never a revoked username or token.
+
+### 36.6 Deliberately left (owner decisions)
+
+* **AU-22** — persistence stays opt-in. Made visible, not changed.
+* **AU-23** — a role or password change still revokes nothing. The role lives in
+  the cookie and is not re-resolved, so a demoted admin keeps admin authority
+  until expiry, and a password change does not invalidate a stolen session.
+  Closing it changes an admin workflow.
+* **AU-2** (pre-existing) — in-flight SSO sessions still survive IdP deletion;
+  there is no `RevokeProvider`. Same family, untouched here: one concern per
+  change.
+* **CA-8 / AU-9** (pre-existing) — the per-restart signing key and the absence of
+  a rotation grace window are unchanged. This sweep only records that the
+  *stable*-key posture is what makes AU-22 bite.
+
+### 36.7 The transferable lesson
+
+Two of the four defects are one mistake made twice: **a map was added beside an
+existing one and the code that carried the first was never taught about the
+second.** `users` was added next to `tokens` for account deletion (Finding 5.2)
+and `ExportRevocations`, `MergeRevocations`, `SaveRevocations` and `Count` all
+kept meaning "tokens". Nothing was wrong when each was written; the second map
+simply inherited none of the first's guarantees, and no test asked whether it
+had.
+
+The other two are the same mistake one level up. The revocation *list* was given
+durability, gossip and corruption handling; the revocation *plane* — which
+includes the node the admin actually uses and the file the list lives in — was
+never treated as one thing that either holds or does not.
+
+So the rule to carry forward: **when you add a second kind of a thing that an
+existing mechanism carries, enumerate every surface the first kind reaches and
+either extend it or record why not.** For this list that was four surfaces —
+disk, gossip, the aggregator, and the counters — and it reached none of them.
+CHAOS-65 stated a neighbouring version of this (*a check that runs at parse time
+governs a value that outlives the parse*); this is its structural twin, and both
+are cheaper to answer at authoring time than to find later.
