@@ -630,6 +630,16 @@ run_mutation M30 \
   'TestCredWall_LedgerStatesTheCampaignSize' . "$OPERDOC" \
   's/mcp-first-canary-no-credential-mutations\.sh` — \d+ mutations/mcp-first-canary-no-credential-mutations.sh` — 999 mutations/'
 
+# M31 targets the clause Codex round 11 added, and it has to do so WITHOUT tripping the two older
+# checks in the same gate. Deleting an entry would break contiguity or the total and be caught by
+# those instead, proving nothing about the new clause; renaming a PROSE mention to a round the list
+# does not contain leaves the total and the enumeration agreeing with each other -- which is exactly
+# the state that was green before round 11 -- so only the new clause can reject it.
+run_mutation M31 \
+  "§25d discusses a round its enumeration does not contain" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/which Codex round 10 found/which Codex round 12 found/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then

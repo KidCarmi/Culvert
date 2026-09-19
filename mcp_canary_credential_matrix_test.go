@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -799,6 +800,37 @@ func TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration(t *testing.T) {
 	if stated != len(seen) {
 		t.Errorf("§25d claims %d review rounds; it enumerates %d. The summary and its own list "+
 			"must derive from the same thing.", stated, len(seen))
+	}
+
+	// Codex round 11: the two checks above tie the TOTAL to the ENUMERATION, and both were
+	// self-consistent while the section's PROSE discussed a round the list did not contain —
+	// §25d described Codex round 10 in detail with the list stopping at 9 and the total reading
+	// "9 rounds", and this gate stayed green throughout. That is round 9's finding one level out:
+	// the gate checked the two things it derived from each other and never asked whether they
+	// covered what the section actually talks about.
+	//
+	// So every round §25d NAMES must also be enumerated. A round worth a paragraph is a round
+	// worth an audit-trail entry, and if a mention is not about this section's own review history
+	// it should not be phrased as "round N" here.
+	enumerated := make(map[int]bool, len(seen))
+	for _, n := range seen {
+		enumerated[n] = true
+	}
+	var unlisted []int
+	for _, r := range regexp.MustCompile(`(?i)\bround\s+(\d+)\b`).FindAllStringSubmatch(doc, -1) {
+		n, e := strconv.Atoi(r[1])
+		if e != nil || enumerated[n] {
+			continue
+		}
+		if !slices.Contains(unlisted, n) {
+			unlisted = append(unlisted, n)
+		}
+	}
+	slices.Sort(unlisted)
+	if len(unlisted) > 0 {
+		t.Errorf("§25d discusses round(s) %v that its structured enumeration does not contain. "+
+			"The total and the list agree with each other and both understate the section: add a "+
+			"`- **Round N** — ...` entry for each, or stop calling it a round here.", unlisted)
 	}
 }
 

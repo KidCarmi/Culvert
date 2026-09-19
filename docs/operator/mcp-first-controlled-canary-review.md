@@ -2839,9 +2839,9 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 30 mutations,
-**30 caught, 0 survived, 0 skipped, measured on `f6f4451c`** (the self-check passed: it refuses the
-run before anything else prints, and this run reached its summary).
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 31 mutations,
+**CAMPAIGN_RESULT_PENDING** (the self-check passes when a run reaches its summary at all: it
+refuses before anything else prints).
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
@@ -3157,21 +3157,42 @@ would not move, and a deleted entry would not shrink).
   section rather than from its enumeration, so an added or deleted entry would not move it; and a
   second paragraph carried its own account of the campaign's growth, stopping at M21 while the
   script reached M28. Gated by M29 and M30.
+- **Round 10** — the payload site counter added one round earlier could not fail. All 30 payloads
+  match exactly one site, so dropping the `/g` from the counting run left every one of them passing
+  with the guard disabled; the counter had been verified by hand and the verification written into
+  this section, which protects no later run. Gated by `selfcheck_site_counter`, which refuses the
+  campaign rather than scoring it.
+- **Round 11** — this section described round 10 in a new paragraph while the enumeration below
+  stopped at 9 and the total still read "9 rounds", and the round gate stayed GREEN because it
+  compared only those two with each other. Round 9's finding one level out: the gate checked the
+  two things it derived from each other and never asked whether they covered what the section
+  talks about. Every round §25d NAMES must now be enumerated. Gated by M31.
 
-**9 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**11 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
 baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
 negation and a needle vs the line it sat on (round 7), and a gated number vs the same number stated
-again two lines away (round 8), and a gate that derived a count from prose beside it rather than from the list it claimed to check (round 9).
+again two lines away (round 8), a gate that derived a count from prose beside it rather than from
+the list it claimed to check (round 9), a guard whose counter could not fail because every input
+expected the same answer (round 10), and a list and a total that agreed with each other while both
+understated the section they described (round 11).
 
 The gates get stronger every round; what keeps failing is the accounting around them, so the
 discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no
 more"** — and, learned the hard way in rounds 7 and 8, **state each fact ONCE.** A number repeated
 is a number that will drift, and gating one of its two statements is worse than gating neither,
 because the audit then reports green while the document contradicts itself.
-`TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration` keeps this very sentence honest by
-comparing its total against the highest round the section actually discusses.
+`TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration` keeps this very sentence honest: the total
+must equal the enumeration, the enumeration must be contiguous from 1, and every round the section
+NAMES must appear in it.
+
+That last clause was added in round 11 and this sentence is why it is worth recording separately.
+The description here previously read *"comparing its total against the highest round the section
+actually discusses"* — which is the behaviour round 9 REMOVED for being unsound, still written down
+as though it were the contract, two paragraphs below the entry recording its removal. Nothing
+checked it, because a gate's prose description is exactly the kind of claim this section keeps
+finding unbacked.
 
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
