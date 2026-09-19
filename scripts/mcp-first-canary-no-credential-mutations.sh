@@ -18,28 +18,15 @@
 # Each mutation reintroduces ONE specific way that could come back, then runs the NAMED gate that
 # must catch it. A mutation no test rejects is not a passing mutation: it is a hole.
 #
-#   M01  ExactPolicyPermit accepts a CredentialProfile obligation
-#   M02  the authoritative server credential requirement is ignored
-#   M03  the server statement is read from the fingerprint, so a disagreement passes
-#   M04  the reviewed/catalog credential statement is ignored
-#   M05  broker.Plan is consulted on the no-credential path
-#   M06  broker.Materialize is reached on the no-credential path
-#   M07  an Authorization header is attached despite an empty profile
-#   M08  a credential-required decision falls through with no broker
-#   M09  CredentialProfile is dropped from the tool fingerprint
-#   M10  a stale reviewed set is accepted after the credential change
-#   M11  auxiliary tools/list discovery carries a credential
-#   M12  readiness consumes the POLICY fact, ignoring the authoritative inventory
-#   M13  the readiness row is hard-coded true at the wiring step
-#   M14  the resolver is constant-false (anti-vacuity: the positive control must fail)
-#   M15  the transition commit forwards the wrong probe field
-#   M16  the restart reconcile forwards the wrong probe field
-#   M17  an engine error is reported as a credential-free answer
-#   M18  the matrix doc's activation row list drifts from the table
+# The mutations are NOT listed here. Each run_mutation call below carries its own one-line
+# description as an argument, and that is the line the runner prints -- so it is the one statement
+# of what a mutation does, and it cannot drift away from the mutation it describes. A header
+# summary is a SECOND statement of the same fact: this file carried one, it stopped at M18 while
+# the campaign grew to 30, and nothing noticed because nothing could.
 #
 # M14 is the anti-vacuity mutation §13 requires. A resolver returning constant false passes every
-# negative gate above while making the First Canary permanently impossible, so the campaign is
-# only meaningful if a POSITIVE control rejects it.
+# negative gate in the campaign while making the First Canary permanently impossible, so the
+# campaign is only meaningful if a POSITIVE control rejects it.
 #
 # A COMPILE FAILURE IS NOT PROOF unless the mutation targets a structural wall whose stated
 # purpose is compile-time prevention (those declare --compile-wall).
@@ -161,11 +148,62 @@ baseline_ok() {
   return 1
 }
 
-# run_mutation <id> <description> [--compile-wall] <gate-regex> <package> <file> <perl-script...>
+# PAYLOAD TARGETING (Codex round 9, PR #1423).
+#
+# The payloads are applied with perl in SLURP mode, so an s/// without /g replaces the FIRST match
+# IN THE WHOLE FILE -- not the first match in the section the mutation is named after. M30's pattern
+# was `mutations.sh` -- \d+ mutations`, which matched FOUR lines of the review document; the first
+# is blocker 4's campaign row, ~1500 lines outside the section M30 targets. The mutation applied,
+# edited an unrelated section, and the correctly-scoped gate saw nothing -- so it scored SURVIVED
+# while the defect it models was never introduced. The campaign reported a hole that did not exist,
+# which is the same failure as missing one: the score stopped describing the suite.
+#
+# Auditing the payloads by hand found the one instance. This makes the RUNNER prove the property
+# instead: every payload must match EXACTLY ONE site, and a payload that means to hit several
+# must say so with --multi <n>. A miss (0) and an overreach (>1) are both NOT PROVEN, the
+# same verdict a mutation that does not build gets, and for the same reason -- nothing ran that
+# could distinguish the mutated tree from the clean one.
+#
+# apply_payload prints how many SITES the payload matches, then applies it. The count must come
+# from a /g run against an UNTOUCHED copy: a plain s/// returns 1 whether the pattern matched one
+# site or forty, so counting substitutions would have reported M30 as a clean single hit -- the
+# guard would have been decoration. eval(STRING) compiles the payload as perl source exactly as
+# `perl -0pi -e` did, so the payloads themselves are unchanged.
+apply_payload() {
+  perl -0 -e '
+    my ($f, $src) = @ARGV;
+    open(my $in, "<", $f)  or die "open $f: $!";
+    my $orig = do { local $/; <$in> };
+    close $in;
+
+    # how many sites does it match?
+    $_ = $orig;
+    my $sites = eval($src . "g");
+    die $@ if $@;
+
+    # apply it for real, from the untouched original
+    $_ = $orig;
+    eval($src);
+    die $@ if $@;
+
+    open(my $out, ">", $f) or die "write $f: $!";
+    print $out $_;
+    close $out;
+    print $sites + 0;
+  ' "$1" "$2"
+}
+
+# run_mutation <id> <description> [--compile-wall] [--multi <n>] <gate-regex> <package> <file> <perl-script...>
 run_mutation() {
   local id="$1" desc="$2"; shift 2
-  local compile_wall=0
-  [ "${1:-}" = "--compile-wall" ] && { compile_wall=1; shift; }
+  local compile_wall=0 expect_subst=1
+  while :; do
+    case "${1:-}" in
+      --compile-wall) compile_wall=1; shift ;;
+      --multi)        expect_subst="$2"; shift 2 ;;
+      *)              break ;;
+    esac
+  done
   local gate="$1" pkg="$2" file="$3"; shift 3
 
   printf '\n[%s] %s\n' "$id" "$desc"
@@ -183,7 +221,17 @@ run_mutation() {
   local before; before="$(git rev-parse HEAD:"$file" 2>/dev/null || echo none)"
   MUTATING_FILE="$file" # armed BEFORE the first edit; the trap restores it if we die here
   for script in "$@"; do
-    perl -0pi -e "$script" "$file"
+    local n; n="$(apply_payload "$file" "$script")"
+    if [ "$n" != "$expect_subst" ]; then
+      printf '      NOT PROVEN — the payload matches %s site(s) in %s; %s was required.\n' \
+        "$n" "$file" "$expect_subst"
+      printf '                   A payload that can land somewhere other than where it claims to\n'
+      printf '                   mutates the wrong thing and proves nothing.\n'
+      SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (payload matches $n site(s), expected $expect_subst)")
+      revert "$file"; MUTATING_FILE=""
+      [ $KEEP -eq 0 ] && exit 1
+      return
+    fi
   done
   local after; after="$(git hash-object "$file")"
   if [ "$before" = "$after" ]; then
@@ -535,7 +583,7 @@ run_mutation M29 \
 run_mutation M30 \
   "the ledger states a campaign size the script does not run" \
   'TestCredWall_LedgerStatesTheCampaignSize' . "$OPERDOC" \
-  's/mutations\.sh` — \d+ mutations/mutations.sh` — 999 mutations/'
+  's/mcp-first-canary-no-credential-mutations\.sh` — \d+ mutations/mcp-first-canary-no-credential-mutations.sh` — 999 mutations/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
