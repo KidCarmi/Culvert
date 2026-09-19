@@ -6631,7 +6631,7 @@ UI listener.
 
 ### 36.5 Gates
 
-26 in total: 14 in `internal/session/revocation_chaos_test.go`, 12 in
+27 in total: 14 in `internal/session/revocation_chaos_test.go`, 13 in
 `session_revocation_chaos_test.go`.
 
 Every defect gate was verified **failing against its reintroduced pre-fix
@@ -6660,6 +6660,25 @@ enforce a logout performed on a Data Plane.
 
 `TestChaos66_ContractRowDoesNotLeakRevokedIdentities` pins the viewer-role
 contract: the row carries counts and a remedy, never a revoked username or token.
+
+**One regression was introduced by this sweep and caught inside it, and how it
+was caught is the useful part.** `/api/diagnostics` is walled against echoing
+secret names, PEM material and raw filesystem paths
+(`TestApiDiagnostics_NoSensitiveValues`), and the first draft of the
+`session_revocation` row spelled its remedy the natural way — naming a `/data/`
+path and the session-secret environment variable — which trips it. **The
+unshuffled suite passed; `-shuffle=on` failed.** The wall can only fire when
+this row is in its *warn* branch, and whether it is depends on whether an
+earlier test left revocation persistence configured, so the wall's coverage of
+any one row is a function of test ORDER. The substance moved to the runbook,
+and `TestChaos66_ContractRowNeverEchoesSensitiveTokens` now drives all four
+branches deterministically against the same forbidden list — verified failing
+against the original wording. The general point: **a global content wall over a
+composed document only tests the branches that composition happens to select,
+so a row with several branches needs its own deterministic driver.** The
+repository's determinism gate (`QA · Determinism`, which re-runs shuffled) is
+what makes this class findable at all; without running shuffled locally it
+would have merged green.
 
 ### 36.6 Deliberately left (owner decisions)
 
