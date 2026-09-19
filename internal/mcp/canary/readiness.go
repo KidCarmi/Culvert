@@ -121,6 +121,22 @@ const (
 	// execution takes the no-broker branch and reaches a credential-required upstream with NO
 	// Authorization header. See EvaluateCredentialFree.
 	ReasonCredentialPathRequired Reason = "credential_path_required" // #nosec G101 -- a reason code, not a credential
+	// ReasonPeerObservationNotFresh — the exact reviewed First-Canary target is not backed by a
+	// recent AUTHENTICATED observation of the peer that advertises it (blocker #11).
+	//
+	// It is deliberately SEPARATE from ReasonFingerprintNotCurrent, and the difference is the
+	// whole blocker. That row asks whether the reviewed digest still matches Culvert's OWN
+	// catalog record; this one asks whether that record was ever backed by the upstream. An
+	// operator-seeded F1 whose local fingerprint has never changed satisfies the first
+	// completely and the second not at all — which is exactly the state the shipped
+	// provisioning path produces, since seedTools re-encodes operator JSON through the same
+	// ingest a real discovery uses.
+	//
+	// It is also not implied by ReasonServerNotUsable or by any approval row. A usable server
+	// with a valid four-eyes live approval can still have been observed never, or an hour ago,
+	// or under an identity it no longer pins. Freshness belongs to an exact observed target,
+	// not to a server and not to a decision about one. See EvaluatePeerObservedFresh.
+	ReasonPeerObservationNotFresh Reason = "peer_observation_not_fresh"
 	// ReasonRollbackPathUnhealthy — the deterministic Canary→Shadow/Observe rollback path is
 	// not healthy (an emergency demotion could not be performed). Driven by the executable
 	// persist/restore rehearsal — rollback MECHANICS evidence.
@@ -210,7 +226,17 @@ type Facts struct {
 	// restart and NOT on a status read (§25d).
 	// See ReasonCredentialPathRequired and EvaluateCredentialFree.
 	FirstCanaryCredentialFree bool
-	RollbackPathHealthy       bool // the persist/restore rollback MECHANICS were executably rehearsed
+	// FirstCanaryPeerObservedFresh — the exact reviewed First-Canary target is backed by a
+	// recent authenticated observation of the peer, under the identity the registry pins now
+	// (blocker #11). Like the two facts above it is LIVE state, re-observed at each evaluation
+	// and never copied into the activation's immutable reviewed snapshot: an observation that
+	// AGES OUT after activation must be able to make the next FULL ACTIVATION PREFLIGHT refuse,
+	// which a frozen copy could not express — freshness is the one fact that becomes false with
+	// no state change at all, purely by the clock advancing. NOT "un-ready" on the NODE
+	// surface — factActivation again, so EvaluateNode skips it and node status can still report
+	// Ready. See ReasonPeerObservationNotFresh and EvaluatePeerObservedFresh.
+	FirstCanaryPeerObservedFresh bool
+	RollbackPathHealthy          bool // the persist/restore rollback MECHANICS were executably rehearsed
 	// RollbackCoordinatorRehearsed — the AUTHORITATIVE rollback path was rehearsed through the real
 	// commitRolloutTransitionAt coordinator. It is a SEPARATE hard prerequisite from RollbackPathHealthy
 	// (which is mechanics-only) and is FALSE in this build (CANARY-ROLLBACK-COORDINATOR-REHEARSAL open),
@@ -275,6 +301,7 @@ var readinessChecks = []readinessCheck{
 	{func(f Facts) bool { return f.ToolCatalogUsable }, ReasonToolNotCatalogUsable, factActivation},
 	{func(f Facts) bool { return f.ExactPolicyPermit }, ReasonExactPolicyNotExecutable, factActivation},
 	{func(f Facts) bool { return f.FirstCanaryCredentialFree }, ReasonCredentialPathRequired, factActivation},
+	{func(f Facts) bool { return f.FirstCanaryPeerObservedFresh }, ReasonPeerObservationNotFresh, factActivation},
 	{func(f Facts) bool { return f.RollbackPathHealthy }, ReasonRollbackPathUnhealthy, factNode},
 	{func(f Facts) bool { return f.RollbackCoordinatorRehearsed }, ReasonRollbackCoordinatorRehearsalPending, factNode},
 	{func(f Facts) bool { return f.BudgetConfigured }, ReasonBudgetNotConfigured, factActivation},
@@ -346,6 +373,7 @@ func AllReasons() []Reason {
 		ReasonToolNotCatalogUsable,
 		ReasonExactPolicyNotExecutable,
 		ReasonCredentialPathRequired,
+		ReasonPeerObservationNotFresh,
 		ReasonRollbackPathUnhealthy,
 		ReasonRollbackCoordinatorRehearsalPending,
 		ReasonBudgetNotConfigured,

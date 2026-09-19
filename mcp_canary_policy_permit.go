@@ -73,6 +73,14 @@ type exactRequestFacts struct {
 	// Authorization header can arise from it.
 	CredentialFree       bool
 	CredentialFreeReason canary.CredentialFreeReason
+	// PeerObservedFresh — blocker #11. The exact reviewed target is backed by a recent
+	// AUTHENTICATED observation of the peer that advertises it, under the identity the registry
+	// pins now. It rides on this same capture for the reason the other two do: the freshness
+	// question is about the very record the permit and the credential statements were decided
+	// against, so resolving it from a second read could produce three verdicts describing three
+	// inventories.
+	PeerObservedFresh       bool
+	PeerObservedFreshReason canary.PeerFreshReason
 }
 
 // canaryExactRequestFacts resolves BOTH exact-request activation facts from ONE coherent capture.
@@ -87,32 +95,35 @@ type exactRequestFacts struct {
 // It is a pure READ with the same properties as canaryExactPolicyPermit: it promotes nothing, arms
 // nothing, publishes nothing, and fails closed on every step it cannot establish.
 func canaryExactRequestFacts(scope rollout.ScopeSpec, reviewed []canary.ReviewedTarget, now time.Time) exactRequestFacts {
-	pi, cf := buildExactPermitInput(scope, reviewed, now)
+	pi, cf, pf := buildExactPermitInput(scope, reviewed, now)
 	pr := canary.EvaluateExactPermit(pi)
 	cr := canary.EvaluateCredentialFree(cf)
+	fr := canary.EvaluatePeerObservedFresh(pf)
 	return exactRequestFacts{
 		Permit: pr == canary.PermitOK, PermitReason: pr,
 		CredentialFree: cr == canary.CredFreeOK, CredentialFreeReason: cr,
+		PeerObservedFresh: fr == canary.PeerFreshOK, PeerObservedFreshReason: fr,
 	}
 }
 
 // buildExactPermitInput gathers everything canary.EvaluateExactPermit needs for the exact
 // First-Canary request. Split from the caller so the resolution reads top-to-bottom and the
 // verdict stays a single call to the pure engine.
-func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTarget, now time.Time) (canary.PermitInput, canary.CredentialFreeInput) {
+func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTarget, now time.Time) (canary.PermitInput, canary.CredentialFreeInput, canary.PeerFreshnessInput) {
 	unavailable := canary.PermitInput{TupleBuilt: false}
 	noCredFacts := canary.CredentialFreeInput{Resolved: false}
+	noPeerFacts := canary.PeerFreshnessInput{Resolved: false}
 	// EXACTLY ONE of each. The permit speaks about ONE request; a scope admitting two tenants or
 	// two tools has no single exact request to speak about. This is not a re-implementation of
 	// blocker #5's gate (canary.ValidateFirstCanaryScope, its own readiness row) — it is this
 	// resolver refusing to pick one element out of an ambiguous scope and call it "the" request.
 	if len(scope.Tenants) != 1 || len(scope.Tools) != 1 || len(scope.Principals) != 1 {
-		return unavailable, noCredFacts
+		return unavailable, noCredFacts, noPeerFacts
 	}
 	tenant, principal, st := scope.Tenants[0], scope.Principals[0], scope.Tools[0]
 	snap := mcpGatewayPolicySnapshot()
 	if snap == nil {
-		return unavailable, noCredFacts
+		return unavailable, noCredFacts, noPeerFacts
 	}
 	// ONE COHERENT CAPTURE of the registry and the catalog, reconciled first — the same seam
 	// and the same reasoning as the blocker-#13 row: reconcile-then-read across two lock
@@ -121,12 +132,12 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 	// two values and nothing re-reads the inventory.
 	cat, servers, ok := mcpToolTrustReconcileSnapshotFor()
 	if !ok {
-		return unavailable, noCredFacts
+		return unavailable, noCredFacts, noPeerFacts
 	}
 	rec, recOK := cat.Get(catalog.ToolKey{Server: registry.ServerID(st.Server), Name: st.Name})
 	srv, srvOK := servers.Get(registry.ServerID(st.Server))
 	if !recOK || !srvOK {
-		return unavailable, noCredFacts
+		return unavailable, noCredFacts, noPeerFacts
 	}
 	// The reviewed determination is asked against the CANDIDATE set the activation would bind,
 	// not the active one: at preflight time nothing is armed, which is the question being
@@ -147,7 +158,7 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 		ReviewedReadFirst: readFirst,
 	})
 	if !built {
-		return unavailable, noCredFacts
+		return unavailable, noCredFacts, noPeerFacts
 	}
 	dec, trace, err := mcpruntime.EvaluateExactPermitTuple(snap, in)
 	pi := canary.PermitInput{
@@ -184,7 +195,48 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 		ServerCredentialProfile:  string(srv.CredentialProfile),
 		CatalogCredentialProfile: string(rec.Fingerprint.CredentialProfile),
 	}
-	return pi, cf
+	// Blocker #11. The exact target binding plus the peer evidence on the very record the two
+	// facts above were decided against.
+	//
+	// Resolved is NOT conditioned on the policy engine's error, unlike the credential input.
+	// The two rows establish different things: the credential verdict needs the DECISION (an
+	// engine error leaves it a zero value, so "no policy credential" would be a statement about
+	// nothing), while this one needs only the inventory capture, which every early return above
+	// already guards. Tying it to `err` would report "peer observation unavailable" for a target
+	// whose observation was captured perfectly well, which is an untrue reason on a surface an
+	// operator acts on.
+	//
+	// The reviewed target is the CANDIDATE the activation would bind, taken from the same
+	// `reviewed` set the permit's read-first determination used. The current target is projected
+	// from the captured records, so both sides of the binding come from one observation.
+	pf := canary.PeerFreshnessInput{
+		Resolved:               true,
+		Now:                    now,
+		Observed:               canary.PeerObservationFacts{At: rec.Observed.At, Identity: string(rec.Observed.Identity)},
+		Reviewed:               exactReviewedTargetFor(reviewed, st.Server, st.Name),
+		Current:                exactPermitCurrentTarget(srv, rec, st.Name),
+		ActivationTenant:       tenant,
+		RegistryPinnedIdentity: string(srv.PinnedIdentity),
+		ServerUsable:           srv.Usable(),
+	}
+	return pi, cf, pf
+}
+
+// exactReviewedTargetFor picks the CANDIDATE reviewed target for this exact (server, tool) out of
+// the set the activation would bind.
+//
+// A miss returns the zero ReviewedTarget, which cannot equal any real current target, so the
+// freshness verdict reports the target moved. That is the correct fail-closed answer: an
+// activation that reviewed nothing for this tool has no reviewed target for an observation to
+// back, and inventing one from the current state would make the binding trivially self-satisfied
+// — the row would then assert only that the catalog agrees with itself.
+func exactReviewedTargetFor(reviewed []canary.ReviewedTarget, server, tool string) canary.ReviewedTarget {
+	for i := range reviewed {
+		if reviewed[i].ServerID == server && reviewed[i].ToolName == tool {
+			return reviewed[i]
+		}
+	}
+	return canary.ReviewedTarget{}
 }
 
 // exactPermitCurrentTarget projects the CURRENT authoritative target for the exact tool from the
