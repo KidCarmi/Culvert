@@ -6510,8 +6510,9 @@ did not exist before this change.
 | SL-7 | A target that fails to connect at BOOT is never retried — forwarding is off for the process lifetime — while the same collector dying one second later reconnects forever. One fault, two postures. | **M** | **OPEN** (posture, recorded below) |
 | SL-8 | `InitSyslog` replaced the writer without releasing the old one. A leak on its own; with the new delivery observer attached, a superseded writer pointed at a dead collector drives the health plane that now describes the NEW writer — a healthy feed reported as down. | **M** | CLOSED (found inside this sweep's own fix) |
 | SL-9 | **Clearing the observer pointer does not fence a callback already past the pointer LOAD.** A retired writer's drain goroutine descheduled inside `notifyDelivery` resumes after the swap and writes into the record that now describes the NEW writer — in both directions: a stale failure marks a healthy feed down, a stale recovery clears a real outage. | **M** | CLOSED (Codex review) |
-| SL-11 | **One condition, two sources of truth — committed inside the fix for exactly that.** `syslogState` OR-ed a health-plane `configured` flag with the operator's intent. `InitSyslog` sets the flag; six pre-existing test files reach `InitSyslog` and none know to clear a global this plane added, so under `-shuffle` a later test that cleared only the intent still read as configured and `syslog_feed` returned `fail` where it must return `ok`. | **M** | CLOSED (the flag is gone, not merely reset; intent is the single authority) |
 | SL-10 | **The page depended on more traffic arriving to carry it.** `alertNow` was evaluated only while processing another failed line, so a gateway that loses one line and then goes quiet crossed the threshold with `/metrics` and `/api/diagnostics` both reporting the episode as degraded while the webhook never fired — two surfaces disagreeing about one condition. | **M** | CLOSED (Codex review) |
+| SL-11 | **One condition, two sources of truth — committed inside the fix for exactly that.** `syslogState` OR-ed a health-plane `configured` flag with the operator's intent. `InitSyslog` sets the flag; six pre-existing test files reach `InitSyslog` and none know to clear a global this plane added, so under `-shuffle` a later test that cleared only the intent still read as configured and `syslog_feed` returned `fail` where it must return `ok`. | **M** | CLOSED (the flag is gone, not merely reset; intent is the single authority) |
+| SL-12 | **A test that restores a field does not stop a timer.** SL-10's per-episode `time.AfterFunc` and SL-9's `owner` fence are state a test cleanup must ACTIVELY release: `withSyslogTestState` put the struct fields back and left a 60s REAL-clock timer armed, so an episode evaluation from a finished test could land inside a later one. Cross-test leakage in the machinery added to fix cross-test leakage. | **M** | CLOSED (cleanup disarms + clears owner; gated by `TestStateLeavesNoArmedTimer`) |
 
 ### 36.3 What shipped
 
@@ -6697,7 +6698,7 @@ read, at a glance, exactly like five greens.
 
 ### 36.5 Gates
 
-`internal/syslog/syslog_delivery_chaos_test.go` — 8 gates. Four DEFECT gates
+`internal/syslog/syslog_delivery_chaos_test.go` — 9 gates. Four DEFECT gates
 were each verified failing against a reintroduced pre-fix shape:
 
 | Reintroduced defect | Gate that catches it |
@@ -6713,7 +6714,7 @@ plus CONTROLS (`HealthyFeedStaysGreen`, `QueueOverflowIsNotACollectorOutage`),
 because the cheapest way to pass a loss-visibility suite is to report everything
 as broken — which would page every healthy deployment.
 
-`syslog_health_chaos_test.go` — 13 gates in `package main`, driving a REAL
+`syslog_health_chaos_test.go` — 16 gates in `package main`, driving a REAL
 loopback collector rather than a mock (the property under test is what the
 TRANSPORT can and cannot tell us, which a mock would define away). The two
 headline defect gates were verified failing against the verbatim pre-fix
