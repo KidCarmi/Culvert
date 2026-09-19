@@ -36,6 +36,15 @@
   operation-keyed, pending until durable, exactly once, and absent on a refused cutover.
   Operator runbooks: `docs/operator/idp-registry-recovery.md`,
   `docs/operator/administrator-account-recovery.md`.
+  FE-6B.1 note (2026-09-19): the Certificates & CA READ surfaces have migrated —
+  `/app/security/certificates` (tabs Certificates = FE-V28 / CA Management = FE-V29, `?tab=ca`
+  deep link; viewer read from uiRoutes evidence, the operation lookup admin-only and issued only
+  on an explicit Look up); persisted vs active vs durability, the four pair-evidence classes, OCSP
+  desired vs runtime and every ledger state render as the server states them (superseded =
+  terminal UNKNOWN). Every certificate MUTATION stays on the legacy console until FE-6B.2. The
+  recorded IA discrepancy (Platform/admin vs shipped Security/viewer) and the `uiCert.active`
+  truth gap (set at boot when the pair resolves, not when the listener serves TLS) are in the
+  FE-6B.1 record; the surface renders a contradiction, never the claim.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`
   (per-feature matrix), `FRONTEND-SECURITY-CONTRACT.md` (invariants),
   `FRONTEND-MIGRATION-PLAN.md` (program)
