@@ -53,7 +53,36 @@ type Writer struct {
 	drops         atomic.Uint64
 	panics        atomic.Uint64
 	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
-	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
+	// deliveryObserver is notified EDGE-WISE about delivery outcomes; see
+	// SetDeliveryObserver. Separate from panicObserver because the two answer
+	// different questions (a panicked line is a code defect, a dropped line is
+	// an infrastructure fault) and an operator acts on them differently.
+	deliveryObserver atomic.Pointer[func(ok bool, reason string, consecutive int64)]
+	dialFunc         func() (net.Conn, error) // test seam; nil = real dialer
+
+	// Delivery accounting (CHAOS-66). Drops() alone answers "how many lines
+	// were lost" and nothing else: it cannot distinguish a collector that is
+	// down from a queue that overflowed, it has no denominator, and it never
+	// moves at all on UDP — where a write to a blackholed collector succeeds
+	// forever. These fields are what a health plane needs to say whether the
+	// feed is DELIVERING, not merely whether it once connected.
+	//
+	// All atomics, all read through Health(): the drain goroutine writes them
+	// and every reader is a scrape or an admin request, so no reader may take
+	// s.mu (deliverLine holds it across up to two dials and two writes).
+	delivered        atomic.Uint64
+	dropsQueueFull   atomic.Uint64
+	dropsCollector   atomic.Uint64
+	dropsClosed      atomic.Uint64
+	dropsFlush       atomic.Uint64
+	lastDeliveryNano atomic.Int64
+	consecutiveFails atomic.Int64
+	// lastFailure is a bounded ENUM, never a string. A raw error here would
+	// embed the collector address and the ephemeral local port, which is the
+	// WK-12/RS-5 defect: alert dedup keys on event+Detail, so a per-attempt
+	// unique reason defeats the suppression window by construction. Making it
+	// an int32 code makes that unrepresentable rather than merely discouraged.
+	lastFailure atomic.Int32
 
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
 	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
@@ -61,6 +90,132 @@ type Writer struct {
 	done      chan struct{} // closed by drainLoop on exit (conn released)
 	closed    atomic.Bool   // post-Close sends drop instead of enqueueing
 	closeOnce sync.Once
+}
+
+// failureReason is the BOUNDED class of a delivery failure. It is an integer
+// code rather than a string on purpose: the only other candidate value is the
+// underlying net error, which embeds the collector address and the ephemeral
+// local port, and alert dedup keys on event+Detail. Encoding the class as an
+// enum makes an unbounded reason unrepresentable instead of merely
+// discouraged. The verbose cause belongs in a rate-limited log line.
+type failureReason int32
+
+const (
+	reasonNone failureReason = iota
+	reasonDialFailed
+	reasonWriteFailed
+	reasonQueueFull
+	reasonClosed
+	reasonFlushTimeout
+	reasonPanic
+)
+
+// String renders the reason class for metric labels and operator text. The
+// value set is closed; an unrecognised code degrades to "unknown" rather than
+// formatting the integer, so a future code added without a name here can never
+// widen the label cardinality.
+func (r failureReason) String() string {
+	switch r {
+	case reasonNone:
+		return ""
+	case reasonDialFailed:
+		return "dial_failed"
+	case reasonWriteFailed:
+		return "write_failed"
+	case reasonQueueFull:
+		return "queue_full"
+	case reasonClosed:
+		return "closed"
+	case reasonFlushTimeout:
+		return "flush_timeout"
+	case reasonPanic:
+		return "panic"
+	default:
+		return "unknown"
+	}
+}
+
+// SetDeliveryObserver publishes an optional observer notified about delivery
+// outcomes, on the drain goroutine. This package is a stdlib-only leaf with no
+// logging or metrics dependency (see the package doc), so without an observer
+// the only delivery signal is a Health() poll — which nothing pushes.
+//
+// It is deliberately NOT called once per line. It fires:
+//
+//   - on every collector-attributable FAILURE, so a health plane can evaluate
+//     how long the feed has been failing without owning a timer; and
+//   - on the first success AFTER a failure run — the recovery edge.
+//
+// In the healthy steady state it therefore costs nothing at all, which is what
+// makes it safe to hang a mutex-taking health plane off it: the callback only
+// happens when something is already wrong. A nil fn clears it. The observer is
+// panic-contained, so a bad observer can never take down delivery — the same
+// rule SetPanicObserver carries.
+func (s *Writer) SetDeliveryObserver(fn func(ok bool, reason string, consecutive int64)) {
+	if fn == nil {
+		s.deliveryObserver.Store(nil)
+		return
+	}
+	s.deliveryObserver.Store(&fn)
+}
+
+// notifyDelivery invokes the delivery observer, contained.
+func (s *Writer) notifyDelivery(ok bool, reason string, consecutive int64) {
+	p := s.deliveryObserver.Load()
+	if p == nil {
+		return
+	}
+	defer func() { _ = recover() }() // an observer must never crash the drain goroutine
+	(*p)(ok, reason, consecutive)
+}
+
+// noteFailure records one lost line under its bounded class and advances the
+// consecutive-failure run. Every path that increments s.drops goes through
+// here or through noteDelivered's counterpart, so the aggregate Drops() can
+// never disagree with the sum of the per-reason counters.
+func (s *Writer) noteFailure(r failureReason) {
+	s.drops.Add(1)
+	s.lastFailure.Store(int32(r))
+	switch r {
+	case reasonQueueFull:
+		s.dropsQueueFull.Add(1)
+	case reasonClosed:
+		s.dropsClosed.Add(1)
+	case reasonFlushTimeout:
+		s.dropsFlush.Add(1)
+	case reasonPanic:
+		// A panicked line never reached the socket, but the socket is not what
+		// failed; it is counted as a loss without being attributed to the
+		// collector, so a formatting bug is never reported as a SIEM outage.
+	default:
+		s.dropsCollector.Add(1)
+	}
+	// Only a collector-attributable loss advances the consecutive run: that run
+	// is what the health plane verdicts on, and a queue overflow means the
+	// collector is too SLOW, not absent — a different remediation.
+	if r == reasonDialFailed || r == reasonWriteFailed {
+		s.notifyDelivery(false, r.String(), s.consecutiveFails.Add(1))
+	}
+}
+
+// noteDelivered records one line accepted by the socket. This is the only
+// EVIDENCE the process ever has that the feed is working, and it is what
+// clears a failure episode — never elapsed time, which is the mistake
+// ca_health.go and storage_health.go both call out by name.
+//
+// On UDP "accepted by the socket" means accepted by the local kernel and
+// nothing more; Health().DeliveryVerifiable reports that honestly rather than
+// letting a caller read this counter as proof of receipt.
+func (s *Writer) noteDelivered(at time.Time) {
+	s.delivered.Add(1)
+	s.lastDeliveryNano.Store(at.UnixNano())
+	// Swap rather than Store so the recovery EDGE is detected without a second
+	// read that could race another failure in between.
+	recovered := s.consecutiveFails.Swap(0) > 0
+	s.lastFailure.Store(int32(reasonNone))
+	if recovered {
+		s.notifyDelivery(true, "", 0)
+	}
 }
 
 // queueCap bounds the async delivery queue. At a formatted line of ~0.5 KB the
@@ -140,7 +295,7 @@ func (s *Writer) drainLoop() {
 					if time.Now().Before(deadline) {
 						s.deliverGuarded(line)
 					} else {
-						s.drops.Add(1)
+						s.noteFailure(reasonFlushTimeout)
 					}
 				default:
 					return
@@ -162,13 +317,13 @@ func (s *Writer) send(pri int, msg string) {
 		return
 	}
 	if s.closed.Load() {
-		s.drops.Add(1)
+		s.noteFailure(reasonClosed)
 		return
 	}
 	select {
 	case s.queue <- s.formatMsg(pri, msg):
 	default:
-		s.drops.Add(1)
+		s.noteFailure(reasonQueueFull)
 	}
 }
 
@@ -279,7 +434,7 @@ func (s *Writer) deliverGuarded(line string) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.panics.Add(1)
-			s.drops.Add(1)
+			s.noteFailure(reasonPanic)
 			if p := s.panicObserver.Load(); p != nil {
 				func() {
 					defer func() { _ = recover() }() // an observer must never crash the drain goroutine
@@ -315,12 +470,12 @@ func (s *Writer) deliverLine(line string) {
 	if s.conn == nil {
 		// Backoff: don't retry more often than every 5 seconds.
 		if time.Since(s.lastReconnErr) < 5*time.Second {
-			s.drops.Add(1)
+			s.noteFailure(reasonDialFailed)
 			return
 		}
 		if err := s.connect(); err != nil {
 			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.noteFailure(reasonDialFailed)
 			return // syslog down — swallow, never block the proxy
 		}
 		s.lastReconnErr = time.Time{} // reset on success
@@ -329,12 +484,12 @@ func (s *Writer) deliverLine(line string) {
 		s.conn.Close()
 		s.conn = nil
 		if time.Since(s.lastReconnErr) < 5*time.Second {
-			s.drops.Add(1)
+			s.noteFailure(reasonWriteFailed)
 			return
 		}
 		if err2 := s.connect(); err2 != nil {
 			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.noteFailure(reasonDialFailed)
 			return
 		}
 		if err3 := s.writeLine(line); err3 != nil {
@@ -347,11 +502,14 @@ func (s *Writer) deliverLine(line string) {
 			s.conn.Close()
 			s.conn = nil
 			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.noteFailure(reasonWriteFailed)
 			return
 		}
 		s.lastReconnErr = time.Time{}
+		s.noteDelivered(time.Now())
+		return
 	}
+	s.noteDelivered(time.Now())
 }
 
 // Drops reports the number of messages dropped because the collector was
@@ -392,8 +550,94 @@ func (s *Writer) Close() error {
 }
 
 // Format returns the syslog message format ("rfc3164" or "rfc5424").
-func (s *Writer) Format() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.format
+//
+// Deliberately LOCK-FREE. s.format is assigned once, in NewWriter, before the
+// Writer is published to any other goroutine, and is never written again — so
+// the mutex protected nothing, while coupling this accessor to the collector
+// socket: deliverLine holds s.mu across up to two dials (5s each) and two
+// writes (5s each), so every caller of Format() could block for ~15s behind a
+// wedged SIEM collector. The callers are GET /api/syslog and, by way of the
+// settings snapshot, adminSettingsSave() — which every mutating admin handler
+// reaches. A management plane must not stall on a log sink (CHAOS-66; the same
+// direction as CHAOS-57's rule that the admin plane and the data plane may not
+// take each other down).
+//
+// Network() is lock-free for the same reason.
+func (s *Writer) Format() string { return s.format }
+
+// Network returns the transport the collector is addressed over ("udp" or
+// "tcp"). Immutable after construction; see Format.
+//
+// This is load-bearing for the health plane rather than cosmetic: on UDP a
+// successful write proves only that the LOCAL kernel accepted the datagram, so
+// no counter this package keeps can distinguish a healthy collector from one
+// that has not existed for a week. Health().DeliveryVerifiable derives from it.
+func (s *Writer) Network() string { return s.network }
+
+// Health is a point-in-time snapshot of delivery evidence. Every field is read
+// from an atomic, so a caller never takes s.mu and therefore can never block
+// behind the collector socket (see Format).
+//
+// The snapshot is not atomic ACROSS fields — the counters are independent — and
+// deliberately so: a combined lock would reintroduce exactly the coupling this
+// type exists to avoid, and the only consumers are a scrape, an admin read and
+// a verdict, none of which need cross-field consistency finer than one line.
+type Health struct {
+	// Network and Format are the transport and wire format in effect.
+	Network string
+	Format  string
+
+	// Delivered counts lines the socket accepted. On TCP this is meaningful
+	// evidence of reachability; on UDP see DeliveryVerifiable.
+	Delivered uint64
+
+	// Drops is the aggregate loss count (== the sum of the four per-reason
+	// counters below plus panic losses).
+	Drops              uint64
+	DropsCollectorDown uint64
+	DropsQueueFull     uint64
+	DropsClosed        uint64
+	DropsFlushTimeout  uint64
+	Panics             uint64
+
+	// LastDelivery is when the socket last accepted a line; zero means never.
+	LastDelivery time.Time
+
+	// ConsecutiveFailures counts collector-attributable losses since the last
+	// delivery. A queue overflow does NOT advance it — that says the collector
+	// is too slow, not that it is gone, and the two have different remedies.
+	ConsecutiveFailures int64
+
+	// LastFailureReason is the bounded class of the most recent loss ("" when
+	// none). Never carries an address or an error string.
+	LastFailureReason string
+
+	// DeliveryVerifiable is false on UDP. It is the honest answer to "does a
+	// green reading here mean anything?": for a connectionless transport the
+	// process cannot observe delivery at all, so a health surface must say so
+	// rather than report the absence of observed failures as success.
+	DeliveryVerifiable bool
+}
+
+// Health returns the current delivery snapshot.
+func (s *Writer) Health() Health {
+	var last time.Time
+	if n := s.lastDeliveryNano.Load(); n > 0 {
+		last = time.Unix(0, n)
+	}
+	return Health{
+		Network:             s.network,
+		Format:              s.format,
+		Delivered:           s.delivered.Load(),
+		Drops:               s.drops.Load(),
+		DropsCollectorDown:  s.dropsCollector.Load(),
+		DropsQueueFull:      s.dropsQueueFull.Load(),
+		DropsClosed:         s.dropsClosed.Load(),
+		DropsFlushTimeout:   s.dropsFlush.Load(),
+		Panics:              s.panics.Load(),
+		LastDelivery:        last,
+		ConsecutiveFailures: s.consecutiveFails.Load(),
+		LastFailureReason:   failureReason(s.lastFailure.Load()).String(),
+		DeliveryVerifiable:  s.network != "udp",
+	}
 }

@@ -1405,26 +1405,23 @@ func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
 	}
 }
 
-// TestApiDiagnostics_SyslogFeedOK — a syslog target was configured and
-// InitSyslog succeeded (globalSyslog non-nil), matching the production success
-// path. UDP construction never blocks on a handshake, so it stands in for a
-// live feed without a real collector.
+// TestApiDiagnostics_SyslogFeedOK — a syslog target was configured, InitSyslog
+// succeeded, and the collector is accepting lines: the row reports ok.
+//
+// This test previously stood a UDP writer up as "a live feed without a real
+// collector", on the reasoning that UDP construction never blocks on a
+// handshake — and asserted that meant ok. That reasoning was the CHAOS-66
+// defect stated out loud: UDP was chosen precisely BECAUSE it cannot fail, and
+// the inability to fail was then read as health. The test was pinning the
+// defect, so it is inverted here: the ok arm now uses a real TCP collector,
+// where an ok verdict is backed by a line the collector actually accepted, and
+// the UDP posture gets its own arm below asserting warn.
 func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
-	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, globalSyslog
-	t.Cleanup(func() {
-		if globalSyslog != nil && globalSyslog != prevSW {
-			globalSyslog.Close()
-		}
-		syslogConfiguredAddr, syslogConfigured, globalSyslog = prevAddr, prevOK, prevSW
-	})
-	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
-	if err != nil {
-		t.Fatalf("newSyslogWriter: %v", err)
-	}
-	// Success path: the live writer's target IS the operator's intent, so the
-	// intent (syslogConfiguredAddr) and the last-successful-connect tracker
-	// (syslogConfigured) agree.
-	syslogConfiguredAddr, syslogConfigured, globalSyslog = "udp://127.0.0.1:514", "udp://127.0.0.1:514", sw
+	withSyslogTestState(t)
+	sw, _ := newLiveCollector(t, "tcp")
+	arm(sw, "tcp://collector.test:601")
+	sw.Write([]byte("one line")) //nolint:errcheck // syslog Write never fails by contract (it enqueues); the delivery outcome is read through Health()
+	waitForDelivery(t, sw, 1)
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1433,7 +1430,32 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 	c := decodeContract(t, w)
 	found := findSyslogFeedCheck(t, c)
 	if found.Status != diagOK {
-		t.Errorf("syslog_feed status = %q, want ok when feed is active", found.Status)
+		t.Errorf("syslog_feed status = %q, want ok when the collector is accepting lines: %+v", found.Status, found)
+	}
+}
+
+// TestApiDiagnostics_SyslogFeedUnverifiableOnUDP — the arm the old OK test was
+// unknowingly exercising (CHAOS-66). A UDP collector cannot report loss: a
+// write to an unreachable one succeeds forever, so the appliance has no way to
+// distinguish a healthy feed from a blackholed one. The row must say so rather
+// than render the absence of evidence as success — warn, not ok, and not fail
+// either, since nothing is known to be broken.
+func TestApiDiagnostics_SyslogFeedUnverifiableOnUDP(t *testing.T) {
+	withSyslogTestState(t)
+	sw, _ := newLiveCollector(t, "udp")
+	arm(sw, "udp://collector.test:514")
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findSyslogFeedCheck(t, c)
+	if found.Status != diagWarn {
+		t.Errorf("syslog_feed status = %q, want warn on a UDP target whose delivery cannot be verified: %+v", found.Status, found)
+	}
+	if found.OperatorAction == "" {
+		t.Error("the unverifiable-transport row must carry an operator action, or it is a dead end")
 	}
 }
 

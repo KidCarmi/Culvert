@@ -10652,7 +10652,7 @@ async function loadSettings() {
       const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
       el.textContent = '✓ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
       el.style.color = 'var(--green)';
-      renderSyslogDrops(sl.drops, sl.panics);
+      renderSyslogDelivery(sl);
     } else {
       // No forwarding configured - never leave a stale drop warning visible.
       hideSyslogDrops();
@@ -10815,16 +10815,50 @@ async function saveUIAllowIPs() {
 }
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────
-// renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
-// forwarding state so a stale amber warning can't survive a reconfigure/disable
-// (a new collector starts a fresh writer at Drops()==0; disabling clears it).
-function renderSyslogDrops(drops, panics) {
+// renderSyslogDelivery / hideSyslogDrops keep the delivery row in sync with the
+// forwarding state so a stale warning can't survive a reconfigure/disable
+// (a new collector starts a fresh writer at delivered==0; disabling clears it).
+//
+// CHAOS-66: this row used to show only a drop count, which answers "how many
+// lines were lost" and nothing else - no denominator, no reason, and on a UDP
+// target it never moves at all, because a UDP write to an unreachable
+// collector succeeds forever. The unverifiable case is now stated outright
+// rather than rendering as a reassuring "No delivery drops".
+function renderSyslogDelivery(sl) {
   const dropsEl = document.getElementById('s-syslog-drops');
-  const n = drops || 0;
-  const p = panics || 0;
+  sl = sl || {};
+  // These are interpolated into innerHTML (the row carries an <svg> icon), so
+  // every value from the server is coerced or escaped rather than trusted to be
+  // the type the contract says it is. lastFailureReason is a bounded enum in
+  // the engine and cannot carry markup, but defence-in-depth here costs
+  // nothing and keeps the rule "never interpolate a server string raw" true
+  // without exception.
+  const num = (v) => Number(v) || 0;
+  const n = num(sl.drops);
+  const p = num(sl.panics);
+  const delivered = num(sl.delivered);
   dropsEl.style.display = '';
+
+  // Failing now outranks everything else: events are being lost as we render.
+  if (sl.connected && sl.deliveryVerifiable && sl.delivering === false) {
+    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not delivering</strong> - forwarding has been failing for '
+      + num(sl.failingForSeconds) + 's (' + escHtml(sl.lastFailureReason || 'unknown') + '), '
+      + num(sl.consecutiveFailures) + ' lines lost since the last successful delivery. '
+      + 'The local audit log is unaffected. Forwarding reconnects every 5s and recovers on its own.';
+    dropsEl.style.color = 'var(--red,#c0392b)';
+    return;
+  }
+  // Unverifiable transport: say so instead of implying health we cannot observe.
+  if (sl.deliveryVerifiable === false) {
+    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
+      + delivered + ' line' + (delivered === 1 ? '' : 's') + ' sent over UDP - <strong>delivery is unverifiable</strong>. '
+      + 'A UDP write to an unreachable collector succeeds forever, so this appliance cannot detect or count loss on this transport. '
+      + 'Use a tcp:// target for a feed whose health can be reported and alerted on, or confirm receipt at the collector.';
+    dropsEl.style.color = 'var(--warn,#b8860b)';
+    return;
+  }
   if (n > 0) {
-    let msg = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started';
+    let msg = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + delivered + ' delivered, ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started';
     // panics is a subset of drops - a recurring formatting bug reads very
     // differently from an unreachable/slow collector, so call it out.
     msg += p > 0
@@ -10833,7 +10867,7 @@ function renderSyslogDrops(drops, panics) {
     dropsEl.innerHTML = msg;
     dropsEl.style.color = 'var(--warn,#b8860b)';
   } else {
-    dropsEl.textContent = 'No delivery drops since forwarding started';
+    dropsEl.textContent = 'Delivering - ' + delivered + ' line' + (delivered === 1 ? '' : 's') + ' accepted by the collector, no loss';
     dropsEl.style.color = 'var(--muted)';
   }
 }
@@ -10857,9 +10891,11 @@ async function saveSyslog() {
     const fmtLabel = (res.format || format) === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
     el.textContent = '✓ Forwarding to ' + addr + ' (' + fmtLabel + ')';
     el.style.color = 'var(--green)';
-    // Reconfiguring points at a fresh writer whose drop counter starts at 0 -
-    // reset the row rather than leaving a prior collector's stale warning up.
-    renderSyslogDrops(res.drops);
+    // Reconfiguring points at a fresh writer whose counters start at 0 - re-read
+    // rather than leaving a prior collector's stale warning up. The POST reply
+    // carries no delivery evidence (there has been none yet), so the readback is
+    // what tells us whether the new target is even a verifiable transport.
+    try { renderSyslogDelivery(await api('/api/syslog')); } catch(_) { renderSyslogDelivery({}); }
     toast('Syslog configured', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -19270,6 +19306,7 @@ function resetBlockPage() {
              read-only / full after boot) — config changes are live in memory but
              are NOT reaching disk and will be lost on restart. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="storage_write_failed"> Storage write failed (state not persisted)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="siem_forwarding_failing" title="Fires when remote syslog/SIEM forwarding has been failing continuously for over a minute — audit and request events are not reaching the collector. Only detectable on a tcp:// target: a UDP write to an unreachable collector succeeds forever."> SIEM forwarding failing (events not reaching the collector)</label>
         <!-- CHAOS-47: the external identity backend (LDAP / OIDC introspection)
              could not be reached, so proxy authentication is failing closed.
              Distinct from an auth-failure spike: this is infrastructure, and
