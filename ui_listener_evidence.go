@@ -33,12 +33,12 @@ package main
 // fingerprint equals the served one. It is never a stored flag. Activation
 // that has not been observed is reported UNKNOWN, never claimed.
 //
-// Residual, recorded: adminUIServeOnce validates the operator pair with one
-// read and http.Server.ServeTLS re-reads the files a few microseconds later
-// (the CHAOS-57 HTTP/2 note explains why the double read stays); a pair
-// replaced in exactly that window is served but recorded as its predecessor
-// until the next bind. The persisted-pair writers run through the staged
-// marker transition, so an atomic replace lands whole on either side of it.
+// Round 2 (B1): the served material and the recorded identity are ONE object.
+// adminUIServeOnce loads the pair once, installs it into the server's TLS
+// configuration and calls ServeTLS with empty file names, so nothing is
+// re-read between the validation and the serve; a pair replaced on disk after
+// the load is served only by the next bind, which records it
+// (TestFE6B1D_D01/D02, real TLS handshake against the published identity).
 
 import (
 	"crypto/x509"

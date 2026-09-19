@@ -1083,11 +1083,104 @@ function requireLiteralTrue(
     );
 }
 
+/** `key` must be present and one of `allowed` (a frozen-contract enum). */
+function requireEnum(
+  o: Record<string, unknown>,
+  key: string,
+  allowed: readonly string[],
+  path: string,
+): void {
+  const v = o[key];
+  if (typeof v !== "string" || !allowed.includes(v))
+    contradiction(`${path}.${key}`, `one of ${allowed.join(" | ")}`);
+}
+
+/** `key` may be absent; when present it must be one of `allowed`. */
+function optionalEnum(
+  o: Record<string, unknown>,
+  key: string,
+  allowed: readonly string[],
+  path: string,
+): void {
+  if (o[key] !== undefined) requireEnum(o, key, allowed, path);
+}
+
+/** An object whose keys are bounded by the frozen schema
+ * (`additionalProperties: false`). */
+function requireBoundedKeys(
+  o: Record<string, unknown>,
+  allowed: readonly string[],
+  path: string,
+): void {
+  for (const k of Object.keys(o))
+    if (!allowed.includes(k))
+      contradiction(`${path}.${k}`, `a key of ${allowed.join(" | ")}`);
+}
+
+const CA_PREVIOUS_KEYS = ["fingerprint", "revision"] as const;
+const CA_INFO_KEYS = [
+  "ready",
+  "revision",
+  "subject",
+  "issuer",
+  "notBefore",
+  "notAfter",
+  "fingerprint",
+] as const;
+const UI_CANDIDATE_KEYS = [
+  "fingerprint",
+  "subject",
+  "issuer",
+  "notBefore",
+  "notAfter",
+  "dnsNames",
+  "chainLength",
+] as const;
+const UI_CLEANUPS = ["complete", "completed_at_settlement"] as const;
+const UI_ACTIVATIONS = ["restart_required"] as const;
+
+/** CAPrevious: the superseded CA's identity — both fields optional strings,
+ * no other keys. */
+function checkCAPrevious(v: unknown, path: string): void {
+  const p = readRecord(v, path);
+  requireBoundedKeys(p, CA_PREVIOUS_KEYS, path);
+  opt(p, "fingerprint", readString, path);
+  opt(p, "revision", readString, path);
+}
+
+/** UICertCandidate: the reviewed candidate's public facts (T2 material). */
+function checkUICandidate(v: unknown, path: string): Record<string, unknown> {
+  const c = readRecord(v, path);
+  refuseCertSecretKeys(c, path);
+  requireBoundedKeys(c, UI_CANDIDATE_KEYS, path);
+  field(c, "fingerprint", readColonFingerprint, path);
+  field(c, "subject", readString, path);
+  field(c, "issuer", readString, path);
+  field(c, "notBefore", readString, path);
+  field(c, "notAfter", readString, path);
+  const n = c["chainLength"];
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 1)
+    contradiction(`${path}.chainLength`, "a positive integer");
+  const dns = c["dnsNames"];
+  if (
+    dns !== undefined &&
+    dns !== null &&
+    !(Array.isArray(dns) && dns.every((d) => typeof d === "string"))
+  )
+    contradiction(`${path}.dnsNames`, "an array of strings or null");
+  return c;
+}
+
 /** A committed record's action-specific `result` must agree with the outer
  * record and the frozen contract (FE-6B.1 correction round, B3): the same
  * operation, the same action, the revision it committed, the certificate it
- * installed, and the action's own discriminant — otherwise the record is
- * contradictory and is refused whole. */
+ * installed, the action's own discriminant — and (correction round 2, B2)
+ * every fact the frozen result schema makes mandatory or bounded: the
+ * durability claim (`persisted` / `durable` are `enum: [true]` because the
+ * mutation is persist-before-publish), the target the action writes, the
+ * bounded cleanup / activation vocabulary, the superseded CA's identity and
+ * the reviewed candidate — otherwise the record is contradictory and is
+ * refused whole. Documented optionality is preserved; nothing is invented. */
 function checkCommittedResult(
   base: CertOperationBase,
   committedRevision: string,
@@ -1119,7 +1212,13 @@ function checkCommittedResult(
         path,
         base.action,
       );
+      requireLiteralTrue(r, "persisted", path);
+      if (base.action === "ca.import") requireEnum(r, "target", ["mitm"], path);
+      else optionalEnum(r, "target", ["mitm"], path);
+      checkCAPrevious(r["previous"], `${path}.previous`);
       const ca = readRecord(r["ca"], `${path}.ca`);
+      requireBoundedKeys(ca, CA_INFO_KEYS, `${path}.ca`);
+      field(ca, "ready", readBoolean, `${path}.ca`);
       const rev = field(ca, "revision", readCARevision, `${path}.ca`);
       if (rev !== committedRevision)
         contradiction(`${path}.ca.revision`, "the committed revision");
@@ -1136,6 +1235,9 @@ function checkCommittedResult(
     case "cert.ui.replace": {
       requireLiteralTrue(r, "replaced", path);
       forbid(r, "deleted", path, base.action);
+      requireLiteralTrue(r, "persisted", path);
+      requireEnum(r, "target", ["ui"], path);
+      requireEnum(r, "activation", UI_ACTIVATIONS, path);
       const ui = decodeUICertFacts(r["uiCert"], `${path}.uiCert`);
       if (ui.revision !== committedRevision)
         contradiction(`${path}.uiCert.revision`, "the committed revision");
@@ -1144,11 +1246,23 @@ function checkCommittedResult(
           `${path}.uiCert.pairState`,
           "a replaced pair is complete",
         );
+      const cand = checkUICandidate(r["candidate"], `${path}.candidate`);
+      if (
+        ui.fingerprint === undefined ||
+        digestKey(String(cand["fingerprint"])) !== digestKey(ui.fingerprint)
+      )
+        contradiction(
+          `${path}.candidate.fingerprint`,
+          "the certificate the replaced pair now holds",
+        );
       return;
     }
     case "cert.ui.delete": {
       requireLiteralTrue(r, "deleted", path);
       forbid(r, "replaced", path, base.action);
+      requireEnum(r, "target", ["ui"], path);
+      requireEnum(r, "cleanup", UI_CLEANUPS, path);
+      optionalEnum(r, "activation", UI_ACTIVATIONS, path);
       const ui = decodeUICertFacts(r["uiCert"], `${path}.uiCert`);
       if (ui.pairState !== "absent" || ui.revision !== committedRevision)
         contradiction(

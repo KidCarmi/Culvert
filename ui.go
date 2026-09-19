@@ -309,11 +309,23 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	//  2. It is what lets the failure be classified as `tls_certificate` rather
 	//     than matching on crypto/tls error text.
 	//
-	// The loaded pair is then DISCARDED and ServeTLS re-reads the files below.
-	// That deliberate double read is what keeps HTTP/2 working: ServeTLS calls
-	// setupHTTP2_ServeTLS, which srv.Serve(tls.NewListener(...)) does not, so
-	// hand-rolling the TLS listener here would silently drop ALPN h2 from the
-	// admin UI that ListenAndServeTLS used to negotiate.
+	// The loaded pair is the ONE piece of material that is both SERVED and
+	// RECORDED (FE-6B.1 correction round 2, B1). It used to be discarded here
+	// and ServeTLS re-read the files, so a pair replaced between the two reads
+	// was served as B while the appliance published A until the next bind —
+	// a window microseconds wide whose consequence lasted indefinitely. The
+	// pair is now installed into the server's TLS configuration and ServeTLS is
+	// called with EMPTY file names, which makes it take the certificate from
+	// that configuration and read nothing; a pair replaced on disk after this
+	// point is served only by the next bind, which records it.
+	//
+	// ServeTLS is still the serve call (never srv.Serve(tls.NewListener(...))):
+	// it runs setupHTTP2_ServeTLS, so ALPN h2 keeps being negotiated. That
+	// setup runs ONCE per server and mutates srv.TLSConfig (h2 into
+	// NextProtos), so the per-attempt configuration is CLONED from
+	// srv.TLSConfig and left installed there — never restored to nil — so a
+	// rebind after a fault carries h2 forward exactly as the file-based path
+	// did (pinned by TestFE6B1D_D03).
 	customTLS := certFile != "" && keyFile != ""
 	var servedLeaf *x509.Certificate
 	if customTLS {
@@ -322,6 +334,19 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 			return fmt.Errorf("%w: %w", errAdminUITLSMaterial, err)
 		}
 		servedLeaf = adminListenerLeafOf(pair)
+		var cfg *tls.Config
+		if srv.TLSConfig != nil {
+			cfg = srv.TLSConfig.Clone()
+		} else {
+			// MinVersion TLS 1.2 is crypto/tls's own server default, which is
+			// what the file-based ServeTLS call (nil TLSConfig) applied; it is
+			// spelled out so the posture is explicit rather than inherited.
+			cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		cfg.Certificates = []tls.Certificate{pair}
+		cfg.GetCertificate = nil
+		cfg.GetConfigForClient = nil
+		srv.TLSConfig = cfg
 	} else if srv.TLSConfig != nil && len(srv.TLSConfig.Certificates) > 0 {
 		servedLeaf = adminListenerLeafOf(srv.TLSConfig.Certificates[0])
 	}
@@ -359,15 +384,16 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	}
 
 	// Serve closes ln on return; the extra Close is a deterministic backstop for
-	// the ServeTLS path, which can return a certificate error without closing
-	// the listener it was handed (see the pre-validation above — this covers the
-	// residual race in which the pair is broken between validating and serving).
+	// the ServeTLS path, which can return without closing the listener it was
+	// handed (e.g. an HTTP/2 configuration error). The former "pair broken
+	// between validating and serving" case no longer exists: ServeTLS reads no
+	// files here.
 	defer ln.Close() //nolint:errcheck // idempotent teardown; Serve has normally closed it already
 
-	if customTLS {
-		return srv.ServeTLS(ln, certFile, keyFile)
-	}
 	if srv.TLSConfig != nil {
+		// customTLS: the loaded pair is in srv.TLSConfig.Certificates;
+		// self-signed: startUI installed it there. Empty file names ⇒ ServeTLS
+		// uses that certificate and reads nothing.
 		return srv.ServeTLS(ln, "", "")
 	}
 	return srv.Serve(ln)
