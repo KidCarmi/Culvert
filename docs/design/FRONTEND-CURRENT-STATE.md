@@ -59,7 +59,7 @@
   `src/api/certificates.ts` (write client; action-bound 2xx or UNPROVEN; the pair as byte-exact
   file parts), `features/security/certRecovery.ts` (the single non-secret subject-bound recovery
   marker written before dispatch) and `features/security/certWrites.tsx` (ceremonies, the
-  UNPROVEN latch, Recover / Re-send-after-404 / typed Abandon). Cache-clear stays legacy.
+  UNPROVEN latch, Recover / a 404 is ABSENT = UNKNOWN with no re-send (correction round 6B2C) / typed Abandon). Cache-clear stays legacy.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`
   (per-feature matrix), `FRONTEND-SECURITY-CONTRACT.md` (invariants),
   `FRONTEND-MIGRATION-PLAN.md` (program)
