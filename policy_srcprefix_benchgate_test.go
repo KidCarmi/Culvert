@@ -31,9 +31,12 @@ const (
 	srcGateDecoyCIDR = "198.51.100.0/24" // TEST-NET-2
 	srcGateDecoyIP   = "198.51.100.7"
 
-	// srcGateMatchHost is a destination the discriminator rule matches, so its
-	// Evaluate verdict is decided purely by the source check.
-	srcGateMatchHost = "target.example.com"
+	// srcGateProbeHost is the destination every gate Evaluate()s against. The
+	// two rulebases relate to it DELIBERATELY oppositely: buildSrcMatchStore's
+	// rule matches it, so its verdict turns purely on the source check, while
+	// buildSrcCIDRStore's rules never match it, so its scan pays every rule's
+	// source check and then falls through — the worst case the alloc gate wants.
+	srcGateProbeHost = "target.example.com"
 )
 
 // buildSrcCIDRStore returns n access rules that ALL pass the source check for
@@ -77,7 +80,7 @@ func TestBenchGate_PolicySourceCIDRAllocFree(t *testing.T) {
 		res := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				ps.Evaluate(srcGateProbeIP, "", "unauth", "target.example.com", nil)
+				ps.Evaluate(srcGateProbeIP, "", "unauth", srcGateProbeHost, nil)
 			}
 		})
 		if got := res.AllocsPerOp(); got != 0 {
@@ -88,7 +91,7 @@ func TestBenchGate_PolicySourceCIDRAllocFree(t *testing.T) {
 
 // buildSrcMatchStore publishes ONE source-scoped rule through the real store
 // mutator, carrying exactly the precomputed state (srcIPNet AND srcPrefix) the
-// hot path sees. Its destination matches srcGateMatchHost, so an Evaluate
+// hot path sees. Its destination matches srcGateProbeHost, so an Evaluate
 // verdict turns purely on the source check: a non-nil PolicyMatch means the
 // client address matched the rule's source network, nil means it did not.
 func buildSrcMatchStore(t *testing.T) *PolicyStore {
@@ -98,7 +101,7 @@ func buildSrcMatchStore(t *testing.T) *PolicyStore {
 		Priority: 1,
 		Name:     "src-gate",
 		SourceIP: srcGateProbeCIDR,
-		DestFQDN: srcGateMatchHost,
+		DestFQDN: srcGateProbeHost,
 		Action:   ActionAllow,
 	}})
 	if len(ps.rules) != 1 {
@@ -150,6 +153,9 @@ func buildSrcMatchStore(t *testing.T) *PolicyStore {
 //     srcPrefix only and the decoy address inside srcIPNet only, so each
 //     verdict names which matcher ran.
 //
+// The old -short skip is gone with the timing loops: the gate is now a handful
+// of map-free comparisons, so there is nothing left to skip. Do not re-add it.
+//
 // A discriminating probe is preferred over an AST walk over matchSourceAddr
 // because it proves which value actually DECIDED at run time, through the
 // production scan, rather than what the source text looks like — it therefore
@@ -171,7 +177,12 @@ func TestBenchGate_PolicySourceCIDRUsesPrefix(t *testing.T) {
 		t.Fatal("published rule carries no srcPrefix — the fast path is not wired at all")
 	}
 	if rule.srcIPNet == nil {
-		t.Fatal("published rule carries no srcIPNet — the discriminator below cannot tell the two matchers apart")
+		// Not a product defect on its own — but the discriminator in step 3
+		// separates the two matchers by making them disagree, so with nothing
+		// to disagree WITH it would pass whichever one ran. Failing here is the
+		// honest answer: if srcIPNet is deliberately gone, this gate needs a
+		// new discriminator, not a green tick.
+		t.Fatal("published rule carries no srcIPNet — step 3 can no longer tell the two matchers apart")
 	}
 
 	// (2) Same verdicts as the pre-change matcher, on the CONSISTENT rule.
@@ -203,13 +214,25 @@ func TestBenchGate_PolicySourceCIDRUsesPrefix(t *testing.T) {
 		t.Fatalf("parsing the decoy network %q: %v", srcGateDecoyCIDR, err)
 	}
 	rule.srcIPNet = decoy
+	// The discriminator rests entirely on the scan evaluating THIS object:
+	// evaluationSnapshot hands out the published pointers, so it does. A
+	// snapshot that instead re-derived the precompute, or handed back one
+	// cached at publication time, would evaluate a self-consistent rule — both
+	// assertions below would then pass whichever matcher decided and the gate
+	// would quietly stop proving anything. (A copy taken AFTER this line is
+	// harmless: it carries the mutation. Verified by injecting both shapes.)
+	// Pin the assumption rather than rely on it.
+	if got := ps.evaluationSnapshot()[0]; got.srcIPNet != decoy {
+		t.Fatalf("the scan does not observe this test's srcIPNet mutation (sees %v, set %v) — "+
+			"the assertions below would pass whichever matcher decided, i.e. prove nothing", got.srcIPNet, decoy)
+	}
 
-	if m := ps.Evaluate(srcGateProbeIP, "", "unauth", srcGateMatchHost, nil); m == nil {
+	if m := ps.Evaluate(srcGateProbeIP, "", "unauth", srcGateProbeHost, nil); m == nil {
 		t.Errorf("client %s matched no rule although it is inside the rule's srcPrefix (%s) — "+
 			"the scan decided with srcIPNet (%s), so the srcPrefix fast path is bypassed",
 			srcGateProbeIP, rule.srcPrefix, decoy)
 	}
-	if m := ps.Evaluate(srcGateDecoyIP, "", "unauth", srcGateMatchHost, nil); m != nil {
+	if m := ps.Evaluate(srcGateDecoyIP, "", "unauth", srcGateProbeHost, nil); m != nil {
 		t.Errorf("client %s matched rule %q although only srcIPNet (%s) contains it, not srcPrefix (%s) — "+
 			"the scan decided with srcIPNet, so the srcPrefix fast path is bypassed",
 			srcGateDecoyIP, m.Rule.Name, decoy, rule.srcPrefix)
