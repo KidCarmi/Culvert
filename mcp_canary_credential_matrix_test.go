@@ -591,9 +591,9 @@ var nodeReadyMentionAllowed = []struct {
 	// Added when nodeReadyIndependence was deleted (Codex round 7). A syntactic rule that tried to
 	// recognise the corrective form was bypassed twice by negating it, so these are named like
 	// every other permitted claim instead of being detected.
-	{"internal/mcp/canary/readiness.go", "node status can still report Ready",
+	{"internal/mcp/canary/readiness.go", "EvaluateNode skips it and node status can still report Ready",
 		"The corrective sentence itself: it states that EvaluateNode skips this factActivation row, which is true."},
-	{"mcp_canary_credential_free_test.go", "node status can still report Ready",
+	{"mcp_canary_credential_free_test.go", "EvaluateNode skips it and node status can still report Ready",
 		"Same corrective sentence, explaining why this test calls canary.Evaluate rather than EvaluateNode."},
 
 	{"mcp_live_tier.go", "mcp live tier: node not ready to arm",
@@ -618,6 +618,25 @@ var nodeReadyMentionAllowed = []struct {
 		"§25d quotes the POSITIVE polarity — the wording that survived round 3 — in order to refute it."},
 	{"docs/operator/mcp-first-controlled-canary-review.md", "node from STILL REPORTING Ready\"* matched both the promise pattern",
 		"§25d quotes the negated form Codex round 6 found the `still` exemption swallowing, in order to record it."},
+	// --- Codex round 17: claims that a PER-LINE scan could not see ---------------------------
+	// Every entry below names a mention that was invisible while the scan read one line at a
+	// time, because the sentence carrying it is WRAPPED. None of them is the forbidden claim;
+	// each is a legitimate statement that now has to be permitted explicitly, which is the
+	// allowlist working as designed rather than a new exemption.
+	{"docs/operator/mcp-first-controlled-canary-review.md", "node-level surface that included them would report every node permanently not-ready",
+		"§25d explains why EvaluateNode excludes activation facts at all: a node surface that included them would report every node permanently un-ready. A statement about the NODE surface's design, not an activation fact promising node readiness."},
+	{"docs/operator/mcp-first-controlled-canary-review.md", "*\"must be able to make a node un-ready\"*",
+		"§25d QUOTES the round-2 phrasing in order to explain why the round-3 sweep, which searched for words rather than for the claim, did not match it."},
+	{"docs/operator/mcp-first-controlled-canary-review.md", "\"EvaluateNode skips it and node status can still report Ready\" is the one sentence that makes an activation fact's scope unambiguous",
+		"§25d quotes the CORRECTING sentence while explaining why the widened matcher flags it; the quoted text asserts the node surface is UNAFFECTED."},
+	{"docs/operator/mcp-first-controlled-canary-review.md", "*\"It is FALSE THAT node status can still report Ready\u2026\"*",
+		"§25d quotes the NEGATED form that bypassed the deleted exemption, as the evidence for deleting it."},
+	{"mcp_canary_catalog_usable_test.go", "so a node could report Ready:true for an experiment in which every single request dies at that override",
+		"Describes the DEFECT this test pins — a node reporting Ready for an experiment whose every request dies at the policy hard-override. A statement of the gap being closed, not a promise."},
+	{"mcp_canary_matrix_mutation_test.go", "what the live node actually reports, and that no path makes it Ready",
+		"Asserts that NO path makes the node Ready — the opposite of a promise, and the posture these composition-layer tests exist to pin."},
+	{"mcp_shadow_usable_tool_test.go", "if the node status folded the usable-tool check in it would always report node-not-ready",
+		"Genuinely node-level: it explains why the scope-dependent usable-tool check is excluded from the node-readiness dry-run — folding it in would report every node not-ready."},
 }
 
 // nodeReadyScanExcluded names the files the scan deliberately does NOT read, with a reason each.
@@ -636,6 +655,99 @@ var nodeReadyScanExcluded = []struct {
 }{
 	{"mcp_canary_credential_matrix_test.go",
 		"defines nodeReadyPromise and the allowlist needles, so a self-scan reports its own machinery forever."},
+}
+
+// claimPassage is ONE PARAGRAPH of a scanned file with its wrapped lines JOINED, plus the mapping
+// back to source line numbers so a failure still names the line it was found on.
+//
+// Codex round 17: the claim scan matched LINE BY LINE, and both Go comments and Markdown wrap. A
+// forbidden claim split over two lines -- "stops a node reporting" / "Ready on the next read" --
+// matched neither line, so the whole-tree wall stayed green while the exact claim it exists to
+// forbid was present in the tree. That is round 16's finding one layer up: the round collector was
+// taught that a line wrap is not a boundary, and this scanner, which reads the same wrapped files,
+// was not. The rule is now stated ONCE and applied in both places: a line wrap is not a boundary,
+// a BLANK LINE is.
+//
+// Joining can only make the matcher see MORE text, so it can only ever turn a silent pass into a
+// visible failure -- the safe direction. Paragraphs are NOT joined to each other, so the scan
+// cannot manufacture a claim by stitching two unrelated statements together.
+type claimPassage struct {
+	text     string
+	segStart []int // byte offset in text where each contributing source line begins
+	segLine  []int // 1-based source line number of that contribution
+}
+
+// lineAt maps a byte offset in the joined text back to the source line it came from.
+func (p claimPassage) lineAt(off int) int {
+	line := 0
+	for i, s := range p.segStart {
+		if s > off {
+			break
+		}
+		line = p.segLine[i]
+	}
+	return line
+}
+
+// claimPassages splits a file into paragraphs and joins each paragraph's wrapped lines with a
+// single space, dropping each line's indentation and any leading `//` so an allowlist needle can
+// be written as prose and stays valid however the line happens to be re-wrapped.
+func claimPassages(data string) []claimPassage {
+	var out []claimPassage
+	var b strings.Builder
+	var segStart, segLine []int
+	flush := func() {
+		if b.Len() > 0 {
+			out = append(out, claimPassage{text: b.String(), segStart: segStart, segLine: segLine})
+		}
+		b.Reset()
+		segStart, segLine = nil, nil
+	}
+	for i, raw := range strings.Split(data, "\n") {
+		body := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "//"))
+		if body == "" {
+			flush() // a blank line -- or a bare `//` -- ends the paragraph
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		segStart = append(segStart, b.Len())
+		segLine = append(segLine, i+1)
+		b.WriteString(body)
+	}
+	flush()
+	return out
+}
+
+// claimUnit is one maximal DOT-FREE run of a joined paragraph, with its offset inside that
+// paragraph so a failure can still be reported against the source line it started on.
+type claimUnit struct {
+	text string
+	base int
+}
+
+// units splits a joined paragraph at sentence terminators, which is exactly the matcher's OWN
+// horizon: every branch of nodeReadyPromise is bounded by `[^.]`, so a match can never span a
+// `.` and splitting there loses no possible match.
+//
+// That property is what makes the unit a sentence rather than the whole paragraph. Scanning
+// whole paragraphs was tried first and is WRONG for a reason worth recording: the regex is
+// leftmost-first, so an earlier unrelated "node" in the same paragraph starts the match and
+// widens its span past the allowlist needle that quotes the claim -- the permission then fails
+// to cover the very text it was written for, and the wall reports live, reasoned entries as
+// unreachable. A sentence keeps every match span as narrow as a single line used to make it,
+// which is what the span-based allowlist depends on, while still spanning a line WRAP.
+func (p claimPassage) units() []claimUnit {
+	var out []claimUnit
+	base := 0
+	for _, seg := range strings.Split(p.text, ".") {
+		if strings.TrimSpace(seg) != "" {
+			out = append(out, claimUnit{text: seg, base: base})
+		}
+		base += len(seg) + 1
+	}
+	return out
 }
 
 // allowlistCoversEveryClaim reports whether EVERY claim the matcher finds on this line sits inside
@@ -897,11 +1009,23 @@ var (
 // only moved the problem: a refusal matching ONE short token is evaded by TWO words. A vocabulary
 // cannot be completed, so there is none.
 //
-// Instead: every one- or two-digit number inside a bounded window after a `round`/`rounds` token
-// is a named round, whatever joins it to the previous one. The window stops at the first sentence
-// terminator so the scan cannot wander into an unrelated paragraph, and numbers are bounded to two
-// digits because round numbers here are small -- which is what keeps ordinary prose like
-// "round 9 in 2026" out of it. Ranges are still expanded, because `rounds 11-13` names 12.
+// Instead: every one- or two-digit number in the same SENTENCE as a `round`/`rounds` token is a
+// named round, whatever joins it to the previous one. Numbers are bounded to two digits because
+// round numbers here are small -- which is what keeps ordinary prose like "round 9 in 2026" out
+// of it. Ranges are still expanded, because `rounds 11-13` names 12.
+//
+// Codex round 17: there used to be a 60-BYTE cutoff on top of the sentence bound, and it silently
+// truncated an ordinary long list -- `rounds 7 and 8, followed after the baseline and campaign
+// instrumentation were repaired by 97` returned 7 and 8 and never reached 97. An arbitrary byte
+// count is not a property of the language, so it could only ever be a guess about how far a
+// sentence runs; the sentence and paragraph terminators already say exactly that. Removing it
+// only WIDENS each window, so the collected set is a superset and the gate can get stricter but
+// not blind. Measured against the live §25d before and after: the same set, [1..N].
+//
+// The cost of having no cutoff is stated rather than hidden: an unrelated one- or two-digit
+// number in the SAME SENTENCE as a round token is now read as a round, so the ledger must not
+// write "in round 9 we ran 36 mutations" with no sentence break. That direction is a visible
+// false FAILURE an author fixes by rewording; the direction it replaces was a silent false PASS.
 //
 // The window stops at a sentence terminator or a BLANK LINE. A single newline is a line wrap in
 // this document, not a boundary, and treating it as one made the scan blind to any list that
@@ -910,14 +1034,9 @@ var (
 // Verified against the live §25d: this collects EXACTLY the enumerated set, so it is neither
 // under-reading the section nor manufacturing rounds out of neighbouring numbers.
 func roundsNamedIn(doc string) []int {
-	const window = 60
 	seen := map[int]bool{}
 	for _, loc := range roundToken.FindAllStringIndex(doc, -1) {
-		end := loc[1] + window
-		if end > len(doc) {
-			end = len(doc)
-		}
-		w := doc[loc[1]:end]
+		w := doc[loc[1]:]
 		if stop := roundStop.FindStringIndex(w); stop != nil {
 			w = w[:stop[0]]
 		}
@@ -1158,19 +1277,23 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 			t.Fatalf("the wall claims to scan %s but cannot read it: %v", rel, err)
 		}
 		scanned++
-		for i, line := range strings.Split(string(data), "\n") {
-			if !nodeReadyPromise.MatchString(line) {
-				continue
-			}
-			allowed, hits := allowlistCoversEveryClaim(rel, line)
-			for _, h := range hits {
-				allowHits[h]++
-			}
-			if !allowed {
-				t.Errorf("%s:%d claims something makes the NODE un-ready, and is not on the "+
-					"reasoned allowlist:\n    %s\nIf this is an ACTIVATION fact, say it refuses "+
-					"the next FULL ACTIVATION PREFLIGHT. If it is genuinely node-level, add an "+
-					"allowlist entry saying why.", rel, i+1, strings.TrimSpace(line))
+		for _, psg := range claimPassages(string(data)) {
+			for _, u := range psg.units() {
+				loc := nodeReadyPromise.FindStringIndex(u.text)
+				if loc == nil {
+					continue
+				}
+				allowed, hits := allowlistCoversEveryClaim(rel, u.text)
+				for _, h := range hits {
+					allowHits[h]++
+				}
+				if !allowed {
+					t.Errorf("%s:%d claims something makes the NODE un-ready, and is not on the "+
+						"reasoned allowlist:\n    %s\nIf this is an ACTIVATION fact, say it refuses "+
+						"the next FULL ACTIVATION PREFLIGHT. If it is genuinely node-level, add an "+
+						"allowlist entry saying why.", rel, psg.lineAt(u.base+loc[0]),
+						strings.TrimSpace(u.text))
+				}
 			}
 		}
 	}
@@ -1183,6 +1306,20 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 	}
 }
 
+// needlePresent reports whether an allowlist needle appears in the file AS THE SCAN READS IT —
+// that is, in the wrap-joined paragraph text rather than in any one raw line.
+func needlePresent(data, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	for _, psg := range claimPassages(data) {
+		if strings.Contains(psg.text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // allowlistEntryReached reports whether the scan actually REACHES a line carrying this needle —
 // that is, a line the wall would flag were the entry not there.
 //
@@ -1192,12 +1329,14 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 // passed and the gate proved nothing about the property it advertises. A check whose claim only
 // holds when the tree happens to violate it is not a check.
 func allowlistEntryReached(data, needle string) bool {
-	for _, line := range strings.Split(data, "\n") {
-		if !nodeReadyPromise.MatchString(line) {
-			continue
-		}
-		if needleCoversAClaim(line, needle) {
-			return true
+	for _, psg := range claimPassages(data) {
+		for _, u := range psg.units() {
+			if !nodeReadyPromise.MatchString(u.text) {
+				continue
+			}
+			if needleCoversAClaim(u.text, needle) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1211,7 +1350,11 @@ func TestCredWall_AllowlistIsNotStale(t *testing.T) {
 		if err != nil {
 			t.Fatalf("allowlist names unreadable file %s: %v", a.file, err)
 		}
-		if !strings.Contains(string(data), a.needle) {
+		// The presence check reads the SAME joined view the scan does. Reading raw bytes here
+		// was wrong for the reason Codex round 17 found in the scan itself: both Go comments
+		// and Markdown wrap, so a needle quoting a claim that spans a line break appears in no
+		// single line of the file and a literal containment check calls the live entry stale.
+		if !needlePresent(string(data), a.needle) {
 			t.Errorf("allowlist entry {%s, %q} matches nothing any more (%s). Remove it rather "+
 				"than leaving a standing permission nobody uses.", a.file, a.needle, a.why)
 			continue
@@ -1424,6 +1567,108 @@ func TestCredWall_ReachabilityCheckCanActuallyFail(t *testing.T) {
 	}
 }
 
+// TestCredWall_ClaimScanSeesWrappedClaims is the direct control for Codex round 17's second
+// finding, and it carries its own proof of non-vacuity.
+//
+// The scan used to read one line at a time. Both Go comments and Markdown wrap, so a claim split
+// over a line break matched NEITHER line and the whole-tree wall stayed green with the forbidden
+// claim present. Each case below therefore asserts BOTH halves: the joined view sees the claim,
+// and a per-line view does NOT -- so if the join were ever removed these cases fail instead of
+// quietly proving nothing. The last case is the opposite guarantee: paragraphs are not stitched
+// together, so the scan cannot manufacture a claim out of two unrelated statements.
+func TestCredWall_ClaimScanSeesWrappedClaims(t *testing.T) {
+	seenPerLine := func(doc string) bool {
+		for _, line := range strings.Split(doc, "\n") {
+			if nodeReadyPromise.MatchString(line) {
+				return true
+			}
+		}
+		return false
+	}
+	seenJoined := func(doc string) bool {
+		for _, psg := range claimPassages(doc) {
+			for _, u := range psg.units() {
+				if nodeReadyPromise.MatchString(u.text) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	for _, tc := range []struct {
+		name        string
+		doc         string
+		wantJoined  bool
+		wantPerLine bool // what the OLD scan saw -- false is the defect this closes
+	}{
+		{
+			name:        "go comment wrapped mid-claim",
+			doc:         "// this activation row stops a node reporting\n// Ready on the next status read\n",
+			wantJoined:  true,
+			wantPerLine: false,
+		},
+		{
+			name:        "markdown wrapped mid-claim",
+			doc:         "The row stops a node from reporting\nReady on the next read.\n",
+			wantJoined:  true,
+			wantPerLine: false,
+		},
+		{
+			name:        "unwrapped claim, unchanged",
+			doc:         "// this row stops a node reporting Ready on the next read\n",
+			wantJoined:  true,
+			wantPerLine: true,
+		},
+		{
+			name:        "two paragraphs are never stitched",
+			doc:         "a sentence ending in the word node\n\nreport Ready is a separate paragraph\n",
+			wantJoined:  false,
+			wantPerLine: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := seenJoined(tc.doc); got != tc.wantJoined {
+				t.Errorf("joined scan saw claim = %v, want %v, in:\n%s", got, tc.wantJoined, tc.doc)
+			}
+			if got := seenPerLine(tc.doc); got != tc.wantPerLine {
+				t.Errorf("per-line scan saw claim = %v, want %v — this case no longer proves "+
+					"what it claims to prove, in:\n%s", got, tc.wantPerLine, tc.doc)
+			}
+		})
+	}
+}
+
+// TestCredWall_ClaimUnitsDoNotWidenAMatchPastItsSentence pins WHY the scan unit is a sentence and
+// not a whole paragraph.
+//
+// Joining whole paragraphs was tried first and is wrong: nodeReadyPromise is leftmost-first, so an
+// earlier unrelated `node` in the same paragraph starts the match and widens its span past the
+// allowlist needle that quotes the claim. The permission then covers nothing, and the wall reports
+// live, reasoned entries as unreachable — a gate failing on correct text, which is how a wall gets
+// switched off. Every branch of the matcher is bounded by `[^.]`, so splitting at a sentence
+// terminator cannot lose a match; it can only keep the span narrow.
+func TestCredWall_ClaimUnitsDoNotWidenAMatchPastItsSentence(t *testing.T) {
+	doc := "// An unrelated mention of a node here. The row stops a node reporting\n// Ready.\n"
+	psgs := claimPassages(doc)
+	if len(psgs) != 1 {
+		t.Fatalf("expected one paragraph, got %d", len(psgs))
+	}
+	var spans []string
+	for _, u := range psgs[0].units() {
+		if loc := nodeReadyPromise.FindStringIndex(u.text); loc != nil {
+			spans = append(spans, u.text[loc[0]:loc[1]])
+		}
+	}
+	if len(spans) != 1 {
+		t.Fatalf("expected exactly one match, got %d: %q", len(spans), spans)
+	}
+	if strings.Contains(spans[0], "unrelated") {
+		t.Fatalf("the match span reached back into the previous sentence: %q\nA paragraph-wide "+
+			"unit does this, and it is what breaks span-based allowlisting.", spans[0])
+	}
+}
+
 // TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses pins roundsNamedIn directly.
 //
 // The gate above consumes it, but a gate that is green proves only that the rounds it FOUND are
@@ -1460,6 +1705,7 @@ func TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses(t *testing.T) {
 		{"wrapped list item", "- rounds 7 and\n  98 were merged\n", []int{7, 98}},
 		{"paragraph break stops the scan", "rounds 7\n\n98 mutations ran", []int{7}},
 		{"sentence end stops the scan", "round 7. 98 mutations ran", []int{7}},
+		{"long list past byte 60", "rounds 7 and 8, followed after the baseline and campaign instrumentation were repaired by 97", []int{7, 8, 97}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := roundsNamedIn(tc.in)

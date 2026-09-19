@@ -2839,8 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 37 mutations,
-**37 caught, 0 survived, 0 skipped, measured on `d4790b7f`**. A run that reaches its summary has
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 39 mutations,
+**CAMPAIGN_RESULT_PENDING**. A run that reaches its summary has
 necessarily passed `selfcheck_site_counter`, which refuses before anything else prints.
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
@@ -3106,8 +3106,9 @@ mechanisms built during round 5, which is what a review is for.
    strings are each named in the allowlist with a reason, kept honest by the reachability check.
    The COUNT is stated once, below, and gated — stating it twice is how this paragraph said three
    while the next sentence said four, two lines apart, with the gate green because it parsed only
-   the other phrase (Codex round 8). **6 allowlist entries name ledger lines** — the two from round 4 plus the
-   four quotations this removal required, counted by
+   the other phrase (Codex round 8). **10 allowlist entries name ledger lines** — the two from round 4, the
+   four quotations this removal required, and the four more that became VISIBLE in round 17 once
+   the scan stopped reading one line at a time, counted by
    `TestCredWall_LedgerCountsItsOwnQuotationPermissions` rather than by hand, because the first
    version of this paragraph said three and understated the permissions it had introduced.
 3. **The directory axis, above.**
@@ -3202,8 +3203,22 @@ would not move, and a deleted entry would not shrink).
   wrap — a change that can only WIDEN each window, so the collected set is a superset of what it
   was and the gate can get stricter but cannot go blind. The live section still yields exactly the
   enumerated set. Gated by M37, whose payload changes no words at all, only where the line breaks.
+- **Round 17** — two findings, both the same axis one step further. (a) The round collector also
+  carried a fixed BYTE cutoff on top of its sentence bound, so an ordinary long sentence naming a
+  round past that offset truncated silently: an arbitrary number cannot be a statement about where
+  a sentence ends, and the terminators already are one, so the cutoff is deleted. Measured before
+  and after against the live section: the same set. Gated by M38. (b) The whole-tree CLAIM scan
+  still read LINE BY LINE, so a forbidden claim split across a wrap matched neither line and the
+  wall stayed green with the claim present — round 16's defect one layer up, in the scanner that
+  reads the same wrapped files. The rule is now stated once and applied in both: a line wrap is
+  not a boundary, a blank line is. The scan unit is a SENTENCE, not a paragraph: every branch of
+  the matcher is bounded by `[^.]`, so splitting there cannot lose a match, while a paragraph-wide
+  unit lets an earlier unrelated `node` start the match and widen its span past the needle that
+  quotes the claim — which made the wall report live, reasoned permissions as unreachable. Joining
+  immediately exposed SEVEN mentions no per-line scan could ever have seen; each is legitimate and
+  each is now named in the allowlist with a reason. Gated by M39.
 
-**16 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**17 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
 baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
@@ -3218,7 +3233,9 @@ without saying so (round 14, where the fix was to stop truncating silently rathe
 fourth word), and a refusal that could read one word but not two (round 15, where the connector
 vocabulary was deleted rather than extended a fifth time), and a parser tested only on single-line
 input against a document that is hard-wrapped (round 16, where the blind spot was the line break
-itself rather than any word).
+itself rather than any word), and that same blindness left unfixed in the scanner beside it while
+the collector was taught to see (round 17, where the rule was finally stated once and applied to
+both readers of the same wrapped files).
 
 The gates get stronger every round; what keeps failing is the accounting around them, so the
 discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no

@@ -714,6 +714,26 @@ run_mutation M37 \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
   's/in rounds 7 and 8/in rounds 7 and\n97/'
 
+# M38 is the LONG-LIST form (Codex round 17). The round collector carried a 60-BYTE cutoff on top
+# of its sentence bound, so an ordinary long sentence naming a round past that offset truncated
+# silently -- the same silent truncation as the connector rounds, produced by an arbitrary number
+# rather than by a word. The bound is now the sentence and paragraph terminators alone, which is
+# what the matcher's own horizon already was.
+run_mutation M38 \
+  "§25d names an unenumerated round PAST THE OLD 60-BYTE CUTOFF" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/in rounds 7 and 8/in rounds 7 and 8, followed after the baseline and campaign instrumentation were repaired by 97/'
+
+# M39 is round 17's SECOND finding, and it is round 16's defect one layer up: the whole-tree claim
+# scan read LINE BY LINE, so a forbidden claim split across a line wrap matched neither line and
+# the wall stayed green with the claim present in the tree. This payload writes exactly that -- an
+# ACTIVATION fact's doc promising NODE readiness, wrapped mid-sentence. It changes no verdict and
+# no behaviour; it is a claim, which is the whole point of the wall.
+run_mutation M39 \
+  "an activation fact promises NODE readiness ACROSS A LINE WRAP" \
+  'TestCredWall_EveryClaimedSurfaceIsScanned' . internal/mcp/canary/readiness.go \
+  's{only stops the next FULL ACTIVATION PREFLIGHT admitting an experiment whose every call\n\t// would be refused\.}{only stops a node reporting\n\t// Ready on the next status read.}'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then
