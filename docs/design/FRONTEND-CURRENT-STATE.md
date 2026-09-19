@@ -49,6 +49,10 @@
   from it; the page renders activation from that evidence alone (unknown stays unknown), bounds
   every durability claim to the frozen contract (audit qualified by the audit sink), and shows a
   lookup answer only when it is bound to the requested id and internally consistent.
+  Round 2 (record 6B1D): the served identity is bound to the exact material served (the pair is
+  loaded once and `ServeTLS` reads no files), and a committed result whose facts contradict the
+  frozen schemas (false durability, foreign target, bad cleanup/activation, foreign candidate) is
+  refused whole.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`
   (per-feature matrix), `FRONTEND-SECURITY-CONTRACT.md` (invariants),
   `FRONTEND-MIGRATION-PLAN.md` (program)
