@@ -2840,7 +2840,8 @@ activation is the residual above, not a drift-path gap.
 negative's positive control — to exist.
 
 **Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 30 mutations,
-**CAMPAIGN_RESULT_PENDING**.
+**30 caught, 0 survived, 0 skipped, measured on `f6f4451c`** (the self-check passed: it refuses the
+run before anything else prints, and this run reached its summary).
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
