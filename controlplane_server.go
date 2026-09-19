@@ -360,6 +360,32 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 		return nil, err
 	}
 	globalRevAggregator.Update(req.NodeID, req.Entries)
+
+	// CHAOS-66: the CP is a session-bearing node like any other, and it is the
+	// node the admin UI runs on — so it is where a logout and an account
+	// deletion actually happen. Before this, the aggregator had exactly ONE
+	// writer (the line above) and the CP's own list was neither contributed nor
+	// consumed: an admin revoking a session on the Control Plane revoked it on
+	// the Control Plane alone, while every Data Plane node kept honouring the
+	// cookie for the rest of its TTL (up to 7 days). The direction that
+	// propagated was DP→fleet; the direction an operator uses did not.
+	//
+	// Both halves are closed here, in the one handler that runs on every sync
+	// tick, so no new loop or cadence is introduced and a node with no enrolled
+	// DPs pays nothing (the handler is never reached).
+	//
+	//  1. CONTRIBUTE — refresh the CP's own slot from its live list. The slot is
+	//     a dedicated field, not a reserved map key, so no enrolled node can
+	//     overwrite it or cause it to be excluded from its own merge.
+	//  2. CONSUME — apply what this DP reported to the CP's own list, so a
+	//     logout performed on a DP is enforced on the CP too.
+	globalRevAggregator.UpdateLocal(sessionRevoked.ExportRevocations())
+	if added := sessionRevoked.MergeRevocations(req.Entries); added > 0 {
+		if err := sessionRevoked.SaveRevocations(); err != nil {
+			logger.Printf("ControlPlane: failed to persist merged revocations: %v", err)
+		}
+	}
+
 	remote := globalRevAggregator.MergedExcluding(req.NodeID)
 	b, err := json.Marshal(map[string]any{"entries": remote})
 	if err != nil {

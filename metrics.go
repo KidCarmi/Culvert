@@ -1103,6 +1103,49 @@ culvert_catfeeddb_quarantined_copies %d
 		cfdb.ResidualCopies,
 	)
 
+	// CHAOS-66: the session revocation plane. Emitted UNCONDITIONALLY, which is
+	// the deliberate exception to the "omit when the feature is off" rule the
+	// socks5/cluster_ca/geo series follow.
+	//
+	// Those series are omitted because a flat 0 from a node that never enabled
+	// the feature is indistinguishable from a broken one. Here the reasoning
+	// inverts: `durable 0` on a node that never configured a revocations file
+	// and `durable 0` on a node whose volume is full mean the SAME thing to the
+	// operator — a revocation applied on this node does not survive a restart —
+	// and it is exactly the condition worth alerting on. Omitting the series on
+	// the unconfigured node would hide the DEFAULT posture, which is the one
+	// most deployments are in. The `session_revocation` contract row carries
+	// which of the two causes applies.
+	//
+	// Paging rule: `culvert_session_revocation_durable == 0` is a warn;
+	// `culvert_session_revocation_persist_failures_total > 0` is a page (an
+	// admin was told a session was withdrawn and it was not).
+	srDurable := 0
+	if revocationsAreDurable() {
+		srDurable = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_session_revocation_durable 1 when a session revocation applied on this node survives a restart
+# TYPE culvert_session_revocation_durable gauge
+culvert_session_revocation_durable %d
+
+# HELP culvert_session_revocation_tokens Session-token revocations (explicit logouts) currently in force on this node
+# TYPE culvert_session_revocation_tokens gauge
+culvert_session_revocation_tokens %d
+
+# HELP culvert_session_revocation_users Account-level revocations (deleted users) currently in force on this node
+# TYPE culvert_session_revocation_users gauge
+culvert_session_revocation_users %d
+
+# HELP culvert_session_revocation_persist_failures_total Session revocations that were applied in memory but could not be written to disk
+# TYPE culvert_session_revocation_persist_failures_total counter
+culvert_session_revocation_persist_failures_total %d
+`,
+		srDurable,
+		sessionRevoked.Count(),
+		sessionRevoked.UserCount(),
+		sessionRevocationPersistFailures.Load(),
+	)
+
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is
 	// loaded — on the default appliance (no .mmdb configured) these series are
 	// absent entirely, because a flat 0 on a node that has no GeoIP is

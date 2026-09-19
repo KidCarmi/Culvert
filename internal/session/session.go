@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -173,18 +174,64 @@ func (r *RevocationList) IsUserRevoked(username string) bool {
 	return true
 }
 
-// RevocationEntry is a single revoked session token for gRPC gossip.
+// userRevocationTokenPrefix namespaces the Token field of a USER-level
+// revocation entry (CHAOS-66).
+//
+// A user entry needs a Token value for two independent reasons, and both are
+// load-bearing:
+//
+//  1. `revocationAggregator.MergedExcluding` (controlplane.go) de-duplicates
+//     the fleet-wide merge on `e.Token` alone. Leaving it empty would collapse
+//     EVERY user revocation in the cluster into a single entry — the fleet
+//     would learn about one deleted account and silently drop the rest.
+//  2. A binary predating this change unmarshals the entry (unknown fields are
+//     ignored) and files it under `tokens[Token]`. With the prefix that key is
+//     INERT: a real token is the `base64.RawURLEncoding` of a Session payload,
+//     whose alphabet is [A-Za-z0-9-_], so a key containing ':' can never equal
+//     a cookie's payload segment. A downgraded node therefore carries the entry
+//     harmlessly instead of matching a live cookie against it — and when it
+//     gossips the entry back, MergeRevocations below recovers the username from
+//     the prefix, so one hop through an old node does not erase the revocation.
+//
+// The non-collision is a security property, not a convenience, and is pinned by
+// TestUserRevocationTokenCannotCollideWithACookiePayload.
+const userRevocationTokenPrefix = "user:"
+
+// RevocationEntry is a single revocation for gRPC gossip and for the persisted
+// revocations file.
+//
+// Exactly one of the two revocation KINDS is represented by any entry:
+//
+//   - a TOKEN revocation (explicit logout) sets Token to the cookie's base64
+//     payload segment and leaves User empty;
+//   - a USER revocation (the account was deleted) sets User to the username and
+//     Token to userRevocationTokenPrefix+User.
+//
+// User is `omitempty` and Token is always populated, so the document stays a
+// JSON array that a binary predating CHAOS-66 parses without error. That
+// downgrade compatibility is deliberate: promoting the file to an object would
+// make an older binary fail the whole parse and lose the TOKEN revocations it
+// does understand — trading a gap for a regression.
 type RevocationEntry struct {
 	Token  string `json:"token"`
 	Expiry int64  `json:"expiry"` // Unix timestamp
+	// User, when non-empty, makes this a user-level revocation.
+	User string `json:"user,omitempty"`
 }
 
-// ExportRevocations returns all non-expired revocation entries for syncing.
+// ExportRevocations returns all non-expired revocation entries — BOTH kinds —
+// for syncing and for persistence.
+//
+// CHAOS-66: this used to walk `r.tokens` only, which made the `users` map
+// invisible to every durable and distributed surface the list has. A deleted
+// account's live sessions were rejected in the memory of the one node that
+// served the DELETE, until that process exited. Both maps are exported now, so
+// a user revocation reaches disk and the fleet by the same paths a logout does.
 func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
-	entries := make([]RevocationEntry, 0, len(r.tokens))
+	entries := make([]RevocationEntry, 0, len(r.tokens)+len(r.users))
 	for tok, exp := range r.tokens {
 		if now.After(exp) {
 			delete(r.tokens, tok)
@@ -192,11 +239,32 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 		}
 		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
 	}
+	for user, exp := range r.users {
+		if now.After(exp) {
+			delete(r.users, user)
+			continue
+		}
+		entries = append(entries, RevocationEntry{
+			Token:  userRevocationTokenPrefix + user,
+			Expiry: exp.Unix(),
+			User:   user,
+		})
+	}
 	return entries
 }
 
-// MergeRevocations imports remote revocation entries (from other cluster nodes).
-// Only adds entries that are not yet expired and not already present.
+// MergeRevocations imports remote revocation entries (from other cluster nodes,
+// or from the persisted file at boot). Only adds entries that are not yet
+// expired and not already present. Returns how many entries were newly applied.
+//
+// An entry is classified as a USER revocation when it carries an explicit User
+// field, OR when its Token carries userRevocationTokenPrefix. The second form
+// only arises when the entry has passed through a node predating CHAOS-66,
+// which drops the unknown `user` JSON field but preserves the token verbatim;
+// recovering the username from the prefix means one hop through an old node
+// degrades nothing. A token that merely LOOKS like a user entry cannot be a
+// real cookie payload (see userRevocationTokenPrefix), so this classification
+// can never swallow a genuine token revocation.
 func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -207,6 +275,23 @@ func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 		if now.After(exp) {
 			continue // already expired
 		}
+		user := e.User
+		if user == "" {
+			user = strings.TrimPrefix(e.Token, userRevocationTokenPrefix)
+			if user == e.Token {
+				user = "" // no prefix — an ordinary token revocation
+			}
+		}
+		if user != "" {
+			// Keep the LATER expiry: a re-delete of the same username extends
+			// the window, and taking the earlier one would shorten a revocation
+			// on a gossip round trip.
+			if cur, exists := r.users[user]; !exists || exp.After(cur) {
+				r.users[user] = exp
+				added++
+			}
+			continue
+		}
 		if _, exists := r.tokens[e.Token]; !exists {
 			r.tokens[e.Token] = exp
 			added++
@@ -215,11 +300,23 @@ func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 	return added
 }
 
-// Count returns the number of active revoked sessions.
+// Count returns the number of active revoked session TOKENS.
 func (r *RevocationList) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.tokens)
+}
+
+// UserCount returns the number of active user-level revocations.
+//
+// Separate from Count because the two answer different operator questions and
+// used to be indistinguishable: `local_revoked` on the cluster API reported
+// only tokens, so a node holding a hundred deleted-account revocations and one
+// holding none serialised identically.
+func (r *RevocationList) UserCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.users)
 }
 
 // SwapForTest replaces the list's maps with empty ones and returns a restore
@@ -260,21 +357,79 @@ func RevocationsPath() string {
 	return revocationsPath
 }
 
+// ErrRevocationsCorrupt wraps a revocations file that was READ successfully and
+// could not be PARSED.
+//
+// The distinction is the caller's whole decision (CHAOS-66): a file we could
+// not read may be perfectly intact behind a transient permission or I/O fault,
+// and quarantining it would move a healthy security-critical file aside; a file
+// we read and could not parse is corrupt, and the next SaveRevocations would
+// atomically OVERWRITE it — destroying the evidence and every revocation in it.
+// Only the second warrants the quarantine path. Same rule as
+// state_corruption.go's, expressed as a sentinel so the caller need not
+// re-classify the error.
+var ErrRevocationsCorrupt = errors.New("session: revocations file corrupt")
+
+// persistFailureObserver is notified whenever a revocation could not be made
+// durable. Installed by package main beside the metrics/health plane.
+//
+// The seam exists because the failure is otherwise INVISIBLE in the direction
+// that matters: SaveRevocations' error is logged by its callers and the admin
+// action (a logout, an account deletion) still reports success, so the operator
+// is told the session was withdrawn while the only durable record of that
+// withdrawal does not exist. The observer must not itself revoke or persist.
+var (
+	persistObserverMu sync.RWMutex
+	persistObserver   func(err error)
+)
+
+// SetPersistFailureObserver installs the durability-failure callback ("" clears).
+func SetPersistFailureObserver(fn func(err error)) {
+	persistObserverMu.Lock()
+	persistObserver = fn
+	persistObserverMu.Unlock()
+}
+
+func notePersistFailure(err error) error {
+	persistObserverMu.RLock()
+	fn := persistObserver
+	persistObserverMu.RUnlock()
+	if fn != nil {
+		// Contained: a panicking observer must never take down the admin plane
+		// it is reporting on (the internal/audit observer rule).
+		func() {
+			defer func() { _ = recover() }()
+			fn(err)
+		}()
+	}
+	return err
+}
+
 // SaveRevocations writes all non-expired revocations to disk as JSON.
+//
+// Every failure path is routed through notePersistFailure, so "the revocation
+// is not durable" is a countable event rather than one log line at a call site
+// that returns 200 regardless.
 func (r *RevocationList) SaveRevocations() error {
 	path := RevocationsPath()
 	if path == "" {
+		// Not a failure: persistence is opt-in via --revocations-file. The
+		// resulting posture (no revocation survives a restart, by
+		// configuration) is reported by the health plane, not here.
 		return nil
 	}
 	entries := r.ExportRevocations()
 	data, err := json.Marshal(entries)
 	if err != nil {
-		return fmt.Errorf("marshal revocations: %w", err)
+		return notePersistFailure(fmt.Errorf("marshal revocations: %w", err))
 	}
 	// AtomicWrite (unique temp + fsync): a torn or power-loss-reverted
 	// revocation file would resurrect revoked session cookies until their
 	// natural expiry.
-	return fileutil.AtomicWrite(path, data, 0o600)
+	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		return notePersistFailure(err)
+	}
+	return nil
 }
 
 // LoadRevocations reads revocations from disk and merges them.
@@ -292,7 +447,11 @@ func (r *RevocationList) LoadRevocations() error {
 	}
 	var entries []RevocationEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		return fmt.Errorf("unmarshal revocations: %w", err)
+		// Read fine, parsed not at all: corrupt. Wrapped in the sentinel so the
+		// caller quarantines instead of silently booting with an EMPTY list —
+		// which is the fail-OPEN direction for this particular file, since
+		// every revocation it held is resurrected for the rest of its TTL.
+		return fmt.Errorf("%w: %v", ErrRevocationsCorrupt, err)
 	}
 	added := r.MergeRevocations(entries)
 	if added > 0 {

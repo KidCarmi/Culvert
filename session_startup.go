@@ -5,6 +5,7 @@ package main
 // revocations, and applies the session TTL.
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,7 +27,34 @@ func loadSession(cfg sessionStartupConfig) error {
 
 	if cfg.RevocationsFile != "" {
 		session.SetRevocationsPath(cfg.RevocationsFile)
+		noteRevocationPersistenceConfigured(cfg.RevocationsFile)
+		// Surface an UNRECONCILED quarantine from a prior boot before the parse
+		// attempt: this boot's file may parse cleanly precisely because a later
+		// save replaced the corrupt one with a fresh EMPTY list, and probes
+		// going green over a lost revocation list is the failure being closed.
+		noteResidualQuarantine("session_revocations", cfg.RevocationsFile)
 		if err := sessionRevoked.LoadRevocations(); err != nil {
+			// CHAOS-66: a revocations file that was READ and could not be
+			// PARSED is corrupt, and the pre-existing posture — log it, boot
+			// with an empty list — is fail-OPEN on the one control that can
+			// withdraw an already-issued session: every revoked cookie and
+			// every deleted account's session works again for the rest of its
+			// TTL, and the next SaveRevocations atomically OVERWRITES the
+			// evidence. Quarantine it (move aside, never delete), fire the
+			// existing state_file_corrupt alert, and record the /readyz row —
+			// the same response ui_users.json and cluster.json already get,
+			// with no new operator vocabulary.
+			//
+			// A READ failure is deliberately NOT quarantined: the content may
+			// be intact behind a transient permission or I/O fault, and moving
+			// a healthy security-critical file aside is the worse error. Same
+			// rule, and the same reasoning, as state_corruption.go's.
+			if errors.Is(err, session.ErrRevocationsCorrupt) {
+				quarantineCorruptStateFile("session_revocations", cfg.RevocationsFile, err)
+				noteRevocationLoadDegraded(err)
+			} else {
+				noteRevocationLoadDegraded(err)
+			}
 			return fmt.Errorf("load revocations: %w", err)
 		}
 	}

@@ -164,6 +164,7 @@ func buildOperatorContract() OperatorContract {
 		checkPlaintextKeyBackups(),
 		checkAuditPersistence(),
 		checkCategoryFeedDB(),
+		checkSessionRevocation(),
 		checkThreatFeed(),
 		checkRequestHistory(),
 		checkBandwidthQoSEnforcement(),

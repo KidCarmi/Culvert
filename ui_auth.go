@@ -317,7 +317,27 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			logger.Printf("UIUsers: failed to persist: %v", err)
 		}
 		// Revoke all active sessions for the deleted user (Finding 5.2).
+		//
+		// CHAOS-66: the revocation must be made DURABLE here, exactly as a
+		// logout's is (revokeSessionCookie, session.go). Without this the
+		// account deletion was reported as complete while the only record that
+		// its live sessions had been withdrawn lived in this process's memory:
+		// a restart — an ordinary redeploy, an OOM, a SIGKILL — resurrected the
+		// deleted account's cookie for the remainder of its TTL (up to 7 days),
+		// and no other node in the cluster ever learned of it at all.
+		//
+		// The persist failure is logged and counted rather than failing the
+		// request: the account IS deleted (SaveUIUsersFile above owns that
+		// durability), and refusing here would leave the caller unsure which of
+		// the two happened. What the operator gets instead is the
+		// session_revocation contract row and
+		// culvert_session_revocation_persist_failures_total — a durability
+		// failure on this path is a security-control failure, so it is counted
+		// and surfaced rather than living in one log line.
 		sessionRevoked.RevokeUser(username)
+		if err := sessionRevoked.SaveRevocations(); err != nil {
+			logger.Printf("Session: failed to persist user revocation for %q: %v", sanitizeLog(username), err)
+		}
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)
 
