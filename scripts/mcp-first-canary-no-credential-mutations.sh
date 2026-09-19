@@ -449,7 +449,7 @@ run_mutation M22 \
 run_mutation M23 \
   "an allowlist needle permits the whole line again, not just the claim it quotes" \
   'TestCredWall_AnAllowlistEntryPermitsOnlyWhatItQuotes' . "$CREDMATRIX" \
-  's/if m\[0\] >= sp\[0\] && m\[1\] <= sp\[1\] \{/if true \{/'
+  's/if m\[0\] >= sp\[0\] && m\[1\] <= sp\[1\] \{/if m\[0\] >= 0 \&\& sp\[0\] >= 0 \{/'
 
 
 

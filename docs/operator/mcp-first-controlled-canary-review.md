@@ -3014,6 +3014,26 @@ precondition rather than a thing a reviewer has to notice.
 3. **The file count was wrong by one, and measured with the observer in the sample** — see above.
 4. **The quotation-permission count understated itself** — see above.
 
+**M23 was NOT PROVEN, then SURVIVED, and the campaign found what review had not.** Its first
+form replaced the span-containment test with `if true {`, which orphaned two loop variables and did
+not compile — the M10 verdict, recorded in this very section, walked into again: a mutation that
+cannot build runs no gate and proves nothing. Rewritten to compile, it then SURVIVED, and the
+reason was in the control rather than the mutation.
+
+`TestCredWall_AnAllowlistEntryPermitsOnlyWhatItQuotes` had been written around the needle
+`**That was FALSE**`. That needle was repointed at the claim an hour later — because under span
+matching a needle quoting the REFUTATION covers nothing — and the control was not re-checked. Its
+sample line then contained no claim and no needle, so "permitted" was true because there was
+nothing to permit, and no mutation of the containment test could change the verdict. **The control
+had been decoration from the moment its dependency moved, and every run of it since had passed for
+that reason.** It is now built on the real ledger line and asserts non-vacuity explicitly: the
+sample must carry exactly one claim, be covered by a real entry, and the appended form must carry
+two.
+
+The general point is the one this section keeps paying for: **a control is coupled to the data it
+samples, and changing that data silently disarms it.** Review found none of this; the campaign did,
+which is the whole reason a score is re-measured rather than asserted.
+
 **Round 6 found three more, and the second was larger than reported.** All three landed on
 mechanisms built during round 5, which is what a review is for.
 

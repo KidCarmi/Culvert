@@ -1107,12 +1107,30 @@ func TestCredWall_NoSyntacticExemptionForCorrectiveWording(t *testing.T) {
 // reachability proves an entry is USED, never that it is NARROW.
 func TestCredWall_AnAllowlistEntryPermitsOnlyWhatItQuotes(t *testing.T) {
 	const ledger = "docs/operator/mcp-first-controlled-canary-review.md"
-	quotedOnly := `Round 4 recorded it: **That was FALSE**, and the row is activation-level.`
-	if ok, _ := allowlistCoversEveryClaim(ledger, quotedOnly); !ok {
-		t.Errorf("premise broken: the allowlisted quotation alone is no longer permitted, so this "+
-			"control cannot say anything about breadth: %q", quotedOnly)
+
+	// The REAL allowlisted line, verbatim. An invented one is how this control went vacuous once
+	// already: it was written around the needle "**That was FALSE**", that needle was later
+	// repointed at the claim it was supposed to quote, and the sample line then contained no claim
+	// and no needle at all — so "permitted" was true because there was nothing to permit, and the
+	// mutation could not change the verdict. Campaign M23 SURVIVED and exposed it.
+	quotedOnly := `readiness row then reports the node un-ready on the next read". **That was FALSE**, and the way it`
+
+	// Non-vacuity, asserted rather than assumed: the sample must carry a claim AND be covered by a
+	// real allowlist entry, or everything below is trivially true.
+	if got := len(nodeReadyPromise.FindAllStringIndex(quotedOnly, -1)); got != 1 {
+		t.Fatalf("the sample line must carry exactly one claim for this control to mean anything, "+
+			"it carries %d — the ledger wording drifted away from the allowlist needle", got)
 	}
+	ok, hits := allowlistCoversEveryClaim(ledger, quotedOnly)
+	if !ok || len(hits) == 0 {
+		t.Fatalf("premise broken: the allowlisted quotation alone is not permitted by a real entry "+
+			"(ok=%v hits=%d), so this control cannot say anything about breadth", ok, len(hits))
+	}
+
 	appended := quotedOnly + ` but this activation row stops a node reporting Ready`
+	if got := len(nodeReadyPromise.FindAllStringIndex(appended, -1)); got != 2 {
+		t.Fatalf("the appended line must carry two claims, it carries %d", got)
+	}
 	if ok, _ := allowlistCoversEveryClaim(ledger, appended); ok {
 		t.Errorf("an allowlist entry permits a SECOND claim appended to its line, so the entry is a "+
 			"whole-line permission rather than a quotation: %q", appended)
