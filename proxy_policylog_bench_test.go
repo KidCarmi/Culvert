@@ -89,20 +89,47 @@ func plCurrentAllowLine(rule string, priority int) {
 	logPolicyAllow(rule, priority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
 }
 
+// plBlackhole is a writer that costs as little as a writer can while still
+// being a REAL one.
+//
+// It exists because io.Discard is not usable here and using it silently voided
+// every benchmark in this file. log.Logger records at construction whether its
+// destination is the io.Discard sentinel, and log.Logger.output returns on that
+// flag BEFORE it calls the closure that formats the line:
+//
+//	func (l *Logger) output(pc uintptr, calldepth int, appendOutput func([]byte) []byte) error {
+//		if l.isDiscard.Load() { return nil }
+//
+// So a Printf-shaped emitter pointed at io.Discard pays its argument boxing and
+// then formats NOTHING, while an emitter that builds its line before calling
+// the logger pays the formatting in full. Against io.Discard the fmt shape
+// measured 393 ns/op and the built shape 716 ns/op; against this writer, which
+// production resembles, the same two are 1299 ns/op and 648 ns/op — the
+// comparison does not merely shift, it INVERTS. A harness that reports the
+// faster shape as the slower one is worse than no harness.
+//
+// It deliberately does not count or store anything beyond a length: the point
+// is to defeat the sentinel check, not to add work to the measurement.
+type plBlackhole struct{ n int64 }
+
+func (d *plBlackhole) Write(p []byte) (int, error) { d.n += int64(len(p)); return len(p), nil }
+
 // plSwapLogger points the package logger at w and returns a restore func.
-// Benchmarks send it to io.Discard so they measure argument construction and
-// formatting — the work the request goroutine actually performs — without the
-// log sink's I/O, which is asynchronous in production anyway (internal/logsink).
+//
+// Benchmarks pass a plBlackhole, never io.Discard (see above), and give the
+// logger the production prefix and flags so the header formatting every real
+// line pays is in the measurement too. The log sink's I/O is not — in
+// production it is asynchronous anyway (internal/logsink).
 func plSwapLogger(w io.Writer) func() {
 	prev := logger
-	logger = log.New(w, "", 0)
+	logger = log.New(w, "[Culvert] ", log.LstdFlags)
 	return func() { logger = prev }
 }
 
 // ── Before vs after ─────────────────────────────────────────────────────────
 
 func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -111,7 +138,7 @@ func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -128,7 +155,7 @@ func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
 // so the comparison stays honest.
 
 func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -139,7 +166,7 @@ func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -155,7 +182,7 @@ func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
 // beaconing flood, so they are measured too rather than assumed to match.
 
 func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -164,7 +191,7 @@ func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Drop(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

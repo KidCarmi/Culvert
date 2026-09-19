@@ -778,48 +778,85 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     sanitize-once decision inside the measured function, where reintroducing
 //     a second call fails the gate.
 //
-//   - The priority is rendered with %d. It was previously spelled
+//   - The priority is rendered as plain digits. It was previously spelled
 //     strings.ReplaceAll(fmt.Sprintf("%d", …), "\n", ""), which formatted an int
 //     to a string and then scanned that string for newlines a decimal integer
-//     cannot contain — two heap allocations per proxied request (the Sprintf
-//     result, then boxing that result back into the Printf argument list) for a
-//     no-op. This is NOT the CWE-117 idiom the code conventions require: that
-//     rule covers STRING values reaching a log sink, whereas Priority is an int
-//     field of the admin-configured rulebase, carries no client-controlled data,
-//     and %d on an int can only ever emit [-0-9]. The rendered digits are
-//     identical either way, so the emitted line is byte-for-byte what it was
-//     (pinned by TestPolicyDecisionLine_RenderIsByteIdentical). Every
-//     genuinely string-typed argument still goes through sanitizeLog.
+//     cannot contain — two heap allocations per proxied request for a no-op.
+//     This is NOT the CWE-117 idiom the code conventions require: that rule
+//     covers STRING values reaching a log sink, whereas Priority is an int
+//     field of the admin-configured rulebase, carries no client-controlled
+//     data, and a base-10 int can only ever emit [-0-9]. Every genuinely
+//     string-typed argument still goes through sanitizeLog.
+//
+// The lines are BUILT rather than formatted — see proxy_policylog.go for the
+// measurement that motivated it and for the byte-identity proofs. Two things
+// follow for anyone editing them. Every appended value must be a sanitizeLog
+// result or one of the three values named in policyLineSafeBare, which
+// TestPolicyLine_EveryAppendedValueIsSanitised enforces structurally now that
+// there is no single format string left to read. And the emitted bytes are
+// pinned against a frozen fmt copy of these exact bodies
+// (TestPolicyDecisionLine_AllBranchesMatchFmt plus two fuzz targets), so a
+// deliberate change to what a decision line SAYS means updating that frozen
+// copy in the same commit — not loosening the comparison.
 
 // logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
 // authority as the client sent it), not the port-stripped host the block
 // branches log — preserved from the pre-extraction call sites verbatim.
 func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}",
-		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	safeHost, safeCond, safeID := sanitizeLog(host), sanitizeLog(matchedConditions), sanitizeLog(identity)
+	var b strings.Builder
+	growPolicyLine(&b, safeRule, safeRule, clientIP, method, safeHost, safeCond, reqID, safeID)
+	policyLineHead(&b, "POLICY_ALLOW", safeRule, priority, clientIP)
+	b.WriteByte(' ')
+	b.WriteString(method)
+	b.WriteByte(' ')
+	writeQuoted(&b, safeHost)
+	policyLineTail(&b, safeCond, reqID, safeID, safeRule, "allow")
+	emitPolicyLine(b.String())
 }
 
 // logPolicyDrop emits the POLICY_DROP decision line.
 func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	safeHost, safeCond, safeID := sanitizeLog(host), sanitizeLog(matchedConditions), sanitizeLog(identity)
+	var b strings.Builder
+	growPolicyLine(&b, safeRule, safeRule, clientIP, safeHost, safeCond, reqID, safeID)
+	policyLineHead(&b, "POLICY_DROP", safeRule, priority, clientIP)
+	b.WriteString(" -> ")
+	writeQuoted(&b, safeHost)
+	policyLineTail(&b, safeCond, reqID, safeID, safeRule, "drop")
+	emitPolicyLine(b.String())
 }
 
 // logPolicyBlock emits the POLICY_BLOCK decision line.
 func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	safeHost, safeCond, safeID := sanitizeLog(host), sanitizeLog(matchedConditions), sanitizeLog(identity)
+	var b strings.Builder
+	growPolicyLine(&b, safeRule, safeRule, clientIP, safeHost, safeCond, reqID, safeID)
+	policyLineHead(&b, "POLICY_BLOCK", safeRule, priority, clientIP)
+	b.WriteString(" -> ")
+	writeQuoted(&b, safeHost)
+	policyLineTail(&b, safeCond, reqID, safeID, safeRule, "block")
+	emitPolicyLine(b.String())
 }
 
 // logPolicyRedirect emits the POLICY_REDIRECT decision line. Reached only after
 // isSafeRedirectURL has accepted redirectURL.
 func logPolicyRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	safeHost, safeRedirect := sanitizeLog(host), sanitizeLog(redirectURL)
+	safeCond, safeID := sanitizeLog(matchedConditions), sanitizeLog(identity)
+	var b strings.Builder
+	growPolicyLine(&b, safeRule, safeRule, clientIP, safeHost, safeRedirect, safeCond, reqID, safeID)
+	policyLineHead(&b, "POLICY_REDIRECT", safeRule, priority, clientIP)
+	b.WriteString(" -> ")
+	writeQuoted(&b, safeHost)
+	b.WriteString(" => ")
+	writeQuoted(&b, safeRedirect)
+	policyLineTail(&b, safeCond, reqID, safeID, safeRule, "redirect")
+	emitPolicyLine(b.String())
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:
