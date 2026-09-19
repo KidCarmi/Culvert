@@ -856,3 +856,54 @@ func TestChaos66_ConfiguredHasExactlyOneSourceOfTruth(t *testing.T) {
 		t.Errorf("metrics still exported after intent was cleared:\n%s", b.String())
 	}
 }
+
+// TestChaos66_TestStateLeavesNoArmedTimer — DEFECT gate for the cross-test leak
+// behind the second determinism failure (CI seed 1789776132190886593, which
+// does NOT reproduce on a different machine — the failure is timing-dependent,
+// not order-determined, and this is the only timing-dependent global the sweep
+// introduced).
+//
+// An episode arms a REAL-clock 60s timer. withSyslogTestState restored the
+// record's scalar fields but stopped nothing, so the timer outlived its test
+// and fired evaluateSyslogEpisode inside a LATER one — against that test's
+// fake clock and its alert counter. A gate asserting an exact page count (e.g.
+// DegradationIsADurationNotACount) then sees a page it did not cause.
+//
+// Restoring a field does not stop a timer. The gate asserts the helper leaves
+// nothing armed, which is checkable deterministically and needs no 60s wait.
+func TestChaos66_TestStateLeavesNoArmedTimer(t *testing.T) {
+	t.Run("a nested test opens an episode", func(t *testing.T) {
+		withSyslogTestState(t)
+		w, stop := newLiveCollector(t, "tcp")
+		arm(w, "tcp://collector.test:601")
+		stop()
+		setSyslogAlert(func(string) {})
+		noteSyslogDelivery(w, false, "write_failed", 1)
+
+		syslogHealth.mu.Lock()
+		armed := syslogHealth.alertTimer != nil
+		owned := syslogHealth.owner != nil
+		syslogHealth.mu.Unlock()
+		if !armed || !owned {
+			t.Fatalf("the nested test did not arm what the gate checks (timer=%v owner=%v)", armed, owned)
+		}
+	}) // cleanup runs here
+
+	syslogHealth.mu.Lock()
+	armed := syslogHealth.alertTimer != nil
+	owner := syslogHealth.owner
+	reason := syslogHealth.lastReason
+	syslogHealth.mu.Unlock()
+
+	if armed {
+		t.Error("an episode timer survived the test that armed it — it will fire " +
+			"evaluateSyslogEpisode inside a later test, against that test's clock and alert sink")
+	}
+	if owner != nil {
+		t.Error("owner still points at a writer the finished test closed — the next test's fence " +
+			"check is comparing against a dead writer")
+	}
+	if reason != "" {
+		t.Errorf("lastReason leaked across tests: %q", reason)
+	}
+}
