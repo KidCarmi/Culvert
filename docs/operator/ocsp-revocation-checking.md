@@ -41,10 +41,12 @@ following is discarded, not treated as a pass:
 
 | Discarded because | Counter (`reason=` label) |
 |---|---|
-| the signed response is about a **different certificate** | `not_for_certificate` |
+| the signed response is about a **different certificate** — a genuine CA-signed response, borrowed | `not_for_certificate` |
+| the response's **signer is not authorized** for this issuer — no `id-kp-OCSPSigning` on the embedded certificate, or a delegate outside its own validity window (RFC 6960 §4.2.2.2); this is what stops a certificate vouching for its own revocation status | `unauthorized_responder` |
 | the response is outside its `ThisUpdate`/`NextUpdate` window | `stale` |
 | the responder answered `unknown` — the issuer does not recognise the certificate | `unknown_status` |
 | the responder URL was refused before any request (bad scheme, private address) | `responder_blocked` |
+| the response could not be parsed for this certificate at all — an HTML error page, truncated DER, a bad signature; an ordinary broken responder, not an attack signal | `malformed` |
 
 When nothing affirmative comes back, the verdict is fail-closed and cached for
 **2 minutes** (not the 1-hour verdict TTL), so recovery tracks the responder
@@ -57,6 +59,18 @@ traffic. Under the CA/Browser Forum baseline requirements a CA must not answer
 mis-issued or forged certificate draws. If a legitimate upstream trips it, the
 `unknown_status` counter names it; the remedy is to fix the responder or the
 chain, not to relax the check.
+
+`not_for_certificate` and `unauthorized_responder` are the two accusation-
+worthy reasons — both mean a responder answered with something it had no
+authority to say about this certificate, and each is charged only when that is
+demonstrable (the response parses and its signature verifies; anything that
+merely fails to parse, including a multi-status response this check cannot
+re-examine, is charged to `malformed` instead, never to either accusation).
+`unauthorized_responder` is the newer of the two checks and, left unclosed, is
+the more direct bypass: a certificate can sign a `good` response about its own
+serial, embed its own leaf as the "responder", and be believed with no other
+party involved at all — so a sustained rate here deserves the same response as
+`not_for_certificate` in the alerting below.
 
 ---
 
@@ -101,9 +115,12 @@ that never turned it on is indistinguishable from a broken one.
 # or egress problem, not a wave of revocations — compare against revoked_total.
 rate(culvert_ocsp_fail_closed_total[10m]) > 0.1
 
-# Something is answering with responses borrowed from other certificates.
-# Any sustained rate here deserves a human.
-increase(culvert_ocsp_response_rejected_total{reason="not_for_certificate"}[1h]) > 0
+# Something is answering with responses borrowed from other certificates, or
+# a certificate is vouching for its own revocation status. Either is a
+# demonstrated bypass attempt, not a broken responder — any sustained rate
+# here deserves a human. (malformed is excluded on purpose: it is the ordinary
+# broken-responder bucket, not an accusation — see §2.)
+increase(culvert_ocsp_response_rejected_total{reason=~"not_for_certificate|unauthorized_responder"}[1h]) > 0
 
 # Certificates engineered to amplify outbound requests.
 increase(culvert_ocsp_responders_truncated_total[1h]) > 0
