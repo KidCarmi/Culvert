@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -464,5 +465,93 @@ func TestChaos50_ManualRecoveryIsNotOverwrittenByRetry(t *testing.T) {
 		t.Errorf("live Root CA %v != persisted Root CA %v — a recovery attempt overwrote a manual one "+
 			"(the admin was told the rotation landed; the process is signing with a different root)",
 			live, persisted)
+	}
+}
+
+// TestChaos50_RecoveredSnapshotCarriesItsAttempt pins the consistency of the
+// recovery record. The successful attempt used to set `recovered` INSIDE the
+// attempt (noteSSLInspectionRecovered) while the campaign loop counted the
+// attempt only AFTER it returned, so a status reader landing between the two
+// writes saw {Recovered: true, Attempts: N-1} — a recovery attributed to an
+// attempt the record said had not happened. It surfaced once, under a loaded
+// `-race -count=3` run, as TestChaos50_TransientLoadFailureSelfHeals reading
+// {Attempts: 0, Recovered: true}, and passed 30/30 in isolation — exactly the
+// shape a polling assertion cannot pin.
+//
+// This gate is DETERMINISTIC: the observer runs under caLoadRecovery.mu at
+// EVERY transition, so it sees each snapshot a concurrent reader could have
+// seen, on any hardware and under any load. Two invariants, both verified
+// failing against the count-after shape: a Recovered snapshot always carries
+// at least one attempt, and once Recovered is observed the attempt count never
+// moves again — the count that recovered it is final. The second is the one
+// that catches the defect regardless of WHICH attempt succeeds (with the
+// count-after shape, `recovered` at N-1 is always followed by attempts++).
+func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
+	swapInspectionCA(t)
+	captureStartupAlerts(t)
+	fastCARetries(t, 20)
+
+	var (
+		mu              sync.Mutex
+		transitions     int
+		violations      []string
+		recoveredAt     int64 // attempts carried by the FIRST Recovered snapshot
+		sawRecovered    bool
+		maxAttemptsSeen int64
+		attemptsRegress bool
+	)
+	setCALoadRecoveryObserverForTest(func(rec caLoadRecoverySnapshot) {
+		mu.Lock()
+		defer mu.Unlock()
+		transitions++
+		if rec.Attempts < maxAttemptsSeen {
+			attemptsRegress = true
+		}
+		if rec.Attempts > maxAttemptsSeen {
+			maxAttemptsSeen = rec.Attempts
+		}
+		if rec.Recovered && rec.Attempts < 1 {
+			violations = append(violations, fmt.Sprintf("Recovered with no attempt: %+v", rec))
+		}
+		if rec.Recovered && !sawRecovered {
+			sawRecovered, recoveredAt = true, rec.Attempts
+		}
+		if sawRecovered && rec.Attempts != recoveredAt {
+			violations = append(violations, fmt.Sprintf("attempt count moved after recovery (%d → %d): %+v",
+				recoveredAt, rec.Attempts, rec))
+		}
+	})
+	t.Cleanup(func() { setCALoadRecoveryObserverForTest(nil) })
+
+	path := writeCorruptBundle(t)
+	loadRootCA(rootCAStartupConfig{Path: path}, t.Context())
+	if certMgr.Ready() {
+		t.Fatal("precondition: load must fail")
+	}
+	writeGoodBundle(t, path) // the fault clears
+
+	awaitCARecoveryTerminal(t)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if transitions == 0 {
+		t.Fatal("observer saw no transitions — the gate is vacuous")
+	}
+	if !sawRecovered {
+		t.Fatalf("campaign did not recover (violations=%v)", violations)
+	}
+	for _, v := range violations {
+		t.Error(v)
+	}
+	if attemptsRegress {
+		t.Error("attempt count went backwards during the campaign")
+	}
+	// The recovering attempt is the LAST one counted: nothing ran after it.
+	if recoveredAt != maxAttemptsSeen {
+		t.Errorf("Recovered snapshot carried %d attempts but the campaign counted %d", recoveredAt, maxAttemptsSeen)
+	}
+	// And the public reader agrees with what the observer saw.
+	if final := caLoadRecoveryStatus(); !final.Recovered || final.Attempts != recoveredAt {
+		t.Errorf("caLoadRecoveryStatus() = %+v, want Recovered with Attempts=%d", final, recoveredAt)
 	}
 }

@@ -84,6 +84,40 @@ type caLoadRecoveryState struct {
 
 var caLoadRecovery caLoadRecoveryState
 
+// caLoadRecoveryObserver, when non-nil, is invoked with the consistent snapshot
+// after EVERY state transition of the recovery record, under caLoadRecovery.mu.
+// TEST seam (nil in production, so the campaign is byte-identical); it exists so
+// a test can assert an invariant at every transition deterministically, rather
+// than polling and hoping to land in the window between two writes.
+//
+// Read and written ONLY under caLoadRecovery.mu (setCALoadRecoveryObserverForTest)
+// so a test restoring it in cleanup can never race a still-running campaign.
+// The observer receives the snapshot and must not call caLoadRecoveryStatus —
+// the mutex is not reentrant.
+var caLoadRecoveryObserver func(caLoadRecoverySnapshot)
+
+// update applies one state transition under the lock and publishes the
+// resulting snapshot to the observer while the lock is still held, so the
+// observer sees exactly what a concurrent caLoadRecoveryStatus reader could see
+// at that instant — never a half-applied pair of writes.
+func (s *caLoadRecoveryState) update(mutate func(*caLoadRecoveryState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mutate(s)
+	if caLoadRecoveryObserver != nil {
+		caLoadRecoveryObserver(s.snapshotLocked())
+	}
+}
+
+func (s *caLoadRecoveryState) snapshotLocked() caLoadRecoverySnapshot {
+	return caLoadRecoverySnapshot{
+		Attempts:  s.attempts,
+		Recovered: s.recovered,
+		GaveUp:    s.gaveUp,
+		LastErr:   s.lastErr,
+	}
+}
+
 // caMutationMu serializes every path that INSTALLS or PERSISTS the inspection
 // Root CA: the automatic recovery attempt, the admin force-rotate, and the
 // custom-CA upload.
@@ -178,11 +212,11 @@ func noteSSLInspectionRecovered(how string) {
 		return
 	}
 	sslInspectionLoadError.Store("")
-	caLoadRecovery.mu.Lock()
-	caLoadRecovery.recovered = true
-	caLoadRecovery.gaveUp = false
-	caLoadRecovery.lastErr = ""
-	caLoadRecovery.mu.Unlock()
+	caLoadRecovery.update(func(s *caLoadRecoveryState) {
+		s.recovered = true
+		s.gaveUp = false
+		s.lastErr = ""
+	})
 	if logger != nil {
 		logger.Printf("SSLCA: Root CA recovered (%s) — SSL inspection re-enabled", sanitizeLog(how))
 	}
@@ -226,6 +260,15 @@ func tryInspectionCARecovery(cfg rootCAStartupConfig, attempt int) (attempted bo
 	if sslInspectionLoadFailure() == "" {
 		return false, nil
 	}
+	// The attempt is COUNTED before it runs, not after it returns. A successful
+	// attempt clears the latch (noteSSLInspectionRecovered sets `recovered`)
+	// while it is still inside this function, so counting afterwards left a
+	// window in which a status reader saw {Recovered: true, Attempts: N-1} — a
+	// recovery attributed to an attempt the record said never happened. Counting
+	// first makes every snapshot carrying `recovered` also carry the attempt
+	// that earned it. The count still moves only for an attempt that actually
+	// RUNS: the "already fixed by hand?" branch above returns before it.
+	caLoadRecovery.update(func(s *caLoadRecoveryState) { s.attempts++ })
 	if err := attemptInspectionCARecovery(cfg); err != nil {
 		return true, err
 	}
@@ -277,16 +320,10 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 			return // an operator recovered it (force-rotate / custom-CA upload)
 		}
 
-		caLoadRecovery.mu.Lock()
-		caLoadRecovery.attempts++
-		if err != nil {
-			caLoadRecovery.lastErr = sanitizeLog(err.Error())
-		}
-		caLoadRecovery.mu.Unlock()
-
 		if err == nil {
-			return
+			return // counted and latched together inside tryInspectionCARecovery
 		}
+		caLoadRecovery.update(func(s *caLoadRecoveryState) { s.lastErr = sanitizeLog(err.Error()) })
 		if logger != nil {
 			logger.Printf("SSLCA: Root CA recovery attempt %d/%d failed: %q — retrying in %s",
 				attempt, sched.budget, sanitizeLog(err.Error()), backoff)
@@ -298,9 +335,7 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 		}
 	}
 
-	caLoadRecovery.mu.Lock()
-	caLoadRecovery.gaveUp = true
-	caLoadRecovery.mu.Unlock()
+	caLoadRecovery.update(func(s *caLoadRecoveryState) { s.gaveUp = true })
 	if logger != nil {
 		logger.Printf("SSLCA: Root CA recovery gave up after %d attempts — SSL inspection stays DISABLED "+
 			"(inspect-matched TLS is forwarded UNINSPECTED). Fix the bundle/passphrase and restart, "+
@@ -319,26 +354,30 @@ type caLoadRecoverySnapshot struct {
 func caLoadRecoveryStatus() caLoadRecoverySnapshot {
 	caLoadRecovery.mu.Lock()
 	defer caLoadRecovery.mu.Unlock()
-	return caLoadRecoverySnapshot{
-		Attempts:  caLoadRecovery.attempts,
-		Recovered: caLoadRecovery.recovered,
-		GaveUp:    caLoadRecovery.gaveUp,
-		LastErr:   caLoadRecovery.lastErr,
-	}
+	return caLoadRecovery.snapshotLocked()
 }
 
 // resetCALoadRecoveryForTest clears the recovery record and the fail-open
 // counter. Test-only helper kept beside the state it resets, mirroring
 // resetCAUsabilityHealthForTest.
 func resetCALoadRecoveryForTest() {
-	caLoadRecovery.mu.Lock()
-	caLoadRecovery.attempts = 0
-	caLoadRecovery.recovered = false
-	caLoadRecovery.gaveUp = false
-	caLoadRecovery.lastErr = ""
-	caLoadRecovery.mu.Unlock()
+	caLoadRecovery.update(func(s *caLoadRecoveryState) {
+		s.attempts = 0
+		s.recovered = false
+		s.gaveUp = false
+		s.lastErr = ""
+	})
 	caInspectBypassed.Store(0)
 	caInspectBypassLogGate.mu.Lock()
 	caInspectBypassLogGate.at = time.Time{}
 	caInspectBypassLogGate.mu.Unlock()
+}
+
+// setCALoadRecoveryObserverForTest installs (or, with nil, removes) the
+// transition observer under the record's own lock, so the swap is ordered
+// against every transition of a campaign that may still be running.
+func setCALoadRecoveryObserverForTest(fn func(caLoadRecoverySnapshot)) {
+	caLoadRecovery.mu.Lock()
+	caLoadRecoveryObserver = fn
+	caLoadRecovery.mu.Unlock()
 }
