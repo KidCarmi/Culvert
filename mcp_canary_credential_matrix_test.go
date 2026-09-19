@@ -833,6 +833,29 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 	}
 }
 
+// allowlistEntryReached reports whether the scan actually REACHES a line carrying this needle —
+// that is, a line the wall would flag were the entry not there.
+//
+// It is a named function rather than a loop inside the test so that a control can drive it in both
+// directions. Campaign M25 survived its first run precisely because it could not: with every entry
+// currently reachable, weakening the check to mere presence changed no verdict, so the mutation
+// passed and the gate proved nothing about the property it advertises. A check whose claim only
+// holds when the tree happens to violate it is not a check.
+func allowlistEntryReached(data, needle string) bool {
+	for _, line := range strings.Split(data, "\n") {
+		if !nodeReadyPromise.MatchString(line) || nodeReadyIndependence.MatchString(line) {
+			continue
+		}
+		if !promiseOutsideQuotes(line) {
+			continue
+		}
+		if strings.Contains(line, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCredWall_AllowlistIsNotStale keeps the allowlist honest: an entry that no longer matches any
 // line silently widens the wall's permission, which is how an allowlist rots into a hole.
 func TestCredWall_AllowlistIsNotStale(t *testing.T) {
@@ -850,20 +873,7 @@ func TestCredWall_AllowlistIsNotStale(t *testing.T) {
 		// already exempted earlier — by nodeReadyIndependence or by the quotation rule — is a
 		// permission nothing exercises, and the containment check above cannot see that. Added
 		// after the quotation rule made one entry unreachable the moment it was written.
-		reached := false
-		for _, line := range strings.Split(string(data), "\n") {
-			if !nodeReadyPromise.MatchString(line) || nodeReadyIndependence.MatchString(line) {
-				continue
-			}
-			if !promiseOutsideQuotes(line) {
-				continue
-			}
-			if strings.Contains(line, a.needle) {
-				reached = true
-				break
-			}
-		}
-		if !reached {
+		if !allowlistEntryReached(string(data), a.needle) {
 			t.Errorf("allowlist entry {%s, %q} is never REACHED by the scan (%s): every line it "+
 				"names is already exempted by an earlier rule. Delete it — an unreachable "+
 				"permission is the thing this test exists to catch.", a.file, a.needle, a.why)
@@ -1009,5 +1019,49 @@ func TestCredWall_QuotationRuleDoesNotExemptAnAssertionBesideIt(t *testing.T) {
 	asserted := `This row only stops a node reporting Ready for an experiment.`
 	if !promiseOutsideQuotes(asserted) {
 		t.Errorf("an unquoted assertion is exempted: %q", asserted)
+	}
+}
+
+// TestCredWall_ReachabilityCheckCanActuallyFail is the control for allowlistEntryReached.
+//
+// It exists because campaign M25 SURVIVED its first run. That mutation weakens
+// TestCredWall_AllowlistIsNotStale from "the scan REACHES this entry" back to "the needle appears
+// somewhere in the file" — and with every entry currently reachable, the weakened form reaches the
+// same verdict on every one of them. The gate passed with the defect reintroduced, so it was
+// establishing nothing about reachability; it was riding on the tree being clean.
+//
+// A control fixes that by making the predicate answer a question whose answer is known and NOT
+// dependent on the current state of the allowlist: a needle that sits only on lines the scan never
+// flags is unreachable, and a needle on a genuinely flagged line is reachable. Now the campaign has
+// something to break.
+func TestCredWall_ReachabilityCheckCanActuallyFail(t *testing.T) {
+	read := func(rel string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(pkgSourceDir(), rel)) //nolint:gosec // fixed in-repo path
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		return string(data)
+	}
+
+	// UNREACHABLE: present in the file, but only on lines that carry no claim at all, so the scan
+	// never gets as far as consulting the allowlist for them.
+	readiness := read(filepath.Join("internal", "mcp", "canary", "readiness.go"))
+	const neverFlagged = "package canary"
+	if !strings.Contains(readiness, neverFlagged) {
+		t.Fatalf("premise broken: %q is no longer in readiness.go, so this control tests nothing", neverFlagged)
+	}
+	if allowlistEntryReached(readiness, neverFlagged) {
+		t.Errorf("allowlistEntryReached says a needle on a line the scan never flags is REACHED. "+
+			"The check cannot distinguish a live permission from a dead one, which is the whole "+
+			"property TestCredWall_AllowlistIsNotStale claims to enforce (needle %q)", neverFlagged)
+	}
+
+	// REACHABLE: the real node-level claim the allowlist exists for.
+	const liveClaim = "rehearsed-mechanics node is still not ready"
+	if !allowlistEntryReached(readiness, liveClaim) {
+		t.Errorf("allowlistEntryReached says the genuine node-level claim is NOT reached, so every "+
+			"real entry would be reported dead and the wall would demand their deletion (needle %q)",
+			liveClaim)
 	}
 }

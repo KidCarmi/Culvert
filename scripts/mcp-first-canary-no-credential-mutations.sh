@@ -460,15 +460,22 @@ run_mutation M24 \
   'TestCredWall_QuotationRuleDoesNotExemptAnAssertionBesideIt' . "$CREDMATRIX" \
   's/return nodeReadyPromise\.MatchString\(quotedSpan\.ReplaceAllString\(line, ""\)\)/return !quotedSpan.MatchString(line) \&\& nodeReadyPromise.MatchString(line)/'
 
-# M25 — A PERMISSION NOTHING EXERCISES. The allowlist staleness check originally asked only whether
-# an entry's needle still appeared in the file. That cannot see an entry whose every line is
-# already exempted by an earlier rule — which happened the moment the quotation rule was written,
-# to an entry added ten minutes earlier in the same session. Reachability is now the test; this
-# mutation weakens it back to mere presence.
+# M25 — A PERMISSION NOTHING EXERCISES. The allowlist staleness check originally asked only
+# whether an entry's needle still appeared in the file. That cannot see an entry whose every line
+# is already exempted by an earlier rule — which happened the moment the quotation rule was
+# written, to an entry added minutes earlier in the same session.
+#
+# M25 SURVIVED its first run, and that survival is the more useful result. It weakened the check
+# from REACHED back to merely present, and with every entry currently reachable the weakened form
+# returned the same verdict on all of them: the gate passed with the defect in place, so it was
+# proving nothing about reachability — it was riding on the allowlist happening to be clean. The
+# predicate is now a named function with a control that drives it BOTH ways
+# (TestCredWall_ReachabilityCheckCanActuallyFail), so this mutation has something to break.
 run_mutation M25 \
-  "the allowlist staleness check drops back from REACHED to merely present" \
-  'TestCredWall_AllowlistIsNotStale' . "$CREDMATRIX" \
-  's/if !promiseOutsideQuotes\(line\) \{\n\t\t\t\tcontinue\n\t\t\t\}\n\t\t\tif strings\.Contains\(line, a\.needle\)/if strings.Contains(line, a.needle)/'
+  "the reachability check reports every allowlist entry as live" \
+  'TestCredWall_ReachabilityCheckCanActuallyFail' . "$CREDMATRIX" \
+  's/func allowlistEntryReached\(data, needle string\) bool \{/func allowlistEntryReached(data, needle string) bool {\n\t_ = data\n\t_ = needle\n\treturn true/'
+
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"

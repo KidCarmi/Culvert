@@ -2977,6 +2977,25 @@ The P1 of that round was separate and is recorded with the campaign score above:
 on the unmodified head, so the recorded 21/0/0 measured nothing. That is now a campaign
 precondition rather than a thing a reviewer has to notice.
 
+**M25 SURVIVED its first run, and that is the most useful result of the round.** The mutation
+weakens the allowlist staleness check from REACHED back to merely present. With every entry
+currently reachable, the weakened form returns the same verdict on all of them — so the gate passed
+with the defect in place. It was not enforcing reachability; it was riding on the allowlist
+happening to be clean, and would have started enforcing only once something was already wrong.
+
+That is this section's own recurring shape reaching the newest gate in it, hours after the gate was
+written to close the previous instance. A check whose claim holds only when the tree happens to
+violate it proves nothing on a healthy tree, which is every tree a reviewer looks at. The predicate
+is now the named `allowlistEntryReached`, and
+`TestCredWall_ReachabilityCheckCanActuallyFail` drives it in BOTH directions against the real
+source — a needle on a line the scan never flags must read unreachable, the genuine node-level
+claim must read reachable — so the mutation has something to break. Verified: M25 now fails that
+control on the assertion, not on a build error.
+
+**A survivor is a finding, not a failure of the run.** The campaign did its job here: it found a
+hole a passing test suite could not, which is the entire reason the score is re-measured rather
+than carried forward.
+
 **Five rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition, and a score vs its
