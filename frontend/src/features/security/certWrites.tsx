@@ -104,9 +104,12 @@ function fenceDigest(fence: string): string {
 }
 
 /** The typed word of the delete ceremony: the persisted certificate's first
- * eight fingerprint bytes exactly as displayed (identity-bound, bounded). */
-export function deleteConfirmWord(fingerprint: string): string {
-  return fingerprint.slice(0, 23);
+ * eight fingerprint bytes exactly as displayed (identity-bound, bounded).
+ * A pair whose certificate cannot be read (an incomplete remnant) has no
+ * fingerprint: its typed word is the revision token the delete is fenced on
+ * (`uic1:incomplete`), never an empty word. */
+export function deleteConfirmWord(fingerprint: string, fence: string): string {
+  return fingerprint !== "" ? fingerprint.slice(0, 23) : fence;
 }
 
 function mintOperationId(): string {
@@ -383,18 +386,19 @@ export function useCertMutations(args: {
   // ── rotate ────────────────────────────────────────────────────────────
   const openRotate = (
     operationId = mintOperationId(),
-    resend = false,
+    /** a re-send keeps the marker's ORIGINAL fence (never the current one) */
+    boundFence?: string,
   ): void => {
     if (inv === undefined) return;
     clearOutcome();
     setCeremony({
       kind: "rotate",
       operationId,
-      fence: inv.ca.revision,
+      fence: boundFence ?? inv.ca.revision,
       current: inv.ca.fingerprint ?? "",
       challenge: null,
       expired: false,
-      resend,
+      resend: boundFence !== undefined,
     });
   };
   const requestChallenge = async (): Promise<void> => {
@@ -820,7 +824,7 @@ export function useCertMutations(args: {
   const resend = (marker: CertRecoveryMarker): void => {
     switch (marker.action) {
       case "rotate":
-        openRotate(marker.operationId, true);
+        openRotate(marker.operationId, marker.fence);
         return;
       case "import":
         openPair("mitm", {
@@ -1021,7 +1025,7 @@ function OutcomeNotice({
             "Audit",
             out.auditState === "pending"
               ? "Success audit still owed (completed by the lookup or at boot)"
-              : "Operation-keyed success audit emitted",
+              : "Operation-keyed success audit recorded (its durability is the inventory's audit sink)",
           ],
           ...(out.replayed
             ? ([
@@ -1534,7 +1538,7 @@ function DeleteCeremony(
 ): JSX.Element {
   const [typed, setTyped] = useState("");
   const { c } = p;
-  const word = deleteConfirmWord(c.fingerprint);
+  const word = deleteConfirmWord(c.fingerprint, c.fence);
   return (
     <ConfirmationDialog
       open

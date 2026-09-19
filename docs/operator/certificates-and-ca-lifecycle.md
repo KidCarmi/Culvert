@@ -275,3 +275,72 @@ operation ledger on every load path (missing, unreadable, quarantined or
 readable settings file) and releases the gate afterwards. A pending intent is
 therefore classified before anything can replace its evidence, whatever the
 startup timing.
+
+## 9. The admin console (React) ceremonies — FE-6B.2
+
+`/app/security/certificates` (tab **Certificates**) exposes every mutation
+of §3–§5 to an **admin** signed in to the new console; viewers and operators
+see the same facts and no mutation control. The console speaks exactly the
+contract above — it invents no token, refreshes no fence on its own and
+retries nothing:
+
+- **Rotate Root CA…** — the console mints the `operationId`, records the
+  recovery marker, obtains the server challenge (§3 step 3; the ceremony
+  shows the CA being replaced and the challenge's expiry) and confirms only
+  after the operator types `ROTATE`. An expired challenge (`409
+  challenge_stale`, `changed: [expired]`) offers a **new challenge for the
+  same operation**; a moved revision (`409 stale`) is rendered with the
+  current revision and the ceremony ends — refresh, review, start again.
+- **Import CA…** / **Replace UI certificate…** — the operator pastes the PEM
+  pair; **Review candidate** runs the `?dryRun=1` validation (a bounded
+  `candidate_invalid` reason is shown; nothing is written); the reviewed
+  facts and the fence to echo are displayed, and **Import** / **Replace**
+  commits the same pair under that fence. The pair is sent once, as
+  byte-exact multipart file parts, and dropped with the dialog. A replace is
+  **not** activation: the result states that the running listener keeps
+  the pair it loaded and that the next restart serves the new one.
+- **Delete UI certificate…** — a typed ceremony: the operator types the
+  persisted certificate's first eight fingerprint bytes exactly as shown.
+  The dialog states the persisted identity **and** the identity the running
+  listener serves; the delete does not stop the listener.
+- **Set OCSP posture…** — states the desired posture, the runtime posture,
+  the node-local scope and the checker's coverage limit (§5 / CHAOS-65
+  OCSP-8) before **Apply**; the result renders desired and runtime as the
+  appliance states them, never merged.
+
+**A lost or unverifiable answer.** Every mutation is dispatched only after a
+NON-secret, subject-bound recovery marker (operation id, intent, the fence
+carried, the candidate's public identity) is stored in the browser session;
+if it cannot be stored, nothing is sent. When the answer is lost, malformed,
+or the non-terminal `outcome_unknown`, the ceremony closes (dropping the
+typed material), the marker is kept and every mutation control stays
+disabled. The **Unresolved certificate operation** card offers:
+
+- **Recover** — `GET /api/ca/operations/{id}` (§2). `committed` clears the
+  marker and shows the recorded result; `pending` and a recoverable
+  `outcome_unknown` keep it (recover again later); `aborted` states that
+  nothing was written; `writer_evidence_superseded` and an unproven
+  `outcome_unknown` are **terminal unknown** — never shown as a success, a
+  failure or a safe retry. A record under the id that is not bound to the
+  dispatched intent (another action, fence or candidate) is reported as
+  such and the marker is kept.
+- **Re-send** — offered **only** after the lookup answered `404` (the
+  appliance never recorded the operation, or no longer holds it). A 404
+  alone is not proof of non-commit: the re-send is safe because it repeats
+  the **same** operation, candidate and original fence — a known id replays,
+  a moved revision is `409 stale`, identical content is `409
+  candidate_duplicate`. A re-sent import/replace must present the same
+  candidate (the review is checked against the marker).
+- **Abandon** — a typed ceremony that discards **this browser's marker
+  only**; it cancels or reverses nothing on the appliance, whose ledger
+  record stays visible through the operation lookup.
+
+Signing out purges the marker; a marker stored under another admin's
+session is never inherited.
+
+**Limitations.** Recovery, replay and re-send are node-local (§7: the ledger
+is not archived, so after a restore a pre-restore operation is `404` and the
+current object state is the only evidence). The console does not restart
+the appliance and does not distribute the CA to clients or nodes. The
+rotation challenge is process-local: a restart between challenge and
+confirm is `409 challenge_stale`, and the console asks for a new one.
