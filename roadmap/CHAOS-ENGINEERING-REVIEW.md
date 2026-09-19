@@ -1136,6 +1136,8 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-21 | **A corrupt revocations file resurrected every revocation, silently.** `initSession` logged the parse error and booted with an EMPTY list, and the next `SaveRevocations` atomically OVERWROTE the evidence. `state_corruption.go` has handled exactly this for `ui_users.json` and `cluster.json` since CHAOS-05/07; the revocations file — the one whose loss is a security-control failure rather than a roster inconvenience — was simply never wired into it. | NEW → **CLOSED** (CHAOS-66: `ErrRevocationsCorrupt` + `quarantineCorruptStateFile("session_revocations", …)`; a READ failure is deliberately NOT quarantined) | **H** | was: `session_startup.go`, `main.go` `initSession`; see §36 |
 | AU-22 | **Revocation persistence is opt-in and ships OFF** (`-revocations-file` defaults to `""`), and the danger is the COUPLING rather than the default alone: with a per-restart signing key every cookie breaks on restart anyway, but the shipped `docker-compose.yml` sets `CULVERT_SESSION_SECRET` and every clustered deployment MUST — so the stable key that makes sessions survive a restart is exactly what lets a cookie outlive the restart that discards its revocation. Defaulting the path to `<dataDir>/revocations.json` is the obvious fix and starts writing a new file on every appliance, so it is an OWNER decision, not a side effect of this sweep. Made VISIBLE rather than changed: the `session_revocation` row warns and names the coupling. | NEW, **REPORTED not changed** (CHAOS-66) | M/H | `main.go:320`, `docker-compose.yml` `CULVERT_SESSION_SECRET`; see §36 |
 | AU-23 | **A role or password change revokes nothing.** `POST /api/auth/users` re-writes the roster, but the role lives IN the cookie (`ui_middleware.go` reads `sess.Role`, it does not re-resolve), so a demoted admin keeps admin authority until the session expires, and the classic "my password was stolen, I changed it" action does not invalidate the stolen session. Only DELETE revokes. Closing it means revoking on a role/password edit, which changes an admin workflow and deserves its own review. | NEW, **REPORTED not changed** (CHAOS-66) | M | `ui_auth.go` POST branch; `ui_middleware.go:276`; see §36 |
+| AU-24 | **The HA standby CP was the one node with no route into the revocation plane at all.** The HA state bundle replicates `SessionHMAC` (inside `Config`), so a standby verifies exactly the cookies the leader does — while `SyncRevocations`, the only other carrier of revocations, is fenced on a standby by `haIssuanceAllowed`. So a session revoked on the leader authenticated against the standby, and kept full authority across a promotion until some Data Plane happened to push the entry back, or forever if none reconnected. Same defect as AU-20, one node over, and it survived AU-20's fix. | NEW → **CLOSED** (CHAOS-66 round 2, Codex P1: `HAStateBundle.Revocations`, `omitempty`, merged + persisted by `applyHABundle` inside the bundle's existing trust boundary) | **H** | was: `controlplane_server.go` `HAStateBundle`/`HASync`, `ha.go` `applyHABundle`; see §36 |
+| AU-25 | **A health row keyed on a CUMULATIVE failure counter can never recover.** `revocationsAreDurable` read `persistFailures == 0`, so one transient write failure pinned `culvert_session_revocation_durable` at 0 and the `session_revocation` row at `fail` for the life of the process — after the volume was repaired and a later save had written the complete live list. The row's own comment claimed the opposite ("evaluated, never latched"). `ca_health.go` records having fixed this exact bug once already, in the file CHAOS-66 cites as its model. | NEW (introduced by CHAOS-66) → **CLOSED in the same PR** (Codex P2: cumulative counter kept for magnitude, separate current-state flag cleared by a `SetPersistSuccessObserver` recovery seam) | M | was: `session_revocation_health.go`; precedent `ca_health.go` `caRotationPersistDegraded`; see §36 |
 
 ### 2.6 Background Workers / Feeds / Scanning / Alerting
 
@@ -6631,8 +6633,8 @@ UI listener.
 
 ### 36.5 Gates
 
-27 in total: 14 in `internal/session/revocation_chaos_test.go`, 13 in
-`session_revocation_chaos_test.go`.
+35 in total: 17 in `internal/session/revocation_chaos_test.go`, 18 in
+`session_revocation_chaos_test.go` (the round-2 findings in §36.6 added 8).
 
 Every defect gate was verified **failing against its reintroduced pre-fix
 shape** — six in the engine (persistence, gossip, distinct tokens, old-node hop,
@@ -6680,7 +6682,57 @@ repository's determinism gate (`QA · Determinism`, which re-runs shuffled) is
 what makes this class findable at all; without running shuffled locally it
 would have merged green.
 
-### 36.6 Deliberately left (owner decisions)
+### 36.6 Review round 2 — two findings, and the second one is the sweep's own
+
+Codex's review of the first push found two real defects. Both are recorded
+because of what they have in common: **each is a rule this repository had
+already written down, applied in one place and not carried to the neighbouring
+one** — the same shape §36.7 names below, found twice more inside the fix for it.
+
+**AU-24 (P1) — the HA standby.** The sweep closed the Control Plane's isolation
+(AU-20) and left the standby CP isolated in exactly the same way. The bundle
+replicates `SessionHMAC`, so a standby verifies precisely the cookies the leader
+does; `SyncRevocations` is fenced on a standby, so the path AU-20 opened cannot
+reach it. A session revoked on the leader therefore authenticated against the
+standby and survived a promotion with full authority. This is pre-existing — the
+CP contributed nothing anywhere before this sweep — but it is squarely this
+sweep's domain, and closing AU-20 without it would have left the plane whole for
+Data Planes and broken for the node that takes over when the leader dies. Fixed
+with one `omitempty` field on `HAStateBundle`, filled by the leader and merged
+by `applyHABundle` inside the bundle's EXISTING trust boundary: one trust
+decision, not two. The merge is additive and can only ever add denials, so a
+persist failure there is logged and counted rather than aborting the resync —
+failing a sync over durability would discard working safety state to punish a
+full disk.
+
+**AU-25 (P2) — introduced by this sweep, and it is the more instructive one.**
+`revocationsAreDurable` was keyed on the CUMULATIVE persist-failure counter, so
+one transient write failure pinned the gauge at 0 and the contract row at `fail`
+for the life of the process — including after the operator repaired the volume
+and a later save had written the complete live list (which genuinely restores
+durability: `SaveRevocations` persists the whole list, not a delta). The
+function's own comment asserted the opposite, word for word: *"a volume that
+fills, and a volume that is repaired all show up on the next read without a
+clearing path to maintain."*
+
+`ca_health.go` states the rule and the reason: the persistence warning there is
+keyed on `caRotationPersistDegraded()`, **not** on the cumulative counter,
+because *"a counter-keyed row would latch until process restart even after the
+operator fixed the volume and re-rotated."* This file cites `ca_health.go` as its
+model twice and then made the exact mistake that file exists to record. Fixed by
+separating the two instruments — cumulative counter for magnitude on `/metrics`,
+a current-state flag for the row and the gauge, cleared by a
+`SetPersistSuccessObserver` seam that fires only on a write that actually landed
+(the `path == ""` early return is deliberately not a recovery: nothing was
+written). Gates in both directions, because a flag that latches either way is
+equally wrong: recovery after repair, and re-degradation after a second failure.
+
+The lesson to carry: **citing a precedent is not the same as applying it.** The
+comment naming `ca_health.go` was written from memory of what that file's rule
+says, not from re-reading what its code does — and the prose was confident
+enough that it read as evidence the rule had been followed.
+
+### 36.7 Deliberately left (owner decisions)
 
 * **AU-22** — persistence stays opt-in. Made visible, not changed.
 * **AU-23** — a role or password change still revokes nothing. The role lives in
@@ -6694,7 +6746,7 @@ would have merged green.
   a rotation grace window are unchanged. This sweep only records that the
   *stable*-key posture is what makes AU-22 bite.
 
-### 36.7 The transferable lesson
+### 36.8 The transferable lesson
 
 Two of the four defects are one mistake made twice: **a map was added beside an
 existing one and the code that carried the first was never taught about the

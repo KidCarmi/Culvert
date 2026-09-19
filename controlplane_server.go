@@ -726,6 +726,22 @@ type HAStateBundle struct {
 	// The PULLER verifies it against its own lease backend before importing
 	// (Finding 7 — a zombie leader serving stale state cannot be imported).
 	Epoch int64 `json:"epoch,omitempty"`
+	// Revocations is the leader's live session-revocation set (CHAOS-66).
+	//
+	// Without it the standby was the one CP-class node with NO route into the
+	// revocation plane, and the consequence is specific rather than
+	// theoretical: `Config` above carries SessionHMAC, so the standby verifies
+	// the very same cookies the leader does, while `SyncRevocations` — the only
+	// other path that carries revocations — is fenced on a standby by
+	// haIssuanceAllowed. So a session revoked on the leader authenticated
+	// against the standby, and kept full authority across a promotion until
+	// some Data Plane happened to push the entry back, or forever if none
+	// reconnected (Codex P1, PR #1437).
+	//
+	// omitempty keeps the bundle byte-identical when there is nothing to
+	// replicate, and a standby predating this field simply ignores it — the
+	// pre-existing behaviour, never worse.
+	Revocations []RevocationEntry `json:"revocations,omitempty"`
 }
 
 // normalizeAdvertisedAddr turns a standby's advertised address into one the
@@ -877,9 +893,10 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		CAKeyEncrypted:   caKeyEncrypted,
 		Config:           published,
 		Version:          published.Version,
-		PromoteRequested: globalHA.plannedPromotion.Load(), // ADR-0004 Slice 1e: coordinated handoff
-		LeaderTerm:       globalHA.Status().Term,           // ADR-0004 Slice 1c/P2: seed standby epoch
-		Epoch:            globalHA.CurrentEpoch(),          // ADR-0005 S3: puller-side fence input
+		PromoteRequested: globalHA.plannedPromotion.Load(),   // ADR-0004 Slice 1e: coordinated handoff
+		LeaderTerm:       globalHA.Status().Term,             // ADR-0004 Slice 1c/P2: seed standby epoch
+		Epoch:            globalHA.CurrentEpoch(),            // ADR-0005 S3: puller-side fence input
+		Revocations:      sessionRevoked.ExportRevocations(), // CHAOS-66: the standby verifies the same cookies
 	}
 
 	resp, _ := json.Marshal(bundle)

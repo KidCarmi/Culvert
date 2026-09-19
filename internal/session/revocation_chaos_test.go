@@ -244,7 +244,7 @@ func TestChaos66_PersistFailureIsObserved(t *testing.T) {
 	// A directory where the file should be: AtomicWrite cannot replace it.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "revocations.json")
-	if err := os.Mkdir(path, 0o755); err != nil {
+	if err := os.Mkdir(path, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	withRevocationsPath(t, path)
@@ -268,7 +268,7 @@ func TestChaos66_PersistFailureIsObserved(t *testing.T) {
 func TestChaos66_PanickingObserverIsContained(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "revocations.json")
-	if err := os.Mkdir(path, 0o755); err != nil {
+	if err := os.Mkdir(path, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	withRevocationsPath(t, path)
@@ -377,4 +377,92 @@ func TestChaos66_UnrevokedSessionsStillDecode(t *testing.T) {
 	if _, err := Decode(revoked); err == nil {
 		t.Fatal("the revoked account's session decoded after a restart")
 	}
+}
+
+// DEFECT (Codex P2). A health surface keyed on a CUMULATIVE failure counter can
+// never recover: it keeps reporting a security-control failure after the
+// operator has fixed the volume, until the process restarts. The counter is the
+// right instrument for magnitude and the wrong one for state, so a successful
+// save must be observable as recovery.
+//
+// This is the same bug ca_health.go records having already fixed once, which is
+// why the seam exists rather than the call site being trusted to notice.
+func TestChaos66_SuccessfulSaveIsObservedAsRecovery(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "blocked")
+	if err := os.Mkdir(bad, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	var failures, recoveries int
+	SetPersistFailureObserver(func(error) { failures++ })
+	SetPersistSuccessObserver(func() { recoveries++ })
+	t.Cleanup(func() {
+		SetPersistFailureObserver(nil)
+		SetPersistSuccessObserver(nil)
+	})
+
+	r := NewRevocationList()
+	r.RevokeUser("ivan")
+
+	withRevocationsPath(t, bad) // a directory: AtomicWrite cannot replace it
+	if err := r.SaveRevocations(); err == nil {
+		t.Fatal("save succeeded against an unwritable path")
+	}
+	if failures != 1 || recoveries != 0 {
+		t.Fatalf("after the fault: failures=%d recoveries=%d, want 1/0", failures, recoveries)
+	}
+
+	// The operator repairs the volume.
+	withRevocationsPath(t, filepath.Join(dir, "revocations.json"))
+	if err := r.SaveRevocations(); err != nil {
+		t.Fatalf("save after repair: %v", err)
+	}
+	if recoveries != 1 {
+		t.Errorf("recoveries = %d, want 1 — a repaired volume must be observable, or the health row latches until restart", recoveries)
+	}
+
+	// And the recovery is real: the complete live list is on disk.
+	reloaded := NewRevocationList()
+	withRevocationsPath(t, filepath.Join(dir, "revocations.json"))
+	if err := reloaded.LoadRevocations(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !reloaded.IsUserRevoked("ivan") {
+		t.Error("the revocation applied during the outage is not durable after recovery")
+	}
+}
+
+// CONTROL. Persistence is opt-in; an unconfigured path writes nothing, so it
+// must NOT be reported as a recovery — that would clear a real degradation.
+func TestChaos66_UnconfiguredSaveIsNotARecovery(t *testing.T) {
+	withRevocationsPath(t, "")
+
+	var recoveries int
+	SetPersistSuccessObserver(func() { recoveries++ })
+	t.Cleanup(func() { SetPersistSuccessObserver(nil) })
+
+	r := NewRevocationList()
+	r.Revoke("tok-f", time.Now().Add(time.Hour))
+	if err := r.SaveRevocations(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if recoveries != 0 {
+		t.Errorf("recoveries = %d, want 0 — nothing was written, so nothing recovered", recoveries)
+	}
+}
+
+// CONTROL. A panicking success observer must be contained too, on the same
+// reasoning as the failure one.
+func TestChaos66_PanickingSuccessObserverIsContained(t *testing.T) {
+	withRevocationsPath(t, filepath.Join(t.TempDir(), "revocations.json"))
+	SetPersistSuccessObserver(func() { panic("observer blew up") })
+	t.Cleanup(func() { SetPersistSuccessObserver(nil) })
+
+	r := NewRevocationList()
+	r.Revoke("tok-g", time.Now().Add(time.Hour))
+	if err := r.SaveRevocations(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Reaching here without a panic is the assertion.
 }

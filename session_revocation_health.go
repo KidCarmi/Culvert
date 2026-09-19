@@ -44,10 +44,28 @@ import (
 )
 
 // sessionRevocationPersistFailures counts revocations that could not be made
-// durable. A counter rather than a flag because the operator question is "is
-// this still happening?", and because the first failure is the interesting one
-// while the hundredth is the magnitude.
-var sessionRevocationPersistFailures atomic.Uint64
+// durable, cumulatively for the life of the process. It is the MAGNITUDE of an
+// incident and is never reset.
+//
+// sessionRevocationPersistDegraded is the CURRENT state: are writes failing
+// right now? Set on a failed save, cleared by a successful one.
+//
+// The two are deliberately separate, and conflating them is a specific known
+// bug this repository has already fixed once. `ca_health.go` records it: the
+// persistence warning there is keyed on `caRotationPersistDegraded()`, NOT on
+// the cumulative counter, because "a counter-keyed row would latch until
+// process restart even after the operator fixed the volume and re-rotated."
+// The first version of this file keyed `revocationsAreDurable` on the counter
+// and made exactly that mistake — while its own comment claimed the opposite
+// (Codex review, PR #1437).
+//
+// A successful save is a genuine recovery rather than merely a fresh write:
+// SaveRevocations persists the COMPLETE live list, so once one succeeds every
+// revocation still in memory is durable again.
+var (
+	sessionRevocationPersistFailures atomic.Uint64
+	sessionRevocationPersistDegraded atomic.Bool
+)
 
 type sessionRevocationHealth struct {
 	// Configured is true when --revocations-file / config supplies a path.
@@ -93,10 +111,20 @@ func noteRevocationLoadDegraded(err error) {
 // audit-free).
 func noteRevocationPersistFailure(error) {
 	sessionRevocationPersistFailures.Add(1)
+	sessionRevocationPersistDegraded.Store(true)
+}
+
+// noteRevocationPersistSuccess clears the degradation on OBSERVED evidence — a
+// write that actually landed. Elapsed time never clears it (the
+// ca_health.go/storage_health.go discipline), and the cumulative counter is
+// deliberately left alone so the incident stays on /metrics.
+func noteRevocationPersistSuccess() {
+	sessionRevocationPersistDegraded.Store(false)
 }
 
 func init() {
 	session.SetPersistFailureObserver(noteRevocationPersistFailure)
+	session.SetPersistSuccessObserver(noteRevocationPersistSuccess)
 }
 
 // sessionRevocationState returns a copy of the recorded posture.
@@ -109,12 +137,13 @@ func sessionRevocationState() sessionRevocationHealth {
 // revocationsAreDurable reports whether a revocation applied right now would
 // survive this process.
 //
-// Evaluated, never latched — the ca_health.go `Usable()` discipline: a
-// persistence path that is removed, a volume that fills, and a volume that is
-// repaired all show up on the next read without a clearing path to maintain.
+// Evaluated from CURRENT state, never from the cumulative counter: a volume
+// that fills and a volume that is then repaired both show up on the next read.
+// See the comment on sessionRevocationPersistDegraded for why that distinction
+// is load-bearing rather than cosmetic.
 func revocationsAreDurable() bool {
 	h := sessionRevocationState()
-	return h.Configured && !h.LoadDegraded && sessionRevocationPersistFailures.Load() == 0
+	return h.Configured && !h.LoadDegraded && !sessionRevocationPersistDegraded.Load()
 }
 
 // resetSessionRevocationHealthForTest clears the record. Test isolation only.
@@ -123,6 +152,7 @@ func resetSessionRevocationHealthForTest() {
 	sessionRevocationHealthy = sessionRevocationHealth{}
 	sessionRevocationHealthMu.Unlock()
 	sessionRevocationPersistFailures.Store(0)
+	sessionRevocationPersistDegraded.Store(false)
 }
 
 // checkSessionRevocation is the `session_revocation` operator-contract row.
@@ -130,10 +160,11 @@ func resetSessionRevocationHealthForTest() {
 // Severity policy, in descending order of how badly the operator is being
 // misled:
 //
-//   - persist failures observed → FAIL. An admin was told a session was
+//   - writes are FAILING RIGHT NOW → FAIL. An admin was told a session was
 //     withdrawn and it was not written down. This is the only row in the sweep
 //     that fails rather than warns, because the operator's belief and the
-//     node's state actively disagree.
+//     node's state actively disagree. It clears on a successful write, not on
+//     elapsed time and not on a restart — see sessionRevocationPersistDegraded.
 //   - the persisted list did not load → FAIL. Revocations the operator already
 //     applied are not in force on this node, and nothing else will tell them.
 //   - no persistence configured → WARN. Not a fault — it is the DEFAULT, and
@@ -159,7 +190,8 @@ func checkSessionRevocation() OperatorContractCheck {
 	h := sessionRevocationState()
 	tokens, users := sessionRevoked.Count(), sessionRevoked.UserCount()
 
-	if failures := sessionRevocationPersistFailures.Load(); failures > 0 {
+	if sessionRevocationPersistDegraded.Load() {
+		failures := sessionRevocationPersistFailures.Load()
 		return OperatorContractCheck{
 			Code:   "session_revocation",
 			Status: diagFail,

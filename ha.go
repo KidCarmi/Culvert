@@ -828,6 +828,23 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 	// armVersionPersistence at promotion.
 	globalConfigStore.seedReplicatedSnapshot(bundle.Config)
 
+	// Apply the leader's session revocations (CHAOS-66). This runs AFTER the
+	// bundle has been accepted, so it inherits the same trust decision as the
+	// CA, the cluster state and the config — one boundary, not two.
+	//
+	// Merging is additive and fail-CLOSED by construction: it can only ever add
+	// denials, never grant access, so a partial set is safe while an absent one
+	// is not. A persist failure is therefore logged and counted rather than
+	// aborting the resync — the revocations are already in memory and
+	// enforcing, and failing the sync over durability would discard working
+	// safety state to punish a full disk.
+	if added := sessionRevoked.MergeRevocations(bundle.Revocations); added > 0 {
+		logger.Printf("HA: merged %d session revocation(s) from the leader", added)
+		if err := sessionRevoked.SaveRevocations(); err != nil {
+			logger.Printf("HA: failed to persist replicated revocations: %v", err)
+		}
+	}
+
 	return true
 }
 

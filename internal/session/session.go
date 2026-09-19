@@ -381,28 +381,62 @@ var ErrRevocationsCorrupt = errors.New("session: revocations file corrupt")
 var (
 	persistObserverMu sync.RWMutex
 	persistObserver   func(err error)
+	persistOKObserver func()
 )
 
-// SetPersistFailureObserver installs the durability-failure callback ("" clears).
+// SetPersistFailureObserver installs the durability-failure callback (nil clears).
 func SetPersistFailureObserver(fn func(err error)) {
 	persistObserverMu.Lock()
 	persistObserver = fn
 	persistObserverMu.Unlock()
 }
 
+// SetPersistSuccessObserver installs the durability-RECOVERY callback (nil clears).
+//
+// It exists for the same reason `ca.RotationPersistSuccessObserver` does: a
+// health surface keyed on a CUMULATIVE failure counter can never recover, so it
+// keeps reporting a security-control failure after the operator has fixed the
+// volume, until the process restarts. The counter is the right instrument for
+// magnitude and the wrong one for state.
+//
+// A successful save is a genuine recovery here, not merely a fresh write:
+// SaveRevocations persists the COMPLETE live list, so once one succeeds every
+// revocation still in memory is durable again.
+func SetPersistSuccessObserver(fn func()) {
+	persistObserverMu.Lock()
+	persistOKObserver = fn
+	persistObserverMu.Unlock()
+}
+
+// callObserver runs fn with panics contained: a panicking observer must never
+// take down the admin plane it is reporting on (the internal/audit rule).
+func callObserver(fn func()) {
+	if fn == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	fn()
+}
+
 func notePersistFailure(err error) error {
 	persistObserverMu.RLock()
 	fn := persistObserver
 	persistObserverMu.RUnlock()
-	if fn != nil {
-		// Contained: a panicking observer must never take down the admin plane
-		// it is reporting on (the internal/audit observer rule).
-		func() {
-			defer func() { _ = recover() }()
-			fn(err)
-		}()
+	if fn == nil {
+		return err
 	}
+	// Wrapping in a closure would hide a nil fn from callObserver's guard (the
+	// closure is non-nil regardless), leaving the nil call to be swallowed by
+	// the recover — so the nil check is here, where fn is in scope.
+	callObserver(func() { fn(err) })
 	return err
+}
+
+func notePersistSuccess() {
+	persistObserverMu.RLock()
+	fn := persistOKObserver
+	persistObserverMu.RUnlock()
+	callObserver(fn)
 }
 
 // SaveRevocations writes all non-expired revocations to disk as JSON.
@@ -429,6 +463,10 @@ func (r *RevocationList) SaveRevocations() error {
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
 		return notePersistFailure(err)
 	}
+	// Only a real write counts as recovery. The `path == ""` early return above
+	// deliberately does NOT reach here: nothing was written, so it must not
+	// clear a durability degradation.
+	notePersistSuccess()
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -355,5 +356,140 @@ func TestChaos66_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 				t.Error("branch produced an empty message")
 			}
 		})
+	}
+}
+
+// DEFECT (Codex P2). The diagnostics row and the durable gauge must recover
+// when the volume is repaired. Keyed on the cumulative counter they never did,
+// and this file's own comment claimed the opposite — the ca_health.go mistake,
+// reproduced in the change that cites ca_health.go as its model.
+func TestChaos66_DurabilityRecoversWhenWritesSucceedAgain(t *testing.T) {
+	withChaos66Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+
+	noteRevocationPersistFailure(os.ErrPermission)
+	if revocationsAreDurable() {
+		t.Fatal("durable while writes are failing")
+	}
+	if checkSessionRevocation().Status != diagFail {
+		t.Fatal("row is not failing while writes are failing")
+	}
+
+	// The operator repairs the volume and a save lands.
+	noteRevocationPersistSuccess()
+
+	if !revocationsAreDurable() {
+		t.Error("revocationsAreDurable() is still false after a successful write — the row latches until process restart")
+	}
+	if row := checkSessionRevocation(); row.Status != diagOK {
+		t.Errorf("status = %q, want %q after recovery (%s)", row.Status, diagOK, row.Message)
+	}
+	// The incident stays visible as magnitude, on /metrics, not as a stuck row.
+	if got := sessionRevocationPersistFailures.Load(); got != 1 {
+		t.Errorf("cumulative failures = %d, want 1 — recovery must not erase the incident's magnitude", got)
+	}
+}
+
+// A failure AFTER a recovery must degrade again — the flag is state, not a
+// one-shot latch in either direction.
+func TestChaos66_DurabilityDegradesAgainAfterRecovery(t *testing.T) {
+	withChaos66Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+
+	noteRevocationPersistFailure(os.ErrPermission)
+	noteRevocationPersistSuccess()
+	noteRevocationPersistFailure(os.ErrPermission)
+
+	if revocationsAreDurable() {
+		t.Error("a second write failure did not re-degrade the durability signal")
+	}
+	if got := sessionRevocationPersistFailures.Load(); got != 2 {
+		t.Errorf("cumulative failures = %d, want 2", got)
+	}
+}
+
+// DEFECT (Codex P1). The HA standby verifies the SAME cookies as the leader —
+// the bundle replicates SessionHMAC — while SyncRevocations, the only other
+// carrier of revocations, is fenced on a standby. Without revocations in the
+// bundle, a session revoked on the leader authenticated against the standby and
+// survived a promotion with full authority.
+func TestChaos66_HABundleCarriesRevocationsToTheStandby(t *testing.T) {
+	leader := session.NewRevocationList()
+	leader.Revoke("leader-logout", time.Now().Add(time.Hour))
+	leader.RevokeUser("fired-admin")
+
+	bundle := HAStateBundle{Revocations: leader.ExportRevocations()}
+
+	// Round-trip the wire form: the standby decodes JSON, not a Go value.
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got HAStateBundle
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	standby := session.NewRevocationList()
+	standby.MergeRevocations(got.Revocations)
+
+	if !standby.IsRevoked("leader-logout") {
+		t.Error("a logout performed on the leader does not reach the standby")
+	}
+	if !standby.IsUserRevoked("fired-admin") {
+		t.Error("an account deleted on the leader does not reach the standby — after promotion its sessions authenticate again")
+	}
+}
+
+// The bundle must stay byte-identical when there is nothing to replicate, so a
+// standby predating this field is unaffected.
+func TestChaos66_HABundleOmitsEmptyRevocations(t *testing.T) {
+	raw, err := json.Marshal(HAStateBundle{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "revocations") {
+		t.Errorf("an empty revocation set is on the wire: %s", raw)
+	}
+}
+
+// STRUCTURAL WALL. The bundle carrying the field is worth nothing unless the
+// leader fills it and the standby applies it. applyHABundle and the HASync
+// handler both need live HA state to drive behaviourally, so the wiring is
+// pinned by shape — the same instrument as SyncRevocationsWiresBothDirections.
+func TestChaos66_HAWiresRevocationsInBothDirections(t *testing.T) {
+	for _, tc := range []struct{ file, fn, call string }{
+		{"controlplane_server.go", "HASync", "ExportRevocations"},
+		{"ha.go", "applyHABundle", "MergeRevocations"},
+	} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, tc.file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", tc.file, err)
+		}
+		var target *ast.FuncDecl
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if ok && fn.Name.Name == tc.fn {
+				target = fn
+				break
+			}
+		}
+		if target == nil {
+			t.Errorf("%s not found in %s", tc.fn, tc.file)
+			continue
+		}
+		var found bool
+		ast.Inspect(target, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == tc.call {
+					found = true
+				}
+			}
+			return true
+		})
+		if !found {
+			t.Errorf("%s does not call %s — the HA standby is isolated from the revocation plane in that direction", tc.fn, tc.call)
+		}
 	}
 }

@@ -36,6 +36,18 @@ That makes the revocation list a security control whose *durability* and
 Both kinds are now persisted to the revocations file and both ride the CP↔DP
 gossip. Before CHAOS-66 only the token kind did either.
 
+Propagation reaches three places, and all three matter because each of them
+verifies the same cookies (the session signing key is replicated to all of them):
+
+* **Data Plane nodes** — via the `SyncRevocations` sync, every 3 s.
+* **The Control Plane itself** — it both contributes its own revocations to the
+  fleet and applies what Data Planes report. Before CHAOS-66 it did neither,
+  which mattered because the admin UI runs on the CP.
+* **An HA standby CP** — via the HA state bundle. `SyncRevocations` is fenced on
+  a standby, so without this the standby held the replicated signing key and no
+  revocations: a session revoked on the leader authenticated against the
+  standby and kept full authority across a promotion.
+
 **Not revoked by anything** (see §7): changing a user's **role** or **password**
 via `POST /api/auth/users`. A demoted admin keeps `role: admin` in their
 existing cookie until it expires, and a password change does not invalidate a
@@ -105,12 +117,20 @@ watching. The contract row tells you which cause applies.
 Suggested rules:
 
 ```
-# Page: an admin was told a session was withdrawn and it was not written down.
-culvert_session_revocation_persist_failures_total > 0
-
-# Warn: revocations on this node do not survive a restart.
+# Page: writes are failing RIGHT NOW — an admin was told a session was
+# withdrawn and it was not written down. Clears on a successful write.
 culvert_session_revocation_durable == 0
+
+# Investigate: a durability incident happened in this process. Cumulative and
+# never reset, so it stays visible after the condition above has cleared.
+increase(culvert_session_revocation_persist_failures_total[1h]) > 0
 ```
+
+The two are deliberately different instruments. `_durable` is **current state**
+and recovers on its own when the volume is repaired; the counter is the
+**magnitude** of an incident and is never reset. Alerting on the counter alone
+would latch until the process restarts, which is the bug this row was fixed for
+(and the same one `ca_health.go` records having already fixed once).
 
 ### Cluster status — `GET /api/cluster/status`
 
@@ -140,11 +160,19 @@ restart those sessions are live again.
 1. Check the volume backing the revocations file: free space, permissions,
    mount state. `AtomicWrite` needs to create a temp file in the same directory
    and `fsync` it.
-2. Fix the volume. The gauge clears on the next successful write — the counter
-   is cumulative and deliberately does not reset, so the incident stays visible.
-3. **Re-apply the affected revocations.** Re-delete the accounts, and treat any
-   session revoked on this node during the window as still live. There is no
-   way to recover the list of what was lost; that is why the counter pages.
+2. **Fix the volume.** Recovery is automatic and needs no restart: the next
+   successful save writes the *complete* live list, so every revocation still
+   in memory becomes durable again. At that point
+   `culvert_session_revocation_durable` returns to `1` and the
+   `session_revocation` row returns to `ok`.
+   `culvert_session_revocation_persist_failures_total` is cumulative and
+   deliberately does **not** reset, so the incident stays visible on `/metrics`
+   after the row has cleared — that is where you look to confirm one happened.
+3. **Re-apply anything revoked during a restart in the window.** A revocation
+   applied while writes were failing is recovered by the next successful save
+   *if the process survived*. If the process restarted before that save, those
+   revocations are gone: re-delete the accounts, and treat any session revoked
+   on this node in that window as still live.
 
 Until the volume is fixed, a restart is a security event, not a maintenance one.
 
