@@ -559,7 +559,7 @@ run_mutation M23 \
 run_mutation M24 \
   "quoted text is treated as citation again, stranding the allowlist entries that need it" \
   'TestCredWall_AllowlistIsNotStale' . "$CREDMATRIX" \
-  's/if needleCoversAClaim\(line, needle\) \{/if strings.Contains(line, "\\"") {\n\t\t\tcontinue\n\t\t}\n\t\tif needleCoversAClaim(line, needle) {/'
+  's/if needleCoversAClaim\(u\.text, needle\) \{/if strings.Contains(u.text, "\\"") {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tif needleCoversAClaim(u.text, needle) {/'
 
 
 
@@ -595,7 +595,7 @@ run_mutation M26 \
 run_mutation M27 \
   "the ledger undercounts the allowlist entries naming its own lines" \
   'TestCredWall_LedgerCountsItsOwnQuotationPermissions' . "$OPERDOC" \
-  's/\*\*6 allowlist entries name ledger lines\*\*/**3 allowlist entries name ledger lines**/'
+  's/\*\*10 allowlist entries name ledger lines\*\*/**3 allowlist entries name ledger lines**/'
 
 # NOTE ON PAYLOAD DURABILITY, THIRD INSTANCE (M31, round 12). M31 renamed a mention to `round 12`
 # to model "a round the enumeration does not contain" -- and the same round ADDED Round 12 to the
