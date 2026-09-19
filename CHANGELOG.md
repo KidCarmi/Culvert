@@ -96,6 +96,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
 
+### Performance
+
+- The threat feed's full-URL check no longer re-parses a URL it was handed
+  already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
+  request, on the request goroutine, before the policy engine — and called it
+  as `CheckURL(r.URL.String())`, so a `*url.URL` net/http had just parsed was
+  serialised and the feed immediately parsed it back, purely to read the three
+  fields (scheme, host, path) the caller already had. Measured against a
+  100k-entry feed for an ordinary destination that misses — what every
+  *allowed* request pays — the check cost **887 ns and 4 allocations**, against
+  **109 ns and 0 allocations** for the domain check beside it doing the same
+  amount of real work. The new `CheckRequestURL` takes the parsed URL:
+  **376 ns / 112 B / 2 allocations** (330 → 162 ns at 4× parallel). Verdicts
+  are unchanged and the equivalence is structural: the fast path is taken only
+  for the URL shape on which `String()` followed by `Parse()` is provably the
+  identity for those fields, and every other shape falls through to the
+  verbatim string derivation. Only deployments with threat intelligence
+  enabled are affected; with the feed off the check already returned early.
+
 ### Added
 
 - New React/TypeScript admin frontend, Batch 2 (`CULVERT_EXPERIMENTAL_UI`,
