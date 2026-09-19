@@ -2839,9 +2839,9 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 31 mutations,
-**31 caught, 0 survived, 0 skipped, measured on `94041185`**. A run that reaches its summary has
-necessarily passed `selfcheck_site_counter`, which refuses before anything else prints.
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 32 mutations,
+**CAMPAIGN_RESULT_PENDING**. A run that reaches its summary has necessarily passed
+`selfcheck_site_counter`, which refuses before anything else prints.
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
@@ -3167,8 +3167,13 @@ would not move, and a deleted entry would not shrink).
   compared only those two with each other. Round 9's finding one level out: the gate checked the
   two things it derived from each other and never asked whether they covered what the section
   talks about. Every round §25d NAMES must now be enumerated. Gated by M31.
+- **Round 12** — the clause added in round 11 read only the SINGULAR form, so `rounds 7 and 8` —
+  a phrasing this section had contained all along — matched nothing at all, not merely its first
+  number, because `round\s+` cannot match the `s`. The gate passed on that text by luck: 7 and 8
+  happen to be enumerated. One mutation per FORM, not one per rule. Gated by M32, which is M31's
+  plural twin and was verified to PASS against the pre-fix extractor.
 
-**11 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**12 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
 baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
@@ -3176,7 +3181,8 @@ negation and a needle vs the line it sat on (round 7), and a gated number vs the
 again two lines away (round 8), a gate that derived a count from prose beside it rather than from
 the list it claimed to check (round 9), a guard whose counter could not fail because every input
 expected the same answer (round 10), and a list and a total that agreed with each other while both
-understated the section they described (round 11).
+understated the section they described (round 11), and a rule stated over several syntaxes that
+was only ever tested in one of them (round 12).
 
 The gates get stronger every round; what keeps failing is the accounting around them, so the
 discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no
@@ -3185,7 +3191,8 @@ is a number that will drift, and gating one of its two statements is worse than 
 because the audit then reports green while the document contradicts itself.
 `TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration` keeps this very sentence honest: the total
 must equal the enumeration, the enumeration must be contiguous from 1, and every round the section
-NAMES must appear in it.
+NAMES — in the singular, plural, comma-list or range form, each pinned directly by
+`TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses` — must appear in it.
 
 That last clause was added in round 11 and this sentence is why it is worth recording separately.
 The description here previously read *"comparing its total against the highest round the section

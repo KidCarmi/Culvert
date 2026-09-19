@@ -817,16 +817,11 @@ func TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration(t *testing.T) {
 		enumerated[n] = true
 	}
 	var unlisted []int
-	for _, r := range regexp.MustCompile(`(?i)\bround\s+(\d+)\b`).FindAllStringSubmatch(doc, -1) {
-		n, e := strconv.Atoi(r[1])
-		if e != nil || enumerated[n] {
-			continue
-		}
-		if !slices.Contains(unlisted, n) {
+	for _, n := range roundsNamedIn(doc) {
+		if !enumerated[n] {
 			unlisted = append(unlisted, n)
 		}
 	}
-	slices.Sort(unlisted)
 	if len(unlisted) > 0 {
 		t.Errorf("§25d discusses round(s) %v that its structured enumeration does not contain. "+
 			"The total and the list agree with each other and both understate the section: add a "+
@@ -860,6 +855,49 @@ func TestCredWall_LedgerStatesTheCampaignSize(t *testing.T) {
 	if stated != actual {
 		t.Errorf("§25d claims %d mutations; the script runs %d", stated, actual)
 	}
+}
+
+// roundsNamedIn returns every round number a passage NAMES, in each of the forms §25d actually
+// uses.
+//
+// Codex round 12: the first version matched only `round N`, so the PLURAL form was invisible --
+// and not "only the first number" as one might assume, but NOTHING, because `round\s+` cannot
+// match the `s` in `rounds`. §25d already contained one (`rounds 7 and 8`), so the gate's claim
+// that every named round is enumerated was false for the most natural phrasing, and it was green
+// on that text by luck: 7 and 8 happen to be enumerated. A range is expanded rather than read as
+// two isolated endpoints, because `rounds 11-13` names 12 as much as it names 11.
+var (
+	roundPhrase = regexp.MustCompile(`(?i)\brounds?\s+(\d+(?:\s*(?:,|and|to|\x{2013}|\x{2014}|-)\s*\d+)*)`)
+	roundRange  = regexp.MustCompile(`(\d+)\s*[\x{2013}\x{2014}-]\s*(\d+)`)
+	roundNumber = regexp.MustCompile(`\d+`)
+)
+
+func roundsNamedIn(doc string) []int {
+	seen := map[int]bool{}
+	for _, m := range roundPhrase.FindAllStringSubmatch(doc, -1) {
+		list := m[1]
+		for _, r := range roundRange.FindAllStringSubmatch(list, -1) {
+			lo, loErr := strconv.Atoi(r[1])
+			hi, hiErr := strconv.Atoi(r[2])
+			if loErr != nil || hiErr != nil || lo > hi || hi-lo > 100 {
+				continue // the endpoints are still picked up by the scan below
+			}
+			for n := lo; n <= hi; n++ {
+				seen[n] = true
+			}
+		}
+		for _, d := range roundNumber.FindAllString(list, -1) {
+			if n, err := strconv.Atoi(d); err == nil {
+				seen[n] = true
+			}
+		}
+	}
+	out := make([]int, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ledgerSection returns §25d alone. The document records Codex rounds from OTHER sections' reviews
@@ -1338,5 +1376,40 @@ func TestCredWall_ReachabilityCheckCanActuallyFail(t *testing.T) {
 		t.Errorf("allowlistEntryReached says the genuine node-level claim is NOT reached, so every "+
 			"real entry would be reported dead and the wall would demand their deletion (needle %q)",
 			liveClaim)
+	}
+}
+
+// TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses pins roundsNamedIn directly.
+//
+// The gate above consumes it, but a gate that is green proves only that the rounds it FOUND are
+// enumerated — it cannot distinguish "found them all" from "found none". That is exactly how the
+// plural blind spot survived: §25d has said `rounds 7 and 8` throughout, the extractor saw
+// nothing there, and the gate passed. Codex round 12.
+func TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want []int
+	}{
+		{"singular", "which Codex round 10 found", []int{10}},
+		{"plural and", "learned the hard way in rounds 7 and 8, state each fact once", []int{7, 8}},
+		{"plural comma", "rounds 7, 8 and 9 each found one", []int{7, 8, 9}},
+		{"en dash range", "rounds 11–13 covered the apparatus", []int{11, 12, 13}},
+		{"hyphen range", "rounds 4-6 were about scope", []int{4, 5, 6}},
+		{"several phrases", "round 2 and later round 9", []int{2, 9}},
+		{"no rounds named", "**11 rounds, one defect shape.** The gates get stronger every round;", nil},
+		{"not a round", "roundabout 7 and background 9", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := roundsNamedIn(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("roundsNamedIn(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("roundsNamedIn(%q) = %v, want %v", tc.in, got, tc.want)
+				}
+			}
+		})
 	}
 }

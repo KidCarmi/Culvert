@@ -640,6 +640,16 @@ run_mutation M31 \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
   's/which Codex round 10 found/which Codex round 12 found/'
 
+# M32 is M31's PLURAL twin, and it exists because M31 alone did not exercise what the gate claims.
+# The first version of the round-name extractor matched only `round N`, so `rounds 7 and 8` -- a
+# form §25d had contained all along -- was invisible to it, and the gate passed on that text only
+# because 7 and 8 happen to be enumerated (Codex round 12). One mutation per FORM, not one per
+# rule: a rule stated over several syntaxes is only as strong as the syntax that gets tested.
+run_mutation M32 \
+  "§25d names an unenumerated round in the PLURAL form the gate used to miss" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/in rounds 7 and 8/in rounds 7 and 13/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then
