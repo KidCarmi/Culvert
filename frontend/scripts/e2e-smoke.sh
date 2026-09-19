@@ -36,6 +36,16 @@ IDPQ_PORT="${CULVERT_E2E_IDPQ_PORT:-19094}"
 # repair → legacy import → cutover ceremony → edit → delete end to end
 # without consuming YAMLUP's once-ever cutover or IDPQ's read-only posture.
 IDPW_PORT="${CULVERT_E2E_IDPW_PORT:-19095}"
+# FE-6B.1 CERT: a persisted, passphrase-sealed inspection CA (-ca-path +
+# CULVERT_CA_PASSPHRASE) and NO UI pair at boot — the fe6b1 spec seeds one
+# through the supported admin API, so the read surface must report it
+# persisted but NOT active (activation requires a restart). CERTDEG: a
+# MALFORMED bundle at -ca-path (load failed, bundle_malformed, no Root CA),
+# a persisted UI pair whose key does not match its certificate (corrupt at
+# boot) and a pre-seeded operation ledger carrying one record per terminal
+# state class — boot-time truths no API can produce on a running node.
+CERT_PORT="${CULVERT_E2E_CERT_PORT:-19096}"
+CERTDEG_PORT="${CULVERT_E2E_CERTDEG_PORT:-19097}"
 WORK="$(mktemp -d)"
 BIN="$WORK/culvert"
 
@@ -48,6 +58,8 @@ cleanup() {
   [ -n "${YAMLUP_PID:-}" ] && kill "$YAMLUP_PID" 2>/dev/null || true
   [ -n "${IDPQ_PID:-}" ] && kill "$IDPQ_PID" 2>/dev/null || true
   [ -n "${IDPW_PID:-}" ] && kill "$IDPW_PID" 2>/dev/null || true
+  [ -n "${CERT_PID:-}" ] && kill "$CERT_PID" 2>/dev/null || true
+  [ -n "${CERTDEG_PID:-}" ] && kill "$CERTDEG_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   rm -rf "$WORK" 2>/dev/null || true
 }
@@ -300,6 +312,46 @@ start_instance YAMLUP "$YAML_PORT" "$((PROXY_PORT + 3))" -ui-users-file "$WORK/y
 start_instance IDPQ "$IDPQ_PORT" "$((PROXY_PORT + 4))" -ui-users-file "$WORK/idpq/ui_users.json" -config "$WORK/idpq/config.yaml" -idp-profiles-file "$WORK/idpq/idp_profiles.json"
 start_instance IDPW "$IDPW_PORT" "$((PROXY_PORT + 5))" -ui-users-file "$WORK/idpw/ui_users.json" -config "$WORK/idpw/config.yaml" -idp-profiles-file "$WORK/idpw/idp_profiles.json"
 
+# ── FE-6B.1 CERT / CERTDEG ──────────────────────────────────────────────────
+CA_PASSPHRASE_CANARY="E2E-CA-PASSPHRASE-never-in-browser"
+mkdir -p "$WORK/cert" "$WORK/certdeg" "$WORK/run-CERTDEG"
+cp "$WORK/auth/ui_users.json" "$WORK/cert/ui_users.json"
+cp "$WORK/auth/ui_users.json" "$WORK/certdeg/ui_users.json"
+printf 'log_store_path: %s/cert/logstore\n' "$WORK" > "$WORK/cert/config.yaml"
+printf 'log_store_path: %s/certdeg/logstore\n' "$WORK" > "$WORK/certdeg/config.yaml"
+# A UI leaf pair the spec uploads through the admin API (target=ui) — never
+# through the surface under test. Generated here so the spec needs no X.509
+# library; the private key never reaches the browser (leak needle).
+openssl ecparam -genkey -name prime256v1 -noout -out "$WORK/cert/ui.key" 2>/dev/null
+openssl req -x509 -new -key "$WORK/cert/ui.key" -subj "/CN=ui-fe6b1.e2e" -days 365 \
+  -addext "subjectAltName=DNS:ui-fe6b1.e2e" -out "$WORK/cert/ui.crt" 2>/dev/null
+# CERTDEG: the bundle is not a bundle; the persisted pair is a certificate
+# beside a key from a DIFFERENT keypair (corrupt at boot: complete, invalid).
+printf 'this is not a CA bundle' > "$WORK/certdeg/ca.bundle"
+openssl ecparam -genkey -name prime256v1 -noout -out "$WORK/certdeg/other.key" 2>/dev/null
+cp "$WORK/cert/ui.crt" "$WORK/run-CERTDEG/ui_tls_cert.pem"
+cp "$WORK/certdeg/other.key" "$WORK/run-CERTDEG/ui_tls_key.pem"
+chmod 600 "$WORK/run-CERTDEG/ui_tls_key.pem"
+# The ledger: SUP (terminal superseded UNKNOWN), PEND (a pending import the
+# boot settles against the malformed bundle: reconciled_evidence_invalid),
+# ABT (aborted, persist_failed), CMT (committed + audited OCSP set).
+FE6B1_HEX="$(printf 'fe6b1-candidate' | openssl dgst -sha256 | sed 's/^.*= *//')"
+cat > "$WORK/run-CERTDEG/certificate_operations.json" <<EOF2
+[
+ {"operationId":"6b1e0000-fe6b-4e2e-9f00-000000000501","state":"outcome_unknown","action":"ca.import","actor":"admin@10.99.0.1","target":"root_ca","candidateDigest":"$FE6B1_HEX","fence":"car1:none","startedAt":"2026-09-18T10:00:00Z","finishedAt":"2026-09-18T10:00:02Z","code":"writer_evidence_superseded","supersededBy":"6b1e0000-fe6b-4e2e-9f00-0000000005aa","audited":false},
+ {"operationId":"6b1e0000-fe6b-4e2e-9f00-000000000502","state":"pending","action":"ca.import","actor":"admin@10.99.0.1","target":"root_ca","candidateDigest":"$FE6B1_HEX","fence":"car1:none","startedAt":"2026-09-18T10:01:00Z","audited":false},
+ {"operationId":"6b1e0000-fe6b-4e2e-9f00-000000000503","state":"aborted","action":"cert.ui.replace","actor":"admin@10.99.0.1","target":"ui_cert","candidateDigest":"$FE6B1_HEX","fence":"uic1:none","startedAt":"2026-09-18T10:02:00Z","finishedAt":"2026-09-18T10:02:01Z","code":"persist_failed","audited":false},
+ {"operationId":"6b1e0000-fe6b-4e2e-9f00-000000000504","state":"committed","action":"ocsp.set","actor":"admin@10.99.0.1","target":"ocsp","candidateDigest":"disabled","fence":"ocr1:$FE6B1_HEX","expect":"1","startedAt":"2026-09-18T10:03:00Z","finishedAt":"2026-09-18T10:03:01Z","committedRevision":"ocr1:$FE6B1_HEX","result":{"ok":true,"enabled":false,"durable":true,"revision":"ocr1:$FE6B1_HEX","desired":{"enabled":false,"source":"admin"},"runtime":{"enabled":false}},"audited":true}
+]
+EOF2
+# Exported explicitly (a prefix assignment on a FUNCTION call is not
+# portably exported to the commands the function runs); unset right after so
+# CERTDEG and nothing else inherits it.
+CULVERT_CA_PASSPHRASE="$CA_PASSPHRASE_CANARY"; export CULVERT_CA_PASSPHRASE
+start_instance CERT "$CERT_PORT" "$((PROXY_PORT + 6))" -ui-users-file "$WORK/cert/ui_users.json" -config "$WORK/cert/config.yaml" -ca-path "$WORK/cert/ca.bundle"
+unset CULVERT_CA_PASSPHRASE
+start_instance CERTDEG "$CERTDEG_PORT" "$((PROXY_PORT + 7))" -ui-users-file "$WORK/certdeg/ui_users.json" -config "$WORK/certdeg/config.yaml" -ca-path "$WORK/certdeg/ca.bundle"
+
 wait_ready() {
   port="$1"; name="$2"
   i=0
@@ -319,7 +371,9 @@ wait_ready "$FAIL_PORT" FAIL
 wait_ready "$YAML_PORT" YAMLUP
 wait_ready "$IDPQ_PORT" IDPQ
 wait_ready "$IDPW_PORT" IDPW
-echo "e2e-smoke: all five instances ready"
+wait_ready "$CERT_PORT" CERT
+wait_ready "$CERTDEG_PORT" CERTDEG
+echo "e2e-smoke: all eight instances ready"
 
 # API-establish the retained-history premise (§19): the AUTH instance boots
 # from a FRESH per-instance data root (PR-C1), so the retained-history store
@@ -405,6 +459,11 @@ CULVERT_E2E_SETUPFAIL_URL="http://127.0.0.1:$FAIL_PORT" \
 CULVERT_E2E_YAML_URL="http://127.0.0.1:$YAML_PORT" \
 CULVERT_E2E_IDPQ_URL="http://127.0.0.1:$IDPQ_PORT" \
 CULVERT_E2E_IDPW_URL="http://127.0.0.1:$IDPW_PORT" \
+CULVERT_E2E_CERT_URL="http://127.0.0.1:$CERT_PORT" \
+CULVERT_E2E_CERTDEG_URL="http://127.0.0.1:$CERTDEG_PORT" \
+CULVERT_E2E_CERT_UI_PAIR_DIR="$WORK/cert" \
+CULVERT_E2E_CERTDEG_DATA_DIR="$WORK/run-CERTDEG" \
+CULVERT_E2E_CA_PASSPHRASE_CANARY="$CA_PASSPHRASE_CANARY" \
 CULVERT_E2E_AUTH_DATA_DIR="$WORK/run-AUTH" \
 CULVERT_E2E_SLUICE_ADDR="127.0.0.1:$SLUICE_PORT" \
 CULVERT_E2E_SLUICE_FP="$SLUICE_FP" \

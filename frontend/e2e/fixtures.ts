@@ -23,6 +23,24 @@ export const IDPQ_URL =
 /** FE-6A.2: the write-journey appliance (corrupt registry + legacy block). */
 export const IDPW_URL =
   process.env["CULVERT_E2E_IDPW_URL"] ?? "http://127.0.0.1:19095";
+/** FE-6B.1: the appliance with a persisted, passphrase-sealed inspection CA
+ * and no UI pair at boot (the spec seeds one through the admin API). */
+export const CERT_URL =
+  process.env["CULVERT_E2E_CERT_URL"] ?? "http://127.0.0.1:19096";
+/** FE-6B.1: the DEGRADED appliance — malformed CA bundle (load failed), a
+ * corrupt persisted UI pair, and a pre-seeded operation ledger. */
+export const CERTDEG_URL =
+  process.env["CULVERT_E2E_CERTDEG_URL"] ?? "http://127.0.0.1:19097";
+/** FE-6B.1: where the harness generated the UI leaf pair the spec uploads. */
+export const CERT_UI_PAIR_DIR =
+  process.env["CULVERT_E2E_CERT_UI_PAIR_DIR"] ?? "";
+/** FE-6B.1: CERTDEG's data root (a leak needle — never in any answer). */
+export const CERTDEG_DATA_DIR =
+  process.env["CULVERT_E2E_CERTDEG_DATA_DIR"] ?? "/data";
+/** FE-6B.1: the CERT appliance's CA passphrase (a leak needle). */
+export const CA_PASSPHRASE_CANARY =
+  process.env["CULVERT_E2E_CA_PASSPHRASE_CANARY"] ??
+  "E2E-CA-PASSPHRASE-never-in-browser";
 /** FE-6A.2 correction: the harness's minimal LDAP responder (cmd/ldapstub) —
  * the directory an ENABLED LDAP profile must reach at the write boundary. */
 export const LDAP_STUB_URL =
