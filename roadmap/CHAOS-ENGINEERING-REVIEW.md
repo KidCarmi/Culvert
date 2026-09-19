@@ -127,6 +127,13 @@ the evidence column named the property that makes all seven reachable, and the
 verdict looked past it. Re-scored **H** and split. See §35, rows CA-6/CA-6b and
 OCSP-1…OCSP-10, and `docs/operator/ocsp-revocation-checking.md`.
 
+**2026-09-19 — CHAOS-66 sweep (the session revocation plane). ID CLAIMED BEFORE ANY CODE
+WAS WRITTEN,** as the header above recommends after ten collisions and as the CHAOS-65 sweep
+first did. This row is commit one of the sweep; nothing else had been written when it landed.
+Scope: the one mechanism in Culvert that can withdraw authority from a session that is already
+issued — `internal/session`'s `RevocationList`, its persistence, its CP↔DP gossip, and the two
+admin actions that reach it. Findings and outcome are recorded in §36 when the sweep completes.
+
 **2026-09-02 — CHAOS-58 sweep (the directory that accepts and then stops answering).**
 CHAOS-47 solved the *unreachable* directory: fail closed, arm a provider-wide cooldown, deny
 without dialing, recover on evidence. This sweep asked which faults can actually ARM that
