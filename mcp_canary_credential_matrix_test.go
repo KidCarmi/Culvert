@@ -510,3 +510,126 @@ func TestCredWall_NodeStatusSurfaceCannotReportActivationReasons(t *testing.T) {
 		t.Fatalf("%q must appear in the advertised prerequisite vocabulary", canary.ReasonCredentialPathRequired)
 	}
 }
+
+// activationFactFieldNames returns the canary.Facts FIELD names that are ACTIVATION-level,
+// derived from exported evaluator behaviour exactly as derivedActivationReasons derives the
+// reasons: flip one fact false, and the field is activation-level when Evaluate reports its
+// reason and EvaluateNode does not. Nothing is hard-coded, so a new row is classified the moment
+// it is declared.
+func activationFactFieldNames(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	base := credAllTrueFacts()
+	ty := reflect.ValueOf(&base).Elem().Type()
+	for i := range ty.NumField() {
+		name := ty.Field(i).Name
+		if ty.Field(i).Type.Kind() != reflect.Bool || name == "CapabilityGateway" {
+			continue
+		}
+		f := credAllTrueFacts()
+		reflect.ValueOf(&f).Elem().Field(i).SetBool(false)
+		full := canary.Evaluate(f)
+		if len(full.Unmet) != 1 {
+			t.Fatalf("flipping %s must yield exactly one unmet reason, got %v", name, full.Unmet)
+		}
+		nodeSees := false
+		for _, r := range canary.EvaluateNode(f).Unmet {
+			if r == full.Unmet[0] {
+				nodeSees = true
+			}
+		}
+		if !nodeSees {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// TestCredWall_NoActivationFactPromisesNodeReadiness closes the class that campaign M19's gate
+// only closed at the STATUS SURFACE, and that a third review round found still open in the prose
+// (Codex P2, round 3).
+//
+// M19 pins that mcpCanaryStatus cannot REPORT an activation reason. It does not stop the code
+// from CLAIMING otherwise, and the claim was everywhere: "a revoked or expired promotion / a
+// policy change that removes the permit / a credential profile ADDED after activation must be
+// able to make a node un-ready" appeared on THREE canary.Facts fields, in the matrix row, in the
+// operator ledger, and in three test comments. Every one of those facts is a factActivation row
+// that EvaluateNode excludes, so none of them can make the NODE surface un-ready — `node_ready`
+// is a literal field on that surface, which is what makes the phrasing a claim rather than loose
+// wording.
+//
+// THE ROUND-2 SWEEP MISSED THEM BECAUSE IT SEARCHED FOR THE PHRASING, NOT THE PROPOSITION.
+// It grepped "next read" and "readiness row reports"; these sites say "make a node un-ready", so
+// they did not match. The rule to carry forward: when a review names one instance, search for the
+// CLAIM the instance makes, not the words it happens to use.
+//
+// The gate derives the activation set from exported behaviour and reads the real source, so a
+// future field that copies the formula fails the build rather than shipping a fourth instance.
+func TestCredWall_NoActivationFactPromisesNodeReadiness(t *testing.T) {
+	src := filepath.Join(pkgSourceDir(), "internal", "mcp", "canary", "readiness.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, src, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse %s: %v", src, err)
+	}
+
+	activation := activationFactFieldNames(t)
+	if len(activation) == 0 {
+		t.Fatal("derived activation set is EMPTY: EvaluateNode no longer excludes activation facts, " +
+			"so this gate would inspect nothing. Re-derive the boundary before trusting it.")
+	}
+
+	// nodeReadyPromise matches the claim, in either order, so a reworded copy is still caught.
+	nodeReadyPromise := regexp.MustCompile(`(?i)(node\s+un-?ready|un-?ready\s+node)`)
+
+	checked, flagged := 0, 0
+	ast.Inspect(file, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != "Facts" {
+			return true
+		}
+		st, ok := ts.Type.(*ast.StructType)
+		if !ok {
+			return false
+		}
+		for _, fld := range st.Fields.List {
+			if fld.Doc == nil || len(fld.Names) == 0 {
+				continue
+			}
+			name := fld.Names[0].Name
+			if !activation[name] {
+				continue // node-level fields may legitimately speak of node readiness
+			}
+			checked++
+			if nodeReadyPromise.MatchString(fld.Doc.Text()) {
+				flagged++
+				t.Errorf("canary.Facts.%s is an ACTIVATION-level fact, but its doc promises NODE "+
+					"readiness. EvaluateNode excludes every activation row, so no status read can "+
+					"report it. Say it refuses the next FULL ACTIVATION PREFLIGHT instead.", name)
+			}
+		}
+		return false
+	})
+
+	if checked == 0 {
+		t.Fatal("inspected NO documented activation fields — the Facts struct moved or lost its " +
+			"doc comments, so this gate is passing by seeing nothing.")
+	}
+	_ = flagged
+}
+
+// TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness is the CONTROL for the gate above.
+// The cheapest way to pass that gate is to ban the phrase outright, which would be wrong: a
+// NODE-level prerequisite genuinely does make the node un-ready, and RollbackCoordinatorRehearsed
+// says exactly that. A gate that cannot tell the two apart is a spell-checker, not a wall.
+func TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness(t *testing.T) {
+	activation := activationFactFieldNames(t)
+	if activation["RollbackCoordinatorRehearsed"] {
+		t.Fatal("premise moved: RollbackCoordinatorRehearsed is no longer NODE-level, so it can no " +
+			"longer serve as the control for the activation-only ban.")
+	}
+	if !activation["FirstCanaryCredentialFree"] {
+		t.Fatal("premise moved: FirstCanaryCredentialFree must be ACTIVATION-level; if it is not, " +
+			"the ban above applies to nothing this PR added.")
+	}
+}

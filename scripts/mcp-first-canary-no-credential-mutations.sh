@@ -356,6 +356,18 @@ run_mutation M19 \
   'TestCredWall_NodeStatusSurfaceCannotReportActivationReasons' . "$READINESS" \
   's/if nodeOnly \&\& c.scope == factActivation {/if false \&\& nodeOnly \&\& c.scope == factActivation {/'
 
+# M20 — THE CLAIM SURVIVES THE FIX. M19 stops the status surface from REPORTING an activation
+# reason; it does not stop the code from CLAIMING otherwise, and round 3 found the claim in EIGHT
+# places (three canary.Facts fields, the matrix row, the operator ledger, three test comments) —
+# every one a factActivation row EvaluateNode excludes. The round-2 sweep missed them because it
+# grepped the PHRASING ("next read") rather than the PROPOSITION ("make a node un-ready"). The gate
+# derives the activation set from exported behaviour and reads the real source, so a fourth copy
+# fails the build.
+run_mutation M20 \
+  "an activation fact's doc promises NODE readiness it cannot deliver" \
+  'TestCredWall_NoActivationFactPromisesNodeReadiness' . "$READINESS" \
+  's/after activation must be able to make the next FULL ACTIVATION PREFLIGHT refuse/after activation must be able to make a node un-ready, which a frozen copy cannot express/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then

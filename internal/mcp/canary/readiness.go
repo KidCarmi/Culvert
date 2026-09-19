@@ -183,14 +183,18 @@ type Facts struct {
 	// fingerprint+format being bound, reached through the governed promotion lifecycle. It is
 	// LIVE governance state, deliberately re-observed at each evaluation and never copied into
 	// the activation's immutable reviewed snapshot: a revoked or expired promotion must be able
-	// to make a node un-ready, which a frozen copy could not express. See ReasonToolNotCatalogUsable.
+	// to make the next FULL ACTIVATION PREFLIGHT refuse (Evaluate -> Ready:false), which a frozen
+	// copy could not express. NOT "un-ready" on the NODE surface — this is a factActivation row,
+	// so EvaluateNode excludes it and mcpCanaryStatus can never report it.
+	// See ReasonToolNotCatalogUsable.
 	ToolCatalogUsable bool
 	// ExactPolicyPermit — the EXACT First-Canary decision tuple, evaluated by the REAL shared
 	// policy engine against the CURRENT snapshot, is a plain executable ALLOW with satisfiable
 	// obligations and a verdict invariant over every unbound field. Like ToolCatalogUsable it is
 	// LIVE governance state, re-observed at each evaluation and never copied into the
 	// activation's immutable reviewed snapshot: a policy change that removes the permit must be
-	// able to make a node un-ready, which a frozen copy could not express.
+	// able to make the next FULL ACTIVATION PREFLIGHT refuse (Evaluate -> Ready:false), which a
+	// frozen copy could not express. NOT "un-ready" on the NODE surface — factActivation again.
 	// See ReasonExactPolicyNotExecutable and EvaluateExactPermit.
 	ExactPolicyPermit bool
 	// FirstCanaryCredentialFree — every authoritative credential statement for the exact
@@ -198,8 +202,11 @@ type Facts struct {
 	// no materialization, no provider access and can send no Authorization header. Like
 	// ExactPolicyPermit it is LIVE state, re-observed at each evaluation and never copied into
 	// the activation's immutable reviewed snapshot: a credential profile ADDED to the server
-	// after activation must be able to make a node un-ready, which a frozen copy could not
-	// express. See ReasonCredentialPathRequired and EvaluateCredentialFree.
+	// after activation must be able to make the next FULL ACTIVATION PREFLIGHT refuse
+	// (Evaluate -> Ready:false), which a frozen copy could not express. NOT "un-ready" on the
+	// NODE surface — factActivation again, so the drift is caught at the next transition or
+	// restart and NOT on a status read (§25d).
+	// See ReasonCredentialPathRequired and EvaluateCredentialFree.
 	FirstCanaryCredentialFree bool
 	RollbackPathHealthy       bool // the persist/restore rollback MECHANICS were executably rehearsed
 	// RollbackCoordinatorRehearsed — the AUTHORITATIVE rollback path was rehearsed through the real

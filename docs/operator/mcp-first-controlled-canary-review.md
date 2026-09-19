@@ -2447,7 +2447,8 @@ safely serve this role, and re-derivation showed it already does: it is exact-fi
 against a rug-pull, it demotes on revocation, and its reconcile re-derives from the durable store, so
 the only thing missing was that the activation gate never asked. And it did not persist usability
 into the activation's immutable reviewed snapshot: a revoked or expired promotion must be able to
-make a node un-ready, which a frozen copy could not express.
+make the next FULL ACTIVATION PREFLIGHT refuse, which a frozen copy could not express. (NOT
+"un-ready" on the node surface — `EvaluateNode` excludes every activation row; see §25d.)
 
 **A removal that was WRONG, and the correction.** The first shape of the resolver cross-checked the
 catalog record's digest and format against `loadTarget`'s re-read. That check was deleted mid-PR on
@@ -2837,8 +2838,7 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **19 caught, 0 survived,
-0 skipped**, measured on `7dbc661c`. M14 is the anti-vacuity mutation: a
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **CAMPAIGN_RESULT**. M14 is the anti-vacuity mutation: a
 constant-false resolver passes every negative gate while making the First Canary permanently
 impossible, and is rejected by a POSITIVE control rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
 `mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
@@ -2869,6 +2869,24 @@ rows; the gate fails in BOTH directions (the derived activation set going empty,
 reporting an activation reason), because checking only "no activation reason appears" would pass
 VACUOUSLY under exactly that mutation — the derived set would be empty and the check would inspect
 nothing.
+
+M20 covers the THIRD review-found defect, and it is the same lesson one level up. M19 stops the
+status surface from REPORTING an activation reason; it does not stop the code from CLAIMING
+otherwise — and round 3 found the claim in EIGHT places: three `canary.Facts` field comments
+(`ToolCatalogUsable`, `ExactPolicyPermit`, `FirstCanaryCredentialFree`), matrix row 21, this
+document's catalog-usable paragraph, and three test comments. Every one of those is a
+`factActivation` row `EvaluateNode` excludes, so none can make the NODE surface un-ready; `node_ready`
+is a literal field on that surface, which is what makes the wording a claim rather than loose prose.
+
+**THE ROUND-2 SWEEP MISSED THEM BECAUSE IT SEARCHED FOR THE PHRASING, NOT THE PROPOSITION.** It
+grepped `next read` and `readiness row reports`; these sites say *"must be able to make a node
+un-ready"*, so they did not match — one formula, written once and copied. The rule to carry
+forward: **when a review names one instance, search for the CLAIM it makes, not the words it
+happens to use.** `TestCredWall_NoActivationFactPromisesNodeReadiness` derives the activation set
+from exported behaviour and AST-reads the real `Facts` doc comments, with
+`TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness` as its CONTROL — a node-level
+prerequisite genuinely does make the node un-ready, and a gate that banned the phrase outright
+would be a spell-checker rather than a wall.
 
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN

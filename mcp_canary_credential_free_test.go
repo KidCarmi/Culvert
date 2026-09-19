@@ -535,10 +535,15 @@ func TestCredDrift_CredentialChangeBreaksTheReviewedBinding(t *testing.T) {
 
 // TestCredDrift_ReadinessIsReEvaluatedNotFrozen pins that the credential fact is LIVE state.
 //
-// A credential profile added to the server AFTER activation must be able to make the node
-// un-ready. If the fact were copied into the activation's immutable reviewed snapshot — which is
-// the natural way to implement "the reviewed target needs no credential" — a post-activation
-// credential requirement would be invisible for the life of the Canary.
+// A credential profile added to the server AFTER activation must be able to make the next FULL
+// ACTIVATION PREFLIGHT refuse. If the fact were copied into the activation's immutable reviewed
+// snapshot — which is the natural way to implement "the reviewed target needs no credential" — a
+// post-activation credential requirement would be invisible for the life of the Canary.
+//
+// What this pins is that the FACT is live. It says NOTHING about which read surface exposes it,
+// and the node status surface does not: EvaluateNode excludes every activation row. Reading more
+// than that out of this gate is exactly the round-2 defect (§25d);
+// TestCredWall_NoActivationFactPromisesNodeReadiness holds that boundary.
 func TestCredDrift_ReadinessIsReEvaluatedNotFrozen(t *testing.T) {
 	free := newCredRig(t, "")
 	before := productionCanaryActivationInputs(rollout.CapabilityGateway, free.scope(), 1)
@@ -549,8 +554,8 @@ func TestCredDrift_ReadinessIsReEvaluatedNotFrozen(t *testing.T) {
 	after := productionCanaryActivationInputs(rollout.CapabilityGateway, bound.scope(), 1)
 	if after.FirstCanaryCredentialFree {
 		t.Fatal("SECURITY: the credential fact did not re-observe authoritative state. A credential " +
-			"requirement that appears after activation must be able to make the node un-ready; a " +
-			"value frozen into the reviewed snapshot could never express that.")
+			"requirement that appears after activation must be able to make the next activation " +
+			"preflight refuse; a value frozen into the reviewed snapshot could never express that.")
 	}
 }
 

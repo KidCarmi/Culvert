@@ -158,8 +158,10 @@ func TestCredZeroUse_CanonicalPathNeverTouchesTheCredentialMachinery(t *testing.
 //
 // What that can and cannot cause is the precise claim: credential PLANNING can be entered (a
 // metadata-only Broker.Plan against an empty profile store, which fails), while MATERIALIZATION,
-// PROVIDER ACCESS and an AUTHORIZATION HEADER cannot — asserted below. The readiness row then
-// reports the node un-ready on the next read, because the credential fact is live state.
+// PROVIDER ACCESS and an AUTHORIZATION HEADER cannot — asserted below. The credential fact is
+// LIVE state, so the next FULL ACTIVATION PREFLIGHT refuses — but NOT the node status read, which
+// reports EvaluateNode and excludes every activation row (§25d;
+// TestCredWall_NoActivationFactPromisesNodeReadiness).
 //
 // It is the defense-in-depth half of the readiness fact: even if a credential-requiring
 // experiment somehow reached execution, no request escapes unauthenticated. And it is what makes
