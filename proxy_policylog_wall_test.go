@@ -85,9 +85,9 @@ var policyLineReadCalls = map[string]bool{
 	"String": true,
 }
 
-func parsePolicyEmitters(t *testing.T) (*token.FileSet, map[string]*ast.FuncDecl) {
+func parsePolicyEmitters(t *testing.T) (fset *token.FileSet, emitters map[string]*ast.FuncDecl) {
 	t.Helper()
-	fset := token.NewFileSet()
+	fset = token.NewFileSet()
 	file, err := parser.ParseFile(fset, "proxy.go", nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse proxy.go: %v", err)
@@ -160,6 +160,50 @@ func appendCallName(call *ast.CallExpr) (string, bool) {
 	return "", false
 }
 
+// classifyAppendedArg checks ONE argument of one append-style call.
+//
+// Split out of the wall itself so the rule is readable as a list of the shapes
+// an appended value is allowed to take, rather than as a nest of type switches
+// inside two ast.Inspect closures.
+func classifyAppendedArg(t *testing.T, fset *token.FileSet, emitter, callee string, call *ast.CallExpr, arg ast.Expr, safe map[string]bool) {
+	t.Helper()
+	switch a := arg.(type) {
+	case *ast.BasicLit:
+		// A literal is the emitter's own template text.
+	case *ast.UnaryExpr:
+		// &b — the builder being threaded through.
+	case *ast.Ident:
+		switch {
+		case safe[a.Name]:
+		case policyLineSafeBare[a.Name] != "":
+		case a.Name == "b" || a.Name == "priority":
+			// The builder itself, and the one non-string value a line carries.
+		default:
+			t.Errorf("%s at %s: %s(%s) appends %q, which is neither sanitizeLog'd nor "+
+				"listed in policyLineSafeBare. A client-chosen byte reaching the process "+
+				"log forges records (CWE-117). Wrap it in sanitizeLog, or add it to "+
+				"policyLineSafeBare WITH the reason it cannot be client-chosen.",
+				emitter, fset.Position(call.Pos()), callee, a.Name, a.Name)
+		}
+	case *ast.CallExpr:
+		if isSanitizeLogCall(a) {
+			return
+		}
+		// b.String() feeding emitPolicyLine is the assembled line; every byte
+		// in it was already checked on the way in.
+		if sel, ok := a.Fun.(*ast.SelectorExpr); ok && policyLineReadCalls[sel.Sel.Name] {
+			return
+		}
+		t.Errorf("%s at %s: %s appends the result of a call that is not sanitizeLog; "+
+			"if it can carry client-chosen bytes it must be sanitised.",
+			emitter, fset.Position(call.Pos()), callee)
+	default:
+		t.Errorf("%s at %s: %s appends an expression the wall cannot classify (%T). "+
+			"Either simplify it or teach the wall about it deliberately.",
+			emitter, fset.Position(call.Pos()), callee, arg)
+	}
+}
+
 // TestPolicyLine_EveryAppendedValueIsSanitised is the wall itself.
 func TestPolicyLine_EveryAppendedValueIsSanitised(t *testing.T) {
 	fset, emitters := parsePolicyEmitters(t)
@@ -179,43 +223,7 @@ func TestPolicyLine_EveryAppendedValueIsSanitised(t *testing.T) {
 			}
 			for _, arg := range call.Args {
 				checked++
-				switch a := arg.(type) {
-				case *ast.BasicLit:
-					// A literal is the emitter's own template text.
-				case *ast.Ident:
-					if safe[a.Name] {
-						continue
-					}
-					if _, ok := policyLineSafeBare[a.Name]; ok {
-						continue
-					}
-					// The builder itself and non-string locals are not values.
-					if a.Name == "b" || a.Name == "priority" {
-						continue
-					}
-					t.Errorf("%s at %s: %s(%s) appends %q, which is neither sanitizeLog'd nor "+
-						"listed in policyLineSafeBare. A client-chosen byte reaching the process "+
-						"log forges records (CWE-117). Wrap it in sanitizeLog, or add it to "+
-						"policyLineSafeBare WITH the reason it cannot be client-chosen.",
-						name, fset.Position(call.Pos()), callee, a.Name, a.Name)
-				case *ast.UnaryExpr:
-					// &b — the builder being threaded through.
-				case *ast.CallExpr:
-					if isSanitizeLogCall(a) {
-						continue
-					}
-					// b.String() feeding emitPolicyLine is the assembled line.
-					if sel, ok := a.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "String" {
-						continue
-					}
-					t.Errorf("%s at %s: %s appends the result of a call that is not sanitizeLog; "+
-						"if it can carry client-chosen bytes it must be sanitised.",
-						name, fset.Position(call.Pos()), callee)
-				default:
-					t.Errorf("%s at %s: %s appends an expression the wall cannot classify (%T). "+
-						"Either simplify it or teach the wall about it deliberately.",
-						name, fset.Position(call.Pos()), callee, arg)
-				}
+				classifyAppendedArg(t, fset, name, callee, call, arg, safe)
 			}
 			return true
 		})

@@ -153,6 +153,7 @@ func TestPolicyDecisionLine_AllBranchesMatchFmt(t *testing.T) {
 // value at once, so a builder that wrote the right bytes into the wrong slot
 // is caught as well as one that escaped a byte wrongly.
 func TestPolicyDecisionLine_RandomizedDifferential(t *testing.T) {
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
 	rng := rand.New(rand.NewSource(20260919))
 	pick := func() string { return plDivergenceShapes[rng.Intn(len(plDivergenceShapes))] }
 	randomBytes := func() string {
@@ -247,6 +248,7 @@ func TestPolicyDecisionLine_QuotableAsIsIsSound(t *testing.T) {
 	for _, s := range plDivergenceShapes {
 		check(s)
 	}
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
 	rng := rand.New(rand.NewSource(7))
 	for i := 0; i < 20000; i++ {
 		b := make([]byte, rng.Intn(16))
