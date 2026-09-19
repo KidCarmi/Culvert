@@ -31,6 +31,7 @@ package main
 // D01/D02 fail on 8960ab53 (published A, peer B); D03–D05 pass there and
 // must keep passing.
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -212,10 +213,16 @@ func TestFE6B1D_D03_Control_HTTP2IsNegotiatedOnTheCustomPairListener(t *testing.
 	_, addr, stop := fe6b1cServeA(t, mux)
 	defer stop()
 
-	d := &net.Dialer{Timeout: 3 * time.Second}
-	conn, err := tls.DialWithDialer(d, "tcp", addr, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2", "http/1.1"}}) //nolint:gosec // test peer read
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	td := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second}, Config: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2", "http/1.1"}}} //nolint:gosec // test peer read
+	rawConn, err := td.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		t.Fatalf("tls dial: %v", err)
+	}
+	conn, ok := rawConn.(*tls.Conn)
+	if !ok {
+		t.Fatalf("not a TLS connection: %T", rawConn)
 	}
 	proto := conn.ConnectionState().NegotiatedProtocol
 	_ = conn.Close()
@@ -225,7 +232,11 @@ func TestFE6B1D_D03_Control_HTTP2IsNegotiatedOnTheCustomPairListener(t *testing.
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, ForceAttemptHTTP2: true} //nolint:gosec // test client
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
-	resp, err := client.Get("https://" + addr + "/probe")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/probe", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET /probe: %v", err)
 	}
@@ -275,7 +286,7 @@ func TestFE6B1D_D05_Control_BrokenPairFailsBeforeBindAndRecordsNothing(t *testin
 		t.Fatalf("a failed validation must record no evidence, got %+v", rec)
 	}
 	// Nothing bound: the port is free again for an immediate re-bind.
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatalf("the port stayed bound after a validation failure: %v", err)
 	}
