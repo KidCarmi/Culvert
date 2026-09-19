@@ -650,9 +650,8 @@ var nodeReadyScanExcluded = []struct {
 // Matching by SPAN makes an entry permit exactly the claim it quotes. A second claim elsewhere on
 // the line produces a match outside every needle occurrence and is flagged. That is structural: it
 // no longer depends on an author choosing a tight needle.
-func allowlistCoversEveryClaim(rel, line string) (bool, []string) {
+func allowlistCoversEveryClaim(rel, line string) (allowed bool, hits []string) {
 	var spans [][2]int
-	var hits []string
 	for _, a := range nodeReadyMentionAllowed {
 		if a.file != rel || a.needle == "" {
 			continue
