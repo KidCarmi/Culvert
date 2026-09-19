@@ -504,6 +504,11 @@ run_mutation M27 \
   'TestCredWall_LedgerCountsItsOwnQuotationPermissions' . "$OPERDOC" \
   's/\*\*6 allowlist entries name ledger lines\*\*/**3 allowlist entries name ledger lines**/'
 
+# NOTE ON PAYLOAD DURABILITY (learned twice: M24 in round 7, M28 in round 9). A payload that
+# hardcodes the CURRENT text of a document stops applying the moment that document changes, and a
+# mutation that does not apply scores SKIPPED — which proves nothing while looking like progress.
+# Ledger payloads below therefore match the SHAPE (\d+) rather than today's value.
+#
 # M28 — THE ROUND TOTAL DRIFTS FROM THE ROUNDS THE SECTION DISCUSSES. §25d's summary states how
 # many review rounds produced the defect classes. Codex round 8 found it saying "Five" while the
 # paragraphs above it already recorded rounds 6 and 7 — a narrative number nobody derives drifts the
@@ -512,7 +517,7 @@ run_mutation M27 \
 run_mutation M28 \
   "the ledger's review-round total drifts from the rounds it discusses" \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
-  's/\*\*8 rounds, one defect shape\.\*\*/**5 rounds, one defect shape.**/'
+  's/\*\*\d+ rounds, one defect shape\.\*\*/**1 rounds, one defect shape.**/'
 
 # M29 — A ROUND VANISHES FROM THE ENUMERATION AND THE TOTAL STILL LOOKS RIGHT. §25d's round total
 # is checked against its own structured list. The FIRST version of that gate compared the total to
@@ -530,7 +535,7 @@ run_mutation M29 \
 run_mutation M30 \
   "the ledger states a campaign size the script does not run" \
   'TestCredWall_LedgerStatesTheCampaignSize' . "$OPERDOC" \
-  's/ — 28 mutations, \*\*28 caught/ — 26 mutations, **28 caught/'
+  's/mutations\.sh` — \d+ mutations/mutations.sh` — 999 mutations/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
