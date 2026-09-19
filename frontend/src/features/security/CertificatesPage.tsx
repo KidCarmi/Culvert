@@ -33,9 +33,14 @@
 //   - bounded classes and refusal codes only — the server's detail lines,
 //     raw transport errors and filesystem paths never reach the DOM.
 //
-// NO mutation exists here (upload, import, rotate, challenge, delete, OCSP
-// toggle, repair, retry, re-send belong to FE-6B.2) and no disabled
-// placeholder stands in for one. Nothing is persisted in the browser.
+// FE-6B.2 adds the ADMIN mutation controls (rotate through the bound
+// challenge, import / replace with the dry-run review, the typed delete, the
+// OCSP posture set) through useCertMutations (certWrites.tsx): every write
+// is fenced on the reviewed server-owned revision, identified by a marker
+// written before dispatch, verified action-bound, recovered only through
+// the authoritative lookup, and never retried automatically. Below admin no
+// mutation control renders. The only thing persisted in the browser is the
+// single NON-SECRET recovery marker (certRecovery.ts).
 // The admin operation lookup is issued ONLY on an explicit "Look up": the
 // backend GET is not a pure read (it may settle a pending intent from the
 // object's own evidence and complete its owed audit once), so it is never
@@ -99,6 +104,8 @@ import type {
 } from "../../api/certificates";
 import policyStyles from "../policy/policy.module.css";
 import styles from "../diagnostics/diagnostics.module.css";
+import { useCertMutations } from "./certWrites";
+import type { CertMutations } from "./certWrites";
 
 const TABS = ["Certificates", "CA Management"] as const;
 type Tab = (typeof TABS)[number];
@@ -167,10 +174,13 @@ function InspectionCASection({
   inv,
   status,
   download,
+  writes,
 }: {
   inv: ReadView<CertificateInventory>;
   status: ReadView<CAStatus>;
   download: { run: () => void; busy: boolean; error: string };
+  /** admin only: the FE-6B.2 mutation controls */
+  writes: CertMutations | null;
 }): JSX.Element {
   const ca = inv.data?.ca;
   return (
@@ -183,6 +193,25 @@ function InspectionCASection({
             <Button size="sm" onClick={download.run} disabled={download.busy}>
               Download CA certificate (PEM)
             </Button>
+          )}
+          {writes !== null && (
+            <>
+              <Button
+                size="sm"
+                variant="danger-quiet"
+                onClick={writes.open.rotate}
+                disabled={writes.blocked || !writes.can.rotate}
+              >
+                Rotate Root CA…
+              </Button>
+              <Button
+                size="sm"
+                onClick={writes.open.importCA}
+                disabled={writes.blocked}
+              >
+                Import CA…
+              </Button>
+            </>
           )}
         </>
       }
@@ -639,15 +668,44 @@ function crossCheck(
 function UICertCard({
   inv,
   listener,
+  writes,
 }: {
   inv: CertificateInventory;
   listener: ReadView<ListenerFacts>;
+  /** admin only: the FE-6B.2 mutation controls */
+  writes: CertMutations | null;
 }): JSX.Element {
   const ui = inv.uiCert;
   const check = crossCheck(inv, listener);
   const posture = activationPosture(inv);
   return (
-    <Card title="UI listener certificate" actions={<NodeLocal />}>
+    <Card
+      title="UI listener certificate"
+      actions={
+        <>
+          <NodeLocal />
+          {writes !== null && (
+            <>
+              <Button
+                size="sm"
+                onClick={writes.open.replaceUI}
+                disabled={writes.blocked}
+              >
+                Replace UI certificate…
+              </Button>
+              <Button
+                size="sm"
+                variant="danger-quiet"
+                onClick={writes.open.deleteUI}
+                disabled={writes.blocked || !writes.can.deleteUI}
+              >
+                Delete UI certificate…
+              </Button>
+            </>
+          )}
+        </>
+      }
+    >
       {check.kind === "contradiction" && (
         <Callout variant="critical" title="Contradictory listener facts">
           {check.text}
@@ -1379,6 +1437,17 @@ export function CertificatesPage(): JSX.Element {
   const refreshAll = (): void => {
     for (const q of all) void q.refetch();
   };
+  // FE-6B.2: the admin mutation surfaces. The hook is unconditional (rules of
+  // hooks); below admin it renders nothing and offers nothing.
+  const subject = state.phase === "authenticated" ? state.user : "";
+  const mutations = useCertMutations({
+    subject,
+    isAdmin,
+    inv: inv.data,
+    ocsp: ocsp.data,
+    refreshAll,
+  });
+  const writes = isAdmin ? mutations : null;
 
   // PEM download (viewer GET of the PUBLIC root certificate).
   const downloads = useRef(createDownloadOwner());
@@ -1460,8 +1529,10 @@ export function CertificatesPage(): JSX.Element {
         />
       </div>
 
+      {writes?.dialog}
       {tab === "Certificates" && (
         <div className={styles.stack}>
+          {writes?.notices}
           <InspectionCASection
             inv={{ data: inv.data, error: inv.error, loading: inv.isLoading }}
             status={caStatusView}
@@ -1470,12 +1541,33 @@ export function CertificatesPage(): JSX.Element {
               busy: downloading,
               error: downloadError,
             }}
+            writes={writes}
           />
           {inv.data !== undefined && (
             <>
-              <UICertCard inv={inv.data} listener={listenerView} />
+              <UICertCard
+                inv={inv.data}
+                listener={listenerView}
+                writes={writes}
+              />
               <MTLSCard m={inv.data.mtlsClientCert} />
-              <Card title="OCSP posture" actions={<NodeLocal />}>
+              <Card
+                title="OCSP posture"
+                actions={
+                  <>
+                    <NodeLocal />
+                    {writes !== null && (
+                      <Button
+                        size="sm"
+                        onClick={writes.open.ocsp}
+                        disabled={writes.blocked}
+                      >
+                        Set OCSP posture…
+                      </Button>
+                    )}
+                  </>
+                }
+              >
                 <OCSPPostureFacts o={inv.data.ocsp} />
               </Card>
               <LedgerCard inv={inv.data} />
