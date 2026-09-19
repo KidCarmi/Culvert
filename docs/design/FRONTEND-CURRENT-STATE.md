@@ -41,7 +41,7 @@
   deep link; viewer read from uiRoutes evidence, the operation lookup admin-only and issued only
   on an explicit Look up); persisted vs active vs durability, the four pair-evidence classes, OCSP
   desired vs runtime and every ledger state render as the server states them (superseded =
-  terminal UNKNOWN). Every certificate MUTATION stays on the legacy console until FE-6B.2. The
+  terminal UNKNOWN). The certificate MUTATIONS migrated in FE-6B.2 (below). The
   recorded IA discrepancy (Platform/admin vs shipped Security/viewer) is in the FE-6B.1 record.
   FE-6B.1 correction round (record 6B1C): the `uiCert.active` truth gap is CLOSED at the source —
   the admin listener's bind evidence (`ui_listener_evidence.go`: state, bounded posture, served
@@ -53,6 +53,13 @@
   loaded once and `ServeTLS` reads no files), and a committed result whose facts contradict the
   frozen schemas (false durability, foreign target, bad cleanup/activation, foreign candidate) is
   refused whole.
+  FE-6B.2 (record 6B2): the admin MUTATIONS — rotate through the server-issued challenge (typed
+  `ROTATE`), import / UI replace with the `?dryRun=1` review and T2 impact copy, the T3 typed UI
+  delete stating persisted AND served identities, the OCSP posture set — through
+  `src/api/certificates.ts` (write client; action-bound 2xx or UNPROVEN; the pair as byte-exact
+  file parts), `features/security/certRecovery.ts` (the single non-secret subject-bound recovery
+  marker written before dispatch) and `features/security/certWrites.tsx` (ceremonies, the
+  UNPROVEN latch, Recover / Re-send-after-404 / typed Abandon). Cache-clear stays legacy.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`
   (per-feature matrix), `FRONTEND-SECURITY-CONTRACT.md` (invariants),
   `FRONTEND-MIGRATION-PLAN.md` (program)
