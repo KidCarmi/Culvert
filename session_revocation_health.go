@@ -141,9 +141,18 @@ func resetSessionRevocationHealthForTest() {
 //     undone by the next restart. It is a warn and not a fail because it is a
 //     deliberate configuration, and because it is harmless on the one posture
 //     where the signing key is also per-restart (every cookie breaks anyway).
-//     The message names the coupling, since the shipped docker-compose sets
-//     CULVERT_SESSION_SECRET — a stable key is what makes a non-durable
-//     revocation list dangerous.
+//     The message names the coupling — a stable key is what makes a
+//     non-durable revocation list dangerous.
+//
+// WORDING CONSTRAINT: /api/diagnostics is viewer-reachable and is walled
+// against echoing secret names and raw filesystem paths
+// (TestApiDiagnostics_NoSensitiveValues). So these strings must not contain a
+// "/data/" path or the session-secret environment variable's name, however
+// natural it is to spell the remedy that way — the substance goes in the
+// runbook instead. The first draft of this row named both and tripped that
+// wall, which is itself order-dependent (it only fires when this row reaches
+// its warn branch), so TestChaos66_ContractRowNeverEchoesSensitiveTokens
+// drives every branch deterministically.
 //   - otherwise → OK, naming the live counts so an operator can tell a node
 //     that is enforcing revocations from one that merely has the file.
 func checkSessionRevocation() OperatorContractCheck {
@@ -173,7 +182,7 @@ func checkSessionRevocation() OperatorContractCheck {
 			Status: diagWarn,
 			Message: fmt.Sprintf("session revocations are not persisted (no revocations file configured) — the %d token and %d account revocation(s) in force are lost on restart",
 				tokens, users),
-			OperatorAction: "Set -revocations-file (e.g. /data/revocations.json) so logouts and deleted accounts stay revoked across restarts. This matters whenever the session signing key is stable (CULVERT_SESSION_SECRET / session_secret, which every clustered deployment sets): a stable key means a cookie outlives the restart that discards its revocation.",
+			OperatorAction: "Set the -revocations-file flag so logouts and deleted accounts stay revoked across restarts; see docs/operator/session-revocation.md. This matters most when the admin session signing key is configured rather than generated per restart — which every clustered deployment does — because a stable key means a cookie outlives the restart that discards its revocation.",
 		}
 	}
 	return OperatorContractCheck{

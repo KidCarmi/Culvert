@@ -309,3 +309,51 @@ func TestChaos66_SyncRevocationsWiresBothDirections(t *testing.T) {
 		}
 	}
 }
+
+// The session_revocation row is viewer-reachable through /api/diagnostics,
+// which is walled against echoing secret names and raw filesystem paths
+// (TestApiDiagnostics_NoSensitiveValues). That wall only fires when this row
+// happens to be in its warn branch, so whether it catches a regression depends
+// on test ORDER — the first draft of this row named both a /data/ path and the
+// session-secret environment variable and passed the unshuffled suite.
+//
+// This gate drives every branch of the row deterministically and applies the
+// same forbidden list, so the order dependence cannot hide a leak here again.
+func TestChaos66_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
+	forbidden := []string{"sessionSecret", "CULVERT_SESSION_SECRET", "-----BEGIN", "/data/"}
+
+	branches := []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"unconfigured", func(*testing.T) {}},
+		{"healthy", func(t *testing.T) {
+			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+		}},
+		{"load-degraded", func(t *testing.T) {
+			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+			noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
+		}},
+		{"persist-failed", func(t *testing.T) {
+			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+			noteRevocationPersistFailure(os.ErrPermission)
+		}},
+	}
+
+	for _, b := range branches {
+		t.Run(b.name, func(t *testing.T) {
+			withChaos66Revocations(t)
+			b.setup(t)
+			row := checkSessionRevocation()
+			blob := row.Code + " " + row.Message + " " + row.OperatorAction
+			for _, needle := range forbidden {
+				if strings.Contains(blob, needle) {
+					t.Errorf("the %s branch leaks %q on a viewer-reachable surface: %q", b.name, needle, blob)
+				}
+			}
+			if row.Message == "" {
+				t.Error("branch produced an empty message")
+			}
+		})
+	}
+}
