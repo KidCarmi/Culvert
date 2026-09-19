@@ -180,6 +180,7 @@ func buildOperatorContract() OperatorContract {
 		checkOIDCJWKSTrust(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
+		checkRewriteIdentity(),
 	}
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
@@ -787,6 +788,38 @@ func checkUpstreamCredentials() OperatorContractCheck {
 		Message: fmt.Sprintf("%d parent prox(y/ies) require a credential to be set again (requiresReplacement) — restored from a backup that omits credentials by design; each stays ineligible and is never sent unauthenticated",
 			requiring),
 		OperatorAction: "For each affected entry in Network → Upstream Proxies, set the credential again (Replace credential, Tier-2) or clear it deliberately (Clear credential, Tier-3). Until then the effective mode is no_eligible_parent when no other parent is eligible — plain-HTTP egress is NOT chained. Backups never carry parent-proxy credentials and the node-local .upstream_cred_key is never restored.",
+	}
+}
+
+// checkRewriteIdentity reports whether the v2 rewrite-rule MANAGEMENT
+// identity is durable on this node (rewrite_identity.go). A corrupt
+// settings-owned rewrite slice, or a failed identity-migration/ledger write
+// at boot, latches rewriteIdentityDegradedState for the rest of the process
+// lifetime: traffic rewrite enforcement keeps running unchanged, but
+// /api/rewrite/state and every StableID-addressed mutation fail closed with
+// a structured 503 until the node is restarted with the underlying
+// persistence issue fixed.
+//
+// Before this check, the ONLY place that degradation surfaced was a WARN log
+// line at boot and the 503 an admin would hit by opening the Rewrite Rules
+// panel — every general-purpose status surface (dashboard, /healthz,
+// /readyz) reported green regardless. Memory-only read of the existing
+// atomic latch; issues no probe and triggers no retry.
+func checkRewriteIdentity() OperatorContractCheck {
+	d := rewriteIdentityDegraded()
+	if d == nil {
+		return OperatorContractCheck{
+			Code:    "rewrite_identity",
+			Status:  diagOK,
+			Message: "rewrite management identity is durable",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "rewrite_identity",
+		Status: diagWarn,
+		Message: fmt.Sprintf("rewrite-rule management identity is not durable on this node — %s (traffic rewrite enforcement is unaffected; Rewrite Rules management is refused until this is fixed)",
+			d.reason),
+		OperatorAction: "Fix the underlying settings-file/volume persistence issue and restart this node to re-establish durable rewrite-rule identity. There is no in-process retry: the Rewrite Rules panel (and its API) stays read-only-refused until then.",
 	}
 }
 
