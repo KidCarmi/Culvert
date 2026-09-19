@@ -3421,6 +3421,16 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/mcp/servers/refresh"
+    method: "POST"
+    handler: "apiMCPServerRefresh"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/mcp/tools"
     method: "GET"
     handler: "apiMCPTools"

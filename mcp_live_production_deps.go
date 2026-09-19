@@ -308,9 +308,17 @@ func newProductionUpstreamClient() (*upstreamclient.Client, error) {
 	// logical reservation consume the whole experiment, destroying the
 	// exactly-N-invocations witness invariant.
 	//
-	// Non-Canary behavior is untouched: nothing else constructs this client, and
-	// upstreamclient's RetryDefault mode still fills the historical retry budget for
-	// every other caller.
+	// Non-Canary behavior is untouched: upstreamclient's RetryDefault mode still fills
+	// the historical retry budget for every other caller.
+	//
+	// A SECOND caller now uses this constructor: the governed peer-refresh path
+	// (mcp_peer_refresh.go, blocker 11 §7), which needs the IDENTICAL transport
+	// guarantees — a freshness claim produced over a weaker transport is not a freshness
+	// claim. It builds its own client instance rather than sharing this one, because a
+	// refresh must work while the live tier is UNARMED and therefore uncomposed. The
+	// retry-free envelope is right for it too, for a different reason: a tools/list that
+	// fails must not be re-attempted into a peer that is by hypothesis already slow, and
+	// a failed observation simply does not advance freshness.
 	lim, lerr := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
 	if lerr != nil {
 		return nil, lerr
