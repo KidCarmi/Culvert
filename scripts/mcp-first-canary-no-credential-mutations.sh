@@ -514,6 +514,24 @@ run_mutation M28 \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
   's/\*\*8 rounds, one defect shape\.\*\*/**5 rounds, one defect shape.**/'
 
+# M29 — A ROUND VANISHES FROM THE ENUMERATION AND THE TOTAL STILL LOOKS RIGHT. §25d's round total
+# is checked against its own structured list. The FIRST version of that gate compared the total to
+# the largest "round N" numeral anywhere in the section, which a dropped entry would not shrink
+# (Codex round 9) — the section's own defect class, inside the gate added one round earlier to
+# close it. This mutation drops an entry and leaves the total alone.
+run_mutation M29 \
+  "a round entry vanishes from the enumeration while the total still reads 8" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/^- \*\*Round 4\*\* — the wall read ONE file.*?\n(?=- \*\*Round 5)//ms'
+
+# M30 — THE LEDGER'S CAMPAIGN SIZE DRIFTS FROM THE SCRIPT. A second paragraph used to carry its own
+# account of the campaign's growth and stopped at M21 while the script reached M28, so §25d gave two
+# incompatible histories of one thing. The size is stated once now and derived from the script.
+run_mutation M30 \
+  "the ledger states a campaign size the script does not run" \
+  'TestCredWall_LedgerStatesTheCampaignSize' . "$OPERDOC" \
+  's/ — 28 mutations, \*\*28 caught/ — 26 mutations, **28 caught/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then

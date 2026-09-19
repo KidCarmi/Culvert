@@ -2839,8 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 28 mutations, **28 caught,
-0 survived, 0 skipped**, measured on `786a7295` from a baseline the campaign verified itself.
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 30 mutations,
+**CAMPAIGN_RESULT_PENDING**.
 
 It took THREE runs on this round's code to get there, and the two discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
@@ -3090,12 +3090,39 @@ control on the assertion, not on a build error.
 hole a passing test suite could not, which is the entire reason the score is re-measured rather
 than carried forward.
 
-**8 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**The rounds, in order.** This list is the ENUMERATION the total below is checked against — both
+derive from it, so neither can drift from the other (Codex round 9: the previous gate compared the
+total to the largest `round N` numeral anywhere in the section, which a new entry headed differently
+would not move, and a deleted entry would not shrink).
+
+- **Round 1** — one stale matrix row reference reported; eight were present. Gated by M18.
+- **Round 2** — the ledger claimed an observability property of a surface that reports nothing of
+  the kind. Gated by M19.
+- **Round 3** — three sites reported; eight present, every one of them in a single polarity.
+  Gated by M20.
+- **Round 4** — the wall read ONE file while its record claimed six, and its control was vacuous.
+  Gated by M21.
+- **Round 5** — the wall was RED on the unmodified head, so the recorded score measured nothing;
+  and the claim stated POSITIVELY survived in five more places, plus a SEVENTH surface in root
+  production source. Gated by M22 and by `baseline_ok`.
+- **Round 6** — the `still` exemption swallowed a negated claim; quoted-means-cited was exempting
+  every Go STRING LITERAL; the directory axis was an unrecorded gap. Gated by M23 and M24.
+- **Round 7** — negating the exemption's own wording bypassed it; a needle permitted the WHOLE
+  LINE; two ledger counts were wrong, one measured with a probe file in the tree. Gated by M23,
+  M26 and M27.
+- **Round 8** — a count stated twice disagreed with itself while its gate stayed GREEN; the round
+  total was stale. Gated by M28.
+- **Round 9** — the round gate derived the total from the largest `round N` numeral in the
+  section rather than from its enumeration, so an added or deleted entry would not move it; and a
+  second paragraph carried its own account of the campaign's growth, stopping at M21 while the
+  script reached M28. Gated by M29 and M30.
+
+**9 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
 baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
 negation and a needle vs the line it sat on (round 7), and a gated number vs the same number stated
-again two lines away (round 8).
+again two lines away (round 8), and a gate that derived a count from prose beside it rather than from the list it claimed to check (round 9).
 
 The gates get stronger every round; what keeps failing is the accounting around them, so the
 discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no
@@ -3109,11 +3136,13 @@ comparing its total against the highest round the section actually discusses.
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
 > rather than caught: the mutation left a variable unused, the package did not build, and no gate
 > ran. A build failure proves nothing, so the mutation was corrected to compile and re-measured.
-> The campaign then grew five times — to 17, and once per review finding after that: M18 (round 1),
-> M19 (round 2), M20 (round 3), M21 (round 4) — so each earlier score described a campaign that no
-> longer existed.
-> Each growth blanked the recorded number back to a placeholder rather than carrying it forward,
-> which is the whole point of the rule.
+> The campaign has grown once per review finding ever since, so every earlier score described a
+> campaign that no longer existed. Each growth blanked the recorded number back to a placeholder
+> rather than carrying it forward, which is the whole point of the rule.
+> The CURRENT size is stated once, with the score above, and
+> `TestCredWall_LedgerStatesTheCampaignSize` ties it to the number of mutations the script actually
+> runs — this paragraph used to carry its own enumeration and stopped at M21 while the script
+> reached M28, giving §25d two incompatible accounts of the same history (Codex round 9).
 
 ## §26 Final verdict
 

@@ -756,56 +756,98 @@ func TestCredWall_LedgerStatesTheRealScanCount(t *testing.T) {
 }
 
 // TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration pins the review-round total against the
-// rounds the section actually discusses.
+// STRUCTURED enumeration in §25d, not against a numeral scraped from its prose.
 //
-// Codex round 8: the summary still said "Five rounds" and stopped enumerating at round 5, while the
-// paragraphs immediately above it recorded rounds 6 and 7. A narrative number nobody derives drifts
-// the moment the narrative grows, and this section's whole subject is records that outrun what
-// establishes them.
+// The first version took the largest `round N` token anywhere in the section. Codex round 9: that
+// does not establish what the gate claims. A ninth entry headed differently would not move it, and
+// a deleted entry would not shrink it while an incidental earlier mention kept it green — so the
+// gate measured "the biggest number written down" and the record said "the rounds enumerated".
+// That is this section's own defect class, inside the gate added one round earlier to close it.
 //
-// The total is compared to the HIGHEST round number the section mentions, which is the one fact the
-// document cannot be wrong about without contradicting itself.
+// Both sides now derive from the same list: `- **Round N** — ...` entries, which must be contiguous
+// from 1 (a gap means an entry was dropped) and must number exactly what the summary claims.
 func TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "mcp-first-controlled-canary-review.md")) //nolint:gosec // fixed in-repo path
-	if err != nil {
-		t.Fatalf("read ledger: %v", err)
-	}
-	// Scoped to §25d. The document records Codex rounds from OTHER sections' reviews (31, 33 and
-	// others from earlier work), so "the highest round in the file" is the wrong derivation — the
-	// first version of this gate used it and reported 33.
-	doc := string(data)
-	start := strings.Index(doc, "## \u00a725d ")
-	if start < 0 {
-		t.Fatal("cannot locate the \u00a725d heading, so the round total cannot be scoped to its own section")
-	}
-	end := strings.Index(doc[start:], "\n## \u00a726 ")
-	if end < 0 {
-		t.Fatal("cannot locate the end of \u00a725d")
-	}
-	doc = doc[start : start+end]
+	doc := ledgerSection(t)
 
 	m := regexp.MustCompile(`\*\*(\d+) rounds, one defect shape\.\*\*`).FindStringSubmatch(doc)
 	if m == nil {
-		t.Fatal("§25d no longer states a round total in the form \"**N rounds, one defect shape.**\", " +
-			"so this gate cannot compare it to the rounds the section discusses.")
+		t.Fatal("§25d no longer states a round total in the form \"**N rounds, one defect shape.**\"")
 	}
 	stated, err := strconv.Atoi(m[1])
 	if err != nil {
 		t.Fatalf("unparsable round total %q: %v", m[1], err)
 	}
-	highest := 0
-	for _, r := range regexp.MustCompile(`(?i)round (\d+)`).FindAllStringSubmatch(doc, -1) {
-		if n, e := strconv.Atoi(r[1]); e == nil && n > highest {
-			highest = n
+
+	var seen []int
+	for _, r := range regexp.MustCompile(`(?m)^- \*\*Round (\d+)\*\*`).FindAllStringSubmatch(doc, -1) {
+		n, e := strconv.Atoi(r[1])
+		if e != nil {
+			t.Fatalf("unparsable round entry %q", r[1])
+		}
+		seen = append(seen, n)
+	}
+	if len(seen) == 0 {
+		t.Fatal("§25d enumerates no rounds in the structured `- **Round N**` form, so the total " +
+			"is checked against nothing. Restore the enumeration or delete this gate.")
+	}
+	for i, n := range seen {
+		if n != i+1 {
+			t.Errorf("the round enumeration is not contiguous from 1: entry %d is Round %d. A gap "+
+				"means an entry was dropped and the total would still look right.", i+1, n)
 		}
 	}
-	if highest == 0 {
-		t.Fatal("the section mentions no numbered round at all, so this gate proves nothing")
+	if stated != len(seen) {
+		t.Errorf("§25d claims %d review rounds; it enumerates %d. The summary and its own list "+
+			"must derive from the same thing.", stated, len(seen))
 	}
-	if stated != highest {
-		t.Errorf("§25d claims %d review rounds; the highest round it discusses is %d. A narrative "+
-			"number nobody derives drifts the moment the narrative grows.", stated, highest)
+}
+
+// TestCredWall_LedgerStatesTheCampaignSize ties §25d's mutation count to the script.
+//
+// Codex round 9 again: a second paragraph carried its own account of the campaign's growth and
+// stopped at M21 while the script reached M28, so the section gave two incompatible histories of
+// one thing. The size is stated once now, and derived.
+func TestCredWall_LedgerStatesTheCampaignSize(t *testing.T) {
+	doc := ledgerSection(t)
+	m := regexp.MustCompile(`mutations\.sh` + "`" + ` — (\d+) mutations`).FindStringSubmatch(doc)
+	if m == nil {
+		t.Fatal("§25d no longer states the campaign size beside the script name")
 	}
+	stated, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("unparsable campaign size %q: %v", m[1], err)
+	}
+	script, err := os.ReadFile(filepath.Join(pkgSourceDir(), "scripts", "mcp-first-canary-no-credential-mutations.sh")) //nolint:gosec // fixed in-repo path
+	if err != nil {
+		t.Fatalf("read campaign script: %v", err)
+	}
+	actual := len(regexp.MustCompile(`(?m)^run_mutation `).FindAllString(string(script), -1))
+	if actual == 0 {
+		t.Fatal("found no run_mutation invocations, so this gate compares against nothing")
+	}
+	if stated != actual {
+		t.Errorf("§25d claims %d mutations; the script runs %d", stated, actual)
+	}
+}
+
+// ledgerSection returns §25d alone. The document records Codex rounds from OTHER sections' reviews
+// (31, 33 and others from earlier work), so every derivation here must be scoped or it reads them.
+func ledgerSection(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "mcp-first-controlled-canary-review.md")) //nolint:gosec // fixed in-repo path
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	doc := string(data)
+	start := strings.Index(doc, "## \u00a725d ")
+	if start < 0 {
+		t.Fatal("cannot locate the \u00a725d heading")
+	}
+	end := strings.Index(doc[start:], "\n## \u00a726 ")
+	if end < 0 {
+		t.Fatal("cannot locate the end of \u00a725d")
+	}
+	return doc[start : start+end]
 }
 
 // TestCredWall_LedgerCountsItsOwnQuotationPermissions pins the other number §25d states.
