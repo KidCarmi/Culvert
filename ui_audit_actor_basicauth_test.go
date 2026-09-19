@@ -182,8 +182,16 @@ func TestAuditActor_UnverifiedBasicHeaderIsNeverAttributed(t *testing.T) {
 // half of the authentication boundary: the identity auditActor and sessionAdmin
 // now trust is only as good as the single place that writes it. This pins that
 // uiUserKey is written in exactly one non-test source location, in
-// ui_middleware.go, inside the branch guarded by cfg.VerifyUIUser — so no future
-// handler can inject an actor that was never authenticated.
+// ui_middleware.go, inside the branch guarded by the Basic verifier — so no
+// future handler can inject an actor that was never authenticated.
+//
+// SEC-BASIC-1 moved that verifier from the bare cfg.VerifyUIUser to
+// verifyUIBasicAuth (ui_basic_auth.go), which is a STRICTLY stronger gate: it
+// adds the two-tier lockout, the TOTP refusal and the failure audit that the
+// bare bcrypt compare never applied. The invariant is unchanged — an identity
+// is written only after a verification — so this wall now pins the new
+// verifier AND additionally requires that the bare one never returns to this
+// file, which would silently re-open the bypass.
 func TestAuditActor_BasicIdentityOriginatesOnlyFromVerifiedLogin(t *testing.T) {
 	sources, err := filepath.Glob(filepath.Join(pkgSourceDir(), "*.go"))
 	if err != nil {
@@ -212,10 +220,17 @@ func TestAuditActor_BasicIdentityOriginatesOnlyFromVerifiedLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ui_middleware.go: %v", err)
 	}
-	verifyAt := bytes.Index(mw, []byte("cfg.VerifyUIUser(user, pass)"))
+	verifyAt := bytes.Index(mw, []byte("verifyUIBasicAuth(r, user, pass)"))
 	writeAt := bytes.Index(mw, []byte("uiUserKey{}"))
 	if verifyAt < 0 || writeAt < 0 || writeAt < verifyAt {
-		t.Fatalf("the uiUserKey write must follow cfg.VerifyUIUser (verify@%d, write@%d)", verifyAt, writeAt)
+		t.Fatalf("the uiUserKey write must follow verifyUIBasicAuth (verify@%d, write@%d)", verifyAt, writeAt)
+	}
+	// SEC-BASIC-1: the bare verifier must never come back to this file. It
+	// consults no lockout, no rate limit and no second factor, so reinstating
+	// it here would restore the 2FA-and-lockout bypass while still satisfying
+	// the ordering check above.
+	if bytes.Contains(mw, []byte("cfg.VerifyUIUser(")) {
+		t.Error("ui_middleware.go calls cfg.VerifyUIUser directly — admin-plane Basic credentials must go through verifyUIBasicAuth (ui_basic_auth.go)")
 	}
 }
 
