@@ -42,9 +42,13 @@
   on an explicit Look up); persisted vs active vs durability, the four pair-evidence classes, OCSP
   desired vs runtime and every ledger state render as the server states them (superseded =
   terminal UNKNOWN). Every certificate MUTATION stays on the legacy console until FE-6B.2. The
-  recorded IA discrepancy (Platform/admin vs shipped Security/viewer) and the `uiCert.active`
-  truth gap (set at boot when the pair resolves, not when the listener serves TLS) are in the
-  FE-6B.1 record; the surface renders a contradiction, never the claim.
+  recorded IA discrepancy (Platform/admin vs shipped Security/viewer) is in the FE-6B.1 record.
+  FE-6B.1 correction round (record 6B1C): the `uiCert.active` truth gap is CLOSED at the source —
+  the admin listener's bind evidence (`ui_listener_evidence.go`: state, bounded posture, served
+  identity) is published as `listener` / `ui_listener` on both reads and `active` is derived
+  from it; the page renders activation from that evidence alone (unknown stays unknown), bounds
+  every durability claim to the frozen contract (audit qualified by the audit sink), and shows a
+  lookup answer only when it is bound to the requested id and internally consistent.
 - **Companions**: `ADR-FE-001-frontend-platform.md` (decision), `FRONTEND-FEATURE-PARITY.md`
   (per-feature matrix), `FRONTEND-SECURITY-CONTRACT.md` (invariants),
   `FRONTEND-MIGRATION-PLAN.md` (program)
