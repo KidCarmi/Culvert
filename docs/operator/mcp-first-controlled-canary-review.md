@@ -2839,8 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 32 mutations,
-**32 caught, 0 survived, 0 skipped, measured on `6c8bd8b4`**. A run that reaches its summary has
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 33 mutations,
+**CAMPAIGN_RESULT_PENDING**. A run that reaches its summary has
 necessarily passed `selfcheck_site_counter`, which refuses before anything else prints.
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
@@ -3172,8 +3172,17 @@ would not move, and a deleted entry would not shrink).
   number, because `round\s+` cannot match the `s`. The gate passed on that text by luck: 7 and 8
   happen to be enumerated. One mutation per FORM, not one per rule. Gated by M32, which is M31's
   plural twin and was verified to PASS against the pre-fix extractor.
+- **Round 13** — the comma-list arm of that same parser accepted only ONE separator token between
+  numbers, so an Oxford comma — the form `rounds 7, 8, and 9` — stopped the list at the serial
+  comma and returned only the first two, dropping the third. The dropped one went unseen whether or
+  not it was enumerated, and in the case that matters it is not. (This entry cannot spell the
+  original example, because the fixed parser reads any number it names as a round this section
+  claims — the gate rejected an earlier draft of this very paragraph for naming an unenumerated
+  one, which is the clearest demonstration available that it now reads the form.) Round 12's
+  own rule, unapplied to itself: "comma list" and "comma list with a serial `and`" are different
+  syntaxes. A separator is now a SEQUENCE, which is what `, and` is. Gated by M33.
 
-**12 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**13 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
 baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
@@ -3182,7 +3191,8 @@ again two lines away (round 8), a gate that derived a count from prose beside it
 the list it claimed to check (round 9), a guard whose counter could not fail because every input
 expected the same answer (round 10), and a list and a total that agreed with each other while both
 understated the section they described (round 11), and a rule stated over several syntaxes that
-was only ever tested in one of them (round 12).
+was only ever tested in one of them (round 12), and that same rule left unapplied to the rule
+itself one round later (round 13).
 
 The gates get stronger every round; what keeps failing is the accounting around them, so the
 discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no

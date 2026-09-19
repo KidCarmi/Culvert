@@ -661,6 +661,21 @@ run_mutation M32 \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
   's/in rounds 7 and 8/in rounds 7 and 98/'
 
+# M33 is the OXFORD-COMMA form. M32 proved the plural arm reads `rounds A and B`; it did not prove
+# the COMMA-LIST arm, whose parser accepted only one separator token and so stopped at the serial
+# comma in `rounds 7, 8, and 98` (Codex round 13). Third form, third mutation -- the rule from
+# round 12 applied to itself: a rule stated over several syntaxes is only as strong as the syntax
+# that gets tested, and "comma list" and "comma list with a serial and" are different syntaxes.
+#
+# NOTE: M32 and M33 deliberately rewrite the SAME source phrase into two different shapes. Each
+# mutation starts from the clean tree, so a payload must match what the file says AT REST -- the
+# first draft of M33 targeted `in rounds 7 and 98`, which only exists once M32 has run, and would
+# have scored SKIPPED forever.
+run_mutation M33 \
+  "§25d names an unenumerated round after an OXFORD COMMA" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/in rounds 7 and 8/in rounds 7, 8, and 97/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then

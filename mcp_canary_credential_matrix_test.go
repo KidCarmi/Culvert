@@ -865,10 +865,18 @@ func TestCredWall_LedgerStatesTheCampaignSize(t *testing.T) {
 // match the `s` in `rounds`. §25d already contained one (`rounds 7 and 8`), so the gate's claim
 // that every named round is enumerated was false for the most natural phrasing, and it was green
 // on that text by luck: 7 and 8 happen to be enumerated. A range is expanded rather than read as
-// two isolated endpoints, because `rounds 11-13` names 12 as much as it names 11.
+// two isolated endpoints, because `rounds 11-13` names 12 as much as it names 11 (`to` counts as
+// a range token for the same reason).
+//
+// Codex round 13: the comma-list arm accepted only ONE separator token between numbers, so an
+// Oxford comma -- `rounds 7, 8, and 98` -- stopped the list at the serial comma and returned just
+// 7 and 8. Both are enumerated, so the gate stayed green while 98 went unseen. The separator is
+// now a sequence, which is what `, and` actually is.
 var (
-	roundPhrase = regexp.MustCompile(`(?i)\brounds?\s+(\d+(?:\s*(?:,|and|to|\x{2013}|\x{2014}|-)\s*\d+)*)`)
-	roundRange  = regexp.MustCompile(`(\d+)\s*[\x{2013}\x{2014}-]\s*(\d+)`)
+	// A separator is a SEQUENCE of tokens, not one: an Oxford comma writes `, and`, and a parser
+	// that accepts only a single token stops at the comma. Codex round 13.
+	roundPhrase = regexp.MustCompile(`(?i)\brounds?\s+(\d+(?:(?:\s*(?:,|and|to|\x{2013}|\x{2014}|-)\s*)+\d+)*)`)
+	roundRange  = regexp.MustCompile(`(\d+)\s*(?:[\x{2013}\x{2014}-]|\bto\b)\s*(\d+)`)
 	roundNumber = regexp.MustCompile(`\d+`)
 )
 
@@ -1396,6 +1404,9 @@ func TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses(t *testing.T) {
 		{"plural comma", "rounds 7, 8 and 9 each found one", []int{7, 8, 9}},
 		{"en dash range", "rounds 11–13 covered the apparatus", []int{11, 12, 13}},
 		{"hyphen range", "rounds 4-6 were about scope", []int{4, 5, 6}},
+		{"oxford comma", "rounds 7, 8, and 98 each found one", []int{7, 8, 98}},
+		{"comma list no and", "rounds 7, 8, 98 each found one", []int{7, 8, 98}},
+		{"to range", "rounds 5 to 7 were about scope", []int{5, 6, 7}},
 		{"several phrases", "round 2 and later round 9", []int{2, 9}},
 		{"no rounds named", "**11 rounds, one defect shape.** The gates get stronger every round;", nil},
 		{"not a round", "roundabout 7 and background 9", nil},
