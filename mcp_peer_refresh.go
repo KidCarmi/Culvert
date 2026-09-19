@@ -112,6 +112,16 @@ var mcpPeerRefreshUpstream = func() (execution.UpstreamCaller, error) {
 	return newProductionUpstreamClient()
 }
 
+// mcpPeerRefreshNow is the OBSERVATION clock handed to Discovery. Production resolves it to the
+// wall clock; a test drives it so freshness can be reasoned about deterministically rather than
+// with sleeps.
+//
+// It is a seam here rather than a parameter because the observation instant is not the caller's
+// to choose: an operator invoking a refresh does not get to say when the peer was observed, and
+// an endpoint that accepted a timestamp would be handing an operator the ability to mint
+// freshness. See the refusal of every other caller-supplied field in mcpRefreshPeerObservation.
+var mcpPeerRefreshNow = time.Now
+
 // mcpRefreshPeerObservation performs ONE authenticated discovery against ONE registered server
 // and returns the bounded outcome, or a bounded refusal reason.
 //
@@ -145,6 +155,7 @@ func mcpRefreshPeerObservation(ctx context.Context, serverID string) (mcpPeerRef
 	if err != nil {
 		return mcpPeerRefreshOutcome{}, mcpPeerRefreshReasonTransport, err
 	}
+	d.Now = mcpPeerRefreshNow
 
 	ctx, cancel := context.WithTimeout(ctx, mcpPeerRefreshBudget)
 	defer cancel()
