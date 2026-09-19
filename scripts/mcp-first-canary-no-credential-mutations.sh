@@ -241,6 +241,7 @@ ROLLOUT=mcp_rollout.go
 MATRIXDOC=docs/design/mcp/CANARY-READINESS-MATRIX.md
 READINESS=internal/mcp/canary/readiness.go
 CREDMATRIX=mcp_canary_credential_matrix_test.go
+OPERDOC=docs/operator/mcp-first-controlled-canary-review.md
 
 # ── the three authoritative layers ────────────────────────────────────────────
 
@@ -439,16 +440,17 @@ run_mutation M22 \
   'TestCredWall_EveryClaimedSurfaceIsScanned' . "$READINESS" \
   's/only stops the next FULL ACTIVATION PREFLIGHT admitting an experiment whose every call/only stops a node reporting Ready for an experiment whose every call/'
 
-# M23 — THE EXEMPTION BECOMES A HOLE. nodeReadyIndependence exists so the CORRECTED wording
-# ("node status can still report Ready") is not flagged alongside the defect it corrects. Its first
-# form matched any "still <verb> ... ready", and Codex round 6 showed that swallows ordinary
-# negated documentation: "This activation prerequisite PREVENTS the node from STILL REPORTING
-# Ready" asserts exactly the forbidden claim and was exempted. This mutation restores that broad
-# form.
+# M23 — THE ALLOWLIST GOES BACK TO PERMITTING WHOLE LINES. An entry's needle used to be matched
+# with strings.Contains, so it permitted the entire line it appeared on: appending a fresh claim
+# after an allowlisted quotation stayed green (Codex round 7). A permission to QUOTE one historical
+# claim had become a permission to ASSERT a new one beside it, and reachability could not see it —
+# reachability proves an entry is USED, never that it is NARROW. Matching is by SPAN now; this
+# mutation restores the whole-line form.
 run_mutation M23 \
-  "the corrected-wording exemption is broadened until it swallows a negated claim" \
-  'TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect' . "$CREDMATRIX" \
-  's/\\bnode status can still\\s\+/\\bstill\\s+/'
+  "an allowlist needle permits the whole line again, not just the claim it quotes" \
+  'TestCredWall_AnAllowlistEntryPermitsOnlyWhatItQuotes' . "$CREDMATRIX" \
+  's/if m\[0\] >= sp\[0\] && m\[1\] <= sp\[1\] \{/if true \{/'
+
 
 
 # M24 — A CLAIM INSIDE QUOTES STOPS BEING A CLAIM. An earlier wall stripped every quoted span
@@ -479,6 +481,23 @@ run_mutation M25 \
   'TestCredWall_ReachabilityCheckCanActuallyFail' . "$CREDMATRIX" \
   's/func allowlistEntryReached\(data, needle string\) bool \{/func allowlistEntryReached(data, needle string) bool {\n\t_ = data\n\t_ = needle\n\treturn true/'
 
+
+# M26 — THE LEDGER'S FILE COUNT DRIFTS FROM THE WALKER'S. §25d states how many files the scan
+# reads. Codex round 7 found it overstated by one — the walk removes the wall's own file — so the
+# sentence recording the coverage fix committed the coverage overclaim. The number is now read back
+# out of the document and compared to the walker.
+run_mutation M26 \
+  "the ledger overstates how many files the wall scans" \
+  'TestCredWall_LedgerStatesTheRealScanCount' . "$OPERDOC" \
+  's/SCANNED \(2,554 files\)/SCANNED (2,999 files)/'
+
+# M27 — THE LEDGER UNDERSTATES THE PERMISSIONS IT INTRODUCED. Removing the quotation rule required
+# naming each ledger quotation in the allowlist. The first version of that paragraph said three when
+# four had been added, understating its own audit trail. The count is derived now.
+run_mutation M27 \
+  "the ledger undercounts the allowlist entries naming its own lines" \
+  'TestCredWall_LedgerCountsItsOwnQuotationPermissions' . "$OPERDOC" \
+  's/\*\*6 allowlist entries name ledger lines\*\*/**3 allowlist entries name ledger lines**/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"

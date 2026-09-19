@@ -2839,10 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 25 mutations, **25 caught,
-0 survived, 0 skipped**, measured on `ecf3414d` from a baseline the campaign verified itself. M23
-and M24 now carry the round-6 shapes (the broad `still` exemption; quoted-means-cited stranding the
-allowlist), so this is a different campaign from the 25/0/0 recorded on `2406423b`.
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 27 mutations,
+**CAMPAIGN_RESULT_PENDING**.
 
 > **The previously recorded score here — "21 caught, 0 survived, 0 skipped, measured on
 > `5d0e8055`" — was VOID, and the way it was void is the most important thing in this section.**
@@ -2975,7 +2973,15 @@ The DIRECTORY axis was itself an unrecorded gap for one round. The first inverte
 `frontend`, `dist` and `testdata` and wrote none of them down, while this paragraph claimed every
 Go and Markdown file was covered — the same overclaim, on the axis introduced to close it, invisible
 to every staleness check because nothing represented it. Codex round 6 found it. Those three are now
-SCANNED (2,555 files), and the two that remain excluded are named with a reason each.
+SCANNED (2,554 files), and the two that remain excluded are named with a reason each.
+
+That number was wrong by one for a round, in two different ways at once, and both are worth
+keeping. It was TRANSCRIBED as 2,555 when the walk returns one fewer — it removes the wall's own
+file — so the sentence recording the coverage fix committed the coverage overclaim. And it was
+MEASURED by adding a temporary probe test to the tree, which the walk then counted: the observer
+was in the sample. `TestCredWall_LedgerStatesTheRealScanCount` now reads the number back out of
+this document and compares it to what the walker returns, so it cannot be right by hand and wrong
+in fact.
 
 The allowlist got the same treatment for the same reason. `TestCredWall_AllowlistIsNotStale` used
 to ask whether an entry's needle still appeared in the file; it now asks whether the scan REACHES
@@ -2985,6 +2991,28 @@ session, made unreachable by the quotation rule written just after it. Present i
 The P1 of that round was separate and is recorded with the campaign score above: the wall was RED
 on the unmodified head, so the recorded 21/0/0 measured nothing. That is now a campaign
 precondition rather than a thing a reviewer has to notice.
+
+**Round 7 found four, and two of them ended a strategy rather than patching one.**
+
+1. **Negating the exemption's own wording bypassed it.** *"It is FALSE THAT node status can still
+   report Ready…"* matched both the promise pattern and the exemption. The round-6 fix had been
+   justified here as *"self-limiting — a sentence containing this phrase asserts the node surface is
+   UNAFFECTED"*; that is simply wrong, because any assertion can be negated and a pattern that
+   recognises a phrase cannot see the operator in front of it. **Two tightenings, two bypasses, both
+   found by a reviewer rather than by a gate** — the signature of a losing game, not of a nearly
+   correct rule. `nodeReadyIndependence` is DELETED. The two real corrective sentences are named in
+   the allowlist like every other permitted claim, which is the conclusion round 6 reached for the
+   quotation rule, now applied consistently instead of one mechanism at a time.
+2. **An allowlist needle permitted the whole LINE it appeared on.** Appending a fresh claim after an
+   allowlisted quotation stayed green: a permission to QUOTE one historical claim had become a
+   permission to ASSERT a new one beside it. The reachability check could not see it, and that gap
+   is the general lesson — **reachability proves an entry is USED; it says nothing about whether it
+   is NARROW.** Matching is now by SPAN: an entry permits exactly the text it quotes, and a second
+   claim elsewhere on the line is flagged. Switching to spans immediately exposed a live instance —
+   the round-4 entry quoted the REFUTATION (`**That was FALSE**`) rather than the claim, so it had
+   been permitting its line while covering nothing at all.
+3. **The file count was wrong by one, and measured with the observer in the sample** — see above.
+4. **The quotation-permission count understated itself** — see above.
 
 **Round 6 found three more, and the second was larger than reported.** All three landed on
 mechanisms built during round 5, which is what a review is for.
@@ -3003,7 +3031,10 @@ mechanisms built during round 5, which is what a review is for.
    string was invisible to the wall. No syntactic rule can separate citing a claim from asserting
    one, so there is no general rule any more: the ledger's three quotations and the three genuine
    node-level Go strings are each named in the allowlist with a reason, kept honest by the
-   reachability check.
+   reachability check. **6 allowlist entries name ledger lines** — the two from round 4 plus the
+   four quotations this removal required, counted by
+   `TestCredWall_LedgerCountsItsOwnQuotationPermissions` rather than by hand, because the first
+   version of this paragraph said three and understated the permissions it had introduced.
 3. **The directory axis, above.**
 
 **M25 SURVIVED its first run, and that is the most useful result of the round.** The mutation

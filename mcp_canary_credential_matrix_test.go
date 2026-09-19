@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -559,24 +560,6 @@ var nodeReadyPromise = regexp.MustCompile(
 		`node\b[^.]{0,60}?\b(report|reports|reporting|reach|reaches|reaching)\b[^.]{0,40}?\bready\b` +
 		`)`)
 
-// nodeReadyIndependence exempts ONE canonical corrective sentence, by exact shape.
-//
-// The corrected wording — "node status can still report Ready" — is the sentence that makes an
-// activation fact's scope unambiguous, and the widened matcher flags it alongside the defect it
-// corrects. It must stay writable.
-//
-// IT IS DELIBERATELY NOT A GENERAL "still" RULE. The first version matched any
-// "still <verb> ... ready", and Codex round 6 showed that swallows ordinary negated documentation:
-// "This activation prerequisite PREVENTS the node from STILL REPORTING Ready" is the forbidden
-// claim, reads naturally, and was exempted. The residual had been recorded here as contrived; it
-// was not contrived, it was one rephrasing away.
-//
-// Anchoring on the full corrective subject ("node status can still …") is self-limiting: a
-// sentence containing it is asserting the node surface is UNAFFECTED, which is the opposite of the
-// defect. TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect drives the negated form.
-var nodeReadyIndependence = regexp.MustCompile(
-	`(?i)\bnode status can still\s+(report|reports|reporting|reach|reaches|reaching)\w*\s+ready\b`)
-
 // nodeReadyMentionAllowed is the EXPLICIT allowlist of places that may speak of node readiness.
 // Every entry needs a reason, so permitting a new one is a deliberate act rather than a hole. The
 // wall fails on any occurrence not listed here, and TestCredWall_AllowlistIsNotStale fails if a
@@ -588,8 +571,8 @@ var nodeReadyMentionAllowed = []struct {
 }{
 	{"internal/mcp/canary/readiness.go", "rehearsed-mechanics node is still not ready",
 		"RollbackCoordinatorRehearsed is NODE-level; the claim is true of it."},
-	{"docs/operator/mcp-first-controlled-canary-review.md", "**That was FALSE**",
-		"§25d quotes the false claim in order to refute it."},
+	{"docs/operator/mcp-first-controlled-canary-review.md", "reports the node un-ready on the next read",
+		"§25d quotes the round-2 false claim in order to refute it. The needle now covers the CLAIM, not the refutation beside it — under span matching a needle that quotes only \"That was FALSE\" permits nothing."},
 	{"docs/operator/mcp-first-controlled-canary-review.md", "prerequisite genuinely does make the node un-ready",
 		"§25d explains why the wall must NOT be a blanket phrase ban."},
 	// Surfaced when the scan was inverted from a six-file list to a whole-tree walk.
@@ -602,6 +585,16 @@ var nodeReadyMentionAllowed = []struct {
 	// literal was treated as a citation, so these three were skipped without anyone deciding they
 	// should be — and so would any FALSE claim written into an error message or test failure
 	// string. Each is now permitted by name, with the reason it is true.
+	// ── The two CORRECTIVE sentences ───────────────────────────────────────────
+	//
+	// Added when nodeReadyIndependence was deleted (Codex round 7). A syntactic rule that tried to
+	// recognise the corrective form was bypassed twice by negating it, so these are named like
+	// every other permitted claim instead of being detected.
+	{"internal/mcp/canary/readiness.go", "node status can still report Ready",
+		"The corrective sentence itself: it states that EvaluateNode skips this factActivation row, which is true."},
+	{"mcp_canary_credential_free_test.go", "node status can still report Ready",
+		"Same corrective sentence, explaining why this test calls canary.Evaluate rather than EvaluateNode."},
+
 	{"mcp_live_tier.go", "mcp live tier: node not ready to arm",
 		"True and node-level: live-tier arming is gated on NODE readiness, so this error names the node's own state."},
 	{"mcp_canary_matrix_mutation_test.go", "make the full preflight ready while the node is not ready",
@@ -644,6 +637,74 @@ var nodeReadyScanExcluded = []struct {
 		"defines nodeReadyPromise and the allowlist needles, so a self-scan reports its own machinery forever."},
 }
 
+// allowlistCoversEveryClaim reports whether EVERY claim the matcher finds on this line sits inside
+// text an allowlist entry quotes, and returns the entries that covered one.
+//
+// A needle used to permit the WHOLE LINE it appeared on. Codex round 7: appending
+// "but this activation row stops a node reporting Ready" after an allowlisted phrase stayed green,
+// because the substring was still present and marked the line allowed. A permission to quote one
+// historical claim had silently become a permission to assert a new one beside it, and the
+// reachability check could not see it — reachability proves an entry is USED, never that it is
+// NARROW.
+//
+// Matching by SPAN makes an entry permit exactly the claim it quotes. A second claim elsewhere on
+// the line produces a match outside every needle occurrence and is flagged. That is structural: it
+// no longer depends on an author choosing a tight needle.
+func allowlistCoversEveryClaim(rel, line string) (bool, []string) {
+	var spans [][2]int
+	var hits []string
+	for _, a := range nodeReadyMentionAllowed {
+		if a.file != rel || a.needle == "" {
+			continue
+		}
+		for idx := 0; idx <= len(line)-len(a.needle); {
+			at := strings.Index(line[idx:], a.needle)
+			if at < 0 {
+				break
+			}
+			lo := idx + at
+			spans = append(spans, [2]int{lo, lo + len(a.needle)})
+			hits = append(hits, a.file+"|"+a.needle)
+			idx = lo + 1
+		}
+	}
+	for _, m := range nodeReadyPromise.FindAllStringIndex(line, -1) {
+		covered := false
+		for _, sp := range spans {
+			if m[0] >= sp[0] && m[1] <= sp[1] {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false, nil
+		}
+	}
+	return true, hits
+}
+
+// needleCoversAClaim is the reachability half: does this needle actually cover a claim on the line?
+func needleCoversAClaim(line, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	ms := nodeReadyPromise.FindAllStringIndex(line, -1)
+	for idx := 0; idx <= len(line)-len(needle); {
+		at := strings.Index(line[idx:], needle)
+		if at < 0 {
+			return false
+		}
+		lo, hi := idx+at, idx+at+len(needle)
+		for _, m := range ms {
+			if m[0] >= lo && m[1] <= hi {
+				return true
+			}
+		}
+		idx = lo + 1
+	}
+	return false
+}
+
 // nodeReadyScanExcludedDirs names the directories the walk does not descend into, with a reason
 // each — the same discipline as the per-file exclusions, applied to the axis that was silently
 // exempt.
@@ -663,6 +724,64 @@ var nodeReadyScanExcludedDirs = []struct {
 }{
 	{".git", "version-control internals: object storage, not authored source."},
 	{"node_modules", "vendored third-party JavaScript; nothing here authors it, and a match would name someone else's prose."},
+}
+
+// TestCredWall_LedgerStatesTheRealScanCount pins the ledger's file count to the walker's.
+//
+// §25d states a number. Codex round 7 found it wrong by one: the text said 2,555 SCANNED while the
+// walk returns one fewer, because it removes the wall's own file. That is the coverage overclaim
+// this section exists to record, committed in the sentence recording its fix.
+//
+// The number was also MEASURED wrong, and the way is worth keeping. The count was taken by adding
+// a temporary probe test to the tree — which the walk then counted. The observer was in the
+// sample. So the ledger no longer carries a number a human transcribes; this test reads it back
+// out of the document and compares it to what the walker actually returns.
+func TestCredWall_LedgerStatesTheRealScanCount(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "mcp-first-controlled-canary-review.md")) //nolint:gosec // fixed in-repo path
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	m := regexp.MustCompile(`SCANNED \(([0-9,]+) files\)`).FindStringSubmatch(string(data))
+	if m == nil {
+		t.Fatal("§25d no longer states a scanned-file count in the form \"SCANNED (N files)\", so " +
+			"this gate cannot compare it to the walker. Restore the claim or delete this test.")
+	}
+	stated, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+	if err != nil {
+		t.Fatalf("unparsable count %q: %v", m[1], err)
+	}
+	if got := len(nodeReadyScanFiles(t)); stated != got {
+		t.Errorf("§25d claims %d files are scanned; the walker returns %d. A coverage claim that "+
+			"overstates the walk by even one file is the defect this section records.", stated, got)
+	}
+}
+
+// TestCredWall_LedgerCountsItsOwnQuotationPermissions pins the other number §25d states.
+//
+// Codex round 7 again: the narrative said three ledger quotations were allowlisted when four had
+// been added, so the audit trail understated the permissions introduced. Counting entries by file
+// is exact, so the document no longer has to be right by hand.
+func TestCredWall_LedgerCountsItsOwnQuotationPermissions(t *testing.T) {
+	ledger := filepath.Join("docs", "operator", "mcp-first-controlled-canary-review.md")
+	actual := 0
+	for _, a := range nodeReadyMentionAllowed {
+		if a.file == ledger {
+			actual++
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), ledger)) //nolint:gosec // fixed in-repo path
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	m := regexp.MustCompile(`(\d+) allowlist entries name ledger lines`).FindStringSubmatch(string(data))
+	if m == nil {
+		t.Fatal("§25d no longer states how many allowlist entries name its own lines. That count " +
+			"is the audit trail for the permissions introduced when the quotation rule was removed.")
+	}
+	stated, _ := strconv.Atoi(m[1])
+	if stated != actual {
+		t.Errorf("§25d claims %d allowlist entries name ledger lines; there are %d", stated, actual)
+	}
 }
 
 // nodeReadyScanFiles returns every Go and Markdown file in the repository except the exclusions.
@@ -834,16 +953,9 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 			if !nodeReadyPromise.MatchString(line) {
 				continue
 			}
-			if nodeReadyIndependence.MatchString(line) {
-				// The corrected form: this line says the node surface is UNAFFECTED.
-				continue
-			}
-			allowed := false
-			for _, a := range nodeReadyMentionAllowed {
-				if a.file == rel && strings.Contains(line, a.needle) {
-					allowHits[a.file+"|"+a.needle]++
-					allowed = true
-				}
+			allowed, hits := allowlistCoversEveryClaim(rel, line)
+			for _, h := range hits {
+				allowHits[h]++
 			}
 			if !allowed {
 				t.Errorf("%s:%d claims something makes the NODE un-ready, and is not on the "+
@@ -872,10 +984,10 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 // holds when the tree happens to violate it is not a check.
 func allowlistEntryReached(data, needle string) bool {
 	for _, line := range strings.Split(data, "\n") {
-		if !nodeReadyPromise.MatchString(line) || nodeReadyIndependence.MatchString(line) {
+		if !nodeReadyPromise.MatchString(line) {
 			continue
 		}
-		if strings.Contains(line, needle) {
+		if needleCoversAClaim(line, needle) {
 			return true
 		}
 	}
@@ -896,7 +1008,7 @@ func TestCredWall_AllowlistIsNotStale(t *testing.T) {
 			continue
 		}
 		// Present in the file is not the same as REACHED by the scan. An entry whose lines are
-		// already exempted earlier — by nodeReadyIndependence or by the quotation rule — is a
+		// already exempted earlier — or whose needle covers no claim — is a
 		// permission nothing exercises, and the containment check above cannot see that. Added
 		// after the quotation rule made one entry unreachable the moment it was written.
 		if !allowlistEntryReached(string(data), a.needle) {
@@ -951,70 +1063,59 @@ func TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness(t *testing.T) {
 	}
 }
 
-// TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect is the control for
-// nodeReadyIndependence.
+// TestCredWall_NoSyntacticExemptionForCorrectiveWording pins the REMOVAL of nodeReadyIndependence,
+// and the reason it was removed rather than tightened again.
 //
-// The exemption exists so an author can write "EvaluateNode skips it and node status can still
-// report Ready" — the one sentence that makes an activation fact's scope unambiguous — without the
-// wall flagging it. An exemption that ALSO swallowed the defect it sits next to would be a hole
-// with a comment on it, so this drives both patterns over both shapes and asserts they separate.
+// The exemption let an author write the one sentence that states an activation fact's scope. A
+// reviewer defeated it twice, in consecutive rounds:
 //
-// It also asserts the exemption fires on the REAL corrected lines in the tree, not merely on
-// strings invented here: an exemption nothing exercises is a standing permission nobody uses.
-func TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect(t *testing.T) {
-	defects := []string{
-		// Codex round 6: the "still" exemption used to swallow this. It is ordinary negated
-		// documentation, not a contrived string, and it asserts exactly the forbidden claim.
+//	round 6: "...PREVENTS the node from STILL REPORTING Ready"      (any "still <verb> ready")
+//	round 7: "It is FALSE THAT node status can still report Ready"  (the anchored subject)
+//
+// The second matters more, because the fix for the first was justified in this file as
+// "self-limiting — a sentence containing this phrase asserts the node surface is UNAFFECTED".
+// That is false: any assertion can be negated, and a pattern that recognises a phrase cannot see
+// the operator in front of it. Two tightenings produced two bypasses, which is the signature of a
+// losing game rather than a nearly-correct rule.
+//
+// So there is no syntactic exemption. The two real corrective sentences are named in
+// nodeReadyMentionAllowed like every other permitted claim — the conclusion round 6 reached for the
+// quotation rule, now applied consistently rather than one mechanism at a time.
+func TestCredWall_NoSyntacticExemptionForCorrectiveWording(t *testing.T) {
+	for _, line := range []string{
+		"It is false that node status can still report Ready after this activation fact fails.",
 		"This activation prerequisite prevents the node from still reporting Ready for an unsafe experiment",
-		"the row stops the node from still reaching Ready",
-		"This row only stops a node reporting Ready for an experiment whose every call would be refused.",
-		"what changed is that a node can no longer report Ready for an experiment",
-		"the node must NOT be able to report Ready",
-		"A node must not report an activation ready unless the request is provably safe",
-	}
-	for _, d := range defects {
-		if !nodeReadyPromise.MatchString(d) {
-			t.Errorf("the matcher no longer sees the defect shape at all: %q", d)
+		"It is not true that node status can still report Ready here.",
+	} {
+		if !nodeReadyPromise.MatchString(line) {
+			t.Errorf("the matcher does not see the claim: %q", line)
 			continue
 		}
-		if nodeReadyIndependence.MatchString(d) {
-			t.Errorf("the corrected-wording exemption SWALLOWS a defect claim, which makes it a "+
-				"hole rather than an exemption: %q", d)
+		allowed, _ := allowlistCoversEveryClaim("docs/operator/mcp-first-controlled-canary-review.md", line)
+		if allowed {
+			t.Errorf("a NEGATED corrective sentence is permitted, so the forbidden claim can be "+
+				"written by negating the exemption's own wording: %q", line)
 		}
 	}
+}
 
-	corrected := []string{
-		"factActivation, so EvaluateNode skips it and node status can still report Ready.",
-		"node status can still report Ready — which is exactly why this test calls canary.Evaluate.",
+// TestCredWall_AnAllowlistEntryPermitsOnlyWhatItQuotes is the control for span matching.
+//
+// Codex round 7: a needle used to permit the WHOLE LINE it appeared on, so appending a fresh claim
+// after an allowlisted phrase stayed green. A permission to quote one historical claim had become a
+// permission to assert a new one beside it, and the reachability check could not see it —
+// reachability proves an entry is USED, never that it is NARROW.
+func TestCredWall_AnAllowlistEntryPermitsOnlyWhatItQuotes(t *testing.T) {
+	const ledger = "docs/operator/mcp-first-controlled-canary-review.md"
+	quotedOnly := `Round 4 recorded it: **That was FALSE**, and the row is activation-level.`
+	if ok, _ := allowlistCoversEveryClaim(ledger, quotedOnly); !ok {
+		t.Errorf("premise broken: the allowlisted quotation alone is no longer permitted, so this "+
+			"control cannot say anything about breadth: %q", quotedOnly)
 	}
-	for _, c := range corrected {
-		if !nodeReadyPromise.MatchString(c) {
-			t.Errorf("premise broken: the corrected form no longer reaches the matcher, so this "+
-				"control proves nothing about the exemption: %q", c)
-			continue
-		}
-		if !nodeReadyIndependence.MatchString(c) {
-			t.Errorf("the corrected form is not exempted, so the wall pushes authors away from "+
-				"the one wording that states an activation fact's scope: %q", c)
-		}
-	}
-
-	// And it must fire on the real tree, not only on the strings above.
-	exempted := 0
-	for _, rel := range nodeReadyScanFiles(t) {
-		data, err := os.ReadFile(filepath.Join(pkgSourceDir(), rel)) //nolint:gosec // repo-relative walk result
-		if err != nil {
-			t.Fatalf("cannot read claimed surface %s: %v", rel, err)
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if nodeReadyPromise.MatchString(line) && nodeReadyIndependence.MatchString(line) {
-				exempted++
-			}
-		}
-	}
-	if exempted == 0 {
-		t.Error("no line in the tree is exempted by nodeReadyIndependence, so the exemption is " +
-			"carrying no weight. Remove it rather than leaving an unexercised permission.")
+	appended := quotedOnly + ` but this activation row stops a node reporting Ready`
+	if ok, _ := allowlistCoversEveryClaim(ledger, appended); ok {
+		t.Errorf("an allowlist entry permits a SECOND claim appended to its line, so the entry is a "+
+			"whole-line permission rather than a quotation: %q", appended)
 	}
 }
 
@@ -1045,9 +1146,9 @@ func TestCredWall_AQuotedClaimIsStillAClaim(t *testing.T) {
 			t.Errorf("the matcher does not see the claim at all: %q", line)
 			continue
 		}
-		if nodeReadyIndependence.MatchString(line) {
-			t.Errorf("a quoted ASSERTION is exempted as corrective wording, so a claim written "+
-				"inside a string literal or scare quotes is invisible to the wall: %q", line)
+		if ok, _ := allowlistCoversEveryClaim("internal/mcp/canary/readiness.go", line); ok {
+			t.Errorf("a quoted ASSERTION is permitted, so a claim written inside a string literal "+
+				"or scare quotes is invisible to the wall: %q", line)
 		}
 	}
 }
