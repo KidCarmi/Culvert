@@ -62,6 +62,15 @@ type ToolRecord struct {
 	OutputSchema *canonical.Node // nil when the tool declares no output schema
 	Eligibility  Eligibility
 	Revision     uint64
+	// Observed is the authenticated peer evidence behind this record, or the zero value when
+	// there is none. Provenance() derives operator-seeded vs peer-observed from it; see
+	// provenance.go for why the distinction is derived rather than declared.
+	//
+	// It is carried by VALUE through Promote/Demote/DisableServer, which copy the record and
+	// change only Eligibility. That is correct in both directions: those are trust and
+	// lifecycle actions, not observations, so they must not MINT evidence — and the peer did
+	// advertise this record at that time, so they must not DESTROY it either.
+	Observed PeerObservation
 }
 
 // Snapshot is an immutable catalog view; its map is never mutated after
@@ -174,7 +183,54 @@ type Report struct {
 // Each tool is classified against its last-known record and written with a
 // disposition that never yields Usable and never auto-clears an existing
 // quarantine.
+// It is the OPERATOR-SEEDED entrypoint: records it writes carry NO peer observation, so their
+// Provenance() is OperatorSeeded. That is not a property of the bytes — a seeded result is
+// deliberately shaped exactly like a real tools/list — it is a property of WHICH ENTRYPOINT was
+// used, which is why the two are separate functions over one implementation rather than one
+// function with a caller-supplied flag. A flag is an assertion the caller makes; an entrypoint is
+// a statement about how the caller got here.
+//
+// Re-seeding an already peer-observed tool DOWNGRADES it to operator-seeded, even when the
+// fingerprint is byte-identical. That is the point: an operator re-running provisioning is not a
+// new sighting of the peer, and if a reseed preserved the prior observation an operator could
+// keep a long-dead peer's freshness alive indefinitely without the peer ever answering again.
 func (c *Catalog) Ingest(reg *registry.Registry, in DiscoveryInput) (*Snapshot, *Report, error) {
+	return c.ingest(reg, in, PeerObservation{})
+}
+
+// IngestObserved is the AUTHENTICATED PEER-OBSERVED entrypoint: it records the same tools with
+// the observation attached, so their Provenance() is PeerObserved and their freshness can be
+// evaluated against a clock.
+//
+// It is reachable in production from exactly one path — execution.Discovery.Discover, which has
+// already dialed the peer over the supported authenticated transport — and that is enforced
+// structurally rather than by convention, because "only the right caller uses this" is precisely
+// the kind of claim that rots silently.
+//
+// The observation is validated here, at the boundary, rather than filtered downstream:
+//
+//   - it must be PRESENT (both a timestamp and a verified identity), else there is nothing to be
+//     fresh about and nobody to have been observed;
+//   - its identity must equal the identity this ingest is being performed under, which the common
+//     path then checks against the LIVE registry pin. Letting the two differ would allow an
+//     observation of one peer to be filed as evidence about another.
+//
+// Re-observing an unchanged tool REFRESHES its timestamp: the peer answering again is a new
+// sighting, and the fingerprint being identical is what makes it good news rather than drift.
+func (c *Catalog) IngestObserved(reg *registry.Registry, in DiscoveryInput, obs PeerObservation) (*Snapshot, *Report, error) {
+	if !obs.Present() {
+		return nil, nil, mcperr.New(mcperr.ReasonServerIdentityMismatch, "catalog.ingest", "peer observation is incomplete")
+	}
+	if obs.Identity != in.Identity {
+		return nil, nil, mcperr.New(mcperr.ReasonServerIdentityMismatch, "catalog.ingest", "observed identity does not match the ingest identity")
+	}
+	return c.ingest(reg, in, obs)
+}
+
+// ingest is the one common implementation behind both entrypoints. Every server-level gate below
+// is identical for a seed and an observation — the difference between them is exactly the
+// evidence carried in obs, and nothing else.
+func (c *Catalog) ingest(reg *registry.Registry, in DiscoveryInput, obs PeerObservation) (*Snapshot, *Report, error) {
 	server, ok := reg.Current().Get(in.ServerID)
 	if !ok {
 		return nil, nil, mcperr.New(mcperr.ReasonUnregisteredServer, "catalog.ingest", "server id is not registered")
@@ -192,17 +248,17 @@ func (c *Catalog) Ingest(reg *registry.Registry, in DiscoveryInput) (*Snapshot, 
 	if err != nil {
 		return nil, nil, err
 	}
-	return c.publishIngest(server.ID, observed, complete)
+	return c.publishIngest(server.ID, observed, complete, obs)
 }
 
 // publishIngest classifies observed records against the current base and installs
 // the new snapshot via optimistic CAS, retrying against the newer base on
 // conflict (bounded). Classification is recomputed each attempt so a concurrent
 // update to the same tool is honored.
-func (c *Catalog) publishIngest(serverID registry.ServerID, observed []*ToolRecord, complete bool) (*Snapshot, *Report, error) {
+func (c *Catalog) publishIngest(serverID registry.ServerID, observed []*ToolRecord, complete bool, peer PeerObservation) (*Snapshot, *Report, error) {
 	for attempt := 0; attempt < maxPublishRetries; attempt++ {
 		base := c.cur.Load()
-		next, report, err := c.buildIngest(base, serverID, observed, complete)
+		next, report, err := c.buildIngest(base, serverID, observed, complete, peer)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -226,7 +282,7 @@ func (c *Catalog) tryPublish(base, next *Snapshot) error {
 // buildIngest is the pure build step: it classifies each observed record against
 // base, computes the disposition, and returns the next snapshot + report without
 // mutating base. It enforces the total catalog-entry capacity.
-func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observed []*ToolRecord, complete bool) (*Snapshot, *Report, error) {
+func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observed []*ToolRecord, complete bool, peer PeerObservation) (*Snapshot, *Report, error) {
 	rev := base.revision + 1
 	next := base.clone(rev)
 	report := &Report{ServerID: serverID, Revision: rev, Observations: make([]Observation, 0, len(observed))}
@@ -267,6 +323,13 @@ func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observ
 		rec := *obs
 		rec.Eligibility = elig
 		rec.Revision = rev
+		// The observation is written UNCONDITIONALLY from this ingest's evidence and is never
+		// inherited from `prior`. Both directions matter and both are load-bearing: a peer
+		// re-observation refreshes the timestamp even when the fingerprint did not move, and an
+		// operator reseed of a previously-observed tool clears it. Copying the prior value when
+		// "nothing changed" would turn a reseed into a way to renew freshness the peer never
+		// granted.
+		rec.Observed = peer
 		if _, existed := next.byKey[obs.Key]; !existed {
 			if len(next.byKey) >= c.lim.MaxCatalogEntries() {
 				return nil, nil, mcperr.New(mcperr.ReasonCapacityExceeded, "catalog.ingest", "catalog entry capacity reached")
