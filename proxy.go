@@ -876,13 +876,40 @@ func recordRequestTelemetry(r *http.Request, start time.Time, sslAction SSLActio
 // The three arms below are the same decision the sequential form made, just
 // with the "generate both" case named so it can share one draw. Nothing is
 // generated that the previous shape would not have generated.
+//
+// SEC-REQID-1: both header values are CLIENT-CHOSEN and are bounded here, at the
+// one place they are read, before they can reach a log line, the response or the
+// upstream. An unusable value is treated exactly as an ABSENT one — the existing
+// mint path runs and its result overwrites the hostile value on the request, the
+// response and the wire — so a tracing header can never decide whether traffic
+// flows. See request_tracing_bounds.go for what "unusable" means and why the
+// remedy is replacement rather than refusal.
 func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
 	// ── Request tracing: generate X-Request-ID if not present ────────────
 	// strings.ReplaceAll stays inline at the read site so CodeQL sees the
-	// CWE-117 sanitiser on the client-supplied value (repo convention).
+	// CWE-117 sanitiser on the client-supplied value (repo convention). It is
+	// NOT sufficient on its own — it scrubs only CR/LF, where sanitizeLog
+	// scrubs every byte < 0x20 and 0x7F — so acceptClientRequestID below is the
+	// bound, not a second opinion. Keep this line: it is the barrier CodeQL's
+	// go/log-injection query recognises on this value.
 	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get(headerRequestID), "\n", ""), "\r", "") // sanitize for CWE-117
+	if reqID != "" && !acceptClientRequestID(reqID) {
+		// The REQUEST is handed over, never a resolved client IP: realClientIP
+		// walks every X-Forwarded-For hop and must not run per rejection ahead of
+		// the limiters. noteRejectedRequestID resolves it behind its rate gate.
+		noteRejectedRequestID(r, len(reqID))
+		reqID = "" // fall into the mint arm below, which also overwrites the header
+	}
 	// ── W3C Trace Context: propagate or generate traceparent ────────────
-	needTraceparent := r.Header.Get(headerTraceparent) == ""
+	// An over-long or control-carrying traceparent is replaced for the same
+	// reason: internal/otlp.ParseTraceparent splits it and hands the pieces
+	// straight to the exported span, so an unbounded value here is an unbounded
+	// attacker-chosen attribute on the OTLP collector.
+	clientTP := r.Header.Get(headerTraceparent)
+	needTraceparent := !acceptClientTraceparent(clientTP)
+	if needTraceparent && clientTP != "" {
+		noteRejectedTraceparent(r, len(clientTP))
+	}
 
 	switch {
 	case reqID == "" && needTraceparent:

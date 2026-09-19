@@ -397,11 +397,29 @@ func TestGenerateTraceparent_MatchesLoneForm(t *testing.T) {
 }
 
 // TestRequestTracing_SanitisesClientRequestID keeps the CWE-117 contract
-// visible: a client-supplied request ID carrying CR/LF must be stripped before
-// it reaches a log line or the response header. The sanitiser moved position
-// in the rewrite (it now runs before the traceparent probe rather than after
-// the request-ID Set), so its effect is pinned rather than assumed.
+// visible: a client-supplied request ID carrying CR/LF must never reach a log
+// line or the response header. The sanitiser moved position in the rewrite (it
+// now runs before the traceparent probe rather than after the request-ID Set),
+// so its effect is pinned rather than assumed.
+//
+// THE EXACT-RESIDUAL ASSERTION HERE WAS INVERTED BY SEC-REQID-1, and the reason
+// is written into the payload this test has always used. It previously required
+// the surviving value to equal "abcX-Injected: 1def" — i.e. it pinned as CORRECT
+// the fact that everything except the CR/LF bytes came through verbatim,
+// including the spaces in the test's own `X-Injected: 1` example. That residual
+// is the defect: the decision lines render the id inside a space-separated
+// `{req_id=… identity=… action=…}` block, so a value containing a space injects
+// additional key=value tokens, and every C0 control byte other than CR/LF (ESC,
+// NUL, BEL, DEL) survived too — where sanitizeLog, the convention everywhere
+// else in this tree, scrubs all of them.
+//
+// The contract is now the stronger one: a value that cannot be retained safely
+// is not retained AT ALL — a fresh id is minted, exactly as for an absent
+// header. The CR/LF half is unchanged and still asserted, because the inline
+// strings.ReplaceAll is the barrier CodeQL's go/log-injection query recognises
+// on this value and must stay on every path.
 func TestRequestTracing_SanitisesClientRequestID(t *testing.T) {
+	resetTracingBoundsStateForTest()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
 	r.Header.Set(headerRequestID, "abc\r\nX-Injected: 1\ndef")
 	rec := httptest.NewRecorder()
@@ -411,11 +429,18 @@ func TestRequestTracing_SanitisesClientRequestID(t *testing.T) {
 	if strings.ContainsAny(got, "\r\n") {
 		t.Errorf("returned request id %q still carries CR/LF", got)
 	}
-	if want := "abcX-Injected: 1def"; got != want {
-		t.Errorf("sanitised id = %q, want %q", got, want)
+	// Nothing the client chose survives: the value is replaced wholesale.
+	if strings.Contains(got, "X-Injected") || strings.Contains(got, "abc") || strings.Contains(got, "def") {
+		t.Errorf("client-chosen bytes survived into the request id %q", got)
 	}
-	if h := rec.Header().Get(headerRequestID); strings.ContainsAny(h, "\r\n") {
-		t.Errorf("response header %q still carries CR/LF", h)
+	if len(got) != requestIDHexLen {
+		t.Errorf("request id = %q (len %d), want a freshly minted %d-char id", got, len(got), requestIDHexLen)
+	}
+	if h := rec.Header().Get(headerRequestID); h != got {
+		t.Errorf("response header %q does not mirror the minted id %q", h, got)
+	}
+	if n := requestIDRejected.Load(); n != 1 {
+		t.Errorf("requestIDRejected = %d, want 1", n)
 	}
 }
 
