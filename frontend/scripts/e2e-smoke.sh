@@ -46,6 +46,7 @@ IDPW_PORT="${CULVERT_E2E_IDPW_PORT:-19095}"
 # state class — boot-time truths no API can produce on a running node.
 CERT_PORT="${CULVERT_E2E_CERT_PORT:-19096}"
 CERTDEG_PORT="${CULVERT_E2E_CERTDEG_PORT:-19097}"
+CERTTLS_PORT="${CULVERT_E2E_CERTTLS_PORT:-19098}"
 WORK="$(mktemp -d)"
 BIN="$WORK/culvert"
 
@@ -60,6 +61,7 @@ cleanup() {
   [ -n "${IDPW_PID:-}" ] && kill "$IDPW_PID" 2>/dev/null || true
   [ -n "${CERT_PID:-}" ] && kill "$CERT_PID" 2>/dev/null || true
   [ -n "${CERTDEG_PID:-}" ] && kill "$CERTDEG_PID" 2>/dev/null || true
+  [ -n "${CERTTLS_PID:-}" ] && kill "$CERTTLS_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   rm -rf "$WORK" 2>/dev/null || true
 }
@@ -352,6 +354,36 @@ start_instance CERT "$CERT_PORT" "$((PROXY_PORT + 6))" -ui-users-file "$WORK/cer
 unset CULVERT_CA_PASSPHRASE
 start_instance CERTDEG "$CERTDEG_PORT" "$((PROXY_PORT + 7))" -ui-users-file "$WORK/certdeg/ui_users.json" -config "$WORK/certdeg/config.yaml" -ca-path "$WORK/certdeg/ca.bundle"
 
+# ── FE-6B.1 correction round: CERTTLS ───────────────────────────────────────
+# A NINTH appliance that boots WITH a persisted UI pair (A) already on disk
+# and WITHOUT -ui-no-tls, so its admin listener really serves A over TLS: the
+# published served identity is then checked against what a TLS client sees
+# (e2e/fe6b1c.spec.ts). Pair B is generated here for the spec to upload
+# through the admin API. The private keys never reach the browser.
+mkdir -p "$WORK/certtls" "$WORK/run-CERTTLS"
+cp "$WORK/auth/ui_users.json" "$WORK/certtls/ui_users.json"
+printf 'log_store_path: %s/certtls/logstore\n' "$WORK" > "$WORK/certtls/config.yaml"
+for pair in a b; do
+  openssl ecparam -genkey -name prime256v1 -noout -out "$WORK/certtls/ui-$pair.key" 2>/dev/null
+  openssl req -x509 -new -key "$WORK/certtls/ui-$pair.key" -subj "/CN=ui-fe6b1c-$pair.e2e" -days 365 \
+    -addext "subjectAltName=DNS:ui-fe6b1c-$pair.e2e" -out "$WORK/certtls/ui-$pair.crt" 2>/dev/null
+done
+cp "$WORK/certtls/ui-a.crt" "$WORK/run-CERTTLS/ui_tls_cert.pem"
+cp "$WORK/certtls/ui-a.key" "$WORK/run-CERTTLS/ui_tls_key.pem"
+chmod 600 "$WORK/run-CERTTLS/ui_tls_key.pem"
+start_instance_tls() {
+  # start_instance without -ui-no-tls: the persisted pair (or the auto
+  # self-signed certificate) is served.
+  name="$1"; uiport="$2"; pport="$3"; shift 3
+  d="$WORK/run-$name"
+  mkdir -p "$d"
+  (cd "$d" && exec env CULVERT_EXPERIMENTAL_UI=1 CULVERT_DATA_DIR="$d" "$BIN" \
+    -port "$pport" -ui-port "$uiport" "$@" \
+    >"$WORK/$name.log" 2>&1) &
+  eval "${name}_PID=\$!"
+}
+start_instance_tls CERTTLS "$CERTTLS_PORT" "$((PROXY_PORT + 8))" -ui-users-file "$WORK/certtls/ui_users.json" -config "$WORK/certtls/config.yaml" -ca-path "$WORK/certtls/ca.bundle"
+
 wait_ready() {
   port="$1"; name="$2"
   i=0
@@ -373,7 +405,21 @@ wait_ready "$IDPQ_PORT" IDPQ
 wait_ready "$IDPW_PORT" IDPW
 wait_ready "$CERT_PORT" CERT
 wait_ready "$CERTDEG_PORT" CERTDEG
-echo "e2e-smoke: all eight instances ready"
+wait_ready_tls() {
+  port="$1"; name="$2"
+  i=0
+  until curl -fsSk "https://127.0.0.1:$port/api/setup/status" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -gt 60 ]; then
+      echo "e2e-smoke: $name did not become ready on https://127.0.0.1:$port" >&2
+      sed -n '1,40p' "$WORK/$name.log" >&2 || true
+      exit 1
+    fi
+    sleep 0.5
+  done
+}
+wait_ready_tls "$CERTTLS_PORT" CERTTLS
+echo "e2e-smoke: all nine instances ready"
 
 # API-establish the retained-history premise (§19): the AUTH instance boots
 # from a FRESH per-instance data root (PR-C1), so the retained-history store
@@ -461,6 +507,8 @@ CULVERT_E2E_IDPQ_URL="http://127.0.0.1:$IDPQ_PORT" \
 CULVERT_E2E_IDPW_URL="http://127.0.0.1:$IDPW_PORT" \
 CULVERT_E2E_CERT_URL="http://127.0.0.1:$CERT_PORT" \
 CULVERT_E2E_CERTDEG_URL="http://127.0.0.1:$CERTDEG_PORT" \
+CULVERT_E2E_CERTTLS_URL="https://127.0.0.1:$CERTTLS_PORT" \
+CULVERT_E2E_CERTTLS_UI_PAIR_DIR="$WORK/certtls" \
 CULVERT_E2E_CERT_UI_PAIR_DIR="$WORK/cert" \
 CULVERT_E2E_CERTDEG_DATA_DIR="$WORK/run-CERTDEG" \
 CULVERT_E2E_CA_PASSPHRASE_CANARY="$CA_PASSPHRASE_CANARY" \

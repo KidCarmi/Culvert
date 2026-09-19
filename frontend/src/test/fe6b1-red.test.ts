@@ -123,7 +123,6 @@ import {
   RAW_CANARY,
   SECRET_CANARY,
   UI_ABSENT,
-  UI_ACTIVE_NOT_PERSISTED,
   UI_ACTIVE_PERSISTED,
   UI_CORRUPT,
   UI_INCOMPLETE,
@@ -813,7 +812,9 @@ describe("A7 postures are pure functions of the read model", () => {
       uiPairPosture(decodeCertificateInventory(withUI(ui)).uiCert);
     expect(inv(UI_PERSISTED_NOT_ACTIVE)).toBe("persisted_restart_required");
     expect(inv(UI_ACTIVE_PERSISTED)).toBe("active_persisted");
-    expect(inv(UI_ACTIVE_NOT_PERSISTED)).toBe("active_not_persisted");
+    // FE-6B.1 correction round: the "active but absent" shape is a
+    // contradiction under the listener-evidence contract (see
+    // fe6b1c-red.test.ts); its posture row is withdrawn.
     expect(inv(UI_ABSENT)).toBe("absent");
     expect(inv(UI_INCOMPLETE)).toBe("incomplete");
     expect(inv(UI_UNAVAILABLE)).toBe("unavailable");

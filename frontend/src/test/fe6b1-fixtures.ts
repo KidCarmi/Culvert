@@ -82,15 +82,11 @@ export const UI_CORRUPT = {
   notAfter: "2027-09-01T00:00:00Z",
 };
 
-/** The running listener loaded a pair that has since been deleted (FE-6B.0
- * 6B0-G: deleting the ACTIVE pair is allowed). */
-export const UI_ACTIVE_NOT_PERSISTED = {
-  present: false,
-  pairState: "absent",
-  revision: "uic1:none",
-  active: true,
-  corrupt: false,
-};
+/** FE-6B.1 correction round: the former UI_ACTIVE_NOT_PERSISTED fixture
+ * (absent pair, `active: true`) is a CONTRADICTION under the listener-evidence
+ * contract — `active` is derived from served == persisted, so an absent pair
+ * is never active. The deleted-while-served case is UI_ABSENT beside
+ * LISTENER_CUSTOM_A(false). */
 
 export const UI_ACTIVE_PERSISTED = {
   ...UI_PERSISTED_NOT_ACTIVE,
@@ -150,6 +146,95 @@ export const BACKUP_FACTS = {
   configVersionRollback: false,
 };
 
+// ── FE-6B.1 correction round (B1): server-owned LISTENER evidence ───────────
+// The RUNNING admin listener's posture and the certificate it actually
+// serves, recorded from the bind (never from a boot-time selection flag), and
+// carried on BOTH reads (`listener` on the inventory, `ui_listener` on the
+// network settings). `uiCert.active` / `ui_custom_cert_active` are DERIVED:
+// true only when the served certificate IS the persisted one.
+export const UI_FP_B =
+  "B0:B1:B2:B3:B4:B5:B6:B7:B8:B9:BA:BB:BC:BD:BE:BF:C0:C1:C2:C3:C4:C5:C6:C7:C8:C9:CA:CB:CC:CD:CE:CF";
+export const SELF_FP =
+  "5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F:5E:1F";
+export const CONF_FP =
+  "C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F:C0:4F";
+
+export const LISTENER_UNKNOWN = {
+  state: "unknown",
+  posture: "unknown",
+  servesPersistedPair: false,
+};
+export const LISTENER_PLAIN = {
+  state: "serving",
+  posture: "plain_http",
+  servesPersistedPair: false,
+};
+export const LISTENER_SELF_SIGNED = {
+  state: "serving",
+  posture: "tls_self_signed",
+  servedCertificate: {
+    fingerprint: SELF_FP,
+    subject: "culvert-admin-ui",
+    notBefore: "2026-09-01T00:00:00Z",
+    notAfter: "2027-09-01T00:00:00Z",
+  },
+  servesPersistedPair: false,
+};
+export const LISTENER_CONFIGURED = {
+  state: "serving",
+  posture: "tls_configured",
+  servedCertificate: {
+    fingerprint: CONF_FP,
+    subject: "ui-configured.example",
+    notBefore: "2026-09-01T00:00:00Z",
+    notAfter: "2027-09-01T00:00:00Z",
+  },
+  servesPersistedPair: false,
+};
+/** The listener serves pair A (UI_FP) — the pair that is (or was) persisted. */
+export const LISTENER_CUSTOM_A = (servesPersisted: boolean) => ({
+  state: "serving",
+  posture: "tls_custom",
+  servedCertificate: {
+    fingerprint: UI_FP,
+    subject: "ui.example",
+    notBefore: "2026-09-01T00:00:00Z",
+    notAfter: "2027-09-01T00:00:00Z",
+  },
+  servesPersistedPair: servesPersisted,
+});
+
+/** Pair B persisted (complete, valid), not the pair the listener serves. */
+export const UI_PERSISTED_B = {
+  present: true,
+  pairState: "complete",
+  revision: `uic1:${HEX64_B}`,
+  active: false,
+  corrupt: false,
+  fingerprint: UI_FP_B,
+  subject: "ui-b.example",
+  notAfter: "2027-09-01T00:00:00Z",
+};
+
+/** A network-settings read carrying the listener evidence beside the legacy flags. */
+export const LISTENER_NET = (
+  listener: Record<string, unknown>,
+  uploaded: boolean,
+  active: boolean,
+  fallback = false,
+) => ({
+  base_url: "",
+  ui_sans: null,
+  trust_forwarded_headers: false,
+  trusted_proxy_cidrs: null,
+  ui_tls_fallback: fallback,
+  ui_tls_fallback_reason: fallback ? `x509: ${RAW_CANARY}` : "",
+  ui_custom_cert_uploaded: uploaded,
+  ui_custom_cert_active: active,
+  ui_custom_cert_corrupt: false,
+  ui_listener: listener,
+});
+
 export const INVENTORY_HEALTHY = {
   scope: "node-local",
   ca: CA_HEALTHY,
@@ -158,6 +243,7 @@ export const INVENTORY_HEALTHY = {
   ocsp: OCSP_INV_DEFAULT,
   operations: LEDGER_OK,
   backup: BACKUP_FACTS,
+  listener: LISTENER_SELF_SIGNED,
 };
 
 export const CA_DEGRADED = {
@@ -182,6 +268,7 @@ export const INVENTORY_DEGRADED = {
   ocsp: OCSP_INV_ADMIN_DIFFERS,
   operations: LEDGER_DEGRADED,
   backup: { ...BACKUP_FACTS, caBundleEncrypted: false },
+  listener: LISTENER_SELF_SIGNED,
 };
 
 export const CA_STATUS_HEALTHY = {
@@ -320,6 +407,7 @@ export const LISTENER_TLS = {
   ui_custom_cert_uploaded: true,
   ui_custom_cert_active: false,
   ui_custom_cert_corrupt: false,
+  ui_listener: LISTENER_SELF_SIGNED,
 };
 
 /** The listener fell back to plain HTTP (self-signed setup failed); the
@@ -334,6 +422,7 @@ export const LISTENER_FALLBACK = {
   ui_custom_cert_uploaded: false,
   ui_custom_cert_active: false,
   ui_custom_cert_corrupt: false,
+  ui_listener: LISTENER_PLAIN,
 };
 
 const OP_BASE = {

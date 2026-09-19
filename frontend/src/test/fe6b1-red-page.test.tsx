@@ -76,8 +76,9 @@ import {
   OP_WRITER,
   RAW_CANARY,
   SECRET_CANARY,
+  LISTENER_CUSTOM_A,
+  LISTENER_NET,
   UI_ABSENT,
-  UI_ACTIVE_NOT_PERSISTED,
   UI_ACTIVE_PERSISTED,
   UI_INCOMPLETE,
   UI_UNAVAILABLE,
@@ -353,9 +354,13 @@ it("P2b the four pair evidence classes are distinct renderings", async () => {
 it("P3 persisted vs active vs durability are three distinct facts", async () => {
   route = (url) => {
     if (url.startsWith("/api/certificates"))
-      return okJSON({ ...INVENTORY_HEALTHY, uiCert: UI_ACTIVE_PERSISTED });
+      return okJSON({
+        ...INVENTORY_HEALTHY,
+        uiCert: UI_ACTIVE_PERSISTED,
+        listener: LISTENER_CUSTOM_A(true),
+      });
     if (url.startsWith("/api/settings/network"))
-      return okJSON({ ...LISTENER_TLS, ui_custom_cert_active: true });
+      return okJSON(LISTENER_NET(LISTENER_CUSTOM_A(true), true, true));
     return defaultRoute(url);
   };
   await mount("viewer");
@@ -368,22 +373,28 @@ it("P3 persisted vs active vs durability are three distinct facts", async () => 
     root.unmount();
   });
 
+  // FE-6B.1 correction round (B1), recorded assertion change: the
+  // deleted-while-served case is expressed through the server-owned listener
+  // evidence (the listener serves A; nothing is persisted). Under that
+  // contract the persisted pair's activation is NOT claimed — the former
+  // "Active on the running listener" assertion for this case is withdrawn
+  // and the served identity is asserted instead (fe6b1c-red-page Q7).
   route = (url) => {
     if (url.startsWith("/api/certificates"))
-      return okJSON({ ...INVENTORY_HEALTHY, uiCert: UI_ACTIVE_NOT_PERSISTED });
-    if (url.startsWith("/api/settings/network"))
       return okJSON({
-        ...LISTENER_TLS,
-        ui_custom_cert_uploaded: false,
-        ui_custom_cert_active: true,
+        ...INVENTORY_HEALTHY,
+        uiCert: UI_ABSENT,
+        listener: LISTENER_CUSTOM_A(false),
       });
+    if (url.startsWith("/api/settings/network"))
+      return okJSON(LISTENER_NET(LISTENER_CUSTOM_A(false), false, false));
     return defaultRoute(url);
   };
   await mount("viewer");
   await flushUntil(() => {
     expect(text()).toContain("no longer persisted");
   });
-  expect(text()).toContain("Active on the running listener");
+  expect(text()).not.toContain("Active on the running listener");
   expect(text()).toContain("No persisted pair");
   act(() => {
     root.unmount();
@@ -393,7 +404,11 @@ it("P3 persisted vs active vs durability are three distinct facts", async () => 
   // plain HTTP — no activation claim, the raw reason never renders.
   route = (url) => {
     if (url.startsWith("/api/certificates"))
-      return okJSON({ ...INVENTORY_HEALTHY, uiCert: UI_ACTIVE_PERSISTED });
+      return okJSON({
+        ...INVENTORY_HEALTHY,
+        uiCert: UI_ACTIVE_PERSISTED,
+        listener: LISTENER_CUSTOM_A(true),
+      });
     if (url.startsWith("/api/settings/network"))
       return okJSON({
         ...LISTENER_FALLBACK,

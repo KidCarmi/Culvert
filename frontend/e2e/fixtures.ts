@@ -31,6 +31,15 @@ export const CERT_URL =
  * corrupt persisted UI pair, and a pre-seeded operation ledger. */
 export const CERTDEG_URL =
   process.env["CULVERT_E2E_CERTDEG_URL"] ?? "http://127.0.0.1:19097";
+/** FE-6B.1 correction round: the appliance that boots WITH a persisted UI
+ * pair (A) on disk and WITHOUT -ui-no-tls — its admin listener serves A over
+ * real TLS, so the published served identity can be checked against the
+ * certificate a TLS client actually receives. */
+export const CERTTLS_URL =
+  process.env["CULVERT_E2E_CERTTLS_URL"] ?? "https://127.0.0.1:19098";
+/** FE-6B.1 correction round: where the harness generated pair B for CERTTLS. */
+export const CERTTLS_UI_PAIR_DIR =
+  process.env["CULVERT_E2E_CERTTLS_UI_PAIR_DIR"] ?? "";
 /** FE-6B.1: where the harness generated the UI leaf pair the spec uploads. */
 export const CERT_UI_PAIR_DIR =
   process.env["CULVERT_E2E_CERT_UI_PAIR_DIR"] ?? "";
