@@ -159,10 +159,12 @@ baseline_ok() {
 # which is the same failure as missing one: the score stopped describing the suite.
 #
 # Auditing the payloads by hand found the one instance. This makes the RUNNER prove the property
-# instead: every payload must match EXACTLY ONE site, and a payload that means to hit several
-# must say so with --multi <n>. A miss (0) and an overreach (>1) are both NOT PROVEN, the
-# same verdict a mutation that does not build gets, and for the same reason -- nothing ran that
-# could distinguish the mutated tree from the clean one.
+# instead: every payload must match EXACTLY ONE site. A miss (0) and an overreach (>1) are both
+# NOT PROVEN, the same verdict a mutation that does not build gets, and for the same reason --
+# nothing ran that could distinguish the mutated tree from the clean one. There is deliberately no
+# opt-out for a payload that wants several sites: run_mutation already takes MULTIPLE payloads, so
+# a mutation that needs several edits spells out each one, and a payload that cannot be anchored to
+# a single site is a payload whose target is ambiguous.
 #
 # apply_payload prints how many SITES the payload matches, then applies it. The count must come
 # from a /g run against an UNTOUCHED copy: a plain s/// returns 1 whether the pattern matched one
@@ -193,17 +195,58 @@ apply_payload() {
   ' "$1" "$2"
 }
 
-# run_mutation <id> <description> [--compile-wall] [--multi <n>] <gate-regex> <package> <file> <perl-script...>
+# SELF-CHECK: THE SITE COUNTER MUST BE ABLE TO FAIL (Codex P2, round 10, PR #1423).
+#
+# The guard above is only worth having if apply_payload can really tell one site from several, and
+# nothing in the campaign exercises that: every one of the 30 payloads matches exactly one site, so
+# dropping the `/g` from the counting run -- or replacing the count with a constant 1 -- leaves all
+# 30 passing while the guard is silently disabled, and the campaign reports 30 caught with the exact
+# M30 ambiguity it exists to stop free to recur. Verified: with the `/g` the ambiguous M30 payload
+# reports 4 sites; without it, 1.
+#
+# That is this campaign's own rule turned on the campaign: A CONTROL THAT CANNOT FAIL IS DECORATION.
+# The manual verification of the counter is recorded in the review ledger, and a verification
+# recorded in prose does not protect later runs -- which is the same gap between what an apparatus
+# proves and what its record claims that every finding on this branch has been.
+#
+# A disagreement REFUSES TO START rather than warning: a counter that cannot distinguish 0 from 1
+# from many makes every score after it unverified, the same reason a dirty tree and a red baseline
+# refuse.
+selfcheck_site_counter() {
+  local dir; dir="$(mktemp -d)"
+  local fixture="$dir/fixture.txt" fail=0 n
+  printf 'token 1 widgets\ntoken 2 widgets\ntoken 3 widgets\nanchored 4 widgets\n' > "$fixture"
+
+  # (1) an AMBIGUOUS payload must report every site it could land on, not the one it took.
+  cp "$fixture" "$dir/a"
+  n="$(apply_payload "$dir/a" 's/ \d+ widgets/ 999 widgets/')"
+  [ "$n" = 4 ] || { printf 'SELF-CHECK: ambiguous payload reported %s site(s), expected 4\n' "$n" >&2; fail=1; }
+
+  # (2) an ANCHORED payload must report exactly one, and must actually apply.
+  cp "$fixture" "$dir/b"
+  n="$(apply_payload "$dir/b" 's/anchored \d+ widgets/anchored 999 widgets/')"
+  [ "$n" = 1 ] || { printf 'SELF-CHECK: anchored payload reported %s site(s), expected 1\n' "$n" >&2; fail=1; }
+  cmp -s "$dir/b" "$fixture" && { printf 'SELF-CHECK: anchored payload counted but did not apply\n' >&2; fail=1; }
+
+  # (3) a payload that matches nothing must report zero and leave the file alone.
+  cp "$fixture" "$dir/c"
+  n="$(apply_payload "$dir/c" 's/no such text anywhere/x/')"
+  [ "$n" = 0 ] || { printf 'SELF-CHECK: non-matching payload reported %s site(s), expected 0\n' "$n" >&2; fail=1; }
+  cmp -s "$dir/c" "$fixture" || { printf 'SELF-CHECK: non-matching payload changed the file\n' >&2; fail=1; }
+
+  rm -rf "$dir"
+  if [ $fail -ne 0 ]; then
+    printf '\nrefusing to run: the payload site counter is broken, so no score it produced would\n' >&2
+    printf '                 mean anything. Fix apply_payload before re-running.\n' >&2
+    exit 3
+  fi
+}
+
+# run_mutation <id> <description> [--compile-wall] <gate-regex> <package> <file> <perl-script...>
 run_mutation() {
   local id="$1" desc="$2"; shift 2
-  local compile_wall=0 expect_subst=1
-  while :; do
-    case "${1:-}" in
-      --compile-wall) compile_wall=1; shift ;;
-      --multi)        expect_subst="$2"; shift 2 ;;
-      *)              break ;;
-    esac
-  done
+  local compile_wall=0
+  [ "${1:-}" = "--compile-wall" ] && { compile_wall=1; shift; }
   local gate="$1" pkg="$2" file="$3"; shift 3
 
   printf '\n[%s] %s\n' "$id" "$desc"
@@ -222,12 +265,12 @@ run_mutation() {
   MUTATING_FILE="$file" # armed BEFORE the first edit; the trap restores it if we die here
   for script in "$@"; do
     local n; n="$(apply_payload "$file" "$script")"
-    if [ "$n" != "$expect_subst" ]; then
-      printf '      NOT PROVEN — the payload matches %s site(s) in %s; %s was required.\n' \
-        "$n" "$file" "$expect_subst"
+    if [ "$n" != 1 ]; then
+      printf '      NOT PROVEN — the payload matches %s site(s) in %s; exactly 1 is required.\n' \
+        "$n" "$file"
       printf '                   A payload that can land somewhere other than where it claims to\n'
       printf '                   mutates the wrong thing and proves nothing.\n'
-      SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (payload matches $n site(s), expected $expect_subst)")
+      SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (payload matches $n site(s), expected 1)")
       revert "$file"; MUTATING_FILE=""
       [ $KEEP -eq 0 ] && exit 1
       return
@@ -274,6 +317,8 @@ run_mutation() {
     [ $KEEP -eq 0 ] && { printf '\nstopping at first survivor (pass -k to continue)\n'; exit 1; }
   fi
 }
+
+selfcheck_site_counter
 
 printf 'MCP FIRST-CANARY CREDENTIAL-FREE PATH mutation campaign (blocker #9)\n'
 printf '===================================================================\n'

@@ -2840,7 +2840,7 @@ activation is the residual above, not a drift-path gap.
 negative's positive control — to exist.
 
 **Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 30 mutations,
-**30 caught, 0 survived, 0 skipped, measured on `5916e7c5`**.
+**CAMPAIGN_RESULT_PENDING**.
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
@@ -2858,14 +2858,34 @@ recurring shape, now at the level of the measuring instrument for the second tim
 what the apparatus proves and what its number claims.**
 
 Anchoring M30 fixed the instance. The runner now proves the property for all thirty: `apply_payload`
-counts how many SITES a payload matches and the runner requires exactly one, with `--multi <n>` as
-the explicit opt-in for a payload that means to hit several; a miss (0) and an overreach (>1) are
-both NOT PROVEN. The count is taken from a `/g` run against an untouched copy, and that detail is
-load-bearing — counting SUBSTITUTIONS would not work, because a plain `s///` returns 1 whether the
-pattern matched one site or forty, and the first version of this guard duly reported the ambiguous
-M30 payload as a clean single hit. **A control that cannot fail is decoration**, so it was verified
-in both directions (the old payload reports 4 sites, the anchored one reports 1) and all thirty
-payloads were differentialled against the previous apply for byte-identical output.
+counts how many SITES a payload matches and the runner requires exactly one; a miss (0) and an
+overreach (>1) are both NOT PROVEN. The count is taken from a `/g` run against an untouched copy,
+and that detail is load-bearing — counting SUBSTITUTIONS would not work, because a plain `s///`
+returns 1 whether the pattern matched one site or forty, and the first version of this guard duly
+reported the ambiguous M30 payload as a clean single hit.
+
+**And then the guard had the same defect the guard was for**, which Codex round 10 found. Every one
+of the thirty payloads matches exactly one site, so nothing in the campaign ever asked the counter
+to report anything else: drop the `/g`, or replace the count with a constant `1`, and all thirty
+still pass while the guard is silently disabled and the M30 ambiguity is free to recur (measured —
+with the `/g` the ambiguous payload reports 4 sites, without it 1). The counter had been verified by
+hand and the verification written down **here**, in prose, which protects no later run. That is this
+section's one recurring shape reaching the third level: the apparatus that measures the suite had
+itself become a record that claimed more than it proved.
+
+So the verification is now part of every run. `selfcheck_site_counter` builds a fixture and requires
+the counter to report **4** for an ambiguous payload, **1** for an anchored one that actually
+applies, and **0** for one that matches nothing and leaves the file alone; a disagreement makes the
+campaign **refuse to start**, for the same reason a dirty tree and a red baseline do — a broken
+counter makes every score after it unverified. It was checked against three injected defects (the
+dropped `/g`, a constant `1`, and a counter that counts correctly but stops applying), each
+rejected, with a healthy counter accepted as the control. All thirty payloads were also
+differentialled against the previous apply for byte-identical output.
+
+There is deliberately **no opt-out** for a payload that wants several sites. `run_mutation` already
+takes multiple payloads, so a mutation needing several edits spells out each one — and the earlier
+`--multi <n>` escape hatch was removed rather than kept, because nothing used it, nothing tested it,
+and an untested branch that loosens a guard is the next round's finding.
 
 > **The previously recorded score here — "21 caught, 0 survived, 0 skipped, measured on
 > `5d0e8055`" — was VOID, and the way it was void is the most important thing in this section.**
