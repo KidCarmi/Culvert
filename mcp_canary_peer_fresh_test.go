@@ -372,6 +372,44 @@ func TestPeerFreshProd_FreshF2NeverMakesAnF1ActivationFresh(t *testing.T) {
 	}
 }
 
+// TestPeerFreshProd_AReviewedSetForAnotherToolIsNotAReviewedTarget closes the case the mutation
+// campaign found the matrix could not see (M13).
+//
+// exactReviewedTargetFor picks the candidate reviewed target for THIS exact (server, tool) out of
+// the set the activation would bind, and returns the ZERO target on a miss — which cannot equal
+// any real current target, so the verdict reports the target moved. The tempting "simplification"
+// is to fall back to whatever the set does contain when there is exactly one entry.
+//
+// That fallback would make the binding trivially self-satisfied: the row would then assert only
+// that the catalog agrees with itself, for an activation that reviewed a DIFFERENT tool. None of
+// the earlier rows could distinguish it, because every one of them supplies a reviewed set that
+// already contains the right tool — which is exactly the blind spot a campaign exists to find.
+func TestPeerFreshProd_AReviewedSetForAnotherToolIsNotAReviewedTarget(t *testing.T) {
+	r := newPeerFreshRig(t)
+	r.observe(t)
+	if fresh, reason := r.freshnessAt(t, r.now); !fresh {
+		t.Fatalf("premise: the exact target must be observed and fresh, got %q", reason)
+	}
+
+	// The activation reviewed some OTHER tool. Nothing was reviewed for the tool the scope names.
+	elsewhere := r.reviewedReadOnly(t)
+	if len(elsewhere) != 1 {
+		t.Fatalf("premise: exactly one reviewed target, got %d", len(elsewhere))
+	}
+	elsewhere[0].ToolName = "some-other-tool"
+
+	f := canaryExactRequestFacts(r.scope(), elsewhere, r.now)
+	if f.PeerObservedFresh {
+		t.Fatal("an activation that reviewed a DIFFERENT tool has no reviewed target for this " +
+			"observation to back; inventing one from the current state would make the binding " +
+			"assert only that the catalog agrees with itself")
+	}
+	if f.PeerObservedFreshReason != canary.PeerFreshTargetMoved {
+		t.Fatalf("a missing reviewed target must report that the target moved, got %q",
+			f.PeerObservedFreshReason)
+	}
+}
+
 // ── no authority widening ───────────────────────────────────────────────────────────────────
 
 // TestPeerFreshProd_FreshnessConfersNoAuthority pins that a fresh observation is only truth.
