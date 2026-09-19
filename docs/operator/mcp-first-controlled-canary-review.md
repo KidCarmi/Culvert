@@ -2839,8 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 28 mutations,
-**CAMPAIGN_RESULT_PENDING**.
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 28 mutations, **28 caught,
+0 survived, 0 skipped**, measured on `786a7295` from a baseline the campaign verified itself.
 
 It took THREE runs on this round's code to get there, and the two discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
