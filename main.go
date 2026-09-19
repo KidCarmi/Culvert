@@ -611,6 +611,15 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
+	// config.yaml's security.ip_filter_mode is validated at load time
+	// (FileConfig.validateEnums), but a CLI -ip-filter-mode value reaches the
+	// same field with no equivalent gate — checked here, on the RESOLVED
+	// value, because a CLI flag always outranks config.yaml. See
+	// validIPFilterMode for why an unvalidated value here is a silent
+	// total-outage risk, not just a cosmetic one.
+	if !validIPFilterMode(s.ipModeVal) {
+		log.Fatalf("Invalid -ip-filter-mode %q: must be \"allow\" or \"block\"", s.ipModeVal)
+	}
 }
 
 // initUIExtras is the PR3 expansion shim: resolve the UI-extras slice
