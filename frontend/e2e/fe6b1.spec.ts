@@ -57,7 +57,7 @@ import {
   EMPTY_STATE,
   USERS,
 } from "./fixtures";
-import { expectNavLinkReachable } from "./nav-open";
+import { expectNavLinkReachable, openNavToFinalState } from "./nav-open";
 
 const ROUTE = "/app/security/certificates";
 const NAV_LABEL = "Certificates & CA";
@@ -369,8 +369,14 @@ test.describe("J1/J2 viewer and operator", () => {
     expect(
       await main.locator("input,select,textarea,dialog,form").count(),
     ).toBe(0);
-    await page.getByRole("button", { name: "Open navigation" }).click();
+    // GREEN-run harness correction (recorded): the off-canvas "Open
+    // navigation" toggle exists only at <=1100px; the RED journey omitted the
+    // viewport step every other nav-reachability journey takes. Same
+    // reachability assertion, reached through the shared settled-open proof.
+    await page.setViewportSize({ width: 640, height: 800 });
+    await openNavToFinalState(page);
     await expectNavLinkReachable(page, NAV_LABEL);
+    await page.setViewportSize({ width: 1280, height: 800 });
     expectOnlyGET(w);
     expect(lookupsIn(w)).toBe(0);
     await expectNoLeak(page, w);
@@ -380,6 +386,12 @@ test.describe("J1/J2 viewer and operator", () => {
     await page.goto(ROUTE);
     await login(page, USERS.operator.user, USERS.operator.pass);
     await expect(page).toHaveURL(new RegExp(`${ROUTE}$`));
+    // GREEN-run harness correction (recorded): the sign-in gate renders AT the
+    // requested URL, so the URL assertion alone does not prove the session
+    // exists — wait for the authenticated page before reloading, or the
+    // reload can interrupt the sign-in POST (the ordering the deep-link
+    // journey already has).
+    await expect(page.getByRole("heading", { name: NAV_LABEL })).toBeVisible();
     const w = watch(page);
     await page.reload();
     const main = page.getByRole("main");

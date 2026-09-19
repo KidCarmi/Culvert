@@ -31,6 +31,7 @@ import { AdministratorsPage } from "../features/administration/AdministratorsPag
 import { ContentSecurityPage } from "../features/security/ContentSecurityPage";
 import { DecryptionPage } from "../features/security/DecryptionPage";
 import { CDRPage } from "../features/security/CDRPage";
+import { CertificatesPage } from "../features/security/CertificatesPage";
 import { PACPage } from "../features/network/pac/PACPage";
 import { UpstreamPage } from "../features/network/upstream/UpstreamPage";
 
@@ -100,6 +101,13 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           {
             path: "security/cdr",
             element: <CDRPage />,
+          },
+          {
+            // FE-6B.1 (FE-V28/FE-V29 read): viewer floor — uiRoutes GET
+            // /api/certificates, /api/ca/status, /api/ocsp; the admin-only
+            // operation lookup is gated inside the page.
+            path: "security/certificates",
+            element: <CertificatesPage />,
           },
           {
             path: "network/pac",

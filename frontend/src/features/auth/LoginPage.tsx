@@ -12,7 +12,7 @@ import { useLocation, useNavigate } from "react-router";
 import { ApiError } from "../../api/client";
 import { postLogin } from "../../api/auth";
 import { useAuth } from "../../auth/AuthProvider";
-import { resolveRouteIntent } from "../../auth/routeIntent";
+import { intentSearch, resolveRouteIntent } from "../../auth/routeIntent";
 import { Button, Callout } from "../../design-system/primitives";
 import { InputField } from "../../design-system/forms";
 import { AuthScreen } from "./AuthScreen";
@@ -57,7 +57,13 @@ export function LoginPage(): JSX.Element {
       // confirmed role may visit; otherwise land on Overview.
       const raw = location.pathname;
       const intent = raw.startsWith("/app") ? raw.slice(4) || "/" : raw;
-      void navigate(resolveRouteIntent(intent, after.role), { replace: true });
+      const resolved = resolveRouteIntent(intent, after.role);
+      void navigate(
+        resolved + intentSearch(resolved, intent, location.search),
+        {
+          replace: true,
+        },
+      );
       return;
     }
     setNotice({

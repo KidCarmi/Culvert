@@ -807,11 +807,10 @@ describe("A7 postures are pure functions of the read model", () => {
     );
   });
   it("UI pair postures: persisted / active / restart-required / active-not-persisted / evidence classes", () => {
-    const inv = (ui: unknown): ReturnType<typeof uiPairPosture> =>
-      uiPairPosture(
-        decodeCertificateInventory(withUI(ui as Record<string, unknown>))
-          .uiCert,
-      );
+    const inv = (
+      ui: Record<string, unknown>,
+    ): ReturnType<typeof uiPairPosture> =>
+      uiPairPosture(decodeCertificateInventory(withUI(ui)).uiCert);
     expect(inv(UI_PERSISTED_NOT_ACTIVE)).toBe("persisted_restart_required");
     expect(inv(UI_ACTIVE_PERSISTED)).toBe("active_persisted");
     expect(inv(UI_ACTIVE_NOT_PERSISTED)).toBe("active_not_persisted");

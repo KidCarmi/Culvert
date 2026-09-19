@@ -226,12 +226,11 @@ async function typeInto(label: string, value: string): Promise<void> {
     );
   });
   if (input === undefined) throw new Error(`no input ${label}`);
-  const setter = Object.getOwnPropertyDescriptor(
-    HTMLInputElement.prototype,
-    "value",
-  )?.set;
   await act(async () => {
-    setter?.call(input, value);
+    // Drive the PROTOTYPE's value setter with the element as receiver so
+    // React's value tracker observes the change (an own-property write would
+    // not); Reflect.set carries the receiver without detaching the accessor.
+    Reflect.set(HTMLInputElement.prototype, "value", value, input);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await Promise.resolve();
   });
