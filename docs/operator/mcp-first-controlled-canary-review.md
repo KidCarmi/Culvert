@@ -2840,12 +2840,32 @@ activation is the residual above, not a drift-path gap.
 negative's positive control — to exist.
 
 **Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 30 mutations,
-**CAMPAIGN_RESULT_PENDING**.
+**30 caught, 0 survived, 0 skipped, measured on `5916e7c5`**.
 
-It took THREE runs on this round's code to get there, and the two discarded runs are the argument
+It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
 then SURVIVED (its control had been silently disarmed), then M24 came back SKIPPED (its payload
 named a symbol this round deleted). Review found none of the three.
+
+The fourth is the one worth recording, because the defect was in the INSTRUMENT. **M30 came back
+SURVIVED, and there was no hole.** The payloads are applied with perl in slurp mode, so an `s///`
+without `/g` replaces the first match IN THE WHOLE FILE. M30's pattern matched four lines of this
+document and the first is blocker 4's campaign row, roughly 1500 lines outside §25d. The mutation
+applied, edited an unrelated section, and the correctly-scoped gate saw nothing — so it reported a
+hole in a suite that did not have one. That is the same defect as missing a hole that does exist:
+the score had stopped describing the suite. In both directions the failure is the section's one
+recurring shape, now at the level of the measuring instrument for the second time — **a gap between
+what the apparatus proves and what its number claims.**
+
+Anchoring M30 fixed the instance. The runner now proves the property for all thirty: `apply_payload`
+counts how many SITES a payload matches and the runner requires exactly one, with `--multi <n>` as
+the explicit opt-in for a payload that means to hit several; a miss (0) and an overreach (>1) are
+both NOT PROVEN. The count is taken from a `/g` run against an untouched copy, and that detail is
+load-bearing — counting SUBSTITUTIONS would not work, because a plain `s///` returns 1 whether the
+pattern matched one site or forty, and the first version of this guard duly reported the ambiguous
+M30 payload as a clean single hit. **A control that cannot fail is decoration**, so it was verified
+in both directions (the old payload reports 4 sites, the anchored one reports 1) and all thirty
+payloads were differentialled against the previous apply for byte-identical output.
 
 > **The previously recorded score here — "21 caught, 0 survived, 0 skipped, measured on
 > `5d0e8055`" — was VOID, and the way it was void is the most important thing in this section.**
