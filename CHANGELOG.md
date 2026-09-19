@@ -9,6 +9,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Session revocations did not survive a restart and did not reach the cluster
+  (CHAOS-66). A Culvert session cookie is self-contained and is trusted on its
+  HMAC alone — nothing re-consults the user roster on a request, and the admin
+  role is read out of the cookie — so the revocation list is the only way to
+  withdraw authority from a session that is already issued, for up to seven
+  days. Four defects: an account-level revocation (`DELETE /api/auth/users`)
+  was written only to memory, so an ordinary restart resurrected a deleted
+  account's live sessions; it was never gossiped either, so on a cluster only
+  the node that served the delete stopped honouring the cookie — including for
+  identity- and group-scoped proxy policy, not just the admin UI; the Control
+  Plane, which is the node the admin UI runs on, neither contributed its own
+  revocations to the fleet nor applied what it received, so a logout performed
+  on the Control Plane propagated nowhere; and a corrupt revocations file
+  booted the node with an empty list behind one log line, after which the next
+  save overwrote the evidence. Both revocation kinds now reach disk and the
+  fleet, the Control Plane participates in both directions, and a corrupt file
+  is quarantined through the existing `state_file_corrupt` path. The persisted
+  document remains a JSON array so an older binary still parses the token
+  revocations it understands.
+
+  Revocation persistence remains opt-in (`-revocations-file`) and is not
+  changed here, but it is no longer silent: a new `session_revocation`
+  diagnostics row and `culvert_session_revocation_*` metrics report whether a
+  revocation applied on this node would survive a restart, and the row names
+  the coupling that makes the default dangerous — a stable session signing key,
+  which every clustered deployment configures, is what lets a cookie outlive
+  the restart that discards its revocation. Operators running a cluster should
+  set `-revocations-file`. See `docs/operator/session-revocation.md`.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
