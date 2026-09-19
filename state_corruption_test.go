@@ -350,3 +350,76 @@ func TestHandleReady_SurfacesStateFileCorruption(t *testing.T) {
 		t.Fatalf("state-file row changed readiness (%s/%d → %s/%d) — must be report-only", base.Status, baseCode, got.Status, gotCode)
 	}
 }
+
+// TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics pins the
+// closed half of the gap TestHandleReady_SurfacesStateFileCorruption
+// documents: the authenticated /api/diagnostics operator contract must carry
+// the corruption's kind, cause, and recovery shape (fresh quarantine,
+// quarantine-attempt-itself-failed, or an unreconciled prior-boot leftover)
+// — without leaking the absolute file path — instead of forcing the admin to
+// read the process log for information the process already computed.
+func TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics(t *testing.T) {
+	isolateStateCorruption(t)
+
+	if got := checkStateFileIntegrity(); got != nil {
+		t.Fatalf("baseline: no corruption recorded, want nil, got %+v", got)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ui_users.json")
+	if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	qpath := quarantineCorruptStateFile("ui_users", path, errors.New("unexpected end of JSON input"))
+	if qpath == "" {
+		t.Fatal("setup: quarantine should have succeeded (path does not exist, rename target is free)")
+	}
+
+	rows := checkStateFileIntegrity()
+	if len(rows) != 1 {
+		t.Fatalf("want exactly one row, got %+v", rows)
+	}
+	row := rows[0]
+	if row.Code != "state_file_ui_users" {
+		t.Fatalf("Code = %q, want state_file_ui_users", row.Code)
+	}
+	if row.Status != diagWarn {
+		t.Fatalf("Status = %q, want %q (survivable — env fallback creds recover this)", row.Status, diagWarn)
+	}
+	if !strings.Contains(row.Message, "unexpected end of JSON input") {
+		t.Fatalf("Message must carry the parse cause, got %q", row.Message)
+	}
+	if strings.Contains(row.Message, path) || strings.Contains(row.Message, dir) || strings.Contains(row.Message, qpath) {
+		t.Fatalf("authenticated diagnostics row leaked the absolute path (viewer-role, no-paths contract): %q", row.Message)
+	}
+	if row.OperatorAction == "" {
+		t.Fatal("a warn/fail row must carry an OperatorAction")
+	}
+
+	// A rename-aside failure (path already gone) is the most urgent shape —
+	// the NEXT save would silently overwrite the corrupt file — and must be
+	// distinguishable from an ordinary quarantine.
+	isolateStateCorruption(t)
+	missing := filepath.Join(dir, "gone.json")
+	if got := quarantineCorruptStateFile("cluster", missing, errors.New("boom")); got != "" {
+		t.Fatalf("expected the rename to fail (source does not exist), got quarantine path %q", got)
+	}
+	rows = checkStateFileIntegrity()
+	if len(rows) != 1 || rows[0].Status != diagFail {
+		t.Fatalf("a failed quarantine attempt must report fail, got %+v", rows)
+	}
+
+	// A residual (prior-boot) leftover, detected without a fresh parse
+	// failure this boot, must also surface — this is the case /readyz can
+	// silently lose across a restart per noteResidualQuarantine's own doc.
+	isolateStateCorruption(t)
+	residualPath := filepath.Join(dir, "cluster.json")
+	if err := os.WriteFile(residualPath+".corrupt.1", []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noteResidualQuarantine("cluster", residualPath)
+	rows = checkStateFileIntegrity()
+	if len(rows) != 1 || rows[0].Status != diagWarn || !strings.Contains(rows[0].Message, "unreconciled") {
+		t.Fatalf("residual quarantine must surface distinctly, got %+v", rows)
+	}
+}
