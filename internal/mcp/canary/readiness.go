@@ -99,7 +99,9 @@ const (
 	// statement about the experiment rather than about one imagined request.
 	//
 	// Enforcement does not move: the policy engine still decides every real request. This row
-	// only stops a node reporting Ready for an experiment whose every call would be refused.
+	// only stops the next FULL ACTIVATION PREFLIGHT admitting an experiment whose every call
+	// would be refused. NOT the node's own readiness surface — factActivation, so EvaluateNode
+	// skips it and node status can still report Ready.
 	ReasonExactPolicyNotExecutable Reason = "exact_policy_not_executable"
 	// ReasonCredentialPathRequired — the exact First-Canary request is not provably
 	// CREDENTIAL-FREE: at least one authoritative layer says this tool needs a credential

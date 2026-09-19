@@ -2633,7 +2633,8 @@ change with this section as its evidence — but it is deliberately not taken he
   executor is composed, no Canary is activated.** Blockers 1, 2, 3, 8, 10, 11, 12 and 15 are
   untouched.
 - Enforcement did not move. The policy engine still decides every real request; this row only stops
-  a node reporting Ready for an experiment whose every call would be refused.
+  the next FULL ACTIVATION PREFLIGHT admitting an experiment whose every call would be refused — not
+  the node readiness surface, which skips it (`factActivation`).
 
 **Campaign:** `scripts/mcp-first-canary-policy-permit-mutations.sh` — **30 mutations, 30 caught,
 0 survived, 0 skipped**, measured on the closing head.
@@ -2683,7 +2684,7 @@ reading would have been too generous.
 
 ### The closure bar
 
-A node must not report an activation ready unless the exact First-Canary request is provably
+An ACTIVATION PREFLIGHT must not return Ready unless the exact First-Canary request is provably
 credential-free at EVERY authoritative layer — and the runtime must be unable to acquire or send a
 credential for it.
 
@@ -2838,8 +2839,27 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **21 caught, 0 survived,
-0 skipped**, measured on `5d0e8055`. M14 is the anti-vacuity mutation: a
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 23 mutations,
+**CAMPAIGN_RESULT_PENDING**.
+
+> **The previously recorded score here — "21 caught, 0 survived, 0 skipped, measured on
+> `5d0e8055`" — was VOID, and the way it was void is the most important thing in this section.**
+>
+> Codex round 5 found `TestCredWall_EveryClaimedSurfaceIsScanned` RED on the unmodified head:
+> the round-4 fix widened `nodeReadyPromise`, and §25d itself quotes the very phrase the widened
+> matcher had just learned to recognise. The campaign was then run against that tree and every
+> mutation pointed at that gate scored CAUGHT — **because the gate was already failing**, not
+> because the mutation was detected. A campaign scores a mutation CAUGHT when the named gate fails;
+> that inference is worthless unless the gate PASSES unmutated, and nothing checked.
+>
+> The campaign now checks. `baseline_ok` runs each named gate on the clean tree before mutating and
+> scores a red or empty baseline as **NOT PROVEN** — the same verdict a non-compiling mutation gets,
+> for the same reason: no gate ran that could tell the mutated tree from the clean one. Cached per
+> (gate, package) so it does not double the run.
+>
+> The lesson is the one this section keeps re-learning, now at the level of the measuring
+> instrument rather than the thing measured: **a campaign score is a measurement, and a measurement
+> with an unverified baseline is not a weak result — it is not a result.** M14 is the anti-vacuity mutation: a
 constant-false resolver passes every negative gate while making the First Canary permanently
 impossible, and is rejected by a POSITIVE control rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
 `mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
@@ -2911,6 +2931,58 @@ Round 4 found TWO faults in that wall, both the same overclaim shape as the clas
 **A control that cannot fail is decoration**, and this one could not: it exercised no matcher and
 quoted text the matcher could not see. That is the anti-vacuity discipline this campaign applies to
 every other gate, not applied to a gate of mine.
+
+M22 and M23 cover the FIFTH review round, which found two things — one of them about the
+measuring instrument itself.
+
+**The claim has a negation, and the sweep only knew one polarity (M22).** Round 3 recorded the rule
+*"search for the CLAIM, not the words"* and fixed eight sites, every one phrased negatively —
+"makes a node un-ready" — because that is what it searched for. The identical proposition stated
+the other way round, *"this row only stops a node reporting Ready"*, survived in **four** more
+places, including the doc comment on `ReasonExactPolicyNotExecutable`: the reason string of an
+ACTIVATION-level fact, in the engine's own source. Codex named one instance (a test comment); the
+widened matcher found six lines in total. So round 3's lesson had been applied to the words of one
+polarity, which is the same mistake one level in. `nodeReadyPromise` now carries a positive branch
+anchored on the VERB (report / reach), so "the verdict is Ready — node readiness AND the
+activation-level facts", a true statement ABOUT node readiness, is not swept up.
+
+**A wall must not push an author away from the correcting sentence (M23).** Widening the matcher
+made it flag the CORRECTED wording too — "EvaluateNode skips it and node status can still report
+Ready" is the one sentence that makes an activation fact's scope unambiguous, and it contains the
+same words as the defect while asserting the opposite. Suppressing it to satisfy a regex would be
+the wall degrading the documentation it exists to protect, and allowlisting each correction
+one-by-one would grow a permission list with every fix. `nodeReadyIndependence` exempts the shape
+that asserts the node surface is UNAFFECTED, keyed on "still". M23 broadens that exemption until it
+swallows the defect, and
+`TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect` rejects it — the exemption is a
+hole the moment it cannot tell the two apart. The residual is stated in the code rather than
+hidden: a false claim contrived to contain "still … report … ready" would be exempted.
+
+**A list of places to look rots the same way the claim does (the seventh surface).** Round 4's
+finding was that the wall read ONE file while its record claimed six; the fix made it read the six.
+Asking the round-5 question *"is there a seventh?"* against the whole repository rather than
+against that list found one immediately: `mcp_canary_policy_permit.go`, ROOT PRODUCTION SOURCE,
+carrying the same sentence as `readiness.go` — a file no version of the wall had ever read. So the
+scan is now INVERTED: it walks every Go and Markdown file in the repository and names its
+exceptions (`nodeReadyScanExcluded`, currently one entry — the wall's own file, which defines the
+matcher). A new file is covered the moment it exists. Campaign scripts are out of scope by
+extension, because a mutation payload contains the claim BY CONSTRUCTION.
+
+The allowlist got the same treatment for the same reason. `TestCredWall_AllowlistIsNotStale` used
+to ask whether an entry's needle still appeared in the file; it now asks whether the scan REACHES
+that entry, and caught a dead one on its first run — an entry added minutes earlier in this same
+session, made unreachable by the quotation rule written just after it. Present is not reached.
+
+The P1 of that round was separate and is recorded with the campaign score above: the wall was RED
+on the unmodified head, so the recorded 21/0/0 measured nothing. That is now a campaign
+precondition rather than a thing a reviewer has to notice.
+
+**Five rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
+class (round 3), one file vs six (round 4), one polarity vs the proposition, and a score vs its
+baseline (round 5). The gates get stronger each round; what keeps failing is the accounting around
+them, so the discipline that matters is not "add a gate" but **"state exactly what the gate
+establishes, and no more."**
 
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
@@ -3194,8 +3266,8 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    trust authority was introduced — the governed `shadow_evaluation` lifecycle remains the only
    writer of `catalog.Usable`, `ApproveLive` still deliberately promotes nothing, and a structural
    wall proves no data-plane caller can. ENFORCEMENT is unchanged and still lives in the policy
-   engine; what changed is that a node can no longer report Ready for an experiment every request
-   would die in.
+   engine; what changed is that an ACTIVATION PREFLIGHT can no longer return Ready for an
+   experiment every request would die in.
 14. **[CLOSED — see §25c] The exact request must resolve to an ALLOW-class decision with satisfiable obligations (§4/§13).**
    Closing the credential condition (blocker 9) by choosing a rule with no `CredentialProfile` does not
    make the request executable: that rule may itself be DENY-class, and if NO enabled rule matches,

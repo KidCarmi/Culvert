@@ -27,8 +27,9 @@ import (
 // WHAT IS RESOLVED HERE, AND WHAT IS NOT. This file resolves the tuple and runs the engine. It
 // decides NOTHING: the verdict is canary.EvaluateExactPermit, a pure function in the readiness
 // engine, and enforcement stays exactly where it was — the policy engine decides every real
-// request, unchanged. This row only stops a node reporting Ready for an experiment whose every
-// call would be refused.
+// request, unchanged. This row only stops the next FULL ACTIVATION PREFLIGHT admitting an
+// experiment whose every call would be refused. NOT the node's own readiness surface — the fact is
+// factActivation, so EvaluateNode skips it.
 //
 // NO SECOND EVALUATOR. The tuple is built by mcpruntime.ExactPermitTuple, which shares
 // GatewayServerRef / GatewayToolRef with the live request path and routes the operation class

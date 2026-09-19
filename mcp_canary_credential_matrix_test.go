@@ -532,11 +532,67 @@ func TestCredWall_NodeStatusSurfaceCannotReportActivationReasons(t *testing.T) {
 // names; and permission to say it is an explicit, reasoned ALLOWLIST rather than a silent gap.
 // ---------------------------------------------------------------------------
 
-// nodeReadyPromise matches a claim that something makes the NODE un-ready. It deliberately also
-// matches the "node is still not ready" phrasing: without it the one LEGITIMATE node-level doc in
-// the tree never reaches the matcher, and the control below would be vacuous — which is exactly
-// what Codex round 4 found.
-var nodeReadyPromise = regexp.MustCompile(`(?i)(node\s+(is\s+)?(still\s+)?(un-?ready|not\s+ready)|un-?ready\s+node)`)
+// nodeReadyPromise matches a claim about what a NODE's readiness verdict does, in EITHER
+// polarity. That is the whole point, and the reason this pattern has now been widened twice.
+//
+// "X makes the node un-ready" and "X stops a node reporting Ready" are the SAME PROPOSITION.
+// Round 3 swept the tree for the claim and fixed eight sites — all of them phrased negatively,
+// because that is the phrasing it searched for. Four more sites stated it positively and survived
+// untouched, including the doc comment on ReasonExactPolicyNotExecutable itself, which is the
+// reason string for an ACTIVATION-level fact. Codex round 5 found one of them.
+//
+// So the lesson round 3 recorded — search for the CLAIM, not the words — was applied to the words
+// of one polarity. A matcher for a proposition has to admit that the proposition has a negation.
+//
+// The positive branch anchors on the VERB (report / reach), not on "node ... Ready" adjacency,
+// so a true statement ABOUT node readiness ("the verdict is Ready — node readiness AND the
+// activation-level facts") is not swept up. Legitimate node-level claims that DO match are
+// permitted by name in nodeReadyMentionAllowed, never by loosening this pattern: a blanket phrase
+// ban is the failure mode the control below exists to prevent.
+var nodeReadyPromise = regexp.MustCompile(
+	`(?i)(` +
+		// negative polarity: "the node is still not ready", "an un-ready node"
+		`node\s+(is\s+)?(still\s+)?(un-?ready|not\s+ready)|un-?ready\s+node` +
+		`|` +
+		// positive polarity: "stops a node reporting Ready", "a node can no longer report
+		// Ready", "the node must NOT be able to report Ready"
+		`node\b[^.]{0,60}?\b(report|reports|reporting|reach|reaches|reaching)\b[^.]{0,40}?\bready\b` +
+		`)`)
+
+// nodeReadyIndependence exempts the CORRECTED form of the claim.
+//
+// "This row stops a node reporting Ready" is the defect. "EvaluateNode skips it and node status
+// can STILL report Ready" is its correction — the same words, asserting the opposite. A matcher
+// that flags both pushes an author away from writing the one sentence that makes an activation
+// fact's scope unambiguous, and that is the wall degrading the documentation it exists to protect.
+//
+// The discriminator is "still": an assertion that the node surface is UNAFFECTED. It is a narrow
+// exemption, not a second allowlist — per-line permissions are for genuine node-level claims and
+// stay in nodeReadyMentionAllowed with a reason each.
+//
+// Residual, stated rather than hidden: a false claim contrived to contain "still ... report ready"
+// would be exempted. TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect pins the
+// realistic shape — drop the "still" and the defect is caught again — and campaign M22 reintroduces
+// the positive-polarity promise to prove the widened matcher sees it at all.
+var nodeReadyIndependence = regexp.MustCompile(
+	`(?i)\bstill\s+(report|reports|reporting|reach|reaches|reaching)\b[^.]{0,40}?\bready\b`)
+
+// quotedSpan matches a quoted run, straight or typographic.
+var quotedSpan = regexp.MustCompile(`"[^"]*"|\x{201c}[^\x{201d}]*\x{201d}`)
+
+// promiseOutsideQuotes reports whether the line makes the claim OUTSIDE any quotation.
+//
+// A ledger that documents a false claim has to QUOTE it — §25d exists to record five rounds of
+// exactly this defect, and it cannot do that without restating the wording. Quoting a claim in
+// order to refute it is not asserting it.
+//
+// This deliberately replaces per-line allowlist entries for that case, and is STRICTLY NARROWER
+// than one: an allowlist entry permits the whole line, whereas this permits only the quoted span
+// and still flags an assertion sitting beside it. The allowlist stays for genuine node-level
+// claims written as claims, where a reason per entry is the right currency.
+func promiseOutsideQuotes(line string) bool {
+	return nodeReadyPromise.MatchString(quotedSpan.ReplaceAllString(line, ""))
+}
 
 // nodeReadyMentionAllowed is the EXPLICIT allowlist of places that may speak of node readiness.
 // Every entry needs a reason, so permitting a new one is a deliberate act rather than a hole. The
@@ -553,23 +609,71 @@ var nodeReadyMentionAllowed = []struct {
 		"§25d quotes the false claim in order to refute it."},
 	{"docs/operator/mcp-first-controlled-canary-review.md", "prerequisite genuinely does make the node un-ready",
 		"§25d explains why the wall must NOT be a blanket phrase ban."},
+	// Surfaced when the scan was inverted from a six-file list to a whole-tree walk.
+	{"mcp_shadow_activation_test.go", "shadow deps ARMED but the node NOT ready",
+		"Genuinely node-level: the deps it names (telemetry/policy/inventory/listener) are factNode rows, so the node IS un-ready."},
 }
 
-// nodeReadySurfaces is every file that carried the claim — the six the §25d record names.
-// Narrowing this list without narrowing that record is the defect Codex round 4 named, so the two
-// move together.
+// nodeReadyScanExcluded names the files the scan deliberately does NOT read, with a reason each.
 //
-// THIS FILE IS DELIBERATELY ABSENT, and the reason is not convenience: it DEFINES the matcher and
-// the allowlist needles, so its source must contain the very pattern being banned. A scanner that
-// reads itself reports its own machinery forever. It was also never one of the eight sites — it is
-// where the wall lives, not a surface that made the claim.
-var nodeReadySurfaces = []string{
-	filepath.Join("internal", "mcp", "canary", "readiness.go"),
-	filepath.Join("docs", "design", "mcp", "CANARY-READINESS-MATRIX.md"),
-	filepath.Join("docs", "operator", "mcp-first-controlled-canary-review.md"),
-	"mcp_canary_credential_zero_use_test.go",
-	"mcp_canary_credential_free_test.go",
-	"mcp_canary_policy_permit_test.go",
+// This is an EXCLUSION list, not an inclusion list, and the inversion is the round-5 fix. The wall
+// used to name the six surfaces it scanned. Round 4 had already caught it naming one while its
+// record claimed six; round 5's own sweep then found a SEVENTH — mcp_canary_policy_permit.go, root
+// production source — carrying the identical claim, because a hand-maintained list of places to
+// look rots exactly the way the claim it hunts does.
+//
+// Scanning everything and naming the exceptions cannot drift that way: a new file is covered the
+// moment it exists, and every gap is written down here.
+var nodeReadyScanExcluded = []struct {
+	file string
+	why  string
+}{
+	{"mcp_canary_credential_matrix_test.go",
+		"defines nodeReadyPromise and the allowlist needles, so a self-scan reports its own machinery forever."},
+}
+
+// nodeReadyScanFiles returns every Go and Markdown file in the repository except the exclusions.
+//
+// .sh is deliberately out of scope: the mutation campaigns REINTRODUCE the claim as their payload,
+// so a campaign script contains it by construction and scanning one would flag the tests that
+// prove the wall works.
+func nodeReadyScanFiles(t *testing.T) []string {
+	t.Helper()
+	excluded := map[string]bool{}
+	for _, e := range nodeReadyScanExcluded {
+		excluded[e.file] = true
+	}
+	root := pkgSourceDir()
+	var out []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case ".git", "node_modules", "frontend", "dist", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if ext := filepath.Ext(path); ext != ".go" && ext != ".md" {
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil || excluded[rel] {
+			return nil //nolint:nilerr // a path we cannot relativise is not a surface we can name
+		}
+		out = append(out, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the tree for node-readiness claims: %v", err)
+	}
+	if len(out) < 100 {
+		t.Fatalf("the walk found only %d files, which is not this repository — a scan that reads "+
+			"almost nothing passes by seeing nothing", len(out))
+	}
+	return out
 }
 
 // activationFactFieldNames returns the canary.Facts FIELD names that are ACTIVATION-level,
@@ -685,7 +789,7 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 
 	allowHits := map[string]int{}
 	scanned := 0
-	for _, rel := range nodeReadySurfaces {
+	for _, rel := range nodeReadyScanFiles(t) {
 		path := filepath.Join(pkgSourceDir(), rel)
 		data, err := os.ReadFile(path) //nolint:gosec // fixed in-repo path list, not caller input
 		if err != nil {
@@ -694,6 +798,15 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 		scanned++
 		for i, line := range strings.Split(string(data), "\n") {
 			if !nodeReadyPromise.MatchString(line) {
+				continue
+			}
+			if nodeReadyIndependence.MatchString(line) {
+				// The corrected form: this line says the node surface is UNAFFECTED.
+				continue
+			}
+			if !promiseOutsideQuotes(line) {
+				// Every match on this line is inside a quotation — the ledger citing wording,
+				// not asserting it.
 				continue
 			}
 			allowed := false
@@ -711,8 +824,8 @@ func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
 			}
 		}
 	}
-	if scanned != len(nodeReadySurfaces) {
-		t.Fatalf("scanned %d of %d claimed surfaces", scanned, len(nodeReadySurfaces))
+	if scanned == 0 {
+		t.Fatal("scanned no files at all")
 	}
 	if len(allowHits) == 0 {
 		t.Fatal("the scan matched NOTHING anywhere, allowlisted or not. Either the matcher broke " +
@@ -731,6 +844,29 @@ func TestCredWall_AllowlistIsNotStale(t *testing.T) {
 		if !strings.Contains(string(data), a.needle) {
 			t.Errorf("allowlist entry {%s, %q} matches nothing any more (%s). Remove it rather "+
 				"than leaving a standing permission nobody uses.", a.file, a.needle, a.why)
+			continue
+		}
+		// Present in the file is not the same as REACHED by the scan. An entry whose lines are
+		// already exempted earlier — by nodeReadyIndependence or by the quotation rule — is a
+		// permission nothing exercises, and the containment check above cannot see that. Added
+		// after the quotation rule made one entry unreachable the moment it was written.
+		reached := false
+		for _, line := range strings.Split(string(data), "\n") {
+			if !nodeReadyPromise.MatchString(line) || nodeReadyIndependence.MatchString(line) {
+				continue
+			}
+			if !promiseOutsideQuotes(line) {
+				continue
+			}
+			if strings.Contains(line, a.needle) {
+				reached = true
+				break
+			}
+		}
+		if !reached {
+			t.Errorf("allowlist entry {%s, %q} is never REACHED by the scan (%s): every line it "+
+				"names is already exempted by an earlier rule. Delete it — an unreachable "+
+				"permission is the thing this test exists to catch.", a.file, a.needle, a.why)
 		}
 	}
 }
@@ -776,5 +912,102 @@ func TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness(t *testing.T) {
 	if !activation["FirstCanaryCredentialFree"] {
 		t.Fatal("premise moved: FirstCanaryCredentialFree must be ACTIVATION-level; if it is not, " +
 			"the ban applies to nothing this PR added.")
+	}
+}
+
+// TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect is the control for
+// nodeReadyIndependence.
+//
+// The exemption exists so an author can write "EvaluateNode skips it and node status can still
+// report Ready" — the one sentence that makes an activation fact's scope unambiguous — without the
+// wall flagging it. An exemption that ALSO swallowed the defect it sits next to would be a hole
+// with a comment on it, so this drives both patterns over both shapes and asserts they separate.
+//
+// It also asserts the exemption fires on the REAL corrected lines in the tree, not merely on
+// strings invented here: an exemption nothing exercises is a standing permission nobody uses.
+func TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect(t *testing.T) {
+	defects := []string{
+		"This row only stops a node reporting Ready for an experiment whose every call would be refused.",
+		"what changed is that a node can no longer report Ready for an experiment",
+		"the node must NOT be able to report Ready",
+		"A node must not report an activation ready unless the request is provably safe",
+	}
+	for _, d := range defects {
+		if !nodeReadyPromise.MatchString(d) {
+			t.Errorf("the matcher no longer sees the defect shape at all: %q", d)
+			continue
+		}
+		if nodeReadyIndependence.MatchString(d) {
+			t.Errorf("the corrected-wording exemption SWALLOWS a defect claim, which makes it a "+
+				"hole rather than an exemption: %q", d)
+		}
+	}
+
+	corrected := []string{
+		"factActivation, so EvaluateNode skips it and node status can still report Ready.",
+		"node status can still report Ready — which is exactly why this test calls canary.Evaluate.",
+	}
+	for _, c := range corrected {
+		if !nodeReadyPromise.MatchString(c) {
+			t.Errorf("premise broken: the corrected form no longer reaches the matcher, so this "+
+				"control proves nothing about the exemption: %q", c)
+			continue
+		}
+		if !nodeReadyIndependence.MatchString(c) {
+			t.Errorf("the corrected form is not exempted, so the wall pushes authors away from "+
+				"the one wording that states an activation fact's scope: %q", c)
+		}
+	}
+
+	// And it must fire on the real tree, not only on the strings above.
+	exempted := 0
+	for _, rel := range nodeReadyScanFiles(t) {
+		data, err := os.ReadFile(filepath.Join(pkgSourceDir(), rel)) //nolint:gosec // repo-relative walk result
+		if err != nil {
+			t.Fatalf("cannot read claimed surface %s: %v", rel, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if nodeReadyPromise.MatchString(line) && nodeReadyIndependence.MatchString(line) {
+				exempted++
+			}
+		}
+	}
+	if exempted == 0 {
+		t.Error("no line in the tree is exempted by nodeReadyIndependence, so the exemption is " +
+			"carrying no weight. Remove it rather than leaving an unexercised permission.")
+	}
+}
+
+// TestCredWall_QuotationRuleDoesNotExemptAnAssertionBesideIt is the control for
+// promiseOutsideQuotes.
+//
+// The rule exists so §25d can QUOTE the false claims it documents. Its safety argument is that it
+// is narrower than an allowlist entry: it permits the quoted span and nothing else. That argument
+// is only true if a claim ASSERTED on the same line still reaches the wall, so this drives exactly
+// that case — the shape a real regression would take if the rule were widened to skip whole lines.
+func TestCredWall_QuotationRuleDoesNotExemptAnAssertionBesideIt(t *testing.T) {
+	// Quoted only — the ledger citing wording. Exempt.
+	quotedOnly := `Round 3 fixed every site phrased "makes a node un-ready", which was the error.`
+	if !nodeReadyPromise.MatchString(quotedOnly) {
+		t.Fatal("premise broken: the matcher no longer sees the quoted claim, so this control " +
+			"cannot say anything about the quotation rule")
+	}
+	if promiseOutsideQuotes(quotedOnly) {
+		t.Errorf("a purely quoted claim is flagged, so the ledger cannot document the defect it "+
+			"exists to record: %q", quotedOnly)
+	}
+
+	// Quoted AND asserted on one line. Must still be flagged — this is the whole safety margin
+	// the rule claims over a per-line allowlist entry.
+	both := `Round 3 fixed every site phrased "makes a node un-ready", and this row makes a node un-ready.`
+	if !promiseOutsideQuotes(both) {
+		t.Errorf("an assertion sitting beside a quotation is exempted, which makes the quotation "+
+			"rule a whole-line permission — the exact thing it claims to be narrower than: %q", both)
+	}
+
+	// Asserted only. Unaffected by the rule.
+	asserted := `This row only stops a node reporting Ready for an experiment.`
+	if !promiseOutsideQuotes(asserted) {
+		t.Errorf("an unquoted assertion is exempted: %q", asserted)
 	}
 }

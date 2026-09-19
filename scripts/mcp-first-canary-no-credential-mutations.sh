@@ -123,6 +123,44 @@ gate_ran() {
   return 0
 }
 
+# BASELINE VERIFICATION (Codex P1, round 5, PR #1423).
+#
+# A mutation is scored CAUGHT when its named gate FAILS. That inference is valid ONLY if the gate
+# PASSES on the UNMUTATED tree. If the gate is already red, every mutation pointed at it "catches"
+# for free and the campaign measures nothing at all.
+#
+# This is not hypothetical, and it is why the check exists. The round-4 fix widened a wall's regex
+# and left TestCredWall_EveryClaimedSurfaceIsScanned failing on the clean head, because §25d quotes
+# the very phrase the widened matcher had just learned to recognise. The campaign was then run and
+# recorded 21 caught / 0 survived / 0 skipped. Every one of those results was measured against a
+# suite that was already failing. Codex found it; the campaign could not, because it never asked.
+#
+# The result is deliberately NOT "CAUGHT" and deliberately NOT "SURVIVED" — it is NOT PROVEN, the
+# same verdict a mutation that fails to compile gets, and for the same reason: no gate ran that
+# could distinguish the mutated tree from the clean one.
+#
+# Cached per (gate, package): the campaign points many mutations at the same gate, and re-running
+# it per mutation would double a run that is already minutes long.
+declare -A BASELINE=()
+declare -A BASELINE_OUT=()
+baseline_ok() {
+  local gate="$1" pkg="$2" key="$1|$2"
+  if [ -n "${BASELINE[$key]+set}" ]; then
+    [ "${BASELINE[$key]}" = ok ]
+    return
+  fi
+  local out rc
+  out="$(go test -count=1 -run "$gate" "$pkg" 2>&1)"; rc=$?
+  # A gate that matches nothing is not a green baseline either — it is a gate that cannot speak.
+  if [ $rc -eq 0 ] && ! has_fixed 'no tests to run' "$out"; then
+    BASELINE[$key]=ok
+    return 0
+  fi
+  BASELINE[$key]=red
+  BASELINE_OUT[$key]="$out"
+  return 1
+}
+
 # run_mutation <id> <description> [--compile-wall] <gate-regex> <package> <file> <perl-script...>
 run_mutation() {
   local id="$1" desc="$2"; shift 2
@@ -132,6 +170,15 @@ run_mutation() {
 
   printf '\n[%s] %s\n' "$id" "$desc"
   printf '      gate: %s  (%s)\n' "$gate" "$pkg"
+
+  if ! baseline_ok "$gate" "$pkg"; then
+    printf '      NOT PROVEN — the gate is ALREADY RED (or matches nothing) on the UNMUTATED tree,\n'
+    printf '                   so its failure after the mutation would prove nothing\n'
+    printf '%s\n' "${BASELINE_OUT["$gate|$pkg"]}" | tail -6 | sed 's/^/        /'
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN (gate red on the unmutated tree)")
+    [ $KEEP -eq 0 ] && exit 1
+    return
+  fi
 
   local before; before="$(git rev-parse HEAD:"$file" 2>/dev/null || echo none)"
   MUTATING_FILE="$file" # armed BEFORE the first edit; the trap restores it if we die here
@@ -193,6 +240,7 @@ DISCOVERY=internal/mcp/execution/discovery.go
 ROLLOUT=mcp_rollout.go
 MATRIXDOC=docs/design/mcp/CANARY-READINESS-MATRIX.md
 READINESS=internal/mcp/canary/readiness.go
+CREDMATRIX=mcp_canary_credential_matrix_test.go
 
 # ── the three authoritative layers ────────────────────────────────────────────
 
@@ -377,6 +425,50 @@ run_mutation M21 \
   "the node-readiness promise returns on a surface the wall does not read" \
   'TestCredWall_EveryClaimedSurfaceIsScanned' . "$MATRIXDOC" \
   's/makes the next FULL ACTIVATION PREFLIGHT refuse\./can make the node un-ready./'
+
+# M22 — THE SAME PROPOSITION, STATED POSITIVELY. Round 3 swept for the claim and fixed eight
+# sites; every one was phrased NEGATIVELY ("makes a node un-ready"), because that is the phrasing
+# the sweep and the matcher both looked for. Four sites stated the identical proposition the other
+# way round — "this row only stops a node reporting Ready" — and survived untouched, one of them on
+# ReasonExactPolicyNotExecutable, the reason string of an ACTIVATION fact. Codex round 5 found one.
+#
+# A proposition has a negation, and a matcher that only knows one polarity closes half a class.
+# This mutation restores the positive form on the engine doc itself.
+run_mutation M22 \
+  "the node-readiness promise returns in the POSITIVE polarity the matcher used to miss" \
+  'TestCredWall_EveryClaimedSurfaceIsScanned' . "$READINESS" \
+  's/only stops the next FULL ACTIVATION PREFLIGHT admitting an experiment whose every call/only stops a node reporting Ready for an experiment whose every call/'
+
+# M23 — THE EXEMPTION BECOMES A HOLE. nodeReadyIndependence exists so the CORRECTED wording ("node
+# status can still report Ready") is not flagged alongside the defect it corrects. An exemption
+# that also swallowed the defect would leave the wall green while the claim came back, which is a
+# hole with a reason attached — the shape this campaign exists to reject. Broadening it to any
+# mention of "report ... ready" is the realistic way that happens.
+run_mutation M23 \
+  "the corrected-wording exemption is broadened until it swallows the defect" \
+  'TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect' . "$CREDMATRIX" \
+  's{\\bstill\\s\+}{\\b(still\\s+)?}'
+
+# M24 — THE QUOTATION RULE BECOMES A WHOLE-LINE PASS. promiseOutsideQuotes lets the ledger QUOTE
+# the false claims it documents, and its entire safety argument is that it is NARROWER than an
+# allowlist entry: it strips the quoted span and re-tests the remainder, so a claim ASSERTED beside
+# a quotation is still caught. Widening it to skip any line that contains a quotation turns it into
+# the whole-line permission it claims not to be — and §25d is dense with quotations, so that hands
+# the ledger a standing exemption.
+run_mutation M24 \
+  "the quotation rule is widened into a whole-line exemption" \
+  'TestCredWall_QuotationRuleDoesNotExemptAnAssertionBesideIt' . "$CREDMATRIX" \
+  's/return nodeReadyPromise\.MatchString\(quotedSpan\.ReplaceAllString\(line, ""\)\)/return !quotedSpan.MatchString(line) \&\& nodeReadyPromise.MatchString(line)/'
+
+# M25 — A PERMISSION NOTHING EXERCISES. The allowlist staleness check originally asked only whether
+# an entry's needle still appeared in the file. That cannot see an entry whose every line is
+# already exempted by an earlier rule — which happened the moment the quotation rule was written,
+# to an entry added ten minutes earlier in the same session. Reachability is now the test; this
+# mutation weakens it back to mere presence.
+run_mutation M25 \
+  "the allowlist staleness check drops back from REACHED to merely present" \
+  'TestCredWall_AllowlistIsNotStale' . "$CREDMATRIX" \
+  's/if !promiseOutsideQuotes\(line\) \{\n\t\t\t\tcontinue\n\t\t\t\}\n\t\t\tif strings\.Contains\(line, a\.needle\)/if strings.Contains(line, a.needle)/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"

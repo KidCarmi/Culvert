@@ -190,7 +190,10 @@ func TestCredFreeE2E_CredentialProfileChangesTheFingerprint(t *testing.T) {
 
 // TestCredFreeE2E_PolicyNoneServerRequiresIsNotReady is §5 direction A end to end, at the
 // readiness verdict rather than at the resolver: policy says no credential, the authoritative
-// server metadata says one is required, and the node must NOT be able to report Ready.
+// server metadata says one is required, and the next FULL ACTIVATION PREFLIGHT must refuse.
+//
+// NOT the node surface. FirstCanaryCredentialFree is factActivation, so EvaluateNode skips it and
+// node status can still report Ready — which is exactly why this test calls canary.Evaluate.
 func TestCredFreeE2E_PolicyNoneServerRequiresIsNotReady(t *testing.T) {
 	r := newCredRig(t, "cred-a")
 	ai := productionCanaryActivationInputs(rollout.CapabilityGateway, r.scope(), 1)
