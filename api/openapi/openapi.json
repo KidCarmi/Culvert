@@ -362,6 +362,65 @@
         ],
         "type": "object"
       },
+      "AdminListener": {
+        "additionalProperties": false,
+        "description": "FE-6B.1 correction round (B1) — the admin listener's ACTIVATION EVIDENCE, recorded from the listener's own successful bind (adminUIServeOnce), never from a boot-time selection flag. `state` serving = a bind was observed and the serve call has not returned; unknown = no bind observed yet, or a serve ended and the retry loop is rebinding — activation that has not been observed is UNKNOWN, never claimed. `posture` tls_custom (the persisted GUI-uploaded pair), tls_configured (an explicit -tls-cert/-tls-key pair — a persisted pair is never used while one is configured), tls_self_signed (the auto self-signed certificate), plain_http (no certificate: -ui-no-tls, or the self-sign fallback), unknown. `servedCertificate` is the served leaf's PUBLIC identity — present iff the posture is a TLS posture; its fingerprint is in the same format as UICertRead.fingerprint so the two are directly comparable (they are two DIFFERENT facts: what is served vs what is persisted). `servesPersistedPair` is derived at read time: posture tls_custom AND the persisted pair is complete and valid AND its fingerprint equals the served one — the meaning of the legacy UICertRead.active / ui_custom_cert_active. The SAME object is published on GET /api/certificates (`listener`) and GET /api/settings/network (`ui_listener`).",
+        "properties": {
+          "posture": {
+            "enum": [
+              "tls_custom",
+              "tls_configured",
+              "tls_self_signed",
+              "plain_http",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "servedCertificate": {
+            "additionalProperties": false,
+            "properties": {
+              "fingerprint": {
+                "description": "SHA-256 of the served leaf, upper-case colon-separated hex (UICertRead.fingerprint format).",
+                "type": "string"
+              },
+              "notAfter": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "notBefore": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "fingerprint",
+              "subject",
+              "notBefore",
+              "notAfter"
+            ],
+            "type": "object"
+          },
+          "servesPersistedPair": {
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "serving",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "posture",
+          "servesPersistedPair"
+        ],
+        "type": "object"
+      },
       "AlertHistory": {
         "additionalProperties": false,
         "properties": {
@@ -2014,6 +2073,9 @@
             ],
             "type": "object"
           },
+          "listener": {
+            "$ref": "#/components/schemas/AdminListener"
+          },
           "mtlsClientCert": {
             "additionalProperties": false,
             "properties": {
@@ -2125,6 +2187,7 @@
           "scope",
           "ca",
           "uiCert",
+          "listener",
           "mtlsClientCert",
           "ocsp",
           "operations",
@@ -4557,7 +4620,7 @@
             "type": "array"
           },
           "ui_custom_cert_active": {
-            "description": "True when the running UI server was started using the uploaded custom certificate (i.e. it is already live, not just saved pending a restart).",
+            "description": "DERIVED from ui_listener (FE-6B.1 correction round): true only while the running listener is observed serving a pair whose certificate fingerprint equals the persisted pair's — never a boot-time selection flag; a pair replaced or deleted without a restart is not active.",
             "type": "boolean"
           },
           "ui_custom_cert_corrupt": {
@@ -4567,6 +4630,9 @@
           "ui_custom_cert_uploaded": {
             "description": "True when a custom UI certificate uploaded via POST /api/certs/upload (target=ui) is saved to disk and will be used on the next restart.",
             "type": "boolean"
+          },
+          "ui_listener": {
+            "$ref": "#/components/schemas/AdminListener"
           },
           "ui_sans": {
             "items": {
@@ -4587,7 +4653,8 @@
         "required": [
           "base_url",
           "trust_forwarded_headers",
-          "ui_tls_fallback"
+          "ui_tls_fallback",
+          "ui_listener"
         ],
         "type": "object"
       },
@@ -7454,7 +7521,7 @@
       },
       "UICertRead": {
         "additionalProperties": false,
-        "description": "The persisted admin-UI certificate pair's public projection. `present` — a COMPLETE pair (both files) is on disk; `pairState` — complete / absent / incomplete (exactly one of the two files exists: an interrupted cleanup or an old-binary crash) / unavailable (a path cannot be examined or READ — the certificate or the private key is not readable, or a path is a directory; a present but unreadable key is unavailable evidence, never an invalid pair); `active` — the RUNNING listener loaded it at boot; `corrupt` — the persisted pair was readable at boot but does not parse as a matching pair.",
+        "description": "The persisted admin-UI certificate pair's public projection. `present` — a COMPLETE pair (both files) is on disk; `pairState` — complete / absent / incomplete (exactly one of the two files exists: an interrupted cleanup or an old-binary crash) / unavailable (a path cannot be examined or READ — the certificate or the private key is not readable, or a path is a directory; a present but unreadable key is unavailable evidence, never an invalid pair); `active` — DERIVED from the listener's own bind evidence (CertificateInventory.listener / NetworkSettings.ui_listener): true only while the running listener is observed serving a pair whose certificate fingerprint equals THIS persisted pair's (FE-6B.1 correction round — never a boot-time selection flag; a pair replaced or deleted without a restart is not active); `corrupt` — the persisted pair was readable at boot but does not parse as a matching pair.",
         "properties": {
           "active": {
             "type": "boolean"

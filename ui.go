@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"embed"
 	"errors"
 	"fmt"
@@ -307,10 +308,15 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	// hand-rolling the TLS listener here would silently drop ALPN h2 from the
 	// admin UI that ListenAndServeTLS used to negotiate.
 	customTLS := certFile != "" && keyFile != ""
+	var servedLeaf *x509.Certificate
 	if customTLS {
-		if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
 			return fmt.Errorf("%w: %w", errAdminUITLSMaterial, err)
 		}
+		servedLeaf = adminListenerLeafOf(pair)
+	} else if srv.TLSConfig != nil && len(srv.TLSConfig.Certificates) > 0 {
+		servedLeaf = adminListenerLeafOf(srv.TLSConfig.Certificates[0])
 	}
 
 	lc := &net.ListenConfig{}
@@ -335,6 +341,12 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	default:
 		logger.Printf("UIHTTP: http://localhost%s", addr)
 	}
+	// The bind is the evidence of WHAT is served, too (FE-6B.1 correction,
+	// B1): record the posture and the served identity now, and withdraw them
+	// when this serve call returns — nothing about the served certificate can
+	// be asserted between a serve ending and the next observed bind.
+	recordAdminListenerServing(adminListenerPostureFor(certFile, customTLS, srv.TLSConfig != nil), servedLeaf)
+	defer recordAdminListenerLost()
 
 	// Serve closes ln on return; the extra Close is a deterministic backstop for
 	// the ServeTLS path, which can return a certificate error without closing
@@ -349,4 +361,20 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 		return srv.ServeTLS(ln, "", "")
 	}
 	return srv.Serve(ln)
+}
+
+// adminListenerLeafOf parses the leaf of a loaded TLS pair, or nil when it
+// cannot be parsed (the served identity is then not asserted).
+func adminListenerLeafOf(pair tls.Certificate) *x509.Certificate {
+	if pair.Leaf != nil {
+		return pair.Leaf
+	}
+	if len(pair.Certificate) == 0 {
+		return nil
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return nil
+	}
+	return leaf
 }

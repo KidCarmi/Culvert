@@ -42,12 +42,18 @@ export class ApiError extends Error {
   readonly status: number | undefined;
   /** bounded, safe-to-render server text (text/plain contract) */
   readonly bodyText: string | undefined;
+  /** the response's media type (the Content-Type before any parameters,
+   * lower-cased) on an HTTP-status error — so a typed refusal can be bound
+   * to the contracted media type as well as the status (FE-6B.1 correction
+   * round, B3); undefined on every other error kind */
+  readonly mediaType: string | undefined;
 
   constructor(
     kind: ApiErrorKind,
     message: string,
     status?: number,
     bodyText?: string,
+    mediaType?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -57,6 +63,7 @@ export class ApiError extends Error {
       bodyText !== undefined
         ? bodyText.slice(0, MAX_ERROR_TEXT_CHARS)
         : undefined;
+    this.mediaType = mediaType;
   }
 
   /** 403: the server is authoritative about roles; the client may be stale. */
@@ -187,6 +194,7 @@ export async function apiRequest<T>(
       `${path}: HTTP ${String(resp.status)}`,
       resp.status,
       text,
+      mediaTypeOf(resp.headers.get("Content-Type")),
     );
   }
 

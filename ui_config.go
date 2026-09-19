@@ -2031,8 +2031,9 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			"ui_tls_fallback":         uiTLSFallbackActive,
 			"ui_tls_fallback_reason":  uiTLSFallbackReason,
 			"ui_custom_cert_uploaded": customUITLSFilesPresent(),
-			"ui_custom_cert_active":   uiCustomTLSActive,
+			"ui_custom_cert_active":   adminListenerServesPersistedPair(),
 			"ui_custom_cert_corrupt":  uiCustomTLSCorrupt,
+			"ui_listener":             adminListenerReadModel(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

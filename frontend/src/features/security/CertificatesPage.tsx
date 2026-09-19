@@ -13,9 +13,23 @@
 //     as succeeded, failed, cancelled or safe to retry;
 //   - a pending audit is a committed operation whose durable audit is still
 //     owed — not a failed mutation;
-//   - the two independent listener reads (inventory vs network settings) are
-//     cross-checked; a disagreement is reported as a contradiction, never
-//     resolved into either side's claim;
+//   - ACTIVATION is rendered from the SERVER-OWNED listener evidence the
+//     inventory carries (`listener`: bind state, posture, served identity),
+//     never from the boot-time `active` flag (FE-6B.1 correction, B1); an
+//     unobserved listener is rendered UNKNOWN with no claim of any kind;
+//   - the network-settings read is a CROSS-CHECK only: a disagreement between
+//     the two reads, or an answer that cannot be verified as consistent
+//     listener facts, is a contradiction that withholds every activation
+//     claim; a read that did not happen (transport failure) is stated and
+//     does not withdraw a claim that rests on the inventory's own evidence;
+//   - durability is never claimed beyond the frozen contract (B2): a persist
+//     failure renders its bounded class only, and a committed operation's
+//     audit is qualified by the inventory's audit sink (file / memory /
+//     sink evidence unavailable);
+//   - the admin lookup shows a record only when it is BOUND to the requested
+//     id and internally consistent, and a refusal only with its contracted
+//     status, media type and shape (B3) — anything else is an unverified
+//     lookup response, never a verdict;
 //   - bounded classes and refusal codes only — the server's detail lines,
 //     raw transport errors and filesystem paths never reach the DOM.
 //
@@ -44,7 +58,7 @@ import {
 import { InputField } from "../../design-system/forms";
 import { DataTable } from "../../design-system/table";
 import { SnapshotBar, useSnapshot } from "../../shared/snapshot";
-import { readErrorSummary, refusalCodeOf } from "../../shared/readErrorSummary";
+import { readErrorSummary } from "../../shared/readErrorSummary";
 import { createDownloadOwner } from "../../shared/blobOwner";
 import { createRequestRunOwner } from "../../shared/runOwner";
 import { registerAuthCleanup } from "../../auth/teardown";
@@ -52,7 +66,8 @@ import { useAuth } from "../../auth/AuthProvider";
 import { hasRole } from "../../auth/rbac";
 import { ApiError } from "../../api/client";
 import {
-  CERT_LOOKUP_REFUSAL_CODES,
+  activationPosture,
+  certLookupRefusal,
   downloadCACertPEM,
   getCAStatus,
   getCertOperation,
@@ -61,11 +76,14 @@ import {
   getOCSPStatus,
   isValidOperationId,
   listenerContradiction,
+  listenerReadsDisagree,
   ocspAgreement,
   operationPosture,
-  uiPairPosture,
 } from "../../api/certificates";
 import type {
+  ActivationPosture,
+  AdminListener,
+  AuditSink,
   CAFacts,
   CAStatus,
   CertLookupRefusalCode,
@@ -73,6 +91,7 @@ import type {
   CertificateInventory,
   ListenerContradiction,
   ListenerFacts,
+  ServedCertificate,
   MTLSClientCertFacts,
   OCSPPosture,
   OCSPStatus,
@@ -189,6 +208,34 @@ function InspectionCASection({
   );
 }
 
+/** B2: a persist failure is rendered as the BOUNDED class the node recorded
+ * and nothing more. Whether the live CA changed is decided by the operation
+ * protocol (persist-before-publish: an ordinary bundle-write failure leaves
+ * the previous CA in place; a post-rename sync doubt installs the candidate
+ * with the outcome recorded as unproven) and is stated by the operation's own
+ * ledger record — this card never infers a live/disk divergence from a
+ * counter. */
+function PersistDegradedCallout({
+  persistClass,
+}: {
+  persistClass: string | undefined;
+}): JSX.Element {
+  return (
+    <Callout variant="warning" title="Last rotation could not be persisted">
+      The bundle write of the last rotation attempt failed
+      {persistClass !== undefined && (
+        <>
+          {" "}
+          (<Mono>{persistClass}</Mono>)
+        </>
+      )}
+      . Only that bounded failure class is recorded here: the identity shown is
+      what the signer holds now, the persisted bundle is what a restart loads,
+      and the operation's ledger record states what the attempt installed.
+    </Callout>
+  );
+}
+
 function CAInventoryFacts({
   ca,
   encryptedAtRest,
@@ -211,16 +258,7 @@ function CAInventoryFacts({
         </Callout>
       )}
       {ca.persistDegraded && (
-        <Callout variant="warning" title="Last rotation could not be persisted">
-          The live CA rotated but the bundle write failed
-          {ca.persistClass !== undefined && (
-            <>
-              {" "}
-              (<Mono>{ca.persistClass}</Mono>)
-            </>
-          )}
-          ; the running root is not on disk.
-        </Callout>
+        <PersistDegradedCallout persistClass={ca.persistClass} />
       )}
       {!ca.present ? (
         <p>
@@ -320,9 +358,9 @@ function CARuntimeLine({
 function contradictionText(c: ListenerContradiction): string {
   switch (c) {
     case "active_on_plain_http_listener":
-      return "The inventory claims the persisted pair is active, but the listener reports it fell back to plain HTTP. No activation claim is made.";
+      return "The network settings report a listener that fell back to plain HTTP while the inventory reports the persisted pair as active.";
     case "active_disagrees":
-      return "The inventory and the network settings disagree about whether a custom pair is active on the running listener. No activation claim is made.";
+      return "The inventory and the network settings disagree about whether the persisted pair is active on the running listener.";
     case "present_disagrees":
       return "The inventory and the network settings disagree about whether a custom pair is persisted.";
     case "corrupt_disagrees":
@@ -330,130 +368,310 @@ function contradictionText(c: ListenerContradiction): string {
   }
 }
 
-function ActivationLine({ active }: { active: boolean }): JSX.Element {
-  return active ? (
-    <StatusBadge status="ok">Active on the running listener</StatusBadge>
-  ) : (
+/** The listener evidence in the operator's words — used only to DESCRIBE the
+ * two reads when they disagree, never to pick one. */
+function listenerWords(l: AdminListener): string {
+  if (l.state !== "serving") return "no bind observed";
+  switch (l.posture) {
+    case "tls_custom":
+      return "serving a GUI-uploaded pair";
+    case "tls_configured":
+      return "serving an explicitly configured certificate";
+    case "tls_self_signed":
+      return "serving the self-signed certificate";
+    case "plain_http":
+      return "serving plain HTTP";
+    case "unknown":
+      return "no bind observed";
+  }
+}
+
+function NotActive(): JSX.Element {
+  return (
     <StatusBadge status="neutral">
       Not active on the running listener
     </StatusBadge>
   );
 }
 
+function RestartActivates(): JSX.Element {
+  return (
+    <p>
+      Activation requires a restart: the listener loads the persisted pair only
+      at boot.
+    </p>
+  );
+}
+
+function ServedLine({
+  lead,
+  served,
+  tail,
+}: {
+  lead: string;
+  served: ServedCertificate;
+  tail: string;
+}): JSX.Element {
+  return (
+    <p>
+      {lead} <Mono>{served.fingerprint}</Mono>
+      {tail}
+    </p>
+  );
+}
+
+/** B1: what the RUNNING listener serves, from the appliance's bind evidence
+ * alone. Every branch names the served identity where one exists; the
+ * "unknown" branch claims nothing. */
+function ListenerActivation({ p }: { p: ActivationPosture }): JSX.Element {
+  switch (p.kind) {
+    case "unknown":
+      return (
+        <>
+          <p>
+            <StatusBadge status="unknown">
+              Listener activation unknown
+            </StatusBadge>
+          </p>
+          <p>
+            The appliance has not been observed serving: no bind evidence is
+            recorded (before the first bind, or while the listener is
+            rebinding). Nothing is claimed about what the running listener
+            serves or whether the persisted pair is in use.
+          </p>
+        </>
+      );
+    case "plain_http":
+      return (
+        <>
+          <p>
+            <NotActive />
+          </p>
+          <p>
+            The listener serves plain HTTP; the persisted pair is not in use.
+          </p>
+          {p.persistedActivatesOnRestart && <RestartActivates />}
+        </>
+      );
+    case "tls_configured":
+      return (
+        <>
+          <p>
+            <NotActive />
+          </p>
+          <ServedLine
+            lead="Listener serves an explicitly configured certificate:"
+            served={p.served}
+            tail=". The persisted GUI pair is never used while an explicit certificate is configured."
+          />
+        </>
+      );
+    case "self_signed":
+      return (
+        <>
+          <p>
+            <NotActive />
+          </p>
+          <ServedLine
+            lead="Listener serves the automatically generated self-signed certificate:"
+            served={p.served}
+            tail="."
+          />
+          {p.persistedActivatesOnRestart && <RestartActivates />}
+        </>
+      );
+    case "custom_matches":
+      return (
+        <>
+          <p>
+            <StatusBadge status="ok">
+              Active on the running listener
+            </StatusBadge>
+          </p>
+          <ServedLine
+            lead="Listener serves the persisted pair:"
+            served={p.served}
+            tail="."
+          />
+        </>
+      );
+    case "custom_differs":
+      return (
+        <>
+          <p>
+            <NotActive />
+          </p>
+          <ServedLine
+            lead="Listener serves a previously persisted GUI pair:"
+            served={p.served}
+            tail="; the pair persisted now is a different one (its identity is below)."
+          />
+          <RestartActivates />
+        </>
+      );
+    case "custom_not_persisted":
+      return (
+        <>
+          <p>
+            <NotActive />
+          </p>
+          <ServedLine
+            lead="Listener serves a GUI pair that is no longer persisted:"
+            served={p.served}
+            tail="; it is not loaded again at the next boot."
+          />
+        </>
+      );
+    case "custom_persisted_unusable":
+      return (
+        <>
+          <p>
+            <NotActive />
+          </p>
+          <ServedLine
+            lead="Listener serves a GUI pair:"
+            served={p.served}
+            tail={
+              p.persistedState === "unavailable"
+                ? "; the pair persisted now cannot be examined, so whether it is the served one is not known."
+                : `; the pair persisted now is ${p.persistedState} and is never loaded.`
+            }
+          />
+        </>
+      );
+  }
+}
+
+function persistedHead(ui: UICertFacts): JSX.Element {
+  switch (ui.pairState) {
+    case "unavailable":
+      return <StatusBadge status="unknown">Evidence unavailable</StatusBadge>;
+    case "incomplete":
+      return <StatusBadge status="critical">Incomplete pair</StatusBadge>;
+    case "absent":
+      return <StatusBadge status="neutral">No persisted pair</StatusBadge>;
+    case "complete":
+      return ui.corrupt ? (
+        <StatusBadge status="critical">Corrupt pair</StatusBadge>
+      ) : (
+        <StatusBadge status="ok">Complete pair persisted</StatusBadge>
+      );
+  }
+}
+
+function persistedBody(ui: UICertFacts): ReactNode {
+  switch (ui.pairState) {
+    case "unavailable":
+      return (
+        <p>
+          The persisted pair cannot be examined or read (an unreadable path, a
+          directory, or an unreadable key). This is not absent: the files may
+          exist, and the evidence blocks mutations until it can be read.
+        </p>
+      );
+    case "incomplete":
+      return (
+        <p>
+          The pair is incomplete: exactly one of the two files (certificate or
+          key) is present; the listener never loads an incomplete pair.
+        </p>
+      );
+    case "absent":
+      return <p>The pair is positively absent: neither file exists.</p>;
+    case "complete":
+      return ui.corrupt ? (
+        <p>
+          The persisted files are readable but did not parse as a matching pair;
+          the listener never loads them.
+        </p>
+      ) : null;
+  }
+}
+
+/** The network-settings read is a CROSS-CHECK of the inventory's listener
+ * evidence. Three outcomes: agreement (nothing extra rendered), a
+ * contradiction (every activation claim withheld), or a read that did not
+ * happen (stated; the inventory's evidence-backed claim stands). An answer
+ * that cannot be verified as consistent listener facts is a contradiction,
+ * not an unavailability — the appliance answered, and its facts disagree. */
+type CrossCheck =
+  | { kind: "pending" }
+  | { kind: "agree" }
+  | { kind: "contradiction"; text: string }
+  | { kind: "unavailable"; text: string };
+
+function crossCheck(
+  inv: CertificateInventory,
+  listener: ReadView<ListenerFacts>,
+): CrossCheck {
+  if (listener.data !== undefined) {
+    const parts: string[] = [];
+    if (listenerReadsDisagree(inv, listener.data)) {
+      parts.push(
+        `The certificate inventory and the network settings disagree about the running listener (inventory: ${listenerWords(inv.listener)}; network settings: ${listenerWords(listener.data.listener)}).`,
+      );
+    }
+    const legacy = listenerContradiction(inv.uiCert, listener.data);
+    if (legacy !== null) parts.push(contradictionText(legacy));
+    if (parts.length === 0) return { kind: "agree" };
+    return {
+      kind: "contradiction",
+      text: `${parts.join(" ")} No activation claim is made until the two reads agree.`,
+    };
+  }
+  if (listener.loading) return { kind: "pending" };
+  const summary = readErrorSummary(listener.error, "network settings");
+  if (
+    listener.error instanceof ApiError &&
+    (listener.error.kind === "decode" || listener.error.kind === "contenttype")
+  ) {
+    return {
+      kind: "contradiction",
+      text: `${summary} The network settings could not be verified as consistent listener facts, so no activation claim is made.`,
+    };
+  }
+  return {
+    kind: "unavailable",
+    text: `${summary} The listener facts below rest on the inventory's own bind evidence and were not cross-checked against the network settings.`,
+  };
+}
+
 function UICertCard({
-  ui,
+  inv,
   listener,
 }: {
-  ui: UICertFacts;
+  inv: CertificateInventory;
   listener: ReadView<ListenerFacts>;
 }): JSX.Element {
-  const posture = uiPairPosture(ui);
-  const contradiction =
-    listener.data !== undefined
-      ? listenerContradiction(ui, listener.data)
-      : null;
-  const activation = (): ReactNode => {
-    if (contradiction !== null) return null;
-    return <ActivationLine active={ui.active} />;
-  };
-  let head: JSX.Element;
-  let body: ReactNode;
-  switch (posture) {
-    case "persisted_restart_required":
-      head = <StatusBadge status="ok">Complete pair persisted</StatusBadge>;
-      body = (
-        <>
-          {activation()}
-          {contradiction === null && (
-            <p>
-              Activation requires a restart: the listener loads the persisted
-              pair only at boot.
-            </p>
-          )}
-        </>
-      );
-      break;
-    case "active_persisted":
-      head = <StatusBadge status="ok">Complete pair persisted</StatusBadge>;
-      body = activation();
-      break;
-    case "active_not_persisted":
-      head = <StatusBadge status="warn">No persisted pair</StatusBadge>;
-      body = (
-        <>
-          {activation()}
-          <p>
-            The running listener holds a pair that is no longer persisted on
-            disk; a restart falls back to the self-signed certificate.
-          </p>
-        </>
-      );
-      break;
-    case "absent":
-      head = <StatusBadge status="neutral">No persisted pair</StatusBadge>;
-      body = (
-        <>
-          <p>
-            The pair is positively absent: neither file exists. The listener
-            serves the self-signed certificate.
-          </p>
-          {activation()}
-        </>
-      );
-      break;
-    case "incomplete":
-      head = <StatusBadge status="critical">Incomplete pair</StatusBadge>;
-      body = (
-        <>
-          <p>
-            The pair is incomplete: exactly one of the two files (certificate or
-            key) is present; the listener never loads an incomplete pair.
-          </p>
-          {activation()}
-        </>
-      );
-      break;
-    case "unavailable":
-      head = <StatusBadge status="unknown">Evidence unavailable</StatusBadge>;
-      body = (
-        <>
-          <p>
-            The persisted pair cannot be examined or read (an unreadable path, a
-            directory, or an unreadable key). This is not absent: the files may
-            exist, and the evidence blocks mutations until it can be read.
-          </p>
-          {activation()}
-        </>
-      );
-      break;
-    case "corrupt":
-      head = <StatusBadge status="critical">Corrupt pair</StatusBadge>;
-      body = (
-        <>
-          <p>
-            The persisted files are readable but did not parse as a matching
-            pair; the listener never loads them.
-          </p>
-          {activation()}
-        </>
-      );
-      break;
-  }
+  const ui = inv.uiCert;
+  const check = crossCheck(inv, listener);
+  const posture = activationPosture(inv);
   return (
     <Card title="UI listener certificate" actions={<NodeLocal />}>
-      {contradiction !== null && (
+      {check.kind === "contradiction" && (
         <Callout variant="critical" title="Contradictory listener facts">
-          {contradictionText(contradiction)}
+          {check.text}
         </Callout>
       )}
-      {listener.data === undefined && !listener.loading && (
-        <Callout variant="warning" title="Listener facts unavailable">
-          {readErrorSummary(listener.error, "network settings")}; the activation
-          claim above is the inventory's alone and was not cross-checked.
+      {check.kind === "unavailable" && (
+        <Callout variant="warning" title="Listener cross-check unavailable">
+          {check.text}
         </Callout>
       )}
-      <p>{head}</p>
-      {body}
+      <p>
+        {posture.kind === "custom_not_persisted" ? (
+          <StatusBadge status="warn">No persisted pair</StatusBadge>
+        ) : (
+          persistedHead(ui)
+        )}
+      </p>
+      {persistedBody(ui)}
+      {check.kind !== "contradiction" && <ListenerActivation p={posture} />}
+      {check.kind === "pending" && (
+        <p>
+          <Skeleton>Cross-checking the network settings…</Skeleton>
+        </p>
+      )}
       <KeyValue
         items={[
           ["Revision", <Mono key="rev">{ui.revision}</Mono>],
@@ -658,9 +876,43 @@ type LookupOutcome =
   | { kind: "pending" }
   | { kind: "record"; op: CertOperation }
   | { kind: "refused"; code: CertLookupRefusalCode }
-  | { kind: "error"; text: string };
+  | { kind: "error"; unverified: boolean; text: string };
 
-function OperationRecord({ op }: { op: CertOperation }): JSX.Element {
+/** B2: "Audited" is qualified by the inventory's audit sink. A file sink is
+ * the only evidence that the success audit reached the node's audit file; a
+ * memory sink means the in-memory ring only; an inventory that could not be
+ * read leaves the sink unknown — and "durable" is never said without the
+ * file sink. */
+function auditQualifier(sink: AuditSink | undefined): {
+  badge: JSX.Element;
+  text: string;
+} {
+  switch (sink) {
+    case "file":
+      return {
+        badge: <StatusBadge status="ok">Audited</StatusBadge>,
+        text: "Audit persisted (file sink): its success audit is appended to the node's audit file.",
+      };
+    case "memory":
+      return {
+        badge: <StatusBadge status="warn">Audited (memory sink)</StatusBadge>,
+        text: "Audit recorded in the in-memory ring only (memory sink): this node has no audit file, so the record does not survive a restart.",
+      };
+    case undefined:
+      return {
+        badge: <StatusBadge status="neutral">Audited</StatusBadge>,
+        text: "Audit recorded; sink evidence unavailable — the inventory read that names the audit sink failed, so whether the audit reached a file is not known.",
+      };
+  }
+}
+
+function OperationRecord({
+  op,
+  auditSink,
+}: {
+  op: CertOperation;
+  auditSink: AuditSink | undefined;
+}): JSX.Element {
   const p = operationPosture(op);
   let head: JSX.Element;
   let explain: ReactNode;
@@ -670,15 +922,16 @@ function OperationRecord({ op }: { op: CertOperation }): JSX.Element {
       explain =
         "The intent is recorded and not yet decided; a later lookup, boot or writer settles it from the object's own evidence.";
       break;
-    case "committed":
+    case "committed": {
+      const q = auditQualifier(auditSink);
       head = (
         <span>
-          <StatusBadge status="ok">Committed</StatusBadge>{" "}
-          <StatusBadge status="ok">Audited</StatusBadge>
+          <StatusBadge status="ok">Committed</StatusBadge> {q.badge}
         </span>
       );
-      explain = "The mutation took effect and its durable audit is recorded.";
+      explain = `The mutation took effect. ${q.text}`;
       break;
+    }
     case "committed_audit_pending":
       head = (
         <span>
@@ -687,7 +940,7 @@ function OperationRecord({ op }: { op: CertOperation }): JSX.Element {
         </span>
       );
       explain =
-        "The mutation took effect; its durable success audit is still owed and is completed by a later settlement. This is not a failed certificate mutation.";
+        "The mutation took effect; its success audit is still owed and is completed by a later settlement. This is not a failed certificate mutation.";
       break;
     case "aborted":
       head = <StatusBadge status="critical">Aborted</StatusBadge>;
@@ -794,7 +1047,11 @@ function refusalText(code: CertLookupRefusalCode): ReactNode {
   }
 }
 
-function OperationLookupCard(): JSX.Element {
+function OperationLookupCard({
+  auditSink,
+}: {
+  auditSink: AuditSink | undefined;
+}): JSX.Element {
   const [id, setId] = useState("");
   const [outcome, setOutcome] = useState<LookupOutcome>({ kind: "idle" });
   const ownerRef = useRef(createRequestRunOwner());
@@ -831,13 +1088,18 @@ function OperationLookupCard(): JSX.Element {
       .catch((err: unknown) => {
         if (signal.aborted) return;
         if (err instanceof ApiError && err.kind === "aborted") return;
-        const code = refusalCodeOf(err, CERT_LOOKUP_REFUSAL_CODES);
+        // B3: a refusal is a verdict only with its contracted HTTP status,
+        // the JSON media type and the bounded {error, code, current?} shape.
+        const code = certLookupRefusal(err);
         if (code !== null) {
           setOutcome({ kind: "refused", code });
           return;
         }
         setOutcome({
           kind: "error",
+          unverified:
+            err instanceof ApiError &&
+            (err.kind === "decode" || err.kind === "contenttype"),
           text: readErrorSummary(err, "operation record"),
         });
       })
@@ -866,14 +1128,22 @@ function OperationLookupCard(): JSX.Element {
       );
       break;
     case "record":
-      result = <OperationRecord op={outcome.op} />;
+      result = <OperationRecord op={outcome.op} auditSink={auditSink} />;
       break;
     case "refused":
       result = refusalText(outcome.code);
       break;
     case "error":
       result = (
-        <ErrorState title="Lookup not answered">{outcome.text}</ErrorState>
+        <ErrorState
+          title={
+            outcome.unverified
+              ? "Lookup response not verified"
+              : "Lookup not answered"
+          }
+        >
+          {outcome.text}
+        </ErrorState>
       );
       break;
   }
@@ -929,22 +1199,12 @@ function CAStatusCard({ s }: { s: CAStatus }): JSX.Element {
               (<Mono>{s.loadFailureClass}</Mono>)
             </>
           )}
-          . Inspected HTTPS is bypassed while no usable CA is installed; the
-          recovery campaign below retries on a bounded schedule.
+          . The recovery campaign below reports its attempts and its last
+          outcome.
         </Callout>
       )}
       {s.rotationPersistDegraded && (
-        <Callout variant="warning" title="Last rotation could not be persisted">
-          The bundle write after the last rotation failed
-          {s.rotationPersistClass !== undefined && (
-            <>
-              {" "}
-              (<Mono>{s.rotationPersistClass}</Mono>)
-            </>
-          )}
-          ; the running root is not on disk and a restart re-rotates to a
-          different root.
-        </Callout>
+        <PersistDegradedCallout persistClass={s.rotationPersistClass} />
       )}
       {!s.ready ? (
         <p>
@@ -1172,7 +1432,7 @@ export function CertificatesPage(): JSX.Element {
     <>
       <PageHeader
         title="Certificates & CA"
-        subtitle="The inspection Root CA, the admin-listener certificate, the OCSP posture and the certificate operation ledger of THIS node — read from the appliance on demand. Node-local: nothing here is exported, rolled back or synced."
+        subtitle="The inspection Root CA, the admin-listener certificate, the OCSP posture and the certificate operation ledger of THIS node — read from the appliance on demand. Node-local: none of these objects ride config export, version rollback or CP→DP sync; what the backup archive carries is stated in the backup facts below."
       />
       <div className={policyStyles.toolbar}>
         <div role="tablist" aria-label="Certificate sections">
@@ -1213,7 +1473,7 @@ export function CertificatesPage(): JSX.Element {
           />
           {inv.data !== undefined && (
             <>
-              <UICertCard ui={inv.data.uiCert} listener={listenerView} />
+              <UICertCard inv={inv.data} listener={listenerView} />
               <MTLSCard m={inv.data.mtlsClientCert} />
               <Card title="OCSP posture" actions={<NodeLocal />}>
                 <OCSPPostureFacts o={inv.data.ocsp} />
@@ -1221,7 +1481,9 @@ export function CertificatesPage(): JSX.Element {
               <LedgerCard inv={inv.data} />
             </>
           )}
-          {isAdmin && <OperationLookupCard />}
+          {isAdmin && (
+            <OperationLookupCard auditSink={inv.data?.operations.auditSink} />
+          )}
         </div>
       )}
 

@@ -985,7 +985,11 @@ func TestFE6B0C_R09d_RecoveredUIDeleteReplaysActionBoundResult(t *testing.T) {
 		if code, m := fe6b0cUIReplace(t, mux, fe6b0OpID(), uiCertRevisionNone, leaf, key); code != http.StatusOK {
 			t.Fatalf("seed = %d %v", code, m)
 		}
-		uiCustomTLSActive = true // the running listener uses the pair (activation posture must survive recovery)
+		// The running listener serves the persisted pair: recorded from the
+		// listener's own evidence, the only source of that fact since the
+		// FE-6B.1 correction round (the boot flag is no longer published).
+		recordAdminListenerServing(adminListenerPostureCustom, persistedUICertLeaf())
+		t.Cleanup(recordAdminListenerLost)
 		since := fe6aSince()
 		rev := fe6b0cUIRevision(t, mux)
 		fe6b0cCommitWithFinishFailure(dir)

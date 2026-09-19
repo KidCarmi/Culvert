@@ -79,11 +79,14 @@ var (
 // tests swap it.
 var uiTLSAtomicWrite = fileutil.AtomicWrite
 
-// uiCustomTLSActive records whether the RUNNING UI server was started using
-// the persisted custom cert (set once at startup by resolveUITLSCertKey) —
-// distinct from customUITLSFilesPresent(), which only says a cert is ON
-// DISK and will take effect on the NEXT restart. Together they let an admin
-// tell "uploaded" apart from "uploaded and live" instead of guessing.
+// uiCustomTLSActive records the BOOT-TIME SELECTION: resolveUITLSCertKey
+// picked the persisted custom pair for the listener startUI is about to
+// start. It is NOT activation evidence and is published nowhere (FE-6B.1
+// correction round, B1): it never observes whether the listener bound or
+// what it serves, and it stays true after the pair is replaced or deleted
+// without a restart. What the running listener actually serves is recorded
+// from the bind itself in ui_listener_evidence.go, and `uiCert.active` /
+// `ui_custom_cert_active` are derived from that record (served == persisted).
 var uiCustomTLSActive bool
 
 // uiCustomTLSCorrupt records whether resolveUITLSCertKey found a persisted

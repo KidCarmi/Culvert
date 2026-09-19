@@ -297,7 +297,7 @@ func uiCertReadModel() map[string]any {
 		"present":   ev.class == uiPairComplete,
 		"pairState": ev.class,
 		"revision":  uiCertRevisionTokenOf(ev),
-		"active":    uiCustomTLSActive,
+		"active":    adminListenerServesPersistedPair(),
 		"corrupt":   uiCustomTLSCorrupt,
 	}
 	if leaf := persistedUICertLeaf(); leaf != nil {
@@ -369,6 +369,7 @@ func apiCertificates(w http.ResponseWriter, r *http.Request) {
 		"scope":          certScopeNodeLocal,
 		"ca":             caM,
 		"uiCert":         uiCertReadModel(),
+		"listener":       adminListenerReadModel(),
 		"mtlsClientCert": mtlsClientCertReadModel(),
 		"ocsp": map[string]any{
 			"revision": ocspRevisionToken(),
@@ -1057,7 +1058,7 @@ func apiCertsUI(w http.ResponseWriter, r *http.Request) {
 	if !certSettleTargetOrRefuse(w, s, "ui_cert", opID) {
 		return
 	}
-	op := certOperation{OperationID: opID, Action: certActionUIDelete, Actor: actor, Target: "ui_cert", Fence: current, WasActive: uiCustomTLSActive}
+	op := certOperation{OperationID: opID, Action: certActionUIDelete, Actor: actor, Target: "ui_cert", Fence: current, WasActive: adminListenerServesPersistedPair()}
 	op.AuditDetail = certAuditDetail(op)
 	if !certBegin(w, s, op) {
 		return

@@ -400,8 +400,16 @@ it("P3 persisted vs active vs durability are three distinct facts", async () => 
     root.unmount();
   });
 
-  // Contradiction: the pair claims active while the listener fell back to
+  // Contradiction: the inventory's listener evidence says the persisted pair
+  // is served while the network settings report a listener that fell back to
   // plain HTTP — no activation claim, the raw reason never renders.
+  // FE-6B.1 correction round (B1), recorded assertion change: the network
+  // answer is now SELF-CONSISTENT (its legacy `ui_custom_cert_active` agrees
+  // with its own `ui_listener` evidence) and disagrees with the INVENTORY;
+  // the former shape — `ui_custom_cert_active: true` beside a plain-HTTP
+  // `ui_listener` — contradicts itself and is refused whole by the
+  // fail-closed decoder (fe6b1c-red A3), which the page renders as a
+  // contradiction without echoing either side.
   route = (url) => {
     if (url.startsWith("/api/certificates"))
       return okJSON({
@@ -410,11 +418,7 @@ it("P3 persisted vs active vs durability are three distinct facts", async () => 
         listener: LISTENER_CUSTOM_A(true),
       });
     if (url.startsWith("/api/settings/network"))
-      return okJSON({
-        ...LISTENER_FALLBACK,
-        ui_custom_cert_uploaded: true,
-        ui_custom_cert_active: true,
-      });
+      return okJSON({ ...LISTENER_FALLBACK, ui_custom_cert_uploaded: true });
     return defaultRoute(url);
   };
   await mount("viewer");

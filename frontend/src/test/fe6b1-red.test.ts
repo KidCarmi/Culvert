@@ -103,6 +103,7 @@ import {
   HEX64_B,
   INVENTORY_DEGRADED,
   INVENTORY_HEALTHY,
+  LISTENER_CUSTOM_A,
   LISTENER_FALLBACK,
   LISTENER_TLS,
   OCSP_STATUS_ADMIN_DIFFERS,
@@ -811,7 +812,19 @@ describe("A7 postures are pure functions of the read model", () => {
     ): ReturnType<typeof uiPairPosture> =>
       uiPairPosture(decodeCertificateInventory(withUI(ui)).uiCert);
     expect(inv(UI_PERSISTED_NOT_ACTIVE)).toBe("persisted_restart_required");
-    expect(inv(UI_ACTIVE_PERSISTED)).toBe("active_persisted");
+    // FE-6B.1 correction round (B1), recorded assertion change: `active` is
+    // DERIVED from the listener evidence, so the active pair is decoded
+    // beside a listener observed serving it (withUI pairs the uiCert with
+    // the healthy inventory's self-signed listener, under which `active:
+    // true` is a contradiction the decoder refuses — fe6b1c-red A1).
+    expect(
+      uiPairPosture(
+        decodeCertificateInventory({
+          ...withUI(UI_ACTIVE_PERSISTED),
+          listener: LISTENER_CUSTOM_A(true),
+        }).uiCert,
+      ),
+    ).toBe("active_persisted");
     // FE-6B.1 correction round: the "active but absent" shape is a
     // contradiction under the listener-evidence contract (see
     // fe6b1c-red.test.ts); its posture row is withdrawn.
@@ -852,14 +865,23 @@ describe("A8 listener facts contribute bounded booleans only", () => {
     expect(
       listenerContradiction(inv.uiCert, decodeListenerFacts(LISTENER_TLS)),
     ).toBeNull();
-    // the custom pair claims active while the listener fell back to plain HTTP
-    const activeInv = decodeCertificateInventory(withUI(UI_ACTIVE_PERSISTED));
+    // the inventory reports the persisted pair as served while the network
+    // settings report a listener that fell back to plain HTTP.
+    // FE-6B.1 correction round (B1), recorded assertion change: the active
+    // inventory carries the listener evidence its `active` derives from, and
+    // the network answer is SELF-CONSISTENT (a plain-HTTP `ui_listener`
+    // beside `ui_custom_cert_active: false`); the former answer asserted
+    // `ui_custom_cert_active: true` beside a plain-HTTP listener, which the
+    // fail-closed decoder now refuses whole (fe6b1c-red A3).
+    const activeInv = decodeCertificateInventory({
+      ...withUI(UI_ACTIVE_PERSISTED),
+      listener: LISTENER_CUSTOM_A(true),
+    });
     expect(
       listenerContradiction(
         activeInv.uiCert,
         decodeListenerFacts({
           ...LISTENER_FALLBACK,
-          ui_custom_cert_active: true,
           ui_custom_cert_uploaded: true,
         }),
       ),

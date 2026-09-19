@@ -437,6 +437,14 @@ const OP_BASE = {
 
 export const OP_PENDING = { ...OP_BASE, state: "pending", audited: false };
 
+/** The inventory-format (upper-case colon hex) fingerprint of a 64-hex digest:
+ * a CA record's committedRevision `car1:<hex>`, its candidateFingerprint and
+ * its result.ca.fingerprint all name ONE certificate (correction round, B3 —
+ * the original fixture paired CA_FP with an unrelated digest). */
+export function colonForm(hex: string): string {
+  return (hex.toUpperCase().match(/.{2}/g) ?? []).join(":");
+}
+
 export const OP_COMMITTED = {
   ...OP_BASE,
   state: "committed",
@@ -446,8 +454,16 @@ export const OP_COMMITTED = {
   result: {
     imported: true,
     target: "mitm",
-    ca: { ready: true, revision: `car1:${HEX64_B}`, fingerprint: CA_FP },
-    previous: { fingerprint: CA_FP, revision: `car1:${HEX64}` },
+    operationId: OP_ID,
+    action: "ca.import",
+    scope: "node-local",
+    persisted: true,
+    ca: {
+      ready: true,
+      revision: `car1:${HEX64_B}`,
+      fingerprint: colonForm(HEX64_B),
+    },
+    previous: { fingerprint: colonForm(HEX64), revision: `car1:${HEX64}` },
   },
 };
 

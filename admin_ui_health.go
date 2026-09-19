@@ -419,6 +419,7 @@ func resetAdminUIHealthForTest() {
 	// own lock (ui.go), and taking a second lock from under this one would
 	// establish an ordering that nothing else in the file needs.
 	resetAdminUIStopForTest()
+	resetAdminListenerEvidenceForTest()
 
 	adminUIListener.mu.Lock()
 	defer adminUIListener.mu.Unlock()

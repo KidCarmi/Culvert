@@ -355,10 +355,53 @@ export interface BackupFacts {
   configVersionRollback: false;
 }
 
+/** FE-6B.1 correction round (B1) — the admin listener's ACTIVATION EVIDENCE,
+ * recorded by the appliance from the listener's own successful bind, never
+ * from a boot-time selection flag. `state` unknown = no bind observed (or the
+ * listener is rebinding): activation that has not been observed is UNKNOWN,
+ * never claimed. `servedCertificate` is the served leaf's public identity,
+ * present iff the posture is a TLS posture; its fingerprint is in the
+ * inventory format so it is comparable with the PERSISTED pair's — two
+ * different facts. `servesPersistedPair` is derived at read time (tls_custom
+ * AND a complete valid persisted pair AND equal fingerprints) and is the
+ * meaning of the legacy `uiCert.active` / `ui_custom_cert_active`. */
+export const LISTENER_STATES = ["serving", "unknown"] as const;
+export type ListenerState = (typeof LISTENER_STATES)[number];
+export const LISTENER_POSTURES = [
+  "tls_custom",
+  "tls_configured",
+  "tls_self_signed",
+  "plain_http",
+  "unknown",
+] as const;
+export type ListenerPosture = (typeof LISTENER_POSTURES)[number];
+const TLS_POSTURES: readonly ListenerPosture[] = [
+  "tls_custom",
+  "tls_configured",
+  "tls_self_signed",
+];
+
+export interface ServedCertificate {
+  /** upper-case colon-separated SHA-256 (UICertFacts.fingerprint format) */
+  fingerprint: string;
+  subject: string;
+  notBefore: string;
+  notAfter: string;
+}
+
+export interface AdminListener {
+  state: ListenerState;
+  posture: ListenerPosture;
+  servedCertificate?: ServedCertificate;
+  servesPersistedPair: boolean;
+}
+
 export interface CertificateInventory {
   scope: "node-local";
   ca: CAFacts;
   uiCert: UICertFacts;
+  /** the listener's own evidence — the ONLY source of an activation claim */
+  listener: AdminListener;
   mtlsClientCert: MTLSClientCertFacts;
   ocsp: OCSPPosture;
   operations: LedgerFacts;
@@ -447,6 +490,8 @@ export interface ListenerFacts {
   customCertUploaded: boolean;
   customCertActive: boolean;
   customCertCorrupt: boolean;
+  /** the same evidence object the inventory carries (`ui_listener`) */
+  listener: AdminListener;
 }
 
 interface CertOperationBase {
@@ -741,16 +786,93 @@ function decodeBackup(v: unknown, path: string): BackupFacts {
   };
 }
 
+const COLON_FINGERPRINT = /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/;
+const readColonFingerprint = readToken(
+  COLON_FINGERPRINT,
+  "SHA-256 as 32 upper-case colon-separated hex bytes",
+);
+
+function decodeServedCertificate(v: unknown, path = "$"): ServedCertificate {
+  const o = readRecord(v, path);
+  refuseCertSecretKeys(o, path);
+  return {
+    fingerprint: field(o, "fingerprint", readColonFingerprint, path),
+    subject: field(o, "subject", readString, path),
+    notBefore: field(o, "notBefore", readString, path),
+    notAfter: field(o, "notAfter", readString, path),
+  };
+}
+
+export const decodeAdminListener: Decoder<AdminListener> = (v, path = "$") => {
+  const o = readRecord(v, path);
+  refuseCertSecretKeys(o, path);
+  const state = field(o, "state", readEnum(LISTENER_STATES), path);
+  const posture = field(o, "posture", readEnum(LISTENER_POSTURES), path);
+  if ((state === "unknown") !== (posture === "unknown"))
+    contradiction(
+      `${path}.posture`,
+      "an unobserved listener has no posture; an observed one has one",
+    );
+  const served = opt(o, "servedCertificate", decodeServedCertificate, path);
+  if (TLS_POSTURES.includes(posture) !== (served !== undefined))
+    contradiction(
+      `${path}.servedCertificate`,
+      "a served identity exists exactly for a TLS posture",
+    );
+  const servesPersistedPair = field(
+    o,
+    "servesPersistedPair",
+    readBoolean,
+    path,
+  );
+  if (servesPersistedPair && posture !== "tls_custom")
+    contradiction(
+      `${path}.servesPersistedPair`,
+      "only the persisted GUI pair can be the served persisted pair",
+    );
+  const out: AdminListener = { state, posture, servesPersistedPair };
+  if (served !== undefined) out.servedCertificate = served;
+  return out;
+};
+
+/** The derived activation fact: the listener is observed serving the exact
+ * pair that is persisted right now (complete, valid, same fingerprint). */
+function derivedServesPersisted(ui: UICertFacts, l: AdminListener): boolean {
+  return (
+    l.state === "serving" &&
+    l.posture === "tls_custom" &&
+    l.servedCertificate !== undefined &&
+    ui.pairState === "complete" &&
+    !ui.corrupt &&
+    ui.fingerprint !== undefined &&
+    ui.fingerprint === l.servedCertificate.fingerprint
+  );
+}
+
 export const decodeCertificateInventory: Decoder<CertificateInventory> = (
   v,
   path = "$",
 ) => {
   const o = readRecord(v, path);
   refuseCertSecretKeys(o, path);
+  const uiCert = decodeUICertFacts(o["uiCert"], `${path}.uiCert`);
+  const listener = decodeAdminListener(o["listener"], `${path}.listener`);
+  const derived = derivedServesPersisted(uiCert, listener);
+  if (listener.servesPersistedPair !== derived)
+    contradiction(
+      `${path}.listener.servesPersistedPair`,
+      "servesPersistedPair must equal served == persisted (complete, valid, same fingerprint)",
+    );
+  if (uiCert.active !== derived)
+    contradiction(
+      `${path}.uiCert.active`,
+      "active is derived from the listener evidence, never asserted apart from it",
+    );
   return {
     scope: field(o, "scope", readScope, path),
     ca: decodeCAFacts(o["ca"], `${path}.ca`),
-    uiCert: decodeUICertFacts(o["uiCert"], `${path}.uiCert`),
+    uiCert,
+    listener,
     mtlsClientCert: decodeMTLS(o["mtlsClientCert"], `${path}.mtlsClientCert`),
     ocsp: decodeOCSPPosture(o["ocsp"], `${path}.ocsp`),
     operations: decodeLedger(o["operations"], `${path}.operations`),
@@ -918,13 +1040,138 @@ export const decodeListenerFacts: Decoder<ListenerFacts> = (v, path = "$") => {
   const o = readRecord(v, path);
   // Only the bounded booleans cross the boundary; ui_tls_fallback_reason is a
   // raw crypto/x509 line and is never decoded.
-  return {
+  const listener = decodeAdminListener(o["ui_listener"], `${path}.ui_listener`);
+  const out: ListenerFacts = {
     tlsFallback: field(o, "ui_tls_fallback", readBoolean, path),
     customCertUploaded: field(o, "ui_custom_cert_uploaded", readBoolean, path),
     customCertActive: field(o, "ui_custom_cert_active", readBoolean, path),
     customCertCorrupt: field(o, "ui_custom_cert_corrupt", readBoolean, path),
+    listener,
   };
+  if (out.customCertActive !== listener.servesPersistedPair)
+    contradiction(
+      `${path}.ui_custom_cert_active`,
+      "the legacy flag is derived from ui_listener.servesPersistedPair",
+    );
+  if (
+    out.tlsFallback &&
+    listener.state === "serving" &&
+    listener.posture !== "plain_http"
+  )
+    contradiction(
+      `${path}.ui_tls_fallback`,
+      "a plain-HTTP fallback listener cannot be observed serving TLS",
+    );
+  return out;
 };
+
+/** Two spellings of one SHA-256: the inventory's upper-case colon form and
+ * the ledger's bare lower-case hex (candidateFingerprint, revision digests). */
+function digestKey(s: string): string {
+  return s.replace(/:/g, "").toLowerCase();
+}
+
+function requireLiteralTrue(
+  o: Record<string, unknown>,
+  key: string,
+  path: string,
+): void {
+  if (o[key] !== true)
+    contradiction(
+      `${path}.${key}`,
+      `the action-bound discriminant ${key}: true`,
+    );
+}
+
+/** A committed record's action-specific `result` must agree with the outer
+ * record and the frozen contract (FE-6B.1 correction round, B3): the same
+ * operation, the same action, the revision it committed, the certificate it
+ * installed, and the action's own discriminant — otherwise the record is
+ * contradictory and is refused whole. */
+function checkCommittedResult(
+  base: CertOperationBase,
+  committedRevision: string,
+  r: Record<string, unknown>,
+  path: string,
+): void {
+  refuseCertSecretKeys(r, path);
+  const rid = opt(r, "operationId", readString, path);
+  if (rid !== undefined && rid.toLowerCase() !== base.operationId.toLowerCase())
+    contradiction(`${path}.operationId`, "the result names this operation");
+  const raction = opt(r, "action", readString, path);
+  if (raction !== undefined && raction !== base.action)
+    contradiction(`${path}.action`, "the result names this action");
+  const scope = opt(r, "scope", readString, path);
+  if (scope !== undefined && scope !== "node-local")
+    contradiction(`${path}.scope`, "node-local");
+  const revDigest = committedRevision.replace(/^[a-z]+1:/, "");
+  switch (base.action) {
+    case "ca.rotate":
+    case "ca.import": {
+      requireLiteralTrue(
+        r,
+        base.action === "ca.rotate" ? "rotated" : "imported",
+        path,
+      );
+      forbid(
+        r,
+        base.action === "ca.rotate" ? "imported" : "rotated",
+        path,
+        base.action,
+      );
+      const ca = readRecord(r["ca"], `${path}.ca`);
+      const rev = field(ca, "revision", readCARevision, `${path}.ca`);
+      if (rev !== committedRevision)
+        contradiction(`${path}.ca.revision`, "the committed revision");
+      const fp = field(ca, "fingerprint", readString, `${path}.ca`);
+      if (digestKey(fp) !== revDigest)
+        contradiction(`${path}.ca.fingerprint`, "the committed certificate");
+      if (
+        base.candidateFingerprint !== undefined &&
+        digestKey(base.candidateFingerprint) !== revDigest
+      )
+        contradiction(`${path}.ca`, "the candidate the record installs");
+      return;
+    }
+    case "cert.ui.replace": {
+      requireLiteralTrue(r, "replaced", path);
+      forbid(r, "deleted", path, base.action);
+      const ui = decodeUICertFacts(r["uiCert"], `${path}.uiCert`);
+      if (ui.revision !== committedRevision)
+        contradiction(`${path}.uiCert.revision`, "the committed revision");
+      if (ui.pairState !== "complete")
+        contradiction(
+          `${path}.uiCert.pairState`,
+          "a replaced pair is complete",
+        );
+      return;
+    }
+    case "cert.ui.delete": {
+      requireLiteralTrue(r, "deleted", path);
+      forbid(r, "replaced", path, base.action);
+      const ui = decodeUICertFacts(r["uiCert"], `${path}.uiCert`);
+      if (ui.pairState !== "absent" || ui.revision !== committedRevision)
+        contradiction(
+          `${path}.uiCert`,
+          "a deleted pair is positively absent at the committed revision",
+        );
+      return;
+    }
+    case "ocsp.set": {
+      requireLiteralTrue(r, "ok", path);
+      requireLiteralTrue(r, "durable", path);
+      const rev = field(r, "revision", readOCSPRevision, path);
+      if (rev !== committedRevision)
+        contradiction(`${path}.revision`, "the committed revision");
+      const enabled = field(r, "enabled", readBoolean, path);
+      const runtime = decodeRuntime(r["runtime"], `${path}.runtime`);
+      decodeDesired(r["desired"], `${path}.desired`);
+      if (enabled !== runtime.enabled)
+        contradiction(`${path}.enabled`, "enabled agrees with runtime.enabled");
+      return;
+    }
+  }
+}
 
 export const decodeCertOperation: Decoder<CertOperation> = (v, path = "$") => {
   const o = readRecord(v, path);
@@ -984,6 +1231,8 @@ export const decodeCertOperation: Decoder<CertOperation> = (v, path = "$") => {
       const committedRevision = field(o, "committedRevision", readString, path);
       const code = opt(o, "code", readEnum(COMMITTED_CODES), path);
       const result = opt(o, "result", readRecord, path);
+      if (result !== undefined)
+        checkCommittedResult(base, committedRevision, result, `${path}.result`);
       const extra = {
         ...(code !== undefined ? { code } : {}),
         ...(result !== undefined ? { result } : {}),
@@ -1131,6 +1380,143 @@ export function listenerContradiction(
   return null;
 }
 
+/** The activation posture of the persisted admin-UI pair, decided from the
+ * listener's own evidence and the persisted identity — never from a flag. */
+export type ActivationPosture =
+  | { kind: "unknown" }
+  | { kind: "plain_http"; persistedActivatesOnRestart: boolean }
+  | { kind: "tls_configured"; served: ServedCertificate }
+  | {
+      kind: "self_signed";
+      served: ServedCertificate;
+      persistedActivatesOnRestart: boolean;
+    }
+  | { kind: "custom_matches"; served: ServedCertificate }
+  | {
+      kind: "custom_differs";
+      served: ServedCertificate;
+      persistedFingerprint: string;
+    }
+  | { kind: "custom_not_persisted"; served: ServedCertificate }
+  | {
+      kind: "custom_persisted_unusable";
+      served: ServedCertificate;
+      persistedState: "corrupt" | "incomplete" | "unavailable";
+    };
+
+export function activationPosture(
+  inv: CertificateInventory,
+): ActivationPosture {
+  const l = inv.listener;
+  const ui = inv.uiCert;
+  const restartActivates = ui.pairState === "complete" && !ui.corrupt;
+  if (l.state !== "serving" || l.servedCertificate === undefined) {
+    if (l.state === "serving" && l.posture === "plain_http")
+      return {
+        kind: "plain_http",
+        persistedActivatesOnRestart: restartActivates,
+      };
+    return { kind: "unknown" };
+  }
+  const served = l.servedCertificate;
+  switch (l.posture) {
+    case "tls_configured":
+      return { kind: "tls_configured", served };
+    case "tls_self_signed":
+      return {
+        kind: "self_signed",
+        served,
+        persistedActivatesOnRestart: restartActivates,
+      };
+    case "tls_custom":
+      break;
+    default:
+      return { kind: "unknown" };
+  }
+  switch (ui.pairState) {
+    case "absent":
+      return { kind: "custom_not_persisted", served };
+    case "incomplete":
+    case "unavailable":
+      return {
+        kind: "custom_persisted_unusable",
+        served,
+        persistedState: ui.pairState,
+      };
+    case "complete":
+      if (ui.corrupt)
+        return {
+          kind: "custom_persisted_unusable",
+          served,
+          persistedState: "corrupt",
+        };
+      if (ui.fingerprint === served.fingerprint)
+        return { kind: "custom_matches", served };
+      return {
+        kind: "custom_differs",
+        served,
+        persistedFingerprint: ui.fingerprint ?? "",
+      };
+  }
+}
+
+function listenerKey(l: AdminListener): string {
+  return JSON.stringify([
+    l.state,
+    l.posture,
+    l.servesPersistedPair,
+    l.servedCertificate?.fingerprint ?? null,
+    l.servedCertificate?.subject ?? null,
+    l.servedCertificate?.notBefore ?? null,
+    l.servedCertificate?.notAfter ?? null,
+  ]);
+}
+
+/** The two reads publish ONE evidence object; a disagreement is reported,
+ * never resolved into either side. */
+export function listenerReadsDisagree(
+  inv: CertificateInventory,
+  net: ListenerFacts,
+): boolean {
+  return listenerKey(inv.listener) !== listenerKey(net.listener);
+}
+
+/** The contracted HTTP status of every lookup refusal code. */
+const LOOKUP_REFUSAL_STATUS: Record<CertLookupRefusalCode, number> = {
+  invalid_input: 400,
+  forbidden: 403,
+  not_found: 404,
+  method_not_allowed: 405,
+  operation_ledger_degraded: 503,
+};
+
+/** A lookup refusal is a verdict ONLY when the failed response carried the
+ * code's contracted HTTP status, the JSON media type and the bounded
+ * CertRefusal shape ({error, code, current?} and nothing else). Anything else
+ * — the right code on the wrong status, on text/plain, or inside a foreign
+ * shape — is an UNVERIFIED lookup response (FE-6B.1 correction round, B3). */
+export function certLookupRefusal(err: unknown): CertLookupRefusalCode | null {
+  if (!(err instanceof ApiError) || err.kind !== "http") return null;
+  if (err.status === undefined || err.bodyText === undefined) return null;
+  if (err.mediaType !== "application/json") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(err.bodyText);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  for (const k of Object.keys(parsed))
+    if (k !== "error" && k !== "code" && k !== "current") return null;
+  if (typeof parsed["error"] !== "string" || typeof parsed["code"] !== "string")
+    return null;
+  if (parsed["current"] !== undefined && !isRecord(parsed["current"]))
+    return null;
+  const code = CERT_LOOKUP_REFUSAL_CODES.find((c) => c === parsed["code"]);
+  if (code === undefined) return null;
+  return LOOKUP_REFUSAL_STATUS[code] === err.status ? code : null;
+}
+
 export function isValidOperationId(s: string): boolean {
   return UUID.test(s);
 }
@@ -1185,9 +1571,20 @@ export function getCertOperation(
       new ApiError("target", "refused: an operation id is a UUID"),
     );
   }
+  const want = operationId.toLowerCase();
   return apiRequest(
-    `/api/ca/operations/${encodeURIComponent(operationId.toLowerCase())}`,
-    decodeCertOperation,
+    `/api/ca/operations/${encodeURIComponent(want)}`,
+    (v, path) => {
+      const op = decodeCertOperation(v, path);
+      // A request for X must never display Y's record (correction round, B3).
+      if (op.operationId.toLowerCase() !== want)
+        throw new DecodeError(
+          `${path ?? "$"}.operationId`,
+          `the requested operation ${want}`,
+          "[another operation]",
+        );
+      return op;
+    },
     signal !== undefined ? { signal } : {},
   );
 }
