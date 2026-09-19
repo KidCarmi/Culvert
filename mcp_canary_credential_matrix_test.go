@@ -816,14 +816,6 @@ func TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration(t *testing.T) {
 	for _, n := range seen {
 		enumerated[n] = true
 	}
-	if bad := roundsUnparsedConnectors(doc); len(bad) > 0 {
-		t.Errorf("§25d joins round numbers with connector(s) %q that the parser does not "+
-			"recognise, so the list is truncated there and a named round can go unchecked. "+
-			"Add the connector to roundPhrase (with a control case), or reword. This check "+
-			"exists because rounds 12, 13 and 14 were each one more form that truncated "+
-			"SILENTLY.", bad)
-	}
-
 	var unlisted []int
 	for _, n := range roundsNamedIn(doc) {
 		if !enumerated[n] {
@@ -881,55 +873,53 @@ func TestCredWall_LedgerStatesTheCampaignSize(t *testing.T) {
 // 7 and 8. Both are enumerated, so the gate stayed green while 98 went unseen. The separator is
 // now a sequence, which is what `, and` actually is.
 var (
-	// A separator is a SEQUENCE of tokens, not one: an Oxford comma writes `, and`, and a parser
-	// that accepts only a single token stops at the comma. Codex round 13.
-	roundPhrase = regexp.MustCompile(`(?i)\brounds?\s+(\d+(?:(?:\s*(?:,|and|or|to|through|&|\x{2013}|\x{2014}|-)\s*)+\d+)*)`)
-	// An UNRECOGNISED connector joining two small numbers after `round(s)`. The parser would
-	// silently truncate the list there, so this makes it a loud failure instead -- see
-	// roundsNamedIn's note. The trailing number is bounded to two digits because round numbers in
-	// this ledger are small; that keeps ordinary prose like "round 9 in 2026" out of it.
-	roundDangling = regexp.MustCompile(`^[\s,]*([\pL&/+]{1,8})[\s,]*\d{1,2}\b`)
-	roundRange    = regexp.MustCompile(`(\d+)\s*(?:[\x{2013}\x{2014}-]|\bto\b|\bthrough\b)\s*(\d+)`)
-	roundNumber   = regexp.MustCompile(`\d+`)
+	// NO CONNECTOR VOCABULARY -- see roundsNamedIn for why there is none.
+	roundToken  = regexp.MustCompile(`(?i)\brounds?\b`)
+	roundStop   = regexp.MustCompile(`[.;:!?\n]`)
+	roundNumber = regexp.MustCompile(`\b\d{1,2}\b`)
+	roundRange  = regexp.MustCompile(`\b(\d{1,2})\s*(?:[\x{2013}\x{2014}-]|\bto\b|\bthrough\b)\s*(\d{1,2})\b`)
 )
 
-// roundsUnparsedConnectors returns the connectors §25d uses between round numbers that the parser
-// does NOT recognise, so the caller can fail rather than under-report.
+// roundsNamedIn returns every round number a passage NAMES.
 //
-// This exists because rounds 12, 13 and 14 were each ONE more natural-language form -- plural,
-// then the Oxford comma, then a serial `or` -- and every one of them truncated the list SILENTLY,
-// which is the same defect three times with a different word in it. Adding a fourth token would
-// have invited a fifth round on `&` or `through` (both measured as silently truncating). The
-// treadmill ends by changing the failure MODE: an unknown connector is now a build failure that
-// names itself, so the next form is reported instead of quietly dropping a round.
-func roundsUnparsedConnectors(doc string) []string {
-	var out []string
-	for _, loc := range roundPhrase.FindAllStringIndex(doc, -1) {
-		if m := roundDangling.FindStringSubmatch(doc[loc[1]:]); m != nil {
-			if !slices.Contains(out, m[1]) {
-				out = append(out, m[1])
-			}
-		}
-	}
-	slices.Sort(out)
-	return out
-}
-
+// It has NO CONNECTOR VOCABULARY, and that is the design. Rounds 12, 13, 14 and 15 were the same
+// finding with a different word in it -- the plural `and`, the Oxford comma, a serial `or`, then
+// multi-word forms like `as well as` and `followed by`. Each fix that learned one more separator
+// left the next one silently truncating the list, and round 14's "refuse what you cannot read"
+// only moved the problem: a refusal matching ONE short token is evaded by TWO words. A vocabulary
+// cannot be completed, so there is none.
+//
+// Instead: every one- or two-digit number inside a bounded window after a `round`/`rounds` token
+// is a named round, whatever joins it to the previous one. The window stops at the first sentence
+// terminator so the scan cannot wander into an unrelated clause, and numbers are bounded to two
+// digits because round numbers here are small -- which is what keeps ordinary prose like
+// "round 9 in 2026" out of it. Ranges are still expanded, because `rounds 11-13` names 12.
+//
+// Verified against the live §25d: this collects EXACTLY the enumerated set, so it is neither
+// under-reading the section nor manufacturing rounds out of neighbouring numbers.
 func roundsNamedIn(doc string) []int {
+	const window = 60
 	seen := map[int]bool{}
-	for _, m := range roundPhrase.FindAllStringSubmatch(doc, -1) {
-		list := m[1]
-		for _, r := range roundRange.FindAllStringSubmatch(list, -1) {
+	for _, loc := range roundToken.FindAllStringIndex(doc, -1) {
+		end := loc[1] + window
+		if end > len(doc) {
+			end = len(doc)
+		}
+		w := doc[loc[1]:end]
+		if stop := roundStop.FindStringIndex(w); stop != nil {
+			w = w[:stop[0]]
+		}
+		for _, r := range roundRange.FindAllStringSubmatch(w, -1) {
 			lo, loErr := strconv.Atoi(r[1])
 			hi, hiErr := strconv.Atoi(r[2])
-			if loErr != nil || hiErr != nil || lo > hi || hi-lo > 100 {
+			if loErr != nil || hiErr != nil || lo > hi || hi-lo > 50 {
 				continue // the endpoints are still picked up by the scan below
 			}
 			for n := lo; n <= hi; n++ {
 				seen[n] = true
 			}
 		}
-		for _, d := range roundNumber.FindAllString(list, -1) {
+		for _, d := range roundNumber.FindAllString(w, -1) {
 			if n, err := strconv.Atoi(d); err == nil {
 				seen[n] = true
 			}
@@ -1441,13 +1431,17 @@ func TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses(t *testing.T) {
 		{"hyphen range", "rounds 4-6 were about scope", []int{4, 5, 6}},
 		{"oxford comma", "rounds 7, 8, and 98 each found one", []int{7, 8, 98}},
 		{"serial or", "rounds 7, 8, or 98 each found one", []int{7, 8, 98}},
+		{"as well as", "rounds 7 as well as 98 found it", []int{7, 98}},
+		{"followed by", "rounds 7 followed by 98 found it", []int{7, 98}},
+		{"alongside", "rounds 7 alongside 98 found it", []int{7, 98}},
+		{"slash", "rounds 7/98 found it", []int{7, 98}},
 		{"plain or", "rounds 7 or 98 found it", []int{7, 98}},
 		{"ampersand", "rounds 7 & 98 found it", []int{7, 98}},
 		{"through range", "rounds 5 through 7 were about scope", []int{5, 6, 7}},
 		{"comma list no and", "rounds 7, 8, 98 each found one", []int{7, 8, 98}},
 		{"to range", "rounds 5 to 7 were about scope", []int{5, 6, 7}},
 		{"several phrases", "round 2 and later round 9", []int{2, 9}},
-		{"no rounds named", "**11 rounds, one defect shape.** The gates get stronger every round;", nil},
+		{"no rounds named", "the gates get stronger every round; nothing numbered follows", nil},
 		{"not a round", "roundabout 7 and background 9", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

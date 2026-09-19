@@ -689,9 +689,19 @@ run_mutation M34 \
   's/in rounds 7 and 8/in rounds 7, 8, or 97/'
 
 run_mutation M35 \
-  "§25d joins round numbers with a connector the parser cannot read" \
+  "§25d names an unenumerated round after a one-word connector" \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
   's/in rounds 7 and 8/in rounds 7 plus 97/'
+
+# M36 is the MULTI-WORD connector (Codex round 15). Round 14 answered the separator treadmill with
+# "refuse what you cannot read", and that refusal matched ONE short token -- so `as well as`,
+# `followed by` and `alongside` evaded BOTH the parser and the refusal, and M35 claimed to close a
+# failure mode it did not. The collector now has no connector vocabulary at all, so M34/M35/M36 are
+# three shapes of the same question: does a named round get seen whatever joins it to the last one?
+run_mutation M36 \
+  "§25d names an unenumerated round after a MULTI-WORD connector" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/in rounds 7 and 8/in rounds 7 as well as 97/'
 
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
