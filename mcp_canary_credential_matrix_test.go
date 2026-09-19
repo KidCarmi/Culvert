@@ -756,6 +756,59 @@ func TestCredWall_LedgerStatesTheRealScanCount(t *testing.T) {
 	}
 }
 
+// TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration pins the review-round total against the
+// rounds the section actually discusses.
+//
+// Codex round 8: the summary still said "Five rounds" and stopped enumerating at round 5, while the
+// paragraphs immediately above it recorded rounds 6 and 7. A narrative number nobody derives drifts
+// the moment the narrative grows, and this section's whole subject is records that outrun what
+// establishes them.
+//
+// The total is compared to the HIGHEST round number the section mentions, which is the one fact the
+// document cannot be wrong about without contradicting itself.
+func TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "mcp-first-controlled-canary-review.md")) //nolint:gosec // fixed in-repo path
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	// Scoped to §25d. The document records Codex rounds from OTHER sections' reviews (31, 33 and
+	// others from earlier work), so "the highest round in the file" is the wrong derivation — the
+	// first version of this gate used it and reported 33.
+	doc := string(data)
+	start := strings.Index(doc, "## \u00a725d ")
+	if start < 0 {
+		t.Fatal("cannot locate the \u00a725d heading, so the round total cannot be scoped to its own section")
+	}
+	end := strings.Index(doc[start:], "\n## \u00a726 ")
+	if end < 0 {
+		t.Fatal("cannot locate the end of \u00a725d")
+	}
+	doc = doc[start : start+end]
+
+	m := regexp.MustCompile(`\*\*(\d+) rounds, one defect shape\.\*\*`).FindStringSubmatch(doc)
+	if m == nil {
+		t.Fatal("§25d no longer states a round total in the form \"**N rounds, one defect shape.**\", " +
+			"so this gate cannot compare it to the rounds the section discusses.")
+	}
+	stated, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("unparsable round total %q: %v", m[1], err)
+	}
+	highest := 0
+	for _, r := range regexp.MustCompile(`(?i)round (\d+)`).FindAllStringSubmatch(doc, -1) {
+		if n, e := strconv.Atoi(r[1]); e == nil && n > highest {
+			highest = n
+		}
+	}
+	if highest == 0 {
+		t.Fatal("the section mentions no numbered round at all, so this gate proves nothing")
+	}
+	if stated != highest {
+		t.Errorf("§25d claims %d review rounds; the highest round it discusses is %d. A narrative "+
+			"number nobody derives drifts the moment the narrative grows.", stated, highest)
+	}
+}
+
 // TestCredWall_LedgerCountsItsOwnQuotationPermissions pins the other number §25d states.
 //
 // Codex round 7 again: the narrative said three ledger quotations were allowlisted when four had

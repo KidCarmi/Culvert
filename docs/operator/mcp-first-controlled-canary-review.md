@@ -2839,8 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 27 mutations, **27 caught,
-0 survived, 0 skipped**, measured on `0ef0df36` from a baseline the campaign verified itself.
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 28 mutations,
+**CAMPAIGN_RESULT_PENDING**.
 
 It took THREE runs on this round's code to get there, and the two discarded runs are the argument
 for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
@@ -3061,9 +3061,11 @@ mechanisms built during round 5, which is what a review is for.
    `t.Fatal` and a `t.Fatalf`. The rule was exempting the contents of every error message, log line
    and test-failure string in the repository — so a false claim shipped to an operator in an error
    string was invisible to the wall. No syntactic rule can separate citing a claim from asserting
-   one, so there is no general rule any more: the ledger's three quotations and the three genuine
-   node-level Go strings are each named in the allowlist with a reason, kept honest by the
-   reachability check. **6 allowlist entries name ledger lines** — the two from round 4 plus the
+   one, so there is no general rule any more: the ledger's quotations and the genuine node-level Go
+   strings are each named in the allowlist with a reason, kept honest by the reachability check.
+   The COUNT is stated once, below, and gated — stating it twice is how this paragraph said three
+   while the next sentence said four, two lines apart, with the gate green because it parsed only
+   the other phrase (Codex round 8). **6 allowlist entries name ledger lines** — the two from round 4 plus the
    four quotations this removal required, counted by
    `TestCredWall_LedgerCountsItsOwnQuotationPermissions` rather than by hand, because the first
    version of this paragraph said three and understated the permissions it had introduced.
@@ -3088,12 +3090,20 @@ control on the assertion, not on a build error.
 hole a passing test suite could not, which is the entire reason the score is re-measured rather
 than carried forward.
 
-**Five rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**8 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
-class (round 3), one file vs six (round 4), one polarity vs the proposition, and a score vs its
-baseline (round 5). The gates get stronger each round; what keeps failing is the accounting around
-them, so the discipline that matters is not "add a gate" but **"state exactly what the gate
-establishes, and no more."**
+class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
+baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
+negation and a needle vs the line it sat on (round 7), and a gated number vs the same number stated
+again two lines away (round 8).
+
+The gates get stronger every round; what keeps failing is the accounting around them, so the
+discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no
+more"** — and, learned the hard way in rounds 7 and 8, **state each fact ONCE.** A number repeated
+is a number that will drift, and gating one of its two statements is worse than gating neither,
+because the audit then reports green while the document contradicts itself.
+`TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration` keeps this very sentence honest by
+comparing its total against the highest round the section actually discusses.
 
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN

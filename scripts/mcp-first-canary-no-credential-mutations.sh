@@ -504,6 +504,16 @@ run_mutation M27 \
   'TestCredWall_LedgerCountsItsOwnQuotationPermissions' . "$OPERDOC" \
   's/\*\*6 allowlist entries name ledger lines\*\*/**3 allowlist entries name ledger lines**/'
 
+# M28 — THE ROUND TOTAL DRIFTS FROM THE ROUNDS THE SECTION DISCUSSES. §25d's summary states how
+# many review rounds produced the defect classes. Codex round 8 found it saying "Five" while the
+# paragraphs above it already recorded rounds 6 and 7 — a narrative number nobody derives drifts the
+# moment the narrative grows, in a section whose whole subject is records that outrun what
+# establishes them.
+run_mutation M28 \
+  "the ledger's review-round total drifts from the rounds it discusses" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/\*\*8 rounds, one defect shape\.\*\*/**5 rounds, one defect shape.**/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then
