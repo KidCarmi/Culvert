@@ -17052,6 +17052,8 @@
         "tags": [
           "mcp"
         ],
+        "x-culvert-audit-event": "mcp.server.refresh",
+        "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "unsafe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",

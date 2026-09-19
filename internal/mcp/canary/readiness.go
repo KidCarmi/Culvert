@@ -233,8 +233,9 @@ type Facts struct {
 	// AGES OUT after activation must be able to make the next FULL ACTIVATION PREFLIGHT refuse,
 	// which a frozen copy could not express — freshness is the one fact that becomes false with
 	// no state change at all, purely by the clock advancing. NOT "un-ready" on the NODE
-	// surface — factActivation again, so EvaluateNode skips it and node status can still report
-	// Ready. See ReasonPeerObservationNotFresh and EvaluatePeerObservedFresh.
+	// surface — factActivation again, so an expired observation is caught at the next
+	// transition or restart and NOT on a status read (§25d).
+	// See ReasonPeerObservationNotFresh and EvaluatePeerObservedFresh.
 	FirstCanaryPeerObservedFresh bool
 	RollbackPathHealthy          bool // the persist/restore rollback MECHANICS were executably rehearsed
 	// RollbackCoordinatorRehearsed — the AUTHORITATIVE rollback path was rehearsed through the real

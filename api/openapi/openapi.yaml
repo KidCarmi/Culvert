@@ -12795,6 +12795,13 @@ paths:
       x-culvert-stability: stable
       x-culvert-idempotency: unsafe
       x-culvert-introduced-version: 1.0.0
+      # medium, not high: a refresh re-ingests the catalog record for one server, so it can move
+      # that tool's drift classification and eligibility projection (an observed change demotes a
+      # promoted tool). It confers no execution authority and cannot arm, approve or activate
+      # anything - see the description above and the structural walls in
+      # mcp_peer_refresh_wall_test.go.
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: mcp.server.refresh
       requestBody:
         required: true
         content:
