@@ -11,6 +11,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/execution"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
 	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
 
@@ -380,10 +381,16 @@ func TestPeerFreshProd_FreshF2NeverMakesAnF1ActivationFresh(t *testing.T) {
 // any real current target, so the verdict reports the target moved. The tempting "simplification"
 // is to fall back to whatever the set does contain when there is exactly one entry.
 //
-// That fallback would make the binding trivially self-satisfied: the row would then assert only
-// that the catalog agrees with itself, for an activation that reviewed a DIFFERENT tool. None of
-// the earlier rows could distinguish it, because every one of them supplies a reviewed set that
-// already contains the right tool — which is exactly the blind spot a campaign exists to find.
+// None of the earlier rows exercised a miss at all: every one supplies a reviewed set that
+// already contains the right tool. This row drives the miss through the production resolver.
+//
+// It does NOT by itself kill that mutation, and saying so is the point. The verdict independently
+// compares Reviewed against Current on server and tool, so a fallback target still fails there and
+// still reports TargetMoved — the fallback is rejected TWICE. The helper's own contract is pinned
+// separately by TestExactReviewedTargetFor_MissReturnsTheZeroTarget, which is what actually
+// distinguishes the two implementations. Both gates are kept: one says what the resolver does,
+// the other says what the helper promises, and the redundancy between them is defence in depth
+// rather than duplication.
 func TestPeerFreshProd_AReviewedSetForAnotherToolIsNotAReviewedTarget(t *testing.T) {
 	r := newPeerFreshRig(t)
 	r.observe(t)
@@ -489,3 +496,36 @@ func (p *clockAdvancingPeer) Call(ctx context.Context, tgt upstreamclient.Target
 	p.advance()
 	return p.inner.Call(ctx, tgt, method, params, opts)
 }
+
+// TestExactReviewedTargetFor_MissReturnsTheZeroTarget pins the helper's own contract.
+//
+// It exists because the mutation campaign showed the verdict is OVER-DETERMINED here: a fallback
+// to "whatever the reviewed set contains" is rejected a second time by the Reviewed-vs-Current
+// comparison, so no end-to-end row can tell the two apart. That redundancy is deliberate and
+// worth keeping — but it also means the helper could be changed to something unsound without a
+// single behavioural test moving, until some later change removed the second rejection.
+//
+// So the contract is asserted where it is made: a miss yields the ZERO target, which cannot equal
+// any real current target.
+func TestExactReviewedTargetFor_MissReturnsTheZeroTarget(t *testing.T) {
+	reviewed := []canary.ReviewedTarget{{
+		Tenant: "tenant-a", ServerID: "controlled", ToolName: "other", Fingerprint: fpOne(),
+	}}
+	if got := exactReviewedTargetFor(reviewed, "controlled", "t"); got != (canary.ReviewedTarget{}) {
+		t.Fatalf("a miss must yield the zero target, not a substitute from the set: %+v", got)
+	}
+	// The positive control: a hit still returns the exact entry, or this gate would be satisfied
+	// by a helper that returned the zero target unconditionally — which would make every
+	// activation report TargetMoved and the First Canary impossible.
+	hit := []canary.ReviewedTarget{
+		{Tenant: "tenant-a", ServerID: "controlled", ToolName: "other"},
+		{Tenant: "tenant-a", ServerID: "controlled", ToolName: "t", Fingerprint: fpOne()},
+	}
+	got := exactReviewedTargetFor(hit, "controlled", "t")
+	if got.ToolName != "t" || got.Fingerprint != fpOne() {
+		t.Fatalf("an exact hit must return that entry, got %+v", got)
+	}
+}
+
+// fpOne is an arbitrary non-zero digest; only its distinctness matters here.
+func fpOne() tooltrust.FingerprintDigest { return tooltrust.FingerprintDigest{7, 7, 7} }

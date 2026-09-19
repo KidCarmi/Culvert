@@ -3374,6 +3374,75 @@ Two further limits are recorded rather than papered over:
   nothing and stops no clock. The existing observation keeps aging, so an outage expires
   freshness by the passage of time rather than by a fabricated verdict.
 
+### Mutation campaign (24 classes)
+
+Each class is a named defect, the exact source edit that reintroduces it, and the gate that must
+catch it. The driver refuses to report a verdict it did not earn: an anchor matching zero sites is
+`NOT PROVEN`, never skipped, and a mutated tree that does not compile is `NOT PROVEN` rather than
+a pass.
+
+**Result: 22 CAUGHT, 1 EQUIVALENT, 1 superseded.** Everything the campaign surfaced is below —
+including two results that were wrong the first time, because how a campaign fails is more useful
+than its score.
+
+| # | defect class | verdict | gate |
+|---|---|---|---|
+| M1 | provenance is declared, not derived — every record claims peer evidence | CAUGHT | `TestProvenance_` |
+| M2 | the observed entrypoint accepts incomplete evidence | CAUGHT | `TestProvenance_ObservedIngestRefusesIncompleteEvidence` |
+| M3 | the observed entrypoint accepts an identity other than the one being ingested | CAUGHT | `TestProvenance_ObservedIdentityMustMatchTheIngestIdentity` |
+| M4 | an unchanged record inherits the prior observation (a reseed renews freshness) | CAUGHT | `TestPeerFreshProd_ByteIdenticalReseedRemovesFreshness` |
+| M5 | the observation is stamped when the answer ARRIVES | superseded by M5b | — |
+| M5b | the late stamp, in compilable form | CAUGHT | `TestDiscoveryObservation_StampPrecedesTheCall` |
+| M6 | the freshness boundary becomes exclusive | CAUGHT | `TestPeerObservationFresh_Predicate` |
+| M7 | an observation stamped in the future is honoured | CAUGHT | `TestPeerObservationFresh_Predicate` |
+| M8 | the max age is expressed in terms of another interval | CAUGHT | `TestPeerFresh_MaxAgeIsItsOwnInterval` |
+| M9 | freshness is never checked — a real observation never expires | CAUGHT | `TestPeerFreshProd_FailedRefreshLeavesTheObservationAndLetsItAge` |
+| M10 | the fingerprint is dropped from the target binding | CAUGHT | `TestPeerFreshProd_FreshF2NeverMakesAnF1ActivationFresh` |
+| M11 | the fingerprint FORMAT is dropped from the target binding | CAUGHT | `TestPeerFresh_Matrix` |
+| M12 | tenant is read from the reviewed set instead of the registry | **EQUIVALENT** | — (proof below) |
+| M13 | a missing reviewed target is invented from the current state | CAUGHT | `TestExactReviewedTargetFor_MissReturnsTheZeroTarget` |
+| M14 | identity is checked against the catalog record only, not the registry pin | CAUGHT | `TestPeerFresh_Matrix` |
+| M15 | a disabled or identity-mismatched server is still observable authority | CAUGHT | `TestPeerFresh_Matrix` |
+| M16 | an unresolved capture reads as a satisfied fact | CAUGHT | `TestPeerFresh_Matrix` |
+| M17 | the clock is checked before the bindings (a moved target reports stale) | CAUGHT | `TestPeerFresh_StaleAndMovedAreNotInterchangeable` |
+| M18 | the readiness row is removed (the pre-#11 contract) | CAUGHT | `TestPeerFreshProd_FingerprintCurrentDoesNotImplyFresh` |
+| M19 | a forwarding hop hardcodes the answer | CAUGHT | `TestPeerFreshWall_ForwardingSitesCarryTheResolverAnswer` |
+| M20 | the evidence is assembled at the call site instead of read from the record | CAUGHT | `TestPeerFreshWall_EvidenceComesFromTheCapturedRecord` |
+| M21 | the verdict samples its own clock | CAUGHT | `TestPeerFreshWall_NeitherSideSamplesItsOwnClock` |
+| M22 | the verdict is never consulted | CAUGHT | `TestPeerFreshWall_VerdictHasExactlyOneProductionCaller` |
+| M23 | a failed refresh is read as "the peer is unchanged" and re-stamps freshness | CAUGHT | `TestPeerFreshProd_FailedRefreshLeavesTheObservationAndLetsItAge` |
+
+**M12 is an equivalent mutant, and the proof is recorded in `peerfresh.go` rather than left as an
+assertion here.** Comparing the activation's tenant against `Reviewed.Tenant` instead of
+`Current.Tenant` cannot change any verdict, because reaching OK ALSO requires
+`Reviewed.Tenant == Current.Tenant` on the very next line, and given that equality the two
+comparisons agree on every input. No test is written to pretend otherwise. The code still reads
+from `Current` deliberately: the equivalence holds only while that second check exists, so reading
+from the authoritative side means the correct answer does not depend on another check elsewhere
+continuing to exist.
+
+**M13 found a genuine gap, and the first attempt to close it was itself insufficient.** No existing
+row exercised a reviewed-set MISS at all — every one supplied a set already containing the right
+tool. A row driving the miss through the production resolver was added, and the mutant SURVIVED it:
+the verdict independently compares Reviewed against Current on server and tool, so a fallback
+target is rejected a second time. That redundancy is defence in depth and is kept, but it also
+means the helper could be made unsound without a single behavioural test moving, until some later
+change removed the second rejection. The contract is therefore pinned where it is made
+(`TestExactReviewedTargetFor_MissReturnsTheZeroTarget`, with a positive control so a helper that
+returned the zero target unconditionally — making every activation report TargetMoved — would
+fail).
+
+**The campaign's own first run was defective, and that is recorded because the failure mode
+matters.** M5b composes on M5 and both patch the same file; on a build failure the driver restored
+its saved states in forward order, so the last write was the MUTATED content. The tree stayed
+dirty and the twenty following mutations all reported `NOT PROVEN` against a tree that was not the
+one under test. The same bug could as easily have produced twenty `SURVIVED` or twenty `CAUGHT`: a
+campaign that keeps going against a tree it did not restore is not measuring the suite, it is
+producing confident output about nothing. The driver now verifies after every restore that each
+touched file reproduces its saved bytes EXACTLY and aborts naming the mutation that failed to —
+and it compares against those saved bytes rather than asking git, because the first version of
+that guard reached for `git checkout` and destroyed uncommitted work it had not created.
+
 ### Status
 
 Blocker 11 stays **OPEN**. The activation-time half is in place and proven; the send-time re-check

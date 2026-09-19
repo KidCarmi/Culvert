@@ -181,6 +181,19 @@ func EvaluatePeerObservedFresh(in PeerFreshnessInput) PeerFreshReason {
 	// without this, a fresh observation of F2 would make an activation reviewed against F1 look
 	// backed. Tenant is taken from Current — i.e. from the REGISTRY's owner scope — because the
 	// peer has no authority over tenancy.
+	//
+	// THAT CHOICE IS NOT BEHAVIOURALLY OBSERVABLE HERE, and the mutation campaign proved it
+	// rather than leaving it assumed: comparing ActivationTenant against Reviewed.Tenant instead
+	// is an EQUIVALENT MUTANT, because reaching OK also requires Reviewed.Tenant == Current.Tenant
+	// (the very next check), and given that equality the two comparisons agree on every input. No
+	// test can distinguish them, so none is written to pretend otherwise.
+	//
+	// It is still written against Current DELIBERATELY. The equivalence holds only while the
+	// Reviewed-vs-Current tenant check sits below; someone removing or reordering that check
+	// would silently make the mutant form read tenancy out of the activation's own reviewed set —
+	// i.e. out of a value the activation supplies — instead of out of the registry. Reading from
+	// the authoritative side means the correct answer does not depend on a second check elsewhere
+	// continuing to exist.
 	if in.ActivationTenant == "" || in.ActivationTenant != in.Current.Tenant {
 		return PeerFreshTargetMoved
 	}
