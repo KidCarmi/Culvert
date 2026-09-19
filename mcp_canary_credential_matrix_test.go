@@ -511,6 +511,67 @@ func TestCredWall_NodeStatusSurfaceCannotReportActivationReasons(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// THE NODE-READINESS PROMISE WALL (campaign M20), rebuilt after Codex round 4.
+//
+// Round 3 found the claim "must be able to make a node un-ready" standing on eight surfaces,
+// every one of them about a factActivation row that EvaluateNode excludes. The first wall shipped
+// for that finding had TWO defects a fourth review round caught, and both are the same shape as
+// the defect they were meant to close — claiming more than the evidence supports:
+//
+//  1. It parsed ONLY internal/mcp/canary/readiness.go, while the ledger claimed M20 closed the
+//     class across all six surfaces. Reintroducing the promise in the matrix, the operator ledger
+//     or any of the three test files left the gate green.
+//  2. Its "control" never applied the matcher and never read a node-level doc — it only compared
+//     two derived classifications. Worse, the doc it CITED as the legitimate node-level case
+//     ("a rehearsed-mechanics node is still not ready") did not match the matcher at all, so the
+//     control exercised nothing. A control that cannot fail is decoration.
+//
+// Both are fixed here. The matcher now recognises the node-level phrasing too, so the real
+// RollbackCoordinatorRehearsed doc genuinely exercises it; the scan covers every surface the claim
+// names; and permission to say it is an explicit, reasoned ALLOWLIST rather than a silent gap.
+// ---------------------------------------------------------------------------
+
+// nodeReadyPromise matches a claim that something makes the NODE un-ready. It deliberately also
+// matches the "node is still not ready" phrasing: without it the one LEGITIMATE node-level doc in
+// the tree never reaches the matcher, and the control below would be vacuous — which is exactly
+// what Codex round 4 found.
+var nodeReadyPromise = regexp.MustCompile(`(?i)(node\s+(is\s+)?(still\s+)?(un-?ready|not\s+ready)|un-?ready\s+node)`)
+
+// nodeReadyMentionAllowed is the EXPLICIT allowlist of places that may speak of node readiness.
+// Every entry needs a reason, so permitting a new one is a deliberate act rather than a hole. The
+// wall fails on any occurrence not listed here, and TestCredWall_AllowlistIsNotStale fails if a
+// listed entry stops matching — an allowlist that matches nothing silently permits everything.
+var nodeReadyMentionAllowed = []struct {
+	file   string
+	needle string
+	why    string
+}{
+	{"internal/mcp/canary/readiness.go", "rehearsed-mechanics node is still not ready",
+		"RollbackCoordinatorRehearsed is NODE-level; the claim is true of it."},
+	{"docs/operator/mcp-first-controlled-canary-review.md", "**That was FALSE**",
+		"§25d quotes the false claim in order to refute it."},
+	{"docs/operator/mcp-first-controlled-canary-review.md", "prerequisite genuinely does make the node un-ready",
+		"§25d explains why the wall must NOT be a blanket phrase ban."},
+}
+
+// nodeReadySurfaces is every file that carried the claim — the six the §25d record names.
+// Narrowing this list without narrowing that record is the defect Codex round 4 named, so the two
+// move together.
+//
+// THIS FILE IS DELIBERATELY ABSENT, and the reason is not convenience: it DEFINES the matcher and
+// the allowlist needles, so its source must contain the very pattern being banned. A scanner that
+// reads itself reports its own machinery forever. It was also never one of the eight sites — it is
+// where the wall lives, not a surface that made the claim.
+var nodeReadySurfaces = []string{
+	filepath.Join("internal", "mcp", "canary", "readiness.go"),
+	filepath.Join("docs", "design", "mcp", "CANARY-READINESS-MATRIX.md"),
+	filepath.Join("docs", "operator", "mcp-first-controlled-canary-review.md"),
+	"mcp_canary_credential_zero_use_test.go",
+	"mcp_canary_credential_free_test.go",
+	"mcp_canary_policy_permit_test.go",
+}
+
 // activationFactFieldNames returns the canary.Facts FIELD names that are ACTIVATION-level,
 // derived from exported evaluator behaviour exactly as derivedActivationReasons derives the
 // reasons: flip one fact false, and the field is activation-level when Evaluate reports its
@@ -545,44 +606,16 @@ func activationFactFieldNames(t *testing.T) map[string]bool {
 	return out
 }
 
-// TestCredWall_NoActivationFactPromisesNodeReadiness closes the class that campaign M19's gate
-// only closed at the STATUS SURFACE, and that a third review round found still open in the prose
-// (Codex P2, round 3).
-//
-// M19 pins that mcpCanaryStatus cannot REPORT an activation reason. It does not stop the code
-// from CLAIMING otherwise, and the claim was everywhere: "a revoked or expired promotion / a
-// policy change that removes the permit / a credential profile ADDED after activation must be
-// able to make a node un-ready" appeared on THREE canary.Facts fields, in the matrix row, in the
-// operator ledger, and in three test comments. Every one of those facts is a factActivation row
-// that EvaluateNode excludes, so none of them can make the NODE surface un-ready — `node_ready`
-// is a literal field on that surface, which is what makes the phrasing a claim rather than loose
-// wording.
-//
-// THE ROUND-2 SWEEP MISSED THEM BECAUSE IT SEARCHED FOR THE PHRASING, NOT THE PROPOSITION.
-// It grepped "next read" and "readiness row reports"; these sites say "make a node un-ready", so
-// they did not match. The rule to carry forward: when a review names one instance, search for the
-// CLAIM the instance makes, not the words it happens to use.
-//
-// The gate derives the activation set from exported behaviour and reads the real source, so a
-// future field that copies the formula fails the build rather than shipping a fourth instance.
-func TestCredWall_NoActivationFactPromisesNodeReadiness(t *testing.T) {
+// factsFieldDocs AST-reads the doc comment of every canary.Facts field from the real source.
+func factsFieldDocs(t *testing.T) map[string]string {
+	t.Helper()
 	src := filepath.Join(pkgSourceDir(), "internal", "mcp", "canary", "readiness.go")
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, src, nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse %s: %v", src, err)
 	}
-
-	activation := activationFactFieldNames(t)
-	if len(activation) == 0 {
-		t.Fatal("derived activation set is EMPTY: EvaluateNode no longer excludes activation facts, " +
-			"so this gate would inspect nothing. Re-derive the boundary before trusting it.")
-	}
-
-	// nodeReadyPromise matches the claim, in either order, so a reworded copy is still caught.
-	nodeReadyPromise := regexp.MustCompile(`(?i)(node\s+un-?ready|un-?ready\s+node)`)
-
-	checked, flagged := 0, 0
+	docs := map[string]string{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		ts, ok := n.(*ast.TypeSpec)
 		if !ok || ts.Name.Name != "Facts" {
@@ -596,40 +629,152 @@ func TestCredWall_NoActivationFactPromisesNodeReadiness(t *testing.T) {
 			if fld.Doc == nil || len(fld.Names) == 0 {
 				continue
 			}
-			name := fld.Names[0].Name
-			if !activation[name] {
-				continue // node-level fields may legitimately speak of node readiness
-			}
-			checked++
-			if nodeReadyPromise.MatchString(fld.Doc.Text()) {
-				flagged++
-				t.Errorf("canary.Facts.%s is an ACTIVATION-level fact, but its doc promises NODE "+
-					"readiness. EvaluateNode excludes every activation row, so no status read can "+
-					"report it. Say it refuses the next FULL ACTIVATION PREFLIGHT instead.", name)
-			}
+			docs[fld.Names[0].Name] = fld.Doc.Text()
 		}
 		return false
 	})
-
-	if checked == 0 {
-		t.Fatal("inspected NO documented activation fields — the Facts struct moved or lost its " +
-			"doc comments, so this gate is passing by seeing nothing.")
-	}
-	_ = flagged
+	return docs
 }
 
-// TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness is the CONTROL for the gate above.
-// The cheapest way to pass that gate is to ban the phrase outright, which would be wrong: a
-// NODE-level prerequisite genuinely does make the node un-ready, and RollbackCoordinatorRehearsed
-// says exactly that. A gate that cannot tell the two apart is a spell-checker, not a wall.
+// TestCredWall_NoActivationFactPromisesNodeReadiness is the PRECISE half: an ACTIVATION-level
+// canary.Facts field may not document itself as able to make the node un-ready, because
+// EvaluateNode excludes every activation row and `node_ready` is a literal field on that surface.
+func TestCredWall_NoActivationFactPromisesNodeReadiness(t *testing.T) {
+	activation := activationFactFieldNames(t)
+	if len(activation) == 0 {
+		t.Fatal("derived activation set is EMPTY: EvaluateNode no longer excludes activation facts, " +
+			"so this gate would inspect nothing. Re-derive the boundary before trusting it.")
+	}
+	docs := factsFieldDocs(t)
+	if len(docs) == 0 {
+		t.Fatal("read NO Facts field docs — the struct moved or lost its comments, so this gate is " +
+			"passing by seeing nothing.")
+	}
+
+	checked := 0
+	for name, doc := range docs {
+		if !activation[name] {
+			continue // node-level fields may legitimately speak of node readiness
+		}
+		checked++
+		if nodeReadyPromise.MatchString(doc) {
+			t.Errorf("canary.Facts.%s is an ACTIVATION-level fact, but its doc promises NODE "+
+				"readiness. EvaluateNode excludes every activation row, so no status read can "+
+				"report it. Say it refuses the next FULL ACTIVATION PREFLIGHT instead.", name)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("inspected NO documented ACTIVATION fields — this gate is passing by seeing nothing.")
+	}
+}
+
+// TestCredWall_EveryClaimedSurfaceIsScanned answers Codex round 4's first finding: M20's ledger
+// entry claims the class is closed across six surfaces, so the wall must READ six surfaces. A gate
+// that inspects one file while its record claims six is the same overclaim the class is made of.
+func TestCredWall_EveryClaimedSurfaceIsScanned(t *testing.T) {
+	activation := activationFactFieldNames(t)
+	docs := factsFieldDocs(t)
+
+	// Build the set of node-level Facts docs, which are allowed to make the claim.
+	nodeLevelDoc := map[string]bool{}
+	for name, doc := range docs {
+		if !activation[name] {
+			nodeLevelDoc[doc] = true
+		}
+	}
+
+	allowHits := map[string]int{}
+	scanned := 0
+	for _, rel := range nodeReadySurfaces {
+		path := filepath.Join(pkgSourceDir(), rel)
+		data, err := os.ReadFile(path) //nolint:gosec // fixed in-repo path list, not caller input
+		if err != nil {
+			t.Fatalf("the wall claims to scan %s but cannot read it: %v", rel, err)
+		}
+		scanned++
+		for i, line := range strings.Split(string(data), "\n") {
+			if !nodeReadyPromise.MatchString(line) {
+				continue
+			}
+			allowed := false
+			for _, a := range nodeReadyMentionAllowed {
+				if a.file == rel && strings.Contains(line, a.needle) {
+					allowHits[a.file+"|"+a.needle]++
+					allowed = true
+				}
+			}
+			if !allowed {
+				t.Errorf("%s:%d claims something makes the NODE un-ready, and is not on the "+
+					"reasoned allowlist:\n    %s\nIf this is an ACTIVATION fact, say it refuses "+
+					"the next FULL ACTIVATION PREFLIGHT. If it is genuinely node-level, add an "+
+					"allowlist entry saying why.", rel, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	if scanned != len(nodeReadySurfaces) {
+		t.Fatalf("scanned %d of %d claimed surfaces", scanned, len(nodeReadySurfaces))
+	}
+	if len(allowHits) == 0 {
+		t.Fatal("the scan matched NOTHING anywhere, allowlisted or not. Either the matcher broke " +
+			"or every mention vanished; both mean this wall is now passing by seeing nothing.")
+	}
+}
+
+// TestCredWall_AllowlistIsNotStale keeps the allowlist honest: an entry that no longer matches any
+// line silently widens the wall's permission, which is how an allowlist rots into a hole.
+func TestCredWall_AllowlistIsNotStale(t *testing.T) {
+	for _, a := range nodeReadyMentionAllowed {
+		data, err := os.ReadFile(filepath.Join(pkgSourceDir(), a.file)) //nolint:gosec // fixed in-repo path
+		if err != nil {
+			t.Fatalf("allowlist names unreadable file %s: %v", a.file, err)
+		}
+		if !strings.Contains(string(data), a.needle) {
+			t.Errorf("allowlist entry {%s, %q} matches nothing any more (%s). Remove it rather "+
+				"than leaving a standing permission nobody uses.", a.file, a.needle, a.why)
+		}
+	}
+}
+
+// TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness is the REAL control, rebuilt after Codex
+// round 4 found the first one vacuous: it compared two derived classifications, never applied the
+// matcher, and cited a doc whose wording the matcher did not even recognise.
+//
+// It now drives the matcher against the ACTUAL RollbackCoordinatorRehearsed doc and asserts BOTH
+// halves of the discrimination: the matcher DOES fire on that legitimate node-level wording, and
+// the wall nonetheless permits it because the field is node-level. Together those rule out the
+// cheapest wrong fix — turning the wall into an indiscriminate phrase ban, which would be a
+// spell-checker rather than a wall.
 func TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness(t *testing.T) {
 	activation := activationFactFieldNames(t)
-	if activation["RollbackCoordinatorRehearsed"] {
-		t.Fatal("premise moved: RollbackCoordinatorRehearsed is no longer NODE-level, so it can no " +
-			"longer serve as the control for the activation-only ban.")
+	docs := factsFieldDocs(t)
+
+	const nodeField = "RollbackCoordinatorRehearsed"
+	if activation[nodeField] {
+		t.Fatalf("premise moved: %s is no longer NODE-level, so it can no longer serve as the "+
+			"control for the activation-only ban.", nodeField)
 	}
+	doc, ok := docs[nodeField]
+	if !ok {
+		t.Fatalf("premise moved: %s has no doc comment, so this control exercises nothing.", nodeField)
+	}
+
+	// Half one: the matcher must actually FIRE on this legitimate wording. Without this the
+	// control is decoration — the exact defect round 4 found, where the cited doc said "node is
+	// still not ready" and the matcher only knew "node un-ready".
+	if !nodeReadyPromise.MatchString(doc) {
+		t.Fatalf("control is VACUOUS: the matcher does not recognise %s's node-readiness wording, "+
+			"so it never exercises the discrimination this test claims to prove.\ndoc: %s",
+			nodeField, strings.TrimSpace(doc))
+	}
+
+	// Half two: and the wall must permit it anyway, because the field is node-level.
+	if activation[nodeField] {
+		t.Fatal("unreachable given the premise check above")
+	}
+
+	// And the activation side must still be banned, or the discrimination is one-sided.
 	if !activation["FirstCanaryCredentialFree"] {
 		t.Fatal("premise moved: FirstCanaryCredentialFree must be ACTIVATION-level; if it is not, " +
-			"the ban above applies to nothing this PR added.")
+			"the ban applies to nothing this PR added.")
 	}
 }

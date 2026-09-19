@@ -368,6 +368,16 @@ run_mutation M20 \
   'TestCredWall_NoActivationFactPromisesNodeReadiness' . "$READINESS" \
   's/after activation must be able to make the next FULL ACTIVATION PREFLIGHT refuse/after activation must be able to make a node un-ready, which a frozen copy cannot express/'
 
+# M21 — THE WALL SCANS ONE FILE WHILE ITS RECORD CLAIMS SIX. M20's ledger entry says the class is
+# closed across every surface that carried the claim; the first wall parsed only readiness.go, so
+# reintroducing the promise in the matrix, the ledger or the test files left it green (Codex P2,
+# round 4). That is the same overclaim the class is made of, one level up. This mutation puts the
+# claim back into the MATRIX DOC — a surface the original wall never read.
+run_mutation M21 \
+  "the node-readiness promise returns on a surface the wall does not read" \
+  'TestCredWall_EveryClaimedSurfaceIsScanned' . "$MATRIXDOC" \
+  's/makes the next FULL ACTIVATION PREFLIGHT refuse\./can make the node un-ready./'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then

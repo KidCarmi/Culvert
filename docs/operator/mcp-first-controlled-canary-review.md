@@ -2838,8 +2838,7 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **20 caught, 0 survived,
-0 skipped**, measured on `1beb9bdb`. M14 is the anti-vacuity mutation: a
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **CAMPAIGN_RESULT**. M14 is the anti-vacuity mutation: a
 constant-false resolver passes every negative gate while making the First Canary permanently
 impossible, and is rejected by a POSITIVE control rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
 `mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
@@ -2888,6 +2887,29 @@ from exported behaviour and AST-reads the real `Facts` doc comments, with
 `TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness` as its CONTROL — a node-level
 prerequisite genuinely does make the node un-ready, and a gate that banned the phrase outright
 would be a spell-checker rather than a wall.
+
+M21 covers the FOURTH review-found defect, and it is the M20 entry above being wrong about itself.
+Round 4 found TWO faults in that wall, both the same overclaim shape as the class it closes:
+
+1. **It parsed only `readiness.go` while this record claimed six surfaces.** Reintroducing the
+   promise in the matrix, this ledger or any of the three test files left the gate green — so M20
+   did not close the class it records. `TestCredWall_EveryClaimedSurfaceIsScanned` now reads every
+   surface the claim names, and permission to speak of node readiness is an EXPLICIT allowlist with
+   a stated reason per entry, kept honest by `TestCredWall_AllowlistIsNotStale` (an entry matching
+   nothing is a standing permission nobody uses). The wall's OWN file is deliberately excluded and
+   says why: it defines the matcher and the allowlist needles, so a scanner reading itself reports
+   its own machinery forever — and it was never one of the eight sites.
+2. **Its control was vacuous.** It compared two derived classifications, never applied the matcher,
+   and cited `RollbackCoordinatorRehearsed` as the legitimate node-level case — whose wording
+   ("a rehearsed-mechanics node is still not ready") the matcher did not even recognise. The
+   matcher now recognises that phrasing, and the control DRIVES it against the real doc, asserting
+   both halves: it fires on legitimate node-level wording, and the wall permits it anyway because
+   the field is node-level. Turning the wall into a blanket phrase ban now fails, flagging that
+   legitimate field — verified.
+
+**A control that cannot fail is decoration**, and this one could not: it exercised no matcher and
+quoted text the matcher could not see. That is the anti-vacuity discipline this campaign applies to
+every other gate, not applied to a gate of mine.
 
 > A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
