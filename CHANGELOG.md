@@ -169,6 +169,39 @@ endpoints for credentialed parents.
 
 ### Performance
 
+- The per-request policy-decision line is built rather than formatted.
+  `applyPolicyDecision` emits exactly one `POLICY_ALLOW`/`BLOCK`/`DROP`/
+  `REDIRECT` line per proxied request, on every protocol, and the four
+  emitters handed nine values to `logger.Printf`. An exact allocation profile
+  of the end-to-end forward benchmark put seven allocations per request on
+  that argument list and nothing anywhere else in the call — `log.Logger`
+  reuses its own output buffer, so the entire `Printf` tree allocated nothing
+  beyond the `[]any` slice and one string-to-interface box per value. Those
+  seven bought only the ability to pass the values through a variadic
+  `...any`, and they were 51% of everything `handleRequest` allocates outside
+  the upstream round trip — the largest Culvert-owned allocation site on the
+  proxy path. The line is now appended directly into a stack-resident
+  `strings.Builder` and handed to `logger.Output`, which takes a plain string
+  parameter: 1299 → 648 ns/op and 8 → 1 allocations per line, taking the
+  whole proxied request from 185 to 179 allocations. Bytes per line rise
+  (147 → 208) because eight small pointer-bearing boxes become one
+  pointer-free string, which is the intended trade — objects fall eightfold
+  and the collector's scanner sees nothing. The emitted bytes are unchanged
+  and pinned against a frozen `fmt` copy of the previous implementation by a
+  differential suite and two fuzz targets, and the sanitisation the lines
+  depend on is now enforced structurally, since removing the format string
+  removed the one place every interpolated value was visible at a glance.
+
+- The `log.Logger` benchmark harness for those lines was measuring nothing.
+  `log.Logger.output` returns on its `isDiscard` flag *before* it formats, so
+  every benchmark and the allocation gate — all of which pointed the logger at
+  `io.Discard` — had the `Printf` shape pay its argument boxing and then skip
+  the formatting it was being graded on. Against `io.Discard` the old and new
+  shapes measure 393 ns and 716 ns; against a writer production resembles they
+  measure 1299 ns and 648 ns, so the comparison inverts rather than merely
+  shifts. The harness now writes to a real black-hole writer with the
+  production prefix and flags.
+
 - The rate-limit exempt check is lock-free and flat in the exempt-CIDR count.
   `RateLimiter.IsExempt` is the first decision inside `Allow`, so once a rate
   limit is configured it runs on every proxied request; it took a
