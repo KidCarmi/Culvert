@@ -872,10 +872,18 @@ func TestCredWall_LedgerStatesTheCampaignSize(t *testing.T) {
 // Oxford comma -- `rounds 7, 8, and 98` -- stopped the list at the serial comma and returned just
 // 7 and 8. Both are enumerated, so the gate stayed green while 98 went unseen. The separator is
 // now a sequence, which is what `, and` actually is.
+//
+// Codex round 16: a hard line wrap is not a sentence boundary. `\n` was in the stop class, so
+// `rounds 7 and\n98` -- ordinary wrapped Markdown, which is how this very section is written --
+// truncated at the wrap and returned only 7, leaving round 98 unenumerated and the gate green.
+// The stop is now a PARAGRAPH break (a blank line), not any newline. That change can only WIDEN
+// each window, so the collected set is a superset of what it was: the gate can get stricter, it
+// cannot go blind. Over-collection would show up as a false failure, and does not -- the live
+// §25d still yields exactly the enumerated set (see below).
 var (
 	// NO CONNECTOR VOCABULARY -- see roundsNamedIn for why there is none.
 	roundToken  = regexp.MustCompile(`(?i)\brounds?\b`)
-	roundStop   = regexp.MustCompile(`[.;:!?\n]`)
+	roundStop   = regexp.MustCompile(`[.;:!?]|\n[ \t]*\n`)
 	roundNumber = regexp.MustCompile(`\b\d{1,2}\b`)
 	roundRange  = regexp.MustCompile(`\b(\d{1,2})\s*(?:[\x{2013}\x{2014}-]|\bto\b|\bthrough\b)\s*(\d{1,2})\b`)
 )
@@ -891,9 +899,13 @@ var (
 //
 // Instead: every one- or two-digit number inside a bounded window after a `round`/`rounds` token
 // is a named round, whatever joins it to the previous one. The window stops at the first sentence
-// terminator so the scan cannot wander into an unrelated clause, and numbers are bounded to two
+// terminator so the scan cannot wander into an unrelated paragraph, and numbers are bounded to two
 // digits because round numbers here are small -- which is what keeps ordinary prose like
 // "round 9 in 2026" out of it. Ranges are still expanded, because `rounds 11-13` names 12.
+//
+// The window stops at a sentence terminator or a BLANK LINE. A single newline is a line wrap in
+// this document, not a boundary, and treating it as one made the scan blind to any list that
+// happened to wrap (round 16).
 //
 // Verified against the live §25d: this collects EXACTLY the enumerated set, so it is neither
 // under-reading the section nor manufacturing rounds out of neighbouring numbers.
@@ -1443,6 +1455,11 @@ func TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses(t *testing.T) {
 		{"several phrases", "round 2 and later round 9", []int{2, 9}},
 		{"no rounds named", "the gates get stronger every round; nothing numbered follows", nil},
 		{"not a round", "roundabout 7 and background 9", nil},
+		{"wrapped and", "rounds 7 and\n98 found it", []int{7, 98}},
+		{"wrapped comma list", "rounds 7,\n8, 98 found it", []int{7, 8, 98}},
+		{"wrapped list item", "- rounds 7 and\n  98 were merged\n", []int{7, 98}},
+		{"paragraph break stops the scan", "rounds 7\n\n98 mutations ran", []int{7}},
+		{"sentence end stops the scan", "round 7. 98 mutations ran", []int{7}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := roundsNamedIn(tc.in)

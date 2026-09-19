@@ -703,6 +703,17 @@ run_mutation M36 \
   'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
   's/in rounds 7 and 8/in rounds 7 as well as 97/'
 
+# M37 is the LINE-WRAP form (Codex round 16). M31-M36 all asked "what joins the numbers"; this one
+# asks what SEPARATES the lines. §25d is hard-wrapped Markdown, so a list of rounds routinely
+# straddles a newline -- and `\n` was in the collector's stop class, which made the wrap look like
+# the end of a sentence. The named round after the wrap was invisible and the gate stayed green.
+# Same defect shape as the connector rounds, a different axis: the payload changes no words at all,
+# only where the line breaks.
+run_mutation M37 \
+  "§25d names an unenumerated round ACROSS A LINE WRAP" \
+  'TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration' . "$OPERDOC" \
+  's/in rounds 7 and 8/in rounds 7 and\n97/'
+
 printf '\n===================================================================\n'
 printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
 if [ ${#SURVIVORS[@]} -gt 0 ]; then

@@ -2839,8 +2839,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 36 mutations,
-**36 caught, 0 survived, 0 skipped, measured on `f2a523f7`**. A run that reaches its summary has
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 37 mutations,
+**CAMPAIGN_RESULT_PENDING**. A run that reaches its summary has
 necessarily passed `selfcheck_site_counter`, which refuses before anything else prints.
 
 It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
@@ -3195,8 +3195,15 @@ would not move, and a deleted entry would not shrink).
   it to the previous one; the window stops at the first sentence terminator, and the two-digit
   bound keeps ordinary prose out. Verified against the live section: it collects EXACTLY the
   enumerated set. Gated by M36.
+- **Round 16** — the collector treated ANY newline as a sentence boundary, and this section is
+  hard-wrapped Markdown, so a list of rounds that straddles a newline truncated at the wrap and the
+  round named after it was invisible while the gate stayed green. Four rounds had asked what JOINS
+  the numbers; none had asked what SEPARATES the lines. The stop is now a paragraph break (a blank line), never a line
+  wrap — a change that can only WIDEN each window, so the collected set is a superset of what it
+  was and the gate can get stricter but cannot go blind. The live section still yields exactly the
+  enumerated set. Gated by M37, whose payload changes no words at all, only where the line breaks.
 
-**15 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+**16 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
 PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
 class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
 baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
@@ -3209,7 +3216,9 @@ was only ever tested in one of them (round 12), and that same rule left unapplie
 itself one round later (round 13), and three separators in three rounds that each truncated a list
 without saying so (round 14, where the fix was to stop truncating silently rather than to learn a
 fourth word), and a refusal that could read one word but not two (round 15, where the connector
-vocabulary was deleted rather than extended a fifth time).
+vocabulary was deleted rather than extended a fifth time), and a parser tested only on single-line
+input against a document that is hard-wrapped (round 16, where the blind spot was the line break
+itself rather than any word).
 
 The gates get stronger every round; what keeps failing is the accounting around them, so the
 discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no
