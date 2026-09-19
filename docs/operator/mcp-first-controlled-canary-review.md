@@ -2838,7 +2838,8 @@ activation is the residual above, not a drift-path gap.
 `TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
 negative's positive control — to exist.
 
-**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **CAMPAIGN_RESULT**. M14 is the anti-vacuity mutation: a
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — **20 caught, 0 survived,
+0 skipped**, measured on `1beb9bdb`. M14 is the anti-vacuity mutation: a
 constant-false resolver passes every negative gate while making the First Canary permanently
 impossible, and is rejected by a POSITIVE control rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
 `mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
@@ -2892,10 +2893,10 @@ would be a spell-checker rather than a wall.
 > change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
 > rather than caught: the mutation left a variable unused, the package did not build, and no gate
 > ran. A build failure proves nothing, so the mutation was corrected to compile and re-measured.
-> The campaign then grew three times — to 17, to 18 when M18 was added for the first review
-> finding, and to 19 when M19 was added for the second — so each earlier score described a campaign
-> that no longer existed. Each growth blanked the recorded number back to a placeholder rather than
-> carrying it forward, which is the whole point of the rule.
+> The campaign then grew four times — to 17, and once per review finding after that: M18 (round 1),
+> M19 (round 2), M20 (round 3) — so each earlier score described a campaign that no longer existed.
+> Each growth blanked the recorded number back to a placeholder rather than carrying it forward,
+> which is the whole point of the rule.
 
 ## §26 Final verdict
 
