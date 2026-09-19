@@ -47,6 +47,17 @@ func withSyslogTestState(t *testing.T) {
 		setSyslogNow(nil)
 		setSyslogAlert(nil)
 		syslogHealth.mu.Lock()
+		// Disarm before restoring. A failure opened during this test arms a
+		// REAL-clock 60s timer; left running it outlives the test and fires
+		// evaluateSyslogEpisode inside an unrelated one, against whatever clock
+		// and alert sink that test installed. Restoring the scalar fields does
+		// not stop it — that is a timer, not a field.
+		stopSyslogAlertTimerLocked()
+		// owner is a pointer to a writer this test created and t.Cleanup is
+		// about to close; leaving it set hands a dead writer to the next test's
+		// fence check.
+		syslogHealth.owner = nil
+		syslogHealth.lastReason = ""
 		syslogHealth.failingSince = prevFailing
 		syslogHealth.alerted = prevAlerted
 		syslogHealth.logAt = prevLogAt
