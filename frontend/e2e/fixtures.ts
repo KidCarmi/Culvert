@@ -37,6 +37,14 @@ export const CERTDEG_URL =
  * certificate a TLS client actually receives. */
 export const CERTTLS_URL =
   process.env["CULVERT_E2E_CERTTLS_URL"] ?? "https://127.0.0.1:19098";
+/** FE-6B.2: the WRITE-journey appliance — sealed persisted Root CA, persisted
+ * UI pair A served over real TLS, OCSP at its default (see
+ * scripts/e2e-smoke.sh). Every fe6b2 journey mutates it; nothing else uses it. */
+export const CERTW_URL =
+  process.env["CULVERT_E2E_CERTW_URL"] ?? "https://127.0.0.1:19099";
+/** FE-6B.2: where the harness generated pair B, the importable CA and the
+ * mismatched key for CERTW. */
+export const CERTW_DIR = process.env["CULVERT_E2E_CERTW_DIR"] ?? "";
 /** FE-6B.1 correction round: where the harness generated pair B for CERTTLS. */
 export const CERTTLS_UI_PAIR_DIR =
   process.env["CULVERT_E2E_CERTTLS_UI_PAIR_DIR"] ?? "";

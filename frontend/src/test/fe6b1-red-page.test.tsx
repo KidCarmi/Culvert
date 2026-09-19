@@ -244,7 +244,18 @@ const VIEWER_CONTROLS: readonly string[] = [
   "Refresh",
   "Download CA certificate (PEM)",
 ];
-const ADMIN_CONTROLS: readonly string[] = [...VIEWER_CONTROLS, "Look up"];
+// FE-6B.2: the admin additionally sees exactly the five approved mutation
+// controls (recorded assertion change — the FE-6B.1 "no mutation control"
+// statement is superseded by the FE-6B.2 scope; viewer/operator unchanged).
+const ADMIN_CONTROLS: readonly string[] = [
+  ...VIEWER_CONTROLS,
+  "Look up",
+  "Rotate Root CA…",
+  "Import CA…",
+  "Replace UI certificate…",
+  "Delete UI certificate…",
+  "Set OCSP posture…",
+];
 
 // ── P1 ──────────────────────────────────────────────────────────────────────
 

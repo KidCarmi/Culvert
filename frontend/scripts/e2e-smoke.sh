@@ -47,6 +47,10 @@ IDPW_PORT="${CULVERT_E2E_IDPW_PORT:-19095}"
 CERT_PORT="${CULVERT_E2E_CERT_PORT:-19096}"
 CERTDEG_PORT="${CULVERT_E2E_CERTDEG_PORT:-19097}"
 CERTTLS_PORT="${CULVERT_E2E_CERTTLS_PORT:-19098}"
+# FE-6B.2 CERTW: the WRITE-journey appliance — a passphrase-sealed persisted
+# Root CA, a persisted UI pair A served over real TLS (no -ui-no-tls), OCSP at
+# its default. Every fe6b2 journey mutates it and nothing else uses it.
+CERTW_PORT="${CULVERT_E2E_CERTW_PORT:-19099}"
 WORK="$(mktemp -d)"
 BIN="$WORK/culvert"
 
@@ -62,6 +66,7 @@ cleanup() {
   [ -n "${CERT_PID:-}" ] && kill "$CERT_PID" 2>/dev/null || true
   [ -n "${CERTDEG_PID:-}" ] && kill "$CERTDEG_PID" 2>/dev/null || true
   [ -n "${CERTTLS_PID:-}" ] && kill "$CERTTLS_PID" 2>/dev/null || true
+  [ -n "${CERTW_PID:-}" ] && kill "$CERTW_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   rm -rf "$WORK" 2>/dev/null || true
 }
@@ -384,6 +389,35 @@ start_instance_tls() {
 }
 start_instance_tls CERTTLS "$CERTTLS_PORT" "$((PROXY_PORT + 8))" -ui-users-file "$WORK/certtls/ui_users.json" -config "$WORK/certtls/config.yaml" -ca-path "$WORK/certtls/ca.bundle"
 
+# ── FE-6B.2 CERTW ───────────────────────────────────────────────────────────
+# A TENTH appliance for the WRITE journeys (e2e/fe6b2.spec.ts): boots with a
+# passphrase-sealed Root CA at -ca-path (rotation and import persist), a
+# persisted UI pair A that it really serves over TLS, OCSP at its default.
+# Beside it the harness generates pair B (the replace candidate), an
+# importable CA (basicConstraints CA:TRUE, EC P-256 — the MITM signer's key
+# family) and a key that does NOT belong to it (the bounded key_mismatch
+# refusal). The browser sees private keys only through the OPEN ceremony's
+# textareas and the multipart request body.
+mkdir -p "$WORK/certw" "$WORK/run-CERTW"
+cp "$WORK/auth/ui_users.json" "$WORK/certw/ui_users.json"
+printf 'log_store_path: %s/certw/logstore\n' "$WORK" > "$WORK/certw/config.yaml"
+for pair in a b; do
+  openssl ecparam -genkey -name prime256v1 -noout -out "$WORK/certw/ui-$pair.key" 2>/dev/null
+  openssl req -x509 -new -key "$WORK/certw/ui-$pair.key" -subj "/CN=ui-fe6b2-$pair.e2e" -days 365 \
+    -addext "subjectAltName=DNS:ui-fe6b2-$pair.e2e" -out "$WORK/certw/ui-$pair.crt" 2>/dev/null
+done
+openssl ecparam -genkey -name prime256v1 -noout -out "$WORK/certw/import-ca.key" 2>/dev/null
+openssl req -x509 -new -key "$WORK/certw/import-ca.key" -subj "/CN=FE-6B.2 Import CA" -days 3650 \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -out "$WORK/certw/import-ca.crt" 2>/dev/null
+openssl ecparam -genkey -name prime256v1 -noout -out "$WORK/certw/mismatch.key" 2>/dev/null
+cp "$WORK/certw/ui-a.crt" "$WORK/run-CERTW/ui_tls_cert.pem"
+cp "$WORK/certw/ui-a.key" "$WORK/run-CERTW/ui_tls_key.pem"
+chmod 600 "$WORK/run-CERTW/ui_tls_key.pem"
+CULVERT_CA_PASSPHRASE="$CA_PASSPHRASE_CANARY"; export CULVERT_CA_PASSPHRASE
+start_instance_tls CERTW "$CERTW_PORT" "$((PROXY_PORT + 9))" -ui-users-file "$WORK/certw/ui_users.json" -config "$WORK/certw/config.yaml" -ca-path "$WORK/certw/ca.bundle"
+unset CULVERT_CA_PASSPHRASE
+
 wait_ready() {
   port="$1"; name="$2"
   i=0
@@ -419,7 +453,8 @@ wait_ready_tls() {
   done
 }
 wait_ready_tls "$CERTTLS_PORT" CERTTLS
-echo "e2e-smoke: all nine instances ready"
+wait_ready_tls "$CERTW_PORT" CERTW
+echo "e2e-smoke: all ten instances ready"
 
 # API-establish the retained-history premise (§19): the AUTH instance boots
 # from a FRESH per-instance data root (PR-C1), so the retained-history store
@@ -509,6 +544,8 @@ CULVERT_E2E_CERT_URL="http://127.0.0.1:$CERT_PORT" \
 CULVERT_E2E_CERTDEG_URL="http://127.0.0.1:$CERTDEG_PORT" \
 CULVERT_E2E_CERTTLS_URL="https://127.0.0.1:$CERTTLS_PORT" \
 CULVERT_E2E_CERTTLS_UI_PAIR_DIR="$WORK/certtls" \
+CULVERT_E2E_CERTW_URL="https://127.0.0.1:$CERTW_PORT" \
+CULVERT_E2E_CERTW_DIR="$WORK/certw" \
 CULVERT_E2E_CERT_UI_PAIR_DIR="$WORK/cert" \
 CULVERT_E2E_CERTDEG_DATA_DIR="$WORK/run-CERTDEG" \
 CULVERT_E2E_CA_PASSPHRASE_CANARY="$CA_PASSPHRASE_CANARY" \
