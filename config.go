@@ -418,6 +418,21 @@ func validCDRFailMode(fm string) bool {
 	return fm == "" || fm == "open" || fm == "closed"
 }
 
+// validCDRTimeoutSec reports whether t is a recognized cdr.timeout_sec /
+// -cdr-timeout-sec value: 0 (unset — the 35s default applied downstream) or
+// >= 30, Sluice's own per-call cap. Shared by FileConfig.validateCDR (the
+// config.yaml path, which fails the whole config load on a value below the
+// cap) and initCDR in main.go (the CLI-flag path). Without this shared gate,
+// a CLI value below the cap (e.g. "-cdr-timeout-sec 5") reached
+// cdr_pool.go's client dial timeout unchanged, so Sluice could never answer
+// a Sanitize call before the client gave up — and because cdr.fail_mode
+// defaults to fail-open, that silently disabled CDR content sanitization
+// for every request, with no startup warning. The same value in config.yaml
+// already refuses to start.
+func validCDRTimeoutSec(t int) bool {
+	return t == 0 || t >= 30
+}
+
 // validCDRServerFingerprint validates the "cdr.server_fingerprint" /
 // -cdr-server-fingerprint value shared by the YAML (validateCDR) and CLI (initCDR,
 // main.go) paths: empty (unset) is valid; otherwise it must decode to
@@ -644,7 +659,7 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 	if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
 		errs = append(errs, fmt.Sprintf("cdr.default_mode: must be ENFORCE | REPORT_ONLY | BYPASS_WITH_REPORT, got %q", m))
 	}
-	if t := fc.CDR.TimeoutSec; t != 0 && t < 30 {
+	if t := fc.CDR.TimeoutSec; !validCDRTimeoutSec(t) {
 		errs = append(errs, fmt.Sprintf("cdr.timeout_sec: must be >= 30 (Sluice's own cap), got %d", t))
 	}
 	if s := fc.CDR.MaxFileSizeMB; s < 0 {

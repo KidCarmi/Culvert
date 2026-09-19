@@ -925,6 +925,18 @@ func initCDR(s *startupState) {
 	if msg := validCDRServerFingerprint(*s.cdrFingerprintFlag); msg != "" {
 		log.Fatalf("Invalid -cdr-server-fingerprint %q: %s", *s.cdrFingerprintFlag, msg)
 	}
+	// Same mirroring for -cdr-timeout-sec: config.yaml's cdr.timeout_sec is
+	// bounds-validated at load time (validateCDR), but the CLI flag reaches
+	// the exact same CDRConfig.TimeoutSec field with no equivalent gate. A
+	// value below Sluice's own 30s per-call cap doesn't fail startup at all —
+	// it reaches cdr_pool.go's client dial timeout unchanged, so every real
+	// Sanitize call times out before Sluice can answer, and with the default
+	// fail-open FailMode that silently disables CDR content sanitization for
+	// every request from then on, with nothing at startup pointing at the
+	// misconfigured flag.
+	if t := *s.cdrTimeoutFlag; !validCDRTimeoutSec(t) {
+		log.Fatalf("Invalid -cdr-timeout-sec %d: must be 0 (default) or >= 30 (Sluice's own cap)", t)
+	}
 	loadCDR(
 		resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
 			Enabled:     *s.cdrEnabledFlag,

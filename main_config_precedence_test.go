@@ -393,3 +393,48 @@ func TestValidCDRServerFingerprint(t *testing.T) {
 		})
 	}
 }
+
+// ── CDR timeout_sec CLI/YAML validation parity (validCDRTimeoutSec) ─────────
+//
+// config.yaml's cdr.timeout_sec is validated by FileConfig.validateCDR: a
+// value below Sluice's own 30s per-call cap (and not the 0 "unset" sentinel)
+// fails the whole config load with a clear error, so the operator sees the
+// mistake immediately instead of shipping a client that can never receive an
+// answer in time.
+//
+// The CLI flag -cdr-timeout-sec reaches the exact same CDRConfig.TimeoutSec
+// field (merged in cdr_startup_config.go's resolveCDRStartupConfig, CLI wins
+// over config.yaml) with no equivalent gate: an invalid CLI value (e.g.
+// "-cdr-timeout-sec 5") was stored verbatim and reached cdr_pool.go's
+// clientCfg.Timeout unchanged. Since Sluice needs up to 30s to answer a
+// Sanitize call, a shorter client timeout makes EVERY call time out, and
+// because cdr.fail_mode defaults to fail-OPEN, that silently disables CDR
+// content sanitization for every request from then on — the identical
+// silent-failure mode TestValidCDRServerFingerprint documents for
+// -cdr-server-fingerprint, reached via a different flag. The same value in
+// config.yaml already refuses to start.
+//
+// validCDRTimeoutSec is the shared predicate (mirroring validCDRFailMode /
+// validCDRServerFingerprint): used by validateCDR (config.go) for the YAML
+// path and by initCDR (main.go) for the CLI path, so both channels reject
+// the same invalid values instead of only one of them.
+func TestValidCDRTimeoutSec(t *testing.T) {
+	tests := []struct {
+		sec  int
+		want bool
+	}{
+		{0, true},   // unset — default (35s, applied downstream)
+		{30, true},  // exactly Sluice's own cap
+		{35, true},  // the documented default
+		{300, true}, // generous but valid
+		{1, false},  // far below Sluice's cap — every call would time out
+		{5, false},  // same failure mode as the field bug this mirrors
+		{29, false}, // one below the cap
+		{-1, false}, // negative is nonsensical and must not slip through t!=0
+	}
+	for _, tt := range tests {
+		if got := validCDRTimeoutSec(tt.sec); got != tt.want {
+			t.Errorf("validCDRTimeoutSec(%d) = %v, want %v", tt.sec, got, tt.want)
+		}
+	}
+}
