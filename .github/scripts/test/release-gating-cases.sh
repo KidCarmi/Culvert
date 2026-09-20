@@ -221,13 +221,14 @@ else bad "the shipped manifest is satisfiable when every listed workflow is gree
 # ─── 5. image promotion ──────────────────────────────────────────────────────
 DIG="sha256:$(printf 'a%.0s' $(seq 64))"
 DIG2="sha256:$(printf 'b%.0s' $(seq 64))"
-printf 'sha-3d8c9bb|%s\n' "$DIG" > "$WORK/tags"; export DOCKER_TAGS="$WORK/tags"
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"; export DOCKER_TAGS="$WORK/tags"
 : > "$WORK/creates"; export DOCKER_CREATES="$WORK/creates"
 : > "$WORK/anc"; export GIT_ANCESTORS="$WORK/anc"
 promote() { bash "$SCRIPTS/promote-image-tags.sh" "$@"; }
 
 : > "$WORK/creates"
-if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG" sha-3d8c9bb latest 1.2.3 >/dev/null 2>&1 \
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest 1.2 1" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
    && grep -q -- "--tag ghcr.io/x:latest" "$WORK/creates" \
    && grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates" \
    && grep -q -- "ghcr.io/x@$DIG" "$WORK/creates"; then
@@ -235,7 +236,8 @@ if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG" sha-3d8c9bb la
 else bad "approved evidence promotes the intended digest onto the intended channels" "creates=$(cat "$WORK/creates")"; fi
 
 : > "$WORK/creates"
-if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG2" sha-3d8c9bb latest >/dev/null 2>&1; then
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG2" candidate-99 >/dev/null 2>&1; then
   bad "promotion refuses a digest this run did not build" "promoted a digest the candidate tag does not resolve to"
 else
   [ -s "$WORK/creates" ] && bad "promotion refuses a digest this run did not build" "it still called imagetools create" \
@@ -243,39 +245,69 @@ else
 fi
 
 : > "$WORK/creates"
-if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG" sha-absent latest >/dev/null 2>&1; then
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" sha-absent >/dev/null 2>&1; then
   bad "promotion refuses an unresolvable candidate tag" "promoted against a tag that is not in the registry"
 else ok "promotion refuses an unresolvable candidate tag"; fi
 
 : > "$WORK/creates"
-if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "sha256:short" sha-3d8c9bb latest >/dev/null 2>&1; then
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha FLOATING_TAGS="latest" \
+     promote ghcr.io/x "sha256:short" candidate-99 >/dev/null 2>&1; then
   bad "promotion refuses a malformed digest" "accepted 'sha256:short'"
 else ok "promotion refuses a malformed digest"; fi
 
 : > "$WORK/creates"
-if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG" sha-3d8c9bb >/dev/null 2>&1; then
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
   bad "promotion refuses an empty target set" "a no-op promotion reported success"
 else ok "promotion refuses an empty target set"; fi
 
 # Re-run of the SAME run: idempotent, promotes the same digest again.
 : > "$WORK/creates"
-RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG" sha-3d8c9bb latest >/dev/null 2>&1
-RELEASE_SHA=tipsha CHANNEL_TIP=tipsha promote ghcr.io/x "$DIG" sha-3d8c9bb latest >/dev/null 2>&1
+for _ in 1 2; do
+  RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+    promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1
+done
 if [ "$(grep -c "ghcr.io/x@$DIG" "$WORK/creates")" -eq 2 ]; then
   ok "re-running the owning run is idempotent (same digest, same channels)"
 else bad "re-running the owning run is idempotent (same digest, same channels)" "creates=$(cat "$WORK/creates")"; fi
 
-# Re-run of a SUPERSEDED run: must not roll the channel back.
-: > "$WORK/creates"; printf 'oldsha|newtip\n' > "$WORK/anc"
-if RELEASE_SHA=oldsha CHANNEL_TIP=newtip promote ghcr.io/x "$DIG" sha-3d8c9bb latest >/dev/null 2>&1; then
-  if [ -s "$WORK/creates" ]; then
-    bad "a superseded re-run does not overwrite a newer candidate" "it repointed latest backwards"
-  else ok "a superseded re-run does not overwrite a newer candidate"; fi
-else bad "a superseded re-run does not overwrite a newer candidate" "it failed instead of skipping cleanly"; fi
+# ── supersession: floating channels defer, immutable version tags do not ────
+printf 'oldsha|newtip\n' > "$WORK/anc"
 
-# Divergent history (not the tip, not an ancestor) must REFUSE, not skip.
+# MAIN path shape (no immutable targets): a superseded re-run promotes NOTHING.
+: > "$WORK/creates"
+if RELEASE_SHA=oldsha CHANNEL_TIP=newtip FLOATING_TAGS="latest main 1.2.3" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
+  if [ -s "$WORK/creates" ]; then
+    bad "a superseded main-path re-run does not overwrite a newer candidate" "it repointed a channel backwards"
+  else ok "a superseded main-path re-run does not overwrite a newer candidate"; fi
+else bad "a superseded main-path re-run does not overwrite a newer candidate" "it failed instead of skipping cleanly"; fi
+
+# TAG path shape: superseded must STILL publish its own immutable version tag,
+# and must NOT move the floating channels. Skipping the version tag left a
+# public release whose X.Y.Z was absent or pointed at another digest.
+: > "$WORK/creates"
+if RELEASE_SHA=oldsha CHANNEL_TIP=newtip IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="1.2 1" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
+  if grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates" \
+     && ! grep -q -- "--tag ghcr.io/x:1.2 " "$WORK/creates" \
+     && ! grep -q -- "--tag ghcr.io/x:1 " "$WORK/creates"; then
+    ok "a superseded tag run still promotes its immutable version tag"
+  else bad "a superseded tag run still promotes its immutable version tag" "creates=$(cat "$WORK/creates")"; fi
+else bad "a superseded tag run still promotes its immutable version tag" "it failed instead of promoting the immutable tag"; fi
+
+: > "$WORK/creates"
+RELEASE_SHA=oldsha CHANNEL_TIP=newtip IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+  promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1
+if grep -q -- "--tag ghcr.io/x:latest" "$WORK/creates"; then
+  bad "a superseded run never moves a floating channel" "it moved latest backwards"
+else ok "a superseded run never moves a floating channel"; fi
+
+# Divergent history (not the tip, not an ancestor) must REFUSE everything,
+# immutable targets included — we cannot tell which release this even is.
 : > "$WORK/creates"; : > "$WORK/anc"
-if RELEASE_SHA=forked CHANNEL_TIP=newtip promote ghcr.io/x "$DIG" sha-3d8c9bb latest >/dev/null 2>&1; then
+if RELEASE_SHA=forked CHANNEL_TIP=newtip IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
   bad "a divergent SHA refuses promotion" "a force-pushed/divergent SHA was allowed to promote"
 else
   [ -s "$WORK/creates" ] && bad "a divergent SHA refuses promotion" "it promoted anyway" \

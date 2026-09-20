@@ -43,9 +43,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   immediate refusal rather than letting `wait` mode poll for 30 minutes first.
   A `workflow_dispatch` on a branch no longer republishes `latest` at all.
 
-  Pinned by `release_publication_gating_test.go` (7 structural walls over
+  Two review rounds on the gating change itself, both real and both fixed:
+  promotion targets are now split into IMMUTABLE (the exact `X.Y.Z`, always
+  promoted — a version tag cannot be superseded) and FLOATING (`latest`,
+  `main`, `X.Y`, `X`, deferred to the newer run), because a single
+  supersession-gated list meant a tag run overtaken by a newer tag skipped its
+  OWN version tag while `publish-release` still undrafted the release; and
+  `--latest` is now decided against the highest `v*` tag rather than asserted,
+  because `scripts/install.sh` resolves its bootstrap verifier through
+  `/releases/latest` and an unconditional flag moved fresh installs onto an
+  older verifier whenever a superseded tag's run finished last.
+
+  Pinned by `release_publication_gating_test.go` (9 structural walls over
   `ci.yml` and the manifest, each verified failing against the pre-fix tree)
-  and `.github/scripts/test/release-gating-cases.sh` (34 behavioural cases
+  and `.github/scripts/test/release-gating-cases.sh` (36 behavioural cases
   against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
   Signing identities are unchanged: cosign keyless SANs are per workflow FILE
   and ref, and both new jobs live in `ci.yml`. See

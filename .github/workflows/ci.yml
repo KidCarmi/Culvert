@@ -226,7 +226,8 @@ jobs:
       proxy_digest: ${{ steps.build.outputs.digest }}
       version_bare: ${{ steps.chan.outputs.version_bare }}
       candidate_tag: ${{ steps.chan.outputs.candidate_tag }}
-      promote_tags: ${{ steps.chan.outputs.promote_tags }}
+      immutable_tags: ${{ steps.chan.outputs.immutable_tags }}
+      floating_tags: ${{ steps.chan.outputs.floating_tags }}
       image: ${{ steps.img-lc.outputs.image }}
 
     permissions:
@@ -282,7 +283,8 @@ jobs:
           # be clobbered by another run, and is stable across re-runs of this
           # one (run_id is constant across attempts).
           CANDIDATE="candidate-${GITHUB_RUN_ID}"
-          PROMOTE=""
+          IMMUTABLE=""
+          FLOATING=""
           if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
             # GITHUB_TOKEN tag pushes (from auto-tag) can't trigger new
             # workflows, so the main-push run computes the semver it will
@@ -296,13 +298,22 @@ jobs:
             NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
             VERSION="$NEXT"
             VERSION_BARE="${NEXT#v}"
-            PROMOTE="latest main ${VERSION} ${VERSION_BARE}"
+            # MAIN path: every target is FLOATING. The version here is
+            # SPECULATIVE — auto-tag has not created the tag yet, and a run
+            # overtaken by a newer main push must promote nothing, because the
+            # version number it computed may end up belonging to that newer
+            # commit. The tag run is what makes X.Y.Z authoritative.
+            FLOATING="latest main ${VERSION} ${VERSION_BARE}"
           elif [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
             VERSION="${GITHUB_REF#refs/tags/}"
             VERSION_BARE="${VERSION#v}"
             MAJOR=$(echo "$VERSION_BARE" | cut -d. -f1)
             MINOR=$(echo "$VERSION_BARE" | cut -d. -f2)
-            PROMOTE="${VERSION_BARE} ${MAJOR}.${MINOR} ${MAJOR}"
+            # TAG path: the exact version is IMMUTABLE — `X.Y.Z` can only ever
+            # mean this tag's release, so it is promoted even when a newer tag
+            # has already landed. Only the moving channels defer.
+            IMMUTABLE="${VERSION_BARE}"
+            FLOATING="${MAJOR}.${MINOR} ${MAJOR}"
           else
             # Any other ref (a branch dispatch off main): build a candidate so
             # the run is still useful, promote NOTHING. Before this change a
@@ -315,9 +326,10 @@ jobs:
             echo "version=$VERSION"
             echo "version_bare=$VERSION_BARE"
             echo "candidate_tag=$CANDIDATE"
-            echo "promote_tags=$PROMOTE"
+            echo "immutable_tags=$IMMUTABLE"
+            echo "floating_tags=$FLOATING"
           } >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION candidate=$CANDIDATE promote=[${PROMOTE}]"
+          echo "version=$VERSION candidate=$CANDIDATE immutable=[${IMMUTABLE}] floating=[${FLOATING}]"
 
       # ── Lowercase repo name ───────────────────────────────────────────────
       # Container registries require lowercase image names, but
@@ -696,22 +708,23 @@ jobs:
           IMAGE: ${{ needs.docker.outputs.image }}
           DIGEST: ${{ needs.docker.outputs.proxy_digest }}
           CANDIDATE: ${{ needs.docker.outputs.candidate_tag }}
-          PROMOTE_TAGS: ${{ needs.docker.outputs.promote_tags }}
+          IMMUTABLE_TAGS: ${{ needs.docker.outputs.immutable_tags }}
+          FLOATING_TAGS: ${{ needs.docker.outputs.floating_tags }}
         run: |
           set -euo pipefail
-          test -n "$PROMOTE_TAGS" || { echo "::error::no promote tags resolved for ${GITHUB_REF} — refusing"; exit 1; }
-          # shellcheck disable=SC2086
-          .github/scripts/promote-image-tags.sh "$IMAGE" "$DIGEST" "$CANDIDATE" $PROMOTE_TAGS
-          # The script exits 0 without promoting when this SHA is superseded;
-          # record which happened so the signing step below matches.
+          test -n "${IMMUTABLE_TAGS}${FLOATING_TAGS}" || { echo "::error::no promote tags resolved for ${GITHUB_REF} — refusing"; exit 1; }
+          .github/scripts/promote-image-tags.sh "$IMAGE" "$DIGEST" "$CANDIDATE"
+          # Which tags actually moved — the immutable set always, the floating
+          # set only when this SHA still owns the channels. The signing step
+          # below signs exactly what was promoted.
+          SIGNED="$IMMUTABLE_TAGS"
           if [ "$RELEASE_SHA" = "$CHANNEL_TIP" ]; then
-            echo "promoted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "promoted=false" >> "$GITHUB_OUTPUT"
+            SIGNED="$SIGNED $FLOATING_TAGS"
           fi
+          echo "signed_tags=$(echo "$SIGNED" | tr -s ' ' | sed 's/^ //; s/ $//')" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        if: steps.promote.outputs.promoted == 'true'
+        if: steps.promote.outputs.signed_tags != ''
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: 'v3.0.6'
@@ -722,12 +735,12 @@ jobs:
       # signed `docker-reference` claim name the public channel too, so a
       # consumer inspecting the payload for `:latest` sees `:latest`.
       - name: Sign the promoted references (keyless)
-        if: steps.promote.outputs.promoted == 'true'
+        if: steps.promote.outputs.signed_tags != ''
         env:
           COSIGN_EXPERIMENTAL: "1"
           IMAGE: ${{ needs.docker.outputs.image }}
           DIGEST: ${{ needs.docker.outputs.proxy_digest }}
-          PROMOTE_TAGS: ${{ needs.docker.outputs.promote_tags }}
+          PROMOTE_TAGS: ${{ steps.promote.outputs.signed_tags }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086 -- PROMOTE_TAGS is a deliberate word list
@@ -1363,6 +1376,8 @@ jobs:
       actions: read     # require-release-evidence.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # needed to compare this tag against the highest v* tag
 
       # Defense in depth: the needs-chain already proves the downstream checks,
       # and every job in it asserted the predicate, but the last step before a
@@ -1382,16 +1397,34 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: .github/scripts/assert-release-complete.sh "$TAG"
 
+      # `--latest` is decided, never asserted. GitHub's "Latest" designation is
+      # load-bearing: scripts/install.sh resolves its bootstrap verifier through
+      # /releases/latest, so marking a SUPERSEDED tag as Latest would point
+      # fresh installs at an older verifier. An unconditional `--latest` does
+      # exactly that whenever an older tag's run finishes after a newer release,
+      # or when an operator re-runs an old tag's workflow (Codex review,
+      # PR #1441). Same rule the image promotion applies to its floating
+      # channels: only the highest v* tag owns "Latest".
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release edit "$TAG" --draft=false --latest
-          echo "published $TAG"
+          HIGHEST="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          test -n "$HIGHEST" || { echo "::error::no v* tag visible — refusing"; exit 1; }
+          if [ "$TAG" = "$HIGHEST" ]; then
+            gh release edit "$TAG" --draft=false --latest
+            MARK="marked Latest"
+          else
+            # Explicit false, not omitted: on a first publish GitHub would
+            # otherwise apply its own default and could still pick this release.
+            gh release edit "$TAG" --draft=false --latest=false
+            MARK="NOT marked Latest (superseded by ${HIGHEST})"
+          fi
+          echo "published $TAG — $MARK"
           {
             echo "### Release published"
             echo ""
-            echo "\`$TAG\` was promoted from draft to public after the full evidence chain succeeded."
+            echo "\`$TAG\` was promoted from draft to public after the full evidence chain succeeded — $MARK."
           } >> "$GITHUB_STEP_SUMMARY"

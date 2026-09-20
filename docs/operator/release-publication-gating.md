@@ -123,16 +123,36 @@ The `docker` job pushes only non-channel tags:
 4. promotes with `docker buildx imagetools create --tag … <image>@<digest>` —
    the tested immutable digest, never a rebuild.
 
+### Immutable vs. floating targets
+
+Targets come in two kinds, and **only one of them can be superseded**:
+
+| kind | tags | rule |
+| --- | --- | --- |
+| **immutable** | the exact version, `X.Y.Z` | names THIS release and nothing else. Promoting it is never a rollback, so it is **always** promoted. |
+| **floating** | `latest`, `main`, `X.Y`, `X` | moving channels naming "the current thing". An older run must never roll them backwards. |
+
+The **main path declares no immutable targets**: the version it computes is
+speculative until `auto-tag` creates the tag, so a superseded main run promotes
+nothing. The tag run is what makes `X.Y.Z` authoritative.
+
 ### Re-run rule
 
-| situation | outcome |
-| --- | --- |
-| release SHA **is** the channel tip | promote (idempotent on re-run) |
-| release SHA is an **ancestor** of the tip | **skip**, exit 0 — a newer run owns the channel. Normal on a busy `main`, where the next merge lands during this run's build+gate window. |
-| anything else (divergent, force-push) | **refuse**, exit 1 |
+| situation | immutable (`X.Y.Z`) | floating (`latest`, `X.Y`, `X`) |
+| --- | --- | --- |
+| release SHA **is** the channel tip | promote (idempotent on re-run) | promote |
+| release SHA is an **ancestor** of the tip | **promote** — a version tag cannot be superseded | **skip**, exit 0 — a newer run owns them. Normal on a busy `main`, where the next merge lands during this run's build+gate window. |
+| anything else (divergent, force-push) | **refuse**, exit 1 | **refuse**, exit 1 |
 
 Channel tip = `origin/main`'s head on the main path, the highest `v*` tag's
 commit on the tag path.
+
+> **Why the split exists.** The first shipped shape gated ONE target list on
+> supersession, so a tag run overtaken by a newer tag skipped *everything* —
+> including its own `X.Y.Z` — while `publish-release` still undrafted the
+> release. The result was a public release whose exact version tag was absent,
+> or pointed at the main run's digest rather than the one its own catalog pins
+> (Codex review, PR #1441).
 
 ---
 
@@ -164,8 +184,16 @@ same digest, and `catalog-pipeline`'s digest-addressed
 
 Every `softprops/action-gh-release` step now passes `draft: true`.
 `publish-release` is the only job that runs `gh release edit --draft=false`,
-and it needs `release`, `catalog-pipeline`, `aggregate-subjects`,
-`verify-reproducible` and `provenance`.
+and it needs `release`, `catalog-pipeline`, `promote-image`,
+`aggregate-subjects`, `verify-reproducible` and `provenance`.
+
+**`--latest` is decided, never asserted.** GitHub's "Latest" designation is
+load-bearing — `scripts/install.sh` resolves its bootstrap verifier through
+`/releases/latest` — so `publish-release` compares the tag against the highest
+`v*` tag and passes `--latest` only when it wins, and an explicit
+`--latest=false` otherwise. An unconditional `--latest` pointed fresh installs
+at an older verifier whenever a superseded tag's run finished after a newer
+release, or when an old tag's workflow was re-run (Codex review, PR #1441).
 
 Before un-drafting it runs `assert-release-complete.sh`, which refuses unless
 every required asset is present **and non-empty**: 5 proxy binaries + 2
@@ -217,9 +245,15 @@ and re-run. The draft is re-used; assets are replaced in place. Nothing is
 public until `publish-release` succeeds. Do **not** flip the draft by hand
 unless you have independently verified reproducibility and provenance.
 
-**`promote-image` skipped with "superseded by channel tip"** — expected.
-Another commit landed on `main` during this run; that commit's run owns
-`latest`. No action.
+**`promote-image` reported "superseded by channel tip"** — expected. Another
+commit landed on `main`, or a newer `v*` tag was created, during this run. On
+the main path nothing is promoted (its version was speculative); on the tag path
+the exact `X.Y.Z` is still promoted and only the moving channels defer. No
+action.
+
+**A release published without being marked "Latest"** — expected when a higher
+`v*` tag already exists. The release is public and complete; only the Latest
+pointer stays with the newer tag.
 
 **`promote-image` refused with "divergent history"** — `main` was force-pushed,
 or the run is from a branch that is no longer an ancestor. Investigate before

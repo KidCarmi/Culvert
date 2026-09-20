@@ -40,8 +40,9 @@ type wfStep struct {
 type wfStepWith struct {
 	AllowedEndpoints string      `yaml:"allowed-endpoints"`
 	EgressPolicy     string      `yaml:"egress-policy"`
-	Draft            interface{} `yaml:"draft"` // release-publication gating (see release_publication_gating_test.go)
-	Tags             string      `yaml:"tags"`  // docker/metadata-action tag directives
+	Draft            interface{} `yaml:"draft"`       // release-publication gating (see release_publication_gating_test.go)
+	Tags             string      `yaml:"tags"`        // docker/metadata-action tag directives
+	FetchDepth       *int        `yaml:"fetch-depth"` // actions/checkout history depth
 }
 
 type wfJob struct {

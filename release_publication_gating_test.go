@@ -78,6 +78,22 @@ func jobMentions(j wfJob, needle string) bool {
 	return false
 }
 
+// armBetween returns the slice of a shell body from the line starting an if/elif
+// arm up to the next one, and false when the arm is not present. Returning false
+// rather than slicing on a -1 index keeps a resolver rewrite a legible test
+// FAILURE instead of a panic (gocritic offBy1).
+func armBetween(body, start, stop string) (string, bool) {
+	i := strings.Index(body, start)
+	if i < 0 {
+		return "", false
+	}
+	arm := body[i:]
+	if j := strings.Index(arm[len(start):], stop); j >= 0 {
+		arm = arm[:len(start)+j]
+	}
+	return arm, true
+}
+
 // statusOverrideRE matches any GitHub Actions status function that would run a
 // job even after a failed `needs` — the one-token way to silently open every
 // gate this file pins.
@@ -404,6 +420,100 @@ func TestPublicationGating_PublishReleaseIsLastAndUnconditionalOnSuccess(t *test
 	}
 }
 
+// ─── 3b. Supersession may defer a moving channel, never a version ────────────
+
+// TestPublicationGating_ImmutableTagsAreNeverDeferred pins the split Codex
+// found missing: the first shipped shape gated ONE target list on supersession,
+// so a tag run overtaken by a newer tag skipped everything — including its own
+// `X.Y.Z` — while publish-release still undrafted the release. The result was a
+// public release whose exact version tag was absent or pointed at the main
+// run's digest instead of the one its own catalog pins.
+func TestPublicationGating_ImmutableTagsAreNeverDeferred(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	docker := mustJob(t, doc, "docker")
+
+	var chanStep *wfStep
+	for i := range docker.Steps {
+		if strings.Contains(docker.Steps[i].Run, "immutable_tags=") {
+			chanStep = &docker.Steps[i]
+			break
+		}
+	}
+	if chanStep == nil {
+		t.Fatal("docker job emits no immutable_tags output — promotion cannot distinguish a version tag from a moving channel")
+	}
+	run := chanStep.Run
+
+	// The MAIN path's version is speculative until auto-tag creates the tag, so
+	// it must declare NO immutable target; everything it promotes is floating.
+	mainArm, ok := armBetween(run, `if [ "${GITHUB_REF}" = "refs/heads/main" ]`, "elif")
+	if !ok {
+		t.Fatal("the channel resolver no longer has a recognisable main-push arm — this wall cannot read it")
+	}
+	if strings.Contains(mainArm, "IMMUTABLE=") {
+		t.Errorf("the main-push arm assigns IMMUTABLE — its computed version is speculative until auto-tag "+
+			"creates the tag, so a superseded main run must promote nothing. Arm:\n%s", mainArm)
+	}
+	if !strings.Contains(mainArm, "FLOATING=") {
+		t.Errorf("the main-push arm assigns no FLOATING targets — it would promote nothing at all. Arm:\n%s", mainArm)
+	}
+
+	// The TAG path's exact version can only ever mean this tag's release.
+	tagArm, ok := armBetween(run, `elif [ "${GITHUB_REF#refs/tags/v}"`, "\n          else")
+	if !ok {
+		t.Fatal("the channel resolver no longer has a recognisable tag arm — this wall cannot read it")
+	}
+	if !strings.Contains(tagArm, `IMMUTABLE="${VERSION_BARE}"`) {
+		t.Errorf("the tag arm must declare the exact version as IMMUTABLE so a superseded tag run still "+
+			"publishes its own X.Y.Z. Arm:\n%s", tagArm)
+	}
+	if strings.Contains(tagArm, `FLOATING="${VERSION_BARE}`) {
+		t.Errorf("the tag arm puts the exact version in FLOATING — it would be deferred when superseded. Arm:\n%s", tagArm)
+	}
+}
+
+// TestPublicationGating_LatestIsDecidedNotAsserted pins the second half of the
+// same class: GitHub's "Latest" designation is what scripts/install.sh resolves
+// its bootstrap verifier through, so an unconditional `gh release edit --latest`
+// moves fresh installs onto an older verifier whenever a superseded tag's run
+// finishes after a newer release, or when an old tag's workflow is re-run.
+func TestPublicationGating_LatestIsDecidedNotAsserted(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	pub := mustJob(t, doc, "publish-release")
+
+	var publish *wfStep
+	for i := range pub.Steps {
+		if strings.Contains(pub.Steps[i].Run, "--draft=false") {
+			publish = &pub.Steps[i]
+			break
+		}
+	}
+	if publish == nil {
+		t.Fatal("publish-release has no --draft=false step — the release never becomes public")
+	}
+	run := publish.Run
+
+	if !strings.Contains(run, "--latest=false") {
+		t.Error("publish-release never passes --latest=false — a superseded tag would be marked Latest, " +
+			"and scripts/install.sh resolves its bootstrap verifier through /releases/latest")
+	}
+	if !strings.Contains(run, `git tag --list 'v*' --sort=-v:refname`) {
+		t.Error("publish-release does not compare this tag against the highest v* tag — `--latest` must be " +
+			"decided from the tag order, not asserted")
+	}
+	// The checkout must actually have the tags to compare against.
+	sawFullFetch := false
+	for i := range pub.Steps {
+		if strings.Contains(pub.Steps[i].Uses, "actions/checkout") && pub.Steps[i].WithFetchDepth() == 0 {
+			sawFullFetch = true
+		}
+	}
+	if !sawFullFetch {
+		t.Error("publish-release checks out shallow — `git tag --list` would see no tags and the highest-tag " +
+			"comparison would refuse every release")
+	}
+}
+
 // ─── 4. The manifest is the predicate's single source of truth ───────────────
 
 type evidenceRow struct {
@@ -572,3 +682,13 @@ func TestReleasePublicationGating_Behaviour(t *testing.T) {
 // call site (the repo standard is goccy/go-yaml, already imported by
 // release_workflow_invariants_test.go).
 func yamlUnmarshalWorkflow(raw []byte, out interface{}) error { return yaml.Unmarshal(raw, out) }
+
+// WithFetchDepth returns the step's `with.fetch-depth`, or -1 when unset.
+// actions/checkout treats 0 as "all history and tags"; an unset value is the
+// default shallow clone, which sees no tags at all.
+func (st wfStep) WithFetchDepth() int {
+	if st.With.FetchDepth == nil {
+		return -1
+	}
+	return *st.With.FetchDepth
+}
