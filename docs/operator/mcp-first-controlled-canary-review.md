@@ -3659,25 +3659,37 @@ production client rather than of the production constructor.
 `TestCanaryPath_ProductionUpstreamClientIsBuiltFromRetryFreeLimits` closes it structurally —
 behaviour cannot reach this constructor, for the loopback reason above.
 
-**The first version of that wall was itself bypassable, and self-attack rather than review is what
-found it.** It required the constructor's body to mention `RetryFreeLimits` and to mention no other
-limits constructor — a DENY-LIST OF SPELLINGS. It killed the obvious swap, and it was defeated by
+**Both earlier versions of that wall were themselves bypassable, and self-attack rather than review
+is what found it each time — three iterations in total.** The first required the constructor's body
+to mention `RetryFreeLimits` and to mention no other limits constructor — a DENY-LIST OF SPELLINGS. It killed the obvious swap, and it was defeated by
 keeping the `RetryFreeLimits` call and then assigning over its result from a local helper the
 deny-list cannot name (measured: the bypass PASSED). That is the same defect class the gate exists
 to close, one level up — *a check that enumerates the ways to be wrong is beaten by a way nobody
 enumerated.* The rule to carry forward: **a wall should follow the VALUE that is used, not the
 names that appear near it.**
 
-The shipped wall therefore starts at the `Limits` field of the `upstreamclient.Config` literal the
-constructor actually returns, takes the identifier bound there, and requires it to be bound EXACTLY
-ONCE, by a call to `RetryFreeLimits` on the upstreamclient package — resolved through the file's own
-import alias, so renaming the import cannot silently retire the gate either. Its control
-(`..._RetryFreeWallIsNotVacuous`) runs six rejection cases through the SAME predicate the gate runs,
-including the three that defeated the first version (swap, overwrite, overwrite-via-indirection) plus
-passing a different value and inlining a helper at the field; and it requires the wall to ACCEPT both
-the production form and an aliased-import form, because a wall nothing can satisfy gets deleted by
-the next person who touches the file. All three bypasses were re-run against the real production file
-and are CAUGHT.
+**The SECOND version was bypassable too, and probing it — not review — is what found that.** It
+took the first `upstreamclient.Config` literal in the function and counted only `Ident` assignments,
+which left two holes, both measured as real bypasses: a **decoy literal** (`_ =
+upstreamclient.Config{Limits: lim}` earlier in the body) captured the check while the literal
+actually handed to `New` carried weak limits; and a **pointer alias** (`p := &lim; *p = weak()`)
+replaced the value through a statement that is not an `Ident` assignment, so the binding count
+stayed at one.
+
+The shipped wall therefore anchors on the value that is USED, twice over: it finds the single call
+to `upstreamclient.New`, takes the `Config` literal passed to it (a non-literal `Config`, several
+`New` calls, or a missing `Limits` field are each refused rather than guessed at), reads the
+identifier in its `Limits` field, and requires that identifier to be bound EXACTLY ONCE by a call to
+`RetryFreeLimits` on the upstreamclient package — resolved through the file's own import alias — and
+to have its **address never taken**, since once it escapes its value can be replaced through an
+alias this analysis cannot follow. Refusing an aliased variable is fail-closed and deliberate: the
+gate does not chase aliases, it declines to certify them.
+
+Its control (`..._RetryFreeWallIsNotVacuous`) runs ten rejection cases through the SAME predicate the
+gate runs — every bypass found against every version of this wall, including the four discovered by
+probing it — plus two acceptance cases (the production form and an aliased-import form), because a
+wall nothing can satisfy gets deleted by the next person who touches the file. **All ten are CAUGHT;
+the shipped wall accepts the real production file.**
 
 Each link of the chain is now pinned somewhere: the production constructor takes the limits it
 passes to `Config` from `RetryFreeLimits` (this wall); `RetryFreeLimits` forces `MaxRedirects = 0`

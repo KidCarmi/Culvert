@@ -155,6 +155,24 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	other := tunedUpstreamLimits()
 	return upstreamclient.New(upstreamclient.Config{Limits: other}, limits.DefaultGateway())`},
 		{"limits inlined from a helper", `return upstreamclient.New(upstreamclient.Config{Limits: tunedUpstreamLimits()}, limits.DefaultGateway())`},
+		// The two below were found by probing this predicate, not by review. Both PASSED the
+		// version that took the first Config literal and counted only Ident assignments.
+		{"a decoy Config literal captures the check", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = upstreamclient.Config{Limits: lim}
+	return upstreamclient.New(upstreamclient.Config{Limits: tunedUpstreamLimits()}, limits.DefaultGateway())`},
+		{"value replaced through a pointer alias", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	p := &lim
+	*p = tunedUpstreamLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"Config assembled across statements", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	cfg := upstreamclient.Config{}
+	cfg.Limits = tunedUpstreamLimits()
+	return upstreamclient.New(cfg, limits.DefaultGateway())`},
+		{"limits carried on a struct field", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	h := holder{lim: tunedUpstreamLimits()}
+	return upstreamclient.New(upstreamclient.Config{Limits: h.lim}, limits.DefaultGateway())`},
 	} {
 		if why := retryFreeLimitsViolation(synthProductionDeps(bad.body)); why == "" {
 			t.Fatalf("the retry-free wall must reject %q; it accepted it", bad.name)
@@ -215,9 +233,9 @@ func retryFreeLimitsViolation(src string) string {
 			"at its new home rather than deleting it: it is the only gate connecting the live tier's " +
 			"client to the retry-free (and therefore redirect-free) shape"
 	}
-	limitsExpr := configLimitsExpr(fn, pkg)
-	if limitsExpr == nil {
-		return "no upstreamclient.Config literal with a Limits field was found"
+	limitsExpr, why := newCallLimitsExpr(fn, pkg)
+	if why != "" {
+		return why
 	}
 	ident, ok := limitsExpr.(*ast.Ident)
 	if !ok {
@@ -234,6 +252,10 @@ func retryFreeLimitsViolation(src string) string {
 	}
 	if !isCallTo(bindings[0], pkg, retryFreeLimitsFunc) {
 		return "the Limits identifier " + ident.Name + " is not bound by " + pkg + "." + retryFreeLimitsFunc
+	}
+	if addressIsTaken(fn, ident.Name) {
+		return "the address of the Limits identifier " + ident.Name + " is taken, so its value can be " +
+			"replaced through an alias without rebinding it"
 	}
 	return ""
 }
@@ -262,37 +284,79 @@ func findFunc(f *ast.File, name string) *ast.FuncDecl {
 	return nil
 }
 
-// configLimitsExpr returns the expression assigned to the Limits field of the first
-// <pkg>.Config composite literal in fn.
-func configLimitsExpr(fn *ast.FuncDecl, pkg string) (out ast.Expr) {
+// newCallLimitsExpr returns the expression assigned to the Limits field of the <pkg>.Config
+// literal that is actually passed to <pkg>.New — NOT merely the first Config literal in the
+// function.
+//
+// Taking the first literal was a bypass, found by probing this predicate rather than by review: a
+// decoy `_ = upstreamclient.Config{Limits: lim}` earlier in the body satisfied the check while the
+// literal actually handed to New carried weak limits. The rule this enforces is the same one that
+// motivated the whole gate — follow the value that is USED.
+func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (ast.Expr, string) {
+	var calls []*ast.CallExpr
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if out != nil {
-			return false
-		}
-		lit, ok := n.(*ast.CompositeLit)
+		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		sel, ok := lit.Type.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Config" {
-			return true
-		}
-		if x, ok := sel.X.(*ast.Ident); !ok || x.Name != pkg {
-			return true
-		}
-		for _, elt := range lit.Elts {
-			kv, ok := elt.(*ast.KeyValueExpr)
-			if !ok {
-				continue
-			}
-			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Limits" {
-				out = kv.Value
-				return false
-			}
+		if isCallExprTo(call, pkg, "New") {
+			calls = append(calls, call)
 		}
 		return true
 	})
-	return out
+	if len(calls) == 0 {
+		return nil, "no call to " + pkg + ".New was found"
+	}
+	if len(calls) > 1 {
+		return nil, "more than one call to " + pkg + ".New; which one builds the live client is ambiguous"
+	}
+	if len(calls[0].Args) == 0 {
+		return nil, pkg + ".New is called with no arguments"
+	}
+	lit, ok := calls[0].Args[0].(*ast.CompositeLit)
+	if !ok {
+		return nil, "the Config passed to " + pkg + ".New is not a literal, so the Limits it carries " +
+			"cannot be followed; build it inline at the call"
+	}
+	sel, ok := lit.Type.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Config" {
+		return nil, "the first argument to " + pkg + ".New is not a " + pkg + ".Config literal"
+	}
+	if x, ok := sel.X.(*ast.Ident); !ok || x.Name != pkg {
+		return nil, "the Config literal is not " + pkg + ".Config"
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Limits" {
+			return kv.Value, ""
+		}
+	}
+	return nil, "the Config passed to " + pkg + ".New sets no Limits field"
+}
+
+// addressIsTaken reports whether &name appears anywhere in fn.
+//
+// Once a variable's address escapes, its value can be replaced through the alias (`*p = weak()`)
+// by a statement this analysis does not see as a rebinding — measured as a real bypass. Rather
+// than chase aliases, the gate refuses: an address-taken limits variable is not followable, and
+// fail-closed is the right direction for a wall.
+func addressIsTaken(fn *ast.FuncDecl, name string) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		u, ok := n.(*ast.UnaryExpr)
+		if !ok || u.Op != token.AND {
+			return true
+		}
+		if id, ok := u.X.(*ast.Ident); ok && id.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // bindingsOf returns every right-hand side that binds name in fn (:= and = alike), so a rebinding
@@ -326,6 +390,10 @@ func isCallTo(e ast.Expr, pkg, fn string) bool {
 	if !ok {
 		return false
 	}
+	return isCallExprTo(call, pkg, fn)
+}
+
+func isCallExprTo(call *ast.CallExpr, pkg, fn string) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != fn {
 		return false
