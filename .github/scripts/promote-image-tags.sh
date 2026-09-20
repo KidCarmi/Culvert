@@ -33,8 +33,31 @@
 # tag was absent, or pointed at the main run's digest rather than the one this
 # release's catalog pins (Codex review, PR #1441).
 #
+# ── An immutable tag is WRITE-ONCE ───────────────────────────────────────────
+# "Always promoted" is not the same as "repointed on every run". This image
+# build is NOT reproducible over time — the Dockerfile rides a floating
+# `alpine:3.24`, runs `apk upgrade`, and downloads a GeoIP database whose URL
+# embeds `$(date +%Y-%m)`, so it changes every calendar month — so re-running an
+# already-published tag's workflow produces a DIFFERENT digest for the same
+# version. Repointing `X.Y.Z` at it would serve different bytes under a released
+# version while that release's published catalog still pins the old digest
+# (Codex review, PR #1441).
+#
+# So an immutable target is promoted only when it is ABSENT, or already resolves
+# to exactly this digest (an idempotent re-run). Present-at-a-different-digest
+# is a REFUSAL, not an overwrite: the correct answer to "this version's bytes
+# changed" is a new version, never a quiet substitution under the old one. This
+# is safe to enforce because the tag run is now the ONLY writer of the exact
+# aliases — the main path stopped promoting them.
+#
 # ── Re-run safety ────────────────────────────────────────────────────────────
-# The channel's owner is the tip of the promoting ref:
+# The channel's owner is the tip of the promoting ref. On the TAG path the tip
+# is a TAG IDENTITY, not a commit: two version tags can name the same commit
+# (a re-tag, or a second tag cut on an already-tagged commit), and comparing
+# only SHAs then lets the LOWER tag believe it owns the channels and roll `X.Y`
+# / `X` back to itself (Codex review, PR #1441). CHANNEL_TIP_TAG/RELEASE_TAG
+# carry that identity; the commit comparison remains the main path's rule and
+# the tag path's fallback for classifying superseded vs divergent.
 #
 #   CHANNEL_TIP == release SHA   → promote IMMUTABLE + FLOATING.
 #   release SHA is an ANCESTOR of CHANNEL_TIP
@@ -65,6 +88,10 @@ CANDIDATE="${3:?candidate tag required}"
 
 RELEASE_SHA="${RELEASE_SHA:?RELEASE_SHA not set}"
 CHANNEL_TIP="${CHANNEL_TIP:?CHANNEL_TIP not set}"
+# Tag identities. Set on the tag path only; empty on the main path, where the
+# commit comparison is the whole rule.
+RELEASE_TAG="${RELEASE_TAG:-}"
+CHANNEL_TIP_TAG="${CHANNEL_TIP_TAG:-}"
 # Space-separated; either may be empty, but not both.
 read -r -a IMMUTABLE <<< "${IMMUTABLE_TAGS:-}"
 read -r -a FLOATING <<< "${FLOATING_TAGS:-}"
@@ -104,24 +131,66 @@ fi
 # ── 3. supersession verdict ──────────────────────────────────────────────────
 TARGETS=("${IMMUTABLE[@]}")
 SUPERSEDED=0
-if [ "$RELEASE_SHA" = "$CHANNEL_TIP" ]; then
-  echo "promotion owner: ${RELEASE_SHA} is the channel tip."
+
+# owns_channels: on the tag path the tip is a TAG IDENTITY — two tags can share
+# a commit, and then the SHA comparison alone would hand ownership to both.
+owns_channels() {
+  if [ -n "$RELEASE_TAG" ] && [ -n "$CHANNEL_TIP_TAG" ]; then
+    [ "$RELEASE_TAG" = "$CHANNEL_TIP_TAG" ]
+    return
+  fi
+  [ "$RELEASE_SHA" = "$CHANNEL_TIP" ]
+}
+
+if owns_channels; then
+  echo "promotion owner: ${RELEASE_TAG:-$RELEASE_SHA} is the channel tip."
   TARGETS+=("${FLOATING[@]}")
-elif "$GIT_BIN" merge-base --is-ancestor "$RELEASE_SHA" "$CHANNEL_TIP" 2>/dev/null; then
+elif [ "$RELEASE_SHA" = "$CHANNEL_TIP" ] || "$GIT_BIN" merge-base --is-ancestor "$RELEASE_SHA" "$CHANNEL_TIP" 2>/dev/null; then
+  # Superseded: either an ancestor commit, or the SAME commit carrying a higher
+  # tag. Both mean a newer release owns the moving channels.
   SUPERSEDED=1
-  echo "::notice::${RELEASE_SHA} is superseded by channel tip ${CHANNEL_TIP} — a newer run owns the moving channels (${FLOATING[*]:-none}); they are NOT moved."
+  echo "::notice::${RELEASE_TAG:-$RELEASE_SHA} is superseded by channel tip ${CHANNEL_TIP_TAG:-$CHANNEL_TIP} — a newer release owns the moving channels (${FLOATING[*]:-none}); they are NOT moved."
 else
   echo "::error::${RELEASE_SHA} is neither the channel tip ${CHANNEL_TIP} nor an ancestor of it (divergent history / force-push) — refusing to promote"
   exit 1
 fi
 
+# ── immutable targets are WRITE-ONCE ─────────────────────────────────────────
+KEEP=()
+for t in "${TARGETS[@]}"; do
+  [ -n "$t" ] || continue
+  is_immutable=0
+  for i in "${IMMUTABLE[@]}"; do [ "$i" = "$t" ] && is_immutable=1; done
+  if [ "$is_immutable" -eq 0 ]; then
+    KEEP+=("$t")
+    continue
+  fi
+  if EXISTING="$("$DOCKER_BIN" buildx imagetools inspect "${IMAGE}:${t}" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+    EXISTING="$(printf '%s' "$EXISTING" | tr -d '[:space:]')"
+    if [ "$EXISTING" = "$DIGEST" ]; then
+      echo "::notice::${IMAGE}:${t} already resolves to ${DIGEST} — idempotent re-run, nothing to move."
+      continue
+    fi
+    echo "::error::${IMAGE}:${t} is ALREADY PUBLISHED at ${EXISTING}, and this run built ${DIGEST}."
+    echo "::error::An exact version tag is write-once. This image build is not reproducible over time"
+    echo "::error::(floating base image, apk upgrade, month-keyed GeoIP download), so a re-run legitimately"
+    echo "::error::produces different bytes — and the published catalog for this release still pins ${EXISTING}."
+    echo "::error::Refusing to repoint a released version. If these bytes must ship, cut a new version."
+    exit 1
+  fi
+  KEEP+=("$t")
+done
+TARGETS=("${KEEP[@]}")
+
 if [ "${#TARGETS[@]}" -eq 0 ]; then
-  # Superseded with no immutable targets: the main path, whose computed version
-  # is speculative. Nothing to do, and that is the correct outcome.
-  echo "::notice::nothing to promote (superseded, and this path declares no immutable targets)."
-  summary "### Image promotion — SKIPPED"
+  # Two ways to land here, both correct and both no-ops: superseded with no
+  # immutable targets (the main path, whose computed version is speculative), or
+  # every immutable target already resolving to this digest (an idempotent
+  # re-run).
+  echo "::notice::nothing to promote (superseded with no immutable targets, or every target already correct)."
+  summary "### Image promotion — nothing to do"
   summary ""
-  summary "\`${RELEASE_SHA}\` is an ancestor of the channel tip \`${CHANNEL_TIP}\`; a newer run owns \`${FLOATING[*]:-the channels}\`. Nothing was promoted."
+  summary "\`${RELEASE_TAG:-$RELEASE_SHA}\` promoted nothing: either a newer release owns \`${FLOATING[*]:-the channels}\`, or every exact tag already resolves to \`${DIGEST}\`."
   exit 0
 fi
 

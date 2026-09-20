@@ -67,9 +67,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   with `make_latest: legacy` and GitHub arbitrates Latest atomically, which
   removes the race rather than narrowing it.
 
+  A fourth round closed the last two. An exact version tag is now WRITE-ONCE:
+  this image build is not reproducible over time (floating `alpine:3.24`, `apk
+  upgrade`, and a GeoIP URL embedding `$(date +%Y-%m)`), so re-running a
+  published tag's workflow builds different bytes, and repointing `X.Y.Z` at
+  them would serve a released version content its own published catalog does
+  not pin — promotion now refuses unless the tag is absent or already at this
+  digest, and says to cut a new version instead. And channel ownership on the
+  tag path compares TAG IDENTITY, not just the commit: two version tags can
+  name the same commit, which let the lower one believe it owned `X.Y`/`X` and
+  roll them back to itself.
+
   Pinned by `release_publication_gating_test.go` (12 structural walls over
   `ci.yml` and the manifest, each verified failing against the pre-fix tree)
-  and `.github/scripts/test/release-gating-cases.sh` (36 behavioural cases
+  and `.github/scripts/test/release-gating-cases.sh` (41 behavioural cases
   against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
   Signing identities are unchanged: cosign keyless SANs are per workflow FILE
   and ref, and both new jobs live in `ci.yml`. See

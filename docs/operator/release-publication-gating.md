@@ -129,7 +129,7 @@ Targets come in two kinds, and **only one of them can be superseded**:
 
 | kind | tags | rule |
 | --- | --- | --- |
-| **immutable** | the exact version, `X.Y.Z` **and** `vX.Y.Z` | names THIS release and nothing else. Promoting it is never a rollback, so it is **always** promoted — and both aliases move together, from one digest. |
+| **immutable** | the exact version, `X.Y.Z` **and** `vX.Y.Z` | names THIS release and nothing else, so it is never deferred to a newer run — and both aliases move together, from one digest. **Write-once**: promoted when absent or already at this digest, refused when it already points somewhere else. |
 | **floating** | `latest`, `main`, `X.Y`, `X` | moving channels naming "the current thing". An older run must never roll them backwards. |
 
 Which path owns which:
@@ -161,6 +161,26 @@ cancels the pending one, which fails the job, skips `publish-release` and leaves
 that release a draft. Fail-closed and re-runnable — and strictly better than a
 silently rolled-back public channel.
 
+### Write-once, and why
+
+"Always promoted" is not "repointed on every run". **This image build is not
+reproducible over time** — the Dockerfile rides a floating `alpine:3.24`, runs
+`apk upgrade`, and downloads a GeoIP database whose URL embeds
+`$(date +%Y-%m)` — so re-running an already-published tag's workflow produces a
+*different digest for the same version*. Repointing `X.Y.Z` at it would serve
+different bytes under a released version while that release's published catalog
+still pins the old digest.
+
+| state of `X.Y.Z` in the registry | outcome |
+| --- | --- |
+| absent | promote |
+| already this digest | no-op, success (idempotent re-run) |
+| a **different** digest | **refuse** — cut a new version instead |
+
+The refusal names the remedy: if those bytes must ship, they ship as a new
+version, never as a quiet substitution under the old one. This is enforceable
+only because the tag run is now the sole writer of the exact aliases.
+
 ### Re-run rule
 
 | situation | immutable (`X.Y.Z`) | floating (`latest`, `X.Y`, `X`) |
@@ -169,8 +189,12 @@ silently rolled-back public channel.
 | release SHA is an **ancestor** of the tip | **promote** — a version tag cannot be superseded | **skip**, exit 0 — a newer run owns them. Normal on a busy `main`, where the next merge lands during this run's build+gate window. |
 | anything else (divergent, force-push) | **refuse**, exit 1 | **refuse**, exit 1 |
 
-Channel tip = `origin/main`'s head on the main path, the highest `v*` tag's
-commit on the tag path.
+Channel tip = `origin/main`'s head on the main path; on the tag path it is the
+highest `v*` tag's **name**, not just its commit. Two version tags can name the
+same commit (a re-tag, or a second tag cut on an already-tagged commit), and a
+SHA-only comparison then lets the *lower* tag believe it owns the channels and
+roll `X.Y`/`X` back to itself. The commit comparison remains the main path's
+rule and the tag path's fallback for telling superseded from divergent.
 
 > **Why the split exists.** The first shipped shape gated ONE target list on
 > supersession, so a tag run overtaken by a newer tag skipped *everything* —
@@ -289,6 +313,12 @@ action.
 `v*` tag already exists. GitHub decides this, not the workflow; the release is
 public and complete, and only the Latest pointer stays with the newer tag. The
 step summary prints which tag GitHub resolved Latest to.
+
+**`promote-image` refused: "is ALREADY PUBLISHED at … and this run built …"** —
+you re-ran a tag whose image was already promoted, and the rebuild produced
+different bytes (expected; the build is not reproducible over time). The
+published version keeps its original digest. If the new bytes must ship, cut a
+new version. Do not delete the tag to force it through.
 
 **`promote-image` queued for a long time, or cancelled** — it holds a
 repository-wide promotion lock so two tag releases cannot move the same channels

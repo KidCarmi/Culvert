@@ -303,6 +303,64 @@ if grep -q -- "--tag ghcr.io/x:latest" "$WORK/creates"; then
   bad "a superseded run never moves a floating channel" "it moved latest backwards"
 else ok "a superseded run never moves a floating channel"; fi
 
+# ── immutable tags are WRITE-ONCE ───────────────────────────────────────────
+# The image build is not reproducible over time (floating base, apk upgrade,
+# month-keyed GeoIP URL), so a re-run of a published tag legitimately builds a
+# different digest. Repointing X.Y.Z at it would serve different bytes under a
+# released version while its published catalog still pins the old digest.
+: > "$WORK/anc"
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n1.2.3|%s\n' "$DIG" "$DIG" "$DIG2" > "$WORK/tags"
+: > "$WORK/creates"
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
+  bad "a published exact tag is never repointed to a rebuild" "it overwrote an already-published version tag"
+else
+  [ -s "$WORK/creates" ] && bad "a published exact tag is never repointed to a rebuild" "it promoted anyway" \
+                         || ok "a published exact tag is never repointed to a rebuild"
+fi
+
+# Same digest ⇒ idempotent re-run: succeed, promote nothing new for that tag.
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n1.2.3|%s\n' "$DIG" "$DIG" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
+   && ! grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates" \
+   && grep -q -- "--tag ghcr.io/x:latest" "$WORK/creates"; then
+  ok "an exact tag already at this digest is a clean no-op, floating still moves"
+else bad "an exact tag already at this digest is a clean no-op, floating still moves" "creates=$(cat "$WORK/creates")"; fi
+
+# An ABSENT exact tag is promoted normally (the control — a write-once rule that
+# refused everything would pass the case above while shipping no releases).
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
+   && grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates"; then
+  ok "an unpublished exact tag is still promoted"
+else bad "an unpublished exact tag is still promoted" "creates=$(cat "$WORK/creates")"; fi
+
+# ── two tags on one commit: ownership is TAG identity, not commit ────────────
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if RELEASE_SHA=samesha CHANNEL_TIP=samesha RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.4 \
+     IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="1.2 1" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
+  if grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates" \
+     && ! grep -q -- "--tag ghcr.io/x:1.2 " "$WORK/creates"; then
+    ok "a lower tag sharing the tip's commit does not own the floating channels"
+  else bad "a lower tag sharing the tip's commit does not own the floating channels" "creates=$(cat "$WORK/creates")"; fi
+else bad "a lower tag sharing the tip's commit does not own the floating channels" "it failed instead of promoting its own version"; fi
+
+: > "$WORK/creates"
+if RELEASE_SHA=samesha CHANNEL_TIP=samesha RELEASE_TAG=v1.2.4 CHANNEL_TIP_TAG=v1.2.4 \
+     IMMUTABLE_TAGS="1.2.4" FLOATING_TAGS="1.2 1" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
+   && grep -q -- "--tag ghcr.io/x:1.2 " "$WORK/creates"; then
+  ok "the highest tag does own the floating channels"
+else bad "the highest tag does own the floating channels" "creates=$(cat "$WORK/creates")"; fi
+
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"
+
 # Divergent history (not the tip, not an ancestor) must REFUSE everything,
 # immutable targets included — we cannot tell which release this even is.
 : > "$WORK/creates"; : > "$WORK/anc"

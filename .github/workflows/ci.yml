@@ -715,6 +715,10 @@ jobs:
             HIGHEST="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
             test -n "$HIGHEST" || { echo "::error::no v* tag visible — refusing"; exit 1; }
             TIP="$(git rev-list -n1 "$HIGHEST")"
+            # The tag NAME, not just its commit: two version tags can name the
+            # same commit, and a SHA-only comparison then lets the lower tag
+            # believe it owns the moving channels.
+            echo "tip_tag=$HIGHEST" >> "$GITHUB_OUTPUT"
             echo "highest v* tag: $HIGHEST"
           fi
           echo "tip=$TIP" >> "$GITHUB_OUTPUT"
@@ -735,6 +739,9 @@ jobs:
         env:
           RELEASE_SHA: ${{ github.sha }}
           CHANNEL_TIP: ${{ steps.tip.outputs.tip }}
+          # Empty on the main path; the highest v* tag name on the tag path.
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          CHANNEL_TIP_TAG: ${{ steps.tip.outputs.tip_tag }}
           IMAGE: ${{ needs.docker.outputs.image }}
           DIGEST: ${{ needs.docker.outputs.proxy_digest }}
           CANDIDATE: ${{ needs.docker.outputs.candidate_tag }}
@@ -744,11 +751,14 @@ jobs:
           set -euo pipefail
           test -n "${IMMUTABLE_TAGS}${FLOATING_TAGS}" || { echo "::error::no promote tags resolved for ${GITHUB_REF} — refusing"; exit 1; }
           .github/scripts/promote-image-tags.sh "$IMAGE" "$DIGEST" "$CANDIDATE"
-          # Which tags actually moved — the immutable set always, the floating
-          # set only when this SHA still owns the channels. The signing step
-          # below signs exactly what was promoted.
+          # Sign exactly what now points at this digest. The immutable set does
+          # once the script returns (it either moved it or confirmed it already
+          # resolved here); the floating set only when this release owns the
+          # channels — by TAG identity on the tag path, by commit on main.
           SIGNED="$IMMUTABLE_TAGS"
-          if [ "$RELEASE_SHA" = "$CHANNEL_TIP" ]; then
+          if [ -n "$RELEASE_TAG" ] && [ -n "$CHANNEL_TIP_TAG" ]; then
+            [ "$RELEASE_TAG" = "$CHANNEL_TIP_TAG" ] && SIGNED="$SIGNED $FLOATING_TAGS"
+          elif [ "$RELEASE_SHA" = "$CHANNEL_TIP" ]; then
             SIGNED="$SIGNED $FLOATING_TAGS"
           fi
           echo "signed_tags=$(echo "$SIGNED" | tr -s ' ' | sed 's/^ //; s/ $//')" >> "$GITHUB_OUTPUT"
