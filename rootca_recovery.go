@@ -115,10 +115,11 @@ func (s *caLoadRecoveryState) update(mutate func(*caLoadRecoveryState)) {
 
 func (s *caLoadRecoveryState) snapshotLocked() caLoadRecoverySnapshot {
 	return caLoadRecoverySnapshot{
-		Attempts:  s.attempts,
-		Recovered: s.recovered,
-		GaveUp:    s.gaveUp,
-		LastErr:   s.lastErr,
+		LoadFailure: sslInspectionLoadFailure(),
+		Attempts:    s.attempts,
+		Recovered:   s.recovered,
+		GaveUp:      s.gaveUp,
+		LastErr:     s.lastErr,
 	}
 }
 
@@ -224,11 +225,19 @@ func noteSSLInspectionRecoveredWith(how string, also func(*caLoadRecoveryState))
 	if sslInspectionLoadFailure() == "" {
 		return
 	}
-	sslInspectionLoadError.Store("")
+	// The latch is cleared INSIDE the same locked transition as the record.
+	// Cleared before it, a reader that pairs the two — /api/ca/status and the
+	// metrics writer both do — could read an empty latch and then, before the
+	// update landed, the previous attempt count: `loadFailed: false` beside an
+	// attempt count one short (Codex review, PR #1440). Hot readers that need
+	// only the latch (/healthz, /readyz, telemetry) keep the lock-free atomic;
+	// readers that pair it with the record take caLoadRecoveryStatus, whose
+	// snapshot reads the latch under the same lock.
 	caLoadRecovery.update(func(s *caLoadRecoveryState) {
 		if also != nil {
 			also(s)
 		}
+		sslInspectionLoadError.Store("")
 		s.recovered = true
 		s.gaveUp = false
 		s.lastErr = ""
@@ -369,11 +378,17 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 }
 
 // caLoadRecoverySnapshot is a consistent read for the admin surfaces.
+//
+// LoadFailure is the sslInspectionLoadError latch read under the record's lock.
+// The latch's only runtime writer (the recovery clear) runs inside that lock,
+// so a surface that reports the latch BESIDE the attempt count must take it
+// from here rather than from sslInspectionLoadFailure() in a separate read.
 type caLoadRecoverySnapshot struct {
-	Attempts  int64
-	Recovered bool
-	GaveUp    bool
-	LastErr   string
+	LoadFailure string
+	Attempts    int64
+	Recovered   bool
+	GaveUp      bool
+	LastErr     string
 }
 
 func caLoadRecoveryStatus() caLoadRecoverySnapshot {

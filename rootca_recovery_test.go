@@ -494,6 +494,10 @@ func TestChaos50_ManualRecoveryIsNotOverwrittenByRetry(t *testing.T) {
 //   - a transition that counts a FAILED attempt carries that attempt's error in
 //     the same snapshot, i.e. the count never advances with the previous
 //     attempt's error still in place (count-before shape);
+//   - the sslInspectionLoadError latch agrees with Recovered in every snapshot
+//     (a control: the observer sees post-transition state, so the ORDERING of
+//     the latch clear against the lock is pinned separately by
+//     TestChaos50_LatchClearsInsideTheRecordTransition);
 //   - the count advances by at most one per transition and never regresses.
 func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 	swapInspectionCA(t)
@@ -532,6 +536,12 @@ func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 		}
 		if rec.Recovered && rec.Attempts < 1 {
 			violations = append(violations, fmt.Sprintf("Recovered with no attempt: %+v", rec))
+		}
+		// The latch is part of the same transition: in this campaign it starts
+		// failed, stays failed through every failed attempt, and clears in the
+		// SAME snapshot that latches Recovered — never one transition apart.
+		if rec.Recovered != (rec.LoadFailure == "") {
+			violations = append(violations, fmt.Sprintf("latch and record disagree: %+v", rec))
 		}
 		if rec.Recovered && !sawRecovered {
 			sawRecovered, recoveredAt = true, rec.Attempts
@@ -585,5 +595,62 @@ func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 	// And the public reader agrees with what the observer saw.
 	if !final.Recovered || final.Attempts != recoveredAt {
 		t.Errorf("caLoadRecoveryStatus() = %+v, want Recovered with Attempts=%d", final, recoveredAt)
+	}
+}
+
+// TestChaos50_LatchClearsInsideTheRecordTransition pins the OTHER half of the
+// consistency claim: the sslInspectionLoadError latch is cleared inside the
+// record's locked transition, never before it. /api/ca/status and the metrics
+// writer read the latch beside the attempt count through caLoadRecoveryStatus,
+// and that read is consistent only if no writer can move the latch while the
+// record's lock is held.
+//
+// The gate HOLDS caLoadRecovery.mu and triggers a recovery on another
+// goroutine: on a correct build the latch cannot clear until the lock is
+// released, so the assertion below is invariant-based and cannot flake; on the
+// pre-fix shape the goroutine clears the latch before contending for the lock,
+// which the bounded watch observes (verified failing 3/3).
+func TestChaos50_LatchClearsInsideTheRecordTransition(t *testing.T) {
+	swapInspectionCA(t)
+	captureStartupAlerts(t)
+
+	noteSSLInspectionUnavailable("/data/ca.bundle", os.ErrPermission)
+	if sslInspectionLoadFailure() == "" {
+		t.Fatal("precondition: the failure must be recorded")
+	}
+	if err := certMgr.InitCA(); err != nil {
+		t.Fatalf("InitCA: %v", err)
+	}
+
+	caLoadRecovery.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		noteSSLInspectionRecovered("test recovery under a held record lock")
+	}()
+	// While the record lock is held, the latch must not move — the paired
+	// reader's whole guarantee rests on this.
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if sslInspectionLoadFailure() == "" {
+			caLoadRecovery.mu.Unlock()
+			<-done
+			t.Fatal("latch cleared while caLoadRecovery.mu was held: the clear runs outside the record transition")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	caLoadRecovery.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery did not complete after the lock was released")
+	}
+	rec := caLoadRecoveryStatus()
+	if rec.LoadFailure != "" || !rec.Recovered {
+		t.Errorf("after release: %+v, want an empty latch and Recovered", rec)
+	}
+	if sslInspectionLoadFailure() != "" {
+		t.Error("the lock-free latch reader disagrees with the snapshot")
 	}
 }
