@@ -3635,6 +3635,41 @@ gate around the mutation. The campaign was then **re-measured end to end against
 rather than having the two rows edited in — the §25e lesson about a campaign reporting confident
 output about a tree it did not restore.
 
+### A vacuous gate found while verifying invariant (2), and closed
+
+The claim that nothing unbounded sits between the last freshness re-ask and the first request byte
+rests on there being exactly **one physical send**. `PreSend` is re-asked per leg and the TLS
+dialer site reaches every leg because each leg builds its own transport — but a **redirect** to the
+SAME approved host can reuse a pooled connection, so it would NOT re-enter the dialer, and the peer
+chooses when its `3xx` arrives. `upstreamclient`'s own limits.go already records the principle
+(*"REDIRECTS ARE A RETRY BY ANOTHER NAME"*: a 307/308 replays the POST body carrying the same
+`AttemptID`, so no witness could tell the two invocations apart) and `RetryFreeLimits` therefore
+FORCES `MaxRedirects = 0` rather than merely validating it.
+
+So the invariant holds — **but nothing pinned that the live tier uses that constructor.**
+`TestCanaryPath_ProductionUpstreamClientIsRetryFree` asserts that `RetryFreeLimits` returns
+retry-free limits and that `newProductionUpstreamClient` constructs without error; neither reaches
+the property its own doc comment names. **Measured: swapping `RetryFreeLimits` for `NewLimits`
+inside the production constructor reintroduces retries AND redirects, and that gate still passes —
+as does every other test in the canary and peer-freshness families.** The HTTPS E2E cannot catch it
+either: `realUpstreamFor` rebuilds the shape locally with its own `RetryFreeLimits` call, because
+`DefaultGatewayPolicy` refuses loopback, so the E2E proves properties of a REPLICA of the
+production client rather than of the production constructor.
+
+`TestCanaryPath_ProductionUpstreamClientIsBuiltFromRetryFreeLimits` closes it structurally —
+behaviour cannot reach this constructor, for the loopback reason above — and carries its own
+control (`..._RetryFreeWallIsNotVacuous`) requiring the predicate to REJECT each way the
+constructor could stop being retry-free, so a matcher typo or an `upstreamclient` rename fails the
+build rather than silently retiring the gate. Each link of the chain is now pinned somewhere: the
+production constructor takes its limits from `RetryFreeLimits` (this wall); `RetryFreeLimits`
+forces `MaxRedirects = 0` and `RetryDisabled` (`internal/mcp/upstreamclient/limits.go` + the gate
+above it); and the client honours both (`retryfree_test.go` and the HTTPS E2E).
+
+**This is a blocker-#6 gate, repaired here because blocker #11's runtime half depends on it.** It
+was found by verifying this PR's own invariant against the code rather than by review — the same
+class as RM5 and RM13, one layer further out: a gate whose doc comment states the requirement and
+whose assertions do not reach it.
+
 ## §26 Final verdict
 
 ### `FIRST CONTROLLED CANARY REVIEW: BLOCKED — NO SAFE FIRST CANARY TARGET`
