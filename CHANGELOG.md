@@ -225,6 +225,15 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- The root-CA recovery record (CHAOS-50) could report a recovery with the
+  wrong attempt count. A successful attempt set `recovered` from inside the
+  attempt while the campaign loop counted it only after the attempt returned,
+  so a reader of `GET /api/ca/status` or `/metrics` landing between the two
+  writes saw `loadRecoveryAttempts` one short of the attempt that recovered it
+  — including zero. Each attempt is now recorded as one locked transition
+  carrying its count together with its outcome (error or recovered), so no
+  snapshot can pair one attempt's count with another attempt's result. No
+  change to the retry schedule, the never-mint rule or the log lines.
 - An admin UI listener failure no longer terminates the proxy data plane
   (CHAOS-57). `startUI`'s listen goroutine called `logFatalf`, so an occupied
   admin port or an unreadable `-tls-cert`/`-tls-key` pair exited the whole
