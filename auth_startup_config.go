@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // auth_startup_config.go — resolved config for the auth startup
 // slice (P4.4 / S1). Covers the caller-side mutation of the `cfg`
 // singleton that `initAuth` performs at startup:
@@ -47,11 +49,23 @@ type authStartupConfig struct {
 // resolver does not consult *FileConfig (pac convention).
 //
 // Pure; deterministic; safe on all-zero inputs.
+//
+// AuthUser is trimmed of leading/trailing whitespace before it is stored.
+// Every other local-admin-credential entry point (apiSetupComplete's web
+// setup wizard) already trims this exact field; this one — the CLI -user
+// flag / config.yaml auth.user merge — did not, and a YAML literal block
+// scalar (`user: |` instead of `user: admin`) always carries a trailing
+// "\n" per the YAML spec, a common habit for a templated or copy-pasted
+// value. Left untrimmed, the stored username becomes "admin\n" verbatim —
+// permanently unusable, since nothing typed at a login prompt can produce a
+// trailing newline — with no error at startup and no indication of the
+// cause. AuthPass is deliberately NOT trimmed: unlike a username, a
+// password may legitimately contain leading/trailing whitespace.
 func resolveAuthStartupConfig(proxyPort, uiPort int, authUser, authPass, uiUsersFile string) authStartupConfig {
 	return authStartupConfig{
 		ProxyPort:   proxyPort,
 		UIPort:      uiPort,
-		AuthUser:    authUser,
+		AuthUser:    strings.TrimSpace(authUser),
 		AuthPass:    authPass,
 		UIUsersFile: uiUsersFile,
 	}

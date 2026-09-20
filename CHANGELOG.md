@@ -200,6 +200,16 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- A `config.yaml` `auth.user` (or CLI `-user`) value written with a YAML
+  literal block scalar (`user: |` instead of `user: admin`) silently
+  appended a trailing newline to the stored admin username. Every other
+  local-admin-credential entry point (the web setup wizard) already trims
+  this field; the CLI/config.yaml startup path did not, so the operator was
+  permanently locked out of the admin UI — nothing typed at a login prompt
+  can produce a trailing newline — with no error at startup and no
+  indication of the cause. `resolveAuthStartupConfig` now trims the
+  resolved username (never the password, which may legitimately carry
+  whitespace) before it reaches `cfg.SetAuth`.
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,
