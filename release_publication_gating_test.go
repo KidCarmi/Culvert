@@ -64,11 +64,14 @@ func jobNeeds(j wfJob) map[string]bool {
 
 // stepBody is a step's run text plus its `uses`, so a single predicate can ask
 // "does this step do X" whether X is a script call or an action.
-func stepBody(st wfStep) string { return st.Run + "\n" + st.Uses }
+func stepBody(st *wfStep) string { return st.Run + "\n" + st.Uses }
 
+// jobMentions reports whether any step of j carries needle in its run body or
+// its `uses`. Index-based range: wfStep is 144 bytes and this walks every step
+// of every job (CLAUDE.md's rangeValCopy rule).
 func jobMentions(j wfJob, needle string) bool {
-	for _, st := range j.Steps {
-		if strings.Contains(stepBody(st), needle) {
+	for i := range j.Steps {
+		if strings.Contains(stepBody(&j.Steps[i]), needle) {
 			return true
 		}
 	}
@@ -153,9 +156,9 @@ func TestPublicationGating_DockerPushesNoReleaseChannel(t *testing.T) {
 
 	// Belt and braces: no step in the build job may repoint tags itself. The
 	// removed "Apply version tag" step did exactly this.
-	for _, st := range docker.Steps {
-		if strings.Contains(st.Run, "imagetools create") {
-			t.Errorf("docker step %q runs `imagetools create` — tag promotion must live in promote-image, behind the predicate", st.Name)
+	for i := range docker.Steps {
+		if strings.Contains(docker.Steps[i].Run, "imagetools create") {
+			t.Errorf("docker step %q runs `imagetools create` — tag promotion must live in promote-image, behind the predicate", docker.Steps[i].Name)
 		}
 	}
 }
@@ -175,8 +178,8 @@ func TestPublicationGating_PromoteImageIsEvidenceGated(t *testing.T) {
 
 	// The predicate must run, and must run BEFORE the promotion.
 	predIdx, promIdx := -1, -1
-	for i, st := range promote.Steps {
-		body := stepBody(st)
+	for i := range promote.Steps {
+		body := stepBody(&promote.Steps[i])
 		if predIdx < 0 && strings.Contains(body, predicateScript) {
 			predIdx = i
 		}
@@ -232,51 +235,73 @@ func TestPublicationGating_EveryPublishingJobAssertsThePredicate(t *testing.T) {
 		}
 	}
 
-	// Not vacuous: no job may reach a public surface without the predicate.
-	// Scan EVERY job for publication verbs and require the predicate alongside,
-	// so a publication path added later cannot omit it the way the main-push
-	// image path did.
-	publishVerbs := []string{
-		"imagetools create", "git push origin", "gh release edit",
-		"gh release upload", "gh release delete-asset", "softprops/action-gh-release",
-	}
-	// Exemptions are DECLARED, not silent — and each must carry the substitute
-	// control named here, asserted below.
-	exempt := map[string]string{
-		"catalog-resign": "re-sign is a freshness-only republish of an ALREADY-RELEASED bundle. " +
-			"Its requirement is cryptographic, not procedural: TestReleaseResignGate verifies the " +
-			"source bundle through the baked Sigstore root + pinned identity BEFORE reading any " +
-			"field (SEC-F1), the dispatch ref must be the latest v* tag (SEC-F2a), and it attaches " +
-			"a NEW versioned asset rather than replacing the original. Requiring the workflow-run " +
-			"predicate here would be strictly worse: the re-signed tag can be months old and its " +
-			"gate runs age out of the Actions retention window, so the predicate would refuse " +
-			"forever and the freshness mechanism would die.",
-	}
-	for name, j := range doc.Jobs {
-		published := ""
-		for _, st := range j.Steps {
-			body := stepBody(st)
-			for _, verb := range publishVerbs {
-				if strings.Contains(body, verb) {
-					published = verb
-				}
+	assertNoUngatedPublisher(t, doc)
+	assertExemptionsKeepTheirSubstituteControls(t, doc)
+}
+
+// publishVerbs are the ways a ci.yml step can reach a public surface. A step
+// matching one of these must sit in a job that calls the predicate.
+var publishVerbs = []string{
+	"imagetools create", "git push origin", "gh release edit",
+	"gh release upload", "gh release delete-asset", "softprops/action-gh-release",
+}
+
+// publicationExemptions are jobs allowed to publish WITHOUT the workflow-run
+// predicate. Each is declared here with the reason, never left implicit, and
+// assertExemptionsKeepTheirSubstituteControls proves the named substitute
+// controls are still in place.
+var publicationExemptions = map[string]string{
+	"catalog-resign": "re-sign is a freshness-only republish of an ALREADY-RELEASED bundle. " +
+		"Its requirement is cryptographic, not procedural: TestReleaseResignGate verifies the " +
+		"source bundle through the baked Sigstore root + pinned identity BEFORE reading any " +
+		"field (SEC-F1), the dispatch ref must be the latest v* tag (SEC-F2a), and it attaches " +
+		"a NEW versioned asset rather than replacing the original. Requiring the workflow-run " +
+		"predicate here would be strictly worse: the re-signed tag can be months old and its " +
+		"gate runs age out of the Actions retention window, so the predicate would refuse " +
+		"forever and the freshness mechanism would die.",
+}
+
+// jobPublishVerb returns the publication verb a job performs, or "".
+func jobPublishVerb(j wfJob) string {
+	found := ""
+	for i := range j.Steps {
+		body := stepBody(&j.Steps[i])
+		for _, verb := range publishVerbs {
+			if strings.Contains(body, verb) {
+				found = verb
 			}
 		}
-		if published == "" {
+	}
+	return found
+}
+
+// assertNoUngatedPublisher is the not-vacuous half: EVERY job is scanned for a
+// publication verb, so a path added later cannot omit the predicate the way the
+// main-push image path did.
+func assertNoUngatedPublisher(t *testing.T, doc wfDoc) {
+	t.Helper()
+	for name := range doc.Jobs {
+		j := doc.Jobs[name]
+		verb := jobPublishVerb(j)
+		if verb == "" {
 			continue
 		}
-		if _, ok := exempt[name]; ok {
+		if _, ok := publicationExemptions[name]; ok {
 			continue
 		}
 		if !jobMentions(j, predicateScript) {
 			t.Errorf("job %q performs a publication (%q) but never calls %s — add the predicate, "+
-				"or declare an exemption with its substitute control in this test", name, published, predicateScript)
+				"or declare an exemption with its substitute control in publicationExemptions", name, verb, predicateScript)
 		}
 	}
+}
 
-	// An exemption that names a job which no longer publishes is stale, and an
-	// exempt job that lost its substitute controls is a hole.
-	for name := range exempt {
+// assertExemptionsKeepTheirSubstituteControls: an exemption naming a job that no
+// longer exists is stale, and an exempt job that lost its substitute controls is
+// a hole.
+func assertExemptionsKeepTheirSubstituteControls(t *testing.T, doc wfDoc) {
+	t.Helper()
+	for name := range publicationExemptions {
 		j, ok := doc.Jobs[name]
 		if !ok {
 			t.Errorf("publication exemption names job %q, which no longer exists in ci.yml", name)
@@ -286,27 +311,36 @@ func TestPublicationGating_EveryPublishingJobAssertsThePredicate(t *testing.T) {
 			t.Errorf("exempt job %q no longer runs its verify-before-read gate (TestReleaseResignGate) — "+
 				"the exemption's stated substitute control is gone", name)
 		}
-		// The latest-v*-tag precondition (SEC-F2a), asserted on the step's
-		// MECHANISM rather than its display name — a step name is not a trust
-		// boundary, the same reason require-gate.sh keys on a workflow path.
-		latestTagGuard := false
-		for _, st := range j.Steps {
-			if strings.Contains(st.Run, `grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'`) &&
-				strings.Contains(st.Run, "refusing to re-sign") {
-				latestTagGuard = true
-			}
+		assertRefusesNonLatestTag(t, name, j)
+		assertNeverPromotes(t, name, j)
+	}
+}
+
+// assertRefusesNonLatestTag pins SEC-F2a on the step's MECHANISM rather than its
+// display name — a step name is not a trust boundary, the same reason
+// require-gate.sh keys on a workflow path.
+func assertRefusesNonLatestTag(t *testing.T, name string, j wfJob) {
+	t.Helper()
+	for i := range j.Steps {
+		run := j.Steps[i].Run
+		if strings.Contains(run, `grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'`) &&
+			strings.Contains(run, "refusing to re-sign") {
+			return
 		}
-		if !latestTagGuard {
-			t.Errorf("exempt job %q no longer refuses a dispatch that is not the latest v* tag (SEC-F2a) — "+
-				"without it a superseded release's freshness could be extended", name)
-		}
-		// It must never touch an image channel or un-draft a release.
-		for _, st := range j.Steps {
-			for _, banned := range []string{"imagetools create", "--draft=false"} {
-				if strings.Contains(st.Run, banned) {
-					t.Errorf("exempt job %q step %q performs %q — the exemption covers republishing a "+
-						"verified catalog bundle, not release promotion", name, st.Name, banned)
-				}
+	}
+	t.Errorf("exempt job %q no longer refuses a dispatch that is not the latest v* tag (SEC-F2a) — "+
+		"without it a superseded release's freshness could be extended", name)
+}
+
+// assertNeverPromotes: the exemption covers republishing a verified catalog
+// bundle, never release promotion.
+func assertNeverPromotes(t *testing.T, name string, j wfJob) {
+	t.Helper()
+	for i := range j.Steps {
+		for _, banned := range []string{"imagetools create", "--draft=false"} {
+			if strings.Contains(j.Steps[i].Run, banned) {
+				t.Errorf("exempt job %q step %q performs %q — the exemption covers republishing a "+
+					"verified catalog bundle, not release promotion", name, j.Steps[i].Name, banned)
 			}
 		}
 	}
@@ -317,15 +351,16 @@ func TestPublicationGating_EveryPublishingJobAssertsThePredicate(t *testing.T) {
 func TestPublicationGating_ReleaseAssetsAreStagedAsDrafts(t *testing.T) {
 	doc := loadWorkflow(t, ciWorkflowPath)
 	seen := 0
-	for name, j := range doc.Jobs {
-		for _, st := range j.Steps {
-			if !strings.Contains(st.Uses, "softprops/action-gh-release") {
+	for name := range doc.Jobs {
+		steps := doc.Jobs[name].Steps
+		for i := range steps {
+			if !strings.Contains(steps[i].Uses, "softprops/action-gh-release") {
 				continue
 			}
 			seen++
-			if st.With.Draft != true {
+			if steps[i].With.Draft != true {
 				t.Errorf("job %q step %q uploads a release asset with draft=%v — it must be draft: true so the release is not public until publish-release",
-					name, st.Name, st.With.Draft)
+					name, steps[i].Name, steps[i].With.Draft)
 			}
 		}
 	}
@@ -353,12 +388,13 @@ func TestPublicationGating_PublishReleaseIsLastAndUnconditionalOnSuccess(t *test
 
 	// Un-drafting must happen in exactly one place, and it must be this job.
 	undraft := 0
-	for name, j := range doc.Jobs {
-		for _, st := range j.Steps {
-			if strings.Contains(st.Run, "--draft=false") {
+	for name := range doc.Jobs {
+		steps := doc.Jobs[name].Steps
+		for i := range steps {
+			if strings.Contains(steps[i].Run, "--draft=false") {
 				undraft++
 				if name != "publish-release" {
-					t.Errorf("job %q step %q publishes the release (--draft=false) — only publish-release may", name, st.Name)
+					t.Errorf("job %q step %q publishes the release (--draft=false) — only publish-release may", name, steps[i].Name)
 				}
 			}
 		}
@@ -513,7 +549,9 @@ func TestReleasePublicationGating_Behaviour(t *testing.T) {
 	if _, err := os.Stat(gatingCasesScript); err != nil {
 		t.Fatalf("%s is missing — the behavioural coverage this test reports is gone", gatingCasesScript)
 	}
-	cmd := exec.Command("bash", gatingCasesScript)
+	// CommandContext, not Command: the harness must die with the test rather
+	// than outlive it (noctx).
+	cmd := exec.CommandContext(t.Context(), "bash", gatingCasesScript)
 	cmd.Env = append(os.Environ(), "GITHUB_STEP_SUMMARY=")
 	out, err := cmd.CombinedOutput()
 	t.Logf("release-gating-cases.sh:\n%s", out)
