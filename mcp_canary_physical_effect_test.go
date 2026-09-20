@@ -334,7 +334,7 @@ func findFunc(f *ast.File, name string) *ast.FuncDecl {
 // decoy `_ = upstreamclient.Config{Limits: lim}` earlier in the body satisfied the check while the
 // literal actually handed to New carried weak limits. The rule this enforces is the same one that
 // motivated the whole gate — follow the value that is USED.
-func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (ast.Expr, string) {
+func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (limitsExpr ast.Expr, why string) {
 	var calls []*ast.CallExpr
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
