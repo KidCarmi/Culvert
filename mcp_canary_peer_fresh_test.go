@@ -529,3 +529,43 @@ func TestExactReviewedTargetFor_MissReturnsTheZeroTarget(t *testing.T) {
 
 // fpOne is an arbitrary non-zero digest; only its distinctness matters here.
 func fpOne() tooltrust.FingerprintDigest { return tooltrust.FingerprintDigest{7, 7, 7} }
+
+// TestPeerFreshProd_TheProductionPrecheckCarriesTheEvidence closes a gap the runtime mutation
+// campaign found (RM13).
+//
+// Every runtime matrix case replaces g.trustPrecheck with a stub, so none of them exercises
+// mcpLiveTrustPrecheck — the production wiring that lifts the peer observation and the registry
+// pin out of the ONE loadTarget snapshot and hands them to the boundary. Zeroing that carrying
+// left all nine runtime cases green: the check still ran, on evidence that was always empty,
+// which would refuse every request in production while the suite reported a working feature.
+//
+// So the wiring is asserted where it is done, against a REAL observed record.
+func TestPeerFreshProd_TheProductionPrecheckCarriesTheEvidence(t *testing.T) {
+	r := newPeerFreshRig(t)
+	r.observe(t)
+
+	rec := r.record(t)
+	if rec.Provenance() != catalog.PeerObserved {
+		t.Fatalf("premise: the refresh must have produced an observation, got %v", rec.Provenance())
+	}
+
+	live := mcpLiveTrustPrecheck(ttTenant, r.serverID, r.toolName, r.fpHex)
+	if !live.Eligible {
+		t.Fatalf("premise: the observed target must be eligible, got %+v", live)
+	}
+	if live.Observed.At.IsZero() || live.Observed.Identity == "" {
+		t.Fatalf("the production precheck must carry the catalog record's peer observation to the "+
+			"boundary; got %+v. Without it the send-boundary check runs on evidence that is "+
+			"always empty — refusing every request in production while every runtime test that "+
+			"stubs the precheck stays green.", live.Observed)
+	}
+	if live.Observed.Identity != string(rec.Observed.Identity) || !live.Observed.At.Equal(rec.Observed.At) {
+		t.Fatalf("the carried evidence must be the RECORD's, not a value assembled on the way: "+
+			"carried %+v, record %+v", live.Observed, rec.Observed)
+	}
+	if live.RegistryPin == "" {
+		t.Fatal("the registry's current pin must be carried too: the verdict requires the observed " +
+			"identity to match BOTH it and the catalog record's identity, and an empty pin would " +
+			"make that second comparison vacuous")
+	}
+}

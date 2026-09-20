@@ -52,6 +52,10 @@ type peerFreshRTRig struct {
 	obsIdent atomic.Value // string
 	regPin   atomic.Value // string
 	eligible atomic.Bool
+	// eligibleAfter, when >= 0, is how many precheck calls report eligible before the target stops
+	// resolving — so drift can be placed AFTER admission rather than before it.
+	eligibleAfter atomic.Int64
+	precheckCalls atomic.Int64
 }
 
 // staleJump is comfortably past the freshness bound, so an expired read is unambiguous.
@@ -65,12 +69,16 @@ func newPeerFreshRTRig(t *testing.T, p *controlledPeer, budget int) *peerFreshRT
 	r.obsIdent.Store(testReviewedTarget().ServerIdentity)
 	r.regPin.Store(testReviewedTarget().ServerIdentity)
 	r.eligible.Store(true)
+	r.eligibleAfter.Store(-1)
 	r.freshReads.Store(-1) // -1 ⇒ the clock never jumps
 
 	r.peerRig = armCanaryWithRealPeerGate(t, p, budget, true, func(g *mcpLiveSideEffectGate) {
 		g.trustPrecheck = func(string, string, string, string) liveTrustPrecheck {
 			base := stubTrustPrecheckObservedAt(time.Unix(0, r.obsNanos.Load()))("", "", "", "")
 			base.Eligible = r.eligible.Load()
+			if ea := r.eligibleAfter.Load(); ea >= 0 && r.precheckCalls.Add(1) > ea {
+				base.Eligible = false
+			}
 			base.Observed.Identity = r.obsIdent.Load().(string)
 			base.RegistryPin = r.regPin.Load().(string)
 			if r.obsNanos.Load() == 0 {
@@ -316,5 +324,36 @@ func TestPeerFreshRT09_ReseedAndRestartBothRemoveTheAuthority(t *testing.T) {
 	if crossed || reqs != 0 {
 		t.Fatalf("a record with no peer observation must not authorize a send: crossed=%v reqs=%d",
 			crossed, reqs)
+	}
+}
+
+// ── the gap the mutation campaign found (RM5) ───────────────────────────────────────────────
+
+// TestPeerFreshRT10_TargetDriftBetweenAdmissionAndTheBoundaryIsRefused.
+//
+// RT06 drives a target that was already ineligible when the request arrived, and admission
+// refuses it — so deleting the boundary's own eligibility check left RT06 green. That made the
+// boundary check look redundant when it is not: its whole reason to exist is the window AFTER
+// admission, where the request holds a reservation and is doing credential materialization, the
+// durable commit and an unbounded wait for a pool slot.
+//
+// Here the target resolves fine for admission and stops resolving at the first boundary re-ask.
+// Nothing may reach the peer.
+func TestPeerFreshRT10_TargetDriftBetweenAdmissionAndTheBoundaryIsRefused(t *testing.T) {
+	p := startControlledPeer(t, respondOK)
+	r := newPeerFreshRTRig(t, p, 10)
+	if crossed, _ := r.run(t); !crossed {
+		t.Fatal("premise: the fixture must execute while the target resolves")
+	}
+
+	// Admission's probe resolves; every later precheck call — the boundary re-asks — does not.
+	r.precheckCalls.Store(0)
+	r.eligibleAfter.Store(1)
+	crossed, reqs := r.run(t)
+	if crossed {
+		t.Fatal("a target that stopped resolving after admission must not reach the upstream")
+	}
+	if reqs != 0 {
+		t.Fatalf("no bytes may reach the peer, got %d request(s)", reqs)
 	}
 }
