@@ -150,3 +150,60 @@ func (u *advancingUpstream) Call(ctx context.Context, tgt upstreamclient.Target,
 	u.advance()
 	return u.inner.Call(ctx, tgt, method, params, opts)
 }
+
+// TestDiscoveryObservation_PartialPageIsReportedAsPartial pins that a paginated tools/list is not
+// laundered into a whole-server observation.
+//
+// Discovery fetches exactly ONE page. On a server that paginates, every tool beyond that page
+// receives no peer observation at all — while the call itself SUCCEEDS. Before this was surfaced,
+// an operator refreshing precisely to satisfy the First-Canary freshness fact would be told the
+// refresh worked and find the fact still false, with nothing in the result pointing at why
+// (Codex round 5, P2; the defect was verified by driving this exact shape before the fix).
+//
+// This does NOT claim pagination is handled — it is not. It claims the result says so.
+func TestDiscoveryObservation_PartialPageIsReportedAsPartial(t *testing.T) {
+	reg, cat := obsRegistry(t, "pin-1")
+	up := &fakeUpstream{result: `{"tools":[{"name":"t","inputSchema":{"type":"object"}}],"nextCursor":"page2"}`}
+	d, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, derr := d.Discover(context.Background(), "s1")
+	if derr != nil {
+		t.Fatalf("a partial page is still a successful discovery of what it carried: %v", derr)
+	}
+	if rep == nil {
+		t.Fatal("expected a report")
+	}
+	if rep.Complete {
+		t.Fatal("a result carrying a nextCursor must NOT be reported as the complete tool set — " +
+			"the operator would read success as 'this server was observed' when only its first " +
+			"page was, and a Canary target on a later page can never become fresh")
+	}
+	// The tool that WAS on the page is genuinely observed: partial must not mean worthless.
+	if rec := obsRecord(t, cat); rec.Provenance() != catalog.PeerObserved {
+		t.Fatalf("a tool carried on the partial page must still be peer-observed, got %v", rec.Provenance())
+	}
+}
+
+// TestDiscoveryObservation_CompletePageIsReportedAsComplete is the CONTROL for the gate above.
+//
+// Without it, reporting every result as partial would satisfy that assertion while making the
+// completeness signal useless — and would silently disable the catalog withdrawal path, which
+// consults the same flag.
+func TestDiscoveryObservation_CompletePageIsReportedAsComplete(t *testing.T) {
+	reg, cat := obsRegistry(t, "pin-1")
+	up := &fakeUpstream{result: `{"tools":[{"name":"t","inputSchema":{"type":"object"}}]}`}
+	d, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, derr := d.Discover(context.Background(), "s1")
+	if derr != nil {
+		t.Fatalf("discovery: %v", derr)
+	}
+	if !rep.Complete {
+		t.Fatal("a result with no continuation cursor IS the complete tool set; reporting it as " +
+			"partial would make the signal meaningless and suppress catalog withdrawal")
+	}
+}

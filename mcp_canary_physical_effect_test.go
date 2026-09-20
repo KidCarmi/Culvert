@@ -164,6 +164,9 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	p := &lim
 	*p = tunedUpstreamLimits()
 	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"the New call's result is discarded", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_, _ = upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	return tunedUpstreamClient()`},
 		{"Config assembled across statements", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
 	_ = lim
 	cfg := upstreamclient.Config{}
@@ -188,6 +191,32 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	if why := retryFreeLimitsViolation(synthProductionDeps(good)); why != "" {
 		t.Fatalf("the retry-free wall must accept the production form, rejected: %s", why)
 	}
+	// Codex round 5, P1: a local's scope begins at its DECLARATION, so a Config in an early
+	// return resolves to a package-level name of the same spelling while a later top-level
+	// retry-free binding supplies the one this gate matched. Needs a whole file for the
+	// package-level declaration.
+	preDeclaration := `package main
+
+import (
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+)
+
+var lim = upstreamclient.DefaultLimits()
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	if true {
+		return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	}
+	lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	return nil, nil
+}
+`
+	if why := retryFreeLimitsViolation(preDeclaration); why == "" {
+		t.Fatal("the retry-free wall must reject a binding that comes after the Config using that name")
+	}
+
 	// Codex round 4, P1: the identifier is matched by spelling, so a nested binding must not be
 	// able to stand in for the one the returned Config actually uses. This case needs a whole file
 	// (it declares a package-level variable), so it is written out rather than wrapped.
@@ -292,6 +321,15 @@ func retryFreeLimitsViolation(src string) string {
 			"scope, so an inner block or closure may be supplying the binding this gate checks while a " +
 			"different value of the same name reaches Config"
 	}
+	// THE BINDING MUST PRECEDE THE USE. A local's scope begins at its declaration, so a package-
+	// level `lim` can feed a Config in an EARLY return while a later top-level
+	// `lim, _ := RetryFreeLimits(...)` supplies the binding this gate matched by spelling
+	// (Codex round 5, P1). Source order is a coarse stand-in for dominance and errs the safe way:
+	// it refuses a shape it cannot prove, and production binds before it builds.
+	if bindings[0].Pos() >= limitsExpr.Pos() {
+		return "the binding of " + ident.Name + " comes AFTER the Config that uses it, so the value " +
+			"reaching Limits is whatever that name meant earlier — not this binding"
+	}
 	if !isCallTo(bindings[0], pkg, retryFreeLimitsFunc) {
 		return "the Limits identifier " + ident.Name + " is not bound by " + pkg + "." + retryFreeLimitsFunc
 	}
@@ -351,6 +389,14 @@ func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (limitsExpr ast.Expr, why s
 	}
 	if len(calls) > 1 {
 		return nil, "more than one call to " + pkg + ".New; which one builds the live client is ambiguous"
+	}
+	// THE CALL MUST BE THE ONE WHOSE RESULT IS RETURNED, not merely the only one present.
+	// `_, _ = upstreamclient.New(Config{Limits: lim}, ...); return tunedUpstreamClient()` has
+	// exactly one New call carrying retry-free limits and returns a client built from something
+	// else entirely (Codex round 5, P1).
+	if !isReturnedCall(fn, calls[0]) {
+		return nil, "the " + pkg + ".New call's result is not returned, so the client this " +
+			"constructor actually hands back is built somewhere this gate cannot see"
 	}
 	if len(calls[0].Args) == 0 {
 		return nil, pkg + ".New is called with no arguments"
@@ -442,6 +488,25 @@ func isTopLevelBinding(fn *ast.FuncDecl, rhs ast.Expr) bool {
 		}
 	}
 	return false
+}
+
+// isReturnedCall reports whether call appears directly in a return statement of fn.
+func isReturnedCall(fn *ast.FuncDecl, call *ast.CallExpr) bool {
+	returned := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, r := range ret.Results {
+			if r == call {
+				returned = true
+				return false
+			}
+		}
+		return true
+	})
+	return returned
 }
 
 func isCallTo(e ast.Expr, pkg, fn string) bool {

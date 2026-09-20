@@ -46,11 +46,15 @@ func apiMCPServerRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = err // success path: err is nil by construction
 	auditEvent(r, "mcp.server.refresh", sanitizeLog(out.ServerID),
-		"revision="+strconv.FormatUint(out.Revision, 10)+" observations="+strconv.Itoa(out.Observations))
+		"revision="+strconv.FormatUint(out.Revision, 10)+" observations="+strconv.Itoa(out.Observations)+
+			" complete="+strconv.FormatBool(out.Complete))
 	jsonOK(w, map[string]any{
 		"server_id":    out.ServerID,
 		"revision":     out.Revision,
 		"observations": out.Observations,
+		// false ⇒ the peer paginated and only its FIRST page was observed; tools beyond it
+		// carry no observation despite this call succeeding. See mcpPeerRefreshOutcome.Complete.
+		"complete": out.Complete,
 	})
 }
 

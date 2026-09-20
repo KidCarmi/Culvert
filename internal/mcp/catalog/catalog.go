@@ -163,6 +163,19 @@ type Report struct {
 	ServerID     registry.ServerID
 	Observations []Observation
 	Revision     uint64
+	// Complete reports whether the ingested result was the server's COMPLETE tool set — i.e. it
+	// carried no MCP `nextCursor` continuation token.
+	//
+	// It is surfaced because a caller cannot otherwise tell a whole-server observation from a
+	// FIRST PAGE. Discovery fetches one page, so on a paginated server every tool beyond that
+	// page receives no peer observation at all, while the call itself succeeds: an operator
+	// refreshing to satisfy the First-Canary freshness fact would be told it worked and find the
+	// fact still false, with nothing pointing at why (Codex round 5, P2).
+	//
+	// The withdrawal gate has consulted this value since before it was exported — a tool absent
+	// from a PARTIAL page has not been proven withdrawn — so nothing about that behaviour changes
+	// here. What changes is that the fact stops being private to this package.
+	Complete bool
 }
 
 // Ingest validates and classifies a discovery result for one server and publishes
@@ -285,7 +298,7 @@ func (c *Catalog) tryPublish(base, next *Snapshot) error {
 func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observed []*ToolRecord, complete bool, peer PeerObservation) (*Snapshot, *Report, error) {
 	rev := base.revision + 1
 	next := base.clone(rev)
-	report := &Report{ServerID: serverID, Revision: rev, Observations: make([]Observation, 0, len(observed))}
+	report := &Report{ServerID: serverID, Revision: rev, Complete: complete, Observations: make([]Observation, 0, len(observed))}
 	observedKeys := make(map[ToolKey]struct{}, len(observed))
 	for _, obs := range observed {
 		observedKeys[obs.Key] = struct{}{}

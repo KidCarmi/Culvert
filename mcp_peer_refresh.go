@@ -68,6 +68,22 @@ type mcpPeerRefreshOutcome struct {
 	ServerID     string
 	Revision     uint64
 	Observations int
+	// Complete reports whether the peer returned its WHOLE tool set, or only a first page.
+	//
+	// A tools/list result MAY paginate (MCP `nextCursor`), and this refresh fetches exactly ONE
+	// page. Without this field a partial refresh is indistinguishable from a whole-server one:
+	// the call succeeds, the operator is told it worked, and every tool beyond the first page
+	// has received NO peer observation — so an operator refreshing precisely to satisfy the
+	// First-Canary freshness fact would find it still false with nothing pointing at why
+	// (Codex round 5, P2; verified by driving a paginated peer through Discover).
+	//
+	// Reporting it is not the same as fixing it, and is not presented as one. Following the
+	// cursor is NOT done here: the completeness flag also gates catalog WITHDRAWAL (a tool
+	// absent from a partial page has not been proven withdrawn), so consuming pages correctly
+	// means reworking when withdrawal may fire — a security-relevant change that belongs in its
+	// own review, not inside this one. Until then the honest surface is to say the observation
+	// was partial rather than to let "succeeded" imply "observed".
+	Complete bool
 }
 
 // mcpPeerRefreshInflight tracks one in-flight refresh per server plus the global cap.
@@ -172,6 +188,7 @@ func mcpRefreshPeerObservation(ctx context.Context, serverID string) (mcpPeerRef
 	if report != nil {
 		out.Revision = report.Revision
 		out.Observations = len(report.Observations)
+		out.Complete = report.Complete
 	}
 	return out, "", nil
 }

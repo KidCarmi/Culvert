@@ -3706,10 +3706,46 @@ alike — plus acceptance cases (the production form and an aliased-import form)
 nothing can satisfy gets deleted by the next person who touches the file. **All twelve known
 bypasses are CAUGHT; the shipped wall accepts the real production file.**
 
-**The honest summary of this sub-thread: one gate, four versions, and every version but the last was
-bypassable.** Two holes were found by probing it, two by review, and none by the test suite passing.
+**A FIFTH iteration followed, from review again.** Codex round 5 found two more, both real: the single
+`New` call's **result may be discarded** (`_, _ = New(Config{Limits: lim}, ...); return
+tunedUpstreamClient()` — one New call, retry-free limits, and a client built from something else),
+and a **pre-declaration scope** case (a local's scope begins at its declaration, so a package-level
+`lim` can feed a `Config` in an EARLY return while a later top-level
+`lim, _ := RetryFreeLimits(...)` supplies the binding matched by spelling). The `New` call must
+therefore be the one whose result is RETURNED, and the binding must PRECEDE the use in source order
+— a coarse stand-in for dominance that errs the safe way.
+
+**The honest summary of this sub-thread: one gate, FIVE versions, and every version but the last was
+bypassable.** Two holes were found by probing it, four by review, and none by the test suite passing.
 It is recorded at this length because the lesson is not about upstream limits at all — *a structural
-wall is itself code, and a wall that has never been attacked should not be counted as evidence.*
+wall is itself code, and a wall that has never been attacked should not be counted as evidence.* The
+count also says something about the instrument: each fix was sound and each left a shape nobody had
+thought of, which is the ordinary behaviour of a hand-written AST predicate standing in for a
+dataflow analysis. That it took five rounds is the argument for treating this gate as a **tripwire,
+not a proof** — the real guarantees are the ones below it (`RetryFreeLimits` forcing the values, and
+the client honouring them), which are pinned behaviourally.
+
+### A partial tools/list page was reported as success (Codex round 5, P2)
+
+Discovery fetches exactly ONE `tools/list` page. A result MAY paginate (MCP `nextCursor`), and the
+completeness flag was consulted only to gate catalog WITHDRAWAL — never surfaced. So on a paginating
+server the refresh **succeeded**, the operator was told it worked, and every tool beyond the first
+page received **no peer observation at all**: an operator refreshing precisely to satisfy the
+First-Canary freshness fact would find it still false with nothing pointing at why. Verified by
+driving a paginated peer through `Discover` before the fix.
+
+It fails CLOSED — the freshness fact stays false, so nothing unsafe activates — which is why it is a
+P2 and not a P1. But it is exactly the class this work is about: **"could not observe" must not be
+reported as anything else.**
+
+`catalog.Report.Complete` and `mcpPeerRefreshOutcome.Complete` now carry the fact, and the refresh
+API and its audit line report it. **Following the cursor is deliberately NOT done here, and saying so
+is the point:** the same flag gates withdrawal (a tool absent from a partial page has not been proven
+withdrawn), so consuming pages correctly means reworking when withdrawal may fire — a
+security-relevant change that belongs in its own review. Recorded as a dependency rather than
+absorbed. Gates: `TestDiscoveryObservation_PartialPageIsReportedAsPartial` with
+`..._CompletePageIsReportedAsComplete` as its control, since reporting everything as partial would
+satisfy the first assertion while making the signal useless and suppressing withdrawal entirely.
 
 Each link of the chain is now pinned somewhere: the production constructor takes the limits it
 passes to `Config` from `RetryFreeLimits` (this wall); `RetryFreeLimits` forces `MaxRedirects = 0`
