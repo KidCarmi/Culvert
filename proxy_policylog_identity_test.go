@@ -159,6 +159,8 @@ func TestPolicyDecisionLine_RandomizedDifferential(t *testing.T) {
 	randomBytes := func() string {
 		b := make([]byte, rng.Intn(24))
 		for i := range b {
+			// #nosec G115 -- truncating to a byte IS the point: the corpus must
+			// reach arbitrary bytes, invalid UTF-8 included.
 			b[i] = byte(rng.Intn(256))
 		}
 		return string(b)
@@ -253,6 +255,8 @@ func TestPolicyDecisionLine_QuotableAsIsIsSound(t *testing.T) {
 	for i := 0; i < 20000; i++ {
 		b := make([]byte, rng.Intn(16))
 		for j := range b {
+			// #nosec G115 -- truncating to a byte IS the point: the corpus must
+			// reach arbitrary bytes, invalid UTF-8 included.
 			b[j] = byte(rng.Intn(256))
 		}
 		check(string(b))
@@ -300,6 +304,15 @@ func FuzzPolicyDecisionLineQuoting(f *testing.F) {
 // line to whichever frame the depth happens to land on, so it must fail here
 // and be resolved deliberately.
 func TestPolicyDecisionLine_LoggerCarriesNoCallerPositionFlag(t *testing.T) {
+	// setupLogger publishes the async sink into the process-wide logSink as a
+	// side effect, and closing the returned Closer does NOT put the previous
+	// pointer back — so without this the test leaves a CLOSED sink installed for
+	// whatever runs next, and flushLogSink / logSinkBackpressure /
+	// logSinkWriteErrors in another test start reading the wrong one. The suite
+	// runs shuffled, so that is an order-dependent failure, not a theoretical
+	// one. restoreLogSink is the existing remedy every other setupLogger caller
+	// uses; see its doc comment in logger_async_test.go.
+	restoreLogSink(t)
 	for _, format := range []string{"", "text", "json"} {
 		lg, closer, err := setupLogger("", 0, format)
 		if err != nil {
