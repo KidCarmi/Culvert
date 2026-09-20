@@ -309,8 +309,15 @@ func TestChaos66_DefectTopHostsNeverRetainsAnOversizeKey(t *testing.T) {
 	chaos66CaptureLog(t)
 
 	// Default-allow posture: the only branch that reaches topHosts.Record.
+	// SAVE the previous action rather than hardcoding "deny" on the way out.
+	// Hardcoding a restore value is the same class of error as restoring a pointer
+	// to a mutated object (see the ipf note above): it looks like a restore and
+	// silently imposes this test's assumption on whatever ran before. The repo
+	// pattern is prevAction := defaultPolicyAction()
+	// (authpolicy_slice8_test.go, dc_final_test.go, config_surfaces_test.go).
+	prevAction := defaultPolicyAction()
+	t.Cleanup(func() { setDefaultPolicyAction(prevAction) })
 	setDefaultPolicyAction("allow")
-	t.Cleanup(func() { setDefaultPolicyAction("deny") })
 	prevTop := topHosts
 	topHosts = &hostCounter{}
 	t.Cleanup(func() { topHosts = prevTop })
