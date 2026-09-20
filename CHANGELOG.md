@@ -169,6 +169,37 @@ endpoints for credentialed parents.
 
 ### Performance
 
+- Concurrent leaf-certificate cache misses for one host are collapsed onto a
+  single sign. `Manager.GetCert` is the `tls.Config.GetCertificate` callback
+  for every SSL-inspected CONNECT, so a miss there is the most expensive unit
+  of work the appliance performs per connection — `signLeaf` measures 144 µs,
+  19.6 KB and 327 allocations on the reference box, 85% of it the irreducible
+  P-256 sign inside `x509.CreateCertificate`. Nothing stood between the cache
+  probe and the sign, so every handshake that arrived for a host while the
+  first was still signing started its own, and the duplicates were pure waste:
+  same host, same CA, same shared leaf key, same 24-hour window, with the last
+  writer simply overwriting the others in the cache. The amplification grew
+  with core count, because what bounded the herd was how many signs could be
+  in flight at once — 64 workers over 256 cold hosts measured 1.00 signs per
+  host at `GOMAXPROCS=1`, 1.35 at 2 and 1.61 at 4, so the 16/32-core hardware
+  the appliance ships to sat further up that curve. It landed during exactly
+  the cold-cache burst the cache exists to absorb: a restart, a TTL boundary
+  (entries are created by traffic and expire on one uniform 1-hour TTL, so a
+  working set goes cold together), or a traffic spike. A leader/follower
+  single flight — the same shape already used for `hostIPCache`, `jwksCache`
+  and `internal/ocsp` — takes that cold burst from 28.13 ms to 14.37 ms
+  (−48.9%), 157,550 allocations to 92,329 (−41.4%) and 9.75 MB to 5.85 MB
+  (−40.0%), at exactly 1.00 signs per host. A follower receives the leader's
+  certificate, which is the one it would have signed itself, so the cache, its
+  TTL, the LRU, the CA-validity refusal and the fail-closed posture are
+  unchanged, and the steady-state hit path is at parity (190.1 ns against
+  189.6 ns, same 32 B and one allocation). New counter
+  `culvert_cert_sign_singleflight_joined_total` reports the duplicate signs
+  avoided; `culvert_cert_cache_misses_total` keeps its meaning — hits plus
+  misses is still the number of `GetCert` calls — but is no longer the same
+  thing as the sign count, for which
+  `culvert_cert_sign_duration_seconds_count` is exact.
+
 - The rate-limit exempt check is lock-free and flat in the exempt-CIDR count.
   `RateLimiter.IsExempt` is the first decision inside `Allow`, so once a rate
   limit is configured it runs on every proxied request; it took a
