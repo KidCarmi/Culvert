@@ -3268,12 +3268,14 @@ finding unbacked.
 
 ## §25e Blocker 11 — peer-observed First-Canary freshness (activation-time half)
 
-**This section changes NO ledger status. Blocker 11 stays OPEN**, and so does everything else:
-blocker 8 remains OPEN (narrowed), blockers 1, 2, 3, 10, 12 and 15 are untouched, the baseline is
-still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY TARGET`.
+**This section changes NO ledger status BY ITSELF, and did not when it was written.** It records
+the ACTIVATION-time half only; the blocker was closed later, by §25f's runtime half together with
+this one. Blocker 8 remains OPEN (narrowed), blockers 1, 2, 3, 10, 12 and 15 are untouched, the
+baseline is still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY
+TARGET`.
 
-It records what the peer-observation work established, and — more usefully — exactly what is left
-before the blocker may be closed. The reason for splitting it is stated plainly below: an
+It records what the peer-observation work established, and — more usefully — exactly what was left
+before the blocker could be closed. The reason for splitting it is stated plainly below: an
 activation-time check alone does not close blocker 11, because freshness is the one prerequisite
 that becomes false with no state change at all.
 
@@ -3346,7 +3348,7 @@ The catalog is not durable, so a restart returns every record to seeded — acce
 persisting a measurement of a third party across a process that was not running to see it would
 let a restart move an observation forward.
 
-### Why blocker 11 is NOT closed by any of that
+### Why the activation-time half alone did not close blocker 11
 
 **An activation-time check is not sufficient, and the reason is specific to this fact.** Every
 other activation prerequisite becomes false only when some state changes — an approval is revoked,
@@ -3354,9 +3356,9 @@ a policy is edited, a fingerprint moves. Freshness becomes false with NO state c
 purely by the clock advancing. So an observation that satisfies the preflight can expire while the
 Canary window is still open, and nothing in this slice re-checks it before a physical send.
 
-Closing blocker 11 therefore additionally requires the runtime to re-check peer freshness in the
+Closing blocker 11 therefore additionally required the runtime to re-check peer freshness in the
 existing live authority revalidation path, immediately before the upstream call — the same seam
-that already revalidates kill state and live trust. `PeerObservationFresh` is exported and
+that already revalidates kill state and live trust. **§25f is that re-check.** `PeerObservationFresh` is exported and
 separate from the binding verdict precisely so both call sites share ONE definition of fresh; an
 activation-time bound and a send-time bound that could drift apart would be two answers to one
 question.
@@ -3445,15 +3447,18 @@ that guard reached for `git checkout` and destroyed uncommitted work it had not 
 
 ### Status
 
-Blocker 11 stays **OPEN** as of this section. The activation-time half is in place and proven; the
-send-time re-check is the remaining work, and until it exists an observation that expires after
-preflight could still back a later request. **§25f below records that re-check.**
+Blocker 11 stayed **OPEN** as of this section, and that was correct at the time: the
+activation-time half was in place and proven, the send-time re-check was the remaining work, and
+until it existed an observation that expired after preflight could still back a later request.
+**§25f below records that re-check, and the blocker is CLOSED there — not here.**
 
 ## §25f Blocker 11 — the runtime half: freshness at the side-effect boundary
 
-**This section changes NO ledger status yet.** It records the send-time work §25e named as the
-remaining half; the ledger decision is made in §26 after the adversarial round, not here. Blockers
-1, 2, 3, 8, 10, 12 and 15 are untouched, the baseline is still fifteen.
+**This section, together with §25e, CLOSES blocker 11 — and closes nothing else.** It records the
+send-time work §25e named as the remaining half. Blockers 1, 2, 3, 8, 10, 12 and 15 are untouched,
+the baseline is still fifteen, and the §26 verdict is unchanged: `BLOCKED — NO SAFE FIRST CANARY
+TARGET`. In particular blocker 1 is NOT absorbed here — the refresh that supplies an observation is
+sessionless, and is not a claim that Culvert implements the MCP session lifecycle.
 
 ### The invariant
 
@@ -3725,6 +3730,16 @@ dataflow analysis. That it took five rounds is the argument for treating this ga
 not a proof** — the real guarantees are the ones below it (`RetryFreeLimits` forcing the values, and
 the client honouring them), which are pinned behaviourally.
 
+Each link of the chain is now pinned somewhere: the production constructor takes the limits it
+passes to `Config` from `RetryFreeLimits` (this wall); `RetryFreeLimits` forces `MaxRedirects = 0`
+and `RetryDisabled` (`internal/mcp/upstreamclient/limits.go` + the gate above it); and the client
+honours both (`retryfree_test.go` and the HTTPS E2E).
+
+**This is a blocker-#6 gate, repaired here because blocker #11's runtime half depends on it.** It
+was found by verifying this PR's own invariant against the code rather than by review — the same
+class as RM5 and RM13, one layer further out: a gate whose doc comment states the requirement and
+whose assertions do not reach it.
+
 ### A partial tools/list page was reported as success (Codex round 5, P2)
 
 Discovery fetches exactly ONE `tools/list` page. A result MAY paginate (MCP `nextCursor`), and the
@@ -3747,15 +3762,28 @@ absorbed. Gates: `TestDiscoveryObservation_PartialPageIsReportedAsPartial` with
 `..._CompletePageIsReportedAsComplete` as its control, since reporting everything as partial would
 satisfy the first assertion while making the signal useless and suppressing withdrawal entirely.
 
-Each link of the chain is now pinned somewhere: the production constructor takes the limits it
-passes to `Config` from `RetryFreeLimits` (this wall); `RetryFreeLimits` forces `MaxRedirects = 0`
-and `RetryDisabled` (`internal/mcp/upstreamclient/limits.go` + the gate above it); and the client
-honours both (`retryfree_test.go` and the HTTPS E2E).
+### Status — blocker 11 is CLOSED, and nothing else moves
 
-**This is a blocker-#6 gate, repaired here because blocker #11's runtime half depends on it.** It
-was found by verifying this PR's own invariant against the code rather than by review — the same
-class as RM5 and RM13, one layer further out: a gate whose doc comment states the requirement and
-whose assertions do not reach it.
+The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
+activation readiness, runtime/live admission, AND every existing pre-send authority revalidation
+site enforce the same property. All three now hold, and the third is the one worth naming
+precisely: there is exactly **one** new check site, inside the existing live authority predicate,
+and every pre-send re-ask reaches it — `preCallGuard` runs the predicate after admission and
+`CallOptions.PreSend` re-runs it after the pool wait and after the TLS handshake. That is why no
+second, third or fourth guard was added; a site with no distinct reason to exist is how #1370's
+stale-authority lesson gets relearned rather than applied.
+
+**What is NOT closed by this.** Blocker 1 is untouched: the refresh that supplies an observation is
+sessionless, and none of this work implements the MCP `initialize` / version-negotiation / session
+lifecycle. Blockers 2, 3, 8, 10, 12 and 15 are untouched. The baseline remains **fifteen**, no entry
+is renumbered, and the §26 verdict is unchanged — closing blocker 11 removes one of fifteen reasons
+a GO is forbidden, not the prohibition.
+
+**What a reader should carry away.** Peer observation supplies TRUTH; it supplies no AUTHORITY by
+itself. Activation asks whether the exact reviewed target is backed by a recent authenticated
+observation; the boundary asks the same question again, from authoritative current state, on one
+clock sample, at the instant authority is spent. One definition of fresh, asked twice, because the
+fact it decides can become false with nothing having changed.
 
 ## §26 Final verdict
 
@@ -3777,12 +3805,15 @@ would let them inherit a neighbour's closure) and NOT filed as a sixteenth block
 fifteen are preserved exactly as adopted). A First Canary requires the fifteen closed AND every such
 §24 finding closed.
 
-**Post-adoption status (see §25a, §25b, §25c).** The baseline remains **fifteen**; the list below is
-preserved as adopted, and nothing is renumbered or deleted. Seven entries have changed status since:
-**blocker 4 is CLOSED**, **blocker 5 is CLOSED**, **blocker 6 is CLOSED**, **blocker 7 is CLOSED**,
-**blocker 13 is CLOSED**, **blocker 14 is CLOSED**, and **blocker 8 is narrowed but still OPEN**.
-Eight are untouched, and the verdict above is unchanged — closing blockers 4, 5, 6, 7, 13 and 14
-removes six of fifteen reasons a GO is forbidden, not the prohibition.
+**Post-adoption status (see §25a, §25b, §25c, §25e, §25f).** The baseline remains **fifteen**; the
+list below is preserved as adopted, and nothing is renumbered or deleted. Eight entries have changed
+status since: **blocker 4 is CLOSED**, **blocker 5 is CLOSED**, **blocker 6 is CLOSED**, **blocker 7
+is CLOSED**, **blocker 11 is CLOSED**, **blocker 13 is CLOSED**, **blocker 14 is CLOSED**, and
+**blocker 8 is narrowed but still OPEN**. Seven are untouched, and the verdict above is unchanged —
+closing blockers 4, 5, 6, 7, 11, 13 and 14 removes seven of fifteen reasons a GO is forbidden, not
+the prohibition. **Blockers 1, 2, 3, 8, 10, 12 and 15 remain OPEN**, and blocker 1 in particular is
+untouched by the peer-observation work: the refresh is sessionless and is NOT a claim that Culvert
+implements the MCP session lifecycle.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -3992,7 +4023,7 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    a Canary→Shadow/Observe target (the demotion runs only via the unwired signed-distribution path). A
    governed operator-reachable rollback control (wire quiesce, or wire the demotion/publication path)
    must be added.
-11. **The reviewed fingerprint is operator-declared, not peer-observed (§7).** The only shipped
+11. **[CLOSED — see §25e and §25f] The reviewed fingerprint is operator-declared, not peer-observed (§7).** The only shipped
    provisioning path (`seedServer`/`seedTools`/`Ingest`, `mcp_inventory.go`) computes the fingerprint
    from operator-supplied JSON and verifies the pinned identity against its own register stamp, and
    `execution.Discovery.Discover` has no non-test caller, so nothing re-observes the live peer.
@@ -4000,6 +4031,46 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    "rug-pull invalidation" bind the SEED, not the actual upstream. Closing this needs authenticated
    production discovery/freshness verification OR an externally-verified ingestion procedure proving
    seeded-fingerprint == the live peer's advertised tool.
+
+   **CLOSED by authenticated observation required at BOTH ends.** The finding stands exactly as
+   written — it was true, and the two facts behind it were confirmed against the code before
+   anything was built. It is closed by making a peer observation REQUIRED, not by re-reading the
+   seed more carefully.
+
+   *Truth.* `ToolRecord.Provenance()` is DERIVED from the evidence (`Observed.Present()`); there is
+   no `Source` field a caller could set, so nothing can claim peer provenance without carrying an
+   observation. Seeding and observing are two semantic entrypoints over one implementation, pinned
+   structurally. Evidence is gathered only by `execution.Discovery.Discover` over the production
+   upstream transport — which now has exactly one governed production caller, `POST
+   /api/mcp/servers/refresh` — and the identity stamped is the one the TRANSPORT verified, never a
+   value read from the MCP payload. The timestamp is taken BEFORE the request goes out, so a stalled
+   call that eventually succeeds lands already stale.
+
+   *Activation.* Readiness row 21a (`peer_observation_not_fresh`) requires the EXACT reviewed target
+   — tenant, server, tool, fingerprint, fingerprint format, under an identity that is still both the
+   catalog record's and the registry's pin — to carry an observation no older than
+   `FirstCanaryPeerObservationMaxAge` (30 min).
+
+   *Runtime.* An activation-time check alone was NOT sufficient, because freshness is the one
+   prerequisite that becomes false with no state change at all. `boundaryPeerFreshness` re-asks the
+   SAME verdict inside the existing live authority predicate, on one capture and one clock sample,
+   at every pre-send re-ask — `preCallGuard` runs it after admission and again from
+   `CallOptions.PreSend` after the pool wait and after the TLS handshake. A request cannot spend
+   execution authority on an observation that has expired.
+
+   *Proven.* A 10-case race/time matrix with no sleeps, driving the real live path against a real
+   local HTTPS peer, expiry placed by counting boundary clock reads; a byte-level proof that an
+   expiry after connect yields **zero MCP request bytes** (not merely an uncalled handler); measured
+   anti-vacuity (delete the check and 7 of 10 fail); and a 14-class runtime mutation campaign at
+   **14 CAUGHT, 0 SURVIVED**, re-measured end to end against the fixed tree.
+
+   *Recorded limitations, both fail-closed.* A target on the second or later page of a paginated
+   `tools/list` cannot receive an observation, so it cannot become a First Canary target — the
+   refresh now REPORTS that (`complete`) rather than implying a whole-server observation, and
+   following the cursor is recorded as a dependency because the same flag gates catalog withdrawal.
+   The catalog is not durable, so a restart returns every record to seeded and re-observation is
+   required — deliberate, since persisting a measurement of a third party across a process that was
+   not running to see it would let a restart move an observation forward.
 12. **No operator-reachable governed Canary ACTIVATION entry point (§13/§17).** Even with arming
    (blocker 3) and the activation inputs (blocker 2) closed, nothing lets an operator TRANSITION the
    node into Canary mode: the admin `apiMCPRolloutTransition` ends with `distribution_not_configured`
@@ -4184,7 +4255,14 @@ verdict FAILED.)
   `distribution_not_configured` for a Canary→Shadow/Observe target (the demotion runs only via the
   unwired signed-distribution path). Wire `quiesceLiveTier`, OR wire the demotion/publication path so
   an admin can drive Canary→Shadow/Observe.
-- bind the reviewed fingerprint to the OBSERVED live peer (blocker 11, §7) — the shipped provisioning
+- ~~bind the reviewed fingerprint to the OBSERVED live peer~~ **DONE (blocker 11 CLOSED, §25e + §25f)**
+  — the requirement is preserved below exactly as written, because the condition it names in its
+  last sentence is precisely what the closure had to satisfy. The route taken is the FIRST
+  alternative: a governed non-test `Discover` caller (`POST /api/mcp/servers/refresh`) supplies an
+  authenticated observation, activation requires the exact reviewed target to carry one no older
+  than 30 minutes, and the SAME verdict is re-asked inside the live authority predicate at every
+  pre-send re-ask — so the freshness guarantee is carried through the side-effect boundary rather
+  than established once at ingestion. (blocker 11, §7) — the shipped provisioning
   (`seedServer`/`seedTools`/`Ingest`) computes the fingerprint from operator-declared JSON and verifies
   the pinned identity against its own register stamp, and `execution.Discovery.Discover` has no non-test
   caller, so `ToolStillCurrent` re-checks only the seeded record. Add authenticated production
