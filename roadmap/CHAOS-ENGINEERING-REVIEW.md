@@ -6647,7 +6647,7 @@ second name for one action is two pages for one response. Runbook:
 
 ### Gates
 
-`proxy_host_bounds_test.go` (13). Eight DEFECT gates, each verified failing
+`proxy_host_bounds_test.go` (15). Nine DEFECT gates, each verified failing
 against the reintroduced pre-fix shape, with the measured failure in each message:
 
 | Gate | Pre-fix result |
@@ -6660,6 +6660,7 @@ against the reintroduced pre-fix shape, with the measured failure in each messag
 | `DefectTopHostsNeverRetainsAnOversizeKey` | 65 536-byte key retained |
 | `DefectSOCKS5RefusesOversizeDestination` | no refusal, no reply `0x02`, counter 0 (also fails against the dead-gate shape below) |
 | `DefectAdminURLLookupIsBounded` | 200, unbounded, uncounted |
+| `DefectConnectFormIsBounded` | 403 not 400; counter 0; 65 540-byte `Host` field — the form EVERY HTTPS request uses |
 
 The cost gate is a **RATIO measured in ONE run**, not an absolute timing bound —
 the standing rule after the `sanitizeLog`, `connlimit` and histogram episodes: a
@@ -6683,6 +6684,23 @@ zone — the shapes PX-21 said a rejection had to answer for before it could shi
 `ControlRejectionIsStillRecorded` pins that bounding the bytes did not delete the
 evidence, and `ControlLogIsRateLimited` pins that 50 refusals cost exactly one
 line while the counter carries all 50.
+
+`ControlRefusalIsAccountedAsABlock` closes a second self-review finding: the
+first version incremented `statBlocked` on the SOCKS5 gate and not on the HTTP
+one — two refusals of the same class disagreeing about whether they happened,
+which is how a dashboard figure goes quietly wrong. Both now count it, matching
+what the `INVALID_HOST` branches (the other malformed-destination refusal, on
+both paths) already do. An atomic counter is not a RETAINING sink, so this does
+not weaken the "a rejected request creates no state" property, which is about the
+log rows, map keys and limiter entries an attacker can grow. Note this control
+passes against the pre-fix tree too, and correctly so: it asserts the accounting
+exists, not that the gate does.
+
+`DefectConnectFormIsBounded` exists because the other gates drive the plain-HTTP
+form, and **every HTTPS request through this proxy is a CONNECT** — a gate proven
+only against plain HTTP is proven against the minority of traffic. It also pins
+that the refusal lands before the tunnel: a 400 on the CONNECT means no 200, no
+hijack and no drain registration.
 
 ### What is deliberately left
 

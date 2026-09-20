@@ -220,6 +220,16 @@ func rejectOversizeDestHost(w http.ResponseWriter, r *http.Request, clientIP str
 	if !destAuthorityOversize(r.Host) {
 		return false
 	}
+	// Counted as a block, matching what the INVALID_HOST branch further down
+	// already does for the other malformed-destination refusal on this path
+	// (and its SOCKS5 twin). An atomic counter is not a RETAINING sink, so this
+	// does not weaken the "a rejected request creates no state" property — that
+	// property is about the log rows, map keys and limiter entries an attacker
+	// could grow, not about a single process-wide int. Leaving it out on this
+	// path while the SOCKS5 gate counted it was an inconsistency in the first
+	// version of this change, caught in self-review: two refusals of the same
+	// class must not disagree about whether they happened.
+	atomic.AddInt64(&statBlocked, 1)
 	noteOversizeHostRejection("HTTP", clientIP, len(r.Host))
 	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxDestAuthorityLen),
 		http.StatusBadRequest)

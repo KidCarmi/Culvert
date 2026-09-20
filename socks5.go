@@ -492,7 +492,7 @@ func handleSOCKS5(conn net.Conn) {
 	// It sits ahead of the first sink (the INVALID_HOST row below) for the same
 	// reason as the HTTP gate.
 	if destHostOversize(host) {
-		atomic.AddInt64(&statBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1) // same accounting as the INVALID_HOST twin below
 		socks5Reply(conn, 0x02)
 		noteOversizeHostRejection("SOCKS5", clientIP, len(host))
 		return

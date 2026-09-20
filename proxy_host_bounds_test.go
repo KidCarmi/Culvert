@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -94,6 +95,55 @@ func TestChaos66_DefectOversizeAuthorityRefusedBeforeAnyState(t *testing.T) {
 	// output for exactly this reason).
 	if w.Body.Len() > 256 {
 		t.Errorf("response body is %d bytes — the refusal is echoing the oversize authority", w.Body.Len())
+	}
+}
+
+// TestChaos66_DefectConnectFormIsBounded covers the DOMINANT traffic class. A
+// CONNECT request carries its authority in the request target rather than a Host
+// header, net/http puts it in r.Host either way, and every HTTPS request through
+// this proxy is one — so a gate proven only against the plain-HTTP form is
+// proven against the minority of traffic. It also pins that the refusal happens
+// BEFORE the tunnel is established: a 400 on the CONNECT means no 200, no
+// hijack, and no drain registration.
+func TestChaos66_DefectConnectFormIsBounded(t *testing.T) {
+	chaos66Isolate(t)
+	chaos66CaptureLog(t)
+
+	host := chaos66Host(64 * 1024)
+	r := httptest.NewRequest(http.MethodConnect, "http://"+host+":443", nil)
+	r.Host = host + ":443"
+	r.RequestURI = host + ":443"
+	r.RemoteAddr = "198.51.100.7:51234"
+	w := httptest.NewRecorder()
+	handleRequest(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("CONNECT status = %d, want %d — the bound does not cover the form every HTTPS request uses", w.Code, http.StatusBadRequest)
+	}
+	if got := proxyOversizeHostRejected.Load(); got != 1 {
+		t.Errorf("proxyOversizeHostRejected = %d, want 1 on the CONNECT form", got)
+	}
+	for _, e := range reqlog.Get() {
+		if len(e.Host) > maxDestAuthorityLen {
+			t.Fatalf("CONNECT retained a %d-byte Host field", len(e.Host))
+		}
+	}
+}
+
+// TestChaos66_ControlRefusalIsAccountedAsABlock pins that the two gates agree
+// about whether the refusal happened. The first version of this change counted
+// statBlocked on the SOCKS5 path and not on the HTTP one — two refusals of the
+// same class disagreeing about their own accounting, which is the kind of split
+// that makes a dashboard figure quietly wrong.
+func TestChaos66_ControlRefusalIsAccountedAsABlock(t *testing.T) {
+	chaos66Isolate(t)
+	chaos66CaptureLog(t)
+
+	before := atomic.LoadInt64(&statBlocked)
+	w := httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://"+chaos66Host(64*1024)+"/", nil))
+	if got := atomic.LoadInt64(&statBlocked); got != before+1 {
+		t.Errorf("statBlocked = %d, want %d — the HTTP refusal is not accounted the way its INVALID_HOST twin is", got, before+1)
 	}
 }
 
