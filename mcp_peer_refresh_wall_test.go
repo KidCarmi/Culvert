@@ -107,47 +107,56 @@ func referencesInSource(rel, src, sel string) ([]callSite, error) {
 	// the observed-ingest capability held in package scope is reachable from every function in the
 	// package at once, which is precisely the thing a per-caller wall cannot certify.
 	for _, decl := range file.Decls {
-		enclosing := packageScopeCaller
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			enclosing = fn.Name.Name
-			if fn.Recv != nil && len(fn.Recv.List) > 0 {
-				enclosing = recvTypeName(fn.Recv) + "." + fn.Name.Name
-			}
-		}
-		// paramClosure tracks whether the node being visited sits inside a function literal
-		// that TAKES PARAMETERS. ast.Inspect has no scope stack, so the walk carries one.
-		var walk func(n ast.Node, inParamClosure bool)
-		walk = func(n ast.Node, inParamClosure bool) {
-			if n == nil {
-				return
-			}
-			if lit, ok := n.(*ast.FuncLit); ok {
-				if lit.Type.Params != nil && len(lit.Type.Params.List) > 0 {
-					inParamClosure = true
-				}
-				for _, st := range lit.Body.List {
-					walk(st, inParamClosure)
-				}
-				return
-			}
-			if sel2, ok := n.(*ast.SelectorExpr); ok && sel2.Sel.Name == sel {
-				who := enclosing
-				if inParamClosure {
-					who = parameterisedClosureCaller
-				}
-				sites = append(sites, callSite{File: rel, Func: who, Line: fset.Position(sel2.Sel.Pos()).Line})
-			}
-			ast.Inspect(n, func(c ast.Node) bool {
-				if c == n {
-					return true
-				}
-				walk(c, inParamClosure)
-				return false
-			})
-		}
-		walk(decl, false)
+		collectSelectorRefs(fset, rel, sel, decl, declEnclosingName(decl), false, &sites)
 	}
 	return sites, nil
+}
+
+// declEnclosingName names the declaration a reference sits in, for the reasoned-caller list.
+func declEnclosingName(decl ast.Decl) string {
+	fn, ok := decl.(*ast.FuncDecl)
+	if !ok {
+		return packageScopeCaller
+	}
+	if fn.Recv != nil && len(fn.Recv.List) > 0 {
+		return recvTypeName(fn.Recv) + "." + fn.Name.Name
+	}
+	return fn.Name.Name
+}
+
+// collectSelectorRefs appends every reference to sel under n, attributed to enclosing — or to the
+// parameterised-closure sentinel once the walk is inside a function literal that takes parameters.
+//
+// It carries its own scope stack because ast.Inspect has none: the walk must know whether the node
+// it is looking at is reachable with caller-supplied data, and that is a property of the ancestors,
+// not of the node.
+func collectSelectorRefs(fset *token.FileSet, rel, sel string, n ast.Node, enclosing string, inParamClosure bool, sites *[]callSite) {
+	if n == nil {
+		return
+	}
+	if lit, ok := n.(*ast.FuncLit); ok {
+		if lit.Type.Params != nil && len(lit.Type.Params.List) > 0 {
+			inParamClosure = true
+		}
+		for _, st := range lit.Body.List {
+			collectSelectorRefs(fset, rel, sel, st, enclosing, inParamClosure, sites)
+		}
+		return
+	}
+	if ref, ok := n.(*ast.SelectorExpr); ok && ref.Sel.Name == sel {
+		who := enclosing
+		if inParamClosure {
+			who = parameterisedClosureCaller
+		}
+		*sites = append(*sites, callSite{File: rel, Func: who, Line: fset.Position(ref.Sel.Pos()).Line})
+	}
+	ast.Inspect(n, func(c ast.Node) bool {
+		if c == n {
+			return true
+		}
+		collectSelectorRefs(fset, rel, sel, c, enclosing, inParamClosure, sites)
+		return false
+	})
 }
 
 // packageScopeCaller names a reference that is not inside any function declaration. It contains
