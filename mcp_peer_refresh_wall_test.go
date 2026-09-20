@@ -114,13 +114,38 @@ func referencesInSource(rel, src, sel string) ([]callSite, error) {
 				enclosing = recvTypeName(fn.Recv) + "." + fn.Name.Name
 			}
 		}
-		ast.Inspect(decl, func(n ast.Node) bool {
-			// Matched wherever it appears — call, method value, or any other reference.
-			if sel2, ok := n.(*ast.SelectorExpr); ok && sel2.Sel.Name == sel {
-				sites = append(sites, callSite{File: rel, Func: enclosing, Line: fset.Position(sel2.Sel.Pos()).Line})
+		// paramClosure tracks whether the node being visited sits inside a function literal
+		// that TAKES PARAMETERS. ast.Inspect has no scope stack, so the walk carries one.
+		var walk func(n ast.Node, inParamClosure bool)
+		walk = func(n ast.Node, inParamClosure bool) {
+			if n == nil {
+				return
 			}
-			return true
-		})
+			if lit, ok := n.(*ast.FuncLit); ok {
+				if lit.Type.Params != nil && len(lit.Type.Params.List) > 0 {
+					inParamClosure = true
+				}
+				for _, st := range lit.Body.List {
+					walk(st, inParamClosure)
+				}
+				return
+			}
+			if sel2, ok := n.(*ast.SelectorExpr); ok && sel2.Sel.Name == sel {
+				who := enclosing
+				if inParamClosure {
+					who = parameterisedClosureCaller
+				}
+				sites = append(sites, callSite{File: rel, Func: who, Line: fset.Position(sel2.Sel.Pos()).Line})
+			}
+			ast.Inspect(n, func(c ast.Node) bool {
+				if c == n {
+					return true
+				}
+				walk(c, inParamClosure)
+				return false
+			})
+		}
+		walk(decl, false)
 	}
 	return sites, nil
 }
@@ -128,6 +153,33 @@ func referencesInSource(rel, src, sel string) ([]callSite, error) {
 // packageScopeCaller names a reference that is not inside any function declaration. It contains
 // characters no Go identifier can, so it can never be spelled on a reasoned-caller list.
 const packageScopeCaller = "<package scope>"
+
+// parameterisedClosureCaller names a reference inside a function literal that TAKES PARAMETERS.
+//
+// Codex round 11, P1, verified before it was agreed with. A closure is not a scope boundary the
+// way a declaration is: it can be stored, registered or handed to an injected dependency, and a
+// reference inside one was attributed to the FuncDecl containing it — the allowed caller. A later
+// holder could then invoke it with FABRICATED discovery bytes and a current timestamp, minting a
+// fresh PeerObserved record while producing no selector of its own.
+//
+// What makes that dangerous is not the escape, it is WHERE THE DATA COMES FROM. Production's
+// closure takes NO parameters:
+//
+//	ingest := func() error { … d.Catalog.IngestObserved(d.Registry, DiscoveryInput{Raw: resp.Result}, …) }
+//
+// Everything it feeds the catalog is CAPTURED from the authenticated dial — the verified pin, the
+// response bytes, and an observedAt stamped before the request went out. It is deliberately handed
+// to d.IngestGuard so the publish serialises with in-flight approvals, so it DOES escape; and that
+// is safe, because a holder can only re-run it. Replaying it re-ingests the same authenticated
+// bytes with the same (by then older) timestamp, which the freshness bound then refuses — the
+// failure is closed.
+//
+// A closure that takes its inputs as PARAMETERS is the opposite: the caller chooses them. That is
+// the whole finding, and it is the line this sentinel draws. The rule states the property directly
+// rather than inferring it from where the closure ends up, which is the round-10 lesson applied to
+// a capability instead of a value: a reference reachable with caller-supplied data is not bounded
+// by the function it is written in, whatever that function is called.
+const parameterisedClosureCaller = "<parameterised closure>"
 
 // assertExactCallers is the shared wall body. want is the exact set of "file:Func" sites allowed
 // to make this call in production.
@@ -328,6 +380,21 @@ func f(c C) { register(c.IngestObserved) }`},
 func f(c C) { h := holder{fn: c.IngestObserved}; _ = h }`},
 		{"method value returned", `package p
 func f(c C) func() { return func() { c.IngestObserved(nil, nil, nil) } }`},
+		// Codex round 11, P1. The capability is captured in a PARAMETERISED closure that is then
+		// registered, so a later holder supplies the discovery bytes. Attribution used to name the
+		// FuncDecl containing the closure — the allowed caller.
+		{"capability escapes in a parameterised closure", `package p
+
+var registry []func(interface{}, interface{}, interface{})
+
+func (d *Discovery) Discover() {
+	mint := func(reg, in, obs interface{}) {
+		d.Catalog.IngestObserved(reg, in, obs)
+	}
+	registry = append(registry, mint)
+}
+
+func evil() { registry[0](nil, nil, nil) }`},
 		// Codex round 9, P1. The alias sits in PACKAGE scope, after the allowed function, and the
 		// running-variable form attributed it to that function.
 		{"package-scope alias after the allowed function", `package p

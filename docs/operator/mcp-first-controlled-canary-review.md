@@ -3915,6 +3915,47 @@ identifier that was not what it looked like. Constrain the scope directly and th
 unnecessary. That is the generalisation of round 9's lesson one level out: **prefer a rule that
 states the property you need over a set of rules from which it can be derived.**
 
+### Round 11: a closure is not a scope boundary, and the line is where the DATA comes from
+
+One P1, on the provenance wall — the one I had asked to have attacked, since it is what actually
+guards blocker 11's truth claim. Verified before agreeing: a capability captured in a closure and
+registered elsewhere
+
+```go
+func (d *Discovery) Discover() {
+	mint := func(reg, in, obs interface{}) { d.Catalog.IngestObserved(reg, in, obs) }
+	registry = append(registry, mint)
+}
+```
+
+reported as `discovery.go:Discovery.Discover` — the allowed caller — while a later holder invokes
+the escaped closure with **fabricated** discovery bytes and a current timestamp, producing no
+selector of its own.
+
+**The obvious fix would have broken production, and finding that out is what produced the right
+rule.** Refusing every closure-nested reference fails immediately: production's own call lives
+inside one. `ingest := func() error { … }` is handed to `d.IngestGuard` deliberately, so the catalog
+publish serialises with in-flight approvals — the capability escapes **by design**.
+
+So the line is not whether the closure escapes. It is **where its inputs come from**:
+
+- production's closure takes **no parameters**. Everything it feeds the catalog is CAPTURED from the
+  authenticated dial — the verified pin, the response bytes, and an `observedAt` stamped before the
+  request went out. A holder can only re-run it, and a replay re-ingests those same bytes with that
+  same (by then older) timestamp, which the freshness bound refuses. It fails closed.
+- a closure that takes its inputs as **parameters** hands that choice to the caller. That is the
+  finding, exactly.
+
+References inside a parameterised closure are therefore attributed to `<parameterised closure>`,
+which cannot be spelled on a reasoned-caller list. The walk carries its own scope stack, because
+`ast.Inspect` has none.
+
+**This is round 10's lesson applied to a capability instead of a value.** There, a binding's scope
+was inferred from the shape of its statement; here, a reference's reachability was inferred from the
+declaration it was written in. Both inferences were sound and both were wrong about the thing that
+mattered. *A reference reachable with caller-supplied data is not bounded by the function it is
+written in, whatever that function is called.*
+
 ### Status — blocker 11 is CLOSED, and nothing else moves
 
 The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
