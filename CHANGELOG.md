@@ -9,6 +9,39 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- An unauthenticated client could park a gateway core for minutes with one
+  request by choosing a very long destination host (CHAOS-66, register rows
+  PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
+  `net/http` admits its 1 MiB default of request line plus headers, and nothing
+  bounded it. It was copied verbatim into the process log and the durable
+  request-log entry — a 256 KiB host wrote 262,228 bytes to a rotating file that
+  keeps one archive — but the copy was the smaller half: the authority is also
+  walked label by label by every destination matcher, and two of those walks are
+  quadratic in its length. The URL-category store probes every suffix beginning
+  just past a `.` against its reverse index, and the Layer-2 community feed
+  (enabled by default in the shipped compose file) opens one BadgerDB read
+  transaction per label. Measured through the real request path with one
+  ordinary category-group rule present: 4 KB of host cost 19.6 ms, 16 KB cost
+  260 ms and 64 KB cost **3.94 s** of CPU — so roughly sixteen minutes at the
+  1 MiB header default, inside the request goroutine, holding the connection and
+  a per-IP connection slot, and spent *before* authentication. Roughly 256 KB/s
+  from one client saturated a four-core gateway, and the three front-door
+  limiters ship disabled. The same value was also retained as a top-hosts map
+  key, whose 10,000-entry cap bounds the entry count and never bounded the key
+  size (about 10 GiB of heap at the cap with megabyte keys), and reached the same
+  quadratic lookup from two viewer-role admin endpoints.
+
+  The destination authority is now refused above **261 bytes** — RFC 1035 caps a
+  wire-format name at 255 octets, which is 253 presentation characters, plus
+  IPv6 brackets and a port — so nothing any resolver could answer for is
+  affected. The bound is applied at each of the four entry points through one
+  shared predicate, ahead of every sink and every matcher (in particular ahead
+  of the IP filter and rate limiter, which both write the host into the request
+  log). A refused request answers 400 without echoing the value, creates no
+  state, and is counted by `culvert_proxy_oversize_host_rejected_total` with a
+  rate-limited log line naming the length rather than the value. Operator
+  runbook: `docs/operator/destination-host-bounds.md`.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party

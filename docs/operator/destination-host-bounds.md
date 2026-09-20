@@ -1,0 +1,182 @@
+# Destination-host bounds on the proxy data path (CHAOS-66)
+
+**Audience:** operators running Culvert as an in-line forward proxy.
+**Scope:** the bound Culvert applies to the client-supplied destination authority
+on every protocol, why it exists, what it refuses, and what you will see when it
+fires.
+
+---
+
+## 1. What changed
+
+Culvert refuses a request whose destination is too long and answers
+`400 Bad Request` (HTTP/CONNECT/WebSocket) or a SOCKS5 `0x02` failure reply.
+Nothing else about the request is evaluated: it never reaches authentication,
+policy, the blocklist, the threat feed, the category store, the request log or
+the stats fan-out.
+
+Two bounds, matched to the shape of the value each path carries:
+
+| Path | Value | Bound |
+| --- | --- | --- |
+| HTTP / CONNECT / WebSocket | the authority, which may carry a port (`host:port`, `[v6]:port`) | **261 bytes** |
+| SOCKS5 | a bare host — RFC 1928 carries the port in its own field | **253 bytes** |
+| `GET /api/url-categories/lookup?host=`, policy test | admin-supplied, may be pasted with a port | **261 bytes** |
+
+The bound is derived, not chosen:
+
+```
+"[" + <253-byte host> + "]" + ":" + "65535"   =   1 + 253 + 1 + 1 + 5  =  261
+```
+
+253 is the longest hostname that can exist. RFC 1035 §2.3.4 caps a wire-format
+domain name at 255 octets, which is 253 characters in presentation form (RFC 1123
+§2.1). So the refused set contains **no destination any resolver would answer
+for**. There is no configuration knob, deliberately — see §6.
+
+---
+
+## 2. Why the bound exists
+
+The destination authority is chosen by the client, and before this change nothing
+bounded it. `net/http` admits its 1 MiB default of request line plus headers, so
+every byte of the authority reached two places:
+
+- **two rotating log sinks** — the process log (`POLICY_*`, `INVALID_HOST`,
+  `IP_BLOCKED`, `RATE_LIMITED`, …) and the durable request-log JSONL, each a
+  rotating file keeping one archive. One 256 KiB authority wrote 262 228 bytes to
+  the process log and a 262 143-byte `Host` field to the request log, measured on
+  the default-deny path.
+- **every destination matcher**, which walks the authority label by label — and
+  two of those walks are **quadratic** in its length:
+  - the URL-category store probes the host and then every suffix beginning just
+    past a `.` against its reverse index, hashing each one;
+  - the Layer-2 community category feed (`-cat-feed-db`, enabled by default in
+    the shipped `docker-compose.yml`) walks parent domains and opens **one
+    BadgerDB read transaction per label**.
+
+Measured through the real request path on a 4-core box, with one ordinary
+category-group rule and the Layer-2 feed present:
+
+| Authority bytes | CPU per request |
+| ---: | ---: |
+| 251 | 0.45 ms |
+| 4 095 | 19.6 ms |
+| 16 383 | 260 ms |
+| 65 535 | **3.94 s** |
+
+The growth is quadratic, so at the 1 MiB header default a single request costs on
+the order of **sixteen minutes of a core**. That time is spent inside the request
+goroutine, holding the client connection, a file descriptor and a per-IP
+connection-limiter slot, and it is spent **before authentication** — the gate
+order is connection limit → IP filter → rate limit → authentication → policy.
+All three front-door limiters ship disabled (`-rate-limit` defaults to 0), so
+roughly 256 KB/s from one unauthenticated client was enough to saturate a
+four-core gateway.
+
+---
+
+## 3. What you will see
+
+### Metric
+
+```
+culvert_proxy_oversize_host_rejected_total
+```
+
+A counter, always emitted (there is no configuration to gate it on, so a flat
+zero means *nothing has been probed*, never *the feature is off*).
+
+**Paging rule:** this counter should be **zero** on a healthy network. A browser,
+a CLI tool and an operating-system resolver cannot produce an authority this
+long, so any sustained growth is either a badly broken client or a deliberate
+probe. Alert on `increase(culvert_proxy_oversize_host_rejected_total[15m]) > 0`
+and treat it as reconnaissance until you have identified the source.
+
+### Log line
+
+Rate-limited to **one line per minute**, with the cumulative count on every
+line — a mitigation for a write-amplification defect must not be one itself:
+
+```
+OVERSIZE_HOST HTTP 10.4.2.19 {bytes=1048310 limit=261 total=4127 action=block}
+```
+
+The line names the **protocol**, the **client IP**, the **length** and the
+**running total**. It deliberately does **not** echo the authority, not even a
+prefix: a copy of the value would reopen the amplification on the rate-limited
+path, and for a name past 253 bytes the length is the only fact that
+distinguishes a probe from a broken client.
+
+`proto` is one of `HTTP`, `SOCKS5`, `api/url-lookup`, `api/policy-test`.
+
+---
+
+## 4. Responding to a non-zero counter
+
+1. **Identify the source.** The log line carries the client IP. On a
+   forwarded deployment that is the `realClientIP` product, so it honours
+   `X-Forwarded-For` only from a configured trusted proxy.
+2. **Decide whether it is a client bug.** A single source with a small steady
+   count, from a host you recognise, is usually a misconfigured application
+   building a URL by concatenation. The 400 tells it what to fix.
+3. **If it is a probe, use the front door.** This bound makes the request cheap;
+   it does not make the *arrival rate* your problem any less. Arm the per-IP
+   rate limiter (`-rate-limit`) and the per-IP connection limiter, and if the
+   source is external, block it at the IP filter. See
+   `docs/operator/credential-verification-cost.md` §"the front door" for the
+   same reasoning applied to authentication cost.
+4. **Nothing needs to be cleaned up.** A refused request leaves no lockout
+   entry, no log row, no top-hosts key and no cached state. The counter is
+   cumulative from boot and is the only residue.
+
+---
+
+## 5. What is NOT affected
+
+- **Legitimate destinations.** Every authority shape a real client produces is
+  accepted: a maximum-length FQDN, an FQDN with a port, a trailing-dot FQDN, an
+  IPv4 literal, and a bracketed IPv6 literal with or without a port or a zone.
+  These are pinned by test.
+- **Admin-configured patterns.** The bound applies to request destinations, not
+  to policy FQDN patterns, blocklist entries or category host patterns. An
+  over-long pattern is still stored; it simply can never match, exactly as
+  before.
+- **Inspected inner requests.** The HTTP/1.1 and HTTP/2 inner-request loops
+  attribute every inner request to the CONNECT target, which this bound already
+  covered.
+- **The proxy's header limit.** `MaxHeaderBytes` is unchanged. It bounds the
+  whole header block rather than one field, so lowering it would cut the worst
+  case by a constant while breaking clients that carry large cookie or token
+  headers — the wrong instrument for a bound on one value.
+
+---
+
+## 6. Why there is no configuration knob
+
+The bound is a constant, like the admin-login username bound it mirrors. A knob
+here could only ever be turned in one useful direction — wider — and widening it
+re-arms a remote CPU-exhaustion vector. There is also nothing to tune toward: the
+limit is fixed by the DNS wire format, not by a local policy. This is a recorded
+GUI-parity deferral of the same class as `maxUsernameLen`.
+
+---
+
+## 7. Known residual
+
+The matchers themselves are still quadratic in the length of whatever host they
+are handed. The bound is the only thing standing in front of them, and it has to
+be, because a length guard *inside* a matcher cannot be made safe: the suffix
+walk exists so that `a.b.example.com` matches a stored `example.com`, so an
+over-long host still has short suffixes that may legitimately match, and skipping
+the walk on length would change the verdict — **fail-open for a block rule**,
+which is worse than the cost it saves.
+
+The practical consequence for you: **any new code path that hands a
+client-supplied host to the policy, blocklist or category engines must apply this
+same bound at its own entry point.** The four that exist today (proxy dispatch,
+SOCKS5, the admin URL-lookup endpoint and the admin policy-test endpoint) all go
+through one shared predicate so they cannot drift apart.
+
+See `roadmap/CHAOS-ENGINEERING-REVIEW.md` §36 for the full failure analysis,
+register rows PX-21/PX-22/PX-23, and the gate inventory.

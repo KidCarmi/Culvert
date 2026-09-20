@@ -476,6 +476,28 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
+	// ── Destination-host bound (CHAOS-66, fail-closed) ──────────────────────
+	// The RFC 1928 §4 DOMAINNAME is length-prefixed with ONE byte, so this
+	// protocol structurally caps the destination at 255 — narrow enough that the
+	// quadratic matcher walks behind it cost microseconds, which is why SOCKS5 is
+	// not the reachable half of this finding. The gate still has to hold: 255
+	// exceeds the 253 bytes a resolvable name can occupy.
+	//
+	// It uses destHostOversize, NOT destAuthorityOversize. The value here is a
+	// BARE host (the port is its own two-byte field), and the authority bound is
+	// 261 — above what this protocol can even carry — so an authority-shaped
+	// check here would have been permanently dead code. See the note on
+	// destHostOversize in proxy_host_bounds.go.
+	//
+	// It sits ahead of the first sink (the INVALID_HOST row below) for the same
+	// reason as the HTTP gate.
+	if destHostOversize(host) {
+		atomic.AddInt64(&statBlocked, 1)
+		socks5Reply(conn, 0x02)
+		noteOversizeHostRejection("SOCKS5", clientIP, len(host))
+		return
+	}
+
 	// ── Host canonicalization gate (RISK-013, fail-closed) ──────────────────
 	// Mirror of the handleRequest gate: a destination that cannot be
 	// IDNA-normalized would reach the blocklist/plugin matchers un-normalized.

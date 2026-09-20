@@ -983,7 +983,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | PX-17 | **An unrecoverable listener error was retried identically to a transient one.** EBADF/ENOTSOCK on the listening descriptor return instantly and forever, so the "retry" was a pure spin that could never accept anything, on a port that stayed BOUND — clients hung against a black hole instead of getting connection-refused. | NEW → **CLOSED** (CHAOS-54: the loop stops, closes the listener so clients fail fast, and records the service DOWN; transient/unknown errors still retry, which is the fail-safe direction) | M/H | was: `socks5.go` `serve`; now `socks5AcceptFatal` — see §22 |
 | PX-18 | **The SOCKS5 listener had NO health surface** — absent from `/healthz`, `/readyz`, `/api/diagnostics` and `/metrics`. A listener spinning on EMFILE and a listener that had stopped accepting entirely were both reported by every probe as a fully healthy node. | NEW → **CLOSED** (CHAOS-54: `socks5_listener` contract row, report-only `/readyz socks5` row, `/healthz socks5` field, `culvert_socks5_{listener_up,accept_errors_total,accept_degraded,accept_backoff_seconds}`, `socks5_listener_down` alert) | M/H | `socks5_health.go` — see §22 |
 | PX-20 | **Every `net.ErrClosed` from `Accept` was read as an expected shutdown.** `ErrClosed` says the listener is gone; it does NOT say a shutdown was requested, and `Stop` is only one of the ways a listener can end up closed. Any closure outside the shutdown path therefore terminated the accept loop with EVERY probe still green (`socks5: ready`, `culvert_socks5_listener_up 1`, `ok` contract row) — PX-18 reintroduced in a narrower costume, inside the very change that closed PX-18. Raised by Codex review on the PR, not by the sweep. | NEW → **CLOSED** (CHAOS-54: the loop checks whether `stopping` was actually closed; `Stop` closes it BEFORE `ln.Close()`, so the check is race-free in the direction that matters and errs toward silence, never toward a false page) | M/H | was: `socks5.go` `serve`; see §22.3 |
-| PX-21 | **The same unbounded-untrusted-value class as AU-15, on the PROXY data path, and it is NOT fixed.** `handleRequest` writes `sanitizeLog(r.Host)` into the POLICY_* process-log line and `r.Host` verbatim into the request-log entry. `sanitizeLog` neutralises control characters but bounds NOTHING, and the proxy `http.Server` sets no `MaxHeaderBytes`, so net/http admits a request line plus headers up to ~1 MiB. **Measured on the default-deny path: one request with a 200 KB host wrote 204,899 bytes to the process log and a 204,812-byte `Host` field to the request log.** Both sinks are rotating files with one archive, and the proxy port is reachable by every client on the network — a far broader audience than the admin login endpoint, with the process log holding the diagnostics for every other incident (the §22 amplification lesson). | **NEW, OPEN** | **H** | `proxy.go:689,728` (`sanitizeLog(r.Host)`), `recordRequestAuthURI` `proxy.go:688`; reproduction in §32.6 |
+| PX-21 | **The same unbounded-untrusted-value class as AU-15, on the PROXY data path.** `handleRequest` writes `sanitizeLog(r.Host)` into the POLICY_* process-log line and `r.Host` verbatim into the request-log entry. `sanitizeLog` neutralises control characters but bounds NOTHING, and the proxy `http.Server` sets no `MaxHeaderBytes`, so net/http admits a request line plus headers up to ~1 MiB. **Measured on the default-deny path: one request with a 200 KB host wrote 204 899 bytes to the process log and a 204 812-byte `Host` field to the request log.** Both sinks are rotating files with one archive, and the proxy port is reachable by every client on the network — a far broader audience than the admin login endpoint, with the process log holding the diagnostics for every other incident (the §22 amplification lesson). **§36 re-measured this and found the copy was the SMALLER half — see PX-23 — and closed both with one entry-point bound.** | NEW → **CLOSED** (CHAOS-66, §36: `maxDestAuthorityLen` 261, refused ahead of every sink and every matcher; `culvert_proxy_oversize_host_rejected_total`) | **H** | was: `proxy.go:689,728` (`sanitizeLog(r.Host)`), `recordRequestAuthURI` `proxy.go:688`; now `proxy_host_bounds.go` `rejectOversizeDestHost`, gates `proxy_host_bounds_test.go` |
+| PX-22 | **The inner inspected request's URI is the same unbounded untrusted value, one layer in.** The SSL-inspect H1 loop logs `req.URL.Path` into the `SSL_INNER` process-log line and `policyLogURI(hostOnly, req.URL.Path)` into the request-log `URI` field, both unbounded; `http.ReadRequest` on the decrypted stream applies no `MaxHeaderBytes`. Narrower reach than PX-21 — it needs an ALLOWED destination and a decryption profile, so the client must first get past policy — but the amplification arithmetic is identical once there. **NOT fixed by §36**, which bounds the authority; the URI is a different value with a different legitimate size (a real URL can be long), so capping it is a product decision about log fidelity rather than an arithmetic one. | **NEW, OPEN** | M | `proxy_tunnel.go:963` (`SSL_INNER … req.URL.Path`), `proxy_tunnel.go:1048` / `proxy_tunnel_h2.go:521` (`policyLogURI`) |
+| PX-23 | **The destination authority is not only COPIED, it is WALKED — and two of the walks are QUADRATIC. This is the reachable, unauthenticated CPU-exhaustion half of PX-21 and is far more severe than the copy.** `internal/urlcat` `lookupIn` (reached by every `DestCategoryGroup` rule through `hostCatScratch.fusion()`) probes the host and then EVERY suffix starting just past a `.` against a non-empty reverse index, hashing each — Σ suffix lengths ≈ L²/4. `internal/catdb` `CommunityDB.Lookup` walks parent domains opening **one BadgerDB read transaction per label**, and `-cat-feed-db /data/catfeeddb` is enabled by DEFAULT in the shipped compose file. **Measured through the real `handleRequest` with one ordinary category-group rule and the Layer-2 feed present: 251 B → 0.45 ms, 4 095 B → 19.6 ms, 16 383 B → 260 ms, 65 535 B → 3.94 s** — clean quadratic, so ~16 minutes of a core at net/http's 1 MiB header default, inside the request goroutine, holding the conn/FD/connlimit slot, and reached BEFORE authentication (gate order: connlimit → IP filter → rate limit → auth → policy, all three front-door limiters shipping disabled). Engine primitives alone: `urlcat.LookupHost` 5.38 s at 1 MiB; `catdb.Lookup` 4.09 s at 64 KiB (32 767 badger transactions). ~256 KB/s from one client saturates a four-core gateway. | **NEW** → **CLOSED at the entry point** (CHAOS-66, §36). The matchers are still quadratic in whatever they are handed — a length guard inside them cannot be made safe (the suffix walk is why `a.b.example.com` matches `example.com`, so skipping it on length is fail-OPEN for a block rule), so the entry-point bound is the only available fix and every future caller must apply it. | **H** | `internal/urlcat/urlcat.go:1196` (`lookupIn` suffix loop), `internal/catdb/catdb.go:71` (`Lookup` per-label `db.View`), `policy_hostcat.go` `resolveFusion`, `categorygroup.go` `categoryGroupMatchesHostScratch`; measurements + gates in §36 |
+| PX-24 | **`topHosts` is bounded on the ENTRY-COUNT axis and never was on the KEY-SIZE axis** — the identical blindness §32 found in `internal/lockout`, whose `Cleanup` doc claimed the maps were bounded "against an unbounded-memory DoS". `topHostsMaxEntries` is 10 000 distinct hosts and the key is the client-supplied authority, so at the cap 1 MiB keys are ~10 GiB of resident heap in an in-line gateway whose OOM is a total traffic outage. Measured: 200 keys of 64 KiB retained 13 107 200 bytes, i.e. 655 MB at the cap for 64 KiB keys alone. Reached on the allow branch (`recordStats` → `topHosts.Record`), so a default-allow posture or any broad allow rule is enough. | **NEW** → **CLOSED** (CHAOS-66, §36 — the same entry-point bound; the cap itself is unchanged and still correct on its own axis) | **H** | `store.go:1723` (`topHosts.Record(redactedHost)`), `store.go:1937-1990` (`hostCounter`); gate `TestChaos66_DefectTopHostsNeverRetainsAnOversizeKey` |
+| PX-25 | **The admin plane reaches the same quadratic fusion from a viewer-role request.** `apiURLCatLookup` takes its host from a query string inside the 1 MiB header block and calls `lookupHostCategory` + `bl.IsBlocked`; the policy-test handler does the same with `body.Host` from a 1 MiB JSON body. Both are `RoleViewer`, so a read-only admin account could park an admin-plane goroutine for minutes with one request. | **NEW** → **CLOSED** (CHAOS-66, §36 — bounded through the SAME shared predicate as the data path, so the four entry points cannot drift apart) | M | `ui_policy.go` `apiURLCatLookup`, `ui_policy.go` policy-test handler |
 | PX-19 | **The SOCKS5 accept loop had no panic guard.** `handleSOCKS5` carries `recoverGoroutine`, but a panic in `serve` itself propagated to the runtime and killed the whole proxy process (the PX-4 class, one level up). | NEW → **CLOSED** (CHAOS-54: contained and reported as listener DOWN — the CHAOS-24 objection to recovering in a worker goroutine does not apply when the recovery path is the loudest state the subsystem can produce) | M | was: `socks5.go` `serve`; see §22 |
 | PX-6 | **No global connection cap**; per-IP map is unbounded in cardinality; limiter ships **disabled by default**. Distributed flood → FD/memory exhaustion. | GAP | H | `internal/connlimit/connlimit.go:12,67` (default disabled, `Acquire`→true when off) |
 | PX-7 | Bandwidth/QoS token buckets are **never enforced on the data path** — `AllowBytes` has no call site in the relays. Configured QoS silently does nothing. | GAP (feature dead) | M | `internal/bandwidth` `AllowBytes` `bandwidth.go:261` — no caller in `proxy.go`/`socks5.go` |
@@ -6412,3 +6416,314 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The client-supplied destination authority on the proxy data path
+
+**Date:** 2026-09-20
+**Domain:** HTTP proxy, HTTPS/CONNECT, SOCKS5, category database, storage,
+audit/logging, metrics, admin API.
+**Origin:** register row **PX-21**, opened by the §32 sweep and deliberately left
+open there — *"a different domain with a different fix shape and a real design
+decision the owner should make, not a reviewer"*. This sweep made that decision,
+and re-measuring the path first found that the defect PX-21 described was the
+smaller half of it.
+
+### Executive summary
+
+The destination authority is written by the client. On the plain-HTTP and CONNECT
+paths it arrives as `r.Host`, `net/http` admits its 1 MiB default of request line
+plus headers, and **nothing bounded it anywhere**. PX-21 recorded the consequence
+as a log-amplification defect: the value is copied verbatim into two rotating
+sinks. That is real and is closed here. But the authority is not only copied, it
+is **WALKED**, label by label, by every destination matcher on the request path —
+and two of those walks are **quadratic in its length**:
+
+- `internal/urlcat` `lookupIn`, reached by every `DestCategoryGroup` rule through
+  `hostCatScratch.fusion()`, probes the host and then **every suffix that starts
+  just past a `.`** against the reverse host index. The index is non-empty on any
+  deployment (the shipped default taxonomy is 657 patterns), so each probe hashes
+  its whole suffix: Σ suffix lengths ≈ L²/4.
+- `internal/catdb` `CommunityDB.Lookup` walks parent domains and opens **one
+  BadgerDB read transaction per label**. `-cat-feed-db /data/catfeeddb` is
+  enabled **by default** in the shipped `docker-compose.yml`.
+
+Measured through the real `handleRequest`, on a 4-core box, with one ordinary
+category-group rule and the Layer-2 feed present:
+
+| Authority bytes | Wall clock |
+| ---: | ---: |
+| 251 | 0.45 ms |
+| 4 095 | 19.6 ms |
+| 16 383 | 260 ms |
+| **65 535** | **3.94 s** |
+
+Clean quadratic — four times the length is about fifteen times the time — so at
+net/http's 1 MiB header default **one request costs on the order of sixteen
+minutes of a core.** It is spent inside the request goroutine, holding the client
+connection, a file descriptor and a per-IP `connlimit` slot, and it is spent
+**before authentication**: the gate order in `handleRequest` is connection limit
+→ IP filter → rate limit → authentication → policy, and all three front-door
+limiters ship **disabled** (`-rate-limit` defaults to 0 — §25's finding). Roughly
+**256 KB/s from one unauthenticated client saturates a four-core gateway.**
+
+Five findings, all closed at the entry point (PX-21, PX-23, PX-24, PX-25) or
+recorded (PX-22).
+
+### The shape of the miss
+
+This is the §32 (CHAOS-63) defect one plane over, and the reason it survived the
+sweep that found it is worth recording precisely: **§32 looked for retaining
+sinks and found them.** Its own residual-risk section states the class is live on
+the proxy data path and measures the copy. What nobody asked was whether the
+value was *consumed* anywhere else, and the answer is that it is consumed
+~10 times per request by matchers each correctly normalising their own input —
+which is exactly the property CLAUDE.md's `hostutil` note records as a
+performance fact and nobody had read as a cost-amplification surface.
+
+Three of the four supporting observations were already written down somewhere in
+the tree and pointing the other way:
+
+1. `hostutil.NormalizeHostStrict`'s own comment states that under the
+   zero-option Punycode profile *"the bidi and DNS-length checks are
+   disabled"* — recorded as the justification for a fast path, which is exactly
+   why a megabyte of ASCII passes the strict gate untouched.
+2. CLAUDE.md's `urlcat` note records that `lookupIn` was made *index-backed* and
+   is now *"O(labels)"* — true, and O(labels) is O(L) probes each hashing O(L)
+   bytes when the attacker chooses the label density.
+3. CLAUDE.md's `topHosts` note states the map *"is hard-capped at
+   `topHostsMaxEntries` (10k distinct hosts) — the hostname is
+   attacker-controllable, so the map would otherwise grow unbounded (memory
+   DoS)."* That sentence names the adversary and the outcome and then bounds the
+   wrong axis. It is verbatim the same sentence `internal/lockout`'s `Cleanup`
+   doc carried before §32 corrected it (*"bounded against an unbounded-memory
+   DoS"* — true on entry count, never true on key size). **The same error, in the
+   same words, in a second component, found by the sweep immediately after the
+   one that found the first.**
+
+### The design decision PX-21 left open, and how it resolves
+
+PX-21 framed the choice as *reject the over-long authority* (defensible, changes
+data-plane behaviour, must answer for IPv6 literals / non-DNS authorities / the
+CONNECT form) versus *truncate at the log call sites* (smaller, safer, does not
+close the request-log field).
+
+Once PX-23 is on the table the choice collapses, because **truncating at the log
+sites closes nothing that matters**: the CPU cost is paid by the matchers, not by
+the logger, and a truncated log line would leave a sixteen-minute unauthenticated
+CPU-exhaustion vector in place while making its evidence harder to see. Rejection
+is the only option that bounds the actual resource.
+
+Rejection is also safe, and the arithmetic is the whole argument. RFC 1035 §2.3.4
+caps a wire-format domain name at 255 octets = 253 presentation characters (RFC
+1123 §2.1). Adding optional IPv6 brackets and a port:
+
+```
+"[" + 253 + "]" + ":" + "65535"  =  1 + 253 + 1 + 1 + 5  =  261
+```
+
+So the refused set contains **no destination any resolver would answer for**, and
+the three shapes PX-21 asked about are all comfortably inside it: an IPv6 literal
+is at most 47 bytes bracketed, a non-DNS registered name is still bounded by the
+DNS wire format for anything a resolver can return, and the CONNECT form carries
+the same `host:port` authority. The gate is ONE length compare on the raw string,
+so the host being a substring of the authority bounds every downstream walk by
+construction (261² ≈ 68k byte operations, i.e. nothing).
+
+### The sharpest structural point: there is NO structural half in the leaf
+
+§32's fix had two halves — a bound at the entry point AND an injective clamp
+inside `internal/lockout` at every public entry point, so *"no future caller can
+reintroduce it."* The instinct here is to do the same: add a length guard inside
+`urlcat`/`catdb`/`blocklist` and be done.
+
+**It cannot be made safe, and understanding why is the load-bearing part of this
+sweep.** The suffix walk exists precisely so that `a.b.example.com` matches a
+stored `example.com`. An over-long host therefore still has SHORT suffixes that
+may legitimately match a real pattern — an attacker can prefix a megabyte of
+`a.` onto `facebook.com` and the correct verdict is still *Social Media*. A
+length guard that skipped the walk would change that verdict to *no match*, which
+for a **block** rule is **fail-OPEN**: the guard would buy a cost bound with the
+exact security failure the matcher exists to prevent. A clamped lockout key is
+still a usable key; a clamped host is a different host.
+
+So the bound is at the entry points and **only** there, and that makes the
+completeness of the entry-point inventory a security property rather than a
+tidiness one. Four exist today and all four go through ONE shared predicate
+(`destAuthorityOversize`), because two entry points disagreeing about what is too
+long is the divergence class §32 pinned for lockout's `Check`/`RecordFailure`
+pair — where two call sites computing different keys silently *weakened* the
+control while passing every byte-size assertion.
+
+### What shipped
+
+`proxy_host_bounds.go`:
+
+- `maxDestHostLen` (253) as the documented DERIVATION constant and
+  `maxDestAuthorityLen` (261) as the bound actually enforced, with the arithmetic
+  pinned by test so it stays checkable in code rather than only in prose.
+- `destAuthorityOversize` — the single shared predicate.
+- `rejectOversizeDestHost` — the HTTP/CONNECT/WebSocket gate, placed as the FIRST
+  consumer of `r.Host` in `handleRequest` and ahead of the connection limiter, the
+  IP filter, the rate limiter, authentication and policy. **The ordering is a
+  contract, not an optimisation:** `IP_BLOCKED` and `RATE_LIMITED` both write
+  `r.Host` into the request log and both run BEFORE the host-canonicalization step
+  where RISK-013's IDNA gate sits, so the intuitive home for a host check is
+  behind two sinks that have already retained the megabyte. A rejected request
+  creates no limiter entry, no request-log row, no top-hosts key, no alert and no
+  label walk.
+- The refusal is 400 and **never echoes the value** — §32's own gates had to
+  suppress their test output because the pre-fix login handler reflected the
+  oversize input back, and the pre-fix proxy does the same (measured: a 68 392-byte
+  response body for a 64 KiB authority). That is the amplification arriving by a
+  third road.
+- `noteOversizeHostRejection` — counter + rate-limited log (one line per minute,
+  cumulative count on every line, because a mitigation for a write-amplification
+  defect must not be one itself). The line names the protocol, the client IP, the
+  **length** and the running total, and deliberately carries **no prefix of the
+  authority**: a copy would reopen the amplification on the rate-limited path,
+  and past 253 bytes the length is the only fact that separates a probe from a
+  broken client. This is the one deliberate divergence from §32's truncated audit
+  actor — a username may name an account an operator recognises; an authority this
+  long names nothing that can exist.
+
+Wired at four entry points: `handleRequest` (proxy.go), `handleSOCKS5`
+(socks5.go), `apiURLCatLookup` and the policy-test handler (ui_policy.go).
+
+**SOCKS5 is structurally bounded already and that is recorded rather than
+assumed:** RFC 1928 §4 length-prefixes DOMAINNAME with one byte, so the protocol
+caps the destination at 255 and the quadratic walks behind it cost microseconds.
+That is why SOCKS5 is not the reachable half of this finding — a pleasing contrast
+with SEC-SOCKS5-LOG-1, where SOCKS5 was the *only* protocol whose destination
+reached a sink unvalidated. The gate is applied anyway, because 255 still exceeds
+the 253 bytes a resolvable name can occupy.
+
+### A defect the fix itself introduced: the SOCKS5 gate was DEAD CODE
+
+Found in self-review, before review. The first version applied
+`destAuthorityOversize` — the 261-byte bound — to the SOCKS5 destination. But the
+value there is a BARE host (RFC 1928 carries the port in its own two-byte field)
+and the protocol caps it at **255**, which is **below 261**. So the gate could
+never fire: it was unreachable by construction, on the one protocol whose whole
+claim to safety was that it is bounded already.
+
+Worse, **its gate passed**. The test asserted only that no oversize host reached
+the request log, with the threshold expressed as `len(e.Host) > maxDestAuthorityLen`
+— and at 255 bytes that comparison is false whether the gate fires or not. The
+assertion was vacuously true, and would have stayed true if the entire SOCKS5 gate
+were deleted.
+
+Two fixes, and the second is the one that generalises:
+
+1. The predicate is now matched to the KIND of the value: `destAuthorityOversize`
+   (261) for `r.Host` and the admin endpoints, where a `host:port` must not be
+   refused; `destHostOversize` (253) for the SOCKS5 destination. Two predicates
+   is a drift risk, which is why `maxDestAuthorityLen` is DERIVED from
+   `maxDestHostLen` and the derivation is pinned. The alternative — one predicate
+   applied to two kinds of value — is exactly how the gate went dead.
+2. `TestChaos66_DefectSOCKS5RefusesOversizeDestination` now asserts the **refusal
+   itself** (SOCKS5 reply `0x02`) and the **counter**, and
+   `ControlBoundIsInclusiveAndDerived` asserts that `maxDestHostLen < 255` — i.e.
+   that the bound is REACHABLE within what the protocol can deliver. A gate that
+   cannot fire now fails the suite.
+
+The lesson is the not-vacuous-check rule this repo already applies to its
+structural walls (`socks5_log_injection_test.go`'s `checked < 4` guard,
+`TestExemptBenchFixturesProbeWhatTheyClaim`'s fixture assertions), arriving from a
+new direction: **a bound is only enforced if it sits inside the range the input
+can occupy, and a gate's test must assert the REFUSAL, never merely the absence of
+the thing the refusal would have prevented.** Absence is what an unreachable gate
+and a working gate have in common.
+
+Surface: `culvert_proxy_oversize_host_rejected_total`, **always emitted** — there
+is no configuration to gate it on, so a flat zero means "nothing has been probed",
+never "the feature is off" (the inverse of the socks5/cluster_ca emission rule,
+and for the same reason: the gauge must not have two readings). No new alert
+event: the operator action is the front door (`-rate-limit`, connlimit, IP
+filter), which is the same action §25's saturation alert already asks for, and a
+second name for one action is two pages for one response. Runbook:
+`docs/operator/destination-host-bounds.md`.
+
+### Gates
+
+`proxy_host_bounds_test.go` (13). Eight DEFECT gates, each verified failing
+against the reintroduced pre-fix shape, with the measured failure in each message:
+
+| Gate | Pre-fix result |
+| --- | --- |
+| `DefectOversizeAuthorityRefusedBeforeAnyState` | 403 not 400; counter 0; **68 392-byte response body** (the refusal echoed the value) |
+| `DefectProcessLogStaysBounded` | **2 097 832 bytes from 8 requests** |
+| `DefectRequestLogNeverCarriesOversizeHost` | 65 536-byte `Host` field on `POLICY_DEFAULT_DENY` |
+| `DefectIPBlockedPathDoesNotRetainTheAuthority` | `IP_BLOCKED` retained 65 536 bytes — the ORDERING gate |
+| `DefectCostIsFlatInAuthorityLength` | ratio **1 442x** (18.8 ms vs 13.0 µs at 64 KiB, warm) |
+| `DefectTopHostsNeverRetainsAnOversizeKey` | 65 536-byte key retained |
+| `DefectSOCKS5RefusesOversizeDestination` | no refusal, no reply `0x02`, counter 0 (also fails against the dead-gate shape below) |
+| `DefectAdminURLLookupIsBounded` | 200, unbounded, uncounted |
+
+The cost gate is a **RATIO measured in ONE run**, not an absolute timing bound —
+the standing rule after the `sanitizeLog`, `connlimit` and histogram episodes: a
+gate whose bound has to be re-baselined per machine gets muted. Post-fix the
+oversize request takes the O(1) reject path and is *cheaper* than the ordinary
+one, so the ratio is below 1 against a bound of 20, orders of magnitude clear in
+both directions.
+
+`DefectIPBlockedPathDoesNotRetainTheAuthority` is the gate that pins *where* the
+bound may live: it fails against the pre-fix tree AND against the plausible-wrong
+fix of gating at the IDNA step.
+
+Five CONTROLS, because the cheapest way to pass every defect gate above is to
+refuse every destination — a total egress outage, far worse than the defect.
+Verified by flipping the predicate to always-true, which fails
+`ControlBoundIsInclusiveAndDerived`, `ControlOrdinaryDestinationStillProxies`
+(the real allow path against a live backend) and
+`ControlLegitimateAuthorityShapesAreAccepted` (maximum-length FQDN, FQDN with
+port, trailing-dot FQDN, IPv4 literal, bracketed IPv6 literal with port and with
+zone — the shapes PX-21 said a rejection had to answer for before it could ship).
+`ControlRejectionIsStillRecorded` pins that bounding the bytes did not delete the
+evidence, and `ControlLogIsRateLimited` pins that 50 refusals cost exactly one
+line while the counter carries all 50.
+
+### What is deliberately left
+
+- **PX-22 — the inner inspected request's URI is unbounded.** `SSL_INNER` logs
+  `req.URL.Path` and `policyLogURI` puts it in the request-log `URI` field, with
+  no `MaxHeaderBytes` on the decrypted `http.ReadRequest`. Narrower reach (an
+  allowed destination plus a decryption profile), but identical arithmetic once
+  there. Not fixed: a real URL can legitimately be long, so capping it is a
+  product decision about log fidelity, not an arithmetic one like 253.
+- **`MaxHeaderBytes` on the proxy server is unchanged.** It bounds the whole
+  header block rather than one field, so lowering it would cut the worst case by
+  a constant while breaking clients carrying large cookie or token headers. The
+  wrong instrument for a bound on one value.
+- **No length guard inside the matchers**, for the fail-open reason above. The
+  residual is that they remain quadratic in whatever they are handed, and the
+  entry-point inventory is the only thing in front of them.
+- **No new alert event and no `/readyz` row.** A refused request is a healthy
+  gateway refusing an impossible destination; failing readiness over it would
+  eject a serving node on client input.
+- **The arrival rate is still not bounded by default** (PX-6 / §25's finding —
+  `-rate-limit` ships at 0). This sweep bounds the COST of each request, not how
+  many arrive; the runbook points at the front door.
+
+### The process lesson
+
+§21 stated one for back ends, §22 for listeners, §23 for decisions, §24 for
+documented residuals, §32 for health planes, §35 for values that outlive a parse.
+This sweep adds one about **bounds**:
+
+> A bound is a claim about one axis. `topHosts` is capped at 10 000 entries and
+> `internal/lockout` sweeps its maps on a window; both comments named an
+> *unbounded-memory DoS* and both bounded the count while the adversary chose the
+> size. The same sentence was wrong in the same way in two components, and the
+> second one survived the sweep that corrected the first. **When a comment claims
+> a structure is bounded, name the axis — and then ask which axis the attacker
+> picks.**
+
+And one about **where a cost lives**:
+
+> PX-21 recorded this value as a logging problem because logging is where the
+> value was visibly *copied*. The expensive thing was the ten places it was
+> *read*, each of them a correct, well-reviewed, individually cheap matcher. A
+> value that fans out to many consumers has no single owner of its cost, so the
+> bound belongs at the one place it has a single owner: where it enters.

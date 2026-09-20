@@ -1100,6 +1100,20 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// byte-identical). See crashguard.go.
 	defer proxyCrashGuard(reqID)
 
+	// ── Destination-authority bound (CHAOS-66, fail-closed) ─────────────────
+	// FIRST consumer of r.Host, and deliberately ahead of the connection
+	// limiter, the IP filter, the rate limiter, authentication and policy. The
+	// client-supplied authority is copied into two rotating sinks and WALKED
+	// label by label by matchers that are quadratic in its length (one 64 KiB
+	// host measured 3.94 s of CPU through this function, ~16 min at net/http's
+	// 1 MiB header default). Every one of those costs is created by a sink or a
+	// matcher BEHIND this point — including IP_BLOCKED and RATE_LIMITED just
+	// below, which both write r.Host into the request log — so the bound has to
+	// be here and not at the IDNA gate further down. See proxy_host_bounds.go.
+	if rejectOversizeDestHost(w, r, clientIP) {
+		return
+	}
+
 	// ── Connection limit per IP ─────────────────────────────────────────
 	if !connLimiter.Acquire(clientIP) {
 		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
