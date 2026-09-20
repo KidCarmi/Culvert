@@ -95,6 +95,16 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-20 — `CHAOS-66` CLAIMED (placeholder, commit one). Domain: the
+client-supplied destination authority on the proxy data path — register row
+**PX-21**, opened by the §32 sweep and left open there on the explicit ground
+that it is "a different domain with a different fix shape and a real design
+decision the owner should make". Second sweep to claim its id before writing
+code; the id has not moved.** This row exists so the id is allocated in a
+committed line before any code is written — the remedy the header above reaches
+twice independently after ten collisions and §35 applied first. Findings and
+gates are written up in §36 below.
+
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
 file as commit one, which is the remedy the header above reaches twice
