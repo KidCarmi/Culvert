@@ -31,11 +31,11 @@ import (
 // silently stop testing the point they were written for.
 //
 // ANTI-VACUITY, MEASURED RATHER THAN CLAIMED. With the boundary freshness call deleted from
-// mcp_live_gate.go, SEVEN of the nine cases below fail. The two that still pass are the two that
-// should: RT01 is the positive control (a boundary that refused everything would satisfy every
-// negative here while making the First Canary impossible), and RT06 proves a DIFFERENT authority
-// — the precheck's target binding — and is labelled as such rather than counted as a freshness
-// gate it is not.
+// mcp_live_gate.go, SEVEN of the ten cases below fail. The three that still pass are the three
+// that should: RT01 is the positive control (a boundary that refused everything would satisfy
+// every negative here while making the First Canary impossible), and RT06 and RT10 prove a
+// DIFFERENT authority — the precheck's target binding — and are labelled as such rather than
+// counted as freshness gates they are not.
 
 // peerFreshRig drives the REAL live-execution path against a REAL local HTTPS peer, with the
 // boundary clock and the peer observation under test control.
@@ -112,7 +112,7 @@ func (r *peerFreshRTRig) run(t *testing.T) (crossed bool, peerRequests int) {
 // ── (1) the POSITIVE CONTROL ────────────────────────────────────────────────────────────────
 
 // TestPeerFreshRT01_FreshObservationCrossesTheWholePath is the control every negative case below
-// depends on. A boundary that refused everything would satisfy all eleven of them while making
+// depends on. A boundary that refused everything would satisfy all nine of them while making
 // the First Canary impossible — strictly worse than the defect being closed.
 //
 // It also pins the THREE-READ structure the rest of the matrix places its expiries against.
@@ -134,7 +134,8 @@ func TestPeerFreshRT01_FreshObservationCrossesTheWholePath(t *testing.T) {
 
 // ── (2)(3)(4) expiry BEFORE the first boundary re-check ─────────────────────────────────────
 
-// TestPeerFreshRT02_StaleBeforeAdmissionNeverReachesThePeer.
+// TestPeerFreshRT02_StaleBeforeAdmissionNeverReachesThePeer covers every ordering in which the
+// observation lapses before the first boundary re-check.
 //
 // This one case covers §9's rows 2, 3 and 4 — stale before admission, expired after activation
 // but before the request, and expired after policy resolution but before live admission — and
@@ -161,7 +162,8 @@ func TestPeerFreshRT02_StaleBeforeAdmissionNeverReachesThePeer(t *testing.T) {
 
 // ── (5) expiry after admission, during the durable work ─────────────────────────────────────
 
-// TestPeerFreshRT03_ExpiryAfterAdmissionRefusesBeforeTheUpstream.
+// TestPeerFreshRT03_ExpiryAfterAdmissionRefusesBeforeTheUpstream places the lapse in the window
+// where the request already holds a budget reservation.
 //
 // preCallGuard has already admitted the request — this is the window in which the request holds a
 // budget reservation and is doing credential materialization and the durable decision commit. The
@@ -228,7 +230,8 @@ func TestPeerFreshRT05_FutureDatedObservationIsRefused(t *testing.T) {
 
 // ── (8) F1 stale, F2 fresh ──────────────────────────────────────────────────────────────────
 
-// TestPeerFreshRT06_AFreshObservationForAnotherTargetDoesNotRescueThisOne.
+// TestPeerFreshRT06_AFreshObservationForAnotherTargetDoesNotRescueThisOne pins that freshness
+// belongs to an exact target and cannot be borrowed from another.
 //
 // The peer moved to F2 and was observed there — so the catalog holds a perfectly fresh
 // observation. The request was authorized against F1. It must still be refused, and the refusal
@@ -260,7 +263,8 @@ func TestPeerFreshRT06_AFreshObservationForAnotherTargetDoesNotRescueThisOne(t *
 
 // ── (9) registry pin changed ────────────────────────────────────────────────────────────────
 
-// TestPeerFreshRT07_ObservationUnderASupersededPinIsRefused.
+// TestPeerFreshRT07_ObservationUnderASupersededPinIsRefused pins that recent, well-formed
+// evidence is worthless once it names an identity the registry no longer pins.
 //
 // The observation is recent and well-formed, and the identity it was gathered under is the one
 // the catalog record carries — but the registry now pins a DIFFERENT identity. The peer that was
@@ -305,7 +309,8 @@ func TestPeerFreshRT08_FailedRefreshDoesNotExtendAgeAndARealOneDoes(t *testing.T
 
 // ── (12) + §11 operator reseed and restart ──────────────────────────────────────────────────
 
-// TestPeerFreshRT09_ReseedAndRestartBothRemoveTheAuthority.
+// TestPeerFreshRT09_ReseedAndRestartBothRemoveTheAuthority pins the accepted posture for a
+// record that carries no observation at all.
 //
 // An operator reseed replaces the record with one carrying no observation, and a restart rebuilds
 // the whole catalog from the operator inventory — the same end state, reached two ways, and the
@@ -329,7 +334,8 @@ func TestPeerFreshRT09_ReseedAndRestartBothRemoveTheAuthority(t *testing.T) {
 
 // ── the gap the mutation campaign found (RM5) ───────────────────────────────────────────────
 
-// TestPeerFreshRT10_TargetDriftBetweenAdmissionAndTheBoundaryIsRefused.
+// TestPeerFreshRT10_TargetDriftBetweenAdmissionAndTheBoundaryIsRefused is the case that makes
+// the boundary's eligibility check non-redundant.
 //
 // RT06 drives a target that was already ineligible when the request arrived, and admission
 // refuses it — so deleting the boundary's own eligibility check left RT06 green. That made the
