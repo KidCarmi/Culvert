@@ -125,6 +125,14 @@ func TestPolicyStore_Load_AdoptingPathPersistsExistingRules(t *testing.T) {
 // boot into a crash loop, which is exactly the class of regression the
 // CHAOS-50 boot-path conventions in this codebase exist to prevent.
 func TestPolicyStore_Load_AdoptFailureNeverFailsLoad(t *testing.T) {
+	// This test deliberately provokes a real AtomicWrite failure, which
+	// updates the process-global storage-health record (storage_health.go).
+	// Reset on both edges so it cannot leak into another test's assertions
+	// about a clean/undegraded baseline — the exact hazard documented on
+	// resetStorageWriteHealthForTest's other callers (diagnostics_test.go).
+	resetStorageWriteHealthForTest()
+	t.Cleanup(resetStorageWriteHealthForTest)
+
 	ps := &PolicyStore{}
 	ps.ReplaceAll([]PolicyRule{{Priority: 1, Name: "unsaved", Action: ActionAllow}})
 
