@@ -493,3 +493,49 @@ func TestChaos66_HAWiresRevocationsInBothDirections(t *testing.T) {
 		}
 	}
 }
+
+// DEFECT (CI-only, found by the determinism and -race gates on PR #1437).
+// The session_revocation row is the sweep's only diagFail-capable row, and both
+// states that produce it are PROCESS-GLOBALS that LATCH: the persist-failure
+// flag clears only on an observed successful write, and the load-degraded flag
+// never clears (it is a boot fact).
+//
+// In production that is correct. In the test binary it is cross-talk: any test
+// whose SaveRevocations fails — an unwritable dataDir, a revocations path left
+// pointing at a removed temp dir — latches the record for the rest of the run,
+// and from then on the aggregate /api/diagnostics verdict is "fail". Every
+// later test asserting `Verdict != diagFail` then fails, in an order-dependent
+// way that only shows up under -shuffle/-count=2.
+//
+// resetDiagVerdictGlobals exists to enumerate exactly these globals, and
+// CHAOS-45, CHAOS-47 and CHAOS-57 each had to register theirs when they added a
+// diagFail-capable row. This sweep added one and did not — the same "a second
+// thing was added beside an existing one and the existing machinery was never
+// taught about it" shape §36.8 names.
+func TestChaos66_RevocationHealthIsIsolatedFromTheAggregateVerdict(t *testing.T) {
+	// Dirty the record the way a failing-volume test does, WITHOUT the
+	// per-test isolation helper — this is the cross-talk, not a tidy test.
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+	noteRevocationPersistFailure(os.ErrPermission)
+	if checkSessionRevocation().Status != diagFail {
+		t.Fatal("precondition: a persist failure must make the row fail")
+	}
+
+	// A later diagnostics test declares its isolation the canonical way.
+	t.Run("verdict-asserting test after the cross-talk", func(t *testing.T) {
+		resetDiagVerdictGlobals(t)
+		if got := checkSessionRevocation().Status; got == diagFail {
+			t.Errorf("session_revocation is still %q after resetDiagVerdictGlobals — "+
+				"the latched record leaks into every later aggregate-verdict assertion", got)
+		}
+		if c := buildOperatorContract(); c.Verdict == diagFail {
+			t.Errorf("aggregate verdict = %q; an earlier test's revocation-write failure "+
+				"must not fail an unrelated test's diagnostics report", c.Verdict)
+		}
+	})
+
+	// And the helper must restore, not merely clear: this outer test's own
+	// record is its business, and a helper that leaked the OTHER way would
+	// silently disarm the production signal for the rest of the binary.
+	t.Cleanup(resetSessionRevocationHealthForTest)
+}

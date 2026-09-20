@@ -1092,6 +1092,9 @@ func TestApiDiagnostics_SessionSecretMissingFail(t *testing.T) {
 //     flips the verdict to fail under -shuffle/-count; e.g. a leaked
 //     CredentialRequired rule with no credential-capable provider configured
 //     trips the auth_cr_no_credential_provider diagFail check.
+//   - the CHAOS-66 session-revocation health record — the session_revocation
+//     row reports diagFail when a revocation could not be persisted or the
+//     persisted list did not load, and both are process-globals that latch.
 //   - the CHAOS-45 durable-write failure record — several tests inject REAL
 //     AtomicWrite failures on purpose (TestPolicyStore_Save_MetaSkippedOn
 //     MainWriteFailure, and every test running with dataDir unwritable), and
@@ -1115,6 +1118,17 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	// same class of process-global and also folds into the aggregate verdict.
 	resetAuthCostHealthForTest()
 	t.Cleanup(resetAuthCostHealthForTest)
+	// CHAOS-66: the session-revocation health record is the same class again,
+	// and it is the one that FAILS rather than warns — a revocation that could
+	// not be written down means the operator was told a session was withdrawn
+	// and it was not. In the test binary that is cross-talk: any test whose
+	// SaveRevocations fails (an unwritable dataDir, a revocations path pointing
+	// at a removed temp dir) latches the record for the REST of the binary,
+	// because the production signal deliberately clears only on an observed
+	// successful write. Every later test asserting the aggregate verdict then
+	// sees fail. Cleared on both edges, like the three above.
+	resetSessionRevocationHealthForTest()
+	t.Cleanup(resetSessionRevocationHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version
