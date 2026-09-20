@@ -536,49 +536,71 @@ func bindingsOf(fn *ast.FuncDecl, name string) []ast.Expr {
 // It walks the whole body including closures, for the same reason bindingsOf does: a deferred
 // closure assigning the variable is a write that lands before the caller uses the client.
 func unfollowableWriteTo(fn *ast.FuncDecl, name string) (why string) {
-	writes := func(e ast.Expr) bool {
-		id, ok := e.(*ast.Ident)
-		return ok && id.Name == name
-	}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if why != "" {
 			return false
 		}
 		switch st := n.(type) {
 		case *ast.RangeStmt:
-			if writes(st.Key) || writes(st.Value) {
-				why = "the Limits identifier " + name + " is written by a range clause, which this " +
-					"gate cannot follow to a value; bind it once with = and nothing else"
-			}
+			why = rangeWriteTo(st, name)
 		case *ast.TypeSwitchStmt:
-			if as, ok := st.Assign.(*ast.AssignStmt); ok {
-				for _, lhs := range as.Lhs {
-					if writes(lhs) {
-						why = "the Limits identifier " + name + " is bound by a type switch, whose " +
-							"per-clause value this gate cannot follow"
-					}
-				}
-			}
+			why = typeSwitchWriteTo(st, name)
 		case *ast.GenDecl:
-			if st.Tok != token.VAR {
-				return true
-			}
-			for _, spec := range st.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for _, id := range vs.Names {
-					if id.Name == name {
-						why = "the Limits identifier " + name + " is (re)declared by a var declaration " +
-							"inside the function; bind it once with = so this gate can follow the value"
-					}
-				}
-			}
+			why = varDeclWriteTo(st, name)
 		}
 		return true
 	})
 	return why
+}
+
+// identNamed reports whether e is exactly the identifier name.
+func identNamed(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+// rangeWriteTo reports a reason when a range clause assigns name (as key or value).
+func rangeWriteTo(st *ast.RangeStmt, name string) string {
+	if identNamed(st.Key, name) || identNamed(st.Value, name) {
+		return "the Limits identifier " + name + " is written by a range clause, which this " +
+			"gate cannot follow to a value; bind it once with = and nothing else"
+	}
+	return ""
+}
+
+// typeSwitchWriteTo reports a reason when a type switch binds name.
+func typeSwitchWriteTo(st *ast.TypeSwitchStmt, name string) string {
+	as, ok := st.Assign.(*ast.AssignStmt)
+	if !ok {
+		return ""
+	}
+	for _, lhs := range as.Lhs {
+		if identNamed(lhs, name) {
+			return "the Limits identifier " + name + " is bound by a type switch, whose " +
+				"per-clause value this gate cannot follow"
+		}
+	}
+	return ""
+}
+
+// varDeclWriteTo reports a reason when a var declaration inside the function (re)declares name.
+func varDeclWriteTo(st *ast.GenDecl, name string) string {
+	if st.Tok != token.VAR {
+		return ""
+	}
+	for _, spec := range st.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for _, id := range vs.Names {
+			if id.Name == name {
+				return "the Limits identifier " + name + " is (re)declared by a var declaration " +
+					"inside the function; bind it once with = so this gate can follow the value"
+			}
+		}
+	}
+	return ""
 }
 
 // isTopLevelBinding reports whether rhs belongs to an assignment that is a DIRECT statement of
