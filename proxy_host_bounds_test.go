@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"log"
@@ -325,7 +326,13 @@ func TestChaos66_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
 	}
 
 	ln := startSOCKS5Listener(t)
-	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	// DialContext, not DialTimeout: the repo convention (CLAUDE.md "HTTP
+	// contexts") and what the noctx linter enforces. The pre-existing SOCKS5
+	// harness in socks5_test.go still uses DialTimeout, which is why copying it
+	// tripped the diff-scoped lint here rather than there.
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDial()
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(dialCtx, "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
