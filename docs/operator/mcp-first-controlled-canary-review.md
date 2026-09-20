@@ -2447,7 +2447,8 @@ safely serve this role, and re-derivation showed it already does: it is exact-fi
 against a rug-pull, it demotes on revocation, and its reconcile re-derives from the durable store, so
 the only thing missing was that the activation gate never asked. And it did not persist usability
 into the activation's immutable reviewed snapshot: a revoked or expired promotion must be able to
-make a node un-ready, which a frozen copy could not express.
+make the next FULL ACTIVATION PREFLIGHT refuse, which a frozen copy could not express. (NOT
+"un-ready" on the node surface — `EvaluateNode` excludes every activation row; see §25d.)
 
 **A removal that was WRONG, and the correction.** The first shape of the resolver cross-checked the
 catalog record's digest and format against `loadTarget`'s re-read. That check was deleted mid-PR on
@@ -2483,7 +2484,8 @@ construction, pinned by `TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBound
 ## §25c Blocker 14 closure (the exact First-Canary policy permit)
 
 This section records ONE status change: **blocker 14 is CLOSED**. Nothing else in the ledger moves.
-Blocker 8 remains OPEN (narrowed), **blocker 9 remains OPEN** (see the overlap note below), the
+Blocker 8 remains OPEN (narrowed), **blocker 9 remained OPEN at the time of this section** (see the
+overlap note below; it was closed later on its own evidence in §25d), the
 baseline is still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY
 TARGET`.
 
@@ -2613,6 +2615,16 @@ first two substantive and the third procedural:
 control. **If the owner judges the first disjunct satisfied, closing blocker 9 is a one-line ledger
 change with this section as its evidence — but it is deliberately not taken here.**
 
+> **SUPERSEDED BY §25d.** Blocker 9 was subsequently closed on its own evidence, and NOT by adopting
+> this overlap. Re-deriving the credential path found that the reading above was too generous: the
+> policy obligation is one of THREE authoritative credential statements and the only one any
+> enforcement path reads, so the permit can be satisfied while the authoritative server record
+> requires a credential. §25d records what that actually took — a separate activation row over all
+> three layers, plus an execution-side proof — and keeps the closure scoped to *the First Canary
+> requires no production credential*. This section is left as written because the reasoning it
+> records, including the part that turned out to be incomplete, is the reason the follow-up looked
+> at the code instead of adopting it.
+
 ### What this does NOT close
 
 - **Blocker 9 stays OPEN** (above).
@@ -2621,10 +2633,638 @@ change with this section as its evidence — but it is deliberately not taken he
   executor is composed, no Canary is activated.** Blockers 1, 2, 3, 8, 10, 11, 12 and 15 are
   untouched.
 - Enforcement did not move. The policy engine still decides every real request; this row only stops
-  a node reporting Ready for an experiment whose every call would be refused.
+  the next FULL ACTIVATION PREFLIGHT admitting an experiment whose every call would be refused — not
+  the node readiness surface, which skips it (`factActivation`).
 
 **Campaign:** `scripts/mcp-first-canary-policy-permit-mutations.sh` — **30 mutations, 30 caught,
 0 survived, 0 skipped**, measured on the closing head.
+
+## §25d Blocker 9 closure (the credential-free First-Canary path)
+
+This section records ONE status change: **blocker 9 is CLOSED**. Nothing else in the ledger moves.
+Blocker 8 remains OPEN (narrowed), blockers 1, 2, 3, 10, 11, 12 and 15 are untouched, the baseline
+is still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY TARGET`.
+
+**The closure is narrow and its wording matters: *the First Canary requires no production
+credential*.** This does NOT claim a production credential provider exists, that the broker path is
+production-ready, or that Culvert cannot support authenticated MCP servers. It closes blocker 9's
+FIRST disjunct — "the exact executable policy path requires no credential" — and leaves the second
+("a real production credential provider/materialization path exists and is safe") unimplemented and
+unclaimed. `mcp_live_production_deps.go` still composes the broker with ZERO providers, which
+remains the truthful pre-Canary posture.
+
+### Why §25c's overlap note was not sufficient, and what changed
+
+§25c recorded that blocker 14's `ExactPolicyPermit` already refuses a matched rule carrying a
+`CredentialProfile` obligation, and — because of the permit's invariance requirement — that the
+refusal holds for every request the exact scope admits. It then left blocker 9 OPEN for three
+stated reasons. All three are now answered, and the FIRST of them turned out to be understated.
+
+**Re-deriving the credential path from the code found the real gap: the policy obligation is one of
+THREE authoritative credential statements, and it is the only one any enforcement path reads.**
+
+| layer | source | read by enforcement? |
+|---|---|---|
+| policy | `Decision.Obligations.CredentialProfile` | YES — `run.go` `profileRef`, `executePreconditionFailure`, the shadow evaluator |
+| registry | `registry.ServerRecord.CredentialProfile` | **NO. Zero enforcement readers.** |
+| catalog | `catalog.Fingerprint.CredentialProfile` | only through fingerprint equality/drift; it is a COPY of the registry value taken at ingest |
+
+So a snapshot in which policy says "no credential" while the authoritative server record says one
+is required is not a contradiction the engine can see. Execution reads the obligation, finds it
+empty, takes the no-broker branch (`useBroker := Broker != nil && profileRef != ""`) and reaches a
+credential-REQUIRED upstream with NO Authorization header — which either fails (an activation that
+cannot execute) or, the case that matters, succeeds against an upstream that accepts ambient
+access, performing a credential-required operation with no planning, no broker gate and no
+`CREDENTIAL_SELECT` event.
+
+`TestCredFreeE2E_ServerCredentialProfileIsRefused` asserts exactly this as its PREMISE: in that
+state the policy permit is still **satisfied**. That assertion is what makes this a separate
+readiness row rather than a duplicate of blocker 14's, and it is why §25c's "proven by the permit"
+reading would have been too generous.
+
+### The closure bar
+
+An ACTIVATION PREFLIGHT must not return Ready unless the exact First-Canary request is provably
+credential-free at EVERY authoritative layer — and the runtime must be unable to acquire or send a
+credential for it.
+
+### What was built
+
+- **`canary.EvaluateCredentialFree`** — the pure verdict over the three layers, with a bounded
+  reason naming which one objected (`policy_requires_credential` / `server_requires_credential` /
+  `reviewed_target_requires_credential`). No profile reference, tenant or host ever appears; an
+  opaque profile id is still a name an operator chose.
+- **`canary.ReasonCredentialPathRequired` / `Facts.FirstCanaryCredentialFree`** — a `factActivation`
+  row. The activation set is now **ten**. It is deliberately distinct from the node-level
+  `ReasonCredentialPathNotReady`, which asks whether this node COULD do credentials at all; this row
+  asks whether this EXPERIMENT needs one, which the First Canary forbids outright.
+- **`canaryExactRequestFacts`** — resolves the permit and the credential fact from ONE coherent
+  capture. Two captures would let each verdict be individually true about a DIFFERENT inventory,
+  since the registry and catalog publish independently; their conjunction would then describe no
+  state that ever existed. Pinned structurally by
+  `TestCredFreeWall_BothFactsComeFromOneCapture`.
+
+An engine error is reported as NOT ESTABLISHED (`credential_facts_unavailable`), never as
+credential-free, and that is self-contained rather than resting on the permit row also refusing.
+
+**The reviewed layer is structural, not a fourth field.** `CredentialProfile` is a hashed
+`catalog.Fingerprint` field, so "the reviewed target needs no credential" IS the catalog statement,
+given the digest match the reviewed-target binding already enforces. There is deliberately no
+separate reviewed-credential authority that could drift against the fingerprint.
+
+### §10 — the credential profile IS fingerprint-relevant, and that is the whole runtime guarantee
+
+`Fingerprint.CredentialProfile` is declared, hashed into `Sum()` and compared in `Equal()`, and
+`catalog/drift.go` classifies a change as `expansion` ("unprovable as narrowing"). So
+`none -> profile-X` produces a DIFFERENT tool identity: the scope pin, the governed promotion and
+the four-eyes live approval all stop matching, and the existing reviewed-target drift machinery
+refuses the stale activation. **No separate credential-drift authority was invented and no
+request-local check was added.** Campaign mutation M09 removes the field from the hash and is
+caught, so the dependency is executable rather than asserted.
+
+`TestCredFreeWall_CatalogCredentialDerivesFromTheRegistryRecord` records the other half: the
+fingerprint's credential profile is DERIVED from the registry record (never from the upstream's
+own `tools/list` response, which is attacker-influenced data), and the registry exposes no mutator
+for it. That is why the registry and catalog cannot disagree today — and the wall fails if a
+credential-profile mutator is ever added, forcing the divergence question to be answered again
+instead of silently opening a window.
+
+### The execution-side proof (§6/§7/§8)
+
+Everything runs through the REAL composed live executor, the REAL side-effect gate, and a REAL
+broker — **never a nil broker**, because production composes a real one and a proof against a
+composition production does not use would be vacuous. The broker's profile store is EMPTY, so ANY
+consultation of the credential path fails and blocks the request; the canonical request still
+reaching the upstream IS the zero-use proof, with the upstream call count as the positive control
+that the request got to the boundary at all.
+
+- `TestCredZeroUse_CanonicalPathNeverTouchesTheCredentialMachinery` — upstream reached exactly once,
+  no Authorization header, provider calls 0.
+- `TestCredZeroUse_CredentialRequiredFailsClosedWithUpstreamZero` — the control that this
+  composition CAN block, which is what makes the gate above a signal rather than a tautology.
+- `TestCredZeroUse_CredentialRequiredWithNoBrokerFailsClosed` — the pre-existing
+  `ReasonCredentialProfileMissing` guard is intact for the other composition shape.
+- `TestCredZeroUse_AuxiliaryTrafficCarriesNoAuthorization` — lifecycle methods are kernel-terminal
+  (asserted through the production `protocol.Admit`, so they never reach `upstreamclient` at all),
+  and `tools/list` discovery sends no `AuthHeader`. Discovery runs OUTSIDE the policy decision, so
+  a credential there would ride no decision and be covered by no obligation.
+
+### §25c's three reasons, answered
+
+1. **"Activation-time fact vs execution path."** Answered by §6/§7/§8 above: the execution path is
+   now proven to send no credential on the canonical path and to fail closed on a credential-
+   required one, under both composition shapes.
+2. **"Blocker 9 also names the broker/provider path."** NOT implemented, and deliberately not
+   claimed. The closure statement is scoped to *the First Canary requires no production
+   credential*; a provider remains future work and is not a First-Canary prerequisite precisely
+   because the experiment needs none.
+3. **"A blocker closed as a side effect inherits another PR's evidence."** Answered procedurally:
+   this is blocker 9's own change, with its own matrix, walls and campaign.
+
+### The §14 answers, including the one residual
+
+**"Can any request eligible under the exact First-Canary activation cause credential planning,
+materialization, provider access, or an Authorization header?"** — Materialization, provider access
+and an Authorization header: **no**, on any path, proven by
+`TestCredZeroUse_CanonicalPathNeverTouchesTheCredentialMachinery` and its credential-required
+control. Credential PLANNING: **not for any request the certified policy admits** — the permit's
+invariance requirement means the same no-`CredentialProfile` rule wins for every such request — but
+there is ONE way to enter it, recorded rather than hidden.
+
+**THE RESIDUAL — a mid-window policy edit.** The permit is an ACTIVATION-time fact over the policy
+as it stood. The runtime re-evaluates per request against whatever snapshot is then current, and
+nothing revalidates "the policy is still the one the permit certified" at the side-effect boundary
+(`SnapshotHash` is carried into evidence, never compared). So an operator editing policy mid-window
+to a credential-bearing rule produces a decision the permit never certified. What that can cause is
+bounded and asserted: `Broker.Plan` — metadata only, against a profile store with nothing in it —
+fails, and the request is blocked with the upstream never reached, no provider touched and no
+Authorization constructed, and the block is METERED with its reason (`Metrics.ObserveBlock`,
+`executor.go`), so the execution plane does carry the evidence.
+
+**WHAT IS NOT OBSERVABLE, corrected (Codex P2, round 2).** This paragraph previously said "the
+readiness row then reports the node un-ready on the next read". **That was FALSE**, and the way it
+was reached is the finding worth keeping. The evidence behind it,
+`TestCredDrift_ReadinessIsReEvaluatedNotFrozen`, proves something NARROWER: the credential FACT is
+re-observed from authoritative state rather than frozen into the reviewed snapshot. It says nothing
+about WHICH READ SURFACE exposes it — and the operator-facing one does not. `mcpCanaryStatus`
+(`GET /api/mcp/rollout`, the "canary" sub-view) reports `evaluateCanaryNodeReadiness` →
+`canary.EvaluateNode` → `evaluate(f, nodeOnly=true)`, whose loop SKIPS every `factActivation` row;
+`FirstCanaryCredentialFree` is one, so `credential_path_required` can never appear in that surface's
+`unmet`. It appears only in the static `all_prerequisites` vocabulary — which is precisely why the
+distinction misleads: an operator sees the prerequisite advertised and may infer the surface would
+report it unmet. The only non-test caller of the full `canary.Evaluate` is the activation preflight,
+reached from the rollout commit gate and the startup restore reconcile. So the drift is observable
+at the NEXT TRANSITION or restart, and as a metered block on the execution plane — **not on a status
+read**.
+
+This is the same defect shape as campaign M17: a gate proves one proposition and the prose claims a
+stronger one built on it. The rule to carry forward is that **an observability claim names the
+SURFACE, and the surface is checked** — so the boundary is now asserted rather than described, by
+`TestCredWall_NodeStatusSurfaceCannotReportActivationReasons` (campaign M19), which derives the
+activation set from exported evaluator behaviour and fails in BOTH directions: if `EvaluateNode`
+stops excluding activation rows, and if the status surface starts reporting them.
+
+`EvaluateNode`'s exclusion is deliberate and is NOT changed here: it exists because activation facts
+default false, so a node-level surface that included them would report every node permanently
+not-ready (Codex P2, PR #1249). Making this drift visible on a read therefore needs a separate
+activation-scoped status field, which is new surface for a build where no Canary is ever armed —
+out of scope for blocker 9 and recorded rather than done.
+
+This is the same activation-time-vs-execution-path seam §25c named for blocker 14; it is narrowed
+here to "planning can be entered, nothing else can" and is NOT claimed closed.
+
+**"Can policy say no credential while authoritative server/tool state says one is required and
+still reach `Ready:true`?"** — No. `TestCredFreeE2E_PolicyNoneServerRequiresIsNotReady` drives the
+production probe into exactly that state and asserts the readiness verdict is unmet for exactly
+`credential_path_required`.
+
+**"Can a credential requirement appear after activation without being caught by the existing
+immutable reviewed-target / fingerprint drift path?"** — No, for a structural reason:
+`registry.ServerRecord.CredentialProfile` has no mutator, so it can only change by republishing the
+whole inventory, which replaces the catalog in the same publication and therefore changes the
+fingerprint. The reviewed binding then stops matching. A POLICY-side credential appearing after
+activation is the residual above, not a drift-path gap.
+
+### What this does NOT close
+
+- **No production credential provider exists.** Any FUTURE experiment that needs a credential is
+  blocked on work this PR does not do.
+- **The mid-window policy-edit residual above.** Bounded to credential planning, fail-closed, and
+  not claimed closed.
+- Blocker 8 stays OPEN (narrowed); blockers 1, 2, 3, 10, 11, 12, 15 are untouched.
+- No upstream is contacted outside the controlled test composition, no Canary is activated, and
+  enforcement did not move.
+
+**Matrix:** the §11 twelve-case matrix is indexed and machine-checked by
+`TestCredMatrix_EveryRequiredCaseHasALivingGate`, which requires each case's gate — and each
+negative's positive control — to exist.
+
+**Campaign:** `scripts/mcp-first-canary-no-credential-mutations.sh` — 39 mutations,
+**39 caught, 0 survived, 0 skipped, measured on `6392283c`**. A run that reaches its summary has
+necessarily passed `selfcheck_site_counter`, which refuses before anything else prints.
+
+It took FOUR runs on this round's code to get there, and the three discarded runs are the argument
+for re-measuring rather than asserting: M23 came back NOT PROVEN (the payload did not compile),
+then SURVIVED (its control had been silently disarmed), then M24 came back SKIPPED (its payload
+named a symbol this round deleted). Review found none of the three.
+
+The fourth is the one worth recording, because the defect was in the INSTRUMENT. **M30 came back
+SURVIVED, and there was no hole.** The payloads are applied with perl in slurp mode, so an `s///`
+without `/g` replaces the first match IN THE WHOLE FILE. M30's pattern matched four lines of this
+document and the first is blocker 4's campaign row, roughly 1500 lines outside §25d. The mutation
+applied, edited an unrelated section, and the correctly-scoped gate saw nothing — so it reported a
+hole in a suite that did not have one. That is the same defect as missing a hole that does exist:
+the score had stopped describing the suite. In both directions the failure is the section's one
+recurring shape, now at the level of the measuring instrument for the second time — **a gap between
+what the apparatus proves and what its number claims.**
+
+Anchoring M30 fixed the instance. The runner now proves the property for all thirty: `apply_payload`
+counts how many SITES a payload matches and the runner requires exactly one; a miss (0) and an
+overreach (>1) are both NOT PROVEN. The count is taken from a `/g` run against an untouched copy,
+and that detail is load-bearing — counting SUBSTITUTIONS would not work, because a plain `s///`
+returns 1 whether the pattern matched one site or forty, and the first version of this guard duly
+reported the ambiguous M30 payload as a clean single hit.
+
+**And then the guard had the same defect the guard was for**, which Codex round 10 found. Every one
+of the thirty payloads matches exactly one site, so nothing in the campaign ever asked the counter
+to report anything else: drop the `/g`, or replace the count with a constant `1`, and all thirty
+still pass while the guard is silently disabled and the M30 ambiguity is free to recur (measured —
+with the `/g` the ambiguous payload reports 4 sites, without it 1). The counter had been verified by
+hand and the verification written down **here**, in prose, which protects no later run. That is this
+section's one recurring shape reaching the third level: the apparatus that measures the suite had
+itself become a record that claimed more than it proved.
+
+So the verification is now part of every run. `selfcheck_site_counter` builds a fixture and requires
+the counter to report **4** for an ambiguous payload, **1** for an anchored one that actually
+applies, and **0** for one that matches nothing and leaves the file alone; a disagreement makes the
+campaign **refuse to start**, for the same reason a dirty tree and a red baseline do — a broken
+counter makes every score after it unverified. It was checked against three injected defects (the
+dropped `/g`, a constant `1`, and a counter that counts correctly but stops applying), each
+rejected, with a healthy counter accepted as the control. All thirty payloads were also
+differentialled against the previous apply for byte-identical output.
+
+There is deliberately **no opt-out** for a payload that wants several sites. `run_mutation` already
+takes multiple payloads, so a mutation needing several edits spells out each one — and the earlier
+`--multi <n>` escape hatch was removed rather than kept, because nothing used it, nothing tested it,
+and an untested branch that loosens a guard is the next round's finding.
+
+> **The previously recorded score here — "21 caught, 0 survived, 0 skipped, measured on
+> `5d0e8055`" — was VOID, and the way it was void is the most important thing in this section.**
+>
+> Codex round 5 found `TestCredWall_EveryClaimedSurfaceIsScanned` RED on the unmodified head:
+> the round-4 fix widened `nodeReadyPromise`, and §25d itself quotes the very phrase the widened
+> matcher had just learned to recognise. The campaign was then run against that tree and every
+> mutation pointed at that gate scored CAUGHT — **because the gate was already failing**, not
+> because the mutation was detected. A campaign scores a mutation CAUGHT when the named gate fails;
+> that inference is worthless unless the gate PASSES unmutated, and nothing checked.
+>
+> The campaign now checks. `baseline_ok` runs each named gate on the clean tree before mutating and
+> scores a red or empty baseline as **NOT PROVEN** — the same verdict a non-compiling mutation gets,
+> for the same reason: no gate ran that could tell the mutated tree from the clean one. Cached per
+> (gate, package) so it does not double the run.
+>
+> The lesson is the one this section keeps re-learning, now at the level of the measuring
+> instrument rather than the thing measured: **a campaign score is a measurement, and a measurement
+> with an unverified baseline is not a weak result — it is not a result.** M14 is the anti-vacuity mutation: a
+constant-false resolver passes every negative gate while making the First Canary permanently
+impossible, and is rejected by a POSITIVE control rather than by a negative. M15/M16 target the two `CanaryActivationInput` call sites in
+`mcp_rollout.go`, which every behavioural gate is blind to because they call the resolver directly;
+they are caught by the PRE-EXISTING
+`TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall`, whose field list is derived
+from the struct — so the new row was covered at both sites the moment it was declared. M17 covers a
+defect SELF-REVIEW found rather than a test: an engine error left the credential input marked
+resolved with an empty POLICY statement, so a tuple whose policy verdict could not be computed
+reported as credential-free. It was defended by "the permit row refuses that tuple anyway", which is
+true today and is exactly the wrong shape of argument — it makes this row's soundness depend on
+another row staying required. `Resolved` is now `err == nil`.
+
+M18 covers a defect a REVIEW found rather than a test, and the fix it named was too small. Codex
+flagged ONE stale cross-reference to the renumbered activation rows in
+`docs/design/mcp/CANARY-READINESS-MATRIX.md`. Checking the whole document found EIGHT: the table had
+been renumbered without the prose that points into it. Fixing only the reported line would have left
+seven live wrong pointers beside it, so the class is closed by machine —
+`TestCredWall_MatrixDocActivationRowsMatchTheTable` parses the table and requires every activation
+row's number AND reason to match what the engine's own `Evaluate`/`EvaluateNode` behaviour reports,
+so a future renumbering that touches the table without the prose fails the build. It was verified
+failing against the exact pre-fix prose, naming both halves.
+
+M19 covers the SECOND review-found defect, recorded in the residual paragraph above: an
+observability claim that named no surface. It guards the boundary that paragraph now depends on —
+`mcpCanaryStatus` reports `EvaluateNode`, which skips every `factActivation` row, so the status read
+can never carry `credential_path_required`. The mutation makes `EvaluateNode` stop excluding those
+rows; the gate fails in BOTH directions (the derived activation set going empty, and the surface
+reporting an activation reason), because checking only "no activation reason appears" would pass
+VACUOUSLY under exactly that mutation — the derived set would be empty and the check would inspect
+nothing.
+
+M20 covers the THIRD review-found defect, and it is the same lesson one level up. M19 stops the
+status surface from REPORTING an activation reason; it does not stop the code from CLAIMING
+otherwise — and round 3 found the claim in EIGHT places: three `canary.Facts` field comments
+(`ToolCatalogUsable`, `ExactPolicyPermit`, `FirstCanaryCredentialFree`), matrix row 21, this
+document's catalog-usable paragraph, and three test comments. Every one of those is a
+`factActivation` row `EvaluateNode` excludes, so none can make the NODE surface un-ready; `node_ready`
+is a literal field on that surface, which is what makes the wording a claim rather than loose prose.
+
+**THE ROUND-2 SWEEP MISSED THEM BECAUSE IT SEARCHED FOR THE PHRASING, NOT THE PROPOSITION.** It
+grepped `next read` and `readiness row reports`; these sites say *"must be able to make a node
+un-ready"*, so they did not match — one formula, written once and copied. The rule to carry
+forward: **when a review names one instance, search for the CLAIM it makes, not the words it
+happens to use.** `TestCredWall_NoActivationFactPromisesNodeReadiness` derives the activation set
+from exported behaviour and AST-reads the real `Facts` doc comments, with
+`TestCredWall_NodeLevelFactsMayStillSpeakOfNodeReadiness` as its CONTROL — a node-level
+prerequisite genuinely does make the node un-ready, and a gate that banned the phrase outright
+would be a spell-checker rather than a wall.
+
+M21 covers the FOURTH review-found defect, and it is the M20 entry above being wrong about itself.
+Round 4 found TWO faults in that wall, both the same overclaim shape as the class it closes:
+
+1. **It parsed only `readiness.go` while this record claimed six surfaces.** Reintroducing the
+   promise in the matrix, this ledger or any of the three test files left the gate green — so M20
+   did not close the class it records. `TestCredWall_EveryClaimedSurfaceIsScanned` now reads every
+   surface the claim names, and permission to speak of node readiness is an EXPLICIT allowlist with
+   a stated reason per entry, kept honest by `TestCredWall_AllowlistIsNotStale` (an entry matching
+   nothing is a standing permission nobody uses). The wall's OWN file is deliberately excluded and
+   says why: it defines the matcher and the allowlist needles, so a scanner reading itself reports
+   its own machinery forever — and it was never one of the eight sites.
+2. **Its control was vacuous.** It compared two derived classifications, never applied the matcher,
+   and cited `RollbackCoordinatorRehearsed` as the legitimate node-level case — whose wording
+   ("a rehearsed-mechanics node is still not ready") the matcher did not even recognise. The
+   matcher now recognises that phrasing, and the control DRIVES it against the real doc, asserting
+   both halves: it fires on legitimate node-level wording, and the wall permits it anyway because
+   the field is node-level. Turning the wall into a blanket phrase ban now fails, flagging that
+   legitimate field — verified.
+
+**A control that cannot fail is decoration**, and this one could not: it exercised no matcher and
+quoted text the matcher could not see. That is the anti-vacuity discipline this campaign applies to
+every other gate, not applied to a gate of mine.
+
+M22 and M23 cover the FIFTH review round, which found two things — one of them about the
+measuring instrument itself.
+
+**The claim has a negation, and the sweep only knew one polarity (M22).** Round 3 recorded the rule
+*"search for the CLAIM, not the words"* and fixed eight sites, every one phrased negatively —
+"makes a node un-ready" — because that is what it searched for. The identical proposition stated
+the other way round, *"this row only stops a node reporting Ready"*, survived in **four** more
+places, including the doc comment on `ReasonExactPolicyNotExecutable`: the reason string of an
+ACTIVATION-level fact, in the engine's own source. Codex named one instance (a test comment); the
+widened matcher found six lines in total. So round 3's lesson had been applied to the words of one
+polarity, which is the same mistake one level in. `nodeReadyPromise` now carries a positive branch
+anchored on the VERB (report / reach), so "the verdict is Ready — node readiness AND the
+activation-level facts", a true statement ABOUT node readiness, is not swept up.
+
+**A wall must not push an author away from the correcting sentence (M23).** Widening the matcher
+made it flag the CORRECTED wording too — "EvaluateNode skips it and node status can still report
+Ready" is the one sentence that makes an activation fact's scope unambiguous, and it contains the
+same words as the defect while asserting the opposite. Suppressing it to satisfy a regex would be
+the wall degrading the documentation it exists to protect, and allowlisting each correction
+one-by-one would grow a permission list with every fix. `nodeReadyIndependence` exempts the shape
+that asserts the node surface is UNAFFECTED, keyed on "still". M23 broadens that exemption until it
+swallows the defect, and
+`TestCredWall_CorrectedWordingExemptionDoesNotSwallowTheDefect` rejects it — the exemption is a
+hole the moment it cannot tell the two apart. The residual is stated in the code rather than
+hidden: a false claim contrived to contain "still … report … ready" would be exempted.
+
+**A list of places to look rots the same way the claim does (the seventh surface).** Round 4's
+finding was that the wall read ONE file while its record claimed six; the fix made it read the six.
+Asking the round-5 question *"is there a seventh?"* against the whole repository rather than
+against that list found one immediately: `mcp_canary_policy_permit.go`, ROOT PRODUCTION SOURCE,
+carrying the same sentence as `readiness.go` — a file no version of the wall had ever read. So the
+scan is now INVERTED: it walks every Go and Markdown file in the repository and names its
+exceptions — `nodeReadyScanExcluded` (one entry: the wall's own file, which defines the matcher)
+and `nodeReadyScanExcludedDirs` (`.git`, `node_modules`). A new file is covered the moment it
+exists. Campaign scripts are out of scope by extension, because a mutation payload contains the
+claim BY CONSTRUCTION.
+
+The DIRECTORY axis was itself an unrecorded gap for one round. The first inverted scan also skipped
+`frontend`, `dist` and `testdata` and wrote none of them down, while this paragraph claimed every
+Go and Markdown file was covered — the same overclaim, on the axis introduced to close it, invisible
+to every staleness check because nothing represented it. Codex round 6 found it. Those three are now
+SCANNED (2,554 files), and the two that remain excluded are named with a reason each.
+
+That number was wrong by one for a round, in two different ways at once, and both are worth
+keeping. It was TRANSCRIBED as 2,555 when the walk returns one fewer — it removes the wall's own
+file — so the sentence recording the coverage fix committed the coverage overclaim. And it was
+MEASURED by adding a temporary probe test to the tree, which the walk then counted: the observer
+was in the sample. `TestCredWall_LedgerStatesTheRealScanCount` now reads the number back out of
+this document and compares it to what the walker returns, so it cannot be right by hand and wrong
+in fact.
+
+The allowlist got the same treatment for the same reason. `TestCredWall_AllowlistIsNotStale` used
+to ask whether an entry's needle still appeared in the file; it now asks whether the scan REACHES
+that entry, and caught a dead one on its first run — an entry added minutes earlier in this same
+session, made unreachable by the quotation rule written just after it. Present is not reached.
+
+The P1 of that round was separate and is recorded with the campaign score above: the wall was RED
+on the unmodified head, so the recorded 21/0/0 measured nothing. That is now a campaign
+precondition rather than a thing a reviewer has to notice.
+
+**Round 7 found four, and two of them ended a strategy rather than patching one.**
+
+1. **Negating the exemption's own wording bypassed it.** *"It is FALSE THAT node status can still
+   report Ready…"* matched both the promise pattern and the exemption. The round-6 fix had been
+   justified here as *"self-limiting — a sentence containing this phrase asserts the node surface is
+   UNAFFECTED"*; that is simply wrong, because any assertion can be negated and a pattern that
+   recognises a phrase cannot see the operator in front of it. **Two tightenings, two bypasses, both
+   found by a reviewer rather than by a gate** — the signature of a losing game, not of a nearly
+   correct rule. `nodeReadyIndependence` is DELETED. The two real corrective sentences are named in
+   the allowlist like every other permitted claim, which is the conclusion round 6 reached for the
+   quotation rule, now applied consistently instead of one mechanism at a time.
+2. **An allowlist needle permitted the whole LINE it appeared on.** Appending a fresh claim after an
+   allowlisted quotation stayed green: a permission to QUOTE one historical claim had become a
+   permission to ASSERT a new one beside it. The reachability check could not see it, and that gap
+   is the general lesson — **reachability proves an entry is USED; it says nothing about whether it
+   is NARROW.** Matching is now by SPAN: an entry permits exactly the text it quotes, and a second
+   claim elsewhere on the line is flagged. Switching to spans immediately exposed a live instance —
+   the round-4 entry quoted the REFUTATION (`**That was FALSE**`) rather than the claim, so it had
+   been permitting its line while covering nothing at all.
+3. **The file count was wrong by one, and measured with the observer in the sample** — see above.
+4. **The quotation-permission count understated itself** — see above.
+
+**M24 then scored SKIPPED for the same root cause, one mutation later.** Its perl still matched a
+line mentioning `nodeReadyIndependence` — deleted in this very round — so it changed nothing and
+proved nothing. M23 had been repointed for that deletion and M24 had not, which is the recurring
+shape again at the smallest possible scale: **a change that removes a symbol has to be carried to
+everything naming it, and a campaign's own payloads are part of the tree.** SKIPPED is deliberately
+not CAUGHT for exactly this reason — a mutation that does not apply is a gate nobody ran.
+
+**M23 was NOT PROVEN, then SURVIVED, and the campaign found what review had not.** Its first
+form replaced the span-containment test with `if true {`, which orphaned two loop variables and did
+not compile — the M10 verdict, recorded in this very section, walked into again: a mutation that
+cannot build runs no gate and proves nothing. Rewritten to compile, it then SURVIVED, and the
+reason was in the control rather than the mutation.
+
+`TestCredWall_AnAllowlistEntryPermitsOnlyWhatItQuotes` had been written around the needle
+`**That was FALSE**`. That needle was repointed at the claim an hour later — because under span
+matching a needle quoting the REFUTATION covers nothing — and the control was not re-checked. Its
+sample line then contained no claim and no needle, so "permitted" was true because there was
+nothing to permit, and no mutation of the containment test could change the verdict. **The control
+had been decoration from the moment its dependency moved, and every run of it since had passed for
+that reason.** It is now built on the real ledger line and asserts non-vacuity explicitly: the
+sample must carry exactly one claim, be covered by a real entry, and the appended form must carry
+two.
+
+The general point is the one this section keeps paying for: **a control is coupled to the data it
+samples, and changing that data silently disarms it.** Review found none of this; the campaign did,
+which is the whole reason a score is re-measured rather than asserted.
+
+**Round 6 found three more, and the second was larger than reported.** All three landed on
+mechanisms built during round 5, which is what a review is for.
+
+1. **The `still` exemption swallowed a negated claim.** *"This activation prerequisite PREVENTS the
+   node from STILL REPORTING Ready"* matched both the promise pattern and the exemption, so the
+   scan skipped it. The residual had been recorded here as contrived; it was one rephrasing away
+   from ordinary documentation. The exemption now anchors on the full corrective subject
+   (*"node status can still …"*), which is self-limiting: a sentence containing it asserts the node
+   surface is UNAFFECTED.
+2. **A quoted claim is still a claim — and in Go, "quoted" means STRING LITERAL.** Codex reported
+   the scare-quote case (subject outside the quotes, predicate inside). Measuring which lines the
+   rule actually exempted found six, and **three were not citations at all**: an `errors.New`, a
+   `t.Fatal` and a `t.Fatalf`. The rule was exempting the contents of every error message, log line
+   and test-failure string in the repository — so a false claim shipped to an operator in an error
+   string was invisible to the wall. No syntactic rule can separate citing a claim from asserting
+   one, so there is no general rule any more: the ledger's quotations and the genuine node-level Go
+   strings are each named in the allowlist with a reason, kept honest by the reachability check.
+   The COUNT is stated once, below, and gated — stating it twice is how this paragraph said three
+   while the next sentence said four, two lines apart, with the gate green because it parsed only
+   the other phrase (Codex round 8). **10 allowlist entries name ledger lines** — the two from round 4, the
+   four quotations this removal required, and the four more that became VISIBLE in round 17 once
+   the scan stopped reading one line at a time, counted by
+   `TestCredWall_LedgerCountsItsOwnQuotationPermissions` rather than by hand, because the first
+   version of this paragraph said three and understated the permissions it had introduced.
+3. **The directory axis, above.**
+
+**M25 SURVIVED its first run, and that is the most useful result of the round.** The mutation
+weakens the allowlist staleness check from REACHED back to merely present. With every entry
+currently reachable, the weakened form returns the same verdict on all of them — so the gate passed
+with the defect in place. It was not enforcing reachability; it was riding on the allowlist
+happening to be clean, and would have started enforcing only once something was already wrong.
+
+That is this section's own recurring shape reaching the newest gate in it, hours after the gate was
+written to close the previous instance. A check whose claim holds only when the tree happens to
+violate it proves nothing on a healthy tree, which is every tree a reviewer looks at. The predicate
+is now the named `allowlistEntryReached`, and
+`TestCredWall_ReachabilityCheckCanActuallyFail` drives it in BOTH directions against the real
+source — a needle on a line the scan never flags must read unreachable, the genuine node-level
+claim must read reachable — so the mutation has something to break. Verified: M25 now fails that
+control on the assertion, not on a build error.
+
+**A survivor is a finding, not a failure of the run.** The campaign did its job here: it found a
+hole a passing test suite could not, which is the entire reason the score is re-measured rather
+than carried forward.
+
+**The rounds, in order.** This list is the ENUMERATION the total below is checked against — both
+derive from it, so neither can drift from the other (Codex round 9: the previous gate compared the
+total to the largest `round N` numeral anywhere in the section, which a new entry headed differently
+would not move, and a deleted entry would not shrink).
+
+- **Round 1** — one stale matrix row reference reported; eight were present. Gated by M18.
+- **Round 2** — the ledger claimed an observability property of a surface that reports nothing of
+  the kind. Gated by M19.
+- **Round 3** — three sites reported; eight present, every one of them in a single polarity.
+  Gated by M20.
+- **Round 4** — the wall read ONE file while its record claimed six, and its control was vacuous.
+  Gated by M21.
+- **Round 5** — the wall was RED on the unmodified head, so the recorded score measured nothing;
+  and the claim stated POSITIVELY survived in five more places, plus a SEVENTH surface in root
+  production source. Gated by M22 and by `baseline_ok`.
+- **Round 6** — the `still` exemption swallowed a negated claim; quoted-means-cited was exempting
+  every Go STRING LITERAL; the directory axis was an unrecorded gap. Gated by M23 and M24.
+- **Round 7** — negating the exemption's own wording bypassed it; a needle permitted the WHOLE
+  LINE; two ledger counts were wrong, one measured with a probe file in the tree. Gated by M23,
+  M26 and M27.
+- **Round 8** — a count stated twice disagreed with itself while its gate stayed GREEN; the round
+  total was stale. Gated by M28.
+- **Round 9** — the round gate derived the total from the largest `round N` numeral in the
+  section rather than from its enumeration, so an added or deleted entry would not move it; and a
+  second paragraph carried its own account of the campaign's growth, stopping at M21 while the
+  script reached M28. Gated by M29 and M30.
+- **Round 10** — the payload site counter added one round earlier could not fail. All 30 payloads
+  match exactly one site, so dropping the `/g` from the counting run left every one of them passing
+  with the guard disabled; the counter had been verified by hand and the verification written into
+  this section, which protects no later run. Gated by `selfcheck_site_counter`, which refuses the
+  campaign rather than scoring it.
+- **Round 11** — this section described round 10 in a new paragraph while the enumeration below
+  stopped at 9 and the total still read "9 rounds", and the round gate stayed GREEN because it
+  compared only those two with each other. Round 9's finding one level out: the gate checked the
+  two things it derived from each other and never asked whether they covered what the section
+  talks about. Every round §25d NAMES must now be enumerated. Gated by M31.
+- **Round 12** — the clause added in round 11 read only the SINGULAR form, so `rounds 7 and 8` —
+  a phrasing this section had contained all along — matched nothing at all, not merely its first
+  number, because `round\s+` cannot match the `s`. The gate passed on that text by luck: 7 and 8
+  happen to be enumerated. One mutation per FORM, not one per rule. Gated by M32, which is M31's
+  plural twin and was verified to PASS against the pre-fix extractor.
+- **Round 13** — the comma-list arm of that same parser accepted only ONE separator token between
+  numbers, so an Oxford comma — the form `rounds 7, 8, and 9` — stopped the list at the serial
+  comma and returned only the first two, dropping the third. The dropped one went unseen whether or
+  not it was enumerated, and in the case that matters it is not. (This entry cannot spell the
+  original example, because the fixed parser reads any number it names as a round this section
+  claims — the gate rejected an earlier draft of this very paragraph for naming an unenumerated
+  one, which is the clearest demonstration available that it now reads the form.) Round 12's
+  own rule, unapplied to itself: "comma list" and "comma list with a serial `and`" are different
+  syntaxes. A separator is now a SEQUENCE, which is what `, and` is. Gated by M33.
+- **Round 14** — a serial `or` was a third separator the parser could not read, after the plural
+  `and` and the Oxford comma, and every one of the three truncated the list SILENTLY. Measured:
+  `or`, `&` and `through` all dropped everything after the first number. Adding a fourth token
+  would have invited a fifth round, so the FAILURE MODE changed instead: an unrecognised connector
+  between two round numbers is now a build failure that names the connector, and the next form is
+  reported rather than quietly dropping a round. Gated by M34 and M35.
+- **Round 15** — that refusal matched ONE short token, so multi-word connectors (`as well as`,
+  `followed by`, `alongside`) evaded BOTH the parser and the refusal: M35 claimed to close a
+  failure mode it did not. Four rounds of the same finding with a different word in it is evidence
+  that a connector VOCABULARY cannot be completed, so there is no longer one. Every one- or
+  two-digit number inside a bounded window after a `round` token is a named round, whatever joins
+  it to the previous one; the window stops at the first sentence terminator, and the two-digit
+  bound keeps ordinary prose out. Verified against the live section: it collects EXACTLY the
+  enumerated set. Gated by M36.
+- **Round 16** — the collector treated ANY newline as a sentence boundary, and this section is
+  hard-wrapped Markdown, so a list of rounds that straddles a newline truncated at the wrap and the
+  round named after it was invisible while the gate stayed green. Four rounds had asked what JOINS
+  the numbers; none had asked what SEPARATES the lines. The stop is now a paragraph break (a blank line), never a line
+  wrap — a change that can only WIDEN each window, so the collected set is a superset of what it
+  was and the gate can get stricter but cannot go blind. The live section still yields exactly the
+  enumerated set. Gated by M37, whose payload changes no words at all, only where the line breaks.
+- **Round 17** — two findings, both the same axis one step further. (a) The round collector also
+  carried a fixed BYTE cutoff on top of its sentence bound, so an ordinary long sentence naming a
+  round past that offset truncated silently: an arbitrary number cannot be a statement about where
+  a sentence ends, and the terminators already are one, so the cutoff is deleted. Measured before
+  and after against the live section: the same set. Gated by M38. (b) The whole-tree CLAIM scan
+  still read LINE BY LINE, so a forbidden claim split across a wrap matched neither line and the
+  wall stayed green with the claim present — round 16's defect one layer up, in the scanner that
+  reads the same wrapped files. The rule is now stated once and applied in both: a line wrap is
+  not a boundary, a blank line is. The scan unit is a SENTENCE, not a paragraph: every branch of
+  the matcher is bounded by `[^.]`, so splitting there cannot lose a match, while a paragraph-wide
+  unit lets an earlier unrelated `node` start the match and widen its span past the needle that
+  quotes the claim — which made the wall report live, reasoned permissions as unreachable. Joining
+  immediately exposed SEVEN mentions no per-line scan could ever have seen; each is legitimate and
+  each is now named in the allowlist with a reason. Gated by M39.
+
+**17 rounds, one defect shape.** Every finding on this branch has been a gap between what a gate
+PROVES and what its record CLAIMS — the readiness fact vs the surface (round 2), the surface vs the
+class (round 3), one file vs six (round 4), one polarity vs the proposition and a score vs its
+baseline (round 5), a general rule vs Go string literals (round 6), an anchored phrase vs its own
+negation and a needle vs the line it sat on (round 7), and a gated number vs the same number stated
+again two lines away (round 8), a gate that derived a count from prose beside it rather than from
+the list it claimed to check (round 9), a guard whose counter could not fail because every input
+expected the same answer (round 10), and a list and a total that agreed with each other while both
+understated the section they described (round 11), and a rule stated over several syntaxes that
+was only ever tested in one of them (round 12), and that same rule left unapplied to the rule
+itself one round later (round 13), and three separators in three rounds that each truncated a list
+without saying so (round 14, where the fix was to stop truncating silently rather than to learn a
+fourth word), and a refusal that could read one word but not two (round 15, where the connector
+vocabulary was deleted rather than extended a fifth time), and a parser tested only on single-line
+input against a document that is hard-wrapped (round 16, where the blind spot was the line break
+itself rather than any word), and that same blindness left unfixed in the scanner beside it while
+the collector was taught to see (round 17, where the rule was finally stated once and applied to
+both readers of the same wrapped files).
+
+The gates get stronger every round; what keeps failing is the accounting around them, so the
+discipline that matters is not "add a gate" but **"state exactly what the gate establishes, and no
+more"** — and, learned the hard way in rounds 7 and 8, **state each fact ONCE.** A number repeated
+is a number that will drift, and gating one of its two statements is worse than gating neither,
+because the audit then reports green while the document contradicts itself.
+`TestCredWall_LedgerRoundCountMatchesItsOwnEnumeration` keeps this very sentence honest: the total
+must equal the enumeration, the enumeration must be contiguous from 1, and every round the section
+NAMES — in the singular, plural, comma-list or range form, each pinned directly by
+`TestCredWall_RoundNamesAreParsedInEveryFormTheLedgerUses` — must appear in it.
+
+That last clause was added in round 11 and this sentence is why it is worth recording separately.
+The description here previously read *"comparing its total against the highest round the section
+actually discusses"* — which is the behaviour round 9 REMOVED for being unsound, still written down
+as though it were the contract, two paragraphs below the entry recording its removal. Nothing
+checked it, because a gate's prose description is exactly the kind of claim this section keeps
+finding unbacked.
+
+> A campaign score is a **measurement, not a property of the suite** — it must be re-run after any
+> change to the code *or* to the campaign. The first run of this campaign scored M10 as NOT PROVEN
+> rather than caught: the mutation left a variable unused, the package did not build, and no gate
+> ran. A build failure proves nothing, so the mutation was corrected to compile and re-measured.
+> The campaign has grown once per review finding ever since, so every earlier score described a
+> campaign that no longer existed. Each growth blanked the recorded number back to a placeholder
+> rather than carrying it forward, which is the whole point of the rule.
+> The CURRENT size is stated once, with the score above, and
+> `TestCredWall_LedgerStatesTheCampaignSize` ties it to the number of mutations the script actually
+> runs — this paragraph used to carry its own enumeration and stopped at M21 while the script
+> reached M28, giving §25d two incompatible accounts of the same history (Codex round 9).
 
 ## §26 Final verdict
 
@@ -2832,13 +3472,29 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    typed witness reconciliation) is complete and proven against the real spool; the AUTHORITATIVE
    PRODUCTION WITNESS ADAPTER remains unwired, and until it is, a post-send crash resolves to
    `reconciliation_required` rather than to a determinate answer.
-9. **Credential path unresolved (§4).** Credential selection comes from the tool's matched policy
-   RULE, not from provisioning a server/tool, and the production broker has ZERO providers, so a
-   `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning a target
-   (blocker 1) does NOT by itself establish no-credential status; it must be closed explicitly by
-   verifying a no-`CredentialProfile` matched rule OR implementing a working credential provider/path.
-   A no-`CredentialProfile` rule is NOT sufficient on its own — see blocker 14: the matched rule must
-   also be ALLOW-class with satisfiable obligations, or the request is denied anyway.
+9. **[CLOSED — see §25d] Credential path unresolved (§4).** Credential selection comes from the tool's
+   matched policy RULE, not from provisioning a server/tool, and the production broker has ZERO
+   providers, so a `CredentialProfile`-bearing rule fails closed at `Broker.Materialize`. Provisioning
+   a target (blocker 1) does NOT by itself establish no-credential status; it must be closed explicitly
+   by verifying a no-`CredentialProfile` matched rule OR implementing a working credential
+   provider/path. A no-`CredentialProfile` rule is NOT sufficient on its own — see blocker 14: the
+   matched rule must also be ALLOW-class with satisfiable obligations, or the request is denied anyway.
+   **CLOSED (§25d) on the FIRST disjunct only, and the closure statement is narrow: *the First Canary
+   requires no production credential*.** The second disjunct is NOT claimed — no production credential
+   Provider adapter exists and the broker still composes zero providers. Re-derivation found that the
+   finding's own wording understates the problem: a "no-`CredentialProfile` matched rule" is a
+   statement about the POLICY layer, which is the only one of three authoritative credential
+   statements any enforcement path reads, so it is satisfiable while the authoritative
+   `registry.ServerRecord.CredentialProfile` requires one — the state in which execution takes the
+   no-broker branch and reaches a credential-required upstream with NO Authorization header. The
+   preflight therefore carries `canary.ReasonCredentialPathRequired`, MET only when the policy
+   obligation, the registry record and the reviewed catalog fingerprint are ALL empty, resolved from
+   the same coherent capture as blocker 14's permit. Runtime drift is answered by the EXISTING
+   reviewed-target machinery, because `CredentialProfile` is a hashed fingerprint field; and the
+   execution path is separately proven to touch no broker, reach no provider and send no
+   Authorization on the canonical path, while failing closed with upstream=0 on a credential-required
+   one. **Any FUTURE experiment that needs a credential remains blocked on the unimplemented provider
+   path.**
 10. **No operator-reachable graceful rollback (§17).** §17's contract bar is "no GO unless rollback
    AND kill are available." Only the emergency kill is reachable: `quiesceLiveTier` has no production
    caller, and the operator-facing `apiMCPRolloutTransition` returns `distribution_not_configured` for
@@ -2882,8 +3538,8 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    trust authority was introduced — the governed `shadow_evaluation` lifecycle remains the only
    writer of `catalog.Usable`, `ApproveLive` still deliberately promotes nothing, and a structural
    wall proves no data-plane caller can. ENFORCEMENT is unchanged and still lives in the policy
-   engine; what changed is that a node can no longer report Ready for an experiment every request
-   would die in.
+   engine; what changed is that an ACTIVATION PREFLIGHT can no longer return Ready for an
+   experiment every request would die in.
 14. **[CLOSED — see §25c] The exact request must resolve to an ALLOW-class decision with satisfiable obligations (§4/§13).**
    Closing the credential condition (blocker 9) by choosing a rule with no `CredentialProfile` does not
    make the request executable: that rule may itself be DENY-class, and if NO enabled rule matches,
