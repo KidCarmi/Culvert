@@ -89,25 +89,45 @@ func referencesInSource(rel, src, sel string) ([]callSite, error) {
 		return nil, err
 	}
 	var sites []callSite
-	// Track the enclosing function as we walk, so a hit can name it.
-	var enclosing string
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch fn := n.(type) {
-		case *ast.FuncDecl:
+	// Attribute each reference to the declaration it is INSIDE, by walking the declarations
+	// themselves — never by carrying a running "last function seen" across the file.
+	//
+	// Codex round 9, P1, verified before it was agreed with: the running-variable form never reset
+	// after leaving a FuncDecl, so a package-level alias declared after the allowed function
+	//
+	//	func (d *Discovery) Discover() { … }
+	//	var mint = (*catalog.Catalog).IngestObserved
+	//
+	// was attributed to Discovery.Discover — the exact key on the reasoned list — and any other
+	// function could then call mint(…) producing no selector at all. Measured: the alias reported
+	// as "internal/mcp/execution/discovery.go:Discovery.Discover", so the wall stayed green.
+	//
+	// A package-scope reference is attributed to a sentinel that is deliberately impossible to put
+	// on the reasoned list, so it is always reported. That is not a gap in the model: an alias to
+	// the observed-ingest capability held in package scope is reachable from every function in the
+	// package at once, which is precisely the thing a per-caller wall cannot certify.
+	for _, decl := range file.Decls {
+		enclosing := packageScopeCaller
+		if fn, ok := decl.(*ast.FuncDecl); ok {
 			enclosing = fn.Name.Name
 			if fn.Recv != nil && len(fn.Recv.List) > 0 {
 				enclosing = recvTypeName(fn.Recv) + "." + fn.Name.Name
 			}
-		case *ast.SelectorExpr:
-			// Matched wherever it appears — call, method value, or any other reference.
-			if fn.Sel.Name == sel {
-				sites = append(sites, callSite{File: rel, Func: enclosing, Line: fset.Position(fn.Sel.Pos()).Line})
-			}
 		}
-		return true
-	})
+		ast.Inspect(decl, func(n ast.Node) bool {
+			// Matched wherever it appears — call, method value, or any other reference.
+			if sel2, ok := n.(*ast.SelectorExpr); ok && sel2.Sel.Name == sel {
+				sites = append(sites, callSite{File: rel, Func: enclosing, Line: fset.Position(sel2.Sel.Pos()).Line})
+			}
+			return true
+		})
+	}
 	return sites, nil
 }
+
+// packageScopeCaller names a reference that is not inside any function declaration. It contains
+// characters no Go identifier can, so it can never be spelled on a reasoned-caller list.
+const packageScopeCaller = "<package scope>"
 
 // assertExactCallers is the shared wall body. want is the exact set of "file:Func" sites allowed
 // to make this call in production.
@@ -308,6 +328,14 @@ func f(c C) { register(c.IngestObserved) }`},
 func f(c C) { h := holder{fn: c.IngestObserved}; _ = h }`},
 		{"method value returned", `package p
 func f(c C) func() { return func() { c.IngestObserved(nil, nil, nil) } }`},
+		// Codex round 9, P1. The alias sits in PACKAGE scope, after the allowed function, and the
+		// running-variable form attributed it to that function.
+		{"package-scope alias after the allowed function", `package p
+func (d *Discovery) Discover() {}
+
+var mint = (*catalog.Catalog).IngestObserved
+
+func evil() { mint(nil, nil, nil) }`},
 	} {
 		got, err := referencesInSource("synth.go", c.src, "IngestObserved")
 		if err != nil {
@@ -316,6 +344,19 @@ func f(c C) func() { return func() { c.IngestObserved(nil, nil, nil) } }`},
 		if len(got) == 0 {
 			t.Errorf("the provenance scan must find %q; it found nothing. A shape it cannot see "+
 				"is a shape that can mint peer evidence with this wall green.", c.name)
+			continue
+		}
+		// FINDING IT IS NOT ENOUGH — it must be attributed to the right caller. A reference
+		// misattributed to a function that IS on the reasoned list is reported and then waved
+		// through, which is indistinguishable from not finding it at all.
+		for _, site := range got {
+			if site.Func == "Discover" || site.Func == "Discovery.Discover" {
+				if c.name != "direct call" {
+					t.Errorf("%q was attributed to %q — the allowed caller — so the wall would "+
+						"accept it. Attribution must follow the declaration the reference is "+
+						"inside.", c.name, site.Func)
+				}
+			}
 		}
 	}
 	// And it must NOT fire on an unrelated name, or every file in the tree would be a hit and the

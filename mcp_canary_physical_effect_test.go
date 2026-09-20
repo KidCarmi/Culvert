@@ -199,6 +199,13 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	for lim = range map[upstreamclient.Limits]bool{upstreamclient.DefaultLimits(): true} {
 	}
 	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		// Codex round 9, P1 — the range target wrapped in parentheses, which the shape-matcher
+		// could not see at all. It is the fourth spelling of one idea and the reason the clause
+		// stopped enumerating write forms.
+		{"value replaced by a PARENTHESISED range target", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	for _, (lim) = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
 		{"value rebound by an inner var declaration", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
 	_ = lim
 	{
@@ -323,27 +330,31 @@ func retryFreeLimitsViolation(src string) string {
 		return "the Limits field is not a plain identifier, so its binding cannot be followed; pass a " +
 			"variable bound from " + retryFreeLimitsFunc
 	}
-	// EVERY WRITE TO THE IDENTIFIER MUST BE ONE THIS GATE CAN FOLLOW.
+	// THE IDENTIFIER MAY APPEAR EXACTLY TWICE: the binding, and the use.
 	//
-	// bindingsOf understands assignments, because an assignment hands it the RHS expression it
-	// has to inspect. Go has other statements that WRITE a variable and carry no such expression,
-	// and a write the gate cannot see is worse than one it rejects: it leaves the binding count at
-	// one, so the retry-free binding still looks unique while the value reaching Config is
-	// something else entirely. Codex round 8 found the range form and it is a real bypass,
-	// verified before it was agreed with:
+	// Every previous version of this clause enumerated the ways a value can be REPLACED —
+	// assignments, then range clauses, then type switches, then inner var declarations — and every
+	// version was beaten by a form nobody had listed. Codex round 8 reported the range clause;
+	// probing that fix found the range KEY and the inner `var` in minutes; round 9 then reported
+	// `for _, (lim) = range ...`, where the target is an *ast.ParenExpr and the shape-matcher
+	// simply does not see it. Four rounds, four spellings of one idea.
 	//
-	//	lim, _ := upstreamclient.RetryFreeLimits(...)      // the one binding this gate counts
-	//	for _, lim = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
-	//	}                                                   // a write, and not an AssignStmt
-	//	return upstreamclient.New(upstreamclient.Config{Limits: lim}, ...)
+	// So the enumeration is abandoned. Production binds `lim` once and uses it once — exactly two
+	// occurrences of the identifier in the whole function body — and ANY third occurrence, of any
+	// kind, disqualifies: a second assignment, a range target parenthesised or not, a var shadow, a
+	// type-switch binding, `&lim`, a closure capture, or a form that does not exist yet. There is
+	// nothing left to enumerate, because the rule never asks what a construct IS.
 	//
-	// Enumerating the write forms is the losing move — that is the deny-list-of-spellings lesson
-	// this wall has already learned twice. So the rule is inverted: any write that is NOT an
-	// assignment disqualifies the function outright, whatever it is. The gate declines to certify
-	// what it cannot follow, which costs production nothing (it writes lim exactly once, with =)
-	// and does not need to be right about which exotic forms exist.
-	if why := unfollowableWriteTo(fn, ident.Name); why != "" {
-		return why
+	// It is deliberately over-strict in the safe direction: a constructor that legitimately READ
+	// its limits (`if lim.RetriesDisabled() { … }`) would be refused. That costs nothing today and
+	// the refusal says exactly what to do, which is the right trade for a gate whose failure mode
+	// is silently certifying a retrying client.
+	if uses := identOccurrences(fn, ident.Name); len(uses) != 2 {
+		return "the Limits identifier " + ident.Name + " appears " + strconv.Itoa(len(uses)) +
+			" times in this function; it must appear exactly twice — once where it is bound from " +
+			retryFreeLimitsFunc + " and once in the Config that is returned. Any other occurrence " +
+			"(a second assignment, a range target, a var shadow, a type switch, an address-of, a " +
+			"closure capture) can replace the retry-free value where this gate cannot follow it"
 	}
 	bindings := bindingsOf(fn, ident.Name)
 	if len(bindings) == 0 {
@@ -533,74 +544,21 @@ func bindingsOf(fn *ast.FuncDecl, name string) []ast.Expr {
 // rests on "the identifier is bound exactly once, by RetryFreeLimits", a write it never counted
 // is precisely the hole.
 //
-// It walks the whole body including closures, for the same reason bindingsOf does: a deferred
-// closure assigning the variable is a write that lands before the caller uses the client.
-func unfollowableWriteTo(fn *ast.FuncDecl, name string) (why string) {
+// identOccurrences returns every *ast.Ident in fn's body spelled name.
+//
+// It counts occurrences rather than classifying statements, which is the whole point: it never has
+// to know what a construct is, so a write form nobody thought of cannot slip past it. It walks
+// closures too, because a deferred closure assigning the variable is a write that lands before the
+// caller uses the client.
+func identOccurrences(fn *ast.FuncDecl, name string) []*ast.Ident {
+	var out []*ast.Ident
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if why != "" {
-			return false
-		}
-		switch st := n.(type) {
-		case *ast.RangeStmt:
-			why = rangeWriteTo(st, name)
-		case *ast.TypeSwitchStmt:
-			why = typeSwitchWriteTo(st, name)
-		case *ast.GenDecl:
-			why = varDeclWriteTo(st, name)
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			out = append(out, id)
 		}
 		return true
 	})
-	return why
-}
-
-// identNamed reports whether e is exactly the identifier name.
-func identNamed(e ast.Expr, name string) bool {
-	id, ok := e.(*ast.Ident)
-	return ok && id.Name == name
-}
-
-// rangeWriteTo reports a reason when a range clause assigns name (as key or value).
-func rangeWriteTo(st *ast.RangeStmt, name string) string {
-	if identNamed(st.Key, name) || identNamed(st.Value, name) {
-		return "the Limits identifier " + name + " is written by a range clause, which this " +
-			"gate cannot follow to a value; bind it once with = and nothing else"
-	}
-	return ""
-}
-
-// typeSwitchWriteTo reports a reason when a type switch binds name.
-func typeSwitchWriteTo(st *ast.TypeSwitchStmt, name string) string {
-	as, ok := st.Assign.(*ast.AssignStmt)
-	if !ok {
-		return ""
-	}
-	for _, lhs := range as.Lhs {
-		if identNamed(lhs, name) {
-			return "the Limits identifier " + name + " is bound by a type switch, whose " +
-				"per-clause value this gate cannot follow"
-		}
-	}
-	return ""
-}
-
-// varDeclWriteTo reports a reason when a var declaration inside the function (re)declares name.
-func varDeclWriteTo(st *ast.GenDecl, name string) string {
-	if st.Tok != token.VAR {
-		return ""
-	}
-	for _, spec := range st.Specs {
-		vs, ok := spec.(*ast.ValueSpec)
-		if !ok {
-			continue
-		}
-		for _, id := range vs.Names {
-			if id.Name == name {
-				return "the Limits identifier " + name + " is (re)declared by a var declaration " +
-					"inside the function; bind it once with = so this gate can follow the value"
-			}
-		}
-	}
-	return ""
+	return out
 }
 
 // isTopLevelBinding reports whether rhs belongs to an assignment that is a DIRECT statement of

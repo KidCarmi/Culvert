@@ -3826,6 +3826,57 @@ That is the standing evidence for the rule already recorded above — *a structu
 code, and a wall that has never been attacked should not be counted as evidence* — and for treating
 these gates as tripwires over guarantees that are pinned behaviourally underneath them.
 
+### Round 9: the enumeration was abandoned, because it kept losing
+
+Two more P1s, both again on the walls, both reproduced before being agreed with.
+
+**The provenance wall attributed a package-scope alias to the function above it.** The scan carried
+a running "last function seen" variable that was never reset on leaving a `FuncDecl`, so
+
+```go
+func (d *Discovery) Discover() { … }
+
+var mint = (*catalog.Catalog).IngestObserved
+
+func evil() { mint(nil, nil, nil) }
+```
+
+reported the alias as `internal/mcp/execution/discovery.go:Discovery.Discover` — **the exact key on
+the reasoned list** — and any other function could then call `mint(…)` producing no selector at all.
+Measured. Attribution now walks `file.Decls` and follows the declaration a reference is INSIDE;
+package-scope references are attributed to a sentinel (`<package scope>`) containing characters no
+Go identifier can hold, so they can never be put on the list and are always reported. That is not a
+modelling gap: an alias to the observed-ingest capability held in package scope is reachable from
+every function in the package at once, which is exactly what a per-caller wall cannot certify.
+
+The control gained the case AND a stronger assertion. Finding a reference is not enough — one
+misattributed to a function that IS on the reasoned list gets reported and then waved through, which
+is indistinguishable from not finding it. The control now checks WHERE each shape is attributed, and
+was verified failing against the reintroduced running-variable form.
+
+**The retry-free wall met a parenthesised range target** — `for _, (lim) = range …`, where the
+target is an `*ast.ParenExpr` and the shape-matcher simply does not see it. Verified accepted before
+the fix.
+
+**That was the fourth spelling of one idea in two rounds** — assignment, range value, range key,
+inner `var`, and now parentheses — so the clause stopped enumerating write forms altogether. The
+rule is now: **the Limits identifier may appear exactly twice in the function body**, once where it
+is bound from `RetryFreeLimits` and once in the returned `Config`. Any third occurrence, of any
+kind, disqualifies — a second assignment, a range target parenthesised or not, a var shadow, a
+type-switch binding, an address-of, a closure capture, or a form that does not exist yet. There is
+nothing left to enumerate because the rule never asks what a construct IS. `unfollowableWriteTo` and
+its three per-node helpers were deleted; the sixteen rejection cases in the control all still fail,
+now for one reason instead of five.
+
+It is deliberately over-strict in the safe direction: a constructor that legitimately READ its limits
+(`if lim.RetriesDisabled() { … }`) would be refused, and the refusal says exactly what to do. That is
+the right trade for a gate whose failure mode is silently certifying a retrying client.
+
+**The lesson, now paid for four times over:** a structural check that classifies SYNTAX is a
+deny-list with extra steps, and a deny-list loses to the next spelling. A check that counts
+OCCURRENCES of the thing it cares about has no spelling to be beaten by. Where a wall can be
+expressed that way, express it that way.
+
 ### Status — blocker 11 is CLOSED, and nothing else moves
 
 The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
