@@ -52,13 +52,41 @@ next visit with three controls:
 | Control | What it does |
 |---|---|
 | **Recover** | `GET /api/idp/operations/{operationId}` (admin only). Renders the server's state verbatim: `pending`, `committed` (+ "audit pending" when the durable audit entry has not landed yet), `aborted` (+ the refusal code), `outcome_unknown`. A `committed` record clears the marker and reloads the registry. |
-| **Re-send** | Offered ONLY when the ledger answers `404 not_found` (the intent was never recorded, so nothing was written). Reopens the editor bound to the SAME operationId; the candidate must match the marker's digest. A changed candidate is a new operation. |
-| **Abandon** | Typed on the operationId. Deletes the marker without touching the server. Use it only after Recover has answered, or when you have confirmed the state another way. |
+| **Abandon** | Typed on the operationId. Deletes the BROWSER marker only, without touching the server. Offered after Recover has answered `404 not_found` (see below) or `aborted`. A new operation after an abandon is a NEW operation: new operationId, fresh review, fresh marker. |
 
-Replay is safe by contract: re-sending the same operationId with the same
-candidate returns the RECORDED result (`replayed: true`) — including when
-the original fence is stale by then — and writes nothing. A different
-candidate under the same operationId is `409 operation_mismatch`.
+**A `404 not_found` lookup is ABSENT = UNKNOWN, never "never written"
+(FE-6A recovery follow-up, record 6AR).** The console used to offer
+"Re-send" after a 404 on the argument that the intent was never recorded.
+That argument holds only while the ledger still HOLDS the record: the
+ledger keeps `256` operations and evicts DECIDED records (aborted, or
+committed with the success audit landed) oldest-first, so a committed
+create, cutover-bearing update or import whose answer was lost can be
+evicted by later ordinary operations and then answer 404. Re-sending it
+then is a NEW intent and executes AGAIN — proved on the production handlers
+and on the real binary across a restart (`fe6ar_resend_red_test.go`): a
+second provider under the same name (the registry has no name uniqueness),
+a second enabled LDAP provider (the retirement itself is one-way and is not
+repeated), a second update, a second imported profile; the same operationId
+with a DIFFERENT secret is accepted once the record is gone (the identity ⇄
+secret commitment lives in the record); and under the durable audit sink the
+second execution is NOT audited (the operation-keyed success audit is
+exactly-once per `(action, operationId)` against the durable file, so the
+duplicate provider has no compliance record of its creation). Neither
+`documentRevision` (content-derived — an unrelated delete returns it to the
+original value) nor the `?documentRevision=` fence the console re-reads at
+dispatch time prevents this. The console therefore has NO re-send path: on a
+404 it states that the appliance retains no record of the operation, that
+the outcome is unknown, keeps the marker, keeps every mutation blocked and
+offers the typed Abandon only. Check the registry for the provider by name
+before starting a new operation; a new operation is reviewed afresh under a
+new identity.
+
+Replay IS the contract while the record is RETAINED: the same operationId
+with the same candidate returns the RECORDED result (`replayed: true`) —
+including when the original fence is stale by then — and writes nothing; a
+different candidate under the same operationId is `409 operation_mismatch`;
+both survive a restart. Retention is bounded, and that bound is why the
+console never re-sends on its own.
 
 `503 operation_ledger_degraded` means the ledger file is unreadable or
 corrupt; the registry still serves and writes, but operation-identified
@@ -241,8 +269,11 @@ correction the import is an ordinary fenced, identified write:
 - The frontend writes the recovery marker (action `import`) BEFORE the
   request. An unproven answer keeps the marker, latches the page and
   re-reads the registry once; **Recover** looks the operation up in the
-  ledger; a `404` offers a re-send of the SAME import operation; a changed
-  legacy block is refused locally and by the appliance (`operation_mismatch`).
+  ledger; a `404` is ABSENT = UNKNOWN (no re-send — record 6AR: an evicted
+  committed import re-sent with the same reviewed token imports a SECOND
+  profile); a changed legacy block is refused by the appliance
+  (`import_source_stale` on a re-read; `operation_mismatch` against a
+  retained record).
 - **The import is bound to the source the administrator REVIEWED** (round
   3). `GET /api/idp/legacy-ldap` publishes `importSourceRevision`, a
   server-owned keyed commitment (`isr1:<64 hex>`, HMAC under the node-local

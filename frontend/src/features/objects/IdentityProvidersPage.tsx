@@ -27,7 +27,7 @@
 // Snapshot doctrine (ADR-FE-002): manual Refresh, no polling. The auth
 // boundary clears the query cache (authBoundaryTeardown); this surface keeps
 // no other subject-bound state and persists nothing.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { JSX } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PageHeader } from "../../layouts/AppShell";
@@ -102,7 +102,6 @@ import {
   draftDirty,
   draftFrom,
   draftToSpec,
-  stripSecrets,
 } from "./idpWrites";
 import type { DiscoverState, ProviderDraft, TestState } from "./idpWrites";
 import styles from "../diagnostics/diagnostics.module.css";
@@ -647,8 +646,6 @@ type Ceremony =
       initial: IdPProfile | null;
       draft: ProviderDraft;
       base: ProviderDraft;
-      /** a re-send bound to an unresolved operation's identity */
-      boundOperationId?: string;
       error: string | null;
     }
   | {
@@ -673,8 +670,6 @@ type Ceremony =
   | {
       kind: "import";
       legacy: LegacyLDAP & { present: true };
-      /** a re-send of an unresolved import keeps its operation identity */
-      boundOperationId?: string;
     }
   | { kind: "abandon"; marker: IdPRecoveryMarker };
 
@@ -685,7 +680,11 @@ type RecoveryView =
   /** round 4: the record under this operationId is NOT the dispatched
    * candidate (another action, or another reviewed source) — UNPROVEN */
   | { kind: "unbound"; op: IdPOperation }
-  | { kind: "never_recorded" }
+  /** 6AR: the ledger holds NO record under this operationId — ABSENT. A
+   * decided record is evictable (256 slots, oldest decided first), so absence
+   * proves neither that the write never started nor that a re-send is safe:
+   * the outcome is UNKNOWN, nothing is re-sent, the marker is kept. */
+  | { kind: "absent" }
   | { kind: "refused"; code: string }
   | { kind: "unproven" };
 
@@ -750,11 +749,6 @@ export function IdentityProvidersPage(): JSX.Element {
   });
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   const [discover, setDiscover] = useState<DiscoverState>({ kind: "idle" });
-  /** the NON-SECRET draft of the last dispatched candidate, for a re-send prefill */
-  const lastCandidate = useRef<{
-    operationId: string;
-    draft: ProviderDraft;
-  } | null>(null);
 
   useEffect(() => {
     setRecovery(readIdPRecovery(subject));
@@ -834,25 +828,18 @@ export function IdentityProvidersPage(): JSX.Element {
     rereadRecovery();
   };
 
-  /** A re-send dispatches under the RECORDED marker (same start instant —
-   * the evidence is immutable, and a freshly stamped copy of it would be
-   * refused by the store as a second unresolved operation). A first dispatch
-   * records the fresh marker. */
-  const adoptOrRecordMarker = (fresh: IdPRecoveryMarker): boolean => {
-    const stored = readIdPRecovery(subject);
-    const marker =
-      stored.kind === "valid" && stored.marker.operationId === fresh.operationId
-        ? stored.marker
-        : fresh;
-    return writeIdPRecovery(subject, marker);
-  };
+  /** Every dispatch is the FIRST dispatch of its own operation (6AR: the
+   * page has no re-send path), so the fresh marker is recorded BEFORE the
+   * POST; the store refuses it while another operation is still unresolved,
+   * and nothing is sent then. */
+  const recordMarker = (fresh: IdPRecoveryMarker): boolean =>
+    writeIdPRecovery(subject, fresh);
 
   // ── dispatch ──────────────────────────────────────────────────────────────
   const dispatchWrite = async (
     mode: "create" | "edit",
     initial: IdPProfile | null,
     spec: IdPWriteSpec,
-    draft: ProviderDraft,
     operationId: string,
     cutoverConfirm: string | undefined,
   ): Promise<void> => {
@@ -875,7 +862,7 @@ export function IdentityProvidersPage(): JSX.Element {
         cutover: cutoverConfirm !== undefined,
         startedAt: Date.now(),
       };
-      if (!adoptOrRecordMarker(marker)) {
+      if (!recordMarker(marker)) {
         setResult("failed");
         setErrorText(
           readIdPRecovery(subject).kind === "valid"
@@ -885,7 +872,6 @@ export function IdentityProvidersPage(): JSX.Element {
         rereadRecovery();
         return;
       }
-      lastCandidate.current = { operationId, draft: stripSecrets(draft) };
     }
     setResult("pending");
     const signal = page.owner.begin();
@@ -912,7 +898,6 @@ export function IdentityProvidersPage(): JSX.Element {
               signal,
             );
       if (marker !== null) clearIdPRecovery(marker.operationId);
-      lastCandidate.current = null;
       close();
       setNotice(
         out.kind === "replayed"
@@ -941,19 +926,7 @@ export function IdentityProvidersPage(): JSX.Element {
       setCeremony({ ...ceremony, error: spec });
       return;
     }
-    const operationId = ceremony.boundOperationId ?? mintOperationId();
-    if (
-      ceremony.boundOperationId !== undefined &&
-      recovery.kind === "valid" &&
-      recovery.marker.candidateDigest !== candidateDigest(spec)
-    ) {
-      setCeremony({
-        ...ceremony,
-        error:
-          "This re-send is bound to the unresolved operation's candidate; re-enter the same candidate or abandon the operation first.",
-      });
-      return;
-    }
+    const operationId = mintOperationId();
     const cut = carriesCutover(spec, legacy.data);
     if (cut !== null) {
       setCeremony({
@@ -982,7 +955,6 @@ export function IdentityProvidersPage(): JSX.Element {
       ceremony.mode,
       ceremony.initial,
       spec,
-      ceremony.draft,
       operationId,
       undefined,
     );
@@ -1036,7 +1008,7 @@ export function IdentityProvidersPage(): JSX.Element {
       );
       return;
     }
-    const operationId = ceremony.boundOperationId ?? mintOperationId();
+    const operationId = mintOperationId();
     const marker: IdPRecoveryMarker = {
       operationId,
       action: "import",
@@ -1051,20 +1023,7 @@ export function IdentityProvidersPage(): JSX.Element {
       cutover: false,
       startedAt: Date.now(),
     };
-    if (
-      ceremony.boundOperationId !== undefined &&
-      recovery.kind === "valid" &&
-      recovery.marker.candidateDigest !== marker.candidateDigest
-    ) {
-      // The legacy block changed since the unresolved import was reviewed:
-      // the appliance would refuse it as operation_mismatch; say so first.
-      setResult("failed");
-      setErrorText(
-        "This re-send is bound to the unresolved import's legacy configuration, which has changed; abandon the operation first.",
-      );
-      return;
-    }
-    if (!adoptOrRecordMarker(marker)) {
+    if (!recordMarker(marker)) {
       setResult("failed");
       setErrorText(
         readIdPRecovery(subject).kind === "valid"
@@ -1209,7 +1168,6 @@ export function IdentityProvidersPage(): JSX.Element {
       setRecoveryView({ kind: "op", op });
       if (op.state === "committed") {
         clearIdPRecovery(marker.operationId);
-        lastCandidate.current = null;
         setNotice(
           `Operation ${marker.operationId} is committed on the appliance${op.audited ? "" : " (success audit still owed)"}`,
         );
@@ -1218,7 +1176,8 @@ export function IdentityProvidersPage(): JSX.Element {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
-        setRecoveryView({ kind: "never_recorded" });
+        // 6AR: ABSENT is not "never written" — see RecoveryView.absent.
+        setRecoveryView({ kind: "absent" });
         return;
       }
       const code = refusalCodeOf(err, IDP_LOOKUP_REFUSAL_CODES);
@@ -1227,44 +1186,8 @@ export function IdentityProvidersPage(): JSX.Element {
       );
     }
   };
-  const resend = (marker: IdPRecoveryMarker): void => {
-    if (marker.action === "import") {
-      // The SAME import operation is re-sent (never a new one); it needs
-      // the legacy block that was reviewed to still be present.
-      if (legacy.data?.present === true)
-        setCeremony({
-          kind: "import",
-          legacy: legacy.data,
-          boundOperationId: marker.operationId,
-        });
-      return;
-    }
-    const initial =
-      marker.action === "update"
-        ? (snap?.list.profiles.find((p) => p.id === marker.profileId) ?? null)
-        : null;
-    const remembered =
-      lastCandidate.current?.operationId === marker.operationId
-        ? lastCandidate.current.draft
-        : null;
-    const base = remembered ?? {
-      ...draftFrom(initial),
-      type: marker.type,
-      name: marker.name,
-    };
-    setCeremony({
-      kind: "editor",
-      mode: marker.action === "create" ? "create" : "edit",
-      initial,
-      draft: base,
-      base,
-      boundOperationId: marker.operationId,
-      error: null,
-    });
-  };
   const abandon = (marker: IdPRecoveryMarker): void => {
     clearIdPRecovery(marker.operationId);
-    lastCandidate.current = null;
     close();
     setRecoveryView({ kind: "none" });
     rereadRecovery();
@@ -1394,18 +1317,7 @@ export function IdentityProvidersPage(): JSX.Element {
               >
                 Recover
               </Button>{" "}
-              {recoveryView.kind === "never_recorded" && (
-                <>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => resend(recovery.marker)}
-                  >
-                    Re-send
-                  </Button>{" "}
-                </>
-              )}
-              {(recoveryView.kind === "never_recorded" ||
+              {(recoveryView.kind === "absent" ||
                 (recoveryView.kind === "op" &&
                   recoveryView.op.state === "aborted")) && (
                 <Button
@@ -1423,12 +1335,14 @@ export function IdentityProvidersPage(): JSX.Element {
               {recoveryView.kind === "looking" && "Looking the operation up…"}
               {recoveryView.kind === "op" &&
                 operationStateView(recoveryView.op)}
-              {recoveryView.kind === "never_recorded" && (
-                <span>
-                  The appliance never recorded this operation: the write did not
-                  start. The same candidate may be re-sent under the same
-                  operation identity, or the marker abandoned.
-                </span>
+              {recoveryView.kind === "absent" && (
+                <StatusBadge status="unknown">
+                  The appliance retains no record of this operation. A decided
+                  record can be evicted from its ledger, and what the node holds
+                  now proves nothing about it: the outcome is unknown. Nothing
+                  is re-sent. Abandon the marker to start a separately reviewed
+                  new operation under a new identity.
+                </StatusBadge>
               )}
               {recoveryView.kind === "unbound" && (
                 <StatusBadge status="unknown">
@@ -1582,7 +1496,6 @@ export function IdentityProvidersPage(): JSX.Element {
               ceremony.mode,
               ceremony.initial,
               ceremony.spec,
-              ceremony.draft,
               ceremony.operationId,
               undefined,
             )
@@ -1617,7 +1530,6 @@ export function IdentityProvidersPage(): JSX.Element {
               ceremony.mode,
               ceremony.initial,
               ceremony.spec,
-              ceremony.draft,
               ceremony.operationId,
               ceremony.legacy.cutoverConfirmValue,
             )
@@ -1655,9 +1567,6 @@ export function IdentityProvidersPage(): JSX.Element {
       {ceremony.kind === "import" && (
         <ImportCeremony
           legacy={ceremony.legacy}
-          {...(ceremony.boundOperationId !== undefined
-            ? { boundOperationId: ceremony.boundOperationId }
-            : {})}
           result={result}
           {...(errorText !== undefined ? { errorText } : {})}
           onConfirm={() => void runImport()}

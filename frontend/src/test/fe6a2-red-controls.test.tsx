@@ -119,7 +119,8 @@ const MUTATION_CONTROLS = [
   "Import legacy configuration",
   "Repair registry",
   "Recover",
-  "Re-send",
+  // "Re-send" was removed by the FE-6A recovery follow-up (record 6AR): an
+  // absent ledger record is UNKNOWN, never a licence to re-dispatch.
   "Abandon",
 ];
 const ADMIN_CONTROLS = [

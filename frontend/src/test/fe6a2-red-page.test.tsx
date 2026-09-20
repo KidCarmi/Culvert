@@ -12,7 +12,8 @@
 //   P3  a stale document fence renders the authoritative current token; the
 //       marker is cleared (nothing was written) and nothing retries.
 //   P4  a lost create response keeps the marker and offers Recover; the ledger
-//       lookup settles it (committed ⇒ cleared; pending ⇒ kept; 404 ⇒ re-send).
+//       lookup settles it (committed ⇒ cleared; pending ⇒ kept; 404 ⇒ ABSENT =
+//       UNKNOWN, no re-send — re-expressed by the FE-6A follow-up, record 6AR).
 //   P5  delete is T3: the exact provider id must be typed; the request carries
 //       the loaded revision.
 //   P6  409 referenced renders the referencing rules with working links.
@@ -483,7 +484,7 @@ it("P4 a lost create response keeps the marker; Recover settles it from the ledg
     expect(marker()).toBeNull();
   });
 });
-it("P4b a never-recorded operation (404) offers a typed re-send; an aborted one offers Abandon", async () => {
+it("P4b an ABSENT operation (404) is UNKNOWN: no re-send, marker kept, typed Abandon offered (re-expressed by 6AR)", async () => {
   idpRoutes({
     "/api/idp": () => Promise.reject(new TypeError("Failed to fetch")),
     "/api/idp/operations/": () => json({ error: RAW, code: "not_found" }, 404),
@@ -504,9 +505,14 @@ it("P4b a never-recorded operation (404) offers a typed re-send; an aborted one 
   });
   await click("Recover");
   await flushUntil(() => {
-    expect(text()).toContain("never recorded");
+    expect(text()).toContain("retains no record");
   });
-  expect(buttons("Re-send")).toHaveLength(1);
+  // 6AR: a DECIDED ledger record is evictable, so a 404 proves neither
+  // non-commit nor safe retry (fe6ar_resend_red_test.go) — the page has no
+  // Re-send; the marker is kept; the typed Abandon is the only exit.
+  expect(buttons("Re-send")).toHaveLength(0);
+  expect(text()).not.toContain("never recorded");
+  expect(marker()).not.toBeNull();
   expect(buttons("Abandon")).toHaveLength(1);
   expect(text()).not.toContain(RAW);
 });

@@ -209,17 +209,6 @@ export function draftFrom(p: IdPProfile | null): ProviderDraft {
   return d;
 }
 
-/** The draft with every secret field blanked — what may be REMEMBERED for a
- * re-send prefill (never the material). */
-export function stripSecrets(d: ProviderDraft): ProviderDraft {
-  return {
-    ...d,
-    oidc: { ...d.oidc, clientSecret: "" },
-    saml: { ...d.saml, metadataXml: "" },
-    ldap: { ...d.ldap, bindPassword: "" },
-  };
-}
-
 export function draftDirty(a: ProviderDraft, b: ProviderDraft): boolean {
   return JSON.stringify(a) !== JSON.stringify(b);
 }
@@ -1151,9 +1140,6 @@ export function RepairCeremony(
 export function ImportCeremony(
   p: CeremonyCommon & {
     legacy: LegacyLDAP & { present: true };
-    /** a re-send of an UNRESOLVED import: the SAME operation is dispatched
-     * again (the appliance's ledger replays or refuses it), never a new one */
-    boundOperationId?: string;
     onConfirm: () => void;
   },
 ): JSX.Element {
@@ -1170,14 +1156,6 @@ export function ImportCeremony(
             profile is <strong>created disabled</strong>: test it, then enable
             it (enabling runs the authority cutover ceremony).
           </p>
-          {p.boundOperationId !== undefined && (
-            <p>
-              Re-sends the unresolved operation{" "}
-              <Mono>{p.boundOperationId}</Mono>; the appliance replays a
-              committed import or refuses a changed one — nothing is imported
-              twice.
-            </p>
-          )}
         </>
       }
       impact="The import is fenced on the loaded registry revision and identified by an operation id recorded before dispatch. The legacy bind credential is copied server-side into the write-only profile material; it never transits this browser. The YAML file is not modified."

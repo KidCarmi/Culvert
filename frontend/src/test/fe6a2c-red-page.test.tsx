@@ -8,15 +8,19 @@
 //        ceremony closes, the page latches, the marker is KEPT, the registry
 //        is re-read once — never "imported".
 //   PC3  Recover settles an unproven import from the ledger (committed
-//        idp.import) and clears the marker; a 404 offers a typed re-send of
-//        the SAME import operation.
+//        idp.import) and clears the marker; a 404 is ABSENT = UNKNOWN (no
+//        re-send; re-expressed by the FE-6A follow-up, record 6AR — the
+//        original row offered a typed re-send of the SAME import operation,
+//        which fe6ar_resend_red_test.go R4 proves executes a second import
+//        once the decided record has been evicted).
 //   PC4  a 422 preflight_failed on an enabled-LDAP save is rendered as the
 //        bounded step + reason, never the server's text; nothing is retried
 //        and the marker is released (nothing was written).
-//   PC5  (found during the correction, verified failing on 64da0df0) a
-//        create re-send after a 404 lookup DISPATCHES the same operation:
-//        the recorded marker is adopted as-is (immutable evidence), never
-//        refused as "another unresolved operation".
+//   PC5  (found during the correction, verified failing on 64da0df0; RE-
+//        EXPRESSED by 6AR) after a 404 the page has no re-send path at all:
+//        the typed Abandon discards the browser marker only, and the next
+//        operation is a NEW one — new operationId, fresh review, fresh
+//        marker — never the abandoned identity.
 //
 // On 64da0df0 this file fails at type-check/import resolution together with
 // fe6a2c-red-api.test.ts (the import client has no fence/operation), and
@@ -342,7 +346,7 @@ it("PC2 an unrelated disabled profile in the 2xx is UNPROVEN: latched, marker ke
   expect(buttons("Import legacy configuration")).toHaveLength(0); // latched
 });
 
-it("PC3 Recover settles an unproven import from the ledger; a 404 offers the same-operation re-send", async () => {
+it("PC3 Recover settles an unproven import from the ledger; a 404 is ABSENT = UNKNOWN with no re-send (re-expressed by 6AR)", async () => {
   let lookupStatus = 404;
   let importCalls = 0;
   idpRoutes(
@@ -383,26 +387,16 @@ it("PC3 Recover settles an unproven import from the ledger; a 404 offers the sam
   const op = rec(JSON.parse(marker() ?? "null"))["operationId"];
   await click("Recover");
   await flushUntil(() => {
-    expect(buttons("Re-send")).toHaveLength(1);
+    expect(text()).toContain("retains no record");
   });
-  // The re-send is the SAME import operation, never a new one: the import
-  // ceremony is re-opened (the editor re-send shape — the operator confirms
-  // the reviewed legacy facts again) bound to the recorded operation.
-  await click("Re-send");
-  await flushUntil(() => {
-    expect(openDialog().textContent).toContain(String(op));
-  });
+  // 6AR: ABSENT is UNKNOWN — nothing is re-sent, the import ceremony is not
+  // reopened, the marker (operation `op`) is kept and every mutation stays
+  // blocked; only the ledger can settle it.
+  expect(buttons("Re-send")).toHaveLength(0);
+  expect(document.querySelector("dialog[open]")).toBeNull();
   expect(importCalls).toBe(1);
-  await click("Import", openDialog());
-  await flushUntil(() => {
-    expect(importCalls).toBe(2);
-  });
-  const again = calls.filter((c) =>
-    c.url.startsWith("/api/idp/legacy-ldap/import"),
-  );
-  const q = new URL(again[1]?.url ?? "", "http://x").searchParams;
-  expect(q.get("operationId")).toBe(op);
-  expect(marker()).not.toBeNull();
+  expect(rec(JSON.parse(marker() ?? "null"))["operationId"]).toBe(op);
+  expect(buttons("Import legacy configuration")).toHaveLength(0); // latched
   lookupStatus = 200;
   await flushUntil(() => {
     expect(buttons("Recover")).toHaveLength(1);
@@ -457,7 +451,7 @@ it("PC4 preflight_failed renders the bounded step + reason, closes the editor, r
   expect(marker()).toBeNull();
 });
 
-it("PC5 an editor re-send dispatches the SAME create operation under the recorded marker", async () => {
+it("PC5 after a 404 there is no re-send path; the typed Abandon discards only the marker and the next operation gets a NEW identity (re-expressed by 6AR)", async () => {
   let posts = 0;
   idpRoutes(
     {
@@ -493,10 +487,39 @@ it("PC5 an editor re-send dispatches the SAME create operation under the recorde
   expect(posts).toBe(1);
   await click("Recover");
   await flushUntil(() => {
-    expect(buttons("Re-send")).toHaveLength(1);
+    expect(text()).toContain("retains no record");
   });
-  await click("Re-send");
+  expect(buttons("Re-send")).toHaveLength(0);
+  expect(buttons("Add provider")[0]?.disabled).toBe(true);
+  // The only exit is the typed Abandon: it discards the BROWSER marker only
+  // (nothing is sent) and re-enables mutation.
+  await click("Abandon");
+  const ab = openDialog();
+  const input = ab.querySelector("input");
+  if (!(input instanceof HTMLInputElement)) throw new Error("no typed field");
+  await act(async () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- invoked with call()
+    const setter = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(input),
+      "value",
+    )?.set;
+    setter?.call(input, op);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+  });
+  await click("Abandon", ab);
+  await flushUntil(() => {
+    expect(marker()).toBeNull();
+    expect(buttons("Add provider")[0]?.disabled).toBe(false);
+  });
+  expect(posts).toBe(1);
+  // A NEW operation after abandonment: new identity, fresh review, fresh marker.
+  await click("Add provider");
   const again = openDialog();
+  await type("Type", "ldap", again);
+  await type("Name", "Resent LDAP", again);
+  await type("Directory URL", "ldap://dc.example:389", again);
+  await type("Base DN", "dc=example", again);
   await click("Review and save", again);
   await flushUntil(() => {
     expect(posts).toBe(2);
@@ -505,14 +528,12 @@ it("PC5 an editor re-send dispatches the SAME create operation under the recorde
     (c) => c.method === "POST" && c.url.startsWith("/api/idp?"),
   );
   expect(sent).toHaveLength(2);
-  expect(
-    new URL(sent[1]?.url ?? "", "http://x").searchParams.get("operationId"),
-  ).toBe(op);
-  // The marker is the SAME evidence (same start instant), still unresolved.
-  const after = rec(JSON.parse(marker() ?? "null"));
-  expect(after["operationId"]).toBe(op);
-  expect(after["startedAt"]).toBe(m["startedAt"]);
-  expect(text()).not.toContain(
-    "Another provider operation is still unresolved",
+  const second = new URL(sent[1]?.url ?? "", "http://x").searchParams.get(
+    "operationId",
   );
+  expect(second).not.toBeNull();
+  expect(second).not.toBe(op);
+  const after = rec(JSON.parse(marker() ?? "null"));
+  expect(after["operationId"]).toBe(second);
+  expect(after["startedAt"]).not.toBe(m["startedAt"]);
 });

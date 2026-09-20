@@ -15,7 +15,9 @@
   roster create/update/delete, lockout clear and the self-service password change for
   administrators (every mutation admin-only; the shell's "Change password" for every role).
   FE-6A.2 correction round (2026-09-13): the legacy import is fenced, operation-identified and
-  ledger-recorded (recovery marker + typed re-send); operations commit the exact secret
+  ledger-recorded (recovery marker; the typed re-send after a 404 was REMOVED by the FE-6A
+  recovery follow-up on 2026-09-20, record 6AR — the ledger evicts decided records, so an
+  absent record is UNKNOWN and never a licence to re-dispatch); operations commit the exact secret
   candidate; enabled-LDAP writes cross the non-bypassable commit-time preflight
   (`422 preflight_failed`); a completed cutover emits no retirement audit on later boots.
   Round 3 (2026-09-16): the import is bound to the REVIEWED legacy source through the
