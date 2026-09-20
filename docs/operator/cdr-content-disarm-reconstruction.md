@@ -5,11 +5,13 @@ Culvert's CDR stage sends files passing through SSL-inspected traffic to
 content (macros, embedded OLE objects, PDF JavaScript/launch actions, etc.)
 and returns a sanitized file. CDR runs **after** file-type/extension
 checks and **before** ClamAV/YARA scanning in the inspect pipeline. Manage it
-under the **CDR** panel in the admin UI (`data-view="cdr"`), or via
-`/api/cdr/*`. The nav item itself is gated at the **operator** role and
-above; the underlying `GET` endpoints accept **viewer** (see **API
-reference** below) — a viewer with a direct link can still read CDR state,
-they just won't see the nav entry.
+via `/api/cdr/*`, or from the GUI: the default admin UI's **CDR** panel
+(`data-view="cdr"`, nav item gated at the **operator** role) or, when the
+experimental new frontend is armed (`CULVERT_EXPERIMENTAL_UI`), **Security →
+CDR Integration** at `/app/security/cdr` (nav item gated at **viewer**,
+matching the API's own read RBAC). The underlying `GET` endpoints always
+accept **viewer** regardless of which nav gate a given UI applies (see **API
+reference** below).
 
 Sluice is a standalone project (`github.com/KidCarmi/Sluice`) that Culvert
 talks to as a client — it is not bundled into the Culvert binary or image.
@@ -38,9 +40,7 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    | `-cdr-max-file-size-mb` | `cdr.max_file_size_mb` | Reject files above this size **before** any bytes are sent to Sluice | 50 |
    | `-cdr-server-fingerprint` | `cdr.server_fingerprint` | TOFU-pinned SHA-256 of Sluice's server certificate (hex; `sha256:` prefix optional) | — |
    | `-cdr-certs-dir` | `cdr.certs_dir` | Directory holding the Sluice mTLS client bundle (`ca.pem`, `client.pem`, `client.key`) | — |
-
-   There is no `fail_mode` CLI flag — set `cdr.fail_mode` in `config.yaml`
-   (`open` or `closed`; see **Failure behavior** below).
+   | `-cdr-fail-mode` | `cdr.fail_mode` | Behavior when Sluice is unreachable: `open` or `closed` (see **Failure behavior** below); an invalid value is a fatal boot error | `open` |
 
 2. **GUI enrollment**, no restart or config-file edit required: open
    **CDR → Enroll new Sluice instance**, paste the one-time enrollment token
@@ -49,9 +49,19 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    credentials via Sluice's `Enroll` RPC, persists them, and **enables CDR
    automatically** — enrolling your first instance is a complete on-switch by
    itself. `PUT /api/cdr/config` (`{"enabled": true|false}`) is the plain
-   runtime toggle for an already-enrolled deployment; it flips the enable
-   sentinel at `<dataDir>/cdr_enabled` so the setting survives a restart, and
-   starts/stops the connection pool immediately.
+   runtime toggle for an already-enrolled deployment; `true` writes the
+   enable sentinel at `<dataDir>/cdr_enabled` and `false` removes it, and
+   either way the connection pool starts/stops immediately.
+
+   **The sentinel can only force CDR *on*, never *off*, across a restart.**
+   At boot, `loadCDR` starts from the static `cdr.enabled` value (config
+   file / `-cdr-enabled`) and then forces it to `true` if the sentinel file
+   is present — it never forces it to `false`. If `cdr.enabled: true` (or
+   `-cdr-enabled`) is still set in your static config, a `PUT
+   {"enabled": false}` disables CDR only until the next restart, at which
+   point the static value wins again and CDR silently comes back on. To
+   disable CDR durably, remove `-cdr-enabled` / `cdr.enabled: true` from the
+   static config as well as toggling it off at runtime.
 
 Enrolled instances, the client credential bundle, and CDR policy rules are
 tracked at `<dataDir>/cdr_instances.json` and `<dataDir>/cdr_policies.json`,
@@ -103,8 +113,14 @@ with an open breaker is skipped. If every enrolled instance's breaker is
 open, the pool reports "no active client" and the request falls through to
 `fail_mode` as if CDR were unreachable. `culvert_cdr_instance_healthy` and
 `culvert_cdr_queue_depth` come from the 15-second background health poll
-(`GET /api/cdr/health`) and are a leading indicator of an instance nearing
-its own worker/queue capacity, independent of the breaker state.
+(`GET /api/cdr/health`) — they are **pool-wide aggregates, not per-instance**:
+`instance_healthy` is 1 when *at least one* enrolled instance's most recent
+probe succeeded, and `queue_depth` is the *minimum* Sluice-reported queue
+depth across the currently-healthy instances. Neither carries an instance
+label, so a multi-instance deployment cannot alert on one specific member
+going unhealthy or saturated from these two series alone — `GET
+/api/cdr/instances` / `/api/cdr/health` are the only place per-instance
+detail is exposed today.
 
 **Revocation requires a second active instance**: `POST /api/cdr/instances/revoke`
 issues the revoke RPC *from* another enrolled, reachable Sluice — a
@@ -115,13 +131,28 @@ single-instance deployment.
 
 ## Certificate lifecycle
 
-Client certificates issued at enrollment are valid for one year (Sluice
-v0.1). There is no zero-touch renewal yet — when a certificate is close to
-expiry, re-enroll with a fresh one-time token and fingerprint from the Sluice
-admin. If Sluice's **server** certificate is regenerated, the TOFU pin
-(`cdr.server_fingerprint`) breaks on every enrolled instance until the
-fingerprint is updated; there is no dual-pin rotation grace window yet (also
-planned for a later Sluice version).
+Both directions of the mTLS relationship renew themselves automatically —
+manual action is a fallback, not the normal path:
+
+- **Client certificate (Culvert → Sluice):** issued at enrollment, valid for
+  one year. The 15-second health poller checks every enrolled instance's
+  client-certificate expiry and, once it's within 30 days of `NotAfter`,
+  fires a `RenewCert` call in the background (single-flighted per instance,
+  so repeated polls don't double-renew). Renewal is a durable, crash-safe
+  transaction — an interrupted renewal is reconciled from disk at the next
+  boot or health poll rather than left in an ambiguous state, and the
+  previous credential keeps working until its own expiry, so a Sluice outage
+  during the 30-day window doesn't cause a gap. Re-enrolling manually is only
+  needed if automatic renewal has been failing (check the log for `RenewCert
+  failed`) or the instance was never successfully enrolled.
+- **Server certificate (Sluice's own cert, TOFU-pinned by
+  `cdr.server_fingerprint`):** Sluice can advertise a rotation in progress
+  via its `Health` response, which Culvert stages as a second accepted
+  fingerprint (dual-pin) so a mid-rotation connection isn't dropped; once the
+  advertised grace window passes, Culvert promotes the new fingerprint to
+  primary automatically. Manually updating `cdr.server_fingerprint` is only
+  needed for a server-cert change Sluice did **not** advertise this way (e.g.
+  an out-of-band replacement).
 
 ## Policy rules
 
@@ -159,9 +190,10 @@ Prometheus metrics (`culvert_cdr_*`, all counters unless noted):
 `fail_open_total`, `fail_closed_total`, `panics_total`,
 `oversize_skipped_total`, `cache_hits_total`, `cache_misses_total`,
 `cache_size` (gauge), `bytes_in_total`, `bytes_out_total`,
-`instance_healthy` (gauge, per enrolled instance), `queue_depth` (gauge, per
-enrolled instance). Labels are deliberately low-cardinality — no filename,
-destination host, or user identity — by contract with Sluice.
+`instance_healthy` (gauge, pool-wide aggregate — see **Multi-instance pool**
+above), `queue_depth` (gauge, pool-wide aggregate). Labels are deliberately
+low-cardinality — no filename, destination host, or user identity — by
+contract with Sluice.
 
 ## API reference
 
@@ -185,6 +217,8 @@ GET is viewer, PUT is admin):
 
 ## Common pitfalls
 
+- **A runtime `PUT {"enabled": false}` doesn't stick if static config still
+  enables CDR** — see the restart caveat under **Enabling it** above.
 - **Enabling CDR with no reachable Sluice instance** leaves every
   SSL-inspected file download depending on `fail_mode`: `open` (default)
   silently stops sanitizing everything; `closed` blocks every eligible
