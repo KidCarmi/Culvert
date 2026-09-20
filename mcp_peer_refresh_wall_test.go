@@ -106,8 +106,10 @@ func referencesInSource(rel, src, sel string) ([]callSite, error) {
 	// on the reasoned list, so it is always reported. That is not a gap in the model: an alias to
 	// the observed-ingest capability held in package scope is reachable from every function in the
 	// package at once, which is precisely the thing a per-caller wall cannot certify.
+	outer := fileOuterNames(file)
 	for _, decl := range file.Decls {
-		collectSelectorRefs(fset, rel, sel, decl, declEnclosingName(decl), false, &sites)
+		sc := &refScope{fset: fset, rel: rel, sel: sel, outer: outer, local: declLocalNames(decl)}
+		collectSelectorRefs(sc, decl, declEnclosingName(decl), false, &sites)
 	}
 	return sites, nil
 }
@@ -130,7 +132,7 @@ func declEnclosingName(decl ast.Decl) string {
 // It carries its own scope stack because ast.Inspect has none: the walk must know whether the node
 // it is looking at is reachable with caller-supplied data, and that is a property of the ancestors,
 // not of the node.
-func collectSelectorRefs(fset *token.FileSet, rel, sel string, n ast.Node, enclosing string, inParamClosure bool, sites *[]callSite) {
+func collectSelectorRefs(sc *refScope, n ast.Node, enclosing string, inParamClosure bool, sites *[]callSite) {
 	if n == nil {
 		return
 	}
@@ -139,25 +141,210 @@ func collectSelectorRefs(fset *token.FileSet, rel, sel string, n ast.Node, enclo
 			inParamClosure = true
 		}
 		for _, st := range lit.Body.List {
-			collectSelectorRefs(fset, rel, sel, st, enclosing, inParamClosure, sites)
+			collectSelectorRefs(sc, st, enclosing, inParamClosure, sites)
 		}
 		return
 	}
-	if ref, ok := n.(*ast.SelectorExpr); ok && ref.Sel.Name == sel {
-		who := enclosing
-		if inParamClosure {
-			who = parameterisedClosureCaller
+	if call, ok := n.(*ast.CallExpr); ok {
+		if ref, isSel := call.Fun.(*ast.SelectorExpr); isSel && ref.Sel.Name == sc.sel {
+			*sites = append(*sites, sc.site(ref, enclosing, inParamClosure, call.Args))
+			for _, a := range call.Args {
+				collectSelectorRefs(sc, a, enclosing, inParamClosure, sites)
+			}
+			return
 		}
-		*sites = append(*sites, callSite{File: rel, Func: who, Line: fset.Position(ref.Sel.Pos()).Line})
+	}
+	if ref, ok := n.(*ast.SelectorExpr); ok && ref.Sel.Name == sc.sel {
+		*sites = append(*sites, sc.site(ref, enclosing, inParamClosure, nil))
 	}
 	ast.Inspect(n, func(c ast.Node) bool {
 		if c == n {
 			return true
 		}
-		collectSelectorRefs(fset, rel, sel, c, enclosing, inParamClosure, sites)
+		collectSelectorRefs(sc, c, enclosing, inParamClosure, sites)
 		return false
 	})
 }
+
+// refScope carries what attribution needs beyond the node itself: the names that are local to the
+// declaration being walked, and the names the file legitimately reaches outside it (imports and
+// builtins).
+type refScope struct {
+	fset  *token.FileSet
+	rel   string
+	sel   string
+	outer map[string]bool
+	local map[string]bool
+}
+
+// site attributes one reference, downgrading it to a sentinel when the reference is reachable with
+// data the enclosing declaration does not control.
+func (sc *refScope) site(ref *ast.SelectorExpr, enclosing string, inParamClosure bool, args []ast.Expr) callSite {
+	who := enclosing
+	switch {
+	case inParamClosure:
+		who = parameterisedClosureCaller
+	case sc.argsEscapeDecl(args):
+		who = callerMutableInputCaller
+	}
+	return callSite{File: sc.rel, Func: who, Line: sc.fset.Position(ref.Sel.Pos()).Line}
+}
+
+// argsEscapeDecl reports whether any value reaching the call comes from outside the declaration.
+//
+// Codex round 12, P1, verified before it was agreed with. Round 11 refused a PARAMETERISED closure
+// because its caller chooses the inputs — and that was necessary, not sufficient. A ZERO-argument
+// closure reads whatever it captures, so if it captures a package-level variable, a later holder
+// sets that variable and then invokes it. Same outcome, no parameters:
+//
+//	var fabricatedRaw []byte
+//	escaped = func() { d.Catalog.IngestObserved(d.Registry, DiscoveryInput{Raw: fabricatedRaw}, …) }
+//
+// Measured: still attributed to Discovery.Discover.
+//
+// So the rule stops asking about the closure and asks about the DATA. Every root identifier in the
+// call's arguments must be something the declaration controls — its receiver, a parameter, a named
+// result, or a local it declared — or a name the file legitimately reaches that is not a mutable
+// value: an imported package qualifier or a builtin. A package-level variable is none of those.
+//
+// Production satisfies it: the arguments are d (receiver) plus rec, resp and observedAt, all
+// locals assigned from the authenticated dial, under catalog.* type qualifiers.
+func (sc *refScope) argsEscapeDecl(args []ast.Expr) bool {
+	escapes := false
+	for _, a := range args {
+		walkValueRoots(a, func(id *ast.Ident) {
+			if id.Name == "_" || sc.local[id.Name] || sc.outer[id.Name] {
+				return
+			}
+			escapes = true
+		})
+	}
+	return escapes
+}
+
+// walkValueRoots calls fn for every identifier that names a VALUE reaching e.
+//
+// The two skips are what make it mean that. A selector's right-hand side is a FIELD name, not a
+// value in scope (rec.ID names a field of rec, and only rec can be a package variable), so the
+// walk descends the chain to its leftmost identifier and stops. A composite-literal key is a field
+// name for the same reason, so only its value is walked. Without both, production is rejected:
+// every field name in DiscoveryInput{ServerID: rec.ID, …} reads as an unresolvable root, which is
+// how the first version of this rule failed — the wall refused the real tree, which is exactly the
+// direction a gate must not err in silently.
+func walkValueRoots(e ast.Node, fn func(*ast.Ident)) {
+	switch v := e.(type) {
+	case nil:
+		return
+	case *ast.Ident:
+		fn(v)
+		return
+	case *ast.SelectorExpr:
+		walkValueRoots(v.X, fn)
+		return
+	case *ast.KeyValueExpr:
+		walkValueRoots(v.Value, fn)
+		return
+	}
+	ast.Inspect(e, func(c ast.Node) bool {
+		if c == e || c == nil {
+			return c == e
+		}
+		walkValueRoots(c, fn)
+		return false
+	})
+}
+
+// fileOuterNames collects the names a file may legitimately reach outside a declaration WITHOUT
+// them being mutable values: imported package qualifiers and Go's builtins. Everything else at
+// package scope is a var, func or const that other code can change or shadow.
+func fileOuterNames(f *ast.File) map[string]bool {
+	out := map[string]bool{}
+	for _, name := range []string{
+		"append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make",
+		"max", "min", "new", "panic", "print", "println", "real", "recover",
+		"bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8",
+		"int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32",
+		"uint64", "uintptr", "any", "true", "false", "iota", "nil",
+	} {
+		out[name] = true
+	}
+	for _, imp := range f.Imports {
+		if imp.Name != nil {
+			out[imp.Name.Name] = true
+			continue
+		}
+		path := strings.Trim(imp.Path.Value, `"`)
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			path = path[i+1:]
+		}
+		out[path] = true
+	}
+	return out
+}
+
+// declLocalNames collects every name a declaration controls: its receiver, parameters, named
+// results, and anything it declares in its body — including inside nested closures, since a
+// closure's own locals are equally beyond a later caller's reach.
+func declLocalNames(decl ast.Decl) map[string]bool {
+	out := map[string]bool{}
+	fn, ok := decl.(*ast.FuncDecl)
+	if !ok {
+		return out
+	}
+	addFieldNames(out, fn.Recv)
+	if fn.Type != nil {
+		addFieldNames(out, fn.Type.Params)
+		addFieldNames(out, fn.Type.Results)
+	}
+	if fn.Body == nil {
+		return out
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			if v.Tok == token.DEFINE {
+				addIdentNames(out, v.Lhs)
+			}
+		case *ast.ValueSpec:
+			for _, id := range v.Names {
+				out[id.Name] = true
+			}
+		case *ast.RangeStmt:
+			addIdentNames(out, []ast.Expr{v.Key, v.Value})
+		case *ast.FuncLit:
+			if v.Type != nil {
+				addFieldNames(out, v.Type.Params)
+				addFieldNames(out, v.Type.Results)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+func addFieldNames(out map[string]bool, fl *ast.FieldList) {
+	if fl == nil {
+		return
+	}
+	for _, f := range fl.List {
+		for _, id := range f.Names {
+			out[id.Name] = true
+		}
+	}
+}
+
+func addIdentNames(out map[string]bool, exprs []ast.Expr) {
+	for _, e := range exprs {
+		if id, ok := e.(*ast.Ident); ok {
+			out[id.Name] = true
+		}
+	}
+}
+
+// callerMutableInputCaller names a reference whose arguments reach outside the declaration for a
+// mutable value — a package-level variable a later holder can set before invoking an escaped
+// closure. It cannot be spelled on a reasoned-caller list.
+const callerMutableInputCaller = "<caller-mutable input>"
 
 // packageScopeCaller names a reference that is not inside any function declaration. It contains
 // characters no Go identifier can, so it can never be spelled on a reasoned-caller list.
@@ -389,6 +576,22 @@ func f(c C) { register(c.IngestObserved) }`},
 func f(c C) { h := holder{fn: c.IngestObserved}; _ = h }`},
 		{"method value returned", `package p
 func f(c C) func() { return func() { c.IngestObserved(nil, nil, nil) } }`},
+		// Codex round 12, P1. A ZERO-argument closure, so round 11's rule does not fire — but it
+		// reads PACKAGE-LEVEL variables a later holder sets before invoking it. Same outcome, no
+		// parameters. This is the case that moved the rule from the closure to the DATA.
+		{"zero-arg closure reading mutable package variables", `package p
+
+var fabricatedRaw []byte
+var fabricatedAt int64
+var escaped func()
+
+func (d *Discovery) Discover() {
+	escaped = func() {
+		d.Catalog.IngestObserved(d.Registry, DiscoveryInput{Raw: fabricatedRaw}, PeerObservation{At: fabricatedAt})
+	}
+}
+
+func evil() { fabricatedRaw = []byte("{}"); fabricatedAt = 99; escaped() }`},
 		// Codex round 11, P1. The capability is captured in a PARAMETERISED closure that is then
 		// registered, so a later holder supplies the discovery bytes. Attribution used to name the
 		// FuncDecl containing the closure — the allowed caller.

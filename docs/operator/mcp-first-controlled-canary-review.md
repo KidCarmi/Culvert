@@ -3956,6 +3956,63 @@ declaration it was written in. Both inferences were sound and both were wrong ab
 mattered. *A reference reachable with caller-supplied data is not bounded by the function it is
 written in, whatever that function is called.*
 
+### Round 12: the rule moved from the closure to the data — and the sequence stops here
+
+One P1, again on the provenance wall, again real. Round 11 refused a PARAMETERISED closure because
+its caller chooses the inputs; that was necessary and not sufficient. A **zero-argument** closure
+reads whatever it captures, so if it captures package-level variables a later holder sets those and
+then invokes it — same outcome, no parameters:
+
+```go
+var fabricatedRaw []byte
+escaped = func() { d.Catalog.IngestObserved(d.Registry, DiscoveryInput{Raw: fabricatedRaw}, …) }
+```
+
+Measured: still attributed to `Discovery.Discover`.
+
+So the rule stops asking about the closure and asks about the **data**. Every root identifier in the
+call's arguments must be something the declaration controls — receiver, parameter, named result, or
+a local it declared — or a name that is not a mutable value at all (an imported package qualifier,
+a builtin). A package-level variable is none of those, and lands on `<caller-mutable input>`.
+
+**The first version of this rule REJECTED PRODUCTION**, and that is worth recording rather than
+quietly fixing: it treated a selector's right-hand side as a root, so every field name in
+`DiscoveryInput{ServerID: rec.ID, …}` read as an unresolvable identifier. A gate that refuses the
+real tree is a gate that gets relaxed by the next person who hits it, which is the failure mode all
+of this exists to avoid. The walk now descends a selector chain to its leftmost identifier and takes
+only a composite-literal's value, never its key.
+
+### The sequence stops here, and this is the honest reason
+
+Rounds 8 through 12 produced **seven real findings against two structural walls**, and every one of
+them was the same thing: a hand-written AST predicate standing in for a dataflow analysis, evaded by
+a shape nobody had enumerated. Each fix was sound. Each fix drew another.
+
+That is not converging, and there is a structural reason it cannot: **deciding where a value came
+from is a types-and-SSA question, and these predicates are pattern matches over syntax.** Every
+round narrows the gap; none closes it, because the gap is the instrument. The measured history —
+seven versions of the retry-free wall, six of them bypassable; four of the provenance wall, three of
+them bypassable; two of the bypasses found by probing, the rest by review, none by the suite passing
+— is the evidence for that claim, not an apology for it.
+
+So the position recorded here, and stated on the PR:
+
+- **These gates are TRIPWIRES, not proofs.** They exist to make a future change to the composition
+  root visible in review. They are not the guarantee, and this document should not be read as
+  claiming they are.
+- **The guarantees are underneath them and are pinned behaviourally.** For blocker 11: provenance is
+  DERIVED from evidence (`Observed.Present()`), there is no `Source` field to set, the only evidence
+  gatherer is `Discovery.Discover` over the authenticated transport, the timestamp is taken before
+  the request, and the runtime re-asks freshness at every pre-send authority check. None of that
+  rests on an AST scan. For blocker 6: `RetryFreeLimits` FORCES the values and the client honours
+  them, pinned by `retryfree_test.go` and the HTTPS E2E.
+- **Further findings of this class will be RECORDED here rather than chased.** A thirteenth shape
+  almost certainly exists. Chasing it buys a slightly narrower pattern match and costs another round
+  of CI on a branch whose production code has not changed in seven commits.
+- **The real fix, if this wall is ever worth more than a tripwire, is `types.Object` resolution**
+  inside the gate. That is a self-contained change with its own review, and it is recorded as a
+  dependency — not folded into a ledger commit.
+
 ### Status — blocker 11 is CLOSED, and nothing else moves
 
 The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
