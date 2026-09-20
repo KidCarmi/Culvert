@@ -3445,9 +3445,195 @@ that guard reached for `git checkout` and destroyed uncommitted work it had not 
 
 ### Status
 
-Blocker 11 stays **OPEN**. The activation-time half is in place and proven; the send-time re-check
-is the remaining work, and until it exists an observation that expires after preflight could still
-back a later request.
+Blocker 11 stays **OPEN** as of this section. The activation-time half is in place and proven; the
+send-time re-check is the remaining work, and until it exists an observation that expires after
+preflight could still back a later request. **§25f below records that re-check.**
+
+## §25f Blocker 11 — the runtime half: freshness at the side-effect boundary
+
+**This section changes NO ledger status yet.** It records the send-time work §25e named as the
+remaining half; the ledger decision is made in §26 after the adversarial round, not here. Blockers
+1, 2, 3, 8, 10, 12 and 15 are untouched, the baseline is still fifteen.
+
+### The invariant
+
+> A request may cross the irreversible boundary only if the exact target still carries a fresh
+> authenticated peer observation at the instant execution authority is spent.
+
+§25e closed the activation half and said plainly why that was not enough: freshness is the one
+prerequisite that becomes false with **no state change at all**. An observation that satisfied the
+preflight expires purely by the clock advancing, while the Canary window is still open.
+
+### One definition of fresh, not two
+
+`canary.EvaluatePeerObservedFresh` — the activation verdict — now **delegates its entire tail** to
+`canary.EvaluateObservedIdentityFresh`, and that is the function the boundary calls. Missing,
+future-dated, identity-not-current and stale are decided in ONE place, against ONE bound
+(`FirstCanaryPeerObservationMaxAge`, 30 min, inclusive). There is no second freshness algorithm,
+no second constant and no bespoke comparison at the send boundary. Two bounds that could drift
+apart would be two answers to one question, and the one that mattered would be whichever ran last.
+
+The delegation is pinned structurally, not by convention: `assertDelegatesTo` fails if the outer
+verdict stops calling the inner one, so a future change cannot quietly fork the definition.
+
+### It EXTENDS the existing authority predicate — it is not a guard bolted on after it
+
+The re-check lives inside `revalidateTargetTrust` (`mcp_live_gate.go`), between the trust precheck
+and the durable approval, on **one capture and one clock sample**. The result is a single coherent
+"is this request still authorized NOW?" predicate covering generation, scope hash, target/trust,
+peer freshness and approval — not an unrelated check appended to it. Sampling `now` once is what
+makes the freshness boundary testable at all: two samples would put two answers at two instants.
+
+**What it asks, and what it deliberately does not.** Every dimension §3 requires is bound on this
+one capture, and the freshness call is responsible for only the two that are still open when it
+runs:
+
+| dimension | bound by | where |
+|---|---|---|
+| tenant | `mcpLiveTrustPrecheck` — registry owner vs the request's tenant | before |
+| server, tool | `mcpLiveTrustPrecheck` — the target is resolved FOR these ids | before |
+| fingerprint | `mcpLiveTrustPrecheck` — current record must still carry the DECISION's fingerprint | before |
+| server usable / registry pin not diverged | `mcpLiveTrustPrecheck` — `AnchorLost`, so `Eligible` is false | before |
+| **peer verified identity** | `EvaluateObservedIdentityFresh` — the observation's identity must be BOTH the catalog record's and the registry's current pin | **the freshness call** |
+| **observation age** | `EvaluateObservedIdentityFresh` — missing / future-dated / stale | **the freshness call** |
+| fingerprint FORMAT | `approvalOK` → `ToolApproval.MatchesTool`, on `live.Target`'s `FingerprintFormat` | after |
+
+Re-comparing the precheck's values inside the freshness call would compare its answer with itself
+— the vacuous shape a test harness exposes and production hides, because in production the two
+sides are equal by construction. That is not hypothetical: it is exactly the defect RM5 found in an
+earlier shape of this work.
+
+A fresh observation for F2 therefore cannot satisfy an F1 request — the precheck refuses first, and
+reports its own reason rather than a freshness one, because the two name different remedies.
+
+**The evidence is read from authoritative current state**, resolved into the precheck from
+pointer-published inventory. It is NOT copied into `Decision`, `ExecInput` or the activation's
+reviewed snapshot as a boolean decided earlier; a cached verdict is precisely the defect.
+
+**NO I/O.** Everything the boundary reads was already resolved. It dials nothing, and a comment at
+the call site records that it must never learn to: a discovery call at the send boundary would put
+an unbounded network wait inside the last authority check — the exact shape the PreSend re-ask
+exists to close.
+
+**Security ordering is unchanged.** The emergency kill re-read stays LAST; nothing moved earlier.
+
+### Why there is exactly ONE new check site (§8, the #1370 lesson)
+
+#1370's lesson is that an authority checked before an unbounded wait is stale by the time it is
+spent. The question is therefore not "how many places can we check?" but "where is the authority
+predicate already re-asked after an unbounded wait?" — and the answer was established by reading
+the executor rather than assumed: `preCallGuard` takes the live revalidation as a closure, and is
+run BOTH after admission and again from `CallOptions.PreSend`, which the upstream client invokes
+after the connection-pool wait and DNS, and again after connect and the TLS handshake.
+
+So one check inside the closure is reached by every pre-send site there is. **No redundant third
+or fourth site was added to inflate defence in depth** — a site with no distinct reason to exist
+is a site nobody maintains. That the existing sites are genuinely covered is not asserted: mutation
+RM12 deletes the re-ask from a PreSend site and the byte-level case catches it.
+
+The guard on the new row is `trustPrecheck != nil` ALONE, where the surrounding code required
+`approvalOK` too. Peer freshness does not depend on the approval seam, so gating it on that seam
+being wired would mean forgetting to wire the approval silently disables freshness as well — the
+permissive direction. A partially composed gate now refuses more, never less.
+
+### The denial reason is request-scoped and bounded
+
+`mcperr.ReasonPeerObservationNotFresh` — ONE bounded class for the live gate, mapped from the
+verdict rather than passed through. The verdict's finer classes exist because an OPERATOR needs to
+know whether to refresh or to re-review; a caller does not, and every one of those classes would
+otherwise carry the shape of the peer's identity, fingerprint or endpoint out to the wire. No SPKI,
+fingerprint, endpoint or raw identity is exposed. The fine class stays where it is safe: the
+activation surface and the log.
+
+### The race/time matrix (10 cases, no sleeps)
+
+Driven against the REAL live-execution path and a REAL local HTTPS peer, with the boundary clock
+and the peer observation under test control. There is not a single `time.Sleep`: expiry is placed
+by *counting boundary clock reads*, so a lapse lands at an exact point on the path.
+
+The three-read structure (preCallGuard, PreSend after the pool wait, PreSend after the handshake)
+is not assumed — the rig records every read and RT01 asserts it, so a change to the PreSend wiring
+makes the matrix fail loudly rather than silently stop testing the point it was written for.
+
+| case | what it places where |
+|---|---|
+| RT01 | POSITIVE CONTROL — a fresh observation crosses the whole path, exactly one request |
+| RT02 | stale before admission — never reaches the peer |
+| RT03 | expiry after admission — refused before the upstream |
+| RT04 | expiry during the connection wait — **zero MCP request bytes** (§10, below) |
+| RT05 | future-dated stamp is refused |
+| RT06 | a fresh observation for ANOTHER target does not rescue this one |
+| RT07 | recent, well-formed evidence under a SUPERSEDED registry pin is refused |
+| RT08 | a failed refresh does not extend age; a real one does |
+| RT09 | reseed and restart both remove the authority |
+| RT10 | target drift between admission and the boundary is refused |
+
+**§10, the sharp proof.** RT04 does not settle for "the handler was not called". The expiry is
+placed after connect, so TCP may legitimately exist; the peer counts **MCP request bytes written**,
+and the assertion is that the count is **0**. A refusal that happened after the bytes went out
+would pass a handler-count assertion and fail this one.
+
+**§11, restart.** Two gates, because the property has two halves. `TestPeerFreshProd_Restart`
+`ReturnsEveryRecordToUnobserved` re-seeds the REAL inventory exactly as boot does and proves every
+record comes back `OperatorSeeded` with no observation. RT09 then drives the LIVE path against
+that end state — reached by a reseed or a restart alike — and proves the request cannot pass.
+Provenance is derived from the evidence, so a seeded record cannot claim otherwise, and a previous
+process's green activation cannot make seed data read as observed.
+
+**ANTI-VACUITY, MEASURED RATHER THAN CLAIMED.** With the `boundaryPeerFreshness` call deleted from
+`mcp_live_gate.go`, **SEVEN of the ten cases fail**. The three that survive are the three that
+should: RT01 is the positive control (a boundary that refused everything would satisfy every
+negative here while making the First Canary impossible), and RT06/RT10 prove a DIFFERENT authority
+— the precheck's target binding — and are labelled as such rather than counted as freshness gates
+they are not.
+
+### Mutation campaign (14 classes)
+
+Same driver discipline as §25e: an anchor matching zero sites is `NOT PROVEN`, never skipped; a
+mutated tree that does not compile is `NOT PROVEN` rather than a pass; and every restore is
+verified to reproduce the saved bytes exactly, compared against those bytes rather than by asking
+git.
+
+**Result: 14 CAUGHT, 0 SURVIVED, 0 NOT PROVEN.**
+
+| # | defect class | verdict | gate |
+|---|---|---|---|
+| RM1 | the runtime freshness check is removed entirely | CAUGHT | `TestPeerFreshRT` |
+| RM2 | freshness is checked only at activation (the boundary always permits) | CAUGHT | `TestPeerFreshRT` |
+| RM3 | a stale observation is accepted at the boundary | CAUGHT | `TestPeerFreshRT08_FailedRefreshDoesNotExtendAgeAndARealOneDoes` |
+| RM4 | a future-dated observation is accepted | CAUGHT | `TestPeerFresh_Matrix` |
+| RM5 | the boundary ignores the precheck's target verdict | CAUGHT | `TestPeerFreshRT10_TargetDriftBetweenAdmissionAndTheBoundaryIsRefused` |
+| RM6 | the fingerprint FORMAT is dropped from the target binding | CAUGHT | `TestPeerFresh_Matrix` |
+| RM7 | the observed identity is not checked against the catalog record | CAUGHT | `TestPeerFreshRT07_ObservationUnderASupersededPinIsRefused` |
+| RM8 | the observed identity is not checked against the REGISTRY PIN | CAUGHT | `TestPeerFreshRT07_ObservationUnderASupersededPinIsRefused` |
+| RM9 | the boundary reuses the DECISION-TIME instant instead of re-reading the clock | CAUGHT | `TestPeerFreshRT` |
+| RM10 | a FAILED refresh stamps a fresh observation anyway | CAUGHT | `TestPeerFreshProd_FailedRefreshLeavesTheObservationAndLetsItAge` |
+| RM11 | seed provenance (no observation at all) is accepted as evidence | CAUGHT | `TestPeerFresh_Matrix` |
+| RM12 | a PRE-SEND revalidation site omits the authority re-ask (the #1370 lesson) | CAUGHT | `TestPeerFreshRT04_ExpiryDuringTheConnectionWaitSendsNoRequestBytes` |
+| RM13 | the catalog record's observation is not carried to the boundary | CAUGHT | `TestPeerFreshProd_TheProductionPrecheckCarriesTheEvidence` |
+| RM14 | seed and observation share one ingest entrypoint again | CAUGHT | `TestProvenance_` |
+
+**Two of these were real gaps, and how they were found matters more than the score.**
+
+**RM13 — the boundary had no evidence to judge.** The first shape of this work let the precheck
+report freshness without carrying the catalog record's observation to the boundary at all. The
+campaign caught it; no behavioural test had, because every one of them supplied a rig whose
+precheck already carried evidence. The contract is now pinned where it is made — a production-level
+gate asserting the REAL precheck carries the REAL record's observation.
+
+**RM5 — the boundary's target comparison was vacuous, and only a harness could show it.** An
+earlier shape built a "reviewed" target from the REQUEST's ids and compared it against the
+precheck's resolved target. In production those are equal by construction, so the comparison could
+never fail and never catch anything; the defect was visible only because the harness could make
+them differ. The fix was to delete the comparison, not to strengthen it: the precheck already
+establishes that binding, and RT10 now proves the precheck's `Eligible` verdict is what the
+boundary acts on.
+
+**Nothing was forced into a fake kill.** RM4 and RM11 survived on the first run and were closed by
+extending the real matrix to drive the future-dated and no-observation rows, not by inventing a
+gate around the mutation. The campaign was then **re-measured end to end against the fixed tree**
+rather than having the two rows edited in — the §25e lesson about a campaign reporting confident
+output about a tree it did not restore.
 
 ## §26 Final verdict
 
