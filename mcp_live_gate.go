@@ -420,31 +420,7 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 			// freshness as well — the permissive direction, and the failure mode a composition
 			// seam must never have. Production wires both, so nothing changes there; a partially
 			// composed gate now refuses more, never less.
-			if g.trustPrecheck != nil {
-				live := g.trustPrecheck(in.Tenant, in.ServerID, in.ToolName, in.Fingerprint)
-				if !live.Eligible {
-					return mcperr.ReasonLiveTrustRevalidationFailed
-				}
-				// ONE CLOCK SAMPLE for this whole revalidation attempt, shared by the freshness
-				// bound and the approval expiry below. Two samples could put the two answers at
-				// two instants, and the freshness boundary would stop being testable at all.
-				at := in.Now
-				if g.now != nil {
-					at = g.now()
-				}
-				if r := boundaryPeerFreshness(in, live, at); r != mcperr.ReasonNone {
-					return r
-				}
-				// THE APPROVAL IS CONSULTED LAST, so the durable store is reached only for a
-				// request every cheaper authority still admits. Unchanged from before this row
-				// existed, except that it now shares the capture and the clock sample above.
-				if g.approvalOK != nil {
-					if ok, _ := g.approvalOK(live.Target, in.Operation, at); !ok {
-						return mcperr.ReasonLiveTrustRevalidationFailed
-					}
-				}
-			}
-			return mcperr.ReasonNone
+			return g.revalidateTargetTrust(in)
 		},
 		Release: func() {
 			g.releaseBudget(gen)
@@ -790,6 +766,47 @@ func newCanaryReservationID() (string, error) {
 		return "", err
 	}
 	return "rsv_" + hex.EncodeToString(b), nil
+}
+
+// revalidateTargetTrust is the target half of the final-boundary re-check: the trust precheck,
+// peer freshness, and the durable approval, in that order and on ONE capture.
+//
+// It is a method rather than three nested blocks inside the Revalidate closure because the
+// closure already carries the generation and scope halves; the nesting made the one path that
+// touches three authorities the hardest part of the file to read.
+//
+// THE GUARD IS ON trustPrecheck ALONE, where it used to require approvalOK too. That is
+// deliberate: peer freshness does not depend on the approval seam, so gating it on approvalOK
+// being wired would mean forgetting to wire the approval silently disables freshness as well —
+// the permissive direction, and the failure mode a composition seam must never have. Production
+// wires both, so nothing changes there; a partially composed gate now refuses more, never less.
+func (g *mcpLiveSideEffectGate) revalidateTargetTrust(in execution.LiveGateInput) mcperr.Reason {
+	if g.trustPrecheck == nil {
+		return mcperr.ReasonNone
+	}
+	live := g.trustPrecheck(in.Tenant, in.ServerID, in.ToolName, in.Fingerprint)
+	if !live.Eligible {
+		return mcperr.ReasonLiveTrustRevalidationFailed
+	}
+	// ONE CLOCK SAMPLE for this whole revalidation attempt, shared by the freshness bound and the
+	// approval expiry below. Two samples could put the two answers at two instants, and the
+	// freshness boundary would stop being testable at all.
+	at := in.Now
+	if g.now != nil {
+		at = g.now()
+	}
+	if r := boundaryPeerFreshness(in, live, at); r != mcperr.ReasonNone {
+		return r
+	}
+	// THE APPROVAL IS CONSULTED LAST, so the durable store is reached only for a request every
+	// cheaper authority still admits. Unchanged from before the freshness row existed, except
+	// that it now shares the capture and the clock sample above.
+	if g.approvalOK != nil {
+		if ok, _ := g.approvalOK(live.Target, in.Operation, at); !ok {
+			return mcperr.ReasonLiveTrustRevalidationFailed
+		}
+	}
+	return mcperr.ReasonNone
 }
 
 // boundaryPeerFreshness is the side-effect boundary's peer-observation re-check (blocker #11).
