@@ -1413,9 +1413,9 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 	// inside the 1 MiB header block, so an authenticated VIEWER could park an
 	// admin-plane goroutine for minutes with one GET. Bounded through the same
 	// predicate the data path uses. See proxy_host_bounds.go.
-	if destAuthorityOversize(host) {
-		noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(host))
-		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestAuthorityLen), http.StatusBadRequest)
+	if rawAuthorityOversize(host) {
+		noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(host), "raw")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
 		return
 	}
 	category, tier, matchedBy := lookupHostCategory(host)
@@ -2787,9 +2787,9 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	// CHAOS-66: this handler reaches walkPolicyTestRules and lookupHostCategory
 	// with a caller-supplied host — the same quadratic fusion the proxy data
 	// path bounds. Same predicate, same reason (see proxy_host_bounds.go).
-	if destAuthorityOversize(body.Host) {
-		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(body.Host))
-		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestAuthorityLen), http.StatusBadRequest)
+	if rawAuthorityOversize(body.Host) {
+		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(body.Host), "raw")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
 		return
 	}
 

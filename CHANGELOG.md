@@ -31,16 +31,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   size (about 10 GiB of heap at the cap with megabyte keys), and reached the same
   quadratic lookup from two viewer-role admin endpoints.
 
-  The destination authority is now refused above **261 bytes** — RFC 1035 caps a
-  wire-format name at 255 octets, which is 253 presentation characters, plus
-  IPv6 brackets and a port — so nothing any resolver could answer for is
-  affected. The bound is applied at each of the four entry points through one
-  shared predicate, ahead of every sink and every matcher (in particular ahead
-  of the IP filter and rate limiter, which both write the host into the request
-  log). A refused request answers 400 without echoing the value, creates no
-  state, and is counted by `culvert_proxy_oversize_host_rejected_total` with a
-  rate-limited log line naming the length rather than the value. Operator
-  runbook: `docs/operator/destination-host-bounds.md`.
+  The destination is now bounded in two tiers, because the DNS limit governs the
+  *canonical* form of a hostname rather than the bytes on the wire: a **1024-byte
+  pre-cap on the raw authority** at the entry point, ahead of every sink and every
+  matcher (in particular ahead of the IP filter and rate limiter, which both write
+  the host into the request log), and a **253-byte bound on the normalized A-label
+  form** at the existing canonicalization gate. The raw tier has to be generous
+  because an internationalized domain name *shrinks* under IDNA — `é`×40 in four
+  labels is 323 raw bytes and 187 canonical, and the widest legitimate case is 883
+  raw to 251 canonical — so a raw bound at the DNS limit would have refused
+  ordinary international destinations with a 400; its value is derived from the
+  maximum Punycode expansion and re-measured against the shipped normalizer by
+  test. The canonical tier is what keeps that generosity from being a hole, since
+  dot-dense ASCII does not shrink and is therefore refused. A refused request
+  answers 400 without echoing the value, creates no state, and is counted by
+  `culvert_proxy_oversize_host_rejected_total` with a rate-limited log line naming
+  the length and the tier rather than the value. Operator runbook:
+  `docs/operator/destination-host-bounds.md`.
 
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own

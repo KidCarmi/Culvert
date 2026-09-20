@@ -1100,7 +1100,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// byte-identical). See crashguard.go.
 	defer proxyCrashGuard(reqID)
 
-	// ── Destination-authority bound (CHAOS-66, fail-closed) ─────────────────
+	// ── Destination-authority RAW pre-cap (CHAOS-66, fail-closed) ───────────
 	// FIRST consumer of r.Host, and deliberately ahead of the connection
 	// limiter, the IP filter, the rate limiter, authentication and policy. The
 	// client-supplied authority is copied into two rotating sinks and WALKED
@@ -1108,8 +1108,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// host measured 3.94 s of CPU through this function, ~16 min at net/http's
 	// 1 MiB header default). Every one of those costs is created by a sink or a
 	// matcher BEHIND this point — including IP_BLOCKED and RATE_LIMITED just
-	// below, which both write r.Host into the request log — so the bound has to
-	// be here and not at the IDNA gate further down. See proxy_host_bounds.go.
+	// below, which both write r.Host into the request log — so this tier has to
+	// be here and not at the IDNA gate further down.
+	//
+	// This is the RAW tier only, and it is deliberately generous (1 KiB): the
+	// bound DNS actually imposes cannot be applied to raw bytes without refusing
+	// legitimate internationalized names, which SHRINK under IDNA (measured: 883
+	// raw bytes → 251 A-label bytes). The tight bound is applied to the CANONICAL
+	// form at the gate below. See proxy_host_bounds.go.
 	if rejectOversizeDestHost(w, r, clientIP) {
 		return
 	}
@@ -1175,6 +1181,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// perturb evidence hashes). Matchers keep receiving the raw host: each
 	// normalizes internally, and changing their input is out of scope here.
 	normHost, ok := normalizeHostStrict(host)
+	if ok && rejectOversizeCanonicalHost(w, r, clientIP, normHost) {
+		// CHAOS-66 canonical tier: the host normalized to more than DNS can
+		// carry. Reachable only for a value that does not shrink under IDNA —
+		// i.e. the dot-dense ASCII shape an attacker wants — because the raw
+		// pre-cap above already bounded everything to 1 KiB and a legitimate IDN
+		// normalizes far below this limit.
+		return
+	}
 	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Bad Request: invalid host", http.StatusBadRequest)

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/idna"
+
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
@@ -125,7 +127,7 @@ func TestChaos66_DefectConnectFormIsBounded(t *testing.T) {
 		t.Errorf("proxyOversizeHostRejected = %d, want 1 on the CONNECT form", got)
 	}
 	for _, e := range reqlog.Get() {
-		if len(e.Host) > maxDestAuthorityLen {
+		if len(e.Host) > maxRawDestAuthorityBytes {
 			t.Fatalf("CONNECT retained a %d-byte Host field", len(e.Host))
 		}
 	}
@@ -191,9 +193,9 @@ func TestChaos66_DefectRequestLogNeverCarriesOversizeHost(t *testing.T) {
 	handleRequest(w, makeRequest("http://"+host+"/", nil))
 
 	for _, e := range reqlog.Get() {
-		if len(e.Host) > maxDestAuthorityLen {
+		if len(e.Host) > maxRawDestAuthorityBytes {
 			t.Fatalf("request-log entry carries a %d-byte Host field (limit %d, status %q) — "+
-				"the durable feed is retaining client-chosen bytes", len(e.Host), maxDestAuthorityLen, e.Status)
+				"the durable feed is retaining client-chosen bytes", len(e.Host), maxRawDestAuthorityBytes, e.Status)
 		}
 	}
 }
@@ -220,7 +222,7 @@ func TestChaos66_DefectIPBlockedPathDoesNotRetainTheAuthority(t *testing.T) {
 			"whose own branch retains r.Host", w.Code, http.StatusBadRequest)
 	}
 	for _, e := range reqlog.Get() {
-		if len(e.Host) > maxDestAuthorityLen {
+		if len(e.Host) > maxRawDestAuthorityBytes {
 			t.Fatalf("IP_BLOCKED retained a %d-byte Host field — the bound is behind a sink", len(e.Host))
 		}
 	}
@@ -302,7 +304,7 @@ func TestChaos66_DefectTopHostsNeverRetainsAnOversizeKey(t *testing.T) {
 
 	for _, h := range topHosts.Top(50) {
 		if len(h.Host) > maxDestAuthorityLen {
-			t.Fatalf("topHosts retained a %d-byte key (limit %d) — the cap bounds the entry count, not the key size", len(h.Host), maxDestAuthorityLen)
+			t.Fatalf("topHosts retained a %d-byte key (limit %d) — the cap bounds the entry count, not the key size", len(h.Host), maxRawDestAuthorityBytes)
 		}
 	}
 }
@@ -320,9 +322,14 @@ func TestChaos66_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
 	chaos66CaptureLog(t)
 
 	// The bound this path enforces must be reachable within what the protocol
-	// can carry — otherwise the gate is unreachable by construction.
+	// can carry — otherwise the gate is unreachable by construction. The RAW
+	// pre-cap (1 KiB) is NOT reachable here, which is why this path enforces the
+	// CANONICAL bound instead; asserting both keeps that distinction honest.
 	if maxDestHostLen >= 255 {
-		t.Fatalf("maxDestHostLen = %d: the SOCKS5 gate cannot fire, since RFC 1928 caps DOMAINNAME at 255", maxDestHostLen)
+		t.Fatalf("maxDestHostLen = %d: the SOCKS5 canonical gate cannot fire, since RFC 1928 caps DOMAINNAME at 255", maxDestHostLen)
+	}
+	if maxRawDestAuthorityBytes < 255 {
+		t.Fatalf("maxRawDestAuthorityBytes = %d is below what RFC 1928 can carry (255); a raw gate here would be live and this comment wrong", maxRawDestAuthorityBytes)
 	}
 
 	ln := startSOCKS5Listener(t)
@@ -346,8 +353,10 @@ func TestChaos66_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
 
 	// The longest DOMAINNAME the protocol can carry: 255 bytes, two above the
 	// 253 a resolvable name can occupy.
+	// 255 ASCII bytes: two above the 253 a resolvable name can occupy, and ASCII
+	// does not shrink under IDNA, so this reaches the canonical gate.
 	host := chaos66Host(255)
-	if !destHostOversize(host) {
+	if !canonicalHostOversize(host) {
 		t.Fatalf("a %d-byte SOCKS5 destination is not considered oversize — the gate is dead code", len(host))
 	}
 	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))} // #nosec G115 -- 255 by construction
@@ -375,7 +384,7 @@ func TestChaos66_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
 	}
 	// And the destination must never have reached the request log.
 	for _, e := range reqlog.Get() {
-		if len(e.Host) > maxDestHostLen {
+		if len(e.Host) > maxRawDestAuthorityBytes {
 			t.Fatalf("SOCKS5 retained a %d-byte Host field in the request log", len(e.Host))
 		}
 	}
@@ -417,27 +426,29 @@ func TestChaos66_ControlBoundIsInclusiveAndDerived(t *testing.T) {
 	if maxDestHostLen != 253 {
 		t.Errorf("maxDestHostLen = %d, want 253 (RFC 1035 §2.3.4 wire limit of 255 octets in RFC 1123 presentation form)", maxDestHostLen)
 	}
-	if destAuthorityOversize(chaos66Host(maxDestAuthorityLen)) {
-		t.Errorf("an authority of exactly %d bytes was refused; the limit is inclusive", maxDestAuthorityLen)
+	if rawAuthorityOversize(chaos66Host(maxRawDestAuthorityBytes)) {
+		t.Errorf("a raw authority of exactly %d bytes was refused; the limit is inclusive", maxRawDestAuthorityBytes)
 	}
-	if !destAuthorityOversize(chaos66Host(maxDestAuthorityLen + 1)) {
-		t.Errorf("an authority of %d bytes was admitted; the limit is not enforced", maxDestAuthorityLen+1)
+	if !rawAuthorityOversize(chaos66Host(maxRawDestAuthorityBytes + 1)) {
+		t.Errorf("a raw authority of %d bytes was admitted; the pre-cap is not enforced", maxRawDestAuthorityBytes+1)
 	}
-	if destHostOversize(chaos66Host(maxDestHostLen)) {
-		t.Errorf("a host of exactly %d bytes was refused; the limit is inclusive", maxDestHostLen)
+	if canonicalHostOversize(chaos66Host(maxDestHostLen)) {
+		t.Errorf("a canonical host of exactly %d bytes was refused; the limit is inclusive", maxDestHostLen)
 	}
-	if !destHostOversize(chaos66Host(maxDestHostLen + 1)) {
-		t.Errorf("a host of %d bytes was admitted; the limit is not enforced", maxDestHostLen+1)
+	if !canonicalHostOversize(chaos66Host(maxDestHostLen + 1)) {
+		t.Errorf("a canonical host of %d bytes was admitted; the canonical bound is not enforced", maxDestHostLen+1)
 	}
-	// The host bound must be STRICTLY tighter than the authority bound, or the
-	// two predicates are interchangeable and the reason for having both is gone.
-	if maxDestHostLen >= maxDestAuthorityLen {
-		t.Errorf("maxDestHostLen (%d) is not tighter than maxDestAuthorityLen (%d) — the split serves no purpose",
-			maxDestHostLen, maxDestAuthorityLen)
+	// The RAW pre-cap must be STRICTLY looser than the canonical bound. If it
+	// were not, it would refuse legitimate IDN input before normalization could
+	// shrink it — which is exactly the Codex P2 regression this two-tier shape
+	// exists to fix, and a single-tier design is what reintroduces it.
+	if maxRawDestAuthorityBytes <= maxDestAuthorityLen {
+		t.Errorf("maxRawDestAuthorityBytes (%d) is not looser than the canonical authority bound (%d) — "+
+			"a raw bound at the DNS limit refuses legitimate internationalized domains",
+			maxRawDestAuthorityBytes, maxDestAuthorityLen)
 	}
-	// Both bounds must be reachable within what each protocol can deliver. The
-	// SOCKS5 DOMAINNAME is one length-prefixed byte, so a gate above 255 there is
-	// dead code — the defect this control exists to keep closed.
+	// The canonical bound must be reachable within what each protocol can
+	// deliver, or its gate is dead code — the first self-review finding.
 	if maxDestHostLen >= 255 {
 		t.Errorf("maxDestHostLen (%d) exceeds what RFC 1928 §4 can carry (255) — the SOCKS5 gate would be unreachable", maxDestHostLen)
 	}
@@ -470,23 +481,159 @@ func TestChaos66_ControlOrdinaryDestinationStillProxies(t *testing.T) {
 }
 
 // TestChaos66_ControlLegitimateAuthorityShapesAreAccepted pins the shapes the
-// register warned the bound had to answer for before it could ship: a
-// maximum-length FQDN, an FQDN with a port, a trailing-dot FQDN, a bare IPv4
-// literal and a BRACKETED IPv6 literal with a port.
+// register warned the bound had to answer for before it could ship.
+//
+// **The IDN cases are here because their absence let a real regression through.**
+// The first version of this control tested ASCII shapes only, and the first
+// version of the bound applied the DNS limit to RAW bytes — which refuses any
+// internationalized name whose UTF-8 form exceeds 261 bytes even though IDNA
+// shrinks it well inside DNS limits. Codex caught it on PR #1446 (P2). A forward
+// proxy that cannot reach international destinations is a customer outage, so
+// these cases are not decoration: they are the control that makes the raw tier's
+// generosity load-bearing rather than arbitrary.
 func TestChaos66_ControlLegitimateAuthorityShapesAreAccepted(t *testing.T) {
-	for _, authority := range []string{
-		"example.com",
-		"example.com:8443",
-		"example.com.",
-		"10.1.2.3:3128",
-		"[2001:db8::1]:443",
-		"[fe80::1%25eth0]:443",
-		chaos66Host(maxDestHostLen),            // longest possible name
-		chaos66Host(maxDestHostLen) + ":65535", // …with a port
-		"[" + "2001:db8::1" + "]",              // bare bracketed literal
+	for _, tc := range []struct{ what, authority string }{
+		{"plain", "example.com"},
+		{"with port", "example.com:8443"},
+		{"trailing dot", "example.com."},
+		{"IPv4 literal", "10.1.2.3:3128"},
+		{"IPv6 literal", "[2001:db8::1]:443"},
+		{"IPv6 with zone", "[fe80::1%25eth0]:443"},
+		{"bare bracketed literal", "[2001:db8::1]"},
+		{"longest possible name", chaos66Host(maxDestHostLen)},
+		{"longest name with port", chaos66Host(maxDestHostLen) + ":65535"},
+		// Codex's example verbatim: 323 raw UTF-8 bytes, 187 A-label bytes.
+		{"IDN, Codex's case", chaos66IDN(40, 4)},
+		{"IDN with port", chaos66IDN(40, 4) + ":443"},
+		{"IDN, single label", chaos66IDN(40, 1) + ".example.com"},
+		// The worst legitimate expansion found by driving the real idna.ToASCII:
+		// 899 raw bytes normalizing to 255 A-label bytes.
+		{"IDN, maximal expansion", chaos66MaxIDN(t)},
 	} {
-		if destAuthorityOversize(authority) {
-			t.Errorf("a legitimate authority was refused (%d bytes): %.40q…", len(authority), authority)
+		if rawAuthorityOversize(tc.authority) {
+			t.Errorf("%s: a legitimate authority was refused by the RAW pre-cap (%d bytes, cap %d)",
+				tc.what, len(tc.authority), maxRawDestAuthorityBytes)
+			continue
+		}
+		// And it must survive the CANONICAL tier too, which is the one an IDN
+		// has to shrink past. Strip any port/brackets the way the dispatch path
+		// does before normalizing.
+		host := tc.authority
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		norm, ok := normalizeHostStrict(host)
+		if !ok {
+			t.Errorf("%s: %q failed canonicalization, so this case proves nothing about the bound", tc.what, tc.what)
+			continue
+		}
+		if canonicalHostOversize(norm) {
+			t.Errorf("%s: a legitimate authority was refused by the CANONICAL bound "+
+				"(raw %d bytes, canonical %d, limit %d) — this is the IDN regression Codex found",
+				tc.what, len(tc.authority), len(norm), maxDestHostLen)
+		}
+	}
+}
+
+// chaos66IDN builds an internationalized host of labelRunes 2-byte runes per
+// label, across labels labels. "é" is the character Codex's example used.
+func chaos66IDN(labelRunes, labels int) string {
+	parts := make([]string, labels)
+	for i := range parts {
+		parts[i] = strings.Repeat("é", labelRunes)
+	}
+	return strings.Join(parts, ".")
+}
+
+// chaos66MaxIDN returns the widest legitimate raw-to-canonical expansion this
+// build's idna can produce: it searches label sizes and label counts for the
+// largest RAW UTF-8 host whose canonical A-label form still fits DNS.
+//
+// It is computed against the REAL idna.ToASCII rather than asserted from a
+// constant, so an x/net change that alters the expansion ratio moves this fixture
+// instead of silently invalidating the raw cap's derivation. 4-byte runes are
+// used because they are the worst case: Punycode emits at least one byte per
+// encoded code point, so the raw:canonical ratio is maximised by the widest
+// UTF-8 encoding.
+func chaos66MaxIDN(t *testing.T) string {
+	t.Helper()
+	best := ""
+	for runes := 1; runes <= 80; runes++ {
+		label := strings.Repeat("\U0001D11E", runes) // U+1D11E, 4 UTF-8 bytes
+		if a, err := idna.ToASCII(label); err != nil || len(a) > 63 {
+			continue // not a valid DNS label
+		}
+		for labels := 1; labels <= 16; labels++ {
+			parts := make([]string, labels)
+			for i := range parts {
+				parts[i] = label
+			}
+			host := strings.Join(parts, ".")
+			a, err := idna.ToASCII(host)
+			if err != nil || len(a) > maxDestHostLen {
+				continue
+			}
+			if len(host) > len(best) {
+				best = host
+			}
+		}
+	}
+	if best == "" {
+		t.Fatal("could not build a maximal legitimate IDN host")
+	}
+	return best
+}
+
+// TestChaos66_ControlRawCapExceedsMaximumIDNExpansion is the DERIVATION control
+// for the raw pre-cap. The cap is only safe if no host whose canonical form fits
+// in DNS can exceed it in raw UTF-8 — otherwise the proxy refuses a destination
+// that resolves. It measures the widest expansion this build's idna actually
+// produces rather than trusting the arithmetic in the comment.
+func TestChaos66_ControlRawCapExceedsMaximumIDNExpansion(t *testing.T) {
+	maxIDN := chaos66MaxIDN(t)
+	canonical, err := idna.ToASCII(maxIDN)
+	if err != nil {
+		t.Fatalf("idna.ToASCII: %v", err)
+	}
+	t.Logf("maximal legitimate IDN: raw=%d bytes canonical=%d bytes (raw cap %d)",
+		len(maxIDN), len(canonical), maxRawDestAuthorityBytes)
+	if len(maxIDN) > maxRawDestAuthorityBytes {
+		t.Fatalf("the widest legitimate IDN is %d raw bytes but the pre-cap is %d — "+
+			"the proxy refuses a destination that resolves", len(maxIDN), maxRawDestAuthorityBytes)
+	}
+	// And the margin must be real, not accidental: if the cap sat barely above
+	// the measured maximum, an idna change could push a legitimate name past it.
+	if margin := maxRawDestAuthorityBytes - len(maxIDN); margin < 64 {
+		t.Errorf("only %d bytes of margin between the raw pre-cap (%d) and the widest legitimate IDN (%d)",
+			margin, maxRawDestAuthorityBytes, len(maxIDN))
+	}
+}
+
+// TestChaos66_DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier is the gate
+// that keeps the raw tier's generosity from being a hole. The raw pre-cap has to
+// be 1 KiB to admit IDN expansion, and on its own that still admits a 1 000-byte
+// dot-dense ASCII authority costing ~1.3 ms of matcher walk. ASCII does not
+// shrink under IDNA, so the canonical tier refuses exactly that shape.
+func TestChaos66_DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier(t *testing.T) {
+	chaos66Isolate(t)
+	chaos66CaptureLog(t)
+
+	host := chaos66Host(1000) // inside the raw pre-cap, far outside DNS
+	if rawAuthorityOversize(host) {
+		t.Fatalf("a %d-byte authority is refused by the RAW tier, so this gate cannot reach the canonical one", len(host))
+	}
+	w := httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://"+host+"/", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d — a %d-byte dot-dense ASCII authority passed both tiers",
+			w.Code, http.StatusBadRequest, len(host))
+	}
+	if got := proxyOversizeHostRejected.Load(); got != 1 {
+		t.Errorf("proxyOversizeHostRejected = %d, want 1 — the canonical refusal is uncounted", got)
+	}
+	for _, e := range reqlog.Get() {
+		if len(e.Host) > maxDestAuthorityLen {
+			t.Fatalf("the canonical tier let a %d-byte Host field reach the request log", len(e.Host))
 		}
 	}
 }

@@ -88,26 +88,55 @@ import (
 //     profile and an allowed destination to reach, so it is its own finding.
 // ---------------------------------------------------------------------------
 
-// maxDestHostLen is the longest hostname that can exist: RFC 1035 §2.3.4 caps a
-// wire-format domain name at 255 octets, which is 253 characters in
-// presentation form (RFC 1123 §2.1). It is the DERIVATION constant for the
-// authority bound below, and is pinned by test so the arithmetic stays
-// checkable in code rather than only in this comment.
+// maxDestHostLen is the longest hostname that can exist, in its CANONICAL
+// A-label form: RFC 1035 §2.3.4 caps a wire-format domain name at 255 octets,
+// which is 253 characters in presentation form (RFC 1123 §2.1).
+//
+// **This bound is applied to the NORMALIZED host, never to the raw bytes**, and
+// the difference is the whole of the Codex P2 finding on PR #1446. An
+// internationalized domain name arrives as UTF-8 and is converted to A-labels by
+// `idna.ToASCII`, which SHRINKS it: measured against the real x/net/idna,
+// `é`×40 in four labels is 323 raw bytes and 187 A-label bytes — a perfectly
+// ordinary IDN that the first version of this bound refused with a 400. The
+// worst legitimate case measured is **899 raw bytes → 255 A-label bytes**. A
+// forward proxy that cannot reach international destinations is a customer
+// outage, so a raw-byte bound at the DNS limit is not a conservative choice, it
+// is a wrong one.
 const maxDestHostLen = 253
 
-// maxDestAuthorityLen is the bound actually enforced, on the RAW authority as
-// the client sent it: the longest possible host, optional IPv6 brackets, and a
-// port.
+// maxDestAuthorityLen bounds the CANONICAL authority: the longest possible
+// A-label host, optional IPv6 brackets, and a port.
 //
 //	"[" + 253 + "]" + ":" + "65535"  =  1 + 253 + 1 + 1 + 5  =  261
-//
-// One length compare on the raw string is deliberately the whole gate. It is
-// O(1), it runs before anything parses or copies the value, and because the
-// host is a substring of the authority it bounds every downstream walk by
-// construction — 261² is ~68k byte operations, i.e. nothing. Splitting the port
-// off first to apply maxDestHostLen exactly would refuse a slightly larger set
-// for no measurable gain and would cost a parse on every proxied request.
 const maxDestAuthorityLen = 261
+
+// maxRawDestAuthorityBytes is the PRE-CAP on the raw authority as the client
+// sent it, enforced at the entry point before anything parses, copies or walks
+// the value. It exists because the canonical bound above cannot be evaluated
+// until the host has been normalized, and normalizing is itself work done on
+// attacker-chosen bytes.
+//
+// It is derived from the maximum expansion an IDN can undergo, so no legitimate
+// destination can exceed it. An A-label is at most 63 bytes (RFC 1035 §2.3.1) =
+// "xn--" plus at most 59 bytes of Punycode; Punycode emits at least one byte per
+// encoded code point (RFC 3492 §3), so a label encodes at most 59 code points,
+// each at most 4 UTF-8 bytes — at most 236 raw bytes per label. Packing a
+// 253-byte A-label authority with maximal labels gives ~940 raw bytes, and the
+// empirical maximum found by driving the real `idna.ToASCII` is **899**
+// (pinned by TestChaos66_ControlRawCapExceedsMaximumIDNExpansion). 1024 clears
+// both with margin.
+//
+// **The cost it buys, stated honestly.** Measured through the real
+// handleRequest with one category-group rule and the Layer-2 feed present:
+// 251 B → 111 µs, 511 B → 396 µs, 1023 B → 1.28 ms, 2047 B → 4.72 ms. So this
+// cap alone bounds the worst case at ~1.3 ms, against 3.94 s at 64 KiB and ~16
+// minutes at net/http's 1 MiB header default — but 1.3 ms is still ~12x an
+// ordinary request, which is why it is NOT the only bound. The canonical bound
+// refuses the shape an attacker actually wants (dot-dense ASCII does not shrink
+// under IDNA, so a 1 000-byte ASCII authority normalizes to 1 000 bytes and is
+// refused), leaving the realistic worst case at the 253-byte figure while the
+// 899-byte IDN goes through. Two tiers, because one cannot do both jobs.
+const maxRawDestAuthorityBytes = 1024
 
 // proxyOversizeHostRejected counts requests refused for an over-long
 // destination authority, on every protocol. Exported on /metrics as
@@ -131,36 +160,23 @@ var (
 
 const oversizeHostLogWindow = time.Minute
 
-// destAuthorityOversize reports whether an AUTHORITY — a host that may carry a
-// port, and may be a bracketed IPv6 literal — exceeds the bound. This is the
-// predicate for `r.Host` on the HTTP/CONNECT/WebSocket path and for the
-// admin-supplied host on the diagnostic endpoints, where a pasted `host:port`
-// must not be refused.
-func destAuthorityOversize(authority string) bool {
-	return len(authority) > maxDestAuthorityLen
+// rawAuthorityOversize reports whether the RAW authority — the bytes as the
+// client sent them, before any normalization — exceeds the pre-cap. This is the
+// predicate for the entry-point gate on every path.
+func rawAuthorityOversize(authority string) bool {
+	return len(authority) > maxRawDestAuthorityBytes
 }
 
-// destHostOversize reports whether a BARE HOST — no port, no brackets —
-// exceeds the bound. This is the predicate for the SOCKS5 destination, which
-// RFC 1928 §4 carries as a DOMAINNAME with the port in its own two-byte field.
+// canonicalHostOversize reports whether a NORMALIZED host — the A-label form
+// hostutil.NormalizeHostStrict produced, with no port and no brackets — exceeds
+// what DNS can carry.
 //
-// **Applying destAuthorityOversize there instead would have been DEAD CODE, and
-// that is the sharpest trap in this change.** RFC 1928 length-prefixes
-// DOMAINNAME with ONE byte, so the protocol caps the destination at 255 — which
-// is BELOW the 261-byte authority bound, so an authority-shaped check on that
-// value can never fire, and a test asserting only "no oversize host reached the
-// request log" passes vacuously because 255 is under the limit it asserts
-// against. Caught in self-review; `TestChaos66_DefectSOCKS5RefusesOversizeDestination`
-// now asserts the REFUSAL and the counter, so the gate cannot go dead again.
-//
-// Two predicates rather than one is a drift risk, which is why
-// maxDestAuthorityLen is DERIVED from maxDestHostLen and the derivation is
-// pinned by TestChaos66_ControlBoundIsInclusiveAndDerived. The alternative —
-// one predicate applied to values of two different kinds — is how the SOCKS5
-// gate became unreachable in the first place. Match the predicate to the KIND
-// of the value, not to the call site's convenience.
-func destHostOversize(host string) bool {
-	return len(host) > maxDestHostLen
+// This is the bound that refuses the shape an attacker wants, and it must be
+// given the CANONICAL form: dot-dense ASCII does not shrink under IDNA, so a
+// 1 000-byte ASCII authority still measures 1 000 bytes here and is refused,
+// while an 899-byte IDN measures 255 and goes through.
+func canonicalHostOversize(normHost string) bool {
+	return len(normHost) > maxDestHostLen
 }
 
 // noteOversizeHostLog reports whether this rejection may emit a log line,
@@ -188,50 +204,77 @@ func noteOversizeHostLog() bool {
 // from CHAOS-63's truncated audit actor: a username identifies an account an
 // operator may recognise, whereas an authority past 253 bytes identifies
 // nothing that can exist.
-func noteOversizeHostRejection(proto, clientIP string, n int) {
+func noteOversizeHostRejection(proto, clientIP string, n int, tier string) {
 	proxyOversizeHostRejected.Add(1)
 	if noteOversizeHostLog() {
-		logger.Printf("OVERSIZE_HOST %s %s {bytes=%d limit=%d total=%d action=block}",
-			sanitizeLog(proto), sanitizeLog(clientIP), n, maxDestAuthorityLen,
+		limit := maxRawDestAuthorityBytes
+		if tier == "canonical" {
+			limit = maxDestHostLen
+		}
+		logger.Printf("OVERSIZE_HOST %s %s {tier=%s bytes=%d limit=%d total=%d action=block}",
+			sanitizeLog(proto), sanitizeLog(clientIP), sanitizeLog(tier), n, limit,
 			proxyOversizeHostRejected.Load())
 	}
 }
 
-// rejectOversizeDestHost refuses an HTTP/CONNECT/WebSocket request whose
-// destination authority exceeds the bound, reporting true when it has written
+// rejectOversizeDestHost refuses an HTTP/CONNECT/WebSocket request whose RAW
+// destination authority exceeds the pre-cap, reporting true when it has written
 // the response.
 //
-// It runs as the FIRST thing in handleRequest that consults r.Host, and ahead
-// of the connection limiter, the IP filter, the rate limiter, authentication
-// and policy evaluation — so a rejected request creates NO state at all: no
-// limiter entry, no request-log row, no top-hosts key, no alert, no label walk.
-// Ordering is the whole contract, not an optimisation: `IP_BLOCKED` and
-// `RATE_LIMITED` both write `r.Host` into the request log, so a gate placed at
-// the host-canonicalization step (where RISK-013's IDNA gate sits) would sit
-// BEHIND two sinks that had already retained the megabyte.
+// It runs as the FIRST thing in handleRequest that consults r.Host, and ahead of
+// the connection limiter, the IP filter, the rate limiter, authentication and
+// policy — so a rejected request creates NO state at all: no limiter entry, no
+// request-log row, no top-hosts key, no alert, no label walk. Ordering is the
+// whole contract, not an optimisation: `IP_BLOCKED` and `RATE_LIMITED` both write
+// `r.Host` into the request log, so a gate placed at the host-canonicalization
+// step (where RISK-013's IDNA gate sits) would sit BEHIND two sinks that had
+// already retained the megabyte.
+//
+// This is the RAW tier. The canonical tier (rejectOversizeCanonicalHost) runs at
+// the canonicalization gate, because it needs the normalized form — and it can
+// safely sit there precisely because this cap has already bounded what those two
+// sinks can retain to 1 KiB.
 //
 // 400 is the honest answer: an authority longer than any name that can be
-// resolved is a malformed request, not a forbidden destination, and its LENGTH
-// is not a secret. The response body names the limit and never echoes the value
-// — §32's own gates had to suppress test output because the pre-fix handler
-// reflected the oversize input back, which is the amplification arriving by a
-// third road.
+// resolved is a malformed request, not a forbidden destination, and its LENGTH is
+// not a secret. The response body names the limit and never echoes the value —
+// §32's own gates had to suppress test output because the pre-fix handler
+// reflected the oversize input back, and the pre-fix proxy does the same
+// (measured: a 68 392-byte body for a 64 KiB authority).
 func rejectOversizeDestHost(w http.ResponseWriter, r *http.Request, clientIP string) bool {
-	if !destAuthorityOversize(r.Host) {
+	if !rawAuthorityOversize(r.Host) {
 		return false
 	}
 	// Counted as a block, matching what the INVALID_HOST branch further down
-	// already does for the other malformed-destination refusal on this path
-	// (and its SOCKS5 twin). An atomic counter is not a RETAINING sink, so this
-	// does not weaken the "a rejected request creates no state" property — that
+	// already does for the other malformed-destination refusal on this path (and
+	// its SOCKS5 twin). An atomic counter is not a RETAINING sink, so this does
+	// not weaken the "a rejected request creates no state" property — that
 	// property is about the log rows, map keys and limiter entries an attacker
-	// could grow, not about a single process-wide int. Leaving it out on this
-	// path while the SOCKS5 gate counted it was an inconsistency in the first
-	// version of this change, caught in self-review: two refusals of the same
-	// class must not disagree about whether they happened.
+	// could grow, not about a single process-wide int.
 	atomic.AddInt64(&statBlocked, 1)
-	noteOversizeHostRejection("HTTP", clientIP, len(r.Host))
-	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxDestAuthorityLen),
+	noteOversizeHostRejection("HTTP", clientIP, len(r.Host), "raw")
+	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxRawDestAuthorityBytes),
+		http.StatusBadRequest)
+	return true
+}
+
+// rejectOversizeCanonicalHost refuses a request whose host, ONCE NORMALIZED to
+// its A-label form, exceeds what DNS can carry. It reports true when it has
+// written the response.
+//
+// It runs immediately after hostutil.NormalizeHostStrict succeeds, on both the
+// HTTP and SOCKS5 paths, and is the tier that makes the bound tight: the raw
+// pre-cap has to be generous enough for IDN expansion (1 KiB), which on its own
+// still admits a 1 000-byte dot-dense ASCII authority costing ~1.3 ms. Measuring
+// the canonical form instead refuses exactly that, because ASCII does not shrink
+// under IDNA — while the 899-byte IDN it protects normalizes to 255 and passes.
+func rejectOversizeCanonicalHost(w http.ResponseWriter, r *http.Request, clientIP, normHost string) bool {
+	if !canonicalHostOversize(normHost) {
+		return false
+	}
+	atomic.AddInt64(&statBlocked, 1)
+	noteOversizeHostRejection("HTTP", clientIP, len(normHost), "canonical")
+	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxDestHostLen),
 		http.StatusBadRequest)
 	return true
 }

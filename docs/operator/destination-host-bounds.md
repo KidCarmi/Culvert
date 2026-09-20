@@ -15,24 +15,31 @@ Nothing else about the request is evaluated: it never reaches authentication,
 policy, the blocklist, the threat feed, the category store, the request log or
 the stats fan-out.
 
-Two bounds, matched to the shape of the value each path carries:
+**Two tiers**, because one bound cannot do both jobs:
 
-| Path | Value | Bound |
-| --- | --- | --- |
-| HTTP / CONNECT / WebSocket | the authority, which may carry a port (`host:port`, `[v6]:port`) | **261 bytes** |
-| SOCKS5 | a bare host — RFC 1928 carries the port in its own field | **253 bytes** |
-| `GET /api/url-categories/lookup?host=`, policy test | admin-supplied, may be pasted with a port | **261 bytes** |
+| Tier | Applied to | Limit | What it catches |
+| --- | --- | --- | --- |
+| **Raw pre-cap** | the authority exactly as the client sent it, before anything parses it | **1024 bytes** | the megabyte — bounds every log sink and every matcher walk before they run |
+| **Canonical** | the host after IDNA normalization to its A-label form | **253 bytes** | the shape an attacker actually wants — dot-dense ASCII, which does not shrink under IDNA |
 
-The bound is derived, not chosen:
+253 is the DNS limit: RFC 1035 §2.3.4 caps a wire-format name at 255 octets, which
+is 253 characters in presentation form (RFC 1123 §2.1).
 
-```
-"[" + <253-byte host> + "]" + ":" + "65535"   =   1 + 253 + 1 + 1 + 5  =  261
-```
+**The raw tier has to be generous, and that is not slack — it is correctness.** An
+internationalized domain name arrives as UTF-8 and *shrinks* when converted to
+A-labels. Measured against the real normalizer: `é`×40 in four labels is **323 raw
+bytes and 187 canonical bytes** — an ordinary IDN. The widest legitimate case is
+**883 raw bytes normalizing to 251**. A raw bound at the DNS limit would refuse all
+of these with a 400, so a forward proxy would stop reaching international
+destinations. The 1024-byte pre-cap clears the measured maximum with 141 bytes of
+margin, and that margin is itself checked by a test that re-measures the expansion
+against the shipped normalizer rather than trusting the arithmetic.
 
-253 is the longest hostname that can exist. RFC 1035 §2.3.4 caps a wire-format
-domain name at 255 octets, which is 253 characters in presentation form (RFC 1123
-§2.1). So the refused set contains **no destination any resolver would answer
-for**. There is no configuration knob, deliberately — see §6.
+**The canonical tier is what makes the bound tight.** The raw pre-cap alone still
+admits a 1000-byte dot-dense ASCII authority, which costs about 1.3 ms of matcher
+walk. ASCII does not shrink under IDNA, so measuring the canonical form refuses
+exactly that while the 883-byte IDN passes. With both tiers the realistic worst
+case is back at the 253-byte figure (~111 µs).
 
 ---
 
@@ -108,7 +115,11 @@ prefix: a copy of the value would reopen the amplification on the rate-limited
 path, and for a name past 253 bytes the length is the only fact that
 distinguishes a probe from a broken client.
 
-`proto` is one of `HTTP`, `SOCKS5`, `api/url-lookup`, `api/policy-test`.
+`proto` is one of `HTTP`, `SOCKS5`, `api/url-lookup`, `api/policy-test`. `tier` is
+`raw` (refused on the client's bytes, before normalization) or `canonical`
+(normalized and still longer than DNS allows). A run of `canonical` refusals from
+one source is the dot-dense-ASCII probe shape; `raw` means the authority was
+simply enormous.
 
 ---
 
@@ -136,8 +147,10 @@ distinguishes a probe from a broken client.
 
 - **Legitimate destinations.** Every authority shape a real client produces is
   accepted: a maximum-length FQDN, an FQDN with a port, a trailing-dot FQDN, an
-  IPv4 literal, and a bracketed IPv6 literal with or without a port or a zone.
-  These are pinned by test.
+  IPv4 literal, a bracketed IPv6 literal with or without a port or a zone, and
+  **internationalized domain names up to the widest expansion the normalizer can
+  produce**. These are pinned by test, the IDN cases specifically because their
+  absence let a real regression through review (see §7).
 - **Admin-configured patterns.** The bound applies to request destinations, not
   to policy FQDN patterns, blocklist entries or category host patterns. An
   over-long pattern is still stored; it simply can never match, exactly as
@@ -162,7 +175,7 @@ GUI-parity deferral of the same class as `maxUsernameLen`.
 
 ---
 
-## 7. Known residual
+## 7. Known residual and one thing that went wrong
 
 The matchers themselves are still quadratic in the length of whatever host they
 are handed. The bound is the only thing standing in front of them, and it has to
@@ -178,5 +191,16 @@ same bound at its own entry point.** The four that exist today (proxy dispatch,
 SOCKS5, the admin URL-lookup endpoint and the admin policy-test endpoint) all go
 through one shared predicate so they cannot drift apart.
 
+**What went wrong in review, recorded because it is the useful part.** The first
+version of this bound applied the DNS limit to the client's *raw bytes*. That is
+the intuitive reading of "a hostname cannot exceed 253 characters" and it is
+wrong, because the limit governs the *canonical* form and IDN shrinks on the way
+there. The bound refused ordinary international destinations with a 400, and the
+control test that should have caught it covered only ASCII shapes. It was found by
+review (Codex, P2, PR #1446), not by the gates. The lesson worth carrying: **a
+bound derived from a specification governs whichever representation the
+specification is about — check which one you are measuring, and make the control
+test carry an example of every representation the input can arrive in.**
+
 See `roadmap/CHAOS-ENGINEERING-REVIEW.md` §36 for the full failure analysis,
-register rows PX-21/PX-22/PX-23, and the gate inventory.
+register rows PX-21…PX-25, and the gate inventory.

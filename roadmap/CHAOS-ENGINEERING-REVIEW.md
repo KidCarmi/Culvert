@@ -6647,7 +6647,7 @@ second name for one action is two pages for one response. Runbook:
 
 ### Gates
 
-`proxy_host_bounds_test.go` (15). Nine DEFECT gates, each verified failing
+`proxy_host_bounds_test.go` (17). Ten DEFECT gates, each verified failing
 against the reintroduced pre-fix shape, with the measured failure in each message:
 
 | Gate | Pre-fix result |
@@ -6661,6 +6661,7 @@ against the reintroduced pre-fix shape, with the measured failure in each messag
 | `DefectSOCKS5RefusesOversizeDestination` | no refusal, no reply `0x02`, counter 0 (also fails against the dead-gate shape below) |
 | `DefectAdminURLLookupIsBounded` | 200, unbounded, uncounted |
 | `DefectConnectFormIsBounded` | 403 not 400; counter 0; 65 540-byte `Host` field — the form EVERY HTTPS request uses |
+| `DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier` | 403 not 400; 1 000-byte `Host` field in the request log (fails with the canonical tier removed — the raw cap alone is not enough) |
 
 The cost gate is a **RATIO measured in ONE run**, not an absolute timing bound —
 the standing rule after the `sanitizeLog`, `connlimit` and histogram episodes: a
@@ -6701,6 +6702,82 @@ form, and **every HTTPS request through this proxy is a CONNECT** — a gate pro
 only against plain HTTP is proven against the minority of traffic. It also pins
 that the refusal lands before the tunnel: a 400 on the CONNECT means no 200, no
 hijack and no drain registration.
+
+### The review round: a bound governs a REPRESENTATION, and I measured the wrong one
+
+Found by review (Codex, P2, PR #1446), not by the gates — the sharpest finding of
+the sweep and the reason this section exists.
+
+The first version applied the 253/261-byte bound to the client's **RAW** bytes.
+That is the intuitive reading of "RFC 1035 caps a hostname at 253 presentation
+characters", and it is wrong: the limit governs the **CANONICAL A-label form**, and
+an internationalized domain name *shrinks* on the way there. Measured against the
+shipped `idna.ToASCII`:
+
+| Host | Raw UTF-8 | Canonical A-label |
+| --- | ---: | ---: |
+| Codex's example (`é`×40, four labels) | **323 B** | **187 B** |
+| widest legitimate expansion (4-byte runes, maximal labels) | **883 B** | **251 B** |
+
+Both are ordinary, resolvable destinations, and **both were refused with a 400.**
+On a forward proxy that is a customer-visible outage — international destinations
+stop working — reached by a change whose entire justification was that "the refused
+set contains no destination any resolver would answer for". That claim was true of
+the canonical form and false of the bytes I was measuring.
+
+**The control test should have caught it and could not: it covered ASCII shapes
+only.** Maximum-length FQDN, FQDN with port, trailing dot, IPv4 literal, bracketed
+IPv6 with and without a zone — and not one non-ASCII character. The gate inventory
+looked thorough while being blind to an entire representation of the input.
+
+The fix is the two-tier shape Codex proposed, and each tier is now pinned by a gate
+that fails without it:
+
+1. **RAW pre-cap, 1024 bytes**, at the entry point. It has to be generous enough for
+   IDN expansion, and its value is *derived*: an A-label is ≤63 bytes = `xn--` plus
+   ≤59 Punycode bytes; Punycode emits ≥1 byte per encoded code point (RFC 3492 §3),
+   so ≤59 code points, each ≤4 UTF-8 bytes ⇒ ≤236 raw bytes per label, ⇒ ~940 for a
+   full authority. The empirical maximum is 883. 1024 clears it with 141 bytes of
+   margin, and `ControlRawCapExceedsMaximumIDNExpansion` **re-measures the expansion
+   against the shipped normalizer** rather than trusting that arithmetic, so an
+   x/net change that widens the ratio fails the build instead of silently making the
+   proxy refuse a resolvable name.
+2. **CANONICAL bound, 253 bytes**, on the normalized host, at the existing
+   RISK-013 canonicalization gate. This is what keeps the raw tier's generosity from
+   being a hole: 1 KiB alone still admits a 1000-byte dot-dense ASCII authority
+   costing ~1.3 ms of matcher walk, and ASCII does **not** shrink under IDNA, so
+   measuring the canonical form refuses exactly the attacker's shape while the
+   883-byte IDN passes. With both tiers the realistic worst case returns to the
+   253-byte figure (~111 µs).
+
+Measured cost at each candidate cap, through the real `handleRequest` with the
+bound lifted (which is how the 1024 figure was chosen rather than guessed):
+251 B → 111 µs, 511 B → 396 µs, 1023 B → **1.28 ms**, 2047 B → 4.72 ms.
+
+Two structural consequences worth keeping. The canonical tier can safely live
+*behind* `IP_BLOCKED`/`RATE_LIMITED` — the ordering rule this section spent so long
+establishing — **only because the raw tier in front of it has already bounded what
+those sinks can retain to 1 KiB**; the tiers are ordered by what each one is able to
+measure, not by preference. And the SOCKS5 gate stopped being dead code without
+being moved: RFC 1928's one-byte length prefix caps the destination at 255, which is
+inside the raw cap and therefore unreachable there, but 255 **exceeds** the canonical
+253 — so applying the canonical bound makes that gate live and correct, where the
+first version's raw bound made it unreachable.
+
+Both new gates were verified failing against their respective wrong shapes: setting
+the raw cap to 261 (the single-tier design) fails
+`ControlLegitimateAuthorityShapesAreAccepted` naming Codex's own 323-byte case and
+the 883-byte maximum, and removing the canonical tier fails
+`DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier` with a 1000-byte `Host` field
+reaching the request log.
+
+> **The lesson: a bound derived from a specification governs whichever
+> REPRESENTATION that specification is about.** "253 characters" is a fact about the
+> A-label form; the bytes on the wire are a different value that can be four times
+> larger and still legal. Before enforcing a limit, name the representation it
+> constrains and check which one the code is holding — and make the control test
+> carry an example of *every* representation the input can arrive in, because a
+> control that samples one of them will pass while the other is broken.
 
 ### What is deliberately left
 
