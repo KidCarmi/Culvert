@@ -45,6 +45,33 @@ var mcpToolTrust = &mcpToolTrustCoordinator{}
 // trust and re-affirms matching active trust.
 var mcpToolTrustReconcile = func() {}
 
+// mcpToolTrustReconcileSnapshot is the COHERENT read-path seam: reconcile and capture both
+// inventory snapshots under one hold of the coordinator's derivation lock. ok is false when the
+// coordinator is not composed, in which case nothing can have promoted anything and the caller's
+// own fail-closed path applies.
+var mcpToolTrustReconcileSnapshot = func() (*registry.Snapshot, *catalog.Snapshot, bool) {
+	return nil, nil, false
+}
+
+// installToolTrustReadHooks installs BOTH read-path seams together, and clearToolTrustReadHooks
+// removes both. They are a pair on purpose: mcpToolTrustReconcile makes the catalog reflect current
+// trust, while mcpToolTrustReconcileSnapshot additionally guarantees the caller's snapshots were
+// captured inside the same derivation critical section. Installing only the first leaves the
+// coherent seam at its fail-closed default, which does not fail loudly — it silently makes the
+// Canary catalog-usability row unsatisfiable. Test wiring that mirrors production must call these
+// rather than assigning the vars, so a future seam is added in one place instead of two.
+func installToolTrustReadHooks(c *mcpToolTrustCoordinator) {
+	mcpToolTrustReconcile = c.reconcile
+	mcpToolTrustReconcileSnapshot = c.reconcileAndSnapshot
+}
+
+func clearToolTrustReadHooks() {
+	mcpToolTrustReconcile = func() {}
+	mcpToolTrustReconcileSnapshot = func() (*registry.Snapshot, *catalog.Snapshot, bool) {
+		return nil, nil, false
+	}
+}
+
 // mcpToolTrustCoordinator owns the durable store and the catalog derivation.
 type mcpToolTrustCoordinator struct {
 	mu       sync.RWMutex
@@ -134,7 +161,7 @@ func initMCPToolTrust(_ *startupState) {
 	mcpToolTrust.composed = true
 	mcpToolTrust.reason = ""
 	mcpToolTrust.mu.Unlock()
-	mcpToolTrustReconcile = mcpToolTrust.reconcile
+	installToolTrustReadHooks(mcpToolTrust)
 	// Wire the discovery ingest path (ADR-0034): a Discovery built by execution.NewDiscovery
 	// reconciles trust immediately after a successful ingest, so a re-discovered tool matching
 	// an active approval is re-promoted at once (not after the periodic sweep). The closure
@@ -281,6 +308,39 @@ func (c *mcpToolTrustCoordinator) composedStatus() (composed bool, reason string
 func (c *mcpToolTrustCoordinator) reconcile() {
 	c.deriveMu.Lock()
 	defer c.deriveMu.Unlock()
+	c.reconcileLocked()
+}
+
+// reconcileAndSnapshot reconciles and captures BOTH inventory snapshots under ONE hold of
+// deriveMu, so the caller's catalog view cannot straddle another writer's critical section.
+//
+// Reconciling and then reading is NOT equivalent, and the difference is a fail-open. Revoke holds
+// deriveMu across store.Revoke AND the catalog demotion precisely so the pair moves together; a
+// reader that reconciles, RELEASES the lock, and only then reads cat.Current() can be scheduled
+// into the middle of that section and observe the durably-revoked store with its tool still
+// catalog.Usable. Every other check in the activation resolver then passes and the row is reported
+// met for an approval that no longer exists (Codex P2 round 8, PR #1378).
+//
+// The critical section grows by two atomic pointer loads: sharedInventory plus one Current() each.
+// Nothing reachable here calls back into the coordinator or the rollout coordinator, so the
+// documented durableMu -> deriveMu order is unchanged — this takes the same lock reconcile()
+// already took on this path, just for a few instructions longer.
+//
+// ok is false when no store or no inventory is published; the caller then has no trust state to be
+// coherent with and decides for itself (the activation resolver fails closed).
+func (c *mcpToolTrustCoordinator) reconcileAndSnapshot() (servers *registry.Snapshot, tools *catalog.Snapshot, ok bool) {
+	c.deriveMu.Lock()
+	defer c.deriveMu.Unlock()
+	c.reconcileLocked()
+	reg, cat := mcpInventory.sharedInventory()
+	if reg == nil || cat == nil {
+		return nil, nil, false
+	}
+	return reg.Current(), cat.Current(), true
+}
+
+// reconcileLocked is the reconcile body. deriveMu MUST be held.
+func (c *mcpToolTrustCoordinator) reconcileLocked() {
 	store, err := c.getStore()
 	if err != nil {
 		return
@@ -906,7 +966,7 @@ func resetMCPToolTrustForTest() {
 	mcpToolTrust.deriveMu.Lock()
 	mcpToolTrust.pendingDemotions = nil
 	mcpToolTrust.deriveMu.Unlock()
-	mcpToolTrustReconcile = func() {}
+	clearToolTrustReadHooks()
 	setMCPDiscoveryReconcileHook(nil)
 	setMCPDiscoveryIngestGuard(nil)
 }
