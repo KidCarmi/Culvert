@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ── Frozen pre-change emitters (fmt-based) ──────────────────────────────────
@@ -205,6 +206,36 @@ func FuzzPolicyDecisionLine(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestPolicyDecisionLine_CaptureIsTimeIndependent pins the property every
+// differential in this file rests on: two captures of the same inputs, taken at
+// different wall-clock instants, must be byte-identical.
+//
+// It exists because they were NOT. Giving the shared plSwapLogger the
+// production prefix and log.LstdFlags — correct for the benchmarks, which must
+// pay the header formatting — put a wall-clock second into every captured line,
+// and plRenderPair captures the two sides separately. A tick between them made
+// byte-identical renderings compare unequal, so the suite reported a divergence
+// that was purely the timestamp: invisible on a fast box, near-certain under
+// -race in CI where thousands of capture pairs span many seconds.
+//
+// A straddle is not reproducible on demand, so this gate forces the condition
+// rather than waiting for it: it captures, crosses a full second, and captures
+// again. Against the timestamped logger it fails every time.
+func TestPolicyDecisionLine_CaptureIsTimeIndependent(t *testing.T) {
+	emit := func() {
+		logPolicyAllow(plRule, plPriority, plClientIP, plMethod, plHost, plCond, plReqID, plIdentity)
+	}
+	first := plCapture(emit)
+	time.Sleep(1100 * time.Millisecond) // guaranteed to cross a second boundary
+	second := plCapture(emit)
+	if first != second {
+		t.Fatalf("plCapture is time-dependent, so every differential in this file can fail on a "+
+			"clock tick rather than a real divergence. plSwapLogger must keep flags 0; the "+
+			"production prefix and flags belong to plSwapProdLogger (benchmarks only).\n"+
+			"  first: %q\n second: %q", first, second)
+	}
 }
 
 // ── The quoting fast path ───────────────────────────────────────────────────

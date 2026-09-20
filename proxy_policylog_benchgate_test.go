@@ -73,7 +73,7 @@ func TestBenchGate_PolicyDecisionLineAllocs(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		restore := plSwapLogger(&plBlackhole{})
+		restore := plSwapProdLogger(&plBlackhole{})
 		res := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -122,7 +122,7 @@ func TestBenchGate_PolicyDecisionLineBeatsLegacy(t *testing.T) {
 	// that started over-reserving or copying twice.
 	const maxBytesPerLine = 512
 
-	restore := plSwapLogger(&plBlackhole{})
+	restore := plSwapProdLogger(&plBlackhole{})
 	legacy := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {

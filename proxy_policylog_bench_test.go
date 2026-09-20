@@ -114,13 +114,37 @@ type plBlackhole struct{ n int64 }
 
 func (d *plBlackhole) Write(p []byte) (int, error) { d.n += int64(len(p)); return len(p), nil }
 
-// plSwapLogger points the package logger at w and returns a restore func.
+// plSwapLogger points the package logger at w with NO prefix and NO flags, and
+// returns a restore func. This is the CORRECTNESS shape, used by plCapture.
 //
-// Benchmarks pass a plBlackhole, never io.Discard (see above), and give the
-// logger the production prefix and flags so the header formatting every real
-// line pays is in the measurement too. The log sink's I/O is not — in
-// production it is asynchronous anyway (internal/logsink).
+// The flags MUST stay 0 here. log.LstdFlags stamps a wall-clock second into
+// every line, and the differential tests capture the production emitter and the
+// frozen fmt copy in two SEPARATE plCapture calls — so a clock tick between
+// them makes two byte-identical renderings compare unequal and the suite
+// reports a divergence that is purely the timestamp. It is a time-dependent
+// flake: rare on a fast box, near-certain under -race in CI, where those tests
+// make thousands of capture pairs over many seconds. That is exactly how it
+// reached CI, on the commit that gave the BENCHMARK harness production flags
+// and changed this shared helper to do it (verified by forcing one tick:
+// "…00:48:27 POLICY_ALLOW…" vs "…00:48:28 POLICY_ALLOW…").
+//
+// Benchmarks have the opposite requirement — they must pay the header
+// formatting a real line pays — so they use plSwapProdLogger. Two requirements,
+// two helpers; do not merge them back into one.
 func plSwapLogger(w io.Writer) func() {
+	prev := logger
+	logger = log.New(w, "", 0)
+	return func() { logger = prev }
+}
+
+// plSwapProdLogger points the package logger at w with the PRODUCTION prefix
+// and flags (setupLogger's "[Culvert] " + log.LstdFlags), so a benchmark pays
+// the same header formatting every real line does.
+//
+// Benchmarks pass a plBlackhole, never io.Discard (see above). The log sink's
+// I/O is still excluded — in production it is asynchronous anyway
+// (internal/logsink). Never use this from a test that compares rendered bytes.
+func plSwapProdLogger(w io.Writer) func() {
 	prev := logger
 	logger = log.New(w, "[Culvert] ", log.LstdFlags)
 	return func() { logger = prev }
@@ -129,7 +153,7 @@ func plSwapLogger(w io.Writer) func() {
 // ── Before vs after ─────────────────────────────────────────────────────────
 
 func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
-	defer plSwapLogger(&plBlackhole{})()
+	defer plSwapProdLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -138,7 +162,7 @@ func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
-	defer plSwapLogger(&plBlackhole{})()
+	defer plSwapProdLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -155,7 +179,7 @@ func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
 // so the comparison stays honest.
 
 func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
-	defer plSwapLogger(&plBlackhole{})()
+	defer plSwapProdLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -166,7 +190,7 @@ func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
-	defer plSwapLogger(&plBlackhole{})()
+	defer plSwapProdLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -182,7 +206,7 @@ func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
 // beaconing flood, so they are measured too rather than assumed to match.
 
 func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
-	defer plSwapLogger(&plBlackhole{})()
+	defer plSwapProdLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -191,7 +215,7 @@ func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Drop(b *testing.B) {
-	defer plSwapLogger(&plBlackhole{})()
+	defer plSwapProdLogger(&plBlackhole{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
