@@ -16993,12 +16993,39 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
+                  "additionalProperties": false,
+                  "properties": {
+                    "complete": {
+                      "description": "True when the peer returned its COMPLETE tool set. False when it paginated (MCP nextCursor) and only the first page was observed - tools beyond that page received no peer observation, so a First-Canary freshness fact for one of them will remain unsatisfied despite this success.",
+                      "type": "boolean"
+                    },
+                    "observations": {
+                      "description": "Number of tool observations in this ingest",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "revision": {
+                      "description": "Catalog revision published by this ingest",
+                      "format": "int64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "server_id": {
+                      "description": "The registered MCP server id that was refreshed",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "server_id",
+                    "revision",
+                    "observations",
+                    "complete"
+                  ],
                   "type": "object"
                 }
               }
             },
-            "description": "Observation recorded"
+            "description": "Observation recorded for the tools the peer returned on this page"
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"

@@ -12813,7 +12813,30 @@ paths:
               properties:
                 server_id: { type: string, description: 'Exact registered MCP server id; no wildcard' }
       responses:
-        '200': { description: 'Observation recorded', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '200':
+          # A 200 means the peer was reached and what it returned was ingested. It does NOT by
+          # itself mean the whole server was observed: tools/list MAY paginate and this refresh
+          # fetches ONE page, so `complete` is the qualification a caller must read. It was an
+          # untyped object, which left `complete` invisible to generated clients and let a 200 be
+          # read as a whole-server observation (Codex round 6, P2).
+          description: 'Observation recorded for the tools the peer returned on this page'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [server_id, revision, observations, complete]
+                additionalProperties: false
+                properties:
+                  server_id: { type: string, description: 'The registered MCP server id that was refreshed' }
+                  revision: { type: integer, format: int64, minimum: 0, description: 'Catalog revision published by this ingest' }
+                  observations: { type: integer, minimum: 0, description: 'Number of tool observations in this ingest' }
+                  complete:
+                    type: boolean
+                    description: >-
+                      True when the peer returned its COMPLETE tool set. False when it paginated
+                      (MCP nextCursor) and only the first page was observed - tools beyond that
+                      page received no peer observation, so a First-Canary freshness fact for one
+                      of them will remain unsatisfied despite this success.
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '405': { $ref: '#/components/responses/PlainMethodNotAllowed' }

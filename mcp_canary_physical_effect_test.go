@@ -164,6 +164,12 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	p := &lim
 	*p = tunedUpstreamLimits()
 	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"New returned from a nested closure", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	mk := func() (*upstreamclient.Client, error) {
+		return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	}
+	_ = mk
+	return tunedUpstreamClient()`},
 		{"the New call's result is discarded", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
 	_, _ = upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
 	return tunedUpstreamClient()`},
@@ -374,7 +380,7 @@ func findFunc(f *ast.File, name string) *ast.FuncDecl {
 // motivated the whole gate — follow the value that is USED.
 func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (limitsExpr ast.Expr, why string) {
 	var calls []*ast.CallExpr
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
+	inspectOwnBody(fn, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -490,10 +496,26 @@ func isTopLevelBinding(fn *ast.FuncDecl, rhs ast.Expr) bool {
 	return false
 }
 
-// isReturnedCall reports whether call appears directly in a return statement of fn.
+// inspectOwnBody walks fn's OWN statements, never descending into a nested function literal.
+//
+// ast.Inspect descends into FuncLit bodies, which let a closure stand in for the constructor: the
+// sole New call could be returned from `func() { return New(Config{Limits: lim}) }` while the
+// constructor itself returned something else entirely (Codex round 6, P1 — verified as a real
+// bypass). What this gate reasons about is what `newProductionUpstreamClient` does, so it must
+// look only at that function's own body.
+func inspectOwnBody(fn *ast.FuncDecl, visit func(ast.Node) bool) {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if _, isLit := n.(*ast.FuncLit); isLit {
+			return false
+		}
+		return visit(n)
+	})
+}
+
+// isReturnedCall reports whether call appears directly in a return statement of fn ITSELF.
 func isReturnedCall(fn *ast.FuncDecl, call *ast.CallExpr) bool {
 	returned := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
+	inspectOwnBody(fn, func(n ast.Node) bool {
 		ret, ok := n.(*ast.ReturnStmt)
 		if !ok {
 			return true
