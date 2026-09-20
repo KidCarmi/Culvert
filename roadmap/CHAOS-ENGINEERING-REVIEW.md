@@ -6705,6 +6705,24 @@ line while the counter carries all 50.
 - **The arrival rate is still not bounded by default** (PX-6 / §25's finding —
   `-rate-limit` ships at 0). This sweep bounds the COST of each request, not how
   many arrive; the runbook points at the front door.
+- **ST-9 (NEW, open) — `TestTopHosts_ConcurrentRecordDecayAndTop` is FLAKY under
+  CPU contention, on `main`, unrelated to this sweep.** It surfaced in this
+  sweep's full-suite run and was then reproduced on a clean `origin/main`
+  worktree with the identical message (`heavy hitters lost under concurrency;
+  Top(2) = [{Host:junk-19859.example Count:1} …]`) by running it under
+  deliberate CPU contention; it passes 6/6 in isolation in both trees, so it is
+  load-dependent, not change-dependent. The mechanism is in the test, not the
+  engine: two heavy-hitter writers race a 20 000-entry junk flood, and when the
+  scheduler starves the writers the decay passes halve `hot-a`/`hot-b` to 1 while
+  junk entries also sit at 1, so `Top(2)` resolves an arbitrary tie. **Recorded
+  rather than fixed, deliberately**: it is a gate for a different subsystem, this
+  repo's standing rule is that a gate which can flake gets muted (the
+  `sanitizeLog`, `connlimit` and histogram episodes all reached it), and
+  rewriting someone else's concurrency gate inside a sweep about destination
+  bounds is the "one concern per change" violation §30 declined for
+  `pollConfig`'s double increment. The fix is to make the assertion
+  tie-insensitive (assert the heavy hitters outrank every junk entry, or give the
+  writers a floor above the decay threshold), not to loosen the bound.
 
 ### The process lesson
 

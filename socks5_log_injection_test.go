@@ -410,6 +410,14 @@ var destinationSinks = map[string]string{
 	"JoinHostPort":        "net; string construction only",
 	"DialContext":         "net.Dialer; the error it returns is sanitised at the log site",
 	"sanitizeLog":         "the sanitiser itself",
+	// CHAOS-66 destination-authority bound. All three receive the destination
+	// only to MEASURE it, which is the whole design decision behind the bound's
+	// log line: the LENGTH is what an operator needs to tell a probe from a
+	// broken client, and a copy of the value — even a prefix — would reopen the
+	// write amplification the bound exists to close.
+	"destHostOversize":          "proxy_host_bounds.go; a pure len() comparison — returns a bool, logs nothing, stores nothing",
+	"noteOversizeHostRejection": "proxy_host_bounds.go; receives len(host), never the host: its log line carries the byte COUNT, the protocol and the peer IP only",
+	"len":                       "builtin; yields an int, so the bytes cannot survive the call",
 }
 
 // TestSOCKS5_EveryDestinationSinkIsAudited is the SECOND wall, and it closes
