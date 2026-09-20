@@ -44,6 +44,19 @@ func TestPeerFreshWall_VerdictHasExactlyOneProductionCaller(t *testing.T) {
 			"The activation-time resolver. Its input is built by buildExactPermitInput from the " +
 			"single reconciled registry+catalog capture that also decided the permit and " +
 			"credential rows, so all three facts necessarily describe one state of the node.",
+	})
+
+	// The OBSERVATION half has two callers, and the pairing is the point: the activation verdict
+	// delegates its whole tail to it, and the send boundary calls it directly because by then the
+	// target binding is already done. One implementation of missing / future-dated /
+	// identity-not-current / stale, reached from both sites.
+	// The ACTIVATION side reaches it intra-package, as a bare identifier, which findCallsites
+	// cannot see (it matches qualified calls, and widening it to bare identifiers would add false
+	// hits for the short method names the other walls pin). So the delegation is asserted directly
+	// below, where the claim can be stated exactly.
+	assertDelegatesTo(t, "EvaluatePeerObservedFresh", "EvaluateObservedIdentityFresh")
+
+	assertExactCallers(t, "EvaluateObservedIdentityFresh", map[string]string{
 		"mcp_live_gate.go:boundaryPeerFreshness": "" +
 			"The SEND-BOUNDARY re-check (blocker #11 runtime half). Its input is the same " +
 			"liveTrustPrecheck capture the approval check beside it uses, so the evidence and " +
@@ -51,8 +64,7 @@ func TestPeerFreshWall_VerdictHasExactlyOneProductionCaller(t *testing.T) {
 			"exists because freshness is the one authority that expires with no state change at " +
 			"all: an observation can satisfy the activation preflight and lapse while the " +
 			"request waits on credential materialization, the durable commit and an upstream " +
-			"pool slot. Sharing this verdict rather than writing a second one is the point — " +
-			"two definitions of fresh would make the effective bound whichever ran last.",
+			"pool slot.",
 	})
 }
 
@@ -266,4 +278,49 @@ func forwardedValueProblem(val ast.Expr, field string) string {
 			"would make the readiness row report something other than peer freshness."
 	}
 	return ""
+}
+
+// assertDelegatesTo requires that canary's outer verdict reaches the shared clause set rather than
+// repeating it. Repetition is how two definitions of "fresh" appear, and the second one is always
+// the one nobody updates.
+func assertDelegatesTo(t *testing.T, outer, inner string) {
+	t.Helper()
+	path := filepath.Join(pkgSourceDir(), "internal", "mcp", "canary", "peerfresh.go")
+	src, err := os.ReadFile(path) //nolint:gosec // fixed in-repo path
+	if err != nil {
+		t.Fatalf("read peerfresh.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	file, perr := parser.ParseFile(fset, path, src, 0)
+	if perr != nil {
+		t.Fatalf("parse peerfresh.go: %v", perr)
+	}
+	found, inspected := false, 0
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != outer || fn.Body == nil {
+			return true
+		}
+		inspected++
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			call, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == inner {
+				found = true
+			}
+			return true
+		})
+		return true
+	})
+	if inspected == 0 {
+		t.Fatalf("%s was not found in peerfresh.go — this wall is checking nothing", outer)
+	}
+	if !found {
+		t.Errorf("%s no longer calls %s. The two call sites must share ONE definition of missing, "+
+			"future-dated, identity-not-current and stale; a copy here is how an activation-time "+
+			"bound and a send-time bound drift apart, and the effective bound becomes whichever "+
+			"ran last.", outer, inner)
+	}
 }

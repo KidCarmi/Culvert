@@ -205,25 +205,52 @@ func EvaluatePeerObservedFresh(in PeerFreshnessInput) PeerFreshReason {
 	// two can genuinely disagree in published state (the repin window: Registry.Repin and the
 	// re-ingest that follows it are separate publications), and an observation that matches only
 	// one of them is not evidence about the server this node would execute against.
-	if in.Observed.Identity == "" {
-		if in.Observed.At.IsZero() {
+	// The identity and clock clauses are ONE implementation, shared with the send boundary. See
+	// EvaluateObservedIdentityFresh. ServerUsable is passed as satisfied because it was decided
+	// above; re-deciding it there would change nothing and split the order across two functions.
+	return EvaluateObservedIdentityFresh(in.Now, in.Observed, in.Current.ServerIdentity, in.RegistryPinnedIdentity, true)
+}
+
+// EvaluateObservedIdentityFresh decides the OBSERVATION half alone: is there evidence, was it
+// gathered under an identity that is still current in BOTH authorities, and is it recent enough to
+// spend authority on?
+//
+// IT EXISTS BECAUSE THE SEND BOUNDARY HAS NO TARGET BINDING LEFT TO DO. By the time a request
+// reaches the irreversible call, the live-trust precheck has already resolved the target FOR that
+// request's tenant, server and tool, gated on the registry owner, and refused unless the record
+// still carries the decision's fingerprint. Handing EvaluatePeerObservedFresh a Reviewed and a
+// Current built from that same resolved target would make three of its clauses trivially true —
+// a comparison that looks like a second opinion while being the same one. Worse, engineering the
+// inputs to satisfy them hides which clauses the boundary actually enforces.
+//
+// So the boundary asks exactly what is still open, and the two call sites share ONE definition of
+// missing, future-dated, identity-not-current and stale: EvaluatePeerObservedFresh delegates its
+// whole tail here. There is no second freshness algorithm and no second bound.
+//
+// ORDER MATCHES the full verdict: usability, then identity, then the clock — so an operator gets
+// the same class from either site for the same state.
+func EvaluateObservedIdentityFresh(now time.Time, obs PeerObservationFacts, currentIdentity, registryPin string, serverUsable bool) PeerFreshReason {
+	if !serverUsable {
+		return PeerFreshServerUnusable
+	}
+	if obs.Identity == "" {
+		if obs.At.IsZero() {
 			return PeerFreshMissing
 		}
 		return PeerFreshNoIdentity
 	}
-	if in.Observed.Identity != in.Current.ServerIdentity ||
-		in.Observed.Identity != in.RegistryPinnedIdentity {
+	if obs.Identity != currentIdentity || obs.Identity != registryPin {
 		return PeerFreshIdentityNotCurrent
 	}
-	// FRESHNESS LAST. Everything above is about WHICH target the evidence describes; this is
-	// about WHEN it was gathered.
-	if in.Observed.At.IsZero() {
+	// FRESHNESS LAST. Everything above is about WHICH peer the evidence describes; this is about
+	// WHEN it was gathered.
+	if obs.At.IsZero() {
 		return PeerFreshMissing
 	}
-	if in.Now.Before(in.Observed.At) {
+	if now.Before(obs.At) {
 		return PeerFreshFuture
 	}
-	if !PeerObservationFresh(in.Now, in.Observed) {
+	if !PeerObservationFresh(now, obs) {
 		return PeerFreshStale
 	}
 	return PeerFreshOK

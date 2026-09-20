@@ -795,7 +795,7 @@ func (g *mcpLiveSideEffectGate) revalidateTargetTrust(in execution.LiveGateInput
 	if g.now != nil {
 		at = g.now()
 	}
-	if r := boundaryPeerFreshness(in, live, at); r != mcperr.ReasonNone {
+	if r := boundaryPeerFreshness(live, at); r != mcperr.ReasonNone {
 		return r
 	}
 	// THE APPROVAL IS CONSULTED LAST, so the durable store is reached only for a request every
@@ -811,71 +811,34 @@ func (g *mcpLiveSideEffectGate) revalidateTargetTrust(in execution.LiveGateInput
 
 // boundaryPeerFreshness is the side-effect boundary's peer-observation re-check (blocker #11).
 //
-// IT REUSES THE ACTIVATION VERDICT VERBATIM. canary.EvaluatePeerObservedFresh is the ONE
-// definition of missing / future-dated / stale / fresh, and of what it means for an observation to
-// back an exact target; there is deliberately no second algorithm, no second TTL constant and no
-// bespoke time comparison here. An activation-time bound and a send-time bound that could drift
-// apart would be two answers to one question, and the one that mattered would be whichever ran
-// last.
+// IT REUSES THE ACTIVATION VERDICT'S OWN CLAUSES. canary.EvaluateObservedIdentityFresh is the
+// tail EvaluatePeerObservedFresh delegates to, so there is exactly ONE definition of missing,
+// future-dated, identity-not-current and stale, and ONE bound. An activation-time bound and a
+// send-time bound that could drift apart would be two answers to one question, and the one that
+// mattered would be whichever ran last.
 //
-// WHAT IS RE-ASKED FROM THE REQUEST'S SIDE. `Reviewed` is built from the identity this request was
-// AUTHORIZED against — the tenant, server, tool and decision fingerprint the executor carries —
-// and `Current` from the authoritative capture taken microseconds ago. So the binding is genuinely
-// re-established at the boundary rather than assumed from the precheck's own gates: a fresh
-// observation of F2 cannot satisfy a request authorized against F1, on this path any more than on
-// the activation path.
-//
-// FingerprintFormat is the one field that cannot be sourced independently from the request, which
-// carries the digest as hex and no format number. It is therefore taken from Current — and that is
-// sound rather than a gap, because tooltrust's Sum() folds FormatVersion INTO the digest, so a
-// format change produces a different digest and is caught by the fingerprint comparison itself.
-// Stating it here rather than leaving the reader to notice the field is trivially equal.
+// WHAT IT ASKS, AND WHAT IT DELIBERATELY DOES NOT. The target binding — tenant, server, tool,
+// fingerprint, format — is ALREADY established a few lines above, inside this same boundary
+// re-check: mcpLiveTrustPrecheck resolves the target FOR this request's ids, gates on the registry
+// owner matching the request's tenant, and refuses unless the current record still carries the
+// DECISION's fingerprint. Re-comparing those values here would compare the precheck's answer with
+// itself. So this asks only what is still open after it: that a peer was seen at all, under an
+// identity that is still BOTH the catalog record's and the registry's pin, recently enough.
 //
 // NO I/O. Everything it reads was already resolved into `live` from pointer-published inventory.
-// It dials nothing, and it must never learn to: a discovery call at the send boundary would put an
+// It dials nothing, and must never learn to: a discovery call at the send boundary would put an
 // unbounded network wait inside the last authority check, which is the exact shape of defect the
 // PreSend re-ask exists to close.
-func boundaryPeerFreshness(in execution.LiveGateInput, live liveTrustPrecheck, at time.Time) mcperr.Reason {
-	reviewed := canary.ReviewedTarget{
-		Tenant:            in.Tenant,
-		ServerID:          in.ServerID,
-		ToolName:          in.ToolName,
-		Fingerprint:       live.Target.Fingerprint,
-		FingerprintFormat: live.Target.FingerprintFormat,
-	}
-	// The decision's fingerprint is what the request was authorized against; live.Eligible above
-	// already required it to equal the current record's, so decoding it here would re-derive a
-	// value we know to be equal. What this DOES re-establish is the rest of the tuple, and the
-	// observation's own binding to it.
-	current := canary.ReviewedTarget{
-		Tenant:            live.Target.Tenant,
-		ServerID:          live.Target.ServerID,
-		ToolName:          live.Target.ToolName,
-		Fingerprint:       live.Target.Fingerprint,
-		FingerprintFormat: live.Target.FingerprintFormat,
-		ServerIdentity:    live.ServerIdentity,
-	}
-	verdict := canary.EvaluatePeerObservedFresh(canary.PeerFreshnessInput{
-		// Eligible is the fact this check depends on — the precheck resolved an authoritative
-		// target, it is this tenant's, the server is usable, the registry pin has not diverged,
-		// and it still carries the decision's fingerprint. Keyed off Eligible rather than
-		// live.Resolved, which the eligible path deliberately does not set (see its comment).
-		Resolved:               live.Eligible,
-		Now:                    at,
-		Observed:               live.Observed,
-		Reviewed:               reviewed,
-		Current:                current,
-		ActivationTenant:       in.Tenant,
-		RegistryPinnedIdentity: live.RegistryPin,
-		ServerUsable:           live.Eligible,
-	})
-	if verdict == canary.PeerFreshOK {
+func boundaryPeerFreshness(live liveTrustPrecheck, at time.Time) mcperr.Reason {
+	// ServerUsable is passed as satisfied because live.Eligible already required it (the precheck
+	// returns AnchorLost, not Eligible, for a disabled or repin-diverged server).
+	if canary.EvaluateObservedIdentityFresh(at, live.Observed, live.ServerIdentity, live.RegistryPin, true) == canary.PeerFreshOK {
 		return mcperr.ReasonNone
 	}
 	// ONE bounded reason for the gate, mapped from the verdict rather than passed through. The
 	// verdict's classes are finer because an OPERATOR needs to know whether to refresh or to
-	// re-review; the wire does not, and every one of those classes would otherwise carry the
-	// shape of the peer's identity, fingerprint or endpoint out to a caller. The fine class stays
-	// where it is safe: the activation surface and the log.
+	// re-review; the wire does not, and every one of those classes would otherwise carry the shape
+	// of the peer's identity, fingerprint or endpoint out to a caller. The fine class stays where
+	// it is safe: the activation surface and the log.
 	return mcperr.ReasonPeerObservationNotFresh
 }
