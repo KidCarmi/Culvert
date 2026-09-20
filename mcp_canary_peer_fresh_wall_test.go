@@ -218,18 +218,8 @@ func TestPeerFreshWall_ForwardingSitesCarryTheResolverAnswer(t *testing.T) {
 		rel := filepath.ToSlash(path)
 		check := func(pos token.Pos, val ast.Expr) {
 			assigns++
-			sel, ok := val.(*ast.SelectorExpr)
-			if !ok {
-				t.Errorf("%s:%d assigns %s from something other than a forwarded value. Every hop "+
-					"must carry the resolver's answer; a constant here would satisfy the "+
-					"readiness row without any peer having been observed.",
-					rel, fset.Position(pos).Line, field)
-				return
-			}
-			if n := sel.Sel.Name; n != field && n != "PeerObservedFresh" {
-				t.Errorf("%s:%d assigns %s from %q. A hop that forwards a DIFFERENT fact would "+
-					"make the readiness row report something other than peer freshness.",
-					rel, fset.Position(pos).Line, field, n)
+			if msg := forwardedValueProblem(val, field); msg != "" {
+				t.Errorf("%s:%d %s", rel, fset.Position(pos).Line, msg)
 			}
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -259,4 +249,21 @@ func TestPeerFreshWall_ForwardingSitesCarryTheResolverAnswer(t *testing.T) {
 			"fail-closed, but silently so, and this wall must fail rather than let it pass "+
 			"unnoticed.", assigns, field)
 	}
+}
+
+// forwardedValueProblem reports why val is not an acceptable forwarding of the freshness fact, or
+// "" when it is. Split out of the wall's AST walk so each function does one job — the walk finds
+// the assignments, this decides about one.
+func forwardedValueProblem(val ast.Expr, field string) string {
+	sel, ok := val.(*ast.SelectorExpr)
+	if !ok {
+		return "assigns " + field + " from something other than a forwarded value. Every hop must " +
+			"carry the resolver's answer; a constant here would satisfy the readiness row without " +
+			"any peer having been observed."
+	}
+	if n := sel.Sel.Name; n != field && n != "PeerObservedFresh" {
+		return "assigns " + field + " from \"" + n + "\". A hop that forwards a DIFFERENT fact " +
+			"would make the readiness row report something other than peer freshness."
+	}
+	return ""
 }

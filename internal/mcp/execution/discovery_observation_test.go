@@ -47,7 +47,8 @@ func obsRecord(t *testing.T, cat *catalog.Catalog) catalog.ToolRecord {
 	return rec
 }
 
-// TestDiscoveryObservation_NoServerCanExistWithoutAPinToObserveAgainst.
+// TestDiscoveryObservation_NoServerCanExistWithoutAPinToObserveAgainst pins the registry
+// invariant that Discovery's unusable-server guard currently rests on.
 //
 // An observation's whole value is that an AUTHENTICATED identity was seen to advertise these
 // bytes, so a server with nothing to authenticate against must never be observable. Today that
@@ -80,7 +81,8 @@ func TestDiscoveryObservation_NoServerCanExistWithoutAPinToObserveAgainst(t *tes
 	}
 }
 
-// TestDiscoveryObservation_RecordsTheVerifiedPinNotThePayload.
+// TestDiscoveryObservation_RecordsTheVerifiedPinNotThePayload pins that the identity on the
+// evidence is the one the TRANSPORT verified, never one the peer supplied.
 //
 // The identity stamped on the evidence is the one handed to the transport as the pin to verify —
 // NOT a value read out of the tools/list body, which the peer writes and could therefore choose.

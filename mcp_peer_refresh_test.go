@@ -136,8 +136,7 @@ func TestPeerRefresh_TakesOnlyAServerID(t *testing.T) {
 	// A compile-time assertion: the engine's shape is (ctx, serverID) and nothing more. If a
 	// future change adds an endpoint, identity, fingerprint or timestamp parameter, this stops
 	// building — which is the point.
-	var f func(context.Context, string) (mcpPeerRefreshOutcome, string, error) = mcpRefreshPeerObservation
-	_ = f
+	var _ func(context.Context, string) (mcpPeerRefreshOutcome, string, error) = mcpRefreshPeerObservation
 	if _, reason, _ := mcpRefreshPeerObservation(context.Background(), ""); reason != mcpPeerRefreshReasonNoServerID {
 		t.Fatalf("an empty server id must be refused, got %q", reason)
 	}

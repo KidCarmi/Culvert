@@ -197,11 +197,7 @@ func EvaluatePeerObservedFresh(in PeerFreshnessInput) PeerFreshReason {
 	if in.ActivationTenant == "" || in.ActivationTenant != in.Current.Tenant {
 		return PeerFreshTargetMoved
 	}
-	if in.Reviewed.Tenant != in.Current.Tenant ||
-		in.Reviewed.ServerID != in.Current.ServerID ||
-		in.Reviewed.ToolName != in.Current.ToolName ||
-		in.Reviewed.Fingerprint != in.Current.Fingerprint ||
-		in.Reviewed.FingerprintFormat != in.Current.FingerprintFormat {
+	if !sameExactTarget(in.Reviewed, in.Current) {
 		return PeerFreshTargetMoved
 	}
 	// IDENTITY MUST BE CURRENT IN BOTH DIRECTIONS. The observation's verified identity has to be
@@ -231,4 +227,18 @@ func EvaluatePeerObservedFresh(in PeerFreshnessInput) PeerFreshReason {
 		return PeerFreshStale
 	}
 	return PeerFreshOK
+}
+
+// sameExactTarget reports whether two targets name the SAME exact tool.
+//
+// ServerIdentity is deliberately not compared here: the verdict binds it separately, and in both
+// directions (against the catalog record's identity AND the registry's current pin), which is a
+// stronger statement than reviewed-equals-current would be. Folding it in would let an
+// observation that matches only one authority satisfy the comparison.
+func sameExactTarget(reviewed, current ReviewedTarget) bool {
+	return reviewed.Tenant == current.Tenant &&
+		reviewed.ServerID == current.ServerID &&
+		reviewed.ToolName == current.ToolName &&
+		reviewed.Fingerprint == current.Fingerprint &&
+		reviewed.FingerprintFormat == current.FingerprintFormat
 }
