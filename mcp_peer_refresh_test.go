@@ -136,7 +136,13 @@ func TestPeerRefresh_TakesOnlyAServerID(t *testing.T) {
 	// A compile-time assertion: the engine's shape is (ctx, serverID) and nothing more. If a
 	// future change adds an endpoint, identity, fingerprint or timestamp parameter, this stops
 	// building — which is the point.
-	var _ func(context.Context, string) (mcpPeerRefreshOutcome, string, error) = mcpRefreshPeerObservation
+	//
+	// It is spelled as a PARAMETER type rather than a variable declaration because staticcheck's
+	// QF1011 reads any `var x T = expr` — including `var _ T = expr` — as a redundant type it can
+	// infer from the right-hand side. Inferring it is exactly what must not happen: the written
+	// type IS the assertion, and letting it be inferred would leave this line asserting nothing
+	// while still looking like a check.
+	assertRefreshShape(mcpRefreshPeerObservation)
 	if _, reason, _ := mcpRefreshPeerObservation(context.Background(), ""); reason != mcpPeerRefreshReasonNoServerID {
 		t.Fatalf("an empty server id must be refused, got %q", reason)
 	}
@@ -339,3 +345,8 @@ func TestPeerRefresh_UpstreamConstructionFailureIsBounded(t *testing.T) {
 		t.Fatal("the cause must still reach the caller for logging, even though the reason is bounded")
 	}
 }
+
+// assertRefreshShape fails to COMPILE unless the governed refresh engine still takes exactly a
+// context and a server id and returns exactly (outcome, bounded reason, error). The assertion is
+// the parameter type; the body is deliberately empty.
+func assertRefreshShape(func(context.Context, string) (mcpPeerRefreshOutcome, string, error)) {}
