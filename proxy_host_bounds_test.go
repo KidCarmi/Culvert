@@ -113,7 +113,7 @@ func TestChaos66_DefectConnectFormIsBounded(t *testing.T) {
 	chaos66CaptureLog(t)
 
 	host := chaos66Host(64 * 1024)
-	r := httptest.NewRequest(http.MethodConnect, "http://"+host+":443", nil)
+	r := httptest.NewRequest(http.MethodConnect, "http://"+host+":443", http.NoBody)
 	r.Host = host + ":443"
 	r.RequestURI = host + ":443"
 	r.RemoteAddr = "198.51.100.7:51234"
@@ -343,7 +343,7 @@ func TestChaos66_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close() //nolint:errcheck // test cleanup; the handler owns the conn and may already have closed it
 
 	_, _ = conn.Write([]byte{0x05, 0x01, 0x00})
 	greet := make([]byte, 2)
@@ -399,7 +399,7 @@ func TestChaos66_DefectAdminURLLookupIsBounded(t *testing.T) {
 	chaos66CaptureLog(t)
 
 	before := proxyOversizeHostRejected.Load()
-	r := httptest.NewRequest(http.MethodGet, "/api/url-categories/lookup?host="+chaos66Host(64*1024), nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/url-categories/lookup?host="+chaos66Host(64*1024), http.NoBody)
 	r = withRole(r, RoleAdmin)
 	w := httptest.NewRecorder()
 	apiURLCatLookup(w, r)
