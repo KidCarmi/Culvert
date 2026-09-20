@@ -33,7 +33,31 @@ type callSite struct {
 
 func (c callSite) String() string { return c.File + ":" + c.Func }
 
-// findCallsites returns every production call to a method named sel, with the enclosing function.
+// findCallsites returns every production REFERENCE to a method named sel, with the enclosing
+// function — not merely every call of it.
+//
+// The distinction is the whole gate (Codex round 8, P1 — verified as a real bypass before it was
+// agreed with). A method VALUE is not a call: in
+//
+//	mint := cat.IngestObserved
+//	mint(reg, in, obs)
+//
+// the selector is not the Fun of a CallExpr and the call is through a plain identifier, so a
+// scan anchored on call position sees NEITHER statement while the legitimate direct call from
+// Discovery.Discover keeps the expected-caller set satisfied. That path can supply current pin
+// data, peer-shaped bytes and a timestamp without dialing anything — minting a fresh
+// PeerObserved record with the wall green.
+//
+// Matching the SELECTOR wherever it appears closes the class rather than that one shape: a
+// caller cannot use a method without naming it, so every call, method value, and any future
+// syntactic form that reaches it must pass through this scan. It is deliberately BROADER than
+// calls — a bare mention with no invocation is reported too, and that is the safe direction:
+// naming the observed-ingest capability at all is what has to be justified.
+//
+// It does NOT reach reflection (reflect.Value.MethodByName and friends), which resolves the
+// method from a string at runtime with no selector in the source. That is recorded as a limit,
+// not papered over; nothing in this tree does it, and a gate that cannot see a construct should
+// say so rather than imply coverage it does not have.
 func findCallsites(t *testing.T, sel string) []callSite {
 	t.Helper()
 	var sites []callSite
@@ -42,31 +66,47 @@ func findCallsites(t *testing.T, sel string) []callSite {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		fset := token.NewFileSet()
-		file, perr := parser.ParseFile(fset, path, src, 0)
+		found, perr := referencesInSource(filepath.ToSlash(path), string(src), sel)
 		if perr != nil {
 			t.Fatalf("parse %s: %v", path, perr)
 		}
-		rel := filepath.ToSlash(path)
-		// Track the enclosing function as we walk, so a hit can name it.
-		var enclosing string
-		ast.Inspect(file, func(n ast.Node) bool {
-			switch fn := n.(type) {
-			case *ast.FuncDecl:
-				enclosing = fn.Name.Name
-				if fn.Recv != nil && len(fn.Recv.List) > 0 {
-					enclosing = recvTypeName(fn.Recv) + "." + fn.Name.Name
-				}
-			case *ast.CallExpr:
-				if s, ok := fn.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == sel {
-					sites = append(sites, callSite{File: rel, Func: enclosing, Line: fset.Position(s.Sel.Pos()).Line})
-				}
-			}
-			return true
-		})
+		sites = append(sites, found...)
 	}
 	sort.Slice(sites, func(i, j int) bool { return sites[i].String() < sites[j].String() })
 	return sites
+}
+
+// referencesInSource is the per-file half of findCallsites, split out so the predicate can be
+// driven against synthetic sources.
+//
+// A wall that can only be run over the real tree can only be shown to PASS, never shown to catch
+// anything — the failure mode every gate in this PR has had at least once. With this seam a
+// control can hand it the exact shapes it must reject, including ones no file in the tree has.
+func referencesInSource(rel, src, sel string) ([]callSite, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, rel, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var sites []callSite
+	// Track the enclosing function as we walk, so a hit can name it.
+	var enclosing string
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch fn := n.(type) {
+		case *ast.FuncDecl:
+			enclosing = fn.Name.Name
+			if fn.Recv != nil && len(fn.Recv.List) > 0 {
+				enclosing = recvTypeName(fn.Recv) + "." + fn.Name.Name
+			}
+		case *ast.SelectorExpr:
+			// Matched wherever it appears — call, method value, or any other reference.
+			if fn.Sel.Name == sel {
+				sites = append(sites, callSite{File: rel, Func: enclosing, Line: fset.Position(fn.Sel.Pos()).Line})
+			}
+		}
+		return true
+	})
+	return sites, nil
 }
 
 // assertExactCallers is the shared wall body. want is the exact set of "file:Func" sites allowed
@@ -84,7 +124,7 @@ func assertExactCallers(t *testing.T, sel string, want map[string]string) {
 		key := s.String()
 		reason, allowed := want[key]
 		if !allowed {
-			t.Errorf("%s:%d calls %s, and that caller is not on the reasoned list.\n"+
+			t.Errorf("%s:%d references %s, and that caller is not on the reasoned list.\n"+
 				"Peer provenance is only as trustworthy as the set of callers that can create "+
 				"it. If this is a legitimate production path, add it here WITH the argument for "+
 				"why its evidence is real.", s.File, s.Line, sel)
@@ -95,7 +135,7 @@ func assertExactCallers(t *testing.T, sel string, want map[string]string) {
 	}
 	for key := range want {
 		if !seen[key] {
-			t.Errorf("the wall expects %s to call %s, and it does not. If the production path "+
+			t.Errorf("the wall expects %s to reference %s, and it does not. If the production path "+
 				"moved, move this entry with it; if it was removed, blocker 11's evidence path "+
 				"is gone and this gate must fail rather than be relaxed.", key, sel)
 		}
@@ -234,5 +274,57 @@ func TestPeerWall_NoNetworkCallUnderAnActivationLock(t *testing.T) {
 	if !strings.Contains(text, "d.Discover(") {
 		t.Fatal("mcp_peer_refresh.go no longer performs the discovery dial — this wall now " +
 			"guards nothing. Move it with the code or delete it.")
+	}
+}
+
+// TestPeerWall_ReferenceScanIsNotVacuous is the CONTROL for the provenance walls above.
+//
+// Those walls can only ever report that the tree contains no unreasoned caller. That is exactly
+// what a scan matching nothing also reports, so on its own it is not evidence — and this is not
+// hypothetical: the version that anchored on call position missed a method VALUE, and a
+// production function minting a PeerObserved record through one passed the wall untouched
+// (Codex round 8, P1; measured against the real tree before the fix).
+//
+// Each shape below must be FOUND, including the four that are not calls at all — a method value
+// is how the capability escapes without ever appearing in call position, and reporting a bare
+// reference is deliberate: naming the observed-ingest capability is itself what has to be
+// justified, and the reasoned list is where that justification lives.
+//
+// The last case is the acceptance half. A scan that flagged every selector would satisfy every
+// "is found" assertion above while making the reasoned list meaningless, so it must stay keyed on
+// the exact name and leave an unrelated one alone.
+func TestPeerWall_ReferenceScanIsNotVacuous(t *testing.T) {
+	for _, c := range []struct{ name, src string }{
+		{"direct call", `package p
+func f(c C) { c.IngestObserved(nil, nil, nil) }`},
+		{"method value, then called through it", `package p
+func f(c C) {
+	mint := c.IngestObserved
+	mint(nil, nil, nil)
+}`},
+		{"method value passed as an argument", `package p
+func f(c C) { register(c.IngestObserved) }`},
+		{"method value stored on a struct field", `package p
+func f(c C) { h := holder{fn: c.IngestObserved}; _ = h }`},
+		{"method value returned", `package p
+func f(c C) func() { return func() { c.IngestObserved(nil, nil, nil) } }`},
+	} {
+		got, err := referencesInSource("synth.go", c.src, "IngestObserved")
+		if err != nil {
+			t.Fatalf("%s: parse: %v", c.name, err)
+		}
+		if len(got) == 0 {
+			t.Errorf("the provenance scan must find %q; it found nothing. A shape it cannot see "+
+				"is a shape that can mint peer evidence with this wall green.", c.name)
+		}
+	}
+	// And it must NOT fire on an unrelated name, or every file in the tree would be a hit and the
+	// reasoned list would be meaningless.
+	quiet := `package p
+func f(c C) { c.Ingest(nil, nil) }`
+	if got, err := referencesInSource("synth.go", quiet, "IngestObserved"); err != nil {
+		t.Fatalf("parse: %v", err)
+	} else if len(got) != 0 {
+		t.Errorf("the scan matched %d unrelated selector(s); it must key on the exact name", len(got))
 	}
 }

@@ -182,6 +182,29 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	_ = lim
 	h := holder{lim: tunedUpstreamLimits()}
 	return upstreamclient.New(upstreamclient.Config{Limits: h.lim}, limits.DefaultGateway())`},
+		// Codex round 8, P1 — found by review, verified as a real bypass of the fifth version
+		// before it was agreed with. A range clause ASSIGNS its value variable, and an assignment
+		// that is not an *ast.AssignStmt was invisible to the binding count.
+		{"value replaced by a range clause", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	for _, lim = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		// The same class, two other statements that write without an AssignStmt. Neither was
+		// REPORTED — both were found by asking what else the inverted rule would have to cover —
+		// and both were then MEASURED as real bypasses of version five, exactly like the range
+		// form above. That is the argument for inverting the rule rather than adding a third
+		// named case: the review found one shape, probing the fix found two more in minutes, and
+		// there is no reason to believe that enumeration was finished either.
+		{"value replaced by a range clause binding the key", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	for lim = range map[upstreamclient.Limits]bool{upstreamclient.DefaultLimits(): true} {
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"value rebound by an inner var declaration", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	{
+		var lim = upstreamclient.DefaultLimits()
+		return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	}`},
 	} {
 		if why := retryFreeLimitsViolation(synthProductionDeps(bad.body)); why == "" {
 			t.Fatalf("the retry-free wall must reject %q; it accepted it", bad.name)
@@ -299,6 +322,28 @@ func retryFreeLimitsViolation(src string) string {
 	if !ok {
 		return "the Limits field is not a plain identifier, so its binding cannot be followed; pass a " +
 			"variable bound from " + retryFreeLimitsFunc
+	}
+	// EVERY WRITE TO THE IDENTIFIER MUST BE ONE THIS GATE CAN FOLLOW.
+	//
+	// bindingsOf understands assignments, because an assignment hands it the RHS expression it
+	// has to inspect. Go has other statements that WRITE a variable and carry no such expression,
+	// and a write the gate cannot see is worse than one it rejects: it leaves the binding count at
+	// one, so the retry-free binding still looks unique while the value reaching Config is
+	// something else entirely. Codex round 8 found the range form and it is a real bypass,
+	// verified before it was agreed with:
+	//
+	//	lim, _ := upstreamclient.RetryFreeLimits(...)      // the one binding this gate counts
+	//	for _, lim = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
+	//	}                                                   // a write, and not an AssignStmt
+	//	return upstreamclient.New(upstreamclient.Config{Limits: lim}, ...)
+	//
+	// Enumerating the write forms is the losing move — that is the deny-list-of-spellings lesson
+	// this wall has already learned twice. So the rule is inverted: any write that is NOT an
+	// assignment disqualifies the function outright, whatever it is. The gate declines to certify
+	// what it cannot follow, which costs production nothing (it writes lim exactly once, with =)
+	// and does not need to be right about which exotic forms exist.
+	if why := unfollowableWriteTo(fn, ident.Name); why != "" {
+		return why
 	}
 	bindings := bindingsOf(fn, ident.Name)
 	if len(bindings) == 0 {
@@ -477,6 +522,63 @@ func bindingsOf(fn *ast.FuncDecl, name string) []ast.Expr {
 		return true
 	})
 	return out
+}
+
+// unfollowableWriteTo reports a reason when name is written by anything other than an assignment.
+//
+// It is the complement of bindingsOf: that function collects the writes this gate can INSPECT,
+// this one refuses the ones it cannot. Range clauses assign their key and value; a var
+// declaration binds; a type switch binds a fresh name per clause. None of them expose a single
+// RHS expression to follow, so none of them can be certified — and since the whole predicate
+// rests on "the identifier is bound exactly once, by RetryFreeLimits", a write it never counted
+// is precisely the hole.
+//
+// It walks the whole body including closures, for the same reason bindingsOf does: a deferred
+// closure assigning the variable is a write that lands before the caller uses the client.
+func unfollowableWriteTo(fn *ast.FuncDecl, name string) (why string) {
+	writes := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == name
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if why != "" {
+			return false
+		}
+		switch st := n.(type) {
+		case *ast.RangeStmt:
+			if writes(st.Key) || writes(st.Value) {
+				why = "the Limits identifier " + name + " is written by a range clause, which this " +
+					"gate cannot follow to a value; bind it once with = and nothing else"
+			}
+		case *ast.TypeSwitchStmt:
+			if as, ok := st.Assign.(*ast.AssignStmt); ok {
+				for _, lhs := range as.Lhs {
+					if writes(lhs) {
+						why = "the Limits identifier " + name + " is bound by a type switch, whose " +
+							"per-clause value this gate cannot follow"
+					}
+				}
+			}
+		case *ast.GenDecl:
+			if st.Tok != token.VAR {
+				return true
+			}
+			for _, spec := range st.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, id := range vs.Names {
+					if id.Name == name {
+						why = "the Limits identifier " + name + " is (re)declared by a var declaration " +
+							"inside the function; bind it once with = so this gate can follow the value"
+					}
+				}
+			}
+		}
+		return true
+	})
+	return why
 }
 
 // isTopLevelBinding reports whether rhs belongs to an assignment that is a DIRECT statement of

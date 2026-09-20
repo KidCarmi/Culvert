@@ -3762,6 +3762,70 @@ absorbed. Gates: `TestDiscoveryObservation_PartialPageIsReportedAsPartial` with
 `..._CompletePageIsReportedAsComplete` as its control, since reporting everything as partial would
 satisfy the first assertion while making the signal useless and suppressing withdrawal entirely.
 
+### Round 8: both walls were bypassable, and the same rule fixes both
+
+Marking the PR ready for review re-triggered Codex on the ledger commit. It returned two P1s, both
+against structural walls in this change and both REAL — each was reproduced against the shipped
+tree before it was agreed with.
+
+**The provenance wall matched CALLS, and a method value is not a call.** `findCallsites` anchored
+on a `*ast.SelectorExpr` in the `Fun` position of a `*ast.CallExpr`, so
+
+```go
+mint := c.IngestObserved
+mint(reg, in, obs)
+```
+
+was invisible twice over — the selector is not in call position, and the call is through a plain
+identifier. Measured: a production function of exactly that shape minted a `PeerObserved` record
+with `TestPeerWall_ObservedIngestHasExactlyOneProducer` **green**, while the legitimate direct call
+from `Discovery.Discover` kept the expected-caller set satisfied. That path needs no peer: current
+pin data, peer-shaped bytes and a timestamp are enough, which is precisely the forgery blocker 11
+exists to prevent. The scan now matches the selector **wherever it appears** — a caller cannot use a
+method without naming it — so calls, method values and any future syntactic form all pass through
+it. It is deliberately broader than calls: a bare mention with no invocation is reported too, and
+naming the observed-ingest capability is itself what has to be justified. It does NOT reach
+reflection (`MethodByName` resolves from a string with no selector in the source); that is recorded
+as a limit rather than implied away.
+
+**The retry-free wall counted assignments, and a range clause assigns without being one.**
+`bindingsOf` collected `*ast.AssignStmt` writes, so
+
+```go
+lim, _ := upstreamclient.RetryFreeLimits(...)   // the one binding the gate counted
+for _, lim = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
+}
+return upstreamclient.New(upstreamclient.Config{Limits: lim}, ...)
+```
+
+left the binding count at exactly one, by `RetryFreeLimits`, at top level, preceding the use — every
+clause satisfied — while the value reaching `Config` was the default limits, restoring retries AND
+redirects. Verified accepted by `retryFreeLimitsViolation` before the fix.
+
+**The fix is the inverted rule, and that choice is the point.** Adding a `RangeStmt` case would have
+been the sixth named shape on a wall whose own history says enumeration loses. So any write that is
+NOT an assignment now disqualifies the function outright, whatever it is — `unfollowableWriteTo`
+refuses range clauses, type switches and inner `var` declarations without needing to be right about
+which exotic forms exist. **Probing the fix immediately found two more real bypasses of version
+five** (a range clause binding the KEY, and an inner `var` shadow), neither of them reported,
+both measured. One review found one shape; ten minutes of probing the fix found two more. There is
+no reason to believe that enumeration was finished either, which is the argument for a rule that
+does not depend on having finished it.
+
+**Both walls gained a falsifiability seam.** The retry-free wall already had one
+(`retryFreeLimitsViolation` over synthetic source) and that is the only reason its bypasses could be
+measured rather than argued about. The provenance wall had none — it could be run only against the
+real tree, so it could be shown to pass and never shown to catch anything. `referencesInSource` is
+now the per-file half, and `TestPeerWall_ReferenceScanIsNotVacuous` drives five shapes through it,
+four of which are not calls, plus an unrelated-name case so a scan that flagged everything cannot
+pass either.
+
+**The running count on this one PR: one wall at six versions, one at two, and no version but the
+last of either was sound.** Every hole was found by review or by probing; none by the suite passing.
+That is the standing evidence for the rule already recorded above — *a structural wall is itself
+code, and a wall that has never been attacked should not be counted as evidence* — and for treating
+these gates as tripwires over guarantees that are pinned behaviourally underneath them.
+
 ### Status — blocker 11 is CLOSED, and nothing else moves
 
 The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
