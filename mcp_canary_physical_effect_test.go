@@ -188,6 +188,29 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	if why := retryFreeLimitsViolation(synthProductionDeps(good)); why != "" {
 		t.Fatalf("the retry-free wall must accept the production form, rejected: %s", why)
 	}
+	// Codex round 4, P1: the identifier is matched by spelling, so a nested binding must not be
+	// able to stand in for the one the returned Config actually uses. This case needs a whole file
+	// (it declares a package-level variable), so it is written out rather than wrapped.
+	scopeConfusion := `package main
+
+import (
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+)
+
+var lim = upstreamclient.DefaultLimits()
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	_ = func() {
+		lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+		_ = lim
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+}
+`
+	if why := retryFreeLimitsViolation(scopeConfusion); why == "" {
+		t.Fatal("the retry-free wall must reject a nested binding standing in for an outer identifier")
+	}
 	aliased := strings.ReplaceAll(good, "upstreamclient.", "uc.")
 	src := strings.Replace(synthProductionDeps(aliased),
 		`"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"`,
@@ -244,11 +267,30 @@ func retryFreeLimitsViolation(src string) string {
 	}
 	bindings := bindingsOf(fn, ident.Name)
 	if len(bindings) == 0 {
-		return "the Limits identifier " + ident.Name + " is never bound in this function"
+		return "the Limits identifier " + ident.Name + " is never bound in this function; it resolves to " +
+			"something outside it (a package-level variable, a parameter, an import) whose value this " +
+			"gate cannot follow"
 	}
 	if len(bindings) > 1 {
 		return "the Limits identifier " + ident.Name + " is bound more than once, so the retry-free " +
 			"binding can be overwritten before it is used"
+	}
+	// THE BINDING MUST BE IN THE FUNCTION'S OWN TOP-LEVEL SCOPE, not in a nested block or closure.
+	//
+	// bindingsOf matches by identifier SPELLING, and an *ast.Ident carries no scope on its own.
+	// Without this, a package-level `lim` holding default limits can feed the returned Config while
+	// an otherwise-unused closure-local `lim := RetryFreeLimits(...)` supplies the one binding that
+	// makes this predicate pass (Codex round 4, P1; verified as a real bypass of the previous
+	// version before this was written).
+	//
+	// The rigorous answer is to resolve the identifier to a types.Object; the fail-closed one is to
+	// refuse anything whose binding is not the function's own. Production binds `lim` at the top
+	// level of the constructor, so refusing the rest costs nothing and cannot be fooled by shadowing
+	// — a gate may decline to certify what it cannot resolve, and that is the direction to err in.
+	if !isTopLevelBinding(fn, bindings[0]) {
+		return "the Limits identifier " + ident.Name + " is not bound in the function's own top-level " +
+			"scope, so an inner block or closure may be supplying the binding this gate checks while a " +
+			"different value of the same name reaches Config"
 	}
 	if !isCallTo(bindings[0], pkg, retryFreeLimitsFunc) {
 		return "the Limits identifier " + ident.Name + " is not bound by " + pkg + "." + retryFreeLimitsFunc
@@ -383,6 +425,23 @@ func bindingsOf(fn *ast.FuncDecl, name string) []ast.Expr {
 		return true
 	})
 	return out
+}
+
+// isTopLevelBinding reports whether rhs belongs to an assignment that is a DIRECT statement of
+// fn.Body — not one nested inside a block, loop, if, or function literal.
+func isTopLevelBinding(fn *ast.FuncDecl, rhs ast.Expr) bool {
+	for _, stmt := range fn.Body.List {
+		as, ok := stmt.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		for _, r := range as.Rhs {
+			if r == rhs {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isCallTo(e ast.Expr, pkg, fn string) bool {

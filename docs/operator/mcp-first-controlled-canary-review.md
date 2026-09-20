@@ -3685,11 +3685,31 @@ to have its **address never taken**, since once it escapes its value can be repl
 alias this analysis cannot follow. Refusing an aliased variable is fail-closed and deliberate: the
 gate does not chase aliases, it declines to certify them.
 
-Its control (`..._RetryFreeWallIsNotVacuous`) runs ten rejection cases through the SAME predicate the
-gate runs — every bypass found against every version of this wall, including the four discovered by
-probing it — plus two acceptance cases (the production form and an aliased-import form), because a
-wall nothing can satisfy gets deleted by the next person who touches the file. **All ten are CAUGHT;
-the shipped wall accepts the real production file.**
+**A FOURTH iteration followed, and this one came from REVIEW rather than from probing.** Codex round
+4 returned two P1s against the third version. The first — a decoy `Config` literal — was the hole
+already closed above, found independently. The second was one probing had NOT found: the Limits
+identifier is matched by **SPELLING**, and an `*ast.Ident` carries no scope, so a **package-level
+`lim`** holding default limits could feed the returned `Config` while an otherwise-unused
+**closure-local `lim := RetryFreeLimits(...)`** supplied the single binding that satisfied the
+predicate. Verified as a real bypass before it was agreed with.
+
+The binding must therefore also be in the function's **own top-level scope** — not in a nested
+block, loop or closure. The rigorous answer is to resolve the identifier to a `types.Object`; the
+fail-closed one is to refuse anything whose binding is not the function's own. Production binds
+`lim` at the top level of the constructor, so refusing the rest costs nothing and cannot be fooled
+by shadowing. **A gate may decline to certify what it cannot resolve, and that is the direction to
+err in.**
+
+Its control (`..._RetryFreeWallIsNotVacuous`) runs the rejection cases through the SAME predicate
+the gate runs — every bypass found against every version of this wall, by probing and by review
+alike — plus acceptance cases (the production form and an aliased-import form), because a wall
+nothing can satisfy gets deleted by the next person who touches the file. **All twelve known
+bypasses are CAUGHT; the shipped wall accepts the real production file.**
+
+**The honest summary of this sub-thread: one gate, four versions, and every version but the last was
+bypassable.** Two holes were found by probing it, two by review, and none by the test suite passing.
+It is recorded at this length because the lesson is not about upstream limits at all — *a structural
+wall is itself code, and a wall that has never been attacked should not be counted as evidence.*
 
 Each link of the chain is now pinned somewhere: the production constructor takes the limits it
 passes to `Config` from `RetryFreeLimits` (this wall); `RetryFreeLimits` forces `MaxRedirects = 0`
