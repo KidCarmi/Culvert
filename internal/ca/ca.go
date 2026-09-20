@@ -102,6 +102,11 @@ type Manager struct {
 	cache      map[string]*certCacheEntry
 	cacheOrder []string // insertion order for LRU eviction
 
+	// signFlightState collapses concurrent misses for one host onto one sign.
+	// It carries its OWN mutex and is never touched while mu is held — see the
+	// lock-order note in signflight.go.
+	signFlightState
+
 	// Leaf-cache effectiveness counters (CA-2). Lock-free; no identity data.
 	cacheHits   atomic.Int64
 	cacheMisses atomic.Int64
@@ -699,6 +704,10 @@ func (cm *Manager) Ready() bool {
 // GetCert is a tls.Config.GetCertificate callback that returns a dynamically
 // signed certificate for the requested ServerName. Results are cached with
 // TTL-based expiry and LRU eviction at certCacheMaxSize entries.
+//
+// A miss is served through signOnce, which collapses concurrent misses for the
+// same host onto ONE sign (signflight.go). The hit path below is untouched by
+// that: it takes no flight lock and never allocates.
 func (cm *Manager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	host := hello.ServerName
 	if host == "" {
@@ -708,30 +717,41 @@ func (cm *Manager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
 		host = h
 	}
 
-	now := time.Now()
-	cm.mu.RLock()
-	if entry, ok := cm.cache[host]; ok && now.Sub(entry.createdAt) < certCacheTTL &&
-		(entry.cert.Leaf == nil || now.Before(entry.cert.Leaf.NotAfter)) {
-		cm.mu.RUnlock()
+	if cert, ok := cm.cachedLeaf(host, time.Now()); ok {
 		cm.cacheHits.Add(1)
-		return entry.cert, nil
+		return cert, nil
 	}
-	cm.mu.RUnlock()
 
 	// Cache did not serve the request (absent, TTL-expired, or leaf-expired) —
-	// count the miss independent of whether the sign below then succeeds.
+	// count the miss independent of whether the sign below then succeeds, and
+	// independent of whether this caller leads its own sign or joins one
+	// already in flight. So cacheHits + cacheMisses stays exactly the number of
+	// GetCert calls, as it was before the single flight existed.
 	cm.cacheMisses.Add(1)
+	return cm.signOnce(host)
+}
 
-	// Observe signing latency for successful signs only (no cm.mu held here).
-	signStart := time.Now()
-	cert, err := cm.signLeaf(host)
-	if err != nil {
-		return nil, err
+// cachedLeaf returns the cached leaf for host when one is present, inside its
+// cache TTL, and not itself expired. It is the read half of GetCert, split out
+// so signOnce can re-run the identical check before opening a flight.
+func (cm *Manager) cachedLeaf(host string, now time.Time) (*tls.Certificate, bool) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	entry, ok := cm.cache[host]
+	if !ok || now.Sub(entry.createdAt) >= certCacheTTL {
+		return nil, false
 	}
-	if SignLatencyObserver != nil {
-		SignLatencyObserver(time.Since(signStart).Seconds())
+	if entry.cert.Leaf != nil && !now.Before(entry.cert.Leaf.NotAfter) {
+		return nil, false
 	}
+	return entry.cert, true
+}
+
+// storeLeaf installs a freshly signed leaf and runs LRU eviction. It is the
+// write half of GetCert, unchanged in behaviour.
+func (cm *Manager) storeLeaf(host string, cert *tls.Certificate, now time.Time) {
 	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	// Track eviction order only for a host that is NOT already tracked
 	// (CHAOS-28). Appending unconditionally leaked: a TTL-expired REFRESH
 	// overwrites the map entry, so len(cache) does not change, the eviction
@@ -766,8 +786,6 @@ func (cm *Manager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
 		}
 		cm.cacheOrder = newOrder
 	}
-	cm.mu.Unlock()
-	return cert, nil
 }
 
 // CertCacheLen returns the current number of cached leaf certificates (testing).
