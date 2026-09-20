@@ -50,6 +50,9 @@
 # is safe to enforce because the tag run is now the ONLY writer of the exact
 # aliases — the main path stopped promoting them.
 #
+# "Absent" must be PROVEN, not inferred from a failed lookup: see
+# resolve_tag_digest below. An ambiguous registry answer refuses.
+#
 # ── Re-run safety ────────────────────────────────────────────────────────────
 # The channel's owner is the tip of the promoting ref. On the TAG path the tip
 # is a TAG IDENTITY, not a commit: two version tags can name the same commit
@@ -100,6 +103,51 @@ DOCKER_BIN="${DOCKER_BIN:-docker}"
 GIT_BIN="${GIT_BIN:-git}"
 
 summary() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; return 0; }
+
+# resolve_tag_digest <ref>
+#   0 → resolved; the digest is on stdout.
+#   2 → the tag is POSITIVELY ABSENT from the registry.
+#   1 → AMBIGUOUS: the registry did not answer the question. The raw error is
+#       on stdout so the caller can name it.
+#
+# The distinction is load-bearing for the write-once check below. Reading every
+# nonzero exit as "absent" makes a transient registry, auth or network failure
+# indistinguishable from a free tag — and the very next step would then repoint
+# an already-published X.Y.Z at a rebuild, which is exactly the overwrite the
+# write-once rule exists to prevent (Codex review, PR #1441).
+#
+# Classification is by MESSAGE because `imagetools inspect` exits 1 for every
+# failure. The allowlist is deliberately NARROW and unrecognised output is
+# AMBIGUOUS, because the two directions are not symmetric: a missed not-found
+# refuses a legitimate first promotion (loud, recoverable by re-running), while
+# a missed transient failure silently overwrites a released version.
+#
+# `404 Not Found` is read as absence rather than as a hidden-authorization 404
+# on evidence, not assumption: step 2 above already resolved the CANDIDATE tag
+# in this same repository with these same credentials moments earlier, so the
+# registry is reachable and we are authorized for this repository. Without that
+# preceding probe this branch would not be safe.
+resolve_tag_digest() {
+  local ref="$1" out rc attempt
+  for attempt in 1 2 3; do
+    rc=0
+    out="$("$DOCKER_BIN" buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s' "$out" | tr -d '[:space:]'
+      return 0
+    fi
+    case "$out" in
+      *"not found"*|*"manifest unknown"*|*MANIFEST_UNKNOWN*|*NAME_UNKNOWN*|*"no such manifest"*|*"404 Not Found"*)
+        return 2 ;;
+    esac
+    # Ambiguous. A single blip must not fail a release that has already spent
+    # forty minutes building and gating, so retry a bounded number of times —
+    # but only here, and never in the direction of assuming the tag is free.
+    [ "$attempt" -eq 3 ] || sleep "${PROMOTE_INSPECT_RETRY_DELAY:-3}"
+  done
+  printf '%s' "$out"
+  return 1
+}
 
 if [ "${#IMMUTABLE[@]}" -eq 0 ] && [ "${#FLOATING[@]}" -eq 0 ]; then
   echo "::error::neither IMMUTABLE_TAGS nor FLOATING_TAGS is set — a promotion that promotes nothing is a silent no-op; refusing"
@@ -165,20 +213,31 @@ for t in "${TARGETS[@]}"; do
     KEEP+=("$t")
     continue
   fi
-  if EXISTING="$("$DOCKER_BIN" buildx imagetools inspect "${IMAGE}:${t}" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
-    EXISTING="$(printf '%s' "$EXISTING" | tr -d '[:space:]')"
-    if [ "$EXISTING" = "$DIGEST" ]; then
-      echo "::notice::${IMAGE}:${t} already resolves to ${DIGEST} — idempotent re-run, nothing to move."
-      continue
-    fi
-    echo "::error::${IMAGE}:${t} is ALREADY PUBLISHED at ${EXISTING}, and this run built ${DIGEST}."
-    echo "::error::An exact version tag is write-once. This image build is not reproducible over time"
-    echo "::error::(floating base image, apk upgrade, month-keyed GeoIP download), so a re-run legitimately"
-    echo "::error::produces different bytes — and the published catalog for this release still pins ${EXISTING}."
-    echo "::error::Refusing to repoint a released version. If these bytes must ship, cut a new version."
-    exit 1
-  fi
-  KEEP+=("$t")
+  INSPECT_RC=0
+  EXISTING="$(resolve_tag_digest "${IMAGE}:${t}")" || INSPECT_RC=$?
+  case "$INSPECT_RC" in
+    2)
+      # Positively absent — the only state in which an immutable tag may be
+      # written.
+      KEEP+=("$t") ;;
+    0)
+      if [ "$EXISTING" = "$DIGEST" ]; then
+        echo "::notice::${IMAGE}:${t} already resolves to ${DIGEST} — idempotent re-run, nothing to move."
+        continue
+      fi
+      echo "::error::${IMAGE}:${t} is ALREADY PUBLISHED at ${EXISTING}, and this run built ${DIGEST}."
+      echo "::error::An exact version tag is write-once. This image build is not reproducible over time"
+      echo "::error::(floating base image, apk upgrade, month-keyed GeoIP download), so a re-run legitimately"
+      echo "::error::produces different bytes — and the published catalog for this release still pins ${EXISTING}."
+      echo "::error::Refusing to repoint a released version. If these bytes must ship, cut a new version."
+      exit 1 ;;
+    *)
+      echo "::error::could not determine whether ${IMAGE}:${t} already exists — the registry did not answer."
+      echo "::error::inspect said: ${EXISTING}"
+      echo "::error::An exact version tag is write-once, and an ambiguous registry answer is NOT proof that"
+      echo "::error::the tag is free. Refusing to promote. Re-run once the registry is reachable."
+      exit 1 ;;
+  esac
 done
 TARGETS=("${KEEP[@]}")
 

@@ -481,6 +481,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # full history for the tagged commit's committer date (deterministic generated_at)
+      # A PUBLISHED release is write-once. Every asset step below stages with
+      # draft:true, which `action-gh-release` applies to an existing release
+      # too — so a re-run of an already-published tag would take it offline and
+      # could not put it back (the rebuild's digest is refused against the
+      # write-once exact image tag, so publish-release never runs). Refuse
+      # BEFORE the first mutation, leaving the public release untouched.
+      - name: Refuse if this release is already published (tag path)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-unpublished.sh "$REF_NAME"
       # Tag-path guard: this job keyless-signs the release catalog on a v*
       # tag. Refuse unless the tagged commit was green on its main push.
       - name: Require gate approval on the tagged commit
@@ -1058,6 +1070,18 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # A PUBLISHED release is write-once. Every asset step below stages with
+      # draft:true, which `action-gh-release` applies to an existing release
+      # too — so a re-run of an already-published tag would take it offline and
+      # could not put it back (the rebuild's digest is refused against the
+      # write-once exact image tag, so publish-release never runs). Refuse
+      # BEFORE the first mutation, leaving the public release untouched.
+      - name: Refuse if this release is already published (tag path)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-unpublished.sh "$REF_NAME"
       # Tag-path guard (assert): refuse to build/sign release binaries unless
       # the tagged commit was green on its main push. Defense-in-depth behind
       # the docker/catalog-pipeline guards; F3 (tag ruleset) is the primary

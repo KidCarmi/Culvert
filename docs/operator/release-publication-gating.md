@@ -173,13 +173,59 @@ still pins the old digest.
 
 | state of `X.Y.Z` in the registry | outcome |
 | --- | --- |
-| absent | promote |
+| **proven** absent | promote |
 | already this digest | no-op, success (idempotent re-run) |
 | a **different** digest | **refuse** — cut a new version instead |
+| registry did not answer | **refuse** — absence was not proven |
 
 The refusal names the remedy: if those bytes must ship, they ship as a new
 version, never as a quiet substitution under the old one. This is enforceable
 only because the tag run is now the sole writer of the exact aliases.
+
+**Absence must be proven, not inferred from a failed lookup.** `imagetools
+inspect` exits 1 for every failure, so reading any nonzero exit as "the tag is
+free" makes a transient registry, auth or network fault indistinguishable from
+an unused tag — and the very next step would then repoint an already-published
+`X.Y.Z` at the rebuild, defeating the whole rule (Codex review, PR #1441).
+`resolve_tag_digest` classifies by message against a deliberately **narrow**
+not-found allowlist and treats anything unrecognised as ambiguous, because the
+two directions are not symmetric: a missed not-found refuses a legitimate first
+promotion (loud, and recovered by re-running), while a missed transient failure
+silently overwrites a released version. An ambiguous answer is retried a bounded
+number of times — a single blip must not discard forty minutes of build and gate
+work — and then refuses.
+
+`404 Not Found` counts as absence on evidence rather than assumption: the
+candidate-tag probe resolved moments earlier in the *same* repository with the
+*same* credentials, so the registry is reachable and this run is authorized.
+Without that preceding probe the branch would not be safe.
+
+### A published release is write-once too
+
+Every asset step stages with `draft: true`, and `action-gh-release` applies that
+to an **existing** release as well. So a re-run of an already-published `v*`
+workflow PATCHes the live release back to draft — and the run cannot put it
+back, because the rebuild's digest is refused against the write-once exact tag
+above and `publish-release` (which needs `promote-image`) is then skipped. The
+release is left stranded: unpublished, with its catalog asset replaced by one
+pinning a digest that was rejected (Codex review, PR #1441).
+
+`.github/scripts/assert-release-unpublished.sh` therefore runs as the first step
+of every job that stages an asset — `catalog-pipeline` and `release` — *before*
+the first mutation:
+
+| release for this tag | outcome |
+| --- | --- |
+| absent | proceed (first run) |
+| `draft: true` | proceed — exactly the recoverable re-run draft staging exists for |
+| `draft: false` | **refuse**, nothing mutated; the public release keeps its state and assets |
+| API did not answer | **refuse** — same rule as above: a failed lookup is not proof of absence |
+
+A published release is finished; a re-run has nothing to add to it. If its bytes
+must change, that is a new version. The catalog **re-sign** dispatch is the one
+sanctioned mutation of a published release and is deliberately not guarded: it
+skips `docker` and therefore the whole staging chain, and uses `gh release
+upload`, which does not touch draft state.
 
 ### Re-run rule
 
@@ -319,6 +365,19 @@ you re-ran a tag whose image was already promoted, and the rebuild produced
 different bytes (expected; the build is not reproducible over time). The
 published version keeps its original digest. If the new bytes must ship, cut a
 new version. Do not delete the tag to force it through.
+
+**`promote-image` refused: "could not determine whether … already exists"** —
+the registry did not answer the existence question (after a bounded retry). It
+is refusing because an ambiguous answer is not proof the tag is free, not
+because the tag is taken. Nothing was written. Confirm ghcr.io is reachable and
+re-run the run; the release is still a draft, so the re-run is clean.
+
+**"the release for vX.Y.Z is ALREADY PUBLISHED"** — you re-ran the full workflow
+for a tag that is already released. The run refused before touching anything;
+the public release, its assets and its Latest pointer are untouched. There is
+nothing a re-run can add to a published release. If its bytes must change, cut a
+new version. To refresh only the catalog's freshness window, use the catalog
+re-sign dispatch, which does not re-stage assets.
 
 **`promote-image` queued for a long time, or cancelled** — it holds a
 repository-wide promotion lock so two tag releases cannot move the same channels

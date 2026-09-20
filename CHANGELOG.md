@@ -78,9 +78,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   name the same commit, which let the lower one believe it owned `X.Y`/`X` and
   roll them back to itself.
 
-  Pinned by `release_publication_gating_test.go` (12 structural walls over
+  A fifth round closed two write-once holes that the fourth round's rule had
+  opened rather than closed. Absence of an exact tag must be PROVEN, not
+  inferred: `imagetools inspect` exits 1 for every failure, so reading any
+  nonzero exit as "the tag is free" made a transient registry, auth or network
+  fault indistinguishable from an unused tag, and the next step would repoint an
+  already-published `X.Y.Z` at the rebuild — the exact overwrite the rule
+  exists to prevent. Classification is now by message against a deliberately
+  narrow not-found allowlist, anything unrecognised is ambiguous and refuses
+  after a bounded retry, and the asymmetry is the argument: a missed not-found
+  refuses a legitimate first promotion loudly and is recovered by re-running,
+  while a missed transient failure silently overwrites a released version. And
+  a PUBLISHED release is write-once too — every asset step stages with
+  `draft: true`, which `action-gh-release` applies to an existing release as
+  well, so a re-run of an already-published tag PATCHed the live release back
+  to draft and could not put it back (the rebuild's digest is refused against
+  the write-once exact tag, so `publish-release` is skipped), stranding a
+  public release unpublished with a catalog asset pinning a rejected digest.
+  `assert-release-unpublished.sh` now runs as the first step of every staging
+  job and refuses before the first mutation, leaving the public release and its
+  assets untouched; the catalog re-sign dispatch is the one sanctioned mutation
+  of a published release and is deliberately unguarded, since it skips the
+  whole staging chain and uses `gh release upload`, which does not touch draft
+  state.
+
+  Pinned by `release_publication_gating_test.go` (13 structural walls over
   `ci.yml` and the manifest, each verified failing against the pre-fix tree)
-  and `.github/scripts/test/release-gating-cases.sh` (41 behavioural cases
+  and `.github/scripts/test/release-gating-cases.sh` (47 behavioural cases
   against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
   Signing identities are unchanged: cosign keyless SANs are per workflow FILE
   and ref, and both new jobs live in `ci.yml`. See

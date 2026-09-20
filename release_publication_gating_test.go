@@ -385,6 +385,52 @@ func TestPublicationGating_ReleaseAssetsAreStagedAsDrafts(t *testing.T) {
 	}
 }
 
+// A PUBLISHED release is write-once, and the guard has to run BEFORE the first
+// mutation to be worth anything. `action-gh-release` applies `draft: true` to an
+// EXISTING release, so a re-run of an already-published tag PATCHes the live
+// release back to draft — and this run cannot undo it: the image build is
+// deliberately not reproducible, so the rebuild's digest is refused against the
+// write-once exact tag and `publish-release`, which needs `promote-image`, is
+// skipped. The public release is then stranded unpublished with a catalog asset
+// pinning a digest that was rejected (Codex review, PR #1441).
+//
+// Structural rather than behavioural because the bash harness can only prove
+// that the guard SCRIPT refuses; only the workflow says whether every job that
+// stages an asset actually calls it, and calls it first. A new staging job added
+// later fails this test until it is wired.
+func TestPublicationGating_StagingJobsRefuseAPublishedRelease(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	const guard = "assert-release-unpublished.sh"
+	staging := 0
+	for name := range doc.Jobs {
+		steps := doc.Jobs[name].Steps
+		firstUpload, guardAt := -1, -1
+		for i := range steps {
+			if guardAt < 0 && strings.Contains(stepBody(&steps[i]), guard) {
+				guardAt = i
+			}
+			if firstUpload < 0 && strings.Contains(steps[i].Uses, "softprops/action-gh-release") {
+				firstUpload = i
+			}
+		}
+		if firstUpload < 0 {
+			continue
+		}
+		staging++
+		if guardAt < 0 {
+			t.Errorf("job %q stages a release asset but never runs %s — a re-run would take an already-published release offline", name, guard)
+			continue
+		}
+		if guardAt > firstUpload {
+			t.Errorf("job %q runs %s at step %d, AFTER its first asset upload at step %d — the guard must refuse before anything is mutated",
+				name, guard, guardAt, firstUpload)
+		}
+	}
+	if staging == 0 {
+		t.Fatal("no asset-staging jobs found in ci.yml — the selector is stale and this test proves nothing")
+	}
+}
+
 func TestPublicationGating_PublishReleaseIsLastAndUnconditionalOnSuccess(t *testing.T) {
 	doc := loadWorkflow(t, ciWorkflowPath)
 	pub := mustJob(t, doc, "publish-release")

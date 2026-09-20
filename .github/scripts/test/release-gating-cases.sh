@@ -67,11 +67,19 @@ cat > "$BIN/docker" <<'EOF'
 # and record `docker buildx imagetools create …`.
 if [ "${2:-}" = "imagetools" ] && [ "${3:-}" = "inspect" ]; then
   ref="$4"; tag="${ref##*:}"
+  # DOCKER_AMBIGUOUS_TAG: this tag's lookup fails for a reason that is NOT
+  # "absent" — a transient registry/network fault. Verbatim-shaped so the
+  # classifier is exercised on real wording, not on a sentinel.
+  if [ -n "${DOCKER_AMBIGUOUS_TAG:-}" ] && [ "$tag" = "$DOCKER_AMBIGUOUS_TAG" ]; then
+    echo "ERROR: failed to do request: Head \"https://ghcr.io/v2/x/manifests/$tag\": dial tcp 140.82.121.33:443: i/o timeout" >&2
+    exit 1
+  fi
   while IFS='|' read -r ftag fdig; do
     [ -z "${ftag:-}" ] && continue
     [ "$ftag" = "$tag" ] && { echo "$fdig"; exit 0; }
   done < "${DOCKER_TAGS:-/dev/null}"
-  echo "mock docker: no such tag $tag" >&2; exit 1
+  # Real GHCR wording for an absent tag; the classifier keys on it.
+  echo "ERROR: $ref: not found" >&2; exit 1
 fi
 if [ "${2:-}" = "imagetools" ] && [ "${3:-}" = "create" ]; then
   printf '%s\n' "$*" >> "${DOCKER_CREATES:-/dev/null}"; exit 0
@@ -93,6 +101,7 @@ chmod +x "$BIN"/*
 
 export PATH="$BIN:$PATH"
 export GITHUB_REPOSITORY="KidCarmi/Culvert"
+export PROMOTE_INSPECT_RETRY_DELAY=0
 export GH_TOKEN="mock"
 unset GITHUB_STEP_SUMMARY || true
 
@@ -339,6 +348,34 @@ if RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="l
   ok "an unpublished exact tag is still promoted"
 else bad "an unpublished exact tag is still promoted" "creates=$(cat "$WORK/creates")"; fi
 
+# ── an ambiguous registry answer is not proof the tag is free ────────────────
+# Reading every failed `imagetools inspect` as "absent" makes a transient
+# registry/auth/network fault indistinguishable from a free tag, and the very
+# next step would repoint an already-published X.Y.Z at the rebuild — the
+# overwrite the write-once rule exists to prevent (Codex review, PR #1441).
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if DOCKER_AMBIGUOUS_TAG=1.2.3 \
+   RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
+  bad "an ambiguous exact-tag lookup refuses" "it promoted on an inspect failure it could not classify"
+else
+  [ -s "$WORK/creates" ] && bad "an ambiguous exact-tag lookup refuses" "it still called imagetools create" \
+                         || ok "an ambiguous exact-tag lookup refuses"
+fi
+
+# CONTROL: the refusal above must come from CLASSIFICATION, not from refusing
+# every lookup. A floating-only promotion never inspects an exact tag, so an
+# ambiguous exact-tag answer for a tag this run does not target is irrelevant
+# and the promotion still happens.
+: > "$WORK/creates"
+if DOCKER_AMBIGUOUS_TAG=9.9.9 \
+   RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
+   && grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates"; then
+  ok "an ambiguous answer about an unrelated tag does not block promotion"
+else bad "an ambiguous answer about an unrelated tag does not block promotion" "creates=$(cat "$WORK/creates")"; fi
+
 # ── two tags on one commit: ownership is TAG identity, not commit ────────────
 printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"
 : > "$WORK/creates"
@@ -407,6 +444,42 @@ complete_list | grep -v '^culvert-windows-amd64.exe ' > "$WORK/assets"
 if ASSERT_RELEASE_ASSETS_FILE="$WORK/assets" bash "$SCRIPTS/assert-release-complete.sh" v1.2.3 >/dev/null 2>&1; then
   bad "a missing platform binary blocks publication" "published with windows/amd64 absent"
 else ok "a missing platform binary blocks publication"; fi
+
+# ─── 7. a published release is write-once ────────────────────────────────────
+# Every asset step stages with draft:true, and action-gh-release applies that to
+# an EXISTING release — so a re-run of an already-published tag takes it offline
+# and cannot put it back (the rebuild's digest is refused against the write-once
+# exact image tag, so publish-release never runs). The guard must refuse BEFORE
+# anything is mutated (Codex review, PR #1441).
+relguard() { GH_BIN="$BIN/ghrel" bash "$SCRIPTS/assert-release-unpublished.sh" "$@"; }
+cat > "$BIN/ghrel" <<'EOF'
+#!/usr/bin/env bash
+# Mock `gh api repos/<r>/releases/tags/<t> --jq .draft`.
+#   REL_STATE=draft|published|absent|error
+case "${REL_STATE:-absent}" in
+  draft)     echo true ;;
+  published) echo false ;;
+  error)     echo "gh: Bad gateway (HTTP 502)" >&2; exit 1 ;;
+  *)         echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$BIN/ghrel"
+
+if REL_STATE=absent relguard v1.2.3 >/dev/null 2>&1; then
+  ok "a first run with no existing release proceeds"
+else bad "a first run with no existing release proceeds" "the guard refused a release that does not exist yet"; fi
+
+if REL_STATE=draft relguard v1.2.3 >/dev/null 2>&1; then
+  ok "a re-run against a still-draft release proceeds"
+else bad "a re-run against a still-draft release proceeds" "the guard blocked the recoverable re-run it exists to allow"; fi
+
+if REL_STATE=published relguard v1.2.3 >/dev/null 2>&1; then
+  bad "a re-run against a PUBLISHED release refuses" "the guard let a run re-draft a public release"
+else ok "a re-run against a PUBLISHED release refuses"; fi
+
+if REL_STATE=error relguard v1.2.3 >/dev/null 2>&1; then
+  bad "an unreadable release state fails closed" "the guard treated an API error as 'no release exists'"
+else ok "an unreadable release state fails closed"; fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
