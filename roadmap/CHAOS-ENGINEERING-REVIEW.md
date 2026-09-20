@@ -6633,8 +6633,9 @@ UI listener.
 
 ### 36.5 Gates
 
-35 in total: 17 in `internal/session/revocation_chaos_test.go`, 18 in
-`session_revocation_chaos_test.go` (the round-2 findings in §36.6 added 8).
+36 in total: 17 in `internal/session/revocation_chaos_test.go`, 19 in
+`session_revocation_chaos_test.go` (the round-2 findings in §36.6 added 8, and
+the CI-found isolation defect in §36.6b one more).
 
 Every defect gate was verified **failing against its reintroduced pre-fix
 shape** — six in the engine (persistence, gossip, distinct tokens, old-node hop,
@@ -6731,6 +6732,55 @@ The lesson to carry: **citing a precedent is not the same as applying it.** The
 comment naming `ca_health.go` was written from memory of what that file's rule
 says, not from re-reading what its code does — and the prose was confident
 enough that it read as evidence the rule had been followed.
+
+### 36.6b A third instance, found by CI: a latching diagFail row needs registering
+
+The Deep-determinism and `-race` gates went red on three consecutive CI runs and
+could not be reproduced locally in ten full-suite attempts. The cause is the
+same shape as §36.8 for the third time, and both halves are worth recording.
+
+**The defect.** `resetDiagVerdictGlobals` (`diagnostics_test.go`) enumerates the
+process-globals the aggregate `/api/diagnostics` verdict folds in, because, in
+its own words, *"earlier tests legitimately dirty and do not restore"* them.
+CHAOS-45, CHAOS-47 and CHAOS-57 each registered theirs when they added a
+`diagFail`-capable row. This sweep added `session_revocation` — the only row in
+it that FAILS rather than warns — and did not.
+
+Both states behind that fail LATCH by design: the persist-failure flag clears
+only on an observed successful write (that is AU-25's fix) and the
+load-degraded flag never clears, because it is a boot fact. Correct in
+production; cross-talk in a test binary. Any test whose `SaveRevocations` fails
+— an unwritable dataDir, a revocations path left pointing at a removed temp dir
+— latches the record for the rest of the run, after which every test asserting
+`Verdict != diagFail` fails. Order-dependent, so only `-shuffle`/`-count=2`
+sees it.
+
+**Why it cost so much to find, which is the more transferable half.** The
+failing test's name was never retrievable. The root package's output exceeds
+the ~698 KB the GitHub logs API returns (identical output at `tail_lines`
+30,000 and 200,000 — it is a hard cap), so no `--- FAIL:` line was in the
+window; the full-log artifact redirects to blob storage the environment cannot
+reach. Ten local reproductions were green, including **CI's exact shuffle seeds
+for both heads** — and that is the subtle part, because a seed fixes the order
+WITHIN a package, which is enough to reproduce an intra-package ordering bug
+and not enough when the question is which *earlier* test dirtied a global.
+`GOMAXPROCS` 2 and 4, `-race` at CI's 40m budget, and `main` as a baseline were
+all green too.
+
+So: **a determinism gate whose failure output is larger than the log API can
+return is a gate that cannot be acted on remotely.** Piping `go test` through a
+filter that preserves `--- FAIL:`/`FAIL\t` lines would have made this a
+two-minute diagnosis. That is a CI change outside this sweep's scope and is
+recorded here rather than made.
+
+**The standing rule this adds:** a new operator-contract row that can return
+`diagFail` from a process-global MUST be registered in
+`resetDiagVerdictGlobals` in the same change. The row's severity is a
+production decision; its globals are a test-isolation obligation, and the two
+are decided at the same moment.
+`TestChaos66_RevocationHealthIsIsolatedFromTheAggregateVerdict` pins it,
+verified failing against the unregistered shape with the production symptom
+(`aggregate verdict = "fail"`).
 
 ### 36.7 Deliberately left (owner decisions)
 
