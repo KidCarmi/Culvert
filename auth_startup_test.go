@@ -221,6 +221,19 @@ func TestValidateAuthStartupCredentials(t *testing.T) {
 			name: "non-empty user with a complexity-satisfying password is accepted",
 			auth: authStartupConfig{AuthUser: "admin", AuthPass: "Sup3rSecret!"},
 		},
+		{
+			// Codex review, PR #1443: resolveAuthStartupConfig trims
+			// AuthUser, so a whitespace-only -user/auth.user value now
+			// resolves to "". Silently treating that the same as "never
+			// configured" would call cfg.SetAuth("", pass) — which DISABLES
+			// local auth entirely, discarding the password that was
+			// supplied, with no error pointing at the cause. An empty
+			// username paired with a real password must be rejected, not
+			// silently exempted.
+			name:    "empty user with a non-empty password is rejected, not silently exempted",
+			auth:    authStartupConfig{AuthUser: "", AuthPass: "Sup3rSecret!"},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

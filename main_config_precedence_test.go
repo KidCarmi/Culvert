@@ -94,6 +94,51 @@ func TestLoadFileConfigAndFlags_LogMaxMB_YAMLHonoredWhenFlagUnset(t *testing.T) 
 	}
 }
 
+// TestLoadFileConfigAndFlags_AuthUser_WhitespaceOnlyCLIFallsBackToYAML proves
+// a whitespace-only -user CLI value does not shadow a real config.yaml
+// auth.user (Codex review, PR #1443). s.authU = firstStr(*s.user,
+// s.fc.Auth.User) treats ANY non-empty string — including one that is pure
+// whitespace — as "the CLI flag was set", so an operator whose deployment
+// wrapper passes -user "$ADMIN_USER" with $ADMIN_USER unexpectedly rendering
+// to spaces (an unset template variable inside a literal-space placeholder,
+// for instance) would silently discard a real config.yaml auth.user in
+// favor of a value that itself collapses to nothing — the same shape as the
+// CDR-fingerprint whitespace bug (resolveCDRStartupConfig), applied to the
+// admin username's CLI/YAML precedence rather than its final storage.
+func TestLoadFileConfigAndFlags_AuthUser_WhitespaceOnlyCLIFallsBackToYAML(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yamlBody := "auth:\n  user: realadmin\n  pass: Sup3rSecret!\n"
+	if err := os.WriteFile(cfgPath, []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	zero := 0
+	empty := ""
+	whitespaceUser := "   "
+	s := &startupState{
+		configPath:   &cfgPath,
+		proxyPort:    &zero,
+		uiPortFlag:   &zero,
+		socks5Port:   &zero,
+		logFilePath:  &empty,
+		blockFile:    &empty,
+		logMaxMB:     &zero,
+		user:         &whitespaceUser, // whitespace-only -user, never explicitly cleared
+		pass:         &empty,
+		tlsCert:      &empty,
+		tlsKey:       &empty,
+		rateLimitRPM: &zero,
+		ipMode:       &empty,
+	}
+
+	loadFileConfigAndFlags(s)
+
+	if s.authU != "realadmin" {
+		t.Errorf("s.authU = %q, want %q (config.yaml's auth.user); a whitespace-only -user must not shadow it", s.authU, "realadmin")
+	}
+}
+
 // ── Port-collision validation (validatePortCollisions) ──────────────────────
 //
 // validatePortCollisions runs on the RESOLVED listener ports — after CLI

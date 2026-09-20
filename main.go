@@ -604,7 +604,20 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.lPath = firstStr(*s.logFilePath, s.fc.Proxy.LogFile)
 	s.blPath = firstStr(*s.blockFile, s.fc.Proxy.Blocklist)
 	s.lMaxMB = firstNonZero(*s.logMaxMB, s.fc.Proxy.LogMaxMB, 50)
-	s.authU = firstStr(*s.user, s.fc.Auth.User)
+	// TrimSpace BOTH candidates before the precedence pick, not just the
+	// winner afterward: firstStr treats any non-empty string — including one
+	// that is pure whitespace — as "the CLI flag was set", so an untrimmed
+	// merge lets a whitespace-only -user (e.g. a deployment wrapper's
+	// -user "$ADMIN_USER" with an unset $ADMIN_USER rendering inside a
+	// literal-space placeholder) silently shadow a real config.yaml
+	// auth.user with a value that itself collapses to nothing (Codex
+	// review, PR #1443 — the CDR-fingerprint whitespace bug's shape, applied
+	// to this field's CLI/YAML precedence rather than its final storage;
+	// resolveAuthStartupConfig's own TrimSpace on the winning value handles
+	// a whitespace-carrying YAML value, such as a literal block scalar's
+	// trailing newline, but cannot recover a YAML value this precedence
+	// pick already discarded).
+	s.authU = firstStr(strings.TrimSpace(*s.user), strings.TrimSpace(s.fc.Auth.User))
 	s.authP = firstStr(*s.pass, s.fc.Auth.Pass)
 	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
 	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)

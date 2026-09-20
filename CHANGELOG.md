@@ -209,7 +209,14 @@ endpoints for credentialed parents.
   can produce a trailing newline — with no error at startup and no
   indication of the cause. `resolveAuthStartupConfig` now trims the
   resolved username (never the password, which may legitimately carry
-  whitespace) before it reaches `cfg.SetAuth`.
+  whitespace) before it reaches `cfg.SetAuth`. Two review-round follow-ups
+  closed the same gap at its other two edges: the CLI/YAML precedence pick
+  (`s.authU = firstStr(...)`) now trims both candidates first, so a
+  whitespace-only `-user` can no longer shadow a real `config.yaml`
+  `auth.user`; and a resolved-empty username paired with a non-empty
+  password is now a fatal startup error instead of silently reaching
+  `cfg.SetAuth("", pass)`, which disabled local authentication entirely
+  and discarded the configured password.
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,
