@@ -3877,6 +3877,44 @@ deny-list with extra steps, and a deny-list loses to the next spelling. A check 
 OCCURRENCES of the thing it cares about has no spelling to be beaten by. Where a wall can be
 expressed that way, express it that way.
 
+### Round 10: the occurrence rule was necessary and not sufficient
+
+One P1, and it is the shape I had explicitly asked for on the round-9 thread — *get past "exactly
+two occurrences" without a third one appearing*. It does, by moving the mutation out of the function
+entirely:
+
+```go
+var lim upstreamclient.Limits                       // PACKAGE scope
+func resetLimits() { lim = upstreamclient.DefaultLimits() }
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	lim, _ = upstreamclient.RetryFreeLimits(…)      // assignment, NOT a declaration
+	resetLimits()                                    // mutates it from outside
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, …)
+}
+```
+
+Two occurrences, top level, preceding the use, bound by `RetryFreeLimits` — every clause satisfied,
+and the returned client carries the default retrying limits. Verified accepted before agreeing.
+
+**The occurrence rule bounds what happens INSIDE the function and says nothing about whether the
+identifier is a local at all.** That is a real limit of it, and worth stating plainly rather than
+treating round 9's rule as finished: it was necessary, not sufficient.
+
+The fix requires the binding to be `:=` rather than `=`, which closes the gap without resolving
+types. A short variable declaration at a function's top level always declares a NEW variable — a
+package-level name lives in an outer scope and is shadowed, not assigned — and it cannot be reusing
+a same-scope local, because the occurrence rule has already established there is no earlier `lim` in
+the body. So **the two rules together say: the value is a function-local, declared once, used
+once.** A helper cannot reach a local without `&lim`, which would be a third occurrence.
+
+**The pattern across rounds 4, 5, 8, 9 and 10 is now explicit.** Every clause constrained the SHAPE
+of the binding — top level, precedes the use, not in a closure, not overwritten — while leaving its
+SCOPE to be inferred from those shapes. Each inference was sound and each left a way to have an
+identifier that was not what it looked like. Constrain the scope directly and the inferences become
+unnecessary. That is the generalisation of round 9's lesson one level out: **prefer a rule that
+states the property you need over a set of rules from which it can be derived.**
+
 ### Status — blocker 11 is CLOSED, and nothing else moves
 
 The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once

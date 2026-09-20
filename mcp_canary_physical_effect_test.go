@@ -227,6 +227,30 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 	if why := retryFreeLimitsViolation(synthProductionDeps(good)); why != "" {
 		t.Fatalf("the retry-free wall must accept the production form, rejected: %s", why)
 	}
+	// Codex round 10, P1 — the shape I had asked for: it gets past "exactly two occurrences"
+	// without a third appearing, because the mutation happens OUTSIDE the function entirely.
+	// Needs a whole file for the package-level declaration and the helper.
+	packageScoped := `package main
+
+import (
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+)
+
+var lim upstreamclient.Limits
+
+func resetLimits() { lim = upstreamclient.DefaultLimits() }
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	lim, _ = upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	resetLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+}
+`
+	if why := retryFreeLimitsViolation(packageScoped); why == "" {
+		t.Fatal("the retry-free wall must reject a package-scoped lim assigned with =: code outside " +
+			"the constructor can replace the value between the binding and the Config")
+	}
 	// Codex round 5, P1: a local's scope begins at its DECLARATION, so a Config in an early
 	// return resolves to a package-level name of the same spelling while a later top-level
 	// retry-free binding supplies the one this gate matched. Needs a whole file for the
@@ -365,6 +389,39 @@ func retryFreeLimitsViolation(src string) string {
 	if len(bindings) > 1 {
 		return "the Limits identifier " + ident.Name + " is bound more than once, so the retry-free " +
 			"binding can be overwritten before it is used"
+	}
+	// THE BINDING MUST DECLARE A FUNCTION-LOCAL — `:=`, never `=`.
+	//
+	// The occurrence rule above bounds what happens INSIDE this function. It says nothing about
+	// whether the identifier is a local at all, and Codex round 10 found exactly that gap — the one
+	// shape I had asked for, since it gets past "exactly two occurrences" without a third appearing:
+	//
+	//	var lim upstreamclient.Limits                       // PACKAGE scope
+	//	func resetLimits() { lim = upstreamclient.DefaultLimits() }
+	//
+	//	func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	//		lim, _ = upstreamclient.RetryFreeLimits(…)      // assignment, not declaration
+	//		resetLimits()                                    // mutates it from OUTSIDE
+	//		return upstreamclient.New(upstreamclient.Config{Limits: lim}, …)
+	//	}
+	//
+	// Two occurrences, top level, preceding the use, bound by RetryFreeLimits — every clause
+	// satisfied, and the client is built from DefaultLimits. Verified accepted before the fix.
+	//
+	// Requiring `:=` closes it without resolving types. A short variable declaration at the
+	// function's top level always declares a NEW variable, because a package-level name lives in an
+	// outer scope and is shadowed rather than assigned; and it cannot be re-using a same-scope
+	// local, because the occurrence rule has already established there is no earlier `lim` in this
+	// body. So the two rules TOGETHER say: the value is a function-local, declared once, used once.
+	// A helper cannot reach a local without `&lim`, which would be a third occurrence.
+	//
+	// This is the same lesson as the last four rounds, one level out: every previous clause
+	// constrained the SHAPE of the binding (top level, precedes the use) while leaving its SCOPE to
+	// be inferred. Constrain the scope directly and the inference is unnecessary.
+	if as := bindingStmt(fn, bindings[0]); as == nil || as.Tok != token.DEFINE {
+		return "the Limits identifier " + ident.Name + " is assigned with = rather than declared " +
+			"with :=, so it may name a package-level variable that code outside this function can " +
+			"change between the binding and the Config; declare a function-local"
 	}
 	// THE BINDING MUST BE IN THE FUNCTION'S OWN TOP-LEVEL SCOPE, not in a nested block or closure.
 	//
@@ -559,6 +616,25 @@ func identOccurrences(fn *ast.FuncDecl, name string) []*ast.Ident {
 		return true
 	})
 	return out
+}
+
+// bindingStmt returns the assignment statement whose RHS is rhs, or nil.
+func bindingStmt(fn *ast.FuncDecl, rhs ast.Expr) *ast.AssignStmt {
+	var found *ast.AssignStmt
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, r := range as.Rhs {
+			if r == rhs {
+				found = as
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // isTopLevelBinding reports whether rhs belongs to an assignment that is a DIRECT statement of
