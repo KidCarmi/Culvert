@@ -44,6 +44,15 @@ func TestPeerFreshWall_VerdictHasExactlyOneProductionCaller(t *testing.T) {
 			"The activation-time resolver. Its input is built by buildExactPermitInput from the " +
 			"single reconciled registry+catalog capture that also decided the permit and " +
 			"credential rows, so all three facts necessarily describe one state of the node.",
+		"mcp_live_gate.go:boundaryPeerFreshness": "" +
+			"The SEND-BOUNDARY re-check (blocker #11 runtime half). Its input is the same " +
+			"liveTrustPrecheck capture the approval check beside it uses, so the evidence and " +
+			"the target it describes come from one snapshot of pointer-published inventory. It " +
+			"exists because freshness is the one authority that expires with no state change at " +
+			"all: an observation can satisfy the activation preflight and lapse while the " +
+			"request waits on credential materialization, the durable commit and an upstream " +
+			"pool slot. Sharing this verdict rather than writing a second one is the point — " +
+			"two definitions of fresh would make the effective bound whichever ran last.",
 	})
 }
 
@@ -55,7 +64,12 @@ func TestPeerFreshWall_VerdictHasExactlyOneProductionCaller(t *testing.T) {
 // anything else a caller could choose. Without this, the type's guarantee is only that evidence
 // has the right SHAPE, never that it was actually observed.
 func TestPeerFreshWall_EvidenceComesFromTheCapturedRecord(t *testing.T) {
-	const wantFile = "mcp_canary_policy_permit.go"
+	// The reasoned construction sites. Both lift the evidence out of a capture rather than
+	// assembling it; neither may invent a value. A THIRD entry here needs the same argument.
+	wantFiles := map[string]string{
+		"mcp_canary_policy_permit.go": "the activation resolver, from the reconciled capture",
+		"mcp_live_gate.go":            "the send-boundary precheck, from the loadTarget snapshot",
+	}
 	found := 0
 	for _, path := range productionGoFiles(t) {
 		src, err := os.ReadFile(path) //nolint:gosec // repo-local walk, not caller input
@@ -78,7 +92,7 @@ func TestPeerFreshWall_EvidenceComesFromTheCapturedRecord(t *testing.T) {
 				return true
 			}
 			line := fset.Position(lit.Pos()).Line
-			if rel != wantFile {
+			if _, ok := wantFiles[rel]; !ok {
 				t.Errorf("%s:%d constructs canary.PeerObservationFacts. Peer evidence may only be "+
 					"lifted out of the captured catalog record by the activation resolver; any "+
 					"other construction site is a way to assert evidence instead of reading it.",
@@ -105,10 +119,11 @@ func TestPeerFreshWall_EvidenceComesFromTheCapturedRecord(t *testing.T) {
 			return true
 		})
 	}
-	if found == 0 {
-		t.Fatalf("no production construction of canary.PeerObservationFacts was found. Either the "+
-			"evidence path was deleted or this scan has stopped matching it; both mean this wall "+
-			"now proves nothing. Expected it in %s.", wantFile)
+	if found < len(wantFiles) {
+		t.Fatalf("found %d production construction(s) of canary.PeerObservationFacts; the reasoned "+
+			"set has %d. Either an evidence path was deleted or this scan has stopped matching "+
+			"one; both mean this wall now proves less than it claims. Expected: %v",
+			found, len(wantFiles), wantFiles)
 	}
 }
 
@@ -118,7 +133,14 @@ func readsCapturedObservation(e ast.Expr) bool {
 	switch v := e.(type) {
 	case *ast.SelectorExpr:
 		inner, ok := v.X.(*ast.SelectorExpr)
-		return ok && inner.Sel.Name == "Observed"
+		if !ok {
+			return false
+		}
+		// `rec.Observed.X` at the activation resolver, `ti.observed.X` at the boundary precheck.
+		// One fact, spelled as each capture struct exports it — the exported catalog record field
+		// and the unexported carrier on toolTrustTargetInput. Any OTHER name is a different
+		// value, which is what this wall is for.
+		return inner.Sel.Name == "Observed" || inner.Sel.Name == "observed"
 	case *ast.CallExpr:
 		// A conversion such as string(rec.Observed.Identity).
 		if len(v.Args) == 1 {

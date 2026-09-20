@@ -828,6 +828,19 @@ const (
 	// upstream call is made. Distinct from ReasonApprovalRequired (a policy-level obligation) so
 	// evidence can tell a runtime trust withdrawal apart from a decision-time approval gap.
 	ReasonLiveTrustRevalidationFailed
+	// ReasonPeerObservationNotFresh — the side-effect boundary re-asked whether the exact target
+	// is still backed by a RECENT AUTHENTICATED observation of the peer that advertises it, and it
+	// is not: never observed (an operator-seeded record, which is what a restart returns every
+	// record to), observed under an identity that is no longer current, or observed longer ago
+	// than the First-Canary freshness bound allows. No upstream call is made.
+	//
+	// Distinct from ReasonLiveTrustRevalidationFailed, which asks whether a HUMAN DECISION still
+	// stands (an approval revoked, expired, or never granted). This one asks whether Culvert's
+	// belief about the THIRD PARTY is still current — the only prerequisite that becomes false
+	// with no state change at all, purely by the clock advancing. Folding them together would
+	// send an operator to re-approve a tool whose approval is perfectly valid and whose peer
+	// simply has not been re-observed.
+	ReasonPeerObservationNotFresh
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -1070,6 +1083,7 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonApprovalStoreUnavailable:    "approval_store_unavailable",
 	ReasonRolloutBudgetExhausted:      "rollout_budget_exhausted",
 	ReasonLiveTrustRevalidationFailed: "live_trust_revalidation_failed",
+	ReasonPeerObservationNotFresh:     "peer_observation_not_fresh",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

@@ -397,17 +397,51 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 			// admission probe used, never from a request-supplied claim, and the time is read NOW
 			// rather than at admission — an approval that expired while this request waited must not
 			// be spent on the strength of how fresh it was when the wait began.
-			if g.approvalOK != nil && g.trustPrecheck != nil {
+			//
+			// PEER FRESHNESS IS THE FOURTH AUTHORITY, AND IT IS THE ONE THAT EXPIRES BY ITSELF
+			// (blocker #11). The three above all go false because something HAPPENED — a
+			// demotion, a scope edit, a revocation. This one goes false with no state change at
+			// all, purely by the clock advancing past the last authenticated sighting of the
+			// peer. That is precisely why activation-time readiness cannot stand in for it: an
+			// observation can satisfy the preflight and expire while the request is still in
+			// flight, and the window is not small — a request waits through credential
+			// materialization, the durable decision commit, and an unbounded wait for an upstream
+			// pool slot.
+			//
+			// It rides the SAME trustPrecheck capture as the approval check below, so the
+			// evidence and the target it describes come from one snapshot. Re-reading the catalog
+			// for it would judge the freshness of a record this request is not about to execute
+			// against — the two-publication window pinnedIdentity's comment describes, one field
+			// over.
+			//
+			// THE GUARD IS ON trustPrecheck ALONE, where it used to require approvalOK too. That
+			// is deliberate: peer freshness does not depend on the approval seam, so gating it on
+			// approvalOK being wired would mean forgetting to wire the approval silently disables
+			// freshness as well — the permissive direction, and the failure mode a composition
+			// seam must never have. Production wires both, so nothing changes there; a partially
+			// composed gate now refuses more, never less.
+			if g.trustPrecheck != nil {
 				live := g.trustPrecheck(in.Tenant, in.ServerID, in.ToolName, in.Fingerprint)
 				if !live.Eligible {
 					return mcperr.ReasonLiveTrustRevalidationFailed
 				}
+				// ONE CLOCK SAMPLE for this whole revalidation attempt, shared by the freshness
+				// bound and the approval expiry below. Two samples could put the two answers at
+				// two instants, and the freshness boundary would stop being testable at all.
 				at := in.Now
 				if g.now != nil {
 					at = g.now()
 				}
-				if ok, _ := g.approvalOK(live.Target, in.Operation, at); !ok {
-					return mcperr.ReasonLiveTrustRevalidationFailed
+				if r := boundaryPeerFreshness(in, live, at); r != mcperr.ReasonNone {
+					return r
+				}
+				// THE APPROVAL IS CONSULTED LAST, so the durable store is reached only for a
+				// request every cheaper authority still admits. Unchanged from before this row
+				// existed, except that it now shares the capture and the clock sample above.
+				if g.approvalOK != nil {
+					if ok, _ := g.approvalOK(live.Target, in.Operation, at); !ok {
+						return mcperr.ReasonLiveTrustRevalidationFailed
+					}
 				}
 			}
 			return mcperr.ReasonNone
@@ -516,6 +550,16 @@ type liveTrustPrecheck struct {
 	// approval matching. It is what makes server_identity_drift decidable against what was
 	// REVIEWED rather than only against "is the server usable right now".
 	ServerIdentity string
+	// Observed is the PEER OBSERVATION carried on the catalog record this verdict describes, and
+	// RegistryPin is the registry's current pinned identity — both from the SAME loadTarget
+	// snapshot as every field above (blocker #11). They ride along so the side-effect boundary can
+	// re-ask peer freshness from the capture it is already making, rather than re-reading the
+	// catalog and judging the freshness of a record it is not about to execute against.
+	//
+	// A zero Observed is the shipped default and the fail-closed answer: an operator-seeded record
+	// has never been backed by a peer, and a restart returns every record to exactly that state.
+	Observed    canary.PeerObservationFacts
+	RegistryPin string
 }
 
 // mcpLiveTrustPrecheck decides everything the whole-Canary latch depends on, reading ONLY
@@ -636,6 +680,19 @@ func mcpLiveTrustPrecheck(tenant, serverID, toolName, decisionFP string) liveTru
 		// a Registry.Repin landing between two reads composes an (F1, I2) pair that was never
 		// simultaneously authoritative. See the pinnedIdentity field comment in mcp_tooltrust.go.
 		ServerIdentity: ti.pinnedIdentity,
+		// Resolved/Authoritative are deliberately NOT set on this path, matching the pre-existing
+		// shape. They feed the whole-Canary drift LATCH (mcp_canary_admission.go reads
+		// live.Resolved without an Eligible guard), so setting them here would hand the
+		// observation sink a target on a path that previously carried none — changing what
+		// latches. The boundary's peer-freshness check therefore keys its own Resolved off
+		// Eligible, which is the fact it actually depends on.
+		//
+		// Blocker #11, from the same snapshot as everything above.
+		Observed: canary.PeerObservationFacts{
+			At:       ti.observed.At,
+			Identity: string(ti.observed.Identity),
+		},
+		RegistryPin: ti.registryPin,
 	}
 }
 
@@ -733,4 +790,75 @@ func newCanaryReservationID() (string, error) {
 		return "", err
 	}
 	return "rsv_" + hex.EncodeToString(b), nil
+}
+
+// boundaryPeerFreshness is the side-effect boundary's peer-observation re-check (blocker #11).
+//
+// IT REUSES THE ACTIVATION VERDICT VERBATIM. canary.EvaluatePeerObservedFresh is the ONE
+// definition of missing / future-dated / stale / fresh, and of what it means for an observation to
+// back an exact target; there is deliberately no second algorithm, no second TTL constant and no
+// bespoke time comparison here. An activation-time bound and a send-time bound that could drift
+// apart would be two answers to one question, and the one that mattered would be whichever ran
+// last.
+//
+// WHAT IS RE-ASKED FROM THE REQUEST'S SIDE. `Reviewed` is built from the identity this request was
+// AUTHORIZED against — the tenant, server, tool and decision fingerprint the executor carries —
+// and `Current` from the authoritative capture taken microseconds ago. So the binding is genuinely
+// re-established at the boundary rather than assumed from the precheck's own gates: a fresh
+// observation of F2 cannot satisfy a request authorized against F1, on this path any more than on
+// the activation path.
+//
+// FingerprintFormat is the one field that cannot be sourced independently from the request, which
+// carries the digest as hex and no format number. It is therefore taken from Current — and that is
+// sound rather than a gap, because tooltrust's Sum() folds FormatVersion INTO the digest, so a
+// format change produces a different digest and is caught by the fingerprint comparison itself.
+// Stating it here rather than leaving the reader to notice the field is trivially equal.
+//
+// NO I/O. Everything it reads was already resolved into `live` from pointer-published inventory.
+// It dials nothing, and it must never learn to: a discovery call at the send boundary would put an
+// unbounded network wait inside the last authority check, which is the exact shape of defect the
+// PreSend re-ask exists to close.
+func boundaryPeerFreshness(in execution.LiveGateInput, live liveTrustPrecheck, at time.Time) mcperr.Reason {
+	reviewed := canary.ReviewedTarget{
+		Tenant:            in.Tenant,
+		ServerID:          in.ServerID,
+		ToolName:          in.ToolName,
+		Fingerprint:       live.Target.Fingerprint,
+		FingerprintFormat: live.Target.FingerprintFormat,
+	}
+	// The decision's fingerprint is what the request was authorized against; live.Eligible above
+	// already required it to equal the current record's, so decoding it here would re-derive a
+	// value we know to be equal. What this DOES re-establish is the rest of the tuple, and the
+	// observation's own binding to it.
+	current := canary.ReviewedTarget{
+		Tenant:            live.Target.Tenant,
+		ServerID:          live.Target.ServerID,
+		ToolName:          live.Target.ToolName,
+		Fingerprint:       live.Target.Fingerprint,
+		FingerprintFormat: live.Target.FingerprintFormat,
+		ServerIdentity:    live.ServerIdentity,
+	}
+	verdict := canary.EvaluatePeerObservedFresh(canary.PeerFreshnessInput{
+		// Eligible is the fact this check depends on — the precheck resolved an authoritative
+		// target, it is this tenant's, the server is usable, the registry pin has not diverged,
+		// and it still carries the decision's fingerprint. Keyed off Eligible rather than
+		// live.Resolved, which the eligible path deliberately does not set (see its comment).
+		Resolved:               live.Eligible,
+		Now:                    at,
+		Observed:               live.Observed,
+		Reviewed:               reviewed,
+		Current:                current,
+		ActivationTenant:       in.Tenant,
+		RegistryPinnedIdentity: live.RegistryPin,
+		ServerUsable:           live.Eligible,
+	})
+	if verdict == canary.PeerFreshOK {
+		return mcperr.ReasonNone
+	}
+	// ONE bounded reason for the gate, mapped from the verdict rather than passed through. The
+	// verdict's classes are finer because an OPERATOR needs to know whether to refresh or to
+	// re-review; the wire does not, and every one of those classes would otherwise carry the
+	// shape of the peer's identity, fingerprint or endpoint out to a caller. The fine class stays
+	// where it is safe: the activation surface and the log.
+	return mcperr.ReasonPeerObservationNotFresh
 }
