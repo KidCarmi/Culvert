@@ -9,6 +9,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Public release promotion ran ahead of the evidence that was supposed to
+  authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
+  published and cosign-signed the `latest`, `v0.0.N` and `0.0.N` image tags at
+  11:40:09Z, while the Security and QA verdict for that same commit only
+  concluded at 12:09:14Z — 29 minutes of publicly pullable, unverified bytes on
+  a channel `packaging/culvert-maint/install.sh` seeds fresh installs from. The
+  cause was one predicate written out by hand in four places and omitted from
+  the fifth: `docker`'s gate step carried
+  `if: startsWith(github.ref, 'refs/tags/v')`, and a main push is not a tag
+  ref. In the same push Install Lifecycle E2E failed before reaching any
+  lifecycle assertion and the SHA was tagged regardless. Release *assets* had
+  the same shape on the tag path: `catalog-pipeline` and `release` uploaded
+  into a live release while `verify-reproducible` and SLSA `provenance` were
+  still running downstream, and the assets stayed public if either then failed.
+
+  The predicate is now one script over one manifest
+  (`.github/scripts/require-release-evidence.sh` +
+  `.github/release-evidence.txt`), every publishing job calls it, and each row
+  is explicitly classified mandatory or advisory with the not-applicable
+  workflows and their reasons recorded in the manifest header. `docker` pushes
+  only non-channel candidate tags (`candidate-<run_id>`, `sha-<short>`); a new
+  evidence-gated `promote-image` job moves `latest`/semver onto that exact
+  tested digest via `imagetools create`, after proving the candidate tag
+  resolves to the digest this run built and after a re-run rule that skips a
+  superseded run and refuses a divergent one. Every release asset is staged
+  `draft: true`, and a new `publish-release` job — needing `release`,
+  `catalog-pipeline`, `aggregate-subjects`, `verify-reproducible` and
+  `provenance` — is the only place `--draft=false` runs, after
+  `assert-release-complete.sh` proves every required binary, signature bundle,
+  SBOM, the signed catalog and the SLSA provenance are present and non-empty.
+  `require-gate.sh` now treats a `skipped` or `neutral` gate conclusion as an
+  immediate refusal rather than letting `wait` mode poll for 30 minutes first.
+  A `workflow_dispatch` on a branch no longer republishes `latest` at all.
+
+  Pinned by `release_publication_gating_test.go` (7 structural walls over
+  `ci.yml` and the manifest, each verified failing against the pre-fix tree)
+  and `.github/scripts/test/release-gating-cases.sh` (34 behavioural cases
+  against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
+  Signing identities are unchanged: cosign keyless SANs are per workflow FILE
+  and ref, and both new jobs live in `ci.yml`. See
+  `docs/operator/release-publication-gating.md`.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party

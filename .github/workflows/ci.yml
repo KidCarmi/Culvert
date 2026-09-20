@@ -220,10 +220,14 @@ jobs:
 
     # Expose the pushed manifest-list digest + computed version so the
     # catalog-pipeline job (P2a) can generate + gate the release catalog against
-    # the digest the workflow actually pushed.
+    # the digest the workflow actually pushed, and so the evidence-gated
+    # promote-image job can move the PUBLIC channels onto that exact digest.
     outputs:
       proxy_digest: ${{ steps.build.outputs.digest }}
-      version_bare: ${{ steps.next-ver.outputs.version_bare }}
+      version_bare: ${{ steps.chan.outputs.version_bare }}
+      candidate_tag: ${{ steps.chan.outputs.candidate_tag }}
+      promote_tags: ${{ steps.chan.outputs.promote_tags }}
+      image: ${{ steps.img-lc.outputs.image }}
 
     permissions:
       contents: read
@@ -248,27 +252,72 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
-          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
+        run: .github/scripts/require-release-evidence.sh "$GITHUB_SHA" assert
 
-      # ── Compute next semver on main push ──────────────────────────────────
-      # GITHUB_TOKEN tag pushes (from auto-tag) can't trigger new workflows,
-      # so the docker job must compute and apply semver tags in the same run.
-      - name: Compute next version
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        id: next-ver
+      # ── Resolve the version + the candidate/promote tag split ─────────────
+      # CANDIDATE tags are pushed by THIS job, before any verdict is known, and
+      # are deliberately non-channel: `sha-<short>` names one immutable build of
+      # one commit and no consumer resolves it as a release. PROMOTE tags are
+      # the PUBLIC release channels (`latest`, `main`, semver) — they are NOT
+      # pushed here. The evidence-gated `promote-image` job moves them onto this
+      # job's digest after the release predicate passes.
+      #
+      # Why this replaced the old shape: `latest` is a real delivery channel
+      # (packaging/culvert-maint/install.sh seeds a fresh install from
+      # `${PROXY_REPO}:latest`), and it was published + cosign-signed here ~29
+      # minutes before QA and Security concluded for the same SHA.
+      - name: Resolve version and release channels
+        id: chan
         run: |
-          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
-          if [ -z "$LATEST" ]; then LATEST="v0.0.0"; fi
-          VER="${LATEST#v}"
-          MAJOR=$(echo "$VER" | cut -d. -f1)
-          MINOR=$(echo "$VER" | cut -d. -f2)
-          PATCH=$(echo "$VER" | cut -d. -f3)
-          NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
-          echo "version=$NEXT" >> $GITHUB_OUTPUT
-          echo "version_bare=${NEXT#v}" >> $GITHUB_OUTPUT
-          echo "Next version: $NEXT"
+          set -euo pipefail
+          SHORT="$(git rev-parse --short=7 HEAD)"
+          # TWO candidate tags, neither a release channel:
+          #   sha-<short>          the conventional per-commit tag (unchanged);
+          #   candidate-<run_id>   the PROMOTION BINDING.
+          # The binding must be per-RUN, not per-commit, because the main-push
+          # run and the tag run share a commit: auto-tag pushes the v* tag while
+          # the main run's promote-image is still resolving, so the tag run's
+          # build would overwrite a per-commit candidate and promote-image would
+          # then see a digest its own run did not build. A run-scoped tag cannot
+          # be clobbered by another run, and is stable across re-runs of this
+          # one (run_id is constant across attempts).
+          CANDIDATE="candidate-${GITHUB_RUN_ID}"
+          PROMOTE=""
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            # GITHUB_TOKEN tag pushes (from auto-tag) can't trigger new
+            # workflows, so the main-push run computes the semver it will
+            # promote to itself.
+            LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+            if [ -z "$LATEST" ]; then LATEST="v0.0.0"; fi
+            VER="${LATEST#v}"
+            MAJOR=$(echo "$VER" | cut -d. -f1)
+            MINOR=$(echo "$VER" | cut -d. -f2)
+            PATCH=$(echo "$VER" | cut -d. -f3)
+            NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+            VERSION="$NEXT"
+            VERSION_BARE="${NEXT#v}"
+            PROMOTE="latest main ${VERSION} ${VERSION_BARE}"
+          elif [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            VERSION_BARE="${VERSION#v}"
+            MAJOR=$(echo "$VERSION_BARE" | cut -d. -f1)
+            MINOR=$(echo "$VERSION_BARE" | cut -d. -f2)
+            PROMOTE="${VERSION_BARE} ${MAJOR}.${MINOR} ${MAJOR}"
+          else
+            # Any other ref (a branch dispatch off main): build a candidate so
+            # the run is still useful, promote NOTHING. Before this change a
+            # workflow_dispatch on any branch republished `latest`, with no gate
+            # step on that path at all.
+            VERSION="0.0.0-${SHORT}"
+            VERSION_BARE="$VERSION"
+          fi
+          {
+            echo "version=$VERSION"
+            echo "version_bare=$VERSION_BARE"
+            echo "candidate_tag=$CANDIDATE"
+            echo "promote_tags=$PROMOTE"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION candidate=$CANDIDATE promote=[${PROMOTE}]"
 
       # ── Lowercase repo name ───────────────────────────────────────────────
       # Container registries require lowercase image names, but
@@ -280,6 +329,7 @@ jobs:
         run: |
           LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "repo=$LC" >> $GITHUB_OUTPUT
+          echo "image=ghcr.io/$LC" >> $GITHUB_OUTPUT
 
       # ── Registry login ────────────────────────────────────────────────────
       # ghcr.io: always available, uses GITHUB_TOKEN — no secrets needed.
@@ -291,12 +341,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # ── Image metadata ────────────────────────────────────────────────────
-      # Generates tags and labels automatically:
-      #   • version tags (v1.2.3 → 1.2.3, 1.2, 1, latest)  [tag-ref events]
-      #   • computed next version                            [main push]
-      #   • branch tags  (main → main)
-      #   • PR tags      (pr-42)
-      #   • SHA tag      (sha-abc1234)
+      # CANDIDATE TAG ONLY. This job pushes exactly one tag — `sha-<short>` —
+      # which is immutable, names one build of one commit, and is not a release
+      # channel any consumer resolves. Every public channel (`latest`, `main`,
+      # `{{version}}`, `{{major}}.{{minor}}`, `{{major}}`) was removed from here
+      # and now lives in the evidence-gated `promote-image` job, which repoints
+      # them at THIS job's digest once the release predicate passes.
+      #
+      # Do NOT add a channel tag back to this list: the push here happens before
+      # any verdict exists, so anything published here is published unverified.
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -304,16 +357,10 @@ jobs:
           images: |
             ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=${{ steps.next-ver.outputs.version }},enable=${{ steps.next-ver.outputs.version != '' }}
-            type=raw,value=${{ steps.next-ver.outputs.version_bare }},enable=${{ steps.next-ver.outputs.version_bare != '' }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=ref,event=branch
-            type=ref,event=pr
+            type=raw,value=${{ steps.chan.outputs.candidate_tag }}
             type=sha,prefix=sha-,format=short
           labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=Culvert
             org.opencontainers.image.description=Enterprise-grade HTTP/HTTPS/SOCKS5 forward proxy
             org.opencontainers.image.vendor=KidCarmi
@@ -337,30 +384,27 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.next-ver.outputs.version || steps.meta.outputs.version }}
+            VERSION=${{ steps.chan.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Embed provenance + SBOM attestations directly in the image manifest.
           provenance: true
           sbom: true
 
-      # ── Apply semver tags explicitly ──────────────────────────────────────
-      # The metadata-action raw tags with enable= can silently fail to apply.
-      # This step guarantees the computed semver tag (e.g. v0.0.18) is applied
-      # to the image that was just pushed.
-      - name: Apply version tag
-        if: steps.next-ver.outputs.version != '' && github.event_name != 'pull_request'
-        run: |
-          VER="${{ steps.next-ver.outputs.version }}"
-          VER_BARE="${{ steps.next-ver.outputs.version_bare }}"
-          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
-          echo "Tagging image with ${VER} and ${VER_BARE}"
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${VER}" \
-            --tag "${IMAGE}:${VER_BARE}" \
-            "${IMAGE}@${{ steps.build.outputs.digest }}"
+      # NOTE: the former "Apply version tag" step lived here. It ran
+      # unconditionally on every non-PR event and published the computed semver
+      # tags with no verdict in sight. Version tags are now applied by
+      # `promote-image`, after the release predicate.
 
-      # ── Sign the published image with cosign (keyless) ────────────────────
+      # ── Sign the candidate digest with cosign (keyless) ───────────────────
+      # Cosign signatures are DIGEST-scoped: `cosign sign <ref>@<digest>` stores
+      # the signature at `sha256-<hex>.sig` in the same repository, so signing
+      # the candidate reference here covers every public tag `promote-image`
+      # later points at the same digest — no re-signing is required for the
+      # signature to verify, and `catalog-pipeline`'s digest-addressed
+      # `cosign verify ghcr.io/kidcarmi/culvert@<digest>` keeps working
+      # unchanged. The promote job signs the promoted references as well, so the
+      # signed `docker-reference` claim also names the public channel.
       # Only runs when the image was actually pushed (not PRs).
       - name: Install cosign
         if: ${{ github.event_name != 'pull_request' }}
@@ -424,9 +468,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
-          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
+        run: .github/scripts/require-release-evidence.sh "$GITHUB_SHA" assert
       - uses: ./.github/actions/setup-go-cache
       # Gather ONLY deterministic facts here (no wall-clock, no tag-count). The
       # catalog spec — timestamps (from the tagged commit's committer date),
@@ -543,11 +585,157 @@ jobs:
           BUNDLE="$RUNNER_TEMP/culvert-release-catalog-${REF_NAME}.tar.gz"
           tar -C "$OUT" -czf "$BUNDLE" index.json index.json.sigstore manifests
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
-      - name: Attach complete signed catalog bundle to the GitHub Release (tag path)
+      # STAGED, NOT PUBLISHED. Every asset-carrying step in this workflow creates
+      # or updates the release as a DRAFT; the `publish-release` job flips
+      # draft=false only after reproducibility, signatures, provenance and the
+      # catalog checks have all succeeded. Before this change the first upload
+      # created a LIVE release, so binaries and the signed catalog were publicly
+      # downloadable while verify-reproducible and SLSA provenance were still
+      # running — and stayed downloadable if either then failed.
+      - name: Stage complete signed catalog bundle on the draft Release (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          draft: true
           files: ${{ steps.pkg.outputs.bundle }}
+
+  # ─── Image promotion (the release predicate's enforcement point) ───────────
+  # THE gate between "built" and "released" for container images. The `docker`
+  # job pushed exactly one immutable candidate tag; this job moves the PUBLIC
+  # channels onto that same digest, and only after
+  # .github/scripts/require-release-evidence.sh resolves every `mandatory` row
+  # of .github/release-evidence.txt to a successful main-push run FOR THIS SHA.
+  #
+  # Ordering is the correctness argument:
+  #   docker            — build + push candidate + sign the digest
+  #   catalog-pipeline  — digest-match gate; on a tag, keyless catalog signing
+  #                       and `cosign verify` of the pushed digest
+  #   promote-image     — evidence predicate, then repoint latest/semver
+  #
+  # Depending on catalog-pipeline means the digest a consumer pulls from
+  # `:latest` is the digest the release catalog pins and whose signature
+  # verified — not merely the digest that happened to build.
+  #
+  # SIGNING IDENTITY: cosign keyless SANs are
+  # `…/.github/workflows/<file>@<ref>`, i.e. per workflow FILE and ref, not per
+  # job. This job lives in ci.yml, so its certificates carry the same identity
+  # the `docker` job's did — `release_identity.env`, the baked pin in
+  # release_catalog_sigstore.go and TestReleaseIdentitySSOT are all unaffected.
+  # Moving promotion into a SEPARATE workflow file would change the SAN and
+  # break that pin; do not.
+  promote-image:
+    name: "Release · Promote image tags"
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    needs: [docker, catalog-pipeline]
+    # Same event surface as catalog-pipeline. A workflow_dispatch on a branch is
+    # deliberately EXCLUDED: it used to republish `latest` with no gate step on
+    # that path at all, and it has no release semantics worth preserving.
+    if: >-
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write   # repoint tags in ghcr.io
+      id-token: write   # cosign keyless signing of the promoted references
+      actions: read     # require-gate.sh (list-workflow-runs)
+    steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # ancestry check + highest-v*-tag resolution
+
+      # THE PREDICATE. `wait` on the main push (the gates run in parallel with
+      # this run); `assert` on a tag (the main-push run must already exist —
+      # qa-gate.yml does not even run on tags, so its only possible run for this
+      # SHA is the main-push one).
+      - name: Require release evidence for this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MODE=assert
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then MODE=wait; fi
+          .github/scripts/require-release-evidence.sh "$GITHUB_SHA" "$MODE"
+
+      # Who owns the channel right now. An older run re-executed after the
+      # channel moved on must not roll `latest` backwards; see
+      # promote-image-tags.sh's re-run-safety block.
+      - name: Resolve channel tip
+        id: tip
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            git fetch --no-tags origin main
+            TIP="$(git rev-parse FETCH_HEAD)"
+          else
+            HIGHEST="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+            test -n "$HIGHEST" || { echo "::error::no v* tag visible — refusing"; exit 1; }
+            TIP="$(git rev-list -n1 "$HIGHEST")"
+          fi
+          echo "tip=$TIP" >> "$GITHUB_OUTPUT"
+          echo "channel tip: $TIP"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Promote the verified digest onto the public channels
+        id: promote
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          CHANNEL_TIP: ${{ steps.tip.outputs.tip }}
+          IMAGE: ${{ needs.docker.outputs.image }}
+          DIGEST: ${{ needs.docker.outputs.proxy_digest }}
+          CANDIDATE: ${{ needs.docker.outputs.candidate_tag }}
+          PROMOTE_TAGS: ${{ needs.docker.outputs.promote_tags }}
+        run: |
+          set -euo pipefail
+          test -n "$PROMOTE_TAGS" || { echo "::error::no promote tags resolved for ${GITHUB_REF} — refusing"; exit 1; }
+          # shellcheck disable=SC2086
+          .github/scripts/promote-image-tags.sh "$IMAGE" "$DIGEST" "$CANDIDATE" $PROMOTE_TAGS
+          # The script exits 0 without promoting when this SHA is superseded;
+          # record which happened so the signing step below matches.
+          if [ "$RELEASE_SHA" = "$CHANNEL_TIP" ]; then
+            echo "promoted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "promoted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install cosign
+        if: steps.promote.outputs.promoted == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+
+      # Belt-and-braces: the digest is already signed by the `docker` job and a
+      # cosign signature is digest-scoped, so verification of a promoted tag
+      # already succeeds. Signing the promoted references in addition makes the
+      # signed `docker-reference` claim name the public channel too, so a
+      # consumer inspecting the payload for `:latest` sees `:latest`.
+      - name: Sign the promoted references (keyless)
+        if: steps.promote.outputs.promoted == 'true'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ${{ needs.docker.outputs.image }}
+          DIGEST: ${{ needs.docker.outputs.proxy_digest }}
+          PROMOTE_TAGS: ${{ needs.docker.outputs.promote_tags }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 -- PROMOTE_TAGS is a deliberate word list
+          for t in $PROMOTE_TAGS; do
+            cosign sign --yes \
+              --rekor-url=https://rekor.sigstore.dev \
+              "${IMAGE}:${t}@${DIGEST}"
+          done
 
   # ─── Catalog re-sign (M1-4, design §4 Slice D) ────────────────────────────
   # Weekly no-bump freshness re-sign, dispatched BY resign-catalog.yml at the
@@ -768,9 +956,7 @@ jobs:
         # `wait`: the gates run in parallel with this job on the same push.
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" wait
-          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" wait
+        run: .github/scripts/require-release-evidence.sh "$GITHUB_SHA" wait
 
       - name: Create and push tag
         # The push is authenticated as RELEASE_TAG_PAT (persisted by checkout
@@ -826,9 +1012,7 @@ jobs:
       - name: Require gate approval on the tagged commit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
-          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
+        run: .github/scripts/require-release-evidence.sh "$GITHUB_SHA" assert
 
       - uses: ./.github/actions/setup-go-cache
 
@@ -945,17 +1129,21 @@ jobs:
           sha256sum $FILES > "subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
           cat "subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
 
-      - name: Upload proxy release asset + signature bundle
+      # Staged as a DRAFT — see the note in catalog-pipeline. publish-release
+      # is the only job that makes this release public.
+      - name: Stage proxy release asset + signature bundle (draft)
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          draft: true
           files: |
             culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
             culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sigstore.json
 
-      - name: Upload culvert-maint release asset + signature bundle (linux)
+      - name: Stage culvert-maint release asset + signature bundle (draft, linux)
         if: matrix.goos == 'linux'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          draft: true
           files: |
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}.sigstore.json
@@ -965,10 +1153,11 @@ jobs:
       # cannot affect the ==7 subject assertion). linux/amd64 leg only (where
       # they're made). The raw SBOM feeds tooling (grype/trivy/Dependency-Track);
       # the .sigstore.json is the in-toto attestation binding it to the binary.
-      - name: Upload SBOMs + attestation bundles (linux/amd64 leg)
+      - name: Stage SBOMs + attestation bundles (draft, linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          draft: true
           files: |
             culvert.sbom.cdx.json
             culvert.sbom.cdx.json.sigstore.json
@@ -1137,3 +1326,72 @@ jobs:
     with:
       base64-subjects: ${{ needs.aggregate-subjects.outputs.hashes }}
       upload-assets: true
+
+  # ─── Release publication (the final promotion) ────────────────────────────
+  # The ONLY job that makes a release public. Every asset-carrying step above
+  # writes to a DRAFT; this job flips draft=false after the full downstream
+  # evidence chain has succeeded:
+  #
+  #   catalog-pipeline    — digest-match + keyless catalog signature + verify of
+  #                         the pushed image signature against the pinned identity
+  #   promote-image       — the image channels this release names actually point
+  #                         at the verified digest (a release advertising a
+  #                         version whose image tag was never promoted is a
+  #                         half-published release)
+  #   release             — build, cosign-sign, SBOM, stage every binary
+  #   aggregate-subjects  — the complete SLSA subject set
+  #   verify-reproducible — an independent rebuild hash-matches every signed subject
+  #   provenance          — SLSA L3 attestation uploaded
+  #
+  # Before this job existed, the first `softprops/action-gh-release` upload
+  # created a LIVE release, so the binaries were public roughly the whole time
+  # verify-reproducible and provenance were running — and remained public if
+  # either failed. A failing need now skips this job and the release simply
+  # stays a draft: fail-closed, and recoverable by re-running the chain.
+  #
+  # Do NOT add always()/!cancelled()/a status function to the `if` below — that
+  # would publish the release even when a need failed, which is precisely the
+  # fail-open this job exists to close.
+  publish-release:
+    name: "Release · Publish (post-evidence)"
+    timeout-minutes: 15
+    needs: [release, catalog-pipeline, promote-image, aggregate-subjects, verify-reproducible, provenance]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # gh release edit --draft=false
+      actions: read     # require-release-evidence.sh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Defense in depth: the needs-chain already proves the downstream checks,
+      # and every job in it asserted the predicate, but the last step before a
+      # release becomes public re-asserts it rather than inheriting the claim.
+      - name: Require release evidence for this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/require-release-evidence.sh "$GITHUB_SHA" assert
+
+      # Prove the draft actually carries what the chain claims to have staged
+      # before making it public. A release that is missing a binary, a signature
+      # bundle, the signed catalog or the SLSA provenance must not be published
+      # just because every job happened to return zero.
+      - name: Assert the staged release is complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-complete.sh "$TAG"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=false --latest
+          echo "published $TAG"
+          {
+            echo "### Release published"
+            echo ""
+            echo "\`$TAG\` was promoted from draft to public after the full evidence chain succeeded."
+          } >> "$GITHUB_STEP_SUMMARY"

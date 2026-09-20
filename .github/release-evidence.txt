@@ -1,0 +1,86 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# release-evidence.txt — THE release predicate's evidence manifest.
+#
+# This file is the SINGLE SOURCE OF TRUTH for "what must be green before this
+# commit's artifacts may be promoted to a public release channel". It is read
+# by .github/scripts/require-release-evidence.sh (the enforcing side) and by
+# release_publication_gating_test.go (the anti-drift wall), so the shipped
+# policy and the tested policy cannot diverge.
+#
+# Format: one row per workflow, two whitespace-separated fields.
+#
+#     <workflow-file>   mandatory|advisory
+#
+#   mandatory — promotion REFUSES unless this workflow has a run for the exact
+#               release SHA, on a push to main, that concluded `success`.
+#               Failed, cancelled, timed-out, SKIPPED, neutral, still-running
+#               and entirely-absent all refuse (fail closed, see
+#               require-gate.sh). There is no "assume green" path.
+#
+#   advisory  — the verdict is RESOLVED and REPORTED (step summary + log) but
+#               never blocks. Use for signals that are real but whose
+#               flakiness or runtime makes them unsuitable as a hard release
+#               interlock TODAY. Promoting an advisory row to mandatory is a
+#               one-word edit on that row — deliberately, so it is an owner
+#               decision made in a reviewable diff, not an accident.
+#
+# Rows are matched by WORKFLOW FILE PATH, never by check-run display name: a
+# check-run name is not a trust boundary (any job can emit one), a workflow
+# file path is reviewed code. See require-gate.sh's header.
+#
+# NOT APPLICABLE — deliberately absent from this manifest, with the reason:
+#
+#   pr-fast-gate.yml / pr-deep-gate.yml / pr-api-governance.yml /
+#   code-review.yml / frontend-verify.yml / api-contract.yml
+#       PR-only merge gates. They do not run on the main push, so they can
+#       produce no evidence for a release SHA. Their signal is consumed by
+#       branch protection before the merge, not by the release.
+#
+#   codeql.yml
+#       Runs on main pushes, but its value is the alert stream and its
+#       conclusion is not a pass/fail release verdict (it reports findings
+#       asynchronously to the security tab). security-release-gate.yml is the
+#       release-blocking security verdict.
+#
+#   fuzz-nightly.yml / proxy-nightly-e2e.yml / proxy-weekly-stress.yml /
+#   proxy-ui-e2e.yml / auth-idp-interop.yml / dast-nightly.yml /
+#   edge-case-lab.yml
+#       Scheduled campaigns, not per-commit evidence. They have no run for an
+#       arbitrary release SHA, so requiring them would refuse every release.
+#
+#   publish-catalog-pages.yml / publish-catalog-r2.yml /
+#   verify-dual-publish.yml / resign-catalog.yml / publish-feeds.yml /
+#   resign-feeds.yml
+#       DOWNSTREAM of the release, not evidence for it. publish-catalog-pages
+#       and publish-catalog-r2 already gate themselves on the whole CI run for
+#       the tag concluding `success` (workflow_run + conclusion == 'success'),
+#       which transitively includes every job in this predicate's chain.
+#
+#   ci.yml
+#       This predicate runs INSIDE ci.yml. A workflow cannot be its own
+#       evidence.
+# ─────────────────────────────────────────────────────────────────────────────
+
+security-release-gate.yml      mandatory
+qa-gate.yml                    mandatory
+
+# ── Advisory (see the classification note below) ────────────────────────────
+#
+# install-lifecycle-e2e.yml is the ONLY end-to-end proof that a fresh
+# `scripts/install.sh` deployment, the state-preserving migrate, and the
+# pinned-digest upgrade all still work — i.e. the maintenance-agent delivery
+# path this release publishes `:latest` for. On the reviewed run
+# (35507615001, SHA 3d8c9bb) its "Stack install + migrate + upgrade" job FAILED
+# 25 s in, at "Build, push, capture v1 + v2 proxy digests", so every Phase 1-4
+# lifecycle assertion was SKIPPED — and the same SHA was still tagged and
+# released. That is a real evidence gap.
+#
+# It is nevertheless recorded ADVISORY rather than mandatory in this slice:
+# making a ~35-minute e2e whose observed failure was in an image-build/registry
+# step a hard interlock on every release is a policy change with an
+# availability cost (a wedged release train) that belongs to the repository
+# owner, not to a gating refactor. The mechanism is here and proven by test;
+# flipping the word below is the whole change.
+install-lifecycle-e2e.yml      advisory
+maint-agent-update-e2e.yml     advisory
+catalog-e2e.yml                advisory
