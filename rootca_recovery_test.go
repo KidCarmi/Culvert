@@ -469,23 +469,32 @@ func TestChaos50_ManualRecoveryIsNotOverwrittenByRetry(t *testing.T) {
 }
 
 // TestChaos50_RecoveredSnapshotCarriesItsAttempt pins the consistency of the
-// recovery record. The successful attempt used to set `recovered` INSIDE the
-// attempt (noteSSLInspectionRecovered) while the campaign loop counted the
-// attempt only AFTER it returned, so a status reader landing between the two
-// writes saw {Recovered: true, Attempts: N-1} — a recovery attributed to an
-// attempt the record said had not happened. It surfaced once, under a loaded
+// recovery record: EVERY attempt is recorded as ONE transition that carries its
+// count together with its outcome.
+//
+// The successful attempt used to set `recovered` INSIDE the attempt
+// (noteSSLInspectionRecovered) while the campaign loop counted the attempt only
+// AFTER it returned, so a status reader landing between the two writes saw
+// {Recovered: true, Attempts: N-1} — a recovery attributed to an attempt the
+// record said had not happened. It surfaced once, under a loaded
 // `-race -count=3` run, as TestChaos50_TransientLoadFailureSelfHeals reading
 // {Attempts: 0, Recovered: true}, and passed 30/30 in isolation — exactly the
-// shape a polling assertion cannot pin.
+// shape a polling assertion cannot pin. The first fix counted BEFORE the attempt
+// and only moved the window to the failure path: a reader then paired attempt
+// N's count with attempt N-1's error for as long as N ran (review finding).
 //
 // This gate is DETERMINISTIC: the observer runs under caLoadRecovery.mu at
 // EVERY transition, so it sees each snapshot a concurrent reader could have
-// seen, on any hardware and under any load. Two invariants, both verified
-// failing against the count-after shape: a Recovered snapshot always carries
-// at least one attempt, and once Recovered is observed the attempt count never
-// moves again — the count that recovered it is final. The second is the one
-// that catches the defect regardless of WHICH attempt succeeds (with the
-// count-after shape, `recovered` at N-1 is always followed by attempts++).
+// seen, on any hardware and under any load. The good bundle is written only
+// after the first attempt has been recorded as FAILED, so the campaign always
+// carries at least one failure transition and the success is never attempt 1.
+// Invariants, each verified failing against the shape it names:
+//   - a Recovered snapshot carries at least one attempt, and the count never
+//     moves once Recovered is seen (count-after-in-loop shape);
+//   - a transition that counts a FAILED attempt carries that attempt's error in
+//     the same snapshot, i.e. the count never advances with the previous
+//     attempt's error still in place (count-before shape);
+//   - the count advances by at most one per transition and never regresses.
 func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 	swapInspectionCA(t)
 	captureStartupAlerts(t)
@@ -495,17 +504,28 @@ func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 		mu              sync.Mutex
 		transitions     int
 		violations      []string
+		prev            caLoadRecoverySnapshot
 		recoveredAt     int64 // attempts carried by the FIRST Recovered snapshot
 		sawRecovered    bool
+		failedAttempts  int
 		maxAttemptsSeen int64
-		attemptsRegress bool
 	)
 	setCALoadRecoveryObserverForTest(func(rec caLoadRecoverySnapshot) {
 		mu.Lock()
 		defer mu.Unlock()
 		transitions++
-		if rec.Attempts < maxAttemptsSeen {
-			attemptsRegress = true
+		switch d := rec.Attempts - prev.Attempts; {
+		case d < 0:
+			violations = append(violations, fmt.Sprintf("attempt count regressed (%d → %d): %+v", prev.Attempts, rec.Attempts, rec))
+		case d > 1:
+			violations = append(violations, fmt.Sprintf("attempt count jumped by %d in one transition: %+v", d, rec))
+		case d == 1 && !rec.Recovered:
+			// A counted, unrecovered attempt is a FAILED one: its error must land
+			// in the same write as its count, not in a later one.
+			failedAttempts++
+			if rec.LastErr == "" {
+				violations = append(violations, fmt.Sprintf("attempt %d counted without its error: %+v", rec.Attempts, rec))
+			}
 		}
 		if rec.Attempts > maxAttemptsSeen {
 			maxAttemptsSeen = rec.Attempts
@@ -520,6 +540,7 @@ func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 			violations = append(violations, fmt.Sprintf("attempt count moved after recovery (%d → %d): %+v",
 				recoveredAt, rec.Attempts, rec))
 		}
+		prev = rec
 	})
 	t.Cleanup(func() { setCALoadRecoveryObserverForTest(nil) })
 
@@ -528,14 +549,28 @@ func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 	if certMgr.Ready() {
 		t.Fatal("precondition: load must fail")
 	}
+	// Let the campaign record at least one FAILED attempt before the fault
+	// clears, so the failure-transition invariant is exercised on every run.
+	waitForCA(t, "the first recovery attempt to fail", 10*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return failedAttempts >= 1
+	})
 	writeGoodBundle(t, path) // the fault clears
 
 	awaitCARecoveryTerminal(t)
+	// Read the public snapshot BEFORE taking the test mutex: the observer runs
+	// under caLoadRecovery.mu and then takes mu, so the reverse order here would
+	// be a lock-order inversion against any late transition.
+	final := caLoadRecoveryStatus()
 
 	mu.Lock()
 	defer mu.Unlock()
 	if transitions == 0 {
 		t.Fatal("observer saw no transitions — the gate is vacuous")
+	}
+	if failedAttempts == 0 {
+		t.Fatal("no failed attempt was observed — the failure-transition invariant was not exercised")
 	}
 	if !sawRecovered {
 		t.Fatalf("campaign did not recover (violations=%v)", violations)
@@ -543,15 +578,12 @@ func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
 	for _, v := range violations {
 		t.Error(v)
 	}
-	if attemptsRegress {
-		t.Error("attempt count went backwards during the campaign")
-	}
 	// The recovering attempt is the LAST one counted: nothing ran after it.
 	if recoveredAt != maxAttemptsSeen {
 		t.Errorf("Recovered snapshot carried %d attempts but the campaign counted %d", recoveredAt, maxAttemptsSeen)
 	}
 	// And the public reader agrees with what the observer saw.
-	if final := caLoadRecoveryStatus(); !final.Recovered || final.Attempts != recoveredAt {
+	if !final.Recovered || final.Attempts != recoveredAt {
 		t.Errorf("caLoadRecoveryStatus() = %+v, want Recovered with Attempts=%d", final, recoveredAt)
 	}
 }
