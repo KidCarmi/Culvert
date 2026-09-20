@@ -1117,6 +1117,14 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
 	}
+	// SEC-RBAC-ROLE-1: a roster record named a role this build does not
+	// enroll and was clamped to viewer at load. Reported only when non-zero,
+	// like the two above: it is an authorization-surface fact (someone's
+	// effective role is NOT what the file says) and the remedy is to re-assign
+	// the role, not to fix storage.
+	if n := RosterRoleClampCount(); n > 0 {
+		resp["uiRosterRoleClamped"] = n
+	}
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.
 	if n := reqlog.Backpressure(); n > 0 {

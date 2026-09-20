@@ -748,16 +748,47 @@ const (
 	RoleViewer   UIRole = "viewer"   // read-only dashboard access
 )
 
-// rolePriority maps roles to numeric levels for comparison.
+// rolePriority maps roles to numeric levels for comparison. Membership of this
+// map is the definition of an ENROLLED role: a UIRole absent from it is one no
+// part of this binary grants, and both directions of HasRole treat it as such.
 var rolePriority = map[UIRole]int{
 	RoleViewer:   1,
 	RoleOperator: 2,
 	RoleAdmin:    3,
 }
 
+// roleEnrolled reports whether r is one of the three roles this binary grants.
+// RolePublic is deliberately NOT enrolled (it is metadata documentation, not an
+// enforcement primitive), and neither is any other string.
+func roleEnrolled(r UIRole) bool {
+	_, ok := rolePriority[r]
+	return ok
+}
+
 // HasRole returns true when r's level is at least the level of min.
+//
+// BOTH SIDES FAIL CLOSED, and the `min` side is the half that used to not.
+// rolePriority is a map, so an unenrolled key read as a plain index yields 0 —
+// which on the RECEIVER side is correct (an unknown role satisfies nothing) and
+// on the MIN side was inverted: a requirement nobody enrolled became a
+// requirement EVERY authenticated role met, RolePublic and typos alike. The
+// only thing standing between that and a silent authorization hole was that
+// every live call site happens to pass one of the three constants, and
+// ui_routes_meta.go carries 18 `MinRole: RolePublic` entries whose routes are
+// short-circuited as Public before the comparison is ever reached. Nothing
+// pinned either fact (see TestRoleMetadata_MinRoleIsAlwaysEnrolled).
+//
+// An unenrolled requirement is therefore UNSATISFIABLE. That is the safe
+// direction: the predicate is used both as an authorization gate (requireRole,
+// C2's uiMetadataEnforcement) and as the ROLE VALIDATOR on POST /api/auth/users
+// — where it already relied on the receiver half failing closed — so denying a
+// requirement no role can be checked against can only ever refuse, never admit.
 func (r UIRole) HasRole(min UIRole) bool {
-	return rolePriority[r] >= rolePriority[min]
+	required, ok := rolePriority[min]
+	if !ok {
+		return false
+	}
+	return rolePriority[r] >= required
 }
 
 // uiAdminUser holds credentials and role for a single UI admin user.
@@ -1381,6 +1412,7 @@ func (c *Config) LoadUIUsersFile() error {
 		if err != nil {
 			continue
 		}
+		rec.Role = loadedRosterRole(rec.Username, rec.Role)
 		c.uiUsers[rec.Username] = &uiAdminUser{
 			passHash:        hash,
 			role:            rec.Role,
@@ -1396,6 +1428,54 @@ func (c *Config) LoadUIUsersFile() error {
 	}
 	return nil
 }
+
+// loadedRosterRole is the fail-closed door for a role value arriving from DISK.
+//
+// POST /api/auth/users validates the role it is given (`!role.HasRole(RoleViewer)`
+// ⇒ 400), but this loader did not, and the two doors reach the same roster. A
+// record carrying a role no version of this binary enrolls therefore entered the
+// roster verbatim, VerifyUIUser handed it back on a successful login,
+// apiAuthLogin minted a signed session with it, and uiAuthMiddleware's
+// "sessions without role = admin" compat branch — written for a pre-RBAC EMPTY
+// role but keyed on `!HasRole(RoleViewer)`, which is true of EVERY unenrolled
+// string — promoted the holder to ADMIN on every subsequent request.
+//
+// The reachable sources are all the raw-persistence ones: a restore of a backup
+// taken by a newer build that enrolls a role this one does not (the downgrade
+// case), a hand-edited or partially-corrupted ui_users.json, and any future
+// writer that bypasses the API. This mirrors IPFilter.SetMode's recorded
+// doctrine — the validated admin path is clean, the raw persistence paths may
+// carry corruption, and the corruption must land fail-closed.
+//
+// An unenrolled NON-EMPTY role is clamped to the LEAST privilege the roster can
+// express (RoleViewer) rather than dropped: dropping the record would delete an
+// account on a file the operator can still repair, while clamping keeps them
+// able to sign in and read, with no authority they were not already holding. An
+// EMPTY role is left exactly as it was — that is the documented pre-RBAC
+// compatibility value (a bare-array roster predating the role field), and
+// narrowing it here would lock legacy single-admin deployments out of their own
+// appliance.
+func loadedRosterRole(username string, role UIRole) UIRole {
+	if role == "" || roleEnrolled(role) {
+		return role
+	}
+	if logger != nil {
+		logger.Printf("UIUsers: user %q carries unrecognized role %q in the persisted roster — "+
+			"clamped to %q (least privilege). Re-assign the role in Security -> Admin Users; "+
+			"a role this build does not know is never honoured.",
+			sanitizeLog(username), sanitizeLog(string(role)), RoleViewer)
+	}
+	rosterRoleClamped.Add(1)
+	return RoleViewer
+}
+
+// rosterRoleClamped counts roster records whose persisted role this build does
+// not enroll. Non-zero means a ui_users.json on this node names a role the
+// binary cannot grant — the downgrade/corruption signal an operator acts on.
+var rosterRoleClamped atomic.Int64
+
+// RosterRoleClampCount reports the clamp counter for the admin/status surfaces.
+func RosterRoleClampCount() int64 { return rosterRoleClamped.Load() }
 
 // SaveUIUsersFile writes the current UI user roster to disk atomically.
 // No-op when no file path is configured.

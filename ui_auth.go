@@ -213,12 +213,15 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := readUISessionCookie(r)
 	if err == nil && sess != nil {
-		role := UIRole(sess.Role)
-		if !role.HasRole(RoleViewer) {
-			role = RoleAdmin
+		// Same fail-closed resolution uiAuthMiddleware applies. Reporting a
+		// session whose role this build does not enroll as `role: admin` would
+		// have the console render the full admin surface for a principal every
+		// gated endpoint is about to refuse; treating it as not-logged-in is
+		// both honest and the safe direction.
+		if role, ok := sessionRoleOrReject(sess.Role); ok {
+			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
+			return
 		}
-		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
-		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()

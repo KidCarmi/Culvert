@@ -9,6 +9,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- A role string this build does not enroll became FULL ADMIN
+  (SEC-RBAC-ROLE-1). `POST /api/auth/users` validates the role it is given,
+  but `LoadUIUsersFile` — the door the same roster arrives through from disk —
+  validated nothing and stored `role` verbatim. `VerifyUIUser` then returned
+  that value on a successful login, `apiAuthLogin` minted a genuinely signed
+  session with it, and `uiAuthMiddleware`'s backwards-compatibility branch
+  promoted it: the branch was written for the pre-RBAC *empty* role but keyed
+  on `!role.HasRole(RoleViewer)`, and because `rolePriority` is a map whose
+  unenrolled keys read as 0, that predicate is true of *every* unrecognized
+  string — so `"read-only"`, `"Admin"` and `"superuser"` all resolved to
+  `RoleAdmin`, on every request, for the full session TTL, with
+  `/api/auth/status` reporting `role: admin` to match. Nothing is forged; the
+  appliance signs the cookie itself. The reachable sources are the ordinary
+  raw-persistence ones: restoring a backup taken by a newer build that enrolls
+  a role this one does not, a hand-edited or partially-corrupted
+  `ui_users.json`, or any future writer that bypasses the admin API. Fixed at
+  all three layers — `HasRole` now refuses an unenrolled *requirement* (which
+  also closes a latent hole where `MinRole: RolePublic` or a typo in
+  `ui_routes_meta.go` would have admitted a viewer to an elevated method),
+  `LoadUIUsersFile` clamps an unenrolled non-empty roster role to `viewer`
+  rather than dropping the account, and the session resolver splits the compat
+  branch so `""` still means admin for pre-RBAC deployments while every other
+  unenrolled value is refused with a 401 and a cleared cookie. The clamp is
+  surfaced as `culvert_ui_roster_role_clamped_total` and as
+  `uiRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
