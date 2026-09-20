@@ -77,3 +77,63 @@ func TestAPIPolicy_GET_ReportsPersistedState(t *testing.T) {
 		t.Errorf("persisted = %v, want true once a policy file path is set", resp2["persisted"])
 	}
 }
+
+// TestPolicyStore_Load_AdoptingPathPersistsExistingRules guards the review
+// finding (Codex, PR #1445): applyHotReload can call Load with a path that
+// does not exist yet while the store already holds in-memory-only rules —
+// e.g. an admin edits rules with no -policy configured, then a SIGHUP config
+// reload turns persistence on. Load must not leave Persisted() claiming
+// durability while those rules exist nowhere on disk; a crash before the
+// next mutation would silently discard them exactly as if the warning had
+// never fired.
+func TestPolicyStore_Load_AdoptingPathPersistsExistingRules(t *testing.T) {
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{Priority: 1, Name: "pre-existing", Action: ActionAllow}})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "newly-adopted.json")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("test setup: %s already exists", path)
+	}
+
+	if err := ps.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !ps.Persisted() {
+		t.Fatal("Persisted() = false immediately after adopting a path")
+	}
+
+	// The claim must be true, not just the flag: the file must actually now
+	// hold the pre-existing in-memory rule.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("adopting a path did not persist the in-memory rules: %v", err)
+	}
+	fresh := &PolicyStore{}
+	if err := fresh.Load(path); err != nil {
+		t.Fatalf("reload from the adopted path: %v", err)
+	}
+	got := fresh.List()
+	if len(got) != 1 || got[0].Name != "pre-existing" {
+		t.Fatalf("reload after adoption = %+v, want the pre-existing rule recovered", got)
+	}
+}
+
+// TestPolicyStore_Load_AdoptFailureNeverFailsLoad pins the fail-safe half:
+// a failed best-effort persist on adoption (e.g. the target directory does
+// not exist) must not turn Load into a fatal error — initPolicy calls
+// logFatalf on any Load error, so that would convert a graceful in-memory
+// boot into a crash loop, which is exactly the class of regression the
+// CHAOS-50 boot-path conventions in this codebase exist to prevent.
+func TestPolicyStore_Load_AdoptFailureNeverFailsLoad(t *testing.T) {
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{Priority: 1, Name: "unsaved", Action: ActionAllow}})
+
+	if err := ps.Load(filepath.Join(t.TempDir(), "no-such-dir", "policy.json")); err != nil {
+		t.Fatalf("Load must not fail when the best-effort adopt-persist fails, got: %v", err)
+	}
+	// Persisted() still reports true (path is configured); the write failure
+	// itself surfaces the normal way, via the next mutation's own SaveErr.
+	if !ps.Persisted() {
+		t.Error("Persisted() = false after Load set a path, even though the adopt-write failed")
+	}
+}

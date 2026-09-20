@@ -331,6 +331,21 @@ func (ps *PolicyStore) Load(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Adopting a path with no file yet — a fresh install, or a hot
+			// reload (applyHotReload) that just turned persistence on for a
+			// store that may already hold in-memory-only rules from before
+			// the switch. Persisted() reports durability from ps.path alone,
+			// so without this write it would start claiming true the instant
+			// the path is set, even though the current rules exist nowhere
+			// on disk — silencing the GUI warning while a crash before the
+			// next mutation would still discard them. Best-effort and never
+			// fatal: SaveErr's own atomic-write failure (e.g. the parent
+			// directory doesn't exist) must not turn a graceful load into a
+			// boot failure at initPolicy — that failure surfaces the normal
+			// way, on the next rule mutation's own persist attempt.
+			if saveErr := ps.SaveErr(); saveErr != nil {
+				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
+			}
 			return nil
 		}
 		return err
