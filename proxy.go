@@ -1181,7 +1181,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// perturb evidence hashes). Matchers keep receiving the raw host: each
 	// normalizes internally, and changing their input is out of scope here.
 	normHost, ok := normalizeHostStrict(host)
-	if ok && rejectOversizeCanonicalHost(w, r, clientIP, normHost) {
+	if ok && rejectOversizeCanonicalHost(w, clientIP, normHost) {
 		// CHAOS-66 canonical tier: the host normalized to more than DNS can
 		// carry. Reachable only for a value that does not shrink under IDNA —
 		// i.e. the dot-dense ASCII shape an attacker wants — because the raw

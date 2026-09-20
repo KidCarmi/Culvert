@@ -484,6 +484,29 @@ func TestSOCKS5_DestinationSinkRegistryHasNoStaleEntries(t *testing.T) {
 		"DialContext":  true, // method on *net.Dialer
 	}
 
+	declared := packageLevelDeclarations(t)
+
+	for name := range destinationSinks {
+		if exempt[name] {
+			continue
+		}
+		if !declared[name] {
+			t.Errorf("destinationSinks registers %q, but nothing by that name is declared in package main — "+
+				"a rename or deletion left a recorded reason behind while its replacement goes unaudited", name)
+		}
+	}
+}
+
+// packageLevelDeclarations returns every package-level function and var/const
+// name declared in package main's non-test sources.
+//
+// Extracted from the gate above rather than inlined: the AST walk's nested
+// switch over declaration kinds pushed the test past the gocognit threshold (35
+// of 30), which the _test.go exclusions do NOT cover — they exempt funlen, dupl,
+// cyclop, errcheck and unparam only. Worth knowing before writing another
+// AST-walking gate in a test file.
+func packageLevelDeclarations(t *testing.T) map[string]bool {
+	t.Helper()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
@@ -498,36 +521,30 @@ func TestSOCKS5_DestinationSinkRegistryHasNoStaleEntries(t *testing.T) {
 		if perr != nil {
 			t.Fatalf("parse %s: %v", f, perr)
 		}
-		for _, d := range af.Decls {
-			switch decl := d.(type) {
-			case *ast.FuncDecl:
-				if decl.Recv == nil { // package-level function
-					declared[decl.Name.Name] = true
-				}
-			case *ast.GenDecl:
-				for _, spec := range decl.Specs {
-					vs, ok := spec.(*ast.ValueSpec)
-					if !ok {
-						continue
-					}
-					for _, n := range vs.Names {
-						declared[n.Name] = true
-					}
-				}
-			}
-		}
+		collectPackageDecls(af, declared)
 	}
 	if len(declared) < 100 {
 		t.Fatalf("only %d package-level names collected; the AST walk is not finding declarations", len(declared))
 	}
+	return declared
+}
 
-	for name := range destinationSinks {
-		if exempt[name] {
-			continue
-		}
-		if !declared[name] {
-			t.Errorf("destinationSinks registers %q, but nothing by that name is declared in package main — "+
-				"a rename or deletion left a recorded reason behind while its replacement goes unaudited", name)
+// collectPackageDecls records af's package-level function and value names.
+func collectPackageDecls(af *ast.File, into map[string]bool) {
+	for _, d := range af.Decls {
+		switch decl := d.(type) {
+		case *ast.FuncDecl:
+			if decl.Recv == nil { // package-level function, not a method
+				into[decl.Name.Name] = true
+			}
+		case *ast.GenDecl:
+			for _, spec := range decl.Specs {
+				if vs, ok := spec.(*ast.ValueSpec); ok {
+					for _, n := range vs.Names {
+						into[n.Name] = true
+					}
+				}
+			}
 		}
 	}
 }

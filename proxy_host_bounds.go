@@ -262,13 +262,18 @@ func rejectOversizeDestHost(w http.ResponseWriter, r *http.Request, clientIP str
 // its A-label form, exceeds what DNS can carry. It reports true when it has
 // written the response.
 //
+// It deliberately does NOT take the *http.Request: the normalized host is passed
+// in explicitly, so there is nothing left to read from the request, and carrying
+// it would be an unused parameter (unparam). The raw-tier gate above does take
+// one, because r.Host is the value it measures.
+//
 // It runs immediately after hostutil.NormalizeHostStrict succeeds, on both the
 // HTTP and SOCKS5 paths, and is the tier that makes the bound tight: the raw
 // pre-cap has to be generous enough for IDN expansion (1 KiB), which on its own
 // still admits a 1 000-byte dot-dense ASCII authority costing ~1.3 ms. Measuring
 // the canonical form instead refuses exactly that, because ASCII does not shrink
 // under IDNA — while the 899-byte IDN it protects normalizes to 255 and passes.
-func rejectOversizeCanonicalHost(w http.ResponseWriter, r *http.Request, clientIP, normHost string) bool {
+func rejectOversizeCanonicalHost(w http.ResponseWriter, clientIP, normHost string) bool {
 	if !canonicalHostOversize(normHost) {
 		return false
 	}

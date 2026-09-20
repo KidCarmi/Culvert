@@ -212,6 +212,23 @@ func TestChaos66_DefectIPBlockedPathDoesNotRetainTheAuthority(t *testing.T) {
 	chaos66CaptureLog(t)
 
 	// Deny every source, so the request takes the IP_BLOCKED branch.
+	//
+	// The ipf global is SAVED AND RESTORED, following the pattern every other test
+	// that touches it uses (config_surfaces_test.go, connlimit_startup_test.go,
+	// controlplane_delta_apply_test.go). Mutating it and leaving it set leaks a
+	// deny-everything IP filter into whatever runs next: setupProxyTest rebuilds
+	// ipf, so any test that calls it is safe, but SEVEN test files drive
+	// handleRequest without it and would see 403 instead of their expected
+	// outcome. Under -shuffle that is a determinism failure whose cause is
+	// nowhere near the test that reports it.
+	// The REPLACEMENT is what makes the restore real: SetMode mutates the filter
+	// in place, so saving and restoring the pointer alone would hand back the same
+	// mutated object. The other call sites swap in a fresh filter first for
+	// exactly this reason; getting it wrong is silent, because the restore looks
+	// present.
+	origIPF := ipf
+	t.Cleanup(func() { ipf = origIPF })
+	ipf = &IPFilter{single: map[string]bool{}}
 	ipf.SetMode("allow") // allowlist mode with an empty list denies everything
 	host := chaos66Host(64 * 1024)
 	w := httptest.NewRecorder()
