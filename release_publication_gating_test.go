@@ -353,7 +353,7 @@ func assertRefusesNonLatestTag(t *testing.T, name string, j wfJob) {
 func assertNeverPromotes(t *testing.T, name string, j wfJob) {
 	t.Helper()
 	for i := range j.Steps {
-		for _, banned := range []string{"imagetools create", "--draft=false"} {
+		for _, banned := range []string{"imagetools create", "draft=false"} {
 			if strings.Contains(j.Steps[i].Run, banned) {
 				t.Errorf("exempt job %q step %q performs %q — the exemption covers republishing a "+
 					"verified catalog bundle, not release promotion", name, j.Steps[i].Name, banned)
@@ -407,16 +407,16 @@ func TestPublicationGating_PublishReleaseIsLastAndUnconditionalOnSuccess(t *test
 	for name := range doc.Jobs {
 		steps := doc.Jobs[name].Steps
 		for i := range steps {
-			if strings.Contains(steps[i].Run, "--draft=false") {
+			if strings.Contains(steps[i].Run, "draft=false") {
 				undraft++
 				if name != "publish-release" {
-					t.Errorf("job %q step %q publishes the release (--draft=false) — only publish-release may", name, steps[i].Name)
+					t.Errorf("job %q step %q publishes the release (draft=false) — only publish-release may", name, steps[i].Name)
 				}
 			}
 		}
 	}
 	if undraft != 1 {
-		t.Fatalf("expected exactly one --draft=false step in ci.yml, found %d — the release either never becomes public or becomes public in more than one place", undraft)
+		t.Fatalf("expected exactly one draft=false step in ci.yml, found %d — the release either never becomes public or becomes public in more than one place", undraft)
 	}
 }
 
@@ -463,7 +463,7 @@ func TestPublicationGating_ImmutableTagsAreNeverDeferred(t *testing.T) {
 	if !ok {
 		t.Fatal("the channel resolver no longer has a recognisable tag arm — this wall cannot read it")
 	}
-	if !strings.Contains(tagArm, `IMMUTABLE="${VERSION_BARE}"`) {
+	if !strings.Contains(tagArm, `IMMUTABLE="${VERSION_BARE} ${VERSION}"`) {
 		t.Errorf("the tag arm must declare the exact version as IMMUTABLE so a superseded tag run still "+
 			"publishes its own X.Y.Z. Arm:\n%s", tagArm)
 	}
@@ -483,34 +483,143 @@ func TestPublicationGating_LatestIsDecidedNotAsserted(t *testing.T) {
 
 	var publish *wfStep
 	for i := range pub.Steps {
-		if strings.Contains(pub.Steps[i].Run, "--draft=false") {
+		if strings.Contains(pub.Steps[i].Run, "draft=false") {
 			publish = &pub.Steps[i]
 			break
 		}
 	}
 	if publish == nil {
-		t.Fatal("publish-release has no --draft=false step — the release never becomes public")
+		t.Fatal("publish-release has no draft=false step — the release never becomes public")
 	}
 	run := publish.Run
 
-	if !strings.Contains(run, "--latest=false") {
-		t.Error("publish-release never passes --latest=false — a superseded tag would be marked Latest, " +
-			"and scripts/install.sh resolves its bootstrap verifier through /releases/latest")
+	// The Latest decision must be GitHub's, taken atomically with the un-draft.
+	if !strings.Contains(run, "make_latest=legacy") {
+		t.Error("publish-release does not pass make_latest=legacy — the Latest designation would be asserted " +
+			"by this run instead of arbitrated by GitHub, and scripts/install.sh resolves its bootstrap " +
+			"verifier through /releases/latest")
 	}
-	if !strings.Contains(run, `git tag --list 'v*' --sort=-v:refname`) {
-		t.Error("publish-release does not compare this tag against the highest v* tag — `--latest` must be " +
-			"decided from the tag order, not asserted")
+	// Asserting an answer this job cannot compute without a race is the defect.
+	// `--latest` / `--latest=false` are both check-then-act against a tag list
+	// that a concurrent tag workflow can invalidate between the read and the edit.
+	if strings.Contains(run, "--latest") {
+		t.Errorf("publish-release asserts --latest: a concurrent tag workflow can create a newer tag between "+
+			"the check and the edit, so the answer must come from make_latest=legacy instead. run:\n%s", run)
 	}
-	// The checkout must actually have the tags to compare against.
-	sawFullFetch := false
-	for i := range pub.Steps {
-		if strings.Contains(pub.Steps[i].Uses, "actions/checkout") && pub.Steps[i].WithFetchDepth() == 0 {
-			sawFullFetch = true
+	if strings.Contains(run, "git tag --list") {
+		t.Errorf("publish-release still reads a local tag list to decide Latest — even a refreshed list is a "+
+			"check-then-act across concurrent tag workflows. run:\n%s", run)
+	}
+	// The un-draft and the Latest decision must be ONE call; splitting them
+	// reopens the window this fix closes.
+	if !strings.Contains(run, "draft=false") {
+		t.Errorf("publish-release no longer clears the draft flag. run:\n%s", run)
+	}
+	undraftLine := ""
+	for _, ln := range strings.Split(run, "\n") {
+		if strings.Contains(ln, "draft=false") {
+			undraftLine = ln
 		}
 	}
-	if !sawFullFetch {
-		t.Error("publish-release checks out shallow — `git tag --list` would see no tags and the highest-tag " +
-			"comparison would refuse every release")
+	if !strings.Contains(undraftLine, "make_latest=legacy") {
+		t.Errorf("the un-draft and the Latest decision are not the same API call — they must be atomic. line:\n%s", undraftLine)
+	}
+}
+
+// TestPublicationGating_ExactVersionsBelongToTheTagRun pins that one version
+// maps to one digest. The main run and the tag run deliberately build different
+// digests, so a main run promoting `vX.Y.Z` while the tag run promotes `X.Y.Z`
+// left the two aliases of a single version on two different images — with
+// `vX.Y.Z` on a digest that release's own catalog does not pin.
+func TestPublicationGating_ExactVersionsBelongToTheTagRun(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	docker := mustJob(t, doc, "docker")
+
+	var chanStep *wfStep
+	for i := range docker.Steps {
+		if strings.Contains(docker.Steps[i].Run, "immutable_tags=") {
+			chanStep = &docker.Steps[i]
+			break
+		}
+	}
+	if chanStep == nil {
+		t.Fatal("docker job emits no immutable_tags output — this wall cannot read the channel split")
+	}
+	run := chanStep.Run
+
+	mainArm, ok := armBetween(run, `if [ "${GITHUB_REF}" = "refs/heads/main" ]`, "elif")
+	if !ok {
+		t.Fatal("the channel resolver no longer has a recognisable main-push arm")
+	}
+	for _, banned := range []string{"${VERSION}", "${VERSION_BARE}"} {
+		if strings.Contains(mainArm, "FLOATING=") && strings.Contains(promoteAssignment(mainArm, "FLOATING"), banned) {
+			t.Errorf("the main-push arm promotes the exact version %s — exact aliases belong to the tag run, "+
+				"whose digest the release catalog pins. Arm:\n%s", banned, mainArm)
+		}
+	}
+
+	tagArm, ok := armBetween(run, `elif [ "${GITHUB_REF#refs/tags/v}"`, "\n          else")
+	if !ok {
+		t.Fatal("the channel resolver no longer has a recognisable tag arm")
+	}
+	imm := promoteAssignment(tagArm, "IMMUTABLE")
+	for _, want := range []string{"${VERSION_BARE}", "${VERSION}"} {
+		if !strings.Contains(imm, want) {
+			t.Errorf("the tag arm must promote BOTH exact aliases as immutable (missing %s) so one version "+
+				"means one digest; got IMMUTABLE=%q", want, imm)
+		}
+	}
+}
+
+// promoteAssignment returns the right-hand side of the last `<name>=...` line in
+// a shell arm, or "" when absent.
+func promoteAssignment(arm, name string) string {
+	out := ""
+	for _, ln := range strings.Split(arm, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, name+"=") {
+			out = strings.TrimPrefix(ln, name+"=")
+		}
+	}
+	return out
+}
+
+// TestPublicationGating_PromotionIsSerializedAcrossRefs pins the other half of
+// the same class: ci.yml's workflow concurrency key includes the ref, so two v*
+// tags run at once, and "am I the channel tip?" is a check-then-act. Promotion
+// therefore takes a ref-INDEPENDENT lock and reads the tip from the remote
+// inside it.
+func TestPublicationGating_PromotionIsSerializedAcrossRefs(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	promote := mustJob(t, doc, "promote-image")
+
+	grp, cancel := promote.ConcurrencyGroupAndCancel()
+	if grp == "" {
+		t.Fatal("promote-image declares no concurrency group — two tag workflows can promote the same moving " +
+			"channels at once and an older run can roll them back")
+	}
+	if strings.Contains(grp, "github.ref") || strings.Contains(grp, "github.sha") {
+		t.Errorf("promote-image's concurrency group %q is per-ref, which serializes nothing across tags", grp)
+	}
+	if cancel {
+		t.Error("promote-image sets cancel-in-progress: true — a promotion cut in half can leave the channels " +
+			"pointing at a partially applied set")
+	}
+
+	var tip *wfStep
+	for i := range promote.Steps {
+		if strings.Contains(promote.Steps[i].Run, "tip=") {
+			tip = &promote.Steps[i]
+			break
+		}
+	}
+	if tip == nil {
+		t.Fatal("promote-image has no channel-tip step")
+	}
+	if !strings.Contains(tip.Run, "--tags origin") {
+		t.Errorf("the channel-tip step does not refresh tags from the remote — a tag created after this job's "+
+			"checkout would leave it believing it is still the highest, and the ancestry guard would compare "+
+			"against the wrong tip. run:\n%s", tip.Run)
 	}
 }
 
@@ -691,4 +800,13 @@ func (st wfStep) WithFetchDepth() int {
 		return -1
 	}
 	return *st.With.FetchDepth
+}
+
+// ConcurrencyGroupAndCancel returns a job's concurrency group and whether it
+// cancels in-progress runs. An absent block yields ("", false).
+func (j wfJob) ConcurrencyGroupAndCancel() (string, bool) {
+	if j.Concurrency == nil {
+		return "", false
+	}
+	return j.Concurrency.Group, j.Concurrency.CancelInProgress == true
 }

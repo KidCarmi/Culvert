@@ -54,7 +54,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `/releases/latest` and an unconditional flag moved fresh installs onto an
   older verifier whenever a superseded tag's run finished last.
 
-  Pinned by `release_publication_gating_test.go` (9 structural walls over
+  A third round found three more, all in the same family and all fixed: the
+  exact version aliases split across paths (the main run promoted `vX.Y.Z` and
+  the tag run `X.Y.Z`, from deliberately different digests, so one version named
+  two images and `vX.Y.Z` sat on a digest its own catalog did not pin) — exact
+  aliases now belong to the tag run alone and move together; image promotion
+  read the channel tip from a checkout snapshot and took no cross-ref lock,
+  while ci.yml's concurrency key includes the ref, so an older tag run could
+  roll `X.Y`/`X` back — promotion now holds a ref-independent job lock and
+  refreshes tags from the remote inside it; and the `--latest` comparison was
+  itself a check-then-act, so the un-draft now goes through the releases API
+  with `make_latest: legacy` and GitHub arbitrates Latest atomically, which
+  removes the race rather than narrowing it.
+
+  Pinned by `release_publication_gating_test.go` (12 structural walls over
   `ci.yml` and the manifest, each verified failing against the pre-fix tree)
   and `.github/scripts/test/release-gating-cases.sh` (36 behavioural cases
   against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).

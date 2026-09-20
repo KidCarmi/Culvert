@@ -298,21 +298,28 @@ jobs:
             NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
             VERSION="$NEXT"
             VERSION_BARE="${NEXT#v}"
-            # MAIN path: every target is FLOATING. The version here is
-            # SPECULATIVE — auto-tag has not created the tag yet, and a run
-            # overtaken by a newer main push must promote nothing, because the
-            # version number it computed may end up belonging to that newer
-            # commit. The tag run is what makes X.Y.Z authoritative.
-            FLOATING="latest main ${VERSION} ${VERSION_BARE}"
+            # MAIN path: moving channels ONLY. It deliberately promotes NO
+            # exact version, for two reasons. Its version is SPECULATIVE —
+            # auto-tag has not created the tag yet, so a run overtaken by a
+            # newer main push would be claiming a number that ends up belonging
+            # to that newer commit. And the main and tag runs produce DIFFERENT
+            # digests, so a main run promoting `vX.Y.Z` while the tag run
+            # promotes `X.Y.Z` left the two aliases of one version pointing at
+            # two different images, with `vX.Y.Z` on a digest that release's
+            # catalog does not pin (Codex review, PR #1441). One version, one
+            # digest, one owner: the tag run.
+            FLOATING="latest main"
           elif [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
             VERSION="${GITHUB_REF#refs/tags/}"
             VERSION_BARE="${VERSION#v}"
             MAJOR=$(echo "$VERSION_BARE" | cut -d. -f1)
             MINOR=$(echo "$VERSION_BARE" | cut -d. -f2)
-            # TAG path: the exact version is IMMUTABLE — `X.Y.Z` can only ever
-            # mean this tag's release, so it is promoted even when a newer tag
-            # has already landed. Only the moving channels defer.
-            IMMUTABLE="${VERSION_BARE}"
+            # TAG path: BOTH exact aliases are IMMUTABLE and belong here.
+            # `X.Y.Z` and `vX.Y.Z` can only ever mean this tag's release, so
+            # they are promoted even when a newer tag has already landed — and
+            # they are promoted TOGETHER, from the one digest this release's
+            # catalog pins. Only the moving channels defer.
+            IMMUTABLE="${VERSION_BARE} ${VERSION}"
             FLOATING="${MAJOR}.${MINOR} ${MAJOR}"
           else
             # Any other ref (a branch dispatch off main): build a candidate so
@@ -646,6 +653,21 @@ jobs:
     if: >-
       (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
       startsWith(github.ref, 'refs/tags/v')
+    # ONE promotion at a time, ACROSS REFS. ci.yml's workflow-level group is
+    # `ci-${{ github.ref }}`, so two different v* tags run concurrently — and
+    # "am I the channel tip?" is a check-then-act, so an older tag's run could
+    # move `X.Y`/`X` back after a newer one had already promoted them (Codex
+    # review, PR #1441). This group is deliberately ref-INDEPENDENT.
+    #
+    # cancel-in-progress is false: a promotion must never be cut in half. The
+    # accepted cost is GitHub's queue depth of one — a THIRD concurrent
+    # promotion cancels the pending one, which fails this job, skips
+    # publish-release and leaves that release a draft. That is fail-closed and
+    # re-runnable, and strictly better than a silently rolled-back public
+    # channel.
+    concurrency:
+      group: release-channel-promotion
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write   # repoint tags in ghcr.io
@@ -673,8 +695,14 @@ jobs:
           .github/scripts/require-release-evidence.sh "$GITHUB_SHA" "$MODE"
 
       # Who owns the channel right now. An older run re-executed after the
-      # channel moved on must not roll `latest` backwards; see
+      # channel moved on must not roll the moving channels backwards; see
       # promote-image-tags.sh's re-run-safety block.
+      #
+      # The tip is read from the REMOTE, inside the serialized region above,
+      # never from the checkout's snapshot: a tag created after this job's
+      # checkout would otherwise leave this run believing it is still the
+      # highest tag, and the ancestry guard would then compare against the
+      # wrong tip and wave the rollback through.
       - name: Resolve channel tip
         id: tip
         run: |
@@ -683,9 +711,11 @@ jobs:
             git fetch --no-tags origin main
             TIP="$(git rev-parse FETCH_HEAD)"
           else
+            git fetch --force --prune --prune-tags --tags origin
             HIGHEST="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
             test -n "$HIGHEST" || { echo "::error::no v* tag visible — refusing"; exit 1; }
             TIP="$(git rev-list -n1 "$HIGHEST")"
+            echo "highest v* tag: $HIGHEST"
           fi
           echo "tip=$TIP" >> "$GITHUB_OUTPUT"
           echo "channel tip: $TIP"
@@ -1372,12 +1402,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # gh release edit --draft=false
+      contents: write   # clears the draft flag via the releases API
       actions: read     # require-release-evidence.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0   # needed to compare this tag against the highest v* tag
 
       # Defense in depth: the needs-chain already proves the downstream checks,
       # and every job in it asserted the predicate, but the last step before a
@@ -1397,34 +1425,41 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: .github/scripts/assert-release-complete.sh "$TAG"
 
-      # `--latest` is decided, never asserted. GitHub's "Latest" designation is
-      # load-bearing: scripts/install.sh resolves its bootstrap verifier through
-      # /releases/latest, so marking a SUPERSEDED tag as Latest would point
-      # fresh installs at an older verifier. An unconditional `--latest` does
-      # exactly that whenever an older tag's run finishes after a newer release,
-      # or when an operator re-runs an old tag's workflow (Codex review,
-      # PR #1441). Same rule the image promotion applies to its floating
-      # channels: only the highest v* tag owns "Latest".
+      # GitHub's "Latest" designation is load-bearing: scripts/install.sh
+      # resolves its bootstrap verifier through /releases/latest, so marking a
+      # SUPERSEDED tag as Latest points fresh installs at an older verifier.
+      # An unconditional `gh release edit --latest` did exactly that whenever an
+      # older tag's run finished after a newer release, or when an operator
+      # re-ran an old tag's workflow (Codex review, PR #1441).
+      #
+      # `make_latest: legacy` is the RACE-FREE answer, and is why this step
+      # takes no cross-tag lock. Comparing against `git tag` — even refreshed —
+      # is a check-then-act: a tag created between the read and the edit still
+      # wins the race, and tag workflows run concurrently because ci.yml's
+      # concurrency key includes the ref. `legacy` moves the decision INTO the
+      # same atomic API call that clears the draft, and GitHub arbitrates it
+      # from the full set of releases by semantic version and creation date —
+      # so there is no window for this run to observe stale state at all.
+      #
+      # Do NOT replace this with `--latest`/`--latest=false`: both assert an
+      # answer this job cannot compute without a race.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          HIGHEST="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
-          test -n "$HIGHEST" || { echo "::error::no v* tag visible — refusing"; exit 1; }
-          if [ "$TAG" = "$HIGHEST" ]; then
-            gh release edit "$TAG" --draft=false --latest
-            MARK="marked Latest"
-          else
-            # Explicit false, not omitted: on a first publish GitHub would
-            # otherwise apply its own default and could still pick this release.
-            gh release edit "$TAG" --draft=false --latest=false
-            MARK="NOT marked Latest (superseded by ${HIGHEST})"
-          fi
-          echo "published $TAG — $MARK"
+          RELEASE_ID="$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq '.id')"
+          test -n "$RELEASE_ID" || { echo "::error::no release found for ${TAG} — refusing"; exit 1; }
+          gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" \
+            -F draft=false -f make_latest=legacy >/dev/null
+          IS_LATEST="$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || echo '?')"
+          echo "published $TAG — GitHub resolved Latest to: $IS_LATEST"
           {
             echo "### Release published"
             echo ""
-            echo "\`$TAG\` was promoted from draft to public after the full evidence chain succeeded — $MARK."
+            echo "\`$TAG\` was promoted from draft to public after the full evidence chain succeeded."
+            echo ""
+            echo "The \"Latest\" designation was left to GitHub (\`make_latest: legacy\`, decided by semantic version and creation date, atomically with the un-draft) and currently resolves to \`$IS_LATEST\`."
           } >> "$GITHUB_STEP_SUMMARY"

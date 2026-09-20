@@ -45,12 +45,21 @@ type wfStepWith struct {
 	FetchDepth       *int        `yaml:"fetch-depth"` // actions/checkout history depth
 }
 
+// wfJobConcurrency is a job-level `concurrency:` block. Release-channel
+// promotion uses one to serialize across refs (see
+// release_publication_gating_test.go).
+type wfJobConcurrency struct {
+	Group            string      `yaml:"group"`
+	CancelInProgress interface{} `yaml:"cancel-in-progress"`
+}
+
 type wfJob struct {
-	If          string      `yaml:"if"`
-	Name        string      `yaml:"name"`
-	Needs       interface{} `yaml:"needs"`       // string OR []string
-	Permissions interface{} `yaml:"permissions"` // string ("read-all"/"write-all") OR map
-	Steps       []wfStep    `yaml:"steps"`
+	If          string            `yaml:"if"`
+	Name        string            `yaml:"name"`
+	Needs       interface{}       `yaml:"needs"` // string OR []string
+	Concurrency *wfJobConcurrency `yaml:"concurrency"`
+	Permissions interface{}       `yaml:"permissions"` // string ("read-all"/"write-all") OR map
+	Steps       []wfStep          `yaml:"steps"`
 }
 
 type wfDoc struct {

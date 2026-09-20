@@ -129,12 +129,37 @@ Targets come in two kinds, and **only one of them can be superseded**:
 
 | kind | tags | rule |
 | --- | --- | --- |
-| **immutable** | the exact version, `X.Y.Z` | names THIS release and nothing else. Promoting it is never a rollback, so it is **always** promoted. |
+| **immutable** | the exact version, `X.Y.Z` **and** `vX.Y.Z` | names THIS release and nothing else. Promoting it is never a rollback, so it is **always** promoted — and both aliases move together, from one digest. |
 | **floating** | `latest`, `main`, `X.Y`, `X` | moving channels naming "the current thing". An older run must never roll them backwards. |
 
-The **main path declares no immutable targets**: the version it computes is
-speculative until `auto-tag` creates the tag, so a superseded main run promotes
-nothing. The tag run is what makes `X.Y.Z` authoritative.
+Which path owns which:
+
+| path | immutable | floating |
+| --- | --- | --- |
+| main push | *(none)* | `latest`, `main` |
+| `v*` tag | `X.Y.Z`, `vX.Y.Z` | `X.Y`, `X` |
+
+The **main path promotes no exact version at all**. Two reasons, and both are
+load-bearing: its version is speculative until `auto-tag` creates the tag, and
+the main and tag runs deliberately build *different digests* — so a main run
+promoting `vX.Y.Z` while the tag run promoted `X.Y.Z` left the two aliases of
+one version pointing at two different images, with `vX.Y.Z` on a digest that
+release's own catalog does not pin. One version, one digest, one owner: the tag
+run.
+
+### Serialization
+
+`ci.yml`'s workflow concurrency key includes the ref, so two `v*` tags run at
+the same time — and "am I the channel tip?" is a check-then-act. `promote-image`
+therefore takes a **ref-independent** job-level lock
+(`concurrency: group: release-channel-promotion`, `cancel-in-progress: false`)
+and reads the tip **from the remote** inside it (`git fetch --tags --force`),
+never from the checkout's snapshot.
+
+The accepted cost is GitHub's queue depth of one: a *third* concurrent promotion
+cancels the pending one, which fails the job, skips `publish-release` and leaves
+that release a draft. Fail-closed and re-runnable — and strictly better than a
+silently rolled-back public channel.
 
 ### Re-run rule
 
@@ -187,13 +212,22 @@ Every `softprops/action-gh-release` step now passes `draft: true`.
 and it needs `release`, `catalog-pipeline`, `promote-image`,
 `aggregate-subjects`, `verify-reproducible` and `provenance`.
 
-**`--latest` is decided, never asserted.** GitHub's "Latest" designation is
+**The "Latest" designation is GitHub's to decide, not this job's.** It is
 load-bearing — `scripts/install.sh` resolves its bootstrap verifier through
-`/releases/latest` — so `publish-release` compares the tag against the highest
-`v*` tag and passes `--latest` only when it wins, and an explicit
-`--latest=false` otherwise. An unconditional `--latest` pointed fresh installs
-at an older verifier whenever a superseded tag's run finished after a newer
-release, or when an old tag's workflow was re-run (Codex review, PR #1441).
+`/releases/latest` — so an unconditional `gh release edit --latest` pointed fresh
+installs at an older verifier whenever a superseded tag's run finished after a
+newer release, or when an old tag's workflow was re-run.
+
+Comparing against `git tag` does not fix it, even refreshed: that is a
+check-then-act, and a tag created between the read and the edit still wins.
+`publish-release` instead clears the draft through the releases API with
+**`make_latest: legacy`**, so the decision happens *inside the same atomic call*
+and GitHub arbitrates it from the full set of releases by semantic version and
+creation date. There is no window in which this run can observe stale state, and
+no cross-tag lock is needed.
+
+Do not replace this with `--latest` or `--latest=false` — both assert an answer
+this job cannot compute without a race.
 
 Before un-drafting it runs `assert-release-complete.sh`, which refuses unless
 every required asset is present **and non-empty**: 5 proxy binaries + 2
@@ -252,8 +286,14 @@ the exact `X.Y.Z` is still promoted and only the moving channels defer. No
 action.
 
 **A release published without being marked "Latest"** — expected when a higher
-`v*` tag already exists. The release is public and complete; only the Latest
-pointer stays with the newer tag.
+`v*` tag already exists. GitHub decides this, not the workflow; the release is
+public and complete, and only the Latest pointer stays with the newer tag. The
+step summary prints which tag GitHub resolved Latest to.
+
+**`promote-image` queued for a long time, or cancelled** — it holds a
+repository-wide promotion lock so two tag releases cannot move the same channels
+at once. A cancellation means three promotions were in flight; the release stays
+a draft. Re-run that tag's workflow.
 
 **`promote-image` refused with "divergent history"** — `main` was force-pushed,
 or the run is from a branch that is no longer an ancestor. Investigate before
@@ -270,11 +310,13 @@ whole change; `release_publication_gating_test.go` and
 
 - **The main-run digest and the tag-run digest differ.** The tag run rebuilds
   the image (embedded provenance attestations carry the run ID), so the digest
-  the release catalog pins is not the digest the main run promoted as `latest`,
-  and the tag run repoints `X.Y.Z` onto its own rebuild. Both digests are
-  evidence-gated and both are signed, so nothing unverified ships — but the two
-  channels are not byte-identical. Unifying them (promote the main run's digest
-  and have the tag run verify rather than rebuild) is a separate slice.
+  the release catalog pins is not the digest the main run promoted as `latest`.
+  The exact version tags are no longer affected — both aliases now come from the
+  tag run — but `latest` still tracks the main build while `X.Y.Z` tracks the tag
+  build. Both digests are evidence-gated and both are signed, so nothing
+  unverified ships; the two channels are simply not byte-identical. Unifying them
+  (promote the main run's digest and have the tag run verify rather than rebuild)
+  is a separate slice.
 - **Branch protection and repository rulesets were not inspected** — this
   session has no permission to read them. Every statement here is about
   in-repository workflow code. The `v*` tag ruleset (F3) and the
