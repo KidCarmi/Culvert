@@ -80,9 +80,49 @@ type caLoadRecoveryState struct {
 	recovered bool
 	gaveUp    bool
 	lastErr   string
+
+	// observer, when non-nil, is invoked with the consistent snapshot after
+	// EVERY campaign transition of this record, under mu. TEST seam (nil in
+	// production, so the campaign is byte-identical); it exists so a test can
+	// assert an invariant at every transition deterministically, rather than
+	// polling and hoping to land in the window between two writes.
+	//
+	// A field rather than a package global so its guard is the receiver's own
+	// lock by construction (setCALoadRecoveryObserverForTest), and a test
+	// restoring it in cleanup can never race a still-running campaign. The
+	// observer receives the snapshot and must not call caLoadRecoveryStatus —
+	// the mutex is not reentrant.
+	observer func(caLoadRecoverySnapshot)
 }
 
 var caLoadRecovery caLoadRecoveryState
+
+// update applies ONE campaign transition under the lock and publishes the
+// resulting snapshot to the observer while the lock is still held, so the
+// observer sees exactly what a concurrent caLoadRecoveryStatus reader could see
+// at that instant — never a half-applied pair of writes. Every write that
+// belongs to one attempt (its count, its error or its latch) goes through a
+// single call, which is the whole invariant: a reader never pairs one
+// attempt's count with another attempt's outcome.
+func (s *caLoadRecoveryState) update(mutate func(*caLoadRecoveryState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mutate(s)
+	if s.observer != nil {
+		s.observer(s.snapshotLocked())
+	}
+}
+
+func (s *caLoadRecoveryState) snapshotLocked() caLoadRecoverySnapshot {
+	return caLoadRecoverySnapshot{
+		LoadFailure:      sslInspectionLoadFailure(),
+		LoadFailureClass: sslInspectionLoadFailureClass(),
+		Attempts:         s.attempts,
+		Recovered:        s.recovered,
+		GaveUp:           s.gaveUp,
+		LastErr:          s.lastErr,
+	}
+}
 
 // caMutationMu serializes every path that INSTALLS or PERSISTS the inspection
 // Root CA: the automatic recovery attempt, the admin force-rotate, and the
@@ -174,16 +214,37 @@ func caInspectBypassCount() int64 { return caInspectBypassed.Load() }
 // resolves only half of them. That is why the admin paths clear this only after
 // a successful persist.
 func noteSSLInspectionRecovered(how string) {
+	noteSSLInspectionRecoveredWith(how, nil)
+}
+
+// noteSSLInspectionRecoveredWith is the latch clear with an extra mutation of
+// the recovery record applied in the SAME locked transition. The automatic
+// campaign uses it to count the recovering attempt and set `recovered` as one
+// write; the admin paths (force-rotate, custom-CA upload) pass nil — they are
+// not attempts.
+func noteSSLInspectionRecoveredWith(how string, also func(*caLoadRecoveryState)) {
 	if sslInspectionLoadFailure() == "" {
 		return
 	}
-	sslInspectionLoadError.Store("")
-	sslInspectionLoadClass.Store("")
-	caLoadRecovery.mu.Lock()
-	caLoadRecovery.recovered = true
-	caLoadRecovery.gaveUp = false
-	caLoadRecovery.lastErr = ""
-	caLoadRecovery.mu.Unlock()
+	// The latch is cleared INSIDE the same locked transition as the record.
+	// Cleared before it, a reader that pairs the two — /api/ca/status and the
+	// metrics writer both do — could read an empty latch and then, before the
+	// update landed, the previous attempt count: `loadFailed: false` beside an
+	// attempt count one short (Codex review, PR #1440). Hot readers that need
+	// only the latch (/healthz, /readyz, telemetry) keep the lock-free atomic;
+	// readers that pair it with the record take caLoadRecoveryStatus, whose
+	// snapshot reads the latch under the same lock. The FE-6B.0 bounded
+	// failure CLASS latch (loadFailureClass) is cleared in the same transition.
+	caLoadRecovery.update(func(s *caLoadRecoveryState) {
+		if also != nil {
+			also(s)
+		}
+		sslInspectionLoadError.Store("")
+		sslInspectionLoadClass.Store("")
+		s.recovered = true
+		s.gaveUp = false
+		s.lastErr = ""
+	})
 	if logger != nil {
 		logger.Printf("SSLCA: Root CA recovered (%s) — SSL inspection re-enabled", sanitizeLog(how))
 	}
@@ -242,16 +303,44 @@ func tryInspectionCARecovery(cfg rootCAStartupConfig, attempt int) (attempted bo
 	// (the intent blocks writers until the evidence can be read, and the
 	// load is what makes it readable), so the load runs first and the
 	// intents on the target are settled from the recovered evidence after.
+	// A deferral is an attempt that RAN and did not proceed: it is recorded
+	// as one transition too (count + bounded class), exactly like a failed
+	// attempt, so the record never pairs a count with another attempt's
+	// outcome (PR #1440's invariant applies to every exit of this function).
 	writes := cfg.Path == "" || certMgr.Ready()
 	if writes {
 		if serr := settleCertTarget(certOpsStore(), "root_ca", "writer", certWriterCARecovery); serr != nil {
-			return true, fmt.Errorf("recovery deferred: %w", serr)
+			derr := fmt.Errorf("recovery deferred: %w", serr)
+			caLoadRecovery.update(func(s *caLoadRecoveryState) {
+				s.attempts++
+				s.lastErr = caFaultClass(derr)
+			})
+			return true, derr
 		}
 	}
+	// Each attempt is recorded as ONE transition: its count together with its
+	// outcome. The campaign loop used to count the attempt only after this
+	// function returned, while a successful attempt set `recovered` inside it —
+	// so a status reader between the two writes saw {Recovered: true,
+	// Attempts: N-1}, a recovery attributed to an attempt the record said never
+	// happened. Counting BEFORE the attempt was the first shape tried and only
+	// moved the window: the count then landed in one write and the error in
+	// another, so a reader paired attempt N's count with attempt N-1's error for
+	// as long as N was running, and `attempts_total` claimed an attempt "made"
+	// that had no outcome yet. One write per attempt closes both. The count
+	// still moves only for an attempt that actually RUNS: the "already fixed by
+	// hand?" branch above returns before it. The recorded error is the FE-6B.0
+	// bounded class (the admin surface publishes it as loadRecoveryClass; the
+	// path and the OS text stay off it).
 	if err := attemptInspectionCARecovery(cfg); err != nil {
+		caLoadRecovery.update(func(s *caLoadRecoveryState) {
+			s.attempts++
+			s.lastErr = caFaultClass(err)
+		})
 		return true, err
 	}
-	noteSSLInspectionRecovered(fmt.Sprintf("automatic recovery succeeded on attempt %d", attempt))
+	noteSSLInspectionRecoveredWith(fmt.Sprintf("automatic recovery succeeded on attempt %d", attempt),
+		func(s *caLoadRecoveryState) { s.attempts++ })
 	if !writes {
 		if serr := settleCertTarget(certOpsStore(), "root_ca", "reconciled", ""); serr != nil {
 			logger.Printf("Root CA recovery: loaded, but an outstanding certificate operation is still unsettled (%s); settled by the next lookup/boot", certBoundedLedgerClass(serr))
@@ -304,15 +393,8 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 			return // an operator recovered it (force-rotate / custom-CA upload)
 		}
 
-		caLoadRecovery.mu.Lock()
-		caLoadRecovery.attempts++
-		if err != nil {
-			// The bounded class (FE-6B.0): the admin surface publishes it
-			// as loadRecoveryClass; the path and the OS text stay off it.
-			caLoadRecovery.lastErr = caFaultClass(err)
-		}
-		caLoadRecovery.mu.Unlock()
-
+		// The attempt's count and outcome were recorded together inside
+		// tryInspectionCARecovery; nothing about it is written here.
 		if err == nil {
 			return
 		}
@@ -327,9 +409,7 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 		}
 	}
 
-	caLoadRecovery.mu.Lock()
-	caLoadRecovery.gaveUp = true
-	caLoadRecovery.mu.Unlock()
+	caLoadRecovery.update(func(s *caLoadRecoveryState) { s.gaveUp = true })
 	if logger != nil {
 		logger.Printf("SSLCA: Root CA recovery gave up after %d attempts — SSL inspection stays DISABLED "+
 			"(inspect-matched TLS is forwarded UNINSPECTED). Fix the bundle/passphrase and restart, "+
@@ -338,28 +418,36 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 }
 
 // caLoadRecoverySnapshot is a consistent read for the admin surfaces.
+//
+// LoadFailure is the sslInspectionLoadError latch read under the record's lock.
+// The latch's only runtime writer (the recovery clear) runs inside that lock,
+// so a surface that reports the latch BESIDE the attempt count must take it
+// from here rather than from sslInspectionLoadFailure() in a separate read.
 type caLoadRecoverySnapshot struct {
-	Attempts  int64
-	Recovered bool
-	GaveUp    bool
-	LastErr   string
+	LoadFailure string
+	// LoadFailureClass is the FE-6B.0 bounded class of LoadFailure, read in the
+	// SAME locked snapshot so a status surface that publishes the class (never
+	// the raw reason) still pairs the latch with the record it was written with.
+	LoadFailureClass string
+	Attempts         int64
+	Recovered        bool
+	GaveUp           bool
+	LastErr          string
 }
 
 func caLoadRecoveryStatus() caLoadRecoverySnapshot {
 	caLoadRecovery.mu.Lock()
 	defer caLoadRecovery.mu.Unlock()
-	return caLoadRecoverySnapshot{
-		Attempts:  caLoadRecovery.attempts,
-		Recovered: caLoadRecovery.recovered,
-		GaveUp:    caLoadRecovery.gaveUp,
-		LastErr:   caLoadRecovery.lastErr,
-	}
+	return caLoadRecovery.snapshotLocked()
 }
 
 // resetCALoadRecoveryForTest clears the recovery record and the fail-open
 // counter. Test-only helper kept beside the state it resets, mirroring
 // resetCAUsabilityHealthForTest.
 func resetCALoadRecoveryForTest() {
+	// Not routed through update: a reset is not a campaign transition, and
+	// publishing it would hand an installed observer a count regression that
+	// no attempt produced.
 	caLoadRecovery.mu.Lock()
 	caLoadRecovery.attempts = 0
 	caLoadRecovery.recovered = false
@@ -370,4 +458,13 @@ func resetCALoadRecoveryForTest() {
 	caInspectBypassLogGate.mu.Lock()
 	caInspectBypassLogGate.at = time.Time{}
 	caInspectBypassLogGate.mu.Unlock()
+}
+
+// setCALoadRecoveryObserverForTest installs (or, with nil, removes) the
+// transition observer under the record's own lock, so the swap is ordered
+// against every transition of a campaign that may still be running.
+func setCALoadRecoveryObserverForTest(fn func(caLoadRecoverySnapshot)) {
+	caLoadRecovery.mu.Lock()
+	caLoadRecovery.observer = fn
+	caLoadRecovery.mu.Unlock()
 }

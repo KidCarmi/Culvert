@@ -358,7 +358,7 @@ func apiCertificates(w http.ResponseWriter, r *http.Request) {
 	if faults.PersistDegraded && faults.PersistErr != "" {
 		caM["persistClass"] = faults.PersistErr
 	}
-	if c := sslInspectionLoadFailureClass(); c != "" {
+	if c := caLoadRecoveryStatus().LoadFailureClass; c != "" {
 		caM["loadFailed"] = true
 		caM["loadFailureClass"] = c
 	} else {
@@ -440,14 +440,17 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	if caFaults.PersistDegraded && caFaults.PersistErr != "" {
 		info["rotationPersistClass"] = caFaults.PersistErr
 	}
-	// CHAOS-50 load/recovery posture, as bounded classes.
-	loadClass := sslInspectionLoadFailureClass()
+	// CHAOS-50 load/recovery posture, as bounded classes. ONE locked snapshot
+	// for the latch and the recovery record (PR #1440): read as two separate
+	// values they can disagree — an empty latch beside an attempt count one
+	// short — while a recovery attempt is landing.
+	rec := caLoadRecoveryStatus()
+	loadClass := rec.LoadFailureClass
 	info["loadFailed"] = loadClass != ""
 	if loadClass != "" {
 		info["loadFailureClass"] = loadClass
 	}
 	info["inspectBypassed"] = caInspectBypassCount()
-	rec := caLoadRecoveryStatus()
 	info["loadRecoveryAttempts"] = rec.Attempts
 	info["loadRecoveryGaveUp"] = rec.GaveUp
 	if rec.LastErr != "" {
