@@ -1934,6 +1934,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			"version":   snap.Version,
 			"updatedAt": snap.UpdatedAt,
 			"draft":     draft,
+			"persisted": policyStore.Persisted(),
 		})
 	case http.MethodPost:
 		apiPolicyCreate(w, r)

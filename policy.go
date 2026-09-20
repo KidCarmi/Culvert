@@ -278,6 +278,15 @@ func (ps *PolicyStore) policyVersion() (int64, string) {
 	return ps.version, ps.updatedAt
 }
 
+// Persisted reports whether rule changes are written to disk. False means the
+// store is in-memory only (no -policy / policy_file configured) and every
+// add/edit/delete/reorder is lost on restart — mirrors IdPRegistry.Persisted.
+func (ps *PolicyStore) Persisted() bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.path != ""
+}
+
 // bumpVersion must be called under ps.mu.Lock().
 func (ps *PolicyStore) bumpVersion() {
 	ps.version++

@@ -3265,6 +3265,10 @@ Firefox (all platforms):
         First matching policy rule wins. Blocklist and threat feed blocks happen before policy evaluation.
       </div>
 
+      <div id="pol-persist-warning" class="banner crit" style="display:none" role="alert">
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
+      </div>
+
       <!-- Rule Table -->
       <div class="panel">
         <div class="panel-header">
@@ -10005,6 +10009,8 @@ async function fetchPolicy() {
       const dt = new Date(d.updatedAt);
       uBadge.textContent = 'updated ' + dt.toLocaleString();
     }
+    const persistWarn = document.getElementById('pol-persist-warning');
+    if (persistWarn) persistWarn.style.display = (d && d.persisted === false) ? '' : 'none';
     renderPolicy();
   } catch(e) { console.error(e); }
   // policy-draft (G2): refresh the commit-mode toggle + pending-changes bar.
