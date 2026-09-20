@@ -3657,13 +3657,32 @@ either: `realUpstreamFor` rebuilds the shape locally with its own `RetryFreeLimi
 production client rather than of the production constructor.
 
 `TestCanaryPath_ProductionUpstreamClientIsBuiltFromRetryFreeLimits` closes it structurally —
-behaviour cannot reach this constructor, for the loopback reason above — and carries its own
-control (`..._RetryFreeWallIsNotVacuous`) requiring the predicate to REJECT each way the
-constructor could stop being retry-free, so a matcher typo or an `upstreamclient` rename fails the
-build rather than silently retiring the gate. Each link of the chain is now pinned somewhere: the
-production constructor takes its limits from `RetryFreeLimits` (this wall); `RetryFreeLimits`
-forces `MaxRedirects = 0` and `RetryDisabled` (`internal/mcp/upstreamclient/limits.go` + the gate
-above it); and the client honours both (`retryfree_test.go` and the HTTPS E2E).
+behaviour cannot reach this constructor, for the loopback reason above.
+
+**The first version of that wall was itself bypassable, and self-attack rather than review is what
+found it.** It required the constructor's body to mention `RetryFreeLimits` and to mention no other
+limits constructor — a DENY-LIST OF SPELLINGS. It killed the obvious swap, and it was defeated by
+keeping the `RetryFreeLimits` call and then assigning over its result from a local helper the
+deny-list cannot name (measured: the bypass PASSED). That is the same defect class the gate exists
+to close, one level up — *a check that enumerates the ways to be wrong is beaten by a way nobody
+enumerated.* The rule to carry forward: **a wall should follow the VALUE that is used, not the
+names that appear near it.**
+
+The shipped wall therefore starts at the `Limits` field of the `upstreamclient.Config` literal the
+constructor actually returns, takes the identifier bound there, and requires it to be bound EXACTLY
+ONCE, by a call to `RetryFreeLimits` on the upstreamclient package — resolved through the file's own
+import alias, so renaming the import cannot silently retire the gate either. Its control
+(`..._RetryFreeWallIsNotVacuous`) runs six rejection cases through the SAME predicate the gate runs,
+including the three that defeated the first version (swap, overwrite, overwrite-via-indirection) plus
+passing a different value and inlining a helper at the field; and it requires the wall to ACCEPT both
+the production form and an aliased-import form, because a wall nothing can satisfy gets deleted by
+the next person who touches the file. All three bypasses were re-run against the real production file
+and are CAUGHT.
+
+Each link of the chain is now pinned somewhere: the production constructor takes the limits it
+passes to `Config` from `RetryFreeLimits` (this wall); `RetryFreeLimits` forces `MaxRedirects = 0`
+and `RetryDisabled` (`internal/mcp/upstreamclient/limits.go` + the gate above it); and the client
+honours both (`retryfree_test.go` and the HTTPS E2E).
 
 **This is a blocker-#6 gate, repaired here because blocker #11's runtime half depends on it.** It
 was found by verifying this PR's own invariant against the code rather than by review — the same

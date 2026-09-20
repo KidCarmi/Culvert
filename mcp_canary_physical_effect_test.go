@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -83,11 +84,11 @@ func TestCanaryGate_MintsReservationIdentity(t *testing.T) {
 // RetryFreeLimits returns retry-free limits, and that newProductionUpstreamClient constructs
 // without error. Neither reaches the property its own doc comment names — that the client the
 // live tier actually uses is built retry-free. Swapping RetryFreeLimits for NewLimits inside
-// newProductionUpstreamClient reintroduces both transport retries AND redirects, and the gate
-// still passes; so does every other test in the canary and peer-freshness families (measured).
-// The E2E proofs cannot catch it either, because realUpstreamFor rebuilds the shape locally with
-// its own RetryFreeLimits call — they prove properties of a REPLICA of the production client, not
-// of the production constructor.
+// newProductionUpstreamClient reintroduces transport retries AND redirects, and that gate still
+// passes; so does every other test in the canary and peer-freshness families (measured). The E2E
+// proofs cannot catch it either, because realUpstreamFor rebuilds the shape locally with its own
+// RetryFreeLimits call — they prove properties of a REPLICA of the production client, not of the
+// production constructor.
 //
 // WHY IT IS LOAD-BEARING, AND FOR TWO BLOCKERS. Blocker #6 is "one accepted reservation, at most
 // one physical invocation" — retries and redirects each defeat it, and upstreamclient's own
@@ -97,88 +98,238 @@ func TestCanaryGate_MintsReservationIdentity(t *testing.T) {
 // peer-freshness re-ask and the first request byte holds because there is exactly ONE physical
 // send. PreSend is re-asked per leg and the TLS dialer site reaches every leg — but a redirect to
 // the SAME approved host can reuse a pooled connection, so it would not re-enter the dialer, and
-// the peer chooses when its 3xx arrives. With redirects forced off that is unreachable; without
-// that forcing it is the peer's to trigger.
+// the peer chooses when its 3xx arrives. With redirects forced off that is unreachable.
 //
-// WHAT THIS PINS, structurally rather than behaviourally: production code cannot be driven
-// against the controlled peer (DefaultGatewayPolicy refuses loopback, which is why the E2E relaxes
-// exactly that knob), so behaviour cannot reach this constructor. The chain each link of which is
-// gated elsewhere: this wall pins that the production constructor takes its limits from
-// RetryFreeLimits; RetryFreeLimits FORCES MaxRedirects=0 and RetryDisabled (gated above and in
-// internal/mcp/upstreamclient/limits.go); and the client honours both (internal/mcp/upstreamclient
-// /retryfree_test.go and the HTTPS E2E).
+// IT FOLLOWS THE VALUE, NOT THE NAMES, AND THE FIRST VERSION DID NOT. That version required the
+// body to mention RetryFreeLimits and to mention no other limits constructor. It killed the
+// obvious mutation and was still bypassable: keep the RetryFreeLimits call, then assign over its
+// result from a local helper the deny-set cannot name (measured — the bypass PASSED). A deny-list
+// of spellings can always be evaded by a new spelling, which is the same defect class this gate
+// exists to close, one level up. So the check now starts at the Limits field of the
+// upstreamclient.Config literal the constructor actually returns, takes the identifier bound
+// there, and requires that identifier to be bound EXACTLY ONCE in the function, by a call to
+// RetryFreeLimits on the upstreamclient package — resolved through the file's own import alias,
+// so renaming the import cannot silently retire the gate either.
+//
+// WHY STRUCTURAL: production code cannot be driven against the controlled peer
+// (DefaultGatewayPolicy refuses loopback, which is why the E2E relaxes exactly that knob), so
+// behaviour cannot reach this constructor. The chain, each link gated somewhere: this wall pins
+// that the constructor's limits come from RetryFreeLimits; RetryFreeLimits FORCES MaxRedirects=0
+// and RetryDisabled (the gate above, and internal/mcp/upstreamclient/limits.go); and the client
+// honours both (internal/mcp/upstreamclient/retryfree_test.go and the HTTPS E2E).
 func TestCanaryPath_ProductionUpstreamClientIsBuiltFromRetryFreeLimits(t *testing.T) {
-	body := productionUpstreamClientBody(t)
-	if !limitsAreRetryFree(body) {
-		t.Fatal("newProductionUpstreamClient must take its limits from upstreamclient.RetryFreeLimits " +
-			"and from nothing else. A client built from NewLimits/DefaultLimits carries transport " +
-			"retries AND redirects, so one accepted reservation can cause several physical tool " +
-			"invocations (blocker #6) and a peer-chosen 3xx can put a second send after the last " +
-			"peer-freshness re-ask on a pooled connection (blocker #11).")
+	const path = "mcp_live_production_deps.go"
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if why := retryFreeLimitsViolation(string(src)); why != "" {
+		t.Fatalf("newProductionUpstreamClient must take the limits it passes to upstreamclient.Config "+
+			"from upstreamclient.RetryFreeLimits, and must not rebind them: %s.\n\nA client built from "+
+			"any other limits carries transport retries AND redirects, so one accepted reservation can "+
+			"cause several physical tool invocations (blocker #6) and a peer-chosen 3xx can put a second "+
+			"send after the last peer-freshness re-ask on a pooled connection (blocker #11).", why)
 	}
 }
 
 // TestCanaryPath_RetryFreeWallIsNotVacuous is the CONTROL for the wall above.
 //
 // A selector that matched nothing would pass forever, which is the failure mode the wall exists to
-// remove. It requires the same predicate to REJECT each way the production constructor could stop
-// being retry-free — so a typo in the matcher, or a rename in upstreamclient, fails the build here
-// rather than silently retiring the gate.
+// remove. Each case below is a way the constructor could stop being retry-free; every one must be
+// REJECTED. The last two are not hypothetical — they are the bypasses that defeated the first
+// version of this wall, kept here so the weaker predicate cannot come back.
 func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
-	for _, bad := range []struct{ name, src string }{
-		{"NewLimits", "lim, err := upstreamclient.NewLimits(upstreamclient.LimitConfig{})"},
-		{"DefaultLimits", "lim := upstreamclient.DefaultLimits()"},
-		{"no limits call at all", "lim := someOtherLimits()"},
+	for _, bad := range []struct{ name, body string }{
+		{"NewLimits instead", `lim, _ := upstreamclient.NewLimits(upstreamclient.LimitConfig{})
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"DefaultLimits instead", `lim := upstreamclient.DefaultLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"retry-free called, result overwritten", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	lim = upstreamclient.DefaultLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"retry-free called, result replaced via an indirection", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	lim = tunedUpstreamLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"retry-free called but a different value is passed", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	other := tunedUpstreamLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: other}, limits.DefaultGateway())`},
+		{"limits inlined from a helper", `return upstreamclient.New(upstreamclient.Config{Limits: tunedUpstreamLimits()}, limits.DefaultGateway())`},
 	} {
-		if limitsAreRetryFree(bad.src) {
-			t.Fatalf("the retry-free wall must reject %s; it accepted %q", bad.name, bad.src)
+		if why := retryFreeLimitsViolation(synthProductionDeps(bad.body)); why == "" {
+			t.Fatalf("the retry-free wall must reject %q; it accepted it", bad.name)
 		}
 	}
-	// And it must ACCEPT the real thing, or the gate above is unfalsifiable in the other direction.
-	if !limitsAreRetryFree("lim, lerr := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})") {
-		t.Fatal("the retry-free wall must accept the production form")
+	// It must ACCEPT the real shape, and the aliased-import form, or it is unfalsifiable the other
+	// way: a wall nothing can satisfy gets deleted by the next person who touches the file.
+	good := `lim, lerr := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	if lerr != nil {
+		return nil, lerr
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`
+	if why := retryFreeLimitsViolation(synthProductionDeps(good)); why != "" {
+		t.Fatalf("the retry-free wall must accept the production form, rejected: %s", why)
+	}
+	aliased := strings.ReplaceAll(good, "upstreamclient.", "uc.")
+	src := strings.Replace(synthProductionDeps(aliased),
+		`"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"`,
+		`uc "github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"`, 1)
+	if why := retryFreeLimitsViolation(src); why != "" {
+		t.Fatalf("the retry-free wall must follow the file's import alias, rejected: %s", why)
 	}
 }
 
-// limitsAreRetryFree reports whether src takes its upstream limits from RetryFreeLimits and from
-// no other limits constructor. Both halves matter: a body that called RetryFreeLimits and then
-// overwrote lim from NewLimits would satisfy a presence-only check.
-func limitsAreRetryFree(src string) bool {
-	if !strings.Contains(src, "upstreamclient.RetryFreeLimits(") {
-		return false
-	}
-	for _, other := range []string{"upstreamclient.NewLimits(", "upstreamclient.DefaultLimits("} {
-		if strings.Contains(src, other) {
-			return false
-		}
-	}
-	return true
+// synthProductionDeps wraps a function body in a minimal file shaped like the real one, so the
+// control exercises the SAME predicate the gate runs rather than a paraphrase of it.
+func synthProductionDeps(body string) string {
+	return "package main\n\nimport (\n\t\"github.com/KidCarmi/Culvert/internal/mcp/limits\"\n" +
+		"\t\"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient\"\n)\n\n" +
+		"func newProductionUpstreamClient() (*upstreamclient.Client, error) {\n\t" + body + "\n}\n"
 }
 
-// productionUpstreamClientBody returns the source text of newProductionUpstreamClient, located by
-// parsing the file rather than by matching line numbers, so moving the function does not retire
-// the wall.
-func productionUpstreamClientBody(t *testing.T) string {
-	t.Helper()
-	const path = "mcp_live_production_deps.go"
-	src, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
+const (
+	upstreamClientPkgPath = "github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+	retryFreeLimitsFunc   = "RetryFreeLimits"
+)
+
+// retryFreeLimitsViolation returns "" when newProductionUpstreamClient in src passes
+// upstreamclient.Config a Limits value that is bound exactly once, by a call to
+// upstreamclient.RetryFreeLimits. Otherwise it returns the reason it is not sound.
+//
+// It works backwards from the VALUE that is actually used, which is what makes it robust against a
+// bypass that merely adds a new name: whatever the body mentions, the Limits field must still
+// resolve to the retry-free binding.
+func retryFreeLimitsViolation(src string) string {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, src, 0)
+	f, err := parser.ParseFile(fset, "src.go", src, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+		return "source does not parse: " + err.Error()
 	}
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "newProductionUpstreamClient" || fn.Body == nil {
+	pkg := upstreamClientAlias(f)
+	if pkg == "" {
+		return "the file does not import " + upstreamClientPkgPath
+	}
+	fn := findFunc(f, "newProductionUpstreamClient")
+	if fn == nil {
+		return "newProductionUpstreamClient not found — if it was renamed or moved, point this wall " +
+			"at its new home rather than deleting it: it is the only gate connecting the live tier's " +
+			"client to the retry-free (and therefore redirect-free) shape"
+	}
+	limitsExpr := configLimitsExpr(fn, pkg)
+	if limitsExpr == nil {
+		return "no upstreamclient.Config literal with a Limits field was found"
+	}
+	ident, ok := limitsExpr.(*ast.Ident)
+	if !ok {
+		return "the Limits field is not a plain identifier, so its binding cannot be followed; pass a " +
+			"variable bound from " + retryFreeLimitsFunc
+	}
+	bindings := bindingsOf(fn, ident.Name)
+	if len(bindings) == 0 {
+		return "the Limits identifier " + ident.Name + " is never bound in this function"
+	}
+	if len(bindings) > 1 {
+		return "the Limits identifier " + ident.Name + " is bound more than once, so the retry-free " +
+			"binding can be overwritten before it is used"
+	}
+	if !isCallTo(bindings[0], pkg, retryFreeLimitsFunc) {
+		return "the Limits identifier " + ident.Name + " is not bound by " + pkg + "." + retryFreeLimitsFunc
+	}
+	return ""
+}
+
+// upstreamClientAlias reports the name upstreamclient is imported under in f, honouring an alias.
+func upstreamClientAlias(f *ast.File) string {
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != upstreamClientPkgPath {
 			continue
 		}
-		return string(src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return "upstreamclient"
 	}
-	t.Fatal("newProductionUpstreamClient not found in " + path + " — if it was renamed or moved, " +
-		"point this wall at its new home rather than deleting it: it is the only gate connecting " +
-		"the live tier's client to the retry-free (and therefore redirect-free) shape.")
 	return ""
+}
+
+func findFunc(f *ast.File, name string) *ast.FuncDecl {
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == name && fn.Body != nil {
+			return fn
+		}
+	}
+	return nil
+}
+
+// configLimitsExpr returns the expression assigned to the Limits field of the first
+// <pkg>.Config composite literal in fn.
+func configLimitsExpr(fn *ast.FuncDecl, pkg string) (out ast.Expr) {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if out != nil {
+			return false
+		}
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := lit.Type.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Config" {
+			return true
+		}
+		if x, ok := sel.X.(*ast.Ident); !ok || x.Name != pkg {
+			return true
+		}
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Limits" {
+				out = kv.Value
+				return false
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// bindingsOf returns every right-hand side that binds name in fn (:= and = alike), so a rebinding
+// after the retry-free call is visible rather than hidden behind the first one.
+func bindingsOf(fn *ast.FuncDecl, name string) []ast.Expr {
+	var out []ast.Expr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range as.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok || id.Name != name {
+				continue
+			}
+			// A multi-value call (lim, err := f()) binds every LHS from the one RHS call.
+			if len(as.Rhs) == 1 {
+				out = append(out, as.Rhs[0])
+			} else if i < len(as.Rhs) {
+				out = append(out, as.Rhs[i])
+			}
+		}
+		return true
+	})
+	return out
+}
+
+func isCallTo(e ast.Expr, pkg, fn string) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != fn {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == pkg
 }
