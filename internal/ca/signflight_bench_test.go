@@ -50,7 +50,11 @@ func getCertLegacy(cm *Manager, hello *tls.ClientHelloInfo) (*tls.Certificate, e
 	if SignLatencyObserver != nil {
 		SignLatencyObserver(time.Since(signStart).Seconds())
 	}
-	cm.storeLeaf(host, cert, now)
+	// The pre-fix body had no generation fence, so it stored unconditionally.
+	// Passing the CURRENT generation reproduces that exactly (the check cannot
+	// fail), which keeps this a faithful frozen copy rather than a copy that
+	// quietly inherits the fix it is the baseline for.
+	cm.storeLeaf(host, cert, cm.caGen.Load(), now)
 	return cert, nil
 }
 

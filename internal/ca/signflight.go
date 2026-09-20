@@ -98,9 +98,30 @@ type signFlight struct {
 // signFlightState is embedded in Manager. It is deliberately a separate struct
 // so the ordering rule above is local: nothing outside this file touches
 // flightMu.
+// flightKey scopes a flight to the CA GENERATION it was opened under, not to
+// the host alone.
+//
+// Keying by host alone was a correctness regression, and a subtle one, because
+// it only bites when a CA replacement overlaps an in-flight sign. A caller
+// arriving AFTER the replacement found the cache cleared, missed, reached
+// signOnce, and joined the flight a pre-replacement leader had already opened
+// against the OUTGOING CA — so it was handed a leaf that a client trusting only
+// the incoming CA rejects. Before the single flight existed that same caller
+// signed for itself and got a correct leaf, so this was work the collapsing
+// newly broke rather than a pre-existing race. Reproduced directly in
+// TestCAGeneration_PostReplacementCallerDoesNotJoinAnOldFlight, which fails
+// against the host-only key.
+//
+// Generations never join each other, and each leader cleans up its own key, so
+// a replacement needs no flight-map surgery and no lock ordering against mu.
+type flightKey struct {
+	gen  uint64
+	host string
+}
+
 type signFlightState struct {
 	flightMu sync.Mutex
-	flights  map[string]*signFlight
+	flights  map[flightKey]*signFlight
 
 	// signFlightsJoined counts misses served by joining an in-progress flight —
 	// i.e. the signs that did NOT happen. Lock-free; no identity data.
@@ -121,6 +142,10 @@ func (cm *Manager) SignFlightsJoined() int64 { return cm.signFlightsJoined.Load(
 // for the same host onto ONE sign. The caller has already probed the cache and
 // charged the miss.
 func (cm *Manager) signOnce(host string) (*tls.Certificate, error) {
+	// Read the generation BEFORE the flight is opened, so a replacement that
+	// lands from here on is guaranteed to be observed by the store below.
+	key := flightKey{gen: cm.caGen.Load(), host: host}
+
 	cm.flightMu.Lock()
 	// Invariant 3: re-check under flightMu. The caller's probe is already stale
 	// by the time we get here if a leader finished in between, and signing again
@@ -131,7 +156,7 @@ func (cm *Manager) signOnce(host string) (*tls.Certificate, error) {
 		cm.flightMu.Unlock()
 		return cert, nil
 	}
-	if f, ok := cm.flights[host]; ok {
+	if f, ok := cm.flights[key]; ok {
 		cm.flightMu.Unlock()
 		cm.signFlightsJoined.Add(1)
 		<-f.done // invariant 2: no timer
@@ -139,9 +164,9 @@ func (cm *Manager) signOnce(host string) (*tls.Certificate, error) {
 	}
 	f := &signFlight{done: make(chan struct{})}
 	if cm.flights == nil {
-		cm.flights = make(map[string]*signFlight)
+		cm.flights = make(map[flightKey]*signFlight)
 	}
-	cm.flights[host] = f
+	cm.flights[key] = f
 	cm.flightMu.Unlock()
 
 	// Invariant 1: publish on every exit path, panic included.
@@ -153,8 +178,8 @@ func (cm *Manager) signOnce(host string) (*tls.Certificate, error) {
 		// Compare identity, not presence: a ClearCache/rotation between our
 		// registration and here cannot replace the entry, but deleting by key
 		// alone would be a latent way to evict a successor's flight.
-		if cur, ok := cm.flights[host]; ok && cur == f {
-			delete(cm.flights, host)
+		if cur, ok := cm.flights[key]; ok && cur == f {
+			delete(cm.flights, key)
 		}
 		cm.flightMu.Unlock()
 		close(f.done)
@@ -179,7 +204,12 @@ func (cm *Manager) signOnce(host string) (*tls.Certificate, error) {
 	if SignLatencyObserver != nil {
 		SignLatencyObserver(time.Since(now).Seconds())
 	}
-	cm.storeLeaf(host, cert, now)
+	// storeLeaf drops the result if key.gen has been retired meanwhile — see
+	// resetLeafCacheLocked. The certificate is still returned to this caller
+	// and to the followers that joined this same generation: they were all
+	// already committed to this sign when the replacement landed, which is
+	// exactly where they stood before the single flight existed.
+	cm.storeLeaf(host, cert, key.gen, now)
 	f.cert = cert
 	return cert, nil
 }

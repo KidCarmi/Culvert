@@ -231,6 +231,25 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- A leaf-certificate sign already in flight could outlive the CA it was started
+  against. Replacing the root CA (`InitCA`, `ImportBundle`, `LoadCustomCA`, and
+  `ClearCache`) cleared the leaf cache, which is not sufficient on its own: a
+  sign that began before the replacement was still running against the outgoing
+  CA, and when it completed it repopulated the just-cleared cache with that
+  outgoing CA's leaf — served to every client for the full one-hour cache TTL,
+  and rejected by any client that trusts only the newly installed CA. A CA
+  replacement is exactly the moment an operator expects the old CA to stop
+  being used. The cache now carries a CA *generation* retired in the same
+  locked step that clears it, a sign records the generation it started under,
+  and a result whose generation has been retired is dropped rather than cached;
+  a new CA-install path that cleared the cache without retiring the generation
+  would silently reintroduce this, so that is pinned structurally rather than
+  behaviourally. Found by Codex review on the leaf-sign single flight above,
+  which briefly widened the same window: a caller arriving *after* the
+  replacement could join the pre-replacement sign and be handed its leaf, where
+  previously it would have signed against the new CA itself. Flights are now
+  scoped to the generation, so generations never join each other.
+
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,

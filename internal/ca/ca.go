@@ -102,6 +102,12 @@ type Manager struct {
 	cache      map[string]*certCacheEntry
 	cacheOrder []string // insertion order for LRU eviction
 
+	// caGen identifies the installed CA. It is retired (incremented) by
+	// resetLeafCacheLocked on every CA replacement, and is what keeps an
+	// in-flight sign from outliving the CA it was started against. Lock-free
+	// for readers; written only under mu.
+	caGen atomic.Uint64
+
 	// signFlightState collapses concurrent misses for one host onto one sign.
 	// It carries its OWN mutex and is never touched while mu is held — see the
 	// lock-order note in signflight.go.
@@ -185,8 +191,7 @@ func (cm *Manager) InitCA() error {
 	cm.mu.Lock()
 	cm.caCert = cert
 	cm.caKey = key
-	cm.cache = map[string]*certCacheEntry{}
-	cm.cacheOrder = nil // clear leaf cache on CA change
+	cm.resetLeafCacheLocked()
 	cm.mu.Unlock()
 	if CAChangedObserver != nil {
 		CAChangedObserver()
@@ -324,8 +329,7 @@ func (cm *Manager) ImportBundle(data []byte) error {
 	cm.mu.Lock()
 	cm.caCert = cert
 	cm.caKey = key
-	cm.cache = map[string]*certCacheEntry{}
-	cm.cacheOrder = nil
+	cm.resetLeafCacheLocked()
 	cm.mu.Unlock()
 	return nil
 }
@@ -483,8 +487,7 @@ func (cm *Manager) LoadCustomCA(certPEM, keyPEM []byte) error {
 	cm.mu.Lock()
 	cm.caCert = x509Cert
 	cm.caKey = ecKey
-	cm.cache = map[string]*certCacheEntry{}
-	cm.cacheOrder = nil
+	cm.resetLeafCacheLocked()
 	cm.mu.Unlock()
 	if CAChangedObserver != nil {
 		CAChangedObserver()
@@ -749,9 +752,18 @@ func (cm *Manager) cachedLeaf(host string, now time.Time) (*tls.Certificate, boo
 
 // storeLeaf installs a freshly signed leaf and runs LRU eviction. It is the
 // write half of GetCert, unchanged in behaviour.
-func (cm *Manager) storeLeaf(host string, cert *tls.Certificate, now time.Time) {
+func (cm *Manager) storeLeaf(host string, cert *tls.Certificate, gen uint64, now time.Time) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
+	// A CA replacement retired this sign's generation while it was running, so
+	// the leaf may be signed by the outgoing CA. Caching it would repopulate
+	// the cache that the replacement had just cleared, and serve the outgoing
+	// CA's leaf to every client for the full certCacheTTL. Drop it instead: the
+	// next miss signs against the incoming CA. The cost is one wasted sign
+	// during an admin CA change, which is the right side to err on.
+	if cm.caGen.Load() != gen {
+		return
+	}
 	// Track eviction order only for a host that is NOT already tracked
 	// (CHAOS-28). Appending unconditionally leaked: a TTL-expired REFRESH
 	// overwrites the map entry, so len(cache) does not change, the eviction
@@ -788,6 +800,29 @@ func (cm *Manager) storeLeaf(host string, cert *tls.Certificate, now time.Time) 
 	}
 }
 
+// resetLeafCacheLocked drops every cached leaf and RETIRES the current CA
+// generation. Callers must hold mu.
+//
+// The two halves are inseparable and that is the whole point of this helper
+// existing rather than four open-coded map assignments. Clearing the cache
+// alone is not enough to make a CA replacement take effect: a leaf sign that is
+// already in flight was started against the OUTGOING CA, and without the
+// generation bump a caller arriving AFTER the replacement would join that
+// flight and be handed the outgoing CA's leaf — which a client that trusts only
+// the incoming CA rejects — and the leader would then repopulate the
+// just-cleared cache with it for the full certCacheTTL. Bumping the generation
+// makes both impossible: post-replacement callers cannot join a pre-replacement
+// flight, and a leader whose generation has been retired does not store its
+// result. See signflight.go.
+//
+// Every site that installs or replaces a CA must go through here; that is
+// pinned structurally by TestCAGeneration_EveryCacheResetRetiresTheGeneration.
+func (cm *Manager) resetLeafCacheLocked() {
+	cm.cache = map[string]*certCacheEntry{}
+	cm.cacheOrder = nil
+	cm.caGen.Add(1)
+}
+
 // CertCacheLen returns the current number of cached leaf certificates (testing).
 func (cm *Manager) CertCacheLen() int {
 	cm.mu.RLock()
@@ -807,8 +842,7 @@ func (cm *Manager) CacheStats() (hits, misses int64, size int) {
 // ClearCache removes all cached leaf certificates.
 func (cm *Manager) ClearCache() {
 	cm.mu.Lock()
-	cm.cache = make(map[string]*certCacheEntry)
-	cm.cacheOrder = nil
+	cm.resetLeafCacheLocked()
 	cm.mu.Unlock()
 }
 
