@@ -1,8 +1,8 @@
 openapi: 3.0.4
 info:
   title: Culvert Admin API
-  version: 2.0.0
-  x-culvert-api-contract-version: 2.0.0
+  version: 2.1.0
+  x-culvert-api-contract-version: 2.1.0
   description: |
     Machine-readable contract for the Culvert admin/control-plane REST API served
     on the UI port (`-ui-port`, default 9090).
@@ -6080,7 +6080,7 @@ paths:
       x-culvert-tenant-scope: appliance
       x-culvert-stability: stable
       x-culvert-idempotency: safe
-      x-culvert-introduced-version: 1.0.0
+      x-culvert-introduced-version: 2.1.0
       responses:
         '200':
           description: Traffic-log destination-privacy posture.
@@ -6101,7 +6101,7 @@ paths:
       x-culvert-tenant-scope: appliance
       x-culvert-stability: stable
       x-culvert-idempotency: idempotent
-      x-culvert-introduced-version: 1.0.0
+      x-culvert-introduced-version: 2.1.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: decryption.redaction.set
       requestBody:
