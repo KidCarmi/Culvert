@@ -20,6 +20,9 @@
 ##        · qa-coverage     — enforces a minimum gate-critical coverage floor
 ##                            on the security-sensitive packages (totp, auth,
 ##                            session, SSRF helpers). Red = gap in coverage.
+##                            It runs NO tests: since CI-REDESIGN stage 2A the
+##                            profile is produced by qa-logic's race run and
+##                            this job only enforces the floors on it.
 ##        · qa-infra-compose — builds the Docker image in isolation and brings
 ##                            up docker-compose.yml WITHOUT the application
 ##                            depending on it. Red = container/orchestration
@@ -31,11 +34,18 @@
 ##                            default policy, on-disk user schema) still parse.
 ##                            Red = on-disk contract broken for operators.
 ##
-##      These layers are INDEPENDENT: none consumes an output or an artifact
-##      from another, so they are all scheduled in parallel (CI-REDESIGN
-##      stage 1) and each carries its own PR-skip condition. A qa-logic
-##      failure therefore no longer suppresses its siblings — it still fails
-##      the aggregate below.
+##      These layers are INDEPENDENT with exactly ONE exception, and the
+##      exception is real rather than incidental: qa-coverage consumes the
+##      coverage profile qa-logic publishes (stage 2A), so it genuinely
+##      cannot start earlier. Every other job is scheduled in parallel
+##      (stage 1) and each carries its own PR-skip condition, so a qa-logic
+##      failure suppresses only qa-coverage — and still fails the aggregate
+##      below, which needs all eight.
+##
+##      Do not add a `needs:` edge here for ordering alone. Stage 1 removed
+##      six that bought nothing but serialised the longest job in front of
+##      every one of them; the surviving edge exists because an artifact
+##      crosses it.
 ##
 ##   2. Every job writes a JUnit-style or step-summary report so failures are
 ##      visible without digging into raw logs.
@@ -78,10 +88,11 @@ jobs:
     # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the
     # Fast/Deep PR Gates; full behavior retained on main pushes and on
     # workflow_dispatch (this workflow has NO tag trigger — see the `on:` block).
-    # No other job depends on this one any more (CI-REDESIGN stage 1): every
-    # sibling carries the same PR-skip condition explicitly rather than
-    # inheriting it by cascade. The aggregate below treats skipped as pass so
-    # the required-check name keeps reporting.
+    # Exactly ONE job depends on this one — qa-coverage, for the coverage
+    # profile published below (CI-REDESIGN stage 2A). Every other sibling is
+    # independent and carries the same PR-skip condition explicitly rather
+    # than inheriting it by cascade (stage 1). The aggregate below treats
+    # skipped as pass so the required-check name keeps reporting.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 50  # > the 40m per-binary test budget below (compile + tee + upload)
@@ -99,9 +110,16 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: Unit + integration tests (race detector, fixed seed)
+      - name: Unit + integration tests (race detector, fixed seed, coverage)
         # Single-seed, single-shuffle run with the race detector. Owners of a
         # failure here MUST treat it as a logic regression, not a flake.
+        #
+        # CI-REDESIGN stage 2A: this run now ALSO produces the coverage profile
+        # the `qa-coverage` job enforces the floors on. Before, `qa-coverage`
+        # ran the whole suite a SECOND time (non-race, no -v, 15m budget) purely
+        # to instrument it — the same tests, the same seed, twice per main push.
+        # `-coverprofile` is additive here: it changes no package scope, no test
+        # selection and no flag this step already carried.
         env:
           # Deterministic RNG seed for tests that use math/rand so reruns are
           # byte-for-byte reproducible. Any test reading TEST_SEED should feed
@@ -126,8 +144,46 @@ jobs:
           # against 1500s; this run of the suite already takes 24m35s end to
           # end). The two budgets move together. A genuinely hung test still
           # fails, later.
-          go test -race -count=1 -timeout=40m -v ./... \
+          #
+          # -coverprofile is placed BEFORE the package list on purpose: `go test`
+          # treats arguments after the packages as arguments to the test BINARY,
+          # so a trailing -coverprofile would be silently handed to the tests
+          # instead of the tool. It also implies -cover, which instruments only
+          # the packages being tested — identical scope to the second run this
+          # replaces. `-race` forces -covermode=atomic (set mode is not
+          # race-safe), so the profile's counts are real counts rather than 0/1;
+          # `go tool cover` treats any count > 0 as covered, so the PERCENTAGES
+          # the floors are computed from are unaffected. Do not "fix" that by
+          # forcing -covermode=set: it would be ignored under -race anyway.
+          go test -race -count=1 -timeout=40m -coverprofile=coverage.out -v ./... \
             2>&1 | tee qa-reports/logic.log
+
+      - name: Assert the coverage profile is usable
+        # Fail CLOSED at the PRODUCER. A green qa-logic that published no usable
+        # profile would let `qa-coverage` enforce floors on nothing, so the
+        # evidence is checked here, where the file is still local, rather than
+        # trusted downstream. `go test` can exit 0 having written a profile that
+        # carries only its `mode:` header if no package was instrumented.
+        run: |
+          set -euo pipefail
+          test -s coverage.out || { echo "::error::coverage.out missing or empty after the race run"; exit 1; }
+          head -n1 coverage.out | grep -q '^mode:' || { echo "::error::coverage.out has no mode line — not a coverage profile"; exit 1; }
+          lines=$(($(wc -l < coverage.out) - 1))
+          [ "$lines" -gt 0 ] || { echo "::error::coverage.out carries a mode line and no statements"; exit 1; }
+          echo "coverage profile: $lines statement blocks, $(head -n1 coverage.out)"
+
+      - name: Upload coverage
+        # The ONE producer of the `qa-coverage` artifact (stage 2A). Name, path
+        # and 30-day retention are carried over verbatim from the job that used
+        # to produce it, so anything consuming this artifact by name is
+        # unaffected. if-no-files-found:error keeps a vanished profile a FAILURE
+        # rather than a silently absent artifact and a green gate.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-coverage
+          path: coverage.out
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Upload logic test reports
         if: always()
@@ -190,37 +246,65 @@ jobs:
   # Coverage floor is enforced on the SECURITY-SENSITIVE surface specifically.
   # A global 55% number from security-release-gate.yml is a health metric; this
   # gate enforces that the blast-radius files stay well above it.
+  #
+  # CI-REDESIGN stage 2A: this job no longer RUNS the suite. It used to execute
+  # the whole `./...` suite a second time (non-race, 15m budget) with the same
+  # TEST_SEED, purely to instrument what qa-logic had already executed. The
+  # profile now comes from qa-logic's race run and this job only ENFORCES the
+  # floors on it, so the duplicate execution is gone while the floor table, its
+  # calculation and its blast-radius scope are byte-identical.
+  #
+  # This is the ONE dependency between substantive jobs (stage 1 removed six
+  # that bought nothing). It is deliberate and narrow: this job consumes
+  # qa-logic's ARTIFACT, so it genuinely cannot start before it. Every other
+  # job stays independent.
   qa-coverage:
     name: "QA · Gate-critical coverage floor"
-    # Independent layer: consumes no output or artifact from qa-logic, so it is
-    # scheduled in parallel with it rather than behind it (CI-REDESIGN stage 1).
-    # The PR-time skip that `needs: qa-logic` used to cascade is now stated here
-    # explicitly — the aggregate still treats a skipped job as a pass.
+    # `needs:` is the artifact dependency, NOT a scheduling preference. It also
+    # makes the gate fail closed in the direction that matters: a failed
+    # qa-logic publishes no profile, this job never runs, and the aggregate
+    # refuses on qa-logic's own result. The PR-skip stays stated explicitly so
+    # the condition does not depend on the cascade (stage 1's rule).
+    needs: qa-logic
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # `go tool cover -func` resolves each profile line's import path to a
+      # source file, so the checkout above and a Go toolchain are both still
+      # required even though no test runs here.
       - uses: ./.github/actions/setup-go-cache
 
-      - name: Run tests with coverage
-        env:
-          TEST_SEED: "20260421"   # same seed as qa-logic — coverage %s must not wobble around the floors between reruns
-        run: go test -count=1 -timeout=15m -coverprofile=coverage.out ./...
+      - name: Download coverage profile from qa-logic
+        # No `run-id`/`github-token`: without them actions/download-artifact
+        # reads ONLY the current workflow run, so a floor can never be enforced
+        # against some other run's profile. Do not add them.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qa-coverage
+
+      - name: Assert the downloaded profile is usable
+        # The producer already checked this; re-checking here is not redundant.
+        # Between the two, the profile crosses the artifact service, and the
+        # failure this catches — a truncated or empty download — would otherwise
+        # reach `go tool cover` as an unparsable file and could only be read out
+        # of a stack trace. Fail closed, with the reason named.
+        run: |
+          set -euo pipefail
+          test -s coverage.out || { echo "::error::no coverage profile from qa-logic (missing or empty after download)"; exit 1; }
+          head -n1 coverage.out | grep -q '^mode:' || { echo "::error::downloaded coverage.out has no mode line — transfer corrupted or not a profile"; exit 1; }
+          lines=$(($(wc -l < coverage.out) - 1))
+          [ "$lines" -gt 0 ] || { echo "::error::downloaded coverage.out carries a mode line and no statements"; exit 1; }
+          echo "coverage profile: $lines statement blocks, $(head -n1 coverage.out)"
 
       - name: Enforce coverage floors (global + per-file)
         # Shared with the Fast PR Gate — floors live in
         # .github/scripts/coverage-floor.sh (one table, two event paths).
+        # UNCHANGED by stage 2A: same script, same global floor, same per-file
+        # table, same averaging. Only where the profile came from moved.
         run: .github/scripts/coverage-floor.sh coverage.out
-
-      - name: Upload coverage
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: qa-coverage
-          path: coverage.out
-          retention-days: 30
 
   # ─── D. Docker Compose infra gate ──────────────────────────────────────────
   # Runs the compose stack INDEPENDENTLY of the Go test run — in PARALLEL with
@@ -594,8 +678,11 @@ jobs:
     # so a branch-protection rule requiring it can never wedge a PR at
     # "Expected". On main pushes and workflow_dispatch all eight substantive
     # jobs run and failure/cancellation of ANY of them fails the gate as before —
-    # including a qa-logic failure, which no longer prevents its former
-    # dependents from running but still refuses this approval.
+    # including a qa-logic failure, which still refuses this approval. A failed
+    # qa-logic now SKIPS qa-coverage (it publishes no profile to enforce against)
+    # and this aggregate reads that skip as a pass — which is correct only
+    # because qa-logic's own `failure` is in the same `needs` set and refuses
+    # on its own. Never drop qa-logic from that set.
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -615,7 +702,7 @@ jobs:
           |-------|-----|--------|
           | Application logic | qa-logic | ✅ |
           | Determinism       | qa-determinism | ✅ |
-          | Coverage floor    | qa-coverage | ✅ |
+          | Coverage floor    | qa-coverage (floors on qa-logic's profile) | ✅ |
           | Infra (Docker Compose) | qa-infra-compose | ✅ |
           | OS / environment  | qa-os | ✅ |
           | On-disk contract  | qa-contract | ✅ |
@@ -630,4 +717,7 @@ jobs:
             build-environment is the problem — not the application.
           - `qa-determinism` failures are flakes or order-dependent tests;
             they must be pinned, not retried away.
+          - `qa-coverage` runs no tests. A red there is a real floor breach in
+            the profile `qa-logic` produced, not a second test run disagreeing
+            with the first.
           EOF
