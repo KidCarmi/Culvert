@@ -1858,54 +1858,63 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if body.Addr == "" {
-			// Disable syslog.
-			releaseSyslogWriter(setActiveSyslog(nil))
-			resetSyslogFeedHealthForTest()
-			syslogConfigured = ""
-			syslogConfiguredAddr = ""
-			auditEvent(r, "settings.syslog", "disabled", "")
-			adminSettingsSave()
-			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
+			disableSyslogForwarding(w, r)
 			return
 		}
-		// Validate the operator's TYPED target BEFORE touching the live
-		// forwarder, then install a SELF-HEALING writer (CHAOS-66).
-		//
-		// The two halves used to be one act: InitSyslog's first dial both
-		// validated the input and decided whether forwarding existed at all.
-		// That is why a transient collector outage meant forwarding was off
-		// for the life of the process. Separating them keeps the useful half
-		// (a typo is refused up front, and a refusal leaves the PREVIOUS
-		// working target in place — probing before installing is what makes
-		// that true) and drops the harmful half.
-		probeCtx, cancelProbe := context.WithTimeout(r.Context(), syslogProbeBudget)
-		network, target := parseSyslogAddr(body.Addr)
-		_, probeErr := syslog.ProbeTarget(probeCtx, network, target, body.Format)
-		cancelProbe()
-		if probeErr != nil {
-			http.Error(w, "syslog connect error: "+probeErr.Error(), http.StatusBadRequest)
-			return
-		}
-		resetSyslogFeedHealthForTest()
-		if err := InitSyslogResilient(body.Addr, body.Format); err != nil {
-			// The probe just succeeded, so this is a fresh transient fault.
-			// The writer IS installed and armed; say so rather than failing a
-			// request whose effect has already taken hold.
-			logger.Printf("Syslog: target accepted but the initial connect failed (%v) — forwarding is armed and will retry", err)
-		}
-		sw := activeSyslog()
-		if sw == nil { // unreachable: InitSyslogResilient always installs
-			http.Error(w, "syslog install failed", http.StatusInternalServerError)
-			return
-		}
-		syslogConfigured = body.Addr
-		syslogConfiguredAddr = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+sw.Format()+")")
-		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": sw.Format(), "deliveryVerifiable": sw.DeliveryVerifiable()})
+		applySyslogTarget(w, r, body.Addr, body.Format)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// disableSyslogForwarding turns remote forwarding off and releases the live
+// writer (which closes its drain goroutine and collector connection — see
+// releaseSyslogWriter).
+func disableSyslogForwarding(w http.ResponseWriter, r *http.Request) {
+	releaseSyslogWriter(setActiveSyslog(nil))
+	resetSyslogFeedHealthForTest()
+	syslogConfigured = ""
+	syslogConfiguredAddr = ""
+	auditEvent(r, "settings.syslog", "disabled", "")
+	adminSettingsSave()
+	jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
+}
+
+// applySyslogTarget validates the operator's TYPED target BEFORE touching the
+// live forwarder, then installs a SELF-HEALING writer (CHAOS-66).
+//
+// The two halves used to be one act: InitSyslog's first dial both validated
+// the input and decided whether forwarding existed at all. That is why a
+// transient collector outage meant forwarding was off for the life of the
+// process. Separating them keeps the useful half — a typo is refused up front,
+// and a refusal leaves the PREVIOUS working target in place, which is exactly
+// what probing before installing buys — and drops the harmful half.
+func applySyslogTarget(w http.ResponseWriter, r *http.Request, addr, format string) {
+	probeCtx, cancelProbe := context.WithTimeout(r.Context(), syslogProbeBudget)
+	network, target := parseSyslogAddr(addr)
+	_, probeErr := syslog.ProbeTarget(probeCtx, network, target, format)
+	cancelProbe()
+	if probeErr != nil {
+		http.Error(w, "syslog connect error: "+probeErr.Error(), http.StatusBadRequest)
+		return
+	}
+	resetSyslogFeedHealthForTest()
+	if err := InitSyslogResilient(addr, format); err != nil {
+		// The probe just succeeded, so this is a fresh transient fault. The
+		// writer IS installed and armed, so say so rather than failing a
+		// request whose effect has already taken hold.
+		logger.Printf("Syslog: target accepted but the initial connect failed (%q) — forwarding is armed and will retry", sanitizeLog(err.Error()))
+	}
+	sw := activeSyslog()
+	if sw == nil { // unreachable: InitSyslogResilient always installs
+		http.Error(w, "syslog install failed", http.StatusInternalServerError)
+		return
+	}
+	syslogConfigured = addr
+	syslogConfiguredAddr = addr
+	auditEvent(r, "settings.syslog", addr, "syslog forwarding enabled (format="+sw.Format()+")")
+	adminSettingsSave()
+	jsonOK(w, map[string]any{"ok": true, "addr": addr, "format": sw.Format(), "deliveryVerifiable": sw.DeliveryVerifiable()})
 }
 
 // POST /api/syslog/test — send a test message to the configured syslog target.

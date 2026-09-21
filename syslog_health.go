@@ -202,7 +202,7 @@ func noteSyslogDeliveryFailed(sw *syslogWriter, reason string, now time.Time) {
 		// The CAUSE (which embeds the collector address and the ephemeral local
 		// port) goes here and nowhere else — never to the alert Detail, never
 		// to the viewer-role contract row.
-		logger.Printf("WARN syslog: SIEM delivery failing (reason=%s, for=%s, dropped=%d, cause=%q) — audit and request-log entries are not reaching the collector",
+		logger.Printf("WARN syslog: SIEM delivery failing (reason=%q, for=%s, dropped=%d, cause=%q) — audit and request-log entries are not reaching the collector",
 			sanitizeLog(reason), failingFor.Round(time.Second), sw.Drops(), sanitizeLog(sw.LastCause()))
 	}
 	if alertNow {

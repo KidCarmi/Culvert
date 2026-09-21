@@ -129,6 +129,23 @@ func driveUntil(t *testing.T, budget time.Duration, cond func() bool) bool {
 	return cond()
 }
 
+// scrapedCounter pulls one unlabelled series' value out of a /metrics body.
+func scrapedCounter(t *testing.T, body, name string) float64 {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, name+" ") {
+			continue
+		}
+		var v float64
+		if _, err := fmt.Sscanf(strings.TrimPrefix(line, name+" "), "%g", &v); err != nil {
+			t.Fatalf("parse %q: %v", line, err)
+		}
+		return v
+	}
+	t.Fatalf("series %q absent from scrape", name)
+	return 0
+}
+
 func syslogAdminReq(method, path string) *http.Request {
 	r := httptest.NewRequest(method, path, http.NoBody)
 	return r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
@@ -378,9 +395,17 @@ func TestChaos66_DropsReachMetricsAndHealthz(t *testing.T) {
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
+	// Wait for a line to actually LAND before killing the collector. A dial
+	// completes at the TCP handshake, i.e. before the server calls Accept, so
+	// killing straight after install can leave the connection alive in the
+	// listen backlog — writes then succeed into the kernel buffer forever and
+	// no drop is ever recorded. Establishing delivery first removes that race.
+	if !driveUntil(t, 3*time.Second, func() bool { return fc.received() > 0 }) {
+		t.Fatal("collector never received a line while healthy")
+	}
 	fc.kill()
 	sw := activeSyslog()
-	if !driveUntil(t, 5*time.Second, func() bool { return sw.Drops() > 0 }) {
+	if !driveUntil(t, 10*time.Second, func() bool { return sw.Drops() > 0 }) {
 		t.Fatalf("no drops recorded (drops=%d)", sw.Drops())
 	}
 
@@ -395,8 +420,12 @@ func TestChaos66_DropsReachMetricsAndHealthz(t *testing.T) {
 			t.Fatalf("DEFECT: /metrics is missing %q", want)
 		}
 	}
-	if !strings.Contains(body, fmt.Sprintf("culvert_syslog_dropped_total %d", sw.Drops())) {
-		t.Fatalf("dropped_total must carry the real count (%d); scrape:\n%s", sw.Drops(), body)
+	// The counter is asserted as a LOWER BOUND, not an equality: the drain
+	// goroutine is still running, so the exact value moves between the read
+	// above and the scrape. Pinning equality would be a flaky gate, and a
+	// gate that can flake gets muted.
+	if got := scrapedCounter(t, body, "culvert_syslog_dropped_total"); got < 1 {
+		t.Fatalf("dropped_total must carry the real loss (observed %d); scrape:\n%s", sw.Drops(), body)
 	}
 }
 
@@ -559,9 +588,12 @@ func TestChaos66Control_DegradationIsADurationNotACount(t *testing.T) {
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
+	if !driveUntil(t, 3*time.Second, func() bool { return fc.received() > 0 }) {
+		t.Fatal("collector never received a line while healthy")
+	}
 	fc.kill()
 	sw := activeSyslog()
-	if !driveUntil(t, 5*time.Second, func() bool { return sw.Drops() > 200 }) {
+	if !driveUntil(t, 10*time.Second, func() bool { return sw.Drops() > 200 }) {
 		t.Fatalf("expected a large drop count, got %d", sw.Drops())
 	}
 	if alerts != 0 {

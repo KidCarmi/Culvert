@@ -2778,6 +2778,7 @@ Firefox (all platforms):
               <option value="rfc5424">RFC 5424 (IETF)</option>
             </select>
             <button class="btn" data-click="saveSyslog">Save</button>
+            <button class="btn ghost sm" data-click="testSyslog">Test connectivity</button>
             <button class="btn ghost sm" data-click="disableSyslog">Disable</button>
           </div>
           <div id="s-syslog-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
@@ -5632,6 +5633,7 @@ document.addEventListener('click', e => {
     case 'removeUIAllowIP':   removeUIAllowIP(+arg); break;
     case 'saveNetworkTLS':    saveNetworkTLS(); break;
     case 'saveSyslog':        saveSyslog(); break;
+    case 'testSyslog':        testSyslog(); break;
     case 'disableSyslog':     disableSyslog(); break;
     case 'saveMetricsToken':  saveMetricsToken(); break;
     case 'clearMetricsToken': clearMetricsToken(); break;
@@ -10647,11 +10649,7 @@ async function loadSettings() {
     document.getElementById('s-syslog-addr').value = sl.addr || '';
     document.getElementById('s-syslog-format').value = sl.format || 'rfc3164';
     if (sl.addr) {
-      const el = document.getElementById('s-syslog-status');
-      el.style.display = '';
-      const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
-      el.textContent = '✓ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
-      el.style.color = 'var(--green)';
+      renderSyslogStatus(sl);
       renderSyslogDrops(sl.drops, sl.panics);
     } else {
       // No forwarding configured - never leave a stale drop warning visible.
@@ -10818,6 +10816,39 @@ async function saveUIAllowIPs() {
 // renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
 // forwarding state so a stale amber warning can't survive a reconfigure/disable
 // (a new collector starts a fresh writer at Drops()==0; disabling clears it).
+// renderSyslogStatus reports the DELIVERY posture, not merely that a target is
+// configured (CHAOS-66). The panel used to print a green "✓ Forwarding to X"
+// whenever an address was set, which is the same false-green the syslog_feed
+// operator-contract row carried: it survived the collector going away.
+//
+// It also refuses to claim delivery over UDP. A connected UDP socket's write
+// succeeds locally whether or not a collector exists, so on UDP there is no
+// delivery evidence to render — saying so is the only honest option, and udp
+// is what an address with no scheme resolves to.
+function renderSyslogStatus(sl) {
+  const el = document.getElementById('s-syslog-status');
+  el.style.display = '';
+  const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
+  const target = sl.addr + ' (' + fmtLabel + ')';
+  if (sl.deliveryVerifiable === false) {
+    el.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Sending to ' + target +
+      ' — delivery is NOT verifiable over UDP. A dead collector is indistinguishable from a healthy one; use tcp:// if this feed is a compliance control.';
+    el.style.color = 'var(--warn,#b8860b)';
+    return;
+  }
+  if (sl.up === false) {
+    const forSec = sl.failingForSeconds || 0;
+    el.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> NOT delivering to ' + target +
+      ' — ' + (sl.lastReason || 'delivery failing') + ' for ' + forSec + 's. Audit and request-log entries are not reaching the collector.' +
+      (sl.degraded ? ' (degraded)' : '') +
+      ' Recovery is automatic once the collector is reachable — no restart or re-save needed.';
+    el.style.color = 'var(--red,#c0392b)';
+    return;
+  }
+  el.textContent = '✓ Delivering to ' + target;
+  el.style.color = 'var(--green)';
+}
+
 function renderSyslogDrops(drops, panics) {
   const dropsEl = document.getElementById('s-syslog-drops');
   const n = drops || 0;
@@ -10853,15 +10884,42 @@ async function saveSyslog() {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({addr, format})
     });
-    el.style.display = '';
-    const fmtLabel = (res.format || format) === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
-    el.textContent = '✓ Forwarding to ' + addr + ' (' + fmtLabel + ')';
-    el.style.color = 'var(--green)';
+    renderSyslogStatus({addr, format: res.format || format, up: true,
+                        deliveryVerifiable: res.deliveryVerifiable});
     // Reconfiguring points at a fresh writer whose drop counter starts at 0 -
     // reset the row rather than leaving a prior collector's stale warning up.
     renderSyslogDrops(res.drops);
     toast('Syslog configured', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// testSyslog runs the server-side connectivity probe and renders its REAL
+// verdict (CHAOS-66). The endpoint behind it used to answer ok unconditionally
+// because it only enqueued a line on the async delivery queue, so it could not
+// fail — while the syslog_feed diagnostics row told the operator to use it to
+// "confirm connectivity". It now dials a fresh connection and reports what
+// actually happened, including that a UDP result confirms nothing.
+async function testSyslog() {
+  const el = document.getElementById('s-syslog-status');
+  el.style.display = '';
+  el.textContent = 'Probing collector…';
+  el.style.color = 'var(--muted)';
+  try {
+    const res = await api('/api/syslog/test', {method: 'POST'});
+    if (res.verified) {
+      el.textContent = '✓ ' + res.message;
+      el.style.color = 'var(--green)';
+      toast('Collector reachable', 'success');
+    } else {
+      el.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + res.message;
+      el.style.color = 'var(--warn,#b8860b)';
+      toast('Sent, but delivery could not be confirmed', 'warn');
+    }
+  } catch(e) {
+    el.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Collector unreachable: ' + e.message;
+    el.style.color = 'var(--red,#c0392b)';
+    toast('Collector unreachable', 'error');
+  }
 }
 
 async function disableSyslog() {

@@ -5053,14 +5053,52 @@
           "addr": {
             "type": "string"
           },
+          "degraded": {
+            "description": "Delivery has been failing for longer than the degradation threshold.",
+            "type": "boolean"
+          },
+          "deliveryVerifiable": {
+            "description": "False on UDP, where a connected socket's write succeeds locally whether or not a collector exists — so `up` and `drops` prove nothing there and must not be rendered as delivery evidence.",
+            "type": "boolean"
+          },
           "drops": {
+            "type": "integer"
+          },
+          "everDelivered": {
+            "type": "boolean"
+          },
+          "failingForSeconds": {
             "type": "integer"
           },
           "format": {
             "type": "string"
           },
+          "lastReason": {
+            "description": "Bounded reason class (connect_failed, write_failed, panic); never a raw error.",
+            "type": "string"
+          },
+          "outages": {
+            "type": "integer"
+          },
           "panics": {
             "type": "integer"
+          },
+          "queueDrops": {
+            "description": "Subset of drops lost to a full delivery queue rather than an unreachable collector.",
+            "type": "integer"
+          },
+          "transport": {
+            "description": "Transport in use. A scheme-less address means udp. Empty when no forwarder is installed (nothing configured, or a target the operator has since disabled).",
+            "enum": [
+              "",
+              "udp",
+              "tcp"
+            ],
+            "type": "string"
+          },
+          "up": {
+            "description": "Whether the last observed delivery reached the collector.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -24755,13 +24793,35 @@
                 }
               }
             },
-            "description": "Test syslog delivery."
+            "description": "The probe completed. `verified` is false on UDP, where the result confirms nothing (CHAOS-66)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The collector could not be reached. Before CHAOS-66 this endpoint only enqueued a line on the async delivery queue and so could not fail, while the syslog_feed diagnostics row told operators to use it to confirm connectivity."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "example": "syslog not configured",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No syslog target is configured, so there is nothing to probe. Body is plain text."
           }
         },
         "security": [

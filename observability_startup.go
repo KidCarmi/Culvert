@@ -45,7 +45,7 @@ func loadObservability(cfg observabilityStartupConfig) {
 		// installed), and the delivery axis is reported by syslogFeedState.
 		syslogConfigured = cfg.SyslogAddr
 		if err := InitSyslogResilient(cfg.SyslogAddr, cfg.SyslogFormat); err != nil {
-			logger.Printf("Syslog: initial connect failed (%v) — forwarding is armed and will retry until the collector answers", err)
+			logger.Printf("Syslog: initial connect failed (%q) — forwarding is armed and will retry until the collector answers", sanitizeLog(err.Error()))
 		}
 	}
 

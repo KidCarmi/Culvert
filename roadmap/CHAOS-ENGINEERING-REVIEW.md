@@ -6405,16 +6405,216 @@ mutation-checked by flipping the claim and confirming the failure.
 
 ---
 
-## 36. CHAOS-66 — The SIEM forwarding path (PLACEHOLDER — id claimed 2026-09-21)
+## 36. CHAOS-66 — The SIEM forwarding path under a collector outage
 
-**Status:** IN PROGRESS. This row exists so the id is allocated before any code
-is written, which is the remedy §0 reaches independently after ten collisions
-across six sweeps, and which §35 (CHAOS-65) was the first sweep to follow.
+**Date:** 2026-09-21 · **Closes:** the third and last copy of the silent
+compliance-loss defect (§13 local audit JSONL, §30 DP→CP push queue), plus a
+false-green operator-contract row, a permanent-off recovery gap, a
+goroutine/FD leak on an admin-reachable path, and a request-path data race.
 
-**Scope:** `internal/syslog` + `syslog.go` + the three surfaces that claim to
-report on it (`checkSyslogFeed` in `diagnostics.go`, `GET /api/syslog` and
-`POST /api/syslog/test` in `ui_config.go`) — what the centralized compliance
-feed does when the collector goes away, and what every operator surface says
-about it while that is happening.
+**Id governance:** claimed in a committed placeholder row as commit one, before
+any code was written — the remedy §0 reaches twice independently after ten
+collisions across six sweeps. Second sweep to follow it (after §35). The id
+never moved.
 
-Findings and gates are written into this section as the sweep closes.
+### Why this path
+
+`internal/syslog` is the CENTRALIZED half of this appliance's compliance
+record. `store.go` forwards every audit entry (the `audit.SetSIEM` hook) and
+every request-log entry (`recordRequest`) to it, and on a fleet it is the copy
+a SOC actually reads. The engine itself is carefully built — bounded queue,
+single drain goroutine, write deadlines, panic containment (CHAOS-24), a
+reconnect state machine — and it counts every line it loses in `Drops()`.
+
+Everything ABOVE the counter was missing or wrong.
+
+### The findings
+
+**SL-1 — SILENT LOSS.** `Drops()` reached exactly ONE surface in the process:
+`GET /api/syslog`, an admin-only JSON endpoint a human has to open. No metric,
+no `/healthz` field, no operator-contract verdict consulting it, no alert, no
+log line. A SIEM outage was invisible to every automated monitor the product
+ships. This is the same CWE-778 / A09:2021 shape this register has now closed
+twice on either side of it — §13 for the local audit JSONL
+(`culvert_audit_write_errors_total` + `/healthz` + `storage_write_failed`) and
+§30 for the DP→CP audit push queue (`culvert_audit_cluster_push_drops_total`) —
+and `docs/security-reviews/2026-07-07-secret-containment-maint-agent-chaos-window.md`
+recommended `culvert_syslog_dropped_total` **by name** on 2026-07-07. It was
+never built. Three copies of one record, the same defect in each, closed one at
+a time over ten weeks: the governance lesson is that closing a defect class on
+one instance did not cause anyone to look for the others.
+
+**SL-2 — A FALSE-GREEN OPERATOR-CONTRACT ROW, which is worse than none.**
+`checkSyslogFeed` answered *"did this process connect once at startup"*, not
+*"is the collector receiving"*, and then reported `ok` /
+`"remote syslog/SIEM forwarding is active"` forever after. Measured against the
+real path: collector killed, 200 audit events forwarded, `Drops()` = 200, row
+still `ok`/"active". The old doc comment argues correctly that a bare
+`globalSyslog != nil` check is not enough — and then reasons **only** about the
+intent-vs-target axis; the delivery axis was never considered. A collector that
+dies mid-life is far more likely than one down at exactly the instant of boot,
+so the row was green for the common case and red only for the rare one. The
+lesson generalises and is worth carrying: *a health check inherits the question
+its author was thinking about, not the one its name promises* — when writing
+one, state the question it answers in the doc comment and then check whether
+that is the question an operator will read it as.
+
+**SL-3 — NO RECOVERY. Detection existed; the way back did not.** `InitSyslog`
+fails closed on its first dial, and both boot callers (`loadObservability`,
+`applyAdminServices`) log-and-continue with a nil writer. Nothing ever
+constructs a second one. So a collector that was down at boot — a SIEM under
+maintenance, a DNS blip, or simply a collector container that starts a second
+after the proxy beside it in the same compose file — meant SIEM forwarding was
+OFF for the entire life of the process, and `checkSyslogFeed`'s own remedy text
+said so: *"re-save the syslog target (POST /api/syslog) or restart the proxy"*.
+Every other periodic or listening subsystem in this tree now retries at a
+bounded rate (§22 SOCKS5, §23 HA lease, §25 admin UI, §27 feeds); the SIEM feed
+was the one that gave up permanently on a single transient fault. **The engine
+already owned a reconnect state machine** (`deliverLine`, 5s backoff) — it was
+simply unreachable from a failed start. The fix is therefore subtraction, not
+machinery: `NewWriterDeferred` installs the writer without requiring the first
+dial, and the existing path self-heals.
+
+**SL-4 — A GOROUTINE + FD LEAK ON AN ADMIN-REACHABLE PATH.** `InitSyslog`
+assigned over `globalSyslog` without closing the predecessor, and nothing else
+held the pointer — so the old drain goroutine parks forever on a queue nobody
+sends to, holding its collector connection open. Measured: five `InitSyslog`
+calls, five leaked goroutines, five still-open TCP connections. Reachable
+TWICE on an ordinary boot (the YAML observability slice, then the persisted
+admin settings) and once per `POST /api/syslog`, i.e. unbounded by operator
+action — the WK-11 descriptor-exhaustion class, whose terminal state §22
+documents.
+
+**SL-5 — A DATA RACE ON THE REQUEST PATH.** `globalSyslog` was a plain package
+pointer, WRITTEN from the admin goroutine and READ on every proxied request and
+every audit event. `go test -race` reports it against the real `InitSyslog`
+immediately. It survived because no test drove traffic and a reconfigure at the
+same time — which is the shape of an ordinary SIEM migration on a live gateway.
+
+**SL-6 — THE DOCUMENTED WAY TO VERIFY THE DOCUMENTED REMEDY COULD NOT FAIL.**
+`POST /api/syslog/test` called `Write`, which — since delivery became
+asynchronous — only enqueues a line on a bounded channel and returns. Against
+`udp://192.0.2.77:514` (TEST-NET-1, a collector that cannot exist) it answered
+`200 {"ok":true,"message":"test message sent"}`, byte-identical to a healthy
+collector. `checkSyslogFeed`'s operator action told the operator to *"use POST
+/api/syslog/test to confirm connectivity"*. This is the §35 (6b) lesson in a
+different register: **a surface an operator is told to act on must be able to
+return the answer that would stop them acting.**
+
+**SL-7 — THE DEFAULT TRANSPORT CANNOT ANSWER THE QUESTION AT ALL.** `udp://` is
+what an address with no scheme resolves to. A connected UDP socket's write
+succeeds locally whether or not anything is listening, so on a UDP feed
+`Drops()` is 0, delivery state is up, the row is green and the probe succeeds —
+against a collector that does not exist. That is a protocol fact, not a bug to
+fix, so the fix is truthfulness: `DeliveryVerifiable()` is transport-derived,
+every surface carries it, and none of them claim delivery they cannot observe.
+**Do not "improve" this by inferring UDP health from ICMP port-unreachable:**
+Linux surfaces it on a LATER write, sometimes, and never through a firewall
+that drops ICMP — so it makes the claim *sometimes* true, which is worse than
+honestly never claiming it. The operator remedy is `tcp://`, and the runbook
+says so at the top.
+
+### What shipped
+
+`internal/syslog` gains `NewWriterDeferred`, a per-outcome `SetStateObserver`
+seam (mirroring `SetPanicObserver`, because this package is a stdlib-only leaf
+that can neither log nor alert for itself), `QueueDrops()`, `Up()`,
+`DeliveryVerifiable()`, `LastCause()` and `ProbeTarget`/`Probe`. `syslog.go`
+holds the writer in an `atomic.Pointer` behind `activeSyslog()` /
+`setActiveSyslog()` (there is deliberately no exported variable, so the racy
+form cannot be reintroduced) and releases every predecessor.
+`syslog_health.go` is the health plane, borrowing its mechanism from
+`socks5_health.go` / `admin_ui_health.go` rather than inventing a dialect.
+
+Five rules hold and must not be relaxed.
+
+**(1) The observer is PER-OUTCOME, not per-transition.** A transition-only seam
+cannot answer *"has this been down long enough to page"*, because the only call
+it makes is at the start of the episode — and the house rule is that
+degradation is a DURATION, not a count. `changed` is what keeps the LOG one
+line per transition rather than one per dropped line, on a feed whose whole
+purpose is carrying one line per proxied request. The healthy steady state
+costs two atomic loads and returns before any mutex.
+
+**(2) Recovery is on OBSERVED evidence only** — a line that actually reached
+the collector. Elapsed time never clears it: a feed that stopped failing
+because nothing is being written looks identical to a delivering one.
+
+**(3) The contract row's SEVERITY tracks the LIVE posture and never latches on
+the cumulative drop counter.** The loss is durable and must be reported, so the
+recovered row still names the gap — but keying severity on a counter would
+leave the row amber for the rest of the process lifetime after one transient
+SIEM restart, with nothing an operator could do to clear it. That is exactly
+the mistake `ca_health.go` records and avoids (its persistence warning is keyed
+on `caRotationPersistDegraded()`, not the counter). The cumulative fact belongs
+in `culvert_syslog_dropped_total`, which a monitor takes `increase()` over.
+
+**(4) The alert Detail is a BOUNDED reason class** (`connect_failed`,
+`write_failed`, `panic`) and the cause goes to a rate-limited log line and
+nowhere else. `Dispatch` dedups on `event + ":" + Detail`, and a transport
+error embeds the collector address AND the ephemeral local port, so a raw error
+mints one dedup key per failure and lets a SIEM outage evict real threat alerts
+from the 500-entry retry queue (the WK-12/RS-5 defect). The event name
+`siem_feed_down` is NEW, which is consistent with the rule rather than an
+exception to it: the rule is *never mint a SECOND name for one root cause*
+(§19 reused `state_file_corrupt`, §28 `dns_failure`, §17 `cert_expiry`), and an
+unreachable collector shares no root cause and no operator action with a
+failing disk — exactly as `socks5_listener_down` (§22) and
+`admin_ui_unavailable` (§25) were minted. `HasSubscriber` honours `"*"`, so a
+wildcard subscriber receives it with no reconfiguration.
+
+**(5) Metrics are emitted ONLY when a collector is configured** — a flat
+`culvert_syslog_up 0` from an appliance that never had a SIEM is
+indistinguishable from one whose feed is dead, and the documented paging rule
+is `== 0` (the socks5 / cluster_ca / dns rule).
+
+The admin `POST /api/syslog` now PROBES before installing, which is what lets a
+typo still be refused up front **while leaving the previous working forwarder
+in place** — the two halves (validating operator input, deciding whether
+forwarding exists at all) used to be one act, which is the root of SL-3.
+
+### Deliberately NOT done, and recorded
+
+- **No `/readyz` row, and `/healthz` never fails on this.** A node whose SIEM
+  feed is down is proxying and enforcing policy perfectly; failing readiness
+  would eject a healthy gateway from the load balancer over its logging
+  pipeline, converting an observability outage into the traffic outage this
+  plane exists to make visible. The trade §19 refused for the category store
+  and §25 for the admin UI listener.
+- **No fail-closed toggle.** Blocking traffic because a SIEM is unreachable
+  converts the logging vendor's outage into the customer's — the deliberate
+  asymmetry with WK-1b/WK-2b, which govern a scanner's verdict on content in
+  flight rather than how fresh or complete an archive is.
+- **No replay of lines lost during an outage.** The queue is bounded on
+  purpose; an unbounded one converts a collector outage into memory exhaustion
+  on an in-line appliance. Back-fill from the node's local audit JSONL.
+- **Open (SL-8):** the drop counters are per-WRITER, so a reconfigure resets
+  them — the evidence of loss is cleared by the action an operator takes to fix
+  it. Acceptable while `culvert_syslog_dropped_total` is scraped (a Prometheus
+  counter reset is handled by `increase()`), a real gap on an unscraped node.
+  A process-lifetime cumulative total would close it; recorded rather than
+  added inside a sweep already this wide.
+- **Open (SL-9):** `internal/otlp` is the fourth telemetry egress on this
+  appliance and was not swept here. One concern per change.
+
+### Gates
+
+`syslog_feed_chaos_test.go` (13) — nine defect gates, each verified failing
+against the shape it replaces by reintroducing that shape and observing the
+failure (the predecessor overwrite, an always-true `DeliveryVerifiable`, the
+fire-and-forget test endpoint, the connected-once row, and a removed metrics
+block), plus three CONTROLS and a bounded-reason-class wall.
+`internal/syslog/syslog_chaos_test.go` (6) — the engine contracts, including
+the two only reachable inside the package (transition-vs-outcome observer
+semantics, and queue drops being a strict subset of total drops).
+
+`TestLoadObservability_SyslogUnreachableLogged` was **INVERTED** and renamed:
+it asserted that a failed dial leaves no writer and called that correct, i.e.
+it pinned SL-3 — the same class as
+`TestRunShutdownSequence_EarlyCtxHasNoDeadline_LateCtxDoes` (§24) and
+`TestResolveHost_TTLExpiry` (§34).
+
+The CONTROLS exist because the cheapest way to pass every defect gate here is
+to report failure more readily, or to stop forwarding altogether — a healthy
+collector must still be reported as delivering, with no drops, and the lines
+must actually arrive; a brief outage must NOT page.

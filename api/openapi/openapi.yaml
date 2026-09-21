@@ -2232,6 +2232,39 @@ components:
         format: { type: string }
         drops: { type: integer }
         panics: { type: integer }
+        # CHAOS-66: the DELIVERY axis. addr+drops alone let a caller tell
+        # "configured" from "nothing configured", never "delivering" from
+        # "dead" — and on UDP drops is structurally 0 whatever happens to the
+        # collector, which is why deliveryVerifiable rides alongside rather
+        # than being inferred from the counters.
+        transport:
+          type: string
+          enum: ["", udp, tcp]
+          description: >-
+            Transport in use. A scheme-less address means udp. Empty when no
+            forwarder is installed (nothing configured, or a target the
+            operator has since disabled).
+        deliveryVerifiable:
+          type: boolean
+          description: >-
+            False on UDP, where a connected socket's write succeeds locally
+            whether or not a collector exists — so `up` and `drops` prove
+            nothing there and must not be rendered as delivery evidence.
+        up:
+          type: boolean
+          description: Whether the last observed delivery reached the collector.
+        everDelivered: { type: boolean }
+        degraded:
+          type: boolean
+          description: Delivery has been failing for longer than the degradation threshold.
+        failingForSeconds: { type: integer }
+        lastReason:
+          type: string
+          description: Bounded reason class (connect_failed, write_failed, panic); never a raw error.
+        queueDrops:
+          type: integer
+          description: Subset of drops lost to a full delivery queue rather than an unreachable collector.
+        outages: { type: integer }
     SetSyslogBody:
       type: object
       additionalProperties: false
@@ -10679,12 +10712,29 @@ paths:
       x-culvert-audit-event: syslog.test
       responses:
         '200':
-          description: Test syslog delivery.
+          description: >-
+            The probe completed. `verified` is false on UDP, where the result
+            confirms nothing (CHAOS-66).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '502':
+          description: >-
+            The collector could not be reached. Before CHAOS-66 this endpoint
+            only enqueued a line on the async delivery queue and so could not
+            fail, while the syslog_feed diagnostics row told operators to use
+            it to confirm connectivity.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '503':
+          description: No syslog target is configured, so there is nothing to probe. Body is plain text.
+          content:
+            text/plain:
+              schema: { type: string }
+              example: "syslog not configured"
   /api/alerts/webhooks/test:
     post:
       operationId: testAlertWebhook

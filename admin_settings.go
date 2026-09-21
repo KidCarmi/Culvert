@@ -500,7 +500,7 @@ func applyAdminServices(s *AdminSettings) {
 		// reported rather than swallowed.
 		syslogConfigured = s.SyslogAddr
 		if err := InitSyslogResilient(s.SyslogAddr, s.SyslogFormat); err != nil {
-			logger.Printf("Syslog: initial connect to the persisted target failed (%v) — forwarding is armed and will retry; delivery state is reported on /api/syslog and the syslog_feed diagnostics row", err)
+			logger.Printf("Syslog: initial connect to the persisted target failed (%q) — forwarding is armed and will retry; delivery state is reported on /api/syslog and the syslog_feed diagnostics row", sanitizeLog(err.Error()))
 		}
 	}
 	if s.OTLPEndpoint != "" {
