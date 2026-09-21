@@ -167,6 +167,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and ref, and both new jobs live in `ci.yml`. See
   `docs/operator/release-publication-gating.md`.
 
+- Release staging is DRAFT-AWARE end to end. `GET /releases/tags/{tag}` does not
+  return drafts, and the #1441 staging design puts every asset on one, so every
+  reader in the chain was blind to the release it was reasoning about. On
+  v1.0.234 the SLSA generator's uploader (`action-gh-release@v2.2.1`, by-tag)
+  404'd on the draft and CREATED A SECOND, PUBLISHED release carrying only the
+  attestation; it became the repository's Latest, `assert-release-complete.sh`
+  read it, reported 19 assets missing and refused, and `scripts/install.sh` —
+  which resolves its bootstrap verifier through `/releases/latest` — broke for
+  fresh installs. The generator now runs with `upload-assets: false` and a new
+  `attach-provenance` job stages the attestation on the draft with the v3.0.2
+  action (which enumerates releases and can see a draft); every other reader
+  resolves the staged release by id through `resolve_staged_release_id`
+  (`.github/scripts/lib/release.sh`), which prefers the draft, warns when a
+  stray published release shares the tag, and refuses on ambiguity. The one
+  legitimate by-tag lookup, `assert-release-unpublished.sh`, is allowlisted with
+  its reason. Walled by `TestPublicationGating_NoDraftBlindReleaseLookup` plus 8
+  behavioural cases including the exact v1.0.234 shape; both verified failing
+  against the defect.
+
 - GitHub Pages is retired as a release-catalog origin; Cloudflare R2
   (`https://catalog.culvertlabs.com`) is the sole publication target.
   `publish-catalog-pages.yml` is deleted, `verify-dual-publish.yml` becomes the

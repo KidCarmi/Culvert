@@ -271,6 +271,37 @@ independently. What the binding buys is that every attempt at a version
 converges on one digest, so whatever is left unfinished can be completed without
 changing what a released version means.
 
+### A draft release is invisible to `releases/tags/{tag}`
+
+`GET /repos/{owner}/{repo}/releases/tags/{tag}` **does not return drafts.** This
+chain stages every asset on a draft, so a by-tag lookup cannot see the release
+it is reasoning about — it silently reads some *other* release object carrying
+the same tag, or none.
+
+That is not theoretical. On **v1.0.234** the SLSA generator's own uploader
+(`softprops/action-gh-release@v2.2.1`, which resolves by tag) 404'd on the
+draft and **created a second, published release** holding nothing but the
+attestation. It became the repository's *Latest*, `assert-release-complete.sh`
+read it, found 19 assets missing and refused — while all 19 sat in the
+invisible draft. `scripts/install.sh` resolves its bootstrap verifier through
+`/releases/latest`, so fresh installs broke.
+
+Two rules follow, both walled by test:
+
+1. **Nothing in the chain uploads through a draft-blind tool.** The generator
+   runs with `upload-assets: false`; `attach-provenance` puts the attestation
+   on the draft with the v3.0.2 action, which enumerates releases and can see
+   one.
+2. **Readers resolve the staged release by id**, via
+   `resolve_staged_release_id` (`.github/scripts/lib/release.sh`), which lists
+   releases and prefers the draft. The single legitimate by-tag lookup is
+   `assert-release-unpublished.sh`, which *asks whether a published release
+   exists* — there a draft reading as absent is the correct answer.
+
+If a tag ever ends up with both a draft and a published release, the resolver
+warns and uses the draft, because that pairing means something uploaded outside
+the staging path. Two drafts, or none, refuse.
+
 ### Failure and retry states
 
 | failure point | public GHCR state | GitHub Release | retry behaviour |

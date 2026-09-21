@@ -706,6 +706,83 @@ if RELEASE_SHA="$SHA_A" GITHUB_OUTPUT="$WORK/ghout" \
   ok "the main path promotes against the run-scoped candidate"
 else bad "the main path promotes against the run-scoped candidate" "out=$(cat "$WORK/ghout")"; fi
 
+# ─── 8. the staged release is resolved DRAFT-AWARE ───────────────────────────
+# `GET /releases/tags/<tag>` does not return drafts. Every reader in the chain
+# used it while the chain staged everything on a draft, so each was blind to
+# the release it was reasoning about. These cases pin the replacement.
+# shellcheck source=.github/scripts/lib/release.sh
+. "$SCRIPTS/lib/release.sh"
+
+relfile() { printf '%s' "$1" > "$WORK/releases.json"; echo "$WORK/releases.json"; }
+
+# The ordinary staged shape: one draft for this tag.
+RELEASE_LIST_FILE="$(relfile '[{"id":11,"tag_name":"v1.2.3","draft":true}]')" \
+  got="$(resolve_staged_release_id o/r v1.2.3 2>/dev/null)" || got=""
+[ "$got" = "11" ] && ok "a staged draft is resolved by id" \
+                  || bad "a staged draft is resolved by id" "got '$got'"
+
+# THE v1.0.234 SHAPE: a draft holding the assets AND a stray published release
+# carrying the same tag. The draft is the staged one; the by-tag endpoint would
+# have returned the other.
+RELEASE_LIST_FILE="$(relfile '[{"id":22,"tag_name":"v1.2.3","draft":false},{"id":33,"tag_name":"v1.2.3","draft":true}]')" \
+  got="$(resolve_staged_release_id o/r v1.2.3 2>/dev/null)" || got=""
+[ "$got" = "33" ] && ok "a draft wins over a stray published release on the same tag" \
+                  || bad "a draft wins over a stray published release on the same tag" "got '$got' (want the draft, 33)"
+
+# CONTROL: with no draft, a single published release is the answer — otherwise
+# a re-run after publication could never resolve anything.
+RELEASE_LIST_FILE="$(relfile '[{"id":44,"tag_name":"v1.2.3","draft":false}]')" \
+  got="$(resolve_staged_release_id o/r v1.2.3 2>/dev/null)" || got=""
+[ "$got" = "44" ] && ok "a published release resolves when no draft exists" \
+                  || bad "a published release resolves when no draft exists" "got '$got'"
+
+# Other tags are never borrowed.
+RELEASE_LIST_FILE="$(relfile '[{"id":55,"tag_name":"v9.9.9","draft":true}]')" \
+  got="$(resolve_staged_release_id o/r v1.2.3 2>/dev/null)" && rc=0 || rc=1
+[ "$rc" -ne 0 ] && ok "another tag's draft is never resolved" \
+                || bad "another tag's draft is never resolved" "got '$got'"
+
+# Ambiguity refuses rather than guessing which draft holds the assets.
+RELEASE_LIST_FILE="$(relfile '[{"id":66,"tag_name":"v1.2.3","draft":true},{"id":77,"tag_name":"v1.2.3","draft":true}]')" \
+  got="$(resolve_staged_release_id o/r v1.2.3 2>/dev/null)" && rc=0 || rc=1
+[ "$rc" -ne 0 ] && ok "two drafts for one tag refuse" \
+                || bad "two drafts for one tag refuse" "picked '$got'"
+
+# Nothing at all refuses.
+RELEASE_LIST_FILE="$(relfile '[]')" \
+  resolve_staged_release_id o/r v1.2.3 >/dev/null 2>&1 && rc=0 || rc=1
+[ "$rc" -ne 0 ] && ok "no release for the tag refuses" \
+                || bad "no release for the tag refuses" "it resolved something"
+
+# assert-release-complete.sh must ASSERT THE STAGED RELEASE. Fed the draft's
+# asset list it passes; fed the stray published release's it refuses — which is
+# precisely the v1.0.234 failure, now attributable to the right object.
+full=""
+for n in culvert-linux-amd64 culvert-linux-arm64 culvert-darwin-amd64 culvert-darwin-arm64 culvert-windows-amd64.exe; do
+  full="${full}${n} 100
+${n}.sigstore.json 100
+"
+done
+for n in culvert-maint-linux-amd64 culvert-maint-linux-arm64 culvert.sbom.cdx.json culvert-maint.sbom.cdx.json; do
+  full="${full}${n} 100
+${n}.sigstore.json 100
+"
+done
+full="${full}culvert-release-catalog-v1.2.3.tar.gz 100
+multiple.intoto.jsonl 100
+"
+printf '%s' "$full" > "$WORK/assets-full.txt"
+if ASSERT_RELEASE_ASSETS_FILE="$WORK/assets-full.txt" \
+     bash "$SCRIPTS/assert-release-complete.sh" v1.2.3 >/dev/null 2>&1; then
+  ok "a complete staged release passes the completeness assert"
+else bad "a complete staged release passes the completeness assert" "$(ASSERT_RELEASE_ASSETS_FILE="$WORK/assets-full.txt" bash "$SCRIPTS/assert-release-complete.sh" v1.2.3 2>&1 | tail -3)"; fi
+
+printf 'multiple.intoto.jsonl 100\n' > "$WORK/assets-prov.txt"
+if ASSERT_RELEASE_ASSETS_FILE="$WORK/assets-prov.txt" \
+     bash "$SCRIPTS/assert-release-complete.sh" v1.2.3 >/dev/null 2>&1; then
+  bad "a provenance-only release is refused" "it accepted a release with no binaries"
+else ok "a provenance-only release is refused"; fi
+
 unset DOCKER_LABELS
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
