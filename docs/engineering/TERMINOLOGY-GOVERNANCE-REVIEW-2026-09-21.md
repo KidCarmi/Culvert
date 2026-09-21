@@ -10,15 +10,23 @@
 > `internal/mcp/upstreamclient`, the `mcp_canary_*.go`/`mcp_live_gate.go`/`ui_mcp_tooltrust.go` root files)
 > and the CHAOS-65 OCSP revocation-checking engine (`internal/ocsp`, `ocsp_coverage.go`, `ocsp_metrics.go`,
 > `mtls_ocsp_startup.go`) plus release-pipeline/CI work (catalog re-sign, R2 migration, release-gating
-> scripts). None of this window is admin-facing feature work in the sense prior reviews found drift in.
+> scripts).
+>
+> **Correction (post-publication, same day):** this report's first published revision incorrectly cleared
+> both engineering streams above of any finding, on two factual errors caught by `chatgpt-codex-connector`'s
+> automated PR review (KidCarmi/Culvert#1456) before merge — see "Corrections made in review" below. This
+> is the corrected revision; the errors are documented rather than silently fixed, since the review program
+> auditing itself is exactly the kind of thing later passes need to be able to trust.
 
 ---
 
 ## Executive Summary
 
-**No new terminology drift found, and no new fixes made this pass.**
+**One new terminology defect found and fixed this pass (T-40)** — a live admin-UI panel title named a
+revocation mechanism (CRL) the appliance does not implement. No other new terminology drift was found.
 
-Two bounded audits were run against the diff since the last review:
+Two bounded audits were run against the diff since the last review; the second one's original conclusion
+was wrong and is corrected here.
 
 1. **MCP "first controlled canary" naming surface** (ADR-0035, the largest single stream in this window):
    checked whether the new vocabulary — "canary", "tool trust" (`internal/mcp/tooltrust`), "reviewed
@@ -27,25 +35,35 @@ Two bounded audits were run against the diff since the last review:
    "read-first" (`mcp_canary_read_first.go`), "exact scope" / "no-credential" / "catalog-usable" (the
    `scripts/mcp-first-canary-*-mutations.sh` family) — collides with anything pre-existing. It does not:
    "Canary" is already an established rollout-ladder state name (`Disabled→Observe→Shadow→Canary→
-   Production`, CLAUDE.md's MCP section, and confirmed still the only "canary" usage surfaced in
+   Production`, CLAUDE.md's MCP section, confirmed still the only "canary" usage surfaced in
    `static/index.html:20633,21003` — the mode-order map and the mode `<select>` options), so this window's
-   canary-*execution* work is additive to an existing name, not a second concept reusing it. The new
-   `internal/mcp/tooltrust` DTOs (`ui_mcp_tooltrust.go`) use "approval"/"reviewed operation" vocabulary on
-   the wire (`ApprovalStatus`, `ApprovalID`, `ReviewedOperationClass`, `RequestedBy/ApprovedBy/RejectedBy`)
-   and were confirmed to register **no independent route** of their own in this window (no
-   `mux.HandleFunc`/`register*Routes` call in `ui_mcp_tooltrust.go`; it is consumed internally) — so there
-   is, as yet, no GUI/API-facing "tooltrust" string to collide with anything. Consistent with the
-   09-08/09-09/09-11 reports' recurring observation that a reliability/security engine landing with no
-   independent admin surface is not itself a finding; flagged here as something to re-check once this
-   surface grows a route of its own, since "Tool Trust" vs. "Reviewed Operation" vs. plain "Approval" would
-   then need to pick one name for the admin-facing side.
+   canary-*execution* work is additive to an existing name, not a second concept reusing it.
+   **Correction**: the first revision of this report claimed the new `internal/mcp/tooltrust` DTOs register
+   "no independent route of their own," reasoning from the absence of a `mux.HandleFunc` call inside
+   `ui_mcp_tooltrust.go` itself. That is true only of the file boundary, not the surface — `ui_mcp.go:166-167`
+   registers `/api/mcp/tool-approvals` and `/api/mcp/tool-approval-decision` against handlers
+   (`apiMCPToolApprovals`, `apiMCPToolApprovalDecision`) that ARE defined in `ui_mcp_tooltrust.go`, both
+   already carrying `reviewed_operation_class` as a JSON field (`ui_mcp_tooltrust.go:95,163,254-286`), and
+   the route is already generated into the OpenAPI spec and the React frontend's typed client
+   (`frontend/src/api/types.gen.ts:2844-2881,13415`). So this is a live, wired, already-shipped API surface
+   today, not a hypothetical future one — the original "flag for a future review" framing was wrong on its
+   face. Re-auditing it directly: the wire vocabulary is, in fact, already internally consistent —
+   `/api/mcp/tool-approvals` (the workflow: requesting/deciding an approval) and `reviewed_operation_class`
+   (a sub-field classifying what the reviewer determined about the tool's effect, `read_only`/`mutating`)
+   are legitimately two different concepts, not two names for one concept, and neither the code nor the
+   generated OpenAPI/TS client uses the Go-internal package name "tool trust" anywhere on the wire (checked
+   directly: zero hits for `tooltrust`/`ToolTrust`/`Tool Trust` in `static/index.html` or `frontend/src/`).
+   So the corrected conclusion is the same as the original ("not a finding"), but for a different and
+   accurate reason — this surface already exists and was checked, not deferred.
 2. **CHAOS-65 OCSP engine** (`internal/ocsp/ocsp.go` +655/-70, `ocsp_coverage.go`, `ocsp_metrics.go`): the
    `culvert_ocsp_*` metric family, the `ocsp_coverage`/`uncheckedEnforcingPaths` fields on
    `GET /api/ocsp`, and `docs/operator/ocsp-revocation-checking.md` were spot-checked for cross-surface
-   naming and match byte-for-byte (metric names ↔ HELP text ↔ doc section headings). This is the same
-   engineering sweep CLAUDE.md's Architecture Notes document at length under CHAOS-65; no new vocabulary
-   was introduced outside that documented shape. Internal engine, no independent GUI panel — not a finding,
-   same reasoning as item 1.
+   naming and match byte-for-byte (metric names ↔ HELP text ↔ doc section headings) — that part of the
+   original audit was correct. **Correction**: the original report went on to conclude "internal engine, no
+   independent GUI panel — not a finding," which is factually wrong — `static/index.html:4477` has carried
+   a live panel titled **"OCSP / CRL Revocation"** since this window (an "Enable OCSP checking" toggle plus
+   four counters and three status banners, all OCSP-only). Auditing that panel directly, as it should have
+   been the first time, surfaces a real finding: see **T-40** below.
 
 Release-pipeline changes in the window (`resign-catalog.yml`, `docs/operator/catalog-resign-runbook.md`,
 `roadmap/R2-CATALOG-MIGRATION-PLAN.md`, the `.github/scripts/*` release-gating rewrite) are CI/operator-doc
@@ -67,10 +85,86 @@ rather than assuming the backlog is unchanged just because no fix commit was see
   `POST /v1/upgrades/check`/`apply` with no `/v1/updates/*` alias, while the GUI still says "Dispatch
   Release" — unchanged.
 
-**Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08 through 2026-09-11). A third consecutive
-large, backend-heavy window (MCP canary execution + OCSP revocation checking + release-pipeline CI) landed
-with disciplined internal naming and no new admin-facing vocabulary drift; the tracked backlog did not move
-in either direction, so the score is carried forward unchanged rather than re-derived from scratch.
+**Terminology Health Score: 8.7 / 10** (unchanged). One new defect (T-40) was found and fixed within the
+same pass — a security-adjacent admin-UI label overclaiming a capability — so, following 2026-09-08's
+precedent that a single item's discovery and its resolution are symmetric ±0.1 moves, the two cancel out
+rather than compounding. The pre-existing thirteen-item backlog did not otherwise move. The score is not
+raised above 8.7 despite the same-day fix, since a defect that reached production before this review is
+not evidence of improving health, only of this review doing its job.
+
+---
+
+## Corrections made in review
+
+`chatgpt-codex-connector[bot]`'s automated review on KidCarmi/Culvert#1456 caught two factual errors in
+this report's first published revision before merge, both now fixed above:
+
+1. **P2 — "Audit the existing tool-approval routes."** Correctly identified that `ui_mcp.go:165-167`
+   already registers `/api/mcp/tool-approvals` and `/api/mcp/tool-approval-decision` against handlers that
+   already carry `reviewed_operation_class`, contradicting this report's claim that no route existed yet.
+   Verified directly (`grep -n "tool-approval" ui_mcp.go`, `grep -rn "ReviewedOperationClass" *.go`,
+   `grep -rn "tool-approval" frontend/src/`) and corrected in Executive Summary item 1 above. On
+   re-investigation the underlying conclusion (not a terminology finding) still holds, but the report's
+   original reasoning for reaching it — "the surface doesn't exist yet" — was simply wrong, and the
+   surface should have been checked directly rather than deferred.
+2. **P2 — "Account for the existing OCSP admin panel."** Correctly identified that the audited window
+   modifies the live `static/index.html` panel titled "OCSP / CRL Revocation," so characterizing the OCSP
+   work as "an internal engine with no independent GUI panel" was factually incorrect, and specifically
+   flagged the panel's CRL label despite the operator runbook and CLAUDE.md both stating there is no CRL
+   fallback. Verified directly (`Read static/index.html:4470-4499`; `grep -rn "CRL" internal/ocsp/*.go
+   ocsp_coverage.go ocsp_metrics.go docs/operator/ocsp-revocation-checking.md` — the runbook's one hit is
+   itself just quoting the panel title back, confirming no CRL logic exists anywhere in the subsystem) and
+   promoted to a new finding, **T-40**, below.
+
+Both errors trace to the same root cause: the original audit searched only the files the diff touched
+directly for GUI/API surfacing (`ui_mcp_tooltrust.go` for routes; the diff's own `.go` files for a GUI
+panel) instead of checking the actual live rendered surface (`static/index.html`, the route-registration
+file, the generated OpenAPI/TS client) that a real admin or support engineer would see. Recorded as a
+process note for future passes: "no GUI/API surface found" is a claim that must be verified against the
+rendered surface directly, not inferred from which files a diff touched.
+
+---
+
+## New Findings This Pass
+
+### T-40 — Admin-UI panel titled "OCSP / CRL Revocation" names a capability that does not exist (High) — FIXED this pass
+
+- **Concept**: certificate-revocation checking for upstream/inspected TLS connections, and which
+  mechanisms the appliance actually uses to perform it.
+- **Names found**: the live admin panel (`static/index.html:4477`, present in production, not
+  experimental/behind a flag) is titled **"OCSP / CRL Revocation"**, with a toggle labeled "Enable OCSP
+  checking" and four counters/banners underneath, every one of them OCSP-specific (`ocsp-cache-len`,
+  `ocsp-revoked-total`, `ocsp-failclosed-total`, `ocsp-rejected-total`, the coverage/borrowed-response/
+  fail-closed banners — all confirmed OCSP-only content, `static/index.html:4478-4495`). Its own operator
+  runbook, `docs/operator/ocsp-revocation-checking.md:4`, quotes the panel title verbatim as
+  "**OCSP / CRL Revocation** toggle in the admin UI" and then documents only OCSP behavior. CLAUDE.md's own
+  CHAOS-65 Architecture Note explicitly records, as a deliberately-open item: *"no CRL fallback... a
+  certificate carrying no AIA responder still accepted unchecked (OCSP-10)"*.
+- **Why real, and why High**: this is not a cosmetic label mismatch — it is a security-relevant capability
+  claim with no implementation behind half of it. `grep`ing the entire OCSP subsystem (`internal/ocsp/*.go`,
+  `ocsp_coverage.go`, `ocsp_metrics.go`) for `CRL` returns **zero** hits outside the one line in the
+  runbook that is quoting the panel's own title back. There is no CRL fetch, no CRL cache, no CRL config
+  surface, no CRL toggle, no CRL counter — nothing. An admin who reads the panel title, sees "Enable OCSP
+  checking" turned on, and reasonably infers "revocation checking, via OCSP or CRL as needed" now has a
+  false sense of coverage for exactly the gap CLAUDE.md records as open: a certificate with no OCSP AIA
+  responder at all is accepted **unchecked** today, and nothing in the CRL half of the panel's promise
+  would catch that, because there is no CRL half. This is precisely the failure mode this governance
+  program's brief singles out — "internal-implementation names exposed to users" runs the other direction
+  here (a business-facing label promising more than the implementation delivers), but it is the same class
+  of harm: an admin, a security engineer, or a support engineer trusts a label that does not describe what
+  the product does.
+- **Canonical direction, applied in this same PR**: renamed the panel to **"OCSP Revocation"** (dropped
+  "/ CRL" until CRL fallback, OCSP-9/OCSP-10 in CLAUDE.md's own register, actually ships) and updated
+  `docs/operator/ocsp-revocation-checking.md`'s one reference to match
+  (`static/index.html:4477`, `docs/operator/ocsp-revocation-checking.md:4`). This was a pure label
+  correction — no API field, metric name, config key, or audit event uses "CRL" anywhere (confirmed by the
+  same-subsystem grep above), so there was no wire-compatibility obligation and no migration plan needed.
+  If CRL fallback is added in the future, "OCSP / CRL Revocation" becomes accurate again and can be
+  restored at that time.
+- **Affected surfaces**: GUI (`static/index.html:4477`) and one doc reference
+  (`docs/operator/ocsp-revocation-checking.md:4`). No API/config/audit/metric surface uses "CRL."
+- **Migration complexity**: trivial (two-line change, no wire contract) — applied. **Compatibility risk**:
+  none. **Actual PR size**: XS (2 lines changed).
 
 ---
 
@@ -82,29 +176,26 @@ T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual
 T-39. Full descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here to avoid drift between two
 descriptions of the same open items — see that report (or its predecessors, cited therein) for the
-canonical text of each.
+canonical text of each. **T-40 (above) was found and fixed within this same pass and does not join the
+open backlog** — the thirteen-entry backlog is unchanged; T-40 is recorded here only as a closed finding
+ID, for the same reason closed items stay in the numbering series rather than being silently dropped.
 
 The "Content & Scanning" (legacy GUI) vs. "Content Security" (new React frontend) soft finding — a
 non-mechanical naming-policy reconciliation between two deliberate design decisions, not a numbered backlog
 item — also remains unresolved, per 2026-09-09's reasoning, and was not revisited this pass.
 
-**One item to watch, not yet a backlog entry**: if `internal/mcp/tooltrust` grows an independent admin
-route in a future window, its wire vocabulary ("approval" fields vs. the package name "tool trust" vs. the
-DTO name "reviewed operation") will need a single canonical admin-facing name picked before it ships, the
-same way T-33 already flags the MCP policy-taxonomy overwrite problem one layer over. Recorded here so the
-next review checks it rather than rediscovering it; not queued as a numbered finding because there is no
-live surface yet to be inconsistent about.
-
 ---
 
 ## Stop-Condition Assessment
 
-No production-worthy NEW terminology improvement was identified this pass: the 21-merge window audited was
-two large, internally-disciplined engineering streams (MCP canary execution, OCSP revocation checking) plus
-release-pipeline CI work, none of which introduced admin-facing vocabulary or collided with an existing
-canonical name. The fourteen-ID (thirteen-entry) carry-over backlog is unchanged and was independently
-re-confirmed (not merely assumed unchanged) for its three highest-visibility items (T-12, T-13, T-29/T-30).
-No cosmetic or preference-driven renames are proposed. This report itself — the audit record, the
-carry-over reconciliation, and the one watch-item for a future MCP admin surface — is the deliverable of
-this pass; per the DEBT-014 process lesson, it was written only after a fresh sync against `origin/main`
-immediately before opening its PR.
+**Does not apply cleanly this pass — a production-worthy terminology defect (T-40) was identified and
+fixed**: a security-adjacent GUI label naming a revocation mechanism (CRL) that does not exist in the
+implementation, corrected in this same PR (XS, no migration risk, no wire surface affected). The MCP
+canary-execution stream introduced no new drift once correctly re-audited (see "Corrections made in
+review"). The fourteen-ID carry-over backlog is otherwise unchanged and was independently re-confirmed (not
+merely assumed unchanged) for its three highest-visibility pre-existing items (T-12, T-13, T-29/T-30). No
+cosmetic or preference-driven renames are proposed. This report's first revision contained two factual
+errors, both caught by automated PR review before merge and corrected above rather than silently fixed —
+per the DEBT-014 process lesson, it was written only after a fresh sync against `origin/main` immediately
+before opening its PR, and this revision adds a second lesson: a "no GUI/API surface" claim must be checked
+against the rendered surface directly, not inferred from which files a diff touched.
