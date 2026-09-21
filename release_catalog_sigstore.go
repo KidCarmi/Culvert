@@ -274,7 +274,7 @@ func resolveSigstoreWiring(getenv func(string) string) sigstoreWiring {
 // loadSigstoreTrustedRoot returns the trusted-root JSON and its source: the
 // operator override file (if CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT is set) else
 // the baked embed.
-func loadSigstoreTrustedRoot(getenv func(string) string) ([]byte, string, error) {
+func loadSigstoreTrustedRoot(getenv func(string) string) (rootJSON []byte, source string, err error) {
 	path := strings.TrimSpace(getenv(envReleaseSigstoreTrustedRoot))
 	if path == "" {
 		return bakedSigstoreTrustedRootJSON, sigstoreSourceDefault, nil
