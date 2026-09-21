@@ -115,11 +115,12 @@ branch-protection edit **in the same sitting**:
    (see §4).
 9. **`ci.yml` constraints — do not violate:**
    - The workflow **name `CI` must not change** and the workflow must not be
-     split in a way that changes its name: `publish-catalog-pages.yml`
+     split in a way that changes its name: `publish-catalog-r2.yml`
      triggers on `workflow_run: workflows: ["CI"]`. Renaming it silently
-     kills signed-catalog publication to Pages (the
-     `CULVERT_RELEASE_CATALOG_URL` auto-seed origin). If it is ever renamed,
-     update `publish-catalog-pages.yml` in the same PR.
+     kills signed-catalog publication to the R2 origin (the
+     `CULVERT_RELEASE_CATALOG_URL` auto-seed origin, and since the Pages
+     retirement the ONLY one). If it is ever renamed, update
+     `publish-catalog-r2.yml` in the same PR.
    - The `docker` job on main-push/tags is **release machinery** (next-version
      compute, push/retag, cosign, `proxy_digest`/`version_bare` outputs
      consumed by `catalog-pipeline`, transitively gating `release`). The
@@ -182,7 +183,7 @@ dependency — a commit that later fails the gate has already shipped a signed
 ### 5b. Egress control on the signing jobs (PANW audit item 2)
 
 The OIDC-token-bearing jobs (`docker`, `catalog-pipeline`, `release`, plus the
-`_build-image` reusable, `pr-fast-gate/test-race`, and `publish-catalog-pages`)
+`_build-image` reusable, and `pr-fast-gate/test-race`)
 run `go build`/`go test`/`docker build` over the full dependency graph while
 holding the cosign signing identity. A compromised transitive dep could
 exfiltrate that token. **Phase 2a (applied):** `step-security/harden-runner`
@@ -410,3 +411,58 @@ continue-on-error).
 | Typical Go PR | ~40–60 min | ~10–15 min (bounded by the single `-race` run) |
 | Proxy/security/deps PR | ~40–60 min | ~20–30 min (Lane A ∥ Lane B, image built once) |
 | Release tag | ~60+ min | unchanged by design (full evidence) |
+
+## 8. Stage 1 — QA scheduling (shipped)
+
+Six QA Gate jobs — `qa-determinism`, `qa-coverage`, `qa-infra-compose`,
+`qa-os`, `qa-contract`, `qa-bench` — carried `needs: qa-logic` while consuming
+no output and no artifact from it. The edge bought nothing and serialised the
+longest job in the workflow (a full `-race` suite, ~25 min observed) in front of
+every one of them on main pushes and manual dispatches. Stage 1 removes the six
+edges, leaving all eight substantive jobs independent and joined only by the
+`✅ QA Gate — APPROVED` aggregate.
+
+The PR-time skip those jobs used to inherit by CASCADE from `qa-logic`'s own
+`if:` is now stated on each job explicitly
+(`if: github.event_name != 'pull_request'`). Dropping the edge without restoring
+the condition would have started running the whole QA suite on every pull
+request — the opposite of retirement step 5. `always()` is deliberately NOT used:
+it would also run the jobs on PRs and after a cancellation.
+
+Unchanged by design: workflow name, job ids, required-check names, the trigger
+matrix (push→main, pull_request→main, workflow_dispatch; no schedule, no tag
+push), every command, flag, seed, coverage floor, timeout, permission,
+concurrency group, artifact and cleanup step, the aggregate's `always()`, the
+shared `needs-verdict` action, and `qa-gate.yml`'s `mandatory` row in
+`.github/release-evidence.txt`.
+
+Behaviour change, intended: a `qa-logic` failure no longer suppresses its former
+dependents — they run and report their own verdict. The aggregate still refuses,
+because it still needs all eight.
+
+Wall: `qa_gate_scheduling_test.go` (5 tests / 22 sub-cases). It parses the real
+workflow and drives the REAL `needs-verdict` composite action's shell rather
+than a re-implementation of its jq. Every assertion was verified failing against
+the pre-change tree or against an injected defect (re-added edge, dropped `if:`,
+`always()` substitution, a job dropped from the aggregate, a restored tag
+trigger, and a `needs-verdict` that stops refusing `cancelled`).
+
+### Follow-up (NOT in stage 1): `needs-verdict` accepts `skipped` on every event
+
+`.github/actions/needs-verdict` treats a `skipped` need as a pass unless the
+caller passes `require-success`. The event is not part of its input, so it
+cannot distinguish a legitimate PR skip from an all-skipped main push. No gate
+aggregate in this repository passes `require-success` today, so an all-skipped
+main-push QA run would report APPROVED. This is PRE-EXISTING and shared by the
+Fast/Deep PR and Security aggregates; it is not made better or worse by stage 1,
+and tightening it is a policy change to a shared action that belongs in its own
+reviewed diff (the likely shape: pass `require-success` with the substantive job
+ids on non-PR events).
+
+Two consequences to carry until it is closed:
+
+* Validating a QA scheduling change on a non-PR event means confirming that all
+  eight substantive jobs **executed** successfully, not merely that the
+  aggregate went green.
+* `TestQAGateVerdict_RealActionBehaviour` pins the behaviour as it IS, including
+  this gap, so closing it is a visible diff rather than a silent one.
