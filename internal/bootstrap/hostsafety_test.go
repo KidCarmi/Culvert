@@ -95,7 +95,7 @@ func bytesGoAcceptsInHostHeader(t *testing.T) []byte {
 			io.WriteString(w, "ok") //nolint:errcheck // probe response body is not read
 		}),
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -105,7 +105,7 @@ func bytesGoAcceptsInHostHeader(t *testing.T) []byte {
 	var accepted []byte
 	for b := 0x20; b < 0x7f; b++ {
 		host := "a" + string(rune(b)) + "b"
-		conn, err := net.Dial("tcp", ln.Addr().String())
+		conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", ln.Addr().String())
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -138,7 +138,10 @@ func TestSafeAuthority_Accepts(t *testing.T) {
 		{"localhost", "localhost"},
 		{"localhost:1", "localhost:1"},
 		{"cp-1.eu-west-2.internal:65535", "cp-1.eu-west-2.internal:65535"},
-		{"culvert_cp:50051", "culvert_cp:50051"}, // Docker Compose service name
+		{"culvert_cp:50051", "culvert_cp:50051"},         // Docker Compose service name
+		{"[fe80::1%eth0]:50051", "[fe80::1%eth0]:50051"}, // RFC 4007 zone id (Codex review)
+		{"[fe80::1%eth0]", "[fe80::1%eth0]"},
+		{"[fe80::1%2]:50051", "[fe80::1%2]:50051"}, // numeric scope id
 		{"10.0.0.7", "10.0.0.7"},
 		{"10.0.0.7:9090", "10.0.0.7:9090"},
 		{"[::1]", "[::1]"},
@@ -190,6 +193,13 @@ func TestSafeAuthority_Refuses(t *testing.T) {
 		strings.Repeat("a", 300),                 // over the byte bound
 		"cp.example.com%00",                      // encoded NUL
 		"café.example.com",                       // non-ASCII (must be punycode)
+		"[fe80::1%]",                             // empty zone
+		"[fe80::1%et$(id)]",                      // injected zone
+		"[fe80::1%eth 0]",                        // whitespace in the zone
+		"[fe80::1%" + strings.Repeat("a", 33) + "]", // zone over the bound
+		"10.0.0.7%eth0",          // a zone is meaningless on IPv4
+		"[::ffff:10.0.0.7%eth0]", // …and on a 4-in-6 address
+		"cp.example.com%eth0",    // a zone is not a DNS-name byte
 	}
 	for _, in := range tests {
 		if got, ok := SafeAuthority(in); ok {
@@ -415,6 +425,8 @@ func TestDefect_DoubleQuotedWordExpandsCommandSubstitution(t *testing.T) {
 	const injected = `cp.example.com$(echo PWNED)`
 	const expanded = `cp.example.comPWNED`
 
+	// CommandContext, not Command: the harness must die with the test (noctx).
+	// #nosec G204 -- fixed argv; `injected` is this test's own literal above.
 	out, err := exec.CommandContext(t.Context(), sh, "-c", `CP_BASE="`+injected+`"; printf %s "$CP_BASE"`).Output()
 	if err != nil {
 		t.Fatalf("bash: %v", err)
@@ -423,6 +435,7 @@ func TestDefect_DoubleQuotedWordExpandsCommandSubstitution(t *testing.T) {
 		t.Fatalf("double-quoted word did not expand $( ) — this gate no longer proves the defect (got %q)", out)
 	}
 
+	// #nosec G204 -- same fixed payload, single-quoted; see above.
 	out, err = exec.CommandContext(t.Context(), sh, "-c", `CP_BASE='`+injected+`'; printf %s "$CP_BASE"`).Output()
 	if err != nil {
 		t.Fatalf("bash: %v", err)

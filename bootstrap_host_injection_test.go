@@ -57,7 +57,7 @@ func bootstrapTestServer(t *testing.T) (token string, get func(path, host string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/cluster/bootstrap/", apiBootstrapRouter)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -66,7 +66,7 @@ func bootstrapTestServer(t *testing.T) (token string, get func(path, host string
 
 	get = func(path, host string, extra ...string) (int, string) {
 		t.Helper()
-		conn, err := net.Dial("tcp", ln.Addr().String())
+		conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", ln.Addr().String())
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -243,9 +243,74 @@ func TestSECBootstrapHost1_RefusalCounterIsOnMetrics(t *testing.T) {
 	for _, want := range []string{
 		"# TYPE culvert_bootstrap_host_refused_total counter",
 		"culvert_bootstrap_host_refused_total ",
+		"# TYPE culvert_bootstrap_token_unusable_total counter",
+		"culvert_bootstrap_token_unusable_total ",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("/metrics is missing %q", want)
 		}
+	}
+}
+
+// TestSECBootstrapHost1_MalformedStoredTokenIsNotAnEmpty200 pins the Codex P2
+// finding on this PR: TokenExists proves only that the token's SHA-256 hash is
+// in the store, so a store that was hand-edited, restored from a legacy format
+// or corrupted can admit a plaintext the renderer refuses.
+//
+// The renderer's refusal is correct and would have landed AFTER the 200 and its
+// headers, leaving the caller with an empty success — and `curl … | sudo bash`
+// silently doing nothing, which is the worst way for a provisioning step to
+// fail because it looks like it worked. The handler now decides before the
+// response is committed.
+func TestSECBootstrapHost1_MalformedStoredTokenIsNotAnEmpty200(t *testing.T) {
+	_, get := bootstrapTestServer(t)
+
+	// URL-safe and slash-free, so it clears the path checks, but not a token
+	// this appliance would ever mint (base64url is [A-Za-z0-9-_]).
+	beforeHost := bootstrapHostRefusedCount()
+	const bad = "tok.bad"
+	globalClusterStore.mu.Lock()
+	globalClusterStore.st.Tokens[hashToken(bad)] = &EnrollToken{
+		TokenHash: hashToken(bad),
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: time.Now(),
+		CreatedBy: "test",
+	}
+	globalClusterStore.mu.Unlock()
+
+	for _, path := range []string{
+		"/api/cluster/bootstrap/" + bad,
+		"/api/cluster/bootstrap/" + bad + "/compose",
+	} {
+		status, body := get(path, "cp.example.com:9090")
+		if status == http.StatusOK {
+			t.Errorf("%s: 200 for a token the renderer refuses (body %d bytes) — an empty success is "+
+				"the failure mode this gate exists for", path, len(body))
+			continue
+		}
+		if status != http.StatusInternalServerError {
+			t.Errorf("%s: status = %d, want 500 (the token IS in the store, so 404 would send the "+
+				"operator to mint another one that fails the same way)", path, status)
+		}
+		if strings.Contains(body, "#!/bin/bash") || strings.Contains(body, "services:") {
+			t.Errorf("%s: refusal body carries artifact bytes: %q", path, body)
+		}
+	}
+
+	if got := bootstrapHostRefusedCount(); got != beforeHost {
+		t.Errorf("a malformed-token refusal moved the HOST counter (%d → %d) — the two refusals point at "+
+			"different operator actions and must not share a series", beforeHost, got)
+	}
+	if got := bootstrapTokenUnusableCount(); got < 2 {
+		t.Errorf("culvert_bootstrap_token_unusable_total = %d after two refusals, want >= 2", got)
+	}
+
+	// CONTROL: a well-formed token in the same store still serves.
+	good, err := globalClusterStore.GenerateToken("dp-", "", "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if status, _ := get("/api/cluster/bootstrap/"+good, "cp.example.com:9090"); status != http.StatusOK {
+		t.Fatalf("well-formed token: status = %d, want 200", status)
 	}
 }

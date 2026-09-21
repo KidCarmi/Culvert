@@ -55,6 +55,7 @@ const maxDNSNameLen = 253
 //	a DNS name          cp.example.com          cp.example.com:9090
 //	an IPv4 literal     10.0.0.7                10.0.0.7:9090
 //	an IPv6 literal     [2001:db8::1]           [2001:db8::1]:9090
+//	…with a zone id     [fe80::1%eth0]          [fe80::1%eth0]:9090
 //
 // Everything else — an empty host, a shell metacharacter, a space, a port that
 // is not a decimal 1-65535, a bare unbracketed IPv6 address, a userinfo or path
@@ -69,10 +70,13 @@ func SafeAuthority(authority string) (string, bool) {
 	if !ok || host == "" {
 		return "", false
 	}
-	if ip := net.ParseIP(host); ip != nil {
+	if ip, zone, isIP := parseIPWithZone(host); isIP {
 		// An IP literal. JoinHostPort re-brackets IPv6 for us; do the same by
 		// hand for the portless form so both branches agree.
 		canonical := ip.String()
+		if zone != "" {
+			canonical += "%" + zone
+		}
 		if port != "" {
 			return net.JoinHostPort(canonical, port), true
 		}
@@ -88,6 +92,59 @@ func SafeAuthority(authority string) (string, bool) {
 		return host + ":" + port, true
 	}
 	return host, true
+}
+
+// parseIPWithZone parses an IP literal that may carry an RFC 4007 zone
+// identifier (`fe80::1%eth0`). net.ParseIP refuses the zone outright, so
+// without this a link-local gRPC listen address the operator configured — and
+// that net.Listen accepts — would be refused and every compose bootstrap
+// request would answer 400 (Codex review, PR #1458). That is the availability
+// regression this package refuses to buy with a security fix, the same trade
+// validDNSName records for the underscore.
+//
+// The zone is NOT a widening: it is admitted only on an IPv6 address (it is
+// meaningless on IPv4, and on a 4-in-6 address), under a grammar strictly
+// narrower than the host alphabet, and every byte it admits is inert in a
+// single-quoted shell word and in a YAML scalar.
+func parseIPWithZone(host string) (ip net.IP, zone string, ok bool) {
+	addr, z, hasZone := strings.Cut(host, "%")
+	parsed := net.ParseIP(addr)
+	if parsed == nil {
+		return nil, "", false
+	}
+	if !hasZone {
+		return parsed, "", true
+	}
+	if parsed.To4() != nil || !validZone(z) {
+		return nil, "", false
+	}
+	return parsed, z, true
+}
+
+// maxZoneLen bounds a zone identifier. IFNAMSIZ is 16 on Linux; 32 leaves room
+// for a numeric scope id or a longer name on another platform without turning
+// the field into a place to hide a payload.
+const maxZoneLen = 32
+
+// validZone reports whether z is a plain interface name or numeric scope id:
+// 1-32 bytes of [A-Za-z0-9_.-]. Deliberately narrower than the host alphabet —
+// the only reason this field exists is to name a link.
+func validZone(z string) bool {
+	if z == "" || len(z) > maxZoneLen {
+		return false
+	}
+	for i := 0; i < len(z); i++ {
+		c := z[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // splitAuthority separates an authority into its host and optional port. The

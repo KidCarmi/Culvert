@@ -53,7 +53,7 @@ into the same place.
 | Stage | Behaviour |
 |---|---|
 | Derive authority | `Host`, or `X-Forwarded-Host` when forwarded headers are trusted |
-| Validate | Must be a DNS name, an IPv4 literal, or a bracketed IPv6 literal, with an optional decimal port 1–65535 |
+| Validate | Must be a DNS name, an IPv4 literal, or a bracketed IPv6 literal (an RFC 4007 zone id such as `fe80::1%eth0` is preserved), with an optional decimal port 1–65535 |
 | On failure | **400 Bad Request**, nothing rendered, nothing written |
 | Order | The enrollment token is checked **first**, so a caller with no token cannot drive the refusal path |
 | Artifacts | The script single-quotes every value it interpolates; the compose document quotes its env entry |
@@ -70,6 +70,17 @@ The same validation guards:
 The compose document is additionally refused with **503** when the cluster CA
 has no fingerprint to pin: a compose file carrying an unpinned enrollment URL
 would have a fresh DP node trust whatever answers.
+
+Both endpoints also refuse with **500** when the enrollment token *is* in the
+store but is not in the format this appliance mints (base64url, `[A-Za-z0-9-_]`).
+`TokenExists` compares only the token's SHA-256 hash, so a token store that was
+hand-edited or restored from an incompatible format can admit a plaintext the
+renderer will not interpolate — and before this check that refusal landed *after*
+the 200, so the caller received an empty success and `curl … | sudo bash`
+silently did nothing. 500 rather than 404 is deliberate: the token is present, so
+"invalid or expired" would send you to mint another one that fails identically.
+The remedy is to restore the token store from a backup taken by this version, or
+revoke and re-issue the tokens.
 
 ---
 
@@ -139,6 +150,12 @@ validator accepts.
 - **No IDNA/punycode conversion.** A non-ASCII authority is refused, not
   transliterated. Converting would mean deciding, inside a security control,
   which of two spellings of a name the operator meant.
+- **The allowlist is not minimal for its own sake.** Two bytes are in it
+  because refusing them would break a real deployment while buying no safety:
+  the underscore (Docker Compose service names) and the IPv6 zone identifier
+  (`fe80::1%eth0`, which `net.Listen` accepts as a gRPC listen address). Both
+  are inert in a single-quoted shell word and in a YAML scalar. A byte is added
+  here only when that argument can be made for it.
 - **No sanitisation.** A bad authority is refused, never stripped down to
   something renderable. An artifact assembled from a partially-rewritten
   authority points at a host nobody chose.

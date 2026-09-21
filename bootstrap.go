@@ -51,6 +51,21 @@ func apiBootstrapScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The token is one of the three values the script interpolates, and
+	// TokenExists proves only that its SHA-256 hash is in the store — a store
+	// that was hand-edited, restored from a legacy format, or corrupted can
+	// therefore admit a plaintext RenderScript will refuse. Without this check
+	// that refusal lands AFTER the 200 and its headers, so the caller gets an
+	// empty success and `curl … | sudo bash` silently does nothing (Codex
+	// review, PR #1458). 500, not 404: the token IS in the store, so telling
+	// the operator "invalid or expired" would send them to mint another one
+	// that fails the same way.
+	if !bootstrap.SafeToken(token) {
+		noteBootstrapTokenUnusable("script")
+		http.Error(w, "enrollment token unusable", http.StatusInternalServerError)
+		return
+	}
+
 	// SEC-BOOTSTRAP-HOST-1 — the rendered script is documented to be piped
 	// into `sudo bash`, and both of the values below are request-derived. They
 	// are validated BEFORE any header is written, so a refusal is a clean 400
@@ -119,6 +134,14 @@ func apiBootstrapCompose(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid host", http.StatusBadRequest)
 		return
 	}
+	if !bootstrap.SafeToken(token) {
+		// Same store-integrity case as the script path above, stated here too
+		// rather than left to SafeEnrollURL's token check: a reader must not
+		// have to derive it from the URL grammar.
+		noteBootstrapTokenUnusable("compose")
+		http.Error(w, "enrollment token unusable", http.StatusInternalServerError)
+		return
+	}
 	caFP := globalClusterCA.CACertFingerprint()
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, token, caFP)
 	if !bootstrap.SafeEnrollURL(enrollURL) {
@@ -139,18 +162,39 @@ func apiBootstrapCompose(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// bootstrapHostRefusedLogGate rate-limits the refusal line. Both bootstrap
-// endpoints sit on the public allowlist (their own token is the auth), and the
-// token check runs BEFORE this is reached, so only a token holder can drive it
-// — but a mitigation for an injection defect must not itself be a
-// write-amplification defect (CHAOS-63), so the line is bounded and the counter
-// carries the magnitude.
-var bootstrapHostRefusedLogGate struct {
+// bootstrapLogGate rate-limits one refusal reason. Both bootstrap endpoints sit
+// on the public allowlist (their own token is the auth), so a mitigation for an
+// injection defect must not itself be a write-amplification defect (CHAOS-63):
+// each refusal logs its onset immediately, then at most one line per interval,
+// and the counter beside it carries the magnitude.
+type bootstrapLogGate struct {
 	mu sync.Mutex
 	at time.Time
 }
 
-const bootstrapHostRefusedLogInterval = time.Minute
+// due reports whether a line may be emitted now, and stamps the gate when it
+// says yes.
+func (g *bootstrapLogGate) due(interval time.Duration) bool {
+	now := time.Now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.at.IsZero() || now.Sub(g.at) >= interval {
+		g.at = now
+		return true
+	}
+	return false
+}
+
+// Two gates, never one. The two refusals point at DIFFERENT operator actions —
+// fix the reverse proxy vs. repair the token store — so a shared gate would
+// swallow whichever arrived second and report one cause for the other
+// (storage_health.go's rule that two failures must not share a rate gate).
+var (
+	bootstrapHostRefusedLogGate bootstrapLogGate
+	bootstrapTokenUnusableGate  bootstrapLogGate
+)
+
+const bootstrapRefusedLogInterval = time.Minute
 
 // bootstrapHostRefused counts artifact renders refused because the request's
 // derived authority was not a plain host[:port]. Non-zero means either a
@@ -165,19 +209,31 @@ func bootstrapHostRefusedCount() int64 { return bootstrapHostRefused.Load() }
 
 func noteBootstrapHostRefused(artifact string) {
 	n := bootstrapHostRefused.Add(1)
-
-	now := time.Now()
-	bootstrapHostRefusedLogGate.mu.Lock()
-	due := bootstrapHostRefusedLogGate.at.IsZero() ||
-		now.Sub(bootstrapHostRefusedLogGate.at) >= bootstrapHostRefusedLogInterval
-	if due {
-		bootstrapHostRefusedLogGate.at = now
-	}
-	bootstrapHostRefusedLogGate.mu.Unlock()
-
-	if due && logger != nil {
+	if bootstrapHostRefusedLogGate.due(bootstrapRefusedLogInterval) && logger != nil {
 		logger.Printf("Bootstrap: refused to render the %s artifact — the request's derived authority "+
 			"is not a plain host[:port]; %d refusal(s) so far. Check the reverse proxy's Host / "+
 			"X-Forwarded-Host handling.", sanitizeLog(artifact), n)
+	}
+}
+
+// bootstrapTokenUnusable counts artifact renders refused because the enrollment
+// token IS in the store but is not in the format this appliance mints. Non-zero
+// means the token store itself is carrying something it did not write — restore
+// it from a backup taken by this version, or revoke and re-issue.
+//
+// Separate from bootstrapHostRefused on purpose: the two send an operator to
+// different places, and one series that could mean either is a series nobody
+// can act on.
+var bootstrapTokenUnusable atomic.Int64
+
+// bootstrapTokenUnusableCount reports the counter for the metrics surface.
+func bootstrapTokenUnusableCount() int64 { return bootstrapTokenUnusable.Load() }
+
+func noteBootstrapTokenUnusable(artifact string) {
+	n := bootstrapTokenUnusable.Add(1)
+	if bootstrapTokenUnusableGate.due(bootstrapRefusedLogInterval) && logger != nil {
+		logger.Printf("Bootstrap: refused to render the %s artifact — the stored enrollment token is not "+
+			"in the format this appliance mints; %d refusal(s) so far. The token store may have been "+
+			"edited or restored from an incompatible format.", sanitizeLog(artifact), n)
 	}
 }
