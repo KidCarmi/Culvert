@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1111,4 +1112,66 @@ func shellCodeOnly(script string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// `GET /repos/{owner}/{repo}/releases/tags/{tag}` DOES NOT RETURN DRAFTS.
+//
+// The whole staging design of #1441 puts every asset on a draft, and then every
+// reader looked the release up by tag — an endpoint that cannot see one. On
+// v1.0.234 the SLSA generator's own draft-blind uploader consequently created a
+// SECOND, published release holding nothing but the attestation; it became the
+// repository's Latest, `assert-release-complete.sh` read it, reported 19 assets
+// missing, and refused. The 19 real assets were in the invisible draft the
+// whole time.
+//
+// The only legitimate by-tag lookup is the one ASKING whether a PUBLISHED
+// release exists — where a draft's 404 is the correct answer, not a blind spot.
+// That caller is named here, with its reason; everything else must resolve
+// through resolve_staged_release_id.
+func TestPublicationGating_NoDraftBlindReleaseLookup(t *testing.T) {
+	const blindEndpoint = "releases/tags/"
+
+	// path -> why a by-tag lookup is correct there.
+	allowed := map[string]string{
+		".github/scripts/assert-release-unpublished.sh": "asks whether a PUBLISHED release exists; a draft must read as absent",
+	}
+
+	roots := []string{".github/scripts", ".github/workflows"}
+	checked, hits := 0, 0
+	for _, root := range roots {
+		err := filepath.WalkDir(filepath.Join(pkgSourceDir(), root), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			checked++
+			rel, relErr := filepath.Rel(pkgSourceDir(), path)
+			if relErr != nil {
+				rel = path
+			}
+			rel = filepath.ToSlash(rel)
+			body := shellCodeOnly(string(b))
+			if !strings.Contains(body, blindEndpoint) {
+				return nil
+			}
+			hits++
+			if reason, ok := allowed[rel]; ok {
+				t.Logf("allowed by-tag lookup in %s: %s", rel, reason)
+				return nil
+			}
+			t.Errorf("%s reads %s — that endpoint does not return drafts, and the release being read IS a draft.\n"+
+				"Resolve it with resolve_staged_release_id (.github/scripts/lib/release.sh), or add this path to the\n"+
+				"allowlist with the reason a draft must read as absent there.", rel, blindEndpoint)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	if checked == 0 || hits == 0 {
+		t.Fatalf("scanned %d files and found %d by-tag lookups — the selector is stale and this test proves nothing", checked, hits)
+	}
 }

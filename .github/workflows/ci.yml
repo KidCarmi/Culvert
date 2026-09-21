@@ -1655,7 +1655,75 @@ jobs:
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.aggregate-subjects.outputs.hashes }}
-      upload-assets: true
+      # upload-assets is FALSE, and that is load-bearing. The generator's
+      # uploader pins softprops/action-gh-release@v2.2.1, which resolves the
+      # target through `GET /releases/tags/{tag}` — an endpoint that DOES NOT
+      # RETURN DRAFTS. Against our staged draft it 404s and CREATES A SECOND
+      # RELEASE, published, holding nothing but the attestation; the tag then
+      # has two release objects and every by-tag reader finds the wrong one.
+      # That is exactly what happened to v1.0.234 (run 35625903415): the
+      # provenance-only release became the repository's Latest while the 19
+      # real assets sat in the invisible draft, and `publish-release` refused.
+      #
+      # With it false the generator still publishes the attestation as a
+      # WORKFLOW ARTIFACT named by its `provenance-name` output, and
+      # attach-provenance below puts it on the draft using the v3.0.2 action,
+      # which enumerates releases and therefore can see one.
+      upload-assets: false
+
+  # Attach the SLSA attestation to the STAGED DRAFT.
+  #
+  # Split out of the generator for the reason above: the uploader it ships
+  # cannot address a draft. This job uses the same draft-aware action every
+  # other staging step uses, so the attestation lands beside the binaries in
+  # the one release object this tag has.
+  attach-provenance:
+    name: "Supply Chain · Attach provenance to the draft"
+    timeout-minutes: 10
+    needs: [provenance]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # stage one more asset on the draft release
+      actions: read     # require-release-evidence.sh
+    steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # This job stages an asset, so it carries the same two guards every other
+      # staging job carries: never touch an already-published release, and
+      # re-assert the predicate rather than inheriting the needs-chain's claim.
+      - name: Refuse if this release is already published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-unpublished.sh "$REF_NAME"
+
+      - name: Require release evidence for this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/require-release-evidence.sh "$GITHUB_SHA" assert
+
+      - name: Download the signed provenance artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.provenance.outputs.provenance-name }}
+      - name: Assert the attestation is present and non-empty
+        env:
+          PROV: ${{ needs.provenance.outputs.provenance-name }}
+        run: |
+          set -euo pipefail
+          test -n "$PROV" || { echo "::error::the generator reported no provenance-name — refusing"; exit 1; }
+          test -s "$PROV" || { echo "::error::${PROV} is missing or empty — refusing"; exit 1; }
+          echo "attaching ${PROV} ($(stat -c%s "$PROV") bytes)"
+      - name: Stage the attestation on the draft
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          draft: true
+          files: ${{ needs.provenance.outputs.provenance-name }}
 
   # ─── Release publication (the final promotion) ────────────────────────────
   # The ONLY job that makes a release public. Every asset-carrying step above
@@ -1685,7 +1753,7 @@ jobs:
   publish-release:
     name: "Release · Publish (post-evidence)"
     timeout-minutes: 15
-    needs: [release, catalog-pipeline, promote-release-channels, aggregate-subjects, verify-reproducible, provenance]
+    needs: [release, catalog-pipeline, promote-release-channels, aggregate-subjects, verify-reproducible, provenance, attach-provenance]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -1737,7 +1805,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          RELEASE_ID="$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq '.id')"
+          # Draft-aware: `releases/tags/<tag>` cannot see the draft this chain
+          # staged, so it used to resolve a different release object entirely.
+          # shellcheck source=.github/scripts/lib/release.sh
+          . .github/scripts/lib/release.sh
+          RELEASE_ID="$(resolve_staged_release_id "$REPO" "$TAG")"
           test -n "$RELEASE_ID" || { echo "::error::no release found for ${TAG} — refusing"; exit 1; }
           gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" \
             -F draft=false -f make_latest=legacy >/dev/null
