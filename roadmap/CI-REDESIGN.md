@@ -557,12 +557,15 @@ The duplicate main-push race execution ACROSS workflows is untouched:
 `-race` suite on a main push. Consolidating them is stage 2B and is not a
 scheduling change — see §10.
 
-## 10. Stage 2B — the cross-workflow race duplication (NOT yet implemented)
+## 10. Stage 2B — cross-workflow race ownership (shipped)
 
-On a main push the full `-race ./...` suite runs twice in two different
-workflows. Removing one copy is worth roughly a `qa-logic` (~33 min of runner
-time), but it cannot be done by deleting a job, because **the two workflows do
-not run on the same events**:
+On a main push the full `-race ./...` suite ran TWICE, in two workflows:
+`qa-gate.yml`'s `qa-logic` (which since stage 2A also produces the authoritative
+coverage profile) and `security-release-gate.yml`'s `tests-race`, with the same
+`TEST_SEED` and the same package scope, for one verdict.
+
+It could not be fixed by deleting a job, because **the two workflows do not run
+on the same events**:
 
 | Event | qa-gate.yml | security-release-gate.yml |
 |---|---|---|
@@ -572,27 +575,88 @@ not run on the same events**:
 | schedule (weekly) | no | yes |
 | workflow_dispatch | yes (any ref) | yes |
 
-So making Security consume QA's race evidence would leave **tags, the weekly
-cron and Security-only dispatches with no race evidence at all** — and
-`require-gate.sh` accepts only a main-push run of a named workflow for the exact
-SHA, so a tag run cannot borrow QA's. Any 2B design has to answer that
-explicitly rather than assume the main-push case generalises.
+Deleting `tests-race` would have left version tags, the weekly cron and
+Security-only dispatches with **no race evidence at all**.
 
-The two shapes worth weighing:
+### What shipped: ownership by event
 
-1. **Shared reusable workflow.** Extract the race suite into a
-   `workflow_call` workflow both gates invoke. Each event still gets its own
-   execution, so nothing is lost on tags or cron — but the main-push duplication
-   is only removed if one caller also learns to skip when the other has already
-   run for the same SHA, which reintroduces the evidence question.
-2. **Event-scoped ownership.** QA owns the race suite on main pushes; Security
-   skips it there and consumes QA's result, while keeping its own execution on
-   tags, cron and dispatch. This removes the duplication outright, but it makes
-   a Security verdict on main depend on a QA run, so
-   `.github/release-evidence.txt` must continue to require BOTH workflows (it
-   already does — both rows are `mandatory`) and the skip must fail closed when
-   QA's run for that SHA is absent, not silently pass.
+`tests-race` is now scoped by EVENT and REF together:
 
-Option 2 is the one that actually removes the duplicate execution. It is also
-the one that touches release evidence, which is why it is its own reviewed
-change and not part of 2A.
+```
+pull_request           → skip  (pass-through, unchanged)
+push → refs/heads/main → SKIP  — owned by qa-gate.yml's qa-logic
+push → refs/tags/v*    → RUN   — qa-gate.yml has no tag trigger
+schedule (weekly)      → RUN   — ref is main, but QA has no schedule
+workflow_dispatch      → RUN   — including on main
+```
+
+**Keying on the branch alone is the trap.** The scheduled and manual runs also
+have `refs/heads/main` as their ref, so a `github.ref != 'refs/heads/main'`
+condition would silently suppress exactly the events on which nothing else runs
+the suite. The condition must test the event too.
+
+### One skip is intentional; every other one is a hole
+
+`needs-verdict` reads a skipped need as a pass — which is what makes the
+intentional main-push skip acceptable, and would equally swallow a `tests-race`
+that failed to start on a tag. So on every event where Security still OWNS the
+suite, the aggregate passes `require-success: tests-race`, which demands
+exactly `success` and refuses a skip. On a main push (and on PRs) the input is
+empty and the skip is accepted.
+
+That predicate is written TWICE — the job's `if:` and the aggregate's
+`require-success` — because a job-level `if:` cannot read `env`, so it cannot be
+factored out in YAML. `TestSecurityRace_OwnershipPredicateIsSingleSourced` pins
+the two copies equal. Drift is silent in one direction (a suite that runs
+unrequired) and wedging in the other (a gate demanding a job that never starts).
+
+### The release verdict did not change, and that is the point
+
+`.github/release-evidence.txt` already required BOTH workflows as `mandatory`,
+and `require-release-evidence.sh` binds each row to the workflow FILE PATH, the
+exact head SHA, `event=push` and `head_branch == main`. Stage 2B moves the
+main-push race run from one side of that conjunction to the other; it does not
+move it out. Nothing was added to the predicate, no cross-workflow polling job
+was introduced, and no reusable workflow was called twice (which would not have
+removed an execution anyway).
+
+Consequently a green Security run on main means **this workflow's required scans
+passed** — not that QA passed. The banner and step summary say so explicitly,
+and the summary renders the race row as "owned by qa-gate.yml — not evaluated
+here" on a main push rather than a tick it did not earn.
+
+### Artifact ownership
+
+| Artifact | Producer | Scope |
+|---|---|---|
+| `qa-coverage` | `qa-gate.yml` / `qa-logic` | **Authoritative** main-push profile; the floors are enforced against it |
+| `coverage-report` | `security-release-gate.yml` / `tests-race` | This workflow's standalone runs only — tags, schedule, dispatch |
+
+`coverage-report` is therefore absent on main pushes from 2B onward. That is
+safe because **nothing consumes it**: it has no reader in any workflow, script or
+test (audited, and pinned by `TestSecurityRace_CoverageArtifactOwnership`). No
+stand-in was fabricated for it; on main, read `qa-coverage`.
+
+### Expected saving, and what is not yet measured
+
+A main push ran the suite three times before 2A, twice after 2A, and **once**
+after 2B — removing roughly one `qa-logic`-equivalent (~2000 s, ~33
+runner-minutes) per main push. **Actual main-push behaviour and savings require
+post-merge observation**: a branch `workflow_dispatch` deliberately RUNS
+`tests-race` (dispatch is an event Security owns), so the dispatch used to
+validate this change cannot demonstrate the main-push skip. Report
+runner-minutes and wall-clock separately when it lands.
+
+Walls: `security_race_ownership_test.go` (7 tests) plus the STAGE 2B section of
+`.github/scripts/test/release-gating-cases.sh`, which drives the REAL predicate
+with Security green and QA absent / failed / cancelled / timed-out / stale /
+skipped / neutral / pending / wrong-SHA / tag-ref / dispatch-event, each
+refusing, with a both-green control that approves.
+
+### Rollback
+
+Revert the commit. `tests-race` returns to `if: github.event_name != 'pull_request'`
+and the aggregate stops passing `require-success`; the main push simply runs the
+suite twice again. Nothing else depends on the change: the release predicate,
+the evidence manifest, every publication barrier and both check identities are
+untouched, and `coverage-report` reappears on main pushes.
