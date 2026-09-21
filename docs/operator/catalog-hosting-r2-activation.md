@@ -1,10 +1,18 @@
 # Activating Cloudflare-R2 catalog hosting
 
-This runbook turns the **dormant** R2 catalog publisher
-(`.github/workflows/publish-catalog-r2.yml`, shipped in M0-PR3) **live**. Until you
-complete it, that workflow skips cleanly (green, no writes) and GitHub Pages remains
-the authoritative catalog host. Every step here requires **owner** credentials — none
-of it is done by CI.
+This runbook turns the R2 catalog publisher
+(`.github/workflows/publish-catalog-r2.yml`, shipped in M0-PR3) **live**. Every step
+here requires **owner** credentials — none of it is done by CI.
+
+> **This is no longer optional, and there is no fallback host.** GitHub Pages —
+> the catalog origin this runbook originally deferred to — has been retired
+> (`docs/operator/release-publication-gating.md` §7b); R2 is now the **sole**
+> catalog origin. `assert-publication-target` in `publish-catalog-r2.yml` reflects
+> that: with `R2_PUBLISH_ENABLED` unset, a tagged release run now **fails red**
+> (`::error::`, exit 1) rather than skipping cleanly, because an unpublished
+> catalog means every appliance running `CULVERT_RELEASE_CATALOG_URL`'s default
+> auto-seed goes stale with no other origin to fall back to. Complete this runbook
+> before cutting the first release after Pages retirement.
 
 > Trust model reminder: R2 (staging and live) is **untrusted transport**. Integrity
 > comes from the catalog's keyless Sigstore signature verified **in the binary**
@@ -129,5 +137,9 @@ auto-seeds and `/api/releases` reflects the served catalog.
 
 ## Rollback
 
-Set `R2_PUBLISH_ENABLED` back to unset/false — the publisher goes dormant again;
-Pages remains authoritative. No R2 object is deleted by disabling.
+Setting `R2_PUBLISH_ENABLED` back to unset/false does **not** fall back to GitHub
+Pages — Pages is retired and no longer serves the catalog. It instead makes every
+subsequent tagged release fail `assert-publication-target` red, because the
+release would otherwise ship with no catalog origin publishing it. Use this only
+to intentionally halt publication (e.g. while re-provisioning R2 credentials),
+and re-enable before the next release. No R2 object is deleted by disabling.
