@@ -431,64 +431,158 @@ func TestPublicationGating_StagingJobsRefuseAPublishedRelease(t *testing.T) {
 	}
 }
 
-// The write-once exception for an UNFINISHED publication is only reachable if
-// the release's draft state actually travels from the job that queries it to
-// the job that acts on it. If that wiring breaks the env goes EMPTY, which
-// promote-image-tags.sh reads as "refuse" — fail-closed, but it silently
-// restores the permanent wedge the exception exists to prevent: a tag run that
-// promoted X.Y.Z and then lost a downstream check leaves a draft that can never
-// publish, because the re-run's rebuild is refused against the tag the failed
-// run left behind (Codex review, PR #1441).
+// PUBLIC VERSION CHANNELS ARE THE LAST THING WRITTEN BEFORE THE RELEASE GOES
+// LIVE. A GHCR tag is public the instant it is written, so `vX.Y.Z`/`X.Y.Z`
+// appearing while verify-reproducible or provenance is still running is an
+// irreversible public act taken on unfinished evidence — and the GitHub
+// Release's Draft flag is NOT a visibility boundary for the registry, so "the
+// release was never published" never made the image private (owner correction,
+// PR #1441).
 //
-// Behavioural tests can only prove the script honours the value it is handed;
-// only the workflow says whether it is handed one. Every hop is asserted by
-// name so a rename fails the build instead of degrading in silence.
-func TestPublicationGating_DraftStateReachesPromotion(t *testing.T) {
+// Every required release check must therefore be a `needs` of the tag-path
+// promotion, so that any of them failing SKIPS it and nothing public is
+// written.
+func TestPublicationGating_VersionChannelsWaitForEveryReleaseCheck(t *testing.T) {
 	doc := loadWorkflow(t, ciWorkflowPath)
-
-	cat := mustJob(t, doc, "catalog-pipeline")
-	out, ok := cat.Outputs["release_state"]
-	if !ok {
-		t.Fatalf("catalog-pipeline must export a %q job output — promote-image reads it to tell an unfinished publication from a released one", "release_state")
-	}
-	if !strings.Contains(out, "steps.relstate.outputs.state") {
-		t.Errorf("catalog-pipeline.outputs.release_state = %q, want it wired to the release guard step's `state` output", out)
-	}
-
-	// …and that step must be the guard itself, not some other step that happens
-	// to carry the id.
-	guarded := false
-	for i := range cat.Steps {
-		if cat.Steps[i].ID != "relstate" {
-			continue
-		}
-		guarded = true
-		if !strings.Contains(stepBody(&cat.Steps[i]), "assert-release-unpublished.sh") {
-			t.Errorf("catalog-pipeline step id=relstate does not run assert-release-unpublished.sh — the exported state would not be the guard's verdict")
+	prom := mustJob(t, doc, "promote-release-channels")
+	needs := jobNeeds(prom)
+	for _, required := range []string{"release", "aggregate-subjects", "verify-reproducible", "provenance", "catalog-pipeline", "resolve-candidate"} {
+		if !needs[required] {
+			t.Errorf("promote-release-channels must need %q — without it a public version tag can be written before that check has passed", required)
 		}
 	}
-	if !guarded {
-		t.Error("catalog-pipeline has no step with id=relstate — nothing produces the release state")
+	if !strings.Contains(prom.If, "refs/tags/v") {
+		t.Errorf("promote-release-channels if = %q, want it restricted to the tag path", prom.If)
+	}
+	if strings.Contains(prom.If, "refs/heads/main") {
+		t.Errorf("promote-release-channels if = %q — the main path must not reach the exact-version promoter", prom.If)
 	}
 
-	prom := mustJob(t, doc, "promote-image")
-	if !jobNeeds(prom)["catalog-pipeline"] {
-		t.Fatal("promote-image must need catalog-pipeline to read its release_state output")
+	// …and the main-path promoter must NOT inherit those tag-only needs, or a
+	// skipped need would skip `latest` on every main push.
+	main := mustJob(t, doc, "promote-image")
+	mneeds := jobNeeds(main)
+	for _, tagOnly := range []string{"release", "aggregate-subjects", "verify-reproducible", "provenance"} {
+		if mneeds[tagOnly] {
+			t.Errorf("promote-image needs %q, which never runs on a main push — the job would be skipped and `latest` would stop moving", tagOnly)
+		}
 	}
-	consumed := false
-	for i := range prom.Steps {
-		for k, v := range prom.Steps[i].Env {
-			if k != "RELEASE_DRAFT_STATE" {
+	if strings.Contains(main.If, "refs/tags/v") {
+		t.Errorf("promote-image if = %q, want main-push only", main.If)
+	}
+
+	// publish-release must sit behind the tag-path promotion, not the main one.
+	pub := mustJob(t, doc, "publish-release")
+	if !jobNeeds(pub)["promote-release-channels"] {
+		t.Error("publish-release must need promote-release-channels — a release must not go live naming channels that were never moved")
+	}
+
+	// Both promoters share ONE ref-independent lock, or two releases can move
+	// the same moving channels at once.
+	for _, name := range []string{"promote-image", "promote-release-channels"} {
+		j := mustJob(t, doc, name)
+		group, cancel := j.ConcurrencyGroupAndCancel()
+		if group != "release-channel-promotion" {
+			t.Errorf("job %q concurrency group = %q, want the shared ref-independent %q", name, group, "release-channel-promotion")
+		}
+		if cancel {
+			t.Errorf("job %q sets cancel-in-progress — a promotion must never be cut in half", name)
+		}
+	}
+}
+
+// ONE VERSION, ONE DIGEST. This image build is not reproducible over time, so
+// every job that names a digest must name the BOUND candidate rather than
+// whatever this run happened to build — otherwise a retry silently re-decides
+// what the version means, and the catalog, the signature and the public tags
+// can end up naming different bytes.
+func TestPublicationGating_EveryConsumerUsesTheBoundCandidate(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	assertBindingIsEstablished(t, doc)
+	assertConsumersReadTheBinding(t, doc)
+	assertOnlyTheBinderReadsTheRawDigest(t, doc)
+}
+
+// rawBuildDigest is the digest `docker` happened to build. Only resolve-candidate
+// may read it; everyone else must read the digest the version is BOUND to, or a
+// retry silently re-decides what that version means.
+const rawBuildDigest = "needs.docker.outputs.proxy_digest"
+
+func assertBindingIsEstablished(t *testing.T, doc wfDoc) {
+	t.Helper()
+	bind := mustJob(t, doc, "resolve-candidate")
+	if out, ok := bind.Outputs["digest"]; !ok || !strings.Contains(out, "steps.candidate.outputs.digest") {
+		t.Fatalf("resolve-candidate must export the bound digest; got %q", out)
+	}
+	for i := range bind.Steps {
+		if strings.Contains(stepBody(&bind.Steps[i]), "resolve-release-candidate.sh") {
+			return
+		}
+	}
+	t.Error("resolve-candidate never runs resolve-release-candidate.sh — nothing establishes the binding")
+}
+
+func assertConsumersReadTheBinding(t *testing.T, doc wfDoc) {
+	t.Helper()
+	for _, name := range []string{"catalog-pipeline", "promote-image", "promote-release-channels"} {
+		j := mustJob(t, doc, name)
+		if !jobNeeds(j)["resolve-candidate"] {
+			t.Errorf("job %q must need resolve-candidate to read the bound digest", name)
+		}
+		for i := range j.Steps {
+			for k, v := range j.Steps[i].Env {
+				if strings.Contains(v, rawBuildDigest) {
+					t.Errorf("job %q step %q sets %s from %s — it must use needs.resolve-candidate.outputs.digest, or a retry re-decides the version's bytes",
+						name, j.Steps[i].Name, k, rawBuildDigest)
+				}
+			}
+			if strings.Contains(j.Steps[i].Run, rawBuildDigest) {
+				t.Errorf("job %q step %q reads %s in its script — it must use the bound digest", name, j.Steps[i].Name, rawBuildDigest)
+			}
+		}
+	}
+}
+
+func assertOnlyTheBinderReadsTheRawDigest(t *testing.T, doc wfDoc) {
+	t.Helper()
+	readers := 0
+	for jobName := range doc.Jobs {
+		j := doc.Jobs[jobName]
+		for i := range j.Steps {
+			body := stepBody(&j.Steps[i])
+			for _, v := range j.Steps[i].Env {
+				body += "\n" + v
+			}
+			if !strings.Contains(body, rawBuildDigest) {
 				continue
 			}
-			consumed = true
-			if !strings.Contains(v, "needs.catalog-pipeline.outputs.release_state") {
-				t.Errorf("promote-image RELEASE_DRAFT_STATE = %q, want catalog-pipeline's release_state output", v)
+			readers++
+			if jobName != "resolve-candidate" {
+				t.Errorf("job %q reads %s; only resolve-candidate may", jobName, rawBuildDigest)
 			}
 		}
 	}
-	if !consumed {
-		t.Error("promote-image never sets RELEASE_DRAFT_STATE — an exact tag left behind by a failed run could never be repointed, wedging the draft permanently")
+	if readers == 0 {
+		t.Error("nothing reads needs.docker.outputs.proxy_digest — the selector is stale and this test proves nothing")
+	}
+}
+
+// The draft-state repoint exception must stay gone. It let a rebuild move an
+// already-public exact version tag whenever the GitHub Release was still a
+// Draft, which is not a property of the registry at all.
+func TestPublicationGating_NoDraftStateRepointException(t *testing.T) {
+	for _, path := range []string{
+		".github/scripts/promote-image-tags.sh",
+		".github/workflows/ci.yml",
+		".github/scripts/assert-release-unpublished.sh",
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(b), "RELEASE_DRAFT_STATE") {
+			t.Errorf("%s still carries RELEASE_DRAFT_STATE — a GitHub Release's Draft flag must never license repointing a public registry tag", path)
+		}
 	}
 }
 

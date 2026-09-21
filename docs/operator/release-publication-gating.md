@@ -89,18 +89,31 @@ v* tag ─ docker [assert QA+Security] ─ catalog-pipeline ──► LIVE relea
 ### After
 
 ```
-main push ─ test ─ smoke ─ docker ──────────────────────────► candidate-<run_id>, sha-<short>  (candidate only)
-                              │                                digest cosign-signed
+main push ─ test ─ smoke ─ docker ──► candidate-<run_id>, sha-<short>   (candidate only)
+                              │        digest cosign-signed
+                              ├─ resolve-candidate  (pass-through on main)
+                              │        ↓
                               ├─ catalog-pipeline
-                              ├─ promote-image [PREDICATE] ──► latest, main, vX.Y.Z, X.Y.Z
+                              ├─ promote-image [PREDICATE] ──► latest, main
                               └─ auto-tag      [PREDICATE] ──► push v* tag
 
-v* tag ─ docker [PREDICATE] ─ catalog-pipeline [PREDICATE] ─► DRAFT release + catalog
-                │                    ├─ promote-image [PREDICATE] ─► X.Y.Z, X.Y, X
-                └───────────────────►└─ release [PREDICATE] ─────► DRAFT release + binaries
-                                            └─ aggregate ─ verify-reproducible ─ provenance
-                                                  └─ publish-release [PREDICATE] ─► draft=false  (PUBLIC)
+v* tag ─ docker ──► candidate-<run_id>
+            ↓
+     resolve-candidate ──► BINDS candidate-vX.Y.Z → D   (or RECOVERS it)
+            ↓                    every job below uses D, never the rebuild
+     catalog-pipeline [PREDICATE] ──► DRAFT release + catalog pinning D
+            ↓
+     release [PREDICATE] ──► DRAFT release + binaries
+            ↓
+     aggregate-subjects ─ verify-reproducible ─ provenance
+            ↓
+     promote-release-channels [PREDICATE] ──► vX.Y.Z, X.Y.Z, X.Y, X
+            ↓                                  (the first public act of this release)
+     publish-release [PREDICATE] ──► draft=false                        (PUBLIC)
 ```
+
+The tag path's public version channels are now written **after** every required
+release check, from a digest a retry cannot change.
 
 ---
 
@@ -200,36 +213,54 @@ candidate-tag probe resolved moments earlier in the *same* repository with the
 *same* credentials, so the registry is reachable and this run is authorized.
 Without that preceding probe the branch would not be safe.
 
-**…but an UNFINISHED publication is not a released version.** Write-once
-protects what a *released* version means, and whether this version is released
-is answered by one fact: the draft state of its GitHub release.
+**…and "absent" is the only state in which an exact tag may be written.** There
+is no exception for a still-Draft GitHub Release. A registry tag is public the
+instant it is written, so Draft is not a visibility boundary for GHCR, and an
+earlier revision of this branch that let a Draft unlock a repoint was wrong.
 
-| `X.Y.Z` at another digest, and the release is… | outcome |
+Retry safety comes from upstream instead — see *One version, one digest* below.
+Because a retry promotes the **same** digest, an already-written alias is an
+idempotent no-op and the write-once branch is never reached on a legitimate
+retry. Reaching it means the exact tag and the candidate binding disagree; that
+refuses, names the recovery and **deletes nothing**.
+
+## One version, one digest
+
+`resolve-candidate` runs before anything is published and binds the version to
+one candidate digest, recorded as the write-once registry tag
+`<image>:candidate-vX.Y.Z`. Every downstream job — catalog generation, `cosign
+verify`, both promoters — reads the digest from **there**, never from the build.
+
+| situation | what happens |
 | --- | --- |
-| `draft` | **repoint** (with a warning) — the publication never finished |
-| `published` | **refuse** |
-| absent / unreadable / unknown | **refuse** — none of these proves it is unfinished |
+| first run for this version | binds `candidate-vX.Y.Z` → this run's digest, reads it back to prove the write landed |
+| retry after any failure | resolves the existing binding, **discards its own rebuild**, resumes on the bound digest |
+| binding names another commit | **refuse** — publishing would ship one commit's bytes under another's tag |
+| binding names no commit, or several | **refuse** — provenance that cannot be read cannot drive publication |
+| binding unreadable (registry down) | **refuse** — an unreadable binding is not an absent one |
+| another run bound it first | **refuse**; the re-run adopts the winner |
 
-Without this the pipeline wedged permanently. A first tag run that promoted
-`X.Y.Z` and then lost `verify-reproducible` or `provenance` leaves the release a
-draft; the full re-run is *allowed* (nothing was published), but its rebuild
-produces a different digest, write-once refused it, `publish-release` was
-skipped for want of promotion — and the only escape was deleting a public image
-tag by hand, which the runbook forbids (Codex review, PR #1441).
+The binding is verified through the image's own
+`org.opencontainers.image.revision` label, on the **first** run as well as on
+retries: if the provenance mechanism is broken, the run that creates the binding
+is the cheapest place to find out, because nothing has been published yet.
 
-The two guards therefore key on the **same fact from the same query**:
-published ⇒ the run is refused before it mutates anything; draft ⇒ the
-publication is unfinished and may be completed. `catalog-pipeline` resolves the
-state once and exports it as a job output; `promote-image` consumes it. That
-also keeps `promote-image` on `contents: read` — GitHub shows a draft release
-only to a token with push access, so a job that asked for itself would have
-needed `contents: write`, a real privilege increase on the job that writes
-public image tags.
+**No cross-service atomicity is claimed.** GHCR and the GitHub Releases API fail
+independently. What the binding buys is that every attempt at a version
+converges on one digest, so whatever is left unfinished can be completed without
+changing what a released version means.
 
-The residual: a digest pulled from an exact tag *during* an unfinished
-publication can be superseded by the re-run. That version was never announced —
-the release was never published, and the install path resolves through
-`/releases/latest`, which excludes drafts.
+### Failure and retry states
+
+| failure point | public GHCR state | GitHub Release | retry behaviour |
+| --- | --- | --- | --- |
+| `docker`, `resolve-candidate` | nothing written (binding may exist) | none/draft | rebuild; adopt the binding if present |
+| `catalog-pipeline` | no version channel | draft | regenerate against the **same** bound digest |
+| `release`, `aggregate-subjects` | no version channel | draft, partial assets | assets replaced in place |
+| `verify-reproducible`, `provenance` | **no version channel** — this is the ordering fix | draft | re-run; still no repoint, because promotion never ran |
+| mid-promotion (some aliases written) | some aliases at the bound digest | draft | written aliases are no-ops; missing ones are completed |
+| `publish-release` | all aliases at the bound digest | draft | un-draft retried; no alias changes |
+| after publication | all aliases | published | the whole run is refused up front |
 
 ### A published release is write-once too
 
@@ -395,16 +426,20 @@ step summary prints which tag GitHub resolved Latest to.
 you re-ran a tag whose image was already promoted, and the rebuild produced
 different bytes (expected; the build is not reproducible over time). The
 published version keeps its original digest. If the new bytes must ship, cut a
-new version. Do not delete the tag to force it through. If the GitHub
-release for that tag is still a **draft**, this refusal should not have
-happened — it means the draft state did not reach `promote-image`. Check that
-`catalog-pipeline` exported `release_state` and that the job's guard step still
-carries `id: relstate`.
+new version. Do not delete the tag to force it through. On a normal retry this refusal
+should be unreachable, because the candidate binding makes the retry promote the
+same digest. Reaching it means the exact tag and `<image>:candidate-vX.Y.Z`
+disagree — compare them and have an owner decide.
 
-**`promote-image` warned: "Repointing to finish the publication"** — expected,
-and the only case in which an exact tag moves. A previous run promoted the tag
-and then failed before publishing, so the release is still a draft and this
-version was never released. Nothing public changed.
+**`resolve-candidate` said "recovering that candidate"** — expected on any
+retry. The version was already bound to a digest, so this run's rebuild is
+discarded and everything downstream resumes on the bound bytes. This is what
+makes a retry safe.
+
+**`resolve-candidate` refused: "was built from … not …"** — the candidate bound
+to this version came from a different commit. Nothing is deleted automatically.
+An owner decides: remove `<image>:candidate-vX.Y.Z` to rebind, or cut a new
+version.
 
 **`promote-image` refused: "could not determine whether … already exists"** —
 the registry did not answer the existence question (after a bounded retry). It

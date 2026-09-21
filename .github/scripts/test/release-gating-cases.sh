@@ -65,8 +65,34 @@ cat > "$BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 # Mock `docker buildx imagetools inspect <ref> --format {{.Manifest.Digest}}`
 # and record `docker buildx imagetools create …`.
+if [ "${2:-}" = "imagetools" ] && [ "${3:-}" = "inspect" ] && [ "${5:-}" = "--format" ] \
+   && [ "${6:-}" = "{{json .Image}}" ]; then
+  # Image config for the SHA-provenance check. Fixture: $DOCKER_LABELS, lines
+  # "<digest>|<revision>"; a digest with no row yields a config carrying no
+  # revision label at all.
+  want="${4##*@}"
+  while IFS='|' read -r fdig frev; do
+    [ -z "${fdig:-}" ] && continue
+    if [ "$fdig" = "$want" ]; then
+      printf '{"linux/amd64":{"config":{"Labels":{"org.opencontainers.image.revision":"%s"}}}}\n' "$frev"
+      exit 0
+    fi
+  done < "${DOCKER_LABELS:-/dev/null}"
+  echo '{"linux/amd64":{"config":{"Labels":{}}}}'; exit 0
+fi
 if [ "${2:-}" = "imagetools" ] && [ "${3:-}" = "inspect" ]; then
   ref="$4"; tag="${ref##*:}"
+  # A DIGEST reference resolves to itself when the image is present — that is
+  # the reachability probe resolve-release-candidate.sh makes before reading any
+  # 404 as "absent". DOCKER_AMBIGUOUS_TAG can name the digest hex to model an
+  # unreachable registry.
+  case "$ref" in
+    *@sha256:*)
+      if [ -n "${DOCKER_AMBIGUOUS_TAG:-}" ] && [ "$tag" = "$DOCKER_AMBIGUOUS_TAG" ]; then
+        echo "ERROR: failed to do request: dial tcp: i/o timeout" >&2; exit 1
+      fi
+      echo "sha256:$tag"; exit 0 ;;
+  esac
   # DOCKER_AMBIGUOUS_TAG: this tag's lookup fails for a reason that is NOT
   # "absent" — a transient registry/network fault. Verbatim-shaped so the
   # classifier is exercised on real wording, not on a sentinel.
@@ -82,7 +108,21 @@ if [ "${2:-}" = "imagetools" ] && [ "${3:-}" = "inspect" ]; then
   echo "ERROR: $ref: not found" >&2; exit 1
 fi
 if [ "${2:-}" = "imagetools" ] && [ "${3:-}" = "create" ]; then
-  printf '%s\n' "$*" >> "${DOCKER_CREATES:-/dev/null}"; exit 0
+  printf '%s\n' "$*" >> "${DOCKER_CREATES:-/dev/null}"
+  # A create makes the tag resolvable from here on, which is what lets a test
+  # drive "bind, then retry and adopt the binding" against one fixture.
+  if [ -n "${DOCKER_TAGS:-}" ]; then
+    newdig=""; t=""; want_tag=0
+    for a in "$@"; do
+      if [ "$want_tag" = 1 ]; then t="${a##*:}"; want_tag=0; continue; fi
+      case "$a" in
+        --tag) want_tag=1 ;;
+        *@sha256:*) newdig="${a##*@}" ;;
+      esac
+    done
+    [ -n "$newdig" ] && [ -n "$t" ] && printf '%s|%s\n' "$t" "$newdig" >> "$DOCKER_TAGS"
+  fi
+  exit 0
 fi
 exit 0
 EOF
@@ -376,36 +416,48 @@ if DOCKER_AMBIGUOUS_TAG=9.9.9 \
   ok "an ambiguous answer about an unrelated tag does not block promotion"
 else bad "an ambiguous answer about an unrelated tag does not block promotion" "creates=$(cat "$WORK/creates")"; fi
 
-# ── an UNFINISHED publication may be finished ────────────────────────────────
-# A first tag run that promoted X.Y.Z and then lost verify-reproducible or
-# provenance leaves the release a DRAFT. The full re-run is allowed (nothing was
-# published) but rebuilds to a different digest, so without this the write-once
-# check refused it, publish-release was skipped for want of promotion, and the
-# draft could never publish — escapable only by deleting a public image tag by
-# hand, which the runbook forbids (Codex review, PR #1441).
+# ── a rebuilt D2 can NEVER replace an already-promoted D1 ────────────────────
+# Not even while the GitHub Release is still a Draft. A registry tag is public
+# the instant it is written, so Draft is not a visibility boundary for GHCR and
+# must not license a repoint. An earlier revision of this branch allowed exactly
+# that; the owner correction reverses it, and retry safety comes from the
+# candidate binding instead (see section 7).
 printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n1.2.3|%s\n' "$DIG" "$DIG" "$DIG2" > "$WORK/tags"
-: > "$WORK/creates"
-if RELEASE_DRAFT_STATE=draft RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.3 \
-   RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
-     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
-   && grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates"; then
-  ok "a still-draft release lets its exact tag be repointed to finish publication"
-else bad "a still-draft release lets its exact tag be repointed to finish publication" "creates=$(cat "$WORK/creates")"; fi
-
-# CONTROL: the unlock is the DRAFT state and nothing else. Every other answer —
-# published, absent, unreadable, unset — must still refuse, or round 3's
-# protection is gone.
-for st in published absent "" garbage; do
+for st in draft published absent "" garbage; do
   : > "$WORK/creates"
   if RELEASE_DRAFT_STATE="$st" RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.3 \
      RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
        promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
-    bad "release state '${st:-<unset>}' still refuses to repoint an exact tag" "it repointed a version tag"
+    bad "a rebuilt digest never replaces a promoted exact tag (release=${st:-<unset>})" "it repointed a public version tag"
   else
-    [ -s "$WORK/creates" ] && bad "release state '${st:-<unset>}' still refuses to repoint an exact tag" "it promoted anyway" \
-                           || ok "release state '${st:-<unset>}' still refuses to repoint an exact tag"
+    [ -s "$WORK/creates" ] && bad "a rebuilt digest never replaces a promoted exact tag (release=${st:-<unset>})" "it promoted anyway" \
+                           || ok "a rebuilt digest never replaces a promoted exact tag (release=${st:-<unset>})"
   fi
 done
+
+# CONTROL: the refusal above is about a CHANGED digest, not about refusing every
+# retry. Promoting the SAME digest again — which is what the candidate binding
+# guarantees a retry does — must be a clean idempotent no-op.
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n1.2.3|%s\n' "$DIG" "$DIG" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.3 \
+   RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
+   && ! grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates"; then
+  ok "retrying with the bound digest leaves the promoted alias untouched"
+else bad "retrying with the bound digest leaves the promoted alias untouched" "creates=$(cat "$WORK/creates")"; fi
+
+# PARTIAL PUBLICATION: one alias written, the other not. A retry on the same
+# candidate must complete the missing one and leave the written one alone.
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n1.2.3|%s\n' "$DIG" "$DIG" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.3 \
+   RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3 v1.2.3" FLOATING_TAGS="" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
+   && grep -q -- "--tag ghcr.io/x:v1.2.3" "$WORK/creates" \
+   && ! grep -q -- "--tag ghcr.io/x:1.2.3 " "$WORK/creates"; then
+  ok "a partial promotion is completed, not redone"
+else bad "a partial promotion is completed, not redone" "creates=$(cat "$WORK/creates")"; fi
 
 # ── two tags on one commit: ownership is TAG identity, not commit ────────────
 printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"
@@ -512,24 +564,105 @@ if REL_STATE=error relguard v1.2.3 >/dev/null 2>&1; then
   bad "an unreadable release state fails closed" "the guard treated an API error as 'no release exists'"
 else ok "an unreadable release state fails closed"; fi
 
-# The guard emits the state it resolved, because promote-image consumes it.
+# The guard is about the GitHub Release ONLY. It must not hand promotion any
+# licence to move a public registry tag — that hop existed briefly and was the
+# mechanism of the draft-state exception the owner reversed.
 : > "$WORK/ghout"
-if REL_STATE=draft GITHUB_OUTPUT="$WORK/ghout" relguard v1.2.3 >/dev/null 2>&1 \
-   && grep -qx 'state=draft' "$WORK/ghout"; then
-  ok "the guard emits state=draft for a still-draft release"
-else bad "the guard emits state=draft for a still-draft release" "output=$(cat "$WORK/ghout")"; fi
+REL_STATE=draft GITHUB_OUTPUT="$WORK/ghout" relguard v1.2.3 >/dev/null 2>&1
+if [ -s "$WORK/ghout" ]; then
+  bad "the release guard exports no promotion licence" "it emitted $(cat "$WORK/ghout")"
+else ok "the release guard exports no promotion licence"; fi
 
-: > "$WORK/ghout"
-if REL_STATE=absent GITHUB_OUTPUT="$WORK/ghout" relguard v1.2.3 >/dev/null 2>&1 \
-   && grep -qx 'state=absent' "$WORK/ghout"; then
-  ok "the guard emits state=absent when no release exists"
-else bad "the guard emits state=absent when no release exists" "output=$(cat "$WORK/ghout")"; fi
+# ─── 7. the release candidate binding (retry recovery) ───────────────────────
+# The pipeline's answer to "this build is not reproducible over time": bind the
+# version to ONE digest before anything is published, and make every retry
+# resume on it rather than re-decide.
+candidate() { bash "$SCRIPTS/resolve-release-candidate.sh" "$@"; }
+SHA_A="3d8c9bb1c62b45bf66d9018e6d9f112c107e5108"
+SHA_B="beefbeefbeefbeefbeefbeefbeefbeefbeefbeef"
+: > "$WORK/labels"; export DOCKER_LABELS="$WORK/labels"
 
+# First run: no binding yet ⇒ create it from this run's digest, and say so.
+printf '%s|%s\n' "$DIG" "$SHA_A" > "$WORK/labels"
+printf 'candidate-99|%s\n' "$DIG" > "$WORK/tags"
+: > "$WORK/creates"; : > "$WORK/ghout"
+if RELEASE_SHA="$SHA_A" GITHUB_OUTPUT="$WORK/ghout" \
+     candidate ghcr.io/x v1.2.3 "$DIG" >/dev/null 2>&1 \
+   && grep -qx "digest=$DIG" "$WORK/ghout" && grep -qx 'binding=created' "$WORK/ghout" \
+   && grep -q -- "--tag ghcr.io/x:candidate-v1.2.3" "$WORK/creates"; then
+  ok "a first run binds the version to the digest it built"
+else bad "a first run binds the version to the digest it built" "out=$(cat "$WORK/ghout") creates=$(cat "$WORK/creates")"; fi
+
+# THE RETRY. The rebuild produced DIG2; the binding still names DIG. The run
+# must adopt DIG and discard its own bytes — this is what stops a retry from
+# repointing public version tags.
+printf '%s|%s\n%s|%s\n' "$DIG" "$SHA_A" "$DIG2" "$SHA_A" > "$WORK/labels"
+printf 'candidate-99|%s\ncandidate-v1.2.3|%s\n' "$DIG2" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"; : > "$WORK/ghout"
+if RELEASE_SHA="$SHA_A" GITHUB_OUTPUT="$WORK/ghout" \
+     candidate ghcr.io/x v1.2.3 "$DIG2" >/dev/null 2>&1 \
+   && grep -qx "digest=$DIG" "$WORK/ghout" && grep -qx 'binding=reused' "$WORK/ghout"; then
+  if [ -s "$WORK/creates" ]; then
+    bad "a retry reuses the bound candidate and rebinds nothing" "it wrote $(cat "$WORK/creates")"
+  else ok "a retry reuses the bound candidate and rebinds nothing"; fi
+else bad "a retry reuses the bound candidate and rebinds nothing" "out=$(cat "$WORK/ghout")"; fi
+
+# WRONG SHA: a binding built from another commit must never drive publication.
+printf '%s|%s\n%s|%s\n' "$DIG" "$SHA_B" "$DIG2" "$SHA_A" > "$WORK/labels"
+printf 'candidate-99|%s\ncandidate-v1.2.3|%s\n' "$DIG2" "$DIG" > "$WORK/tags"
 : > "$WORK/ghout"
-REL_STATE=published GITHUB_OUTPUT="$WORK/ghout" relguard v1.2.3 >/dev/null 2>&1
-if grep -q 'state=' "$WORK/ghout"; then
-  bad "a published release emits no state" "it emitted $(cat "$WORK/ghout") — the run is refused, there is nothing to hand on"
-else ok "a published release emits no state"; fi
+if RELEASE_SHA="$SHA_A" GITHUB_OUTPUT="$WORK/ghout" \
+     candidate ghcr.io/x v1.2.3 "$DIG2" >/dev/null 2>&1; then
+  bad "a candidate built from another commit refuses" "it published a foreign commit's bytes under this tag"
+else ok "a candidate built from another commit refuses"; fi
+
+# MISSING provenance: no revision label at all ⇒ unverifiable ⇒ refuse.
+: > "$WORK/labels"
+printf 'candidate-99|%s\ncandidate-v1.2.3|%s\n' "$DIG2" "$DIG" > "$WORK/tags"
+if RELEASE_SHA="$SHA_A" candidate ghcr.io/x v1.2.3 "$DIG2" >/dev/null 2>&1; then
+  bad "a candidate with no source-commit provenance refuses" "it accepted an unverifiable binding"
+else ok "a candidate with no source-commit provenance refuses"; fi
+
+# AMBIGUOUS binding lookup: not proof the version is unbound.
+printf '%s|%s\n' "$DIG" "$SHA_A" > "$WORK/labels"
+printf 'candidate-99|%s\n' "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if DOCKER_AMBIGUOUS_TAG=candidate-v1.2.3 RELEASE_SHA="$SHA_A" \
+     candidate ghcr.io/x v1.2.3 "$DIG" >/dev/null 2>&1; then
+  bad "an unreadable binding refuses rather than rebinding" "it bound over an unreadable answer"
+else
+  [ -s "$WORK/creates" ] && bad "an unreadable binding refuses rather than rebinding" "it wrote $(cat "$WORK/creates")" \
+                         || ok "an unreadable binding refuses rather than rebinding"
+fi
+
+# The registry must be proven reachable before a 404 counts as "unbound".
+printf 'candidate-99|%s\n' "$DIG" > "$WORK/tags"
+: > "$WORK/creates"
+if DOCKER_AMBIGUOUS_TAG="${DIG#sha256:}" RELEASE_SHA="$SHA_A" \
+     candidate ghcr.io/x v1.2.3 "$DIG" >/dev/null 2>&1; then
+  bad "an unreachable registry refuses before binding" "it bound without proving the registry answers"
+else
+  [ -s "$WORK/creates" ] && bad "an unreachable registry refuses before binding" "it wrote $(cat "$WORK/creates")" \
+                         || ok "an unreachable registry refuses before binding"
+fi
+
+# MAIN path: no version tag, so nothing is bound and this run's digest passes
+# through. The control that the binding never leaks onto the main branch.
+printf 'candidate-99|%s\n' "$DIG" > "$WORK/tags"
+: > "$WORK/creates"; : > "$WORK/ghout"
+if RELEASE_SHA="$SHA_A" GITHUB_OUTPUT="$WORK/ghout" \
+     candidate ghcr.io/x "" "$DIG" >/dev/null 2>&1 \
+   && grep -qx "digest=$DIG" "$WORK/ghout" && grep -qx 'binding=passthrough' "$WORK/ghout" \
+   && [ ! -s "$WORK/creates" ]; then
+  ok "the main path binds nothing and passes its own digest through"
+else bad "the main path binds nothing and passes its own digest through" "out=$(cat "$WORK/ghout") creates=$(cat "$WORK/creates")"; fi
+
+# A malformed digest never reaches the registry.
+if RELEASE_SHA="$SHA_A" candidate ghcr.io/x v1.2.3 "sha256:nope" >/dev/null 2>&1; then
+  bad "a malformed digest refuses before any registry write" "it accepted a malformed digest"
+else ok "a malformed digest refuses before any registry write"; fi
+
+unset DOCKER_LABELS
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

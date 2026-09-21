@@ -118,9 +118,39 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   rather than re-querying also keeps `promote-image` on `contents: read` —
   GitHub shows a draft release only to a token with push access.
 
-  Pinned by `release_publication_gating_test.go` (13 structural walls over
+  An OWNER CORRECTION reversed the sixth round and closed the ordering defect
+  underneath it. The draft-state exception was wrong on its premise: a GHCR tag
+  is public the instant it is written, so a GitHub Release's Draft flag is not a
+  visibility boundary for the registry, and letting a Draft license a repoint
+  weakened exactly the immutability it was guarding. It is removed — an exact
+  version tag is write-once with no exception. The ordering defect that made an
+  exception look necessary is fixed at the same time: `promote-image` depended
+  only on `docker` and `catalog-pipeline`, so public version tags appeared while
+  `verify-reproducible` and `provenance` were still running, and stayed public
+  if either then failed. Promotion is now SPLIT — `promote-image` moves only
+  `latest`/`main` on the main push, and a new `promote-release-channels` writes
+  `vX.Y.Z`/`X.Y.Z`/`X.Y`/`X` only after every required release check has
+  succeeded, so a reproducibility or provenance failure promotes nothing.
+
+  Retry safety is bought properly instead of by exception. `resolve-candidate`
+  binds each version to ONE candidate digest before anything is published —
+  recorded as the write-once registry tag `candidate-vX.Y.Z`, read back to prove
+  the write landed, and verified against this commit through the image's own
+  `org.opencontainers.image.revision` label on the first run as well as on
+  retries. Every downstream job (catalog generation, `cosign verify`, both
+  promoters) reads the digest from the binding, never from the build, so a retry
+  DISCARDS its own rebuild and resumes: aliases already written are idempotent
+  no-ops, missing ones are completed, and no public version tag ever changes
+  digest. Missing, unreadable, multi-valued or wrong-commit bindings all refuse
+  with a named recovery, and nothing is ever deleted or overwritten
+  automatically. No cross-service atomicity is claimed — GHCR and the Releases
+  API fail independently; what the binding guarantees is that every attempt at a
+  version converges on one digest, so partial publication is completed rather
+  than re-decided.
+
+  Pinned by `release_publication_gating_test.go` (15 structural walls over
   `ci.yml` and the manifest, each verified failing against the pre-fix tree)
-  and `.github/scripts/test/release-gating-cases.sh` (55 behavioural cases
+  and `.github/scripts/test/release-gating-cases.sh` (63 behavioural cases
   against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
   Signing identities are unchanged: cosign keyless SANs are per workflow FILE
   and ref, and both new jobs live in `ci.yml`. See
