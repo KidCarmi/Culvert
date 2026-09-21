@@ -58,6 +58,41 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
+- Remote syslog/SIEM forwarding lost audit and request-log events silently
+  (CHAOS-66). The centralized compliance feed counted every line it dropped,
+  but that counter reached exactly one surface in the process — the admin-only
+  `GET /api/syslog` — so a collector outage was invisible to every automated
+  monitor the product ships. Worse, the operator-contract row that claimed to
+  report on the feed verified only that the process had connected once at
+  startup: with the collector killed and 200 audit events forwarded, 200 were
+  dropped and the row still read `ok` / "remote syslog/SIEM forwarding is
+  active". A collector unreachable at *boot* meant forwarding stayed off for
+  the entire life of the process, with no retry. `POST /api/syslog/test`
+  answered `{"ok":true}` against a collector that could not exist, while the
+  diagnostics row told operators to use it to confirm connectivity. Delivery
+  state is now reported on `/metrics` (`culvert_syslog_*`), `/healthz`, the
+  `syslog_feed` diagnostics row, `GET /api/syslog` and the admin panel; a
+  `siem_feed_down` alert fires once per outage; forwarding self-heals with no
+  restart or re-save; and the test endpoint performs a real probe. See
+  `docs/operator/siem-feed-health.md`.
+- **Read every syslog signal through `deliveryVerifiable`.** Over UDP — which
+  is what a syslog address with no scheme means — a connected socket's write
+  succeeds locally whether or not a collector exists, so drops stay 0 and
+  every surface reports a healthy feed against a collector that is not there.
+  That is a property of the protocol; Culvert no longer claims otherwise, and
+  reports `deliveryVerifiable: false` / `culvert_syslog_delivery_verifiable 0`
+  on every surface. **If the SIEM feed is a compliance control, use `tcp://`:**
+  it is the only configuration in which an undelivered event is detectable.
+
+### Fixed
+
+- A reconfigure of the syslog target leaked the forwarder it replaced —
+  its delivery goroutine and its open collector connection were never
+  released. Reachable twice on an ordinary boot and once per
+  `POST /api/syslog`, so it was unbounded by operator action. The live
+  forwarder was also a plain package pointer written by the admin goroutine
+  and read on every proxied request, which the race detector flags; it is now
+  an atomic pointer behind an accessor.
 
 ### Changed
 
