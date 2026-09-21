@@ -31,6 +31,12 @@
 ##                            default policy, on-disk user schema) still parse.
 ##                            Red = on-disk contract broken for operators.
 ##
+##      These layers are INDEPENDENT: none consumes an output or an artifact
+##      from another, so they are all scheduled in parallel (CI-REDESIGN
+##      stage 1) and each carries its own PR-skip condition. A qa-logic
+##      failure therefore no longer suppresses its siblings — it still fails
+##      the aggregate below.
+##
 ##   2. Every job writes a JUnit-style or step-summary report so failures are
 ##      visible without digging into raw logs.
 ##
@@ -69,7 +75,13 @@ jobs:
   # the committed source code is wrong — not infra, not the runner.
   qa-logic:
     name: "QA · Application logic (race + vet)"
-    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates; full behavior retained on main pushes and tags. Dependent jobs cascade-skip; the aggregate below treats skipped as pass so the required-check name keeps reporting.
+    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the
+    # Fast/Deep PR Gates; full behavior retained on main pushes and on
+    # workflow_dispatch (this workflow has NO tag trigger — see the `on:` block).
+    # No other job depends on this one any more (CI-REDESIGN stage 1): every
+    # sibling carries the same PR-skip condition explicitly rather than
+    # inheriting it by cascade. The aggregate below treats skipped as pass so
+    # the required-check name keeps reporting.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 50  # > the 40m per-binary test budget below (compile + tee + upload)
@@ -132,9 +144,13 @@ jobs:
   # mark the build green.
   qa-determinism:
     name: "QA · Determinism (shuffle + count=2)"
+    # Independent layer: consumes no output or artifact from qa-logic, so it is
+    # scheduled in parallel with it rather than behind it (CI-REDESIGN stage 1).
+    # The PR-time skip that `needs: qa-logic` used to cascade is now stated here
+    # explicitly — the aggregate still treats a skipped job as a pass.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: qa-logic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -176,9 +192,13 @@ jobs:
   # gate enforces that the blast-radius files stay well above it.
   qa-coverage:
     name: "QA · Gate-critical coverage floor"
+    # Independent layer: consumes no output or artifact from qa-logic, so it is
+    # scheduled in parallel with it rather than behind it (CI-REDESIGN stage 1).
+    # The PR-time skip that `needs: qa-logic` used to cascade is now stated here
+    # explicitly — the aggregate still treats a skipped job as a pass.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: qa-logic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -203,16 +223,21 @@ jobs:
           retention-days: 30
 
   # ─── D. Docker Compose infra gate ──────────────────────────────────────────
-  # Runs the compose stack INDEPENDENTLY of the Go test run. The application
-  # tests already passed (qa-logic). If this job fails, the failure is an
-  # infra/orchestration issue — image build, healthcheck, compose graph —
-  # NOT application logic. That isolation matters: it lets operators ship a
-  # hotfix without re-running hours of Go tests.
+  # Runs the compose stack INDEPENDENTLY of the Go test run — in PARALLEL with
+  # qa-logic, not after it (CI-REDESIGN stage 1). If this job fails, the failure
+  # is an infra/orchestration issue — image build, healthcheck, compose graph —
+  # NOT application logic; read it against qa-logic's result in the same run.
+  # That isolation matters: it lets operators ship a hotfix without re-running
+  # hours of Go tests.
   qa-infra-compose:
     name: "QA · Docker Compose (infra)"
+    # Independent layer: consumes no output or artifact from qa-logic, so it is
+    # scheduled in parallel with it rather than behind it (CI-REDESIGN stage 1).
+    # The PR-time skip that `needs: qa-logic` used to cascade is now stated here
+    # explicitly — the aggregate still treats a skipped job as a pass.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: qa-logic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -307,13 +332,18 @@ jobs:
 
   # ─── E. OS / environment gate ──────────────────────────────────────────────
   # Runs a static CGO_ENABLED=0 binary on a clean Ubuntu runner (no Docker,
-  # no sidecar). If qa-logic passes but this job fails, the problem is in the
-  # build or the runtime environment, NOT the Go test logic.
+  # no sidecar). Runs in PARALLEL with qa-logic. If qa-logic is green in the
+  # same run and this job is red, the problem is in the build or the runtime
+  # environment, NOT the Go test logic.
   qa-os:
     name: "QA · Bare-metal smoke (no Docker)"
+    # Independent layer: consumes no output or artifact from qa-logic, so it is
+    # scheduled in parallel with it rather than behind it (CI-REDESIGN stage 1).
+    # The PR-time skip that `needs: qa-logic` used to cascade is now stated here
+    # explicitly — the aggregate still treats a skipped job as a pass.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: qa-logic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -339,7 +369,7 @@ jobs:
         run: |
           # Runs in a clean shell on the runner itself. If /health responds
           # we know the OS environment + binary combination is good. A
-          # failure here with qa-logic green = runner/OS problem.
+          # failure here with qa-logic green in the same run = runner/OS problem.
           export CULVERT_SESSION_SECRET=$(openssl rand -hex 32)
           ./culvert -port 18080 -ui-port 19090 &
           PID=$!
@@ -361,9 +391,13 @@ jobs:
   # build. Failing here = deliberate or accidental schema break.
   qa-contract:
     name: "QA · On-disk contract"
+    # Independent layer: consumes no output or artifact from qa-logic, so it is
+    # scheduled in parallel with it rather than behind it (CI-REDESIGN stage 1).
+    # The PR-time skip that `needs: qa-logic` used to cascade is now stated here
+    # explicitly — the aggregate still treats a skipped job as a pass.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: qa-logic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -394,7 +428,11 @@ jobs:
   # before merge.
   qa-agent:
     name: "QA · Maintenance Agent (cmd/culvert-maint)"
-    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates; full behavior retained on main pushes and tags. Dependent jobs cascade-skip; the aggregate below treats skipped as pass so the required-check name keeps reporting.
+    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the
+    # Fast/Deep PR Gates; full behavior retained on main pushes and on
+    # workflow_dispatch (this workflow has NO tag trigger — see the `on:` block).
+    # Independent of every other job; the aggregate below treats skipped as pass
+    # so the required-check name keeps reporting.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -518,9 +556,13 @@ jobs:
   # default `go test ./...`, so this is the ONLY required path that runs them.
   qa-bench:
     name: "QA · Perf-regression gate (allocs/op)"
+    # Independent layer: consumes no output or artifact from qa-logic, so it is
+    # scheduled in parallel with it rather than behind it (CI-REDESIGN stage 1).
+    # The PR-time skip that `needs: qa-logic` used to cascade is now stated here
+    # explicitly — the aggregate still treats a skipped job as a pass.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: qa-logic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -546,11 +588,14 @@ jobs:
       - qa-contract
       - qa-agent
       - qa-bench
-    # always() + skipped-as-pass: on PRs the QA jobs are skipped (superseded
-    # by the Fast/Deep PR Gates — retirement step 5) but this check name must
-    # keep reporting success so a branch-protection rule requiring it can
-    # never wedge a PR at "Expected". On main pushes/tags everything runs
-    # and failure/cancellation of any needed job fails the gate as before.
+    # always() + skipped-as-pass: on PRs every QA job skips on its OWN
+    # `if: github.event_name != 'pull_request'` (superseded by the Fast/Deep PR
+    # Gates — retirement step 5) but this check name must keep reporting success
+    # so a branch-protection rule requiring it can never wedge a PR at
+    # "Expected". On main pushes and workflow_dispatch all eight substantive
+    # jobs run and failure/cancellation of ANY of them fails the gate as before —
+    # including a qa-logic failure, which no longer prevents its former
+    # dependents from running but still refuses this approval.
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
