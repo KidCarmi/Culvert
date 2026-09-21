@@ -490,6 +490,10 @@ jobs:
       # needs.docker.outputs.proxy_digest, or a retry silently re-decides.
       digest: ${{ steps.candidate.outputs.digest }}
       binding: ${{ steps.candidate.outputs.binding }}
+      # The candidate reference promotion must verify against: the version
+      # binding on a tag, the run-scoped tag on main. Promoters read it FROM
+      # HERE — see the promotion-authority note in resolve-release-candidate.sh.
+      candidate_tag: ${{ steps.candidate.outputs.candidate_tag }}
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
         uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
@@ -513,7 +517,10 @@ jobs:
           # Empty on the main path: the version is speculative until auto-tag
           # creates the tag, and the main path promotes only moving channels.
           VERSION_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-        run: .github/scripts/resolve-release-candidate.sh "$IMAGE" "$VERSION_TAG" "$RUN_DIGEST"
+          # Used only when VERSION_TAG is empty (main): with nothing bound, the
+          # run's own candidate is the only reference promotion can verify.
+          RUN_CANDIDATE_TAG: ${{ needs.docker.outputs.candidate_tag }}
+        run: .github/scripts/resolve-release-candidate.sh "$IMAGE" "$VERSION_TAG" "$RUN_DIGEST" "$RUN_CANDIDATE_TAG"
 
   catalog-pipeline:
     name: "Supply Chain · Release catalog gate"
@@ -811,7 +818,7 @@ jobs:
           CHANNEL_TIP_TAG: ${{ steps.tip.outputs.tip_tag }}
           IMAGE: ${{ needs.docker.outputs.image }}
           DIGEST: ${{ needs.resolve-candidate.outputs.digest }}
-          CANDIDATE: ${{ needs.docker.outputs.candidate_tag }}
+          CANDIDATE: ${{ needs.resolve-candidate.outputs.candidate_tag }}
           IMMUTABLE_TAGS: ${{ needs.docker.outputs.immutable_tags }}
           FLOATING_TAGS: ${{ needs.docker.outputs.floating_tags }}
         run: |
@@ -988,7 +995,7 @@ jobs:
           CHANNEL_TIP_TAG: ${{ steps.tip.outputs.tip_tag }}
           IMAGE: ${{ needs.docker.outputs.image }}
           DIGEST: ${{ needs.resolve-candidate.outputs.digest }}
-          CANDIDATE: ${{ needs.docker.outputs.candidate_tag }}
+          CANDIDATE: ${{ needs.resolve-candidate.outputs.candidate_tag }}
           IMMUTABLE_TAGS: ${{ needs.docker.outputs.immutable_tags }}
           FLOATING_TAGS: ${{ needs.docker.outputs.floating_tags }}
         run: |

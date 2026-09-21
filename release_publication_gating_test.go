@@ -501,6 +501,7 @@ func TestPublicationGating_EveryConsumerUsesTheBoundCandidate(t *testing.T) {
 	assertBindingIsEstablished(t, doc)
 	assertConsumersReadTheBinding(t, doc)
 	assertOnlyTheBinderReadsTheRawDigest(t, doc)
+	assertPromotersVerifyAgainstTheBoundCandidate(t, doc)
 }
 
 // rawBuildDigest is the digest `docker` happened to build. Only resolve-candidate
@@ -540,6 +541,49 @@ func assertConsumersReadTheBinding(t *testing.T, doc wfDoc) {
 				t.Errorf("job %q step %q reads %s in its script — it must use the bound digest", name, j.Steps[i].Name, rawBuildDigest)
 			}
 		}
+	}
+}
+
+// The digest is only half the binding. promote-image-tags.sh refuses to promote
+// a digest unless the candidate tag it is HANDED resolves to it, so handing it
+// the run-scoped `candidate-<run_id>` defeats the whole mechanism on the retry
+// it exists for: a re-run keeps its run id and force-pushes non-reproducible new
+// bytes over that tag, while the binding still names the original digest — the
+// promoter then compares the two, refuses, and a partially-published release can
+// never be completed (Codex review, PR #1441).
+//
+// resolve-candidate emits the authoritative reference (the version binding on a
+// tag, the run-scoped tag on main). Both promoters must read it from there.
+func assertPromotersVerifyAgainstTheBoundCandidate(t *testing.T, doc wfDoc) {
+	t.Helper()
+	const (
+		runScopedCandidate = "needs.docker.outputs.candidate_tag"
+		boundCandidate     = "needs.resolve-candidate.outputs.candidate_tag"
+	)
+	bind := mustJob(t, doc, "resolve-candidate")
+	if out, ok := bind.Outputs["candidate_tag"]; !ok || !strings.Contains(out, "steps.candidate.outputs.candidate_tag") {
+		t.Fatalf("resolve-candidate must export the candidate reference promotion verifies against; got %q", out)
+	}
+	checked := 0
+	for _, name := range []string{"promote-image", "promote-release-channels"} {
+		j := mustJob(t, doc, name)
+		for i := range j.Steps {
+			v, ok := j.Steps[i].Env["CANDIDATE"]
+			if !ok {
+				continue
+			}
+			checked++
+			if strings.Contains(v, runScopedCandidate) {
+				t.Errorf("job %q sets CANDIDATE from %s — on a tag path the rebuild overwrites that tag, so every retry refuses; use %s",
+					name, runScopedCandidate, boundCandidate)
+			}
+			if !strings.Contains(v, boundCandidate) {
+				t.Errorf("job %q sets CANDIDATE to %q; it must come from %s", name, v, boundCandidate)
+			}
+		}
+	}
+	if checked != 2 {
+		t.Errorf("expected both promoters to set CANDIDATE, found %d — the selector is stale and this test proves nothing", checked)
 	}
 }
 

@@ -662,6 +662,50 @@ if RELEASE_SHA="$SHA_A" candidate ghcr.io/x v1.2.3 "sha256:nope" >/dev/null 2>&1
   bad "a malformed digest refuses before any registry write" "it accepted a malformed digest"
 else ok "a malformed digest refuses before any registry write"; fi
 
+# ── THE RETRY, WIRED AS ci.yml WIRES IT ──────────────────────────────────────
+# The two scripts were each correct in isolation and the workflow handed the
+# promoter the WRONG candidate reference, so the retry path they exist to
+# provide did not work end to end (Codex review, PR #1441). A re-run keeps its
+# run id, so the rebuild force-pushes D2 over `candidate-<run_id>` while the
+# binding still names D1 — checking promotion against the run-scoped tag then
+# compares D1 to D2 and refuses every retry.
+#
+# This case therefore does NOT hand the promoter a hand-picked tag: it takes the
+# candidate reference from the resolver's own output, which is what the workflow
+# now does. It fails against the previous wiring.
+printf '%s|%s\n%s|%s\n' "$DIG" "$SHA_A" "$DIG2" "$SHA_A" > "$WORK/labels"
+printf 'candidate-99|%s\ncandidate-v1.2.3|%s\n1.2.3|%s\n' "$DIG2" "$DIG" "$DIG" > "$WORK/tags"
+: > "$WORK/creates"; : > "$WORK/ghout"
+if RELEASE_SHA="$SHA_A" GITHUB_OUTPUT="$WORK/ghout" \
+     candidate ghcr.io/x v1.2.3 "$DIG2" candidate-99 >/dev/null 2>&1; then
+  BOUND_DIG="$(sed -n 's/^digest=//p' "$WORK/ghout")"
+  BOUND_TAG="$(sed -n 's/^candidate_tag=//p' "$WORK/ghout")"
+  : > "$WORK/creates"
+  if [ "$BOUND_TAG" = "candidate-v1.2.3" ] \
+     && RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.3 RELEASE_SHA=tipsha CHANNEL_TIP=tipsha \
+        IMMUTABLE_TAGS="1.2.3 v1.2.3" FLOATING_TAGS="latest" \
+          promote ghcr.io/x "$BOUND_DIG" "$BOUND_TAG" >/dev/null 2>&1 \
+     && grep -q -- "--tag ghcr.io/x:v1.2.3" "$WORK/creates" \
+     && grep -q -- "ghcr.io/x@$DIG" "$WORK/creates" \
+     && ! grep -q -- "ghcr.io/x@$DIG2" "$WORK/creates"; then
+    ok "a retry whose rebuild differs still completes promotion on the bound digest"
+  else
+    bad "a retry whose rebuild differs still completes promotion on the bound digest" \
+        "candidate_tag=$BOUND_TAG digest=$BOUND_DIG creates=$(cat "$WORK/creates")"
+  fi
+else bad "a retry whose rebuild differs still completes promotion on the bound digest" "resolver refused: $(cat "$WORK/ghout")"; fi
+
+# CONTROL: the emitted reference is not a constant. On the main path there is no
+# binding, so the run-scoped tag IS the authority — emitting `candidate-v` there
+# would hand the promoter a reference that does not exist.
+printf 'candidate-99|%s\n' "$DIG" > "$WORK/tags"
+: > "$WORK/ghout"
+if RELEASE_SHA="$SHA_A" GITHUB_OUTPUT="$WORK/ghout" \
+     candidate ghcr.io/x "" "$DIG" candidate-99 >/dev/null 2>&1 \
+   && grep -qx 'candidate_tag=candidate-99' "$WORK/ghout"; then
+  ok "the main path promotes against the run-scoped candidate"
+else bad "the main path promotes against the run-scoped candidate" "out=$(cat "$WORK/ghout")"; fi
+
 unset DOCKER_LABELS
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

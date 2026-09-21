@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# resolve-release-candidate.sh <image> <version-tag> <this-run-digest>
+# resolve-release-candidate.sh <image> <version-tag> <this-run-digest> [run-candidate-tag]
 #
 # Binds a version to ONE candidate digest, once, and hands that digest to every
 # job downstream. On a retry it RECOVERS the binding instead of rebuilding.
@@ -52,14 +52,34 @@
 # means. Partial publication is handled by making each remaining step
 # idempotent, not by pretending it cannot happen.
 #
-# Outputs (to $GITHUB_OUTPUT): digest, binding=created|reused|passthrough.
+# ── The binding is also the PROMOTION AUTHORITY ──────────────────────────────
+# promote-image-tags.sh refuses to promote a digest unless some candidate tag in
+# the registry already resolves to it, and WHICH candidate it is handed decides
+# whether a retry can work at all. The run-scoped `candidate-<run_id>` cannot be
+# that reference on the tag path: a re-run keeps the same run id, rebuilds
+# non-reproducibly and force-pushes D2 over it, while this script adopts the
+# bound D1 — so the promoter would compare D1 against D2 and refuse, and the
+# resume path this whole mechanism exists to provide would be dead on exactly
+# the retry it was built for (Codex review, PR #1441).
+#
+# So this script emits the tag NAME too, and the promoters read it from here.
+# The authority is `candidate-vX.Y.Z` wherever a version is bound and the
+# run-scoped tag only on the main path, where nothing is bound and the moving
+# channels are allowed to change. Do NOT re-derive `candidate-<version>` at a
+# call site: the binding's name and the reference promotion is checked against
+# must be one string, or they can drift apart.
+#
+# Outputs (to $GITHUB_OUTPUT): digest, binding=created|reused|passthrough,
+# candidate_tag (the reference promotion must verify against).
 # Seams: DOCKER_BIN, JQ_BIN, PROMOTE_INSPECT_RETRY_DELAY.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-IMAGE="${1:?usage: resolve-release-candidate.sh <image> <version-tag> <digest>}"
+IMAGE="${1:?usage: resolve-release-candidate.sh <image> <version-tag> <digest> [run-candidate-tag]}"
 VERSION_TAG="${2-}"
 RUN_DIGEST="${3:?digest built by this run required (arg 3)}"
+# Only used on the main path, where there is no version to bind.
+RUN_CANDIDATE_TAG="${4-}"
 
 RELEASE_SHA="${RELEASE_SHA:?RELEASE_SHA not set}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
@@ -82,6 +102,7 @@ if [ -z "$VERSION_TAG" ]; then
   echo "::notice::no version tag on this ref — no candidate binding; using this run's digest ${RUN_DIGEST}."
   emit "digest=${RUN_DIGEST}"
   emit "binding=passthrough"
+  emit "candidate_tag=${RUN_CANDIDATE_TAG}"
   exit 0
 fi
 
@@ -184,6 +205,8 @@ fi
 echo "::notice::release candidate for ${VERSION_TAG}: ${BOUND} (${STATE}), source commit ${RELEASE_SHA}."
 emit "digest=${BOUND}"
 emit "binding=${STATE}"
+# The bound reference, not this run's, is what promotion must verify against.
+emit "candidate_tag=candidate-${VERSION_TAG}"
 summary "### Release candidate"
 summary ""
 summary "\`${VERSION_TAG}\` is bound to \`${BOUND}\` (${STATE}). Every downstream job — catalog, signing, promotion — uses this digest, so a retry resumes rather than rebuilds."

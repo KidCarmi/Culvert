@@ -123,14 +123,28 @@ The `docker` job pushes only non-channel tags:
 
 | tag | role |
 | --- | --- |
-| `candidate-<run_id>` | the **promotion binding**. Run-scoped, because the main-push run and the tag run share a commit — `auto-tag` pushes the `v*` tag while the main run's `promote-image` is still resolving, so a per-commit binding could be overwritten by the other run's build. |
+| `candidate-<run_id>` | this run's own build. Run-scoped, because the main-push run and the tag run share a commit — `auto-tag` pushes the `v*` tag while the main run's `promote-image` is still resolving, so a per-commit tag could be overwritten by the other run's build. |
 | `sha-<short>` | the conventional per-commit tag (unchanged). |
 
-`promote-image` then runs `promote-image-tags.sh`, which:
+`candidate-v<version>`, written by `resolve-candidate`, is the **promotion
+authority** on the tag path (see *One version, one digest* below). The
+run-scoped tag is the authority only on main, where no version is bound yet.
+
+> **Which candidate reference promotion is checked against is load-bearing.**
+> A re-run keeps its run id and force-pushes non-reproducible new bytes over
+> `candidate-<run_id>`, while the binding still names the original digest.
+> Checking against the run-scoped tag on a tag path therefore compares the bound
+> digest to the rebuild, refuses, and leaves a partially-published release with
+> no way to complete. `resolve-candidate` emits the right reference for the path
+> (`candidate_tag`), and both promoters read it from there — never re-derived at
+> the call site, so the binding's name and the reference it is verified against
+> cannot drift apart.
+
+The promoters then run `promote-image-tags.sh`, which:
 
 1. rejects a malformed digest;
-2. resolves `candidate-<run_id>` in the registry and **refuses unless it is
-   exactly the digest this run built** — so the job cannot be handed an
+2. resolves the candidate reference it was handed and **refuses unless it is
+   exactly the digest offered for promotion** — so the job cannot be handed an
    arbitrary digest to publish;
 3. applies the re-run rule (below);
 4. promotes with `docker buildx imagetools create --tag … <image>@<digest>` —
@@ -244,6 +258,13 @@ The binding is verified through the image's own
 `org.opencontainers.image.revision` label, on the **first** run as well as on
 retries: if the provenance mechanism is broken, the run that creates the binding
 is the cheapest place to find out, because nothing has been published yet.
+
+The binding is also what promotion is **verified against**: `resolve-candidate`
+emits `candidate_tag`, and both promoters take the reference from there. That is
+not cosmetic — a re-run keeps its run id, so the rebuild overwrites
+`candidate-<run_id>` with different bytes; verifying against that tag would
+compare the bound digest to the rebuild and refuse every retry, disabling the
+resume path on exactly the occasion it exists for.
 
 **No cross-service atomicity is claimed.** GHCR and the GitHub Releases API fail
 independently. What the binding buys is that every attempt at a version

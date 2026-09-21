@@ -13,9 +13,16 @@
 # Preconditions THIS script enforces (each a hard refusal):
 #   1. <digest> is a well-formed sha256 reference.
 #   2. <candidate-tag> exists in the registry and resolves to EXACTLY <digest>.
-#      This binds the promotion to the digest this run actually built and the
-#      catalog gate actually pinned — without it, a promote step could be handed
+#      This binds the promotion to a digest some candidate reference in the
+#      registry already vouches for — without it, a promote step could be handed
 #      any digest string and would happily publish it.
+#      WHICH candidate reference is the caller's decision and is load-bearing:
+#      on a tag it must be the VERSION binding (`candidate-vX.Y.Z`), never the
+#      run-scoped `candidate-<run_id>`. A re-run keeps its run id and force-
+#      pushes non-reproducible new bytes over that tag, so checking against it
+#      would compare the bound digest to the rebuild and refuse every retry —
+#      killing the resume path (Codex review, PR #1441). resolve-release-
+#      candidate.sh emits the right reference for the path; read it from there.
 #   3. RE-RUN SAFETY (see below).
 #
 # ── Two kinds of target, and only one of them can be superseded ─────────────
@@ -144,7 +151,10 @@ if ! CAND_DIGEST="$("$DOCKER_BIN" buildx imagetools inspect "${IMAGE}:${CANDIDAT
 fi
 CAND_DIGEST="$(printf '%s' "$CAND_DIGEST" | tr -d '[:space:]')"
 if [ "$CAND_DIGEST" != "$DIGEST" ]; then
-  echo "::error::candidate ${IMAGE}:${CANDIDATE} resolves to ${CAND_DIGEST} but this run built ${DIGEST} — refusing to promote a digest this run did not produce"
+  echo "::error::candidate ${IMAGE}:${CANDIDATE} resolves to ${CAND_DIGEST}, but the digest offered for promotion is ${DIGEST}."
+  echo "::error::Refusing: no candidate reference in the registry vouches for ${DIGEST}."
+  echo "::error::On a tag path CANDIDATE must be the version binding candidate-v<version>, not this run's"
+  echo "::error::candidate-<run_id> — the rebuild overwrites the latter, so comparing against it fails every retry."
   exit 1
 fi
 

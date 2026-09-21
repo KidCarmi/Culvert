@@ -148,9 +148,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   version converges on one digest, so partial publication is completed rather
   than re-decided.
 
-  Pinned by `release_publication_gating_test.go` (15 structural walls over
+  The binding is also the reference promotion is VERIFIED against, and getting
+  that wrong defeated the whole mechanism: `promote-image-tags.sh` refuses a
+  digest no candidate tag resolves to, and the tag path was handing it the
+  run-scoped `candidate-<run_id>`. A re-run keeps its run id and force-pushes
+  non-reproducible new bytes over that tag, so the promoter compared the bound
+  digest against the rebuild and refused EVERY retry — the resume path dead on
+  exactly the occasion it exists for. `resolve-candidate` now emits
+  `candidate_tag` (the version binding on a tag, the run-scoped tag on main) and
+  both promoters read it from there; the name is never re-derived at a call
+  site, so the binding and the reference checked against it cannot drift apart.
+
+  Pinned by `release_publication_gating_test.go` (16 structural walls over
   `ci.yml` and the manifest, each verified failing against the pre-fix tree)
-  and `.github/scripts/test/release-gating-cases.sh` (63 behavioural cases
+  and `.github/scripts/test/release-gating-cases.sh` (65 behavioural cases
   against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
   Signing identities are unchanged: cosign keyless SANs are per workflow FILE
   and ref, and both new jobs live in `ci.yml`. See
