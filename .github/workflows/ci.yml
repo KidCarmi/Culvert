@@ -289,7 +289,14 @@ jobs:
             # GITHUB_TOKEN tag pushes (from auto-tag) can't trigger new
             # workflows, so the main-push run computes the semver it will
             # promote to itself.
-            LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+            # NOT piped into `head`: this step runs under `pipefail`, and a
+            # reader that exits after one line SIGPIPEs git, whose 141 then
+            # becomes the pipeline's status and kills the step. The original
+            # step had no `pipefail`, so only head's status counted and the
+            # signal was invisible — consolidating the steps is what made it
+            # fatal (run 35616066584). Read it all, then take the first line.
+            LATEST="$(git tag --list 'v*' --sort=-v:refname)"
+            LATEST="${LATEST%%$'\n'*}"
             if [ -z "$LATEST" ]; then LATEST="v0.0.0"; fi
             VER="${LATEST#v}"
             MAJOR=$(echo "$VER" | cut -d. -f1)
@@ -786,7 +793,10 @@ jobs:
             TIP="$(git rev-parse FETCH_HEAD)"
           else
             git fetch --force --prune --prune-tags --tags origin
-            HIGHEST="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+            # No `| head`: under `pipefail` an early-exiting reader SIGPIPEs
+            # git and its 141 fails the step (see the docker job's note).
+            HIGHEST="$(git tag --list 'v*' --sort=-v:refname)"
+            HIGHEST="${HIGHEST%%$'\n'*}"
             test -n "$HIGHEST" || { echo "::error::no v* tag visible — refusing"; exit 1; }
             TIP="$(git rev-list -n1 "$HIGHEST")"
             # The tag NAME, not just its commit: two version tags can name the
@@ -963,7 +973,10 @@ jobs:
             TIP="$(git rev-parse FETCH_HEAD)"
           else
             git fetch --force --prune --prune-tags --tags origin
-            HIGHEST="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+            # No `| head`: under `pipefail` an early-exiting reader SIGPIPEs
+            # git and its 141 fails the step (see the docker job's note).
+            HIGHEST="$(git tag --list 'v*' --sort=-v:refname)"
+            HIGHEST="${HIGHEST%%$'\n'*}"
             test -n "$HIGHEST" || { echo "::error::no v* tag visible — refusing"; exit 1; }
             TIP="$(git rev-list -n1 "$HIGHEST")"
             # The tag NAME, not just its commit: two version tags can name the
