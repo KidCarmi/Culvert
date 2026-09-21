@@ -29,9 +29,17 @@ if [ -n "${ASSERT_RELEASE_ASSETS_FILE:-}" ]; then
   ASSETS="$(cat "$ASSERT_RELEASE_ASSETS_FILE")"
 else
   REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY not set}"
-  ASSETS="$(gh api "repos/${REPO}/releases/tags/${TAG}" \
+  # NOT `releases/tags/<tag>`: that endpoint does not return drafts, and the
+  # release being asserted IS a draft, so it read whatever OTHER release object
+  # happened to carry the tag. On v1.0.234 that was a provenance-only release a
+  # draft-blind uploader had created, and this script correctly reported 19
+  # assets missing — from a release that was never the staged one.
+  # shellcheck source=.github/scripts/lib/release.sh
+  . "$(dirname "$0")/lib/release.sh"
+  RELEASE_ID="$(resolve_staged_release_id "$REPO" "$TAG")" || exit 1
+  ASSETS="$(gh api "repos/${REPO}/releases/${RELEASE_ID}" \
     --jq '.assets[] | "\(.name) \(.size)"')" || {
-      echo "::error::cannot read assets of release ${TAG} — refusing to publish"
+      echo "::error::cannot read assets of release ${TAG} (id ${RELEASE_ID}) — refusing to publish"
       exit 1
     }
 fi
