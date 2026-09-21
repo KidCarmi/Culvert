@@ -224,7 +224,7 @@ idempotent no-op and the write-once branch is never reached on a legitimate
 retry. Reaching it means the exact tag and the candidate binding disagree; that
 refuses, names the recovery and **deletes nothing**.
 
-## One version, one digest
+### One version, one digest
 
 `resolve-candidate` runs before anything is published and binds the version to
 one candidate digest, recorded as the write-once registry tag
@@ -467,6 +467,56 @@ re-running; do not promote by hand.
 `.github/release-evidence.txt` from `advisory` to `mandatory`. That is the
 whole change; `release_publication_gating_test.go` and
 `.github/scripts/test/release-gating-cases.sh` prove the mechanism.
+
+---
+
+## 7b. Catalog origin: R2 only
+
+GitHub Pages has been retired as a catalog origin. `publish-catalog-r2.yml`
+publishes to `https://catalog.culvertlabs.com`, and
+`verify-catalog-publish.yml` (formerly `verify-dual-publish.yml`) proves that
+origin serves the release's signed bytes.
+
+**Nothing about trust changed, and that is why the removal is safe.** The
+catalog's integrity comes from its keyless Sigstore signature, verified
+in-binary against the baked trusted root and the pinned `ci.yml` identity. The
+host was always untrusted transport, so a second host of the same bytes added no
+trust — only a divergence surface, a second freshness obligation and a second
+thing to keep alive. The verify workflow still performs every check it used to
+perform per origin: content match against the release bundle, a baked-root
+served verify that must PASS (a skip is not a pass), availability convergence,
+and the weekly SEC-F5 freshness canary.
+
+**Migration impact.** The baked default client URL
+(`defaultReleaseCatalogURL`, `release_wiring.go`) is already the R2 origin, and
+no Go, installer or packaging code references `kidcarmi.github.io` — so **no
+shipped client defaults to Pages**. The one affected case is an operator who
+explicitly set `CULVERT_RELEASE_CATALOG_URL` to the Pages URL; they must repoint
+it at `https://catalog.culvertlabs.com/release-catalog`. Because the appliance
+verifies the signature regardless of origin, that repoint is a configuration
+change, not a trust change.
+
+**A dormant publisher is no longer safe.** While Pages also served the catalog,
+`vars.R2_PUBLISH_ENABLED` being unset was a harmless no-op. Now it means nothing
+is published at all. `publish-catalog-r2.yml` therefore runs
+`assert-publication-target` first, which FAILS when the variable is not `true`,
+so the state is loud. It fails rather than warns because the publisher is
+downstream of the release: a red run is an operator signal and blocks nothing.
+
+**Remaining settings-level cleanup (owner action, NOT done here).** This patch
+changes repository *content* only. To fully retire Pages an owner must, in
+repository Settings → Pages, unpublish/disable the site (the last deployment
+keeps serving until then) and, if a custom domain or DNS record points at it,
+remove that. This session cannot read or change repository settings, so none of
+that is verified here.
+
+**Not verified from this environment.** `vars.R2_PUBLISH_ENABLED` is a
+repository variable that cannot be read from a workflow-less context, and this
+environment's network policy blocks both `catalog.culvertlabs.com` and
+`kidcarmi.github.io` (403 at the proxy CONNECT), so neither origin's live state
+was observed. The `assert-publication-target` job exists precisely because that
+precondition could not be confirmed ahead of time: it converts an unverifiable
+assumption into a CI-visible failure.
 
 ---
 

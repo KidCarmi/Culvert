@@ -156,6 +156,36 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and ref, and both new jobs live in `ci.yml`. See
   `docs/operator/release-publication-gating.md`.
 
+- GitHub Pages is retired as a release-catalog origin; Cloudflare R2
+  (`https://catalog.culvertlabs.com`) is the sole publication target.
+  `publish-catalog-pages.yml` is deleted, `verify-dual-publish.yml` becomes the
+  R2-only `verify-catalog-publish.yml`, the weekly re-sign scheduler no longer
+  dispatches a Pages publisher, and no workflow may grant `pages: write` or name
+  `kidcarmi.github.io` (pinned structurally by `TestCatalogOriginIsR2Only`).
+
+  **The trust contract is unchanged, which is exactly why the second origin was
+  removable.** Catalog integrity comes from the keyless Sigstore signature
+  verified IN-BINARY against the baked trusted root and the pinned `ci.yml`
+  identity — never from the host. A second host of the same bytes therefore
+  bought no trust while costing a divergence surface, a second freshness
+  obligation and a second thing to keep serving. The verify workflow still
+  applies every check it previously applied per origin: content match against
+  the release's signed bundle, a baked-root served verify that must PASS (a skip
+  is not a pass), availability convergence, and the weekly SEC-F5 freshness
+  canary.
+
+  **Migration impact:** the baked default client URL
+  (`defaultReleaseCatalogURL`) was already the R2 origin and no Go, installer or
+  packaging code references the Pages host, so no shipped client defaulted to
+  Pages. Only an operator who explicitly set `CULVERT_RELEASE_CATALOG_URL` to
+  the Pages URL is affected, and must repoint it. **A dormant publisher stops
+  being safe** once R2 is the only target — `vars.R2_PUBLISH_ENABLED` being
+  unset used to be a harmless skip and now means nothing is published at all —
+  so `publish-catalog-r2.yml` gains an `assert-publication-target` job that
+  FAILS in that state rather than skipping green. Disabling the Pages site
+  itself is a repository-settings action an owner must still take; this change
+  touches repository content only.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party

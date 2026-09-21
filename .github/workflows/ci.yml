@@ -1,6 +1,6 @@
-# NOTE: the workflow name "CI" is load-bearing — publish-catalog-pages.yml
+# NOTE: the workflow name "CI" is load-bearing — publish-catalog-r2.yml
 # triggers on `workflow_run: workflows: ["CI"]`. Renaming this workflow
-# silently stops signed-catalog publication to Pages.
+# silently stops signed-catalog publication to the R2 origin.
 name: CI
 # Least-privilege default: jobs that need write scopes (packages, checks,
 # contents, security-events, pull-requests) declare them at job level.

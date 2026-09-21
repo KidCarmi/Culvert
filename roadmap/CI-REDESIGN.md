@@ -115,11 +115,12 @@ branch-protection edit **in the same sitting**:
    (see §4).
 9. **`ci.yml` constraints — do not violate:**
    - The workflow **name `CI` must not change** and the workflow must not be
-     split in a way that changes its name: `publish-catalog-pages.yml`
+     split in a way that changes its name: `publish-catalog-r2.yml`
      triggers on `workflow_run: workflows: ["CI"]`. Renaming it silently
-     kills signed-catalog publication to Pages (the
-     `CULVERT_RELEASE_CATALOG_URL` auto-seed origin). If it is ever renamed,
-     update `publish-catalog-pages.yml` in the same PR.
+     kills signed-catalog publication to the R2 origin (the
+     `CULVERT_RELEASE_CATALOG_URL` auto-seed origin, and since the Pages
+     retirement the ONLY one). If it is ever renamed, update
+     `publish-catalog-r2.yml` in the same PR.
    - The `docker` job on main-push/tags is **release machinery** (next-version
      compute, push/retag, cosign, `proxy_digest`/`version_bare` outputs
      consumed by `catalog-pipeline`, transitively gating `release`). The
@@ -182,7 +183,7 @@ dependency — a commit that later fails the gate has already shipped a signed
 ### 5b. Egress control on the signing jobs (PANW audit item 2)
 
 The OIDC-token-bearing jobs (`docker`, `catalog-pipeline`, `release`, plus the
-`_build-image` reusable, `pr-fast-gate/test-race`, and `publish-catalog-pages`)
+`_build-image` reusable, and `pr-fast-gate/test-race`)
 run `go build`/`go test`/`docker build` over the full dependency graph while
 holding the cosign signing identity. A compromised transitive dep could
 exfiltrate that token. **Phase 2a (applied):** `step-security/harden-runner`
