@@ -18,8 +18,18 @@ import (
 // constructor) stay unchanged.
 type syslogWriter = syslog.Writer
 
-// newSyslogWriter constructs a syslog Writer. Thin wrapper over syslog.NewWriter
-// kept for InitSyslog and the integration test that builds a writer directly.
+// newSyslogWriter constructs a syslog Writer whose FIRST DIAL MUST SUCCEED.
+//
+// There is deliberately no production caller. `InitSyslog`, which was one, is
+// gone: its fail-closed first dial is CHAOS-66's SL-3 — a collector that was
+// unreachable at boot meant SIEM forwarding stayed off for the life of the
+// process, because nothing ever constructed a second writer. Production goes
+// through InitSyslogResilient, which installs a writer that self-heals; an
+// operator's TYPED target is validated separately by syslog.ProbeTarget, so a
+// typo is still refused without that refusal being able to disable the feed.
+//
+// Kept for the tests that need a writer known to be connected at construction.
+// Do not reintroduce a production caller — use InitSyslogResilient.
 // Wires the panic observer here (the internal/syslog package is a stdlib-only
 // leaf and cannot log for itself) so every Writer this process constructs —
 // startup and runtime reconfigure alike — reports a recovered delivery panic
@@ -98,27 +108,6 @@ func releaseSyslogWriter(old *syslogWriter) {
 		return
 	}
 	go func() { _ = old.Close() }()
-}
-
-// InitSyslog parses addr and initialises the global syslog writer.
-// Supported addr formats:
-//
-//	udp://10.0.0.1:514       (default protocol when scheme is omitted)
-//	tcp://logs.corp.com:601
-//
-// syslogFmt selects the message format: "rfc3164" (default) or "rfc5424".
-func InitSyslog(addr, syslogFmt string) error {
-	if addr == "" {
-		return nil
-	}
-	network, target := parseSyslogAddr(addr)
-	sw, err := newSyslogWriter(network, target, syslogFmt)
-	if err != nil {
-		return err
-	}
-	installSyslogWriter(sw)
-	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
-	return nil
 }
 
 // InitSyslogResilient installs a SELF-HEALING forwarder for addr: the first

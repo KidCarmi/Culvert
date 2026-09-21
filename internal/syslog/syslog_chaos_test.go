@@ -106,7 +106,7 @@ func waitFor(t *testing.T, budget time.Duration, cond func() bool) bool {
 	return cond()
 }
 
-// TestChaos66_StateObserverFiresOnTransitionsOnly is what keeps the log one
+// TestChaos66_StateObserverFiresOnTransitionsOnly pins what keeps the log one
 // line per outage rather than one per dropped line. A feed carrying one line
 // per proxied request would otherwise make the mitigation for a
 // write-amplification defect into one itself.
@@ -236,7 +236,8 @@ func TestChaos66_DeferredWriterSelfHealsWithoutReconstruction(t *testing.T) {
 // check must be able to FAIL. Before CHAOS-66 the admin endpoint behind it
 // called Write, which only enqueues.
 func TestChaos66_ProbeTargetReportsTheTruth(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1420,7 +1420,7 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 		}
 		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
 		setActiveSyslog(prevSW)
-		resetSyslogFeedHealthForTest()
+		resetSyslogFeedHealth()
 	})
 	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
 	if err != nil {
@@ -1461,7 +1461,7 @@ func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
 		}
 		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
 		setActiveSyslog(prevSW)
-		resetSyslogFeedHealthForTest()
+		resetSyslogFeedHealth()
 	})
 	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
 	if err != nil {

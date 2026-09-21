@@ -465,7 +465,7 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 // did not. The caller publishes that outcome via noteOutcome once s.mu is
 // released — never from in here, because an observer runs arbitrary caller
 // code and this mutex fences every delivery in the process.
-func (s *Writer) deliverLine(line string) (bool, string) {
+func (s *Writer) deliverLine(line string) (delivered bool, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {

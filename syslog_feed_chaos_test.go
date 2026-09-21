@@ -37,7 +37,8 @@ type fakeCollector struct {
 
 func newFakeCollector(t *testing.T) *fakeCollector {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -104,12 +105,12 @@ func withSyslogTestEnv(t *testing.T) {
 	prevW := setActiveSyslog(nil)
 	prevCfg, prevIntent := syslogConfigured, syslogConfiguredAddr
 	prevAlert := fireSyslogFeedAlert
-	resetSyslogFeedHealthForTest()
+	resetSyslogFeedHealth()
 	t.Cleanup(func() {
 		releaseSyslogWriter(setActiveSyslog(prevW))
 		syslogConfigured, syslogConfiguredAddr = prevCfg, prevIntent
 		fireSyslogFeedAlert = prevAlert
-		resetSyslogFeedHealthForTest()
+		resetSyslogFeedHealth()
 	})
 }
 
@@ -159,7 +160,9 @@ func syslogAdminJSONReq(method, path, body string) *http.Request {
 
 // ─── DEFECT GATES ───────────────────────────────────────────────────────────
 
-// TestChaos66_ContractRowReportsDeliveryNotStartupConnect.
+// TestChaos66_ContractRowReportsDeliveryNotStartupConnect pins that the
+// syslog_feed row answers "is the collector receiving", not "did we connect
+// once at startup".
 //
 // PRE-FIX EVIDENCE: with the collector killed and 200 audit events forwarded,
 // Drops() reached 200 and checkSyslogFeed still returned
@@ -199,7 +202,8 @@ func TestChaos66_ContractRowReportsDeliveryNotStartupConnect(t *testing.T) {
 	}
 }
 
-// TestChaos66_InitDoesNotLeakItsPredecessor.
+// TestChaos66_InitDoesNotLeakItsPredecessor pins that installing a forwarder
+// releases the one it displaced.
 //
 // PRE-FIX EVIDENCE: five InitSyslog calls left five drain goroutines running
 // and five TCP connections open — the predecessor was overwritten, never
@@ -237,7 +241,8 @@ func TestChaos66_InitDoesNotLeakItsPredecessor(t *testing.T) {
 		after-before, installs, before, after)
 }
 
-// TestChaos66_ConnectFailureAtBootStillArmsForwarding.
+// TestChaos66_ConnectFailureAtBootStillArmsForwarding pins that a collector
+// unreachable at boot leaves forwarding ARMED and self-healing, not off.
 //
 // PRE-FIX EVIDENCE: InitSyslog fails closed on its first dial, and both boot
 // callers log-and-continue with globalSyslog nil. Nothing ever constructs a
@@ -249,7 +254,8 @@ func TestChaos66_ConnectFailureAtBootStillArmsForwarding(t *testing.T) {
 
 	// Bind and immediately release a port so the address is well-formed and
 	// routable but nothing is listening on it.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +273,7 @@ func TestChaos66_ConnectFailureAtBootStillArmsForwarding(t *testing.T) {
 
 	// The collector comes back. Recovery must be automatic: no restart, no
 	// operator re-save.
-	ln2, err := net.Listen("tcp", addr)
+	ln2, err := lc.Listen(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Skipf("could not re-bind %s to simulate the collector returning: %v", addr, err)
 	}
@@ -312,7 +318,8 @@ func TestChaos66_ConnectFailureAtBootStillArmsForwarding(t *testing.T) {
 	}
 }
 
-// TestChaos66_TestEndpointCannotReportSuccessAgainstADeadCollector.
+// TestChaos66_TestEndpointCannotReportSuccessAgainstADeadCollector pins that
+// the connectivity probe is able to FAIL.
 //
 // PRE-FIX EVIDENCE: POST /api/syslog/test answered
 // `200 {"ok":true,"message":"test message sent"}` against udp://192.0.2.77:514
@@ -342,7 +349,8 @@ func TestChaos66_TestEndpointCannotReportSuccessAgainstADeadCollector(t *testing
 	}
 }
 
-// TestChaos66_UDPFeedNeverClaimsVerifiedDelivery.
+// TestChaos66_UDPFeedNeverClaimsVerifiedDelivery pins that no surface reports
+// delivery over a transport on which delivery cannot be observed.
 //
 // PRE-FIX EVIDENCE: a UDP writer aimed at 192.0.2.77:514 connected
 // successfully and reported drops=0 forever, so checkSyslogFeed said
@@ -381,7 +389,8 @@ func TestChaos66_UDPFeedNeverClaimsVerifiedDelivery(t *testing.T) {
 	}
 }
 
-// TestChaos66_DropsReachMetricsAndHealthz.
+// TestChaos66_DropsReachMetricsAndHealthz pins that lost compliance events are
+// visible to an automated monitor, not just to an admin opening a panel.
 //
 // PRE-FIX EVIDENCE: Drops() reached exactly one surface in the process — the
 // admin-only GET /api/syslog. No metric existed at all (a 2026-07-07 security
@@ -482,7 +491,8 @@ func TestChaos66_GlobalWriterIsNotRacedByAReconfigure(t *testing.T) {
 	wg.Wait()
 }
 
-// TestChaos66_RefusedTargetLeavesTheWorkingForwarderInPlace.
+// TestChaos66_RefusedTargetLeavesTheWorkingForwarderInPlace pins that a
+// rejected reconfigure does not take the feed down with it.
 //
 // A reconfigure that is REJECTED must not take the feed down with it. The
 // probe-then-install order is what makes this true; installing first and
@@ -497,7 +507,8 @@ func TestChaos66_RefusedTargetLeavesTheWorkingForwarderInPlace(t *testing.T) {
 	}
 	good := activeSyslog()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +531,8 @@ func TestChaos66_RefusedTargetLeavesTheWorkingForwarderInPlace(t *testing.T) {
 
 // ─── CONTROLS ───────────────────────────────────────────────────────────────
 
-// TestChaos66Control_HealthyFeedStaysGreenAndDelivers.
+// TestChaos66Control_HealthyFeedStaysGreenAndDelivers is the control against
+// over-reporting failure.
 //
 // The cheapest way to pass the defect gates above is to report failure more
 // readily. This is the gate that makes that a losing move: a working collector
@@ -575,7 +587,7 @@ func TestChaos66Control_ForwardingIsNotSilentlyDisabled(t *testing.T) {
 	}
 }
 
-// TestChaos66Control_DegradationIsADurationNotACount: a collector that blips
+// TestChaos66Control_DegradationIsADurationNotACount pins that a collector that blips
 // must NOT page. The entry rate of a gateway is thousands of lines a minute,
 // so any count threshold is crossed inside an ordinary SIEM restart.
 func TestChaos66Control_DegradationIsADurationNotACount(t *testing.T) {

@@ -82,7 +82,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	syslogConfigured = ""
 	syslogConfiguredAddr = ""
 	releaseSyslogWriter(setActiveSyslog(nil))
-	resetSyslogFeedHealthForTest()
+	resetSyslogFeedHealth()
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
 	auditLogConfiguredPath = ""
@@ -100,7 +100,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		syslogConfigured = oldSyslogConfigured
 		syslogConfiguredAddr = oldSyslogConfiguredAddr
 		setActiveSyslog(oldGlobalSyslog)
-		resetSyslogFeedHealthForTest()
+		resetSyslogFeedHealth()
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
 		auditLogConfiguredPath = oldAuditLogConfiguredPath
@@ -319,7 +319,7 @@ func TestLoadObservability_SyslogUnreachableStillArmsForwarding(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 
-	// tcp://127.0.0.1:1 — no listener; the first dial fails.
+	// Port 1 on loopback has no listener, so the first dial fails.
 	loadObservability(observabilityStartupConfig{
 		SyslogAddr:      "tcp://127.0.0.1:1",
 		RequestLogMaxMB: 100,

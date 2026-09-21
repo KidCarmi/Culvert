@@ -1872,7 +1872,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 // releaseSyslogWriter).
 func disableSyslogForwarding(w http.ResponseWriter, r *http.Request) {
 	releaseSyslogWriter(setActiveSyslog(nil))
-	resetSyslogFeedHealthForTest()
+	resetSyslogFeedHealth()
 	syslogConfigured = ""
 	syslogConfiguredAddr = ""
 	auditEvent(r, "settings.syslog", "disabled", "")
@@ -1898,7 +1898,7 @@ func applySyslogTarget(w http.ResponseWriter, r *http.Request, addr, format stri
 		http.Error(w, "syslog connect error: "+probeErr.Error(), http.StatusBadRequest)
 		return
 	}
-	resetSyslogFeedHealthForTest()
+	resetSyslogFeedHealth()
 	if err := InitSyslogResilient(addr, format); err != nil {
 		// The probe just succeeded, so this is a fresh transient fault. The
 		// writer IS installed and armed, so say so rather than failing a

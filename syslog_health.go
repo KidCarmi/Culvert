@@ -302,10 +302,17 @@ func syslogFeedState() syslogFeedSnapshot {
 	return snap
 }
 
-// resetSyslogFeedHealthForTest clears the process-global delivery record.
-// Mirrors resetAuthBackendHealthForTest: these globals otherwise leak across
-// tests under -count/-shuffle.
-func resetSyslogFeedHealthForTest() {
+// resetSyslogFeedHealth clears the process-global delivery record, starting a
+// fresh episode.
+//
+// This is a PRODUCTION operation, not just a test hook: installing a new
+// forwarder (or disabling forwarding) ends the previous writer's episode, and
+// carrying its degradation state onto a different collector would report the
+// old target's outage against the new one. Tests reuse it to stop these
+// globals leaking across cases under -count/-shuffle, the way
+// resetAuthBackendHealthForTest does — hence no ForTest suffix, which would
+// have been a lie at two of its three call sites.
+func resetSyslogFeedHealth() {
 	syslogFeedDown.Store(false)
 	syslogFeed.mu.Lock()
 	syslogFeed.everDelivered = false
