@@ -6800,24 +6800,58 @@ reaching the request log.
 - **The arrival rate is still not bounded by default** (PX-6 / §25's finding —
   `-rate-limit` ships at 0). This sweep bounds the COST of each request, not how
   many arrive; the runbook points at the front door.
-- **ST-9 (NEW, open) — `TestTopHosts_ConcurrentRecordDecayAndTop` is FLAKY under
-  CPU contention, on `main`, unrelated to this sweep.** It surfaced in this
-  sweep's full-suite run and was then reproduced on a clean `origin/main`
-  worktree with the identical message (`heavy hitters lost under concurrency;
-  Top(2) = [{Host:junk-19859.example Count:1} …]`) by running it under
-  deliberate CPU contention; it passes 6/6 in isolation in both trees, so it is
-  load-dependent, not change-dependent. The mechanism is in the test, not the
-  engine: two heavy-hitter writers race a 20 000-entry junk flood, and when the
-  scheduler starves the writers the decay passes halve `hot-a`/`hot-b` to 1 while
-  junk entries also sit at 1, so `Top(2)` resolves an arbitrary tie. **Recorded
-  rather than fixed, deliberately**: it is a gate for a different subsystem, this
-  repo's standing rule is that a gate which can flake gets muted (the
-  `sanitizeLog`, `connlimit` and histogram episodes all reached it), and
-  rewriting someone else's concurrency gate inside a sweep about destination
-  bounds is the "one concern per change" violation §30 declined for
-  `pollConfig`'s double increment. The fix is to make the assertion
-  tie-insensitive (assert the heavy hitters outrank every junk entry, or give the
-  writers a floor above the decay threshold), not to loosen the bound.
+- **ST-9 (NEW) — `TestTopHosts_ConcurrentRecordDecayAndTop` was FLAKY under CPU
+  contention, and it is what failed `Deep · determinism` on this PR. CLOSED.**
+  First recorded here as "open, recorded rather than fixed" on one-concern-per-change
+  grounds. That disposition was **wrong once it blocked a required gate on a PR
+  this sweep owned**: "pre-existing" does not make a red required check somebody
+  else's problem.
+
+  **Diagnosis, and the two false starts worth recording.** The determinism gate
+  failed on two heads. The obvious cause looked like an ORDERING leak, and the
+  sweep did have one — `TestChaos66_DefectIPBlockedPathDoesNotRetainTheAuthority`
+  set `ipf.SetMode("allow")` (an allowlist with an empty list denies everything)
+  and restored nothing, which seven test files that drive `handleRequest` without
+  `setupProxyTest` would have seen as a 403. That leak was real, was proven with a
+  probe, and **was not the determinism failure**: the first fix for it was also
+  ineffective (restoring a POINTER to an in-place-mutated object restores nothing
+  — the probe caught the restore being present and useless), and once genuinely
+  fixed, CI failed again under a NEW seed. Re-running **both** CI seeds locally
+  passed (674 s each), which is the fact that settled it: *a fixed seed that does
+  not reproduce is not an ordering bug.* It is load-dependent.
+
+  **Mechanism.** The test's own comment says "the flood is the clock: the heavy
+  hitters must be reinforced for as long as it runs". Under CPU starvation that
+  stops being true — the flood goroutine completes all 20 000 junk inserts
+  (~156 decay passes at cap 128) while the scheduler starves the four hot
+  workers, so `hot-a`/`hot-b` are halved to 1 and lose an arbitrary tie to a
+  count-1 junk entry. Measured with six spinning CPU hogs: **3 failures in 30
+  runs**, one observed `Top(2) = [{hot-b Count:4} {junk-19999 Count:1}]` — the
+  heavy hitters were **not actually heavy**. So the TEST's premise was failing,
+  not the engine's contract.
+
+  **Fix: restore the interleaving, never loosen the assertion.** The flood is now
+  PACED by the heavy hitters (`reinforcementChunk` 256, `awaitReinforcement`), so
+  the documented "flood is the clock" property holds by construction instead of by
+  scheduler luck. The `Top(2)` assertion is UNCHANGED — a tie-tolerant assertion
+  would have passed while the engine's heavy-hitter guarantee went unchecked,
+  which is the failure mode this register keeps naming. The wait is bounded (10 s)
+  and returns false so the flood abandons immediately: without that early return a
+  control that killed the hot workers took the test past 120 s, because ~78 chunks
+  each waited the full bound.
+
+  Verified both directions: 30 runs under the same contention now pass, and the
+  CONTROL — hot workers stopping early, which the test's comment says must fail
+  because a host that stops being requested is supposed to age out — fails in
+  10.0 s.
+
+  > **The lesson, and it is the third instance in this sweep of the same shape:**
+  > a flaky gate is a claim about the engine that the test cannot currently
+  > support. Two plausible causes (an ordering leak, then a second ordering leak)
+  > were each fixed on evidence and neither was the failure. What distinguished
+  > them was asking whether the failure was REPRODUCIBLE UNDER ITS OWN STATED
+  > MECHANISM: a shuffle seed that does not reproduce is not an ordering bug, no
+  > matter how many ordering bugs the diff genuinely contains.
 
 ### The process lesson
 
