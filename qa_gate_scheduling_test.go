@@ -12,16 +12,23 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QA Gate scheduling wall (CI-REDESIGN stage 1).
+// QA Gate scheduling wall (CI-REDESIGN stages 1 and 2A).
 //
-// The eight substantive QA jobs are INDEPENDENT layers: none reads an output or
-// downloads an artifact from another. Six of them nevertheless carried
-// `needs: qa-logic`, which bought nothing but serialised ~14 minutes of the
-// longest job in front of every one of them on main pushes and manual
-// dispatches. Stage 1 removes those edges and states the PR-time skip on each
-// job explicitly, because the skip used to arrive by CASCADE from qa-logic's
-// own `if:` — dropping the edge without restoring the condition would have
-// started running the whole QA suite on every pull request.
+// STAGE 1. Six of the eight substantive QA jobs carried `needs: qa-logic` while
+// reading no output and no artifact from it — the edge bought nothing but
+// serialised ~14 minutes of the longest job in front of every one of them on
+// main pushes and manual dispatches. Stage 1 removed those edges and stated the
+// PR-time skip on each job explicitly, because the skip used to arrive by
+// CASCADE from qa-logic's own `if:` — dropping the edge without restoring the
+// condition would have started running the whole QA suite on every pull
+// request.
+//
+// STAGE 2A gave exactly ONE of them the edge back, for the opposite reason:
+// qa-coverage used to run the entire suite a SECOND time purely to instrument
+// it, and now consumes the coverage profile qa-logic's race run publishes. That
+// edge carries DATA, so it is justified where the six were not — and the
+// distinction is the invariant this file pins (`qaAllowedJobEdges`), rather
+// than a blanket "no edges" rule that would have to be deleted to ship 2A.
 //
 // This file is the anti-drift wall for that change. It parses the real
 // workflow (never a substring scan of the whole file) and drives the REAL
@@ -63,16 +70,29 @@ var qaSubstantiveJobs = []string{
 	"qa-bench",
 }
 
-// qaFreedJobs are the six jobs stage 1 detached from qa-logic. Named
-// explicitly (rather than derived as "everything but qa-logic and qa-agent")
-// so re-adding the edge to any one of them is a named failure.
+// qaFreedJobs are the jobs that must NOT depend on qa-logic. Named explicitly
+// (rather than derived as "everything else") so re-adding an edge to any one of
+// them is a named failure.
+//
+// Stage 1 detached six. Stage 2A gave ONE of them — qa-coverage — a real
+// dependency back, because qa-logic now publishes the coverage profile
+// qa-coverage enforces the floors on, so it is deliberately absent here and
+// pinned by TestQAGateCoverage_* instead. The other five stay listed: nothing
+// has ever justified an edge for them.
 var qaFreedJobs = []string{
 	"qa-determinism",
-	"qa-coverage",
 	"qa-infra-compose",
 	"qa-os",
 	"qa-contract",
 	"qa-bench",
+}
+
+// qaAllowedJobEdges is the COMPLETE set of dependencies permitted between
+// substantive jobs, as "job -> the one job it may need". Anything outside this
+// map is a scheduling regression; anything inside it must be justified by data
+// crossing the edge, never by ordering preference.
+var qaAllowedJobEdges = map[string]string{
+	"qa-coverage": "qa-logic", // the coverage profile artifact (stage 2A)
 }
 
 func qaGateJob(t *testing.T, doc wfDoc, name string) wfJob {
@@ -112,10 +132,15 @@ func TestQAGateScheduling_FreedJobsAreIndependent(t *testing.T) {
 	}
 }
 
-// TestQAGateScheduling_SubstantiveGraphIsFlat pins the property the stage
-// depends on: no substantive job waits for another, so all eight become
-// eligible at the same moment and the aggregate is the only join point.
-func TestQAGateScheduling_SubstantiveGraphIsFlat(t *testing.T) {
+// TestQAGateScheduling_SubstantiveGraphHasOnlyJustifiedEdges pins the property
+// both stages depend on: the only dependency between substantive jobs is one
+// that carries DATA. Stage 1 removed six edges that carried none; stage 2A
+// added one that does (qa-coverage consumes qa-logic's coverage artifact).
+//
+// The assertion is on the whole edge SET, not on "no edges" and not on "these
+// edges exist", so both regressions fail here: a re-added ordering edge, and a
+// silently dropped artifact edge.
+func TestQAGateScheduling_SubstantiveGraphHasOnlyJustifiedEdges(t *testing.T) {
 	doc := loadWorkflow(t, qaGateWorkflowPath)
 
 	substantive := map[string]bool{}
@@ -125,26 +150,42 @@ func TestQAGateScheduling_SubstantiveGraphIsFlat(t *testing.T) {
 
 	for _, name := range qaSubstantiveJobs {
 		j := qaGateJob(t, doc, name)
+		allowed, hasAllowed := qaAllowedJobEdges[name]
+		edges := 0
 		for dep := range jobNeeds(j) {
-			if substantive[dep] {
-				t.Errorf("job %q waits for %q — the QA layers are independent and must all be schedulable at once", name, dep)
+			if !substantive[dep] {
+				continue
 			}
+			edges++
+			if !hasAllowed || dep != allowed {
+				t.Errorf("job %q waits for %q, which is not a justified edge. The QA layers stay independent "+
+					"unless DATA crosses the edge; add it to qaAllowedJobEdges with the reason, or remove the `needs:`.", name, dep)
+			}
+		}
+		if hasAllowed && edges == 0 {
+			t.Errorf("job %q must keep `needs: %s` — it consumes that job's artifact, so dropping the edge "+
+				"would let it run against a missing or stale profile", name, allowed)
 		}
 		if strings.TrimSpace(j.If) != qaPRSkipCondition {
 			t.Errorf("job %q must carry `if: %s` so it skips on pull requests on its own (got %q)", name, qaPRSkipCondition, j.If)
 		}
 	}
 
-	// Control: the aggregate is the ONE job that joins. A wall that passed
-	// because every job had been deleted would fail here.
-	joiners := []string{}
+	// Control: only the aggregate and the justified consumers may join. A wall
+	// that passed because every job had been deleted would fail here.
+	wantJoiners := map[string]bool{qaGateAggregateJob: true}
+	for consumer := range qaAllowedJobEdges {
+		wantJoiners[consumer] = true
+	}
 	for name := range doc.Jobs {
-		if len(jobNeeds(doc.Jobs[name])) > 0 {
-			joiners = append(joiners, name)
+		if len(jobNeeds(doc.Jobs[name])) > 0 && !wantJoiners[name] {
+			t.Errorf("job %q declares `needs:` but is neither the aggregate nor a justified consumer of another job's output", name)
 		}
 	}
-	if len(joiners) != 1 || joiners[0] != qaGateAggregateJob {
-		t.Errorf("exactly one job (%q) may declare `needs:`; got %v", qaGateAggregateJob, joiners)
+	for name := range wantJoiners {
+		if len(jobNeeds(qaGateJob(t, doc, name))) == 0 {
+			t.Errorf("job %q must declare `needs:`", name)
+		}
 	}
 }
 
