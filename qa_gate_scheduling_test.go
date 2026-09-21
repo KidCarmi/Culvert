@@ -42,11 +42,12 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	qaGateWorkflowPath   = ".github/workflows/qa-gate.yml"
-	needsVerdictActionYM = ".github/actions/needs-verdict/action.yml"
-	qaGateAggregateJob   = "qa-gate-approved"
-	qaGateAggregateName  = "✅ QA Gate — APPROVED"
-	qaPRSkipCondition    = "github.event_name != 'pull_request'"
+	qaGateWorkflowPath    = ".github/workflows/qa-gate.yml"
+	needsVerdictActionYM  = ".github/actions/needs-verdict/action.yml"
+	qaGateAggregateJob    = "qa-gate-approved"
+	qaGateAggregateName   = "✅ QA Gate — APPROVED"
+	needsVerdictActionRef = "./.github/actions/needs-verdict"
+	qaPRSkipCondition     = "github.event_name != 'pull_request'"
 )
 
 // qaSubstantiveJobs are the eight jobs the aggregate must wait for. Order is
@@ -254,27 +255,50 @@ func TestQAGateScheduling_AggregateStillJoinsEveryJob(t *testing.T) {
 	}
 
 	// The verdict must be delegated to the SHARED action, not hand-rolled: a
-	// per-workflow jq copy is how four aggregates drifted apart before.
+	// per-workflow jq copy is how four aggregates drifted apart before. Read the
+	// aggregate's OWN steps — a whole-file substring scan would be satisfied by
+	// the string appearing anywhere, including in a comment.
 	usesShared, passesNeeds := false, false
-	for i := range agg.Steps {
-		st := &agg.Steps[i]
-		if strings.Contains(st.Uses, "./.github/actions/needs-verdict") {
-			usesShared = true
+	for _, st := range aggregateSteps(t) {
+		if !strings.Contains(toStr(st["uses"]), needsVerdictActionRef) {
+			continue
+		}
+		usesShared = true
+		with, _ := st["with"].(map[string]interface{})
+		if strings.Contains(toStr(with["needs-json"]), "toJSON(needs)") {
+			passesNeeds = true
 		}
 	}
-	rawAgg, err := os.ReadFile(qaGateWorkflowPath)
+	if !usesShared {
+		t.Errorf("aggregate must evaluate its needs through %s", needsVerdictActionRef)
+	}
+	if !passesNeeds {
+		t.Errorf("aggregate must pass `needs-json: ${{ toJSON(needs) }}` to %s — otherwise the shared action judges nothing", needsVerdictActionRef)
+	}
+}
+
+// aggregateSteps returns the aggregate job's steps as generic maps, so a step's
+// `with:` can be inspected without adding QA-only fields to the wfStepWith
+// struct that the release-workflow tests share.
+func aggregateSteps(t *testing.T) []map[string]interface{} {
+	t.Helper()
+	raw, err := os.ReadFile(qaGateWorkflowPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", qaGateWorkflowPath, err)
 	}
-	if strings.Contains(string(rawAgg), "needs-json: ${{ toJSON(needs) }}") {
-		passesNeeds = true
+	var generic struct {
+		Jobs map[string]struct {
+			Steps []map[string]interface{} `yaml:"steps"`
+		} `yaml:"jobs"`
 	}
-	if !usesShared {
-		t.Errorf("aggregate must evaluate its needs through ./.github/actions/needs-verdict")
+	if err := yaml.Unmarshal(raw, &generic); err != nil {
+		t.Fatalf("parse %s (generic): %v", qaGateWorkflowPath, err)
 	}
-	if !passesNeeds {
-		t.Errorf("aggregate must pass `needs-json: ${{ toJSON(needs) }}` — otherwise the shared action judges nothing")
+	steps := generic.Jobs[qaGateAggregateJob].Steps
+	if len(steps) == 0 {
+		t.Fatalf("aggregate job %q has no steps — the selector is stale", qaGateAggregateJob)
 	}
+	return steps
 }
 
 // ─── 4. The REAL shared verdict implementation, exercised ────────────────────
