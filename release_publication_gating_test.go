@@ -1136,40 +1136,47 @@ func TestPublicationGating_NoDraftBlindReleaseLookup(t *testing.T) {
 		".github/scripts/assert-release-unpublished.sh": "asks whether a PUBLISHED release exists; a draft must read as absent",
 	}
 
-	roots := []string{".github/scripts", ".github/workflows"}
-	checked, hits := 0, 0
-	for _, root := range roots {
+	// Collect paths during the walk and read them AFTER it returns: doing no
+	// filesystem operation inside the callback avoids the gosec G122
+	// race-prone-path warning, the same shape
+	// TestSealedGoldenTestKeyIsConfinedToTestData uses.
+	var files []string
+	for _, root := range []string{".github/scripts", ".github/workflows"} {
 		err := filepath.WalkDir(filepath.Join(pkgSourceDir(), root), func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return err
 			}
-			b, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			checked++
-			rel, relErr := filepath.Rel(pkgSourceDir(), path)
-			if relErr != nil {
-				rel = path
-			}
-			rel = filepath.ToSlash(rel)
-			body := shellCodeOnly(string(b))
-			if !strings.Contains(body, blindEndpoint) {
-				return nil
-			}
-			hits++
-			if reason, ok := allowed[rel]; ok {
-				t.Logf("allowed by-tag lookup in %s: %s", rel, reason)
-				return nil
-			}
-			t.Errorf("%s reads %s — that endpoint does not return drafts, and the release being read IS a draft.\n"+
-				"Resolve it with resolve_staged_release_id (.github/scripts/lib/release.sh), or add this path to the\n"+
-				"allowlist with the reason a draft must read as absent there.", rel, blindEndpoint)
+			files = append(files, path)
 			return nil
 		})
 		if err != nil {
 			t.Fatalf("walk %s: %v", root, err)
 		}
+	}
+
+	checked, hits := 0, 0
+	for _, path := range files {
+		b, err := os.ReadFile(path) // #nosec G304 -- repository-owned paths collected above
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		checked++
+		rel, relErr := filepath.Rel(pkgSourceDir(), path)
+		if relErr != nil {
+			rel = path
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.Contains(shellCodeOnly(string(b)), blindEndpoint) {
+			continue
+		}
+		hits++
+		if reason, ok := allowed[rel]; ok {
+			t.Logf("allowed by-tag lookup in %s: %s", rel, reason)
+			continue
+		}
+		t.Errorf("%s reads %s — that endpoint does not return drafts, and the release being read IS a draft.\n"+
+			"Resolve it with resolve_staged_release_id (.github/scripts/lib/release.sh), or add this path to the\n"+
+			"allowlist with the reason a draft must read as absent there.", rel, blindEndpoint)
 	}
 	if checked == 0 || hits == 0 {
 		t.Fatalf("scanned %d files and found %d by-tag lookups — the selector is stale and this test proves nothing", checked, hits)
