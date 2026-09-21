@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -778,7 +779,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     sanitize-once decision inside the measured function, where reintroducing
 //     a second call fails the gate.
 //
-//   - The priority is rendered with %d. It was previously spelled
+//   - The priority is rendered with %d semantics. It was previously spelled
 //     strings.ReplaceAll(fmt.Sprintf("%d", …), "\n", ""), which formatted an int
 //     to a string and then scanned that string for newlines a decimal integer
 //     cannot contain — two heap allocations per proxied request (the Sprintf
@@ -786,40 +787,181 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     no-op. This is NOT the CWE-117 idiom the code conventions require: that
 //     rule covers STRING values reaching a log sink, whereas Priority is an int
 //     field of the admin-configured rulebase, carries no client-controlled data,
-//     and %d on an int can only ever emit [-0-9]. The rendered digits are
+//     and a base-10 int can only ever emit [-0-9]. The rendered digits are
 //     identical either way, so the emitted line is byte-for-byte what it was
 //     (pinned by TestPolicyDecisionLine_RenderIsByteIdentical). Every
 //     genuinely string-typed argument still goes through sanitizeLog.
+//
+// THE LINE IS BUILT WITH append, NOT fmt, AND THAT IS THE WHOLE POINT OF THE
+// SHAPE BELOW. logger.Printf takes its arguments as `...any`, so every one of
+// them is boxed into an interface on the way in, and a string box is a 16-byte
+// heap object that the garbage collector must then SCAN because it holds a
+// pointer. The allow line names nine arguments, eight of them strings, so the
+// call cost seven or eight heap allocations per proxied request before fmt had
+// parsed a single verb — measured as the largest allocating leaf anywhere in
+// Culvert's own request path (11.9% of every object handleRequest allocates;
+// alloc_objects over BenchmarkPerfQual_ProxyHTTPForward at -memprofilerate=1).
+//
+// Building the same bytes with append + strconv removes all of it. What is
+// left is ONE allocation: the message string handed to logger.Output, which is
+// pointer-free and therefore never scanned. Measured on the four emitters, with
+// the logger pointed at a REAL writer so the formatting is actually performed
+// (4-core Xeon @2.80GHz, medians of six):
+//
+//	shape              serial       4x parallel   allocs   bytes
+//	logger.Printf      1238 ns/op    665 ns/op      8       128 B
+//	append + Output     811 ns/op    530 ns/op      1       192 B
+//
+// The byte count goes UP and the allocation count goes DOWN, which is the right
+// direction and worth stating plainly rather than burying: the +64 B is ~1% of
+// the 6.1 KB handleRequest allocates per request, while the seven removed
+// objects are seven fewer mallocgc calls and seven fewer pointer-bearing
+// objects for the collector to mark. Bytes drive how OFTEN a GC runs; object
+// count drives how much each one costs, and how much the allocator costs on the
+// request goroutine itself.
+//
+// A pooled scratch buffer reaches 24 B/op instead of 192 B/op by handing the
+// []byte to fmt as `logger.Printf("%s", b)`. It was built and measured (745
+// ns/op serial) and DELIBERATELY NOT CARRIED: it buys ~65 ns/op over this shape
+// in exchange for a package-level sync.Pool, a Get/Put lifecycle, and a
+// correctness argument about whether the logger may retain the slice — in code
+// whose bug class is log injection and whose output is a compliance record.
+// That is the same trade, at the same magnitude, that sanitizeLog already
+// recorded when it built a SWAR control scan, measured it ~60 ns faster, and
+// threw it away. If the byte rate ever becomes the binding constraint, the
+// measurement is here; do not reach for it without one.
+//
+// Three rules keep the shape correct, and each has a gate:
+//
+//   - THE SCRATCH BUFFER IS DECLARED INSIDE THE EMITTER. `make([]byte, 0,
+//     policyLineScratch)` with a constant capacity is stack-allocated only
+//     while it does not escape, and string(b) copies, so it does not. Creating
+//     it anywhere else — a helper that returns one, a field, a pool — makes it
+//     escape and costs a second allocation per request. Pinned by the 1
+//     alloc/op bound in TestBenchGate_PolicyDecisionLineAllocs: a heap buffer
+//     measures 2.
+//
+//   - sanitizeLog STAYS AT THE EMITTER, never inside the append helpers. The
+//     helpers take values that are already safe and say so in their parameter
+//     names. This is the repo's CodeQL convention (the sanitiser must be
+//     visible at the site that reaches the sink) and it keeps the CWE-117
+//     audit readable: every client-influenced value on these lines is wrapped
+//     where it is used.
+//
+//   - THE RENDERED BYTES DO NOT CHANGE. strconv.AppendQuote is what fmt's %q
+//     calls for a string and strconv.AppendInt is what %d calls for an int, so
+//     equivalence is exact rather than approximate — and it is proved against
+//     the frozen fmt shapes over a corpus and a fuzz target
+//     (TestPolicyDecisionLine_RenderIsByteIdentical, FuzzPolicyDecisionLine).
+
+// policyLineScratch is the scratch capacity each decision emitter builds its
+// line in. The representative POLICY_ALLOW line measures 187 bytes, so 256
+// covers the common case whole; a long rule name, identity DN or redirect
+// target simply grows the slice once, which costs one extra allocation on an
+// unusual line and never a wrong one.
+const policyLineScratch = 256
+
+// appendPolicyLineHead appends `<verb> rule="<safeRule>" pri=<priority> <clientIP>`.
+//
+// safeRule has already been through sanitizeLog at the emitter. clientIP is a
+// net.SplitHostPort product of the kernel-supplied peer address, which is why
+// it is emitted raw here exactly as the %s verb emitted it before.
+func appendPolicyLineHead(b []byte, verb, safeRule string, priority int, clientIP string) []byte {
+	b = append(b, verb...)
+	b = append(b, " rule="...)
+	b = strconv.AppendQuote(b, safeRule) // what fmt's %q does for a string
+	b = append(b, " pri="...)
+	b = strconv.AppendInt(b, int64(priority), 10) // what fmt's %d does for an int
+	b = append(b, ' ')
+	return append(b, clientIP...)
+}
+
+// appendPolicyLineTail appends the trailing
+// ` [<safeConditions>] {req_id=<reqID> identity=<safeIdentity> rule=<safeRule> action=<action>}`
+// every decision line ends with.
+//
+// safeConditions, safeIdentity and safeRule have already been through
+// sanitizeLog at the emitter; reqID is generated by setupRequestTracing and
+// action is a compile-time constant at each call site.
+func appendPolicyLineTail(b []byte, safeConditions, reqID, safeIdentity, safeRule, action string) []byte {
+	b = append(b, " ["...)
+	b = append(b, safeConditions...)
+	b = append(b, "] {req_id="...)
+	b = append(b, reqID...)
+	b = append(b, " identity="...)
+	b = append(b, safeIdentity...)
+	b = append(b, " rule="...)
+	b = append(b, safeRule...)
+	b = append(b, " action="...)
+	b = append(b, action...)
+	return append(b, '}')
+}
+
+// Each emitter ends with logger.Output(1, string(b)).
+//
+// Output(1) names the emitter itself as the call site, which is what
+// logger.Printf reported from here before, so a build that turns on
+// log.Lshortfile still attributes these lines to proxy.go rather than to
+// log.go (pinned by TestPolicyDecisionLine_CallDepthNamesTheEmitter). Culvert
+// composes its logger with log.LstdFlags, which reads no caller at all, so in
+// production the depth costs nothing either way. The call is made directly in
+// each emitter rather than through a shared helper precisely because the frame
+// count has to be stable: a one-line helper is exactly the kind the compiler
+// inlines, which would silently shift the depth by one.
+//
+// The write is best-effort, as logger.Printf's was: Output's error is the
+// destination's, the destination is the asynchronous process-log sink, and a
+// proxied request must not fail because a log line did not land.
 
 // logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
 // authority as the client sent it), not the port-stripped host the block
 // branches log — preserved from the pre-extraction call sites verbatim.
 func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}",
-		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	b := make([]byte, 0, policyLineScratch)
+	b = appendPolicyLineHead(b, "POLICY_ALLOW", safeRule, priority, clientIP)
+	b = append(b, ' ')
+	b = append(b, method...)
+	b = append(b, ' ')
+	b = strconv.AppendQuote(b, sanitizeLog(host))
+	b = appendPolicyLineTail(b, sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule, "allow")
+	_ = logger.Output(1, string(b))
 }
 
 // logPolicyDrop emits the POLICY_DROP decision line.
 func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	b := make([]byte, 0, policyLineScratch)
+	b = appendPolicyLineHead(b, "POLICY_DROP", safeRule, priority, clientIP)
+	b = append(b, " -> "...)
+	b = strconv.AppendQuote(b, sanitizeLog(host))
+	b = appendPolicyLineTail(b, sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule, "drop")
+	_ = logger.Output(1, string(b))
 }
 
 // logPolicyBlock emits the POLICY_BLOCK decision line.
 func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	b := make([]byte, 0, policyLineScratch)
+	b = appendPolicyLineHead(b, "POLICY_BLOCK", safeRule, priority, clientIP)
+	b = append(b, " -> "...)
+	b = strconv.AppendQuote(b, sanitizeLog(host))
+	b = appendPolicyLineTail(b, sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule, "block")
+	_ = logger.Output(1, string(b))
 }
 
 // logPolicyRedirect emits the POLICY_REDIRECT decision line. Reached only after
 // isSafeRedirectURL has accepted redirectURL.
 func logPolicyRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	b := make([]byte, 0, policyLineScratch)
+	b = appendPolicyLineHead(b, "POLICY_REDIRECT", safeRule, priority, clientIP)
+	b = append(b, " -> "...)
+	b = strconv.AppendQuote(b, sanitizeLog(host))
+	b = append(b, " => "...)
+	b = strconv.AppendQuote(b, sanitizeLog(redirectURL))
+	b = appendPolicyLineTail(b, sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule, "redirect")
+	_ = logger.Output(1, string(b))
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:

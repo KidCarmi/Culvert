@@ -10,8 +10,20 @@ package main
 // thirds of the dispatch pipeline's own allocation, before any policy, auth or
 // transport work is counted.
 //
-// Two of its allocations were pure waste; see the contract comment above
-// logPolicyAllow in proxy.go for what they were and why removing them is sound.
+// Two rounds have landed against that finding. The first removed two allocations
+// that were pure waste (a fmt.Sprintf over an int, and a duplicated
+// sanitizeLog). The second replaced fmt with append + strconv, which removed
+// the remaining seven interface boxes and left ONE allocation: the message
+// string. See the contract comment above logPolicyAllow in proxy.go for the
+// measurements and the trade.
+//
+// The oracles below are FROZEN SHAPES, one per round, and they are the point of
+// this file. plLegacy*Line is the pre-first-round fmt shape; plPrintf*Line is
+// the pre-second-round fmt shape. The production emitters must render
+// BYTE-IDENTICAL output to both, for every input, because these lines are
+// parsed by SIEM forwarders — a faster line that is not the same line is not a
+// win, it is an incident. That equivalence is what makes the allocation
+// comparison meaningful at all.
 //
 // EVERYTHING BELOW MEASURES THE PRODUCTION FUNCTIONS. logPolicyAllow and its
 // siblings are the real emitters applyPolicyDecision calls, so a change that
@@ -28,6 +40,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -90,19 +103,39 @@ func plCurrentAllowLine(rule string, priority int) {
 }
 
 // plSwapLogger points the package logger at w and returns a restore func.
-// Benchmarks send it to io.Discard so they measure argument construction and
-// formatting — the work the request goroutine actually performs — without the
-// log sink's I/O, which is asynchronous in production anyway (internal/logsink).
+//
+// THE WRITER MUST NOT BE io.Discard, AND THAT IS A CORRECTION. log.Logger's
+// output() begins with `if l.isDiscard.Load() { return nil }`, so a logger
+// wired to io.Discard returns BEFORE it formats anything: every benchmark here
+// used to measure the caller's argument boxing and nothing else, and reported
+// roughly a third of the work a real gateway performs on the same line. The
+// gap is not small — the allow line measures 397 ns/op into io.Discard and
+// 1238 ns/op into a writer that merely counts bytes.
+//
+// plCountingSink is that writer. It is a real io.Writer, so the formatting
+// happens; it only counts, so no syscall or file I/O contaminates the figure.
+// That is the right isolation for this path: in production the destination is
+// internal/logsink, which is asynchronous, so what the request goroutine
+// actually pays is argument construction plus formatting plus a buffer copy.
 func plSwapLogger(w io.Writer) func() {
 	prev := logger
 	logger = log.New(w, "", 0)
 	return func() { logger = prev }
 }
 
+// plCountingSink is a real io.Writer that discards the bytes without being
+// io.Discard, so log.Logger cannot take its short circuit. See plSwapLogger.
+type plCountingSink struct{ n atomic.Int64 }
+
+func (s *plCountingSink) Write(p []byte) (int, error) {
+	s.n.Add(int64(len(p)))
+	return len(p), nil
+}
+
 // ── Before vs after ─────────────────────────────────────────────────────────
 
 func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plCountingSink{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -111,7 +144,7 @@ func BenchmarkPolicyDecisionLine_Legacy(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plCountingSink{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -128,7 +161,7 @@ func BenchmarkPolicyDecisionLine_Current(b *testing.B) {
 // so the comparison stays honest.
 
 func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plCountingSink{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -139,7 +172,7 @@ func BenchmarkPolicyDecisionLine_LegacyParallel(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plCountingSink{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -155,7 +188,7 @@ func BenchmarkPolicyDecisionLine_CurrentParallel(b *testing.B) {
 // beaconing flood, so they are measured too rather than assumed to match.
 
 func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plCountingSink{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -164,7 +197,7 @@ func BenchmarkPolicyDecisionLine_Block(b *testing.B) {
 }
 
 func BenchmarkPolicyDecisionLine_Drop(b *testing.B) {
-	defer plSwapLogger(io.Discard)()
+	defer plSwapLogger(&plCountingSink{})()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -270,4 +303,275 @@ func TestPolicyDecisionLine_SanitizesTheRuleNameOnBothOccurrences(t *testing.T) 
 			t.Errorf("%s: want the sanitized rule name twice (rule=%%q and the trailing rule=%%s), got %d in %q", name, n, out)
 		}
 	}
+}
+
+// ── The frozen fmt shapes: the differential oracle ──────────────────────────
+//
+// These four reproduce the production emitters EXACTLY as they stood before the
+// append rewrite — same format strings, same sanitizeLog placement, same
+// sanitize-the-rule-once contract. They exist for one reason: the rewrite is
+// only acceptable if the bytes are unchanged, and the cheapest way to be sure
+// of that is to keep the thing it replaced and compare against it on every run
+// rather than to reason about strconv.AppendQuote matching %q.
+//
+// They are the BASELINE, never the thing under test. Nothing in proxy.go calls
+// them.
+
+const (
+	plPrintfAllowFmt    = "POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}"
+	plPrintfDropFmt     = "POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}"
+	plPrintfBlockFmt    = "POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}"
+	plPrintfRedirectFmt = "POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}"
+)
+
+func plPrintfAllowLine(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plPrintfAllowFmt,
+		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+func plPrintfDropLine(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plPrintfDropFmt,
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+func plPrintfBlockLine(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plPrintfBlockFmt,
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+func plPrintfRedirectLine(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
+	safeRule := sanitizeLog(rule)
+	logger.Printf(plPrintfRedirectFmt,
+		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+}
+
+// plLineArgs is one full argument set for every branch. The differential drives
+// all four emitters from a single struct so no field can be exercised on one
+// branch and quietly skipped on another.
+type plLineArgs struct {
+	rule        string
+	priority    int
+	clientIP    string
+	method      string
+	host        string
+	redirectURL string
+	cond        string
+	reqID       string
+	identity    string
+}
+
+// plRenderPairs returns, for one argument set, the rendered output of each
+// production emitter beside the frozen fmt shape it must match.
+func plRenderPairs(a plLineArgs) map[string][2]string {
+	return map[string][2]string{
+		"allow": {
+			plCapture(func() {
+				logPolicyAllow(a.rule, a.priority, a.clientIP, a.method, a.host, a.cond, a.reqID, a.identity)
+			}),
+			plCapture(func() {
+				plPrintfAllowLine(a.rule, a.priority, a.clientIP, a.method, a.host, a.cond, a.reqID, a.identity)
+			}),
+		},
+		"drop": {
+			plCapture(func() { logPolicyDrop(a.rule, a.priority, a.clientIP, a.host, a.cond, a.reqID, a.identity) }),
+			plCapture(func() { plPrintfDropLine(a.rule, a.priority, a.clientIP, a.host, a.cond, a.reqID, a.identity) }),
+		},
+		"block": {
+			plCapture(func() { logPolicyBlock(a.rule, a.priority, a.clientIP, a.host, a.cond, a.reqID, a.identity) }),
+			plCapture(func() { plPrintfBlockLine(a.rule, a.priority, a.clientIP, a.host, a.cond, a.reqID, a.identity) }),
+		},
+		"redirect": {
+			plCapture(func() {
+				logPolicyRedirect(a.rule, a.priority, a.clientIP, a.host, a.redirectURL, a.cond, a.reqID, a.identity)
+			}),
+			plCapture(func() {
+				plPrintfRedirectLine(a.rule, a.priority, a.clientIP, a.host, a.redirectURL, a.cond, a.reqID, a.identity)
+			}),
+		},
+	}
+}
+
+// plDivergenceShapes is the hand-picked corpus. Randomised input finds the
+// ordinary cases; these are the ones where an append-and-strconv rewrite could
+// plausibly diverge from fmt and a fuzzer would be unlikely to construct.
+var plDivergenceShapes = []string{
+	"corp-saas-allow",
+	"",                     // empty: %q renders "" and append renders nothing
+	"rule with spaces",     // no quoting effect
+	"rule\nwith\nnewlines", // sanitizeLog territory
+	"rule\rwith\rCR",
+	"rule\twith\ttabs",
+	"rule\x00with\x1bcontrol", // NUL and ESC: %q escapes, sanitizeLog scrubs first
+	"\x7f",                    // DEL, the top end of sanitizeLog's range
+	"\x20",                    // SP, the first byte sanitizeLog leaves alone
+	"ünïcode-rule-名前",         // multi-byte: %q must not mangle it
+	"\xff\xfe",                // invalid UTF-8: %q renders \xff, append must too
+	`quotes"and\backslashes`,  // the bytes %q itself escapes
+	"a`backquoted`string",     // %q never picks backquotes without the # flag
+	strings.Repeat("x", 400),  // longer than policyLineScratch: forces one grow
+}
+
+// TestPolicyDecisionLine_AppendRenderMatchesFmt is the half that outranks every
+// benchmark in this file.
+//
+// It drives ALL FOUR production emitters against the frozen fmt shapes over the
+// full cross product of the divergence corpus, on every string field rather
+// than only the rule name. The previous round's equivalence test covered the
+// allow branch and the rule name alone, which was enough for a one-verb change
+// and is not enough for a rewrite that replaces the formatter itself: %q, %d
+// and %s each had to be reproduced by hand, and a mistake in any one of them
+// would land on a different field of a different branch.
+func TestPolicyDecisionLine_AppendRenderMatchesFmt(t *testing.T) {
+	base := plLineArgs{
+		rule: plRule, priority: plPriority, clientIP: plClientIP, method: plMethod,
+		host: plHost, redirectURL: plArgs.redirectURL, cond: plCond, reqID: plReqID, identity: plIdentity,
+	}
+	// Each field is varied in turn across the whole corpus, so a divergence is
+	// reported against the field that caused it rather than a soup of them.
+	fields := map[string]func(*plLineArgs, string){
+		"rule":        func(a *plLineArgs, v string) { a.rule = v },
+		"clientIP":    func(a *plLineArgs, v string) { a.clientIP = v },
+		"method":      func(a *plLineArgs, v string) { a.method = v },
+		"host":        func(a *plLineArgs, v string) { a.host = v },
+		"redirectURL": func(a *plLineArgs, v string) { a.redirectURL = v },
+		"cond":        func(a *plLineArgs, v string) { a.cond = v },
+		"reqID":       func(a *plLineArgs, v string) { a.reqID = v },
+		"identity":    func(a *plLineArgs, v string) { a.identity = v },
+	}
+	priorities := []int{0, 1, 7, 42, 100, 999, 2147483647, -1, -32768, -2147483648}
+
+	for field, set := range fields {
+		for _, v := range plDivergenceShapes {
+			for _, pri := range priorities {
+				a := base
+				a.priority = pri
+				set(&a, v)
+				for branch, pair := range plRenderPairs(a) {
+					if pair[0] != pair[1] {
+						t.Fatalf("%s branch diverged with %s=%q pri=%d:\n  append: %q\n     fmt: %q",
+							branch, field, v, pri, pair[0], pair[1])
+					}
+				}
+			}
+		}
+	}
+}
+
+// FuzzPolicyDecisionLine is the randomised half of the same claim. The corpus
+// above covers the shapes a human thought of; this covers the ones nobody did.
+//
+//	go test -run '^$' -fuzz FuzzPolicyDecisionLine -fuzztime=60s .
+func FuzzPolicyDecisionLine(f *testing.F) {
+	f.Add("corp-saas-allow", 100, "203.0.113.7", "GET", "files.example.com", "https://p/x", "fqdn", "abc", "alice@example.com")
+	f.Add("", 0, "", "", "", "", "", "", "")
+	f.Add("r\nn", -1, "\x00", "\x7f", `h"q`, "\xff", "\t", "\x1b", "ünï")
+	f.Fuzz(func(t *testing.T, rule string, priority int, clientIP, method, host, redirectURL, cond, reqID, identity string) {
+		a := plLineArgs{
+			rule: rule, priority: priority, clientIP: clientIP, method: method,
+			host: host, redirectURL: redirectURL, cond: cond, reqID: reqID, identity: identity,
+		}
+		for branch, pair := range plRenderPairs(a) {
+			if pair[0] != pair[1] {
+				t.Fatalf("%s branch diverged:\n  append: %q\n     fmt: %q", branch, pair[0], pair[1])
+			}
+		}
+	})
+}
+
+// TestPolicyDecisionLine_StaysOnOnePhysicalLine pins the CWE-117 property
+// directly on the new construction, for every branch and every string field.
+//
+// The append rewrite moved these lines off fmt, which is where the %q escaping
+// used to live, so "the emitted record cannot be forged into two records" is
+// now a property of code in proxy.go rather than of the standard library. It
+// deserves its own assertion instead of riding on the equivalence test: if a
+// future edit ever changes BOTH the production emitter and the frozen oracle
+// the same wrong way, equivalence would still hold and this would not.
+func TestPolicyDecisionLine_StaysOnOnePhysicalLine(t *testing.T) {
+	const forge = "x\ny\rz"
+	base := plLineArgs{
+		rule: plRule, priority: plPriority, clientIP: plClientIP, method: plMethod,
+		host: plHost, redirectURL: plArgs.redirectURL, cond: plCond, reqID: plReqID, identity: plIdentity,
+	}
+	fields := map[string]func(*plLineArgs){
+		"rule":        func(a *plLineArgs) { a.rule = forge },
+		"host":        func(a *plLineArgs) { a.host = forge },
+		"redirectURL": func(a *plLineArgs) { a.redirectURL = forge },
+		"cond":        func(a *plLineArgs) { a.cond = forge },
+		"identity":    func(a *plLineArgs) { a.identity = forge },
+	}
+	for field, set := range fields {
+		a := base
+		set(&a)
+		for branch, pair := range plRenderPairs(a) {
+			body := strings.TrimSuffix(pair[0], "\n")
+			if strings.ContainsAny(body, "\n\r") {
+				t.Errorf("%s branch: a raw newline or CR in %s split the record (log forging): %q", branch, field, body)
+			}
+		}
+	}
+}
+
+// TestPolicyDecisionLine_CallDepthNamesTheEmitter pins the one observable the
+// switch from logger.Printf to logger.Output could have changed silently.
+//
+// Output takes an explicit call depth where Printf hard-codes its own, and
+// getting it wrong does not fail anything under the log.LstdFlags composition
+// Culvert ships — the flags never ask for a caller, so the depth is simply not
+// read. It becomes visible the moment anyone debugging turns on log.Lshortfile,
+// and at that point a wrong depth attributes every policy decision to log.go or
+// to applyPolicyDecision instead of to the emitter that wrote it.
+//
+// The assertion is on the FILE, not the line: Printf and Output are on
+// different source lines by construction, so a line-for-line comparison would
+// be pinning an accident rather than the property that matters.
+func TestPolicyDecisionLine_CallDepthNamesTheEmitter(t *testing.T) {
+	emitters := map[string]func(){
+		"allow": func() { logPolicyAllow(plRule, plPriority, plClientIP, plMethod, plHost, plCond, plReqID, plIdentity) },
+		"drop":  func() { logPolicyDrop(plRule, plPriority, plClientIP, plHost, plCond, plReqID, plIdentity) },
+		"block": func() { logPolicyBlock(plRule, plPriority, plClientIP, plHost, plCond, plReqID, plIdentity) },
+		"redirect": func() {
+			logPolicyRedirect(plRule, plPriority, plClientIP, plHost, plArgs.redirectURL, plCond, plReqID, plIdentity)
+		},
+	}
+	for name, emit := range emitters {
+		var buf strings.Builder
+		prev := logger
+		logger = log.New(&buf, "", log.Lshortfile)
+		emit()
+		logger = prev
+
+		out := buf.String()
+		if !strings.HasPrefix(out, "proxy.go:") {
+			t.Errorf("%s: with Lshortfile the decision line is attributed to %q, want a proxy.go site — "+
+				"the logger.Output call depth in the emitter is wrong, so a debugging build would "+
+				"blame the logging package instead of the policy path.",
+				name, strings.SplitN(out, " ", 2)[0])
+		}
+	}
+}
+
+// ── Before vs after: the append rewrite ─────────────────────────────────────
+
+func BenchmarkPolicyDecisionLine_PrintfShape(b *testing.B) {
+	defer plSwapLogger(&plCountingSink{})()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		plPrintfAllowLine(plRule, plPriority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
+	}
+}
+
+func BenchmarkPolicyDecisionLine_PrintfShapeParallel(b *testing.B) {
+	defer plSwapLogger(&plCountingSink{})()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			plPrintfAllowLine(plRule, plPriority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
+		}
+	})
 }

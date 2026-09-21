@@ -303,6 +303,39 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
 
+### Performance
+
+- The per-request policy decision line no longer goes through `fmt`.
+  `applyPolicyDecision` writes exactly one `POLICY_ALLOW` / `POLICY_BLOCK` /
+  `POLICY_DROP` / `POLICY_REDIRECT` line for every proxied request, on every
+  protocol, and it wrote it with `logger.Printf`. `Printf` takes `...any`, so
+  each of the nine arguments was boxed into an interface — a 16-byte heap
+  object holding a pointer, which the collector then has to scan. Profiled
+  against the end-to-end forward benchmark at `-memprofilerate=1`, that single
+  call accounted for 7 of the 59 objects `handleRequest` allocates per request
+  (11.9%), the largest allocating leaf anywhere in Culvert's own request path.
+  The line is now assembled with `append` plus `strconv.AppendQuote`/
+  `AppendInt` into a stack-resident scratch buffer and handed to
+  `logger.Output`, which leaves one allocation: the message string itself,
+  pointer-free and never scanned. Measured against a real writer (4-core Xeon
+  @2.80GHz, medians of six): **1150 → 700 ns/op serial, 1146 → 462 ns/op at
+  4x parallel, 8 → 1 allocations per request**; the end-to-end qualification
+  benchmark goes 185 → 179 allocs/op.
+
+  **The emitted bytes are unchanged**, which is the part that matters for
+  anything parsing these lines: `strconv.AppendQuote` is what `%q` calls for a
+  string and `AppendInt` is what `%d` calls for an int. Equivalence is proved
+  rather than asserted — the pre-change `fmt` shapes are frozen in-tree and all
+  four branches are compared against them over a divergence corpus on every
+  string field, plus a fuzz target (~1.14M executions, no divergence). The
+  allocation gate for these lines drops from 8/8/7/7 to 1 per branch.
+
+  Allocated *bytes* per line rise 128 B → 192 B, which is the correct trade and
+  is recorded rather than buried: +64 B is about 1% of the 6.1 KB
+  `handleRequest` allocates per request, against seven fewer allocator calls on
+  the request goroutine and seven fewer pointer-bearing objects for every GC
+  cycle to mark.
+
 ### Added
 
 - New React/TypeScript admin frontend, Batch 2 (`CULVERT_EXPERIMENTAL_UI`,
