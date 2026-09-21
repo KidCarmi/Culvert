@@ -1055,3 +1055,60 @@ func (j wfJob) ConcurrencyGroupAndCancel() (string, bool) {
 	}
 	return j.Concurrency.Group, j.Concurrency.CancelInProgress == true
 }
+
+// A `| head -n1` reader exits after the first line, which SIGPIPEs the producer;
+// under `pipefail` that 141 becomes the pipeline's status and KILLS the step.
+//
+// This is not hypothetical. Consolidating the docker job's version steps into
+// one `chan` step added `set -euo pipefail` around a `git tag --list | head -n1`
+// that had lived for years without it — so a signal that had always been raised
+// and always been discarded suddenly failed the job, and main went red on the
+// first push after the merge (run 35616066584, exit 141). Reproduced 20/20 at
+// this repository's tag count; it is racy at small counts, which is exactly why
+// it survived review and every PR run — the job is main/tag-only and was
+// SKIPPED on the PR.
+//
+// The rule is narrow on purpose: `pipefail` is worth keeping, so the fix is to
+// stop creating the signal rather than stop observing it. Read the whole output
+// and take the first line with a parameter expansion.
+func TestPublicationGating_NoSIGPIPEProneHeadUnderPipefail(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	checked := 0
+	for jobName := range doc.Jobs {
+		j := doc.Jobs[jobName]
+		for i := range j.Steps {
+			run := shellCodeOnly(j.Steps[i].Run)
+			if !strings.Contains(run, "pipefail") {
+				continue
+			}
+			checked++
+			if strings.Contains(run, "| head") {
+				t.Errorf("job %q step %q pipes into `head` under pipefail: the producer is SIGPIPEd and its 141 fails the step.\n"+
+					"Read the full output and take the first line instead:\n"+
+					"  X=\"$(producer)\"; X=\"${X%%%%$'\\n'*}\"",
+					jobName, j.Steps[i].Name)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no pipefail steps found in ci.yml — the selector is stale and this test proves nothing")
+	}
+}
+
+// shellCodeOnly strips `#` comments so a note ABOUT a hazard is not mistaken for
+// the hazard. Naive on purpose — it is only ever fed workflow shell, and a false
+// positive here is a failing build with a confusing message, which is the one
+// outcome a wall must not produce.
+func shellCodeOnly(script string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(script, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+				line = line[:i]
+			}
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
