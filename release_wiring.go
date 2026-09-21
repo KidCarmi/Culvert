@@ -89,21 +89,27 @@ const (
 var bakedReleaseTrustKeysJSON = ""
 
 type releaseStartupConfig struct {
-	proxyRepo        string
-	catalogDir       string
-	statePath        string     // persisted rollback version floor (sibling of catalogDir)
-	maintURL         string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
-	catalogURL       string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
-	trustKeys        []TrustKey // baked roots ∪ operator-configured roots
-	trustKeysErr     error
-	sigstore         *sigstoreVerifier // optional keyless (Sigstore-identity) verifier; nil ⇒ scheme inactive
-	sigstoreActive   bool              // true ⇒ a Sigstore trusted root is present
-	sigstoreWarn     string            // loud one-line note (identity set without a root) ("" ⇒ none)
-	sigstoreErr      error             // fatal Sigstore config error ⇒ Release Management disabled
-	verifyMode       VerifyMode
-	verifyModeWarn   string        // loud break-glass message to log once at startup ("" ⇒ none)
-	refreshInterval  time.Duration // periodic catalog refresh cadence (M1-2); 0 ⇒ loop disabled
-	catalogURLSource string        // catalogURLSource{Default,Override,Disabled} (M1-2 product revision)
+	proxyRepo      string
+	catalogDir     string
+	statePath      string     // persisted rollback version floor (sibling of catalogDir)
+	maintURL       string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
+	catalogURL     string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
+	trustKeys      []TrustKey // baked roots ∪ operator-configured roots
+	trustKeysErr   error
+	sigstore       *sigstoreVerifier // optional keyless (Sigstore-identity) verifier; nil ⇒ scheme inactive
+	sigstoreActive bool              // true ⇒ a Sigstore trusted root is present
+	sigstoreWarn   string            // loud one-line note (identity set without a root) ("" ⇒ none)
+	sigstoreErr    error             // fatal Sigstore config error ⇒ Release Management disabled
+	// sigstoreIdentitySource / sigstoreRootSource are "default" or "override",
+	// set only when sigstoreActive — positive confirmation of which trust
+	// material is actually enforcing, distinct from sigstoreWarn's negative
+	// signal for a BROKEN override.
+	sigstoreIdentitySource string
+	sigstoreRootSource     string
+	verifyMode             VerifyMode
+	verifyModeWarn         string        // loud break-glass message to log once at startup ("" ⇒ none)
+	refreshInterval        time.Duration // periodic catalog refresh cadence (M1-2); 0 ⇒ loop disabled
+	catalogURLSource       string        // catalogURLSource{Default,Override,Disabled} (M1-2 product revision)
 }
 
 // resolveReleaseStartupConfig reads the static inputs (env + dataDir). No mutable
@@ -137,21 +143,23 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 	interval := resolveRefreshInterval(getenv(envReleaseRefreshInterval))
 	catalogURL, catalogURLSource := resolveCatalogURL(getenv(envReleaseCatalogURL))
 	return releaseStartupConfig{
-		proxyRepo:        proxyRepo,
-		catalogDir:       catalogDir,
-		statePath:        filepath.Join(dataDir, "release_catalog_state.json"),
-		maintURL:         maintURL,
-		catalogURL:       catalogURL,
-		trustKeys:        keys,
-		trustKeysErr:     keysErr,
-		sigstore:         sig.verifier,
-		sigstoreActive:   sig.active,
-		sigstoreWarn:     sig.warn,
-		sigstoreErr:      sig.err,
-		verifyMode:       mode,
-		verifyModeWarn:   warn,
-		refreshInterval:  interval,
-		catalogURLSource: catalogURLSource,
+		proxyRepo:              proxyRepo,
+		catalogDir:             catalogDir,
+		statePath:              filepath.Join(dataDir, "release_catalog_state.json"),
+		maintURL:               maintURL,
+		catalogURL:             catalogURL,
+		trustKeys:              keys,
+		trustKeysErr:           keysErr,
+		sigstore:               sig.verifier,
+		sigstoreActive:         sig.active,
+		sigstoreWarn:           sig.warn,
+		sigstoreErr:            sig.err,
+		sigstoreIdentitySource: sig.identitySource,
+		sigstoreRootSource:     sig.rootSource,
+		verifyMode:             mode,
+		verifyModeWarn:         warn,
+		refreshInterval:        interval,
+		catalogURLSource:       catalogURLSource,
 	}
 }
 
@@ -400,6 +408,8 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	rm.verifyMode = cfg.verifyMode
 	rm.trustSchemes = trustSchemes(cfg)
 	rm.sigstoreWarn = cfg.sigstoreWarn
+	rm.sigstoreIdentitySource = cfg.sigstoreIdentitySource
+	rm.sigstoreRootSource = cfg.sigstoreRootSource
 	rm.catalogURLSource = cfg.catalogURLSource
 	if cfg.catalogURL != "" {
 		// Host only (never the full override URL — it may carry presigned creds).

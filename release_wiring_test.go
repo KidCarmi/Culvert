@@ -385,6 +385,48 @@ func TestLoadReleaseManagement_SigstoreWarnSurfacedOnAPI(t *testing.T) {
 	}
 }
 
+// TestLoadReleaseManagement_SigstoreSourceFieldsSurfacedOnAPI proves the
+// positive counterpart to the warning above: when the Sigstore scheme is
+// ACTIVE, GET /api/releases says whether the enforcing identity/root is the
+// baked default or an operator override, so a correctly-configured override
+// doesn't look identical to the baked default on the API/GUI.
+func TestLoadReleaseManagement_SigstoreSourceFieldsSurfacedOnAPI(t *testing.T) {
+	t.Cleanup(func() { setReleaseManager(nil) })
+	setReleaseManager(nil)
+
+	loadReleaseManagement(releaseStartupConfig{
+		proxyRepo: defaultReleaseProxyRepo, catalogDir: "/tmp/nonexistent-catalog", maintURL: "",
+		verifyMode:             VerifyPermissive,
+		sigstoreActive:         true,
+		sigstoreIdentitySource: sigstoreSourceOverride,
+		sigstoreRootSource:     sigstoreSourceDefault,
+	})
+	rm := currentReleaseManager()
+	if rm == nil {
+		t.Fatal("valid config must publish a release manager")
+	}
+	if rm.sigstoreIdentitySource != sigstoreSourceOverride || rm.sigstoreRootSource != sigstoreSourceDefault {
+		t.Fatalf("releaseManager sigstore source fields = (%q, %q), want (%q, %q)",
+			rm.sigstoreIdentitySource, rm.sigstoreRootSource, sigstoreSourceOverride, sigstoreSourceDefault)
+	}
+
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/releases = %d %s; want 200", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if got := body["sigstore_identity_source"]; got != sigstoreSourceOverride {
+		t.Fatalf("GET /api/releases sigstore_identity_source = %v, want %q", got, sigstoreSourceOverride)
+	}
+	if got := body["sigstore_root_source"]; got != sigstoreSourceDefault {
+		t.Fatalf("GET /api/releases sigstore_root_source = %v, want %q", got, sigstoreSourceDefault)
+	}
+	if _, present := body["sigstore_warn"]; present {
+		t.Fatal("sigstore_warn must be absent when the scheme is active (no misconfiguration)")
+	}
+}
+
 // TestLoadReleaseManagement_SigstoreWarnSurfacedWhenTrustFails covers the case
 // the warning actually exists for: enforce mode with no ed25519 roots and an
 // inactive Sigstore scheme (a custom identity set without a trusted root). The
