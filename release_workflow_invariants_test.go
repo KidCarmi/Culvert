@@ -29,12 +29,14 @@ import (
 const r2WorkflowPath = ".github/workflows/publish-catalog-r2.yml"
 
 type wfStep struct {
-	Name            string      `yaml:"name"`
-	Uses            string      `yaml:"uses"`
-	Run             string      `yaml:"run"`
-	If              string      `yaml:"if"`
-	ContinueOnError interface{} `yaml:"continue-on-error"`
-	With            wfStepWith  `yaml:"with"`
+	Name            string            `yaml:"name"`
+	ID              string            `yaml:"id"` // release-publication gating (draft-state hop)
+	Uses            string            `yaml:"uses"`
+	Run             string            `yaml:"run"`
+	If              string            `yaml:"if"`
+	Env             map[string]string `yaml:"env"` // release-publication gating (draft-state hop)
+	ContinueOnError interface{}       `yaml:"continue-on-error"`
+	With            wfStepWith        `yaml:"with"`
 }
 
 type wfStepWith struct {
@@ -59,6 +61,7 @@ type wfJob struct {
 	Needs       interface{}       `yaml:"needs"` // string OR []string
 	Concurrency *wfJobConcurrency `yaml:"concurrency"`
 	Permissions interface{}       `yaml:"permissions"` // string ("read-all"/"write-all") OR map
+	Outputs     map[string]string `yaml:"outputs"`     // release-publication gating (draft-state hop)
 	Steps       []wfStep          `yaml:"steps"`
 }
 

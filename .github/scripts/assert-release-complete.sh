@@ -57,7 +57,8 @@ need() {
 }
 
 for pair in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64" "windows amd64"; do
-  # shellcheck disable=SC2086 -- deliberate split of the "<goos> <goarch>" pair
+  # Deliberate word split of the "<goos> <goarch>" pair.
+  # shellcheck disable=SC2086
   set -- $pair
   ext=""
   [ "$1" = "windows" ] && ext=".exe"

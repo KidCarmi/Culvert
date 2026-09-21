@@ -376,6 +376,37 @@ if DOCKER_AMBIGUOUS_TAG=9.9.9 \
   ok "an ambiguous answer about an unrelated tag does not block promotion"
 else bad "an ambiguous answer about an unrelated tag does not block promotion" "creates=$(cat "$WORK/creates")"; fi
 
+# ── an UNFINISHED publication may be finished ────────────────────────────────
+# A first tag run that promoted X.Y.Z and then lost verify-reproducible or
+# provenance leaves the release a DRAFT. The full re-run is allowed (nothing was
+# published) but rebuilds to a different digest, so without this the write-once
+# check refused it, publish-release was skipped for want of promotion, and the
+# draft could never publish — escapable only by deleting a public image tag by
+# hand, which the runbook forbids (Codex review, PR #1441).
+printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n1.2.3|%s\n' "$DIG" "$DIG" "$DIG2" > "$WORK/tags"
+: > "$WORK/creates"
+if RELEASE_DRAFT_STATE=draft RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.3 \
+   RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+     promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1 \
+   && grep -q -- "--tag ghcr.io/x:1.2.3" "$WORK/creates"; then
+  ok "a still-draft release lets its exact tag be repointed to finish publication"
+else bad "a still-draft release lets its exact tag be repointed to finish publication" "creates=$(cat "$WORK/creates")"; fi
+
+# CONTROL: the unlock is the DRAFT state and nothing else. Every other answer —
+# published, absent, unreadable, unset — must still refuse, or round 3's
+# protection is gone.
+for st in published absent "" garbage; do
+  : > "$WORK/creates"
+  if RELEASE_DRAFT_STATE="$st" RELEASE_TAG=v1.2.3 CHANNEL_TIP_TAG=v1.2.3 \
+     RELEASE_SHA=tipsha CHANNEL_TIP=tipsha IMMUTABLE_TAGS="1.2.3" FLOATING_TAGS="latest" \
+       promote ghcr.io/x "$DIG" candidate-99 >/dev/null 2>&1; then
+    bad "release state '${st:-<unset>}' still refuses to repoint an exact tag" "it repointed a version tag"
+  else
+    [ -s "$WORK/creates" ] && bad "release state '${st:-<unset>}' still refuses to repoint an exact tag" "it promoted anyway" \
+                           || ok "release state '${st:-<unset>}' still refuses to repoint an exact tag"
+  fi
+done
+
 # ── two tags on one commit: ownership is TAG identity, not commit ────────────
 printf 'sha-3d8c9bb|%s\ncandidate-99|%s\n' "$DIG" "$DIG" > "$WORK/tags"
 : > "$WORK/creates"
@@ -480,6 +511,25 @@ else ok "a re-run against a PUBLISHED release refuses"; fi
 if REL_STATE=error relguard v1.2.3 >/dev/null 2>&1; then
   bad "an unreadable release state fails closed" "the guard treated an API error as 'no release exists'"
 else ok "an unreadable release state fails closed"; fi
+
+# The guard emits the state it resolved, because promote-image consumes it.
+: > "$WORK/ghout"
+if REL_STATE=draft GITHUB_OUTPUT="$WORK/ghout" relguard v1.2.3 >/dev/null 2>&1 \
+   && grep -qx 'state=draft' "$WORK/ghout"; then
+  ok "the guard emits state=draft for a still-draft release"
+else bad "the guard emits state=draft for a still-draft release" "output=$(cat "$WORK/ghout")"; fi
+
+: > "$WORK/ghout"
+if REL_STATE=absent GITHUB_OUTPUT="$WORK/ghout" relguard v1.2.3 >/dev/null 2>&1 \
+   && grep -qx 'state=absent' "$WORK/ghout"; then
+  ok "the guard emits state=absent when no release exists"
+else bad "the guard emits state=absent when no release exists" "output=$(cat "$WORK/ghout")"; fi
+
+: > "$WORK/ghout"
+REL_STATE=published GITHUB_OUTPUT="$WORK/ghout" relguard v1.2.3 >/dev/null 2>&1
+if grep -q 'state=' "$WORK/ghout"; then
+  bad "a published release emits no state" "it emitted $(cat "$WORK/ghout") — the run is refused, there is nothing to hand on"
+else ok "a published release emits no state"; fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -31,6 +31,20 @@
 #                           exists"; inferring absence from a failed lookup is
 #                           the same mistake resolve_tag_digest exists to avoid.
 #
+# ── The state is also an OUTPUT, and that is load-bearing ────────────────────
+# When $GITHUB_OUTPUT is set this writes `state=absent|draft`, which the
+# `promote-image` job consumes to decide whether an exact image tag may be
+# repointed. That is ONE query answering ONE question — "is this version
+# finished?" — for both guards, rather than two guards forming their own
+# opinions. It is also the state as it stood BEFORE this run mutated anything,
+# which is the semantically correct input for both.
+#
+# Emitting it from here rather than re-querying inside `promote-image` also
+# keeps that job's permissions at `contents: read`: GitHub only shows a DRAFT
+# release to a token with push access, so a `promote-image` that asked for
+# itself would have needed `contents: write` — a real privilege increase on the
+# job that writes public image tags, bought for a value this job already holds.
+#
 # The resign path (`catalog-resign`) legitimately attaches an asset to a
 # PUBLISHED release and is deliberately NOT guarded here: it is a
 # workflow_dispatch job that skips `docker`, and therefore the whole
@@ -46,6 +60,7 @@ REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY not set}"
 GH_BIN="${GH_BIN:-gh}"
 
 summary() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; return 0; }
+emit_state() { [ -n "${GITHUB_OUTPUT:-}" ] && printf 'state=%s\n' "$1" >> "$GITHUB_OUTPUT"; return 0; }
 
 RC=0
 OUT="$("$GH_BIN" api "repos/${REPO}/releases/tags/${TAG}" --jq '.draft' 2>&1)" || RC=$?
@@ -54,6 +69,7 @@ if [ "$RC" -ne 0 ]; then
   case "$OUT" in
     *"Not Found"*|*"HTTP 404"*|*"404"*)
       echo "::notice::no existing release for ${TAG} — first run, nothing to protect."
+      emit_state absent
       exit 0 ;;
   esac
   echo "::error::could not determine whether the release for ${TAG} is already published."
@@ -66,6 +82,7 @@ DRAFT="$(printf '%s' "$OUT" | tr -d '[:space:]')"
 case "$DRAFT" in
   true)
     echo "::notice::release ${TAG} exists and is still a DRAFT — a re-run may continue staging."
+    emit_state draft
     exit 0 ;;
   false)
     echo "::error::the release for ${TAG} is ALREADY PUBLISHED."

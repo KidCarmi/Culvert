@@ -53,6 +53,30 @@
 # "Absent" must be PROVEN, not inferred from a failed lookup: see
 # resolve_tag_digest below. An ambiguous registry answer refuses.
 #
+# ── …but an UNFINISHED publication is not a released version ────────────────
+# "Write-once" protects what a RELEASED version means. Whether this version is
+# released is answered by exactly one fact — the draft state of its GitHub
+# release — and `RELEASE_DRAFT_STATE` carries it here from the one place that
+# already queried it (assert-release-unpublished.sh, in catalog-pipeline).
+#
+# A still-DRAFT release is an unfinished publication, so repointing its exact
+# tag finishes it rather than mutating a release. Without this, a first tag run
+# that promoted `X.Y.Z` and then lost `verify-reproducible` or `provenance`
+# WEDGED PERMANENTLY: the release stays a draft, the full re-run is allowed
+# (nothing was published), the rebuild produces a different digest because this
+# build is not reproducible over time, write-once refuses it, publish-release
+# is skipped for want of promotion — and the only escape was deleting a public
+# image tag by hand, which the runbook forbids (Codex review, PR #1441).
+#
+# So the two guards now key on ONE fact and split cleanly:
+#   published → the run is refused before it mutates anything (round 4's guard)
+#   draft     → the publication is unfinished; exact tags may be repointed
+# Every other answer — absent, unreadable, unset — REFUSES, because none of
+# them proves the version is unfinished. The residual is that a digest pulled
+# from an exact tag during an unfinished publication can be superseded; that
+# version was never announced (the release was never published, and the install
+# path resolves through /releases/latest, which excludes drafts).
+#
 # ── Re-run safety ────────────────────────────────────────────────────────────
 # The channel's owner is the tip of the promoting ref. On the TAG path the tip
 # is a TAG IDENTITY, not a commit: two version tags can name the same commit
@@ -95,6 +119,11 @@ CHANNEL_TIP="${CHANNEL_TIP:?CHANNEL_TIP not set}"
 # commit comparison is the whole rule.
 RELEASE_TAG="${RELEASE_TAG:-}"
 CHANNEL_TIP_TAG="${CHANNEL_TIP_TAG:-}"
+# Draft state of THIS version's GitHub release as it stood before this run,
+# from assert-release-unpublished.sh. Only the exact string "draft" unlocks the
+# repoint below; anything else — including unset, which is the main path, where
+# there are no immutable targets anyway — refuses.
+RELEASE_DRAFT_STATE="${RELEASE_DRAFT_STATE:-}"
 # Space-separated; either may be empty, but not both.
 read -r -a IMMUTABLE <<< "${IMMUTABLE_TAGS:-}"
 read -r -a FLOATING <<< "${FLOATING_TAGS:-}"
@@ -225,11 +254,22 @@ for t in "${TARGETS[@]}"; do
         echo "::notice::${IMAGE}:${t} already resolves to ${DIGEST} — idempotent re-run, nothing to move."
         continue
       fi
+      if [ "${RELEASE_DRAFT_STATE:-}" = "draft" ]; then
+        # Unfinished publication — see the header. Loud, because it is the one
+        # case in which an exact tag moves.
+        echo "::warning::${IMAGE}:${t} is at ${EXISTING}, and this run built ${DIGEST}."
+        echo "::warning::The GitHub release for ${RELEASE_TAG:-this version} is still a DRAFT, so this version was"
+        echo "::warning::never published — a previous run promoted the tag and then failed before publishing."
+        echo "::warning::Repointing to finish the publication. Nothing released is being changed."
+        KEEP+=("$t")
+        continue
+      fi
       echo "::error::${IMAGE}:${t} is ALREADY PUBLISHED at ${EXISTING}, and this run built ${DIGEST}."
       echo "::error::An exact version tag is write-once. This image build is not reproducible over time"
       echo "::error::(floating base image, apk upgrade, month-keyed GeoIP download), so a re-run legitimately"
       echo "::error::produces different bytes — and the published catalog for this release still pins ${EXISTING}."
       echo "::error::Refusing to repoint a released version. If these bytes must ship, cut a new version."
+      echo "::error::(release state: ${RELEASE_DRAFT_STATE:-unknown} — only a still-DRAFT release may be repointed.)"
       exit 1 ;;
     *)
       echo "::error::could not determine whether ${IMAGE}:${t} already exists — the registry did not answer."

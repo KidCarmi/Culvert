@@ -431,6 +431,67 @@ func TestPublicationGating_StagingJobsRefuseAPublishedRelease(t *testing.T) {
 	}
 }
 
+// The write-once exception for an UNFINISHED publication is only reachable if
+// the release's draft state actually travels from the job that queries it to
+// the job that acts on it. If that wiring breaks the env goes EMPTY, which
+// promote-image-tags.sh reads as "refuse" — fail-closed, but it silently
+// restores the permanent wedge the exception exists to prevent: a tag run that
+// promoted X.Y.Z and then lost a downstream check leaves a draft that can never
+// publish, because the re-run's rebuild is refused against the tag the failed
+// run left behind (Codex review, PR #1441).
+//
+// Behavioural tests can only prove the script honours the value it is handed;
+// only the workflow says whether it is handed one. Every hop is asserted by
+// name so a rename fails the build instead of degrading in silence.
+func TestPublicationGating_DraftStateReachesPromotion(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+
+	cat := mustJob(t, doc, "catalog-pipeline")
+	out, ok := cat.Outputs["release_state"]
+	if !ok {
+		t.Fatalf("catalog-pipeline must export a %q job output — promote-image reads it to tell an unfinished publication from a released one", "release_state")
+	}
+	if !strings.Contains(out, "steps.relstate.outputs.state") {
+		t.Errorf("catalog-pipeline.outputs.release_state = %q, want it wired to the release guard step's `state` output", out)
+	}
+
+	// …and that step must be the guard itself, not some other step that happens
+	// to carry the id.
+	guarded := false
+	for i := range cat.Steps {
+		if cat.Steps[i].ID != "relstate" {
+			continue
+		}
+		guarded = true
+		if !strings.Contains(stepBody(&cat.Steps[i]), "assert-release-unpublished.sh") {
+			t.Errorf("catalog-pipeline step id=relstate does not run assert-release-unpublished.sh — the exported state would not be the guard's verdict")
+		}
+	}
+	if !guarded {
+		t.Error("catalog-pipeline has no step with id=relstate — nothing produces the release state")
+	}
+
+	prom := mustJob(t, doc, "promote-image")
+	if !jobNeeds(prom)["catalog-pipeline"] {
+		t.Fatal("promote-image must need catalog-pipeline to read its release_state output")
+	}
+	consumed := false
+	for i := range prom.Steps {
+		for k, v := range prom.Steps[i].Env {
+			if k != "RELEASE_DRAFT_STATE" {
+				continue
+			}
+			consumed = true
+			if !strings.Contains(v, "needs.catalog-pipeline.outputs.release_state") {
+				t.Errorf("promote-image RELEASE_DRAFT_STATE = %q, want catalog-pipeline's release_state output", v)
+			}
+		}
+	}
+	if !consumed {
+		t.Error("promote-image never sets RELEASE_DRAFT_STATE — an exact tag left behind by a failed run could never be repointed, wedging the draft permanently")
+	}
+}
+
 func TestPublicationGating_PublishReleaseIsLastAndUnconditionalOnSuccess(t *testing.T) {
 	doc := loadWorkflow(t, ciWorkflowPath)
 	pub := mustJob(t, doc, "publish-release")

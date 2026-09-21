@@ -102,9 +102,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   whole staging chain and uses `gh release upload`, which does not touch draft
   state.
 
+  A sixth round closed the deadlock the fifth had left. Write-once protects
+  what a RELEASED version means, and the fifth round had no way to tell a
+  released version from an unfinished publication — so a first tag run that
+  promoted `X.Y.Z` and then lost `verify-reproducible` or `provenance` WEDGED
+  PERMANENTLY: the release stayed a draft, the full re-run was allowed (nothing
+  had been published), the rebuild produced a different digest because this
+  build is not reproducible over time, write-once refused it, `publish-release`
+  was skipped for want of promotion, and the only escape was deleting a public
+  image tag by hand — which the runbook forbids. Both guards now key on ONE
+  fact from ONE query: `catalog-pipeline` resolves the release's draft state
+  before anything is mutated and exports it, `promote-image` consumes it, and a
+  still-DRAFT release lets its exact tag be repointed to finish the publication
+  while published, absent, unreadable and unset all still refuse. Exporting it
+  rather than re-querying also keeps `promote-image` on `contents: read` —
+  GitHub shows a draft release only to a token with push access.
+
   Pinned by `release_publication_gating_test.go` (13 structural walls over
   `ci.yml` and the manifest, each verified failing against the pre-fix tree)
-  and `.github/scripts/test/release-gating-cases.sh` (47 behavioural cases
+  and `.github/scripts/test/release-gating-cases.sh` (55 behavioural cases
   against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
   Signing identities are unchanged: cosign keyless SANs are per workflow FILE
   and ref, and both new jobs live in `ci.yml`. See

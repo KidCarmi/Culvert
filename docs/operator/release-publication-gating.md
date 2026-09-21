@@ -200,6 +200,37 @@ candidate-tag probe resolved moments earlier in the *same* repository with the
 *same* credentials, so the registry is reachable and this run is authorized.
 Without that preceding probe the branch would not be safe.
 
+**…but an UNFINISHED publication is not a released version.** Write-once
+protects what a *released* version means, and whether this version is released
+is answered by one fact: the draft state of its GitHub release.
+
+| `X.Y.Z` at another digest, and the release is… | outcome |
+| --- | --- |
+| `draft` | **repoint** (with a warning) — the publication never finished |
+| `published` | **refuse** |
+| absent / unreadable / unknown | **refuse** — none of these proves it is unfinished |
+
+Without this the pipeline wedged permanently. A first tag run that promoted
+`X.Y.Z` and then lost `verify-reproducible` or `provenance` leaves the release a
+draft; the full re-run is *allowed* (nothing was published), but its rebuild
+produces a different digest, write-once refused it, `publish-release` was
+skipped for want of promotion — and the only escape was deleting a public image
+tag by hand, which the runbook forbids (Codex review, PR #1441).
+
+The two guards therefore key on the **same fact from the same query**:
+published ⇒ the run is refused before it mutates anything; draft ⇒ the
+publication is unfinished and may be completed. `catalog-pipeline` resolves the
+state once and exports it as a job output; `promote-image` consumes it. That
+also keeps `promote-image` on `contents: read` — GitHub shows a draft release
+only to a token with push access, so a job that asked for itself would have
+needed `contents: write`, a real privilege increase on the job that writes
+public image tags.
+
+The residual: a digest pulled from an exact tag *during* an unfinished
+publication can be superseded by the re-run. That version was never announced —
+the release was never published, and the install path resolves through
+`/releases/latest`, which excludes drafts.
+
 ### A published release is write-once too
 
 Every asset step stages with `draft: true`, and `action-gh-release` applies that
@@ -364,7 +395,16 @@ step summary prints which tag GitHub resolved Latest to.
 you re-ran a tag whose image was already promoted, and the rebuild produced
 different bytes (expected; the build is not reproducible over time). The
 published version keeps its original digest. If the new bytes must ship, cut a
-new version. Do not delete the tag to force it through.
+new version. Do not delete the tag to force it through. If the GitHub
+release for that tag is still a **draft**, this refusal should not have
+happened — it means the draft state did not reach `promote-image`. Check that
+`catalog-pipeline` exported `release_state` and that the job's guard step still
+carries `id: relstate`.
+
+**`promote-image` warned: "Repointing to finish the publication"** — expected,
+and the only case in which an exact tag moves. A previous run promoted the tag
+and then failed before publishing, so the release is still a draft and this
+version was never released. Nothing public changed.
 
 **`promote-image` refused: "could not determine whether … already exists"** —
 the registry did not answer the existence question (after a bounded retry). It

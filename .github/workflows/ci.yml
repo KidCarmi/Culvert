@@ -473,6 +473,14 @@ jobs:
       contents: write     # attach the signed catalog to the GitHub Release (tag path)
       id-token: write     # cosign keyless blob signing of index.json (tag path)
       actions: read       # require-gate.sh (tag-path guard)
+    outputs:
+      # Draft state of this version's GitHub release BEFORE this run mutated
+      # anything: absent | draft (a published release refuses the job outright).
+      # promote-image consumes it to decide whether an exact image tag may be
+      # repointed — see .github/scripts/promote-image-tags.sh. Emitted here so
+      # that job can stay on `contents: read`; GitHub shows a draft release only
+      # to a token with push access.
+      release_state: ${{ steps.relstate.outputs.state }}
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
         uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
@@ -488,6 +496,7 @@ jobs:
       # write-once exact image tag, so publish-release never runs). Refuse
       # BEFORE the first mutation, leaving the public release untouched.
       - name: Refuse if this release is already published (tag path)
+        id: relstate
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -754,6 +763,10 @@ jobs:
           # Empty on the main path; the highest v* tag name on the tag path.
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           CHANNEL_TIP_TAG: ${{ steps.tip.outputs.tip_tag }}
+          # "draft" ⇒ this version's publication never finished, so its exact
+          # tag may be repointed to finish it. Anything else refuses. Empty on
+          # the main path, which declares no immutable targets anyway.
+          RELEASE_DRAFT_STATE: ${{ needs.catalog-pipeline.outputs.release_state }}
           IMAGE: ${{ needs.docker.outputs.image }}
           DIGEST: ${{ needs.docker.outputs.proxy_digest }}
           CANDIDATE: ${{ needs.docker.outputs.candidate_tag }}
