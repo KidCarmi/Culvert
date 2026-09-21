@@ -49,11 +49,16 @@ type Writer struct {
 	tag           string
 	format        string    // "rfc3164" (default) or "rfc5424"
 	pid           string    // cached PID string for RFC 5424 PROCID
-	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
+	lastReconnErr time.Time // backoff: suppress reconnect attempts for reconnectBackoff after failure
+	lastCause     string    // most recent delivery error text; LOG only (see noteCause)
 	drops         atomic.Uint64
+	queueDrops    atomic.Uint64
 	panics        atomic.Uint64
 	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
-	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
+	stateObserver atomic.Pointer[func(up bool, reason string, changed bool)]
+	up            atomic.Bool              // last OBSERVED delivery outcome; see noteOutcome
+	stateKnown    atomic.Bool              // false until the first outcome is observed
+	dialFunc      func() (net.Conn, error) // test seam; nil = real dialer
 
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
 	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
@@ -100,9 +105,79 @@ func NewWriter(network, addr, format string) (*Writer, error) {
 	if err := sw.connect(); err != nil {
 		return nil, fmt.Errorf("syslog connect %s://%s: %w", network, addr, err)
 	}
+	sw.up.Store(true)
+	sw.stateKnown.Store(true)
 	sw.startAsync()
 	return sw, nil
 }
+
+// NewWriterDeferred returns a ready Writer WITHOUT requiring the first dial to
+// succeed. The connection is established lazily by deliverLine's existing
+// reconnect path (bounded to one attempt per reconnectBackoff), so a collector
+// that is unreachable at construction self-heals the moment it returns.
+//
+// CHAOS-66: NewWriter fails CLOSED on the first dial, and the only boot-path
+// callers (loadObservability, applyAdminServices) log-and-continue with a nil
+// writer. Nothing ever constructs a second one, so a SIEM that happened to be
+// down — or merely slower to start than the proxy beside it in the same
+// compose file — turned into SIEM forwarding being OFF for the entire life of
+// the process, recoverable only by an operator re-saving the target or
+// restarting. This constructor is the recovery path: the engine already owns a
+// reconnect state machine, it was simply never reachable from a failed start.
+//
+// The dial error is returned for logging; the Writer is valid either way. A
+// caller that wants to REJECT an unreachable target (validating operator
+// input) should use Probe instead of inferring it from construction.
+func NewWriterDeferred(network, addr, format string) (*Writer, error) {
+	host, err := os.Hostname()
+	if err != nil {
+		host = "culvert"
+	}
+	if format == "" {
+		format = "rfc3164"
+	}
+	sw := &Writer{
+		network: network,
+		addr:    addr,
+		host:    host,
+		tag:     "culvert",
+		format:  format,
+		pid:     fmt.Sprintf("%d", os.Getpid()),
+	}
+	dialErr := sw.connect()
+	if dialErr != nil {
+		// Arm the backoff so the first delivery does not immediately re-dial a
+		// target we already know is refusing.
+		sw.lastReconnErr = time.Now()
+	}
+	sw.up.Store(dialErr == nil)
+	sw.stateKnown.Store(true)
+	sw.startAsync()
+	return sw, dialErr
+}
+
+// Network reports the transport ("udp" or "tcp") this Writer forwards over.
+func (s *Writer) Network() string { return s.network }
+
+// Target reports the collector address this Writer forwards to.
+func (s *Writer) Target() string { return s.addr }
+
+// DeliveryVerifiable reports whether a delivery failure to this collector is
+// OBSERVABLE by this process.
+//
+// It is false for UDP, and that is a protocol fact, not an implementation gap:
+// a connected UDP socket's write succeeds locally whether or not anything is
+// listening, so Drops() stays 0, Up() stays true and every surface above them
+// reports a healthy feed while nothing is received. (Linux may surface a
+// returned ICMP port-unreachable on a LATER write, so a UDP failure is
+// sometimes visible — never reliably, and never through a firewall that drops
+// ICMP.) UDP is also the DEFAULT transport when the operator's address carries
+// no scheme, so this is the posture most deployments are in.
+//
+// Callers must not upgrade a UDP feed's reported state to "delivering"; they
+// report that lines are being SENT and that delivery is unverifiable. The
+// operator remedy is to use tcp:// when the SIEM feed is a compliance control.
+func (s *Writer) DeliveryVerifiable() bool { return s.network != "udp" }
 
 // startAsync arms the bounded queue and starts the drain goroutine. Split from
 // NewWriter so tests can build a Writer with an injected conn/dialFunc and
@@ -163,12 +238,22 @@ func (s *Writer) send(pri int, msg string) {
 	}
 	if s.closed.Load() {
 		s.drops.Add(1)
+		s.queueDrops.Add(1)
 		return
 	}
 	select {
 	case s.queue <- s.formatMsg(pri, msg):
 	default:
+		// CHAOS-66: charged to BOTH counters. Drops() stays the single
+		// "lines that never reached the collector" total; QueueDrops()
+		// separates the cause, because the two point at different operator
+		// actions — an unreachable collector is a network/host fault, a full
+		// queue is a collector that accepts but is slower than this node's
+		// entry rate. Counted on the caller goroutine, never observed there:
+		// send() is on the request path (store.go's recordRequest and the
+		// audit SIEM hook), so it stays two atomics and no callback.
 		s.drops.Add(1)
+		s.queueDrops.Add(1)
 	}
 }
 
@@ -250,7 +335,8 @@ func (s *Writer) writeLine(line string) error {
 // reaches deliverLine via the drain goroutine instead; this remains the
 // zero-value-Writer path and the unit under the deadline/backoff tests.
 func (s *Writer) writeMsg(pri int, msg string) {
-	s.deliverLine(s.formatMsg(pri, msg))
+	ok, reason := s.deliverLine(s.formatMsg(pri, msg))
+	s.noteOutcome(ok, reason)
 }
 
 // deliverLine sends one pre-formatted line, holding s.mu across the write and
@@ -280,6 +366,7 @@ func (s *Writer) deliverGuarded(line string) {
 		if r := recover(); r != nil {
 			s.panics.Add(1)
 			s.drops.Add(1)
+			s.noteOutcome(false, ReasonPanic)
 			if p := s.panicObserver.Load(); p != nil {
 				func() {
 					defer func() { _ = recover() }() // an observer must never crash the drain goroutine
@@ -288,8 +375,72 @@ func (s *Writer) deliverGuarded(line string) {
 			}
 		}
 	}()
-	s.deliverLine(line)
+	ok, reason := s.deliverLine(line)
+	s.noteOutcome(ok, reason)
 }
+
+// Bounded delivery-state reason classes. These reach an alert's dedup key and
+// an operator-contract row, so they are a FIXED vocabulary, never a raw
+// error: net errors embed the collector address and the ephemeral local port,
+// which gives Store.Dispatch's `event + ":" + Detail` key one value per
+// failure and lets a SIEM outage evict real threat alerts from the retry
+// queue (the WK-12/RS-5 defect). The cause itself goes to a rate-limited log
+// line, not to the alert.
+const (
+	ReasonConnectFailed = "connect_failed"
+	ReasonWriteFailed   = "write_failed"
+	ReasonPanic         = "panic"
+)
+
+// SetStateObserver publishes an optional observer notified of every delivery
+// OUTCOME on this Writer: up=true when the line reached the collector,
+// up=false with a bounded reason class when it did not, and changed=true on
+// the calls that flipped the state. Mirrors SetPanicObserver (this package is
+// a stdlib-only leaf and cannot log or alert for itself).
+//
+// Per-outcome rather than per-transition, deliberately. A transition-only
+// seam cannot answer "has this feed been down long enough to page", because
+// the only call it makes is the one at the start of the episode — and the
+// house rule for every other subsystem here is that degradation is a
+// DURATION, not a count, so the observer has to be re-entered while the fault
+// persists for the duration to be evaluated at all. `changed` is what keeps
+// the LOG one line per transition rather than one per dropped line.
+//
+// It runs on the drain goroutine, never on a request goroutine, and with s.mu
+// RELEASED so it may call back into the Writer. It is panic-contained: a bad
+// observer can never take down delivery.
+func (s *Writer) SetStateObserver(fn func(up bool, reason string, changed bool)) {
+	if fn == nil {
+		s.stateObserver.Store(nil)
+		return
+	}
+	s.stateObserver.Store(&fn)
+}
+
+// noteOutcome records one delivery outcome and publishes it. Must be called
+// with s.mu RELEASED.
+func (s *Writer) noteOutcome(up bool, reason string) {
+	known := s.stateKnown.Swap(true)
+	prev := s.up.Swap(up)
+	changed := !known || prev != up
+	o := s.stateObserver.Load()
+	if o == nil {
+		return
+	}
+	func() {
+		defer func() { _ = recover() }() // an observer must never crash the drain goroutine
+		(*o)(up, reason, changed)
+	}()
+}
+
+// Up reports the last OBSERVED delivery outcome: true when the most recent
+// line reached the collector, false when it did not.
+//
+// For a UDP Writer this is nearly always true and means only "the local send
+// succeeded" — see DeliveryVerifiable. Evaluated, never latched: recovery
+// needs no clearing path and a wedged feed keeps reporting the truth (the
+// ca_health.go Usable() discipline).
+func (s *Writer) Up() bool { return s.up.Load() }
 
 // SetPanicObserver publishes an optional observer notified synchronously, on
 // the drain goroutine, whenever deliverGuarded recovers a panic. This package
@@ -309,33 +460,40 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 	s.panicObserver.Store(&fn)
 }
 
-func (s *Writer) deliverLine(line string) {
+// deliverLine sends one pre-formatted line and reports the outcome: (true, "")
+// when the line reached the collector, (false, <bounded reason class>) when it
+// did not. The caller publishes that outcome via noteOutcome once s.mu is
+// released — never from in here, because an observer runs arbitrary caller
+// code and this mutex fences every delivery in the process.
+func (s *Writer) deliverLine(line string) (bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {
-		// Backoff: don't retry more often than every 5 seconds.
-		if time.Since(s.lastReconnErr) < 5*time.Second {
+		// Backoff: don't retry more often than every reconnectBackoff.
+		if time.Since(s.lastReconnErr) < reconnectBackoff {
 			s.drops.Add(1)
-			return
+			return false, ReasonConnectFailed
 		}
 		if err := s.connect(); err != nil {
 			s.lastReconnErr = time.Now()
 			s.drops.Add(1)
-			return // syslog down — swallow, never block the proxy
+			s.noteCause(err)
+			return false, ReasonConnectFailed // syslog down — swallow, never block the proxy
 		}
 		s.lastReconnErr = time.Time{} // reset on success
 	}
 	if err := s.writeLine(line); err != nil {
 		s.conn.Close()
 		s.conn = nil
-		if time.Since(s.lastReconnErr) < 5*time.Second {
+		if time.Since(s.lastReconnErr) < reconnectBackoff {
 			s.drops.Add(1)
-			return
+			return false, ReasonWriteFailed
 		}
 		if err2 := s.connect(); err2 != nil {
 			s.lastReconnErr = time.Now()
 			s.drops.Add(1)
-			return
+			s.noteCause(err2)
+			return false, ReasonConnectFailed
 		}
 		if err3 := s.writeLine(line); err3 != nil {
 			// A collector that ACCEPTS connections but never drains would
@@ -348,11 +506,43 @@ func (s *Writer) deliverLine(line string) {
 			s.conn = nil
 			s.lastReconnErr = time.Now()
 			s.drops.Add(1)
-			return
+			s.noteCause(err3)
+			return false, ReasonWriteFailed
 		}
 		s.lastReconnErr = time.Time{}
 	}
+	return true, ""
 }
+
+// reconnectBackoff bounds how often a down collector is re-dialled. Bounded in
+// RATE and unbounded in COUNT, deliberately: a feed that stopped retrying
+// would stay dark for the life of the process, which is the CHAOS-66 defect
+// this engine's recovery path exists to prevent. The retry is never silent —
+// every failure is counted in Drops() and the first of each episode reaches
+// the state observer.
+const reconnectBackoff = 5 * time.Second
+
+// lastCause holds the most recent delivery error string for the operator LOG
+// only. Never for an alert Detail or an unauthenticated surface: a net error
+// embeds the collector address and the ephemeral local port. Guarded by s.mu.
+func (s *Writer) noteCause(err error) {
+	if err == nil {
+		return
+	}
+	s.lastCause = err.Error()
+}
+
+// LastCause returns the most recent delivery error text, for the process log.
+func (s *Writer) LastCause() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastCause
+}
+
+// QueueDrops reports the subset of Drops() lost because the bounded delivery
+// queue was full (collector slower than this node's entry rate) or the Writer
+// was already closed — as opposed to the collector being unreachable.
+func (s *Writer) QueueDrops() uint64 { return s.queueDrops.Load() }
 
 // Drops reports the number of messages dropped because the collector was
 // unreachable or not draining, the delivery queue overflowed, or the Writer
@@ -396,4 +586,85 @@ func (s *Writer) Format() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.format
+}
+
+// probeTimeout bounds one Probe end to end (dial + write). Deliberately the
+// same order as writeTimeout so an operator's connectivity check cannot park
+// an admin request longer than one ordinary delivery attempt would.
+const probeTimeout = 5 * time.Second
+
+// Probe performs a SYNCHRONOUS one-shot connectivity check against this
+// Writer's collector on a FRESH connection and reports what was actually
+// observed. It never touches s.conn, so a probe can neither disturb live
+// delivery nor be answered by a connection that is already wedged.
+//
+// CHAOS-66: this exists because `POST /api/syslog/test` used to answer
+// `{"ok":true,"message":"test message sent"}` by calling Write — which, since
+// delivery became asynchronous, only enqueues a line on a bounded channel and
+// returns. A collector that does not exist produced exactly the same 200 as a
+// healthy one, while `checkSyslogFeed`'s own operator-action text told the
+// operator to "use POST /api/syslog/test to confirm connectivity". The
+// documented way to verify the remedy could not fail.
+//
+// verified reports whether the answer MEANS anything: it is false for UDP,
+// where a local send succeeds regardless (see DeliveryVerifiable). A caller
+// must not render an unverified probe as proof of delivery.
+func (s *Writer) Probe(ctx context.Context) (verified bool, err error) {
+	return probeTarget(ctx, s.network, s.addr, s.format, s.host, s.pid, s.tag, s.dialFunc)
+}
+
+// ProbeTarget performs the same one-shot connectivity check as
+// (*Writer).Probe against a target NO Writer has been built for.
+//
+// This is what lets an admin endpoint VALIDATE an operator-typed target
+// without installing it: the caller can refuse a typo up front and still
+// leave a working forwarder untouched. Building a throwaway Writer to find
+// out would start a drain goroutine and a queue for a target that may be
+// about to be rejected.
+func ProbeTarget(ctx context.Context, network, addr, format string) (verified bool, err error) {
+	host, herr := os.Hostname()
+	if herr != nil {
+		host = "culvert"
+	}
+	if format == "" {
+		format = "rfc3164"
+	}
+	return probeTarget(ctx, network, addr, format, host, fmt.Sprintf("%d", os.Getpid()), "culvert", nil)
+}
+
+func probeTarget(ctx context.Context, network, addr, format, host, pid, tag string, dial func() (net.Conn, error)) (verified bool, err error) {
+	line := (&Writer{network: network, addr: addr, format: format, host: host, pid: pid, tag: tag}).formatMsg(14, probeMessage)
+	conn, derr := probeDialTarget(ctx, network, addr, dial)
+	// A UDP dial is a local operation and a UDP write succeeds locally
+	// regardless, so nothing a UDP probe observes is evidence of delivery.
+	// The line is still SENT (a working UDP path carries the operator's test
+	// message to their SIEM), and verified=false says the result proves
+	// nothing — a caller must not render it as confirmation.
+	verified = network != "udp"
+	if derr != nil {
+		return verified, derr
+	}
+	defer conn.Close() //nolint:errcheck // best-effort release of a one-shot probe conn
+	if dl, ok := ctx.Deadline(); ok {
+		conn.SetWriteDeadline(dl) //nolint:errcheck // best-effort; a failed deadline set surfaces on the write itself
+	} else {
+		conn.SetWriteDeadline(time.Now().Add(probeTimeout)) //nolint:errcheck // as above
+	}
+	_, werr := fmt.Fprint(conn, line)
+	return verified, werr
+}
+
+// probeMessage is the line a Probe delivers. Fixed text: it reaches the
+// operator's SIEM, so it must be recognisable there and must carry nothing
+// caller-supplied.
+const probeMessage = "Culvert syslog connectivity probe"
+
+// probeDialTarget opens a one-shot connection for a probe. Honours the test
+// dialFunc seam so a probe is drivable without a real collector.
+func probeDialTarget(ctx context.Context, network, addr string, dial func() (net.Conn, error)) (net.Conn, error) {
+	if dial != nil {
+		return dial()
+	}
+	d := net.Dialer{Timeout: probeTimeout}
+	return d.DialContext(ctx, network, addr)
 }

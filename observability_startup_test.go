@@ -62,7 +62,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	// Syslog forwarding (syslog.go + ui_config.go:648).
 	oldSyslogConfigured := syslogConfigured
 	oldSyslogConfiguredAddr := syslogConfiguredAddr
-	oldGlobalSyslog := globalSyslog
+	oldGlobalSyslog := activeSyslog()
 
 	// Configured-path readback for GET /api/stats (ui_config.go).
 	oldAuditLogConfiguredPath := auditLogConfiguredPath
@@ -81,7 +81,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 
 	syslogConfigured = ""
 	syslogConfiguredAddr = ""
-	globalSyslog = nil
+	releaseSyslogWriter(setActiveSyslog(nil))
+	resetSyslogFeedHealthForTest()
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
 	auditLogConfiguredPath = ""
@@ -90,15 +91,16 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	t.Cleanup(func() {
 		// Close handles + stop goroutines the test opened on the
 		// fresh instances before restoring originals.
-		if globalSyslog != nil {
-			_ = globalSyslog.Close()
+		if sw := activeSyslog(); sw != nil {
+			_ = sw.Close()
 		}
 		globalOTLP.Stop()
 		globalOTLPTraces.Stop()
 		_ = audit.Close() // close any handle the test-under-test opened
 		syslogConfigured = oldSyslogConfigured
 		syslogConfiguredAddr = oldSyslogConfiguredAddr
-		globalSyslog = oldGlobalSyslog
+		setActiveSyslog(oldGlobalSyslog)
+		resetSyslogFeedHealthForTest()
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
 		auditLogConfiguredPath = oldAuditLogConfiguredPath
@@ -198,8 +200,8 @@ func TestLoadObservability_EmptyConfigIsNoOp(t *testing.T) {
 	if syslogConfigured != "" {
 		t.Errorf("syslogConfigured = %q; want empty", syslogConfigured)
 	}
-	if globalSyslog != nil {
-		t.Errorf("globalSyslog = %v; want nil", globalSyslog)
+	if activeSyslog() != nil {
+		t.Errorf("activeSyslog() = %v; want nil", activeSyslog())
 	}
 	if globalOTLP.Enabled() {
 		t.Errorf("globalOTLP.Enabled() = true; want false")
@@ -299,26 +301,44 @@ func TestLoadObservability_RequestLogFallbackIsDistinguishable(t *testing.T) {
 	}
 }
 
-func TestLoadObservability_SyslogUnreachableLogged(t *testing.T) {
+// TestLoadObservability_SyslogUnreachableStillArmsForwarding was INVERTED by
+// CHAOS-66. It previously asserted `globalSyslog == nil` after a failed dial
+// and called that correct — i.e. it pinned the defect, the same way
+// TestRunShutdownSequence_EarlyCtxHasNoDeadline_LateCtxDoes pinned CHAOS-56's
+// and TestResolveHost_TTLExpiry pinned CHAOS-64's.
+//
+// A collector that is unreachable at boot is the ORDINARY case: a SIEM under
+// maintenance, a DNS blip, or simply a collector container that starts a
+// second after the proxy beside it in the same compose file. Failing closed
+// there meant no writer was ever constructed and nothing ever constructed a
+// second one, so SIEM forwarding was off for the life of the process with the
+// documented remedy being "re-save the target or restart the proxy". The
+// forwarder is now installed regardless and self-heals through the engine's
+// own reconnect path.
+func TestLoadObservability_SyslogUnreachableStillArmsForwarding(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 
-	// tcp://127.0.0.1:1 — no listener; InitSyslog returns an error.
+	// tcp://127.0.0.1:1 — no listener; the first dial fails.
 	loadObservability(observabilityStartupConfig{
 		SyslogAddr:      "tcp://127.0.0.1:1",
 		RequestLogMaxMB: 100,
 	})
 
-	if syslogConfigured != "" {
-		t.Errorf("syslogConfigured = %q; want empty after unreachable syslog", syslogConfigured)
+	if syslogConfigured != "tcp://127.0.0.1:1" {
+		t.Errorf("syslogConfigured = %q; want the target the live writer is aimed at", syslogConfigured)
 	}
-	if globalSyslog != nil {
-		t.Errorf("globalSyslog = %v; want nil after failed dial", globalSyslog)
+	if activeSyslog() == nil {
+		t.Error("a failed first dial must still arm forwarding (CHAOS-66); got no writer")
 	}
 	// Intent must be recorded even though the connect failed, so
 	// checkSyslogFeed can surface the silently-down feed (vs "not configured").
 	if syslogConfiguredAddr != "tcp://127.0.0.1:1" {
 		t.Errorf("syslogConfiguredAddr = %q; want the configured addr recorded despite connect failure", syslogConfiguredAddr)
+	}
+	// And the row must report the DELIVERY truth, not "active".
+	if row := checkSyslogFeed(); row.Status == diagOK {
+		t.Errorf("syslog_feed must not read ok while nothing has ever been delivered: %v %q", row.Status, row.Message)
 	}
 }
 
@@ -345,8 +365,8 @@ func TestLoadObservability_SyslogSuccessSetsConfigured(t *testing.T) {
 	if syslogConfigured != cfgAddr {
 		t.Errorf("syslogConfigured = %q; want %q", syslogConfigured, cfgAddr)
 	}
-	if globalSyslog == nil {
-		t.Error("globalSyslog == nil after successful InitSyslog")
+	if activeSyslog() == nil {
+		t.Error("no syslog writer installed after a successful connect")
 	}
 }
 

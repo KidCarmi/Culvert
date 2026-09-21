@@ -1310,6 +1310,81 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-66: SIEM/syslog forwarding health. Emitted ONLY when an operator
+	// has configured a collector — `culvert_syslog_up 0` on an appliance that
+	// never had a SIEM is indistinguishable from one whose feed is dead, and
+	// the documented paging rule is `== 0` (the socks5 / cluster_ca / dns
+	// rule). Every value is a plain total or a 0/1 gauge: /metrics is
+	// unauthenticated on the proxy port, so the collector address, the
+	// transport error and the failure reason never appear here and nothing is
+	// a label.
+	//
+	// The paging signal is `culvert_syslog_degraded == 1` — delivery failing
+	// for longer than the degradation threshold — not a drop RATE, so a SIEM
+	// container restart does not page. `culvert_syslog_dropped_total` is the
+	// COMPLIANCE signal: any non-zero value means the centralized audit trail
+	// has a gap (the node's local JSONL is unaffected). It was recommended by
+	// name in a 2026-07-07 security review and had never been built.
+	//
+	// `culvert_syslog_delivery_verifiable` is the honesty gauge: it is 0 on a
+	// UDP feed, where a connected socket's write succeeds locally whether or
+	// not a collector exists, so `up 1` and `dropped_total 0` are guaranteed
+	// there and prove nothing. An alert on `up == 0` must be read together
+	// with it.
+	if sl := syslogFeedState(); sl.Configured {
+		up, degraded, verifiable := 0, 0, 0
+		if sl.Up {
+			up = 1
+		}
+		if sl.Degraded {
+			degraded = 1
+		}
+		if sl.DeliveryVerifiable {
+			verifiable = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_syslog_up 1 while the last SIEM delivery reached the collector; 0 while delivery is failing
+# TYPE culvert_syslog_up gauge
+culvert_syslog_up %d
+
+# HELP culvert_syslog_degraded 1 while SIEM delivery has been failing for longer than the degradation threshold
+# TYPE culvert_syslog_degraded gauge
+culvert_syslog_degraded %d
+
+# HELP culvert_syslog_delivery_verifiable 1 when a delivery failure to this collector is observable by this process; 0 on UDP, where it is not
+# TYPE culvert_syslog_delivery_verifiable gauge
+culvert_syslog_delivery_verifiable %d
+
+# HELP culvert_syslog_dropped_total SIEM messages that never reached the collector since the current forwarder started
+# TYPE culvert_syslog_dropped_total counter
+culvert_syslog_dropped_total %d
+
+# HELP culvert_syslog_queue_dropped_total Subset of culvert_syslog_dropped_total lost to a full delivery queue rather than an unreachable collector
+# TYPE culvert_syslog_queue_dropped_total counter
+culvert_syslog_queue_dropped_total %d
+
+# HELP culvert_syslog_panics_total SIEM lines lost to a recovered panic in the delivery goroutine
+# TYPE culvert_syslog_panics_total counter
+culvert_syslog_panics_total %d
+
+# HELP culvert_syslog_outages_total SIEM delivery outages observed since startup
+# TYPE culvert_syslog_outages_total counter
+culvert_syslog_outages_total %d
+
+# HELP culvert_syslog_failing_seconds How long SIEM delivery has been failing; 0 while it is delivering
+# TYPE culvert_syslog_failing_seconds gauge
+culvert_syslog_failing_seconds %g
+`,
+			up,
+			degraded,
+			verifiable,
+			sl.Drops,
+			sl.QueueDrops,
+			sl.Panics,
+			sl.Episodes,
+			sl.FailingFor.Seconds(),
+		)
+	}
+
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
 	// only for a DestCountry rule on a node with a GeoIP database, and a block

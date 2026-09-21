@@ -36,10 +36,16 @@ func loadObservability(cfg observabilityStartupConfig) {
 		// so checkSyslogFeed can distinguish an intentional no-SIEM setup from a
 		// configured feed that silently failed to connect at startup.
 		syslogConfiguredAddr = cfg.SyslogAddr
-		if err := InitSyslog(cfg.SyslogAddr, cfg.SyslogFormat); err != nil {
-			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
-		} else {
-			syslogConfigured = cfg.SyslogAddr
+		// CHAOS-66: a failed FIRST dial no longer means "no syslog for the
+		// life of the process". InitSyslogResilient installs a writer that
+		// self-heals through the engine's own reconnect path, so a collector
+		// that is merely slower to start than the proxy beside it in the same
+		// compose file recovers with no operator action. syslogConfigured now
+		// records the target the live writer is AIMED at (it is always
+		// installed), and the delivery axis is reported by syslogFeedState.
+		syslogConfigured = cfg.SyslogAddr
+		if err := InitSyslogResilient(cfg.SyslogAddr, cfg.SyslogFormat); err != nil {
+			logger.Printf("Syslog: initial connect failed (%v) — forwarding is armed and will retry until the collector answers", err)
 		}
 	}
 

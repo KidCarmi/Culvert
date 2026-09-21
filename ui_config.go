@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 	"github.com/KidCarmi/Culvert/internal/session"
+	"github.com/KidCarmi/Culvert/internal/syslog"
 	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
@@ -1808,18 +1810,35 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		format := "rfc3164"
 		var drops, panics uint64
-		if globalSyslog != nil {
-			format = globalSyslog.Format()
+		if sw := activeSyslog(); sw != nil {
+			format = sw.Format()
 			// Read panics before drops: deliverGuarded's recover branch always
 			// increments panics first, then drops (independent atomics, no
 			// combined snapshot). Reading in the same order means a report can
 			// only ever lag panics behind drops, never the reverse — so the
 			// UI's `drops > 0` gate can never hide a real panic behind a
 			// stale-looking drops==0.
-			panics = globalSyslog.Panics()
-			drops = globalSyslog.Drops()
+			panics = sw.Panics()
+			drops = sw.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
+		// CHAOS-66: the delivery axis. `addr` and `drops` alone let a caller
+		// tell "configured" from "nothing configured", never "delivering" from
+		// "dead" — and on UDP `drops` is structurally 0 whatever happens to the
+		// collector, which is why deliveryVerifiable rides alongside rather
+		// than being inferred from the counters.
+		snap := syslogFeedState()
+		jsonOK(w, map[string]any{
+			"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics,
+			"transport":          snap.Transport,
+			"deliveryVerifiable": snap.DeliveryVerifiable,
+			"up":                 snap.Up,
+			"everDelivered":      snap.EverDelivered,
+			"degraded":           snap.Degraded,
+			"failingForSeconds":  int64(snap.FailingFor.Seconds()),
+			"lastReason":         snap.LastReason,
+			"queueDrops":         snap.QueueDrops,
+			"outages":            snap.Episodes,
+		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1840,10 +1859,8 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Addr == "" {
 			// Disable syslog.
-			if globalSyslog != nil {
-				globalSyslog.Close()
-				globalSyslog = nil
-			}
+			releaseSyslogWriter(setActiveSyslog(nil))
+			resetSyslogFeedHealthForTest()
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
@@ -1851,15 +1868,41 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
 			return
 		}
-		if err := InitSyslog(body.Addr, body.Format); err != nil {
-			http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
+		// Validate the operator's TYPED target BEFORE touching the live
+		// forwarder, then install a SELF-HEALING writer (CHAOS-66).
+		//
+		// The two halves used to be one act: InitSyslog's first dial both
+		// validated the input and decided whether forwarding existed at all.
+		// That is why a transient collector outage meant forwarding was off
+		// for the life of the process. Separating them keeps the useful half
+		// (a typo is refused up front, and a refusal leaves the PREVIOUS
+		// working target in place — probing before installing is what makes
+		// that true) and drops the harmful half.
+		probeCtx, cancelProbe := context.WithTimeout(r.Context(), syslogProbeBudget)
+		network, target := parseSyslogAddr(body.Addr)
+		_, probeErr := syslog.ProbeTarget(probeCtx, network, target, body.Format)
+		cancelProbe()
+		if probeErr != nil {
+			http.Error(w, "syslog connect error: "+probeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		resetSyslogFeedHealthForTest()
+		if err := InitSyslogResilient(body.Addr, body.Format); err != nil {
+			// The probe just succeeded, so this is a fresh transient fault.
+			// The writer IS installed and armed; say so rather than failing a
+			// request whose effect has already taken hold.
+			logger.Printf("Syslog: target accepted but the initial connect failed (%v) — forwarding is armed and will retry", err)
+		}
+		sw := activeSyslog()
+		if sw == nil { // unreachable: InitSyslogResilient always installs
+			http.Error(w, "syslog install failed", http.StatusInternalServerError)
 			return
 		}
 		syslogConfigured = body.Addr
 		syslogConfiguredAddr = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+sw.Format()+")")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": sw.Format(), "deliveryVerifiable": sw.DeliveryVerifiable()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1874,14 +1917,45 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if globalSyslog == nil {
+	sw := activeSyslog()
+	if sw == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
-	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
-	// now via the exported io.Writer surface (writeMsg is package-internal).
-	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
-	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
+	// CHAOS-66: this is now a REAL probe.
+	//
+	// It used to call Write, which — since delivery became asynchronous —
+	// only enqueues a line on a bounded channel and returns. A collector that
+	// cannot exist produced exactly the same `200 {"ok":true,"message":"test
+	// message sent"}` as a healthy one (measured against udp://192.0.2.77:514,
+	// TEST-NET-1). checkSyslogFeed's own operator-action text told the
+	// operator to "use POST /api/syslog/test to confirm connectivity", so the
+	// documented way to verify the documented remedy could not fail.
+	//
+	// Probe dials a FRESH connection, so it can neither disturb live delivery
+	// nor be answered by a connection that is already wedged, and it reports
+	// `verified` honestly: false on UDP, where nothing observable can confirm
+	// delivery.
+	probeCtx, cancel := context.WithTimeout(r.Context(), syslogProbeBudget)
+	defer cancel()
+	verified, err := sw.Probe(probeCtx)
+	if err != nil {
+		// Bounded: the operator typed this target, and this is an admin-only
+		// surface, so the cause is useful here — but it still goes through
+		// sanitizeLog on the log line, and never into an alert Detail.
+		logger.Printf("Syslog: connectivity probe to the configured collector failed: %q", sanitizeLog(err.Error()))
+		writeJSONStatus(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "verified": verified, "error": err.Error(),
+			"message": "the collector could not be reached — audit and request-log entries are not being delivered",
+		})
+		return
+	}
+	if !verified {
+		jsonOK(w, map[string]any{"ok": true, "verified": false,
+			"message": "test message sent over UDP — delivery is NOT verifiable (a connected UDP socket succeeds whether or not the collector exists); use tcp:// if this feed is a compliance control"})
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true, "verified": true, "message": "test message delivered to the collector"})
 }
 
 // GET/POST /api/security — IP filter + rate limiter config

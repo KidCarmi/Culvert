@@ -1367,9 +1367,10 @@ func findSyslogFeedCheck(t *testing.T, c OperatorContract) OperatorContractCheck
 // This is a normal, valid posture (no remote SIEM forwarding) and must report
 // ok, not warn/fail.
 func TestApiDiagnostics_SyslogFeedNotConfigured(t *testing.T) {
-	prevAddr, prevSW := syslogConfiguredAddr, globalSyslog
-	syslogConfiguredAddr, globalSyslog = "", nil
-	t.Cleanup(func() { syslogConfiguredAddr, globalSyslog = prevAddr, prevSW })
+	prevAddr, prevSW := syslogConfiguredAddr, activeSyslog()
+	syslogConfiguredAddr = ""
+	setActiveSyslog(nil)
+	t.Cleanup(func() { syslogConfiguredAddr = prevAddr; setActiveSyslog(prevSW) })
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1387,9 +1388,10 @@ func TestApiDiagnostics_SyslogFeedNotConfigured(t *testing.T) {
 // down. This is the blind-spot scenario the check exists to surface: it must
 // report fail with an operator_action.
 func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
-	prevAddr, prevSW := syslogConfiguredAddr, globalSyslog
-	syslogConfiguredAddr, globalSyslog = "tcp://collector.invalid:601", nil
-	t.Cleanup(func() { syslogConfiguredAddr, globalSyslog = prevAddr, prevSW })
+	prevAddr, prevSW := syslogConfiguredAddr, activeSyslog()
+	syslogConfiguredAddr = "tcp://collector.invalid:601"
+	setActiveSyslog(nil)
+	t.Cleanup(func() { syslogConfiguredAddr = prevAddr; setActiveSyslog(prevSW) })
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1405,17 +1407,20 @@ func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
 	}
 }
 
-// TestApiDiagnostics_SyslogFeedOK — a syslog target was configured and
-// InitSyslog succeeded (globalSyslog non-nil), matching the production success
-// path. UDP construction never blocks on a handshake, so it stands in for a
-// live feed without a real collector.
+// TestApiDiagnostics_SyslogFeedOK — a syslog target was configured and a
+// writer is installed and aimed at it, matching the production success path.
+// UDP construction never blocks on a handshake, so it stands in for a live
+// feed without a real collector — and since CHAOS-66 the row says so: a UDP
+// feed reports ok but must NOT claim delivery it cannot observe.
 func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
-	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, globalSyslog
+	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, activeSyslog()
 	t.Cleanup(func() {
-		if globalSyslog != nil && globalSyslog != prevSW {
-			globalSyslog.Close()
+		if sw := activeSyslog(); sw != nil && sw != prevSW {
+			sw.Close()
 		}
-		syslogConfiguredAddr, syslogConfigured, globalSyslog = prevAddr, prevOK, prevSW
+		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
+		setActiveSyslog(prevSW)
+		resetSyslogFeedHealthForTest()
 	})
 	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
 	if err != nil {
@@ -1424,7 +1429,8 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 	// Success path: the live writer's target IS the operator's intent, so the
 	// intent (syslogConfiguredAddr) and the last-successful-connect tracker
 	// (syslogConfigured) agree.
-	syslogConfiguredAddr, syslogConfigured, globalSyslog = "udp://127.0.0.1:514", "udp://127.0.0.1:514", sw
+	syslogConfiguredAddr, syslogConfigured = "udp://127.0.0.1:514", "udp://127.0.0.1:514"
+	setActiveSyslog(sw)
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1434,6 +1440,9 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 	found := findSyslogFeedCheck(t, c)
 	if found.Status != diagOK {
 		t.Errorf("syslog_feed status = %q, want ok when feed is active", found.Status)
+	}
+	if strings.Contains(found.Message, "delivering") {
+		t.Errorf("a UDP feed must not claim delivery it cannot observe: %q", found.Message)
 	}
 }
 
@@ -1445,12 +1454,14 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 // globalSyslog != nil check reported OK; the feed to the intended collector is
 // actually down.
 func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
-	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, globalSyslog
+	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, activeSyslog()
 	t.Cleanup(func() {
-		if globalSyslog != nil && globalSyslog != prevSW {
-			globalSyslog.Close()
+		if sw := activeSyslog(); sw != nil && sw != prevSW {
+			sw.Close()
 		}
-		syslogConfiguredAddr, syslogConfigured, globalSyslog = prevAddr, prevOK, prevSW
+		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
+		setActiveSyslog(prevSW)
+		resetSyslogFeedHealthForTest()
 	})
 	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
 	if err != nil {
@@ -1458,7 +1469,7 @@ func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
 	}
 	// Live writer + last-successful connect are the FIRST target; intent has
 	// since moved to a second target whose re-init failed.
-	globalSyslog = sw
+	setActiveSyslog(sw)
 	syslogConfigured = "udp://127.0.0.1:514"
 	syslogConfiguredAddr = "tcp://collector.invalid:601"
 
