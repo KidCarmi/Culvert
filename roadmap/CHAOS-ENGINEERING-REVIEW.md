@@ -6402,3 +6402,19 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The SIEM forwarding path (PLACEHOLDER — id claimed 2026-09-21)
+
+**Status:** IN PROGRESS. This row exists so the id is allocated before any code
+is written, which is the remedy §0 reaches independently after ten collisions
+across six sweeps, and which §35 (CHAOS-65) was the first sweep to follow.
+
+**Scope:** `internal/syslog` + `syslog.go` + the three surfaces that claim to
+report on it (`checkSyslogFeed` in `diagnostics.go`, `GET /api/syslog` and
+`POST /api/syslog/test` in `ui_config.go`) — what the centralized compliance
+feed does when the collector goes away, and what every operator surface says
+about it while that is happening.
+
+Findings and gates are written into this section as the sweep closes.
