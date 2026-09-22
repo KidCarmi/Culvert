@@ -952,3 +952,67 @@ the six E2E jobs running the unchanged recipe on GitHub runners (see the PR).
 Revert the commit. The E2E image returns to the old base images, build-time
 `go mod tidy` and the previous flags; the four workflows are unchanged, so
 nothing else needs to move.
+
+## 13. Stage 5A — root-suite sharding pilot (evidence only)
+
+The root package's race+coverage suite is ONE process inside `qa-logic`: ~6,300
+top-level entries in ~25–33 minutes, the longest item on every main push. Stage
+5A asks one question — can it run as several isolated processes **without
+silently losing a test, a coverage block or a failure** — and answers it with a
+working, opt-in pilot and measured evidence. Adopting it in a required gate is
+stage 5B; nothing here changes what any gate requires.
+
+### Shape
+
+`cmd/rootshard` + `.github/workflows/qa-root-shard-pilot.yml` (reusable, no
+trigger of its own), called from `qa-gate.yml` only when a manual dispatch sets
+`root_shard_pilot: true` (default false):
+
+| Job | What it does |
+|---|---|
+| `pilot-build` | `go test -c -race -cover .` **once**; inventory from the binary's own `-test.list .*` (source-regex counts are not authoritative: 6,416 `func Test` in source vs 6,306 runnable Test entries in the default-tag binary); times an empty run (process start + TestMain + coverage write); partitions by measured duration |
+| `pilot-shard` ×4 | runs its selections against THAT binary from the same checkout path; refuses another binary, commit, toolchain or working directory; first proves the binary's own `-test.list` selects exactly the planned entries; then runs with the reference's per-binary flags (`-test.paniconexit0 -test.gocoverdir -test.timeout=40m -test.count=1 -test.coverprofile`), test2json events streamed to evidence |
+| `pilot-lane` | every package `go list ./...` returns EXCEPT the exact root import path, as whole packages, `-race -count=1 -timeout=40m -coverprofile -json` |
+| `pilot-verdict` | `if: always()`; rejects failed/cancelled/missing shards, identity mismatches, inventory mismatches (every planned entry exactly one result; nothing unselected ran), unusable or incompatible profiles; merges all profiles by block; runs the UNCHANGED `coverage-floor.sh` |
+| `qa-root-shard-pilot-compare` (in `qa-gate.yml`) | compares with the SAME run's unsharded `qa-logic` (no extra full-suite run): discovered vs executed inventory, pass/skip per entry, subtest inventory, package set, block universe, covered-block union, per-file coverage, and the floors verdict of both profiles |
+
+### Why each choice
+
+* **Build once, run the binary.** Compiling per shard would give four binaries
+  whose equality is assumed, not checked; one binary with a sha256 in the
+  manifest makes "every shard ran the same code" a verified fact.
+* **Same checkout path, no `-trimpath`.** `pkgSourceDir()` uses
+  `runtime.Caller`; tests read source, docs, frontend assets and fixtures and
+  invoke Go. Each shard checks out the same commit at the path the binary was
+  compiled in and has the same toolchain; the tool refuses otherwise.
+* **Evidence outside the checkout.** Several tests walk the repository, so the
+  binary and evidence live in `RUNNER_TEMP` — the shards test exactly the tree
+  the reference tests.
+* **Partition = longest-processing-time-first over measured durations**, total
+  order (estimate desc, name asc; ties to the lowest shard), so the same inputs
+  give the same plan. Estimates are floored at the 10 ms resolution of `go test
+  -v` (most root tests print `0.00s`; zero weights piled 5,053 of 6,319 entries
+  onto one shard in the first seeded plan) and a new test takes the MEAN
+  measured cost (the median is 0). New tests therefore enter the partition
+  automatically.
+* **Selections are anchored, escaped and verified twice.**
+  `^(?:QuoteMeta(a)|QuoteMeta(b)…)$` — the group keeps testing's splitter from
+  seeing a top-level `|`/`/`; every chunk regex is evaluated against the whole
+  inventory with the same regexp engine `testing` uses (it must select exactly
+  its names, nothing else, no benchmark), an empty selection is refused
+  (`-test.run ''` runs everything), and on the runner the binary's own
+  `-test.list <regex>` must return exactly the planned names.
+* **Argument size.** Linux caps one argv string at 128 KiB; the inventory is
+  ~268 KB of names. Selections are chunked at 96 KiB (one process each); four
+  shards need one chunk each today, and the tool handles more.
+* **Merge by block.** Key = source path + block coordinates; statement counts
+  must agree (else: different builds, refused); counters sum (atomic), a
+  zero-covered block is counted once. Root profiles must share an identical
+  block universe (same binary); the lane profile must contain no root block.
+  Percentages are never averaged and duplicate root blocks never concatenated.
+* **Coverage differences are reported, not fatal.** The block universe must be
+  identical; covered-block differences are listed by location, and the floors
+  decide pass/fail exactly as today — race/timing-dependent branches differ
+  between any two runs.
+* **Failures are never retried.** `fail-fast: false`, every shard runs to
+  completion, evidence uploads `if: always()`.
