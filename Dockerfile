@@ -1,5 +1,18 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM golang:1.27-alpine AS builder
+# Both Go stages run on the BUILD platform and CROSS-compile for the target
+# (CI-REDESIGN §11, stage 3). Without `--platform=$BUILDPLATFORM` a
+# multi-platform build pulls the TARGET-arch golang image and runs the whole
+# compiler under QEMU for linux/arm64. With it, the compiler runs natively and
+# GOOS/GOARCH select the output — the pure-Go (CGO_ENABLED=0) binary is the
+# same one a native build would produce. The RUNTIME stage below deliberately
+# stays on the target platform: an arm64 image must carry an arm64 userland.
+#
+# INVARIANT (pinned by dockerfile_crossbuild_test.go): every `go build` in a
+# $BUILDPLATFORM stage takes GOOS/GOARCH from TARGETOS/TARGETARCH, and those
+# ARGs are declared INSIDE the stage before the RUN. An undeclared ARG expands
+# to EMPTY, and an empty GOARCH silently builds for the HOST — an amd64 binary
+# inside the arm64 image that fails only when an arm64 host executes it.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 WORKDIR /app
 RUN apk add --no-cache git
@@ -12,13 +25,18 @@ COPY . .
 #   2. Git tag (auto-detected from .git — works for local docker compose builds)
 #   3. Falls back to "dev"
 ARG VERSION=
+# Declared AFTER `go mod download` / `COPY . .` on purpose: a build ARG joins
+# the cache key of every later RUN, so declaring the target here keeps the
+# arch-independent module-download layer shared by all target platforms.
+ARG TARGETOS
+ARG TARGETARCH
 RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
       VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev"); \
     fi && \
     : "${VERSION:=dev}" && \
     COMMIT=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "") && \
     echo "$VERSION" > /app/VERSION && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.buildCommit=${COMMIT}" -o culvert .
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.buildCommit=${COMMIT}" -o culvert .
 # No `go mod tidy` here — the image must build from the EXACT reviewed module
 # graph (go.mod/go.sum COPYed + `go mod download`ed above), not re-resolve deps
 # at build time (a divergent-recipe supply-chain smell). Tidiness is enforced in
@@ -43,7 +61,9 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
 # release-asset convention (vX.Y.Z) so the quick-start installer's
 # upgrade/idempotence check (`culvert-maint --version` vs target) works for
 # image-bundled installs exactly like signed-release downloads.
-FROM golang:1.27-alpine AS maintbuilder
+# Cross-compiled on the build platform like `builder` above — an arm64 image
+# must bundle an arm64 agent, and a proxy-only check would not catch this one.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS maintbuilder
 
 WORKDIR /src
 COPY cmd/culvert-maint/go.mod cmd/culvert-maint/go.sum ./
@@ -51,9 +71,11 @@ RUN go mod download
 
 COPY cmd/culvert-maint/ ./
 ARG VERSION=
+ARG TARGETOS
+ARG TARGETARCH
 RUN VER="${VERSION:-}" && \
     case "$VER" in "") VER=dev ;; v*) : ;; *) VER="v$VER" ;; esac && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false \
       -ldflags="-s -w -X culvert-maint/internal/server.Version=${VER}" \
       -o /culvert-maint .
 
