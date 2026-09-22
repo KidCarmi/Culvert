@@ -53,6 +53,7 @@ type Writer struct {
 	lastCause     string    // most recent delivery error text; LOG only (see noteCause)
 	drops         atomic.Uint64
 	queueDrops    atomic.Uint64
+	lastQueueDrop atomic.Int64 // UnixNano of the most recent queue-full drop; see QueueSaturatedSince
 	panics        atomic.Uint64
 	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
 	stateObserver atomic.Pointer[func(up bool, reason string, changed bool)]
@@ -249,12 +250,42 @@ func (s *Writer) send(pri int, msg string) {
 		// separates the cause, because the two point at different operator
 		// actions — an unreachable collector is a network/host fault, a full
 		// queue is a collector that accepts but is slower than this node's
-		// entry rate. Counted on the caller goroutine, never observed there:
-		// send() is on the request path (store.go's recordRequest and the
-		// audit SIEM hook), so it stays two atomics and no callback.
+		// entry rate.
+		//
+		// The TIMESTAMP is what makes this loss visible as a LIVE fault
+		// rather than a counter nobody re-reads (Codex review, PR #1461).
+		// A collector that stays writable but drains slower than producers
+		// discards entries here continuously while the drain goroutine keeps
+		// succeeding — so Up() stays true, the health record stays clean, the
+		// contract row reads "delivering" and reports the loss as having
+		// happened "earlier", and neither the degradation gauge nor the alert
+		// ever fires. That is the same reporting error this sweep exists to
+		// remove (SL-2), for the "collector too slow" case instead of the
+		// "collector unreachable" one — and a slow SIEM is the commoner
+		// fault of the two.
+		//
+		// Still no callback: send() is on the request path (store.go's
+		// recordRequest and the audit SIEM hook), so the drop path stays
+		// three atomic ops, and the HEALTHY path is untouched. The drain
+		// goroutine reads this stamp on its next outcome and folds it into
+		// the state, which is where an observer may legitimately run.
 		s.drops.Add(1)
 		s.queueDrops.Add(1)
+		s.lastQueueDrop.Store(time.Now().UnixNano())
 	}
+}
+
+// QueueSaturatedSince reports whether the bounded delivery queue has dropped a
+// line since t — i.e. whether this Writer is losing entries RIGHT NOW because
+// the collector drains slower than this node produces.
+//
+// Distinct from Up(), which reports whether the last line the drain goroutine
+// attempted reached the collector. Both can be true at once, and that
+// combination is exactly the fault this answers: delivery is working and
+// entries are being lost anyway.
+func (s *Writer) QueueSaturatedSince(t time.Time) bool {
+	n := s.lastQueueDrop.Load()
+	return n != 0 && n >= t.UnixNano()
 }
 
 func (s *Writer) connect() error {
@@ -390,6 +421,10 @@ const (
 	ReasonConnectFailed = "connect_failed"
 	ReasonWriteFailed   = "write_failed"
 	ReasonPanic         = "panic"
+	// ReasonQueueFull is delivery SUCCEEDING while entries are lost anyway:
+	// the collector accepts but drains slower than this node produces, so the
+	// bounded queue sheds. Its operator action is capacity, not reachability.
+	ReasonQueueFull = "queue_full"
 )
 
 // SetStateObserver publishes an optional observer notified of every delivery

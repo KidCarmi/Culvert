@@ -1332,9 +1332,12 @@ culvert_admin_ui_listen_backoff_seconds %g
 	// there and prove nothing. An alert on `up == 0` must be read together
 	// with it.
 	if sl := syslogFeedState(); sl.Configured {
-		up, degraded, verifiable := 0, 0, 0
+		up, degraded, verifiable, saturated := 0, 0, 0, 0
 		if sl.Up {
 			up = 1
+		}
+		if sl.QueueSaturated {
+			saturated = 1
 		}
 		if sl.Degraded {
 			degraded = 1
@@ -1362,6 +1365,10 @@ culvert_syslog_dropped_total %d
 # TYPE culvert_syslog_queue_dropped_total counter
 culvert_syslog_queue_dropped_total %d
 
+# HELP culvert_syslog_queue_saturated 1 while the delivery queue is shedding entries because the collector drains slower than this node produces
+# TYPE culvert_syslog_queue_saturated gauge
+culvert_syslog_queue_saturated %d
+
 # HELP culvert_syslog_panics_total SIEM lines lost to a recovered panic in the delivery goroutine
 # TYPE culvert_syslog_panics_total counter
 culvert_syslog_panics_total %d
@@ -1379,6 +1386,7 @@ culvert_syslog_failing_seconds %g
 			verifiable,
 			sl.Drops,
 			sl.QueueDrops,
+			saturated,
 			sl.Panics,
 			sl.Episodes,
 			sl.FailingFor.Seconds(),

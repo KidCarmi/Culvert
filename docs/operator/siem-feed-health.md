@@ -49,6 +49,7 @@ and says in words that delivery is not verifiable.
 | | `culvert_syslog_delivery_verifiable` | 0 on UDP; read every other series through this |
 | | `culvert_syslog_dropped_total` | **the compliance signal** — any non-zero value means a gap |
 | | `culvert_syslog_queue_dropped_total` | the subset lost to a *full queue* rather than an unreachable collector |
+| | `culvert_syslog_queue_saturated` | **1 while the queue is shedding NOW** — the collector is reachable but too slow |
 | | `culvert_syslog_panics_total` | lines lost to a contained panic in the delivery goroutine |
 | | `culvert_syslog_outages_total` | delivery outages since startup |
 | | `culvert_syslog_failing_seconds` | 0 while delivering |
@@ -161,9 +162,13 @@ is the subset lost because the bounded in-process delivery queue was full.
 - **`dropped − queue_dropped` climbing** → the collector is **unreachable**.
   Fix the host/port, route, firewall or the collector process.
 - **`queue_dropped` climbing while `up` is 1** → the collector is **reachable
-  but slower than this node's entry rate**. Fix SIEM ingest capacity, or reduce
-  what is forwarded. The queue is a shock absorber, not a load shedder's
-  excuse: lines past the cap are gone.
+  but slower than this node's entry rate**. This is a LIVE fault, not a
+  historical one: `culvert_syslog_queue_saturated` reads 1, the `syslog_feed`
+  row goes amber (or red past the degradation window) and names the CAPACITY
+  remedy, and `siem_feed_down` fires — even though `up` stays 1, because
+  delivery is succeeding and entries are being lost anyway. Fix SIEM ingest
+  capacity, or reduce what is forwarded. The queue is a shock absorber, not a
+  load shedder's excuse: lines past the cap are gone.
 - **`culvert_syslog_panics_total` non-zero** → a delivery bug is being
   contained rather than crashing the gateway. The process log names it. Report
   it.

@@ -311,3 +311,52 @@ func TestChaos66_DeliveryVerifiableIsTransportDerived(t *testing.T) {
 		}
 	}
 }
+
+// TestChaos66_QueueSaturationIsObservableWhileDeliverySucceeds pins the fault
+// Codex found in review (PR #1461): delivery succeeding is not the same as
+// entries arriving.
+//
+// A collector that stays writable but drains slower than producers sheds lines
+// in send()'s queue-full branch while every drain outcome is a success. Before
+// the fix that was counted and nothing else: Up() stayed true, so the health
+// record stayed clean, the contract row read "delivering" and described the
+// loss as having happened "earlier", and neither the degradation gauge nor the
+// alert fired. Same reporting error as SL-2, for the commoner fault.
+func TestChaos66_QueueSaturationIsObservableWhileDeliverySucceeds(t *testing.T) {
+	// slowConn (syslog_bench_test.go) models a congested collector: every
+	// write SUCCEEDS, each taking ~200µs to drain. Reused rather than
+	// redefined — it already models exactly this fault.
+	conn := &slowConn{}
+	w, sl := newObservedWriter(t, conn, func() (net.Conn, error) { return conn, nil })
+
+	// Outrun the drain until the bounded queue sheds.
+	for i := 0; i < queueCap*3 && w.QueueDrops() == 0; i++ {
+		w.WriteAudit(map[string]string{"n": "flood"})
+	}
+	if w.QueueDrops() == 0 {
+		t.Fatalf("the queue never shed (drops=%d) — the flood did not outrun the drain", w.Drops())
+	}
+
+	// The contract the fix rests on: delivery is UP and entries are being lost.
+	if !w.Up() {
+		t.Skip("the drain fell over rather than merely lagging; this gate needs a SUCCEEDING drain")
+	}
+	if !w.QueueSaturatedSince(time.Now().Add(-syslogTestSaturationWindow)) {
+		t.Fatal("DEFECT: the writer is shedding entries but reports no recent queue saturation")
+	}
+	// The observer must still be seeing SUCCESSES — that is what made this
+	// invisible, and the gate is worthless if the drain is actually failing.
+	if n := sl.outcomes.Load(); n == 0 {
+		t.Fatal("no delivery outcomes observed")
+	}
+
+	// And it must clear on its own once the flood stops: saturation is a RATE
+	// condition, so it needs no clearing path that could be forgotten.
+	if w.QueueSaturatedSince(time.Now().Add(time.Second)) {
+		t.Fatal("saturation must be scoped to a window, not latched")
+	}
+}
+
+// syslogTestSaturationWindow mirrors the root package's
+// syslogQueueSaturationWindow; this package cannot import it.
+const syslogTestSaturationWindow = 10 * time.Second

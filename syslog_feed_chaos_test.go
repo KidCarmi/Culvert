@@ -204,7 +204,6 @@ func TestChaos66_ContractRowReportsDeliveryNotStartupConnect(t *testing.T) {
 	if !driveUntil(t, collectorWait, func() bool { return fc.received() > 0 }) {
 		t.Fatal("collector never received a line while healthy")
 	}
-	t.Logf("health record: %+v", syslogFeedState())
 	if row := checkSyslogFeed(); row.Status != diagOK {
 		t.Fatalf("healthy feed should be ok, got %v: %s", row.Status, row.Message)
 	}
@@ -716,3 +715,83 @@ func TestChaos66_DisplacedWriterCannotWriteTheHealthRecord(t *testing.T) {
 		t.Fatalf("the ACTIVE writer must still record: episodes=%d lastReason=%q", snap.Episodes, snap.LastReason)
 	}
 }
+
+// TestChaos66_QueueSaturationIsReportedAsLiveLoss pins the SURFACES for the
+// fault Codex found in review (PR #1461): a collector that stays reachable but
+// drains slower than this node produces.
+//
+// PRE-FIX EVIDENCE: send()'s queue-full branch counted the loss and did
+// nothing else, while every drain outcome was a success — so Up() stayed true,
+// the health record stayed clean, and checkSyslogFeed took its
+// "delivering — but N message(s) were lost earlier" branch, whose operator
+// action reads "No action is needed for delivery, which has recovered." Both
+// halves of that sentence are false while the queue is shedding: the loss is
+// NOW, and the remedy is capacity. culvert_syslog_degraded stayed 0 and
+// siem_feed_down never fired.
+//
+// Driven through the observer seam so the assertion is deterministic — the
+// engine-level gate (internal/syslog) is the one that proves a real congested
+// collector reaches this state.
+func TestChaos66_QueueSaturationIsReportedAsLiveLoss(t *testing.T) {
+	withSyslogTestEnv(t)
+	fc := newFakeCollector(t)
+	setSyslogIntent(fc.addr())
+	setSyslogConfiguredTarget(fc.addr())
+	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	sw := activeSyslog()
+
+	// Saturate the queue: fill it while the drain cannot keep up. The writer
+	// records the shed itself, which is what the surfaces must react to.
+	for i := 0; i < queueFloodLines && sw.QueueDrops() == 0; i++ {
+		sw.WriteAudit(map[string]string{"n": "flood"})
+	}
+	if sw.QueueDrops() == 0 {
+		t.Skip("the local collector drained faster than the flood; nothing was shed")
+	}
+
+	// Delivery is UP and entries are being lost — the combination that was
+	// invisible. Feed successful outcomes, as the drain goroutine does
+	// continuously throughout this fault.
+	noteSyslogDeliveryState(sw, true, "", false)
+	noteSyslogDeliveryState(sw, true, "", false)
+
+	// The OBSERVER must have opened a failing episode. This is the half the
+	// reporting assertions below cannot prove: syslogFeedState reads the
+	// writer's saturation stamp directly, so the row goes amber either way —
+	// but the degradation DURATION and therefore the siem_feed_down alert
+	// only ever accrue if the observer refuses to treat a saturated success
+	// as a recovery. Without it the feed sheds indefinitely and never pages.
+	if !syslogFeedDown.Load() {
+		t.Fatal("DEFECT: a successful delivery while shedding was treated as healthy — the degradation timer never starts, so siem_feed_down can never fire")
+	}
+	snap := syslogFeedState()
+	if snap.Episodes == 0 {
+		t.Fatal("DEFECT: sustained queue saturation opened no failing episode")
+	}
+	if snap.LastReason != syslog.ReasonQueueFull {
+		t.Fatalf("saturation must be attributed to %q, got %q", syslog.ReasonQueueFull, snap.LastReason)
+	}
+
+	if !snap.QueueSaturated {
+		t.Fatal("DEFECT: the feed is shedding entries but reports no live saturation")
+	}
+	row := checkSyslogFeed()
+	if row.Status == diagOK {
+		t.Fatalf("DEFECT: ongoing loss reported as ok: %q", row.Message)
+	}
+	if strings.Contains(row.Message, "lost earlier") || strings.Contains(row.OperatorAction, "has recovered") {
+		t.Fatalf("DEFECT: ongoing loss described as historical: %q / %q", row.Message, row.OperatorAction)
+	}
+	if !strings.Contains(row.OperatorAction, "CAPACITY") {
+		t.Fatalf("a saturated queue must name the capacity remedy, not reachability: %q", row.OperatorAction)
+	}
+	if body := renderMetricsForTest(t); !strings.Contains(body, "culvert_syslog_queue_saturated 1") {
+		t.Fatal("DEFECT: /metrics does not expose live queue saturation")
+	}
+}
+
+// queueFloodLines is comfortably more than the engine's bounded queue, so the
+// flood outruns any drain that is not instantaneous.
+const queueFloodLines = 20000

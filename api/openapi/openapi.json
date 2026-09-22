@@ -5087,6 +5087,10 @@
             "description": "Subset of drops lost to a full delivery queue rather than an unreachable collector.",
             "type": "integer"
           },
+          "queueSaturated": {
+            "description": "True while entries are being lost RIGHT NOW to a full delivery queue — the collector is reachable and delivery is succeeding, but it drains slower than this node produces. The remedy is capacity, not reachability, so it is reported separately from `up`.",
+            "type": "boolean"
+          },
           "transport": {
             "description": "Transport in use. A scheme-less address means udp. Empty when no forwarder is installed (nothing configured, or a target the operator has since disabled).",
             "enum": [

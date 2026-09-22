@@ -876,6 +876,24 @@ func checkSyslogFeed() OperatorContractCheck {
 			OperatorAction: "Restore the collector's reachability (host/port, route, firewall, SIEM capacity). Recovery is automatic — the forwarder retries and clears this row on the first line that lands; no restart or re-save is needed.",
 		}
 	}
+	// Losing entries NOW while delivery succeeds — the collector is reachable
+	// but drains slower than this node produces (Codex review, PR #1461).
+	// Placed BEFORE the UDP branch: a saturated queue is observable on any
+	// transport, because the shedding happens locally in send(), so this is
+	// the one loss a UDP feed CAN prove.
+	if snap.QueueSaturated {
+		status := diagWarn
+		if snap.Degraded {
+			status = diagFail
+		}
+		return OperatorContractCheck{
+			Code:   "syslog_feed",
+			Status: status,
+			Message: fmt.Sprintf("the collector is reachable but is draining slower than this node produces — the delivery queue is shedding and audit/request-log entries are being lost NOW (%d lost, %d of them to a full queue)",
+				snap.Drops, snap.QueueDrops),
+			OperatorAction: "This is a CAPACITY fault, not a reachability one: reconnecting will not help. Increase the collector's ingest capacity, or reduce what this node forwards. The node's local audit JSONL is unaffected.",
+		}
+	}
 	if !snap.DeliveryVerifiable {
 		return OperatorContractCheck{
 			Code:   "syslog_feed",

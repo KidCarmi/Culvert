@@ -87,6 +87,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/syslog"
 )
 
 // syslogFeedDegradedAfter is how long delivery must be failing before the feed
@@ -105,6 +107,15 @@ const syslogFeedDegradedAfter = 60 * time.Second
 // re-enters the observer once per dropped line, and this feed's whole purpose
 // is carrying one line per proxied request.
 const syslogFeedLogInterval = 60 * time.Second
+
+// syslogQueueSaturationWindow is how recently the bounded delivery queue must
+// have shed a line for the feed to count as LOSING ENTRIES NOW.
+//
+// A window rather than a latch: saturation is a rate condition, so it must
+// clear on its own once the collector keeps up, with no clearing path to
+// forget. Comfortably longer than the drain's own cycle, so a feed that is
+// shedding steadily never reads as recovered between two drops.
+const syslogQueueSaturationWindow = 10 * time.Second
 
 // syslogProbeBudget bounds one operator-triggered connectivity probe end to
 // end (dial + write). Deliberately the same order as the engine's own
@@ -174,10 +185,25 @@ func noteSyslogDeliveryState(sw *syslogWriter, up bool, reason string, changed b
 	if sw != activeSyslog() {
 		return
 	}
+	now := time.Now()
+
+	// Delivery SUCCEEDING is not the same as entries ARRIVING. A collector
+	// that stays writable but drains slower than this node produces sheds
+	// lines in send()'s queue-full branch while every drain outcome here is a
+	// success — so without this check Up() stays true, the record stays
+	// clean, the contract row reads "delivering" and calls the loss
+	// "earlier", and neither the degradation gauge nor the alert ever fires
+	// (Codex review, PR #1461). That is SL-2 again for the commoner fault.
+	//
+	// Checked BEFORE the healthy-steady-state fast path, deliberately: the
+	// whole point is that this case LOOKS like healthy steady state.
+	if up && sw.QueueSaturatedSince(now.Add(-syslogQueueSaturationWindow)) {
+		noteSyslogDeliveryFailed(sw, syslog.ReasonQueueFull, now)
+		return
+	}
 	if up && !changed && !syslogFeedDown.Load() {
 		return // healthy steady state
 	}
-	now := time.Now()
 	if up {
 		noteSyslogDeliveryRecovered(now)
 		return
@@ -220,8 +246,13 @@ func noteSyslogDeliveryFailed(sw *syslogWriter, reason string, now time.Time) {
 		// The CAUSE (which embeds the collector address and the ephemeral local
 		// port) goes here and nowhere else — never to the alert Detail, never
 		// to the viewer-role contract row.
-		logger.Printf("WARN syslog: SIEM delivery failing (reason=%q, for=%s, dropped=%d, cause=%q) — audit and request-log entries are not reaching the collector",
-			sanitizeLog(reason), failingFor.Round(time.Second), sw.Drops(), sanitizeLog(sw.LastCause()))
+		if reason == syslog.ReasonQueueFull {
+			logger.Printf("WARN syslog: SIEM delivery queue saturated (for=%s, dropped=%d of which %d to a full queue) — the collector is reachable but drains slower than this node produces; audit and request-log entries are being lost NOW",
+				failingFor.Round(time.Second), sw.Drops(), sw.QueueDrops())
+		} else {
+			logger.Printf("WARN syslog: SIEM delivery failing (reason=%q, for=%s, dropped=%d, cause=%q) — audit and request-log entries are not reaching the collector",
+				sanitizeLog(reason), failingFor.Round(time.Second), sw.Drops(), sanitizeLog(sw.LastCause()))
+		}
 	}
 	if alertNow {
 		fireSyslogFeedAlert(reason)
@@ -272,6 +303,7 @@ type syslogFeedSnapshot struct {
 	Up                 bool   // last OBSERVED delivery outcome
 	EverDelivered      bool
 	Degraded           bool
+	QueueSaturated     bool // losing entries NOW to a full queue, while delivery succeeds
 	FailingFor         time.Duration
 	LastReason         string
 	Drops              uint64
@@ -294,6 +326,7 @@ func syslogFeedState() syslogFeedSnapshot {
 		snap.Transport = sw.Network()
 		snap.DeliveryVerifiable = sw.DeliveryVerifiable()
 		snap.Up = sw.Up()
+		snap.QueueSaturated = sw.QueueSaturatedSince(time.Now().Add(-syslogQueueSaturationWindow))
 		snap.Drops = sw.Drops()
 		snap.QueueDrops = sw.QueueDrops()
 		snap.Panics = sw.Panics()
@@ -346,4 +379,39 @@ func resetSyslogFeedHealth() {
 	syslogFeed.logAt = time.Time{}
 	syslogFeed.suppressed = 0
 	syslogFeed.mu.Unlock()
+}
+
+// addSyslogFeedHealth adds the SIEM-feed fields to a /healthz body.
+//
+// Extracted from the handler so the per-field guards read as a flat list
+// rather than a nested block (nestif). Each field is added only when it says
+// something, and none of them ever FAILS the probe: a node whose SIEM feed is
+// degraded is proxying and enforcing policy perfectly, and failing readiness
+// over a logging pipeline is the trade this plane exists to refuse.
+func addSyslogFeedHealth(resp map[string]any) {
+	sl := syslogFeedState()
+	if !sl.Configured {
+		return
+	}
+	if sl.Drops > 0 {
+		resp["syslogDrops"] = sl.Drops
+	}
+	if !sl.Up {
+		resp["syslogDeliveryFailing"] = sl.LastReason
+	}
+	if sl.Degraded {
+		resp["syslogFeedDegraded"] = true
+	}
+	if sl.QueueSaturated {
+		// Distinct from syslogDeliveryFailing: delivery is WORKING and entries
+		// are being lost anyway. Different remedy (capacity, not
+		// reachability), so it gets its own field.
+		resp["syslogQueueSaturated"] = true
+	}
+	if !sl.DeliveryVerifiable {
+		// Stated positively rather than left to inference: on UDP the fields
+		// above are structurally silent, so their absence is not evidence that
+		// the feed is healthy.
+		resp["syslogDeliveryVerifiable"] = false
+	}
 }

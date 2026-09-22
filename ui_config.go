@@ -1871,6 +1871,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			"up":                 snap.Up,
 			"everDelivered":      snap.EverDelivered,
 			"degraded":           snap.Degraded,
+			"queueSaturated":     snap.QueueSaturated,
 			"failingForSeconds":  int64(snap.FailingFor.Seconds()),
 			"lastReason":         snap.LastReason,
 			"queueDrops":         snap.QueueDrops,

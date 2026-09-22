@@ -2257,6 +2257,13 @@ components:
         degraded:
           type: boolean
           description: Delivery has been failing for longer than the degradation threshold.
+        queueSaturated:
+          type: boolean
+          description: >-
+            True while entries are being lost RIGHT NOW to a full delivery
+            queue — the collector is reachable and delivery is succeeding, but
+            it drains slower than this node produces. The remedy is capacity,
+            not reachability, so it is reported separately from `up`.
         failingForSeconds: { type: integer }
         lastReason:
           type: string

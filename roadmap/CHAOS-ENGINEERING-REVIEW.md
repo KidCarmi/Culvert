@@ -6501,6 +6501,33 @@ collector. `checkSyslogFeed`'s operator action told the operator to *"use POST
 different register: **a surface an operator is told to act on must be able to
 return the answer that would stop them acting.**
 
+**SL-10 — QUEUE SATURATION IS A LIVE FAULT, NOT A HISTORICAL COUNTER (Codex
+review, PR #1461).** SL-2 fixed the "collector unreachable" reporting error;
+this is the same error for the commoner "collector too slow" fault, and the
+first fix did not cover it. A collector that stays writable but drains slower
+than this node produces sheds lines in `send`'s queue-full branch while every
+drain outcome is a SUCCESS — so `Up()` stays true, the health record stays
+clean, `checkSyslogFeed` takes its "delivering — but N lost earlier" branch
+(whose operator action literally reads *"No action is needed for delivery,
+which has recovered"*), `culvert_syslog_degraded` stays 0 and `siem_feed_down`
+never fires, all while entries are being lost RIGHT NOW. `send` now stamps
+`lastQueueDrop` on each shed (three atomics, still no callback on the request
+path), the drain goroutine's observer treats a successful delivery within
+`syslogQueueSaturationWindow` (10s) of a shed as a FAILED round with reason
+`queue_full` — checked BEFORE the healthy-steady-state fast path, because the
+whole point is that this case looks like healthy steady state — and every
+surface gains the live fact (`culvert_syslog_queue_saturated`, `/healthz`
+`syslogQueueSaturated`, `GET /api/syslog` `queueSaturated`, and a contract row
+that names the CAPACITY remedy instead of calling the loss historical).
+Saturation is a WINDOW, not a latch: it is a rate condition, so it must clear
+itself once the collector keeps up, with no clearing path to forget. Gates:
+`internal/syslog` `TestChaos66_QueueSaturationIsObservableWhileDeliverySucceeds`
+(the engine sees a real congested collector reach the state) +
+`TestChaos66_QueueSaturationIsReportedAsLiveLoss` (the surfaces report it, and
+— the half the reporting assertions cannot prove — the observer opens a
+degradation episode so the alert can fire); both verified failing against the
+reintroduced pre-fix shape.
+
 **SL-7 — THE DEFAULT TRANSPORT CANNOT ANSWER THE QUESTION AT ALL.** `udp://` is
 what an address with no scheme resolves to. A connected UDP socket's write
 succeeds locally whether or not anything is listening, so on a UDP feed
@@ -6563,10 +6590,15 @@ failing disk — exactly as `socks5_listener_down` (§22) and
 `admin_ui_unavailable` (§25) were minted. `HasSubscriber` honours `"*"`, so a
 wildcard subscriber receives it with no reconfiguration.
 
-**(5) Metrics are emitted ONLY when a collector is configured** — a flat
-`culvert_syslog_up 0` from an appliance that never had a SIEM is
-indistinguishable from one whose feed is dead, and the documented paging rule
-is `== 0` (the socks5 / cluster_ca / dns rule).
+**(4b) Only the ACTIVE writer may write the health record** (Codex review): a
+displaced writer's drain goroutine keeps delivering to the OLD collector
+through its flush window, so its outcomes must not land on a record that now
+describes the new one — SL-2 one layer down. The observer drops any outcome
+from a writer that is no longer `activeSyslog()`. **(5) Metrics are emitted
+ONLY when a collector is configured** — a flat `culvert_syslog_up 0` from an
+appliance that never had a SIEM is indistinguishable from one whose feed is
+dead, and the documented paging rule is `== 0` (the socks5 / cluster_ca / dns
+rule).
 
 The admin `POST /api/syslog` now PROBES before installing, which is what lets a
 typo still be refused up front **while leaving the previous working forwarder

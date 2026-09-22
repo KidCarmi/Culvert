@@ -1124,23 +1124,7 @@ func addRequestLogHealth(resp map[string]any) {
 	// JSONL) and not by restoring the CP link (the cluster push queue).
 	// Added only when non-zero, and never fails the probe — a node whose SIEM
 	// feed is down is proxying and enforcing perfectly.
-	if sl := syslogFeedState(); sl.Configured {
-		if sl.Drops > 0 {
-			resp["syslogDrops"] = sl.Drops
-		}
-		if !sl.Up {
-			resp["syslogDeliveryFailing"] = sl.LastReason
-		}
-		if sl.Degraded {
-			resp["syslogFeedDegraded"] = true
-		}
-		if !sl.DeliveryVerifiable {
-			// Stated positively rather than left to inference: on UDP the two
-			// fields above are structurally silent, so their absence is not
-			// evidence that the feed is healthy.
-			resp["syslogDeliveryVerifiable"] = false
-		}
-	}
+	addSyslogFeedHealth(resp)
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.
 	if n := reqlog.Backpressure(); n > 0 {
