@@ -156,6 +156,24 @@ var fireSyslogFeedAlert = func(detail string) {
 // wireSyslogObservers). It runs on the drain goroutine, once per delivery
 // outcome, with the Writer's mutex released.
 func noteSyslogDeliveryState(sw *syslogWriter, up bool, reason string, changed bool) {
+	// Only the ACTIVE writer may write the health record.
+	//
+	// A displaced writer is not finished when it is displaced: releaseSyslogWriter
+	// closes it asynchronously and Close deliberately keeps draining what is
+	// already queued for up to its flush window, so its drain goroutine is still
+	// delivering — to the OLD collector — while this record already describes the
+	// new one. Without this check, a reconfigure away from a dead collector would
+	// have the dead one's trailing failures reported against its healthy
+	// replacement, and a reconfigure away from a healthy collector could clear a
+	// genuine degradation on the new target. That is attributing one target's
+	// state to another, which is the reporting error this whole sweep exists to
+	// remove — reintroduced by the fix for it, which is exactly where this class
+	// keeps showing up (see §35's "(1b)/(2b)/(2c)" chain in the register).
+	//
+	// One atomic load, on a path that already loads two.
+	if sw != activeSyslog() {
+		return
+	}
 	if up && !changed && !syslogFeedDown.Load() {
 		return // healthy steady state
 	}

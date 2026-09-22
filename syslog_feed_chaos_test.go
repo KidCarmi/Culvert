@@ -180,6 +180,7 @@ func TestChaos66_ContractRowReportsDeliveryNotStartupConnect(t *testing.T) {
 	if !driveUntil(t, 2*time.Second, func() bool { return fc.received() > 0 }) {
 		t.Fatal("collector never received a line while healthy")
 	}
+	t.Logf("health record: %+v", syslogFeedState())
 	if row := checkSyslogFeed(); row.Status != diagOK {
 		t.Fatalf("healthy feed should be ok, got %v: %s", row.Status, row.Message)
 	}
@@ -635,5 +636,72 @@ func TestChaos66_AlertDetailIsABoundedReasonClass(t *testing.T) {
 		if strings.ContainsAny(r, " :/@.") {
 			t.Fatalf("reason class %q looks like it carries an address or a raw error", r)
 		}
+	}
+}
+
+// TestChaos66_DisplacedWriterCannotWriteTheHealthRecord pins that only the
+// ACTIVE forwarder may write the delivery-health record.
+//
+// A displaced writer is not finished when it is displaced: releaseSyslogWriter
+// closes it asynchronously and Close keeps draining what is already queued, so
+// its drain goroutine is still delivering to the OLD collector while the record
+// already describes the new one. Letting it write meant a reconfigure away from
+// a dead collector reported the dead one's trailing failures against its healthy
+// replacement — attributing one target's state to another, which is the
+// reporting error this sweep exists to remove. Introduced BY the CHAOS-66 fix
+// and caught in self-review.
+//
+// The gate calls the observer DIRECTLY rather than racing two live writers.
+// The first two attempts did the latter and both passed against the unguarded
+// observer, for two different reasons worth recording: the active writer's own
+// successful delivery called noteSyslogDeliveryRecovered and scrubbed the
+// pollution before the assertion ran, and the fields the assertions read
+// (row.Status, snap.Up) are derived from the ACTIVE writer rather than from the
+// record being polluted. A gate whose subject repairs or masks the damage it is
+// meant to detect proves nothing. Driving the seam directly makes the invariant
+// deterministic — no sleeps, no ports, no scheduling.
+func TestChaos66_DisplacedWriterCannotWriteTheHealthRecord(t *testing.T) {
+	withSyslogTestEnv(t)
+	fc := newFakeCollector(t)
+
+	syslogConfiguredAddr, syslogConfigured = fc.addr(), fc.addr()
+	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	active := activeSyslog()
+	if active == nil {
+		t.Fatal("no forwarder installed")
+	}
+	resetSyslogFeedHealth()
+
+	// A writer that is NOT the active one — exactly what a predecessor is
+	// between its displacement and the end of its flush window.
+	displaced, _ := syslog.NewWriterDeferred("tcp", "192.0.2.77:514", "rfc3164")
+	t.Cleanup(func() { _ = displaced.Close() })
+	if displaced == active {
+		t.Fatal("test setup: the displaced writer must not be the active one")
+	}
+
+	for i := 0; i < 5; i++ {
+		noteSyslogDeliveryState(displaced, false, syslog.ReasonConnectFailed, i == 0)
+	}
+
+	snap := syslogFeedState()
+	if snap.Episodes != 0 || snap.LastReason != "" || snap.FailingFor != 0 {
+		t.Fatalf("DEFECT: a displaced writer wrote the health record: episodes=%d lastReason=%q failingFor=%v",
+			snap.Episodes, snap.LastReason, snap.FailingFor)
+	}
+	if syslogFeedDown.Load() {
+		t.Fatal("DEFECT: a displaced writer moved the fast-path down gate")
+	}
+	if row := checkSyslogFeed(); row.Status != diagOK {
+		t.Fatalf("DEFECT: the displaced writer's failures reached the contract row: %v %q", row.Status, row.Message)
+	}
+
+	// CONTROL: the ACTIVE writer must still be able to write the record, or
+	// the guard above would have disabled the whole health plane.
+	noteSyslogDeliveryState(active, false, syslog.ReasonWriteFailed, true)
+	if snap := syslogFeedState(); snap.Episodes != 1 || snap.LastReason != syslog.ReasonWriteFailed {
+		t.Fatalf("the ACTIVE writer must still record: episodes=%d lastReason=%q", snap.Episodes, snap.LastReason)
 	}
 }
