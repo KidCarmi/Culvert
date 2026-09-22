@@ -137,8 +137,22 @@ func TestChaos66_StateObserverFiresOnTransitionsOnly(t *testing.T) {
 	if len(got) != 1 || got[0] {
 		t.Fatalf("expected exactly one down transition across 50 failing lines, got %v", got)
 	}
-	if n := sl.outcomes.Load(); n < 50 {
-		t.Fatalf("the observer must still see every OUTCOME (that is what makes a DURATION evaluable); got %d", n)
+	// Per-OUTCOME, not per-transition — the property that makes a DURATION
+	// evaluable at all. Expressed as "strictly more outcomes than
+	// transitions", which is the invariant itself and holds no matter how
+	// much of the flood has drained when the assertion runs.
+	//
+	// It previously asserted an absolute count (>= the 50 lines written) and
+	// CI caught that as the flake it was: waitFor returns on the FIRST
+	// transition, so only part of the flood has been drained by then — a
+	// loaded runner had delivered 29. An absolute quantity that depends on
+	// scheduling is not the invariant; the ratio is.
+	outcomes := sl.outcomes.Load()
+	if outcomes <= int64(len(got)) {
+		t.Fatalf("observer fired %d time(s) for %d transition(s) — it is per-TRANSITION, so a degradation duration can never be evaluated", outcomes, len(got))
+	}
+	if outcomes < 5 {
+		t.Fatalf("observer fired only %d time(s) across a flood of failing lines; too few to establish the per-outcome contract", outcomes)
 	}
 }
 
