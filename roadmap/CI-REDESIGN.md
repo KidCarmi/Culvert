@@ -848,3 +848,107 @@ under QEMU resumes, and the regression wall is removed with it. Nothing else
 depends on the change: the produced binaries are byte-identical, `ci.yml`, the
 cache configuration and every release/publication gate are untouched. A revert
 also restores legacy-builder support.
+
+## 12. Stage 4 — E2E image dependency discipline and recipe parity (shipped)
+
+`test/e2e/maint-agent/Dockerfile.e2e` is the proxy image four workflows use to
+drive real installs, upgrades, backups and rollbacks: `install-lifecycle-e2e`
+(three jobs), `maint-agent-update-e2e`, `maint-agent-backup-upgrade-e2e` and
+`appliance-catalog-update-e2e`. It had drifted from production in two ways.
+
+### 1. It repaired the module graph it was supposed to test
+
+The build ran `go mod tidy` inside the image. A committed `go.mod`/`go.sum` that
+could not build was silently fixed in the layer, and the E2E went green on a
+module graph nobody committed. Reproduced locally against a real worktree:
+
+| Committed-graph defect | Old recipe (`go mod tidy`) | New recipe |
+|---|---|---|
+| `go.sum` missing the hash of a compiled module (`goccy/go-yaml`) | tidy restores it, build **passes** | build **fails**: `missing go.sum entry for module providing package github.com/goccy/go-yaml` |
+| `go.mod` missing a requirement | tidy restores it, build **passes** | build **fails**: `cannot find module providing package … import lookup disabled by -mod=readonly` |
+
+The image now builds only from the committed graph:
+
+* no `go mod tidy` (or any other module-graph mutator) at build time;
+* `go build -mod=readonly` — already Go's default without a vendor directory,
+  now explicit so a future `GOFLAGS` or vendor tree cannot change it silently;
+* `go.mod` and `go.sum` are proven unchanged across **both** the download and
+  the compile by `test/e2e/maint-agent/depfiles-guard.sh`, which prints a unified
+  diff and the fix (`go mod tidy` in the repo, commit both files) on failure.
+
+**The download check has to be in the SAME `RUN` as `go mod download`.** The
+next instruction, `COPY . .`, overwrites both files with the committed copies,
+so a download-induced change checked any later is already gone. A test
+(`TestE2EImage_LateCheckIsConcealedByCopy`) demonstrates exactly that, and the
+wall requires the ordering structurally. Tidiness itself stays enforced where it
+belongs, in the Fast Gate's `go mod tidy -diff`, which this stage does not touch.
+
+### 2. It had drifted from production's recipe
+
+It used `golang:1.26-alpine` and `alpine:3.22` against production's
+`golang:1.27-alpine` and `alpine:3.24`, and compiled without `-trimpath` and
+`-buildvcs=false`. The builder now uses production's image and production's
+compile: `$BUILDPLATFORM` with `GOOS/GOARCH` from in-stage `TARGETOS/TARGETARCH`
+(§11), `CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, `-ldflags="-s -w …"`,
+and the runtime uses production's alpine. It prints `go version` so every CI log
+records the compiler that built the image. The companion rollback image
+`test/e2e/catalog-update/Dockerfile.badhealth` moved to the same alpine.
+
+The root `go.mod` (`go 1.26.6`) and `cmd/culvert-maint/go.mod` (`go 1.25`) are
+unchanged; a 1.27 toolchain satisfies both. The host-side agent toolchain is
+unchanged too, including `scripts/install.sh`'s `CULVERT_GO_IMAGE` default of
+`golang:1.25` for building the agent from source — recorded, deliberately out
+of scope.
+
+### Intentional differences from production — kept, and pinned
+
+* **No GeoIP stage** (db-ip.com is often blocked on runners; irrelevant here).
+* **`BUILD_VARIANT`** reaches the binary (`-X main.version=e2e-<v>`),
+  `/app/VERSION` and a final `LABEL`, so v1 and v2 are genuinely different
+  images with different registry digests — the agent compares REAL digests.
+* **No `/app/deploy` bundle and no `maintbuilder` stage.** Without the bundled
+  agent, `scripts/install.sh` takes its source/release fallback, which the
+  installer-lifecycle job exists to exercise. Adding the bundle to make this
+  image "look like production" would silently stop testing it.
+
+### The wall: `e2e_image_recipe_test.go`
+
+Every parity expectation is **derived from the production Dockerfile at test
+time** — builder image, runtime image, builder platform, compile flags,
+non-symbol `-ldflags`, `CGO_ENABLED`/`GOOS`/`GOARCH` — so the test holds no
+third copy of the version list. A production bump that is not mirrored fails
+the build; a deliberate bump needs no test edit. It also checks the dependency
+discipline (no mutators, `-mod=readonly`, both guards in the same `RUN` as the
+step they guard, guard before `COPY . .`), reuses §11's in-scope-`TARGETARCH`
+checker, and pins the intentional differences. It derives 14 regressions from
+the real files — image anchors taken from production, never literals — and
+requires each to be rejected. It executes the REAL `depfiles-guard.sh` against
+real `go.mod`/`go.sum` mutations. Against the pre-change files it reports every
+problem this section lists.
+
+### Reproducibility: what is and is not pinned
+
+Matching tags do not make the image reproducible. Still mutable: the
+`golang:1.27-alpine` and `alpine:3.24` tags (each resolves to whatever digest
+is current), the runtime `apk upgrade`/`apk add` against the live Alpine
+repositories, and the module proxy (bounded by `go.sum`, which now cannot
+change during the build). CI logs record the digests and `go version` each run
+actually resolved. Pinning base images by digest is a production-wide decision
+and is not taken here.
+
+### Measurement
+
+Local, same machine, both recipes built as the workflows build them (plain
+`docker build`, v1 with a pruned cache, then v2): old cold 52.9s / warm 46.1s;
+new cold 53.4s / warm 38.7s. The compile step is 41.1s cold / 35.8s warm
+against the old tidy+build step's 43.1s / 43.2s. This stage is about
+correctness; it is roughly time-neutral. The sandbox blocks the Alpine package
+CDN, so both local recipes had their `apk` lines made non-fatal and used base
+images carrying the sandbox CA — that is NOT qualification. Qualification is
+the six E2E jobs running the unchanged recipe on GitHub runners (see the PR).
+
+### Rollback
+
+Revert the commit. The E2E image returns to the old base images, build-time
+`go mod tidy` and the previous flags; the four workflows are unchanged, so
+nothing else needs to move.
