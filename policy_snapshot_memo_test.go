@@ -75,6 +75,17 @@ func legacyEvaluationSnapshot(ps *PolicyStore) []*PolicyRule {
 
 var snapSink []*PolicyRule
 
+// snapSinkParallel is the keep-alive sink for the PARALLEL benchmark. It is
+// atomic because every RunParallel worker publishes into it, and a plain
+// package-level assignment from several workers is a data race that fails
+// `go test -race -bench` (Codex review). Keeping each worker's result in a
+// LOCAL for the duration of the loop is still what matters for the
+// measurement — a shared sink written every iteration turns false sharing into
+// the thing being measured, the trap recorded on internal/blocklist's hot-read
+// benchmark — so the local stays and only the one publish per worker is
+// synchronized.
+var snapSinkParallel atomic.Pointer[[]*PolicyRule]
+
 func BenchmarkPolicySnapshot_Legacy(b *testing.B) {
 	for _, n := range []int{10, 100, 1000, 10000} {
 		ps := buildPolicyStore(n)
@@ -102,10 +113,12 @@ func BenchmarkPolicySnapshot_Current(b *testing.B) {
 }
 
 // BenchmarkPolicySnapshot_CurrentParallel is the figure a gateway actually
-// pays: every core evaluating policy at once. Each worker keeps its own sink so
-// the benchmark measures the snapshot rather than false sharing on one shared
-// package variable — the trap recorded on internal/blocklist's hot-read
-// benchmark, where a shared sink flattened the result and hid the finding.
+// pays: every core evaluating policy at once. Each worker accumulates into its
+// own local and publishes once, so the benchmark measures the snapshot rather
+// than false sharing on one shared package variable — the trap recorded on
+// internal/blocklist's hot-read benchmark, where a shared sink flattened the
+// result and hid the finding. See snapSinkParallel for why that one publish is
+// atomic rather than a plain assignment.
 func BenchmarkPolicySnapshot_CurrentParallel(b *testing.B) {
 	for _, n := range []int{100, 1000} {
 		ps := buildPolicyStore(n)
@@ -117,7 +130,7 @@ func BenchmarkPolicySnapshot_CurrentParallel(b *testing.B) {
 				for pb.Next() {
 					local = ps.evaluationSnapshot()
 				}
-				snapSink = local
+				snapSinkParallel.Store(&local)
 			})
 		})
 	}
