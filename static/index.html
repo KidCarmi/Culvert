@@ -5194,13 +5194,30 @@ Firefox (all platforms):
           </div>
 
           <div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
               <span style="font-weight:600">Backups</span>
               <button class="btn ghost sm" data-click="loadBackups" title="Re-check the backup archive directory">
                 <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
               </button>
+              <button class="btn sm" data-click="backupNowOpen" data-min-role="admin" title="Create a backup now, without SSH">
+                <svg class="ico" aria-hidden="true"><use href="#i-save"/></svg> Backup Now
+              </button>
             </div>
             <p class="hint">Archive directory scanned by the maintenance agent - the same listing <code>--list-backups</code> produces, without SSH.</p>
+            <div id="support-backup-trigger" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface)" data-min-role="admin">
+              <label style="font-size:.82rem;display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="backup-now-encrypt" data-change="backupNowEncryptToggle"> Encrypt this backup
+              </label>
+              <label id="backup-now-passlabel" style="font-size:.78rem;color:var(--muted);display:none;margin-top:6px">
+                Passphrase env var (must already be set on the maintenance-agent host)
+                <input id="backup-now-passvar" placeholder="CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+              </label>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button class="btn primary sm" id="backup-now-submit" data-click="backupNowSubmit">Start Backup</button>
+                <button class="btn ghost sm" data-click="backupNowCancel">Cancel</button>
+              </div>
+            </div>
+            <div id="support-backup-progress" style="display:none;margin:8px 0" role="status" aria-live="polite"></div>
             <div id="support-backups" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
@@ -5822,6 +5839,9 @@ document.addEventListener('click', e => {
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
     case 'loadBackups':            loadBackups(); break;
+    case 'backupNowOpen':          backupNowOpen(); break;
+    case 'backupNowCancel':        backupNowCancel(); break;
+    case 'backupNowSubmit':        backupNowSubmit(); break;
     case 'loadMaintAgentStatus':    loadMaintAgentStatus(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
@@ -5898,6 +5918,7 @@ document.addEventListener('change', e => {
     case 'releaseDispSelectRelease': if (el.value) document.getElementById('rel-disp-channel').value = ''; break;
     case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
+    case 'backupNowEncryptToggle':   document.getElementById('backup-now-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
     case 'toggleDecRedaction': toggleDecRedaction(); break;
@@ -15802,6 +15823,91 @@ function renderBackups(data) {
       '<td>' + (b.modified_at ? escHtml(timeAgo(new Date(b.modified_at))) : '-') + '</td>' +
       '<td>' + (b.encrypted ? 'yes' : 'no') + '</td>' +
     '</tr>').join('') + '</tbody></table></div>';
+}
+
+// On-demand backup trigger (Enterprise Product Experience finding): the
+// maintenance agent already implements POST /v1/backups end to end
+// (validation, idempotency, exclusive maintenance-lock serialization against
+// a concurrent backup/restore/upgrade); this is the GUI's trigger + poll over
+// the CP pass-through in backups_api.go. Previously an on-demand backup - a
+// routine, no-downtime operation per D1.5 - needed
+// `docker compose --profile cli run --rm cli --backup ...` over SSH.
+let backupNowPollTimer = null;
+
+function backupNowOpen() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  document.getElementById('backup-now-encrypt').checked = false;
+  document.getElementById('backup-now-passvar').value = '';
+  document.getElementById('backup-now-passlabel').style.display = 'none';
+  document.getElementById('support-backup-trigger').style.display = '';
+}
+function backupNowCancel() {
+  document.getElementById('support-backup-trigger').style.display = 'none';
+}
+
+async function backupNowSubmit() {
+  const encrypt = document.getElementById('backup-now-encrypt').checked;
+  const passphraseEnvVar = document.getElementById('backup-now-passvar').value.trim();
+  if (encrypt && !passphraseEnvVar) {
+    toast('Encrypting requires a passphrase env var name (or uncheck Encrypt)', 'error');
+    return;
+  }
+  const body = { encrypt };
+  if (encrypt) body.passphraseEnvVar = passphraseEnvVar;
+  const btn = document.getElementById('backup-now-submit');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/backups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { toast('Backup failed to start: ' + (await r.text()), 'error'); return; }
+    const payload = await r.json();
+    backupNowCancel();
+    toast('Backup started (' + payload.filename + ')', 'success');
+    backupNowPollStart(payload.opId, payload.filename);
+  } catch (err) {
+    toast('Backup failed to start: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// backupNowPollStart polls GET /api/backups/operations/{id} every 3s until
+// the op reaches a terminal state (or 10 minutes elapse), then refreshes the
+// archive listing so the new backup shows up without a manual Refresh click.
+function backupNowPollStart(opId, filename) {
+  const el = document.getElementById('support-backup-progress');
+  if (!opId || !el) return;
+  if (backupNowPollTimer) clearTimeout(backupNowPollTimer);
+  let elapsed = 0;
+  const poll = async () => {
+    el.style.display = '';
+    let op;
+    try {
+      op = await api('/api/backups/operations/' + encodeURIComponent(opId));
+    } catch (err) {
+      el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (status check failed: ' + escHtml(err.message) + ')</p>';
+      backupNowPollTimer = setTimeout(poll, 5000);
+      return;
+    }
+    if (op.state === 'succeeded') {
+      el.innerHTML = '<p class="hint" style="color:var(--green)">Backup ' + escHtml(filename || '') + ' completed.</p>';
+      loadBackups();
+      return;
+    }
+    if (op.state === 'failed' || op.state === 'cancelled') {
+      el.innerHTML = '<p class="hint" style="color:var(--red)">Backup ' + escHtml(filename || '') + ' ' + escHtml(op.state) +
+        (op.failure_reason ? ': ' + escHtml(op.failure_reason) : '') + '.</p>';
+      loadBackups();
+      return;
+    }
+    el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (' + escHtml(op.state || 'running') + ')</p>';
+    elapsed += 3;
+    if (elapsed > 600) {
+      el.innerHTML += '<p class="hint">Still running - check back with Refresh.</p>';
+      return;
+    }
+    backupNowPollTimer = setTimeout(poll, 3000);
+  };
+  poll();
 }
 
 // Maintenance-agent health visibility: read-only pass-through of the

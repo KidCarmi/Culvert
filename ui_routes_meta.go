@@ -806,10 +806,22 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "re-fetch the catalog from the configured origin + reload; verification unchanged; audited via auditEvent"}}},
 
 	// Backup archive visibility (read-only pass-through of the CP-local
-	// maintenance agent's GET /v1/backups; no new agent capability).
+	// maintenance agent's GET /v1/backups; no new agent capability) plus
+	// on-demand backup creation (pass-through of the agent's existing POST
+	// /v1/backups — no new agent capability).
 	{Path: "/api/backups", Handler: "apiBackups", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer,
+				Note: "read-only backup archive listing via the CP-local maintenance agent"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "trigger an on-demand backup via the CP-local maintenance agent's existing POST /v1/backups"},
+		}},
+
+	// Poll a triggered backup (pass-through of the agent's existing GET
+	// /v1/operations/{id}; no new agent capability).
+	{Path: "/api/backups/operations/", Handler: "apiBackupOperationStatus", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
-			Note: "read-only backup archive listing via the CP-local maintenance agent"}}},
+			Note: "poll a triggered backup op via the CP-local maintenance agent's existing GET /v1/operations/{id}"}}},
 
 	// Maintenance-agent health visibility (read-only pass-through of the
 	// CP-local maintenance agent's GET /v1/status; no new agent capability).

@@ -455,6 +455,116 @@
         ],
         "type": "object"
       },
+      "BackupCreateBody": {
+        "additionalProperties": false,
+        "description": "Optional; an empty body creates an unencrypted backup.",
+        "properties": {
+          "encrypt": {
+            "description": "Encrypt the archive with AES-256-GCM. Requires passphraseEnvVar.",
+            "type": "boolean"
+          },
+          "passphraseEnvVar": {
+            "description": "Name of an env var the maintenance agent is allowed to read (its EnvAllow); never the secret value itself.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BackupCreateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "deduped": {
+            "description": "True when an identical in-flight/recent op was reused instead of starting a new one.",
+            "type": "boolean"
+          },
+          "filename": {
+            "description": "Server-generated archive filename.",
+            "type": "string"
+          },
+          "opId": {
+            "description": "Poll via GET /api/backups/operations/{id}.",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "triggered": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "triggered"
+        ],
+        "type": "object"
+      },
+      "BackupOperationStatus": {
+        "additionalProperties": true,
+        "description": "The maintenance agent's operation record (cmd/culvert-maint/internal/ops.Op), passed through verbatim. `params` only ever carries the backup filename/encrypt/passphrase_ref (an env var name, never a secret).",
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "failure_reason": {
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "op_id": {
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "progress": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op_id",
+          "kind",
+          "state",
+          "progress"
+        ],
+        "type": "object"
+      },
       "BackupsStatus": {
         "additionalProperties": true,
         "description": "Backup archive listing read from the CP-local maintenance agent. `available:false` means the agent could not be reached or is not configured; `backups` is newest-first when available.",
@@ -7742,7 +7852,134 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Triggers a new backup via the CP-local maintenance agent's existing POST /v1/backups (input validation, idempotency, and exclusive maintenance-lock serialization against a concurrent backup/restore/ upgrade all happen agent-side; this is a thin pass-through — no new agent capability). Returns an op id; poll GET /api/backups/operations/{id} for completion. Previously the only way to create a backup was `docker compose --profile cli run --rm cli --backup ...` over SSH, even though backup creation needs no downtime.",
+        "operationId": "createBackup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCreateBody"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupCreateResult"
+                }
+              }
+            },
+            "description": "Backup triggered."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "502": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent unreachable or rejected the request. Body is plain text."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent not configured. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Trigger an on-demand backup",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "backup.trigger",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
+    },
+    "/api/backups/operations/{id}": {
+      "get": {
+        "description": "Polls a backup operation (as created by POST /api/backups) to a terminal state, sourced from the CP-local maintenance agent's existing GET /v1/operations/{id}. The op record's params only ever carry the backup filename, whether it is encrypted, and the passphrase env var NAME (never a secret value).",
+        "operationId": "getBackupOperationStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupOperationStatus"
+                }
+              }
+            },
+            "description": "Operation status."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Poll a triggered backup operation",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "/api/blocklist": {
       "delete": {

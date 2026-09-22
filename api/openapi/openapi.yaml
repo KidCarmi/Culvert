@@ -1177,6 +1177,44 @@ components:
         `available:false` means the agent could not be reached or is not
         configured; `backups` is newest-first when available.
       additionalProperties: true
+    BackupCreateBody:
+      type: object
+      description: >-
+        Optional; an empty body creates an unencrypted backup.
+      additionalProperties: false
+      properties:
+        encrypt: { type: boolean, description: 'Encrypt the archive with AES-256-GCM. Requires passphraseEnvVar.' }
+        passphraseEnvVar: { type: string, description: 'Name of an env var the maintenance agent is allowed to read (its EnvAllow); never the secret value itself.' }
+    BackupCreateResult:
+      type: object
+      required: [triggered]
+      additionalProperties: false
+      properties:
+        triggered: { type: boolean }
+        filename: { type: string, description: 'Server-generated archive filename.' }
+        opId: { type: string, description: 'Poll via GET /api/backups/operations/{id}.' }
+        state: { type: string, enum: [pending, running, succeeded, failed, cancelled] }
+        deduped: { type: boolean, description: 'True when an identical in-flight/recent op was reused instead of starting a new one.' }
+    BackupOperationStatus:
+      type: object
+      description: >-
+        The maintenance agent's operation record (cmd/culvert-maint/internal/ops.Op),
+        passed through verbatim. `params` only ever carries the backup
+        filename/encrypt/passphrase_ref (an env var name, never a secret).
+      required: [op_id, kind, state, progress]
+      additionalProperties: true
+      properties:
+        op_id: { type: string }
+        kind: { type: string }
+        state: { type: string, enum: [pending, running, succeeded, failed, cancelled] }
+        actor: { type: string }
+        idempotency_key: { type: string }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        failure_reason: { type: string }
+        params: { type: object, additionalProperties: true }
+        progress: { type: array, items: { type: object, additionalProperties: true } }
+        result: { type: object, additionalProperties: true }
     UpstreamEntry:
       type: object
       description: >-
@@ -6641,6 +6679,87 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/BackupsStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createBackup
+      tags: [support]
+      summary: Trigger an on-demand backup
+      description: >-
+        Triggers a new backup via the CP-local maintenance agent's existing
+        POST /v1/backups (input validation, idempotency, and exclusive
+        maintenance-lock serialization against a concurrent backup/restore/
+        upgrade all happen agent-side; this is a thin pass-through — no new
+        agent capability). Returns an op id; poll
+        GET /api/backups/operations/{id} for completion. Previously the only
+        way to create a backup was `docker compose --profile cli run --rm cli
+        --backup ...` over SSH, even though backup creation needs no
+        downtime.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: backup.trigger
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BackupCreateBody' }
+      responses:
+        '200':
+          description: Backup triggered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupCreateResult' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '502':
+          description: Maintenance agent unreachable or rejected the request. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+        '503':
+          description: Maintenance agent not configured. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+
+  /api/backups/operations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getBackupOperationStatus
+      tags: [support]
+      summary: Poll a triggered backup operation
+      description: >-
+        Polls a backup operation (as created by POST /api/backups) to a
+        terminal state, sourced from the CP-local maintenance agent's
+        existing GET /v1/operations/{id}. The op record's params only ever
+        carry the backup filename, whether it is encrypted, and the
+        passphrase env var NAME (never a secret value).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Operation status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupOperationStatus' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
 
   /api/support/status:
     get:
