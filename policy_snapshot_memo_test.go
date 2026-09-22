@@ -197,6 +197,7 @@ func TestBenchGate_SnapshotControl_StillReturnsTheWholeRulebase(t *testing.T) {
 // one — including the direct-install shape that the compatibility path exists
 // for, which no ordinary mutator produces.
 func TestEvaluationSnapshot_DifferentialAgainstLegacy(t *testing.T) {
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
 	rng := rand.New(rand.NewSource(20260922))
 	ps := &PolicyStore{}
 	next := 1
