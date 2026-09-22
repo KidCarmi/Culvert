@@ -172,8 +172,11 @@ func TestQAGateScheduling_SubstantiveGraphHasOnlyJustifiedEdges(t *testing.T) {
 	}
 
 	// Control: only the aggregate and the justified consumers may join. A wall
-	// that passed because every job had been deleted would fail here.
-	wantJoiners := map[string]bool{qaGateAggregateJob: true}
+	// that passed because every job had been deleted would fail here. The
+	// opt-in stage-5A pilot's comparison job joins qa-logic for its DATA (the
+	// unsharded reference log and profile); it is pinned — dispatch-only,
+	// outside the aggregate — by qa_root_shard_pilot_test.go.
+	wantJoiners := map[string]bool{qaGateAggregateJob: true, qaPilotCompareJob: true}
 	for consumer := range qaAllowedJobEdges {
 		wantJoiners[consumer] = true
 	}

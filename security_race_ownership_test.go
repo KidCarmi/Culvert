@@ -123,6 +123,14 @@ func TestSecurityRace_OwnershipMatrix(t *testing.T) {
 func evalRaceOwnership(t *testing.T, expr, event, ref string) bool {
 	t.Helper()
 	work := expr
+	// The stage-5A pilot's opt-in dispatch input is a boolean that defaults to
+	// false and does not exist at all on push/pull_request/tag events, so it
+	// evaluates to false for every event this matrix models. Only this ONE
+	// input is understood; any other `inputs.*` still fails loudly below.
+	work = strings.ReplaceAll(work, "inputs.root_shard_pilot", "false")
+	// always() only widens WHEN a job runs relative to its needs' results; for
+	// "does this event reach the job at all" it is true.
+	work = strings.ReplaceAll(work, "always()", "true")
 	work = strings.ReplaceAll(work, "github.event_name", "\x00EVENT\x00")
 	work = strings.ReplaceAll(work, "github.ref", "\x00REF\x00")
 

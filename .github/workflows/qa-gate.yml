@@ -74,6 +74,15 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      root_shard_pilot:
+        # CI-REDESIGN stage 5A. Default false: an ordinary dispatch runs exactly
+        # the graph it always did. true ADDS the root-suite sharding pilot and
+        # its comparison with this run's own unsharded qa-logic — evidence for
+        # stage 5B, never a gate (the aggregate below does not wait for it).
+        description: "Also run the root-suite sharding pilot (evidence only, not a gate)"
+        type: boolean
+        default: false
 
 concurrency:
   group: qa-gate-${{ github.ref }}
@@ -657,6 +666,118 @@ jobs:
 
       - name: Allocation-regression gate (policy + scrub hot paths)
         run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v .
+
+  # ─── Pilot: root-suite sharding (CI-REDESIGN stage 5A) ─────────────────────
+  # OPT-IN and EVIDENCE-ONLY. Both jobs run only on a manual dispatch with
+  # `root_shard_pilot: true`; on every push, pull request and default dispatch
+  # they are skipped, and the `✅ QA Gate — APPROVED` aggregate does not list
+  # them, so pilot success can neither approve nor block anything. Artifacts
+  # carry the `qa-root-shard-pilot-` prefix so no existing consumer can pick
+  # one up by name. qa_gate_scheduling_test.go pins all of that.
+  qa-root-shard-pilot:
+    name: "Pilot · root-suite shards"
+    if: github.event_name == 'workflow_dispatch' && inputs.root_shard_pilot
+    uses: ./.github/workflows/qa-root-shard-pilot.yml
+    with:
+      shards: 4
+
+  qa-root-shard-pilot-compare:
+    name: "Pilot · compare with unsharded qa-logic"
+    # qa-logic IS the unsharded reference: the same commit, toolchain, runner
+    # image, TEST_SEED, -race, -count, -timeout and coverage scope, executed
+    # once in this very run — so no second identical full-suite run is added.
+    # The edge carries DATA (its log and profile), like qa-coverage's.
+    needs: [qa-logic, qa-root-shard-pilot]
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.root_shard_pilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Download the unsharded reference (qa-logic's log and profile)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qa-logic-reports
+          path: reference
+
+      - name: Download the unsharded reference profile
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qa-coverage
+          path: reference
+
+      - name: Download the pilot's inventory
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qa-root-shard-pilot-build
+          path: pilot-build
+
+      - name: Download the pilot's verdict
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qa-root-shard-pilot-verdict
+          path: pilot-verdict
+
+      - name: Compare inventory, results and coverage with the reference
+        run: |
+          set -o pipefail
+          mkdir -p pilot-compare
+          pkg=$(jq -r .package pilot-build/manifest.json)
+          go run ./cmd/rootshard compare \
+            -ref-log reference/logic.log -ref-profile reference/coverage.out \
+            -pilot-results pilot-verdict/results.json -pilot-profile pilot-verdict/merged.cover.out \
+            -list pilot-build/list.txt -pkg "$pkg" \
+            -out pilot-compare/comparison.json -baseline-out pilot-compare/reference-timings.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage floors, reference vs pilot (same unchanged script)
+        if: always()
+        run: |
+          # +e: both verdicts are recorded before either decides the step.
+          set +e -u
+          .github/scripts/coverage-floor.sh reference/coverage.out > pilot-compare/floors-reference.txt; ref=$?
+          .github/scripts/coverage-floor.sh pilot-verdict/merged.cover.out > pilot-compare/floors-pilot.txt; pilot=$?
+          echo "coverage-floor.sh exit: reference=$ref pilot=$pilot"
+          diff -u pilot-compare/floors-reference.txt pilot-compare/floors-pilot.txt | tee pilot-compare/floors.diff || true
+          [ "$ref" = "$pilot" ] || { echo "::error::the floors verdict differs between the reference and the pilot"; exit 1; }
+
+      - name: Refreshed timing file from this reference (candidate for .github/qa-root-shard-timings.json)
+        if: always()
+        run: |
+          go run ./cmd/rootshard timings -log reference/logic.log -pkg "$(jq -r .package pilot-build/manifest.json)" \
+            -source "qa-gate run ${{ github.run_id }} @ ${{ github.sha }}" -out pilot-compare/qa-root-shard-timings.json
+
+      - name: Both sides must have succeeded
+        if: always()
+        run: |
+          set -eu
+          fail=0
+          for pair in "qa-logic=${{ needs.qa-logic.result }}" "qa-root-shard-pilot=${{ needs.qa-root-shard-pilot.result }}"; do
+            echo "$pair"
+            [ "${pair#*=}" = success ] || { echo "::error::${pair%%=*} did not succeed (${pair#*=})"; fail=1; }
+          done
+          exit $fail
+
+      - name: Evidence, compact (last in the log, readable without the artifact)
+        # One JSON document per line at the END of the job log, so the evidence
+        # survives log-tail retrieval where artifact downloads are unavailable.
+        if: always()
+        run: |
+          for f in pilot-verdict/verdict.json pilot-compare/comparison.json \
+                   pilot-compare/reference-timings.json pilot-compare/qa-root-shard-timings.json; do
+            [ -s "$f" ] && echo "EVIDENCE $f $(jq -c . "$f")" || echo "EVIDENCE $f MISSING"
+          done
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-root-shard-pilot-compare
+          path: pilot-compare/
+          retention-days: 7
+          if-no-files-found: warn
 
   # ─── Gate summary ───────────────────────────────────────────────────────────
   qa-gate-approved:
