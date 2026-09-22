@@ -925,6 +925,18 @@ func initCDR(s *startupState) {
 	if msg := validCDRServerFingerprint(*s.cdrFingerprintFlag); msg != "" {
 		log.Fatalf("Invalid -cdr-server-fingerprint %q: %s", *s.cdrFingerprintFlag, msg)
 	}
+	// Same mirroring for -cdr-timeout-sec: config.yaml's cdr.timeout_sec is
+	// range-validated at load time (validateCDR, >= 30 — Sluice's own cap),
+	// but the CLI flag reaches the exact same CDRConfig.TimeoutSec field with
+	// no equivalent gate. An invalid (too-low) value here doesn't fail
+	// startup at all — cdr_pool.go/cdr_proxy.go use any positive value
+	// verbatim as the per-file gRPC deadline, so a deadline too short for
+	// Sluice to ever finish makes every CDR call time out. With the default
+	// fail-open FailMode, that silently disables CDR content sanitization
+	// for every download from startup, with nothing pointing at the cause.
+	if msg := validCDRTimeoutSec(*s.cdrTimeoutFlag); msg != "" {
+		log.Fatalf("Invalid -cdr-timeout-sec %d: %s", *s.cdrTimeoutFlag, msg)
+	}
 	loadCDR(
 		resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
 			Enabled:     *s.cdrEnabledFlag,

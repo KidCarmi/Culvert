@@ -451,6 +451,19 @@ func validCDRServerFingerprint(fp string) string {
 	return ""
 }
 
+// validCDRTimeoutSec validates the "cdr.timeout_sec" / -cdr-timeout-sec value
+// shared by the YAML (validateCDR) and CLI (initCDR, main.go) paths: 0
+// (unset — defaults to Sluice's own cap) is valid; otherwise it must be >= 30.
+// Returns "" when valid, else a message describing why (without the
+// "cdr.timeout_sec:" / "-cdr-timeout-sec" field prefix, which each caller
+// supplies itself).
+func validCDRTimeoutSec(t int) string {
+	if t != 0 && t < 30 {
+		return fmt.Sprintf("must be >= 30 (Sluice's own cap), got %d", t)
+	}
+	return ""
+}
+
 func loadFileConfig(path string) (*FileConfig, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -644,8 +657,8 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 	if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
 		errs = append(errs, fmt.Sprintf("cdr.default_mode: must be ENFORCE | REPORT_ONLY | BYPASS_WITH_REPORT, got %q", m))
 	}
-	if t := fc.CDR.TimeoutSec; t != 0 && t < 30 {
-		errs = append(errs, fmt.Sprintf("cdr.timeout_sec: must be >= 30 (Sluice's own cap), got %d", t))
+	if msg := validCDRTimeoutSec(fc.CDR.TimeoutSec); msg != "" {
+		errs = append(errs, "cdr.timeout_sec: "+msg)
 	}
 	if s := fc.CDR.MaxFileSizeMB; s < 0 {
 		errs = append(errs, fmt.Sprintf("cdr.max_file_size_mb: must be >= 0, got %d", s))

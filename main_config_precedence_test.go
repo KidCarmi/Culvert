@@ -393,3 +393,53 @@ func TestValidCDRServerFingerprint(t *testing.T) {
 		})
 	}
 }
+
+// ── CDR timeout_sec CLI/YAML validation parity (validCDRTimeoutSec) ────────
+//
+// config.yaml's cdr.timeout_sec is range-validated by FileConfig.validateCDR
+// at load time ("must be >= 30 (Sluice's own cap)") — but the CLI flag
+// -cdr-timeout-sec reaches the exact same CDRConfig.TimeoutSec field (merged
+// in cdr_startup_config.go's resolveCDRStartupConfig, CLI wins over
+// config.yaml) with no equivalent gate, the same CLI/YAML parity gap
+// TestValidCDRFailMode and TestValidCDRServerFingerprint close for their own
+// fields above.
+//
+// A too-low CLI value (e.g. a fat-fingered "-cdr-timeout-sec 3", or a value
+// copied from a different per-request timeout the operator conflated with
+// this one) is not rejected at startup at all: cdr_pool.go/cdr_proxy.go use
+// any positive cfg.TimeoutSec verbatim as the per-file gRPC deadline against
+// Sluice. Because cdr.fail_mode defaults to fail-OPEN, a deadline too short
+// for Sluice to ever finish sanitizing a real file makes every CDR call time
+// out and silently disables content-disarm-and-reconstruction for every
+// download from startup, with no error naming the bad flag — the exact
+// failure mode validateCDR's own comment says the YAML-side check exists to
+// prevent, just reached from the other input path. The same too-low value in
+// config.yaml already refuses to start.
+//
+// validCDRTimeoutSec is the shared predicate (mirroring validCDRFailMode /
+// validCDRServerFingerprint): used by validateCDR (config.go) for the YAML
+// path and by initCDR (main.go) for the CLI path, so both channels reject
+// the same invalid values instead of only one of them.
+func TestValidCDRTimeoutSec(t *testing.T) {
+	tests := []struct {
+		name string
+		sec  int
+		want bool // true = accepted (validCDRTimeoutSec returns "")
+	}{
+		{"unset (0) — defaults to Sluice's own cap", 0, true},
+		{"exactly the floor", 30, true},
+		{"comfortably above the floor", 35, true},
+		{"one below the floor", 29, false},
+		{"a fat-fingered single-digit value", 3, false},
+		{"negative", -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validCDRTimeoutSec(tt.sec) == ""
+			if got != tt.want {
+				t.Errorf("validCDRTimeoutSec(%d) accepted=%v (msg=%q), want accepted=%v",
+					tt.sec, got, validCDRTimeoutSec(tt.sec), tt.want)
+			}
+		})
+	}
+}
