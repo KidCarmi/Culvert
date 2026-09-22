@@ -314,3 +314,44 @@ func TestSECBootstrapHost1_MalformedStoredTokenIsNotAnEmpty200(t *testing.T) {
 		t.Fatalf("well-formed token: status = %d, want 200", status)
 	}
 }
+
+// TestSECBootstrapHost1_ComposeRefusesAnUnpinnedEnrollmentURL pins the second
+// hole SEC-BOOTSTRAP-HOST-1 closed, which until now was only implied by
+// SafeEnrollURL's grammar: with no cluster CA there is no fingerprint, so the
+// enrollment URL would carry an empty `ca-fp=sha256:` and a fresh DP node would
+// trust whatever answers at that address.
+//
+// This is also the behaviour that exposed a hidden order dependency in
+// TestUIAuthMiddleware_ClusterBootstrapIsTokenAuthed, which had been relying on
+// whatever cluster CA an earlier test left in the global (caught by the
+// determinism gate at seed 1790033347947695463). Pinning it here means a revert
+// to serving the unpinned document fails a gate that names the reason, instead
+// of resurfacing as someone else's shuffle-order flake.
+func TestSECBootstrapHost1_ComposeRefusesAnUnpinnedEnrollmentURL(t *testing.T) {
+	tok, get := bootstrapTestServer(t)
+
+	// CONTROL first: with the CA the helper installed, compose serves.
+	if status, _ := get("/api/cluster/bootstrap/"+tok+"/compose", "cp.example.com:9090"); status != http.StatusOK {
+		t.Fatalf("with a cluster CA: status = %d, want 200", status)
+	}
+
+	// Now a Control Plane with no cluster CA: no fingerprint to pin.
+	globalClusterCA = &clusterCA{} // restored by bootstrapTestServer's cleanup
+
+	status, body := get("/api/cluster/bootstrap/"+tok+"/compose", "cp.example.com:9090")
+	if status == http.StatusOK {
+		t.Fatalf("served a compose document with no CA fingerprint to pin; body:\n%s", body)
+	}
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", status)
+	}
+	if strings.Contains(body, "services:") || strings.Contains(body, "ENROLL_URL") {
+		t.Fatalf("refusal body carries compose bytes: %q", body)
+	}
+
+	// The script path does not depend on the CA and must keep working — the
+	// cheapest wrong fix is to refuse both.
+	if status, _ := get("/api/cluster/bootstrap/"+tok, "cp.example.com:9090"); status != http.StatusOK {
+		t.Fatalf("script path: status = %d, want 200 — it does not need a cluster CA", status)
+	}
+}
