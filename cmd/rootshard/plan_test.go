@@ -133,15 +133,15 @@ func TestBuildPlan_BalancesByMeasuredDuration(t *testing.T) {
 	}
 }
 
-func TestBuildPlan_NewEntriesGetTheMedianFallback(t *testing.T) {
+func TestBuildPlan_NewEntriesGetTheMeanFallback(t *testing.T) {
 	inv := mustList(t, "TestOld1", "TestOld2", "TestOld3", "TestNew", "FuzzNew")
-	tm := Timings{Tests: map[string]float64{"TestOld1": 1, "TestOld2": 5, "TestOld3": 100, "TestGone": 7}}
+	tm := Timings{Tests: map[string]float64{"TestOld1": 1, "TestOld2": 5, "TestOld3": 100, "TestGone": 6}}
 	p, err := buildPlan("m", inv, tm, 2, maxRegexBytesDefault)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.FallbackSeconds != 6 || p.FallbackEntries != 2 {
-		t.Fatalf("fallback = %.1fs for %d entries, want the median 6s for 2", p.FallbackSeconds, p.FallbackEntries)
+	if p.FallbackSeconds != 28 || p.FallbackEntries != 2 {
+		t.Fatalf("fallback = %.3fs for %d entries, want the mean 28s for 2", p.FallbackSeconds, p.FallbackEntries)
 	}
 	if err := verifyPlan(p, inv); err != nil {
 		t.Fatalf("a new entry did not enter the partition: %v", err)
@@ -149,6 +149,36 @@ func TestBuildPlan_NewEntriesGetTheMedianFallback(t *testing.T) {
 	none, err := buildPlan("m", inv, Timings{}, 2, maxRegexBytesDefault)
 	if err != nil || none.FallbackSeconds != 1 || none.FallbackEntries != 5 {
 		t.Fatalf("no timings: %v, fallback %.1f for %d", err, none.FallbackSeconds, none.FallbackEntries)
+	}
+}
+
+// The real shape: a few slow entries and thousands that report 0.00s. Without
+// the floor every zero entry piles onto one shard; with it they spread.
+func TestBuildPlan_ZeroDurationEntriesSpread(t *testing.T) {
+	var lines []string
+	tm := Timings{Tests: map[string]float64{}}
+	for i := 0; i < 2000; i++ {
+		n := fmt.Sprintf("TestZero%04d", i)
+		lines = append(lines, n)
+		tm.Tests[n] = 0
+	}
+	for i := 0; i < 4; i++ {
+		n := fmt.Sprintf("TestSlow%d", i)
+		lines = append(lines, n)
+		tm.Tests[n] = 10
+	}
+	inv := mustList(t, lines...)
+	p, err := buildPlan("m", inv, tm, 4, maxRegexBytesDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range p.Shards {
+		if len(s.Names) < 400 || len(s.Names) > 600 {
+			t.Fatalf("shard %d holds %d of 2004 entries — zero-duration entries piled up", s.Index, len(s.Names))
+		}
+	}
+	if fallbackEstimate(tm) <= 0 {
+		t.Fatal("an all-but-zero timing file must still give new entries a positive estimate")
 	}
 }
 

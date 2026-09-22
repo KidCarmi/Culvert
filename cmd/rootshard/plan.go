@@ -140,26 +140,32 @@ type Chunk struct {
 	Names []string `json:"names"`
 }
 
+// minEstimateSeconds floors every estimate at the resolution of the timing
+// source: `go test -v` prints durations to 10ms, so most root tests report
+// 0.00s. A zero weight makes every such entry tie onto whichever shard is
+// currently lightest — measured on the real inventory, one shard received
+// 5,053 of 6,319 entries — although together they cost real seconds and each
+// extra chunk repeats TestMain. With a floor they spread across shards.
+const minEstimateSeconds = 0.005
+
 // fallbackEstimate is the estimate for an entry with no historical timing: the
-// MEDIAN of the measured entries (robust to the few very slow tests that
-// dominate the mean), or 1s when nothing was measured at all. Deterministic for
-// a given timing file.
+// MEAN of the measured entries (floored), i.e. the typical cost of one entry.
+// Not the median: with most entries reporting 0.00s the median is zero, which
+// would place every new test as if it cost nothing. 1s when nothing was
+// measured at all. Deterministic for a given timing file.
 func fallbackEstimate(t Timings) float64 {
-	vals := make([]float64, 0, len(t.Tests))
+	var sum float64
+	n := 0
 	for _, v := range t.Tests {
 		if v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
-			vals = append(vals, v)
+			sum += math.Max(v, minEstimateSeconds)
+			n++
 		}
 	}
-	if len(vals) == 0 {
+	if n == 0 {
 		return 1
 	}
-	sort.Float64s(vals)
-	m := vals[len(vals)/2]
-	if len(vals)%2 == 0 {
-		m = (vals[len(vals)/2-1] + vals[len(vals)/2]) / 2
-	}
-	return m
+	return math.Round(sum/float64(n)*1000) / 1000
 }
 
 // buildPlan partitions inv into n shards by longest-processing-time-first:
@@ -219,7 +225,7 @@ func estimates(inv Inventory, t Timings, fb float64) []estimate {
 			ests[i] = estimate{e.Name, fb, true}
 			continue
 		}
-		ests[i] = estimate{e.Name, sec, false}
+		ests[i] = estimate{e.Name, math.Max(sec, minEstimateSeconds), false}
 	}
 	sort.Slice(ests, func(i, j int) bool {
 		if ests[i].sec != ests[j].sec {
