@@ -1407,7 +1407,15 @@ func (c *Config) LoadUIUsersFile() error {
 func (c *Config) SaveUIUsersFile() error {
 	c.saveUIUsersMu.Lock()
 	defer c.saveUIUsersMu.Unlock()
+	return c.saveUIUsersLocked()
+}
 
+// saveUIUsersLocked is SaveUIUsersFile's body with saveUIUsersMu already held.
+// Split out for mutateRosterDurably, which must hold that mutex across the
+// whole snapshot → mutate → persist → rollback sequence: a concurrent save
+// landing between this call and a rollback would persist state the rollback is
+// about to undo.
+func (c *Config) saveUIUsersLocked() error {
 	c.mu.RLock()
 	path := c.uiUsersFile
 	// Canonicalize for serialization: an unset in-memory value persists as the
@@ -1446,6 +1454,112 @@ func (c *Config) SaveUIUsersFile() error {
 	// goroutines, and a shared temp name lets two writers interleave into
 	// the same file before one renames the torn result over the roster.
 	return fileutil.AtomicWrite(path, data, 0o600)
+}
+
+// rosterSnapshot is a deep copy of every piece of state SaveUIUsersFile
+// serialises. It exists so a mutation whose durable write fails can be undone
+// exactly, without each caller having to write an inverse operation — undoing
+// a DeleteUIUser, for instance, means restoring the account's password hash,
+// role, TOTP secret, backup codes AND replay counter, which no caller has in
+// hand by the time the write fails.
+type rosterSnapshot struct {
+	users   map[string]*uiAdminUser
+	outcome AuthOutcome
+}
+
+// snapshotRoster deep-copies the roster. Takes c.mu itself, so the caller must
+// NOT hold it; saveUIUsersMu is expected to be held by mutateRosterDurably.
+func (c *Config) snapshotRoster() rosterSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	snap := rosterSnapshot{outcome: c.defaultAuthOutcome}
+	if c.uiUsers != nil {
+		snap.users = make(map[string]*uiAdminUser, len(c.uiUsers))
+		for k, v := range c.uiUsers {
+			cp := *v
+			cp.passHash = append([]byte(nil), v.passHash...)
+			cp.backupCodes = append([]string(nil), v.backupCodes...)
+			snap.users[k] = &cp
+		}
+	}
+	return snap
+}
+
+// restoreRoster puts a snapshot back and invalidates every cached auth
+// decision derived from the state being rolled back. Takes c.mu itself, so the
+// caller must NOT hold it.
+func (c *Config) restoreRoster(snap rosterSnapshot) {
+	c.mu.Lock()
+	c.uiUsers = snap.users
+	c.defaultAuthOutcome = snap.outcome
+	// A rolled-back password change may have cached a positive verdict for the
+	// NEW password; leaving it would let a credential the roster no longer
+	// contains keep authenticating for the cache TTL. authRevision additionally
+	// invalidates local-auth snapshots already in flight.
+	c.authRevision++
+	c.cache.clear()
+	c.mu.Unlock()
+}
+
+// ErrRosterNotPersisted reports that a roster mutation was rolled back because
+// it could not be written durably. Callers turn it into a non-2xx: the change
+// did not happen, and the operator must retry once the volume is writable.
+var ErrRosterNotPersisted = errors.New("admin roster change was not persisted")
+
+// mutateRosterDurably applies mutate to the admin roster and commits it to
+// disk, rolling the in-memory change back when the write does not land.
+//
+// CHAOS-66. ui_users.json is the ONLY durable home of the admin roster,
+// password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
+// replay counter. Every mutation changes memory first and persists second, so
+// the two can disagree; the disagreement is resolved at the next restart, when
+// the file wins. A handler that mutates memory, logs the persist error and
+// answers 2xx therefore reports a security decision as done while the durable
+// state still says otherwise — deleting a compromised administrator, revoking a
+// role or rotating a leaked password all revert on the next restart, with the
+// audit trail recording the action as successful.
+//
+// apiSetupComplete already treats that as a wrong answer rather than a degraded
+// success (see setDefaultAuthOutcomeChecked and the RollbackFailedSetupAuth
+// branch beside it, both pinned by tests). This is the same rule applied to the
+// ongoing-administration mutations of the same file.
+//
+// fileutil.ErrReplacedNotSynced is deliberately NOT rolled back: its contract
+// says the rename already landed the new content, so restoring the snapshot
+// would leave memory contradicting the file every future reader — including a
+// restart — now sees. The error is still returned so the caller can report that
+// durability across an immediate crash is not guaranteed.
+//
+// Lock order: saveUIUsersMu → c.mu, matching SaveUIUsersFile. mutate is invoked
+// with neither held, so it may take c.mu itself as the ordinary setters do.
+func (c *Config) mutateRosterDurably(mutate func() error) error {
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+
+	snap := c.snapshotRoster()
+	if err := mutate(); err != nil {
+		// CONTRACT: mutate must leave the roster untouched when it returns an
+		// error. Both current mutations satisfy it — SetUIUser validates and
+		// hashes before assigning anything, DeleteUIUser runs its "last admin"
+		// check before the delete — and a future one must too.
+		//
+		// The snapshot is deliberately NOT restored here, because restoring
+		// means clearing the credential-verification cache: that cache is read
+		// by the PROXY data path, and dropping it makes every active user
+		// re-pay a ~80 ms bcrypt on their next request (CHAOS-57). Restoring on
+		// every refused password-complexity check would hand an authenticated
+		// admin a repeatable way to do exactly that. A refused mutation wrote
+		// nothing, so there is nothing to undo.
+		return err
+	}
+	if err := c.saveUIUsersLocked(); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			return err
+		}
+		c.restoreRoster(snap)
+		return fmt.Errorf("%w: %w", ErrRosterNotPersisted, err)
+	}
+	return nil
 }
 
 // VerifyUIUser checks credentials against the admin user roster and returns

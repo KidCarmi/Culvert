@@ -1021,7 +1021,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-18 | **Expired cluster CA kept signing node certs** (CA-1 analogue in the enrollment CA) and node cert `NotAfter` was an unconditional `now+365d`, **not clamped to the issuer** — so a node enrolled anywhere in the CA's final year held a cert overclaiming by up to a YEAR, and every expiry surface (nodes API, DP `checkDPCertExpiry`) reported validity that did not exist. Worse than CA-1: `Enroll` uses `VerifyClientCertIfGiven`, so the operator's *re-enroll* recovery succeeded and returned a certificate that was dead on arrival. | NEW → **CLOSED** (CHAOS-50: `clusterCAUsable` gate in `SignCSR` fails closed with `errClusterCAUnusable`; `clampNodeCertValidity` on both ends; `culvert_cluster_ca_{usable,expires_in_seconds,sign_refused_total,node_certs_clamped_total}`) | **H** | was: `enrollment.go` `SignCSR`; now `cluster_ca_validity.go` — see §17 |
 | CA-19 | **The cluster CA's ONLY rotation driver was gated on the INSPECTION CA being ready** (`loadRootCA`: `if certMgr.Ready() { StartCAAutoRotation(…) }`). A corrupt bundle / wrong `CULVERT_CA_PASSPHRASE` / unreadable `-ca-path` silently disabled cluster-CA auto-rotation AND secondary-overlap cleanup on a node whose cluster CA was healthy. Two independent trust roots, one shared failure — and because the cluster CA is a 10-YEAR cert, the consequence surfaces years after the fault that caused it, with nothing left to connect them. | NEW → **CLOSED** (CHAOS-50: loop started unconditionally; both halves are already no-ops when their CA is absent; pinned by `TestChaos50_ClusterRotationSurvivesInspectionCALoadFailure`, verified FAILING pre-fix) | M/H | was: `rootca_startup.go` `loadRootCA`; see §17.5 |
 | CA-20 | `ImportCA` **nil-dereferenced `ca.secondaryCert`** on a first-ever import (a node that never ran `InitOrLoad`, e.g. a non-cluster node whose admin posts `/api/cluster/ca`) — and it fired AFTER `ca.cert`/`ca.key` were swapped in, so the panic left the new CA installed with the TLS pool never rebuilt and no rotation tracking: a partially applied trust change. | NEW → **CLOSED** (CHAOS-50: guarded — a first import is a bootstrap, not a rotation) | M | was: `enrollment.go` `ImportCA`; see §17 |
-| CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
+| CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP → **CLOSED** for the revocation list (`fileutil.AtomicWrite`); the SAME sentence was never checked for the credential store beside it — the consumed-backup-code and TOTP-replay-counter writes had the identical shape, now surfaced + counted by CHAOS-66 §36 (posture deliberately fail-open, owned there) | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
 ### 2.3 Cluster / HA / Control-Plane ↔ Data-Plane
@@ -6402,3 +6402,234 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The admin-roster mutations that report success on a write that never landed
+
+**Date:** 2026-09-22 · **Domain:** Authentication / persistence / configuration
+(the admin credential store; never previously swept as a durability surface) ·
+**Code:** `store.go` (`mutateRosterDurably`, `saveUIUsersLocked`),
+`ui_auth.go`, `roster_persist_durability.go`, `events.go` · **Runbook:**
+`docs/operator/admin-roster-durability.md`
+
+> **Id claimed before the write-up, per §35's standing recommendation.**
+> `CHAOS-66` was unused across the tree at the time of claiming.
+
+### Executive summary
+
+`ui_users.json` is the **only** durable home of the admin roster: every account,
+password hash, role, TOTP secret, consumed-backup-code list and TOTP replay
+counter. Every mutation changes **memory first** and persists second, so the two
+can disagree — and the disagreement is resolved at the next restart, when the
+file wins.
+
+Three handlers mutated that state, logged the persist error, and answered **2xx**.
+They are precisely the three an operator reaches for during a security incident:
+
+- **delete a compromised or departing administrator** → `204 No Content`, audited
+  as done; the account returns at the next restart with its original password
+  hash, role and TOTP enrolment,
+- **downgrade a role** (admin → viewer) → `{"ok":true}`; the privilege is restored
+  at the next restart,
+- **rotate a leaked password** → `{"ok":true}`; the old password still
+  authenticates after the next restart.
+
+The response said success. The UI said success. **The audit log said success.**
+The divergence between memory and disk then stayed invisible until a restart
+materialised it — plausibly weeks later, and most likely during the same incident
+that filled the volume in the first place.
+
+### The rule already existed, twenty lines away
+
+This is not a gap nobody had thought about. `apiSetupComplete`, in the same file,
+treats exactly this hazard as a **wrong answer rather than a degraded success** —
+in both of its branches, with the reasoning spelled out in
+`setDefaultAuthOutcomeChecked`'s comment and the `RollbackFailedSetupAuth` branch
+beside it, and pinned by two dedicated tests
+(`TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess` and its open-mode
+sibling). Its recorded rationale generalises verbatim: *an unpersisted change
+reports done for the rest of this process's lifetime and reverts on the next
+restart.*
+
+So the rule was understood, written down and tested — **for the one-time setup
+wizard only.** Every subsequent security-relevant mutation of the same file
+reported success on a failed durable write. That asymmetry, not the individual
+handlers, is the finding.
+
+### What was NOT wrong, and why that matters
+
+The platform-level signal was already present and correct. `fileutil.AtomicWrite`
+notifies the CHAOS-45 write-failure observer on every failure branch, so the
+storage plane fires underneath: the reproduction emitted
+`Storage: DURABLE WRITE FAILED for "ui_users.json" (1 since boot) — persisted
+state is being lost`, with the degraded operator-contract row and the
+`storage_write_failed` alert behind it.
+
+This is therefore **not** a silent-failure finding, and calling it one would
+overstate it. It is a **mis-reporting** finding: the operator gets an alert
+saying *some* durable write failed, and a `204` saying *this specific revocation
+succeeded*. The storage alert cannot name the administrative decision that was
+lost, and no amount of storage observability can make a wrong HTTP status right.
+
+`ui_users.json` also already used `fileutil.AtomicWrite` — register rows **ST-5**
+and **ST-6** were closed correctly. The file is never torn. The gap was never
+*how* the bytes are written; it was what the caller does when they are not.
+
+### Evidence (measured against the real handlers, pre-fix)
+
+`roster_persist_durability_chaos_test.go` drives the production handlers with the
+roster pointed at an unwritable path, so `AtomicWrite`'s `os.CreateTemp` fails
+deterministically for any uid (a `chmod`-based read-only directory does not
+constrain root, and CI runs both ways — the technique is the one the accepted
+`apiSetupComplete` gates already use).
+
+| Gate | Pre-fix result |
+|---|---|
+| `DeleteUser_PersistFailure_DoesNotClaimSuccess` | `204`; account still in the durable roster |
+| `SetUser_PersistFailure_DoesNotClaimSuccess` | `200 {"ok":true}`; disk still grants admin |
+| `ChangePassword_PersistFailure_DoesNotClaimSuccess` | `200 {"ok":true}`; no new hash on disk |
+| `RollbackRestoresTheWholeAccount` | `204`; account half-deleted (gone from memory, present on disk) |
+
+### The fix
+
+**(1) One primitive, because an inverse operation per caller is where the bugs
+live.** `Config.mutateRosterDurably(mutate func() error)` snapshots the roster
+wholesale, runs the mutation, persists, and on failure restores the snapshot and
+returns `ErrRosterNotPersisted`. Undoing a delete means restoring the password
+hash, role, TOTP secret, backup codes **and** replay counter — none of which the
+handler still holds by the time the write fails. A partial restore is *worse*
+than no rollback: it leaves an account its owner cannot use and an operator
+cannot see is broken. Pinned by `RollbackRestoresTheWholeAccount`, which asserts
+all four survive a refused delete.
+
+**(2) The rollback invalidates cached auth decisions.** A rolled-back password
+change could otherwise leave a cached positive verdict for the *new* password —
+a credential the roster no longer contains, still authenticating for the cache
+TTL. `authRevision` is bumped and `cache.clear()` called, matching
+`RollbackFailedSetupAuth`.
+
+**(3) `ErrReplacedNotSynced` is deliberately NOT rolled back.** Its contract says
+the rename already landed the new content, so every future reader — including a
+restart — sees the new roster. Rolling back would leave memory contradicting the
+file, and refusing the request would be a false negative: the operator's change
+*did* take effect. It is reported loudly and treated as committed. This is the
+same carve-out `setDefaultAuthOutcomeChecked` already documents, and it is the
+subtle half — a naive "non-nil error ⇒ roll back" reintroduces the hazard from
+the opposite direction.
+
+**(4) The mutation's own refusals keep their own status codes.** `DeleteUIUser`'s
+"cannot delete the last admin user" guard stays a `409 Conflict`: turning every
+refusal into the persistence `500` would send an operator to check their disk
+over a policy decision that has nothing to do with it. Pinned as a CONTROL, which
+also asserts the persistence counter does **not** move.
+
+**(5) The refusal is audited.** The success entry is written only on success, so
+without this the compliance record would carry no trace at all of an attempted
+revocation that did not take effect — the audit log would simply be missing the
+event rather than wrong about it. `<action>.refused` closes that.
+
+**(6) The login path stays fail-OPEN, and that is a posture decision, recorded.**
+Two roster writes happen on the login path: advancing the TOTP replay counter and
+removing a consumed single-use backup code. Both previously discarded their error
+outright (`//nolint:errcheck`), so a failed write silently weakened a security
+property — after a restart a consumed single-use code is valid again and the
+replay window for an already-used OTP reopens. **This is the same shape the
+register recorded as CA-14 for the session revocation list** (*"a revoked token
+can be honored again after crash/disk-full"*), closed there by moving to
+`AtomicWrite` and never checked for the credential store sitting beside it.
+
+They are **not** made fail-closed. Refusing the login would mean an operator whose
+TOTP device is lost, on an appliance whose volume has just gone read-only, cannot
+reach the admin UI at all — during exactly the incident they need it to diagnose.
+That is the terminal state CHAOS-55 and CHAOS-57 both refuse: *an appliance
+nobody can manage.* The weakening is bounded by the outage and requires an
+attacker to already hold a valid backup code or a live OTP; locking the
+legitimate administrator out is the larger harm. So the posture is fail-open but
+never silent: counted, and logged at onset then at most once a minute with the
+magnitude carried by the counter (the CHAOS-63 rate-limit discipline — a
+mitigation for a write-amplification defect must not be one itself).
+
+**(7) One vestigial write removed.** The TOTP *failure* branch called
+`SaveUIUsersFile()` after `loginLimiter.RecordFailure`, which changes nothing
+`ui_users.json` carries — `internal/lockout` is in-memory and deliberately
+non-persisted (register row **AU-4**). It re-serialised every account and bcrypt
+hash and `fsync`'d a rename on **every failed OTP**, persisting nothing, on the
+brute-force path that branch exists to rate-limit (its own comment anticipates
+1M-possibility OTP guessing). Removed.
+
+### Surfaces
+
+`culvert_admin_roster_persist_failures_total` (refused and rolled back) and
+`culvert_admin_roster_persist_degraded_total` (login-path write failed, login
+proceeded). Both emitted **unconditionally** — unlike the gauges elsewhere in
+this tree, a flat zero here is the healthy steady state for every appliance, not
+an ambiguous "feature not configured", so the socks5/cluster_ca emit-only-when-
+armed rule does not apply.
+
+Deliberately distinct from `storage_write_failed`, which says only that *some*
+durable write failed: these say which administrative decision was affected and
+therefore what the operator must redo. **No new alert event** — the storage plane
+already pages for the root cause (a failing volume), and a second name for one
+root cause is two pages for one action; what was missing was not a page but the
+ability to answer *"what did I lose?"*, which is a counter and a log line.
+
+**Nothing is queued and nothing retries automatically.** That is deliberate: a
+privilege change replayed later, out of order, against a roster that has since
+changed is worse than one the operator reapplies knowingly.
+
+### Gates
+
+`roster_persist_durability_chaos_test.go` — 4 defect gates, **each verified
+failing against the pre-fix handler shape** (reverted `ui_auth.go` against the
+shipped primitive, so the handler conversion is demonstrably what closes them),
+plus:
+
+- **3 CONTROLS**, because the cheapest way to pass every defect gate is to refuse
+  roster mutations outright or roll back so aggressively that legitimate changes
+  are lost: a healthy volume must still apply and persist both a role change and
+  a delete; a policy refusal must keep its `409` and must **not** be counted as a
+  persistence failure; and `ErrReplacedNotSynced` must count as committed while
+  an ordinary write failure must not.
+- **1 STRUCTURAL WALL** (`Wall_NoRosterPersistErrorIsDiscarded`), which AST-walks
+  `ui_auth.go` and fails when any `cfg.SaveUIUsersFile()` call appears as a bare
+  expression statement. Behavioural coverage cannot reach this: a future call
+  site that discards the error reintroduces the defect while every test keeps
+  passing on a healthy disk. Verified by injecting a discarded call (caught, with
+  the position named) and carrying its own not-vacuous check, so a selector that
+  stops matching fails rather than passing forever against nothing. This is
+  SEC-SOCKS5-LOG-1 round 2's lesson — *walling one call shape does not wall the
+  path* — applied to the shape that matters here.
+
+### Register rows
+
+- **CA-14** — the session-revocation half was already closed (`AtomicWrite`); the
+  same sentence was never checked for the credential store beside it. The
+  backup-code/replay-counter half is now **surfaced and counted**, posture
+  unchanged and owned above.
+- **ST-5 / ST-6** — confirmed still closed and not the cause here. The file is
+  never torn; the gap was what the caller does when the write fails.
+
+### Deliberately left, and recorded
+
+- **AU-18 (new) — TOTP 2FA has no enrolment surface at all.** `SetTOTPSecret`,
+  `ClearTOTP` and `SetBackupCodes` have **no production callers**, and `uiRoutes`
+  carries no TOTP route. The login path verifies TOTP and consumes backup codes
+  (`verifyLoginTOTP` reads `cfg.GetTOTPSecret`), so the feature is half-live: it
+  can be *enforced* but can only be *enabled* by hand-editing `ui_users.json`.
+  This is a GUI-parity gap (CLAUDE.md's code conventions require every option to
+  be manageable from the admin UI) rather than a resilience defect, and it bounds
+  the reachability of the backup-code item above to operators who hand-provision
+  TOTP. Reported, not fixed: adding an enrolment API is a feature with its own
+  security review, not a chaos remediation.
+- **The `Provider != "local"` branch of the deleted-user backstop.**
+  `uiAuthMiddleware` rejects a session for a deleted account only when
+  `sess.Provider == "local"`; a session minted by an external IdP is not checked
+  against the roster. Combined with `RevokeUser`'s users map being **neither
+  persisted nor gossiped** (`ExportRevocations` exports only `tokens`), a
+  user-level revocation is node-local and volatile where token-level revocation
+  is durable and cluster-wide — two mechanisms for one question, one of which
+  survives a restart. Today this is bounded by `RevokeUser` being reached only
+  from the local-account delete path, which the roster backstop already covers;
+  it becomes live the moment user-level revocation is wired to anything else.
+  Recorded as **AU-19**, not fixed inside a sweep about durability.

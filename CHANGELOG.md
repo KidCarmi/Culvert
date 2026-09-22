@@ -9,6 +9,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Admin-roster changes reported success on a durable write that never landed
+  (CHAOS-66). `ui_users.json` is the only durable home of the admin roster,
+  password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
+  replay counter, and every mutation changes memory first and persists second.
+  Three handlers logged the persist error and answered 2xx anyway — precisely
+  the three an operator reaches for during an incident. On a full or read-only
+  data volume, deleting a compromised administrator returned `204 No Content`
+  and was audited as done while the account returned at the next restart with
+  its original password hash, role and TOTP enrolment; a role downgrade returned
+  `{"ok":true}` and the privilege came back; a password rotation returned
+  `{"ok":true}` and the leaked password still authenticated. The response, the
+  UI and the audit log all reported success, and the divergence between memory
+  and disk stayed invisible until a restart materialised it. The same rule was
+  already written down, reasoned out and tested twenty lines away — for the
+  one-time setup wizard only. `POST/DELETE /api/auth/users` and
+  `POST /api/auth/password` are now durable-or-refused: the in-memory change is
+  rolled back wholesale (hash, role, TOTP secret, backup codes and replay
+  counter together), the request fails with an actionable `500`, and the
+  refusal is audited as `<action>.refused`. `fileutil.ErrReplacedNotSynced` is
+  deliberately treated as committed — the content already landed. New counters
+  `culvert_admin_roster_persist_failures_total` and
+  `culvert_admin_roster_persist_degraded_total` name which administrative
+  decision was affected, which the pre-existing `storage_write_failed` alert
+  cannot. The two login-path roster writes (TOTP replay counter, backup-code
+  consumption) stay fail-open by recorded decision — refusing them would lock an
+  operator out of the appliance during the incident they need it to diagnose —
+  but no longer discard their error. See
+  `docs/operator/admin-roster-durability.md`.
+
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
   published and cosign-signed the `latest`, `v0.0.N` and `0.0.N` image tags at
