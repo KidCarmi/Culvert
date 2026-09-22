@@ -21,6 +21,16 @@ var fixtureModule = map[string]string{
 
 func Add(a, b int) int { return a + b }
 
+// ChildOnly runs only inside a re-exec'd child process (TestChild), the way
+// the repository's helper-process tests run main() and one-shot commands.
+func ChildOnly() int {
+	x := 0
+	for i := 0; i < 3; i++ {
+		x += i
+	}
+	return x
+}
+
 func Sign(x int) string {
 	if x > 0 {
 		return "pos"
@@ -36,6 +46,7 @@ func Sign(x int) string {
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 )
 
@@ -68,6 +79,23 @@ func TestMaybeCrash(t *testing.T) {
 }
 
 func TestZLast(t *testing.T) {}
+
+// TestChild re-executes the test binary and exits through os.Exit, exactly as
+// the repository's helper-process tests run main() and its one-shot commands
+// (upstream_v2_codex_red_test.go). The child's coverage reaches the profile
+// only through GOCOVERDIR, which go test sets in the ENVIRONMENT as well as
+// passing -test.gocoverdir; a runner that passes only the flag loses it.
+func TestChild(t *testing.T) {
+	if os.Getenv("PILOT_CHILD") == "1" {
+		_ = ChildOnly()
+		os.Exit(0) // like the repository's one-shot helpers: exit hooks emit to GOCOVERDIR
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "PILOT_CHILD=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+}
 
 func FuzzAdd(f *testing.F) {
 	f.Add(1, 2)
@@ -162,8 +190,8 @@ func TestPilot_EndToEnd(t *testing.T) {
 	if err := readJSON(f.path("build", "manifest.json"), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Package != "example.com/pilot" || m.Runnable != 8 || m.Benchmarks != 1 {
-		t.Fatalf("manifest = %+v (want 8 runnable incl. FuzzAdd + ExampleAdd, 1 benchmark)", m)
+	if m.Package != "example.com/pilot" || m.Runnable != 9 || m.Benchmarks != 1 {
+		t.Fatalf("manifest = %+v (want 9 runnable incl. FuzzAdd + ExampleAdd, 1 benchmark)", m)
 	}
 	f.mustRS("plan", "-list", f.path("build", "list.txt"), "-pkg", m.Package, "-shards", "2", "-max-regex-bytes", "40", "-out", f.path("build", "plan.json"))
 	for i := 0; i < 2; i++ {
@@ -200,8 +228,13 @@ func TestPilot_EndToEnd(t *testing.T) {
 	if err := readJSON(f.path("cmp.json"), &c); err != nil {
 		t.Fatal(err)
 	}
-	if c.RootPilotEntries != 8 || len(c.PilotSkipped) != 1 || c.SubtestsPilot < 3 || len(c.BlocksLost) != 0 {
+	if c.RootPilotEntries != 9 || len(c.PilotSkipped) != 1 || c.SubtestsPilot < 3 {
 		t.Fatalf("comparison = %+v", c)
+	}
+	// Coverage produced in a re-exec'd child (TestChild → ChildOnly) must reach
+	// the pilot's profile exactly as it reaches go test's.
+	if len(c.BlocksLost) != 0 {
+		t.Fatalf("pilot lost coverage the unsharded reference has: %v", c.BlocksLost)
 	}
 	t.Run("failed test", func(t *testing.T) { failedTest(t, f, commit) })
 	t.Run("crash loses execution", func(t *testing.T) { crashedShard(t, f, commit) })

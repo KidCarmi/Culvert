@@ -327,7 +327,7 @@ func (r chunkRunner) run(c Chunk) ChunkMeta {
 		"-test.coverprofile=" + filepath.Join(r.outDir, fmt.Sprintf("chunk-%d.cover.out", c.Index)),
 		"-test.v=test2json", "-test.run=" + c.Regex}
 	start = time.Now()
-	cm.ExitCode = r.stream(args, filepath.Join(r.outDir, fmt.Sprintf("chunk-%d.json", c.Index)))
+	cm.ExitCode = r.stream(args, cov, filepath.Join(r.outDir, fmt.Sprintf("chunk-%d.json", c.Index)))
 	cm.Seconds = since(start)
 	_ = os.RemoveAll(scratch) // listing scratch only; evidence lives beside it
 	return cm
@@ -337,7 +337,7 @@ func (r chunkRunner) run(c Chunk) ChunkMeta {
 // `go tool test2json`, tees the events to eventsPath and prints each Output
 // field, so the job log reads like the reference's -v log. Returns the test
 // binary's exit code; a conversion failure is reported as -2.
-func (r chunkRunner) stream(args []string, eventsPath string) int {
+func (r chunkRunner) stream(args []string, gocoverdir, eventsPath string) int {
 	f, err := os.Create(eventsPath)
 	if err != nil {
 		say(r.stdout, "::error::create %s: %v\n", eventsPath, err)
@@ -352,6 +352,15 @@ func (r chunkRunner) stream(args []string, eventsPath string) int {
 	// #nosec G204 -- the verified prebuilt test binary; args are built above.
 	bin := exec.CommandContext(r.ctx, r.binary, args...)
 	bin.Dir, bin.Stdout, bin.Stderr = r.dir, pw, pw
+	// go test passes -test.gocoverdir AND sets GOCOVERDIR in the environment
+	// (cmd/go/internal/test: "to help with tests that run go build to build
+	// fresh copies of tools"). Tests that re-exec the test binary — this
+	// repository runs main() and its one-shot commands that way — emit their
+	// counters through the ENVIRONMENT variable, and the parent merges every
+	// counter file in the directory. Passing only the flag silently drops
+	// that coverage (found by the CI comparison: main.go and the one-shot
+	// dispatcher were covered in the reference and not in the pilot).
+	bin.Env = append(os.Environ(), "GOCOVERDIR="+gocoverdir)
 	// #nosec G204 -- fixed go subcommand.
 	conv := exec.CommandContext(r.ctx, r.goBin, "tool", "test2json", "-t", "-p", r.pkg)
 	conv.Stdin, conv.Stderr = pr, r.stdout
