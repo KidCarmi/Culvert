@@ -5,6 +5,8 @@
 ## release is published.  It runs automatically on:
 ##   • Push of a version tag (v*)   → blocks release if any check fails
 ##   • Push to main + weekly cron   → continuous scanning cadence
+##     (on a main push the race + coverage suite is owned by qa-gate.yml —
+##      see the ownership matrix below)
 ##   • Pull requests to main        → PASS-THROUGH ONLY (retirement step 6):
 ##     the scan jobs skip and the aggregate reports success — PR-time
 ##     scanning lives in the Fast/Deep PR Gates (roadmap/CI-REDESIGN.md)
@@ -18,6 +20,31 @@
 ##      enforcement point (branch protection cannot gate tag-triggered
 ##      workflows). Manually-pushed tags bypass it: only tag commits that
 ##      are already green on main.
+##
+## WHAT A GREEN VERDICT HERE MEANS (CI-REDESIGN stage 2B):
+##   THIS workflow's required security scans passed for this SHA. It is NOT a
+##   statement about qa-gate.yml. On a main push the race + coverage suite is
+##   OWNED BY QA and is neither run nor evaluated here.
+##
+##   Customer release eligibility is the CONJUNCTION of a successful main-push
+##   run of this workflow AND of qa-gate.yml for the exact release SHA, which
+##   .github/scripts/require-release-evidence.sh resolves against
+##   .github/release-evidence.txt (both rows `mandatory`). Nothing in this file
+##   authorises a publication on its own.
+##
+## RACE + COVERAGE OWNERSHIP MATRIX (`tests-race`):
+##   pull_request           → skip  (pass-through, unchanged)
+##   push → refs/heads/main → SKIP  — owned by qa-gate.yml's `qa-logic`
+##   push → refs/tags/v*    → RUN   — qa-gate.yml has no tag trigger
+##   schedule (weekly)      → RUN   — ref is main, but QA has no schedule
+##   workflow_dispatch      → RUN   — including on main
+##
+##   The condition tests the EVENT and the REF together: keying on the branch
+##   alone would also suppress the scheduled and manual runs, whose ref is main
+##   too, and those are the events on which nothing else runs this suite. On
+##   every event where the suite IS owned here the aggregate additionally
+##   demands it via `require-success`, so an unexpected skip refuses instead of
+##   passing through needs-verdict's skipped-as-pass door.
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: Security Release Gate
@@ -390,6 +417,37 @@ jobs:
           working-directory: cmd/culvert-maint
 
   # ─── 9. Race-condition & coverage tests ────────────────────────────────────
+  #
+  # OWNERSHIP BY EVENT (CI-REDESIGN stage 2B). On a main push this suite is
+  # owned by qa-gate.yml's `qa-logic`, which since stage 2A runs the identical
+  # command — `-race -count=1 -timeout=40m -coverprofile=… -v ./...` with the
+  # same TEST_SEED — and publishes the authoritative `qa-coverage` profile that
+  # `qa-coverage` enforces the floors on. Running it here as well executed the
+  # whole suite twice per main push for one verdict.
+  #
+  # It is NOT removed, because the two workflows do not run on the same events:
+  #
+  #   pull_request          → skip (pass-through; unchanged)
+  #   push → refs/heads/main → SKIP — owned by QA (the stage 2B change)
+  #   push → refs/tags/v*    → RUN — qa-gate.yml has NO tag trigger at all
+  #   schedule (weekly)      → RUN — its ref is main, but QA has no schedule
+  #   workflow_dispatch      → RUN — including on main; QA's dispatch is separate
+  #
+  # The condition therefore tests the EVENT and the REF together. Keying on the
+  # branch alone would suppress the scheduled and manual runs, whose ref is also
+  # main — and those are the events on which nothing else runs this suite.
+  #
+  # Release qualification is unaffected: .github/release-evidence.txt requires a
+  # successful main-push run of BOTH this workflow and qa-gate.yml for the exact
+  # release SHA, and that conjunction is what authorises publication. Skipping
+  # this job does not make this workflow's run anything other than a full,
+  # required security verdict.
+  #
+  # KEEP THIS PREDICATE AND THE AGGREGATE'S `require-success` IN SYNC — they are
+  # two copies of one decision (job-level `if:` cannot read `env`, so it cannot
+  # be written once). TestSecurityRace_OwnershipPredicateIsSingleSourced pins
+  # them equal; if they drift, either the suite runs unrequired or the gate
+  # wedges demanding a job that never starts.
   tests-race:
     name: "Tests · race detector + coverage"
     # Budget mirrors the Fast PR Gate's identical `-race` + coverage run
@@ -398,8 +456,13 @@ jobs:
     # died at the per-binary 15m timeout, which require-gate.sh then turned
     # into a refused Auto-Tag Release.
     timeout-minutes: 50
-    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
-    if: github.event_name != 'pull_request'
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the
+    # Fast/Deep PR Gates. Stage 2B additionally delegates the MAIN-PUSH run to
+    # qa-gate.yml; tags, the weekly schedule and manual dispatch still run here.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -424,6 +487,15 @@ jobs:
           fi
 
       - name: Upload coverage report
+        # ARTIFACT OWNERSHIP (stage 2B). `qa-coverage`, published by
+        # qa-gate.yml's qa-logic, is the AUTHORITATIVE coverage profile for a
+        # main push and the one the floors are enforced against. This
+        # `coverage-report` artifact belongs to THIS workflow's standalone runs
+        # — version tags, the weekly schedule and manual dispatch — where QA
+        # does not run at all. It is therefore absent on main pushes from stage
+        # 2B onward, which is safe because nothing consumes it: it has no reader
+        # in any workflow, script or test (audited). Do not synthesise a
+        # stand-in for it on main; read `qa-coverage` instead.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
@@ -483,8 +555,17 @@ jobs:
     # (superseded by the Fast/Deep PR Gates — retirement step 6) but this
     # check name must keep reporting success so a branch-protection rule
     # requiring it can never wedge a PR at "Expected". On main pushes, tags,
-    # and the weekly schedule everything runs and any failure/cancellation
+    # and the weekly schedule the scans run and any failure/cancellation
     # fails the gate as before.
+    #
+    # STAGE 2B — one skip is intentional, every other one is not. `tests-race`
+    # is deliberately absent on a main push (owned by qa-gate.yml), and
+    # needs-verdict reads a skip as a pass, so on that event alone the skip is
+    # accepted. On every event where this workflow still OWNS the suite — tags,
+    # schedule, dispatch — `require-success` demands it be exactly `success`,
+    # so a job that silently fails to start refuses the gate instead of
+    # passing through the skipped-as-pass door. The predicate is the same one
+    # on the job's `if:`; see the note there before editing either.
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -492,38 +573,71 @@ jobs:
         with:
           needs-json: ${{ toJSON(needs) }}
           title: "✅ Security Gate — APPROVED"
+          require-success: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && 'tests-race' || '' }}
           extra-summary: ${{ github.event_name == 'pull_request' && 'PASS-THROUGH on PRs — scanning is enforced by the Fast PR Gate (govulncheck/gosec/gitleaks) and Deep PR Gate (trivy/hadolint/go-licenses) — roadmap/CI-REDESIGN.md, step 6; this gate runs fully on main pushes, tags, and weekly.' || '' }}
 
-      - name: Release-approved banner
+      - name: Security-checks-passed banner
         if: github.event_name != 'pull_request'
+        env:
+          RACE_OWNED_HERE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && 'yes' || 'no' }}
         run: |
           echo "=================================================="
-          echo "  All security checks passed — release approved"
+          echo "  This workflow's required security scans passed"
           echo "  Ref:    ${{ github.ref }}"
           echo "  SHA:    ${{ github.sha }}"
           echo "  Actor:  ${{ github.actor }}"
           echo "  Time:   $(date -u)"
+          if [ "$RACE_OWNED_HERE" = "yes" ]; then
+            echo "  Race + coverage: RUN HERE for this event"
+          else
+            echo "  Race + coverage: owned by qa-gate.yml on a main push."
+            echo "                   This gate does NOT evaluate it and makes"
+            echo "                   no claim about whether QA passed."
+          fi
+          echo "  Customer release eligibility is NOT decided here: it"
+          echo "  requires a successful main-push run of BOTH this workflow"
+          echo "  and qa-gate.yml for this exact SHA, resolved by"
+          echo "  .github/scripts/require-release-evidence.sh."
           echo "=================================================="
 
       - name: Create gate summary
         if: github.event_name != 'pull_request'
+        env:
+          RACE_ROW: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && '| Tests (race detector + coverage) | ✅ |' || '| Tests (race detector + coverage) | ➖ owned by `qa-gate.yml` on a main push — not evaluated here |' }}
         run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## ✅ Security Gate Passed
-
-          | Check | Status |
-          |-------|--------|
-          | SAST (gosec) | ✅ |
-          | CVE scan (govulncheck) | ✅ |
-          | CVE scan (trivy source) | ✅ |
-          | CVE scan (trivy image) | ✅ |
-          | Secret scan (gitleaks) | ✅ |
-          | License audit | ✅ |
-          | Static analysis (staticcheck) | ✅ |
-          | Tests (race detector + coverage) | ✅ |
-          | Dockerfile lint (hadolint) | ✅ |
-
-          **SBOM** (source-tree) uploaded as a 90-day workflow artifact
-          (`culvert-sbom.json`). Per-release binary SBOMs are signed + attached
-          to each GitHub Release by the `release` job.
-          EOF
+          {
+            echo "## ✅ Security checks passed"
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| SAST (gosec) | ✅ |"
+            echo "| CVE scan (govulncheck) | ✅ |"
+            echo "| CVE scan (trivy source) | ✅ |"
+            echo "| CVE scan (trivy image) | ✅ |"
+            echo "| Secret scan (gitleaks) | ✅ |"
+            echo "| License audit | ✅ |"
+            echo "| Static analysis (staticcheck) | ✅ |"
+            echo "$RACE_ROW"
+            echo "| Dockerfile lint (hadolint) | ✅ |"
+            echo ""
+            echo "**Scope of this verdict.** A green result here means THIS"
+            echo "workflow's required scans passed for this SHA. On a main push"
+            echo "the race + coverage suite is owned by \`qa-gate.yml\` (CI-REDESIGN"
+            echo "stage 2B) and is neither run nor evaluated here — this gate makes"
+            echo "NO claim about whether QA passed."
+            echo ""
+            echo "**Customer release eligibility is decided elsewhere.** It requires a"
+            echo "successful main-push run of BOTH this workflow and \`qa-gate.yml\`"
+            echo "for this exact SHA, resolved by"
+            echo "\`.github/scripts/require-release-evidence.sh\` against"
+            echo "\`.github/release-evidence.txt\`, where both are \`mandatory\`."
+            echo ""
+            echo "**SBOM** (source-tree) uploaded as a 90-day workflow artifact"
+            echo "(\`culvert-sbom.json\`). Per-release binary SBOMs are signed + attached"
+            echo "to each GitHub Release by the \`release\` job."
+            echo ""
+            echo "**Coverage artifact.** \`coverage-report\` is published only on the"
+            echo "events this workflow owns the suite for (tags, schedule, dispatch)."
+            echo "The authoritative main-push profile is \`qa-coverage\`, published by"
+            echo "\`qa-gate.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
