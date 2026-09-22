@@ -118,11 +118,14 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      # Everything the pilot writes lives in RUNNER_TEMP, OUTSIDE the checkout:
+      # the tests see exactly the tree the unsharded reference saw (several
+      # walk the repository), not a tree with a 100 MB binary and evidence in it.
       - name: Download the prebuilt binary and plan
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: qa-root-shard-pilot-build
-          path: pilot-build
+          path: ${{ runner.temp }}/pilot-build
 
       - name: Run the shard against the prebuilt binary
         # run-shard refuses a different binary, commit, toolchain or checkout
@@ -130,11 +133,12 @@ jobs:
         # entries, then runs them with the reference's per-binary flags
         # (-timeout is qa-logic's; qa_root_shard_pilot_test.go pins the two).
         run: |
-          chmod +x pilot-build/rootshard pilot-build/root.test
-          pilot-build/rootshard run-shard \
-            -plan pilot-build/plan.json -manifest pilot-build/manifest.json \
-            -binary pilot-build/root.test -shard "${{ matrix.shard }}" \
-            -out-dir "pilot-shards/shard-${{ matrix.shard }}" -commit "$GITHUB_SHA" -timeout 40m
+          b="$RUNNER_TEMP/pilot-build"
+          chmod +x "$b/rootshard" "$b/root.test"
+          "$b/rootshard" run-shard \
+            -plan "$b/plan.json" -manifest "$b/manifest.json" \
+            -binary "$b/root.test" -shard "${{ matrix.shard }}" \
+            -out-dir "$RUNNER_TEMP/pilot-shards/shard-${{ matrix.shard }}" -commit "$GITHUB_SHA" -timeout 40m
 
       - name: Upload shard evidence
         if: always()
@@ -142,9 +146,9 @@ jobs:
         with:
           name: qa-root-shard-pilot-shard-${{ matrix.shard }}
           path: |
-            pilot-shards/
-            !pilot-shards/**/gocoverdir-*
-            !pilot-shards/**/scratch-*
+            ${{ runner.temp }}/pilot-shards/
+            !${{ runner.temp }}/pilot-shards/**/gocoverdir-*
+            !${{ runner.temp }}/pilot-shards/**/scratch-*
           retention-days: 7
           if-no-files-found: warn
 
@@ -163,14 +167,15 @@ jobs:
       - name: Race + coverage over every package except the root
         # `go list ./...` minus the EXACT root import path — cmd/, internal/
         # and any future package, whole packages, the reference's flags.
-        run: go run ./cmd/rootshard run-lane -out-dir pilot-lane -commit "$GITHUB_SHA" -timeout 40m
+        # Evidence goes to RUNNER_TEMP, outside the tree the tests walk.
+        run: go run ./cmd/rootshard run-lane -out-dir "$RUNNER_TEMP/pilot-lane" -commit "$GITHUB_SHA" -timeout 40m
 
       - name: Upload lane evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qa-root-shard-pilot-lane
-          path: pilot-lane/
+          path: ${{ runner.temp }}/pilot-lane/
           retention-days: 7
           if-no-files-found: warn
 
