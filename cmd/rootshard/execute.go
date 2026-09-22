@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -235,7 +236,7 @@ func cmdRunShard(args []string, stdout io.Writer) error {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	r := chunkRunner{ctx: ctx, binary: *binary, goBin: *goBin, pkg: m.Package, dir: meta.WorkDir,
-		outDir: *outDir, timeout: *timeout, stdout: stdout}
+		outDir: *outDir, timeout: *timeout, stdout: &lockedWriter{w: stdout}}
 	var failed []string
 	for _, c := range p.Shards[*shard].Chunks {
 		cm := r.run(c)
@@ -404,6 +405,21 @@ func copyEvents(r io.Reader, w, log io.Writer) error {
 	return nil
 }
 
+// lockedWriter serialises writes to the job log. exec copies a child's stderr
+// into a non-*os.File writer from its OWN goroutine, while copyEvents writes the
+// streamed test output to the same writer: without the lock those two writers
+// race (found by -race in CI, on the bytes.Buffer the tests pass as stdout).
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 func exitCode(err error) int {
 	if err == nil {
 		return 0
@@ -538,6 +554,7 @@ func cmdRunLane(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("pipe: %w", err)
 	}
+	stdout = &lockedWriter{w: stdout}
 	c.Stderr = stdout
 	if err := c.Start(); err != nil {
 		return fmt.Errorf("start go test: %w", err)
