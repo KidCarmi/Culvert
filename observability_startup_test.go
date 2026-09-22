@@ -60,8 +60,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	t.Helper()
 
 	// Syslog forwarding (syslog.go + ui_config.go:648).
-	oldSyslogConfigured := syslogConfigured
-	oldSyslogConfiguredAddr := syslogConfiguredAddr
+	oldSyslogConfigured := syslogConfiguredTarget()
+	oldSyslogConfiguredAddr := syslogIntent()
 	oldGlobalSyslog := activeSyslog()
 
 	// Configured-path readback for GET /api/stats (ui_config.go).
@@ -79,8 +79,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	// handle the test-under-test opened before reinstating the snapshot.
 	restoreReqlog := reqlog.SwapPersistenceForTest()
 
-	syslogConfigured = ""
-	syslogConfiguredAddr = ""
+	setSyslogConfiguredTarget("")
+	setSyslogIntent("")
 	releaseSyslogWriter(setActiveSyslog(nil))
 	resetSyslogFeedHealth()
 	globalOTLP = freshOTLPExporter()
@@ -97,8 +97,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		globalOTLP.Stop()
 		globalOTLPTraces.Stop()
 		_ = audit.Close() // close any handle the test-under-test opened
-		syslogConfigured = oldSyslogConfigured
-		syslogConfiguredAddr = oldSyslogConfiguredAddr
+		setSyslogConfiguredTarget(oldSyslogConfigured)
+		setSyslogIntent(oldSyslogConfiguredAddr)
 		setActiveSyslog(oldGlobalSyslog)
 		resetSyslogFeedHealth()
 		globalOTLP = oldGlobalOTLP
@@ -197,8 +197,8 @@ func TestLoadObservability_EmptyConfigIsNoOp(t *testing.T) {
 
 	loadObservability(observabilityStartupConfig{})
 
-	if syslogConfigured != "" {
-		t.Errorf("syslogConfigured = %q; want empty", syslogConfigured)
+	if got := syslogConfiguredTarget(); got != "" {
+		t.Errorf("syslogConfiguredTarget() = %q; want empty", got)
 	}
 	if activeSyslog() != nil {
 		t.Errorf("activeSyslog() = %v; want nil", activeSyslog())
@@ -325,16 +325,16 @@ func TestLoadObservability_SyslogUnreachableStillArmsForwarding(t *testing.T) {
 		RequestLogMaxMB: 100,
 	})
 
-	if syslogConfigured != "tcp://127.0.0.1:1" {
-		t.Errorf("syslogConfigured = %q; want the target the live writer is aimed at", syslogConfigured)
+	if got := syslogConfiguredTarget(); got != "tcp://127.0.0.1:1" {
+		t.Errorf("syslogConfiguredTarget() = %q; want the target the live writer is aimed at", got)
 	}
 	if activeSyslog() == nil {
 		t.Error("a failed first dial must still arm forwarding (CHAOS-66); got no writer")
 	}
 	// Intent must be recorded even though the connect failed, so
 	// checkSyslogFeed can surface the silently-down feed (vs "not configured").
-	if syslogConfiguredAddr != "tcp://127.0.0.1:1" {
-		t.Errorf("syslogConfiguredAddr = %q; want the configured addr recorded despite connect failure", syslogConfiguredAddr)
+	if got := syslogIntent(); got != "tcp://127.0.0.1:1" {
+		t.Errorf("syslogIntent() = %q; want the configured addr recorded despite connect failure", got)
 	}
 	// And the row must report the DELIVERY truth, not "active".
 	if row := checkSyslogFeed(); row.Status == diagOK {
@@ -362,8 +362,8 @@ func TestLoadObservability_SyslogSuccessSetsConfigured(t *testing.T) {
 		RequestLogMaxMB: 100,
 	})
 
-	if syslogConfigured != cfgAddr {
-		t.Errorf("syslogConfigured = %q; want %q", syslogConfigured, cfgAddr)
+	if got := syslogConfiguredTarget(); got != cfgAddr {
+		t.Errorf("syslogConfiguredTarget() = %q; want %q", got, cfgAddr)
 	}
 	if activeSyslog() == nil {
 		t.Error("no syslog writer installed after a successful connect")

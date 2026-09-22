@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -100,15 +101,29 @@ func (fc *fakeCollector) kill() {
 }
 
 // withSyslogTestEnv isolates the process-global syslog state for one test.
+//
+// adminSettingsPath is redirected to a per-test file because the two gates that
+// drive apiSyslogConfig reach adminSettingsSave(), which writes the process-wide
+// admin settings on a DETACHED goroutine. Left alone, those gates would persist
+// a syslog target into whatever path the shuffled run happened to leave set, and
+// a later test would load it — an order-dependent failure that only appears
+// under -shuffle, which is precisely what the determinism gate exists to catch.
+// The cleanup waits on adminSettingsSaveWG before restoring the path, or the
+// detached save lands after the restore and writes to the real file anyway.
 func withSyslogTestEnv(t *testing.T) {
 	t.Helper()
 	prevW := setActiveSyslog(nil)
-	prevCfg, prevIntent := syslogConfigured, syslogConfiguredAddr
+	prevCfg, prevIntent := syslogConfiguredTarget(), syslogIntent()
 	prevAlert := fireSyslogFeedAlert
+	prevSettingsPath := adminSettingsPath
+	adminSettingsPath = filepath.Join(t.TempDir(), "admin_settings.json")
 	resetSyslogFeedHealth()
 	t.Cleanup(func() {
+		adminSettingsSaveWG.Wait()
+		adminSettingsPath = prevSettingsPath
 		releaseSyslogWriter(setActiveSyslog(prevW))
-		syslogConfigured, syslogConfiguredAddr = prevCfg, prevIntent
+		setSyslogConfiguredTarget(prevCfg)
+		setSyslogIntent(prevIntent)
 		fireSyslogFeedAlert = prevAlert
 		resetSyslogFeedHealth()
 	})
@@ -172,8 +187,8 @@ func TestChaos66_ContractRowReportsDeliveryNotStartupConnect(t *testing.T) {
 	withSyslogTestEnv(t)
 	fc := newFakeCollector(t)
 
-	syslogConfiguredAddr = fc.addr()
-	syslogConfigured = fc.addr()
+	setSyslogIntent(fc.addr())
+	setSyslogConfiguredTarget(fc.addr())
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -263,8 +278,8 @@ func TestChaos66_ConnectFailureAtBootStillArmsForwarding(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 
-	syslogConfiguredAddr = "tcp://" + addr
-	syslogConfigured = "tcp://" + addr
+	setSyslogIntent("tcp://" + addr)
+	setSyslogConfiguredTarget("tcp://" + addr)
 	if err := InitSyslogResilient("tcp://"+addr, "rfc3164"); err == nil {
 		t.Skip("port was re-bound by another process; the dial unexpectedly succeeded")
 	}
@@ -362,7 +377,8 @@ func TestChaos66_UDPFeedNeverClaimsVerifiedDelivery(t *testing.T) {
 	withSyslogTestEnv(t)
 	const dead = "udp://192.0.2.77:514" // TEST-NET-1
 
-	syslogConfiguredAddr, syslogConfigured = dead, dead
+	setSyslogIntent(dead)
+	setSyslogConfiguredTarget(dead)
 	if err := InitSyslogResilient(dead, "rfc5424"); err != nil {
 		t.Fatalf("a UDP connect is local and must not fail: %v", err)
 	}
@@ -401,7 +417,8 @@ func TestChaos66_UDPFeedNeverClaimsVerifiedDelivery(t *testing.T) {
 func TestChaos66_DropsReachMetricsAndHealthz(t *testing.T) {
 	withSyslogTestEnv(t)
 	fc := newFakeCollector(t)
-	syslogConfiguredAddr, syslogConfigured = fc.addr(), fc.addr()
+	setSyslogIntent(fc.addr())
+	setSyslogConfiguredTarget(fc.addr())
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -445,7 +462,8 @@ func TestChaos66_DropsReachMetricsAndHealthz(t *testing.T) {
 // dead, and the documented paging rule is `== 0`.
 func TestChaos66_MetricsAbsentWhenNoCollectorConfigured(t *testing.T) {
 	withSyslogTestEnv(t)
-	syslogConfiguredAddr, syslogConfigured = "", ""
+	setSyslogIntent("")
+	setSyslogConfiguredTarget("")
 	if body := renderMetricsForTest(t); strings.Contains(body, "culvert_syslog_") {
 		t.Fatal("DEFECT: syslog series emitted on a node with no SIEM configured")
 	}
@@ -502,7 +520,8 @@ func TestChaos66_GlobalWriterIsNotRacedByAReconfigure(t *testing.T) {
 func TestChaos66_RefusedTargetLeavesTheWorkingForwarderInPlace(t *testing.T) {
 	withSyslogTestEnv(t)
 	fc := newFakeCollector(t)
-	syslogConfiguredAddr, syslogConfigured = fc.addr(), fc.addr()
+	setSyslogIntent(fc.addr())
+	setSyslogConfiguredTarget(fc.addr())
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -525,8 +544,8 @@ func TestChaos66_RefusedTargetLeavesTheWorkingForwarderInPlace(t *testing.T) {
 	if activeSyslog() != good {
 		t.Fatal("DEFECT: a refused reconfigure replaced the working forwarder")
 	}
-	if syslogConfigured != fc.addr() {
-		t.Fatalf("DEFECT: a refused reconfigure moved syslogConfigured to %q", syslogConfigured)
+	if got := syslogConfiguredTarget(); got != fc.addr() {
+		t.Fatalf("DEFECT: a refused reconfigure moved the live target to %q", got)
 	}
 }
 
@@ -542,7 +561,8 @@ func TestChaos66_RefusedTargetLeavesTheWorkingForwarderInPlace(t *testing.T) {
 func TestChaos66Control_HealthyFeedStaysGreenAndDelivers(t *testing.T) {
 	withSyslogTestEnv(t)
 	fc := newFakeCollector(t)
-	syslogConfiguredAddr, syslogConfigured = fc.addr(), fc.addr()
+	setSyslogIntent(fc.addr())
+	setSyslogConfiguredTarget(fc.addr())
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -597,7 +617,8 @@ func TestChaos66Control_DegradationIsADurationNotACount(t *testing.T) {
 	var alerts int
 	fireSyslogFeedAlert = func(string) { alerts++ }
 
-	syslogConfiguredAddr, syslogConfigured = fc.addr(), fc.addr()
+	setSyslogIntent(fc.addr())
+	setSyslogConfiguredTarget(fc.addr())
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -664,7 +685,8 @@ func TestChaos66_DisplacedWriterCannotWriteTheHealthRecord(t *testing.T) {
 	withSyslogTestEnv(t)
 	fc := newFakeCollector(t)
 
-	syslogConfiguredAddr, syslogConfigured = fc.addr(), fc.addr()
+	setSyslogIntent(fc.addr())
+	setSyslogConfiguredTarget(fc.addr())
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}

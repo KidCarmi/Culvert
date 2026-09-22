@@ -284,8 +284,8 @@ type syslogFeedSnapshot struct {
 // syslogFeedState reports the live SIEM-feed posture.
 func syslogFeedState() syslogFeedSnapshot {
 	snap := syslogFeedSnapshot{
-		Intent:     syslogConfiguredAddr,
-		Configured: syslogConfiguredAddr != "",
+		Intent:     syslogIntent(),
+		Configured: syslogIntent() != "",
 	}
 	sw := activeSyslog()
 	if sw != nil {

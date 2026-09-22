@@ -1770,10 +1770,32 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// syslogConfigured tracks whether syslog was initialised SUCCESSFULLY so the UI
-// can reflect it AND so admin_settings persistence only re-saves a working addr
-// (see admin_settings.go:447 — never persist a connect-failed target).
-var syslogConfigured string // the addr string, empty = not configured
+// syslogConfiguredStore holds the target the live forwarder is aimed at, so
+// the UI can reflect it AND so admin_settings persistence only re-saves a
+// target the operator actually asked for.
+//
+// ATOMIC, not a plain string, because of what CHAOS-66 added on top of it.
+// Before this sweep the only reader was checkSyslogFeed; the sweep put it on
+// the `/metrics` path — which is UNAUTHENTICATED on the proxy port and
+// scraped every few seconds on a live appliance — and on `/healthz`, while it
+// is still written by the admin goroutine on every reconfigure. A Go string is
+// two words, so a racing read can tear into a mismatched pointer/length pair;
+// this is not a theoretical concern on a gauge a monitoring system polls
+// continuously. Same reasoning, and the same shape, as activeSyslogPtr: read
+// through syslogConfiguredTarget(), write through setSyslogConfiguredTarget(),
+// and there is no exported variable, so the racy form cannot come back.
+var syslogConfiguredStore atomic.Pointer[string]
+
+// syslogConfiguredTarget reports the target the live forwarder is aimed at.
+func syslogConfiguredTarget() string {
+	if p := syslogConfiguredStore.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// setSyslogConfiguredTarget records the target the live forwarder is aimed at.
+func setSyslogConfiguredTarget(addr string) { syslogConfiguredStore.Store(&addr) }
 
 // syslogConfiguredAddr records the operator-configured syslog/SIEM target
 // regardless of whether InitSyslog actually connected (mirrors
@@ -1784,7 +1806,22 @@ var syslogConfigured string // the addr string, empty = not configured
 // as signal while the /api/syslog readback reported the feed as "not
 // configured". Kept in sync at both startup paths (loadObservability,
 // applyAdminServices) and the runtime API (apiSyslogConfig enable/disable).
-var syslogConfiguredAddr string
+//
+// Atomic for the reason given on syslogConfiguredStore above: CHAOS-66 made it
+// a reader on the unauthenticated `/metrics` path and on `/healthz`.
+var syslogIntentStore atomic.Pointer[string]
+
+// syslogIntent reports the operator-configured SIEM target, whether or not the
+// forwarder aimed at it has ever delivered.
+func syslogIntent() string {
+	if p := syslogIntentStore.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// setSyslogIntent records the operator-configured SIEM target.
+func setSyslogIntent(addr string) { syslogIntentStore.Store(&addr) }
 
 // auditLogConfiguredPath / requestLogConfiguredPath record the operator-
 // configured persistent-log path (set in loadObservability regardless of
@@ -1828,7 +1865,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		// than being inferred from the counters.
 		snap := syslogFeedState()
 		jsonOK(w, map[string]any{
-			"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics,
+			"addr": syslogConfiguredTarget(), "format": format, "drops": drops, "panics": panics,
 			"transport":          snap.Transport,
 			"deliveryVerifiable": snap.DeliveryVerifiable,
 			"up":                 snap.Up,
@@ -1873,8 +1910,8 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 func disableSyslogForwarding(w http.ResponseWriter, r *http.Request) {
 	releaseSyslogWriter(setActiveSyslog(nil))
 	resetSyslogFeedHealth()
-	syslogConfigured = ""
-	syslogConfiguredAddr = ""
+	setSyslogConfiguredTarget("")
+	setSyslogIntent("")
 	auditEvent(r, "settings.syslog", "disabled", "")
 	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1910,8 +1947,8 @@ func applySyslogTarget(w http.ResponseWriter, r *http.Request, addr, format stri
 		http.Error(w, "syslog install failed", http.StatusInternalServerError)
 		return
 	}
-	syslogConfigured = addr
-	syslogConfiguredAddr = addr
+	setSyslogConfiguredTarget(addr)
+	setSyslogIntent(addr)
 	auditEvent(r, "settings.syslog", addr, "syslog forwarding enabled (format="+sw.Format()+")")
 	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "addr": addr, "format": sw.Format(), "deliveryVerifiable": sw.DeliveryVerifiable()})

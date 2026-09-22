@@ -855,7 +855,7 @@ func checkSyslogFeed() OperatorContractCheck {
 			Message: "not configured — no remote syslog/SIEM forwarding",
 		}
 	}
-	if !snap.Installed || snap.Intent != syslogConfigured {
+	if !snap.Installed || snap.Intent != syslogConfiguredTarget() {
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,

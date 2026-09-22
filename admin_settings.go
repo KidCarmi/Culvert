@@ -491,14 +491,14 @@ func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
 		// Record intent even if the connect fails so checkSyslogFeed surfaces a
 		// silently-down SIEM feed (see syslogConfiguredAddr).
-		syslogConfiguredAddr = s.SyslogAddr
+		setSyslogIntent(s.SyslogAddr)
 		// CHAOS-66: resilient install. A persisted SIEM target that cannot be
 		// reached at boot used to leave forwarding OFF for the life of the
 		// process (and, uniquely on this path, with no log line at all —
 		// loadObservability at least logged its failure). The writer now
 		// self-heals via the engine's own reconnect path, and the outcome is
 		// reported rather than swallowed.
-		syslogConfigured = s.SyslogAddr
+		setSyslogConfiguredTarget(s.SyslogAddr)
 		if err := InitSyslogResilient(s.SyslogAddr, s.SyslogFormat); err != nil {
 			logger.Printf("Syslog: initial connect to the persisted target failed (%q) — forwarding is armed and will retry; delivery state is reported on /api/syslog and the syslog_feed diagnostics row", sanitizeLog(err.Error()))
 		}
@@ -789,8 +789,8 @@ func snapshotAdminEndpoints(s *AdminSettings) {
 	if len(uiExtraSANs) > 0 {
 		s.UISANs = uiExtraSANs
 	}
-	if syslogConfigured != "" {
-		s.SyslogAddr = syslogConfigured
+	if t := syslogConfiguredTarget(); t != "" {
+		s.SyslogAddr = t
 		if sw := activeSyslog(); sw != nil {
 			s.SyslogFormat = sw.Format()
 		}

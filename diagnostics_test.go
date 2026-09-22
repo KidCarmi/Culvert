@@ -1367,10 +1367,10 @@ func findSyslogFeedCheck(t *testing.T, c OperatorContract) OperatorContractCheck
 // This is a normal, valid posture (no remote SIEM forwarding) and must report
 // ok, not warn/fail.
 func TestApiDiagnostics_SyslogFeedNotConfigured(t *testing.T) {
-	prevAddr, prevSW := syslogConfiguredAddr, activeSyslog()
-	syslogConfiguredAddr = ""
+	prevAddr, prevSW := syslogIntent(), activeSyslog()
+	setSyslogIntent("")
 	setActiveSyslog(nil)
-	t.Cleanup(func() { syslogConfiguredAddr = prevAddr; setActiveSyslog(prevSW) })
+	t.Cleanup(func() { setSyslogIntent(prevAddr); setActiveSyslog(prevSW) })
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1388,10 +1388,10 @@ func TestApiDiagnostics_SyslogFeedNotConfigured(t *testing.T) {
 // down. This is the blind-spot scenario the check exists to surface: it must
 // report fail with an operator_action.
 func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
-	prevAddr, prevSW := syslogConfiguredAddr, activeSyslog()
-	syslogConfiguredAddr = "tcp://collector.invalid:601"
+	prevAddr, prevSW := syslogIntent(), activeSyslog()
+	setSyslogIntent("tcp://collector.invalid:601")
 	setActiveSyslog(nil)
-	t.Cleanup(func() { syslogConfiguredAddr = prevAddr; setActiveSyslog(prevSW) })
+	t.Cleanup(func() { setSyslogIntent(prevAddr); setActiveSyslog(prevSW) })
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1413,12 +1413,13 @@ func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
 // feed without a real collector — and since CHAOS-66 the row says so: a UDP
 // feed reports ok but must NOT claim delivery it cannot observe.
 func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
-	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, activeSyslog()
+	prevAddr, prevOK, prevSW := syslogIntent(), syslogConfiguredTarget(), activeSyslog()
 	t.Cleanup(func() {
 		if sw := activeSyslog(); sw != nil && sw != prevSW {
 			sw.Close()
 		}
-		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
+		setSyslogIntent(prevAddr)
+		setSyslogConfiguredTarget(prevOK)
 		setActiveSyslog(prevSW)
 		resetSyslogFeedHealth()
 	})
@@ -1429,7 +1430,8 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 	// Success path: the live writer's target IS the operator's intent, so the
 	// intent (syslogConfiguredAddr) and the last-successful-connect tracker
 	// (syslogConfigured) agree.
-	syslogConfiguredAddr, syslogConfigured = "udp://127.0.0.1:514", "udp://127.0.0.1:514"
+	setSyslogIntent("udp://127.0.0.1:514")
+	setSyslogConfiguredTarget("udp://127.0.0.1:514")
 	setActiveSyslog(sw)
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
@@ -1454,12 +1456,13 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 // globalSyslog != nil check reported OK; the feed to the intended collector is
 // actually down.
 func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
-	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, activeSyslog()
+	prevAddr, prevOK, prevSW := syslogIntent(), syslogConfiguredTarget(), activeSyslog()
 	t.Cleanup(func() {
 		if sw := activeSyslog(); sw != nil && sw != prevSW {
 			sw.Close()
 		}
-		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
+		setSyslogIntent(prevAddr)
+		setSyslogConfiguredTarget(prevOK)
 		setActiveSyslog(prevSW)
 		resetSyslogFeedHealth()
 	})
@@ -1470,8 +1473,8 @@ func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
 	// Live writer + last-successful connect are the FIRST target; intent has
 	// since moved to a second target whose re-init failed.
 	setActiveSyslog(sw)
-	syslogConfigured = "udp://127.0.0.1:514"
-	syslogConfiguredAddr = "tcp://collector.invalid:601"
+	setSyslogConfiguredTarget("udp://127.0.0.1:514")
+	setSyslogIntent("tcp://collector.invalid:601")
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
