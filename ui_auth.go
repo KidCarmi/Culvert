@@ -47,17 +47,26 @@ func verifyLoginTOTP(w http.ResponseWriter, r *http.Request, clientIP, user, cod
 	if totpOK {
 		// Persist the matched counter to close the replay window for this
 		// step and all earlier steps within the skew tolerance.
-		cfg.SetTOTPLastCounter(user, matchedCounter)
 		// CHAOS-66: fail-open but never silent — see noteRosterPersistBestEffort
-		// for why the login is not refused when this write does not land.
-		noteRosterPersistBestEffort("TOTP replay counter", cfg.SaveUIUsersFile())
+		// for why the login is not refused when this write does not land. The
+		// mutate and the persist run as ONE transaction (mutateRosterBestEffort)
+		// so a concurrent admin mutation's rollback cannot discard this update.
+		noteRosterPersistBestEffort("TOTP replay counter", cfg.mutateRosterBestEffort(func() bool {
+			return cfg.SetTOTPLastCounter(user, matchedCounter)
+		}))
 		return true
 	}
-	if cfg.ConsumeBackupCode(user, code) {
-		// Backup code consumed — persist removal. A code whose removal does not
-		// reach disk is valid again after a restart (single-use violated);
-		// counted and logged rather than discarded (CHAOS-66).
-		noteRosterPersistBestEffort("backup-code consumption", cfg.SaveUIUsersFile())
+	// Backup code consumed — persist the removal in the same transaction. A
+	// code whose removal does not reach disk is valid again after a restart
+	// (single-use violated); counted and logged rather than discarded, and
+	// never rolled back by a concurrent admin write (CHAOS-66).
+	consumedBackupCode := false
+	backupPersistErr := cfg.mutateRosterBestEffort(func() bool {
+		consumedBackupCode = cfg.ConsumeBackupCode(user, code)
+		return consumedBackupCode
+	})
+	if consumedBackupCode {
+		noteRosterPersistBestEffort("backup-code consumption", backupPersistErr)
 		return true
 	}
 	// TOTP failures MUST feed the lockout counter — otherwise an attacker

@@ -1123,6 +1123,17 @@ func (c *Config) setDefaultAuthOutcomeChecked(outcome AuthOutcome) error {
 	if outcome == OutcomeExempt {
 		resolved = OutcomeExempt
 	}
+	// CHAOS-66 (Codex P1): the mutate and the persist are ONE transaction.
+	// mutateRosterDurably restores a whole-roster snapshot when its write
+	// fails, so any roster mutation that is not serialised against it can be
+	// silently reverted by that rollback — and this setter's own compensating
+	// rollback below has the mirror-image problem. saveUIUsersMu is the
+	// transaction lock for every persisted roster mutation; taking it here
+	// means neither writer can observe or discard the other's half-applied
+	// state. Lock order is saveUIUsersMu → c.mu throughout.
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+
 	c.mu.Lock()
 	previous := c.defaultAuthOutcome
 	c.defaultAuthOutcome = resolved
@@ -1132,8 +1143,9 @@ func (c *Config) setDefaultAuthOutcomeChecked(outcome AuthOutcome) error {
 	} else {
 		logger.Printf("Auth: default authentication = Require authentication (defaultAuthOutcome=Default)")
 	}
-	// Persist so the setting survives restarts.
-	if err := c.SaveUIUsersFile(); err != nil {
+	// Persist so the setting survives restarts. saveUIUsersLocked, not
+	// SaveUIUsersFile: saveUIUsersMu is already held above.
+	if err := c.saveUIUsersLocked(); err != nil {
 		// fileutil.ErrReplacedNotSynced means the rename already landed the
 		// new content on disk — only the best-effort parent-directory sync
 		// afterward failed. Its contract explicitly forbids a compensating
@@ -1560,6 +1572,32 @@ func (c *Config) mutateRosterDurably(mutate func() error) error {
 		return fmt.Errorf("%w: %w", ErrRosterNotPersisted, err)
 	}
 	return nil
+}
+
+// mutateRosterBestEffort is mutateRosterDurably's fail-OPEN sibling for the
+// LOGIN path: it runs mutate and persists under the same transaction lock, but
+// never rolls back on a persist failure — it returns the error for the caller
+// to count and report (see noteRosterPersistBestEffort for why that posture is
+// correct there).
+//
+// Holding saveUIUsersMu across the mutate is what makes the sibling's rollback
+// sound (CHAOS-66, Codex P1). Before this, ConsumeBackupCode and
+// SetTOTPLastCounter took only c.mu, so a login that consumed a single-use
+// backup code between a failing admin mutation's snapshot and its rollback had
+// that consumption DISCARDED — the code became reusable, and the login's own
+// save (which blocks on this mutex) then persisted the reverted state, making
+// it durable. That is precisely the property CHAOS-66 exists to protect,
+// broken by the rollback CHAOS-66 introduced.
+//
+// mutate reports whether it changed anything; when it did not, no write is
+// issued at all — a rejected backup code must not re-serialise the roster.
+func (c *Config) mutateRosterBestEffort(mutate func() bool) error {
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+	if !mutate() {
+		return nil
+	}
+	return c.saveUIUsersLocked()
 }
 
 // VerifyUIUser checks credentials against the admin user roster and returns

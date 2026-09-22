@@ -143,12 +143,22 @@ func noteRosterPersistBestEffort(what string, err error) {
 	}
 	n := rosterPersistBestEffort.Add(1)
 	now := time.Now()
-	last := rosterPersistLogLast.Load()
-	if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
-		rosterPersistSuppress.Add(1)
-		return
+	// CHAOS-66 (Codex P2): CLAIM the interval atomically. A plain load/compare/
+	// store lets every caller that finishes concurrently read the same expired
+	// stamp and all emit a line — which is the log amplification this gate
+	// exists to prevent, arriving exactly when the volume is already failing
+	// and the login path can be driven by an attacker. Exactly one caller wins
+	// the CAS; the losers re-read and land in the suppressed branch.
+	for {
+		last := rosterPersistLogLast.Load()
+		if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
+			rosterPersistSuppress.Add(1)
+			return
+		}
+		if rosterPersistLogLast.CompareAndSwap(last, now.UnixNano()) {
+			break
+		}
 	}
-	rosterPersistLogLast.Store(now.UnixNano())
 	suppressed := rosterPersistSuppress.Swap(0)
 	logger.Printf("UIUsers: DEGRADED — %s could not be persisted (%d since boot, %d suppressed since the last line); "+
 		"login allowed to proceed, but this state does not survive a restart: %v",

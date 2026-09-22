@@ -6601,6 +6601,65 @@ plus:
   SEC-SOCKS5-LOG-1 round 2's lesson — *walling one call shape does not wall the
   path* — applied to the shape that matters here.
 
+### Codex review round 1 — the rollback needed a transaction, and the rate gate needed a claim
+
+**P1 — a whole-roster rollback is only sound if nothing else can write the
+roster.** `mutateRosterDurably` restores a WHOLE-ROSTER snapshot on a failed
+write, and the login-path setters (`ConsumeBackupCode`, `SetTOTPLastCounter`)
+took only `c.mu`, not `saveUIUsersMu`. So a login that consumed a single-use
+backup code between a failing admin mutation's snapshot and its rollback had
+that consumption **discarded** — and because the login's own save blocks on
+`saveUIUsersMu` and therefore lands AFTER the rollback, it then persisted the
+reverted state, making the resurrection **durable**. `setDefaultAuthOutcomeChecked`
+had the mirror-image problem and is reachable from a live admin API
+(`ui_config.go`), not just first-time setup.
+
+That is precisely the property this section exists to protect — *a consumed
+single-use credential must not come back* — **broken by the rollback this
+section introduced**. The lesson is the one this file keeps relearning, in a new
+place: *a mechanism that restores state is only as sound as the boundary that
+stops anyone else writing it*, and CHAOS-66 added the first mechanism in this
+file that can un-apply a mutation without adding the boundary that makes it safe.
+
+`saveUIUsersMu` is now the transaction lock for **every** persisted roster
+mutation, held across mutate+persist by all three shapes: `mutateRosterDurably`
+(rollback), the new `mutateRosterBestEffort` (login path, fail-open, no
+rollback) and `setDefaultAuthOutcomeChecked` (targeted rollback). A mutation
+reporting no change issues no write at all, so a rejected backup code does not
+re-serialise the roster — the vestigial write removed above does not return
+through the fix.
+
+**P2 — the log-rate gate did not CLAIM its interval.** It read the last-emitted
+stamp, compared, then stored, so concurrent callers could all observe the same
+expired value and all emit — the log amplification the gate exists to prevent,
+arriving while the volume is already failing, on a path an unauthenticated
+client can drive. Now a `CompareAndSwap` loop: exactly one caller wins, the
+losers re-read and suppress.
+
+**The P2 gate is STRUCTURAL, and the measurement is the reason.** The defect is
+a TOCTOU on an atomic, so `-race` cannot see it (atomics are race-free by
+definition), and it is not reachable behaviourally: a 256-goroutine hammer over
+**200 trials** against the exact pre-fix shape produced more than one winner in
+**0 of 200 runs**, because the load→store window is a few nanoseconds. A
+behavioural gate therefore PASSES against the defect — measured, it did — which
+is worse than no gate, because it is a false assurance. The shipped gate asserts
+the mechanism (CAS present, no bare `Store`) and carries a control that rejects a
+verbatim copy of the pre-fix body, the same shape and the same recorded reasoning
+as `sanitizeLog`'s scan-count gate. The behavioural test is kept and **relabelled
+a CONTROL**: what it pins deterministically is that the line is suppressed while
+the COUNT never is.
+
+Gates added: `RollbackDoesNotDiscardConcurrentLoginMutation` (deterministic — the
+admin mutation blocks inside its transaction while the login goroutine is
+started, so the interleaving is forced, not raced; verified failing against the
+unserialised shape with the consumed code resurrected),
+`Control_BestEffortSkipsWriteWhenNothingChanged`,
+`Wall_LogRateGateClaimsIntervalAtomically` (+ its control), and
+`Control_LogRateGateCountsEveryCaller`. The existing structural wall's
+**not-vacuous check did its job**: moving the login path onto the new primitives
+dropped its match count and it failed rather than passing against nothing, so the
+selector was widened to every roster-persisting call.
+
 ### Register rows
 
 - **CA-14** — the session-revocation half was already closed (`AtomicWrite`); the

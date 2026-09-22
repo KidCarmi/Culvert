@@ -12,7 +12,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -363,9 +366,18 @@ func TestChaos66_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 		t.Fatalf("parse ui_auth.go: %v", err)
 	}
 
+	// Every way this file can persist the roster. The set grew when the login
+	// path moved onto the transaction primitives (Codex P1): a wall scoped to
+	// one spelling stops proving anything the moment the call it names is
+	// replaced, which is what the not-vacuous check below caught.
+	rosterPersistCalls := map[string]bool{
+		"SaveUIUsersFile":        true,
+		"mutateRosterDurably":    true,
+		"mutateRosterBestEffort": true,
+	}
 	isRosterSave := func(call *ast.CallExpr) bool {
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "SaveUIUsersFile" {
+		if !ok || !rosterPersistCalls[sel.Sel.Name] {
 			return false
 		}
 		recv, ok := sel.X.(*ast.Ident)
@@ -390,7 +402,7 @@ func TestChaos66_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 	})
 
 	for _, pos := range discarded {
-		t.Errorf("cfg.SaveUIUsersFile()'s error is discarded at %s — a roster change that did not "+
+		t.Errorf("a roster-persisting call's error is discarded at %s — a roster change that did not "+
 			"reach disk reverts at the next restart while the handler reports success (CHAOS-66). "+
 			"Check the error, or pass it to noteRosterPersistBestEffort and record why fail-open is "+
 			"correct at that call site.", pos)
@@ -398,8 +410,255 @@ func TestChaos66_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 
 	// Not-vacuous: if the selector ever stops matching, the wall must fail
 	// rather than pass forever against nothing.
-	if found < 2 {
-		t.Fatalf("wall matched only %d cfg.SaveUIUsersFile call sites in ui_auth.go; the selector has "+
-			"gone stale and is no longer proving anything", found)
+	// Not-vacuous: ui_auth.go carries one SaveUIUsersFile (first-time setup),
+	// two mutateRosterBestEffort (login path) and three mutateRosterDurably
+	// (the administrative mutations). A selector that stops matching them must
+	// fail rather than pass forever against nothing.
+	if found < 6 {
+		t.Fatalf("wall matched only %d roster-persisting call sites in ui_auth.go (want >= 6); the "+
+			"selector has gone stale and is no longer proving anything", found)
+	}
+}
+
+// ─── Codex review round 1 ────────────────────────────────────────────────────
+
+// TestChaos66_RollbackDoesNotDiscardConcurrentLoginMutation is the P1 gate.
+//
+// mutateRosterDurably restores a WHOLE-ROSTER snapshot when its write fails.
+// That is only sound if no other writer can mutate the roster inside the
+// window between the snapshot and the rollback. Before the fix the login-path
+// setters (ConsumeBackupCode, SetTOTPLastCounter) took only c.mu, so a login
+// that consumed a single-use backup code during a failing admin delete had that
+// consumption silently reverted — and because the login's own save blocks on
+// saveUIUsersMu and therefore runs AFTER the rollback, it then persisted the
+// reverted state, making the resurrection durable.
+//
+// That is the exact property CHAOS-66 exists to protect (a consumed single-use
+// credential must not come back), broken by the rollback CHAOS-66 introduced.
+//
+// The interleaving is forced, not raced: the admin mutation blocks inside
+// mutateRosterDurably until the login goroutine has been started, so the test
+// is deterministic. Against the pre-fix tree the consume completes immediately
+// and is discarded; with the fix it blocks on the transaction lock and its
+// effect survives.
+func TestChaos66_RollbackDoesNotDiscardConcurrentLoginMutation(t *testing.T) {
+	snapshotAuthGlobals(t)
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+	_ = seedRoster(t)
+
+	hashCode := func(code string) string {
+		h, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.MinCost)
+		if err != nil {
+			t.Fatalf("hash backup code: %v", err)
+		}
+		return string(h)
+	}
+	if !cfg.SetTOTPSecret("doomed", "JBSWY3DPEHPK3PXP", []string{hashCode("code-one"), hashCode("code-two")}) {
+		t.Fatal("seed TOTP secret")
+	}
+	if err := cfg.SaveUIUsersFile(); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+	breakRosterWrites(t)
+
+	mutateEntered := make(chan struct{})
+	proceed := make(chan struct{})
+	adminDone := make(chan error, 1)
+	go func() {
+		adminDone <- cfg.mutateRosterDurably(func() error {
+			close(mutateEntered)
+			<-proceed
+			return cfg.DeleteUIUser("doomed")
+		})
+	}()
+	<-mutateEntered
+
+	// A login consumes a single-use backup code while the admin mutation is
+	// mid-transaction.
+	loginDone := make(chan bool, 1)
+	go func() {
+		consumed := false
+		_ = cfg.mutateRosterBestEffort(func() bool {
+			consumed = cfg.ConsumeBackupCode("doomed", "code-one")
+			return consumed
+		})
+		loginDone <- consumed
+	}()
+
+	// Give the login goroutine a chance to reach the roster. With the fix it
+	// parks on the transaction lock; without it, it mutates immediately.
+	time.Sleep(50 * time.Millisecond)
+	close(proceed)
+
+	if err := <-adminDone; !errors.Is(err, ErrRosterNotPersisted) {
+		t.Fatalf("admin mutation should have been refused and rolled back; got %v", err)
+	}
+	if !<-loginDone {
+		t.Fatal("the backup code should have been accepted once")
+	}
+
+	// The consumed single-use code must NOT be usable again.
+	if cfg.ConsumeBackupCode("doomed", "code-one") {
+		t.Error("a consumed single-use backup code was resurrected by the admin mutation's rollback: " +
+			"the rollback discarded a concurrent login-path mutation (CHAOS-66 Codex P1)")
+	}
+}
+
+// TestChaos66_Control_BestEffortSkipsWriteWhenNothingChanged proves the
+// transaction does not reintroduce the vestigial write this change removed: a
+// REJECTED backup code must not re-serialise the whole roster (every account
+// and bcrypt hash, plus an fsync'd rename) on the brute-force path.
+func TestChaos66_Control_BestEffortSkipsWriteWhenNothingChanged(t *testing.T) {
+	snapshotAuthGlobals(t)
+	_ = seedRoster(t)
+	breakRosterWrites(t) // any real write would fail and be observable
+
+	if err := cfg.mutateRosterBestEffort(func() bool { return false }); err != nil {
+		t.Errorf("a mutation that changed nothing must issue no write; got %v", err)
+	}
+	if err := cfg.mutateRosterBestEffort(func() bool { return true }); err == nil {
+		t.Error("a mutation that DID change something must still persist (and here, fail)")
+	}
+}
+
+// TestChaos66_Wall_LogRateGateClaimsIntervalAtomically is the P2 gate, and it
+// is STRUCTURAL rather than behavioural — deliberately, and the measurement is
+// why. The defect is a TOCTOU on an atomic stamp: every caller that finishes
+// concurrently can read the same expired value before any of them stores, and
+// all of them log. The race detector cannot see it (atomics are race-free by
+// definition; the bug is logical), and it is not reachable behaviourally on
+// ordinary hardware — a 256-goroutine hammer over 200 trials against the exact
+// non-atomic shape produced >1 winner in 0 of 200 runs, because the window
+// between the load and the store is a few nanoseconds wide.
+//
+// A behavioural gate would therefore pass against the defect (measured: it
+// did), which is worse than no gate — it is a false assurance. So the gate
+// asserts the MECHANISM: the interval must be claimed with a compare-and-swap,
+// and the stamp must never be written with a bare Store. Deterministic on any
+// hardware, at any load, with or without -race.
+//
+// It carries its own CONTROL: the same predicate is run against a verbatim
+// copy of the pre-fix body and must REJECT it, so a selector that matches
+// nothing cannot pass forever. This mirrors sanitizeLog's scan-count gate,
+// which reached the same conclusion for the same reason.
+func TestChaos66_Wall_LogRateGateClaimsIntervalAtomically(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "roster_persist_durability.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse roster_persist_durability.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "noteRosterPersistBestEffort" {
+			fn = f
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("noteRosterPersistBestEffort not found; the gate's selector has gone stale")
+	}
+
+	cas, bareStore := stampClaimShape(fn)
+	if !cas {
+		t.Error("the log-rate gate must CLAIM its interval with rosterPersistLogLast.CompareAndSwap: " +
+			"a load/compare/store lets every concurrent caller emit a line at once, which is the log " +
+			"amplification the gate exists to prevent (CHAOS-66 Codex P2)")
+	}
+	if bareStore {
+		t.Error("rosterPersistLogLast is written with a bare Store inside the rate gate; the claim must " +
+			"be a compare-and-swap so exactly one caller wins the interval")
+	}
+
+	// CONTROL: the pre-fix shape must be rejected by this same predicate.
+	legacyFset := token.NewFileSet()
+	legacyFile, err := parser.ParseFile(legacyFset, "legacy.go", legacyRateGateSource, 0)
+	if err != nil {
+		t.Fatalf("parse legacy control: %v", err)
+	}
+	legacyFn, _ := legacyFile.Decls[0].(*ast.FuncDecl)
+	if legacyFn == nil {
+		t.Fatal("legacy control did not parse into a function")
+	}
+	legacyCAS, legacyStore := stampClaimShape(legacyFn)
+	if legacyCAS || !legacyStore {
+		t.Error("the control failed: the verbatim pre-fix (load/compare/store) shape must be REJECTED " +
+			"by this gate, otherwise the gate is matching nothing and proves nothing")
+	}
+}
+
+// stampClaimShape reports whether fn claims the interval with a CAS on
+// rosterPersistLogLast, and whether it writes that stamp with a bare Store.
+func stampClaimShape(fn *ast.FuncDecl) (cas, bareStore bool) {
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		if !ok || recv.Name != "rosterPersistLogLast" {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "CompareAndSwap":
+			cas = true
+		case "Store":
+			bareStore = true
+		}
+		return true
+	})
+	return cas, bareStore
+}
+
+// legacyRateGateSource is the VERBATIM pre-fix rate gate, kept only as the
+// control above. It must never be called.
+const legacyRateGateSource = `package legacy
+
+func legacyNoteRosterPersistBestEffort() {
+	last := rosterPersistLogLast.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
+		rosterPersistSuppress.Add(1)
+		return
+	}
+	rosterPersistLogLast.Store(now.UnixNano())
+}
+`
+
+// TestChaos66_Control_LogRateGateCountsEveryCaller is a CONTROL, not a defect
+// gate (it passes against the pre-fix shape too — see the wall above for why
+// the defect is not behaviourally reachable). What it does pin, deterministically,
+// is the half that makes rate-limiting a security-relevant log acceptable at
+// all: the line is suppressed but the COUNT never is, so the magnitude survives
+// in the counter an operator alerts on.
+func TestChaos66_Control_LogRateGateCountsEveryCaller(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+
+	const callers = 64
+	out := captureLogger(t, func() {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < callers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				noteRosterPersistBestEffort("backup-code consumption", errors.New("write failed"))
+			}()
+		}
+		close(start)
+		wg.Wait()
+	})
+
+	if got := strings.Count(out, "UIUsers: DEGRADED"); got != 1 {
+		t.Errorf("%d concurrent degraded writes emitted %d log lines; the gate must emit exactly 1", callers, got)
+	}
+	if got := rosterPersistBestEffort.Load(); got != callers {
+		t.Errorf("counter = %d, want %d: rate-limiting the log must never drop the count", got, callers)
 	}
 }
