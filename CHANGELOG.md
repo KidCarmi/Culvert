@@ -268,6 +268,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- The production image now cross-compiles the proxy and the bundled
+  maintenance agent on the build platform instead of compiling them under QEMU
+  for arm64. The shipped binaries are byte-identical to before; only the build
+  got faster. **Building the image now requires BuildKit.** It has been
+  Docker's default builder since Engine 23.0 and is the only builder Compose v2
+  uses. The deprecated legacy builder (`DOCKER_BUILDKIT=0`) stops at the first
+  `FROM` with `failed to parse platform : ""`. Pulling the published image is
+  unaffected.
+
 - OCSP now reports which TLS handshakes it actually covers. Enabling it
   installs the check on the shared upstream transport only, which for a
   forward proxy means the handshake to an `https://` parent proxy — inspected
