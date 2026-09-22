@@ -1016,3 +1016,160 @@ trigger of its own), called from `qa-gate.yml` only when a manual dispatch sets
   between any two runs.
 * **Failures are never retried.** `fail-fast: false`, every shard runs to
   completion, evidence uploads `if: always()`.
+
+### Reproduce
+
+The pilot is opt-in and runs only on a manual dispatch of the QA gate from the
+branch under test (PR/main behaviour, required job names and the aggregate's
+`needs` are unchanged — pinned by `qa_root_shard_pilot_test.go`,
+`qa_gate_scheduling_test.go` and `security_race_ownership_test.go`):
+
+```bash
+gh workflow run qa-gate.yml --ref <branch> -f root_shard_pilot=true
+```
+
+Locally, the same steps the jobs run (any writable directory outside the
+checkout for `$OUT`):
+
+```bash
+C=$(git rev-parse HEAD); go build -o "$OUT/rootshard" ./cmd/rootshard
+"$OUT/rootshard" build -out-dir "$OUT/build" -commit "$C"     # compile once, list, time an empty run
+"$OUT/rootshard" plan -list "$OUT/build/list.txt" -timings .github/qa-root-shard-timings.json \
+  -pkg "$(go list .)" -shards 4 -out "$OUT/build/plan.json"
+for i in 0 1 2 3; do
+  "$OUT/rootshard" run-shard -plan "$OUT/build/plan.json" -manifest "$OUT/build/manifest.json" \
+    -binary "$OUT/build/root.test" -shard $i -out-dir "$OUT/shards/shard-$i" -commit "$C" -timeout 40m
+done
+"$OUT/rootshard" run-lane -out-dir "$OUT/lane" -commit "$C" -timeout 40m
+"$OUT/rootshard" verdict -build-dir "$OUT/build" -shards-dir "$OUT/shards" -lane-dir "$OUT/lane" -out-dir "$OUT/verdict"
+.github/scripts/coverage-floor.sh "$OUT/verdict/merged.cover.out"
+# against an unsharded `go test -race -coverprofile=coverage.out -v ./... > logic.log` of the same commit:
+"$OUT/rootshard" compare -ref-log logic.log -ref-profile coverage.out \
+  -pilot-results "$OUT/verdict/results.json" -pilot-profile "$OUT/verdict/merged.cover.out" \
+  -list "$OUT/build/list.txt" -pkg "$(go list .)" -out "$OUT/comparison.json"
+```
+
+`go test ./cmd/rootshard` runs the tool's own gates, including an end-to-end
+test that builds a fixture module (TestMain, subtests, a skip, a Fuzz seed, an
+Example, a benchmark, a helper that re-execs the test binary and `os.Exit`s,
+a second package) and requires ZERO lost coverage blocks against a real
+unsharded `go test -race -coverprofile -v ./...` of it, plus the failure paths:
+a failing test, a crashing test (panic mid-chunk), a missing shard, a shard
+from another binary, and an unusable profile — each must turn the verdict red
+and name the cause.
+
+### Measurements (GitHub-hosted `ubuntu-latest`, 4 vCPU, warm module cache)
+
+Three dispatches on the branch; each run's reference is the SAME run's
+unsharded `qa-logic`, so both sides share runner class, cache state and time
+of day.
+
+| | Run 1 `35786256715` | Run 2 `35789916458` | Run 3 `35793263705` |
+|---|---|---|---|
+| Plan | bootstrap (local timings, fallback-heavy) | local measured timings, 5 ms floor | **CI-measured timings** (run 2's reference) |
+| Build job (compile+list+empty run) | — | 108 s (81 s) | 95 s (72 s) |
+| Empty run = process start + TestMain + coverage write | — | 1.95 s | ≈2 s |
+| Binary / artifact | — | 112 MB / 55 MB, ~4 s up, 2–4 s down | same |
+| Shard test time (s) | 414 / 324 / 504 / 296 | 424 / 440 / 405 / 434 | **379 / 421 / 420 / 411** (plan 392 each) |
+| Shard job (s) | — | 452 / 466 / 435 / 468 | 415 / 456 / 453 / 436 |
+| Non-root lane job (s) | 719 | 468 | 668 |
+| … of which `internal/mcp/execution` | 521 s | 311 s | 465 s |
+| **Pilot critical path** (first queued → verdict) | 769 s | **614 s** | **723 s** |
+| build+shards done / lane done | — | +583 s / +471 s | +578 s / +691 s |
+| **Reference critical path** (`qa-logic` job) | 1987 s | 1710 s | 1929 s |
+| Speed-up | 2.6× | 2.8× | 2.7× |
+| Pilot runner time (build+4 shards+lane+verdict) | 42.2 min | 40.4 min | 42.5 min |
+| Reference runner time (`qa-logic` + `qa-coverage`) | 33.1 min | 28.8 min | 32.7 min |
+| Verdict | **red, correctly** (5 problems) | green | green |
+
+Costs the spec asked to separate: queue delay 2–23 s per job (the lane and
+build queue longest because they start with the rest of the gate); setup-go
+10–19 s per job; artifact transfer ≤ 5 s per job; repeated TestMain ≈ 2 s per
+shard (8 s total — negligible against ~410 s shards). Compilation is paid ONCE
+(72–81 s) instead of once per shard. The extra runner time (~+10 min, +30–40%)
+is five extra setups, one extra compile, and the lane re-running what
+`qa-logic` already runs in the reference; it buys a ~2.7× shorter critical
+path.
+
+**The critical path is now bounded by two things, not by the root suite.**
+Build + the slowest shard finish at ~+580 s in both measured runs; the lane
+finishes anywhere from +471 s to +691 s, driven almost entirely by
+`internal/mcp/execution` (311–521 s across three runs; 428–505 s in the
+reference). In run 3 the lane, not the shards, was the critical path.
+
+### Equivalence (run 3 — the fix-complete run)
+
+| Check | Reference | Pilot |
+|---|---|---|
+| Root entries discovered (binary `-test.list`) | 6,325 | 6,325 |
+| Root entries executed, each exactly once | 6,325 | 6,325 |
+| Skipped (all environmental: `/data` not writable, opt-in CI-only gates, no root for a bind mount, interop env unset) | 51 | the same 51, each with its skip reason |
+| Subtests | 3,819 | 3,819 (0 missing, 0 extra) |
+| Packages | 112 | 112 |
+| Block universe (root + all other packages) | 46,223 | 46,223 — identical |
+| Covered blocks | 35,043 | 35,038 |
+| Statement coverage | 78.8% (56,029/71,092) | 78.8% (56,021/71,092) |
+| `coverage-floor.sh` | exit 0 | exit 0, byte-identical per-file table |
+
+**Failure path, demonstrated for real (run 1).** Run 1 carried a deliberately
+unmeasured timing seed that one of the pilot's own wall tests rejects. The
+shard containing that test exited 1, its evidence still uploaded, the other
+shards ran to completion, and the verdict listed the failure by name alongside
+the other problems — nothing was retried or masked. The same run's lane
+`-race` found a real data race in the tool itself (two writers on one
+buffer), fixed in the next commit.
+
+**Lost coverage — found, fixed, and the remainder explained.**
+
+* *Found and fixed:* run 2 lost 14 blocks in `main.go`/`upstream_downgrade.go`.
+  Those are reached by helper tests that re-exec the test binary and leave via
+  `os.Exit`; the child's counters are written to `GOCOVERDIR` and merged by the
+  parent. `go test` sets `GOCOVERDIR` in the environment AND passes
+  `-test.gocoverdir`; the pilot passed only the flag, so every child's
+  coverage was silently dropped. Now reproduced by the fixture's re-exec test
+  (which fails without the fix) and gone in run 3.
+* *Remaining (run 3): 14 blocks covered only by the reference, 9 only by the
+  pilot*, all in the root package. 11 of the 14 recur in run 2 under a
+  different plan, so they are NOT noise. They are **test-order coupling**:
+  branches reached only when an EARLIER test in the same process left global
+  state behind (a loaded root/cluster CA, a recorded CA-load failure or GeoIP
+  load error, a populated request log, a once-resolved value). Proven for
+  `ui_frontend_v2.go:110` (`ensureFrontendV2`'s cached return, a
+  process-lifetime `atomic.Pointer` no test resets):
+  `TestNewAdminUIServer_ReturnsConfiguredServer` alone → 0,
+  `TestAdminUIServer_ShutdownReturnsBeforeDeadline` alone → 0, both in one
+  process → 1. The unsharded reference covers it only because file order puts
+  both in one process; the pilot's plan puts them on different shards. The 9
+  gained blocks are the same mechanism in the other direction. No TEST is
+  lost — each still runs once and passes — only an incidental path through
+  shared state. Net effect 8 statements (0.01 pp), inside every floor.
+
+### Recommendation for stage 5B
+
+1. **Adopt 4 shards; do not go to 6.** The shards land within −3%/+8% of
+   the plan (379–421 s against 392 s), and build + slowest shard already finish at ~580 s — below the
+   lane in run 3. Six shards would cut ~140 s of shard time only while the
+   lane is not the bound, at two more setups (~2 runner-minutes) per run.
+2. **Split the lane, and put `internal/mcp/execution` on its own job.** It is
+   the single biggest variance on the critical path (311–521 s); alone it
+   bounds the pilot at roughly build-time + 470 s either way. With it split
+   out, the expected critical path is max(build + shard, mcp/execution) ≈
+   580 s, i.e. ~3× today.
+3. **Refresh timings from CI, not by hand.** The compare job prints a fresh
+   `qa-root-shard-timings.json` derived from the same run's reference;
+   committing it periodically (or deriving it in the gate from the last main
+   run) keeps the balance. New tests already enter automatically at the mean.
+4. **Keep the equivalence check as the adoption gate**, not a one-off: the
+   compare job (inventory, per-entry results, block universe) should stay red
+   on any missing execution when 5B moves the race+coverage contract onto the
+   shards; coverage differences stay reported, floors stay the judge.
+5. **Cost.** Expect ~+30–40% runner-minutes for ~2.7× critical path. If that
+   is too much, run the shards only where the critical path matters (the PR
+   Fast Gate) and keep the single process on main.
+6. **Test-order coupling is now visible**, which it never was in one process.
+   The 11 recurring blocks are candidates for making those tests set up their
+   own state; that is test hygiene for a separate change, not a blocker.
+
+Rollback: delete the `root_shard_pilot` input and its two jobs from
+`qa-gate.yml`, `qa-root-shard-pilot.yml`, `cmd/rootshard` and the timing file.
+Nothing else depends on them.
