@@ -236,7 +236,7 @@ func TestDockerfileCrossBuild_BothBinariesTargetThePlatform(t *testing.T) {
 // whose anchor stopped matching would otherwise test the unmodified file and
 // "pass" by accident.
 func TestDockerfileCrossBuild_RejectsHostArchMutations(t *testing.T) {
-	real := readDockerfile(t)
+	src := readDockerfile(t)
 
 	const (
 		builderFrom = "FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder"
@@ -273,10 +273,10 @@ func TestDockerfileCrossBuild_RejectsHostArchMutations(t *testing.T) {
 
 	for _, m := range mutations {
 		t.Run(m.name, func(t *testing.T) {
-			if n := strings.Count(real, m.old); n != 1 {
+			if n := strings.Count(src, m.old); n != 1 {
 				t.Fatalf("mutation anchor must match the Dockerfile exactly once, matched %d times: %q", n, m.old)
 			}
-			mutated := strings.Replace(real, m.old, m.new, 1)
+			mutated := strings.Replace(src, m.old, m.new, 1)
 			if m.name == "agent ARG TARGETARCH declared only after the RUN" {
 				// Re-add the declaration AFTER the build: present in the
 				// stage, but not in scope when the RUN executes.

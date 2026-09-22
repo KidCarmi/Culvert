@@ -12,6 +12,12 @@
 # ARGs are declared INSIDE the stage before the RUN. An undeclared ARG expands
 # to EMPTY, and an empty GOARCH silently builds for the HOST — an amd64 binary
 # inside the arm64 image that fails only when an arm64 host executes it.
+#
+# Requires BuildKit — the default builder since Docker Engine 23.0 and the only
+# one Compose v2 uses. The deprecated legacy builder (DOCKER_BUILDKIT=0) never
+# sets $BUILDPLATFORM, so it stops HERE with `failed to parse platform : ""`.
+# There is no default that would keep it working: the legacy builder does not
+# expose the host platform at all, and hardcoding one breaks the other arch.
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 WORKDIR /app
