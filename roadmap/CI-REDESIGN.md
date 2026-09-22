@@ -115,11 +115,12 @@ branch-protection edit **in the same sitting**:
    (see §4).
 9. **`ci.yml` constraints — do not violate:**
    - The workflow **name `CI` must not change** and the workflow must not be
-     split in a way that changes its name: `publish-catalog-pages.yml`
+     split in a way that changes its name: `publish-catalog-r2.yml`
      triggers on `workflow_run: workflows: ["CI"]`. Renaming it silently
-     kills signed-catalog publication to Pages (the
-     `CULVERT_RELEASE_CATALOG_URL` auto-seed origin). If it is ever renamed,
-     update `publish-catalog-pages.yml` in the same PR.
+     kills signed-catalog publication to the R2 origin (the
+     `CULVERT_RELEASE_CATALOG_URL` auto-seed origin, and since the Pages
+     retirement the ONLY one). If it is ever renamed, update
+     `publish-catalog-r2.yml` in the same PR.
    - The `docker` job on main-push/tags is **release machinery** (next-version
      compute, push/retag, cosign, `proxy_digest`/`version_bare` outputs
      consumed by `catalog-pipeline`, transitively gating `release`). The
@@ -182,7 +183,7 @@ dependency — a commit that later fails the gate has already shipped a signed
 ### 5b. Egress control on the signing jobs (PANW audit item 2)
 
 The OIDC-token-bearing jobs (`docker`, `catalog-pipeline`, `release`, plus the
-`_build-image` reusable, `pr-fast-gate/test-race`, and `publish-catalog-pages`)
+`_build-image` reusable, and `pr-fast-gate/test-race`)
 run `go build`/`go test`/`docker build` over the full dependency graph while
 holding the cosign signing identity. A compromised transitive dep could
 exfiltrate that token. **Phase 2a (applied):** `step-security/harden-runner`
@@ -410,3 +411,188 @@ continue-on-error).
 | Typical Go PR | ~40–60 min | ~10–15 min (bounded by the single `-race` run) |
 | Proxy/security/deps PR | ~40–60 min | ~20–30 min (Lane A ∥ Lane B, image built once) |
 | Release tag | ~60+ min | unchanged by design (full evidence) |
+
+## 8. Stage 1 — QA scheduling (shipped)
+
+Six QA Gate jobs — `qa-determinism`, `qa-coverage`, `qa-infra-compose`,
+`qa-os`, `qa-contract`, `qa-bench` — carried `needs: qa-logic` while consuming
+no output and no artifact from it. The edge bought nothing and serialised the
+longest job in the workflow (a full `-race` suite, ~25 min observed) in front of
+every one of them on main pushes and manual dispatches. Stage 1 removes the six
+edges, leaving all eight substantive jobs independent and joined only by the
+`✅ QA Gate — APPROVED` aggregate.
+
+The PR-time skip those jobs used to inherit by CASCADE from `qa-logic`'s own
+`if:` is now stated on each job explicitly
+(`if: github.event_name != 'pull_request'`). Dropping the edge without restoring
+the condition would have started running the whole QA suite on every pull
+request — the opposite of retirement step 5. `always()` is deliberately NOT used:
+it would also run the jobs on PRs and after a cancellation.
+
+Unchanged by design: workflow name, job ids, required-check names, the trigger
+matrix (push→main, pull_request→main, workflow_dispatch; no schedule, no tag
+push), every command, flag, seed, coverage floor, timeout, permission,
+concurrency group, artifact and cleanup step, the aggregate's `always()`, the
+shared `needs-verdict` action, and `qa-gate.yml`'s `mandatory` row in
+`.github/release-evidence.txt`.
+
+Behaviour change, intended: a `qa-logic` failure no longer suppresses its former
+dependents — they run and report their own verdict. The aggregate still refuses,
+because it still needs all eight.
+
+Wall: `qa_gate_scheduling_test.go` (5 tests / 22 sub-cases). It parses the real
+workflow and drives the REAL `needs-verdict` composite action's shell rather
+than a re-implementation of its jq. Every assertion was verified failing against
+the pre-change tree or against an injected defect (re-added edge, dropped `if:`,
+`always()` substitution, a job dropped from the aggregate, a restored tag
+trigger, and a `needs-verdict` that stops refusing `cancelled`).
+
+### Follow-up (NOT in stage 1): `needs-verdict` accepts `skipped` on every event
+
+`.github/actions/needs-verdict` treats a `skipped` need as a pass unless the
+caller passes `require-success`. The event is not part of its input, so it
+cannot distinguish a legitimate PR skip from an all-skipped main push. No gate
+aggregate in this repository passes `require-success` today, so an all-skipped
+main-push QA run would report APPROVED. This is PRE-EXISTING and shared by the
+Fast/Deep PR and Security aggregates; it is not made better or worse by stage 1,
+and tightening it is a policy change to a shared action that belongs in its own
+reviewed diff (the likely shape: pass `require-success` with the substantive job
+ids on non-PR events).
+
+Two consequences to carry until it is closed:
+
+* Validating a QA scheduling change on a non-PR event means confirming that all
+  eight substantive jobs **executed** successfully, not merely that the
+  aggregate went green.
+* `TestQAGateVerdict_RealActionBehaviour` pins the behaviour as it IS, including
+  this gap, so closing it is a visible diff rather than a silent one.
+
+## 9. Stage 2A — QA coverage from the race run (shipped)
+
+QA executed the whole `./...` suite TWICE on every main push. `qa-logic` ran it
+under `-race`; `qa-coverage` ran it again under `-coverprofile`, with the same
+`TEST_SEED` and the same package scope, purely to instrument what the first run
+had already executed.
+
+Stage 2A adds `-coverprofile=coverage.out` to the race invocation and turns
+`qa-coverage` into a VERIFIER: it downloads the profile `qa-logic` publishes and
+runs the existing `.github/scripts/coverage-floor.sh` on it. One execution, same
+evidence.
+
+`qa-coverage` therefore gets a `needs: qa-logic` edge back — the one stage 1
+removed from it. That is not a reversal: stage 1 removed six edges that carried
+**no data**, and this one carries an artifact, so the job genuinely cannot start
+earlier. The invariant the wall pins is that distinction (`qaAllowedJobEdges`),
+not a blanket "no edges" rule.
+
+Unchanged: the eight substantive jobs and the aggregate; the other five jobs stay
+independent; the global 55% floor, every per-file floor and the script's
+arithmetic; the `qa-coverage` artifact name, its `coverage.out` path and its
+30-day retention; the shuffled determinism suite, the maintenance-agent module
+checks and the benchgate tests; the PR pass-through.
+
+### The shape is not new here — Security already runs it
+
+`security-release-gate.yml`'s `tests-race` job has been running
+`go test -v -race -count=1 -timeout=40m -coverprofile=coverage.out ./...` —
+the same combined command, on the same suite, under the same 50m/40m budgets —
+on every non-PR event. Stage 2A makes QA match a shape this repository already
+relies on, rather than introducing one.
+
+It also supplies a CONTROLLED measurement of the instrumentation cost, on the
+same commit `35169ba` and the same runner class:
+
+| Job | Command | Duration |
+|---|---|---|
+| `qa-gate` / `qa-logic` | `-race`, no coverage | **1969 s** |
+| `security-release-gate` / `tests-race` | `-race` **+ `-coverprofile`** | **1950 s** |
+
+Race+coverage measured 19 s FASTER than race-only — i.e. the overhead is below
+this suite's run-to-run variance, not that instrumentation is free. Do not quote
+that as a speedup; quote it as "no measurable cost".
+
+So a main push ran the full suite **three** times before 2A (QA race, QA
+coverage, Security race+coverage), runs it **twice** after, and would run it
+**once** after 2B.
+
+### Why the coverage numbers do not move
+
+`-race` forces `-covermode=atomic`, so the profile's `mode:` line changes and its
+counters carry real counts instead of 0/1. `go tool cover` treats any count > 0
+as covered, so the PERCENTAGES the floors are computed from are unaffected.
+Measured on the packages hosting four of the nine floor files, `go tool cover
+-func` output is **byte-identical** between the two arms — same statement-block
+set (348 blocks), same total, same per-file floor arithmetic. Only the `mode:`
+line differs.
+
+### The failure modes the edge introduces, and where each is refused
+
+Moving evidence across a job boundary adds ways to be green without it. A floor
+enforced against nothing is indistinguishable from a floor that passed, so each
+is refused explicitly:
+
+| Failure | Refused by |
+|---|---|
+| Profile missing/empty/malformed at the producer | `qa-logic`'s guard step, before upload |
+| Profile never published | `if-no-files-found: error` on the upload |
+| Producer failed or was cancelled | `needs: qa-logic` — `qa-coverage` never runs, and qa-logic's own result fails the aggregate |
+| Download empty or truncated | `qa-coverage`'s guard step, before the floor script |
+| Floor genuinely breached | `coverage-floor.sh`, unchanged |
+| A profile from some OTHER run | `download-artifact` is passed no `run-id`/`github-token`, so it is scoped to this run |
+
+Note the third row: a failed `qa-logic` SKIPS `qa-coverage`, and `needs-verdict`
+reads a skip as a pass. The gate is still correct **only** because qa-logic's own
+`failure` is in the same `needs` set. Never drop qa-logic from the aggregate.
+Pinned by `TestQAGateCoverage_VerdictRefusesMissingCoverageEvidence`.
+
+Wall: `qa_gate_coverage_test.go`, which drives the REAL shipped shell — both
+guard steps and `coverage-floor.sh` itself — rather than re-implementing them,
+and builds a genuinely valid profile by compiling a throwaway module instead of
+hand-writing profile lines that `go tool cover` cannot resolve.
+
+### Not done here — stage 2B
+
+The duplicate main-push race execution ACROSS workflows is untouched:
+`qa-gate.yml`'s `qa-logic` and `security-release-gate.yml` both run the full
+`-race` suite on a main push. Consolidating them is stage 2B and is not a
+scheduling change — see §10.
+
+## 10. Stage 2B — the cross-workflow race duplication (NOT yet implemented)
+
+On a main push the full `-race ./...` suite runs twice in two different
+workflows. Removing one copy is worth roughly a `qa-logic` (~33 min of runner
+time), but it cannot be done by deleting a job, because **the two workflows do
+not run on the same events**:
+
+| Event | qa-gate.yml | security-release-gate.yml |
+|---|---|---|
+| push → main | yes | yes |
+| pull_request → main | jobs skip (pass-through) | pass-through |
+| tag `v*` | **no trigger at all** | yes |
+| schedule (weekly) | no | yes |
+| workflow_dispatch | yes (any ref) | yes |
+
+So making Security consume QA's race evidence would leave **tags, the weekly
+cron and Security-only dispatches with no race evidence at all** — and
+`require-gate.sh` accepts only a main-push run of a named workflow for the exact
+SHA, so a tag run cannot borrow QA's. Any 2B design has to answer that
+explicitly rather than assume the main-push case generalises.
+
+The two shapes worth weighing:
+
+1. **Shared reusable workflow.** Extract the race suite into a
+   `workflow_call` workflow both gates invoke. Each event still gets its own
+   execution, so nothing is lost on tags or cron — but the main-push duplication
+   is only removed if one caller also learns to skip when the other has already
+   run for the same SHA, which reintroduces the evidence question.
+2. **Event-scoped ownership.** QA owns the race suite on main pushes; Security
+   skips it there and consumes QA's result, while keeping its own execution on
+   tags, cron and dispatch. This removes the duplication outright, but it makes
+   a Security verdict on main depend on a QA run, so
+   `.github/release-evidence.txt` must continue to require BOTH workflows (it
+   already does — both rows are `mandatory`) and the skip must fail closed when
+   QA's run for that SHA is absent, not silently pass.
+
+Option 2 is the one that actually removes the duplicate execution. It is also
+the one that touches release evidence, which is why it is its own reviewed
+change and not part of 2A.

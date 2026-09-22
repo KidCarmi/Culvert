@@ -9,6 +9,213 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Public release promotion ran ahead of the evidence that was supposed to
+  authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
+  published and cosign-signed the `latest`, `v0.0.N` and `0.0.N` image tags at
+  11:40:09Z, while the Security and QA verdict for that same commit only
+  concluded at 12:09:14Z — 29 minutes of publicly pullable, unverified bytes on
+  a channel `packaging/culvert-maint/install.sh` seeds fresh installs from. The
+  cause was one predicate written out by hand in four places and omitted from
+  the fifth: `docker`'s gate step carried
+  `if: startsWith(github.ref, 'refs/tags/v')`, and a main push is not a tag
+  ref. In the same push Install Lifecycle E2E failed before reaching any
+  lifecycle assertion and the SHA was tagged regardless. Release *assets* had
+  the same shape on the tag path: `catalog-pipeline` and `release` uploaded
+  into a live release while `verify-reproducible` and SLSA `provenance` were
+  still running downstream, and the assets stayed public if either then failed.
+
+  The predicate is now one script over one manifest
+  (`.github/scripts/require-release-evidence.sh` +
+  `.github/release-evidence.txt`), every publishing job calls it, and each row
+  is explicitly classified mandatory or advisory with the not-applicable
+  workflows and their reasons recorded in the manifest header. `docker` pushes
+  only non-channel candidate tags (`candidate-<run_id>`, `sha-<short>`); a new
+  evidence-gated `promote-image` job moves `latest`/semver onto that exact
+  tested digest via `imagetools create`, after proving the candidate tag
+  resolves to the digest this run built and after a re-run rule that skips a
+  superseded run and refuses a divergent one. Every release asset is staged
+  `draft: true`, and a new `publish-release` job — needing `release`,
+  `catalog-pipeline`, `aggregate-subjects`, `verify-reproducible` and
+  `provenance` — is the only place `--draft=false` runs, after
+  `assert-release-complete.sh` proves every required binary, signature bundle,
+  SBOM, the signed catalog and the SLSA provenance are present and non-empty.
+  `require-gate.sh` now treats a `skipped` or `neutral` gate conclusion as an
+  immediate refusal rather than letting `wait` mode poll for 30 minutes first.
+  A `workflow_dispatch` on a branch no longer republishes `latest` at all.
+
+  Two review rounds on the gating change itself, both real and both fixed:
+  promotion targets are now split into IMMUTABLE (the exact `X.Y.Z`, always
+  promoted — a version tag cannot be superseded) and FLOATING (`latest`,
+  `main`, `X.Y`, `X`, deferred to the newer run), because a single
+  supersession-gated list meant a tag run overtaken by a newer tag skipped its
+  OWN version tag while `publish-release` still undrafted the release; and
+  `--latest` is now decided against the highest `v*` tag rather than asserted,
+  because `scripts/install.sh` resolves its bootstrap verifier through
+  `/releases/latest` and an unconditional flag moved fresh installs onto an
+  older verifier whenever a superseded tag's run finished last.
+
+  A third round found three more, all in the same family and all fixed: the
+  exact version aliases split across paths (the main run promoted `vX.Y.Z` and
+  the tag run `X.Y.Z`, from deliberately different digests, so one version named
+  two images and `vX.Y.Z` sat on a digest its own catalog did not pin) — exact
+  aliases now belong to the tag run alone and move together; image promotion
+  read the channel tip from a checkout snapshot and took no cross-ref lock,
+  while ci.yml's concurrency key includes the ref, so an older tag run could
+  roll `X.Y`/`X` back — promotion now holds a ref-independent job lock and
+  refreshes tags from the remote inside it; and the `--latest` comparison was
+  itself a check-then-act, so the un-draft now goes through the releases API
+  with `make_latest: legacy` and GitHub arbitrates Latest atomically, which
+  removes the race rather than narrowing it.
+
+  A fourth round closed the last two. An exact version tag is now WRITE-ONCE:
+  this image build is not reproducible over time (floating `alpine:3.24`, `apk
+  upgrade`, and a GeoIP URL embedding `$(date +%Y-%m)`), so re-running a
+  published tag's workflow builds different bytes, and repointing `X.Y.Z` at
+  them would serve a released version content its own published catalog does
+  not pin — promotion now refuses unless the tag is absent or already at this
+  digest, and says to cut a new version instead. And channel ownership on the
+  tag path compares TAG IDENTITY, not just the commit: two version tags can
+  name the same commit, which let the lower one believe it owned `X.Y`/`X` and
+  roll them back to itself.
+
+  A fifth round closed two write-once holes that the fourth round's rule had
+  opened rather than closed. Absence of an exact tag must be PROVEN, not
+  inferred: `imagetools inspect` exits 1 for every failure, so reading any
+  nonzero exit as "the tag is free" made a transient registry, auth or network
+  fault indistinguishable from an unused tag, and the next step would repoint an
+  already-published `X.Y.Z` at the rebuild — the exact overwrite the rule
+  exists to prevent. Classification is now by message against a deliberately
+  narrow not-found allowlist, anything unrecognised is ambiguous and refuses
+  after a bounded retry, and the asymmetry is the argument: a missed not-found
+  refuses a legitimate first promotion loudly and is recovered by re-running,
+  while a missed transient failure silently overwrites a released version. And
+  a PUBLISHED release is write-once too — every asset step stages with
+  `draft: true`, which `action-gh-release` applies to an existing release as
+  well, so a re-run of an already-published tag PATCHed the live release back
+  to draft and could not put it back (the rebuild's digest is refused against
+  the write-once exact tag, so `publish-release` is skipped), stranding a
+  public release unpublished with a catalog asset pinning a rejected digest.
+  `assert-release-unpublished.sh` now runs as the first step of every staging
+  job and refuses before the first mutation, leaving the public release and its
+  assets untouched; the catalog re-sign dispatch is the one sanctioned mutation
+  of a published release and is deliberately unguarded, since it skips the
+  whole staging chain and uses `gh release upload`, which does not touch draft
+  state.
+
+  A sixth round closed the deadlock the fifth had left. Write-once protects
+  what a RELEASED version means, and the fifth round had no way to tell a
+  released version from an unfinished publication — so a first tag run that
+  promoted `X.Y.Z` and then lost `verify-reproducible` or `provenance` WEDGED
+  PERMANENTLY: the release stayed a draft, the full re-run was allowed (nothing
+  had been published), the rebuild produced a different digest because this
+  build is not reproducible over time, write-once refused it, `publish-release`
+  was skipped for want of promotion, and the only escape was deleting a public
+  image tag by hand — which the runbook forbids. Both guards now key on ONE
+  fact from ONE query: `catalog-pipeline` resolves the release's draft state
+  before anything is mutated and exports it, `promote-image` consumes it, and a
+  still-DRAFT release lets its exact tag be repointed to finish the publication
+  while published, absent, unreadable and unset all still refuse. Exporting it
+  rather than re-querying also keeps `promote-image` on `contents: read` —
+  GitHub shows a draft release only to a token with push access.
+
+  An OWNER CORRECTION reversed the sixth round and closed the ordering defect
+  underneath it. The draft-state exception was wrong on its premise: a GHCR tag
+  is public the instant it is written, so a GitHub Release's Draft flag is not a
+  visibility boundary for the registry, and letting a Draft license a repoint
+  weakened exactly the immutability it was guarding. It is removed — an exact
+  version tag is write-once with no exception. The ordering defect that made an
+  exception look necessary is fixed at the same time: `promote-image` depended
+  only on `docker` and `catalog-pipeline`, so public version tags appeared while
+  `verify-reproducible` and `provenance` were still running, and stayed public
+  if either then failed. Promotion is now SPLIT — `promote-image` moves only
+  `latest`/`main` on the main push, and a new `promote-release-channels` writes
+  `vX.Y.Z`/`X.Y.Z`/`X.Y`/`X` only after every required release check has
+  succeeded, so a reproducibility or provenance failure promotes nothing.
+
+  Retry safety is bought properly instead of by exception. `resolve-candidate`
+  binds each version to ONE candidate digest before anything is published —
+  recorded as the write-once registry tag `candidate-vX.Y.Z`, read back to prove
+  the write landed, and verified against this commit through the image's own
+  `org.opencontainers.image.revision` label on the first run as well as on
+  retries. Every downstream job (catalog generation, `cosign verify`, both
+  promoters) reads the digest from the binding, never from the build, so a retry
+  DISCARDS its own rebuild and resumes: aliases already written are idempotent
+  no-ops, missing ones are completed, and no public version tag ever changes
+  digest. Missing, unreadable, multi-valued or wrong-commit bindings all refuse
+  with a named recovery, and nothing is ever deleted or overwritten
+  automatically. No cross-service atomicity is claimed — GHCR and the Releases
+  API fail independently; what the binding guarantees is that every attempt at a
+  version converges on one digest, so partial publication is completed rather
+  than re-decided.
+
+  The binding is also the reference promotion is VERIFIED against, and getting
+  that wrong defeated the whole mechanism: `promote-image-tags.sh` refuses a
+  digest no candidate tag resolves to, and the tag path was handing it the
+  run-scoped `candidate-<run_id>`. A re-run keeps its run id and force-pushes
+  non-reproducible new bytes over that tag, so the promoter compared the bound
+  digest against the rebuild and refused EVERY retry — the resume path dead on
+  exactly the occasion it exists for. `resolve-candidate` now emits
+  `candidate_tag` (the version binding on a tag, the run-scoped tag on main) and
+  both promoters read it from there; the name is never re-derived at a call
+  site, so the binding and the reference checked against it cannot drift apart.
+
+  Pinned by `release_publication_gating_test.go` (16 structural walls over
+  `ci.yml` and the manifest, each verified failing against the pre-fix tree)
+  and `.github/scripts/test/release-gating-cases.sh` (65 behavioural cases
+  against mocked `gh`/`docker`/`git` — no registry, no release, no Sigstore).
+  Signing identities are unchanged: cosign keyless SANs are per workflow FILE
+  and ref, and both new jobs live in `ci.yml`. See
+  `docs/operator/release-publication-gating.md`.
+
+- Release staging is DRAFT-AWARE end to end. `GET /releases/tags/{tag}` does not
+  return drafts, and the #1441 staging design puts every asset on one, so every
+  reader in the chain was blind to the release it was reasoning about. On
+  v1.0.234 the SLSA generator's uploader (`action-gh-release@v2.2.1`, by-tag)
+  404'd on the draft and CREATED A SECOND, PUBLISHED release carrying only the
+  attestation; it became the repository's Latest, `assert-release-complete.sh`
+  read it, reported 19 assets missing and refused, and `scripts/install.sh` —
+  which resolves its bootstrap verifier through `/releases/latest` — broke for
+  fresh installs. The generator now runs with `upload-assets: false` and a new
+  `attach-provenance` job stages the attestation on the draft with the v3.0.2
+  action (which enumerates releases and can see a draft); every other reader
+  resolves the staged release by id through `resolve_staged_release_id`
+  (`.github/scripts/lib/release.sh`), which prefers the draft, warns when a
+  stray published release shares the tag, and refuses on ambiguity. The one
+  legitimate by-tag lookup, `assert-release-unpublished.sh`, is allowlisted with
+  its reason. Walled by `TestPublicationGating_NoDraftBlindReleaseLookup` plus 8
+  behavioural cases including the exact v1.0.234 shape; both verified failing
+  against the defect.
+
+- GitHub Pages is retired as a release-catalog origin; Cloudflare R2
+  (`https://catalog.culvertlabs.com`) is the sole publication target.
+  `publish-catalog-pages.yml` is deleted, `verify-dual-publish.yml` becomes the
+  R2-only `verify-catalog-publish.yml`, the weekly re-sign scheduler no longer
+  dispatches a Pages publisher, and no workflow may grant `pages: write` or name
+  `kidcarmi.github.io` (pinned structurally by `TestCatalogOriginIsR2Only`).
+
+  **The trust contract is unchanged, which is exactly why the second origin was
+  removable.** Catalog integrity comes from the keyless Sigstore signature
+  verified IN-BINARY against the baked trusted root and the pinned `ci.yml`
+  identity — never from the host. A second host of the same bytes therefore
+  bought no trust while costing a divergence surface, a second freshness
+  obligation and a second thing to keep serving. The verify workflow still
+  applies every check it previously applied per origin: content match against
+  the release's signed bundle, a baked-root served verify that must PASS (a skip
+  is not a pass), availability convergence, and the weekly SEC-F5 freshness
+  canary.
+
+  **Migration impact:** the baked default client URL
+  (`defaultReleaseCatalogURL`) was already the R2 origin and no Go, installer or
+  packaging code references the Pages host, so no shipped client defaulted to
+  Pages. Only an operator who explicitly set `CULVERT_RELEASE_CATALOG_URL` to
+  the Pages URL is affected, and must repoint it. **A dormant publisher stops
+  being safe** once R2 is the only target — `vars.R2_PUBLISH_ENABLED` being
+  unset used to be a harmless skip and now means nothing is published at all —
+  so `publish-catalog-r2.yml` gains an `assert-publication-target` job that
+  FAILS in that state rather than skipping green. Disabling the Pages site
+  itself is a repository-settings action an owner must still take; this change
+  touches repository content only.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
@@ -235,6 +442,15 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- The root-CA recovery record (CHAOS-50) could report a recovery with the
+  wrong attempt count. A successful attempt set `recovered` from inside the
+  attempt while the campaign loop counted it only after the attempt returned,
+  so a reader of `GET /api/ca/status` or `/metrics` landing between the two
+  writes saw `loadRecoveryAttempts` one short of the attempt that recovered it
+  — including zero. Each attempt is now recorded as one locked transition
+  carrying its count together with its outcome (error or recovered), so no
+  snapshot can pair one attempt's count with another attempt's result. No
+  change to the retry schedule, the never-mint rule or the log lines.
 - An admin UI listener failure no longer terminates the proxy data plane
   (CHAOS-57). `startUI`'s listen goroutine called `logFatalf`, so an occupied
   admin port or an unreadable `-tls-cert`/`-tls-key` pair exited the whole
