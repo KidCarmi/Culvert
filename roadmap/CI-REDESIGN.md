@@ -970,7 +970,7 @@ trigger of its own), called from `qa-gate.yml` only when a manual dispatch sets
 
 | Job | What it does |
 |---|---|
-| `pilot-build` | `go test -c -race -cover .` **once**; inventory from the binary's own `-test.list .*` (source-regex counts are not authoritative: 6,416 `func Test` in source vs 6,306 runnable Test entries in the default-tag binary); times an empty run (process start + TestMain + coverage write); partitions by measured duration |
+| `pilot-build` | `go test -c -race -cover .` **once**; inventory from the binary's own `-test.list .*` (source-regex counts are not authoritative: the root has 6,421 `func Test…` in source, many behind build tags such as `benchgate`, against 6,325 runnable Test/Fuzz/Example entries + 136 benchmarks in the default-tag CI binary); times an empty run (process start + TestMain + coverage write); partitions by measured duration |
 | `pilot-shard` ×4 | runs its selections against THAT binary from the same checkout path; refuses another binary, commit, toolchain or working directory; first proves the binary's own `-test.list` selects exactly the planned entries; then runs with the reference's per-binary flags (`-test.paniconexit0 -test.gocoverdir -test.timeout=40m -test.count=1 -test.coverprofile`), test2json events streamed to evidence |
 | `pilot-lane` | every package `go list ./...` returns EXCEPT the exact root import path, as whole packages, `-race -count=1 -timeout=40m -coverprofile -json` |
 | `pilot-verdict` | `if: always()`; rejects failed/cancelled/missing shards, identity mismatches, inventory mismatches (every planned entry exactly one result; nothing unselected ran), unusable or incompatible profiles; merges all profiles by block; runs the UNCHANGED `coverage-floor.sh` |
