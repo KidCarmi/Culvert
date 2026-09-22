@@ -159,3 +159,76 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	noteWriteSuccess(path)
 	return nil
 }
+
+// ── Predictable-path secret writes (SEC-SECRETWRITE-1) ───────────────────────
+//
+// WriteFileExclusive is the safe counterpart to AtomicWrite for the few
+// callers that CANNOT use a random temp name because the path itself is a
+// rendezvous another code path looks for by name (the CDR renewal's
+// "<bundle>.tmp" files, which reconcileCredentialLineage finds at the next
+// boot to finish an interrupted swap).
+//
+// It exists because os.WriteFile is unsafe for secret material on a
+// predictable path, in two ways that are easy to miss and were each
+// reproduced against this tree:
+//
+//   - IT FOLLOWS SYMLINKS. O_CREATE without O_EXCL opens the link's TARGET,
+//     so an entry planted at the path before the first write sends the bytes
+//     somewhere the writer never chose — outside the data directory
+//     entirely. For a key file the read side makes this worse rather than
+//     better: os.ReadFile on a DANGLING link reports fs.ErrNotExist, which is
+//     exactly the condition every mint path treats as "no key yet, create
+//     one".
+//   - ITS perm ARGUMENT APPLIES ONLY ON CREATION. Writing over a file that
+//     already exists keeps that file's mode, so a 0666 file planted at the
+//     path receives the secret and stays world-readable however carefully
+//     0600 was passed.
+//
+// WriteFileExclusive removes any pre-existing entry — link or file, which is
+// what makes the create exclusive rather than merely racy — then creates the
+// path with O_EXCL at perm, writes, fsyncs and closes. Removing first keeps
+// the drop-in semantics of os.WriteFile (a stale rendezvous file from an
+// interrupted predecessor is superseded, exactly as a truncating write
+// superseded it before); O_EXCL then guarantees the descriptor refers to a
+// file THIS call created, at THIS mode, at THIS path.
+//
+// Anything the remove cannot clear — a non-empty directory, a parent that
+// denies unlink — fails the call CLOSED, with nothing written and the
+// existing entry untouched. An EMPTY directory is cleared like a stale file;
+// that is a deliberate widening over os.WriteFile's EISDIR, since nothing
+// security-relevant distinguishes an empty directory at a rendezvous path
+// from no entry at all.
+//
+// Callers that do NOT need a predictable path must use AtomicWrite instead:
+// it is the durable-write chokepoint, it is atomic against readers, and its
+// rename-over-the-target replaces a planted symlink rather than writing
+// through it.
+//
+// Deliberately NOT wired to the AtomicWrite observers (CHAOS-45): this is not
+// that chokepoint, and every call site checks the returned error itself.
+// Notifying only the failure seam would degrade the storage row with no
+// success seam able to clear it by evidence.
+func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("exclusive write %s: clear existing: %w", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if err != nil {
+		return fmt.Errorf("exclusive write %s: create: %w", path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("exclusive write %s: write: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("exclusive write %s: fsync: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("exclusive write %s: close: %w", path, err)
+	}
+	return nil
+}
