@@ -55,11 +55,14 @@ Three bounded audits were run against the diff:
    field (`ReviewedOperationClass`), the JSON tag, the request-body comment, and the parse function
    (`ParseReviewedOperationClass`) — no drift.
 2. **New Prometheus/JSON surfaces added this window** — scanned every `culvert_*` metric name and every
-   new `json:"..."` tag added by the diff. All of it is CHAOS-65 (OCSP) continuation
-   (`culvert_ocsp_path_checked`, `culvert_ocsp_response_rejected_total`, the new `ocspPathCoverage{Path,
-   Checked, Detail}` struct with path identifiers `upstream_transport`/`ssl_inspect_origin`/
-   `connect_bypass`) and one CHAOS-63 field (`loginOversizeRejected` newly exposed on `GET /api/stats`).
-   Every one of these matches byte-for-byte across its Go var name, JSON tag, GUI DOM id/JS accessor
+   new `json:"..."` tag added by the diff. Two categories, both consistent, neither drift: the MCP
+   canary's `reviewed_operation_class` (already audited above, under point 1 — included here rather than
+   omitted, since it is also a new JSON tag in this same window) is spelled identically across the Go
+   field, the JSON tag, the request-body comment, and `ParseReviewedOperationClass`; and the rest —
+   CHAOS-65 (OCSP) continuation (`culvert_ocsp_path_checked`, `culvert_ocsp_response_rejected_total`, the
+   new `ocspPathCoverage{Path, Checked, Detail}` struct with path identifiers `upstream_transport`/
+   `ssl_inspect_origin`/`connect_bypass`) and one CHAOS-63 field (`loginOversizeRejected` newly exposed on
+   `GET /api/stats`) — matches byte-for-byte across its Go var name, JSON tag, GUI DOM id/JS accessor
    (`static/index.html`'s new `ocsp-coverage-*`/`oversize-login-*` elements read
    `ocsp.notForCertificateTotal` / `s.loginOversizeRejected` verbatim), and its `/metrics` HELP text. Zero
    new MCP-canary metrics, zero new audit event names, zero new CLI flags/YAML keys/env vars anywhere in
