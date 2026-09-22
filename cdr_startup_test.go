@@ -31,6 +31,46 @@ func TestResolveCDRStartupConfig_FlagsWinOverConfig(t *testing.T) {
 	}
 }
 
+// TestResolveCDRStartupConfig_YAMLTimeoutBelowFloorSurvivesCLIEnable pins the
+// exact scenario a PR #1465 review comment identified: config.yaml's
+// validateCDR (config.go) skips the WHOLE cdr block — including the
+// timeout_sec range check — whenever cdr.enabled is false, so a config with
+// cdr.enabled: false and an out-of-range timeout_sec (e.g. carried over from
+// a disabled draft, or a value an operator plans to flip on later) passes
+// YAML validation untouched. If CDR is then enabled via -cdr-enabled with
+// -cdr-timeout-sec left unset (0, "not passed" in this package's
+// firstNonZero convention), resolveCDRStartupConfig merges in the
+// still-unvalidated YAML timeout_sec verbatim. Validating only the raw CLI
+// flag (initCDR's first shape) never sees this — the flag itself is 0/valid;
+// the invalid value is hiding in the config-fallthrough side of the merge.
+// initCDR must therefore validate the RESOLVED value this test proves is
+// produced, not just the CLI flag in isolation.
+func TestResolveCDRStartupConfig_YAMLTimeoutBelowFloorSurvivesCLIEnable(t *testing.T) {
+	fc := &FileConfig{}
+	fc.CDR.Enabled = false // validateCDR() never inspects TimeoutSec below
+	fc.CDR.Endpoint = "sluice:8443"
+	fc.CDR.TimeoutSec = 3 // below the 30s floor, but unreachable by validateCDR while disabled
+	if err := fc.validate(); err != nil {
+		t.Fatalf("validate() rejected a disabled CDR block with an out-of-range timeout_sec (should be unchecked while disabled): %v", err)
+	}
+
+	got := resolveCDRStartupConfig(fc, defaultDataDir, cdrCLIFlags{
+		Enabled:    true, // -cdr-enabled
+		TimeoutSec: 0,    // -cdr-timeout-sec not passed
+	})
+	if !got.CDR.Enabled {
+		t.Fatal("CLI --cdr-enabled must enable")
+	}
+	if got.CDR.TimeoutSec != 3 {
+		t.Fatalf("TimeoutSec = %d, want 3 (the unvalidated YAML value falling through)", got.CDR.TimeoutSec)
+	}
+	// The value initCDR must catch: resolved, enabled, and out of range —
+	// even though the raw CLI flag alone (0) is perfectly valid.
+	if msg := validCDRTimeoutSec(got.CDR.TimeoutSec); msg == "" {
+		t.Fatal("validCDRTimeoutSec accepted the resolved TimeoutSec=3, want a rejection — this is the value initCDR must validate")
+	}
+}
+
 func TestResolveCDRStartupConfig_ConfigFallthroughAndPaths(t *testing.T) {
 	fc := &FileConfig{}
 	fc.CDR.Enabled = true

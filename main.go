@@ -925,32 +925,34 @@ func initCDR(s *startupState) {
 	if msg := validCDRServerFingerprint(*s.cdrFingerprintFlag); msg != "" {
 		log.Fatalf("Invalid -cdr-server-fingerprint %q: %s", *s.cdrFingerprintFlag, msg)
 	}
-	// Same mirroring for -cdr-timeout-sec: config.yaml's cdr.timeout_sec is
-	// range-validated at load time (validateCDR, >= 30 — Sluice's own cap),
-	// but the CLI flag reaches the exact same CDRConfig.TimeoutSec field with
-	// no equivalent gate. An invalid (too-low) value here doesn't fail
-	// startup at all — cdr_pool.go/cdr_proxy.go use any positive value
-	// verbatim as the per-file gRPC deadline, so a deadline too short for
-	// Sluice to ever finish makes every CDR call time out. With the default
-	// fail-open FailMode, that silently disables CDR content sanitization
-	// for every download from startup, with nothing pointing at the cause.
-	if msg := validCDRTimeoutSec(*s.cdrTimeoutFlag); msg != "" {
-		log.Fatalf("Invalid -cdr-timeout-sec %d: %s", *s.cdrTimeoutFlag, msg)
+	resolved := resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
+		Enabled:     *s.cdrEnabledFlag,
+		Endpoint:    *s.cdrEndpointFlag,
+		FailMode:    *s.cdrFailModeFlag,
+		Profile:     *s.cdrProfileFlag,
+		Mode:        *s.cdrModeFlag,
+		TimeoutSec:  *s.cdrTimeoutFlag,
+		MaxSizeMB:   *s.cdrMaxSizeFlag,
+		Fingerprint: *s.cdrFingerprintFlag,
+		CertsDir:    *s.cdrCertsDirFlag,
+	})
+	// Mirror config.yaml's cdr.timeout_sec validation on the RESOLVED value,
+	// not just the raw -cdr-timeout-sec flag: validateCDR (config.go) skips
+	// the WHOLE cdr block — including timeout_sec — whenever cdr.enabled is
+	// false in config.yaml, so an out-of-range timeout_sec can sit unchecked
+	// in a disabled block. Validating only *s.cdrTimeoutFlag misses the case
+	// where that unvalidated YAML value becomes live the moment -cdr-enabled
+	// flips CDR on with -cdr-timeout-sec itself left unset (0) — the flag in
+	// isolation is valid, but the merged config resolveCDRStartupConfig just
+	// produced is not (TestResolveCDRStartupConfig_YAMLTimeoutBelowFloorSurvivesCLIEnable
+	// pins this). Only checked when the resolved config is actually enabled —
+	// a value that will never be used must not fail startup.
+	if resolved.CDR.Enabled {
+		if msg := validCDRTimeoutSec(resolved.CDR.TimeoutSec); msg != "" {
+			log.Fatalf("Invalid cdr.timeout_sec %d (from -cdr-timeout-sec or config.yaml): %s", resolved.CDR.TimeoutSec, msg)
+		}
 	}
-	loadCDR(
-		resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
-			Enabled:     *s.cdrEnabledFlag,
-			Endpoint:    *s.cdrEndpointFlag,
-			FailMode:    *s.cdrFailModeFlag,
-			Profile:     *s.cdrProfileFlag,
-			Mode:        *s.cdrModeFlag,
-			TimeoutSec:  *s.cdrTimeoutFlag,
-			MaxSizeMB:   *s.cdrMaxSizeFlag,
-			Fingerprint: *s.cdrFingerprintFlag,
-			CertsDir:    *s.cdrCertsDirFlag,
-		}),
-		appLifecycleCtx,
-	)
+	loadCDR(resolved, appLifecycleCtx)
 }
 
 // initMTLSAndOCSP is the PR3 expansion shim: resolve the upstream
