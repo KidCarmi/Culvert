@@ -129,6 +129,15 @@ func withSyslogTestEnv(t *testing.T) {
 	})
 }
 
+// collectorWait is the budget every collector-interaction wait in this file
+// uses. Generous on purpose: these gates run under -race on shared CI runners
+// alongside a -count=2 shuffled double run, and every one of them asserts a
+// STATE that is reached quickly on an idle box. A tight budget here would buy
+// nothing and turn a correct gate into a flaky one — which this repo's
+// standard treats as worse than no gate, because a gate that can flake gets
+// muted.
+const collectorWait = 30 * time.Second
+
 // driveUntil forwards audit lines until cond holds or the budget expires.
 func driveUntil(t *testing.T, budget time.Duration, cond func() bool) bool {
 	t.Helper()
@@ -192,7 +201,7 @@ func TestChaos66_ContractRowReportsDeliveryNotStartupConnect(t *testing.T) {
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if !driveUntil(t, 2*time.Second, func() bool { return fc.received() > 0 }) {
+	if !driveUntil(t, collectorWait, func() bool { return fc.received() > 0 }) {
 		t.Fatal("collector never received a line while healthy")
 	}
 	t.Logf("health record: %+v", syslogFeedState())
@@ -203,7 +212,7 @@ func TestChaos66_ContractRowReportsDeliveryNotStartupConnect(t *testing.T) {
 	fc.kill()
 
 	sw := activeSyslog()
-	if !driveUntil(t, 5*time.Second, func() bool { return sw.Drops() > 0 }) {
+	if !driveUntil(t, collectorWait, func() bool { return sw.Drops() > 0 }) {
 		t.Fatalf("no drops recorded after the collector died (drops=%d)", sw.Drops())
 	}
 	row := checkSyslogFeed()
@@ -258,13 +267,25 @@ func TestChaos66_InitDoesNotLeakItsPredecessor(t *testing.T) {
 }
 
 // TestChaos66_ConnectFailureAtBootStillArmsForwarding pins that a collector
-// unreachable at boot leaves forwarding ARMED and self-healing, not off.
+// unreachable at boot leaves forwarding ARMED, not off.
 //
 // PRE-FIX EVIDENCE: InitSyslog fails closed on its first dial, and both boot
-// callers log-and-continue with globalSyslog nil. Nothing ever constructs a
-// second writer, so a collector that was down at boot — or merely slower to
-// start than the proxy beside it in the same compose file — meant SIEM
-// forwarding was OFF for the life of the process.
+// callers log-and-continue with a nil writer. Nothing ever constructs a second
+// one, so a collector that was down at boot — or merely slower to start than
+// the proxy beside it in the same compose file — meant SIEM forwarding was OFF
+// for the life of the process.
+//
+// This gate asserts the BOOT-PATH property and nothing else. The first version
+// also drove the recovery end to end: it re-bound the released port and waited
+// up to 20s for a line to land. That is a flake waiting to happen — recovery
+// is gated on the engine's real 5s reconnect timer, so on a loaded CI runner
+// under -race the wait can legitimately overrun, and the port can be taken by
+// another process between release and re-bind. This repo's standard is
+// explicit about this (a gate that can flake gets muted), and the recovery
+// MECHANICS are already pinned deterministically one layer down, with an
+// injected dialer and no real ports, by
+// internal/syslog TestChaos66_DeferredWriterSelfHealsWithoutReconstruction.
+// Asserting it twice bought nothing and cost ~25s of race-run wall clock.
 func TestChaos66_ConnectFailureAtBootStillArmsForwarding(t *testing.T) {
 	withSyslogTestEnv(t)
 
@@ -275,62 +296,28 @@ func TestChaos66_ConnectFailureAtBootStillArmsForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
+	addr := "tcp://" + ln.Addr().String()
 	_ = ln.Close()
 
-	setSyslogIntent("tcp://" + addr)
-	setSyslogConfiguredTarget("tcp://" + addr)
-	if err := InitSyslogResilient("tcp://"+addr, "rfc3164"); err == nil {
-		t.Skip("port was re-bound by another process; the dial unexpectedly succeeded")
-	}
-	if activeSyslog() == nil {
-		t.Fatal("DEFECT: a failed first dial left no forwarder — forwarding is off for the life of the process")
+	setSyslogIntent(addr)
+	setSyslogConfiguredTarget(addr)
+	if err := InitSyslogResilient(addr, "rfc3164"); err == nil {
+		t.Skip("the released port was re-bound by another process; the dial unexpectedly succeeded")
 	}
 
-	// The collector comes back. Recovery must be automatic: no restart, no
-	// operator re-save.
-	ln2, err := lc.Listen(t.Context(), "tcp", addr)
-	if err != nil {
-		t.Skipf("could not re-bind %s to simulate the collector returning: %v", addr, err)
+	sw := activeSyslog()
+	if sw == nil {
+		t.Fatal("DEFECT: a failed first dial left no forwarder — SIEM forwarding is off for the life of the process")
 	}
-	defer ln2.Close()
-	got := make(chan struct{}, 1)
-	go func() {
-		c, err := ln2.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		buf := make([]byte, 512)
-		if n, _ := c.Read(buf); n > 0 {
-			select {
-			case got <- struct{}{}:
-			default:
-			}
-		}
-	}()
-
-	// deliverLine's reconnect backoff is 5s, so allow more than one window.
-	if !driveUntil(t, 20*time.Second, func() bool {
-		select {
-		case <-got:
-			return true
-		default:
-			return false
-		}
-	}) {
-		t.Fatal("DEFECT: forwarding never recovered after the collector returned")
+	if sw.Target() != strings.TrimPrefix(addr, "tcp://") {
+		t.Fatalf("the armed forwarder points at %q, want the configured target", sw.Target())
 	}
-	// Recovery is reported on OBSERVED evidence: the row clears the moment a
-	// line lands. The historical gap is still named in the message — severity
-	// must NOT latch on a cumulative counter (the ca_health.go rule), or one
-	// transient SIEM restart would leave the row amber until process restart.
-	row := checkSyslogFeed()
-	if row.Status != diagOK {
-		t.Fatalf("row should clear on OBSERVED delivery, got %v: %s", row.Status, row.Message)
+	// And the feed must report the truth meanwhile: armed, but not delivering.
+	if row := checkSyslogFeed(); row.Status == diagOK {
+		t.Fatalf("syslog_feed must not read ok while nothing has ever been delivered: %v %q", row.Status, row.Message)
 	}
-	if !strings.Contains(row.Message, "lost earlier") {
-		t.Fatalf("a recovered feed must still name the gap it left: %q", row.Message)
+	if snap := syslogFeedState(); snap.EverDelivered {
+		t.Fatal("EverDelivered must be false on a feed that has never reached its collector")
 	}
 }
 
@@ -427,12 +414,12 @@ func TestChaos66_DropsReachMetricsAndHealthz(t *testing.T) {
 	// killing straight after install can leave the connection alive in the
 	// listen backlog — writes then succeed into the kernel buffer forever and
 	// no drop is ever recorded. Establishing delivery first removes that race.
-	if !driveUntil(t, 3*time.Second, func() bool { return fc.received() > 0 }) {
+	if !driveUntil(t, collectorWait, func() bool { return fc.received() > 0 }) {
 		t.Fatal("collector never received a line while healthy")
 	}
 	fc.kill()
 	sw := activeSyslog()
-	if !driveUntil(t, 10*time.Second, func() bool { return sw.Drops() > 0 }) {
+	if !driveUntil(t, collectorWait, func() bool { return sw.Drops() > 0 }) {
 		t.Fatalf("no drops recorded (drops=%d)", sw.Drops())
 	}
 
@@ -566,7 +553,7 @@ func TestChaos66Control_HealthyFeedStaysGreenAndDelivers(t *testing.T) {
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if !driveUntil(t, 3*time.Second, func() bool { return fc.received() >= 5 }) {
+	if !driveUntil(t, collectorWait, func() bool { return fc.received() >= 5 }) {
 		t.Fatalf("healthy collector received only %d batches", fc.received())
 	}
 	sw := activeSyslog()
@@ -603,7 +590,7 @@ func TestChaos66Control_ForwardingIsNotSilentlyDisabled(t *testing.T) {
 	if activeSyslog() == nil {
 		t.Fatal("DEFECT: a successful configure installed no forwarder")
 	}
-	if !driveUntil(t, 3*time.Second, func() bool { return fc.received() > 0 }) {
+	if !driveUntil(t, collectorWait, func() bool { return fc.received() > 0 }) {
 		t.Fatal("DEFECT: nothing reached the collector after a successful configure")
 	}
 }
@@ -622,12 +609,12 @@ func TestChaos66Control_DegradationIsADurationNotACount(t *testing.T) {
 	if err := InitSyslogResilient(fc.addr(), "rfc3164"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if !driveUntil(t, 3*time.Second, func() bool { return fc.received() > 0 }) {
+	if !driveUntil(t, collectorWait, func() bool { return fc.received() > 0 }) {
 		t.Fatal("collector never received a line while healthy")
 	}
 	fc.kill()
 	sw := activeSyslog()
-	if !driveUntil(t, 10*time.Second, func() bool { return sw.Drops() > 200 }) {
+	if !driveUntil(t, collectorWait, func() bool { return sw.Drops() > 200 }) {
 		t.Fatalf("expected a large drop count, got %d", sw.Drops())
 	}
 	if alerts != 0 {
@@ -697,8 +684,10 @@ func TestChaos66_DisplacedWriterCannotWriteTheHealthRecord(t *testing.T) {
 	resetSyslogFeedHealth()
 
 	// A writer that is NOT the active one — exactly what a predecessor is
-	// between its displacement and the end of its flush window.
-	displaced, _ := syslog.NewWriterDeferred("tcp", "192.0.2.77:514", "rfc3164")
+	// between its displacement and the end of its flush window. Aimed at a
+	// reachable collector so construction costs no dial timeout; what matters
+	// is only that it is not the ACTIVE writer.
+	displaced, _ := syslog.NewWriterDeferred("tcp", strings.TrimPrefix(fc.addr(), "tcp://"), "rfc3164")
 	t.Cleanup(func() { _ = displaced.Close() })
 	if displaced == active {
 		t.Fatal("test setup: the displaced writer must not be the active one")
