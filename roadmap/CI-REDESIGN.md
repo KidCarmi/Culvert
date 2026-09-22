@@ -660,3 +660,191 @@ and the aggregate stops passing `require-success`; the main push simply runs the
 suite twice again. Nothing else depends on the change: the release predicate,
 the evidence manifest, every publication barrier and both check identities are
 untouched, and `coverage-report` reappears on main pushes.
+
+## 11. Stage 3 — native cross-compilation in the production image (shipped)
+
+The production multi-platform build (`ci.yml` `docker` job, `linux/amd64,linux/arm64`)
+ran the **whole Go compiler under QEMU** for arm64. Neither Go stage pinned a
+platform, so each pulled the TARGET-arch `golang` image, and on an amd64 runner
+the arm64 compile of both the proxy and the bundled maintenance agent was
+emulated instruction by instruction.
+
+### What shipped
+
+Both Go stages — `builder` (proxy) and `maintbuilder` (the separately
+versioned agent) — now run `FROM --platform=$BUILDPLATFORM` and cross-compile
+with `GOOS=${TARGETOS} GOARCH=${TARGETARCH}`. `CGO_ENABLED=0` is unchanged, so
+the output is the static pure-Go binary a native build produces. Everything
+else in the recipe is untouched: version resolution and normalization, the
+proxy `buildCommit`, the agent's `server.Version` symbol, `-trimpath` and
+`-buildvcs=false`, every binary path, the `/app/deploy` bundle, the runtime
+user, permissions, entrypoint, HEALTHCHECK and `/data` volume.
+
+The **runtime stage stays on the TARGET platform** — an arm64 image must carry
+an arm64 userland — so QEMU is still required for its Alpine package and user
+setup, and `setup-qemu-action` stays in `ci.yml`. Only the compilation moved.
+
+`ARG TARGETOS`/`ARG TARGETARCH` are declared inside each stage **after**
+`go mod download` and `COPY`. A build ARG joins the cache key of every later
+RUN, so declaring it late keeps the architecture-independent layers (git,
+module download, source copy) shared: BuildKit runs them ONCE for both targets
+and forks only the final `go build`, visible in its own step labels as
+`[linux/amd64 builder 7/7]` and `[linux/amd64->arm64 builder 7/7]`.
+
+The CI cache configuration (`cache-from: type=gha`, `cache-to: mode=max`) was
+deliberately NOT changed, so this change's effect is measurable on its own.
+Adding a Go build-cache mount is a separate step that must first prove correct
+invalidation across source, module graph, toolchain and target architecture.
+
+### The defect this makes possible, and the wall against it
+
+On the build platform, a `go build` that does not take GOARCH from the target
+compiles for the **host**. The image still builds, the manifest still says
+arm64, every amd64 check stays green — and the binary is amd64. It fails only
+when an arm64 host executes it, and for the agent that host is the operator's:
+`scripts/install.sh` extracts `/app/deploy/bin/culvert-maint` from the image and
+checks only that it is executable (`[[ -x ]]`) before installing it as the
+host-root agent.
+
+The sharp case is `GOARCH=${TARGETARCH}` with no `ARG TARGETARCH` in the same
+stage. The automatic platform ARGs exist in global scope but must be
+re-declared per stage, so the expansion is EMPTY — and an empty GOARCH means
+host. A grep for the assignment passes that defect.
+
+`dockerfile_crossbuild_test.go` therefore models the Dockerfile rather than
+matching text: it splits stages, tracks the ARGs in scope at each RUN, reads the
+GOOS/GOARCH each `go build` actually receives, and requires them to come from
+in-scope TARGETOS/TARGETARCH. It also requires every Go-compiling stage to be on
+`$BUILDPLATFORM` (otherwise compilation is emulated again), keeps the final
+stage OFF it, and fails when either expected build stops being visible. It
+derives 11 defects from the REAL Dockerfile — each anchor must match exactly
+once, so a stale mutation cannot silently test the unmodified file — and
+requires every one to be rejected, plus a global-scope-ARG control and an
+equivalent-spelling control. It was verified failing on both stages of the
+pre-change Dockerfile.
+
+### Evidence (local; see the PR for logs)
+
+Existing PR checks cannot show this: the Deep PR gate builds an amd64 image
+only, and the Fast gate's arm64 compile covers the proxy but not the bundled
+agent. So real final images were built for both platforms and inspected.
+
+* **Architecture.** Both binaries were extracted from each final image and read
+  with `readelf`/`file`/`go version -m`. In the arm64 image, `/app/culvert` and
+  `/app/deploy/bin/culvert-maint` are both `AArch64`, statically linked (no
+  program interpreter, no dynamic section), `GOARCH=arm64`, `CGO_ENABLED=0`; the
+  amd64 image carries `x86-64` equivalents.
+* **Byte identity.** All four binaries (proxy + agent × amd64 + arm64) are
+  **byte-identical** to the ones the pre-change, QEMU-emulated build produced
+  (same sha256, same size). The change alters how the binaries are produced,
+  not what ships.
+* **Runtime.** The same built images (not rebuilt) were run for each platform
+  with an isolated data volume: `/health` 200, `/ready` 200 reporting version
+  `1.0.235`, Docker HEALTHCHECK `healthy`, and the bundled
+  `culvert-maint --version` printing `v1.0.235` — the arm64 image under an
+  `aarch64` userland as user `proxy`.
+* **Single-platform builds.** Plain `docker build` (QA's path) and
+  `docker compose -f docker-compose.yml -f docker-compose.ci.yml build proxy`
+  (the smoke job's path, also with `--no-cache`) both build, produce host-arch
+  static binaries, and the compose stack comes up `healthy`.
+
+### Measurement
+
+Same machine for every run (4 vCPU / 15 GB — the shape of a GitHub
+`ubuntu-latest` runner), same source tree, same Go 1.27.1 toolchain, same
+base-image digests, one BuildKit `docker-container` builder, multi-platform
+`linux/amd64,linux/arm64`, pushed to a local registry. **Cold** = builder cache
+pruned and `--no-cache`. **Warm** = cache primed by the cold run, then a
+one-line source change in BOTH modules, so module layers are cached and both
+compilers re-run (the shape of an ordinary main push).
+
+Compiler-stage durations (BuildKit `DONE` times). Stages run concurrently, so
+these are NOT additive:
+
+| Stage | Baseline cold | Candidate cold | Baseline warm | Candidate warm |
+|---|---|---|---|---|
+| proxy `go build`, arm64 | 871.6s (QEMU) | **78.6s** (amd64→arm64) | 598.3s | **82.5s** |
+| agent `go build`, arm64 | 500.2s (QEMU) | **32.9s** | 289.6s | **38.2s** |
+| proxy `go build`, amd64 | 120.0s | 79.3s | 106.9s | 80.7s |
+| agent `go build`, amd64 | 44.3s | 35.7s | 41.6s | 39.0s |
+| arm64 `go mod download` | 56.8s (QEMU) | shared with amd64 (7.0s) | cached | cached |
+
+The amd64 stages got faster only because they no longer share 4 cores with an
+emulated compiler — amd64 compilation itself is unchanged.
+
+Whole multi-platform build (wall-clock; a build runs on one runner, so its
+runner-time equals its wall time):
+
+| | Baseline | Candidate | Change |
+|---|---|---|---|
+| Cold | 938.6s (15.6 min) | 90.8s / 91.2s (n=2) | ~10x |
+| Warm | 601.3s (10.0 min) | 85.3s / 85.7s (n=2) | ~7x |
+
+Baseline is n=1 per cell (each baseline cold run costs ~16 minutes); the
+effect is an order of magnitude larger than run-to-run variance.
+
+**Scope of these numbers.** They are the image BUILD step on local hardware of
+the same shape as a CI runner. They are not a claim about the `docker` job's
+total duration or about main-push wall-clock: the job also logs in, pushes
+through the GHA cache and signs, and its position on the release critical path
+is not measured here. Like stage 2B, the real effect requires **post-merge
+observation** of the `docker` job on main. A branch `workflow_dispatch` is not a
+substitute: it pushes and signs a candidate image in the public registry.
+
+**Validation environment, disclosed.** This sandbox's egress policy denies the
+Alpine package CDN (`dl-cdn.alpinelinux.org`, 403) and re-terminates TLS. So
+every build — baseline AND candidate — used a validation copy of the Dockerfile
+that differs from the real one in exactly three `apk` lines, made non-fatal,
+plus base images carrying the sandbox's CA. It was verified that
+`diff(baseline, candidate)` of the two measured files equals the PR's diff
+exactly. Consequences: no `git` in the builder (so `buildCommit` is empty in
+BOTH), and the runtime stage's `apk` setup is near-instant here, where in CI it
+runs under QEMU. Neither touches the compiler stages this change moves; CI
+exercises the real `apk` lines.
+
+### Behavior change: the legacy builder is no longer supported
+
+`FROM --platform=$BUILDPLATFORM` requires BuildKit. The deprecated legacy
+builder (`DOCKER_BUILDKIT=0`) never sets `$BUILDPLATFORM` and now stops at the
+first FROM with `failed to parse platform : ""` — verified: the pre-change
+Dockerfile builds under it, the new one does not. No default preserves it: the
+legacy builder does not expose the host platform at all, so any hardcoded value
+breaks the other architecture. Every supported path already uses BuildKit — it
+is Docker's default since Engine 23.0, Compose v2 uses nothing else, every CI
+path uses buildx, and `scripts/install.sh` installs current Docker + Compose v2
+— and the Dockerfile now says so at the line the error points to. An owner who
+still needs the legacy builder should revert this stage.
+
+### Supply chain: what changes and what does not
+
+`ci.yml` is not modified. Cosign signing, the SBOM attestation (scans the final
+image, whose binaries are byte-identical), catalog digest binding
+(`list_digest` == pushed digest), `promote-image`'s own-run digest check, the
+`org.opencontainers.image.revision` binding and every publication barrier are
+untouched. SLSA release subjects and `verify-reproducible` are built by the
+`build-release-binaries` composite, not this Dockerfile.
+
+One recorded, intended difference: the arm64 image's BuildKit **provenance**
+now lists `golang@1.27-alpine?platform=linux/amd64` as a material (previously
+`linux/arm64`), because that is the toolchain that compiled it. The runtime
+`alpine` material stays `linux/arm64`. Nothing in the repository reads
+provenance materials; an external policy that pins the toolchain material to the
+image's platform would need updating.
+
+### Next original-plan follow-up (NOT in this stage)
+
+`test/e2e/maint-agent/Dockerfile.e2e` — used by the maint-agent update,
+backup-upgrade, install-lifecycle and appliance-catalog-update E2E workflows —
+has drifted from production: `golang:1.26-alpine` (production 1.27),
+`alpine:3.22` (production 3.24), a build-time `go mod tidy` (the divergent-recipe
+step production removed), and no `-trimpath`/`-buildvcs=false`. Aligning it is
+the next step; it was left alone here to keep this change to the production
+image.
+
+### Rollback
+
+Revert the commit. Both Go stages go back to the target platform, compilation
+under QEMU resumes, and the regression wall is removed with it. Nothing else
+depends on the change: the produced binaries are byte-identical, `ci.yml`, the
+cache configuration and every release/publication gate are untouched. A revert
+also restores legacy-builder support.
