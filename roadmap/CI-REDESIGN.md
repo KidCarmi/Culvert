@@ -557,12 +557,15 @@ The duplicate main-push race execution ACROSS workflows is untouched:
 `-race` suite on a main push. Consolidating them is stage 2B and is not a
 scheduling change — see §10.
 
-## 10. Stage 2B — the cross-workflow race duplication (NOT yet implemented)
+## 10. Stage 2B — cross-workflow race ownership (shipped)
 
-On a main push the full `-race ./...` suite runs twice in two different
-workflows. Removing one copy is worth roughly a `qa-logic` (~33 min of runner
-time), but it cannot be done by deleting a job, because **the two workflows do
-not run on the same events**:
+On a main push the full `-race ./...` suite ran TWICE, in two workflows:
+`qa-gate.yml`'s `qa-logic` (which since stage 2A also produces the authoritative
+coverage profile) and `security-release-gate.yml`'s `tests-race`, with the same
+`TEST_SEED` and the same package scope, for one verdict.
+
+It could not be fixed by deleting a job, because **the two workflows do not run
+on the same events**:
 
 | Event | qa-gate.yml | security-release-gate.yml |
 |---|---|---|
@@ -572,27 +575,380 @@ not run on the same events**:
 | schedule (weekly) | no | yes |
 | workflow_dispatch | yes (any ref) | yes |
 
-So making Security consume QA's race evidence would leave **tags, the weekly
-cron and Security-only dispatches with no race evidence at all** — and
-`require-gate.sh` accepts only a main-push run of a named workflow for the exact
-SHA, so a tag run cannot borrow QA's. Any 2B design has to answer that
-explicitly rather than assume the main-push case generalises.
+Deleting `tests-race` would have left version tags, the weekly cron and
+Security-only dispatches with **no race evidence at all**.
 
-The two shapes worth weighing:
+### What shipped: ownership by event
 
-1. **Shared reusable workflow.** Extract the race suite into a
-   `workflow_call` workflow both gates invoke. Each event still gets its own
-   execution, so nothing is lost on tags or cron — but the main-push duplication
-   is only removed if one caller also learns to skip when the other has already
-   run for the same SHA, which reintroduces the evidence question.
-2. **Event-scoped ownership.** QA owns the race suite on main pushes; Security
-   skips it there and consumes QA's result, while keeping its own execution on
-   tags, cron and dispatch. This removes the duplication outright, but it makes
-   a Security verdict on main depend on a QA run, so
-   `.github/release-evidence.txt` must continue to require BOTH workflows (it
-   already does — both rows are `mandatory`) and the skip must fail closed when
-   QA's run for that SHA is absent, not silently pass.
+`tests-race` is now scoped by EVENT and REF together:
 
-Option 2 is the one that actually removes the duplicate execution. It is also
-the one that touches release evidence, which is why it is its own reviewed
-change and not part of 2A.
+```
+pull_request           → skip  (pass-through, unchanged)
+push → refs/heads/main → SKIP  — owned by qa-gate.yml's qa-logic
+push → refs/tags/v*    → RUN   — qa-gate.yml has no tag trigger
+schedule (weekly)      → RUN   — ref is main, but QA has no schedule
+workflow_dispatch      → RUN   — including on main
+```
+
+**Keying on the branch alone is the trap.** The scheduled and manual runs also
+have `refs/heads/main` as their ref, so a `github.ref != 'refs/heads/main'`
+condition would silently suppress exactly the events on which nothing else runs
+the suite. The condition must test the event too.
+
+### One skip is intentional; every other one is a hole
+
+`needs-verdict` reads a skipped need as a pass — which is what makes the
+intentional main-push skip acceptable, and would equally swallow a `tests-race`
+that failed to start on a tag. So on every event where Security still OWNS the
+suite, the aggregate passes `require-success: tests-race`, which demands
+exactly `success` and refuses a skip. On a main push (and on PRs) the input is
+empty and the skip is accepted.
+
+That predicate is written TWICE — the job's `if:` and the aggregate's
+`require-success` — because a job-level `if:` cannot read `env`, so it cannot be
+factored out in YAML. `TestSecurityRace_OwnershipPredicateIsSingleSourced` pins
+the two copies equal. Drift is silent in one direction (a suite that runs
+unrequired) and wedging in the other (a gate demanding a job that never starts).
+
+### The release verdict did not change, and that is the point
+
+`.github/release-evidence.txt` already required BOTH workflows as `mandatory`,
+and `require-release-evidence.sh` binds each row to the workflow FILE PATH, the
+exact head SHA, `event=push` and `head_branch == main`. Stage 2B moves the
+main-push race run from one side of that conjunction to the other; it does not
+move it out. Nothing was added to the predicate, no cross-workflow polling job
+was introduced, and no reusable workflow was called twice (which would not have
+removed an execution anyway).
+
+Consequently a green Security run on main means **this workflow's required scans
+passed** — not that QA passed. The banner and step summary say so explicitly,
+and the summary renders the race row as "owned by qa-gate.yml — not evaluated
+here" on a main push rather than a tick it did not earn.
+
+### Artifact ownership
+
+| Artifact | Producer | Scope |
+|---|---|---|
+| `qa-coverage` | `qa-gate.yml` / `qa-logic` | **Authoritative** main-push profile; the floors are enforced against it |
+| `coverage-report` | `security-release-gate.yml` / `tests-race` | This workflow's standalone runs only — tags, schedule, dispatch |
+
+`coverage-report` is therefore absent on main pushes from 2B onward. That is
+safe because **nothing consumes it**: it has no reader in any workflow, script or
+test (audited, and pinned by `TestSecurityRace_CoverageArtifactOwnership`). No
+stand-in was fabricated for it; on main, read `qa-coverage`.
+
+### Expected saving, and what is not yet measured
+
+A main push ran the suite three times before 2A, twice after 2A, and **once**
+after 2B — removing roughly one `qa-logic`-equivalent (~2000 s, ~33
+runner-minutes) per main push. **Actual main-push behaviour and savings require
+post-merge observation**: a branch `workflow_dispatch` deliberately RUNS
+`tests-race` (dispatch is an event Security owns), so the dispatch used to
+validate this change cannot demonstrate the main-push skip. Report
+runner-minutes and wall-clock separately when it lands.
+
+Walls: `security_race_ownership_test.go` (7 tests) plus the STAGE 2B section of
+`.github/scripts/test/release-gating-cases.sh`, which drives the REAL predicate
+with Security green and QA absent / failed / cancelled / timed-out / stale /
+skipped / neutral / pending / wrong-SHA / tag-ref / dispatch-event, each
+refusing, with a both-green control that approves.
+
+### Rollback
+
+Revert the commit. `tests-race` returns to `if: github.event_name != 'pull_request'`
+and the aggregate stops passing `require-success`; the main push simply runs the
+suite twice again. Nothing else depends on the change: the release predicate,
+the evidence manifest, every publication barrier and both check identities are
+untouched, and `coverage-report` reappears on main pushes.
+
+## 11. Stage 3 — native cross-compilation in the production image (shipped)
+
+The production multi-platform build (`ci.yml` `docker` job, `linux/amd64,linux/arm64`)
+ran the **whole Go compiler under QEMU** for arm64. Neither Go stage pinned a
+platform, so each pulled the TARGET-arch `golang` image, and on an amd64 runner
+the arm64 compile of both the proxy and the bundled maintenance agent was
+emulated instruction by instruction.
+
+### What shipped
+
+Both Go stages — `builder` (proxy) and `maintbuilder` (the separately
+versioned agent) — now run `FROM --platform=$BUILDPLATFORM` and cross-compile
+with `GOOS=${TARGETOS} GOARCH=${TARGETARCH}`. `CGO_ENABLED=0` is unchanged, so
+the output is the static pure-Go binary a native build produces. Everything
+else in the recipe is untouched: version resolution and normalization, the
+proxy `buildCommit`, the agent's `server.Version` symbol, `-trimpath` and
+`-buildvcs=false`, every binary path, the `/app/deploy` bundle, the runtime
+user, permissions, entrypoint, HEALTHCHECK and `/data` volume.
+
+The **runtime stage stays on the TARGET platform** — an arm64 image must carry
+an arm64 userland — so QEMU is still required for its Alpine package and user
+setup, and `setup-qemu-action` stays in `ci.yml`. Only the compilation moved.
+
+`ARG TARGETOS`/`ARG TARGETARCH` are declared inside each stage **after**
+`go mod download` and `COPY`. A build ARG joins the cache key of every later
+RUN, so declaring it late keeps the architecture-independent layers (git,
+module download, source copy) shared: BuildKit runs them ONCE for both targets
+and forks only the final `go build`, visible in its own step labels as
+`[linux/amd64 builder 7/7]` and `[linux/amd64->arm64 builder 7/7]`.
+
+The CI cache configuration (`cache-from: type=gha`, `cache-to: mode=max`) was
+deliberately NOT changed, so this change's effect is measurable on its own.
+Adding a Go build-cache mount is a separate step that must first prove correct
+invalidation across source, module graph, toolchain and target architecture.
+
+### The defect this makes possible, and the wall against it
+
+On the build platform, a `go build` that does not take GOARCH from the target
+compiles for the **host**. The image still builds, the manifest still says
+arm64, every amd64 check stays green — and the binary is amd64. It fails only
+when an arm64 host executes it, and for the agent that host is the operator's:
+`scripts/install.sh` extracts `/app/deploy/bin/culvert-maint` from the image and
+checks only that it is executable (`[[ -x ]]`) before installing it as the
+host-root agent.
+
+The sharp case is `GOARCH=${TARGETARCH}` with no `ARG TARGETARCH` in the same
+stage. The automatic platform ARGs exist in global scope but must be
+re-declared per stage, so the expansion is EMPTY — and an empty GOARCH means
+host. A grep for the assignment passes that defect.
+
+`dockerfile_crossbuild_test.go` therefore models the Dockerfile rather than
+matching text: it splits stages, tracks the ARGs in scope at each RUN, reads the
+GOOS/GOARCH each `go build` actually receives, and requires them to come from
+in-scope TARGETOS/TARGETARCH. It also requires every Go-compiling stage to be on
+`$BUILDPLATFORM` (otherwise compilation is emulated again), keeps the final
+stage OFF it, and fails when either expected build stops being visible. It
+derives 11 defects from the REAL Dockerfile — each anchor must match exactly
+once, so a stale mutation cannot silently test the unmodified file — and
+requires every one to be rejected, plus a global-scope-ARG control and an
+equivalent-spelling control. It was verified failing on both stages of the
+pre-change Dockerfile.
+
+### Evidence (local; see the PR for logs)
+
+Existing PR checks cannot show this: the Deep PR gate builds an amd64 image
+only, and the Fast gate's arm64 compile covers the proxy but not the bundled
+agent. So real final images were built for both platforms and inspected.
+
+* **Architecture.** Both binaries were extracted from each final image and read
+  with `readelf`/`file`/`go version -m`. In the arm64 image, `/app/culvert` and
+  `/app/deploy/bin/culvert-maint` are both `AArch64`, statically linked (no
+  program interpreter, no dynamic section), `GOARCH=arm64`, `CGO_ENABLED=0`; the
+  amd64 image carries `x86-64` equivalents.
+* **Byte identity.** All four binaries (proxy + agent × amd64 + arm64) are
+  **byte-identical** to the ones the pre-change, QEMU-emulated build produced
+  (same sha256, same size). The change alters how the binaries are produced,
+  not what ships.
+* **Runtime.** The same built images (not rebuilt) were run for each platform
+  with an isolated data volume: `/health` 200, `/ready` 200 reporting version
+  `1.0.235`, Docker HEALTHCHECK `healthy`, and the bundled
+  `culvert-maint --version` printing `v1.0.235` — the arm64 image under an
+  `aarch64` userland as user `proxy`.
+* **Single-platform builds.** Plain `docker build` (QA's path) and
+  `docker compose -f docker-compose.yml -f docker-compose.ci.yml build proxy`
+  (the smoke job's path, also with `--no-cache`) both build, produce host-arch
+  static binaries, and the compose stack comes up `healthy`.
+
+### Measurement
+
+Same machine for every run (4 vCPU / 15 GB — the shape of a GitHub
+`ubuntu-latest` runner), same source tree, same Go 1.27.1 toolchain, same
+base-image digests, one BuildKit `docker-container` builder, multi-platform
+`linux/amd64,linux/arm64`, pushed to a local registry. **Cold** = builder cache
+pruned and `--no-cache`. **Warm** = cache primed by the cold run, then a
+one-line source change in BOTH modules, so module layers are cached and both
+compilers re-run (the shape of an ordinary main push).
+
+Compiler-stage durations (BuildKit `DONE` times). Stages run concurrently, so
+these are NOT additive:
+
+| Stage | Baseline cold | Candidate cold | Baseline warm | Candidate warm |
+|---|---|---|---|---|
+| proxy `go build`, arm64 | 871.6s (QEMU) | **78.6s** (amd64→arm64) | 598.3s | **82.5s** |
+| agent `go build`, arm64 | 500.2s (QEMU) | **32.9s** | 289.6s | **38.2s** |
+| proxy `go build`, amd64 | 120.0s | 79.3s | 106.9s | 80.7s |
+| agent `go build`, amd64 | 44.3s | 35.7s | 41.6s | 39.0s |
+| arm64 `go mod download` | 56.8s (QEMU) | shared with amd64 (7.0s) | cached | cached |
+
+The amd64 stages got faster only because they no longer share 4 cores with an
+emulated compiler — amd64 compilation itself is unchanged.
+
+Whole multi-platform build (wall-clock; a build runs on one runner, so its
+runner-time equals its wall time):
+
+| | Baseline | Candidate | Change |
+|---|---|---|---|
+| Cold | 938.6s (15.6 min) | 90.8s / 91.2s (n=2) | ~10x |
+| Warm | 601.3s (10.0 min) | 85.3s / 85.7s (n=2) | ~7x |
+
+Baseline is n=1 per cell (each baseline cold run costs ~16 minutes); the
+effect is an order of magnitude larger than run-to-run variance.
+
+**Scope of these numbers.** They are the image BUILD step on local hardware of
+the same shape as a CI runner. They are not a claim about the `docker` job's
+total duration or about main-push wall-clock: the job also logs in, pushes
+through the GHA cache and signs, and its position on the release critical path
+is not measured here. Like stage 2B, the real effect requires **post-merge
+observation** of the `docker` job on main. A branch `workflow_dispatch` is not a
+substitute: it pushes and signs a candidate image in the public registry.
+
+**Validation environment, disclosed.** This sandbox's egress policy denies the
+Alpine package CDN (`dl-cdn.alpinelinux.org`, 403) and re-terminates TLS. So
+every build — baseline AND candidate — used a validation copy of the Dockerfile
+that differs from the real one in exactly three `apk` lines, made non-fatal,
+plus base images carrying the sandbox's CA. It was verified that
+`diff(baseline, candidate)` of the two measured files equals the PR's diff
+exactly. Consequences: no `git` in the builder (so `buildCommit` is empty in
+BOTH), and the runtime stage's `apk` setup is near-instant here, where in CI it
+runs under QEMU. Neither touches the compiler stages this change moves; CI
+exercises the real `apk` lines.
+
+### Behavior change: the legacy builder is no longer supported
+
+`FROM --platform=$BUILDPLATFORM` requires BuildKit. The deprecated legacy
+builder (`DOCKER_BUILDKIT=0`) never sets `$BUILDPLATFORM` and now stops at the
+first FROM with `failed to parse platform : ""` — verified: the pre-change
+Dockerfile builds under it, the new one does not. No default preserves it: the
+legacy builder does not expose the host platform at all, so any hardcoded value
+breaks the other architecture. Every supported path already uses BuildKit — it
+is Docker's default since Engine 23.0, Compose v2 uses nothing else, every CI
+path uses buildx, and `scripts/install.sh` installs current Docker + Compose v2
+— and the Dockerfile now says so at the line the error points to. An owner who
+still needs the legacy builder should revert this stage.
+
+### Supply chain: what changes and what does not
+
+`ci.yml` is not modified. Cosign signing, the SBOM attestation (scans the final
+image, whose binaries are byte-identical), catalog digest binding
+(`list_digest` == pushed digest), `promote-image`'s own-run digest check, the
+`org.opencontainers.image.revision` binding and every publication barrier are
+untouched. SLSA release subjects and `verify-reproducible` are built by the
+`build-release-binaries` composite, not this Dockerfile.
+
+One recorded, intended difference: the arm64 image's BuildKit **provenance**
+now lists `golang@1.27-alpine?platform=linux/amd64` as a material (previously
+`linux/arm64`), because that is the toolchain that compiled it. The runtime
+`alpine` material stays `linux/arm64`. Nothing in the repository reads
+provenance materials; an external policy that pins the toolchain material to the
+image's platform would need updating.
+
+### Next original-plan follow-up (NOT in this stage)
+
+`test/e2e/maint-agent/Dockerfile.e2e` — used by the maint-agent update,
+backup-upgrade, install-lifecycle and appliance-catalog-update E2E workflows —
+has drifted from production: `golang:1.26-alpine` (production 1.27),
+`alpine:3.22` (production 3.24), a build-time `go mod tidy` (the divergent-recipe
+step production removed), and no `-trimpath`/`-buildvcs=false`. Aligning it is
+the next step; it was left alone here to keep this change to the production
+image.
+
+### Rollback
+
+Revert the commit. Both Go stages go back to the target platform, compilation
+under QEMU resumes, and the regression wall is removed with it. Nothing else
+depends on the change: the produced binaries are byte-identical, `ci.yml`, the
+cache configuration and every release/publication gate are untouched. A revert
+also restores legacy-builder support.
+
+## 12. Stage 4 — E2E image dependency discipline and recipe parity (shipped)
+
+`test/e2e/maint-agent/Dockerfile.e2e` is the proxy image four workflows use to
+drive real installs, upgrades, backups and rollbacks: `install-lifecycle-e2e`
+(three jobs), `maint-agent-update-e2e`, `maint-agent-backup-upgrade-e2e` and
+`appliance-catalog-update-e2e`. It had drifted from production in two ways.
+
+### 1. It repaired the module graph it was supposed to test
+
+The build ran `go mod tidy` inside the image. A committed `go.mod`/`go.sum` that
+could not build was silently fixed in the layer, and the E2E went green on a
+module graph nobody committed. Reproduced locally against a real worktree:
+
+| Committed-graph defect | Old recipe (`go mod tidy`) | New recipe |
+|---|---|---|
+| `go.sum` missing the hash of a compiled module (`goccy/go-yaml`) | tidy restores it, build **passes** | build **fails**: `missing go.sum entry for module providing package github.com/goccy/go-yaml` |
+| `go.mod` missing a requirement | tidy restores it, build **passes** | build **fails**: `cannot find module providing package … import lookup disabled by -mod=readonly` |
+
+The image now builds only from the committed graph:
+
+* no `go mod tidy` (or any other module-graph mutator) at build time;
+* `go build -mod=readonly` — already Go's default without a vendor directory,
+  now explicit so a future `GOFLAGS` or vendor tree cannot change it silently;
+* `go.mod` and `go.sum` are proven unchanged across **both** the download and
+  the compile by `test/e2e/maint-agent/depfiles-guard.sh`, which prints a unified
+  diff and the fix (`go mod tidy` in the repo, commit both files) on failure.
+
+**The download check has to be in the SAME `RUN` as `go mod download`.** The
+next instruction, `COPY . .`, overwrites both files with the committed copies,
+so a download-induced change checked any later is already gone. A test
+(`TestE2EImage_LateCheckIsConcealedByCopy`) demonstrates exactly that, and the
+wall requires the ordering structurally. Tidiness itself stays enforced where it
+belongs, in the Fast Gate's `go mod tidy -diff`, which this stage does not touch.
+
+### 2. It had drifted from production's recipe
+
+It used `golang:1.26-alpine` and `alpine:3.22` against production's
+`golang:1.27-alpine` and `alpine:3.24`, and compiled without `-trimpath` and
+`-buildvcs=false`. The builder now uses production's image and production's
+compile: `$BUILDPLATFORM` with `GOOS/GOARCH` from in-stage `TARGETOS/TARGETARCH`
+(§11), `CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, `-ldflags="-s -w …"`,
+and the runtime uses production's alpine. It prints `go version` so every CI log
+records the compiler that built the image. The companion rollback image
+`test/e2e/catalog-update/Dockerfile.badhealth` moved to the same alpine.
+
+The root `go.mod` (`go 1.26.6`) and `cmd/culvert-maint/go.mod` (`go 1.25`) are
+unchanged; a 1.27 toolchain satisfies both. The host-side agent toolchain is
+unchanged too, including `scripts/install.sh`'s `CULVERT_GO_IMAGE` default of
+`golang:1.25` for building the agent from source — recorded, deliberately out
+of scope.
+
+### Intentional differences from production — kept, and pinned
+
+* **No GeoIP stage** (db-ip.com is often blocked on runners; irrelevant here).
+* **`BUILD_VARIANT`** reaches the binary (`-X main.version=e2e-<v>`),
+  `/app/VERSION` and a final `LABEL`, so v1 and v2 are genuinely different
+  images with different registry digests — the agent compares REAL digests.
+* **No `/app/deploy` bundle and no `maintbuilder` stage.** Without the bundled
+  agent, `scripts/install.sh` takes its source/release fallback, which the
+  installer-lifecycle job exists to exercise. Adding the bundle to make this
+  image "look like production" would silently stop testing it.
+
+### The wall: `e2e_image_recipe_test.go`
+
+Every parity expectation is **derived from the production Dockerfile at test
+time** — builder image, runtime image, builder platform, compile flags,
+non-symbol `-ldflags`, `CGO_ENABLED`/`GOOS`/`GOARCH` — so the test holds no
+third copy of the version list. A production bump that is not mirrored fails
+the build; a deliberate bump needs no test edit. It also checks the dependency
+discipline (no mutators, `-mod=readonly`, both guards in the same `RUN` as the
+step they guard, guard before `COPY . .`), reuses §11's in-scope-`TARGETARCH`
+checker, and pins the intentional differences. It derives 14 regressions from
+the real files — image anchors taken from production, never literals — and
+requires each to be rejected. It executes the REAL `depfiles-guard.sh` against
+real `go.mod`/`go.sum` mutations. Against the pre-change files it reports every
+problem this section lists.
+
+### Reproducibility: what is and is not pinned
+
+Matching tags do not make the image reproducible. Still mutable: the
+`golang:1.27-alpine` and `alpine:3.24` tags (each resolves to whatever digest
+is current), the runtime `apk upgrade`/`apk add` against the live Alpine
+repositories, and the module proxy (bounded by `go.sum`, which now cannot
+change during the build). CI logs record the digests and `go version` each run
+actually resolved. Pinning base images by digest is a production-wide decision
+and is not taken here.
+
+### Measurement
+
+Local, same machine, both recipes built as the workflows build them (plain
+`docker build`, v1 with a pruned cache, then v2): old cold 52.9s / warm 46.1s;
+new cold 53.4s / warm 38.7s. The compile step is 41.1s cold / 35.8s warm
+against the old tidy+build step's 43.1s / 43.2s. This stage is about
+correctness; it is roughly time-neutral. The sandbox blocks the Alpine package
+CDN, so both local recipes had their `apk` lines made non-fatal and used base
+images carrying the sandbox CA — that is NOT qualification. Qualification is
+the six E2E jobs running the unchanged recipe on GitHub runners (see the PR).
+
+### Rollback
+
+Revert the commit. The E2E image returns to the old base images, build-time
+`go mod tidy` and the previous flags; the four workflows are unchanged, so
+nothing else needs to move.
