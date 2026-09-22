@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -365,7 +366,7 @@ func wrongIdentity(t *testing.T, f *fixture, commit string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.WriteFile(metaPath, orig, 0o600) })
+	t.Cleanup(func() { _ = os.WriteFile(metaPath, orig, 0o600) }) // #nosec G703 -- restores the fixture's own t.TempDir()-derived file
 	var meta ShardMeta
 	_ = json.Unmarshal(orig, &meta)
 	meta.BinarySHA256 = strings.Repeat("0", 64)
@@ -381,7 +382,7 @@ func unusableProfile(t *testing.T, f *fixture, commit string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.WriteFile(p, orig, 0o600) })
+	t.Cleanup(func() { _ = os.WriteFile(p, orig, 0o600) }) // #nosec G703 -- restores the fixture's own t.TempDir()-derived file
 	if err := os.WriteFile(p, []byte("mode: atomic\nexample.com/pilot/lib.go:3.1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -391,11 +392,12 @@ func unusableProfile(t *testing.T, f *fixture, commit string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p, orig, 0o600); err != nil {
+	if err := os.WriteFile(p, orig, 0o600); err != nil { // #nosec G703 -- test rewrites its own t.TempDir()-derived evidence file
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.WriteFile(lane, laneOrig, 0o600) })
-	if err := os.WriteFile(lane, append(laneOrig, []byte("example.com/pilot/lib.go:3.1,5.2 1 0\n")...), 0o600); err != nil {
+	t.Cleanup(func() { _ = os.WriteFile(lane, laneOrig, 0o600) }) // #nosec G703 -- restores the fixture's own t.TempDir()-derived file
+	rootBlock := slices.Concat(laneOrig, []byte("example.com/pilot/lib.go:3.1,5.2 1 0\n"))
+	if err := os.WriteFile(lane, rootBlock, 0o600); err != nil { // #nosec G703 -- test rewrites its own t.TempDir()-derived profile
 		t.Fatal(err)
 	}
 	wantRejected(t, f, "belongs to the root package")

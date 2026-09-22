@@ -267,7 +267,7 @@ func TestQARootShardPilot_MatchesTheReference(t *testing.T) {
 	for _, job := range []string{"pilot-shard", "pilot-lane"} {
 		body := shellCodeOnly(stepBodies(asMap(asMap(pilot["jobs"])[job])))
 		m := timeoutFlagRe.FindStringSubmatch(body)
-		if m == nil || m[1] != refTimeout {
+		if len(m) < 2 || m[1] != refTimeout {
 			t.Errorf("%s must pass qa-logic's per-binary -timeout %s explicitly (got %v)", job, refTimeout, m)
 		}
 	}

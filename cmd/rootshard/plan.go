@@ -449,7 +449,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil { // #nosec G703 -- output path is the operator's own CLI flag; this is a CI tool, not a service
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
