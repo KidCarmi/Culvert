@@ -98,15 +98,28 @@ func (r *fireAlertRecorder) wait(t *testing.T, n int, event string) []string {
 
 // recordFireAlert swaps the fireAlert var for a recorder that ALSO performs the
 // real dispatch, so the alert store's dedup accounting stays exercised.
+//
+// THE ORDER IS THE SYNCHRONISATION, not a style choice. The real fireAlert reads
+// the globalAlertStore var, and withCDRAlertStore's cleanup WRITES it — so a
+// recorder that appended BEFORE delegating let wait() return while the delegated
+// Dispatch was still running, and the test's cleanup then raced it. The race
+// detector caught exactly that (Race · root shard 3 on 96dcc0c):
+//
+//	Write  withCDRAlertStore.func1  (cleanup restoring globalAlertStore)
+//	Read   alerts.go:47 fireAlert   (reached from this wrapper's delegation)
+//
+// Delegating FIRST makes an observed record proof that the dispatch behind it has
+// already returned, so waiting for every expected record is a real barrier
+// against the restore.
 func recordFireAlert(t *testing.T) *fireAlertRecorder {
 	t.Helper()
 	rec := &fireAlertRecorder{}
 	old := fireAlert
 	fireAlert = func(event string, payload AlertPayload) {
+		old(event, payload)
 		rec.mu.Lock()
 		rec.seen = append(rec.seen, recordedFire{event: event, detail: payload.Detail})
 		rec.mu.Unlock()
-		old(event, payload)
 	}
 	t.Cleanup(func() { fireAlert = old })
 	return rec
@@ -258,9 +271,15 @@ func TestNoteCDRCallError_NoSubscriberNoDispatch(t *testing.T) {
 		noteCDRCallError(status.Error(codes.Unavailable, fmt.Sprintf("down %d", i)))
 	}
 	// A negative needs a positive control to be worth anything: fire one alert
-	// through the same seam and wait for it. Once the control has landed, any
+	// through the same seam and observe it. Once the control has landed, any
 	// goroutine the loop spawned has had at least as long to land too.
-	go fireAlert("cdr_probe_control", AlertPayload{Detail: "control"})
+	//
+	// SYNCHRONOUS on purpose: a `go fireAlert(...)` here would still be inside
+	// Dispatch — reading globalAlertStore — when the test returned and its
+	// cleanup restored that var, which is the data race this gate first shipped
+	// with. Firing inline leaves nothing in flight at cleanup and is a stronger
+	// barrier besides.
+	fireAlert("cdr_probe_control", AlertPayload{Detail: "control"})
 	rec.wait(t, 1, "cdr_probe_control")
 
 	if got := rec.details("cdr_unavailable"); len(got) != 0 {

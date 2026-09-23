@@ -512,14 +512,16 @@ func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
 	delta := fire()
 	// A negative needs a positive control, so that "saw nothing" cannot mean
 	// "did not wait long enough": dispatch one alert of another name through
-	// the same seam and wait for the store to record it.
-	go fireAlert("scan_skipped_control", AlertPayload{Detail: "control"})
-	deadline := time.Now().Add(5 * time.Second)
-	for globalAlertStore.DedupTracked() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the control alert never reached Dispatch; the negative below proves nothing")
-		}
-		time.Sleep(2 * time.Millisecond)
+	// the same seam and require the store to have recorded it.
+	//
+	// SYNCHRONOUS: this test swaps globalAlertStore and restores it in cleanup,
+	// so a `go fireAlert(...)` control could still be inside Dispatch — reading
+	// that var — when the restore writes it. Firing inline leaves nothing in
+	// flight, and Dispatch having returned is itself the proof the control asks
+	// for, so no polling is needed either.
+	fireAlert("scan_skipped_control", AlertPayload{Detail: "control"})
+	if globalAlertStore.DedupTracked() == 0 {
+		t.Fatal("the control alert never reached Dispatch; the negative below proves nothing")
 	}
 	if got := count(); got != 0 {
 		t.Errorf("dispatched %d scan_skipped alerts with no subscriber", got)
