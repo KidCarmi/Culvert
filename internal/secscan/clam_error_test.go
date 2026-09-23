@@ -85,22 +85,6 @@ func withAlertRecorder(t *testing.T) *alertRecorder {
 	return rec
 }
 
-// waitForMatching polls until the recorder has at least n events whose
-// detail contains marker, or the deadline passes (the clam alert fires on
-// its own goroutine, mirroring remoteScanFail — Dispatch must never run
-// inside ScanBody's timeout).
-func (rec *alertRecorder) waitForMatching(t *testing.T, n int, marker string) []recordedAlert {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		events := rec.matching(marker)
-		if len(events) >= n || time.Now().After(deadline) {
-			return events
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 // boundedClamClasses is the complete set a scan_clam_error Detail may carry.
 var boundedClamClasses = func() map[string]bool {
 	m := map[string]bool{"engine_error": true}
@@ -121,6 +105,10 @@ func (rec *alertRecorder) matchingEvent(event string) []recordedAlert {
 	return out
 }
 
+// waitForEvent polls until the recorder has at least n events of that name, or
+// the deadline passes. Polling rather than reading once is required: the clam
+// alert fires on its OWN goroutine, mirroring remoteScanFail, because Dispatch
+// must never run inside ScanBody's timeout.
 func (rec *alertRecorder) waitForEvent(t *testing.T, n int, event string) []recordedAlert {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
