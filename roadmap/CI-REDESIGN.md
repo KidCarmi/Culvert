@@ -1543,3 +1543,339 @@ Revert the 5C commit(s).
 Do **not** roll back by removing `test-race` or `coverage-floors` from the
 aggregate's `needs`, or by weakening `require-success`. Either leaves a PR
 approvable with no race run.
+
+### 15.6 Qualification (actual CI evidence)
+
+Every run is a GitHub-hosted `ubuntu-latest` run on commit `b0a20d9` (PR #1475).
+Fault runs are `workflow_dispatch` runs of `pr-fast-gate.yml` with the `fault`
+input; all dispatches share one concurrency group, so they ran one at a time.
+
+| Case | Run | Observed |
+|---|---|---|
+| Code-changing PR, real `pull_request` event, PR merge commit | [35859739941](https://github.com/KidCarmi/Culvert/actions/runs/35859739941) | All 21 jobs green: 4 shards, lane, universe, privileged, verdict, `coverage-floors`, aggregate |
+| Privileged mount-point regression | same run; also [35859947671](https://github.com/KidCarmi/Culvert/actions/runs/35859947671) | `sudo env TEST_SEED=… root.test -test.run ^TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting$` on this run's prebuilt binary: `--- PASS … (0.03s)`, then "executed as root and passed" |
+| Docs-only classification (`fault=docs-only`, a docs-only file list through the real classifier) | [35859812047](https://github.com/KidCarmi/Culvert/actions/runs/35859812047) | `code=false`; `test-race`, `coverage-floors` and every other code job skipped; gitleaks ran; `needs-verdict` **passed**; "Qualification runs never approve" then refused, by design |
+| Classifier failure (`fault=classifier-fails`) | [35859745755](https://github.com/KidCarmi/Culvert/actions/runs/35859745755) | Everything downstream skipped; aggregate: `required job 'changes' result=failure — cannot trust the gate` |
+| Cancellation (run superseded by a newer dispatch) | [35859947671](https://github.com/KidCarmi/Culvert/actions/runs/35859947671) | Run `cancelled`; shards and lane cancelled; the verdict still ran and **failed**; aggregate **failed** — no green check left behind |
+| Missing shard evidence (`fault=shard-evidence-missing`) | [35860261722](https://github.com/KidCarmi/Culvert/actions/runs/35860261722) | Every producer `success`; the verdict alone refused: `shard 0: no usable evidence … failed, cancelled or never uploaded`; floors skipped; aggregate failed |
+| Truncated shard profile (`fault=shard-profile-truncated`) | [35861640418](https://github.com/KidCarmi/Culvert/actions/runs/35861640418) | Shard 0's job `success`; the verdict refused: three shards' block universes differ from shard 0's (`admin_settings.go:286.59,288.3` missing) and the merged root coverage is incomplete against the build's expected block set; floors skipped; aggregate failed |
+| QA unchanged by the parameterized engine | [35859748488](https://github.com/KidCarmi/Culvert/actions/runs/35859748488) | QA green; `race-privileged` skipped and the verdict required exactly that (`race-privileged=skipped (want skipped)`); `qa-coverage` published (46,447 blocks) and consumed by `QA · Gate-critical coverage floor`; no harden step |
+
+**An unrelated failure the truncated-profile run also exposed.** In
+35861640418, shard 3, which the fault never touched, failed
+`TestReportCatFeedDBUnavailable_DoesNotClaimRecovery` with a data race:
+
+- `TestLoadCommunityFeedDB_CorruptStoreSelfHealsAndKeepsServing` starts the
+  category-feed syncer with `t.Context()`.
+- `feedsync.Syncer.Start` gives callers no way to wait for its goroutine, so a
+  sync round still running after the test ends logs through the package
+  `logger`.
+- A later test's `captureLogger` is swapping that same variable at the time.
+
+The failure depends on order and timing, and it is independent of sharding.
+It belongs to the flaky-test investigation and is recorded here only as evidence.
+
+**Not run before #1475 merged**, and still open:
+
+- the `producer-fails` fault;
+- the `coverage-floor-fails` fault;
+- the same-SHA `unsharded_audit` comparison.
+
+The mechanisms these cover are the same verdict producer check that the
+cancellation and missing-evidence runs exercised, and the unchanged floor
+script. The same-SHA comparison is carried out on the stage-6A branch; see §16.
+
+### 15.7 Measurements
+
+Before is the eight most recent green code-PR Fast runs before 5C. After is
+every green code-PR Fast run observed since 5C merged. These are observed
+values, not a completion target.
+
+| | Before (8 runs) | After (2 runs) |
+|---|---|---|
+| Fast aggregate, run start → aggregate done | 1,660–2,073 s (27.7–34.6 min) | 711 s and 732 s (11.9, 12.2 min) |
+| Race path, run start → floors done | 1,651–2,062 s | 703 s and 721 s |
+| Slowest single job | the race job, 1,610–2,018 s | a root shard, 471 s and 486 s |
+| Queue time per job | median 3 s, max 3–39 s | median 3 s, max 4–7 s |
+| Runner-minutes | 47.5–51.0 | 67.6 and 67.0 |
+
+Runner-minutes are **not** like for like. Both "after" runs changed workflow
+files, so the frontend and MCP jobs ran as well (about 5.7 min in 35859739941).
+Without them the cost is about 62 runner-minutes. Sharding therefore spends
+roughly 11–14 extra runner-minutes per code PR to save 16–22 minutes of wait.
+The critical path is now build (≈138 s) → slowest shard (≈470 s) → verdict
+(≈44 s) → floors (≈27 s).
+
+## 16. Stage 6A — restore-archive fixtures: small by default, production size where it belongs
+
+### 16.1 The finding
+
+`restore_decompression_bomb_test.go` guarded `readTarball`'s two
+decompression-bomb bounds (256 MiB per entry, 512 MiB in aggregate, `restore.go`)
+with two very expensive fixtures:
+
+| Test (pre-6A) | Fixture | Committed CI timing |
+|---|---|---|
+| `TestReadTarball_RejectsOversizedEntry` | one 300 MiB entry | 29.01 s |
+| `TestReadTarball_RejectsOversizedAggregate` | four 200 MiB entries (800 MiB) | 81.56 s — the largest entry in `.github/qa-root-shard-timings.json` |
+
+Both accepted **any** error as a pass: a malformed archive, a truncated body or
+an unrelated guard would have satisfied them just as well as the bound.
+
+**Where the time went.** Same machine, same toolchain (go1.26.6, 4 vCPU),
+instrumented separately for fixture generation and parsing:
+
+| | Fixture, `-race` | Parse, `-race` | Fixture, no race | Parse, no race |
+|---|---|---|---|---|
+| per-entry (300 MiB) | 26.83 s | 0.00 s (refused on the header) | 0.70 s | 0.00 s |
+| aggregate (4 × 200 MiB) | 71.34 s | 28.59 s (reads 600 MiB before the 4th header) | 1.88 s | 1.74 s |
+
+The files on disk are 0.3 MB and 0.8 MB. The cost is producing and gzipping
+hundreds of MiB of zeros under the race detector: the fixture's `zeroReader`
+zero-filled byte by byte, and every byte was instrumented.
+
+### 16.2 The change
+
+- **A minimal seam, no new configuration.** `readTarball(path, pass)` now calls
+  `readTarballLimited(path, pass, tarballLimits{entry: maxRestoreEntryBytes, total: maxRestoreTotalBytes})`.
+  - The limits are built from the unchanged constants on every call. There is
+    no mutable global and no flag, env var or setting.
+  - The refusal is a typed `*tarballLimitError` whose text is byte-identical to
+    the previous messages.
+  - The parsing loop and the order of the checks are unchanged: both bounds are
+    checked on the header, before `io.ReadAll` touches the body.
+- **The same parser, kilobyte fixtures** (4 KiB per entry, 8 KiB aggregate):
+  - a valid archive, with its bodies and order;
+  - per-entry below, exactly at and above the limit;
+  - aggregate below, exactly at and above the limit;
+  - aggregate overflow with every entry below its own cap;
+  - both refusals happen **before the body is read**: each fixture ends right
+    after the offending header, so a parser that read the body would report
+    `io.ErrUnexpectedEOF`. A control case proves that it does.
+- **Only the intended failure passes.** Each limit test requires
+  `*tarballLimitError` with the right scope, entry name, declared figure and
+  limit. A separate test proves a non-gzip file, a malformed tar, a
+  namespace-guard failure and a truncated body are **not** limit refusals.
+- **The production bounds, still proved:**
+  - `TestReadTarball_ProductionLimitsAreFixed` checks the constants: 256 MiB,
+    512 MiB, and a 2× ratio.
+  - `TestReadTarball_ProductionEntryBoundRejectsOnTheHeader` goes through
+    `readTarball` at production size (256 MiB + 1, 300 MiB and 1 TiB) for
+    nothing: the refusal needs a header, never a body. It runs in the ordinary
+    suite on every Fast and QA run.
+  - `TestReadTarball_ProductionAggregateBound_Integration` also goes through
+    `readTarball` with the production constants. A 256 MiB entry (exactly at the
+    cap) is accepted and read, a 1-byte entry follows, and a third header
+    declaring 256 MiB takes the total to 512 MiB + 1 and is refused before its
+    unwritten body is read. This is the smallest production-size aggregate case
+    that exists: every earlier entry must be read in full, and each is capped at
+    256 MiB. It costs 1.40 s without race and 43.40 s under race, so it runs in
+    **`QA · On-disk contract` (qa-gate.yml), without `-race`**, with
+    `CULVERT_RESTORE_PRODUCTION_SIZE=1`. The step fails unless the log carries
+    the test's PASS line. That job is in the QA aggregate's `needs`, and
+    `qa-gate.yml` is a mandatory row of `.github/release-evidence.txt`, so a
+    failure refuses the QA gate and release promotion.
+    `restore_limits_lane_test.go` pins every link of that chain. The ordinary
+    suite skips the test with a message naming where it runs.
+
+### 16.3 Mutation proof
+
+Each mutation below was applied to `restore.go` and the package's
+`TestReadTarball*` tests re-run with `CULVERT_RESTORE_PRODUCTION_SIZE=1`. Every
+mutation failed at least one test:
+
+| Mutation | Failing tests |
+|---|---|
+| per-entry check removed | EntryBoundary, RejectsBeforeReadingTheBody, ProductionEntryBoundRejectsOnTheHeader |
+| aggregate check removed | AggregateBoundary, AggregateOverflowWithEveryEntryUnderItsCap, RejectsBeforeReadingTheBody, ProductionAggregateBound_Integration |
+| per-entry `>` → `>=` | EntryBoundary, AggregateBoundary, RejectsBeforeReadingTheBody, ProductionAggregateBound_Integration |
+| aggregate `>` → `>=` | AggregateBoundary, RejectsBeforeReadingTheBody |
+| per-entry check moved after a body read | EntryBoundary, RejectsBeforeReadingTheBody, ValidArchive, AcceptsEntryUnderTheBound, ProductionAggregateBound_Integration, ProductionEntryBoundRejectsOnTheHeader |
+| production path handed other limits | ProductionEntryBoundRejectsOnTheHeader, ProductionAggregateBound_Integration |
+
+The lane wall was mutated the same way, and each mutation failed
+`TestRestoreLimitsLane_ProductionSizeCaseRunsInQAContract`:
+
+- env var dropped;
+- PASS check dropped;
+- job no longer running on push.
+
+### 16.4 CI evidence
+
+All runs are GitHub-hosted `ubuntu-latest`.
+
+| What | Run | Commit | Observed |
+|---|---|---|---|
+| Production-size aggregate case in `QA · On-disk contract` (no `-race`) | [35866546559](https://github.com/KidCarmi/Culvert/actions/runs/35866546559), job 107199502354 | `a606f82` | `CULVERT_RESTORE_PRODUCTION_SIZE: 1`; `--- PASS: TestReadTarball_ProductionAggregateBound_Integration (0.79s)`; job green |
+| Same-SHA QA audit (sharded vs unsharded) | same run, `Audit · sharded vs unsharded` | `a606f82` | **Passed.** Root entries 6,381 discovered / 6,381 reference / 6,381 sharded; skips 51 = 51; subtests 3,873 = 3,873 (0 missing, 0 extra); packages 112 = 112. Blocks: **0 lost**, 4 gained (35,243 vs 35,239 of 46,451). `coverage-floor.sh` exit 0 on both |
+| Fast PR run, real `pull_request` event | [35867970387](https://github.com/KidCarmi/Culvert/actions/runs/35867970387) | `9fb5e7c` | All 18 jobs green, including the privileged mount-point test, the verdict, both coverage floors and the aggregate |
+| Same-SHA Fast audit (the item §15.6 left open) | [35866549240](https://github.com/KidCarmi/Culvert/actions/runs/35866549240), `Audit · sharded vs unsharded` | `a606f82` | **Failed on one block, not a sharding loss.** Inventory identical: root entries 6,381 / 6,381 / 6,381; skips 51 = 51; subtests 3,873 = 3,873; packages 112 = 112. Blocks: 1 lost (`internal/yara/regexrunner.go:184.25,186.4`), 5 gained; `coverage-floor.sh` exit 0 on both. See below |
+
+**The one lost block is scheduling, not sharding.** It is the worker's
+`if r.abandoned.Load() { return }` in `internal/yara`'s regex runner, reached
+only when the parent abandons a scan while a job is still queued. That package
+runs in the non-root lane with the same `go test` invocation as the reference,
+so sharding cannot change what reaches it. Running `go test -race -coverprofile`
+on `./internal/yara/` alone, six times on the same commit, covered it in five
+runs and missed it in one. The QA audit on the same SHA lost no blocks.
+
+The 5B rule for a reference-only block is an isolated deterministic test, not an
+exception entry (the exceptions file stays pinned empty).
+`TestRegexRunner_AbandonedWorkerSkipsAQueuedJob` arranges the state and drives
+`run` synchronously: covered in 6 of 6 runs afterwards, and it fails when the
+early return is removed. The Fast audit's lint job was also red on `a606f82`;
+that is the `unnamedResult` finding fixed in `9fb5e7c`, so its aggregate was red
+regardless.
+
+`9fb5e7c` differs from `a606f82` only by naming `readTarballLimited`'s results,
+a gocritic finding from the Fast gate's diff-scoped lint, so the audits on
+`a606f82` qualify the parser change.
+
+The superseded PR run on `a606f82` (35866550469) failed root shard 2 with the
+§15.6 `feedsync` data race, this time surfacing in
+`TestReportCatFeedDBOpened_WordsTheOutcome`. This change does not touch that
+path, and the re-run on `9fb5e7c` passed.
+
+It fired again on `7fbc5ae` (run 35870770341, root shard 1, in
+`TestReportCatFeedDBUnavailable_DoesNotClaimRecovery`): the third root-shard
+failure on this PR. A re-run was only a gamble, so it is fixed here.
+- **Cause.** `feedsync.Syncer.Start` launched a goroutine nothing could join.
+  The trace reports the reading goroutine as *finished*: it is a missing
+  happens-before edge between a sync round's log call and the next test's
+  `captureLogger` write, not two goroutines overlapping in time.
+- **Fix.** `Syncer.Wait` joins the loop (a `WaitGroup` around the goroutine).
+  The three in-process `loadCommunityFeedDB` tests go through
+  `loadCommunityFeedDBForTest`, which registers `t.Cleanup(syncer.Wait)`.
+  `t.Context()` is cancelled before cleanups run, so the loop exits after its
+  round in flight. `TestSyncer_WaitJoinsTheLoop` pins the join.
+- **Evidence limit.** Local runs did not reproduce the race with or without the
+  join (40 runs, then 25 runs at `-cpu=1,2,4` under CPU load). The fix is
+  correct by construction, not shown by a local repro.
+
+### 16.5 Measurements
+
+**Test cost.** "Before" is the same toolchain on the same machine, taken just
+before the change (§16.1). "After" is the new tests on the same machine.
+
+| | Before, `-race` | After, `-race` |
+|---|---|---|
+| The two expensive tests: fixture + parse | 26.83 s + 0.00 s, 71.34 s + 28.59 s = **126.8 s** | none remain |
+| Every `TestReadTarball*` test in the file, one run | 126.8 s + 0.14 s control | **≈0.2 s** (the largest is the 1 MiB control, 0.14 s) |
+| Production-size aggregate proof | inside the ordinary suite, under `-race` | QA On-disk contract, no race: 1.40 s locally, **0.79 s on CI** |
+
+Per-test CI timings come from the committed timing file and the unsharded
+reference in QA audit 35866546559. The two removed tests had 29.01 s and
+81.56 s. The new restore tests measure between 0 and 0.06 s each.
+
+**Why summed test time is not the CI saving.** The 110.57 s sat in whichever
+root shard the plan gave it, and a shard's time counts only while that shard
+is the slowest process. In the QA audit's sharded run, still on the
+pre-refresh timing file, the four root shards ran 348–406 s of tests against
+estimates of 428 s. The non-root lane ran 722 s. The lane, not a root shard,
+now bounds the verdict. It is dominated by `internal/mcp/execution` and is
+untouched by 6A.
+
+**Fast and QA, observed.**
+
+| | Post-5C Fast (2 runs) | 6A Fast PR run 35867970387 |
+|---|---|---|
+| Aggregate | 711 s, 732 s | 779 s |
+| Root shards | 439–486 s | 408–443 s |
+| Non-root lane | 588 s (35859739941) | **600 s: the critical path** |
+| Runner-minutes | 67.6, 67.0, including the frontend and MCP jobs; about 62 without | 60.9 (no frontend or MCP jobs this time) |
+| Queue per job | 2–7 s | 3–5 s |
+
+- The root shards got shorter by roughly 30–40 s at the slowest.
+- The Fast aggregate did **not** get shorter in this sample: the non-root lane
+  was the longest job at 600 s, and the verdict waits for it. The aggregate
+  moves with run-to-run variance in the lane (588–722 s across the runs above).
+- No wall-clock saving is claimed for 6A.
+- The runner-minute saving is the removed fixture work, about 1.8 min per
+  race-suite execution: 110 s of CI test time, **estimated** from the
+  committed timings. The shuffled determinism lane runs the suite twice
+  (`-count=2`), so it saves about twice that. That estimate has not been
+  measured separately.
+
+### 16.6 Shard timing refresh
+
+`.github/qa-root-shard-timings.json` is replaced with the file the QA audit's
+comparison job derived from its own unsharded reference (run 35866546559 at
+`a606f82`), committed as-is per §14.5.
+
+- The two deleted tests (81.56 s and 29.01 s) are gone.
+- 23 entries were added: the new restore tests and the stage-5C walls. The new
+  restore tests measure 0–0.06 s.
+- The rest of the file also moved: summed entries went from 1,794.5 s to
+  1,128.7 s. Several unrelated slow tests measured 30–60 % faster in this
+  reference, for example `TestConformance_Response_Slice3f` 28.52 → 9.16 s and
+  `TestCredWall_EveryClaimedSurfaceIsScanned` 35.69 → 20.85 s. That is
+  run-to-run drift since the previous file (commit `21bfd7d`), not a 6A effect.
+- The timing file only balances; it never decides what runs (§14.5).
+- Because the partition changes with it, the refreshed file was qualified by a
+  further same-SHA audit on the final commit (§16.7).
+
+### 16.7 Qualification of the refreshed partition
+
+Both same-SHA audits ran on the final code commit `fef1fd0`, the first commit
+carrying the refreshed timing file, the yara test and the feedsync fix.
+
+| Audit | Run | Inventory | Blocks | Floors |
+|---|---|---|---|---|
+| QA | [35874102885](https://github.com/KidCarmi/Culvert/actions/runs/35874102885) | root 6,381 / 6,381 / 6,381; skips 51 = 51; subtests 3,873 = 3,873; packages 112 = 112 | **0 lost**, 1 gained (35,243 vs 35,242 of 46,453) | exit 0 / 0 |
+| Fast | [35874107185](https://github.com/KidCarmi/Culvert/actions/runs/35874107185) | identical to QA | **0 lost**, 1 gained | exit 0 / 0 |
+
+The yara block that failed the `a606f82` Fast audit is covered by both runs.
+The gained block (`controlplane_delta.go:207`) is on the sharded side, so it
+cannot fail the audit.
+
+On the same commit, the Fast PR run
+([35874104460](https://github.com/KidCarmi/Culvert/actions/runs/35874104460)),
+Deep ([35874104508](https://github.com/KidCarmi/Culvert/actions/runs/35874104508),
+including `Deep · determinism`) and QA's `Determinism` job were all green.
+
+**What the refresh did and did not change.**
+
+| | Estimate per shard | Actual root shards (test s) |
+|---|---|---|
+| Before, QA `a606f82` | 428 s | 348–406 |
+| After, QA `fef1fd0` | 288 s | 323–414 |
+| After, Fast `fef1fd0` | 288 s | 267–423 |
+
+- The estimates now match the partition the new file produces.
+- The shard spread did not narrow: two runs of the same commit spread 91 s and
+  156 s. Runner variance dominates, and no timing file can balance it away.
+- The non-root lane (610 s in QA, 724 s in the Fast audit, 761 s in the Fast PR
+  run) is still the critical path.
+- No wall-clock gain is claimed for the refresh. It removes stale entries and
+  keeps the estimates honest.
+
+**Fast PR run on `fef1fd0`:**
+- 872 s from run start to aggregate;
+- ≈60.1 runner-minutes summed over job durations (no frontend or MCP jobs);
+- root shards 360–462 s job time; non-root lane 761 s.
+
+**Open item: one determinism failure on `7fbc5ae`.** `Deep · determinism`
+failed once (run 35870770250, root package, no `-race`).
+- Rerunning the same seed locally on `7fbc5ae` (`-test.shuffle 1790172022257462916`,
+  `-count=2`) passed in 718 s.
+- The failing test's name is only in the `deep-determinism-log` artifact, which
+  the session environment could not download.
+- Both determinism jobs on `fef1fd0` passed.
+
+It is recorded here unresolved, not dismissed as a flake. Anyone with that
+artifact can name the test.
+
+### 16.8 Rollback
+
+Revert the 6A commits.
+
+- The tests go back to generating 300 MiB and 800 MiB under `-race`.
+- `readTarballLimited` and `tarballLimitError` disappear. `readTarball`'s
+  behaviour and text are identical either way.
+- The QA contract step and its wall go too.
+- The timing file reverts with them.
+- `TestRegexRunner_AbandonedWorkerSkipsAQueuedJob` can stay: it only makes an
+  existing block's coverage deterministic.
+
+Do **not** remove the QA contract step on its own. That would leave the
+production aggregate bound proved nowhere at production size.
