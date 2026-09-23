@@ -151,6 +151,32 @@ func TestCohort_OneSilentShardMakesTheImageUnknown(t *testing.T) {
 	}
 }
 
+// During an image rollout shards can share an image OS but not a build. The
+// run-level build is stated only when every shard agrees; the cohort (keyed
+// on the OS) is unaffected.
+func TestCohort_ImageBuildStatedOnlyWhenShardsAgree(t *testing.T) {
+	fx, ev := qaAuditRun(t)
+	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
+	ev = withImage(ev, "ubuntu24", "20260915.1")
+	if r := Analyze(fx.Run, jobs, ev); r.Toolchain.RunnerImageVersion != "20260915.1" {
+		t.Fatalf("agreeing shards: build %q", r.Toolchain.RunnerImageVersion)
+	}
+	for name, mut := range map[string]func(e runEvidence){
+		"one shard on the next build": func(e runEvidence) { e.ShardMetas[3].RunnerImageVersion = "20260922.1" },
+		"one shard silent":            func(e runEvidence) { e.ShardMetas[3].RunnerImageVersion = "" },
+	} {
+		e := withImage(ev, "ubuntu24", "20260915.1")
+		mut(e)
+		r := Analyze(fx.Run, jobs, e)
+		if r.Toolchain.RunnerImageVersion != "" || !strings.Contains(strings.Join(r.Unknowns, "\n"), "image build is unknown") {
+			t.Errorf("%s: build %q unknowns %v, want unstated and noted", name, r.Toolchain.RunnerImageVersion, r.Unknowns)
+		}
+		if r.Cohort.Image != "ubuntu24" || !r.Cohort.Verified {
+			t.Errorf("%s: the cohort is keyed on the image OS and must stay %q verified, got %+v", name, "ubuntu24", r.Cohort)
+		}
+	}
+}
+
 // Ordinary change stays comparable: a different commit, different durations
 // and a Go patch release land in the same cohort as the base.
 func TestCohort_ComparableRunsStayGrouped(t *testing.T) {

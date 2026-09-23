@@ -2288,7 +2288,11 @@ trend groups by `workflow|class|job set|cohort`:
   `unknown` (never a guessed value), forms its own unverified cohort, and the
   baseline loader refuses a reviewed median unless the key parses as exactly
   `platform=…;image=…;shards=…;toolchain=…`, every field is non-empty and
-  observed, and the image is not `mixed:` (Codex review, PR #1478). Runs without a race engine
+  observed, and the image is not `mixed:` (Codex review, PR #1478).
+- **The image build is stated only when all shards agree.** During a
+  rollout, shards can share an image OS but not a build; the report then
+  leaves the build unstated and says so, and the cohort (keyed on the OS) is
+  unaffected (Codex review, PR #1478). Runs without a race engine
   (docs-only, QA pass-through) have no observed image and stay unverified.
 - **Metadata-only PR reporting is unchanged.** PR runs are still measured
   from metadata in the trend. A selected natural run is enriched with the
@@ -2436,7 +2440,8 @@ candidate after it.
   10. a cohort verified from a subset of the shards' metadata;
   11. a silent shard's image ignored;
   12. a reviewed `mixed:` cohort accepted;
-  13. cohort field names and emptiness unchecked.
+  13. cohort field names and emptiness unchecked;
+  14. one shard's image build presented as the run's.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback

@@ -731,26 +731,36 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 		}
 	}
 	rep.cohortMetas = len(idx)
-	images := map[string]bool{}
+	shardImage(ev, idx, tc, rep)
+	rep.Toolchain = tc
+	if len(ev.ShardMetas) != len(v.Shards) {
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("toolchain read from %d of %d shards", len(ev.ShardMetas), len(v.Shards)))
+	}
+}
+
+// shardImage records the runner image the shards ran on. Any shard that did
+// not report its image leaves the run's image unobserved; shards on different
+// images are "mixed:"; the image build is stated only when all shards agree.
+func shardImage(ev runEvidence, idx []int, tc *Toolchain, rep *RunReport) {
+	images, versions := map[string]bool{}, map[string]bool{}
 	for _, i := range idx {
 		images[ev.ShardMetas[i].RunnerImage] = true
+		versions[ev.ShardMetas[i].RunnerImageVersion] = true
 	}
-	// Any shard that did not report its image leaves the run's image
-	// unobserved: the others do not speak for it.
 	switch names := sortedKeys(images); {
 	case images[""]:
 	case len(names) == 1:
 		rep.cohortImage = names[0]
 		tc.RunnerImage = names[0]
-		if v0 := ev.ShardMetas[idx[0]].RunnerImageVersion; v0 != "" {
-			tc.RunnerImageVersion = v0
+		// The image build is stated only when every shard reports the same
+		// one: during a rollout shards share an image OS but not a build.
+		if vs := sortedKeys(versions); len(vs) == 1 && vs[0] != "" {
+			tc.RunnerImageVersion = vs[0]
+		} else {
+			rep.Unknowns = append(rep.Unknowns, "shards reported different or missing runner image builds: the run's image build is unknown")
 		}
 	case len(names) > 1:
 		rep.cohortImage = "mixed:" + strings.Join(names, "+")
-	}
-	rep.Toolchain = tc
-	if len(ev.ShardMetas) != len(v.Shards) {
-		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("toolchain read from %d of %d shards", len(ev.ShardMetas), len(v.Shards)))
 	}
 }
 
