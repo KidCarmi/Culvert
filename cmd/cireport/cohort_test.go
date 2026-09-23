@@ -76,6 +76,22 @@ func dropMeta(ev runEvidence, idx int) runEvidence {
 	return ev
 }
 
+// renumberMeta moves shard from's metadata to artifact index to, with the
+// document's own shard field set to named.
+func renumberMeta(ev runEvidence, from, to, named int) runEvidence {
+	metas := map[int]*evShardMeta{}
+	for i, m := range ev.ShardMetas {
+		if i != from {
+			metas[i] = m
+		}
+	}
+	c := *ev.ShardMetas[from]
+	c.Shard = named
+	metas[to] = &c
+	ev.ShardMetas = metas
+	return ev
+}
+
 // threeShards is the same evidence from a 3-shard engine: shard 3's metadata
 // and verdict entry are gone too.
 func threeShards(ev runEvidence) runEvidence {
@@ -145,6 +161,12 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 		// Four shards scheduled, one shard's metadata never read: that shard
 		// may have run another toolchain.
 		{"one shard's metadata not read", jobs, dropMeta(ev, 2), false},
+		// Four documents for four scheduled shards, but not the same four:
+		// shard 3 was never observed.
+		{"metadata for an unscheduled shard in place of one scheduled", jobs, renumberMeta(ev, 3, 4, 4), false},
+		// Shard 3's artifact carries a document naming shard 2: it says
+		// nothing about what shard 3 ran.
+		{"a shard's meta.json names another shard", jobs, renumberMeta(ev, 3, 3, 2), false},
 		{"nothing read (metadata only)", jobs, runEvidence{}, false},
 		{"platform not observed", fx.Jobs, ev, false},
 	} {

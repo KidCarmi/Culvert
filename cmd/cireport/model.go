@@ -38,9 +38,10 @@ type RunReport struct {
 	// Problems are contradictions in the evidence (identities that disagree).
 	// They make the evidence untrusted, never the run green or red.
 	Problems []string `json:"problems"`
-	// cohortMetas is how many shard meta.json documents were decoded; the
-	// cohort is verified only when every scheduled shard's was.
-	cohortMetas int
+	// cohortMetaShards are the shard indices whose meta.json was decoded and
+	// names itself as that shard; the cohort is verified only when this set
+	// equals the set of shards GitHub scheduled.
+	cohortMetaShards []int
 	// cohortToolchains are the distinct toolchain lines (release line +
 	// GOOS/GOARCH) the shards reported; more than one is a mixed run.
 	cohortToolchains []string

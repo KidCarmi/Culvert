@@ -2291,7 +2291,10 @@ trend groups by `workflow|class|job set|cohort`:
   and the weekly runner image build do not split a cohort. The exact Go and
   image versions stay in each report and trend sample row.
 - **Complete evidence only.** The toolchain counts as observed only when the
-  `meta.json` of **every** scheduled shard was read; the image only when
+  `meta.json` of **every** scheduled shard was read — matched shard for
+  shard, not by count (documents for shards `{0,1,2,4}` do not cover
+  scheduled `{0,1,2,3}`), and each document must name the shard whose
+  artifact carried it; the image only when
   **every** measured job's log was. An unread one may have run elsewhere,
   and the others do not speak for it. Shards that disagree on the Go release
   line or GOOS/GOARCH make the toolchain `mixed:…`, like the image, and
@@ -2424,7 +2427,9 @@ candidate after it.
     under the same label.
   - **Unverified, never reviewed:** a non-shard job (the lane) on another
     image, one measured job's log not read, one shard's metadata not read,
-    nothing read, platform not observed.
+    four documents for four shards that are not the scheduled four, a
+    shard's `meta.json` naming another shard, nothing read, platform not
+    observed.
   - **Verified without an engine:** a real docs-only run whose jobs were
     all observed (toolchain `n/a`).
   - **Log parsing:** the real log head of job 107340167293 parses to
@@ -2467,7 +2472,9 @@ candidate after it.
       reviewed baseline;
   18. the image read from the root shards only;
   19. the parser matching the provisioner group;
-  20. an unsafe image value accepted.
+  20. an unsafe image value accepted;
+  21. shard metadata matched to the scheduled shards by count, not index;
+  22. a `meta.json` accepted for a shard it does not name.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback

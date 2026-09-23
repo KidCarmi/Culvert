@@ -513,13 +513,15 @@ var goReleaseLineRE = regexp.MustCompile(`^(go\d+\.\d+)(?:\.\d+)?$`)
 // "unknown" when it was not. Nothing is filled in from what the workflow
 // files say should have happened.
 func cohortOf(views []jobView, ev runEvidence, rep *RunReport) Cohort {
-	c := Cohort{Platform: observedPlatform(views), Image: observedImage(views, ev, rep), Shards: scheduledShards(views, rep), Toolchain: cohortUnknown}
-	// Every scheduled shard's metadata must have been read: a shard that was
-	// not may have run another toolchain.
+	scheduled := scheduledShardIndices(views)
+	c := Cohort{Platform: observedPlatform(views), Image: observedImage(views, ev, rep), Shards: scheduledShards(scheduled, rep), Toolchain: cohortUnknown}
+	// Every scheduled shard's metadata must have been read, shard for shard:
+	// a shard that was not may have run another toolchain, and a count match
+	// over different shards is not coverage.
 	complete := true
-	if n, err := strconv.Atoi(c.Shards); err == nil && rep.cohortMetas != n {
+	if len(scheduled) > 0 && !sameInts(scheduled, rep.cohortMetaShards) {
 		complete = false
-		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read from %d of %d scheduled shards: an unread shard may have run another toolchain", rep.cohortMetas, n))
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read for shards %v, GitHub scheduled shards %v: an unread shard may have run another toolchain", rep.cohortMetaShards, scheduled))
 	}
 	switch {
 	case !complete:
@@ -621,20 +623,26 @@ func observedPlatform(views []jobView) string {
 	return strings.Join(out, ",")
 }
 
-// scheduledShards counts the root-shard jobs GitHub scheduled (not skipped),
-// which is the engine's shard count even when a shard failed or was
-// cancelled. "none" when no shard job was scheduled. The verdict's own count,
-// when read, must agree.
-func scheduledShards(views []jobView, rep *RunReport) string {
-	idx := map[int]bool{}
+// scheduledShardIndices are the indices of the root-shard jobs GitHub
+// scheduled (not skipped), sorted: the engine's shards even when one failed or
+// was cancelled.
+func scheduledShardIndices(views []jobView) []int {
+	var idx []int
 	for vI := range views {
 		v := &views[vI]
 		if m := shardJobRE.FindStringSubmatch(v.api.Name); m != nil && v.api.Conclusion != "skipped" {
-			if i, err := strconv.Atoi(m[1]); err == nil {
-				idx[i] = true
+			if i, err := strconv.Atoi(m[1]); err == nil && !containsInt(idx, i) {
+				idx = append(idx, i)
 			}
 		}
 	}
+	sort.Ints(idx)
+	return idx
+}
+
+// scheduledShards is the scheduled shard count, or "none" when no shard job
+// was scheduled. The verdict's own count, when read, must agree.
+func scheduledShards(idx []int, rep *RunReport) string {
 	if len(idx) == 0 {
 		return "none"
 	}
@@ -642,6 +650,28 @@ func scheduledShards(views []jobView, rep *RunReport) string {
 		rep.Problems = append(rep.Problems, fmt.Sprintf("the verdict reports %d shards, GitHub scheduled %d shard jobs", rep.Config.Shards, len(idx)))
 	}
 	return strconv.Itoa(len(idx))
+}
+
+func containsInt(s []int, v int) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// sameInts reports whether two sorted index lists are equal.
+func sameInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func jobByName(views []jobView, pred func(string) bool) *jobView {
@@ -765,8 +795,16 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 		idx = append(idx, i)
 	}
 	sort.Ints(idx)
+	var named []int
 	for _, i := range idx {
 		m := ev.ShardMetas[i]
+		// The document must name the shard whose artifact carried it; one
+		// that names another shard proves nothing about this one.
+		if m.Shard != i {
+			rep.Problems = append(rep.Problems, fmt.Sprintf("artifact qa-race-shard-%d carries meta.json for shard %d", i, m.Shard))
+		} else {
+			named = append(named, i)
+		}
 		if m.Commit != v.Commit {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("shard %d ran commit %s, the verdict judged %s", i, short(m.Commit), short(v.Commit)))
 		}
@@ -777,9 +815,9 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("shard %d reports toolchain %v, shard %d reports %v", i, cur, idx[0], *tc))
 		}
 	}
-	rep.cohortMetas = len(idx)
+	rep.cohortMetaShards = named
 	lines := map[string]bool{}
-	for _, i := range idx {
+	for _, i := range named {
 		m := ev.ShardMetas[i]
 		lines[toolchainLine(&Toolchain{Go: m.GoVersion, GOOS: m.GOOS, GOARCH: m.GOARCH})] = true
 	}
