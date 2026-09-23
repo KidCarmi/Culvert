@@ -114,18 +114,7 @@ func comparePackages(in compareRuns, c *Comparison, fail, note func(string, ...a
 		if pp == nil {
 			continue
 		}
-		c.SubtestsReference += len(rp.Subtests)
-		c.SubtestsPilot += len(pp.Subtests)
-		for _, s := range sortedKeys(rp.Subtests) {
-			if _, ok := pp.Subtests[s]; !ok {
-				c.SubtestsMissing = append(c.SubtestsMissing, s)
-			}
-		}
-		for _, s := range sortedKeys(pp.Subtests) {
-			if _, ok := rp.Subtests[s]; !ok {
-				c.SubtestsExtra = append(c.SubtestsExtra, s)
-			}
-		}
+		compareSubtests(rp, pp, c, fail)
 		if name == in.pkg {
 			continue
 		}
@@ -135,12 +124,42 @@ func comparePackages(in compareRuns, c *Comparison, fail, note func(string, ...a
 		if d := diffNames(sortedKeys(rp.Tests), sortedKeys(pp.Tests)); d != "" {
 			fail("%s entries: reference vs pilot: %s", name, d)
 		}
+		for _, n := range sortedKeys(rp.Tests) {
+			if pt := pp.Tests[n]; pt != nil && pt.Status != rp.Tests[n].Status {
+				fail("%s %s: reference %s, pilot %s", name, n, rp.Tests[n].Status, pt.Status)
+			}
+		}
 	}
 	if len(c.SubtestsMissing) > 0 {
 		fail("%d subtest(s) ran in the reference but not in the pilot: %s", len(c.SubtestsMissing), headList(c.SubtestsMissing, 10))
 	}
 	if len(c.SubtestsExtra) > 0 {
 		note("%d subtest(s) ran only in the pilot: %s", len(c.SubtestsExtra), headList(c.SubtestsExtra, 10))
+	}
+}
+
+// compareSubtests records one package's subtest inventory and holds subtests
+// present on both sides to the same rule as top-level entries: the OUTCOME must
+// match, not just the name. A subtest that passed in the reference and skipped
+// in the pilot (sharding changed the process state it depends on) executed a
+// body the pilot did not, and its parent still reports pass — only this check
+// sees it.
+func compareSubtests(rp, pp *PkgResult, c *Comparison, fail func(string, ...any)) {
+	c.SubtestsReference += len(rp.Subtests)
+	c.SubtestsPilot += len(pp.Subtests)
+	for _, s := range sortedKeys(rp.Subtests) {
+		ps, ok := pp.Subtests[s]
+		switch {
+		case !ok:
+			c.SubtestsMissing = append(c.SubtestsMissing, s)
+		case ps != rp.Subtests[s]:
+			fail("subtest %s: reference %s, pilot %s", s, rp.Subtests[s], ps)
+		}
+	}
+	for _, s := range sortedKeys(pp.Subtests) {
+		if _, ok := rp.Subtests[s]; !ok {
+			c.SubtestsExtra = append(c.SubtestsExtra, s)
+		}
 	}
 }
 

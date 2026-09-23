@@ -47,7 +47,12 @@ func TestCompare_RejectsLostExecution(t *testing.T) {
 		"entry missing from pilot": {func(in *compareRuns) { delete(in.pilot["m"].Tests, "FuzzC") }, "reference vs pilot"},
 		"skip became pass":         {func(in *compareRuns) { in.pilot["m"].Tests["TestB"].Status = statusPass }, "TestB: reference skip, pilot pass"},
 		"subtest missing":          {func(in *compareRuns) { in.pilot["m"].Subtests = map[string]string{} }, "subtest(s) ran in the reference but not in the pilot"},
-		"inventory drift":          {func(in *compareRuns) { in.inv = mustList(t, "TestA", "TestB", "FuzzC", "TestNew") }, "binary inventory"},
+		"subtest pass became skip": {func(in *compareRuns) { in.pilot["m"].Subtests["TestA/x"] = statusSkip }, "subtest TestA/x: reference pass, pilot skip"},
+		"non-root entry outcome differs": {func(in *compareRuns) {
+			in.ref["m/sub"] = &PkgResult{Status: statusPass, Tests: map[string]*TestResult{"TestS": {Status: statusPass, Reports: 1}}, Subtests: map[string]string{}}
+			in.pilot["m/sub"] = &PkgResult{Status: statusPass, Tests: map[string]*TestResult{"TestS": {Status: statusSkip, Reports: 1}}, Subtests: map[string]string{}}
+		}, "m/sub TestS: reference pass, pilot skip"},
+		"inventory drift": {func(in *compareRuns) { in.inv = mustList(t, "TestA", "TestB", "FuzzC", "TestNew") }, "binary inventory"},
 		"package missing": {func(in *compareRuns) {
 			in.ref["m/sub"] = &PkgResult{Status: statusPass, Tests: map[string]*TestResult{}, Subtests: map[string]string{}}
 		}, "package set"},
