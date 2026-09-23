@@ -30,7 +30,33 @@ type Comparison struct {
 	PilotCoverage     coverageStats `json:"pilotCoverage"`
 	BlocksLost        []string      `json:"blocksCoveredOnlyInReference"`
 	BlocksGained      []string      `json:"blocksCoveredOnlyInPilot"`
-	FilesChanged      []FileDelta   `json:"filesWithDifferentCoverage"`
+	// BlocksExcepted are the lost blocks a checked-in exception justifies;
+	// every OTHER lost block is a problem.
+	BlocksExcepted []string    `json:"blocksLostUnderException"`
+	FilesChanged   []FileDelta `json:"filesWithDifferentCoverage"`
+}
+
+// CoverageExceptions is the ONLY way a block the unsharded reference covered
+// may go uncovered in the sharded run without failing the comparison. It is a
+// checked-in file, and every entry must be NARROW (one exact block), EXPLICIT
+// (a reason and the evidence for it) and CURRENT (the block must still exist
+// in this commit's universe, so a stale entry fails instead of silently
+// excusing whatever code later occupies those coordinates).
+//
+// The expected content is empty. Stage 5B pinned every block that differed in
+// the documented comparisons with an isolated fixture instead (the
+// coverage_isolation*_test.go files); an entry here is a last resort for a
+// path that genuinely cannot be exercised deterministically.
+type CoverageExceptions struct {
+	Schema     int                 `json:"schema"`
+	Exceptions []CoverageException `json:"exceptions"`
+}
+
+// CoverageException excuses one block.
+type CoverageException struct {
+	Block    string `json:"block"`
+	Reason   string `json:"reason"`
+	Evidence string `json:"evidence"`
 }
 
 // FileDelta is one source file whose statement coverage differs.
@@ -40,19 +66,24 @@ type FileDelta struct {
 	Pilot     float64 `json:"pilot"`
 }
 
-// compareRuns holds the four inputs of a comparison.
+// compareRuns holds the inputs of a comparison.
 type compareRuns struct {
 	pkg                string
 	inv                Inventory
 	ref, pilot         Results
 	refProf, pilotProf *Profile
+	exceptions         CoverageExceptions
 }
 
-// compare checks the pilot against the unsharded reference on the SAME
-// commit. Inventory and result differences are problems; coverage-block
-// differences are reported with their locations but are not by themselves a
-// rejection, because counters and timing-dependent branches legitimately vary
-// between any two runs — the coverage floors decide pass/fail, unchanged.
+// compare checks the sharded run against the unsharded reference on the SAME
+// commit. Inventory and result differences are problems, and so is COVERAGE
+// LOSS: a block the reference executed and the sharded run did not is a path
+// that sharding (or luck) stopped exercising. Unchanged rounded percentages and
+// passing floors do not establish equivalence — 5A's runs had both while
+// losing 14–35 blocks — so every lost block must be explained by a checked-in
+// exception or it fails. Blocks covered ONLY by the sharded run are notes: the
+// sharded evidence is a superset there, and the reference's own variance is
+// what those notes record.
 func compare(in compareRuns) Comparison {
 	var c Comparison
 	fail := func(format string, a ...any) { c.Problems = append(c.Problems, fmt.Sprintf(format, a...)) }
@@ -180,6 +211,7 @@ func compareCoverage(in compareRuns, c *Comparison, fail func(string, ...any)) {
 	if d := sameUniverse(in.refProf, in.pilotProf); d != "" {
 		fail("coverage block universe differs (reference vs pilot): %s", d)
 	}
+	excepted := checkExceptions(in.exceptions, in.refProf, fail)
 	c.ReferenceCoverage, c.PilotCoverage = in.refProf.stats(nil), in.pilotProf.stats(nil)
 	for _, k := range in.refProf.sortedKeys() {
 		pv, ok := in.pilotProf.Blocks[k]
@@ -190,9 +222,22 @@ func compareCoverage(in compareRuns, c *Comparison, fail func(string, ...any)) {
 		switch {
 		case rc && !pc:
 			c.BlocksLost = append(c.BlocksLost, k.String())
+			if excepted[k.String()] {
+				c.BlocksExcepted = append(c.BlocksExcepted, k.String())
+			}
 		case pc && !rc:
 			c.BlocksGained = append(c.BlocksGained, k.String())
 		}
+	}
+	if n := len(c.BlocksLost) - len(c.BlocksExcepted); n > 0 {
+		var unexplained []string
+		for _, b := range c.BlocksLost {
+			if !excepted[b] {
+				unexplained = append(unexplained, b)
+			}
+		}
+		fail("%d block(s) covered by the unsharded reference are NOT covered by the sharded run: %s — pin each with an isolated test, or justify it in the coverage exceptions file",
+			n, headList(unexplained, 20))
 	}
 	ref, pilot := perFile(in.refProf), perFile(in.pilotProf)
 	for _, f := range sortedKeys(ref) {
@@ -201,6 +246,30 @@ func compareCoverage(in compareRuns, c *Comparison, fail func(string, ...any)) {
 			c.FilesChanged = append(c.FilesChanged, FileDelta{f, pct(r), pct(p)})
 		}
 	}
+}
+
+// checkExceptions validates the exceptions file against THIS commit's block
+// universe and returns the excused blocks. A malformed, duplicated, vague or
+// stale entry is a problem in its own right.
+func checkExceptions(ex CoverageExceptions, universe *Profile, fail func(string, ...any)) map[string]bool {
+	known := map[string]bool{}
+	for k := range universe.Blocks {
+		known[k.String()] = true
+	}
+	out := map[string]bool{}
+	for i, e := range ex.Exceptions {
+		switch {
+		case e.Block == "" || e.Reason == "" || e.Evidence == "":
+			fail("coverage exception %d is not explicit: block, reason and evidence are all required", i)
+		case out[e.Block]:
+			fail("coverage exception for %s is listed twice", e.Block)
+		case !known[e.Block]:
+			fail("coverage exception for %s is stale: no such block in this commit — remove or re-derive it", e.Block)
+		default:
+			out[e.Block] = true
+		}
+	}
+	return out
 }
 
 // perFile is statement-weighted coverage per source file, in one pass.
@@ -236,13 +305,20 @@ func cmdCompare(args []string, stdout io.Writer) error {
 	pkg := fs.String("pkg", "", "root import path")
 	out := fs.String("out", "", "comparison.json to write")
 	baseline := fs.String("baseline-out", "", "reference per-test/per-package timing JSON to write")
+	exceptions := fs.String("coverage-exceptions", "", "checked-in coverage exceptions JSON (required; may list none)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
-	if err := required(fs, "ref-log", "ref-profile", "pilot-results", "pilot-profile", "list", "pkg", "out"); err != nil {
+	if err := required(fs, "ref-log", "ref-profile", "pilot-results", "pilot-profile", "list", "pkg", "out", "coverage-exceptions"); err != nil {
 		return err
 	}
 	in := compareRuns{pkg: *pkg}
+	if err := readJSON(*exceptions, &in.exceptions); err != nil {
+		return err
+	}
+	if in.exceptions.Schema != 1 {
+		return fmt.Errorf("coverage exceptions %s: schema %d, want 1", *exceptions, in.exceptions.Schema)
+	}
 	var err error
 	if in.inv, err = readInventory(*list); err != nil {
 		return err
@@ -283,8 +359,8 @@ func printComparison(w io.Writer, c Comparison) {
 	say(w, "coverage: reference %.1f%% (%d/%d blocks covered), pilot %.1f%% (%d/%d)\n",
 		c.ReferenceCoverage.Percent, c.ReferenceCoverage.CoveredBlocks, c.ReferenceCoverage.Blocks,
 		c.PilotCoverage.Percent, c.PilotCoverage.CoveredBlocks, c.PilotCoverage.Blocks)
-	say(w, "blocks covered only in reference: %d; only in pilot: %d; files whose coverage differs: %d\n",
-		len(c.BlocksLost), len(c.BlocksGained), len(c.FilesChanged))
+	say(w, "blocks covered only in reference: %d (%d under a checked-in exception); only in pilot: %d; files whose coverage differs: %d\n",
+		len(c.BlocksLost), len(c.BlocksExcepted), len(c.BlocksGained), len(c.FilesChanged))
 	for i := 0; i < len(c.BlocksLost) && i < 40; i++ {
 		say(w, "  lost   %s\n", c.BlocksLost[i])
 	}

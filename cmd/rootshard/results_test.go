@@ -97,10 +97,14 @@ func TestParseVerboseLog_AttributesResultsToPackages(t *testing.T) {
 	if s := res["example.com/m/sub"]; s == nil || len(s.Tests) != 1 || s.Elapsed != 1.234 {
 		t.Fatalf("sub = %+v", s)
 	}
-	for _, p := range []string{"example.com/m/cmd/tool", "example.com/m/gen"} {
-		if res[p] == nil || res[p].Status != statusPass {
-			t.Fatalf("no-test package %s = %+v", p, res[p])
-		}
+	// A coverage-only line (a package with statements and no tests) is a
+	// pass; "[no test files]" (nothing to instrument either) is test2json's
+	// package-level skip, so the text log and `go test -json` agree.
+	if p := res["example.com/m/cmd/tool"]; p == nil || p.Status != statusPass {
+		t.Fatalf("coverage-only package = %+v", p)
+	}
+	if p := res["example.com/m/gen"]; p == nil || p.Status != statusSkip {
+		t.Fatalf("[no test files] package = %+v", p)
 	}
 	for _, p := range []string{"example.com/m/broken", "example.com/m/nobuild"} {
 		if res[p] == nil || res[p].Status != statusFail {

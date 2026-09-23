@@ -19,8 +19,8 @@ import (
 	"time"
 )
 
-// manifestSchema versions manifest.json.
-const manifestSchema = 1
+// manifestSchema versions manifest.json. 2 added the root coverage universe.
+const manifestSchema = 2
 
 // Manifest is the build identity every shard and the verdict check against. A
 // shard that ran a different binary, a different commit, a different
@@ -40,6 +40,15 @@ type Manifest struct {
 	ListSHA256   string   `json:"listSHA256"`
 	Runnable     int      `json:"runnable"`
 	Benchmarks   int      `json:"benchmarks"`
+	// RootUniverse is the root package's EXPECTED coverage-block set: the
+	// profile of an empty run of this very binary (-test.run=^$), in which
+	// every instrumented block of the package appears (counted only by package
+	// init and TestMain). The
+	// verdict requires the merged shard profiles to carry exactly this set, so
+	// a truncated or partial profile cannot pass by being self-consistent.
+	RootUniverse       string `json:"rootUniverse"`
+	RootUniverseSHA256 string `json:"rootUniverseSHA256"`
+	RootUniverseBlocks int    `json:"rootUniverseBlocks"`
 	// Measured costs (seconds).
 	CompileSeconds  float64 `json:"compileSeconds"`
 	ListSeconds     float64 `json:"listSeconds"`
@@ -152,7 +161,37 @@ func listAndMeasure(ctx context.Context, binary, scratch, outDir string, m *Mani
 		return fmt.Errorf("empty run failed: %w\n%s", err, out)
 	}
 	m.EmptyRunSeconds = since(start)
-	return nil
+	return keepRootUniverse(filepath.Join(scratch, "empty.out"), outDir, m)
+}
+
+// keepRootUniverse validates the empty run's profile as the root package's
+// expected block set and keeps it beside the binary.
+func keepRootUniverse(src, outDir string, m *Manifest) error {
+	u, err := readProfile(src)
+	if err != nil {
+		return fmt.Errorf("root universe: %w", err)
+	}
+	if u.Mode != "atomic" {
+		return fmt.Errorf("root universe: coverage mode %q, a -race build is atomic", u.Mode)
+	}
+	if len(u.Blocks) == 0 {
+		return errors.New("root universe: the empty run instrumented no blocks")
+	}
+	// Counts are NOT required to be zero: package init and TestMain run in an
+	// empty run too. The universe is the set of block KEYS, nothing more.
+	for k := range u.Blocks {
+		if !rootFile(m.Package, k.File) {
+			return fmt.Errorf("root universe: block %s is outside %s", k, m.Package)
+		}
+	}
+	m.RootUniverse = "root-universe.cover.out"
+	dst := filepath.Join(outDir, m.RootUniverse)
+	if err := writeProfile(dst, u); err != nil {
+		return err
+	}
+	m.RootUniverseBlocks = len(u.Blocks)
+	m.RootUniverseSHA256, _, err = fileSHA256(dst)
+	return err
 }
 
 // listEntries runs `<binary> -test.list <pattern>` — the binary's own view of
@@ -475,8 +514,11 @@ func headList(xs []string, n int) string {
 	return fmt.Sprintf("%d %v…", len(xs), xs[:n])
 }
 
-// LaneMeta records the non-root package lane.
+// LaneMeta records one run over the non-root packages: the lane itself, or its
+// universe. Kind says which, so one directory's evidence cannot stand in for
+// the other's.
 type LaneMeta struct {
+	Kind      string   `json:"kind"`
 	Commit    string   `json:"commit"`
 	GoVersion string   `json:"goVersion"`
 	GOOS      string   `json:"goos"`
@@ -520,7 +562,42 @@ func nonRootPackages(ctx context.Context, goBin string) (root string, pkgs []str
 }
 
 func cmdRunLane(args []string, stdout io.Writer) error {
-	fs := newFlags("run-lane")
+	return runPackageSet(args, stdout, laneRun)
+}
+
+// cmdUniverse produces the non-root lane's EXPECTED coverage-block set: the
+// same `go test` invocation as the lane — same packages, -race, -count, the
+// same build — with `-run=^$`, so every instrumented block of every package
+// appears in the profile and no test executes. It runs in its own job, so the
+// lane's evidence is judged against a set the lane did not produce: a lane
+// profile that lost a package, a file or a block cannot pass by being
+// self-consistent.
+func cmdUniverse(args []string, stdout io.Writer) error {
+	return runPackageSet(args, stdout, universeRun)
+}
+
+// packageRun names one of the two `go test` invocations over the non-root
+// packages. They differ ONLY in test selection and output names.
+type packageRun struct {
+	name, events, profile string
+	extra                 []string
+}
+
+var (
+	laneRun     = packageRun{name: "run-lane", events: "lane.json", profile: "lane.cover.out"}
+	universeRun = packageRun{name: "universe", events: "universe.json", profile: "universe.cover.out", extra: []string{"-run=^$"}}
+)
+
+// packageArgs is the lane's `go test` command. Kept in one place so the lane
+// and its universe cannot drift apart in build configuration.
+func packageArgs(run packageRun, timeout, profile string, pkgs []string) []string {
+	args := append([]string{"test", "-race", "-count=1", "-timeout=" + timeout}, run.extra...)
+	args = append(args, "-coverprofile="+profile, "-json")
+	return append(args, pkgs...)
+}
+
+func runPackageSet(args []string, stdout io.Writer, run packageRun) error {
+	fs := newFlags(run.name)
 	outDir := fs.String("out-dir", "", "evidence directory")
 	commit := fs.String("commit", os.Getenv("GITHUB_SHA"), "commit this job checked out")
 	timeout := fs.String("timeout", "40m", "per-binary -timeout (the reference's)")
@@ -547,13 +624,12 @@ func cmdRunLane(args []string, stdout io.Writer) error {
 	if err := os.MkdirAll(*outDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
-	goArgs := append([]string{"test", "-race", "-count=1", "-timeout=" + *timeout,
-		"-coverprofile=" + filepath.Join(*outDir, "lane.cover.out"), "-json"}, pkgs...)
-	meta := LaneMeta{Commit: *commit, GoVersion: tc.Version, GOOS: tc.GOOS, GOARCH: tc.GOARCH, WorkDir: wd,
-		Excluded: root, Packages: pkgs, Command: append([]string{*goBin}, goArgs[:6]...)}
-	f, err := os.Create(filepath.Join(*outDir, "lane.json"))
+	goArgs := packageArgs(run, *timeout, filepath.Join(*outDir, run.profile), pkgs)
+	meta := LaneMeta{Kind: run.name, Commit: *commit, GoVersion: tc.Version, GOOS: tc.GOOS, GOARCH: tc.GOARCH, WorkDir: wd,
+		Excluded: root, Packages: pkgs, Command: append([]string{*goBin}, goArgs[:len(goArgs)-len(pkgs)]...)}
+	f, err := os.Create(filepath.Join(*outDir, run.events))
 	if err != nil {
-		return fmt.Errorf("create lane.json: %w", err)
+		return fmt.Errorf("create %s: %w", run.events, err)
 	}
 	defer f.Close()
 	start := time.Now()
@@ -572,14 +648,14 @@ func cmdRunLane(args []string, stdout io.Writer) error {
 	meta.ExitCode = exitCode(c.Wait())
 	if copyErr != nil && meta.ExitCode == 0 {
 		meta.ExitCode = -2
-		say(stdout, "::error::lane events: %v\n", copyErr)
+		say(stdout, "::error::%s events: %v\n", run.name, copyErr)
 	}
 	meta.Seconds = since(start)
 	if err := writeJSON(filepath.Join(*outDir, "meta.json"), meta); err != nil {
 		return err
 	}
 	if meta.ExitCode != 0 {
-		return fmt.Errorf("non-root lane: go test exited %d", meta.ExitCode)
+		return fmt.Errorf("%s: go test exited %d", run.name, meta.ExitCode)
 	}
 	return nil
 }
