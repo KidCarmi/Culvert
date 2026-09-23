@@ -642,3 +642,25 @@ func TestCohort_UnsafeToolchainValueIsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// The run-level exact toolchain is stated under the same completeness rule as
+// the cohort: shards whose metadata was not read may have run another one.
+func TestCohort_ExactToolchainNeedsEveryScheduledShard(t *testing.T) {
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
+	if r := Analyze(fx.Run, jobs, ev); r.Toolchain == nil {
+		t.Fatal("control: a complete run must state its exact toolchain")
+	}
+	for name, e := range map[string]runEvidence{
+		"one shard's metadata not read":         dropMeta(ev, 2),
+		"metadata for an unscheduled shard":     renumberMeta(ev, 3, 4, 4),
+		"a shard's meta.json names another one": renumberMeta(ev, 3, 3, 2),
+	} {
+		r := Analyze(fx.Run, jobs, e)
+		if r.Toolchain != nil {
+			t.Errorf("%s: run toolchain %+v stated from a partial read", name, *r.Toolchain)
+		}
+		if row := sampleRow("g", "success", &Sample{Report: r}); row.Toolchain != "" {
+			t.Errorf("%s: trend row toolchain %q, want empty", name, row.Toolchain)
+		}
+	}
+}

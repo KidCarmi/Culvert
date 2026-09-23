@@ -522,6 +522,9 @@ func cohortOf(views []jobView, ev runEvidence, rep *RunReport) Cohort {
 	if len(scheduled) > 0 && !sameInts(scheduled, rep.cohortMetaShards) {
 		complete = false
 		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read for shards %v, GitHub scheduled shards %v: an unread shard may have run another toolchain", rep.cohortMetaShards, scheduled))
+		// The exact toolchain the read shards agree on does not speak for
+		// the unread ones either.
+		rep.Toolchain = nil
 	}
 	switch {
 	case !complete:
@@ -850,7 +853,7 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 	// one; otherwise no shard's version speaks for the others. Patch releases
 	// can differ while the release line (the cohort) still agrees.
 	exact := map[string]bool{}
-	for _, i := range idx {
+	for _, i := range named {
 		m := ev.ShardMetas[i]
 		exact[m.GoVersion+" "+m.GOOS+"/"+m.GOARCH] = true
 	}
