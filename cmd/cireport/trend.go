@@ -75,7 +75,26 @@ func validateBaseline(b Baseline) error {
 	case b.Regression.Ratio <= 1 || b.Regression.Consecutive < 2:
 		return fmt.Errorf("sustained-regression rule needs ratio > 1 and at least 2 consecutive samples")
 	}
+	if err := validateReviewedGroups(b); err != nil {
+		return err
+	}
 	return validateAuditBlock(b.Audit)
+}
+
+// validateReviewedGroups refuses a reviewed median for a cohort that is not
+// fully observed or not in the current key shape: a baseline must describe one
+// verified configuration, never a mix of unknown ones.
+func validateReviewedGroups(b Baseline) error {
+	for k := range b.Groups {
+		parts := strings.Split(k, "|")
+		if len(parts) != 4 || !strings.HasPrefix(parts[3], "platform=") {
+			return fmt.Errorf("baseline group %q is not workflow|class|jobSet|cohort", k)
+		}
+		if strings.Contains(parts[3], "="+cohortUnknown) {
+			return fmt.Errorf("baseline group %q has an unobserved cohort component; enrich natural runs with on-demand reports first", k)
+		}
+	}
+	return nil
 }
 
 // validateAuditBlock rejects an audit block that cannot expire or whose
@@ -162,6 +181,8 @@ type GroupStats struct {
 	Workflow     string          `json:"workflow"`
 	Class        string          `json:"class"`
 	JobSet       string          `json:"jobSet"`
+	Cohort       string          `json:"cohort"`
+	Verified     bool            `json:"cohortVerified"`
 	Total        int             `json:"total"`
 	ByConclusion map[string]int  `json:"byConclusion"`
 	Reruns       int             `json:"reruns"`
@@ -230,6 +251,9 @@ type SampleRow struct {
 	Source     string   `json:"source"`
 	Elapsed    *float64 `json:"elapsedToAggregateSeconds"`
 	Runner     float64  `json:"runnerMinutes"`
+	// Toolchain is the exact Go version the shards reported, when read; the
+	// cohort keeps only the release line.
+	Toolchain string `json:"toolchain,omitempty"`
 }
 
 // metricValues extracts the compared metrics; absent values are simply absent.
@@ -253,8 +277,23 @@ func metricValues(r RunReport) map[string]float64 {
 	return m
 }
 
+// groupKeyOf is the comparison cohort: workflow, execution class, the job
+// families that ran, and the observed configuration (runner platform, shard
+// count, Go release line). The source commit is deliberately not part of it —
+// ordinary code changes stay comparable. A run whose configuration was not
+// observed carries "unknown" and so forms its own cohort, separate from every
+// verified one.
 func groupKeyOf(r RunReport) string {
-	return r.Run.WorkflowPath + "|" + r.Class + "|" + r.JobSet.Key
+	return r.Run.WorkflowPath + "|" + r.Class + "|" + r.JobSet.Key + "|" + cohortKeyOf(r)
+}
+
+// cohortKeyOf tolerates a report without a derived cohort (never produced by
+// this collector) by calling it unknown rather than guessing.
+func cohortKeyOf(r RunReport) string {
+	if r.Cohort.Key == "" {
+		return "platform=unknown;shards=unknown;toolchain=unknown"
+	}
+	return r.Cohort.Key
 }
 
 // countedWhy returns "" when a sample may enter statistics, else the reason.
@@ -288,6 +327,19 @@ func stat(vals []float64, minSamples int) Stat {
 	return st
 }
 
+// sampleRow is one execution's visible row, counted or not.
+func sampleRow(group, concl string, s *Sample) SampleRow {
+	r := &s.Report
+	why := countedWhy(*s)
+	row := SampleRow{Group: group, RunID: r.Run.RunID, Attempt: r.Run.Attempt, Event: r.Run.Event, Conclusion: concl,
+		CreatedAt: r.Run.CreatedAt, Counted: why == "", Why: why, Source: s.Source,
+		Elapsed: r.Timing.ElapsedToAggregate, Runner: r.Timing.RunnerMinutes}
+	if r.Toolchain != nil {
+		row.Toolchain = r.Toolchain.Go
+	}
+	return row
+}
+
 // buildTrend is pure: samples + baseline + audit in, report out.
 func buildTrend(samples []Sample, b Baseline, audit AuditFreshness, now time.Time) TrendReport {
 	tr := TrendReport{Schema: trendReportSchema, GeneratedAt: now.UTC().Format(time.RFC3339), Baseline: b.Status, Audit: audit, Unknowns: []string{}}
@@ -300,7 +352,8 @@ func buildTrend(samples []Sample, b Baseline, audit AuditFreshness, now time.Tim
 		k := groupKeyOf(r)
 		g := groups[k]
 		if g == nil {
-			g = &GroupStats{Key: k, Workflow: r.Run.WorkflowPath, Class: r.Class, JobSet: r.JobSet.Key, ByConclusion: map[string]int{}, Metrics: map[string]Stat{}}
+			g = &GroupStats{Key: k, Workflow: r.Run.WorkflowPath, Class: r.Class, JobSet: r.JobSet.Key,
+				Cohort: cohortKeyOf(r), Verified: r.Cohort.Verified, ByConclusion: map[string]int{}, Metrics: map[string]Stat{}}
 			groups[k] = g
 		}
 		g.Total++
@@ -315,12 +368,9 @@ func buildTrend(samples []Sample, b Baseline, audit AuditFreshness, now time.Tim
 		if s.Source != "per-run-report" || r.Evidence.Verdict == "missing" {
 			g.UnknownEv++
 		}
-		why := countedWhy(*s)
-		row := SampleRow{Group: k, RunID: r.Run.RunID, Attempt: r.Run.Attempt, Event: r.Run.Event, Conclusion: concl,
-			CreatedAt: r.Run.CreatedAt, Counted: why == "", Why: why, Source: s.Source,
-			Elapsed: r.Timing.ElapsedToAggregate, Runner: r.Timing.RunnerMinutes}
+		row := sampleRow(k, concl, s)
 		tr.Samples = append(tr.Samples, row)
-		if why == "" && len(eligible[k]) < b.MaxSamples {
+		if row.Counted && len(eligible[k]) < b.MaxSamples {
 			eligible[k] = append(eligible[k], r)
 		}
 	}
@@ -708,8 +758,9 @@ func renderTrend(tr TrendReport) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## CI performance and evidence trend — %s\n\n", tr.GeneratedAt)
 	fmt.Fprintf(&b, "Baseline: **%s**. Statistics are over counted executions only (completed, first attempt, success, consistent evidence); every other execution is listed below with the reason. Elapsed is wall clock; runner-minutes are summed job time, not a bill.\n\n", tr.Baseline)
-	b.WriteString("| workflow | class | job set | executions (by conclusion) | re-runs | counted | evidence unknown | elapsed to aggregate s, median / p90 | race verdict s, median / p90 | runner-min median | status |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
-	for _, g := range tr.Groups {
+	b.WriteString("| workflow | class | job set | cohort | executions (by conclusion) | re-runs | counted | evidence unknown | elapsed to aggregate s, median / p90 | race verdict s, median / p90 | runner-min median | status |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	for gI := range tr.Groups {
+		g := &tr.Groups[gI]
 		conc := make([]string, 0, len(g.ByConclusion))
 		for k, v := range g.ByConclusion {
 			conc = append(conc, fmt.Sprintf("%s %d", k, v))
@@ -723,11 +774,18 @@ func renderTrend(tr TrendReport) string {
 			runner = fmt.Sprintf("%.1f", rm.Median)
 		}
 		status := "provisional"
-		if e.N >= 10 && !e.Provisional {
+		switch {
+		case !g.Verified:
+			status = "unverified cohort: never reviewed"
+		case e.N >= 10 && !e.Provisional:
 			status = "enough samples to review"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %d (%s) | %d | %d | %d | %s | %s | %s | %s |\n",
-			shortWorkflow(g.Workflow), g.Class, g.JobSet, g.Total, strings.Join(conc, ", "), g.Reruns, g.Eligible, g.UnknownEv,
+		cohort := strings.ReplaceAll(g.Cohort, ";", "; ")
+		if !g.Verified {
+			cohort += " (unverified)"
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %d (%s) | %d | %d | %d | %s | %s | %s | %s |\n",
+			shortWorkflow(g.Workflow), g.Class, g.JobSet, cohort, g.Total, strings.Join(conc, ", "), g.Reruns, g.Eligible, g.UnknownEv,
 			fmtStat(e, ok1), fmtStat(rv, ok2), runner, status)
 	}
 	a := tr.Audit

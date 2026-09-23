@@ -32,10 +32,20 @@ func collectRun(ctx context.Context, c *ghClient, o runOpts) (RunReport, error) 
 	if err != nil {
 		return RunReport{}, fmt.Errorf("run %d: %w", o.runID, err)
 	}
-	if o.attempt > 0 && o.attempt != run.RunAttempt {
-		if err := c.getJSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d", o.repo, o.runID, o.attempt), &run); err != nil {
-			return RunReport{}, fmt.Errorf("run %d attempt %d: %w", o.runID, o.attempt, err)
-		}
+	// Always read through the attempt endpoint: it is the only place GitHub
+	// exposes a re-run's own enqueue time. An older attempt cannot be
+	// measured without it; for the latest attempt its absence only makes the
+	// attempt queue unknown.
+	want := run.RunAttempt
+	if o.attempt > 0 {
+		want = o.attempt
+	}
+	att, err := c.runAttempt(ctx, o.repo, run, want)
+	switch {
+	case err == nil:
+		run = att
+	case want != run.RunAttempt:
+		return RunReport{}, fmt.Errorf("run %d attempt %d: %w", o.runID, want, err)
 	}
 	jobs, err := c.jobs(ctx, o.repo, run.ID, run.RunAttempt)
 	if err != nil {

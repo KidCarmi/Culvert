@@ -20,6 +20,11 @@ func renderRunSummary(r RunReport) string {
 	fmt.Fprintf(&b, "| event / conclusion | %s / %s |\n", r.Run.Event, r.Run.Conclusion)
 	fmt.Fprintf(&b, "| head / tested checkout | `%s` / `%s` |\n", short(r.Run.HeadSHA), short(r.Run.TestedSHA))
 	fmt.Fprintf(&b, "| job set | `%s` |\n", r.JobSet.Key)
+	verified := "verified"
+	if !r.Cohort.Verified {
+		verified = "unverified — a component was not observed"
+	}
+	fmt.Fprintf(&b, "| cohort | `%s` (%s) |\n", r.Cohort.Key, verified)
 	if r.Toolchain != nil {
 		fmt.Fprintf(&b, "| toolchain | %s %s/%s |\n", r.Toolchain.Go, r.Toolchain.GOOS, r.Toolchain.GOARCH)
 	}
@@ -33,6 +38,7 @@ func renderRunSummary(r RunReport) string {
 	fmt.Fprintf(&b, "| elapsed to the race verdict | %s |\n", fmtSecs(t.ElapsedToRaceVerdict))
 	fmt.Fprintf(&b, "| wall span / busy (union of jobs) | %.0f s / %.0f s |\n", t.WallSpan, t.Busy)
 	fmt.Fprintf(&b, "| runner-minutes (summed) | %.1f over %d jobs |\n", t.RunnerMinutes, t.Queue.Jobs)
+	fmt.Fprintf(&b, "| attempt queue (enqueue → first job start) | %s |\n", fmtSecs(t.AttemptQueue))
 	fmt.Fprintf(&b, "| job queue wait: median / max | %.0f s / %.0f s |\n", t.Queue.Median, t.Queue.Max)
 	fmt.Fprintf(&b, "| job setup: median / max | %.0f s / %.0f s |\n", t.Setup.Median, t.Setup.Max)
 	if rs := r.Race; rs != nil {

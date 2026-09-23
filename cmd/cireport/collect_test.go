@@ -26,13 +26,17 @@ type fakeGitHub struct {
 	files     map[string][]byte // "path@ref"
 	wfRuns    map[string][]apiRun
 	failJobs  map[int64]bool // runs whose jobs endpoint answers 500
-	mu        sync.Mutex
-	fetched   []string
+	// attempts overrides the attempt endpoint ("id/n"); unset, it answers
+	// with the run itself, as GitHub does for attempt 1.
+	attempts map[string]apiRun
+	mu       sync.Mutex
+	fetched  []string
 }
 
 func newFake(t *testing.T) *fakeGitHub {
 	return &fakeGitHub{t: t, runs: map[int64]fixture{}, artifacts: map[int64][]apiArtifact{}, zips: map[int64][]byte{},
-		named: map[string][]apiArtifact{}, files: map[string][]byte{}, wfRuns: map[string][]apiRun{}, failJobs: map[int64]bool{}}
+		named: map[string][]apiArtifact{}, files: map[string][]byte{}, wfRuns: map[string][]apiRun{}, failJobs: map[int64]bool{},
+		attempts: map[string]apiRun{}}
 }
 
 func (f *fakeGitHub) addArtifact(runID, id int64, name string, zipData []byte) {
@@ -106,6 +110,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(b)})
 		return
+	}
+	if m := reRunAttmpt.FindStringSubmatch(p); m != nil {
+		if a, ok := f.attempts[m[1]+"/"+m[2]]; ok {
+			write(a)
+			return
+		}
 	}
 	m := reRun.FindStringSubmatch(p)
 	if m == nil {

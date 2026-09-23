@@ -355,9 +355,6 @@ func measureTiming(run apiRun, views []jobView, rep *RunReport) {
 	start, ok := parseTime(run.RunStartedAt)
 	t := &rep.Timing
 	t.RunnerMinutesNote = runnerMinutesNote
-	if created, ok2 := parseTime(run.CreatedAt); ok && ok2 && start.After(created) {
-		t.RunQueue = secs(start.Sub(created))
-	}
 	var iv [][2]time.Time
 	var runner float64
 	var queue, setup, work []float64
@@ -395,12 +392,50 @@ func measureTiming(run apiRun, views []jobView, rep *RunReport) {
 		t.WallSpan = secs(last.Sub(start))
 	}
 	t.Queue, t.Setup, t.Work = phaseStats(queue), phaseStats(setup), phaseStats(work)
+	t.AttemptQueue = attemptQueue(run, iv, rep)
 	if !ok {
 		rep.Unknowns = append(rep.Unknowns, "run_started_at missing: elapsed time is not observable")
 	}
 	if t.ElapsedToAggregate == nil {
 		rep.Unknowns = append(rep.Unknowns, "the aggregate job did not complete in this attempt: elapsed-to-aggregate is unknown")
 	}
+}
+
+// attemptEnqueue is when this attempt was queued, when that is observable:
+// the attempt endpoint's created_at, or the run's created_at on attempt 1.
+// A re-run read through the runs endpoint or list carries attempt 1's
+// created_at, and using it would add the interval between attempts.
+func attemptEnqueue(run apiRun) (time.Time, bool) {
+	if run.attemptCreatedAt != "" {
+		return parseTime(run.attemptCreatedAt)
+	}
+	if run.RunAttempt <= 1 {
+		return parseTime(run.CreatedAt)
+	}
+	return time.Time{}, false
+}
+
+// attemptQueue is the attempt's wait for its first runner: enqueue to the
+// earliest start among this attempt's own jobs (carried-over jobs excluded).
+// Unknown — nil, never zero — when the enqueue time was not observed.
+func attemptQueue(run apiRun, iv [][2]time.Time, rep *RunReport) *float64 {
+	enq, ok := attemptEnqueue(run)
+	if !ok {
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("attempt %d's enqueue time was not observed (only the attempt endpoint carries it): attempt queue is unknown", run.RunAttempt))
+		return nil
+	}
+	var first time.Time
+	for _, x := range iv {
+		if first.IsZero() || x[0].Before(first) {
+			first = x[0]
+		}
+	}
+	if first.IsZero() || first.Before(enq) {
+		rep.Unknowns = append(rep.Unknowns, "no job of this attempt started after its enqueue time: attempt queue is unknown")
+		return nil
+	}
+	q := secs(first.Sub(enq))
+	return &q
 }
 
 // Analyze builds a RunReport from GitHub metadata and whatever evidence was
@@ -414,7 +449,8 @@ func Analyze(run apiRun, jobs []apiJob, ev runEvidence) RunReport {
 			Workflow: run.Name, WorkflowPath: run.Path, Event: run.Event, RunID: run.ID,
 			Attempt: run.RunAttempt, Rerun: run.RunAttempt > 1, HeadSHA: run.HeadSHA,
 			HeadBranch: run.HeadBranch, DisplayTitle: run.DisplayTitle, Status: run.Status,
-			Conclusion: run.Conclusion, CreatedAt: run.CreatedAt, StartedAt: run.RunStartedAt,
+			Conclusion: run.Conclusion, CreatedAt: run.CreatedAt, AttemptCreatedAt: run.attemptCreatedAt,
+			StartedAt: run.RunStartedAt,
 		},
 		Unknowns: []string{},
 		Problems: []string{},
@@ -446,8 +482,90 @@ func Analyze(run apiRun, jobs []apiJob, ev runEvidence) RunReport {
 	measureTiming(run, views, &rep)
 	raceEvidence(run, views, groups, ev, &rep)
 	auditEvidence(views, auditReq, ev, &rep)
+	rep.Cohort = cohortOf(views, &rep)
 	rep.Unknowns = append(rep.Unknowns, ev.Notes...)
 	return rep
+}
+
+const cohortUnknown = "unknown"
+
+var goReleaseLineRE = regexp.MustCompile(`^(go\d+\.\d+)(?:\.\d+)?$`)
+
+// cohortOf derives the observed configuration the run executed under. Each
+// component is read from something observed — job metadata for the platform
+// and shard count, the shards' own meta.json for the toolchain — and is
+// "unknown" when it was not. Nothing is filled in from what the workflow
+// files say should have happened.
+func cohortOf(views []jobView, rep *RunReport) Cohort {
+	c := Cohort{Platform: observedPlatform(views), Shards: scheduledShards(views, rep), Toolchain: cohortUnknown}
+	if tc := rep.Toolchain; tc != nil && tc.Go != "" && tc.GOOS != "" && tc.GOARCH != "" {
+		line := tc.Go
+		if m := goReleaseLineRE.FindStringSubmatch(tc.Go); m != nil {
+			line = m[1]
+		}
+		c.Toolchain = line + " " + tc.GOOS + "/" + tc.GOARCH
+	}
+	switch {
+	case c.Shards == "none":
+		// No race engine ran: there is no toolchain to observe and none to
+		// compare. "n/a", not "unknown" — unknown always means unobserved.
+		c.Toolchain = "n/a"
+	case c.Toolchain == cohortUnknown:
+		rep.Unknowns = append(rep.Unknowns, "toolchain not observed (no shard meta.json read): this run's cohort is unverified")
+	}
+	c.Verified = c.Platform != cohortUnknown && c.Toolchain != cohortUnknown
+	c.Key = "platform=" + c.Platform + ";shards=" + c.Shards + ";toolchain=" + c.Toolchain
+	return c
+}
+
+// observedPlatform is the distinct runner label sets and runner groups of the
+// executed jobs, sorted. Any executed job without them makes it unknown.
+func observedPlatform(views []jobView) string {
+	seen := map[string]bool{}
+	for vI := range views {
+		v := &views[vI]
+		if !v.executed {
+			continue
+		}
+		if len(v.api.Labels) == 0 || v.api.RunnerGroupName == "" {
+			return cohortUnknown
+		}
+		labels := append([]string(nil), v.api.Labels...)
+		sort.Strings(labels)
+		seen[strings.Join(labels, "+")+"@"+v.api.RunnerGroupName] = true
+	}
+	if len(seen) == 0 {
+		return cohortUnknown
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+// scheduledShards counts the root-shard jobs GitHub scheduled (not skipped),
+// which is the engine's shard count even when a shard failed or was
+// cancelled. "none" when no shard job was scheduled. The verdict's own count,
+// when read, must agree.
+func scheduledShards(views []jobView, rep *RunReport) string {
+	idx := map[int]bool{}
+	for vI := range views {
+		v := &views[vI]
+		if m := shardJobRE.FindStringSubmatch(v.api.Name); m != nil && v.api.Conclusion != "skipped" {
+			if i, err := strconv.Atoi(m[1]); err == nil {
+				idx[i] = true
+			}
+		}
+	}
+	if len(idx) == 0 {
+		return "none"
+	}
+	if rep.Config.Shards > 0 && rep.Config.Shards != len(idx) {
+		rep.Problems = append(rep.Problems, fmt.Sprintf("the verdict reports %d shards, GitHub scheduled %d shard jobs", rep.Config.Shards, len(idx)))
+	}
+	return strconv.Itoa(len(idx))
 }
 
 func jobByName(views []jobView, pred func(string) bool) *jobView {

@@ -42,7 +42,11 @@ type apiRun struct {
 	RunStartedAt string `json:"run_started_at"`
 	UpdatedAt    string `json:"updated_at"`
 	DisplayTitle string `json:"display_title"`
-	Repository   struct {
+	// attemptCreatedAt is set only when the run was read from the attempt
+	// endpoint, whose created_at is that attempt's enqueue time (the runs
+	// endpoint and the runs list report attempt 1's).
+	attemptCreatedAt string
+	Repository       struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 	HeadRepository struct {
@@ -66,6 +70,10 @@ type apiJob struct {
 	CompletedAt string    `json:"completed_at"`
 	RunAttempt  int       `json:"run_attempt"`
 	Steps       []apiStep `json:"steps"`
+	// Labels and RunnerGroupName say where the job ran (the runs-on labels
+	// and the hosted or self-hosted runner group).
+	Labels          []string `json:"labels"`
+	RunnerGroupName string   `json:"runner_group_name"`
 }
 
 type apiArtifact struct {
@@ -180,6 +188,19 @@ func (c *ghClient) run(ctx context.Context, repo string, id int64) (apiRun, erro
 	var r apiRun
 	err := c.getJSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d", repo, id), &r)
 	return r, err
+}
+
+// runAttempt reads one attempt of a run. Its created_at is the ATTEMPT's
+// enqueue time, so it is kept separately; every other identity field keeps the
+// run's own values, which is what the trend compares retained reports with.
+func (c *ghClient) runAttempt(ctx context.Context, repo string, run apiRun, attempt int) (apiRun, error) {
+	var a apiRun
+	if err := c.getJSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d", repo, run.ID, attempt), &a); err != nil {
+		return apiRun{}, err
+	}
+	a.attemptCreatedAt = a.CreatedAt
+	a.CreatedAt = run.CreatedAt
+	return a, nil
 }
 
 // jobs lists one attempt's jobs, every page.

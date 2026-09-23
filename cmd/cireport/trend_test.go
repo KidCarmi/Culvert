@@ -21,6 +21,10 @@ func testBaseline(status string) Baseline {
 
 func f64(v float64) *float64 { return &v }
 
+// testCohort is a fully observed configuration for synthetic samples.
+var testCohort = Cohort{Platform: "ubuntu-latest@GitHub Actions", Shards: "4", Toolchain: "go1.26 linux/amd64", Verified: true,
+	Key: "platform=ubuntu-latest@GitHub Actions;shards=4;toolchain=go1.26 linux/amd64"}
+
 // sample builds a report in one group with the given outcome and timing.
 func sample(id int64, day int, concl string, attempt int, elapsed float64, class, key string) Sample {
 	r := RunReport{Schema: runReportSchema, Class: class}
@@ -28,6 +32,7 @@ func sample(id int64, day int, concl string, attempt int, elapsed float64, class
 		WorkflowPath: fastWorkflowPath, Event: "pull_request",
 		CreatedAt: time.Date(2026, 9, day, 10, 0, 0, 0, time.UTC).Format(time.RFC3339)}
 	r.JobSet.Key = key
+	r.Cohort = testCohort
 	r.Timing.ElapsedToAggregate = f64(elapsed)
 	r.Timing.RunnerMinutes = elapsed / 10
 	r.Evidence.Verdict = "ok"
@@ -36,8 +41,8 @@ func sample(id int64, day int, concl string, attempt int, elapsed float64, class
 
 func findGroup(t *testing.T, tr TrendReport, class, key string) GroupStats {
 	t.Helper()
-	for _, g := range tr.Groups {
-		if g.Class == class && g.JobSet == key {
+	for gI := range tr.Groups {
+		if g := tr.Groups[gI]; g.Class == class && g.JobSet == key {
 			return g
 		}
 	}
@@ -116,7 +121,7 @@ func TestBuildTrend_WindowIsTheNewestMaxSamples(t *testing.T) {
 func TestRegressions_AdvisoryAndSustainedOnly(t *testing.T) {
 	b := testBaseline("reviewed")
 	b.ReviewedBy, b.ReviewedAt = "someone", "2026-10-01"
-	key := fastWorkflowPath + "|" + classPRCode + "|race"
+	key := fastWorkflowPath + "|" + classPRCode + "|race|" + testCohort.Key
 	b.Groups = map[string]map[string]struct {
 		Median float64 `json:"median"`
 	}{key: {"elapsedToAggregateSeconds": {Median: 700}}}
