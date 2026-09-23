@@ -1331,3 +1331,92 @@ done
 ```
 
 In CI: `gh workflow run qa-gate.yml --ref <branch> -f unsharded_audit=true`.
+
+### 14.7 Qualification (actual CI evidence)
+
+Every number below comes from a GitHub-hosted `ubuntu-latest` run. The before
+figures are the two most recent main-push QA runs under the pre-5B layout.
+
+**Rounds.**
+
+| Round | Run | Commit | Mode | Outcome |
+|---|---|---|---|---|
+| 1 | `35834009198` | `21bfd7d` | audit (sharded + unsharded, same commit) | Inventory identical; **1** reference-only covered block, so the comparison failed, as designed. Pinned by `TestCovIsoPolicy_ImportEnablesConnLimit` |
+| 2 | `35837869936` | `59a555e` | ordinary (no reference) | Race path fully green. The determinism lane failed on `internal/yara` `TestRegexRunner_ConcurrentScans` (see below) |
+| 3 | see the PR | current head | audit | Equivalence on the final code |
+
+**Inventory completeness.** Round 1 compares the sharded run with the reference. Round 2 is the verdict alone, with no reference.
+
+| | Unsharded reference (r1) | Sharded (r1) | Sharded verdict alone (r2) |
+|---|---|---|---|
+| Root entries discovered / executed, each exactly once | 6,360 / 6,360 | 6,360 / 6,360 | 6,361 (+1 fixture) |
+| Skips | 50 | the same 50 | — |
+| Subtests | 3,847 | 3,847 (0 missing, 0 extra) | — |
+| Packages | 112 | 112 | 111 lane + root |
+| Lane top-level entries | — | — | 3,045 reported / 3,045 source-declared |
+| Source enumerator vs binary `-test.list` | — | agrees | agrees |
+| Block universe (root / lane) | 46,447 | 46,447 | 25,137 / 21,310, each matched exactly |
+| Covered blocks | 35,233 | 35,232 (1 lost, 0 gained) | 35,233 |
+| Statement coverage / floors | 78.8%, exit 0 | 78.8%, exit 0 | 78.8%, exit 0 |
+
+**Coverage differences, stage by stage.**
+
+| Stage | Reference-only blocks | Sharded-only blocks |
+|---|---|---|
+| 5A run 3 | 14 | 9 |
+| 5B round 1 | 1 | 0 |
+| 5B round 3 | see the PR | see the PR |
+
+The remaining differences are gone because the fixtures now set up their own state. No exception was needed, and the exceptions file stays empty.
+
+**Negative tests for incomplete evidence.** These are `cmd/rootshard`'s
+`completeness_test.go` cases. They ran in CI as part of the lane (the
+`cmd/rootshard` package passed in both rounds) and in the shuffled
+determinism lane. Each case produces a real verdict that fails with no
+reference run present:
+- a lane profile with no blocks, or truncated;
+- one test's events lost, or the event stream cut mid-line;
+- a ghost entry;
+- a missing universe, or lane evidence passed off as the universe;
+- a universe from another commit;
+- every root profile truncated identically;
+- a test added to the source after the build;
+- a replaced root universe.
+
+A failed or cancelled producer is refused twice: the verdict marks its
+evidence as missing, and the "every producer succeeded" step checks each
+`needs.*.result`. 5A run 1 exercised the red path on the real pipeline.
+
+**Wall-clock and runner time.**
+
+| | Before 5B: main push `35829097344` | Before 5B: main push `35782882080` | 5B ordinary, round 2 |
+|---|---|---|---|
+| QA wall-clock (first job queued to aggregate) | 33.8 min | 27.4 min | **14.8 min** |
+| Longest job | race job, 1,986 s | race job, 1,602 s | determinism, 877 s (unchanged job) |
+| Race + coverage evidence published (coverage floor done) | +2,016 s | +1,630 s | **+827 s** |
+| Runner-minutes (sum of job durations) | 54.7 | 50.3 | **73.0** |
+
+What the round-2 figures show:
+- **Measured:**
+  - The QA wall-clock fell by 12.6–19.0 min (2.3×) against the two baselines.
+  - Runner time rose by about 18–23 minutes (about 35%).
+  - The critical path is now the pre-existing shuffled determinism lane (877 s).
+  - Next on the critical path: the verdict path (827 s), bounded by the non-root lane (727.7 s of tests, of which `internal/mcp/execution` alone takes 523 s).
+  - The four root shards ran 363–477 s of tests against an estimate of 454.5 s each.
+- **Estimate, not measured:** splitting `internal/mcp/execution` out of the lane would take about 200 s off the verdict path. It would not shorten QA until determinism is also faster. It is deliberately not done here.
+- **Not claimed:** no full-CI speed-up. Only the QA gate changed, and the Fast PR Gate still runs its own unsharded race suite.
+
+**The one red job in round 2 is outside this change.**
+- `QA · Determinism` failed on `internal/yara` `TestRegexRunner_ConcurrentScans` (`inflight delta = -1 after all concurrent scans finished`, seed `1790152692675770089`).
+- That package is untouched by this branch, and its tests run in their own process.
+- The failure is the same timing/ordering class that is being investigated separately. It is recorded here, not fixed.
+
+### 14.8 Remaining work
+
+1. **Fast PR Gate migration (next stage).**
+   - Move the Fast PR Gate's single `-race` run onto the same shards.
+   - Keep its runner hardening and the privileged mount-point regression it carries.
+   - Keep its two coverage contracts, fed by the verdict's `merged.cover.out`.
+2. **`internal/mcp/execution` split.** Unmeasured, and optional. It becomes worthwhile only once the verdict path, not determinism, bounds QA.
+3. **Timing refresh cadence.** Replace `.github/qa-root-shard-timings.json` with the file an audit run prints (§14.5) whenever the slowest shard drifts well above the estimate. In round 2 the shards landed at 0.80–1.05× their estimates.
+4. **The determinism failures** listed above belong to the separate flaky-test investigation, not to this stage.
