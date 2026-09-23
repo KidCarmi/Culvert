@@ -114,6 +114,7 @@ func cmdTrend(ctx context.Context, args []string) (int, error) {
 	workflows := fl.String("workflows", "pr-fast-gate.yml,qa-gate.yml", "workflow files to summarise")
 	per := fl.Int("per-event", 25, "most recent runs read per workflow and event (the sample window is 20)")
 	baseline := fl.String("baseline", ".github/ci-perf-baseline.json", "reviewed baseline file")
+	defaultBranch := fl.String("default-branch", "main", "the only branch a trusted reporter run (whose retained reports are read) may be on")
 	if err := fl.Parse(args); err != nil {
 		return 0, fmt.Errorf("flags: %w", err)
 	}
@@ -121,7 +122,7 @@ func cmdTrend(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	tr, err := collectTrend(ctx, c, trendOpts{repo: cf.repo, workflows: strings.Split(*workflows, ","), perEvent: *per,
+	tr, err := collectTrend(ctx, c, trendOpts{repo: cf.repo, workflows: strings.Split(*workflows, ","), perEvent: *per, defaultBranch: *defaultBranch,
 		baselinePath: *baseline, outDir: cf.outDir, summary: cf.summary, now: time.Now(),
 		collector: Collector{RunID: cf.collectorRun, SHA: cf.collectorSHA}})
 	if err != nil {

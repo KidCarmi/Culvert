@@ -392,14 +392,16 @@ func auditRunPassed(s Sample) bool {
 }
 
 type trendOpts struct {
-	repo         string
-	workflows    []string
-	perEvent     int
-	baselinePath string
-	outDir       string
-	summary      string
-	now          time.Time
-	collector    Collector
+	repo      string
+	workflows []string
+	perEvent  int
+	// defaultBranch is the only branch a trusted reporter run may be on.
+	defaultBranch string
+	baselinePath  string
+	outDir        string
+	summary       string
+	now           time.Time
+	collector     Collector
 }
 
 const reportArtifactPrefix = "ci-run-report-"
@@ -410,29 +412,107 @@ func reportArtifactName(runID int64, attempt int) string {
 
 // loadSample prefers the collector's retained per-run report; without one it
 // measures the run from metadata alone and says so.
-func loadSample(ctx context.Context, c *ghClient, repo string, run apiRun) (Sample, error) {
-	arts, err := c.artifactsNamed(ctx, repo, reportArtifactName(run.ID, run.RunAttempt))
+func loadSample(ctx context.Context, c *ghClient, o trendOpts, run apiRun) (Sample, error) {
+	var rejected []string
+	arts, err := c.artifactsNamed(ctx, o.repo, reportArtifactName(run.ID, run.RunAttempt))
 	if err == nil {
 		for _, a := range arts {
 			if a.Expired {
 				continue
 			}
-			members, err := c.artifactMembers(ctx, repo, a, map[string]bool{"report.json": true})
-			if err != nil {
-				continue
-			}
-			var rep RunReport
-			if json.Unmarshal(members["report.json"], &rep) == nil && rep.Schema == runReportSchema && rep.Run.RunID == run.ID && rep.Run.Attempt == run.RunAttempt {
+			rep, why := trustedReport(ctx, c, o, run, a)
+			if why == "" {
 				return Sample{Report: rep, Source: "per-run-report"}, nil
 			}
+			rejected = append(rejected, fmt.Sprintf("retained report artifact %d rejected: %s", a.ID, why))
 		}
 	}
-	jobs, err := c.jobs(ctx, repo, run.ID, run.RunAttempt)
+	jobs, err := c.jobs(ctx, o.repo, run.ID, run.RunAttempt)
 	if err != nil {
 		return Sample{}, err
 	}
-	rep := Analyze(run, jobs, runEvidence{Notes: []string{"no retained per-run report: evidence artifacts were not read"}})
+	rep := Analyze(run, jobs, runEvidence{Notes: append(rejected, "no retained per-run report: evidence artifacts were not read")})
 	return Sample{Report: rep, Source: "metadata-only"}, nil
+}
+
+// reporterWorkflowPath is the only workflow whose report artifacts the trend
+// trusts.
+const reporterWorkflowPath = ".github/workflows/ci-perf-report.yml"
+
+// trustedReport accepts a retained report only when BOTH hold, and otherwise
+// says why not:
+//
+//  1. It was produced by a trusted run: the reporter workflow, on the
+//     default branch of this repository, from an event that runs
+//     default-branch code (workflow_run, schedule, or a dispatch on the
+//     default branch). Artifact names are not access-controlled — any run in
+//     the repository, including a pull request that edits or adds a workflow,
+//     can upload an artifact with this name — so the name proves nothing.
+//  2. Its run identity matches the API's run field for field. A report that
+//     disagrees with GitHub about its own run (a different workflow, event,
+//     commit or conclusion) is not about this run.
+//
+// Without both, a pull request could make a failed equivalence audit read as
+// passed by uploading a report named for the scheduled run.
+func trustedReport(ctx context.Context, c *ghClient, o trendOpts, run apiRun, a apiArtifact) (rep RunReport, rejected string) {
+	producer, err := c.run(ctx, o.repo, a.WorkflowRun.ID)
+	if err != nil {
+		return RunReport{}, fmt.Sprintf("producing run %d unreadable: %v", a.WorkflowRun.ID, err)
+	}
+	if why := untrustedProducer(producer, o); why != "" {
+		return RunReport{}, why
+	}
+	members, err := c.artifactMembers(ctx, o.repo, a, map[string]bool{"report.json": true})
+	if err != nil {
+		return RunReport{}, fmt.Sprintf("unreadable: %v", err)
+	}
+	if err := decodeStrict("report.json", members["report.json"], &rep); err != nil {
+		return RunReport{}, fmt.Sprintf("undecodable: %v", err)
+	}
+	if rep.Schema != runReportSchema {
+		return RunReport{}, fmt.Sprintf("schema %q", rep.Schema)
+	}
+	if why := identityMismatch(rep.Run, run); why != "" {
+		return RunReport{}, why
+	}
+	return rep, ""
+}
+
+// untrustedProducer returns why a producing run is not the trusted reporter,
+// or "" when it is.
+func untrustedProducer(p apiRun, o trendOpts) string {
+	switch {
+	case p.Path != reporterWorkflowPath:
+		return fmt.Sprintf("produced by %s, not the reporter workflow", p.Path)
+	case p.Event != "workflow_run" && p.Event != "schedule" && p.Event != "workflow_dispatch":
+		return fmt.Sprintf("produced by a %s run, which may execute unreviewed workflow code", p.Event)
+	case p.HeadBranch != o.defaultBranch:
+		return fmt.Sprintf("produced on branch %q, not %q", p.HeadBranch, o.defaultBranch)
+	case p.Repository.FullName != o.repo || p.HeadRepository.FullName != o.repo:
+		return fmt.Sprintf("produced in %s (head %s), not %s", p.Repository.FullName, p.HeadRepository.FullName, o.repo)
+	}
+	return ""
+}
+
+// identityMismatch compares a report's immutable run identity with the API.
+func identityMismatch(got RunIdentity, run apiRun) string {
+	for _, f := range []struct{ name, report, api string }{
+		{"workflowPath", got.WorkflowPath, run.Path},
+		{"event", got.Event, run.Event},
+		{"headSha", got.HeadSHA, run.HeadSHA},
+		{"headBranch", got.HeadBranch, run.HeadBranch},
+		{"status", got.Status, run.Status},
+		{"conclusion", got.Conclusion, run.Conclusion},
+		{"createdAt", got.CreatedAt, run.CreatedAt},
+	} {
+		if f.report != f.api {
+			return fmt.Sprintf("%s %q disagrees with the API's %q", f.name, f.report, f.api)
+		}
+	}
+	if got.RunID != run.ID || got.Attempt != run.RunAttempt {
+		return fmt.Sprintf("names run %d attempt %d, not %d attempt %d", got.RunID, got.Attempt, run.ID, run.RunAttempt)
+	}
+	return ""
 }
 
 // trendEvents are listed separately for every workflow; the scheduled audit
@@ -441,8 +521,8 @@ var trendEvents = []string{"pull_request", "push", "workflow_dispatch"}
 
 // loadRuns lists the newest runs of one workflow for one event and reads each
 // as a sample; a run that cannot be read is noted, never silently dropped.
-func loadRuns(ctx context.Context, c *ghClient, repo, wf, event string, limit int) ([]Sample, []string, error) {
-	runs, err := c.workflowRuns(ctx, repo, wf, event, limit)
+func loadRuns(ctx context.Context, c *ghClient, o trendOpts, wf, event string, limit int) ([]Sample, []string, error) {
+	runs, err := c.workflowRuns(ctx, o.repo, wf, event, limit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list %s %s runs: %w", wf, event, err)
 	}
@@ -450,7 +530,7 @@ func loadRuns(ctx context.Context, c *ghClient, repo, wf, event string, limit in
 	var notes []string
 	for runI := range runs {
 		run := &runs[runI]
-		s, err := loadSample(ctx, c, repo, *run)
+		s, err := loadSample(ctx, c, o, *run)
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("%s run %d unreadable: %v", event, run.ID, err))
 			continue
@@ -472,14 +552,14 @@ func collectTrend(ctx context.Context, c *ghClient, o trendOpts) (TrendReport, e
 	// main-push and dispatch executions out of the window entirely.
 	for _, wf := range o.workflows {
 		for _, ev := range trendEvents {
-			got, notes, err := loadRuns(ctx, c, o.repo, wf, ev, o.perEvent)
+			got, notes, err := loadRuns(ctx, c, o, wf, ev, o.perEvent)
 			if err != nil {
 				return TrendReport{}, err
 			}
 			samples, unknowns = append(samples, got...), append(unknowns, notes...)
 		}
 	}
-	auditSamples, notes, err := loadRuns(ctx, c, o.repo, b.Audit.Workflow, "schedule", 30)
+	auditSamples, notes, err := loadRuns(ctx, c, o, b.Audit.Workflow, "schedule", 30)
 	if err != nil {
 		return TrendReport{}, err
 	}

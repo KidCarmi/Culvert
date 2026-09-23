@@ -42,6 +42,12 @@ type apiRun struct {
 	RunStartedAt string `json:"run_started_at"`
 	UpdatedAt    string `json:"updated_at"`
 	DisplayTitle string `json:"display_title"`
+	Repository   struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	HeadRepository struct {
+		FullName string `json:"full_name"`
+	} `json:"head_repository"`
 }
 
 type apiStep struct {

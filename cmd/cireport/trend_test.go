@@ -221,6 +221,7 @@ func TestCollectTrend_EndToEnd(t *testing.T) {
 	fake.runs[code.Run.ID], fake.runs[docs.Run.ID] = code, docs
 	fake.wfRuns["pr-fast-gate.yml"] = []apiRun{code.Run, docs.Run}
 	rep := Analyze(code.Run, code.Jobs, runEvidence{})
+	fake.runs[999] = fixture{Run: reporterRun(999, "workflow_run", "main")}
 	fake.addArtifact(999, 1, reportArtifactName(code.Run.ID, code.Run.RunAttempt), makeZip(t, map[string][]byte{"report.json": mustJSON(t, rep)}))
 
 	audit := loadFixture(t, "qa-dispatch-audit")
@@ -249,7 +250,7 @@ func TestCollectTrend_EndToEnd(t *testing.T) {
 	}
 	out := filepath.Join(t.TempDir(), "trend")
 	tr, err := collectTrend(context.Background(), c, trendOpts{repo: "o/r", workflows: []string{"pr-fast-gate.yml", "qa-gate.yml"},
-		perEvent: 10, baselinePath: b, outDir: out, now: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)})
+		perEvent: 10, defaultBranch: "main", baselinePath: b, outDir: out, now: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,5 +276,81 @@ func TestCollectTrend_EndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(out, "trend.json")); err != nil {
 		t.Error(err)
+	}
+}
+
+// reporterRun is a run of the reporter workflow in repository o/r.
+func reporterRun(id int64, event, branch string) apiRun {
+	r := apiRun{ID: id, Path: reporterWorkflowPath, Event: event, HeadBranch: branch, Status: "completed", Conclusion: "success"}
+	r.Repository.FullName, r.HeadRepository.FullName = "o/r", "o/r"
+	return r
+}
+
+// A retained report is trusted only when a default-branch reporter run
+// produced it AND it agrees with the API about its own run. Artifact names
+// are not access-controlled: a pull request can upload one named for the
+// scheduled audit and claim that a FAILED audit passed.
+func TestCollectTrend_ForgedReportCannotPassAFailedAudit(t *testing.T) {
+	failed := loadFixture(t, "qa-dispatch-audit")
+	failed.Run.Event = "schedule"
+	failed.Run.Conclusion = "failure"
+	for i := range failed.Jobs {
+		if failed.Jobs[i].Name == auditCompareJob {
+			failed.Jobs[i].Conclusion = "failure"
+		}
+	}
+	// The forgery: a report for the same run, claiming success and a passed audit.
+	forged := Analyze(failed.Run, failed.Jobs, runEvidence{})
+	forged.Run.Conclusion = "success"
+	forged.Evidence.Audit.State, forged.Evidence.Audit.ReferenceJob, forged.Evidence.Audit.CompareJob = "passed", "success", "success"
+	honest := forged
+	honest.Run.Conclusion = "failure" // agrees with the API, but the producer below is untrusted anyway
+
+	for _, tc := range []struct {
+		name     string
+		producer apiRun
+		report   RunReport
+	}{
+		{"pull-request run of an edited reporter", reporterRun(801, "pull_request", "attacker-branch"), forged},
+		{"push to a non-default branch", reporterRun(802, "push", "attacker-branch"), forged},
+		{"dispatch on a non-default branch", reporterRun(803, "workflow_dispatch", "attacker-branch"), forged},
+		{"another workflow on main", func() apiRun {
+			r := reporterRun(804, "push", "main")
+			r.Path = ".github/workflows/pr-fast-gate.yml"
+			return r
+		}(), forged},
+		{"a fork's head repository", func() apiRun {
+			r := reporterRun(805, "workflow_run", "main")
+			r.HeadRepository.FullName = "fork/r"
+			return r
+		}(), forged},
+		{"trusted producer, identity disagrees with the API", reporterRun(806, "schedule", "main"), forged},
+		{"untrusted producer, identity agrees", reporterRun(807, "pull_request", "main"), honest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFake(t)
+			fake.runs[failed.Run.ID] = failed
+			fake.wfRuns["qa-gate.yml"] = []apiRun{failed.Run}
+			fake.runs[tc.producer.ID] = fixture{Run: tc.producer}
+			fake.addArtifact(tc.producer.ID, 1, reportArtifactName(failed.Run.ID, failed.Run.RunAttempt),
+				makeZip(t, map[string][]byte{"report.json": mustJSON(t, tc.report)}))
+			srv := httptest.NewServer(fake)
+			defer srv.Close()
+			c, _ := newGHClient(srv.URL, "")
+			tr, err := collectTrend(context.Background(), c, trendOpts{repo: "o/r", workflows: []string{"qa-gate.yml"}, perEvent: 5,
+				defaultBranch: "main", baselinePath: "../../.github/ci-perf-baseline.json", outDir: t.TempDir(),
+				now: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tr.Audit.State != "failed" {
+				t.Fatalf("audit state %q (%s): a report the trend must not trust decided the audit", tr.Audit.State, tr.Audit.Detail)
+			}
+			for _, row := range tr.Samples {
+				if row.RunID == failed.Run.ID && row.Source != "metadata-only" {
+					t.Errorf("run %d taken from an untrusted report (source %s)", row.RunID, row.Source)
+				}
+			}
+		})
 	}
 }

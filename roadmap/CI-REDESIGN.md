@@ -2004,6 +2004,23 @@ succeeded" step. Nothing in the comparison changed.
 - **No shell injection.** Event data reaches shell through `env`, and every
   run id is checked to be numeric. No `run:` body interpolates `${{ }}`
   (pinned).
+- **A retained report is authenticated before the trend trusts it.**
+  Artifact names are not access-controlled: any run in the repository,
+  including a pull request that edits or adds a workflow, can upload an
+  artifact named `ci-run-report-<id>-<attempt>`. Without a check, such a
+  report could make a failed scheduled audit read as passed. The trend
+  therefore accepts a report only when both of these hold:
+  1. **Trusted producer.** It was made by a run of `ci-perf-report.yml` on
+     the default branch of this repository (not a fork), from an event that
+     runs default-branch code: `workflow_run`, `schedule`, or a
+     default-branch dispatch.
+  2. **Matching identity.** Its run identity matches the API field for
+     field: workflow, event, commit, branch, status, conclusion, creation
+     time, run id and attempt.
+
+  Anything else is rejected and noted, and the run is measured from
+  metadata alone (Codex review, PR #1477). Removing either check alone
+  fails a test.
 
 ### 17.5 Operation and retention
 
