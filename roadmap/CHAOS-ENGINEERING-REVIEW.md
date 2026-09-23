@@ -95,12 +95,36 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
-**2026-09-23 — `CHAOS-66` CLAIMED (placeholder, allocated before any code).**
-Sweep: **the interactive IdP compile path — what an enabled SAML/OIDC profile
-depends on being reachable, and what happens to everything else when it is
-not.** Id allocated in this file as commit one, per the remedy the header above
-reaches twice independently after ten collisions and CHAOS-65 proved. Findings
-and the section number follow in the same PR.
+**2026-09-23 — CHAOS-66 sweep (the interactive IdP compile path). SECOND SWEEP
+TO CLAIM ITS ID BEFORE WRITING CODE**, and again the id never moved. The
+finding: three previous identity sweeps (CHAOS-47, 49, 58) each asked what
+happens when an IdP fails to answer a REQUEST, and none asked what an enabled
+SAML/OIDC profile needs to be reachable in order to EXIST. `compileIdPProfile`
+performs a synchronous outbound fetch at the customer's IdP with no cache, no
+fallback and no retry, on three paths: boot, admin write, and **every CP→DP
+config sync**. Five defects, three closed. The sharpest is that **a third party
+could veto the operator's config push** — a failed IdP metadata fetch aborted
+the whole ConfigSnapshot without advancing `lastVersion`, so an ordinary IdP
+maintenance window stopped policy, blocklist and threat-feed distribution to
+every data plane in the fleet, and because the version could not advance every
+DP retried the fetch every 30 s for the duration (measured 1:1), aiming the
+fleet's full poll rate at the IdP that was already down — the WK-13 herd
+pointed at the customer's identity provider. Alongside it: a boot-time compile
+failure was PERMANENT for the process lifetime (an IdP unreachable for seconds
+during a host reboot left browser SSO dark until a restart), and the
+enabled-but-not-live state it produces had NO surface at all — not a metric,
+not a contract row, not an alert — so *"no IdP configured"* and *"an IdP is
+configured, enabled and dead"* were indistinguishable from outside. The rule:
+**a third party's availability decides whether an IdP's metadata is FRESH,
+never whether the IdP EXISTS** — `internal/idpmeta` keeps the last
+successfully-fetched document, bounded by a 7-day staleness ceiling on the
+SEC-JWKS-1 reasoning (withdrawing a key from published metadata is the IdP's
+revocation lever). Two are REPORTED, NOT FIXED: a node that has never compiled
+a profile still has no fallback (IDP-5), and the SAML SP key pair is still
+ephemeral per process and per node (IDP-6). Governance note: construction-time
+dependencies are invisible to request-path chaos testing by definition — the
+component either exists or the test does not run. See §36, rows IDP-1…IDP-7,
+and `docs/operator/idp-metadata-availability.md`.
 
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
@@ -6409,3 +6433,231 @@ queries nothing). `ocsp_coverage_test.go` — 4 gates pinning the AGREEMENT
 between the coverage claim and the `tls.Config` each named path builds, in both
 directions, plus the emit-only-when-enabled rule; the agreement gate was
 mutation-checked by flipping the claim and confirming the failure.
+
+---
+
+## 36. CHAOS-66 — The interactive IdP compile path
+
+**Sweep date:** 2026-09-23. **Id claimed in a committed placeholder row before
+any code was written** (the remedy §0 reaches twice independently after ten
+collisions; CHAOS-65 was the first to follow it, this is the second, and the id
+never moved).
+
+### The question
+
+Every previous identity sweep asked what happens when an IdP does not answer a
+*request*: CHAOS-47 (LDAP/OIDC outcome caching and the `authProbeGate`),
+CHAOS-49 (the IdP registry, JWKS integrity and stale-key ceiling), CHAOS-58 (a
+directory that accepts and then stalls). All three govern the moment a user
+authenticates. This sweep asked the question one layer up and one moment
+earlier: **what does an enabled SAML or OIDC profile need to be reachable
+before it can EXIST at all, and what else breaks when it is not?**
+
+### The finding
+
+`compileIdPProfile` performs a synchronous outbound fetch against the
+customer's identity provider — `fetchSAMLMetadata` for a `metadataUrl`,
+`fetchOIDCDiscovery` for an issuer — with **no cache, no fallback and no
+retry**. That fetch sits on three paths, and on each of them a third party's
+availability decided something it had no business deciding.
+
+**(1) There was no last-known-good.** A provider that compiled successfully
+seconds earlier could not be compiled at all once its endpoint stopped
+answering, although nothing about the IdP's published document had changed.
+
+**(2) A boot-time failure was PERMANENT.** `IdPRegistry.Load` logs a compile
+error and moves on, leaving the profile `Enabled` in `r.profiles` and absent
+from `r.live`. Every accessor — `EnabledProviders`, `HasEnabledProviders`,
+`EnabledInteractiveProviders`, `LiveProvider` — keys on `r.live`, so the
+profile becomes operationally invisible while remaining enabled, stored and
+listed in the admin UI. **Nothing in the process ever retried**, so an IdP that
+came back thirty seconds later stayed dark until a restart or an admin re-save.
+The trigger is ordinary rather than exotic: on a host reboot the container and
+the network come up concurrently, and a few seconds of unresolvable DNS is
+enough. Note the asymmetry that hid it — the admin write path (`Upsert`) and
+the CP→DP path (`ReplaceAll`) both run `validateExternalURL` first, so the
+config an operator types is checked; `Load` does not, so the config an
+appliance boots with is not.
+
+**(3) It was INVISIBLE.** No metric, no contract row, no alert and no
+`/health` or `/ready` field distinguished *"no IdP configured"* from *"an IdP
+is configured, enabled, and dead"*. One `logger.Printf` at boot, into a
+rotating file. That is the register's §1 silent-failure theme reached through
+the identity plane. Downstream, a scoped `SSORequired` rule correctly fails
+CLOSED (403, `proxy.go` arm 3c — the posture is right and is pinned as a
+control), so the symptom customers see is *every browser user denied*, with a
+green dashboard and a rule hit-counter that reads exactly like *"no traffic
+matched"*.
+
+**(4) A third party could veto the operator's config push — the sharpest one.**
+`ReplaceAll` compiles every enabled profile and is all-or-nothing, and
+`syncSnapshotIdPProfiles` returns its error into `fetchAndApply`
+(`controlplane_client.go:343`), which abandons the snapshot **without advancing
+`lastVersion` and without persisting last-good**. So an IdP maintenance window
+— Okta, Entra or ADFS patching, an ordinary scheduled event — **stopped policy,
+blocklist, threat-feed and session-HMAC distribution to every data plane in the
+fleet.** A failure in the identity plane taking out the config plane. Measured:
+an inline-`metadataXml` profile that needs no network at all was rejected
+because a *sibling* profile's remote endpoint was unreachable.
+
+**(5) It amplified into the IdP.** Because the version never advanced, the
+pending snapshot stayed pending, so every DP retried the whole apply — fetch
+included — on its next 30 s poll, indefinitely. Measured 1:1: ten applies, ten
+outbound connections. A 200-node fleet with two remote IdPs aims roughly 800
+requests/minute at the metadata endpoint for the duration of the outage,
+starting the moment an operator pushes a config change, and **it never stops on
+its own** because the thing that would stop it is the config version advancing.
+That is the WK-13 herd, pointed at the customer's identity provider at the
+moment it is least able to answer, and it is the same shape CHAOS-64 found
+pointed at the customer's DNS and CHAOS-49 found pointed at the customer's JWKS
+endpoint.
+
+### The rule
+
+> **A third party's availability decides whether an IdP's metadata is FRESH.
+> It never decides whether the IdP EXISTS.**
+
+`internal/idpmeta` keeps the raw bytes of the last document each profile
+successfully fetched, and the compile degrades to it. That closes (1), and with
+it the compile failure that drives (4) and (5) for any node that has ever
+compiled the profile — which is every node in steady state. `idp_recovery.go`
+closes (2). `idp_metadata_health.go` closes (3).
+
+### Why the cache is bounded, and why that is the security half
+
+Serving a cached document forever would keep trusting an IdP signing key the
+IdP may have withdrawn — **withdrawing a key from published metadata is the
+IdP's revocation lever**, exactly as it is for a JWKS document. SEC-JWKS-1
+reached the identical conclusion one layer down (`jwksStaleMaxAge`) and the
+answer is the same: stale is a BOUNDED degradation. Past `idpmeta.StaleMaxAge`
+(7 days) the entry is refused and the caller fails exactly as it did before this
+package existed. It is a CONSTANT with no config surface — the only thing a
+knob here could do is widen the window in which a withdrawn key stays trusted,
+which is the one direction this value must not move.
+
+Four further rules the design carries, each with its own gate:
+
+* **The network always WINS when it answers.** The cache is a fallback, never a
+  first choice, so an IdP-side key rotation is picked up at the first compile
+  after it happens. This is the CONTROL, not a nicety: *"always serve the
+  cache"* passes every single defect gate above while silently stopping the
+  appliance from ever noticing a key rotation — strictly worse than the outage
+  being fixed. Verified: the control is the only gate that fails against that
+  shape.
+* **The key binds the document to its SOURCE** (profile id + a digest of the
+  URL), so re-pointing a profile at a different IdP has no cache. Otherwise a
+  deliberate migration could be answered by the provider being migrated away
+  from, which is a trust decision, not a caching one.
+* **Cached bytes go through the IDENTICAL parser and validator as network
+  bytes.** The store returns raw bytes and never parses. For OIDC this is
+  load-bearing: the discovery document names the authorization and token
+  endpoints this appliance sends users and credentials to, so
+  `parseAndValidateOIDCDiscovery` — now the single parser for both origins —
+  puts every discovered endpoint back through `validateExternalURL`. A cache
+  file edited by anything that got write access to `dataDir` cannot widen a
+  trust decision.
+* **A NEGATIVE age is STALE, not fresh.** A document stamped in the future,
+  which a clock rollback produces, is refused rather than read as maximally
+  fresh — the rule CHAOS-61 established for cluster rate-limit broadcast
+  freshness, for the same reason: a future stamp otherwise extends the trust
+  window by however far the clock moved.
+
+The store is also INERT rather than fatal when it has no writable directory:
+the cache is an availability aid, never a correctness dependency, so its
+absence degrades to exactly the pre-CHAOS-66 behaviour instead of failing a
+compile that would otherwise have worked.
+
+### The way back (idp_recovery.go)
+
+Same shape as CHAOS-55 (the fencing lease) and CHAOS-57 (the admin UI
+listener), and for the same reasons. Retry is **RATE-bounded, never
+COUNT-bounded** — the terminal state of "give up" is an appliance whose SSO
+never returns without an operator, which is the outcome being fixed — and
+"avoid infinite retries" is satisfied the CHAOS-54/55/57 way, by the retry
+never being SILENT. Waits are **jittered**, because a fleet restarts together
+and a fleet's IdP outage ends for everyone at once, so a fixed cadence would
+aim a synchronised herd at a recovering IdP: this sweep's own finding (5),
+which must not be reintroduced inside its own fix. Waits are
+**interruptible**, so shutdown never sits one out. Recovery is declared on
+**OBSERVED evidence only** — a provider that actually compiled. And the loop
+exits the moment nothing is dark, so a healthy appliance pays one goroutine
+that returns immediately.
+
+`publishRecompiled` re-checks **everything** under the lock — still present,
+still enabled, still the same generation, still not live — because the compile
+ran without it. Publishing blind would resurrect a profile deleted while we
+were fetching, or overwrite a newer provider with one built from older config.
+The compile itself deliberately runs OUTSIDE `r.mu`: it reaches the network,
+and `HasEnabledInteractiveProvider` runs on the proxy request path, so holding
+the lock across an IdP timeout would stall every proxied request — the CHAOS-50
+cluster-CA rule (never hold a lock across a call that reaches the network).
+
+### Surfaces
+
+All reuse existing operator vocabulary. `/api/diagnostics` gains the
+`idp_metadata` row; `/metrics` gains `culvert_idp_enabled_not_live` and
+`culvert_idp_metadata_*`, **emitted only on a node that has an enabled
+interactive IdP profile or has acquired a remote document** (the
+socks5/cluster_ca/dns rule: a flat `0` from every appliance that never
+configured SSO is indistinguishable from one whose IdP is dead, and the paging
+rule is `> 0`). The alert is the **existing `identity_backend_unreachable`
+event** with source `idp_metadata` — a new name would be silently unsubscribed
+on every already-configured webhook (the cluster-CA `cert_expiry` precedent),
+and "the IdP cannot be reached" is one operator action whether the unreachable
+thing is an LDAP bind endpoint, an OIDC introspection endpoint or a metadata
+document. Its Detail is a **BOUNDED reason class**: `Dispatch` dedups on
+`event + ":" + Detail`, and the raw error embeds the configured IdP URL.
+
+**Deliberately NOT on `/readyz`.** An IdP outage is fleet-wide by construction,
+so failing readiness would eject the entire fleet from the load balancer
+simultaneously over a dependency none of them can fix by restarting — turning
+an SSO degradation into the total traffic outage the change exists to prevent.
+The `ca`, `cluster_ca` and `dns_resolution` rows already follow this rule.
+
+The admin "test this issuer" endpoint (`POST /api/idp/oidc/discover`) was split
+onto its own cache-free path (`probeOIDCDiscovery`) in both directions: it must
+never READ the cache, because a diagnostic answered from cache reports a dead
+IdP as healthy (the `ocspCoverage` *"found nothing wrong" vs "never consulted"*
+mistake), and it must never WRITE it, because the issuer is caller-supplied and
+a cache keyed on one would be a seeding surface.
+
+### Gates
+
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (17
+functions). Five DEFECT gates were verified failing against the reintroduced
+pre-fix shape and the four security gates plus three controls pass against it —
+the correct signature, since the security properties are new rather than
+regressions. The CONTROL `FreshDocumentAlwaysBeatsTheCache` was separately
+verified as **the only** gate that fails against the always-prefer-cache wrong
+fix, which is what makes the defect gates worth trusting.
+
+One defect was introduced by this change and caught by its own gates:
+`resetIdPMetadataHealthForTest` assigned a zero struct **while holding the
+struct's own mutex**, so the deferred `Unlock` released a fresh mutex and the
+runtime killed the process with `sync: unlock of unlocked mutex`. Fields are
+now cleared individually, with the reason recorded at the site.
+
+### Register rows
+
+| Row | Finding | Status |
+|---|---|---|
+| **IDP-1** | Interactive IdP compile depends on a live third-party fetch; no last-known-good | **CLOSED** — `internal/idpmeta`, bounded by `StaleMaxAge` |
+| **IDP-2** | A boot-time compile failure is permanent for the process lifetime | **CLOSED** — `idp_recovery.go`, rate-bounded + jittered + evidence-gated |
+| **IDP-3** | Enabled-but-not-live is invisible: no metric, row, alert or health field | **CLOSED** — `idp_metadata_health.go`, `culvert_idp_enabled_not_live` |
+| **IDP-4** | Metadata is refreshed only on compile, so a long-lived process can hold a document indefinitely and miss an IdP key rotation | **OPEN** — needs a periodic refresh on `internal/feedsched`; recorded rather than bolted on, because a refresh must recompile into the live registry and that touches the P1-3 transactional mutation model |
+| **IDP-5** | `ReplaceAll` is all-or-nothing, so on a node with **no** cached document (first enrollment, newly added profile) an unreachable IdP still rejects the whole IdP set and aborts the snapshot | **OPEN** — steady-state nodes are covered by IDP-1; closing it properly means classifying reachability failures separately from validation failures inside the config-sync path, which deserves its own review |
+| **IDP-6** | The SAML SP key pair is EPHEMERAL (`ensureSPKeyPair`, regenerated per process) and therefore differs on every node and after every restart — SP metadata is node- and restart-dependent, and encrypted assertions cannot be decrypted by a node that did not issue the AuthnRequest | **OPEN, REPORTED NOT FIXED** — persisting it is a key-management decision with cluster-distribution consequences, not a resilience patch |
+| **IDP-7** | Neither fetch honours the metadata document's own `validUntil` / `cacheDuration` | **OPEN** — noted during this sweep; the 7-day ceiling bounds the exposure but does not implement the IdP's stated intent |
+
+### Governance note
+
+Rows IDP-1…IDP-3 describe a subsystem no previous sweep looked at, despite
+three separate identity-plane sweeps (CHAOS-47, 49, 58) that each stopped at
+the *request* boundary. The pattern worth carrying forward: **every one of
+those sweeps asked "what happens when this dependency fails while serving a
+request?" and none asked "what does this component need in order to be
+constructed?"** Construction-time dependencies are invisible to request-path
+chaos testing by definition — the component either exists or the test does not
+run — and on this appliance construction happens on the boot path, the admin
+path and the config-sync path, which is a strictly larger blast radius than the
+request path it was compared against.

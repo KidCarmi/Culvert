@@ -61,6 +61,21 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 			return fmt.Errorf("IdP profiles load error: %w", err)
 		}
 		logger.Printf("IdP: loaded from %s (%d profiles)", cfg.IdPProfilesFile, len(idpRegistry.All()))
+		// CHAOS-66: Load reports a compile failure with one log line and
+		// leaves the profile enabled-but-not-live, which before this was
+		// PERMANENT for the process lifetime — an IdP that was briefly
+		// unreachable at boot (ordinary on a host reboot, where the container
+		// and the network come up concurrently) stayed dark until somebody
+		// restarted the appliance or re-saved the profile. The loop exits
+		// immediately when every enabled profile compiled, so a healthy boot
+		// costs one goroutine that returns at once.
+		// Keyed on the loop's OWN predicate (every enabled profile with no
+		// live provider, LDAP included), not on the interactive-only counts
+		// the contract row reports — a start condition narrower than what the
+		// loop recovers would leave a dark profile with no way back.
+		if len(idpRegistry.darkEnabledProfiles()) > 0 {
+			go runIdPRecoveryLoop(resolveLifecycleCtx())
+		}
 	}
 	return nil
 }

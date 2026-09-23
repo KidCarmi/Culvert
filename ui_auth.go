@@ -870,7 +870,9 @@ func apiIdPDiscover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "issuer: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	doc, err := fetchOIDCDiscovery(body.Issuer)
+	// CHAOS-66: the admin probe never consults or populates the last-known-good
+	// document cache — a diagnostic must report the IdP as it is right now.
+	doc, err := probeOIDCDiscovery(body.Issuer)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

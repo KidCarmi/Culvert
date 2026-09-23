@@ -29,6 +29,7 @@ import (
 	"github.com/crewjam/saml/samlsp"
 
 	"github.com/KidCarmi/Culvert/internal/authstate"
+	"github.com/KidCarmi/Culvert/internal/idpmeta"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] name_id_format: %w", p.ID, err)
 	}
 
-	idpMeta, err := fetchSAMLMetadata(cfg)
+	idpMeta, err := fetchSAMLMetadata(p.ID, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] metadata: %w", p.ID, err)
 	}
@@ -218,7 +219,15 @@ func newSAMLStateStore() *samlStateStore {
 // SAML metadata fetch + parse
 // ---------------------------------------------------------------------------
 
-func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
+// fetchSAMLMetadata resolves the IdP EntityDescriptor for a profile.
+//
+// CHAOS-66: the remote branch goes through acquireIdPDocument, so a metadata
+// endpoint that is momentarily unreachable degrades to the last successfully
+// fetched document (bounded by idpmeta.StaleMaxAge) instead of destroying the
+// provider. The bytes it returns are parsed by the SAME samlsp.ParseMetadata
+// call as network bytes — the cache is a source of bytes, never a source of
+// trust.
+func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 	var xmlData []byte
 
 	if cfg.MetadataURL != "" {
@@ -231,38 +240,53 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 			return nil, fmt.Errorf("metadata URL must use http or https scheme")
 		}
 
-		// Use an SSRF-safe transport that rejects private/internal IPs at
-		// the dial level — even if DNS changes between validation and
-		// connection, the transport blocks the request.
-		client := &http.Client{
-			Timeout: 15 * time.Second,
-			Transport: &http.Transport{
-				DialContext: ssrfSafeDialContext,
-			},
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
+		doc, _, err := acquireIdPDocument(profileID, idpmeta.KindSAMLMetadata, metaURL.String(),
+			func() ([]byte, error) { return fetchSAMLMetadataOverNetwork(metaURL) })
 		if err != nil {
-			return nil, fmt.Errorf("metadata request: %w", err)
+			return nil, err
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("fetch: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("HTTP %d fetching metadata", resp.StatusCode)
-		}
-		xmlData, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			return nil, fmt.Errorf("read: %w", err)
-		}
+		xmlData = doc
 	} else {
 		xmlData = []byte(cfg.MetadataXML)
+		noteIdPMetadataOutcome(profileID, idpMetaInline, nil)
 	}
 
 	return samlsp.ParseMetadata(xmlData)
+}
+
+// fetchSAMLMetadataOverNetwork performs exactly the request the pre-CHAOS-66
+// code performed: same 15 s budget, same SSRF-safe dialer, same 1 MiB read
+// limit, same HTTP-status rule. It is split out only so acquireIdPDocument can
+// own the cache/fallback decision around it.
+func fetchSAMLMetadataOverNetwork(metaURL *url.URL) ([]byte, error) {
+	// Use an SSRF-safe transport that rejects private/internal IPs at
+	// the dial level — even if DNS changes between validation and
+	// connection, the transport blocks the request.
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			DialContext: ssrfSafeDialContext,
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("metadata request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d fetching metadata", resp.StatusCode)
+	}
+	xmlData, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	return xmlData, nil
 }
 
 // ---------------------------------------------------------------------------

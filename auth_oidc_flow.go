@@ -13,6 +13,7 @@ package main
 //   - All upstream URLs are validated as HTTPS + non-private (SSRF guard).
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -33,6 +34,8 @@ import (
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 
 	"github.com/KidCarmi/Culvert/internal/authstate"
+
+	"github.com/KidCarmi/Culvert/internal/idpmeta"
 )
 
 // ---------------------------------------------------------------------------
@@ -50,18 +53,11 @@ type oidcDiscoveryDoc struct {
 	JWKsURI               string `json:"jwks_uri"`
 }
 
-// fetchOIDCDiscovery fetches and validates the provider's well-known metadata.
-// The caller is responsible for ensuring issuer is a valid HTTPS URL.
-func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
-	// Normalise: strip trailing slash.
-	issuer = strings.TrimRight(issuer, "/")
-	wellKnown := issuer + "/.well-known/openid-configuration"
-
-	// Security: ensure the discovery URL is safe (non-private HTTPS).
-	if err := validateExternalURL(wellKnown); err != nil {
-		return nil, fmt.Errorf("oidc discovery: %w", err)
-	}
-
+// fetchOIDCDiscoveryOverNetwork performs exactly the request the
+// pre-CHAOS-66 code performed: same 10 s budget, same SSRF-safe dialer, same
+// 64 KiB read limit, same HTTP-status rule. Split out only so
+// acquireIdPDocument can own the cache/fallback decision around it.
+func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
@@ -80,9 +76,51 @@ func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("oidc discovery: HTTP %d", resp.StatusCode)
 	}
+	return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+}
 
+// fetchOIDCDiscovery fetches and validates the provider's well-known metadata
+// for a configured profile. The caller is responsible for ensuring issuer is a
+// valid HTTPS URL.
+func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
+	// Normalise: strip trailing slash.
+	issuer = strings.TrimRight(issuer, "/")
+	wellKnown := issuer + "/.well-known/openid-configuration"
+
+	// Security: ensure the discovery URL is safe (non-private HTTPS).
+	if err := validateExternalURL(wellKnown); err != nil {
+		return nil, fmt.Errorf("oidc discovery: %w", err)
+	}
+
+	// CHAOS-66: a discovery endpoint that is momentarily unreachable must not
+	// destroy the provider. acquireIdPDocument prefers the network and falls
+	// back to the last successfully fetched document within
+	// idpmeta.StaleMaxAge. The bytes are decoded and RE-VALIDATED below by the
+	// same code either way — in particular every discovered endpoint is put
+	// back through validateExternalURL, so a cached document cannot name an
+	// endpoint the network path would have refused.
+	raw, _, err := acquireIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown,
+		func() ([]byte, error) { return fetchOIDCDiscoveryOverNetwork(wellKnown) })
+	if err != nil {
+		return nil, err
+	}
+
+	return parseAndValidateOIDCDiscovery(raw)
+}
+
+// parseAndValidateOIDCDiscovery decodes and validates a discovery document.
+//
+// CHAOS-66 makes this the SINGLE parser for the document, reached identically
+// whether the bytes came off the network or out of the last-known-good cache.
+// That is the load-bearing half of the cache's safety argument: the discovery
+// document names the authorization and token endpoints this appliance sends
+// users and credentials to, so every one of them is put back through
+// validateExternalURL (https, non-private) here. A cached document therefore
+// cannot widen anything the network path would have refused — including one
+// edited on disk by something that got write access to dataDir.
+func parseAndValidateOIDCDiscovery(raw []byte) (*oidcDiscoveryDoc, error) {
 	var doc oidcDiscoveryDoc
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(bytes.NewReader(raw), 64<<10)).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("oidc discovery parse: %w", err)
 	}
 	if doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
@@ -102,6 +140,30 @@ func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 		}
 	}
 	return &doc, nil
+}
+
+// probeOIDCDiscovery is the ADMIN "test this issuer" path (POST
+// /api/idp/oidc/discover). It deliberately does NOT go through the
+// last-known-good cache, in either direction:
+//
+//   - it must never READ the cache, because its whole job is to report
+//     whether the issuer is reachable RIGHT NOW; answering a diagnostic from
+//     cache would report a dead IdP as healthy, which is the
+//     `ocspCoverage`/"found nothing wrong vs never consulted" mistake;
+//   - it must never WRITE the cache, because the issuer is CALLER-SUPPLIED.
+//     A cache keyed on an arbitrary admin-supplied issuer would let the test
+//     endpoint pre-seed documents for profiles that do not exist yet.
+func probeOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
+	issuer = strings.TrimRight(issuer, "/")
+	wellKnown := issuer + "/.well-known/openid-configuration"
+	if err := validateExternalURL(wellKnown); err != nil {
+		return nil, fmt.Errorf("oidc discovery: %w", err)
+	}
+	raw, err := fetchOIDCDiscoveryOverNetwork(wellKnown)
+	if err != nil {
+		return nil, err
+	}
+	return parseAndValidateOIDCDiscovery(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +642,7 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
-	disc, err := fetchOIDCDiscovery(cfg.Issuer)
+	disc, err := fetchOIDCDiscovery(p.ID, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc[%s] discovery: %w", p.ID, err)
 	}
