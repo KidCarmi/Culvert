@@ -57,14 +57,23 @@ type oidcDiscoveryDoc struct {
 // pre-CHAOS-66 code performed: same 10 s budget, same SSRF-safe dialer, same
 // 64 KiB read limit, same HTTP-status rule. Split out only so
 // acquireIdPDocument can own the cache/fallback decision around it.
+//
+// THE GUARD IS REPEATED HERE ON PURPOSE — see the matching note on
+// fetchSAMLMetadataOverNetwork. The convention is that the check sits in the
+// same function as the outbound request so CodeQL can verify it; a check in a
+// calling function is what raised a critical go/request-forgery alert when
+// this helper was first split out.
 func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
+	if err := validateExternalURL(wellKnown); err != nil {
+		return nil, fmt.Errorf("oidc discovery: %w", err)
+	}
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}
@@ -99,7 +108,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// same code either way — in particular every discovered endpoint is put
 	// back through validateExternalURL, so a cached document cannot name an
 	// endpoint the network path would have refused.
-	raw, _, err := acquireIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown,
+	raw, err := acquireIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown,
 		func() ([]byte, error) { return fetchOIDCDiscoveryOverNetwork(wellKnown) })
 	if err != nil {
 		return nil, err

@@ -240,8 +240,8 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 			return nil, fmt.Errorf("metadata URL must use http or https scheme")
 		}
 
-		doc, _, err := acquireIdPDocument(profileID, idpmeta.KindSAMLMetadata, metaURL.String(),
-			func() ([]byte, error) { return fetchSAMLMetadataOverNetwork(metaURL) })
+		doc, err := acquireIdPDocument(profileID, idpmeta.KindSAMLMetadata, metaURL.String(),
+			func() ([]byte, error) { return fetchSAMLMetadataOverNetwork(metaURL.String()) })
 		if err != nil {
 			return nil, err
 		}
@@ -258,7 +258,23 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 // code performed: same 15 s budget, same SSRF-safe dialer, same 1 MiB read
 // limit, same HTTP-status rule. It is split out only so acquireIdPDocument can
 // own the cache/fallback decision around it.
-func fetchSAMLMetadataOverNetwork(metaURL *url.URL) ([]byte, error) {
+//
+// THE SCHEME CHECK IS REPEATED HERE ON PURPOSE, and must not be "cleaned up"
+// as redundant with the caller's. The repo convention (CLAUDE.md, SSRF guards)
+// is that the guard is inlined in the same function as the outbound request so
+// CodeQL can verify it — relying on a check in a calling function is exactly
+// what the convention forbids. Splitting this helper out of
+// fetchSAMLMetadata without carrying the guard raised a critical
+// go/request-forgery alert on the first CI run of CHAOS-66.
+func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
+	metaURL, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("metadata URL parse: %w", err)
+	}
+	if metaURL.Scheme != "http" && metaURL.Scheme != "https" {
+		return nil, fmt.Errorf("metadata URL must use http or https scheme")
+	}
+
 	// Use an SSRF-safe transport that rejects private/internal IPs at
 	// the dial level — even if DNS changes between validation and
 	// connection, the transport blocks the request.
@@ -270,7 +286,7 @@ func fetchSAMLMetadataOverNetwork(metaURL *url.URL) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("metadata request: %w", err)
 	}

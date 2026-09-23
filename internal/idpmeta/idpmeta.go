@@ -104,8 +104,13 @@ var ErrNoEntry = errors.New("idpmeta: no usable cached document")
 // carries both cannot have them collide on disk.
 type Kind string
 
+// The two remote document kinds an interactive IdP profile can depend on.
 const (
-	KindSAMLMetadata  Kind = "saml_metadata"
+	// KindSAMLMetadata is a SAML IdP EntityDescriptor fetched from a
+	// profile's metadata_url.
+	KindSAMLMetadata Kind = "saml_metadata"
+	// KindOIDCDiscovery is an OIDC discovery document fetched from a
+	// profile's issuer.
 	KindOIDCDiscovery Kind = "oidc_discovery"
 )
 

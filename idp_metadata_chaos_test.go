@@ -146,7 +146,7 @@ func chaos66Profile(id, metadataURL string) *IdPProfile {
 // not answering — counting every connection.
 func chaos66DeadTLSEndpoint(t *testing.T) (string, *atomic.Int64) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -605,17 +605,19 @@ func TestChaos66_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 	fireIdPMetadataAlert = func(d string) { details = append(details, d) }
 	t.Cleanup(func() { fireIdPMetadataAlert = prev })
 
-	secret := "https://idp.internal.example/very-secret-metadata-path"
+	// A URL, not a credential — but it is exactly the kind of value that must
+	// never reach an alert Detail, because Dispatch dedups on it.
+	privateURL := "https://idp.internal.example/private-metadata-path"
 	idpMetadata.mu.Lock()
 	idpMetadata.firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
 	idpMetadataEverUsed.Store(true)
-	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("fetch %s: connection refused", secret))
+	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("fetch %s: connection refused", privateURL))
 
 	if len(details) != 1 {
 		t.Fatalf("want exactly one page per degradation episode, got %d", len(details))
 	}
-	if strings.Contains(details[0], secret) || strings.Contains(details[0], "idp.internal.example") {
+	if strings.Contains(details[0], privateURL) || strings.Contains(details[0], "idp.internal.example") {
 		t.Fatalf("alert Detail leaked the IdP URL: %q", details[0])
 	}
 
@@ -692,8 +694,9 @@ func certCNOf(t *testing.T, p *SAMLProvider) string {
 	if md == nil || len(md.IDPSSODescriptors) == 0 {
 		t.Fatal("no IdP descriptors")
 	}
-	for _, kd := range md.IDPSSODescriptors[0].KeyDescriptors {
-		for _, c := range kd.KeyInfo.X509Data.X509Certificates {
+	kds := md.IDPSSODescriptors[0].KeyDescriptors
+	for i := range kds {
+		for _, c := range kds[i].KeyInfo.X509Data.X509Certificates {
 			der, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.Data))
 			if err != nil {
 				continue

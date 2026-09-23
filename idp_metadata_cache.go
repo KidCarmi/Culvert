@@ -79,16 +79,6 @@ func idpmetaStaleMaxAgeString() string {
 	return (idpmeta.StaleMaxAge).String()
 }
 
-// idpDocumentOrigin says where the bytes a compile is about to parse came
-// from. It exists so the caller can report the outcome accurately without this
-// file knowing anything about SAML or OIDC.
-type idpDocumentOrigin int
-
-const (
-	idpDocFromNetwork idpDocumentOrigin = iota
-	idpDocFromCache
-)
-
 // acquireIdPDocument is the ONE entry point the IdP compile path uses to get a
 // remote document.
 //
@@ -112,8 +102,11 @@ const (
 //
 // The `fetch` seam takes no arguments and returns raw bytes so this function
 // stays protocol-agnostic and so tests can drive every branch without a
-// network.
-func acquireIdPDocument(profileID string, kind idpmeta.Kind, source string, fetch func() ([]byte, error)) ([]byte, idpDocumentOrigin, error) {
+// network. Where the bytes came from is reported through
+// noteIdPMetadataOutcome rather than returned: the caller's job is identical
+// either way (parse and validate them), and a returned origin nobody consults
+// is an invitation to start treating cached bytes differently.
+func acquireIdPDocument(profileID string, kind idpmeta.Kind, source string, fetch func() ([]byte, error)) ([]byte, error) {
 	store := idpMetadataStore()
 
 	doc, err := fetch()
@@ -127,7 +120,7 @@ func acquireIdPDocument(profileID string, kind idpmeta.Kind, source string, fetc
 				sanitizeLog(profileID), putErr)
 		}
 		noteIdPMetadataOutcome(profileID, idpMetaFresh, nil)
-		return doc, idpDocFromNetwork, nil
+		return doc, nil
 	}
 	if err == nil {
 		err = fmt.Errorf("IdP returned an empty document")
@@ -136,10 +129,10 @@ func acquireIdPDocument(profileID string, kind idpmeta.Kind, source string, fetc
 	cached, age, cacheErr := store.Get(profileID, kind, source)
 	if cacheErr != nil {
 		noteIdPMetadataOutcome(profileID, idpMetaUnavailable, err)
-		return nil, idpDocFromCache, err
+		return nil, err
 	}
 	noteIdPMetadataOutcome(profileID, idpMetaStale, err)
 	logger.Printf("IdP[%s]: metadata fetch failed (%v) — continuing from the cached document fetched %s ago (refused past %s)",
 		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(err)), age.Round(time.Second), idpmetaStaleMaxAgeString())
-	return cached, idpDocFromCache, nil
+	return cached, nil
 }
