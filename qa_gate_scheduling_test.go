@@ -44,8 +44,10 @@ import (
 // KNOWN LIMITATION, deliberately NOT changed here and NOT asserted away:
 // .github/actions/needs-verdict treats a `skipped` need as a pass on EVERY
 // event, not only on pull requests, unless the caller passes `require-success`.
-// The QA aggregate passes no `require-success`, so an all-skipped main-push run
-// would report APPROVED. That is pre-existing behaviour shared by every gate
+// The QA aggregate passes no `require-success` on ordinary runs, so an
+// all-skipped main-push run would report APPROVED. (Audit runs — the stage-6B
+// weekly schedule and an `unsharded_audit` dispatch — DO pass one; see
+// ci_perf_report_test.go.) That is pre-existing behaviour shared by every gate
 // aggregate in the repository; tightening it is a policy change to a shared
 // action and belongs in its own reviewed diff (recorded as a follow-up in
 // roadmap/CI-REDESIGN.md §8). TestQAGateVerdict_RealActionBehaviour pins the
@@ -271,10 +273,15 @@ func TestQAGateScheduling_TriggerMatrixPreserved(t *testing.T) {
 			}
 		}
 	}
-	if _, ok := keyed.On["schedule"]; ok {
-		t.Error("qa-gate.yml has no scheduled trigger and stage 1 does not add one")
+	// Stage 6B added exactly ONE schedule: the weekly same-SHA equivalence
+	// audit (ci_perf_report_test.go pins what it runs). A second cron, or a
+	// daily one, would be a cost decision this test makes visible.
+	if sched, ok := keyed.On["schedule"].([]interface{}); !ok || len(sched) != 1 {
+		t.Errorf("qa-gate.yml must carry exactly one scheduled trigger (the stage-6B weekly audit); got %v", keyed.On["schedule"])
+	} else if cron := toStr(asMap(sched[0])["cron"]); len(strings.Fields(cron)) != 5 || strings.Fields(cron)[4] == "*" {
+		t.Errorf("the scheduled audit must be WEEKLY (a fixed day-of-week); got cron %q", cron)
 	}
-	want := map[string]bool{"push": true, "pull_request": true, "workflow_dispatch": true}
+	want := map[string]bool{"push": true, "pull_request": true, "workflow_dispatch": true, "schedule": true}
 	for k := range keyed.On {
 		if !want[k] {
 			t.Errorf("unexpected trigger %q — the stage-1 change must not widen the event matrix", k)
@@ -433,6 +440,15 @@ func allQAResults(result string) map[string]string {
 // returns (combined output, exit-was-zero).
 func runNeedsVerdict(t *testing.T, script, payload string) (string, bool) {
 	t.Helper()
+	// An ordinary QA run passes no require-success (audit runs do — see
+	// ci_perf_report_test.go).
+	return runNeedsVerdictRequiring(t, script, payload, "")
+}
+
+// runNeedsVerdictRequiring is runNeedsVerdict with the action's
+// require-success input set to require.
+func runNeedsVerdictRequiring(t *testing.T, script, payload, require string) (string, bool) {
+	t.Helper()
 	dir := t.TempDir()
 	sh := filepath.Join(dir, "verdict.sh")
 	if err := os.WriteFile(sh, []byte(script), 0o700); err != nil { //nolint:gosec // test harness script, temp dir
@@ -448,7 +464,7 @@ func runNeedsVerdict(t *testing.T, script, payload string) (string, bool) {
 	cmd := exec.CommandContext(t.Context(), "bash", sh)
 	cmd.Env = append(os.Environ(),
 		"NEEDS_JSON="+payload,
-		"REQUIRE=", // the QA aggregate passes no require-success
+		"REQUIRE="+require,
 		"TITLE="+qaGateAggregateName,
 		"EXTRA=",
 		"GITHUB_STEP_SUMMARY="+summary,
