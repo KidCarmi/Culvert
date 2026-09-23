@@ -349,6 +349,28 @@ func TestAnalyze_RerunQueueIsAttemptScoped(t *testing.T) {
 	}
 }
 
+// A run reported while still in progress: the earliest start of this
+// attempt's jobs counts whether or not that job has completed yet.
+func TestAnalyze_AttemptQueueCountsRunningJobs(t *testing.T) {
+	base := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	run := apiRun{ID: 9, Path: fastWorkflowPath, Event: "pull_request", RunAttempt: 1, Status: "in_progress",
+		CreatedAt: ts(base, 0), RunStartedAt: ts(base, 0)}
+	running := apiJob{Name: "Gate · go test -race (sharded) / Race · non-root packages", Status: "in_progress",
+		CreatedAt: ts(base, 2), StartedAt: ts(base, 7), RunAttempt: 1}
+	later := synthJob(base, "Gate · gitleaks", "success", 2, 30, 60)
+	r := Analyze(run, []apiJob{running, later}, runEvidence{})
+	if r.Timing.AttemptQueue == nil || *r.Timing.AttemptQueue != 7 {
+		t.Errorf("attempt queue %v, want 7 s (the running job started first), not 30 s", fmtSecs(r.Timing.AttemptQueue))
+	}
+	if r := Analyze(run, []apiJob{running}, runEvidence{}); r.Timing.AttemptQueue == nil || *r.Timing.AttemptQueue != 7 {
+		t.Errorf("no job completed yet: attempt queue %v, want 7 s (a start is observed)", fmtSecs(r.Timing.AttemptQueue))
+	}
+	skipped := apiJob{Name: "x", Status: "completed", Conclusion: "skipped", StartedAt: ts(base, 1), CompletedAt: ts(base, 0)}
+	if r := Analyze(run, []apiJob{skipped, later}, runEvidence{}); r.Timing.AttemptQueue == nil || *r.Timing.AttemptQueue != 30 {
+		t.Errorf("a skipped job's stamp must not count: %v", fmtSecs(r.Timing.AttemptQueue))
+	}
+}
+
 // The collector reads through the attempt endpoint, keeps the run's own
 // created_at as identity (what the trend compares) and the attempt's enqueue
 // time separately.

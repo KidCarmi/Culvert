@@ -2312,7 +2312,9 @@ queueing.
 `created_at` is that attempt's enqueue time, keeps the run's own `created_at`
 as identity (what the trend compares), and reports
 `attemptQueueSeconds` = attempt enqueue → the first start among this
-attempt's own jobs. When the enqueue time was not observed (a re-run read
+attempt's own jobs — every job that has started, completed or still running
+(a run reported in progress), excluding skipped jobs and jobs carried over
+from an earlier attempt (Codex review, PR #1478). When the enqueue time was not observed (a re-run read
 through the runs list) it is `null` with an `unknowns` entry, never zero.
 Elapsed time and runner-minutes are unchanged. Report schemas move to `v2`;
 the trend refuses `v1` reports and measures those runs from metadata.
@@ -2441,7 +2443,9 @@ candidate after it.
   11. a silent shard's image ignored;
   12. a reviewed `mixed:` cohort accepted;
   13. cohort field names and emptiness unchecked;
-  14. one shard's image build presented as the run's.
+  14. one shard's image build presented as the run's;
+  15. the attempt queue read only from completed jobs;
+  16. a skipped job's stamp counted as a start.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback

@@ -392,7 +392,7 @@ func measureTiming(run apiRun, views []jobView, rep *RunReport) {
 		t.WallSpan = secs(last.Sub(start))
 	}
 	t.Queue, t.Setup, t.Work = phaseStats(queue), phaseStats(setup), phaseStats(work)
-	t.AttemptQueue = attemptQueue(run, iv, rep)
+	t.AttemptQueue = attemptQueue(run, views, start, rep)
 	if !ok {
 		rep.Unknowns = append(rep.Unknowns, "run_started_at missing: elapsed time is not observable")
 	}
@@ -416,18 +416,28 @@ func attemptEnqueue(run apiRun) (time.Time, bool) {
 }
 
 // attemptQueue is the attempt's wait for its first runner: enqueue to the
-// earliest start among this attempt's own jobs (carried-over jobs excluded).
+// earliest start among this attempt's own jobs. Every job of the attempt
+// that has started counts, completed or not — a run reported while still in
+// progress has running jobs whose start is observed. Skipped jobs and jobs
+// carried over from an earlier attempt (started before this one) do not.
 // Unknown — nil, never zero — when the enqueue time was not observed.
-func attemptQueue(run apiRun, iv [][2]time.Time, rep *RunReport) *float64 {
+func attemptQueue(run apiRun, views []jobView, attemptStart time.Time, rep *RunReport) *float64 {
 	enq, ok := attemptEnqueue(run)
 	if !ok {
 		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("attempt %d's enqueue time was not observed (only the attempt endpoint carries it): attempt queue is unknown", run.RunAttempt))
 		return nil
 	}
 	var first time.Time
-	for _, x := range iv {
-		if first.IsZero() || x[0].Before(first) {
-			first = x[0]
+	for vI := range views {
+		v := &views[vI]
+		switch {
+		case v.api.Conclusion == "skipped", v.start.IsZero():
+			continue
+		case !attemptStart.IsZero() && v.start.Before(attemptStart):
+			continue // carried over from an earlier attempt
+		}
+		if first.IsZero() || v.start.Before(first) {
+			first = v.start
 		}
 	}
 	if first.IsZero() || first.Before(enq) {
