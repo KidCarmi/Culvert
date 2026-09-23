@@ -529,8 +529,8 @@ func cohortOf(views []jobView, ev runEvidence, rep *RunReport) Cohort {
 		// Shards disagreed on the release line or platform: the run did not
 		// execute under one configuration, whichever shard is listed first.
 		c.Toolchain = "mixed:" + strings.Join(rep.cohortToolchains, "+")
-	default:
-		c.Toolchain = toolchainLine(rep.Toolchain)
+	case len(rep.cohortToolchains) == 1:
+		c.Toolchain = rep.cohortToolchains[0]
 	}
 	switch {
 	case c.Shards == "none":
@@ -608,9 +608,12 @@ func observedPlatform(views []jobView) string {
 		if len(v.api.Labels) == 0 || v.api.RunnerGroupName == "" {
 			return cohortUnknown
 		}
-		labels := append([]string(nil), v.api.Labels...)
+		labels := make([]string, len(v.api.Labels))
+		for i, l := range v.api.Labels {
+			labels[i] = escapePlatform(l)
+		}
 		sort.Strings(labels)
-		seen[strings.Join(labels, "+")+"@"+v.api.RunnerGroupName] = true
+		seen[strings.Join(labels, "+")+"@"+escapePlatform(v.api.RunnerGroupName)] = true
 	}
 	if len(seen) == 0 {
 		return cohortUnknown
@@ -621,6 +624,24 @@ func observedPlatform(views []jobView) string {
 	}
 	sort.Strings(out)
 	return strings.Join(out, ",")
+}
+
+// escapePlatform percent-encodes the characters the platform and cohort key
+// use as separators (and the escape character itself), so distinct label sets
+// and groups never serialise to the same string: labels "a+b","c" and
+// "a","b","c" would otherwise both read "a+b+c". Ordinary labels such as
+// ubuntu-latest and the group "GitHub Actions" are unchanged.
+func escapePlatform(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f || strings.IndexByte("%+@,;=", c) >= 0 {
+			fmt.Fprintf(&b, "%%%02X", c)
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // scheduledShardIndices are the indices of the root-shard jobs GitHub
@@ -822,7 +843,19 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 		lines[toolchainLine(&Toolchain{Go: m.GoVersion, GOOS: m.GOOS, GOARCH: m.GOARCH})] = true
 	}
 	rep.cohortToolchains = sortedKeys(lines)
-	rep.Toolchain = tc
+	// The run has one exact toolchain only when every shard reported the same
+	// one; otherwise no shard's version speaks for the others. Patch releases
+	// can differ while the release line (the cohort) still agrees.
+	exact := map[string]bool{}
+	for _, i := range idx {
+		m := ev.ShardMetas[i]
+		exact[m.GoVersion+" "+m.GOOS+"/"+m.GOARCH] = true
+	}
+	if len(exact) == 1 {
+		rep.Toolchain = tc
+	} else {
+		rep.Unknowns = append(rep.Unknowns, "shards reported different exact toolchains ("+strings.Join(sortedKeys(exact), ", ")+"): no one version is stated for the run")
+	}
 	if len(ev.ShardMetas) != len(v.Shards) {
 		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("toolchain read from %d of %d shards", len(ev.ShardMetas), len(v.Shards)))
 	}

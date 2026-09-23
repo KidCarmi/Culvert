@@ -260,8 +260,49 @@ func TestCohort_ShardsDisagreeingOnToolchainAreMixed(t *testing.T) {
 	// the exact-toolchain contradiction is still recorded as a problem.
 	e := withGo(ev, "go1.26.6")
 	e.ShardMetas[3].GoVersion = "go1.26.7"
-	if r := Analyze(fx.Run, jobs, e); strings.HasPrefix(r.Cohort.Toolchain, "mixed:") || len(r.Problems) == 0 {
+	r := Analyze(fx.Run, jobs, e)
+	if strings.HasPrefix(r.Cohort.Toolchain, "mixed:") || r.Cohort.Toolchain != "go1.26 linux/amd64" || len(r.Problems) == 0 {
 		t.Errorf("patch-only difference: cohort %+v problems %v", r.Cohort, r.Problems)
+	}
+	// No one shard's exact version is presented as the run's.
+	if r.Toolchain != nil {
+		t.Errorf("patch-only difference: run toolchain %+v, want unstated", *r.Toolchain)
+	}
+	if row := sampleRow("g", "success", &Sample{Report: r}); row.Toolchain != "" {
+		t.Errorf("patch-only difference: trend row toolchain %q, want empty", row.Toolchain)
+	}
+}
+
+// Label sets that differ only in where a separator falls must not share a
+// platform: joined raw, "a+b","c" and "a","b","c" both read "a+b+c".
+func TestCohort_PlatformEncodingIsUnambiguous(t *testing.T) {
+	fx, _, _ := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
+	withLabels := func(group string, labels ...string) string {
+		jobs := hosted(fx.Jobs, "x", group)
+		for jI := range jobs {
+			jobs[jI].Labels = labels
+		}
+		return observedPlatform(viewJobs(jobs, time.Time{}))
+	}
+	for _, pair := range [][2]string{
+		{withLabels("g", "a+b", "c", "self-hosted"), withLabels("g", "a", "b", "c", "self-hosted")},
+		{withLabels("g", "a@b"), withLabels("b", "a")},
+		{withLabels("g", "a,b"), withLabels("g", "a")},
+		{withLabels("g", "a%2Bb"), withLabels("g", "a+b")},
+	} {
+		if pair[0] == cohortUnknown || pair[1] == cohortUnknown {
+			t.Fatalf("fixture platform not observed: %q / %q", pair[0], pair[1])
+		}
+		if pair[0] == pair[1] {
+			t.Errorf("distinct platforms serialise to the same string %q", pair[0])
+		}
+	}
+	if got := withLabels("GitHub Actions", "ubuntu-latest"); got != "ubuntu-latest@GitHub Actions" {
+		t.Errorf("an ordinary platform reads %q, want it unchanged", got)
+	}
+	// Separators never reach the cohort key raw, so its fields still parse.
+	if p := withLabels("g;x=y", "a;b"); strings.ContainsAny(p, ";=") {
+		t.Errorf("platform %q carries a cohort key separator", p)
 	}
 }
 

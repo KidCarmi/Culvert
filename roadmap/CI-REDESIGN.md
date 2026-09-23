@@ -2267,7 +2267,7 @@ trend groups by `workflow|class|job set|cohort`:
 
 | Component | Source | Value when not observed |
 |---|---|---|
-| `platform` | the executed jobs' runner labels + runner group (job metadata) | `unknown` |
+| `platform` | the executed jobs' runner labels + runner group (job metadata), separators percent-escaped so distinct label sets never share a string | `unknown` |
 | `image` | the runner image **every measured job** reported in its own log (the "Runner Image" group the runner writes first, e.g. `ubuntu-24.04`) | `unknown` when any measured job was not observed; `mixed:…` when jobs ran on different images |
 | `shards` | the root-shard jobs GitHub scheduled | `none` when no race engine ran |
 | `toolchain` | Go release line + GOOS/GOARCH from the shards' `meta.json` | `unknown`; `n/a` when no race engine ran |
@@ -2289,7 +2289,8 @@ trend groups by `workflow|class|job set|cohort`:
   (docs-only, pass-through) get an observed image too.
 - **What stays comparable.** Source commits, durations, Go patch releases
   and the weekly runner image build do not split a cohort. The exact Go and
-  image versions stay in each report and trend sample row.
+  image versions stay in each report and trend sample row, stated only when
+  every shard (or job) reported the same one.
 - **Complete evidence only.** The toolchain counts as observed only when the
   `meta.json` of **every** scheduled shard was read — matched shard for
   shard, not by count (documents for shards `{0,1,2,4}` do not cover
@@ -2474,7 +2475,10 @@ candidate after it.
   19. the parser matching the provisioner group;
   20. an unsafe image value accepted;
   21. shard metadata matched to the scheduled shards by count, not index;
-  22. a `meta.json` accepted for a shard it does not name.
+  22. a `meta.json` accepted for a shard it does not name;
+  23. one shard's exact Go version presented as the run's when shards
+      differ by patch release;
+  24. runner labels joined without escaping their separators.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback
