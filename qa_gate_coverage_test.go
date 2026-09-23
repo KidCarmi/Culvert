@@ -229,7 +229,7 @@ func coverageUploaders(t *testing.T, wf string, jobs map[string]struct {
 				continue
 			}
 			with, _ := st["with"].(map[string]interface{})
-			if toStr(with["name"]) != qaCoverageArtifact {
+			if resolveEngineName(t, wf, toStr(with["name"])) != qaCoverageArtifact {
 				continue
 			}
 			producers = append(producers, wf+" / "+job)

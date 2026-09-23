@@ -121,12 +121,67 @@ func uploadedArtifacts(t *testing.T, path string, jobs ...string) []string {
 		for _, st := range steps {
 			s := asMap(st)
 			if strings.Contains(toStr(s["uses"]), "actions/upload-artifact@") {
-				out = append(out, toStr(asMap(s["with"])["name"]))
+				out = append(out, resolveEngineName(t, path, toStr(asMap(s["with"])["name"])))
 			}
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// engineInputRe matches a value the engine takes wholly from one of its
+// workflow_call inputs (stage 5C parameterized the coverage artifact name).
+var engineInputRe = regexp.MustCompile(`^\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}$`)
+
+// engineInputDefault returns the declared default of one of the engine's
+// workflow_call inputs, as text.
+func engineInputDefault(t *testing.T, input string) string {
+	t.Helper()
+	doc := genericWorkflow(t, qaRaceShardsWorkflowPath)
+	in := asMap(asMap(asMap(asMap(doc["on"])["workflow_call"])["inputs"])[input])
+	if in == nil {
+		t.Fatalf("%s declares no workflow_call input %q", qaRaceShardsWorkflowPath, input)
+	}
+	return toScalar(in["default"])
+}
+
+// resolveEngineName maps an engine value of the form `${{ inputs.X }}` to X's
+// default — the value it takes for the QA gate, which passes nothing but
+// `shards` (pinned by TestQARaceShards_QAKeepsEveryEngineDefault). Any other
+// value, or any other workflow's value, is returned unchanged.
+func resolveEngineName(t *testing.T, path, v string) string {
+	t.Helper()
+	if path != qaRaceShardsWorkflowPath {
+		return v
+	}
+	if m := engineInputRe.FindStringSubmatch(strings.TrimSpace(v)); m != nil {
+		return engineInputDefault(t, m[1])
+	}
+	return v
+}
+
+// TestQARaceShards_QAKeepsEveryEngineDefault pins that parameterizing the
+// shared engine for the Fast gate (stage 5C) changed nothing for QA: qa-race
+// passes `shards: 4` and nothing else, so the coverage artifact stays
+// `qa-coverage`, no hardening step, no privileged job and no fault — and the
+// defaults themselves are those values.
+func TestQARaceShards_QAKeepsEveryEngineDefault(t *testing.T) {
+	gate := genericWorkflow(t, qaGateWorkflowPath)
+	with := asMap(asMap(asMap(gate["jobs"])[qaRaceJob])["with"])
+	if len(with) != 1 || toScalar(with["shards"]) != qaRaceShardCount {
+		t.Errorf("qa-gate.yml %s must pass exactly `shards: %s` to the engine (got %v) — every other input keeps its QA default",
+			qaRaceJob, qaRaceShardCount, with)
+	}
+	for input, want := range map[string]string{
+		"coverage-artifact": qaCoverageArtifact,
+		"harden-runner":     "false",
+		"privileged-test":   "",
+		"fault":             "none",
+	} {
+		if got := engineInputDefault(t, input); got != want {
+			t.Errorf("engine input %q defaults to %q, want %q (the QA gate relies on the default)", input, got, want)
+		}
+	}
 }
 
 func TestQARaceShards_ArtifactNamesAreDistinct(t *testing.T) {
@@ -167,7 +222,7 @@ func TestQARaceShards_VerdictFailsClosedAndIsComplete(t *testing.T) {
 	for _, n := range needs {
 		got[toStr(n)] = true
 	}
-	producers := []string{"race-build", "race-shard", "race-lane", "race-universe"}
+	producers := []string{"race-build", "race-shard", "race-lane", "race-universe", "race-privileged"}
 	for _, want := range producers {
 		if !got[want] {
 			t.Errorf("race-verdict must need %q", want)

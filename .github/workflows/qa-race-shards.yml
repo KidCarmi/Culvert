@@ -1,11 +1,17 @@
 ## ─────────────────────────────────────────────────────────────────────────────
 ## Culvert — QA race + coverage, sharded (CI-REDESIGN stage 5B)
 ## ─────────────────────────────────────────────────────────────────────────────
-## A REUSABLE workflow, called from qa-gate.yml's `qa-race` job. It has no
-## trigger of its own. It is the QA gate's full race + coverage execution — the
-## job that `go test -race -coverprofile ./...` used to be inside qa-logic — run
-## as isolated processes, and it PUBLISHES the authoritative `qa-coverage`
-## profile that qa-coverage enforces the unchanged floors on.
+## A REUSABLE workflow with no trigger of its own. Two callers, ONE engine:
+##
+##   qa-gate.yml       `qa-race`   (stage 5B) — publishes `qa-coverage`
+##   pr-fast-gate.yml  `test-race` (stage 5C) — publishes `fast-gate-coverage`
+##
+## It is the full race + coverage execution — the single-process
+## `go test -race -coverprofile ./...` both gates used to run — as isolated
+## processes, and it PUBLISHES the authoritative merged profile the caller
+## enforces the unchanged floors on. The inputs below are the ONLY differences
+## between callers; every default reproduces the QA gate exactly, so qa-gate.yml
+## passes nothing but `shards`.
 ##
 ## Stage 5A proved the approach as an opt-in pilot compared against the
 ## unsharded run. Stage 5B adopts it and makes the verdict stand on its own:
@@ -36,6 +42,21 @@
 ## an entry the timing file has never seen is placed at the mean cost.
 ##
 ## Failures are never retried: a red shard stays red and its evidence uploads.
+##
+## Caller-specific inputs (stage 5C):
+##   coverage-artifact  name of the published merged profile (path coverage.out,
+##                      30-day retention, if-no-files-found: error — unchanged)
+##   harden-runner      step-security/harden-runner, egress-policy: audit, as
+##                      the FIRST step of every job (the Fast gate's race job
+##                      carried it before 5C; QA never did)
+##   privileged-test    one root-package test that needs root/CAP_SYS_ADMIN and
+##                      therefore only ever SKIPS inside the unprivileged
+##                      shards. race-privileged runs it with sudo against the
+##                      SAME prebuilt binary and fails unless it reports PASS
+##   fault              qualification-only failure injection (never set by QA;
+##                      the Fast gate forwards it from workflow_dispatch and its
+##                      aggregate refuses ANY run that sets it). Every value can
+##                      only make a run fail, never pass
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: QA race shards
@@ -47,6 +68,22 @@ on:
         description: "Number of isolated root-package shards"
         type: number
         default: 4
+      coverage-artifact:
+        description: "Artifact name for the merged coverage profile (coverage.out)"
+        type: string
+        default: qa-coverage
+      harden-runner:
+        description: "Run step-security/harden-runner (egress-policy: audit) first in every job"
+        type: boolean
+        default: false
+      privileged-test:
+        description: "A root-package test to run as root against the prebuilt binary; must PASS (empty = none)"
+        type: string
+        default: ""
+      fault:
+        description: "Qualification-only failure injection: none | shard-evidence-missing | shard-profile-truncated | producer-fails"
+        type: string
+        default: none
 
 permissions:
   contents: read
@@ -64,6 +101,12 @@ jobs:
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
     steps:
+      - name: Harden runner (egress audit)
+        if: inputs.harden-runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-cache
@@ -113,6 +156,12 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.race-build.outputs.shards) }}
     steps:
+      - name: Harden runner (egress audit)
+        if: inputs.harden-runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Tests invoke Go (go run / go build / go list), so the shard needs the
@@ -144,6 +193,19 @@ jobs:
             -binary "$b/root.test" -shard "${{ matrix.shard }}" \
             -out-dir "$RUNNER_TEMP/race-shards/shard-${{ matrix.shard }}" -commit "$GITHUB_SHA" -timeout 40m
 
+      - name: "Qualification fault: damage shard 0's evidence AFTER a successful run"
+        # The job stays green on purpose: only the verdict's own evidence
+        # checks (not the producer-result check) can catch this.
+        if: matrix.shard == 0 && (inputs.fault == 'shard-evidence-missing' || inputs.fault == 'shard-profile-truncated')
+        env:
+          FAULT: ${{ inputs.fault }}
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/race-shards/shard-0"
+          echo "::warning::qualification fault $FAULT injected into $d"
+          if [ "$FAULT" = shard-evidence-missing ]; then rm -rf "$d"; exit 0; fi
+          for f in "$d"/chunk-*.cover.out; do head -n 2 "$f" > "$f.cut"; mv "$f.cut" "$f"; done
+
       - name: Upload shard evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -161,6 +223,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
+      - name: Harden runner (egress audit)
+        if: inputs.harden-runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-cache
@@ -191,12 +259,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Harden runner (egress audit)
+        if: inputs.harden-runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-cache
 
       - name: Download dependencies
         run: go mod download
+
+      - name: "Qualification fault: this producer fails before producing"
+        if: inputs.fault == 'producer-fails'
+        run: |
+          echo "::error::qualification fault producer-fails injected: race-universe fails without evidence"
+          exit 1
 
       - name: Empty race + coverage run over every package except the root
         run: go run ./cmd/rootshard universe -out-dir "$RUNNER_TEMP/race-universe" -commit "$GITHUB_SHA" -timeout 40m
@@ -210,15 +290,71 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+  race-privileged:
+    name: "Race · privileged test (root)"
+    # A root-package test that needs root/CAP_SYS_ADMIN only ever reaches its
+    # t.Skip branch in the unprivileged shards. This job runs it again as root
+    # (ubuntu-latest grants the runner user passwordless sudo) against the SAME
+    # prebuilt race+coverage binary, from the same checkout path, and passes
+    # only on an explicit PASS line: a SKIP (no privilege, no bind mount) or a
+    # missing line fails, so "not executed" can never read as "passed".
+    # The binary needs no Go toolchain at run time, so sudo's reset PATH/HOME
+    # cannot change what runs.
+    needs: race-build
+    if: inputs.privileged-test != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden runner (egress audit)
+        if: inputs.harden-runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download the prebuilt binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qa-race-build
+          path: ${{ runner.temp }}/race-build
+
+      - name: Run the privileged test as root; require PASS
+        env:
+          PRIV_TEST: ${{ inputs.privileged-test }}
+        run: |
+          set -euo pipefail
+          case "$PRIV_TEST" in *[!A-Za-z0-9_]*|"") echo "::error::privileged-test must be one top-level test name, got '$PRIV_TEST'"; exit 1;; esac
+          b="$RUNNER_TEMP/race-build"
+          chmod +x "$b/root.test"
+          # The binary records the commit it was built from; refuse any other.
+          built=$(jq -r .commit "$b/manifest.json")
+          [ "$built" = "$GITHUB_SHA" ] || { echo "::error::prebuilt binary is from $built, this run is $GITHUB_SHA"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/race-privileged"
+          log="$RUNNER_TEMP/race-privileged/test.log"
+          sudo env "TEST_SEED=$TEST_SEED" "$b/root.test" -test.run "^${PRIV_TEST}\$" \
+            -test.count=1 -test.v -test.timeout=10m 2>&1 | tee "$log"
+          if grep -q -- "--- SKIP: ${PRIV_TEST} " "$log"; then
+            echo "::error::$PRIV_TEST SKIPPED as root — the privileged regression did not execute"; exit 1
+          fi
+          grep -q -- "--- PASS: ${PRIV_TEST} " "$log" || { echo "::error::$PRIV_TEST reported no PASS"; exit 1; }
+          echo "$PRIV_TEST executed as root and passed"
+
   race-verdict:
     name: "Race · verdict + coverage evidence"
-    needs: [race-build, race-shard, race-lane, race-universe]
+    needs: [race-build, race-shard, race-lane, race-universe, race-privileged]
     # always(): a failed or cancelled producer must still produce a verdict
     # that names it — never a silently skipped check.
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Harden runner (egress audit)
+        if: inputs.harden-runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-cache
@@ -270,6 +406,8 @@ jobs:
         # timed-out producer that somehow left usable-looking evidence still
         # fails.
         if: always()
+        env:
+          PRIV_TEST: ${{ inputs.privileged-test }}
         run: |
           set -eu
           fail=0
@@ -280,6 +418,11 @@ jobs:
             echo "$pair"
             [ "${pair#*=}" = success ] || { echo "::error::${pair%%=*} did not succeed (${pair#*=})"; fail=1; }
           done
+          # The privileged job must have RUN and succeeded when requested, and
+          # must not have run when not requested.
+          want=skipped; [ -z "$PRIV_TEST" ] || want=success
+          echo "race-privileged=${{ needs.race-privileged.result }} (want $want)"
+          [ "${{ needs.race-privileged.result }}" = "$want" ] || { echo "::error::race-privileged is ${{ needs.race-privileged.result }}, want $want"; fail=1; }
           exit $fail
 
       - name: Assert the coverage profile is usable
@@ -297,15 +440,16 @@ jobs:
           echo "coverage profile: $lines statement blocks, $(head -n1 coverage.out)"
 
       - name: Upload coverage
-        # The ONE producer of the `qa-coverage` artifact. Name, path and 30-day
-        # retention are carried over verbatim from qa-logic's stage-2A upload,
-        # so qa-coverage (and anything else reading it by name) is unaffected.
+        # The ONE producer of the caller's coverage artifact (`qa-coverage` for
+        # QA — the input's default — and `fast-gate-coverage` for the Fast
+        # gate). Path and 30-day retention are carried over verbatim from both
+        # gates' pre-sharding uploads, so readers by name are unaffected.
         # Reached only when the verdict and every producer succeeded.
         # if-no-files-found:error keeps a vanished profile a FAILURE rather than
         # a silently absent artifact and a green gate.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qa-coverage
+          name: ${{ inputs.coverage-artifact }}
           path: coverage.out
           retention-days: 30
           if-no-files-found: error

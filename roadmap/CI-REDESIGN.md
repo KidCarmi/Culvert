@@ -1431,10 +1431,115 @@ What the round-2 figures show:
 
 ### 14.8 Remaining work
 
-1. **Fast PR Gate migration (next stage).**
-   - Move the Fast PR Gate's single `-race` run onto the same shards.
-   - Keep its runner hardening and the privileged mount-point regression it carries.
-   - Keep its two coverage contracts, fed by the verdict's `merged.cover.out`.
+1. **Fast PR Gate migration.** Done in stage 5C (§15).
 2. **`internal/mcp/execution` split.** Unmeasured, and optional. It becomes worthwhile only once the verdict path, not determinism, bounds QA.
 3. **Timing refresh cadence.** Replace `.github/qa-root-shard-timings.json` with the file an audit run prints (§14.5) whenever the slowest shard drifts well above the estimate. In round 2 the shards landed at 0.80–1.05× their estimates.
 4. **The determinism failures** listed above belong to the separate flaky-test investigation, not to this stage.
+
+## 15. Stage 5C — the Fast PR Gate on the shared sharded engine
+
+Stage 5B made the four-shard race + coverage execution authoritative in QA.
+The Fast PR Gate still ran the single-process
+`go test -race -count=1 -timeout=40m -coverprofile=coverage.out ./...`, and that
+one job was the whole critical path of every code PR (§15.4 baseline:
+1,610–2,018 s of a 1,660–2,073 s aggregate). Stage 5C moves Fast onto the SAME
+engine. There is still exactly one implementation.
+
+### 15.1 What changed
+
+| | Before 5C (`test-race`, one job) | After 5C |
+|---|---|---|
+| Race + coverage | one `go test -race ./...` process | `test-race` **calls** `qa-race-shards.yml` (4 root shards + lane + universe + verdict) |
+| Coverage floors | a step in the same job | `coverage-floors` job on the verdict's merged profile |
+| `fast-gate-coverage` | uploaded `if: always()` by the race job | uploaded by the verdict, only after it proved the evidence complete (same name, `coverage.out`, 30-day retention) |
+| Runner hardening | harden-runner (egress `audit`) on the race job | the same step first in **every** engine job, the floors job and the audit jobs |
+| Mount-point regression | `sudo go test -run TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting .` | `race-privileged`: the SAME prebuilt binary as root; must print PASS (a SKIP fails) |
+| Aggregate | skipped = pass for every need | + the race path (`test-race`, `coverage-floors`) must be exactly `success` when the diff classified as code |
+| Unsharded run | every code PR | dispatch-only audit (`unsharded_audit: true`) |
+
+Unchanged: the classifier (and so the docs-only skips), the required check name
+`✅ Fast PR Gate — APPROVED`, hygiene, lint, benchgate, govulncheck + gosec,
+gitleaks, the agent/MCP/frontend jobs, the advisory traffic smoke, the
+concurrency group (a new push cancels the superseded run), and the
+`pull_request` trigger with read-only permissions and no secrets.
+
+**The engine's caller-specific inputs.** Every default reproduces the QA gate,
+which still passes only `shards: 4` (pinned by
+`TestQARaceShards_QAKeepsEveryEngineDefault`):
+
+| Input | QA (default) | Fast |
+|---|---|---|
+| `coverage-artifact` | `qa-coverage` | `fast-gate-coverage` |
+| `harden-runner` | `false` | `true` |
+| `privileged-test` | *(none: `race-privileged` skipped, and the verdict requires `skipped`)* | `TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting` (the verdict requires `success`) |
+| `fault` | `none` | forwarded from `workflow_dispatch` (qualification only) |
+
+The engine's evidence artifacts keep their `qa-race-` names in a Fast run: the
+prefix names the engine, and artifact names are scoped to the run.
+
+### 15.2 Identity and permissions
+
+- **One checkout.** Every engine job checks out the caller's `$GITHUB_SHA` —
+  for a pull request, the PR merge commit — and the build manifest records it.
+  The shards, the privileged job and the verdict refuse a binary from another
+  commit.
+- **No foreign evidence.** Every download is scoped to the current run: none
+  passes `run-id` or a token (`TestFastGateRace_CoverageFloorsOnThisRunsMergedProfile`).
+  Timing data only balances the shards and never decides inclusion (§14.5).
+- **Fork-safe.** The engine asks for `contents: read` only, no secrets are
+  passed, and the trigger stays `pull_request`: no `pull_request_target`, no
+  `workflow_run`.
+
+### 15.3 Why the aggregate changed
+
+`needs-verdict` treats `skipped` as passing so a docs-only PR can satisfy the
+required check. That is right for a job the classifier switched off, and wrong
+for the race path when the classifier said *code*: a race path skipped for any
+other reason would read as green. `require-success` is therefore computed:
+
+```
+format('changes{0}{1}',
+  needs.changes.outputs.code == 'true' && ',test-race,coverage-floors' || '',
+  inputs.unsharded_audit && ',race-unsharded-audit,race-unsharded-audit-compare' || '')
+```
+
+`test-race` is the whole reusable call, so it is `success` only when every
+engine job succeeded — including the verdict, which judges each producer's
+result itself. A qualification dispatch (`fault` set) fails the aggregate in a
+final step, after the verdict has been computed and logged.
+
+### 15.4 Operating instructions
+
+- **A red `test-race` on a PR.**
+  - Open `Race · verdict + coverage evidence` first. It names the missing test,
+    block, package or producer.
+  - Then open the producer it names.
+- **A red `Race · privileged test (root)`.**
+  - The mount-point regression failed, skipped or did not print PASS as root.
+  - A SKIP here means the runner lost `sudo` or bind-mount capability. That is
+    an infrastructure change, not a test to skip.
+- **A red `coverage-floors`.**
+  - Same script, same floors as before 5C, applied to the complete merged
+    profile.
+- **Qualification on demand.**
+  - `gh workflow run pr-fast-gate.yml --ref <branch> -f unsharded_audit=true`
+    runs the same-SHA comparison. The comparison is the QA audit's command, pinned
+    by `TestFastGateRace_AuditMatchesTheQAAudit`.
+  - `-f fault=<value>` exercises one failure path.
+  - Both are dispatch-only. A pull request cannot set either.
+- **Timings, new tests, new packages.** As in §14.5; the Fast gate reads the same
+  `.github/qa-root-shard-timings.json`.
+
+### 15.5 Rollback
+
+Revert the 5C commit(s).
+
+- `test-race` becomes the single hardened job again, with the floors and the
+  privileged step inside it.
+- The engine loses its four inputs, and QA is untouched because it only ever
+  used the defaults.
+- The walls revert with it.
+
+Do **not** roll back by removing `test-race` or `coverage-floors` from the
+aggregate's `needs`, or by weakening `require-success`. Either leaves a PR
+approvable with no race run.

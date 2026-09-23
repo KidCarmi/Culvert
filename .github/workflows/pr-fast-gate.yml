@@ -2,10 +2,18 @@
 # Lane A — Fast PR Gate
 #
 # The single REQUIRED merge check for pull requests. Lean, deterministic,
-# fast: hygiene, lint, ONE full `-race` run with the coverage floors,
-# the alloc-regression benchgate, and the fast security trio
-# (govulncheck + gosec + gitleaks). Target wall time ≤ ~15 min warm-cache
-# (bounded by the -race suite).
+# fast: hygiene, lint, the full `-race` + coverage suite with the coverage
+# floors, the alloc-regression benchgate, and the fast security trio
+# (govulncheck + gosec + gitleaks). The race suite is bounded by its slowest
+# process, not by a target: see roadmap/CI-REDESIGN.md §15 for measured runs.
+#
+# Race + coverage (stage 5C): the SAME sharded engine the QA gate runs
+# (.github/workflows/qa-race-shards.yml, via cmd/rootshard) — the root package
+# as 4 isolated shards of one prebuilt binary, every other package whole, an
+# independent coverage-universe job, and a verdict that proves the evidence
+# complete on its own. It replaced the single-process
+# `go test -race -coverprofile ./...` this gate ran until 5C; that command
+# survives only as the dispatch-only qualification audit below.
 #
 # Docs-only handling (required-check safe): this workflow deliberately has
 # NO `paths:`/`paths-ignore:` filter. A required check whose workflow never
@@ -24,6 +32,32 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      unsharded_audit:
+        # Stage 5C qualification, the Fast-gate twin of qa-gate.yml's input.
+        # Default false: an ordinary dispatch runs exactly the PR graph. true
+        # ADDS the pre-5C single-process race run (verbatim) and compares the
+        # sharded evidence with it on the same SHA — inventory, results and
+        # every covered block. Never part of an ordinary run.
+        description: "Also run the unsharded race reference and compare the sharded evidence with it (qualification)"
+        type: boolean
+        default: false
+      fault:
+        # Stage 5C qualification: exercise the gate's failure paths on the real
+        # workflow. Every value can only make the run FAIL, and the aggregate
+        # refuses ANY run that sets one (including docs-only, which simulates a
+        # docs-only diff through the real classifier to show which jobs skip).
+        description: "Qualification-only failure injection (any value but none makes the aggregate refuse)"
+        type: choice
+        default: none
+        options:
+          - none
+          - classifier-fails
+          - docs-only
+          - shard-evidence-missing
+          - shard-profile-truncated
+          - producer-fails
+          - coverage-floor-fails
 
 concurrency:
   group: fast-gate-${{ github.ref }}
@@ -56,17 +90,32 @@ jobs:
 
       - name: Classify changed files
         id: classify
+        env:
+          # Empty on pull_request (no inputs) — only a dispatch can set it.
+          FAULT: ${{ inputs.fault || 'none' }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            # workflow_dispatch: no diff to classify — run everything.
-            echo "code=true"     >> "$GITHUB_OUTPUT"
-            echo "agent=true"    >> "$GITHUB_OUTPUT"
-            echo "mcp_docs=true" >> "$GITHUB_OUTPUT"
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run — all jobs enabled."
-            exit 0
-          fi
+            case "$FAULT" in
+              classifier-fails)
+                echo "::error::qualification fault classifier-fails injected: the diff is left unclassified"
+                exit 1 ;;
+              docs-only)
+                # SIMULATION (stage 5C qualification): a docs-only file list
+                # through the SAME case statements a pull_request uses. The
+                # aggregate refuses this run whatever it computes.
+                echo "::warning::qualification simulation: classifying a docs-only diff"
+                printf '%s\n' README.md docs/operator/graceful-shutdown.md roadmap/CI-REDESIGN.md > changed.txt ;;
+              *)
+                # workflow_dispatch: no diff to classify — run everything.
+                echo "code=true"     >> "$GITHUB_OUTPUT"
+                echo "agent=true"    >> "$GITHUB_OUTPUT"
+                echo "mcp_docs=true" >> "$GITHUB_OUTPUT"
+                echo "frontend=true" >> "$GITHUB_OUTPUT"
+                echo "Manual run — all jobs enabled."
+                exit 0 ;;
+            esac
+          else
           # --no-renames is load-bearing, not stylistic. With rename detection
           # on (the default), `--name-only` emits ONLY the destination of a
           # rename — so moving a file OUT of a classified directory hides the
@@ -81,6 +130,7 @@ jobs:
           # add paths, never remove them, so it stays consistent with this
           # classifier's fail-toward-running-the-gate posture.
           git diff --no-renames --name-only HEAD^1 HEAD > changed.txt
+          fi
           echo "── Changed files ──"; cat changed.txt
 
           # Docs-only = every file matches a documentation pattern.
@@ -211,94 +261,82 @@ jobs:
           git fetch --no-tags origin "$BASE_REF"
           golangci-lint run --timeout=5m --new-from-rev "origin/$BASE_REF"
 
-  # ─── 3. THE race + coverage run (single source of truth) ──────────────────
-  # Replaces the 3× full -race runs previously spread across qa-gate and
-  # security-release-gate, and unifies BOTH coverage contracts: the global
-  # 55% floor (was security-release-gate) and the per-file floors on the
-  # security-sensitive surface (was qa-gate).
+  # ─── 3. Race + coverage (sharded, stage 5C) ────────────────────────────────
+  # THE race + coverage execution for PRs, on the shared engine the QA gate
+  # runs (.github/workflows/qa-race-shards.yml): the root package as 4
+  # isolated shards of ONE prebuilt `go test -c -race -cover` binary, every
+  # other package whole, an independent coverage-universe job, and a verdict
+  # that refuses missing tests, omitted packages, truncated/foreign profiles
+  # and any producer that did not succeed. It publishes the complete merged
+  # profile as `fast-gate-coverage` (path coverage.out, 30-day retention —
+  # the pre-5C contract), and coverage-floors below enforces BOTH floors on it.
+  #
+  # Everything that runs is this run's PR merge checkout ($GITHUB_SHA, which
+  # every engine job checks out and the verdict pins): no evidence from main
+  # or another run is ever read. The only caller-specific settings are these
+  # inputs; see the engine's header.
   test-race:
-    name: "Gate · go test -race + coverage floors"
-    runs-on: ubuntu-latest
-    # 50, against a 40m go-test budget below: the job also pays checkout, cache
-    # restore, ~4m of -race compilation and the coverage-floor step, so the job
-    # ceiling has to sit well above the test budget or it becomes the real limit
-    # and truncates the panic dump that says WHICH test overran.
-    timeout-minutes: 50
+    name: "Gate · go test -race (sharded)"
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/qa-race-shards.yml
+    with:
+      shards: 4
+      coverage-artifact: fast-gate-coverage
+      # The pre-5C test-race job carried step-security/harden-runner in audit
+      # mode; every engine job that replaces it carries the same step.
+      harden-runner: true
+      # restore_mountpoint_test.go needs CAP_SYS_ADMIN to bind-mount a
+      # directory (docker-compose.yml's `cli` topology: the proxy-data volume
+      # mounted at /data). The unprivileged shards only ever reach its t.Skip,
+      # so the engine re-runs it as root against the same binary and requires
+      # PASS — the pre-5C "Mount-point regression (privileged)" step.
+      privileged-test: TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting
+      fault: ${{ inputs.fault || 'none' }}
+
+  # ─── 3b. Coverage floors (global + per-file) on the merged profile ─────────
+  # Single source of truth for BOTH coverage contracts — floors live in
+  # .github/scripts/coverage-floor.sh (shared with qa-gate's qa-coverage, so
+  # the two gates can never drift). The profile is THIS run's
+  # `fast-gate-coverage`, published by the verdict only after it proved the
+  # evidence complete; no run-id, so nothing from another run can be read.
+  coverage-floors:
+    name: "Gate · coverage floors (global + per-file)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes, test-race]
+    if: needs.changes.outputs.code == 'true'
     steps:
-      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+      - name: Harden runner (egress audit)
         uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go-cache
 
-      - name: Run full suite (-race, coverage)
-        env:
-          TEST_SEED: "20260421"
-        # -timeout is PER TEST BINARY, and the root package alone consumes
-        # essentially the whole budget: measured 897.9s on origin/main against a
-        # 900s limit -- 2.1s, or 0.23%, of headroom. Every other package in the
-        # module finishes in seconds (the largest, internal/ssrf, takes 37s).
-        #
-        # 0.23% is far below this suite's own run-to-run variance; it makes real
-        # network calls while it runs (urlhaus.abuse.ch, openphish.com and
-        # raw.githubusercontent.com all appear in the job log), so the gate was
-        # not passing so much as winning a coin flip, and any PR adding a few
-        # seconds of root-package tests tipped it into a 15m timeout that reads
-        # like a hang rather than a budget overrun.
-        #
-        # 25m restored a real margin without weakening what is checked: the
-        # timeout exists to stop a genuinely hung test, and a hang still fails,
-        # ~10 minutes later. It does NOT make the underlying problem acceptable
-        # -- one test binary holding 900s while 65 others finish in seconds is
-        # the thing to fix, by splitting the root package. Recorded as CI-01 in
-        # docs/engineering/security-reviews/2026-08-25-mcp-overnight-hardening-run.md
-        #
-        # The margin was consumed again within two weeks: on 2026-09-08 the root
-        # package measured 1445s on origin/main (1b3d0e6, -race, same box, per-
-        # test -json) against the 1500s budget -- 3.7% of headroom -- and the
-        # QA gate's main-push run of the same suite took 24m35s end to end. The
-        # Batch 2 frontend PR (#1340) adds 445 root tests (58s) and a larger
-        # OpenAPI contract (the conformance slices, +20s), 1553s in total, and
-        # its gate run timed out at 1502.7s with one test 1s into its run. 40m
-        # is the same decision as 25m was, with today's numbers; the durable
-        # fix is unchanged (split the root package), and the per-binary budget
-        # here and in qa-gate.yml must move together.
-        run: go test -race -count=1 -timeout=40m -coverprofile=coverage.out ./...
-
-      - name: Enforce coverage floors (global + per-file)
-        # Single source of truth for BOTH coverage contracts — floors live in
-        # .github/scripts/coverage-floor.sh (shared with qa-gate's main-push
-        # run so the two event paths can never drift).
-        run: .github/scripts/coverage-floor.sh coverage.out
-
-      - name: Mount-point regression (privileged)
-        # TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting
-        # (restore_mountpoint_test.go) needs CAP_SYS_ADMIN to bind-mount a
-        # directory — it reproduces docker-compose.yml's `cli` service
-        # topology, where the named volume proxy-data is mounted at /data.
-        # The main "Run full suite" step above runs as the unprivileged
-        # runner user, so this test only ever hits its t.Skip branch there
-        # and the regression is never actually exercised. ubuntu-latest
-        # grants the runner user passwordless sudo, so run just this test
-        # again, as root. sudo resets PATH (secure_path) and HOME (→ /root),
-        # which would hide the setup-go-cache toolchain and the module/build
-        # caches the step above just populated, forcing a cold re-download
-        # under root — forward PATH/GOCACHE/GOMODCACHE explicitly instead of
-        # `sudo -E`, so the toolchain resolves and the warm caches are reused.
-        run: |
-          sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" \
-            go test -run TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting -count=1 -v .
-
-      - name: Upload coverage
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Download the merged coverage profile
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: fast-gate-coverage
-          path: coverage.out
-          retention-days: 30
+          path: .
+
+      - name: Assert the coverage profile is usable
+        run: |
+          set -euo pipefail
+          test -s coverage.out || { echo "::error::no coverage profile from test-race (missing or empty after download)"; exit 1; }
+          head -n1 coverage.out | grep -q '^mode:' || { echo "::error::coverage.out has no mode line"; exit 1; }
+          lines=$(($(wc -l < coverage.out) - 1))
+          [ "$lines" -gt 0 ] || { echo "::error::coverage.out carries a mode line and no statements"; exit 1; }
+          echo "coverage profile: $lines statement blocks, $(head -n1 coverage.out)"
+
+      - name: "Qualification fault: zero every count before the floors"
+        if: github.event_name == 'workflow_dispatch' && inputs.fault == 'coverage-floor-fails'
+        run: |
+          echo "::warning::qualification fault coverage-floor-fails injected: every block count set to 0"
+          sed -i -E '2,$ s/ [0-9]+$/ 0/' coverage.out
+
+      - name: Enforce coverage floors (global + per-file)
+        run: .github/scripts/coverage-floor.sh coverage.out
 
   # ─── 4. Alloc-regression benchgate ─────────────────────────────────────────
   # `benchgate`-tagged tests are OUTSIDE the default `go test ./...` build —
@@ -484,10 +522,161 @@ jobs:
     if: needs.changes.outputs.frontend == 'true'
     uses: ./.github/workflows/frontend-verify.yml
 
+  # ─── Audit: the unsharded race reference (stage 5C qualification) ─────────
+  # Dispatch-only (`unsharded_audit: true`), the Fast-gate twin of qa-gate.yml's
+  # audit. On every pull request and default dispatch both jobs are skipped,
+  # so an ordinary run pays nothing for them. When requested they are part of
+  # the gate: the aggregate requires both, so a lost test or a lost covered
+  # block refuses that run. The reference is the pre-5C test-race command,
+  # verbatim; fast_gate_race_shards_test.go pins it and the comparison to
+  # qa-gate.yml's so the two audits cannot drift apart.
+  race-unsharded-audit:
+    name: "Audit · unsharded race reference"
+    if: github.event_name == 'workflow_dispatch' && inputs.unsharded_audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 50  # > the 40m per-binary test budget below (compile + tee + upload)
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Unsharded race + coverage run (the pre-5C test-race command)
+        env:
+          TEST_SEED: "20260421"
+        run: |
+          set -o pipefail
+          mkdir -p fast-audit-reference
+          go test -race -count=1 -timeout=40m -coverprofile=fast-audit-reference/coverage.out -v ./... \
+            2>&1 | tee fast-audit-reference/logic.log
+
+      - name: Upload the unsharded reference
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fast-audit-reference
+          path: fast-audit-reference/
+          retention-days: 14
+          if-no-files-found: warn
+
+  race-unsharded-audit-compare:
+    name: "Audit · sharded vs unsharded"
+    # The edge carries DATA: the reference's log and profile, and test-race's
+    # inventory, results and merged profile — all from THIS run.
+    needs: [test-race, race-unsharded-audit]
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.unsharded_audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Download the unsharded reference
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: fast-audit-reference
+          path: reference
+
+      - name: Download the sharded run's inventory
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: qa-race-build
+          path: race-build
+
+      - name: Download the sharded run's verdict
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: qa-race-verdict
+          path: race-verdict
+
+      - name: Compare inventory, results and EVERY covered block with the reference
+        # A block the reference covered and the sharded run did not fails here
+        # unless .github/qa-root-shard-coverage-exceptions.json justifies it —
+        # that file is expected to be empty.
+        run: |
+          set -o pipefail
+          mkdir -p audit-compare
+          missing=0
+          for f in reference/logic.log reference/coverage.out race-build/list.txt \
+                   race-verdict/results.json race-verdict/merged.cover.out; do
+            [ -s "$f" ] || { echo "::error::comparison input $f is missing (its producer failed or published nothing)"; missing=1; }
+          done
+          [ "$missing" = 0 ] || exit 1
+          go run ./cmd/rootshard compare \
+            -ref-log reference/logic.log -ref-profile reference/coverage.out \
+            -pilot-results race-verdict/results.json -pilot-profile race-verdict/merged.cover.out \
+            -list race-build/list.txt -pkg "$(go list .)" \
+            -coverage-exceptions .github/qa-root-shard-coverage-exceptions.json \
+            -out audit-compare/comparison.json -baseline-out audit-compare/reference-timings.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage floors, reference vs sharded (same unchanged script)
+        if: always()
+        run: |
+          # +e: both verdicts are recorded before either decides the step.
+          set +e -u
+          mkdir -p audit-compare
+          .github/scripts/coverage-floor.sh reference/coverage.out > audit-compare/floors-reference.txt; ref=$?
+          .github/scripts/coverage-floor.sh race-verdict/merged.cover.out > audit-compare/floors-sharded.txt; sharded=$?
+          echo "coverage-floor.sh exit: reference=$ref sharded=$sharded"
+          diff -u audit-compare/floors-reference.txt audit-compare/floors-sharded.txt | tee audit-compare/floors.diff || true
+          [ "$ref" = "$sharded" ] || { echo "::error::the floors verdict differs between the reference and the sharded run"; exit 1; }
+
+      - name: Both sides must have succeeded
+        if: always()
+        run: |
+          set -eu
+          fail=0
+          for pair in "race-unsharded-audit=${{ needs.race-unsharded-audit.result }}" "test-race=${{ needs.test-race.result }}"; do
+            echo "$pair"
+            [ "${pair#*=}" = success ] || { echo "::error::${pair%%=*} did not succeed (${pair#*=})"; fail=1; }
+          done
+          exit $fail
+
+      - name: Evidence, compact (last in the log, readable without the artifact)
+        if: always()
+        run: |
+          for f in race-verdict/verdict.json audit-compare/comparison.json; do
+            [ -s "$f" ] && echo "EVIDENCE $f $(jq -c . "$f")" || echo "EVIDENCE $f MISSING"
+          done
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fast-audit-compare
+          path: audit-compare/
+          retention-days: 14
+          if-no-files-found: warn
+
   # ─── ✅ Aggregate — the ONE required branch-protection check ────────────────
   # Always runs. Skipped jobs (docs-only PRs, unchanged agent module) count
   # as passing; failure or cancellation of any needed job fails the gate.
   # traffic-smoke is intentionally NOT in `needs` while advisory.
+  #
+  # Stage 5C: skipped = pass is safe only for a job the classifier legitimately
+  # switched off. When the diff classified as code, the migrated race path
+  # (test-race — the whole sharded engine, whose verdict judges every producer
+  # — and coverage-floors) must be exactly `success`: a race path that was
+  # skipped for any other reason must not read as green. A requested audit is
+  # required the same way. A qualification dispatch (`fault` set) never
+  # approves.
   fast-gate-approved:
     name: "✅ Fast PR Gate — APPROVED"
     runs-on: ubuntu-latest
@@ -497,12 +686,15 @@ jobs:
       - hygiene
       - lint
       - test-race
+      - coverage-floors
       - benchgate
       - security-fast
       - gitleaks
       - agent
       - mcp-predicates
       - frontend
+      - race-unsharded-audit
+      - race-unsharded-audit-compare
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -510,4 +702,15 @@ jobs:
         with:
           needs-json: ${{ toJSON(needs) }}
           title: "✅ Fast PR Gate — APPROVED"
-          require-success: changes
+          require-success: >-
+            ${{ format('changes{0}{1}',
+                needs.changes.outputs.code == 'true' && ',test-race,coverage-floors' || '',
+                inputs.unsharded_audit && ',race-unsharded-audit,race-unsharded-audit-compare' || '') }}
+
+      - name: Qualification runs never approve
+        if: github.event_name == 'workflow_dispatch' && inputs.fault != 'none'
+        env:
+          FAULT: ${{ inputs.fault }}
+        run: |
+          echo "::error::qualification dispatch (fault=$FAULT): the aggregate above computed its verdict, but a run with injected faults or a simulated classification never approves"
+          exit 1
