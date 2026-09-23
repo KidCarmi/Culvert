@@ -705,3 +705,52 @@ func TestCovIsoPolicy_CrashCollectorWithNoCrashRecorded(t *testing.T) {
 		t.Fatalf("section = %v, want exactly {last_crash: nil}", m)
 	}
 }
+
+// ─── OTLP per-rule metrics (otlp.go) ────────────────────────────────────────
+
+// Pins otlp.go otlpRuleMetrics' per-rule loop body. The only existing test
+// (distributed_rl_test.go) exercises the EMPTY registry; the body ran only when
+// an earlier test in the same process had left a rule registered in the global
+// ruleMet — order coupling the qualification audit caught (qa-gate run
+// 35839915521). The registry is swapped for a private empty one, one rule is
+// recorded twice, and the exported metric must name it with its exact count.
+func TestCovIsoPolicy_OTLPRuleMetricsReportsRegisteredRules(t *testing.T) {
+	ruleMet.mu.Lock()
+	saved := ruleMet.countersLocked()
+	ruleMet.setCountersLocked(ruleCounterState{
+		hits:          map[string]*int64{},
+		last:          map[string]*int64{},
+		byID:          map[string]persistedRuleCounter{},
+		loadedByName:  map[string]persistedRuleCounter{},
+		appliedByName: map[string]int64{},
+	})
+	ruleMet.mu.Unlock()
+	t.Cleanup(func() {
+		ruleMet.mu.Lock()
+		ruleMet.setCountersLocked(saved)
+		ruleMet.mu.Unlock()
+	})
+
+	const rule = "coviso-otlp-rule"
+	ruleMet.RecordHit(rule)
+	ruleMet.RecordHit(rule)
+
+	metrics := otlpRuleMetrics("1234567890")
+	if len(metrics) != 1 {
+		t.Fatalf("got %d rule metrics, want exactly 1", len(metrics))
+	}
+	m := metrics[0]
+	if m.Name != "culvert.policy.rule_hits" || m.Sum == nil || len(m.Sum.DataPoints) != 1 {
+		t.Fatalf("unexpected metric shape: %+v", m)
+	}
+	dp := m.Sum.DataPoints[0]
+	if dp.AsInt == nil || *dp.AsInt != 2 {
+		t.Fatalf("rule hit count = %v, want 2", dp.AsInt)
+	}
+	if len(dp.Attributes) != 1 || dp.Attributes[0].Key != "rule" || dp.Attributes[0].Value.StringValue != rule {
+		t.Fatalf("rule attribute = %+v, want rule=%q", dp.Attributes, rule)
+	}
+	if !m.Sum.IsMonotonic || m.Sum.AggregationTemporality != 2 {
+		t.Fatalf("rule_hits must be a cumulative monotonic sum: %+v", m.Sum)
+	}
+}
