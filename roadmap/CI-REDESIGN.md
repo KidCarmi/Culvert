@@ -1879,3 +1879,286 @@ Revert the 6A commits.
 
 Do **not** remove the QA contract step on its own. That would leave the
 production aggregate bound proved nowhere at production size.
+
+## 17. Stage 6B — performance reporting and the weekly equivalence audit
+
+Goal: see CI performance drift and evidence drift early, from evidence that
+already exists. No test is re-run to produce a number.
+
+### 17.1 What was added
+
+| Piece | Where | What it does |
+|---|---|---|
+| Collector | `cmd/cireport` (stdlib only) | `run` → one versioned report (`culvert.ci-run-report/v1`) + step summary per run attempt. `trend` → equivalence groups, provisional statistics, advisory regressions, audit freshness (`culvert.ci-trend-report/v1`). |
+| Reporter workflow | `.github/workflows/ci-perf-report.yml` | Runs the collector after gate runs complete, weekly, or on dispatch. |
+| Weekly audit | `qa-gate.yml` `schedule: "23 6 * * 0"` | The existing unsharded reference and `rootshard compare`, on the default branch, every Sunday. |
+| Baseline | `.github/ci-perf-baseline.json` | Reviewed performance targets. Ships `provisional` and empty. |
+| Walls | `ci_perf_report_test.go`, `cmd/cireport/*_test.go` | See §17.9. |
+
+### 17.2 What a report measures, and how
+
+- **Elapsed** = the required aggregate's `completed_at` minus the attempt's
+  `run_started_at`, and the same for the race verdict job. It is wall clock.
+  Parallel jobs are never added together to produce it.
+- **Busy** = the union of job intervals. It is always ≤ the wall span.
+- **Runner-minutes** = the sum of executed job durations. Every report says
+  this is **not a bill**: GitHub rounds per job, and public-repo minutes are free.
+- **Attempt scoping.** A re-run attempt lists the earlier attempt's jobs.
+  A job that started before this attempt did is *carried over*: it is listed
+  but never timed. Skipped jobs never count.
+- **Phases.** Queue is job `created_at` → `started_at`. Setup, work and
+  teardown come from step names. Anything else is recorded under `unknowns`.
+  Cache state is **not inferred**.
+- **Race evidence.** Read from `qa-race-verdict` (`verdict.json`,
+  `results.json`) and `qa-race-shard-N/meta.json`: shard imbalance, slowest
+  lane packages, slowest root tests, inventory size, coverage and verdict
+  problems. Pre-5C Fast runs used a single race job with no verdict. Their
+  job set is `race-unsharded`, so they never share a group with the
+  sharded engine.
+- **Audit evidence.** Read from `qa-audit-compare` / `fast-audit-compare`
+  (`comparison.json`). The audit state is one of:
+  - `not-requested`
+  - `passed`
+  - `failed`
+  - `missing` — requested, but the jobs did not execute
+  - `unknown` — executed, but the comparison could not be read
+
+  Only `passed` is healthy.
+- **Identity.** The verdict's commit must equal `head_sha` on every event
+  except `pull_request`, which tests the merge commit. Every shard meta must
+  agree on commit and toolchain. A timing candidate's `source` must name this
+  run and SHA. Any disagreement is recorded as a **problem**, and the run is
+  kept out of the statistics.
+- **Classes**, which are never mixed:
+  - `pr-code`
+  - `pr-docs-only` — the race engine was not *scheduled*
+  - `pr-pass-through`
+  - `main-qa`
+  - `scheduled-audit`
+  - `manual-audit`
+  - `manual-qualification`
+  - `fault-injection`
+  - `other`
+
+  Groups are keyed `workflow|class|job set`. The job set comes from what
+  actually executed: `race`, `race-unsharded`, `audit`, `qa-layers`,
+  `frontend`, `mcp`, `maint`. So a PR that ran the frontend and MCP lanes is
+  never compared with one that did not.
+- **Run-names.** A dispatch publishes its inputs in its title, which the runs
+  API returns:
+  - Fast PR Gate: `… · dispatch · audit=<bool> · fault=<choice>`
+  - QA Gate: `… · dispatch · audit=<bool>`
+
+  The collector trusts these facts **only on `workflow_dispatch`**. On a pull
+  request `display_title` is the PR's own title, so a PR named "fault=x"
+  cannot reclassify its run (pinned by test).
+
+**Missing evidence is `unknown`, never healthy.** Expired artifacts, a
+refused download or an undecodable document are listed under `unknowns`. The
+report still completes.
+
+### 17.3 The weekly same-SHA equivalence audit
+
+A scheduled QA run executes the **full main graph plus** `qa-unsharded-audit`
+and `qa-unsharded-audit-compare`. That is the job set an `unsharded_audit: true`
+dispatch has run since 5B, with the same comparison engine, inventory checks,
+coverage floors, the empty exceptions file and the "both sides must have
+succeeded" step. Nothing in the comparison changed.
+
+- **One predicate:**
+  `github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)`.
+  It is written in five places, all pinned equal: the concurrency group, its
+  cancel flag, both audit jobs' `if:`, and the aggregate's `require-success`.
+- **An unexpectedly skipped audit cannot pass.** On an audit run the aggregate
+  requires `qa-race`, `qa-coverage`, `qa-unsharded-audit` and
+  `qa-unsharded-audit-compare` to be exactly `success`. The test drives the real
+  `needs-verdict` shell: `skipped`, `failure`, `cancelled` or an absent entry
+  for any of the four refuses. Ordinary runs pass `''` and are unchanged.
+- **Separate concurrency.** Audits use the `qa-audit-<ref>` group with
+  `cancel-in-progress: false`. Ordinary runs keep `qa-gate-<ref>`, which
+  cancels superseded runs. A main push cannot cancel a running audit, and an
+  audit cannot cancel the main-push run that is release evidence.
+- **Never release evidence.** `require-gate.sh` reads only `event=push` runs of
+  `main`. The release manifest does not name the reporter (pinned).
+- **Sunday 06:23 UTC.** Monday 02:00–06:00 already starts 14 scheduled runs. Sunday 06:23 is after every daily cron has started and shares a slot with no other schedule.
+- **Fast's manual audit is kept** (`pr-fast-gate.yml` `unsharded_audit`) for
+  changes to Fast's caller-specific inputs. Only its run-name changed.
+
+### 17.4 Isolation of the reporter
+
+- **Off the PR critical path.** It runs on `workflow_run`, after the gate has
+  finished, on the default branch, and posts no check to the PR. Nothing
+  requires it, and no workflow chains from it (pinned).
+- **Trusted code only.** `actions/checkout` takes the default branch with no
+  `ref:` and `persist-credentials: false`.
+- **Least privilege.** The token has `actions: read` and `contents: read`, and
+  no secret is used. `setup-go` runs with `cache: false`, because a cache here
+  could have been written by a PR run.
+- **Nothing fetched or executed.** `go run` builds with `GOPROXY=off`; the
+  collector imports only the standard library (pinned).
+- **Artifacts are data.** ZIPs are read into memory, capped in size, and only
+  allowlisted JSON members are decoded. Duplicate member names are refused.
+  `qa-race-build`, which carries the prebuilt test binary, is **never
+  downloaded** (pinned by test). A presigned storage URL's query is stripped
+  from errors before anything is written.
+- **No shell injection.** Event data reaches shell through `env`, and every
+  run id is checked to be numeric. No `run:` body interpolates `${{ }}`
+  (pinned).
+
+### 17.5 Operation and retention
+
+| Output | Produced | Kept |
+|---|---|---|
+| `ci-run-report-<run>-<attempt>` (`report.json`, `summary.md`) | After every **non-PR, non-cancelled** Fast/QA run: main pushes, dispatches, the schedule | 90 days |
+| `timing-refresh-candidate-<run>-<attempt>` | Only for a **passed** audit: the refreshed timing file + `diff.json` against the committed one | 90 days |
+| `ci-trend-report-<collector run>` (`trend.json`, `summary.md`) | Sundays 09:43 UTC, after a scheduled audit completes, or on dispatch | 90 days |
+| Raw evidence the reports are built from | Race shard/build artifacts | 7 days |
+| | `qa-race-verdict` | 30 days |
+| | Audit reference/compare artifacts | 14 days |
+
+The 90-day reports outlive the evidence they were built from.
+
+- **Report on any run, including a PR run:** dispatch *CI Performance Report*
+  with `run_id`. The trend already lists PR runs from metadata.
+- **The trend** reads the newest 25 runs **per workflow and event**. A
+  workflow-wide window would let ~240 PR runs a week push every main push
+  out. It uses the retained per-run report when one exists, else metadata
+  only, and says which.
+
+### 17.6 Expected additional runner usage
+
+These figures are from the last 7 days of gate runs and the measured audit
+runs.
+
+| Item | Estimate |
+|---|---|
+| Weekly audit: one QA run with the audit jobs | **~92–99 runner-min/week**, measured in runs 35866546559 (92.6) and 35874102885 (99.4). An ordinary main QA run is 72 runner-min; the audit jobs are ~24–27 of the total. |
+| Per-run reports | ~47 jobs/week (19 main pushes, 27 dispatches, 1 schedule) × ~1–2 min ≈ **50–95 runner-min/week**. This is an estimate: the workflow cannot run before it is on `main`. |
+| Trend | 1–2 runs/week × ~4 min, of which 2.5 min is collection measured locally over 102 executions |
+| **Total** | **≈ 150–200 runner-min/week** |
+
+None of it is on a required check's path.
+
+Reporting a job per PR run was rejected. About 240 PR runs a week, roughly
+half of them cancelled by a newer push, would cost more than the audit
+itself.
+
+### 17.7 Baseline policy, ownership, investigation
+
+- **Provisional until reviewed.** A group's statistics count only executions
+  that are completed, first attempt, `success` and free of identity problems.
+  The window is the newest 20, and the statistics stay *provisional* below 10
+  samples.
+- **Reviewing a group.** After a group has 10–20 samples, a maintainer copies
+  its reviewed medians into `groups` and sets `status: reviewed`,
+  `reviewedBy` and `reviewedAt` in a PR. The loader refuses a `reviewed`
+  file without a reviewer or date, and sample bounds outside 10..20.
+  Extra full-suite runs must **not** be generated to fill a sample.
+- **Sustained regression (advisory).** It triggers when the 3 newest counted
+  samples of a group all exceed the reviewed median × 1.25. It is emitted as a
+  `::warning::` and never fails anything. Performance signals stay advisory.
+- **Audit freshness (a correctness signal, not advice).** States:
+  `pending-first`, `passed`, `failed`, `stale` (> 8 days since the last pass)
+  and `missing` (no completed scheduled audit after the grace period).
+  `failed`, `stale` and `missing` make the trend job exit 1 with an `::error::`.
+  **Set `audit.introduced` to the merge date when this lands.**
+- **Owner.** The CI-REDESIGN owner reviews baselines and investigates every
+  red trend.
+- **Investigating a red audit:**
+  1. Open the audit run's `Audit · sharded vs unsharded` summary and
+     `comparison.json`. Lost tests or blocks are named there.
+  2. Follow §14.2. Every lost block needs an isolated fixture or a reviewed
+     exception.
+  3. Never re-run a red audit to get a green one.
+- **Investigating a regression warning:**
+  1. Compare the group's recent `report.json`s. Look at the job queue, the
+     setup phase, shard imbalance and the slowest tests.
+  2. A timing-driven imbalance is fixed by reviewing a timing candidate
+     (§17.8), not by editing the partition by hand.
+
+### 17.8 Timing-refresh candidates
+
+A **passed** audit's `qa-root-shard-timings.json` is published as a candidate,
+with a diff against the committed file listing added, removed and changed
+entries. It is **never committed automatically**.
+
+To adopt one, open a PR that replaces `.github/qa-root-shard-timings.json` and
+follow §16.6–16.7. Coverage exceptions are never generated.
+
+### 17.9 Validation
+
+- **`cmd/cireport` tests** use 14 real run fixtures and real audit evidence
+  from run 35874102885. They cover:
+  - every class, including a genuine docs-only run, a cancelled run, a failed
+    run and two re-run attempts;
+  - that parallel jobs do not inflate elapsed time (4 × 400 s shards → 545 s
+    elapsed; runner-minutes = the sum);
+  - that carried-over jobs are excluded;
+  - mismatched verdict, shard and candidate identities;
+  - that an audit that is missing, unreadable or failed never reads as passed;
+  - that only allowlisted artifact members are read, and `qa-race-build`
+    never;
+  - end-to-end collection through a fake API, including a report with no
+    artifacts;
+  - grouping, windowing, advisory regressions and all audit-freshness states;
+  - per-event listing surviving a flood of 30 PR runs.
+- **`ci_perf_report_test.go`** covers:
+  - predicate single-sourcing and its event matrix;
+  - the real `needs-verdict` shell refusing a skipped, failed, cancelled or
+    absent audit job on an audit run;
+  - separate concurrency;
+  - reporter isolation and cost bounds;
+  - the collector's standard-library-only imports;
+  - release evidence staying `event=push` of `main`;
+  - run-name ↔ parser agreement.
+
+  The existing walls were updated rather than bypassed:
+  - the trigger matrix now pins exactly one **weekly** schedule;
+  - the audit opt-in wall now also proves the audit runs on the schedule and
+    on `unsharded_audit=true`;
+  - the race-ownership rationale is corrected.
+- **Mutation proof.** Each of these 13 defects was injected and failed a test:
+  1. an audit job dropped from `require-success`;
+  2. `require-success` removed;
+  3. the compare job not scheduled;
+  4. audits cancellable;
+  5. a shared concurrency group;
+  6. a daily audit;
+  7. a write-scoped reporter;
+  8. a reporter cache;
+  9. a network `GOPROXY`;
+  10. the reporter no longer following QA;
+  11. the reporter checking out the PR head;
+  12. shell interpolation in the reporter;
+  13. a PR title trusted as a run-name.
+- **Live API.** `cireport run` on QA audit run 35874102885 produced:
+  - class `manual-audit`, job set `race+audit+qa-layers`;
+  - elapsed 1939 s to the aggregate and 751 s to the race verdict;
+  - wall 1939 s, busy 1870 s;
+  - runner-minutes 99.4 over 19 jobs.
+
+  `cireport trend` read 102 executions into 13 groups, with every failed and
+  cancelled run listed. Artifact downloads from the authoring session were
+  refused by blob storage (403, session egress policy). They were correctly
+  reported as `unknown` with verdict `missing`, and no signature leaked into
+  the output. Artifact parsing is proven through the fake API. The
+  `workflow_run` path runs for the first time after merge.
+
+### 17.10 Rollback
+
+- **Reporting only.** Delete `.github/workflows/ci-perf-report.yml` (and
+  optionally `cmd/cireport`, `.github/ci-perf-baseline.json` and
+  `ci_perf_report_test.go`). No gate, check or release depends on them.
+- **The weekly audit.** In `qa-gate.yml`:
+  1. remove the `schedule:` block, the `run-name` and the audit concurrency
+     split;
+  2. restore the two audit `if:`s to
+     `github.event_name == 'workflow_dispatch' && inputs.unsharded_audit`;
+  3. drop `require-success`.
+
+  Then revert the matching wall changes in `qa_gate_scheduling_test.go`,
+  `qa_race_shards_test.go` and `ci_perf_report_test.go`.
+
+  Do **not** remove only `require-success`: a scheduled audit would then pass
+  with its audit jobs skipped.
+- Fast's `run-name` can stay or go independently.

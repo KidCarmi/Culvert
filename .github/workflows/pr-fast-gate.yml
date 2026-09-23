@@ -27,6 +27,11 @@
 # there (see roadmap/CI-REDESIGN.md for the retirement checklist).
 # ─────────────────────────────────────────────────────────────────────────────
 name: Fast PR Gate
+# Dispatches name their inputs in the title so a reporter reading run metadata
+# can separate audit and fault-injection qualification runs from ordinary ones
+# (the runs API does not return inputs; CI-REDESIGN §17). '' keeps GitHub's
+# default title for pull requests.
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Fast PR Gate · dispatch · audit={0} · fault={1}', inputs.unsharded_audit, inputs.fault) || '' }}
 
 on:
   pull_request:

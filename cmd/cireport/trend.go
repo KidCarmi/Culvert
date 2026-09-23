@@ -1,0 +1,569 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Baseline is the REVIEWED reference the trend is compared with. It starts
+// provisional with no targets; targets are written by a person after 10–20
+// representative executions of a group have been observed, never generated.
+type Baseline struct {
+	Schema     string `json:"schema"`
+	Status     string `json:"status"` // provisional | reviewed
+	ReviewedBy string `json:"reviewedBy"`
+	ReviewedAt string `json:"reviewedAt"`
+	MinSamples int    `json:"minSamples"`
+	MaxSamples int    `json:"maxSamples"`
+	Regression struct {
+		Ratio       float64 `json:"ratio"`
+		Consecutive int     `json:"consecutive"`
+	} `json:"sustainedRegression"`
+	Audit struct {
+		Workflow   string `json:"workflow"`
+		Introduced string `json:"introduced"`
+		MaxAgeDays int    `json:"maxAgeDays"`
+	} `json:"audit"`
+	// Groups: "<workflowPath>|<class>|<jobSetKey>" → metric → reviewed median.
+	Groups map[string]map[string]struct {
+		Median float64 `json:"median"`
+	} `json:"groups"`
+}
+
+func loadBaseline(path string) (Baseline, error) {
+	var b Baseline
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return b, fmt.Errorf("read baseline: %w", err)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
+		return b, fmt.Errorf("decode baseline %s: %w", path, err)
+	}
+	return b, validateBaseline(b)
+}
+
+// validateBaseline rejects a baseline whose rules could not be applied as
+// written: an unreviewed "reviewed" file, sample bounds outside 10..20, a
+// regression rule that fires on noise, or an audit block that cannot expire.
+func validateBaseline(b Baseline) error {
+	switch {
+	case b.Schema != baselineSchema:
+		return fmt.Errorf("baseline schema %q, want %q", b.Schema, baselineSchema)
+	case b.Status != "provisional" && b.Status != "reviewed":
+		return fmt.Errorf("baseline status %q, want provisional|reviewed", b.Status)
+	case b.Status == "reviewed" && (b.ReviewedBy == "" || b.ReviewedAt == ""):
+		return fmt.Errorf("a reviewed baseline must name its reviewer and date")
+	case b.MinSamples < 10 || b.MaxSamples < b.MinSamples || b.MaxSamples > 20:
+		return fmt.Errorf("baseline sample bounds %d..%d must lie within 10..20", b.MinSamples, b.MaxSamples)
+	case b.Regression.Ratio <= 1 || b.Regression.Consecutive < 2:
+		return fmt.Errorf("sustained-regression rule needs ratio > 1 and at least 2 consecutive samples")
+	case b.Audit.Workflow == "" || b.Audit.MaxAgeDays < 7:
+		return fmt.Errorf("baseline audit block needs a workflow and maxAgeDays >= 7")
+	}
+	if _, err := time.Parse("2006-01-02", b.Audit.Introduced); err != nil {
+		return fmt.Errorf("baseline audit.introduced: %w", err)
+	}
+	return nil
+}
+
+// Sample is one observed execution and where its report came from.
+type Sample struct {
+	Report RunReport `json:"report"`
+	// Source: per-run-report (the collector's artifact) or metadata-only (no
+	// report; evidence not read, so evidence-derived values are unknown).
+	Source string `json:"source"`
+}
+
+// Stat is a provisional or baseline-eligible summary of one metric.
+type Stat struct {
+	N           int     `json:"n"`
+	Median      float64 `json:"median"`
+	P90         float64 `json:"p90"`
+	Min         float64 `json:"min"`
+	Max         float64 `json:"max"`
+	Provisional bool    `json:"provisional"`
+}
+
+// Indicator is an ADVISORY sustained-regression signal.
+type Indicator struct {
+	Group    string    `json:"group"`
+	Metric   string    `json:"metric"`
+	Baseline float64   `json:"baselineMedian"`
+	Recent   []float64 `json:"recent"`
+	Ratio    float64   `json:"ratio"`
+}
+
+// GroupStats summarises one class of equivalent executions.
+type GroupStats struct {
+	Key          string          `json:"key"`
+	Workflow     string          `json:"workflow"`
+	Class        string          `json:"class"`
+	JobSet       string          `json:"jobSet"`
+	Total        int             `json:"total"`
+	ByConclusion map[string]int  `json:"byConclusion"`
+	Reruns       int             `json:"reruns"`
+	Eligible     int             `json:"eligible"`
+	UnknownEv    int             `json:"evidenceUnknown"`
+	Metrics      map[string]Stat `json:"metrics"`
+}
+
+// AuditRun is one scheduled audit execution.
+type AuditRun struct {
+	RunID      int64  `json:"runId"`
+	CreatedAt  string `json:"createdAt"`
+	Conclusion string `json:"conclusion"`
+	Audit      string `json:"audit"`
+	Reference  string `json:"referenceJob"`
+	Compare    string `json:"compareJob"`
+}
+
+// AuditFreshness says whether the recurring equivalence audit is current.
+type AuditFreshness struct {
+	Workflow   string     `json:"workflow"`
+	Introduced string     `json:"introduced"`
+	MaxAgeDays int        `json:"maxAgeDays"`
+	State      string     `json:"state"` // passed | pending-first | failed | stale | missing
+	Detail     string     `json:"detail"`
+	LastPassed *AuditRun  `json:"lastPassed"`
+	AgeDays    float64    `json:"ageDays"`
+	Expected   int        `json:"expectedSinceIntroduced"`
+	Observed   int        `json:"observedSinceIntroduced"`
+	Runs       []AuditRun `json:"runs"`
+}
+
+// failing reports the audit states that fail the trend: an equivalence check
+// that failed, went stale, or never ran is a correctness signal, not advice.
+func (a AuditFreshness) failing() bool {
+	return a.State == "failed" || a.State == "stale" || a.State == "missing"
+}
+
+// TrendReport is the periodic summary.
+type TrendReport struct {
+	Schema      string         `json:"schema"`
+	GeneratedAt string         `json:"generatedAt"`
+	Collector   Collector      `json:"collector"`
+	Baseline    string         `json:"baselineStatus"`
+	Groups      []GroupStats   `json:"groups"`
+	Indicators  []Indicator    `json:"sustainedRegressions"`
+	Audit       AuditFreshness `json:"audit"`
+	Samples     []SampleRow    `json:"samples"`
+	Unknowns    []string       `json:"unknowns"`
+}
+
+// SampleRow keeps every observed execution visible, including the ones not
+// counted: failures, cancellations and re-runs are listed, never dropped.
+type SampleRow struct {
+	Group      string   `json:"group"`
+	RunID      int64    `json:"runId"`
+	Attempt    int      `json:"attempt"`
+	Event      string   `json:"event"`
+	Conclusion string   `json:"conclusion"`
+	CreatedAt  string   `json:"createdAt"`
+	Counted    bool     `json:"counted"`
+	Why        string   `json:"whyNotCounted,omitempty"`
+	Source     string   `json:"source"`
+	Elapsed    *float64 `json:"elapsedToAggregateSeconds"`
+	Runner     float64  `json:"runnerMinutes"`
+}
+
+// metricValues extracts the compared metrics; absent values are simply absent.
+func metricValues(r RunReport) map[string]float64 {
+	m := map[string]float64{"runnerMinutes": r.Timing.RunnerMinutes}
+	if r.Timing.ElapsedToAggregate != nil {
+		m["elapsedToAggregateSeconds"] = *r.Timing.ElapsedToAggregate
+	}
+	if r.Timing.ElapsedToRaceVerdict != nil {
+		m["elapsedToRaceVerdictSeconds"] = *r.Timing.ElapsedToRaceVerdict
+	}
+	if r.Race != nil && len(r.Race.Shards) > 0 {
+		var hi float64
+		for _, s := range r.Race.Shards {
+			hi = math.Max(hi, s.Test)
+		}
+		m["maxShardTestSeconds"] = hi
+		m["laneSeconds"] = r.Race.Lane.Seconds
+		m["shardMaxOverMean"] = r.Race.Imbalance.MaxOverMean
+	}
+	return m
+}
+
+func groupKeyOf(r RunReport) string {
+	return r.Run.WorkflowPath + "|" + r.Class + "|" + r.JobSet.Key
+}
+
+// countedWhy returns "" when a sample may enter statistics, else the reason.
+func countedWhy(s Sample) string {
+	r := s.Report
+	switch {
+	case r.Run.Status != "completed":
+		return "not completed"
+	case r.Run.Rerun:
+		return "re-run attempt (partial job set)"
+	case r.Run.Conclusion != "success":
+		return "conclusion " + r.Run.Conclusion
+	case len(r.Problems) > 0:
+		return "contradictory evidence"
+	}
+	return ""
+}
+
+func stat(vals []float64, minSamples int) Stat {
+	s := append([]float64(nil), vals...)
+	sort.Float64s(s)
+	st := Stat{N: len(s), Provisional: len(s) < minSamples}
+	if len(s) == 0 {
+		return st
+	}
+	st.Median, st.Min, st.Max = median(s), s[0], s[len(s)-1]
+	rank := int(math.Ceil(0.9*float64(len(s)))) - 1
+	st.P90 = s[rank]
+	return st
+}
+
+// buildTrend is pure: samples + baseline + audit in, report out.
+func buildTrend(samples []Sample, b Baseline, audit AuditFreshness, now time.Time) TrendReport {
+	tr := TrendReport{Schema: trendReportSchema, GeneratedAt: now.UTC().Format(time.RFC3339), Baseline: b.Status, Audit: audit, Unknowns: []string{}}
+	sort.SliceStable(samples, func(i, j int) bool { return samples[i].Report.Run.CreatedAt > samples[j].Report.Run.CreatedAt })
+	groups := map[string]*GroupStats{}
+	eligible := map[string][]RunReport{}
+	for sI := range samples {
+		s := &samples[sI]
+		r := s.Report
+		k := groupKeyOf(r)
+		g := groups[k]
+		if g == nil {
+			g = &GroupStats{Key: k, Workflow: r.Run.WorkflowPath, Class: r.Class, JobSet: r.JobSet.Key, ByConclusion: map[string]int{}, Metrics: map[string]Stat{}}
+			groups[k] = g
+		}
+		g.Total++
+		concl := r.Run.Conclusion
+		if concl == "" {
+			concl = r.Run.Status
+		}
+		g.ByConclusion[concl]++
+		if r.Run.Rerun {
+			g.Reruns++
+		}
+		if s.Source != "per-run-report" || r.Evidence.Verdict == "missing" {
+			g.UnknownEv++
+		}
+		why := countedWhy(*s)
+		row := SampleRow{Group: k, RunID: r.Run.RunID, Attempt: r.Run.Attempt, Event: r.Run.Event, Conclusion: concl,
+			CreatedAt: r.Run.CreatedAt, Counted: why == "", Why: why, Source: s.Source,
+			Elapsed: r.Timing.ElapsedToAggregate, Runner: r.Timing.RunnerMinutes}
+		tr.Samples = append(tr.Samples, row)
+		if why == "" && len(eligible[k]) < b.MaxSamples {
+			eligible[k] = append(eligible[k], r)
+		}
+	}
+	keys := make([]string, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		g := groups[k]
+		g.Eligible = len(eligible[k])
+		perMetric := map[string][]float64{}
+		for rI := range eligible[k] { // newest first
+			r := &eligible[k][rI]
+			for m, v := range metricValues(*r) {
+				perMetric[m] = append(perMetric[m], v)
+			}
+		}
+		for m, vals := range perMetric {
+			g.Metrics[m] = stat(vals, b.MinSamples)
+		}
+		tr.Indicators = append(tr.Indicators, regressions(k, perMetric, b)...)
+		tr.Groups = append(tr.Groups, *g)
+	}
+	if b.Status != "reviewed" {
+		tr.Unknowns = append(tr.Unknowns, "baseline is provisional: no performance targets exist yet, so no regression can be asserted; statistics below are provisional until each group has "+fmt.Sprint(b.MinSamples)+" counted samples and a person reviews them")
+	}
+	return tr
+}
+
+// regressions: a metric regresses when the `consecutive` newest counted
+// samples ALL exceed the reviewed median by the ratio. Advisory only.
+func regressions(key string, perMetric map[string][]float64, b Baseline) []Indicator {
+	if b.Status != "reviewed" {
+		return nil
+	}
+	ref, ok := b.Groups[key]
+	if !ok {
+		return nil
+	}
+	var out []Indicator
+	metrics := make([]string, 0, len(ref))
+	for m := range ref {
+		metrics = append(metrics, m)
+	}
+	sort.Strings(metrics)
+	for _, m := range metrics {
+		vals, base := perMetric[m], ref[m].Median
+		if base <= 0 || len(vals) < b.Regression.Consecutive {
+			continue
+		}
+		recent := vals[:b.Regression.Consecutive]
+		all := true
+		for _, v := range recent {
+			if v <= base*b.Regression.Ratio {
+				all = false
+				break
+			}
+		}
+		if all {
+			out = append(out, Indicator{Group: key, Metric: m, Baseline: base, Recent: append([]float64(nil), recent...), Ratio: b.Regression.Ratio})
+		}
+	}
+	return out
+}
+
+// auditFreshness judges the recurring audit from its scheduled runs (newest
+// first). A run passes only when the gate concluded success AND both audit jobs
+// executed and succeeded AND, when the collector's report exists, the report
+// read the comparison as passed with consistent identities.
+func auditFreshness(runs []Sample, b Baseline, now time.Time) AuditFreshness {
+	af := AuditFreshness{Workflow: b.Audit.Workflow, Introduced: b.Audit.Introduced, MaxAgeDays: b.Audit.MaxAgeDays}
+	intro, _ := time.Parse("2006-01-02", b.Audit.Introduced)
+	af.Expected = int(now.Sub(intro).Hours() / (24 * 7))
+	var latestCompleted *AuditRun
+	for sI := range runs {
+		s := &runs[sI]
+		r := s.Report
+		ar := AuditRun{RunID: r.Run.RunID, CreatedAt: r.Run.CreatedAt, Conclusion: r.Run.Conclusion,
+			Audit: r.Evidence.Audit.State, Reference: r.Evidence.Audit.ReferenceJob, Compare: r.Evidence.Audit.CompareJob}
+		af.Runs = append(af.Runs, ar)
+		if created, ok := parseTime(r.Run.CreatedAt); ok && !created.Before(intro) {
+			af.Observed++
+		}
+		if r.Run.Status != "completed" {
+			continue
+		}
+		if latestCompleted == nil {
+			latestCompleted = &af.Runs[len(af.Runs)-1]
+		}
+		if af.LastPassed == nil && auditRunPassed(*s) {
+			af.LastPassed = &af.Runs[len(af.Runs)-1]
+		}
+	}
+	grace := intro.Add(time.Duration(b.Audit.MaxAgeDays) * 24 * time.Hour)
+	switch {
+	case latestCompleted == nil && now.Before(grace):
+		af.State, af.Detail = "pending-first", "no scheduled audit has completed yet; within the grace period after introduction"
+	case latestCompleted == nil:
+		af.State, af.Detail = "missing", "no scheduled audit has completed since introduction"
+	case af.LastPassed == nil || af.LastPassed.RunID != latestCompleted.RunID:
+		af.State = "failed"
+		af.Detail = fmt.Sprintf("the latest scheduled audit (run %d) did not pass: conclusion %s, audit %s, reference %s, compare %s",
+			latestCompleted.RunID, latestCompleted.Conclusion, latestCompleted.Audit, latestCompleted.Reference, latestCompleted.Compare)
+	default:
+		created, _ := parseTime(af.LastPassed.CreatedAt)
+		af.AgeDays = math.Round(now.Sub(created).Hours()/24*10) / 10
+		af.State, af.Detail = "passed", fmt.Sprintf("run %d passed %.1f days ago", af.LastPassed.RunID, af.AgeDays)
+		if af.AgeDays > float64(b.Audit.MaxAgeDays) {
+			af.State = "stale"
+			af.Detail = fmt.Sprintf("the last passing scheduled audit (run %d) is %.1f days old, over the %d-day limit", af.LastPassed.RunID, af.AgeDays, b.Audit.MaxAgeDays)
+		}
+	}
+	return af
+}
+
+func auditRunPassed(s Sample) bool {
+	r := s.Report
+	a := r.Evidence.Audit
+	if r.Run.Conclusion != "success" || a.ReferenceJob != "success" || a.CompareJob != "success" {
+		return false
+	}
+	if s.Source == "per-run-report" {
+		return a.State == "passed" && len(r.Problems) == 0
+	}
+	// Metadata-only: the comparison was not read by this reporter, so the
+	// pass rests on the gate's own verdict, which requires both audit jobs.
+	return true
+}
+
+type trendOpts struct {
+	repo         string
+	workflows    []string
+	perEvent     int
+	baselinePath string
+	outDir       string
+	summary      string
+	now          time.Time
+	collector    Collector
+}
+
+const reportArtifactPrefix = "ci-run-report-"
+
+func reportArtifactName(runID int64, attempt int) string {
+	return fmt.Sprintf("%s%d-%d", reportArtifactPrefix, runID, attempt)
+}
+
+// loadSample prefers the collector's retained per-run report; without one it
+// measures the run from metadata alone and says so.
+func loadSample(ctx context.Context, c *ghClient, repo string, run apiRun) (Sample, error) {
+	arts, err := c.artifactsNamed(ctx, repo, reportArtifactName(run.ID, run.RunAttempt))
+	if err == nil {
+		for _, a := range arts {
+			if a.Expired {
+				continue
+			}
+			members, err := c.artifactMembers(ctx, repo, a, map[string]bool{"report.json": true})
+			if err != nil {
+				continue
+			}
+			var rep RunReport
+			if json.Unmarshal(members["report.json"], &rep) == nil && rep.Schema == runReportSchema && rep.Run.RunID == run.ID && rep.Run.Attempt == run.RunAttempt {
+				return Sample{Report: rep, Source: "per-run-report"}, nil
+			}
+		}
+	}
+	jobs, err := c.jobs(ctx, repo, run.ID, run.RunAttempt)
+	if err != nil {
+		return Sample{}, err
+	}
+	rep := Analyze(run, jobs, runEvidence{Notes: []string{"no retained per-run report: evidence artifacts were not read"}})
+	return Sample{Report: rep, Source: "metadata-only"}, nil
+}
+
+// trendEvents are listed separately for every workflow; the scheduled audit
+// is listed on its own (it also decides audit freshness).
+var trendEvents = []string{"pull_request", "push", "workflow_dispatch"}
+
+// loadRuns lists the newest runs of one workflow for one event and reads each
+// as a sample; a run that cannot be read is noted, never silently dropped.
+func loadRuns(ctx context.Context, c *ghClient, repo, wf, event string, limit int) ([]Sample, []string, error) {
+	runs, err := c.workflowRuns(ctx, repo, wf, event, limit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list %s %s runs: %w", wf, event, err)
+	}
+	var out []Sample
+	var notes []string
+	for runI := range runs {
+		run := &runs[runI]
+		s, err := loadSample(ctx, c, repo, *run)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("%s run %d unreadable: %v", event, run.ID, err))
+			continue
+		}
+		out = append(out, s)
+	}
+	return out, notes, nil
+}
+
+func collectTrend(ctx context.Context, c *ghClient, o trendOpts) (TrendReport, error) {
+	b, err := loadBaseline(o.baselinePath)
+	if err != nil {
+		return TrendReport{}, err
+	}
+	var samples []Sample
+	var unknowns []string
+	// Listed PER EVENT: a workflow-wide "newest N" is dominated by whichever
+	// event is most frequent, so ~240 pull-request runs a week would push the
+	// main-push and dispatch executions out of the window entirely.
+	for _, wf := range o.workflows {
+		for _, ev := range trendEvents {
+			got, notes, err := loadRuns(ctx, c, o.repo, wf, ev, o.perEvent)
+			if err != nil {
+				return TrendReport{}, err
+			}
+			samples, unknowns = append(samples, got...), append(unknowns, notes...)
+		}
+	}
+	auditSamples, notes, err := loadRuns(ctx, c, o.repo, b.Audit.Workflow, "schedule", 30)
+	if err != nil {
+		return TrendReport{}, err
+	}
+	unknowns = append(unknowns, notes...)
+	// Scheduled audits are also executions of their workflow: they get a trend
+	// group of their own, besides deciding the audit's freshness.
+	samples = append(samples, auditSamples...)
+	tr := buildTrend(samples, b, auditFreshness(auditSamples, b, o.now), o.now)
+	tr.Collector = o.collector
+	tr.Unknowns = append(tr.Unknowns, unknowns...)
+	return tr, writeTrendOutputs(tr, o)
+}
+
+func writeTrendOutputs(tr TrendReport, o trendOpts) error {
+	if o.outDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(o.outDir, 0o750); err != nil {
+		return fmt.Errorf("out dir: %w", err)
+	}
+	md := renderTrend(tr)
+	if err := writeJSON(o.outDir+"/trend.json", tr); err != nil {
+		return err
+	}
+	if err := os.WriteFile(o.outDir+"/summary.md", []byte(md), 0o600); err != nil {
+		return fmt.Errorf("write summary.md: %w", err)
+	}
+	return appendSummary(o.summary, md)
+}
+
+func shortWorkflow(p string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(p, ".github/workflows/"), ".yml")
+}
+
+func fmtStat(s Stat, ok bool) string {
+	if !ok || s.N == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f / %.0f", s.Median, s.P90)
+}
+
+func renderTrend(tr TrendReport) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## CI performance and evidence trend — %s\n\n", tr.GeneratedAt)
+	fmt.Fprintf(&b, "Baseline: **%s**. Statistics are over counted executions only (completed, first attempt, success, consistent evidence); every other execution is listed below with the reason. Elapsed is wall clock; runner-minutes are summed job time, not a bill.\n\n", tr.Baseline)
+	b.WriteString("| workflow | class | job set | executions (by conclusion) | re-runs | counted | evidence unknown | elapsed to aggregate s, median / p90 | race verdict s, median / p90 | runner-min median | status |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
+	for _, g := range tr.Groups {
+		conc := make([]string, 0, len(g.ByConclusion))
+		for k, v := range g.ByConclusion {
+			conc = append(conc, fmt.Sprintf("%s %d", k, v))
+		}
+		sort.Strings(conc)
+		e, ok1 := g.Metrics["elapsedToAggregateSeconds"]
+		rv, ok2 := g.Metrics["elapsedToRaceVerdictSeconds"]
+		rm, ok3 := g.Metrics["runnerMinutes"]
+		runner := "—"
+		if ok3 && rm.N > 0 {
+			runner = fmt.Sprintf("%.1f", rm.Median)
+		}
+		status := "provisional"
+		if e.N >= 10 && !e.Provisional {
+			status = "enough samples to review"
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %d (%s) | %d | %d | %d | %s | %s | %s | %s |\n",
+			shortWorkflow(g.Workflow), g.Class, g.JobSet, g.Total, strings.Join(conc, ", "), g.Reruns, g.Eligible, g.UnknownEv,
+			fmtStat(e, ok1), fmtStat(rv, ok2), runner, status)
+	}
+	a := tr.Audit
+	fmt.Fprintf(&b, "\n### Weekly same-SHA equivalence audit: **%s**\n\n%s. Scheduled audits observed since %s: %d of %d expected.\n",
+		a.State, a.Detail, a.Introduced, a.Observed, a.Expected)
+	if len(tr.Indicators) > 0 {
+		b.WriteString("\n### Sustained regressions (advisory)\n\n")
+		for _, in := range tr.Indicators {
+			fmt.Fprintf(&b, "- `%s` %s: the %d newest counted samples %v all exceed the reviewed median %.0f × %.2f\n", in.Group, in.Metric, len(in.Recent), in.Recent, in.Baseline, in.Ratio)
+		}
+	}
+	var excluded []string
+	for sI := range tr.Samples {
+		s := &tr.Samples[sI]
+		if !s.Counted {
+			excluded = append(excluded, fmt.Sprintf("run %d attempt %d (%s, %s): %s", s.RunID, s.Attempt, shortWorkflow(strings.SplitN(s.Group, "|", 2)[0]), s.Event, s.Why))
+		}
+	}
+	writeList(&b, "Not counted (visible, never dropped)", excluded)
+	writeList(&b, "Unknown", tr.Unknowns)
+	return b.String()
+}
