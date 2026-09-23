@@ -31,6 +31,19 @@ func withGo(ev runEvidence, version string) runEvidence {
 	return ev
 }
 
+// withImage sets the runner image every shard reported; image "" leaves one
+// shard on a different image (mixed).
+func withImage(ev runEvidence, image, version string) runEvidence {
+	metas := map[int]*evShardMeta{}
+	for i, m := range ev.ShardMetas {
+		c := *m
+		c.RunnerImage, c.RunnerImageVersion = image, version
+		metas[i] = &c
+	}
+	ev.ShardMetas = metas
+	return ev
+}
+
 // dropShard removes one root-shard job, as a 3-shard engine would schedule.
 func dropShard(jobs []apiJob) []apiJob {
 	var out []apiJob
@@ -46,10 +59,16 @@ func dropShard(jobs []apiJob) []apiJob {
 // configuration that was not observed is its own, unverified cohort.
 func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 	fx, ev := qaAuditRun(t)
+	ev = withImage(ev, "ubuntu24", "20260915.1")
 	gh := "GitHub Actions"
 	base := Analyze(fx.Run, hosted(fx.Jobs, "ubuntu-latest", gh), ev)
-	if !base.Cohort.Verified || base.Cohort.Key != "platform=ubuntu-latest@GitHub Actions;shards=4;toolchain=go1.26 linux/amd64" {
+	if !base.Cohort.Verified || base.Cohort.Key != "platform=ubuntu-latest@GitHub Actions;image=ubuntu24;shards=4;toolchain=go1.26 linux/amd64" {
 		t.Fatalf("base cohort %+v", base.Cohort)
+	}
+	mixedImages := func(e runEvidence) runEvidence {
+		e = withImage(e, "ubuntu24", "20260915.1")
+		e.ShardMetas[2].RunnerImage = "ubuntu26"
+		return e
 	}
 	arm := ev
 	arm.ShardMetas = map[int]*evShardMeta{}
@@ -69,6 +88,10 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 		{"another shard count", dropShard(hosted(fx.Jobs, "ubuntu-latest", gh)), ev, true},
 		{"another Go release line", hosted(fx.Jobs, "ubuntu-latest", gh), withGo(ev, "go1.27.0"), true},
 		{"another GOARCH", hosted(fx.Jobs, "ubuntu-latest", gh), arm, true},
+		// The label ubuntu-latest moves to a new image under one name.
+		{"same label, another runner image", hosted(fx.Jobs, "ubuntu-latest", gh), withImage(ev, "ubuntu26", "20261020.1"), true},
+		{"shards on different images", hosted(fx.Jobs, "ubuntu-latest", gh), mixedImages(ev), false},
+		{"image not recorded (artifacts from before it was)", hosted(fx.Jobs, "ubuntu-latest", gh), withImage(ev, "", ""), false},
 		{"toolchain not observed (metadata only)", hosted(fx.Jobs, "ubuntu-latest", gh), runEvidence{}, false},
 		{"platform not observed", fx.Jobs, ev, false},
 	} {
@@ -80,7 +103,7 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 			if r.Cohort.Verified != tc.wantV {
 				t.Errorf("cohort %+v verified=%v, want %v", r.Cohort, r.Cohort.Verified, tc.wantV)
 			}
-			if !tc.wantV && !strings.Contains(r.Cohort.Key, "=unknown") {
+			if !tc.wantV && !strings.Contains(r.Cohort.Key, "=unknown") && !strings.Contains(r.Cohort.Key, "=mixed:") {
 				t.Errorf("an unobserved component must read unknown, never a guessed value: %q", r.Cohort.Key)
 			}
 		})
@@ -91,12 +114,13 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 // and a Go patch release land in the same cohort as the base.
 func TestCohort_ComparableRunsStayGrouped(t *testing.T) {
 	fx, ev := qaAuditRun(t)
+	ev = withImage(ev, "ubuntu24", "20260915.1")
 	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
 	base := Analyze(fx.Run, jobs, ev)
 
 	other := fx.Run
 	other.ID, other.HeadSHA = fx.Run.ID+1, strings.Repeat("a", 40)
-	oev := withGo(ev, "go1.26.7")
+	oev := withImage(withGo(ev, "go1.26.7"), "ubuntu24", "20260922.1") // next week's image build
 	v := *ev.Verdict
 	v.Commit = other.HeadSHA
 	oev.Verdict = &v
@@ -118,8 +142,8 @@ func TestCohort_ComparableRunsStayGrouped(t *testing.T) {
 	if groupKeyOf(r) != groupKeyOf(base) {
 		t.Fatalf("comparable runs split:\n %s\n %s", groupKeyOf(base), groupKeyOf(r))
 	}
-	if r.Toolchain.Go != "go1.26.7" || base.Toolchain.Go != "go1.26.6" {
-		t.Error("the exact version stays in the report even though the cohort keeps the release line")
+	if r.Toolchain.Go != "go1.26.7" || base.Toolchain.Go != "go1.26.6" || r.Toolchain.RunnerImageVersion != "20260922.1" {
+		t.Error("the exact Go and image versions stay in the report even though the cohort keeps only the release line and image OS")
 	}
 
 	// And the trend pools them: one group, two counted samples, with the
@@ -138,6 +162,7 @@ func TestCohort_ComparableRunsStayGrouped(t *testing.T) {
 // verified cohort's statistics — they are pooled separately and labelled.
 func TestCohort_TrendKeepsUnknownApart(t *testing.T) {
 	fx, ev := qaAuditRun(t)
+	ev = withImage(ev, "ubuntu24", "20260915.1")
 	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
 	verified := Analyze(fx.Run, jobs, ev)
 	meta := Analyze(fx.Run, jobs, runEvidence{})
@@ -161,6 +186,7 @@ func TestCohort_TrendKeepsUnknownApart(t *testing.T) {
 // the current key shape.
 func TestBaseline_ReviewedGroupsMustBeVerifiedCohorts(t *testing.T) {
 	fx, ev := qaAuditRun(t)
+	ev = withImage(ev, "ubuntu24", "20260915.1")
 	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
 	good := groupKeyOf(Analyze(fx.Run, jobs, ev))
 	for _, tc := range []struct {
@@ -168,8 +194,9 @@ func TestBaseline_ReviewedGroupsMustBeVerifiedCohorts(t *testing.T) {
 		ok  bool
 	}{
 		{good, true},
-		{groupKeyOf(Analyze(fx.Run, jobs, runEvidence{})), false},        // toolchain unknown
-		{qaWorkflowPath + "|" + classManualAudit + "|race+audit", false}, // pre-cohort key shape
+		{groupKeyOf(Analyze(fx.Run, jobs, runEvidence{})), false},         // toolchain unknown
+		{groupKeyOf(Analyze(fx.Run, jobs, withImage(ev, "", ""))), false}, // image unknown
+		{qaWorkflowPath + "|" + classManualAudit + "|race+audit", false},  // pre-cohort key shape
 	} {
 		b := testBaseline("reviewed")
 		b.ReviewedBy, b.ReviewedAt = "someone", "2026-10-01"

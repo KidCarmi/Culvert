@@ -225,6 +225,20 @@ type ShardMeta struct {
 	WorkDir      string      `json:"workDir"`
 	Chunks       []ChunkMeta `json:"chunks"`
 	TestSeconds  float64     `json:"testSeconds"`
+	// RunnerImage and RunnerImageVersion are the hosted runner image this
+	// shard ran on (the runner's ImageOS / ImageVersion, e.g. ubuntu24 /
+	// 20260915.1). A moving label like ubuntu-latest changes image under
+	// the same name, so the CI reporter needs the image itself to keep
+	// measurements from different platforms apart. Recorded only: never a
+	// verdict input, and empty off a hosted runner.
+	RunnerImage        string `json:"runnerImage,omitempty"`
+	RunnerImageVersion string `json:"runnerImageVersion,omitempty"`
+}
+
+// runnerImage reads the hosted runner image identity from the environment the
+// runner provides.
+func runnerImage(getenv func(string) string) (image, version string) {
+	return strings.TrimSpace(getenv("ImageOS")), strings.TrimSpace(getenv("ImageVersion"))
 }
 
 // ChunkMeta records one process.
@@ -271,6 +285,7 @@ func cmdRunShard(args []string, stdout io.Writer) error {
 		return err
 	}
 	meta.Shard = *shard
+	meta.RunnerImage, meta.RunnerImageVersion = runnerImage(os.Getenv)
 	if err := os.MkdirAll(*outDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}

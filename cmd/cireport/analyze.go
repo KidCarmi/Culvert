@@ -497,7 +497,10 @@ var goReleaseLineRE = regexp.MustCompile(`^(go\d+\.\d+)(?:\.\d+)?$`)
 // "unknown" when it was not. Nothing is filled in from what the workflow
 // files say should have happened.
 func cohortOf(views []jobView, rep *RunReport) Cohort {
-	c := Cohort{Platform: observedPlatform(views), Shards: scheduledShards(views, rep), Toolchain: cohortUnknown}
+	c := Cohort{Platform: observedPlatform(views), Image: rep.cohortImage, Shards: scheduledShards(views, rep), Toolchain: cohortUnknown}
+	if c.Image == "" {
+		c.Image = cohortUnknown
+	}
 	if tc := rep.Toolchain; tc != nil && tc.Go != "" && tc.GOOS != "" && tc.GOARCH != "" {
 		line := tc.Go
 		if m := goReleaseLineRE.FindStringSubmatch(tc.Go); m != nil {
@@ -513,8 +516,12 @@ func cohortOf(views []jobView, rep *RunReport) Cohort {
 	case c.Toolchain == cohortUnknown:
 		rep.Unknowns = append(rep.Unknowns, "toolchain not observed (no shard meta.json read): this run's cohort is unverified")
 	}
-	c.Verified = c.Platform != cohortUnknown && c.Toolchain != cohortUnknown
-	c.Key = "platform=" + c.Platform + ";shards=" + c.Shards + ";toolchain=" + c.Toolchain
+	if c.Image == cohortUnknown {
+		rep.Unknowns = append(rep.Unknowns, "runner image not observed (no shard reported ImageOS): this run's cohort is unverified")
+	}
+	c.Verified = c.Platform != cohortUnknown && c.Toolchain != cohortUnknown &&
+		c.Image != cohortUnknown && !strings.HasPrefix(c.Image, "mixed:")
+	c.Key = "platform=" + c.Platform + ";image=" + c.Image + ";shards=" + c.Shards + ";toolchain=" + c.Toolchain
 	return c
 }
 
@@ -701,10 +708,35 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("shard %d reports toolchain %v, shard %d reports %v", i, cur, idx[0], *tc))
 		}
 	}
+	images := map[string]bool{}
+	for _, i := range idx {
+		if img := ev.ShardMetas[i].RunnerImage; img != "" {
+			images[img] = true
+		}
+	}
+	switch names := sortedKeys(images); {
+	case len(names) == 1:
+		rep.cohortImage = names[0]
+		tc.RunnerImage = names[0]
+		if v0 := ev.ShardMetas[idx[0]].RunnerImageVersion; v0 != "" {
+			tc.RunnerImageVersion = v0
+		}
+	case len(names) > 1:
+		rep.cohortImage = "mixed:" + strings.Join(names, "+")
+	}
 	rep.Toolchain = tc
 	if len(ev.ShardMetas) != len(v.Shards) {
 		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("toolchain read from %d of %d shards", len(ev.ShardMetas), len(v.Shards)))
 	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func short(sha string) string {

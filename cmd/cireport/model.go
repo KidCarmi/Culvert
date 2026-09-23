@@ -35,6 +35,9 @@ type RunReport struct {
 	// Problems are contradictions in the evidence (identities that disagree).
 	// They make the evidence untrusted, never the run green or red.
 	Problems []string `json:"problems"`
+	// cohortImage carries the shards' runner image from the evidence check
+	// to the cohort; not serialised (the cohort and toolchain carry it).
+	cohortImage string
 }
 
 // Collector identifies the reporting execution, so a report can be traced to
@@ -102,6 +105,10 @@ type Toolchain struct {
 	Go     string `json:"go"`
 	GOOS   string `json:"goos"`
 	GOARCH string `json:"goarch"`
+	// RunnerImage / RunnerImageVersion as the shards reported them, when
+	// they agree; the version changes weekly and is not a cohort component.
+	RunnerImage        string `json:"runnerImage,omitempty"`
+	RunnerImageVersion string `json:"runnerImageVersion,omitempty"`
 }
 
 // Cohort is the observed configuration an execution ran under. Executions are
@@ -114,6 +121,12 @@ type Cohort struct {
 	// from GitHub's job metadata. The hosted image version behind a moving
 	// label (ubuntu-latest) is not exposed by the API and is not part of it.
 	Platform string `json:"platform"`
+	// Image is the hosted runner image OS the race shards reported
+	// (ImageOS, e.g. ubuntu24): the label ubuntu-latest moves between
+	// images under one name. "unknown" when no shard reported it; "mixed:…"
+	// when shards of one run landed on different images (never verified).
+	// The weekly image version is recorded per report, not keyed.
+	Image string `json:"image"`
 	// Shards is the sharded race engine's root shard count, from the shard
 	// jobs GitHub scheduled; "none" when the engine did not run.
 	Shards string `json:"shards"`

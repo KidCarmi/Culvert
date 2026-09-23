@@ -57,6 +57,10 @@ type evShardMeta struct {
 	GoVersion string `json:"goVersion"`
 	GOOS      string `json:"goos"`
 	GOARCH    string `json:"goarch"`
+	// RunnerImage is the hosted image the shard ran on (ImageOS); empty in
+	// artifacts from before it was recorded.
+	RunnerImage        string `json:"runnerImage"`
+	RunnerImageVersion string `json:"runnerImageVersion"`
 }
 
 type evComparison struct {

@@ -22,8 +22,8 @@ func testBaseline(status string) Baseline {
 func f64(v float64) *float64 { return &v }
 
 // testCohort is a fully observed configuration for synthetic samples.
-var testCohort = Cohort{Platform: "ubuntu-latest@GitHub Actions", Shards: "4", Toolchain: "go1.26 linux/amd64", Verified: true,
-	Key: "platform=ubuntu-latest@GitHub Actions;shards=4;toolchain=go1.26 linux/amd64"}
+var testCohort = Cohort{Platform: "ubuntu-latest@GitHub Actions", Image: "ubuntu24", Shards: "4", Toolchain: "go1.26 linux/amd64", Verified: true,
+	Key: "platform=ubuntu-latest@GitHub Actions;image=ubuntu24;shards=4;toolchain=go1.26 linux/amd64"}
 
 // sample builds a report in one group with the given outcome and timing.
 func sample(id int64, day int, concl string, attempt int, elapsed float64, class, key string) Sample {
