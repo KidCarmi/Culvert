@@ -19,9 +19,11 @@ import (
 // with the same seed and the same package scope, for one verdict.
 //
 // Stage 2B gives it ONE owner per event rather than deleting a job, because the
-// two workflows do not run on the same events. qa-gate.yml has no tag trigger
-// and no schedule, so deleting `tests-race` outright would leave version tags,
-// the weekly cron and Security-only dispatches with NO race evidence at all.
+// two workflows do not run on the same events. qa-gate.yml has no tag trigger,
+// so deleting `tests-race` outright would leave version tags, Security's weekly
+// cron and Security-only dispatches with NO race evidence at all. (Stage 6B
+// gave QA a weekly schedule of its own — the equivalence audit, on another day
+// and not Security's evidence — which changes none of this.)
 //
 // Two properties have to hold together, and this file pins both:
 //
@@ -101,7 +103,7 @@ func TestSecurityRace_OwnershipMatrix(t *testing.T) {
 		{"version tag push", "push", "refs/tags/v1.2.3", true,
 			"qa-gate.yml has NO tag trigger, so nothing else runs the suite for a tag"},
 		{"schedule", "schedule", "refs/heads/main", true,
-			"the weekly cron's ref is main, but QA has no schedule — keying on the branch would silently suppress it"},
+			"the weekly cron's ref is main, and Security's scan must carry its own race evidence — keying on the branch would silently suppress it"},
 		{"manual dispatch on main", "workflow_dispatch", "refs/heads/main", true,
 			"a Security-only dispatch must still be able to run the suite on main"},
 		{"manual dispatch on a branch", "workflow_dispatch", "refs/heads/some-branch", true,
