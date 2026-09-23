@@ -463,6 +463,26 @@ jobs:
         # that single test with -v so a schema break is called out loudly.
         run: go test -v -run TestConfig_TOTPLastCounter_PersistsThroughFile ./...
 
+      - name: Backup archive size bounds hold at production size
+        # The backup/restore archive is part of the operator contract, and its
+        # decompression-bomb bounds are fixed: 256 MiB per entry, 512 MiB in
+        # aggregate (restore.go). The ordinary suite proves the SAME parser
+        # with kilobyte limits plus the production per-entry bound (a header,
+        # no body); the production AGGREGATE bound needs 256 MiB of real body
+        # read before the overflowing header, which costs tens of seconds under
+        # -race, so it runs here, without -race (CI-REDESIGN stage 6A). The
+        # test skips unless the env var is set, so a PASS line is required: a
+        # SKIP, a missing test or any failure fails this job, and with it the
+        # QA gate — a mandatory release-evidence row.
+        # restore_limits_lane_test.go pins this step.
+        env:
+          CULVERT_RESTORE_PRODUCTION_SIZE: "1"
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestReadTarball_ProductionAggregateBound_Integration$' . | tee restore-limits.log
+          grep -q -- '^--- PASS: TestReadTarball_ProductionAggregateBound_Integration ' restore-limits.log \
+            || { echo "::error::the production-size restore aggregate bound did not PASS (skipped or missing)"; exit 1; }
+
   # ─── G. Maintenance Agent (cmd/culvert-maint) ──────────────────────────────
   # The agent is a separate Go module — `go test ./...` from the repo root
   # does NOT descend into nested modules, so its tests would silently fall

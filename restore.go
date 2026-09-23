@@ -67,6 +67,42 @@ const maxRestoreEntryBytes = 256 << 20 // 256 MiB
 // still bounding the aggregate.
 const maxRestoreTotalBytes = 2 * maxRestoreEntryBytes // 512 MiB
 
+// tarballLimits carries the two declared-size bounds readTarballLimited
+// enforces. Production has exactly one value, built from the two constants
+// above inside readTarball on every call — there is no mutable global and no
+// operator setting. The type exists so the regression tests can drive the SAME
+// parsing and enforcement code with kilobyte fixtures instead of hundreds of
+// MiB of generated archive (CI-REDESIGN stage 6A).
+type tarballLimits struct {
+	entry int64 // per-entry declared-size bound
+	total int64 // bound on the running sum of declared sizes
+}
+
+// Scopes a tarballLimitError reports.
+const (
+	tarballLimitEntry = "entry"
+	tarballLimitTotal = "total"
+)
+
+// tarballLimitError is the error readTarballLimited returns when a declared
+// size exceeds a bound. Its text is byte-identical to the messages readTarball
+// returned before the type existed; the structure lets callers and tests tell
+// a limit refusal from any other archive fault (a malformed tar, a truncated
+// body) with errors.As instead of matching text.
+type tarballLimitError struct {
+	Scope    string // tarballLimitEntry or tarballLimitTotal
+	Name     string // the entry whose header crossed the bound
+	Declared int64  // the entry's declared size, or the running total including it
+	Limit    int64  // the bound that was exceeded
+}
+
+func (e *tarballLimitError) Error() string {
+	if e.Scope == tarballLimitEntry {
+		return fmt.Sprintf("restore: tarball entry %q declares %d bytes, exceeding the %d-byte per-entry bound", e.Name, e.Declared, e.Limit)
+	}
+	return fmt.Sprintf("restore: tarball declares %d bytes across entries (at %q), exceeding the %d-byte total bound", e.Declared, e.Name, e.Limit)
+}
+
 // restoreSummary is the data shape printed by printRestoreSummary and
 // returned to tests for assertion.
 type restoreSummary struct {
@@ -292,6 +328,13 @@ func loadAndMaybeDecrypt(path, backupPassphrase string) ([]byte, error) {
 // disk: when the file is encrypted, decryption produces an in-memory
 // byte slice that's gunzipped via bytes.Reader.
 func readTarball(path, backupPassphrase string) (map[string][]byte, []string, error) {
+	return readTarballLimited(path, backupPassphrase, tarballLimits{entry: maxRestoreEntryBytes, total: maxRestoreTotalBytes})
+}
+
+// readTarballLimited is readTarball with its two declared-size bounds passed
+// in. Production reaches it only through readTarball, with the fixed
+// constants; see tarballLimits.
+func readTarballLimited(path, backupPassphrase string, lim tarballLimits) (map[string][]byte, []string, error) {
 	blob, err := loadAndMaybeDecrypt(path, backupPassphrase)
 	if err != nil {
 		return nil, nil, err
@@ -320,12 +363,12 @@ func readTarball(path, backupPassphrase string) (map[string][]byte, []string, er
 		// matters before any bytes of the entry body are read. Per-entry alone
 		// is not enough: a hostile archive can split its payload across many
 		// uniquely named entries each under that cap (Codex review, PR #1344).
-		if hdr.Size > maxRestoreEntryBytes {
-			return nil, nil, fmt.Errorf("restore: tarball entry %q declares %d bytes, exceeding the %d-byte per-entry bound", hdr.Name, hdr.Size, maxRestoreEntryBytes)
+		if hdr.Size > lim.entry {
+			return nil, nil, &tarballLimitError{Scope: tarballLimitEntry, Name: hdr.Name, Declared: hdr.Size, Limit: lim.entry}
 		}
 		totalDeclared += hdr.Size
-		if totalDeclared > maxRestoreTotalBytes {
-			return nil, nil, fmt.Errorf("restore: tarball declares %d bytes across entries (at %q), exceeding the %d-byte total bound", totalDeclared, hdr.Name, maxRestoreTotalBytes)
+		if totalDeclared > lim.total {
+			return nil, nil, &tarballLimitError{Scope: tarballLimitTotal, Name: hdr.Name, Declared: totalDeclared, Limit: lim.total}
 		}
 		// Absolute-path guard: tar entries must be relative under the
 		// backup namespace. Reject anything starting with "/" so a
