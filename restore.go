@@ -334,7 +334,7 @@ func readTarball(path, backupPassphrase string) (map[string][]byte, []string, er
 // readTarballLimited is readTarball with its two declared-size bounds passed
 // in. Production reaches it only through readTarball, with the fixed
 // constants; see tarballLimits.
-func readTarballLimited(path, backupPassphrase string, lim tarballLimits) (map[string][]byte, []string, error) {
+func readTarballLimited(path, backupPassphrase string, lim tarballLimits) (files map[string][]byte, order []string, err error) {
 	blob, err := loadAndMaybeDecrypt(path, backupPassphrase)
 	if err != nil {
 		return nil, nil, err
@@ -346,8 +346,7 @@ func readTarballLimited(path, backupPassphrase string, lim tarballLimits) (map[s
 	defer func() { _ = gz.Close() }()
 
 	tr := tar.NewReader(gz)
-	files := map[string][]byte{}
-	var order []string
+	files = map[string][]byte{}
 	var totalDeclared int64
 	for {
 		hdr, err := tr.Next()
