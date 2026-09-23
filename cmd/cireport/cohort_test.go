@@ -177,6 +177,43 @@ func TestCohort_ImageBuildStatedOnlyWhenShardsAgree(t *testing.T) {
 	}
 }
 
+// Every shard's metadata read, but one shard on another release line or
+// architecture: the run is a mixed configuration and never verified, even
+// though the contradiction already keeps it out of the statistics.
+func TestCohort_ShardsDisagreeingOnToolchainAreMixed(t *testing.T) {
+	fx, ev := qaAuditRun(t)
+	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
+	for name, mut := range map[string]func(m *evShardMeta){
+		"another release line": func(m *evShardMeta) { m.GoVersion = "go1.27.0" },
+		"another GOARCH":       func(m *evShardMeta) { m.GOARCH = "arm64" },
+	} {
+		e := withImage(ev, "ubuntu24", "20260915.1")
+		mut(e.ShardMetas[3])
+		r := Analyze(fx.Run, jobs, e)
+		if !strings.HasPrefix(r.Cohort.Toolchain, "mixed:") || r.Cohort.Verified {
+			t.Errorf("%s: cohort %+v, want a mixed, unverified toolchain", name, r.Cohort)
+		}
+		if strings.Contains(reportLogLine(r), "verified=true") {
+			t.Errorf("%s: the log line claims a verified cohort", name)
+		}
+		b := testBaseline("reviewed")
+		b.ReviewedBy, b.ReviewedAt = "someone", "2026-10-01"
+		b.Groups = map[string]map[string]struct {
+			Median float64 `json:"median"`
+		}{groupKeyOf(r): {"elapsedToAggregateSeconds": {Median: 700}}}
+		if validateBaseline(b) == nil {
+			t.Errorf("%s: a reviewed baseline accepted the mixed cohort %q", name, groupKeyOf(r))
+		}
+	}
+	// A patch-only difference is the same release line: comparable, though
+	// the exact-toolchain contradiction is still recorded as a problem.
+	e := withImage(ev, "ubuntu24", "20260915.1")
+	e.ShardMetas[3].GoVersion = "go1.26.7"
+	if r := Analyze(fx.Run, jobs, e); strings.HasPrefix(r.Cohort.Toolchain, "mixed:") || len(r.Problems) == 0 {
+		t.Errorf("patch-only difference: cohort %+v problems %v", r.Cohort, r.Problems)
+	}
+}
+
 // Ordinary change stays comparable: a different commit, different durations
 // and a Go patch release land in the same cohort as the base.
 func TestCohort_ComparableRunsStayGrouped(t *testing.T) {

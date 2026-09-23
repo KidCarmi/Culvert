@@ -2283,12 +2283,14 @@ trend groups by `workflow|class|job set|cohort`:
 - **Complete evidence only.** The image and toolchain count as observed only
   when the `meta.json` of **every** scheduled shard was read and every shard
   reported its image. A shard that was not read may have run elsewhere, and
-  the others do not speak for it (Codex review, PR #1478).
+  the others do not speak for it. Shards that disagree on the Go release
+  line or GOOS/GOARCH make the toolchain `mixed:…`, like the image, and
+  never verified (Codex review, PR #1478).
 - **Unknown stays separate.** A component that was not observed reads
   `unknown` (never a guessed value), forms its own unverified cohort, and the
   baseline loader refuses a reviewed median unless the key parses as exactly
   `platform=…;image=…;shards=…;toolchain=…`, every field is non-empty and
-  observed, and the image is not `mixed:` (Codex review, PR #1478).
+  observed, and no field is `mixed:` (Codex review, PR #1478).
 - **The image build is stated only when all shards agree.** During a
   rollout, shards can share an image OS but not a build; the report then
   leaves the build unstated and says so, and the cohort (keyed on the OS) is
@@ -2445,7 +2447,9 @@ candidate after it.
   13. cohort field names and emptiness unchecked;
   14. one shard's image build presented as the run's;
   15. the attempt queue read only from completed jobs;
-  16. a skipped job's stamp counted as a start.
+  16. a skipped job's stamp counted as a start;
+  17. shards on different toolchain lines verified, or accepted by a
+      reviewed baseline.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback

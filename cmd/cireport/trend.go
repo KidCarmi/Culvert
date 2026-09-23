@@ -114,8 +114,8 @@ func verifiedCohortKey(key string) error {
 			return fmt.Errorf("cohort %q: field %d must be a non-empty %s=", key, i+1, f)
 		case val == cohortUnknown:
 			return fmt.Errorf("cohort %q: %s was not observed; enrich natural runs with on-demand reports first", key, f)
-		case f == "image" && strings.HasPrefix(val, "mixed:"):
-			return fmt.Errorf("cohort %q: shards ran on different images, which is not one configuration", key)
+		case strings.HasPrefix(val, "mixed:"):
+			return fmt.Errorf("cohort %q: shards disagreed on %s, which is not one configuration", key, f)
 		}
 	}
 	return nil

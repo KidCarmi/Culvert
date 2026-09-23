@@ -525,7 +525,13 @@ func cohortOf(views []jobView, rep *RunReport) Cohort {
 		c.Image = cohortUnknown
 		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read from %d of %d scheduled shards: an unread shard may have run another image or toolchain", rep.cohortMetas, n))
 	}
-	if complete {
+	switch {
+	case !complete:
+	case len(rep.cohortToolchains) > 1:
+		// Shards disagreed on the release line or platform: the run did not
+		// execute under one configuration, whichever shard is listed first.
+		c.Toolchain = "mixed:" + strings.Join(rep.cohortToolchains, "+")
+	default:
 		c.Toolchain = toolchainLine(rep.Toolchain)
 	}
 	switch {
@@ -539,8 +545,8 @@ func cohortOf(views []jobView, rep *RunReport) Cohort {
 	if c.Image == cohortUnknown {
 		rep.Unknowns = append(rep.Unknowns, "runner image not observed (no shard reported ImageOS): this run's cohort is unverified")
 	}
-	c.Verified = c.Platform != cohortUnknown && c.Toolchain != cohortUnknown &&
-		c.Image != cohortUnknown && !strings.HasPrefix(c.Image, "mixed:")
+	c.Verified = c.Platform != cohortUnknown && c.Toolchain != cohortUnknown && c.Image != cohortUnknown &&
+		!strings.HasPrefix(c.Image, "mixed:") && !strings.HasPrefix(c.Toolchain, "mixed:")
 	c.Key = "platform=" + c.Platform + ";image=" + c.Image + ";shards=" + c.Shards + ";toolchain=" + c.Toolchain
 	return c
 }
@@ -741,6 +747,12 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 		}
 	}
 	rep.cohortMetas = len(idx)
+	lines := map[string]bool{}
+	for _, i := range idx {
+		m := ev.ShardMetas[i]
+		lines[toolchainLine(&Toolchain{Go: m.GoVersion, GOOS: m.GOOS, GOARCH: m.GOARCH})] = true
+	}
+	rep.cohortToolchains = sortedKeys(lines)
 	shardImage(ev, idx, tc, rep)
 	rep.Toolchain = tc
 	if len(ev.ShardMetas) != len(v.Shards) {

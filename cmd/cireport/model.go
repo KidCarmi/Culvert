@@ -41,6 +41,9 @@ type RunReport struct {
 	// cohortMetas is how many shard meta.json documents were decoded; the
 	// cohort is verified only when every scheduled shard's was.
 	cohortMetas int
+	// cohortToolchains are the distinct toolchain lines (release line +
+	// GOOS/GOARCH) the shards reported; more than one is a mixed run.
+	cohortToolchains []string
 }
 
 // Collector identifies the reporting execution, so a report can be traced to
