@@ -1709,7 +1709,23 @@ All runs are GitHub-hosted `ubuntu-latest`.
 | Production-size aggregate case in `QA · On-disk contract` (no `-race`) | [35866546559](https://github.com/KidCarmi/Culvert/actions/runs/35866546559), job 107199502354 | `a606f82` | `CULVERT_RESTORE_PRODUCTION_SIZE: 1`; `--- PASS: TestReadTarball_ProductionAggregateBound_Integration (0.79s)`; job green |
 | Same-SHA QA audit (sharded vs unsharded) | same run, `Audit · sharded vs unsharded` | `a606f82` | **Passed.** Root entries 6,381 discovered / 6,381 reference / 6,381 sharded; skips 51 = 51; subtests 3,873 = 3,873 (0 missing, 0 extra); packages 112 = 112. Blocks: **0 lost**, 4 gained (35,243 vs 35,239 of 46,451). `coverage-floor.sh` exit 0 on both |
 | Fast PR run, real `pull_request` event | [35867970387](https://github.com/KidCarmi/Culvert/actions/runs/35867970387) | `9fb5e7c` | All 18 jobs green, including the privileged mount-point test, the verdict, both coverage floors and the aggregate |
-| Same-SHA Fast audit (the item §15.6 left open) | [35866549240](https://github.com/KidCarmi/Culvert/actions/runs/35866549240) | `a606f82` | see §16.5 |
+| Same-SHA Fast audit (the item §15.6 left open) | [35866549240](https://github.com/KidCarmi/Culvert/actions/runs/35866549240), `Audit · sharded vs unsharded` | `a606f82` | **Failed on one block, not a sharding loss.** Inventory identical: root entries 6,381 / 6,381 / 6,381; skips 51 = 51; subtests 3,873 = 3,873; packages 112 = 112. Blocks: 1 lost (`internal/yara/regexrunner.go:184.25,186.4`), 5 gained; `coverage-floor.sh` exit 0 on both. See below |
+
+**The one lost block is scheduling, not sharding.** It is the worker's
+`if r.abandoned.Load() { return }` in `internal/yara`'s regex runner, reached
+only when the parent abandons a scan while a job is still queued. That package
+runs in the non-root lane with the same `go test` invocation as the reference,
+so sharding cannot change what reaches it. Running `go test -race -coverprofile`
+on `./internal/yara/` alone, six times on the same commit, covered it in five
+runs and missed it in one. The QA audit on the same SHA lost no blocks.
+
+The 5B rule for a reference-only block is an isolated deterministic test, not an
+exception entry (the exceptions file stays pinned empty).
+`TestRegexRunner_AbandonedWorkerSkipsAQueuedJob` arranges the state and drives
+`run` synchronously: covered in 6 of 6 runs afterwards, and it fails when the
+early return is removed. The Fast audit's lint job was also red on `a606f82`;
+that is the `unnamedResult` finding fixed in `9fb5e7c`, so its aggregate was red
+regardless.
 
 `9fb5e7c` differs from `a606f82` only by naming `readTarballLimited`'s results,
 a gocritic finding from the Fast gate's diff-scoped lint, so the audits on
@@ -1796,6 +1812,8 @@ Revert the 6A commits.
   behaviour and text are identical either way.
 - The QA contract step and its wall go too.
 - The timing file reverts with them.
+- `TestRegexRunner_AbandonedWorkerSkipsAQueuedJob` can stay: it only makes an
+  existing block's coverage deterministic.
 
 Do **not** remove the QA contract step on its own. That would leave the
 production aggregate bound proved nowhere at production size.
