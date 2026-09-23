@@ -25,13 +25,14 @@ type fakeGitHub struct {
 	named     map[string][]apiArtifact
 	files     map[string][]byte // "path@ref"
 	wfRuns    map[string][]apiRun
+	failJobs  map[int64]bool // runs whose jobs endpoint answers 500
 	mu        sync.Mutex
 	fetched   []string
 }
 
 func newFake(t *testing.T) *fakeGitHub {
 	return &fakeGitHub{t: t, runs: map[int64]fixture{}, artifacts: map[int64][]apiArtifact{}, zips: map[int64][]byte{},
-		named: map[string][]apiArtifact{}, files: map[string][]byte{}, wfRuns: map[string][]apiRun{}}
+		named: map[string][]apiArtifact{}, files: map[string][]byte{}, wfRuns: map[string][]apiRun{}, failJobs: map[int64]bool{}}
 }
 
 func (f *fakeGitHub) addArtifact(runID, id int64, name string, zipData []byte) {
@@ -61,6 +62,10 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p := strings.TrimPrefix(r.URL.Path, "/repos/o/r/")
 	write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 	if m := reJobs.FindStringSubmatch(p); m != nil {
+		if f.failJobs[atoi(m[1])] {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		jobs := f.runs[atoi(m[1])].Jobs
 		write(map[string]any{"total_count": len(jobs), "jobs": jobs})
 		return

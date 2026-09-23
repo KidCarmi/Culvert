@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,15 +26,23 @@ type Baseline struct {
 		Ratio       float64 `json:"ratio"`
 		Consecutive int     `json:"consecutive"`
 	} `json:"sustainedRegression"`
-	Audit struct {
-		Workflow   string `json:"workflow"`
-		Introduced string `json:"introduced"`
-		MaxAgeDays int    `json:"maxAgeDays"`
-	} `json:"audit"`
+	Audit AuditPolicy `json:"audit"`
 	// Groups: "<workflowPath>|<class>|<jobSetKey>" → metric → reviewed median.
 	Groups map[string]map[string]struct {
 		Median float64 `json:"median"`
 	} `json:"groups"`
+}
+
+// AuditPolicy is the baseline's rule for the recurring equivalence audit.
+type AuditPolicy struct {
+	Workflow   string `json:"workflow"`
+	Introduced string `json:"introduced"`
+	MaxAgeDays int    `json:"maxAgeDays"`
+	// Cron is the audit workflow's schedule ("M H * * D", UTC), pinned
+	// equal to qa-gate.yml by ci_perf_report_test.go. SlotGraceHours is
+	// how long after a slot its audit may still be queued or running.
+	Cron           string `json:"cron"`
+	SlotGraceHours int    `json:"slotGraceHours"`
 }
 
 func loadBaseline(path string) (Baseline, error) {
@@ -65,13 +74,59 @@ func validateBaseline(b Baseline) error {
 		return fmt.Errorf("baseline sample bounds %d..%d must lie within 10..20", b.MinSamples, b.MaxSamples)
 	case b.Regression.Ratio <= 1 || b.Regression.Consecutive < 2:
 		return fmt.Errorf("sustained-regression rule needs ratio > 1 and at least 2 consecutive samples")
-	case b.Audit.Workflow == "" || b.Audit.MaxAgeDays < 7:
+	}
+	return validateAuditBlock(b.Audit)
+}
+
+// validateAuditBlock rejects an audit block that cannot expire or whose
+// weekly slot cannot be computed.
+func validateAuditBlock(a AuditPolicy) error {
+	if a.Workflow == "" || a.MaxAgeDays < 7 {
 		return fmt.Errorf("baseline audit block needs a workflow and maxAgeDays >= 7")
 	}
-	if _, err := time.Parse("2006-01-02", b.Audit.Introduced); err != nil {
+	if _, err := time.Parse("2006-01-02", a.Introduced); err != nil {
 		return fmt.Errorf("baseline audit.introduced: %w", err)
 	}
+	if _, err := parseWeeklyCron(a.Cron); err != nil {
+		return fmt.Errorf("baseline audit.cron: %w", err)
+	}
+	if a.SlotGraceHours < 1 || a.SlotGraceHours > 48 {
+		return fmt.Errorf("baseline audit.slotGraceHours %d must lie within 1..48", a.SlotGraceHours)
+	}
 	return nil
+}
+
+// weeklySlot is a once-a-week schedule: weekday and time of day, UTC.
+type weeklySlot struct {
+	weekday      time.Weekday
+	hour, minute int
+}
+
+// parseWeeklyCron accepts exactly the "M H * * D" shape the audit uses.
+func parseWeeklyCron(expr string) (weeklySlot, error) {
+	f := strings.Fields(expr)
+	if len(f) != 5 || f[2] != "*" || f[3] != "*" {
+		return weeklySlot{}, fmt.Errorf("%q is not a weekly \"M H * * D\" schedule", expr)
+	}
+	m, errM := strconv.Atoi(f[0])
+	h, errH := strconv.Atoi(f[1])
+	d, errD := strconv.Atoi(f[4])
+	if errM != nil || errH != nil || errD != nil || m < 0 || m > 59 || h < 0 || h > 23 || d < 0 || d > 6 {
+		return weeklySlot{}, fmt.Errorf("%q has an out-of-range or non-numeric field", expr)
+	}
+	return weeklySlot{weekday: time.Weekday(d), hour: h, minute: m}, nil
+}
+
+// lastDueSlot is the most recent scheduled audit time whose grace period has
+// ended by now: the slot whose audit must already have completed.
+func lastDueSlot(ws weeklySlot, grace time.Duration, now time.Time) time.Time {
+	now = now.UTC()
+	t := time.Date(now.Year(), now.Month(), now.Day(), ws.hour, ws.minute, 0, 0, time.UTC)
+	t = t.AddDate(0, 0, -((int(t.Weekday()) - int(ws.weekday) + 7) % 7))
+	for t.Add(grace).After(now) {
+		t = t.AddDate(0, 0, -7)
+	}
+	return t
 }
 
 // Sample is one observed execution and where its report came from.
@@ -124,6 +179,7 @@ type AuditRun struct {
 	Audit      string `json:"audit"`
 	Reference  string `json:"referenceJob"`
 	Compare    string `json:"compareJob"`
+	Unreadable bool   `json:"unreadable,omitempty"`
 }
 
 // AuditFreshness says whether the recurring equivalence audit is current.
@@ -135,6 +191,7 @@ type AuditFreshness struct {
 	Detail     string     `json:"detail"`
 	LastPassed *AuditRun  `json:"lastPassed"`
 	AgeDays    float64    `json:"ageDays"`
+	DueSlot    string     `json:"dueSlot"`
 	Expected   int        `json:"expectedSinceIntroduced"`
 	Observed   int        `json:"observedSinceIntroduced"`
 	Runs       []AuditRun `json:"runs"`
@@ -204,6 +261,8 @@ func groupKeyOf(r RunReport) string {
 func countedWhy(s Sample) string {
 	r := s.Report
 	switch {
+	case s.Source == "unreadable":
+		return "run data unreadable"
 	case r.Run.Status != "completed":
 		return "not completed"
 	case r.Run.Rerun:
@@ -341,7 +400,7 @@ func auditFreshness(runs []Sample, b Baseline, now time.Time) AuditFreshness {
 		s := &runs[sI]
 		r := s.Report
 		ar := AuditRun{RunID: r.Run.RunID, Attempt: r.Run.Attempt, CreatedAt: r.Run.CreatedAt, Conclusion: r.Run.Conclusion,
-			Audit: r.Evidence.Audit.State, Reference: r.Evidence.Audit.ReferenceJob, Compare: r.Evidence.Audit.CompareJob}
+			Audit: r.Evidence.Audit.State, Reference: r.Evidence.Audit.ReferenceJob, Compare: r.Evidence.Audit.CompareJob, Unreadable: s.Source == "unreadable"}
 		af.Runs = append(af.Runs, ar)
 		if created, ok := parseTime(r.Run.CreatedAt); ok && !created.Before(intro) {
 			af.Observed++
@@ -356,12 +415,32 @@ func auditFreshness(runs []Sample, b Baseline, now time.Time) AuditFreshness {
 			af.LastPassed = &af.Runs[len(af.Runs)-1]
 		}
 	}
-	grace := intro.Add(time.Duration(b.Audit.MaxAgeDays) * 24 * time.Hour)
+	// Every weekly slot must have its own completed audit. An age limit alone
+	// cannot say this: a backstop run a few hours after the slot still sees
+	// last week's audit as "7 days old" and would pass a week with no audit.
+	ws, _ := parseWeeklyCron(b.Audit.Cron) // validated by loadBaseline
+	slot := lastDueSlot(ws, time.Duration(b.Audit.SlotGraceHours)*time.Hour, now)
+	af.DueSlot = slot.Format(time.RFC3339)
+	judgeAudit(&af, latestCompleted, slot, intro, now)
+	return af
+}
+
+// judgeAudit sets the verdict from the latest completed scheduled run and the
+// last passing one: pending-first, missing, failed, stale or passed.
+func judgeAudit(af *AuditFreshness, latestCompleted *AuditRun, slot, intro, now time.Time) {
+	var latestCreated time.Time
+	if latestCompleted != nil {
+		latestCreated, _ = parseTime(latestCompleted.CreatedAt)
+	}
 	switch {
-	case latestCompleted == nil && now.Before(grace):
-		af.State, af.Detail = "pending-first", "no scheduled audit has completed yet; within the grace period after introduction"
+	case slot.Before(intro) && latestCompleted == nil:
+		af.State, af.Detail = "pending-first", "no scheduled audit slot has come due since introduction"
 	case latestCompleted == nil:
-		af.State, af.Detail = "missing", "no scheduled audit has completed since introduction"
+		af.State, af.Detail = "missing", fmt.Sprintf("no scheduled audit has completed since introduction; the slot due %s has none", af.DueSlot)
+	case !slot.Before(intro) && latestCreated.Before(slot):
+		af.State = "missing"
+		af.Detail = fmt.Sprintf("no scheduled audit completed for the slot due %s; the latest completed one is run %d from %s",
+			af.DueSlot, latestCompleted.RunID, latestCompleted.CreatedAt)
 	case af.LastPassed == nil || af.LastPassed.RunID != latestCompleted.RunID:
 		af.State = "failed"
 		af.Detail = failedAuditDetail(latestCompleted)
@@ -369,12 +448,11 @@ func auditFreshness(runs []Sample, b Baseline, now time.Time) AuditFreshness {
 		created, _ := parseTime(af.LastPassed.CreatedAt)
 		af.AgeDays = math.Round(now.Sub(created).Hours()/24*10) / 10
 		af.State, af.Detail = "passed", fmt.Sprintf("run %d passed %.1f days ago", af.LastPassed.RunID, af.AgeDays)
-		if af.AgeDays > float64(b.Audit.MaxAgeDays) {
+		if af.AgeDays > float64(af.MaxAgeDays) {
 			af.State = "stale"
-			af.Detail = fmt.Sprintf("the last passing scheduled audit (run %d) is %.1f days old, over the %d-day limit", af.LastPassed.RunID, af.AgeDays, b.Audit.MaxAgeDays)
+			af.Detail = fmt.Sprintf("the last passing scheduled audit (run %d) is %.1f days old, over the %d-day limit", af.LastPassed.RunID, af.AgeDays, af.MaxAgeDays)
 		}
 	}
-	return af
 }
 
 // failedAuditDetail names why the latest completed scheduled audit failed.
@@ -383,6 +461,9 @@ func failedAuditDetail(r *AuditRun) string {
 		r.RunID, r.Attempt, r.Conclusion, r.Audit, r.Reference, r.Compare)
 	if r.Attempt > 1 {
 		d += " — a re-run attempt cannot establish a passing audit"
+	}
+	if r.Unreadable {
+		d += " — its jobs could not be read, and unknown evidence never passes"
 	}
 	return d
 }
@@ -396,7 +477,7 @@ func auditRunPassed(s Sample) bool {
 	// a fresh comparison with jobs carried over from the attempt that failed.
 	// A red audit is investigated, never re-run away (§17.7); the next
 	// scheduled audit must pass on its first attempt.
-	if r.Run.Rerun || r.Run.Attempt > 1 {
+	if r.Run.Rerun || r.Run.Attempt > 1 || s.Source == "unreadable" {
 		return false
 	}
 	if r.Run.Conclusion != "success" || a.ReferenceJob != "success" || a.CompareJob != "success" {
@@ -551,8 +632,11 @@ func loadRuns(ctx context.Context, c *ghClient, o trendOpts, wf, event string, l
 		run := &runs[runI]
 		s, err := loadSample(ctx, c, o, *run)
 		if err != nil {
+			// Kept, not dropped: dropping the newest scheduled run would let an
+			// older passing one stand in for it. An unreadable run never counts
+			// in statistics and never passes an audit.
 			notes = append(notes, fmt.Sprintf("%s run %d unreadable: %v", event, run.ID, err))
-			continue
+			s = Sample{Report: Analyze(*run, nil, runEvidence{Notes: []string{"run jobs unreadable: " + err.Error()}}), Source: "unreadable"}
 		}
 		out = append(out, s)
 	}

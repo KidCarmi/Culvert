@@ -131,7 +131,7 @@ jobs:
   trend:
     name: "Report · trend + audit freshness"
     # A scheduled QA run IS the weekly audit, so its completion refreshes the
-    # trend immediately; the Monday schedule is the backstop that notices an
+    # trend immediately; the Sunday 09:43 schedule is the backstop that notices an
     # audit that never ran at all.
     # After run-report when both run, so the audit's own report is readable;
     # always() because run-report is skipped on the schedule and a failed

@@ -15,6 +15,7 @@ func testBaseline(status string) Baseline {
 	b.Schema, b.Status, b.MinSamples, b.MaxSamples = baselineSchema, status, 10, 20
 	b.Regression.Ratio, b.Regression.Consecutive = 1.25, 3
 	b.Audit.Workflow, b.Audit.Introduced, b.Audit.MaxAgeDays = "qa-gate.yml", "2026-09-01", 8
+	b.Audit.Cron, b.Audit.SlotGraceHours = "23 6 * * 0", 3 // Sundays 06:23 UTC
 	return b
 }
 
@@ -140,8 +141,9 @@ func TestRegressions_AdvisoryAndSustainedOnly(t *testing.T) {
 
 func auditSample(id int64, day int, concl, ref, cmp, state, source string) Sample {
 	r := RunReport{Schema: runReportSchema, Class: classScheduledAudit}
+	// A scheduled run is created at (or after) its 06:23 slot.
 	r.Run = RunIdentity{RunID: id, Attempt: 1, Status: "completed", Conclusion: concl, Event: "schedule",
-		CreatedAt: time.Date(2026, 9, day, 4, 0, 0, 0, time.UTC).Format(time.RFC3339)}
+		CreatedAt: time.Date(2026, 9, day, 6, 30, 0, 0, time.UTC).Format(time.RFC3339)}
 	r.Evidence.Audit = Audit{State: state, Requested: true, ReferenceJob: ref, CompareJob: cmp}
 	return Sample{Report: r, Source: source}
 }
@@ -170,7 +172,15 @@ func TestAuditFreshness_States(t *testing.T) {
 		{"none yet, within grace", nil, at(5), "pending-first"},
 		{"none after the grace", nil, at(12), "missing"},
 		{"passed this week", []Sample{pass(2, 14)}, at(15), "passed"},
-		{"last pass too old", []Sample{pass(2, 14)}, at(24), "stale"},
+		// Sundays in September 2026: 6, 13, 20, 27. A slot's audit is due by
+		// 09:23 (06:23 + 3 h grace).
+		{"no audit for the latest due slot", []Sample{pass(2, 14)}, at(24), "missing"},
+		{"backstop on audit Sunday, last week's audit only (the 7.1-day case)", []Sample{pass(2, 13)},
+			time.Date(2026, 9, 20, 9, 43, 0, 0, time.UTC), "missing"},
+		{"audit Sunday before the slot's grace ends", []Sample{pass(2, 13)},
+			time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC), "passed"},
+		{"this slot's audit completed", []Sample{pass(3, 20), pass(2, 13)},
+			time.Date(2026, 9, 20, 9, 43, 0, 0, time.UTC), "passed"},
 		{"latest failed although an older one passed", []Sample{auditSample(3, 21, "failure", "success", "failure", "failed", "per-run-report"), pass(2, 14)}, at(21), "failed"},
 		{"audit jobs skipped, gate green", []Sample{auditSample(3, 21, "success", "skipped", "skipped", "missing", "per-run-report")}, at(21), "failed"},
 		{"comparison unreadable in the report", []Sample{auditSample(3, 21, "success", "success", "success", "unknown", "per-run-report")}, at(21), "failed"},
@@ -256,7 +266,7 @@ func TestCollectTrend_EndToEnd(t *testing.T) {
 	defer srv.Close()
 	c, _ := newGHClient(srv.URL, "")
 	b := filepath.Join(t.TempDir(), "baseline.json")
-	if err := os.WriteFile(b, []byte(`{"schema":"culvert.ci-perf-baseline/v1","status":"provisional","reviewedBy":"","reviewedAt":"","minSamples":10,"maxSamples":20,"sustainedRegression":{"ratio":1.25,"consecutive":3},"audit":{"workflow":"qa-gate.yml","introduced":"2026-09-20","maxAgeDays":8},"groups":{}}`), 0o600); err != nil {
+	if err := os.WriteFile(b, []byte(`{"schema":"culvert.ci-perf-baseline/v1","status":"provisional","reviewedBy":"","reviewedAt":"","minSamples":10,"maxSamples":20,"sustainedRegression":{"ratio":1.25,"consecutive":3},"audit":{"workflow":"qa-gate.yml","introduced":"2026-09-20","maxAgeDays":8,"cron":"23 6 * * 0","slotGraceHours":3},"groups":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out := filepath.Join(t.TempDir(), "trend")
@@ -363,5 +373,37 @@ func TestCollectTrend_ForgedReportCannotPassAFailedAudit(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A scheduled run whose jobs cannot be read is KEPT as an unreadable sample.
+// Dropping it would let an older passing audit stand in for a newer one that
+// may have failed.
+func TestCollectTrend_UnreadableNewestAuditNeverPasses(t *testing.T) {
+	older := loadFixture(t, "qa-dispatch-audit")
+	older.Run.Event = "schedule"
+	newest := older
+	newest.Run.ID, newest.Run.Conclusion = older.Run.ID+1, "failure"
+	newest.Run.CreatedAt = "2026-09-23T23:00:00Z"
+	fake := newFake(t)
+	fake.runs[older.Run.ID], fake.runs[newest.Run.ID] = older, newest
+	fake.wfRuns["qa-gate.yml"] = []apiRun{newest.Run, older.Run} // newest first, as the API lists
+	fake.failJobs[newest.Run.ID] = true
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	c, _ := newGHClient(srv.URL, "")
+	tr, err := collectTrend(context.Background(), c, trendOpts{repo: "o/r", workflows: []string{"qa-gate.yml"}, perEvent: 5,
+		defaultBranch: "main", baselinePath: "../../.github/ci-perf-baseline.json", outDir: t.TempDir(),
+		now: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Audit.State != "failed" || !strings.Contains(tr.Audit.Detail, "could not be read") {
+		t.Fatalf("an older passing audit stood in for the newest, unreadable one: %s — %s", tr.Audit.State, tr.Audit.Detail)
+	}
+	for _, row := range tr.Samples {
+		if row.RunID == newest.Run.ID && (row.Source != "unreadable" || row.Counted) {
+			t.Errorf("unreadable run row %+v: must be kept, marked unreadable and not counted", row)
+		}
 	}
 }

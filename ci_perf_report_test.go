@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -367,5 +369,48 @@ func TestCIPerf_ReporterCostIsBounded(t *testing.T) {
 	trend := normaliseExpr(toStr(asMap(jobs["trend"])["if"]))
 	if !strings.Contains(trend, "(github.event_name == 'workflow_run' && github.event.workflow_run.event == 'schedule')") {
 		t.Errorf("the trend may follow a gate run only when that run was the scheduled audit: %s", trend)
+	}
+}
+
+// The freshness check's idea of WHEN the weekly audit is due must be the
+// schedule qa-gate.yml actually uses, and the reporter's backstop must run
+// only after that slot's grace period has ended: otherwise the same-day
+// backstop judges an audit that is still allowed to be running, or looks for
+// one at a time the workflow never schedules.
+func TestCIPerf_AuditSlotMatchesTheSchedules(t *testing.T) {
+	var b struct {
+		Audit struct {
+			Cron           string `json:"cron"`
+			SlotGraceHours int    `json:"slotGraceHours"`
+		} `json:"audit"`
+	}
+	if err := json.Unmarshal(mustRead(t, ".github/ci-perf-baseline.json"), &b); err != nil {
+		t.Fatal(err)
+	}
+	cronOf := func(path string) string {
+		sched, _ := asMap(genericWorkflow(t, path)["on"])["schedule"].([]interface{})
+		if len(sched) != 1 {
+			t.Fatalf("%s must carry exactly one schedule, has %v", path, sched)
+		}
+		return toStr(asMap(sched[0])["cron"])
+	}
+	audit, backstop := cronOf(qaGateWorkflowPath), cronOf(ciPerfReportPath)
+	if b.Audit.Cron != audit {
+		t.Fatalf("baseline audit.cron %q differs from qa-gate.yml's schedule %q — freshness would look for the audit in the wrong slot", b.Audit.Cron, audit)
+	}
+	minutesOf := func(expr string) (day, mins int) {
+		f := strings.Fields(expr)
+		if len(f) != 5 {
+			t.Fatalf("cron %q", expr)
+		}
+		m, _ := strconv.Atoi(f[0])
+		h, _ := strconv.Atoi(f[1])
+		d, _ := strconv.Atoi(f[4])
+		return d, h*60 + m
+	}
+	ad, am := minutesOf(audit)
+	bd, bm := minutesOf(backstop)
+	if bd != ad || bm < am+b.Audit.SlotGraceHours*60 {
+		t.Errorf("the backstop (%s) must run on the audit's day, after the slot (%s) plus its %d h grace", backstop, audit, b.Audit.SlotGraceHours)
 	}
 }

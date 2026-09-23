@@ -2076,9 +2076,21 @@ itself.
   `::warning::` and never fails anything. Performance signals stay advisory.
 - **Audit freshness (a correctness signal, not advice).** States:
   `pending-first`, `passed`, `failed`, `stale` (> 8 days since the last pass)
-  and `missing` (no completed scheduled audit after the grace period).
+  and `missing`.
   `failed`, `stale` and `missing` make the trend job exit 1 with an `::error::`.
   **Set `audit.introduced` to the merge date when this lands.**
+  - **One audit per weekly slot.** The baseline carries the audit schedule
+    (`audit.cron`, pinned equal to `qa-gate.yml`'s cron) and `slotGraceHours`
+    (3). The latest slot whose grace has passed must have its own completed
+    scheduled audit, or the state is `missing`. An age limit alone cannot
+    say this: the Sunday backstop runs about three hours after the slot, so
+    last week's audit is only ~7.1 days old and would pass a week in which
+    no audit ran (Codex review, PR #1477). A wall pins the backstop to the
+    same day, at or after slot + grace.
+  - **Unknown evidence never passes.** A scheduled run whose jobs cannot be
+    read is kept in the report as `unreadable` and judged `failed`. It is
+    never dropped: dropping it would let an older passing audit stand in
+    for it (Codex review, PR #1477).
 - **Owner.** The CI-REDESIGN owner reviews baselines and investigates every
   red trend.
 - **Investigating a red audit:**
