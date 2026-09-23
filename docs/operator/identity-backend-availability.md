@@ -15,6 +15,28 @@ eventually hits. This page is what to do when that happens.
 
 ---
 
+## A third cause fires the same alert: IdP metadata (CHAOS-66)
+
+The `identity_backend_unreachable` event is also raised, with source
+`idp_metadata`, when a SAML profile's `metadataUrl` or an OIDC profile's
+discovery document cannot be fetched. That is a different moment in the
+lifecycle from everything else on this page: it happens when a provider is
+**constructed** (appliance boot, an admin save, or a CP→DP config sync), not
+when a user authenticates.
+
+The symptom is different too — instead of individual logins failing, an entire
+enabled IdP profile can have **no live provider at all**, so browser SSO is
+unavailable for it and a scoped `SSORequired` rule returns `403`. Check
+`culvert_idp_enabled_not_live` and the `idp_metadata` diagnostics row, and see
+[`idp-metadata-availability.md`](idp-metadata-availability.md) for the runbook.
+
+The event name is shared on purpose: the operator action is the same one
+("this appliance cannot reach the identity provider — check egress"), and a
+second event name would be silently unsubscribed on every webhook you have
+already configured. Use the alert's `Source` field to tell the two apart.
+
+---
+
 ## The two failure classes, and why they are different
 
 | Class | Example | What Culvert does | Cached? |

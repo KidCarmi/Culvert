@@ -6623,7 +6623,7 @@ a cache keyed on one would be a seeding surface.
 
 ### Gates
 
-`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (17
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (20
 functions). Five DEFECT gates were verified failing against the reintroduced
 pre-fix shape and the four security gates plus three controls pass against it —
 the correct signature, since the security properties are new rather than
