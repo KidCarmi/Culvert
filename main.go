@@ -925,31 +925,46 @@ func initCDR(s *startupState) {
 	if msg := validCDRServerFingerprint(*s.cdrFingerprintFlag); msg != "" {
 		log.Fatalf("Invalid -cdr-server-fingerprint %q: %s", *s.cdrFingerprintFlag, msg)
 	}
-	// Same mirroring for -cdr-timeout-sec: config.yaml's cdr.timeout_sec is
-	// range-validated at load time (validateCDR), but the CLI flag reaches
-	// the exact same CDRConfig.TimeoutSec field with no equivalent gate. An
-	// out-of-range value here isn't rejected at all — it becomes the per-file
-	// gRPC deadline (cdr_pool.go/cdr_proxy.go), which is shorter than
-	// Sluice's own 30s processing cap, so ordinary files reliably miss the
-	// deadline and every scan comes back as a client-side timeout. Under the
-	// default fail-open FailMode that silently skips CDR sanitization on
-	// every request that hits it, with nothing at startup naming the bad
-	// flag — the same config.yaml already refuses to start with.
-	if msg := validCDRTimeoutSec(*s.cdrTimeoutFlag); msg != "" {
-		log.Fatalf("Invalid -cdr-timeout-sec %d: %s", *s.cdrTimeoutFlag, msg)
+	resolved := resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
+		Enabled:     *s.cdrEnabledFlag,
+		Endpoint:    *s.cdrEndpointFlag,
+		FailMode:    *s.cdrFailModeFlag,
+		Profile:     *s.cdrProfileFlag,
+		Mode:        *s.cdrModeFlag,
+		TimeoutSec:  *s.cdrTimeoutFlag,
+		MaxSizeMB:   *s.cdrMaxSizeFlag,
+		Fingerprint: *s.cdrFingerprintFlag,
+		CertsDir:    *s.cdrCertsDirFlag,
+	})
+	// Same mirroring for cdr.timeout_sec / -cdr-timeout-sec: config.yaml's
+	// value is range-validated at load time (validateCDR), but ONLY when
+	// cdr.enabled is already true IN THE FILE — validateCDR returns
+	// immediately for a disabled block, so a config.yaml shipped with
+	// cdr.enabled: false and an out-of-range cdr.timeout_sec (e.g. staged
+	// ahead of turning CDR on later) passes load-time validation untouched.
+	// Checking only the raw -cdr-timeout-sec flag (as a first pass here did)
+	// misses that value entirely when the operator instead flips CDR on via
+	// -cdr-enabled without ever touching -cdr-timeout-sec: the CLI flag
+	// reads as 0 ("unset"), so the bad YAML value survives the merge in
+	// resolveCDRStartupConfig untouched (Codex review, PR #1480). Validating
+	// the RESOLVED value — after CLI/YAML merge, gated on the RESOLVED
+	// (post-merge) Enabled — closes both the CLI-flag typo and the
+	// dormant-then-enabled config.yaml case; a value that will never take
+	// effect (CDR stays disabled) is deliberately left unvalidated, matching
+	// validateCDR's own posture. An out-of-range value here isn't merely
+	// rejected late: left unvalidated, it becomes the per-file gRPC deadline
+	// (cdr_pool.go/cdr_proxy.go), shorter than Sluice's own 30s processing
+	// cap, so ordinary files reliably miss the deadline and every scan comes
+	// back as a client-side timeout — which, under the default fail-open
+	// FailMode, silently skips CDR sanitization on every request that hits
+	// it, with nothing at startup naming the cause.
+	if resolved.CDR.Enabled {
+		if msg := validCDRTimeoutSec(resolved.CDR.TimeoutSec); msg != "" {
+			log.Fatalf("Invalid cdr.timeout_sec/-cdr-timeout-sec %d: %s", resolved.CDR.TimeoutSec, msg)
+		}
 	}
 	loadCDR(
-		resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
-			Enabled:     *s.cdrEnabledFlag,
-			Endpoint:    *s.cdrEndpointFlag,
-			FailMode:    *s.cdrFailModeFlag,
-			Profile:     *s.cdrProfileFlag,
-			Mode:        *s.cdrModeFlag,
-			TimeoutSec:  *s.cdrTimeoutFlag,
-			MaxSizeMB:   *s.cdrMaxSizeFlag,
-			Fingerprint: *s.cdrFingerprintFlag,
-			CertsDir:    *s.cdrCertsDirFlag,
-		}),
+		resolved,
 		appLifecycleCtx,
 	)
 }

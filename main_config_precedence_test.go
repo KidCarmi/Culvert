@@ -481,11 +481,9 @@ func TestValidateCDR_RejectsTimeoutSecBelowMinimum(t *testing.T) {
 // the exact shape of the bug this change closes: resolveCDRStartupConfig
 // (the CLI/YAML merge, cdr_startup_config.go) has no opinion on validity — it
 // just merges — so a CLI-only timeout that config.yaml would refuse to boot
-// with merges through untouched. Before this fix, nothing downstream of the
-// merge (initCDR, main.go) caught it either; the merged value reached the
-// live CDR client as its per-file gRPC deadline. This test pins the merge
-// half of that chain: it is the CLI-side validCDRTimeoutSec check in initCDR
-// (not the merge) that must catch the value on the real startup path.
+// with merges through untouched. It is initCDR's post-merge
+// validCDRTimeoutSec(resolved.CDR.TimeoutSec) check — not the merge itself —
+// that must catch the value on the real startup path.
 func TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation(t *testing.T) {
 	fc := &FileConfig{} // no config.yaml timeout_sec at all
 	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{
@@ -503,10 +501,53 @@ func TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation(t *testing
 	if err := asIfFromYAML.validate(); err == nil {
 		t.Fatalf("a merged CDR config with timeout_sec=5 must fail validate() — validCDRTimeoutSec regressed")
 	}
-	// And the CLI-facing gate (what initCDR actually calls before ever
-	// reaching resolveCDRStartupConfig's caller) must independently reject
-	// the same raw flag value.
-	if msg := validCDRTimeoutSec(5); msg == "" {
-		t.Fatalf("validCDRTimeoutSec(5) accepted a value below Sluice's 30s cap")
+	// And the RESOLVED value — what initCDR actually validates today — must
+	// independently be rejected too, not just the raw CLI flag in isolation.
+	if !got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = false, want true (Enabled: true was passed via CLI flags)")
+	}
+	if msg := validCDRTimeoutSec(got.CDR.TimeoutSec); msg == "" {
+		t.Fatalf("validCDRTimeoutSec(%d) accepted a value below Sluice's 30s cap", got.CDR.TimeoutSec)
+	}
+}
+
+// TestResolveCDRStartupConfig_DormantYAMLTimeoutSurvivesCLIEnable pins the
+// specific gap a review of this change found (Codex, PR #1480): config.yaml
+// can ship with cdr.enabled: false and an out-of-range cdr.timeout_sec —
+// validateCDR (config.go) returns immediately for a disabled block, so that
+// value passes load-time validation completely unexamined. An operator who
+// later flips CDR on purely via -cdr-enabled (never touching
+// -cdr-timeout-sec, which then reads as the CLI "unset" sentinel 0) merges
+// straight through to the dormant, invalid YAML value — checking only the
+// raw -cdr-timeout-sec flag (as an earlier version of this fix did) never
+// sees it. initCDR must validate the value AFTER the CLI/YAML merge, gated
+// on the RESOLVED (post-merge) Enabled, so this exact path is caught too.
+func TestResolveCDRStartupConfig_DormantYAMLTimeoutSurvivesCLIEnable(t *testing.T) {
+	fc := &FileConfig{}
+	fc.CDR.Enabled = false // dormant in the file — validateCDR never looked at TimeoutSec
+	fc.CDR.Endpoint = "sluice:8443"
+	fc.CDR.TimeoutSec = 5 // below Sluice's own 30s cap
+	if err := fc.validate(); err != nil {
+		t.Fatalf("a disabled CDR block with an out-of-range timeout_sec must still load: %v", err)
+	}
+
+	// Operator turns CDR on purely via -cdr-enabled; -cdr-timeout-sec is
+	// never passed, so its flag value is the CLI "unset" sentinel (0).
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{
+		Enabled: true,
+		// TimeoutSec deliberately omitted (zero value): flag not passed.
+	})
+
+	if !got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = false, want true (-cdr-enabled was passed)")
+	}
+	if got.CDR.TimeoutSec != 5 {
+		t.Fatalf("resolved TimeoutSec = %d, want 5 (the dormant config.yaml value must survive the merge, not be silently dropped)", got.CDR.TimeoutSec)
+	}
+	// This is the crux: the RESOLVED, now-effective value must fail the same
+	// check config.yaml would have failed had cdr.enabled been true from the
+	// start. Checking only the raw CLI flag (0, "unset") would miss this.
+	if msg := validCDRTimeoutSec(got.CDR.TimeoutSec); msg == "" {
+		t.Fatalf("validCDRTimeoutSec(%d) accepted a dormant-then-enabled value below Sluice's 30s cap", got.CDR.TimeoutSec)
 	}
 }
