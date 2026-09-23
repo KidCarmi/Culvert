@@ -73,6 +73,13 @@ func compareRoot(in compareRuns, c *Comparison, fail func(string, ...any)) {
 	if ref.Status != statusPass {
 		fail("the unsharded reference's root package result is %q — no passing baseline to compare with", ref.Status)
 	}
+	// The pilot's root result is checked here too, not left to the verdict: a
+	// TestMain that fails after m.Run returns (a cleanup error) leaves every
+	// entry and subtest passing while the package fails, and comparePackages
+	// deliberately skips the root package's status.
+	if pilot.Status != statusPass {
+		fail("the pilot's root package result is %q", pilot.Status)
+	}
 	discovered := make([]string, len(in.inv.Runnable))
 	for i, e := range in.inv.Runnable {
 		discovered[i] = e.Name

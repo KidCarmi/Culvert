@@ -56,7 +56,8 @@ func TestCompare_RejectsLostExecution(t *testing.T) {
 		"package missing": {func(in *compareRuns) {
 			in.ref["m/sub"] = &PkgResult{Status: statusPass, Tests: map[string]*TestResult{}, Subtests: map[string]string{}}
 		}, "package set"},
-		"reference failed": {func(in *compareRuns) { in.ref["m"].Status = statusFail }, "no passing baseline"},
+		"reference failed":                  {func(in *compareRuns) { in.ref["m"].Status = statusFail }, "no passing baseline"},
+		"pilot root failed after its tests": {func(in *compareRuns) { in.pilot["m"].Status = statusFail }, "the pilot's root package result is \"fail\""},
 		"universe differs": {func(in *compareRuns) {
 			in.pilotProf = mustProfile(t, "mode: atomic\nm/a.go:1.1,2.2 2 3\n")
 		}, "block universe"},
