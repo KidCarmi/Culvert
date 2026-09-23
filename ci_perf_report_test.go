@@ -257,8 +257,11 @@ func checkReporterStep(t *testing.T, name string, step map[string]interface{}) {
 		if with["persist-credentials"] != false {
 			t.Errorf("%s: checkout must set persist-credentials: false", name)
 		}
-		if with["ref"] != nil || with["repository"] != nil {
-			t.Errorf("%s: checkout must take the default branch — never a PR head or another repository (got %v)", name, with)
+		// Pinned explicitly: without `ref`, checkout follows the triggering
+		// ref, and a dispatch with --ref <branch> would build that branch's
+		// unreviewed collector.
+		if toStr(with["ref"]) != "${{ github.event.repository.default_branch }}" || with["repository"] != nil {
+			t.Errorf("%s: checkout must pin ref to the default branch — never a PR head, a dispatched branch or another repository (got %v)", name, with)
 		}
 	case strings.HasPrefix(uses, "actions/setup-go@"):
 		if with["cache"] != false {
