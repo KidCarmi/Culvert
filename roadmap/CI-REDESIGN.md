@@ -2280,10 +2280,15 @@ trend groups by `workflow|class|job set|cohort`:
 - **What stays comparable.** Source commits, durations, Go patch releases
   and the weekly runner image build do not split a cohort. The exact Go and
   image versions stay in each report and trend sample row.
+- **Complete evidence only.** The image and toolchain count as observed only
+  when the `meta.json` of **every** scheduled shard was read and every shard
+  reported its image. A shard that was not read may have run elsewhere, and
+  the others do not speak for it (Codex review, PR #1478).
 - **Unknown stays separate.** A component that was not observed reads
   `unknown` (never a guessed value), forms its own unverified cohort, and the
-  baseline loader refuses a reviewed median for any cohort that is not fully
-  observed or not in the four-part key shape. Runs without a race engine
+  baseline loader refuses a reviewed median unless the key parses as exactly
+  `platform=…;image=…;shards=…;toolchain=…`, every field is non-empty and
+  observed, and the image is not `mixed:` (Codex review, PR #1478). Runs without a race engine
   (docs-only, QA pass-through) have no observed image and stay unverified.
 - **Metadata-only PR reporting is unchanged.** PR runs are still measured
   from metadata in the trend. A selected natural run is enriched with the
@@ -2401,11 +2406,13 @@ candidate after it.
     count, another Go release line, another GOARCH, another runner image
     under the same label.
   - **Unverified, never reviewed:** shards on mixed images, image not
-    recorded, toolchain not observed, platform not observed.
+    recorded, one shard's metadata not read, one shard silent about its
+    image, toolchain not observed, platform not observed.
   - **Still grouped:** another commit, slower jobs, a Go patch release and
     next week's image build.
   - **Trend and baseline:** the trend keeps verified and unknown cohorts
-    apart; the baseline refuses an unverified or old-shape reviewed key.
+    apart; the baseline refuses an unverified, mixed, incomplete,
+    reordered or empty-field reviewed key, and the old key shape.
   - **Re-run queue:** the real 34-minute re-run reads 33 s through the
     attempt endpoint, unknown through the runs list, with elapsed (222 s)
     and runner-minutes (3.1) unchanged. The collector reads the attempt
@@ -2425,7 +2432,11 @@ candidate after it.
   6. the attempt's `created_at` replacing identity;
   7. the runner group ignored;
   8. the image dropped from the key;
-  9. a mixed-image run verified.
+  9. a mixed-image run verified;
+  10. a cohort verified from a subset of the shards' metadata;
+  11. a silent shard's image ignored;
+  12. a reviewed `mixed:` cohort accepted;
+  13. cohort field names and emptiness unchecked.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback

@@ -38,6 +38,9 @@ type RunReport struct {
 	// cohortImage carries the shards' runner image from the evidence check
 	// to the cohort; not serialised (the cohort and toolchain carry it).
 	cohortImage string
+	// cohortMetas is how many shard meta.json documents were decoded; the
+	// cohort is verified only when every scheduled shard's was.
+	cohortMetas int
 }
 
 // Collector identifies the reporting execution, so a report can be traced to

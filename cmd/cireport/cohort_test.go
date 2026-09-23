@@ -44,6 +44,33 @@ func withImage(ev runEvidence, image, version string) runEvidence {
 	return ev
 }
 
+func dropMeta(ev runEvidence, idx int) runEvidence {
+	metas := map[int]*evShardMeta{}
+	for i, m := range ev.ShardMetas {
+		if i != idx {
+			metas[i] = m
+		}
+	}
+	ev.ShardMetas = metas
+	return ev
+}
+
+func blankImage(ev runEvidence, idx int) runEvidence {
+	ev = withImage(ev, "ubuntu24", "20260915.1")
+	ev.ShardMetas[idx].RunnerImage = ""
+	return ev
+}
+
+// threeShards is the same evidence from a 3-shard engine: shard 3's metadata
+// and verdict entry are gone too.
+func threeShards(ev runEvidence) runEvidence {
+	ev = dropMeta(ev, 3)
+	v := *ev.Verdict
+	v.Shards = v.Shards[:3]
+	ev.Verdict = &v
+	return ev
+}
+
 // dropShard removes one root-shard job, as a 3-shard engine would schedule.
 func dropShard(jobs []apiJob) []apiJob {
 	var out []apiJob
@@ -85,7 +112,11 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 	}{
 		{"another runner label", hosted(fx.Jobs, "ubuntu-24.04-arm", gh), arm, true},
 		{"self-hosted runner group", hosted(fx.Jobs, "ubuntu-latest", "culvert-self-hosted"), ev, true},
-		{"another shard count", dropShard(hosted(fx.Jobs, "ubuntu-latest", gh)), ev, true},
+		{"another shard count", dropShard(hosted(fx.Jobs, "ubuntu-latest", gh)), threeShards(ev), true},
+		// Four shards scheduled, one shard's metadata never read: that shard
+		// may have run elsewhere, so the run is not a verified cohort.
+		{"one shard's metadata not read", hosted(fx.Jobs, "ubuntu-latest", gh), dropMeta(ev, 2), false},
+		{"one shard did not report its image", hosted(fx.Jobs, "ubuntu-latest", gh), blankImage(ev, 1), false},
 		{"another Go release line", hosted(fx.Jobs, "ubuntu-latest", gh), withGo(ev, "go1.27.0"), true},
 		{"another GOARCH", hosted(fx.Jobs, "ubuntu-latest", gh), arm, true},
 		// The label ubuntu-latest moves to a new image under one name.
@@ -107,6 +138,16 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 				t.Errorf("an unobserved component must read unknown, never a guessed value: %q", r.Cohort.Key)
 			}
 		})
+	}
+}
+
+// A shard that did not report its image leaves the run's image unobserved:
+// the other shards do not speak for it, and it is not a second image either.
+func TestCohort_OneSilentShardMakesTheImageUnknown(t *testing.T) {
+	fx, ev := qaAuditRun(t)
+	r := Analyze(fx.Run, hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions"), blankImage(ev, 1))
+	if r.Cohort.Image != cohortUnknown || r.Cohort.Verified {
+		t.Errorf("image %q verified=%v, want unknown and unverified", r.Cohort.Image, r.Cohort.Verified)
 	}
 }
 
@@ -189,14 +230,21 @@ func TestBaseline_ReviewedGroupsMustBeVerifiedCohorts(t *testing.T) {
 	ev = withImage(ev, "ubuntu24", "20260915.1")
 	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
 	good := groupKeyOf(Analyze(fx.Run, jobs, ev))
+	mixed := withImage(ev, "ubuntu24", "20260915.1")
+	mixed.ShardMetas[2].RunnerImage = "ubuntu26"
+	pre := qaWorkflowPath + "|" + classManualAudit + "|race+audit|"
 	for _, tc := range []struct {
 		key string
 		ok  bool
 	}{
 		{good, true},
-		{groupKeyOf(Analyze(fx.Run, jobs, runEvidence{})), false},         // toolchain unknown
-		{groupKeyOf(Analyze(fx.Run, jobs, withImage(ev, "", ""))), false}, // image unknown
-		{qaWorkflowPath + "|" + classManualAudit + "|race+audit", false},  // pre-cohort key shape
+		{groupKeyOf(Analyze(fx.Run, jobs, runEvidence{})), false},                        // toolchain unknown
+		{groupKeyOf(Analyze(fx.Run, jobs, withImage(ev, "", ""))), false},                // image unknown
+		{qaWorkflowPath + "|" + classManualAudit + "|race+audit", false},                 // pre-cohort key shape
+		{groupKeyOf(Analyze(fx.Run, jobs, mixed)), false},                                // shards on different images
+		{pre + "platform=ubuntu-latest@GitHub Actions", false},                           // incomplete cohort
+		{pre + "platform=x;shards=4;image=ubuntu24;toolchain=go1.26 linux/amd64", false}, // fields out of order
+		{pre + "platform=x;image=;shards=4;toolchain=go1.26 linux/amd64", false},         // empty field
 	} {
 		b := testBaseline("reviewed")
 		b.ReviewedBy, b.ReviewedAt = "someone", "2026-10-01"

@@ -87,11 +87,35 @@ func validateBaseline(b Baseline) error {
 func validateReviewedGroups(b Baseline) error {
 	for k := range b.Groups {
 		parts := strings.Split(k, "|")
-		if len(parts) != 4 || !strings.HasPrefix(parts[3], "platform=") {
+		if len(parts) != 4 {
 			return fmt.Errorf("baseline group %q is not workflow|class|jobSet|cohort", k)
 		}
-		if strings.Contains(parts[3], "="+cohortUnknown) {
-			return fmt.Errorf("baseline group %q has an unobserved cohort component; enrich natural runs with on-demand reports first", k)
+		if err := verifiedCohortKey(parts[3]); err != nil {
+			return fmt.Errorf("baseline group %q: %w", k, err)
+		}
+	}
+	return nil
+}
+
+// cohortFields is the exact field order cohortOf writes.
+var cohortFields = []string{"platform", "image", "shards", "toolchain"}
+
+// verifiedCohortKey accepts only a complete cohort key in which every
+// component was observed and describes one configuration.
+func verifiedCohortKey(key string) error {
+	parts := strings.Split(key, ";")
+	if len(parts) != len(cohortFields) {
+		return fmt.Errorf("cohort %q must have exactly %s", key, strings.Join(cohortFields, ";"))
+	}
+	for i, f := range cohortFields {
+		name, val, ok := strings.Cut(parts[i], "=")
+		switch {
+		case !ok || name != f || val == "":
+			return fmt.Errorf("cohort %q: field %d must be a non-empty %s=", key, i+1, f)
+		case val == cohortUnknown:
+			return fmt.Errorf("cohort %q: %s was not observed; enrich natural runs with on-demand reports first", key, f)
+		case f == "image" && strings.HasPrefix(val, "mixed:"):
+			return fmt.Errorf("cohort %q: shards ran on different images, which is not one configuration", key)
 		}
 	}
 	return nil

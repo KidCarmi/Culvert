@@ -507,12 +507,16 @@ func cohortOf(views []jobView, rep *RunReport) Cohort {
 	if c.Image == "" {
 		c.Image = cohortUnknown
 	}
-	if tc := rep.Toolchain; tc != nil && tc.Go != "" && tc.GOOS != "" && tc.GOARCH != "" {
-		line := tc.Go
-		if m := goReleaseLineRE.FindStringSubmatch(tc.Go); m != nil {
-			line = m[1]
-		}
-		c.Toolchain = line + " " + tc.GOOS + "/" + tc.GOARCH
+	// Every scheduled shard's metadata must have been read: a shard that was
+	// not may have run on another image or toolchain.
+	complete := true
+	if n, err := strconv.Atoi(c.Shards); err == nil && rep.cohortMetas != n {
+		complete = false
+		c.Image = cohortUnknown
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read from %d of %d scheduled shards: an unread shard may have run another image or toolchain", rep.cohortMetas, n))
+	}
+	if complete {
+		c.Toolchain = toolchainLine(rep.Toolchain)
 	}
 	switch {
 	case c.Shards == "none":
@@ -529,6 +533,18 @@ func cohortOf(views []jobView, rep *RunReport) Cohort {
 		c.Image != cohortUnknown && !strings.HasPrefix(c.Image, "mixed:")
 	c.Key = "platform=" + c.Platform + ";image=" + c.Image + ";shards=" + c.Shards + ";toolchain=" + c.Toolchain
 	return c
+}
+
+// toolchainLine is the Go release line and GOOS/GOARCH, or unknown.
+func toolchainLine(tc *Toolchain) string {
+	if tc == nil || tc.Go == "" || tc.GOOS == "" || tc.GOARCH == "" {
+		return cohortUnknown
+	}
+	line := tc.Go
+	if m := goReleaseLineRE.FindStringSubmatch(tc.Go); m != nil {
+		line = m[1]
+	}
+	return line + " " + tc.GOOS + "/" + tc.GOARCH
 }
 
 // observedPlatform is the distinct runner label sets and runner groups of the
@@ -714,13 +730,15 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("shard %d reports toolchain %v, shard %d reports %v", i, cur, idx[0], *tc))
 		}
 	}
+	rep.cohortMetas = len(idx)
 	images := map[string]bool{}
 	for _, i := range idx {
-		if img := ev.ShardMetas[i].RunnerImage; img != "" {
-			images[img] = true
-		}
+		images[ev.ShardMetas[i].RunnerImage] = true
 	}
+	// Any shard that did not report its image leaves the run's image
+	// unobserved: the others do not speak for it.
 	switch names := sortedKeys(images); {
+	case images[""]:
 	case len(names) == 1:
 		rep.cohortImage = names[0]
 		tc.RunnerImage = names[0]
