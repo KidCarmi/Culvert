@@ -457,6 +457,32 @@ func TestCovIsoPolicy_ImportDisablesConnLimit(t *testing.T) {
 	}
 }
 
+// Pins the other arm, `connLimiter.Enable(b.ConnLimitMaxPerIP)`. No test
+// imports an enabled limit directly: before, the arm was reached only by an
+// export→import round trip that happened to run after an earlier test left the
+// process-global limiter enabled, so the export carried enabled=true. The
+// qualification audit caught it the first time the shards separated those two
+// tests (qa-gate run 35834009198). Starting from a disabled limiter, importing
+// maxPerIP>0 with enabled=true must switch it on AT the imported cap.
+func TestCovIsoPolicy_ImportEnablesConnLimit(t *testing.T) {
+	covIsoImportEnv(t)
+	connLimiter.Disable()
+	if connLimiter.Enabled() {
+		t.Fatal("precondition: limiter must start disabled")
+	}
+	covIsoImport(t, "/api/config/import", map[string]any{
+		"version":           1,
+		"connLimitMaxPerIP": 7,
+		"connLimitEnabled":  true,
+	})
+	if !connLimiter.Enabled() {
+		t.Fatal("import with connLimitEnabled=true must enable the connection limiter")
+	}
+	if got := connLimiter.MaxPerIP(); got != 7 {
+		t.Fatalf("imported cap not applied: MaxPerIP=%d, want 7", got)
+	}
+}
+
 // ─── top-hosts insert race (store.go) ───────────────────────────────────────
 
 // covIsoWaitBlockedInRecord polls every goroutine's stack until one that was
