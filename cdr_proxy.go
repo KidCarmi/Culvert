@@ -37,6 +37,7 @@ import (
 	"time"
 
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -465,9 +466,16 @@ const cdrCallErrorLogInterval = time.Minute
 // event — no second counter, no second dialect.
 var cdrCallErrorLogAt atomic.Int64
 
+// cdrMaxCanonicalStatusCode is the highest code gRPC defines. codes.Code is a
+// uint32 and the library's own `_maxCode` is unexported, so the bound is named
+// here and PINNED AGAINST THE LIBRARY by
+// TestCDRCallErrorClass_CanonicalRangeMatchesTheLibrary: if grpc-go ever adds a
+// code above this one, that test fails rather than this file silently folding a
+// real status into "unknown".
+const cdrMaxCanonicalStatusCode = codes.Unauthenticated // 16
+
 // cdrCallErrorClass is the BOUNDED reason class the cdr_unavailable alert
-// carries in its Detail: the gRPC status code, whose cardinality is fixed by
-// the protocol.
+// carries in its Detail: the gRPC status code, CLAMPED to the canonical range.
 //
 // The bound is load-bearing. The alert store dedups on "event:detail" within a
 // 30 s window (internal/alerts, Q17/CHAOS-27), and a gRPC transport error's
@@ -478,14 +486,32 @@ var cdrCallErrorLogAt atomic.Int64
 // a CDR fault evicts real threat_detected alerts (register rows WK-12/RS-5,
 // the same defect internal/secscan's remoteScanFail documents). The full cause
 // goes to the rate-limited log line and nowhere else.
+//
+// THE CLAMP IS THE WHOLE BOUND, and taking "the protocol fixes the cardinality"
+// on trust is what made the first version of this fix wrong (Codex review, PR
+// #1483). grpc-go parses the `grpc-status` header with
+// strconv.ParseInt(hf.Value, 10, 32) and stores codes.Code(uint32(code)) with
+// NO range check (internal/transport/http2_client.go) — only a NON-NUMERIC
+// value is refused — and Code.String() renders anything outside 0..16 as
+// "Code(" + the integer + ")" (codes/code_string.go). So a faulty or hostile
+// Sluice varying that number per response minted a distinct dedup key per
+// response, which is precisely the flooding this change exists to close,
+// reintroduced inside its own fix. The library validates the range on its JSON
+// path (codes.go's UnmarshalJSON refuses `ci >= _maxCode`) and not on the wire
+// path, so the peer's number reaches String() unchecked.
+//
+// The lesson generalises and is the same one CHAOS-65 records four times: a
+// value is bounded only where something ACTUALLY bounds it — never because the
+// format it arrived in is said to have a fixed alphabet.
 func cdrCallErrorClass(err error) string {
 	if err == nil {
 		return "unknown"
 	}
-	if st, ok := status.FromError(err); ok {
-		return st.Code().String()
+	st, ok := status.FromError(err)
+	if !ok || st.Code() > cdrMaxCanonicalStatusCode {
+		return "unknown"
 	}
-	return "unknown"
+	return st.Code().String()
 }
 
 // noteCDRCallError logs (rate-limited, with the cause) and alerts (gated, with

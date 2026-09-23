@@ -26,6 +26,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -157,6 +158,78 @@ func TestCDRCallErrorClass_IsTheStatusCode(t *testing.T) {
 				t.Fatalf("cdrCallErrorClass = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCDRCallErrorClass_ClampsNoncanonicalCodes is the regression gate for the
+// hole in the FIRST version of this bound (Codex review, PR #1483): the class
+// was st.Code().String(), taken on the belief that the protocol fixes its
+// cardinality. It does not. grpc-go parses the `grpc-status` header with
+// ParseInt and stores codes.Code(uint32(code)) with NO range check — only a
+// non-numeric value is refused — and Code.String() renders anything outside
+// 0..16 as "Code(<n>)". A faulty or hostile Sluice varying that number per
+// response therefore minted a distinct alert dedup key per response: the exact
+// retry-queue flooding this change exists to close, reintroduced inside it.
+//
+// Verified failing against the unclamped shape: 300 noncanonical codes produced
+// 300 distinct keys.
+func TestCDRCallErrorClass_ClampsNoncanonicalCodes(t *testing.T) {
+	seen := map[string]bool{}
+	for i := uint32(0); i < 300; i++ {
+		// Stays in uint32 throughout — codes.Code's own underlying type — so the
+		// deliberate noncanonical value needs no overflow-conversion suppression.
+		code := codes.Code(uint32(cdrMaxCanonicalStatusCode) + 1 + i)
+		got := cdrCallErrorClass(status.Error(code, "boom"))
+		seen[got] = true
+		if got != "unknown" {
+			t.Fatalf("cdrCallErrorClass(code %d) = %q, want %q — a peer-chosen integer "+
+				"must never reach the dedup key", code, got, "unknown")
+		}
+	}
+	if len(seen) != 1 {
+		t.Fatalf("300 noncanonical codes produced %d distinct dedup keys: %v", len(seen), seen)
+	}
+	// The extremes of the uint32 the transport will accept.
+	for _, code := range []codes.Code{codes.Code(17), codes.Code(1000), codes.Code(math.MaxUint32)} {
+		if got := cdrCallErrorClass(status.Error(code, "boom")); got != "unknown" {
+			t.Errorf("cdrCallErrorClass(code %d) = %q, want %q", code, got, "unknown")
+		}
+	}
+}
+
+// TestCDRCallErrorClass_CanonicalRangeMatchesTheLibrary pins cdrMaxCanonicalStatusCode
+// against grpc-go itself, because the library's own `_maxCode` is unexported and a
+// hardcoded bound rots silently in BOTH directions.
+//
+// Every code at or below the bound must render a real NAME (so the clamp never
+// folds a genuine status into "unknown"), and the first code above it must render
+// the synthetic "Code(n)" form (so a grpc-go release that adds a canonical code
+// fails here instead of being silently discarded). Same discipline as CHAOS-50's
+// empirical badger message table: the assumption about a dependency IS the test.
+func TestCDRCallErrorClass_CanonicalRangeMatchesTheLibrary(t *testing.T) {
+	for c := codes.Code(0); c <= cdrMaxCanonicalStatusCode; c++ {
+		name := c.String()
+		if strings.HasPrefix(name, "Code(") {
+			t.Errorf("codes.Code(%d).String() = %q: the bound claims this code is canonical", c, name)
+		}
+		if c == codes.OK {
+			// status.Error(codes.OK, …) returns NIL by construction, so OK can
+			// never reach the class from a call failure; cdrCallErrorClass(nil)
+			// answers "unknown", which is the right answer for "no error".
+			if got := cdrCallErrorClass(status.Error(c, "boom")); got != "unknown" {
+				t.Errorf("cdrCallErrorClass(OK) = %q, want %q", got, "unknown")
+			}
+			continue
+		}
+		if got := cdrCallErrorClass(status.Error(c, "boom")); got != name {
+			t.Errorf("cdrCallErrorClass(code %d) = %q, want the library's %q", c, got, name)
+		}
+	}
+	next := cdrMaxCanonicalStatusCode + 1
+	if name := next.String(); !strings.HasPrefix(name, "Code(") {
+		t.Fatalf("codes.Code(%d).String() = %q — grpc-go added a canonical code above "+
+			"cdrMaxCanonicalStatusCode, so the clamp is now discarding a real status. "+
+			"Raise the constant.", next, name)
 	}
 }
 
