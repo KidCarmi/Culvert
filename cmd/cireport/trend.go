@@ -118,6 +118,7 @@ type GroupStats struct {
 // AuditRun is one scheduled audit execution.
 type AuditRun struct {
 	RunID      int64  `json:"runId"`
+	Attempt    int    `json:"attempt"`
 	CreatedAt  string `json:"createdAt"`
 	Conclusion string `json:"conclusion"`
 	Audit      string `json:"audit"`
@@ -339,7 +340,7 @@ func auditFreshness(runs []Sample, b Baseline, now time.Time) AuditFreshness {
 	for sI := range runs {
 		s := &runs[sI]
 		r := s.Report
-		ar := AuditRun{RunID: r.Run.RunID, CreatedAt: r.Run.CreatedAt, Conclusion: r.Run.Conclusion,
+		ar := AuditRun{RunID: r.Run.RunID, Attempt: r.Run.Attempt, CreatedAt: r.Run.CreatedAt, Conclusion: r.Run.Conclusion,
 			Audit: r.Evidence.Audit.State, Reference: r.Evidence.Audit.ReferenceJob, Compare: r.Evidence.Audit.CompareJob}
 		af.Runs = append(af.Runs, ar)
 		if created, ok := parseTime(r.Run.CreatedAt); ok && !created.Before(intro) {
@@ -363,8 +364,7 @@ func auditFreshness(runs []Sample, b Baseline, now time.Time) AuditFreshness {
 		af.State, af.Detail = "missing", "no scheduled audit has completed since introduction"
 	case af.LastPassed == nil || af.LastPassed.RunID != latestCompleted.RunID:
 		af.State = "failed"
-		af.Detail = fmt.Sprintf("the latest scheduled audit (run %d) did not pass: conclusion %s, audit %s, reference %s, compare %s",
-			latestCompleted.RunID, latestCompleted.Conclusion, latestCompleted.Audit, latestCompleted.Reference, latestCompleted.Compare)
+		af.Detail = failedAuditDetail(latestCompleted)
 	default:
 		created, _ := parseTime(af.LastPassed.CreatedAt)
 		af.AgeDays = math.Round(now.Sub(created).Hours()/24*10) / 10
@@ -377,9 +377,28 @@ func auditFreshness(runs []Sample, b Baseline, now time.Time) AuditFreshness {
 	return af
 }
 
+// failedAuditDetail names why the latest completed scheduled audit failed.
+func failedAuditDetail(r *AuditRun) string {
+	d := fmt.Sprintf("the latest scheduled audit (run %d, attempt %d) did not pass: conclusion %s, audit %s, reference %s, compare %s",
+		r.RunID, r.Attempt, r.Conclusion, r.Audit, r.Reference, r.Compare)
+	if r.Attempt > 1 {
+		d += " — a re-run attempt cannot establish a passing audit"
+	}
+	return d
+}
+
 func auditRunPassed(s Sample) bool {
 	r := s.Report
 	a := r.Evidence.Audit
+	// A re-run attempt never establishes a passing audit. The runs API
+	// reports only a run's LATEST attempt, so a failed audit re-run to green
+	// would otherwise read as passed, and a "re-run failed jobs" attempt mixes
+	// a fresh comparison with jobs carried over from the attempt that failed.
+	// A red audit is investigated, never re-run away (§17.7); the next
+	// scheduled audit must pass on its first attempt.
+	if r.Run.Rerun || r.Run.Attempt > 1 {
+		return false
+	}
 	if r.Run.Conclusion != "success" || a.ReferenceJob != "success" || a.CompareJob != "success" {
 		return false
 	}

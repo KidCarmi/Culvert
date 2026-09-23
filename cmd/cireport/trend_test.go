@@ -146,6 +146,12 @@ func auditSample(id int64, day int, concl, ref, cmp, state, source string) Sampl
 	return Sample{Report: r, Source: source}
 }
 
+// rerunOf marks a sample as a re-run attempt of its run.
+func rerunOf(s Sample) Sample {
+	s.Report.Run.Attempt, s.Report.Run.Rerun = 2, true
+	return s
+}
+
 // The scheduled audit is judged fail-closed: failed, skipped, stale and
 // never-run audits fail the trend; a pass needs the gate's success AND both
 // audit jobs' success AND (when read) a passed comparison.
@@ -175,6 +181,11 @@ func TestAuditFreshness_States(t *testing.T) {
 		}(), at(21), "failed"},
 		{"metadata-only pass rests on the gate's verdict", []Sample{auditSample(3, 21, "success", "success", "success", "unknown", "metadata-only")}, at(21), "passed"},
 		{"cancelled audit", []Sample{auditSample(3, 21, "cancelled", "cancelled", "skipped", "failed", "metadata-only")}, at(21), "failed"},
+		// The runs API reports only the LATEST attempt: a failed audit re-run
+		// to green looks like a passing run with attempt > 1. It must not pass,
+		// whichever source the sample came from, and even with an older pass.
+		{"failed audit re-run to green (metadata)", []Sample{rerunOf(auditSample(3, 21, "success", "success", "success", "unknown", "metadata-only")), pass(2, 14)}, at(21), "failed"},
+		{"failed audit re-run to green (report)", []Sample{rerunOf(pass(3, 21))}, at(21), "failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			af := auditFreshness(tc.runs, b, tc.now)

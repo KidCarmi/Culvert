@@ -2086,7 +2086,10 @@ itself.
      `comparison.json`. Lost tests or blocks are named there.
   2. Follow §14.2. Every lost block needs an isolated fixture or a reviewed
      exception.
-  3. Never re-run a red audit to get a green one.
+  3. Never re-run a red audit to get a green one. The trend enforces this:
+     the runs API reports only a run's latest attempt, so a re-run attempt
+     (attempt > 1) never counts as a passing audit. The next scheduled audit
+     must pass on its first attempt (Codex review, PR #1477).
 - **Investigating a regression warning:**
   1. Compare the group's recent `report.json`s. Look at the job queue, the
      setup phase, shard imbalance and the slowest tests.
