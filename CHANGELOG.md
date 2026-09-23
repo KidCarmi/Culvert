@@ -311,6 +311,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - `google.golang.org/grpc` bumped `v1.83.1` → `v1.83.2` (CVE-2026-84445,
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
+- The Cluster panel's Distributed Rate Limiting card now shows **Stale
+  Episodes** — the number of times this node's cluster-wide rate-limit
+  broadcast has gone fresh→stale since startup (`GET /api/cluster/rate-limits`
+  already returned `remote_counts_stale_episodes`; the panel never rendered
+  it). The existing stale banner only appears while the broadcast is
+  *currently* stale, so an operator reviewing the panel after a Control Plane
+  blip had recovered saw a fully healthy panel with no way to tell "did this
+  happen once overnight, or six times" without SSHing in and grepping the
+  process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Added
 
