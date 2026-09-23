@@ -95,6 +95,13 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-23 — `CHAOS-66` CLAIMED (placeholder, allocated before any code).**
+Sweep: **the interactive IdP compile path — what an enabled SAML/OIDC profile
+depends on being reachable, and what happens to everything else when it is
+not.** Id allocated in this file as commit one, per the remedy the header above
+reaches twice independently after ten collisions and CHAOS-65 proved. Findings
+and the section number follow in the same PR.
+
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
 file as commit one, which is the remedy the header above reaches twice
