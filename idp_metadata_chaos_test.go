@@ -99,11 +99,26 @@ func chaos66MetadataXML(t *testing.T, cn string) string {
 }
 
 // chaos66Env isolates every process-global this sweep touches: the document
-// store singleton, the metadata health record, the SSRF posture and the dialer.
-// Skipping any one of them leaks state into unrelated tests (the PR3d
-// fence-pollution class) and makes -count=2 -shuffle=on fail.
+// store singleton, the metadata health record, the SSRF posture, the dialer
+// AND the global IdP registry.
+//
+// The registry is the one that bites, and it is not hypothetical — it was
+// caught by the full suite after these gates passed on their own. Tests that
+// drive syncSnapshotIdPProfiles go through the GLOBAL idpRegistry, so a gate
+// that compiles a SAML provider and does not restore it leaves that provider
+// live for the rest of the package. `resolveRequestAuth` then reads
+// `ssoCapable = idpRegistry.HasEnabledInteractiveProvider()` as true, flips
+// `authRequired` on, and every later test that proxies a request without
+// credentials gets 407 instead of 200 — which surfaced as twenty unrelated
+// MITM/H2 failures in a package that had passed. That is the PR3d
+// fence-pollution class, and under -shuffle it is order-dependent, so it must
+// be isolated here rather than per test.
 func chaos66Env(t *testing.T) *idpmeta.Store {
 	t.Helper()
+	prevRegistry := idpRegistry
+	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	t.Cleanup(func() { idpRegistry = prevRegistry })
+
 	store := idpmeta.New(t.TempDir())
 	t.Cleanup(swapIdPMetadataStore(store))
 	resetIdPMetadataHealthForTest()
