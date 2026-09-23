@@ -452,40 +452,21 @@ func workflowFiles(t *testing.T) []string {
 // and deliberately excluded; TestSecurityRace_OtherSuitesIntact pins that it
 // still runs.
 func TestSecurityRace_MainPushHasExactlyOneRaceOwner(t *testing.T) {
-	type candidate struct{ workflow, job, how string }
-	var runners []candidate
-
+	var runners []raceRunner
 	for _, wf := range []string{securityWorkflowPath, qaGateWorkflowPath} {
 		doc := loadWorkflow(t, wf)
 		generic := asMap(genericWorkflow(t, wf)["jobs"])
 		steps := workflowStepsByJob(t, wf)
 		for name := range doc.Jobs {
-			j := doc.Jobs[name]
-			cond := normaliseExpr(j.If)
-			runsOnMainPush := cond == "" ||
-				cond == "github.event_name != 'pull_request'" ||
-				(strings.Contains(cond, "github.event_name") && evalRaceOwnership(t, cond, "push", "refs/heads/main"))
-			if !runsOnMainPush {
+			if !jobRunsOnMainPush(t, doc.Jobs[name].If) {
 				continue
 			}
 			if uses := toStr(asMap(generic[name])["uses"]); uses == "./"+qaRaceShardsWorkflowPath {
-				runners = append(runners, candidate{wf, name, "uses " + uses})
+				runners = append(runners, raceRunner{wf, name, "uses " + uses})
 				continue
 			}
-			for _, st := range steps[name] {
-				run := shellCodeOnly(toStr(st["run"]))
-				if !strings.Contains(run, "go test") || !strings.Contains(run, "-race") {
-					continue
-				}
-				// A nested module's suite is not a duplicate of the root's.
-				if wd := toStr(st["working-directory"]); wd != "" && wd != "." {
-					continue
-				}
-				// The duplicate this stage removes is the WHOLE-MODULE run.
-				if !strings.Contains(run, "./...") {
-					continue
-				}
-				runners = append(runners, candidate{wf, name, strings.TrimSpace(run)})
+			for _, run := range wholeModuleRaceRuns(steps[name]) {
+				runners = append(runners, raceRunner{wf, name, run})
 			}
 		}
 	}
@@ -508,6 +489,39 @@ func TestSecurityRace_MainPushHasExactlyOneRaceOwner(t *testing.T) {
 		t.Errorf("the main-push race owner no longer publishes %q — stage 2A's single race+coverage run is the "+
 			"reason Security can stop running the suite here. race-verdict uploads: %v", qaCoverageArtifact, got)
 	}
+}
+
+// raceRunner is one job found executing the full root-module race suite.
+type raceRunner struct{ workflow, job, how string }
+
+// jobRunsOnMainPush reports whether a job with this `if:` runs on a push to
+// main (no condition, the plain non-PR guard, or an event expression that
+// evaluates true for that event).
+func jobRunsOnMainPush(t *testing.T, ifExpr string) bool {
+	t.Helper()
+	cond := normaliseExpr(ifExpr)
+	return cond == "" ||
+		cond == "github.event_name != 'pull_request'" ||
+		(strings.Contains(cond, "github.event_name") && evalRaceOwnership(t, cond, "push", "refs/heads/main"))
+}
+
+// wholeModuleRaceRuns returns the steps that run the WHOLE root module under
+// the race detector — the duplicate stage 2B removed. A nested module's suite
+// (a working-directory other than the root) is a different suite, and a
+// package-scoped `go test -race` is not the whole module.
+func wholeModuleRaceRuns(steps []map[string]interface{}) []string {
+	var out []string
+	for _, st := range steps {
+		run := shellCodeOnly(toStr(st["run"]))
+		if !strings.Contains(run, "go test") || !strings.Contains(run, "-race") || !strings.Contains(run, "./...") {
+			continue
+		}
+		if wd := toStr(st["working-directory"]); wd != "" && wd != "." {
+			continue
+		}
+		out = append(out, strings.TrimSpace(run))
+	}
+	return out
 }
 
 // workflowStepsByJob returns every job's steps as generic maps, so a step's
