@@ -81,13 +81,51 @@ func TestCompare_ReportsCoverageDifferencesByBlock(t *testing.T) {
 	in := baseCompare(t)
 	in.pilotProf = mustProfile(t, "mode: atomic\nm/a.go:1.1,2.2 2 0\nm/a.go:3.1,4.2 1 5\n")
 	c := compare(in)
-	if !c.OK {
-		t.Fatalf("problems: %v", c.Problems)
-	}
 	if strings.Join(c.BlocksLost, ",") != "m/a.go:1.1,2.2" || strings.Join(c.BlocksGained, ",") != "m/a.go:3.1,4.2" {
 		t.Fatalf("lost %v gained %v", c.BlocksLost, c.BlocksGained)
 	}
 	if len(c.FilesChanged) != 1 || c.FilesChanged[0].Reference != 66.67 || c.FilesChanged[0].Pilot != 33.33 {
 		t.Fatalf("files changed = %+v", c.FilesChanged)
+	}
+}
+
+// TestCompare_CoverageLossFailsUnlessExcepted pins the stage-5B rule: a block
+// the reference covered and the sharded run did not is a PROBLEM — rounded
+// percentages and passing floors do not establish equivalence. Coverage the
+// sharded run gained is only a note.
+func TestCompare_CoverageLossFailsUnlessExcepted(t *testing.T) {
+	lostOne := func(t *testing.T) compareRuns {
+		in := baseCompare(t)
+		in.pilotProf = mustProfile(t, "mode: atomic\nm/a.go:1.1,2.2 2 0\nm/a.go:3.1,4.2 1 0\n")
+		return in
+	}
+	ok := CoverageException{Block: "m/a.go:1.1,2.2", Reason: "why", Evidence: "how we know"}
+	for _, tc := range []struct {
+		name   string
+		ex     []CoverageException
+		wantOK bool
+		want   string
+	}{
+		{"unexplained loss", nil, false, "1 block(s) covered by the unsharded reference are NOT covered by the sharded run: 1 [m/a.go:1.1,2.2]"},
+		{"justified exception", []CoverageException{ok}, true, ""},
+		{"exception without evidence", []CoverageException{{Block: ok.Block, Reason: "why"}}, false, "is not explicit"},
+		{"duplicated exception", []CoverageException{ok, ok}, false, "listed twice"},
+		{"stale exception", []CoverageException{ok, {Block: "m/a.go:9.1,9.9", Reason: "r", Evidence: "e"}}, false, "is stale"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := lostOne(t)
+			in.exceptions = CoverageExceptions{Schema: 1, Exceptions: tc.ex}
+			c := compare(in)
+			if c.OK != tc.wantOK || !strings.Contains(strings.Join(c.Problems, "\n"), tc.want) {
+				t.Fatalf("ok=%v problems=%v, want ok=%v and %q", c.OK, c.Problems, tc.wantOK, tc.want)
+			}
+		})
+	}
+
+	// Pilot-only coverage never fails.
+	in := baseCompare(t)
+	in.pilotProf = mustProfile(t, "mode: atomic\nm/a.go:1.1,2.2 2 3\nm/a.go:3.1,4.2 1 7\n")
+	if c := compare(in); !c.OK || len(c.BlocksGained) != 1 {
+		t.Fatalf("gained coverage failed the comparison: %+v", c)
 	}
 }

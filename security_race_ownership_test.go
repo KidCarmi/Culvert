@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ const (
 	securityRaceJob      = "tests-race"
 	securityAggregateJob = "release-approved"
 	securityAggregateNm  = "✅ Security Gate — APPROVED"
-	qaRaceOwnerJob       = "qa-logic"
+	qaRaceOwnerJob       = "qa-race"
 	securityCovArtifact  = "coverage-report"
 )
 
@@ -123,11 +124,12 @@ func TestSecurityRace_OwnershipMatrix(t *testing.T) {
 func evalRaceOwnership(t *testing.T, expr, event, ref string) bool {
 	t.Helper()
 	work := expr
-	// The stage-5A pilot's opt-in dispatch input is a boolean that defaults to
-	// false and does not exist at all on push/pull_request/tag events, so it
-	// evaluates to false for every event this matrix models. Only this ONE
-	// input is understood; any other `inputs.*` still fails loudly below.
-	work = strings.ReplaceAll(work, "inputs.root_shard_pilot", "false")
+	// The stage-5B unsharded audit's opt-in dispatch input is a boolean that
+	// defaults to false and does not exist at all on push/pull_request/tag
+	// events, so it evaluates to false for every event this matrix models.
+	// Only this ONE input is understood; any other `inputs.*` still fails
+	// loudly below.
+	work = strings.ReplaceAll(work, "inputs.unsharded_audit", "false")
 	// always() only widens WHEN a job runs relative to its needs' results; for
 	// "does this event reach the job at all" it is true.
 	work = strings.ReplaceAll(work, "always()", "true")
@@ -435,6 +437,14 @@ func workflowFiles(t *testing.T) []string {
 // stage across BOTH workflows: on a push to main, exactly one job runs the full
 // ROOT-MODULE race suite.
 //
+// Since stage 5B that owner is qa-gate.yml's `qa-race`, which runs the suite
+// through the reusable qa-race-shards.yml (4 root shards of one `go test -c
+// -race -cover` binary + every other package), so it is recognised by its
+// `uses:` rather than by a `go test -race ./...` step. The wall therefore
+// counts BOTH shapes: any job that still runs a whole-module `go test -race
+// ./...` on a main push, and any job that calls the sharded workflow. Exactly
+// one may exist, and it must be qa-race.
+//
 // "Full root-module" is the load-bearing qualifier. qa-agent also runs
 // `go test -race`, but against cmd/culvert-maint — a separate Go module that
 // `go test ./...` from the repo root never descends into, so it is a different
@@ -442,11 +452,12 @@ func workflowFiles(t *testing.T) []string {
 // and deliberately excluded; TestSecurityRace_OtherSuitesIntact pins that it
 // still runs.
 func TestSecurityRace_MainPushHasExactlyOneRaceOwner(t *testing.T) {
-	type candidate struct{ workflow, job, cmd string }
+	type candidate struct{ workflow, job, how string }
 	var runners []candidate
 
 	for _, wf := range []string{securityWorkflowPath, qaGateWorkflowPath} {
 		doc := loadWorkflow(t, wf)
+		generic := asMap(genericWorkflow(t, wf)["jobs"])
 		steps := workflowStepsByJob(t, wf)
 		for name := range doc.Jobs {
 			j := doc.Jobs[name]
@@ -455,6 +466,10 @@ func TestSecurityRace_MainPushHasExactlyOneRaceOwner(t *testing.T) {
 				cond == "github.event_name != 'pull_request'" ||
 				(strings.Contains(cond, "github.event_name") && evalRaceOwnership(t, cond, "push", "refs/heads/main"))
 			if !runsOnMainPush {
+				continue
+			}
+			if uses := toStr(asMap(generic[name])["uses"]); uses == "./"+qaRaceShardsWorkflowPath {
+				runners = append(runners, candidate{wf, name, "uses " + uses})
 				continue
 			}
 			for _, st := range steps[name] {
@@ -478,19 +493,20 @@ func TestSecurityRace_MainPushHasExactlyOneRaceOwner(t *testing.T) {
 	if len(runners) != 1 {
 		var lines []string
 		for _, r := range runners {
-			lines = append(lines, r.workflow+" / "+r.job)
+			lines = append(lines, r.workflow+" / "+r.job+" ("+r.how+")")
 		}
 		t.Fatalf("a push to main must have EXACTLY ONE full root-module race execution across QA and Security; found %d: %v\n"+
 			"That duplication is what stage 2B removes.", len(runners), lines)
 	}
-	if runners[0].job != qaRaceOwnerJob {
+	if runners[0].job != qaRaceOwnerJob || runners[0].workflow != qaGateWorkflowPath {
 		t.Errorf("the main-push race owner is %q in %s, want %q in %s",
 			runners[0].job, runners[0].workflow, qaRaceOwnerJob, qaGateWorkflowPath)
 	}
-	// And that owner must still produce the coverage profile (stage 2A).
-	if !strings.Contains(runners[0].cmd, "-coverprofile=") {
-		t.Errorf("the main-push race owner no longer writes a coverage profile — stage 2A's single race+coverage run is the "+
-			"reason Security can stop running the suite here.\ncmd: %s", runners[0].cmd)
+	// And that owner must still produce the coverage profile (stage 2A): the
+	// sharded workflow's verdict publishes `qa-coverage`.
+	if got := uploadedArtifacts(t, qaRaceShardsWorkflowPath, "race-verdict"); !slices.Contains(got, qaCoverageArtifact) {
+		t.Errorf("the main-push race owner no longer publishes %q — stage 2A's single race+coverage run is the "+
+			"reason Security can stop running the suite here. race-verdict uploads: %v", qaCoverageArtifact, got)
 	}
 }
 

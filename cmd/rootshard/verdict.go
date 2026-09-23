@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,6 +28,9 @@ type Verdict struct {
 	Merged   coverageStats `json:"mergedCoverage"`
 	Root     coverageStats `json:"rootCoverage"`
 	Profiles int           `json:"profilesMerged"`
+	// Completeness is what makes this verdict stand WITHOUT an unsharded
+	// reference: see completeness.go.
+	Completeness Completeness `json:"completeness"`
 }
 
 // ShardReport summarises one shard's evidence.
@@ -46,16 +51,22 @@ type LaneReport struct {
 	Elapsed  map[string]float64 `json:"packageElapsed"`
 }
 
-// verdictInput locates every piece of evidence.
+// verdictInput locates every piece of evidence and every independent
+// expectation it is judged against.
 type verdictInput struct {
-	plan      Plan
-	manifest  Manifest
-	inv       Inventory
-	listSum   string
-	shardsDir string
-	laneDir   string
-	lanePkgs  []string
-	laneRoot  string
+	plan         Plan
+	manifest     Manifest
+	inv          Inventory
+	listSum      string
+	shardsDir    string
+	laneDir      string
+	universeDir  string
+	lanePkgs     []string
+	laneRoot     string
+	rootUniverse *Profile
+	// source is the source-enumerated inventory of the root AND every lane
+	// package, from the verdict's own checkout of the build's commit.
+	source map[string]PkgInventory
 }
 
 // judge checks all evidence and merges coverage. It collects EVERY problem
@@ -73,24 +84,31 @@ func judge(in verdictInput) (Verdict, Results, *Profile) {
 		fail("plan package %s != manifest package %s", in.plan.Package, in.manifest.Package)
 	}
 	results := Results{}
-	var merged, rootUniverse *Profile
+	var merged, shardUniverse *Profile
 	for _, sp := range in.plan.Shards {
 		rep, res, profs := judgeShard(in, sp, fail)
 		v.Shards = append(v.Shards, rep)
 		results.merge(res)
 		for _, p := range profs {
-			if rootUniverse == nil {
-				rootUniverse = p
-			} else if d := sameUniverse(rootUniverse, p); d != "" {
+			if shardUniverse == nil {
+				shardUniverse = p
+			} else if d := sameUniverse(shardUniverse, p); d != "" {
 				fail("shard %d: root profile block universe differs from shard 0's: %s", sp.Index, d)
 			}
 			merged = mergeInto(merged, p, fail)
 			v.Profiles++
 		}
 	}
-	laneRep, laneRes, laneProf := judgeLane(in, fail)
+	checkRootUniverse(in, shardUniverse, &v.Completeness, fail)
+	checkSourceAgreement(in, &v.Completeness, fail)
+	// The universe first: it decides which lane packages are legitimately
+	// EMPTY (no tests and no statements), the one case in which `go test`
+	// reports a package as skipped rather than passed.
+	universe := judgeUniverse(in, &v.Completeness, fail)
+	laneRep, laneRes, laneProf := judgeLane(in, &v.Completeness, fail)
 	v.Lane = laneRep
 	results.merge(laneRes)
+	checkLaneUniverse(universe, laneProf, fail)
 	if laneProf != nil {
 		merged = mergeInto(merged, laneProf, fail)
 		v.Profiles++
@@ -254,18 +272,22 @@ func checkChunkResults(pkg, where string, names []string, res Results, fail func
 }
 
 // judgeLane verifies the non-root lane: same source/toolchain identity, the
-// exact expected package set, every package passed, and a usable profile with
-// no root-package blocks.
-func judgeLane(in verdictInput, fail func(string, ...any)) (LaneReport, Results, *Profile) {
+// exact expected package set, every package passed with exactly its source
+// inventory of entries, and a usable profile with no root-package blocks (its
+// completeness against the universe is checked by the caller).
+func judgeLane(in verdictInput, c *Completeness, fail func(string, ...any)) (LaneReport, Results, *Profile) {
 	rep := LaneReport{Elapsed: map[string]float64{}}
 	var meta LaneMeta
 	if err := readJSON(filepath.Join(in.laneDir, "meta.json"), &meta); err != nil {
 		fail("lane: no usable evidence (%v) — failed, cancelled or never uploaded", err)
 		return rep, Results{}, nil
 	}
-	checkLaneIdentity(in, meta, fail)
+	if meta.Kind != laneRun.name {
+		fail("lane: evidence is of kind %q, not %q", meta.Kind, laneRun.name)
+	}
+	checkPackageRunIdentity("lane", in, meta, fail)
 	rep.Packages, rep.Seconds = len(meta.Packages), meta.Seconds
-	f, err := os.Open(filepath.Join(in.laneDir, "lane.json"))
+	f, err := os.Open(filepath.Join(in.laneDir, laneRun.events))
 	if err != nil {
 		fail("lane: no test events (%v)", err)
 		return rep, Results{}, nil
@@ -276,14 +298,18 @@ func judgeLane(in verdictInput, fail func(string, ...any)) (LaneReport, Results,
 		fail("lane: %v", err)
 		return rep, Results{}, nil
 	}
-	rep.Elapsed = checkLaneResults(in, res, fail)
-	prof, err := readProfile(filepath.Join(in.laneDir, "lane.cover.out"))
+	rep.Elapsed = checkLaneResults(in, res, c.empty(), fail)
+	checkLaneEntries(in, res, c, fail)
+	prof, err := readProfile(filepath.Join(in.laneDir, laneRun.profile))
 	if err != nil {
 		fail("lane: unusable coverage profile: %v", err)
 		return rep, res, nil
 	}
 	if prof.Mode != "atomic" {
 		fail("lane: coverage mode %q, the race reference is atomic", prof.Mode)
+	}
+	if len(prof.Blocks) == 0 {
+		fail("lane: coverage profile has no blocks")
 	}
 	for k := range prof.Blocks {
 		if rootFile(in.manifest.Package, k.File) {
@@ -294,32 +320,19 @@ func judgeLane(in verdictInput, fail func(string, ...any)) (LaneReport, Results,
 	return rep, res, prof
 }
 
-// checkLaneIdentity: same source/toolchain as the build, exit 0, and exactly
-// `go list ./...` minus the root import path.
-func checkLaneIdentity(in verdictInput, meta LaneMeta, fail func(string, ...any)) {
-	m := in.manifest
-	if meta.Commit != m.Commit || meta.GoVersion != m.GoVersion || meta.GOOS != m.GOOS || meta.GOARCH != m.GOARCH {
-		fail("lane: identity %s %s %s/%s differs from the build %s %s %s/%s", meta.Commit, meta.GoVersion, meta.GOOS, meta.GOARCH, m.Commit, m.GoVersion, m.GOOS, m.GOARCH)
-	}
-	if meta.ExitCode != 0 {
-		fail("lane: go test exited %d", meta.ExitCode)
-	}
-	if meta.Excluded != m.Package || in.laneRoot != m.Package {
-		fail("lane excluded %q (expected root %q per go list: %q)", meta.Excluded, m.Package, in.laneRoot)
-	}
-	if d := diffNames(in.lanePkgs, meta.Packages); d != "" {
-		fail("lane package set differs from `go list ./...` minus the root: %s", d)
-	}
-}
-
 // checkLaneResults: every expected package passed; the root never ran here.
-func checkLaneResults(in verdictInput, res Results, fail func(string, ...any)) map[string]float64 {
+// A package-level `skip` is accepted ONLY for a listed empty package (no tests
+// in its source AND no statements in the universe): that is what `go test
+// -cover` reports for it, and nothing else may read as skipped.
+func checkLaneResults(in verdictInput, res Results, empty map[string]bool, fail func(string, ...any)) map[string]float64 {
 	elapsed := map[string]float64{}
 	for _, p := range in.lanePkgs {
 		r := res[p]
 		switch {
 		case r == nil:
 			fail("lane: %s has no result — it never ran", p)
+		case r.Status == statusSkip && empty[p]:
+			elapsed[p] = r.Elapsed
 		case r.Status != statusPass:
 			fail("lane: %s result %q", p, r.Status)
 		default:
@@ -333,35 +346,22 @@ func checkLaneResults(in verdictInput, res Results, fail func(string, ...any)) m
 }
 
 func cmdVerdict(args []string, stdout io.Writer) error {
-	fs := newFlags("verdict")
-	buildDir := fs.String("build-dir", "", "directory with manifest.json, list.txt, plan.json")
-	shardsDir := fs.String("shards-dir", "", "directory holding shard-<i>/ evidence")
-	laneDir := fs.String("lane-dir", "", "non-root lane evidence directory")
-	outDir := fs.String("out-dir", "", "where to write verdict.json, results.json, merged.cover.out")
-	goBin := fs.String("go", "go", "go command (for `go list ./...`)")
-	if err := fs.Parse(args); err != nil {
+	fl := newFlags("verdict")
+	buildDir := fl.String("build-dir", "", "directory with manifest.json, list.txt, plan.json")
+	shardsDir := fl.String("shards-dir", "", "directory holding shard-<i>/ evidence")
+	laneDir := fl.String("lane-dir", "", "non-root lane evidence directory")
+	universeDir := fl.String("universe-dir", "", "non-root lane universe evidence directory")
+	outDir := fl.String("out-dir", "", "where to write verdict.json, results.json, merged.cover.out")
+	commit := fl.String("commit", os.Getenv("GITHUB_SHA"), "commit THIS job checked out (the source the expectations are enumerated from)")
+	goBin := fl.String("go", "go", "go command (for `go list ./...`)")
+	if err := fl.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
-	if err := required(fs, "build-dir", "shards-dir", "lane-dir", "out-dir"); err != nil {
+	if err := required(fl, "build-dir", "shards-dir", "lane-dir", "universe-dir", "out-dir", "commit"); err != nil {
 		return err
 	}
-	in := verdictInput{shardsDir: *shardsDir, laneDir: *laneDir}
-	if err := readJSON(filepath.Join(*buildDir, "manifest.json"), &in.manifest); err != nil {
-		return err
-	}
-	if err := readJSON(filepath.Join(*buildDir, "plan.json"), &in.plan); err != nil {
-		return err
-	}
-	list, err := os.ReadFile(filepath.Join(*buildDir, "list.txt"))
-	if err != nil {
-		return fmt.Errorf("read list: %w", err)
-	}
-	sum := sha256.Sum256(list)
-	in.listSum = hex.EncodeToString(sum[:])
-	if in.inv, err = parseList(strings.NewReader(string(list))); err != nil {
-		return err
-	}
-	if in.laneRoot, in.lanePkgs, err = nonRootPackages(context.Background(), *goBin); err != nil {
+	in := verdictInput{shardsDir: *shardsDir, laneDir: *laneDir, universeDir: *universeDir}
+	if err := loadVerdictInput(*buildDir, *commit, *goBin, &in); err != nil {
 		return err
 	}
 	v, results, merged := judge(in)
@@ -386,6 +386,71 @@ func cmdVerdict(args []string, stdout io.Writer) error {
 	return nil
 }
 
+// loadVerdictInput reads the build's evidence and derives every expectation
+// the judge needs that does not come from the evidence being judged.
+func loadVerdictInput(buildDir, commit, goBin string, in *verdictInput) error {
+	if err := readJSON(filepath.Join(buildDir, "manifest.json"), &in.manifest); err != nil {
+		return err
+	}
+	// The expectations below are enumerated from THIS checkout, so it must be
+	// the source the evidence was built from.
+	if commit != in.manifest.Commit {
+		return fmt.Errorf("verdict checkout is %s but the build is %s — expectations would describe another tree", commit, in.manifest.Commit)
+	}
+	if err := loadRootUniverse(buildDir, in); err != nil {
+		return err
+	}
+	if err := readJSON(filepath.Join(buildDir, "plan.json"), &in.plan); err != nil {
+		return err
+	}
+	list, err := os.ReadFile(filepath.Join(buildDir, "list.txt"))
+	if err != nil {
+		return fmt.Errorf("read list: %w", err)
+	}
+	sum := sha256.Sum256(list)
+	in.listSum = hex.EncodeToString(sum[:])
+	if in.inv, err = parseList(strings.NewReader(string(list))); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	if in.laneRoot, in.lanePkgs, err = nonRootPackages(ctx, goBin); err != nil {
+		return err
+	}
+	all := append([]string{in.laneRoot}, in.lanePkgs...)
+	if in.source, err = sourceInventory(ctx, goBin, laneBuildFlags, all); err != nil {
+		return fmt.Errorf("source inventory: %w", err)
+	}
+	return nil
+}
+
+// loadRootUniverse reads the build's expected root block set and checks it is
+// the one the manifest recorded. A missing universe is not an error HERE — the
+// judge reports it as a problem, so it appears in verdict.json with the rest.
+func loadRootUniverse(buildDir string, in *verdictInput) error {
+	m := in.manifest
+	if m.RootUniverse == "" {
+		return nil
+	}
+	p := filepath.Join(buildDir, m.RootUniverse)
+	if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	sum, _, err := fileSHA256(p)
+	if err != nil {
+		return err
+	}
+	if sum != m.RootUniverseSHA256 {
+		return fmt.Errorf("root universe %s sha256 %s != manifest %s", p, sum, m.RootUniverseSHA256)
+	}
+	if in.rootUniverse, err = readProfile(p); err != nil {
+		return err
+	}
+	if len(in.rootUniverse.Blocks) != m.RootUniverseBlocks {
+		return fmt.Errorf("root universe has %d blocks, manifest recorded %d", len(in.rootUniverse.Blocks), m.RootUniverseBlocks)
+	}
+	return nil
+}
+
 func printVerdict(w io.Writer, v Verdict) {
 	say(w, "pilot verdict for %s @ %s: ok=%v, %d profile(s) merged\n", v.Package, v.Commit, v.OK, v.Profiles)
 	for _, s := range v.Shards {
@@ -406,6 +471,11 @@ func printVerdict(w io.Writer, v Verdict) {
 		say(w, "    %8.1fs %s\n", slow[i].s, slow[i].p)
 	}
 	say(w, "  merged coverage: %.1f%% of %d statements (root package %.1f%%)\n", v.Merged.Percent, v.Merged.Statements, v.Root.Percent)
+	c := v.Completeness
+	say(w, "  completeness: root universe %d blocks, lane universe %d blocks; source enumerator agrees with the binary: %v; lane entries %d reported / %d expected\n",
+		c.RootUniverseBlocks, c.LaneUniverseBlocks, c.SourceAgreesWithBinary, c.LaneReportedEntries, c.LaneExpectedEntries)
+	say(w, "  packages without tests (%d): %s\n", len(c.PackagesWithoutTests), headList(c.PackagesWithoutTests, 8))
+	say(w, "  packages without instrumentable statements (%d): %s\n", len(c.PackagesWithoutStatements), headList(c.PackagesWithoutStatements, 8))
 	for _, p := range v.Problems {
 		say(w, "::error::%s\n", p)
 	}

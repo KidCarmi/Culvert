@@ -81,6 +81,9 @@ func TestMaybeCrash(t *testing.T) {
 
 func TestZLast(t *testing.T) {}
 
+// Testify starts with "Test" but is not a test (lowercase after the prefix).
+func Testify() int { return 1 }
+
 // TestChild re-executes the test binary and exits through os.Exit, exactly as
 // the repository's helper-process tests run main() and its one-shot commands
 // (upstream_v2_codex_red_test.go). The child's coverage reaches the profile
@@ -114,15 +117,57 @@ func BenchmarkAdd(b *testing.B) {
 	}
 }
 `,
-	"sub/sub.go":      "package sub\n\nfunc Twice(x int) int { return 2 * x }\n",
-	"sub/sub_test.go": "package sub\n\nimport \"testing\"\n\nfunc TestTwice(t *testing.T) {\n\tif Twice(2) != 4 {\n\t\tt.Fatal(\"twice\")\n\t}\n}\n",
-	"notest/n.go":     "package notest\n\nfunc N() int { return 1 }\n",
+	"sub/sub.go": "package sub\n\nfunc Twice(x int) int { return 2 * x }\n",
+	// The lane package carries every entry shape the source enumerator must
+	// get right: a test, a fuzz target, a runnable example, an example with
+	// no output (compiled, never run), a benchmark (not an entry), a helper
+	// whose name starts with "Test" but is not a test, and an external
+	// (package sub_test) file.
+	"sub/sub_test.go": `package sub
+
+import (
+	"fmt"
+	"testing"
+)
+
+func TestTwice(t *testing.T) {
+	if Twice(2) != 4 {
+		t.Fatal("twice")
+	}
+}
+
+func FuzzTwice(f *testing.F) {
+	f.Add(1)
+	f.Fuzz(func(t *testing.T, x int) { _ = Twice(x) })
+}
+
+func ExampleTwice() {
+	fmt.Println(Twice(2))
+	// Output: 4
+}
+
+func ExampleTwice_silent() { _ = Twice(1) }
+
+func BenchmarkTwice(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = Twice(i)
+	}
+}
+
+func Testify() int { return 1 }
+`,
+	"sub/x_test.go": "package sub_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/pilot/sub\"\n)\n\nfunc TestExternal(t *testing.T) {\n\tif sub.Twice(1) != 2 {\n\t\tt.Fatal(\"external\")\n\t}\n}\n",
+	// A package with statements and no tests, and one with neither: both are
+	// legitimate, and the verdict must LIST them rather than count zeros.
+	"notest/n.go":    "package notest\n\nfunc N() int { return 1 }\n",
+	"types/types.go": "package types\n\n// T has no statements to instrument.\ntype T int\n\n// C is a constant.\nconst C = 1\n",
 }
 
 type fixture struct {
-	t    *testing.T
-	root string
-	work string
+	t      *testing.T
+	root   string
+	work   string
+	commit string
 }
 
 // newFixture writes the module and makes it the working directory: the pilot
@@ -132,7 +177,7 @@ func newFixture(t *testing.T) *fixture {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not on PATH")
 	}
-	f := &fixture{t: t, root: t.TempDir(), work: t.TempDir()}
+	f := &fixture{t: t, root: t.TempDir(), work: t.TempDir(), commit: "0123456789abcdef"}
 	for name, body := range fixtureModule {
 		p := filepath.Join(f.root, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
@@ -168,7 +213,7 @@ func (f *fixture) mustRS(args ...string) string {
 
 func (f *fixture) verdict(dir string) (code int, v Verdict, output string) {
 	code, output = f.rs("verdict", "-build-dir", f.path("build"), "-shards-dir", f.path("shards"),
-		"-lane-dir", f.path("lane"), "-out-dir", f.path(dir))
+		"-lane-dir", f.path("lane"), "-universe-dir", f.path("universe"), "-commit", f.commit, "-out-dir", f.path(dir))
 	_ = readJSON(f.path(dir, "verdict.json"), &v)
 	return code, v, output
 }
@@ -185,7 +230,7 @@ func (f *fixture) runShard(i int, commit string) (code int, output string) {
 // then breaks it in each way a sharded suite can silently lose evidence.
 func TestPilot_EndToEnd(t *testing.T) {
 	f := newFixture(t)
-	const commit = "0123456789abcdef"
+	commit := f.commit
 	f.mustRS("build", "-out-dir", f.path("build"), "-commit", commit)
 	var m Manifest
 	if err := readJSON(f.path("build", "manifest.json"), &m); err != nil {
@@ -201,6 +246,7 @@ func TestPilot_EndToEnd(t *testing.T) {
 		}
 	}
 	f.mustRS("run-lane", "-out-dir", f.path("lane"), "-commit", commit, "-timeout", "2m")
+	f.mustRS("universe", "-out-dir", f.path("universe"), "-commit", commit, "-timeout", "2m")
 	code, v, out := f.verdict("verdict")
 	if code != 0 || !v.OK {
 		t.Fatalf("clean pilot rejected (exit %d):\n%s", code, out)
@@ -208,7 +254,15 @@ func TestPilot_EndToEnd(t *testing.T) {
 	if v.Profiles < 3 || v.Merged.Blocks == 0 {
 		t.Fatalf("verdict merged %d profiles / %d blocks", v.Profiles, v.Merged.Blocks)
 	}
+	checkCleanCompleteness(t, v.Completeness)
 
+	// Every way evidence can be incomplete must be refused by the standalone
+	// verdict — no unsharded reference exists at this point.
+	t.Run("incomplete evidence", func(t *testing.T) { incompleteEvidence(t, f) })
+
+	if err := writeJSON(f.path("no-exceptions.json"), CoverageExceptions{Schema: 1}); err != nil {
+		t.Fatal(err)
+	}
 	// The unsharded reference, exactly as qa-logic runs it.
 	// #nosec G204 -- literal go command over this test's own temp paths.
 	ref := exec.CommandContext(t.Context(), "go", "test", "-race", "-count=1", "-timeout=2m", "-coverprofile="+f.path("ref.out"), "-v", "./...")
@@ -221,7 +275,8 @@ func TestPilot_EndToEnd(t *testing.T) {
 	}
 	code, out = f.rs("compare", "-ref-log", f.path("ref.log"), "-ref-profile", f.path("ref.out"),
 		"-pilot-results", f.path("verdict", "results.json"), "-pilot-profile", f.path("verdict", "merged.cover.out"),
-		"-list", f.path("build", "list.txt"), "-pkg", m.Package, "-out", f.path("cmp.json"), "-baseline-out", f.path("baseline.json"))
+		"-list", f.path("build", "list.txt"), "-pkg", m.Package, "-out", f.path("cmp.json"), "-baseline-out", f.path("baseline.json"),
+		"-coverage-exceptions", f.path("no-exceptions.json"))
 	if code != 0 {
 		t.Fatalf("pilot differs from the unsharded reference:\n%s", out)
 	}
