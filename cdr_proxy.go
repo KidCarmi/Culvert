@@ -37,6 +37,7 @@ import (
 	"time"
 
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
+	"google.golang.org/grpc/status"
 )
 
 // ─── Outcome + result shape ─────────────────────────────────────────────────
@@ -442,15 +443,74 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 func cdrHandleCallError(err error, profile, mode string, ms int64, cfg CDRConfig) *cdrRunResult {
 	if IsFileTooLarge(err) {
 		atomic.AddInt64(&statCDROversizeSkipped, 1)
-		logger.Printf("CDR: sluice rejected oversize — %v", err)
+		// CWE-117: a gRPC status description is written by Sluice, not by this
+		// process, so it is sanitised like any other non-local value.
+		logger.Printf("CDR: sluice rejected oversize — %s", sanitizeLog(err.Error()))
 		return cdrPassSkipped("SKIPPED_OVERSIZE")
 	}
-	logger.Printf("CDR: call error: %v", err)
+	noteCDRCallError(err)
+	return cdrErrorOutcome(err.Error(), profile, mode, ms, cfg)
+}
+
+// cdrCallErrorLogInterval bounds the CDR call-error log line. safeCDRSanitize
+// runs once per inspected response body, so an unbounded line here is a
+// request-path amplifier: internal/logsink BLOCKS a producer on a full queue,
+// so logging every failed Sanitize adds latency to every proxied response for
+// as long as Sluice is unwell.
+const cdrCallErrorLogInterval = time.Minute
+
+// cdrCallErrorLogAt is the UnixNano of the last emitted line. The magnitude
+// the gated line no longer repeats is already carried by statCDRErrors
+// (culvert_cdr_errors_total), which cdrErrorOutcome increments for this same
+// event — no second counter, no second dialect.
+var cdrCallErrorLogAt atomic.Int64
+
+// cdrCallErrorClass is the BOUNDED reason class the cdr_unavailable alert
+// carries in its Detail: the gRPC status code, whose cardinality is fixed by
+// the protocol.
+//
+// The bound is load-bearing. The alert store dedups on "event:detail" within a
+// 30 s window (internal/alerts, Q17/CHAOS-27), and a gRPC transport error's
+// text embeds the ephemeral local port and, for a server-produced status, a
+// remote-supplied description. Passing it through made a distinct key per
+// request, so dedup could not suppress a Sluice outage by construction and
+// every failed sanitize landed a delivery in the 500-entry retry queue — where
+// a CDR fault evicts real threat_detected alerts (register rows WK-12/RS-5,
+// the same defect internal/secscan's remoteScanFail documents). The full cause
+// goes to the rate-limited log line and nowhere else.
+func cdrCallErrorClass(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if st, ok := status.FromError(err); ok {
+		return st.Code().String()
+	}
+	return "unknown"
+}
+
+// noteCDRCallError logs (rate-limited, with the cause) and alerts (gated, with
+// a bounded class) one failed Sluice Sanitize call. The count is
+// cdrErrorOutcome's, which the caller reaches for this same event.
+func noteCDRCallError(err error) {
+	now := time.Now().UnixNano()
+	if prev := cdrCallErrorLogAt.Load(); (prev == 0 || now-prev >= int64(cdrCallErrorLogInterval)) &&
+		cdrCallErrorLogAt.CompareAndSwap(prev, now) {
+		logger.Printf("CDR: call error (%s): %s; errors total %d",
+			cdrCallErrorClass(err), sanitizeLog(err.Error()), atomic.LoadInt64(&statCDRErrors))
+	}
+	// The HasSubscriber gate is the contract fireDNSFailureAlert documents,
+	// applied to the other producer whose rate is set by a fault rather than by
+	// the operator: in the default posture (no webhooks configured) it removes
+	// a goroutine, a payload build and a round trip through the process-wide
+	// dedup mutex from every inspected response of a node that is already
+	// degraded.
+	if !globalAlertStore.HasSubscriber("cdr_unavailable") {
+		return
+	}
 	go fireAlert("cdr_unavailable", AlertPayload{
 		Source: "cdr",
-		Detail: fmt.Sprintf("sluice call failed: %v", err),
+		Detail: cdrCallErrorClass(err),
 	})
-	return cdrErrorOutcome(err.Error(), profile, mode, ms, cfg)
 }
 
 // cdrErrorOutcome applies the configured fail_mode to an error event.

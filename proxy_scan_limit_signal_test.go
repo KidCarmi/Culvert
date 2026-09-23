@@ -30,7 +30,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/scanner"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
@@ -442,5 +444,103 @@ func TestScanLimitSignal_ConcurrentResponsesEachCountedOnce(t *testing.T) {
 
 	if delta != workers {
 		t.Errorf("scan_skipped delta = %d, want %d — one signal per over-limit response", delta, workers)
+	}
+}
+
+// ─── SEC-ALERTKEY sweep: the scan_skipped producer is HasSubscriber-gated ────
+
+// TestScanSkipped_ProducerIsSubscriberGated pins the request-path alert
+// contract for logScanLimitExceeded.
+//
+// Unlike scan_timeout — whose rate is bounded by construction, since every fire
+// costs a multi-second scan budget — this producer's rate is set by TRAFFIC: an
+// origin chooses its own response size, so a client can put every request on
+// this path. Ungated, each one paid a goroutine, a payload build, an RFC3339
+// format and a round trip through the process-wide dedup mutex to deliver an
+// alert to nobody, which is the default posture (no webhooks configured).
+//
+// The counter is the CONTROL: the gate must skip the DISPATCH, never the
+// accounting — an operator scraping the unscanned-content signal must still see
+// it on a node with no webhooks.
+//
+// The observation point is the alerts SINK, not the fireAlert var: this
+// producer fires through the internal seam (alerts.Fire), whose sink was
+// captured by value at init, so swapping fireAlert would observe nothing. The
+// recorder deliberately does NOT delegate to Dispatch, so no webhook delivery
+// is ever attempted and the gate needs no network.
+func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
+	oldStore := globalAlertStore
+	globalAlertStore = &AlertStore{}
+	t.Cleanup(func() { globalAlertStore = oldStore })
+
+	var mu sync.Mutex
+	var seen []string
+	alerts.SetSink(func(event string, p AlertPayload) {
+		if event != "scan_skipped" {
+			return
+		}
+		mu.Lock()
+		seen = append(seen, p.Detail)
+		mu.Unlock()
+	})
+	t.Cleanup(func() { alerts.SetSink(fireAlert) })
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen)
+	}
+	waitFor := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for count() < n {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %d scan_skipped alerts, saw %d", n, count())
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	fire := func() int64 {
+		return scanSkippedDelta(func() {
+			for range 20 {
+				logScanLimitExceeded("files.example.com", "203.0.113.9", 1024)
+			}
+		})
+	}
+
+	// No subscriber: no dispatch, but the counter must still move.
+	delta := fire()
+	// A negative needs a positive control, so that "saw nothing" cannot mean
+	// "did not wait long enough": dispatch one alert of another name through
+	// the same seam and wait for the store to record it.
+	go fireAlert("scan_skipped_control", AlertPayload{Detail: "control"})
+	deadline := time.Now().Add(5 * time.Second)
+	for globalAlertStore.DedupTracked() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the control alert never reached Dispatch; the negative below proves nothing")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := count(); got != 0 {
+		t.Errorf("dispatched %d scan_skipped alerts with no subscriber", got)
+	}
+	if delta != 20 {
+		t.Errorf("ScanSkipped counter delta = %d, want 20: the gate must not cost the counter", delta)
+	}
+
+	// With a subscriber the alert must still fire, with its bounded Detail.
+	globalAlertStore.Add(AlertWebhook{URL: "https://example.invalid/h", Events: []string{"scan_skipped"}, Enabled: true})
+	if delta = fire(); delta != 20 {
+		t.Errorf("ScanSkipped counter delta = %d, want 20 while subscribed", delta)
+	}
+	waitFor(20)
+	mu.Lock()
+	distinct := map[string]bool{}
+	for _, d := range seen {
+		distinct[d] = true
+	}
+	mu.Unlock()
+	if len(distinct) != 1 {
+		t.Errorf("%d distinct dedup keys for one limit, want 1: %v", len(distinct), distinct)
 	}
 }
