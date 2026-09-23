@@ -1346,7 +1346,7 @@ figures are the two most recent main-push QA runs under the pre-5B layout.
 | 3 | `35839915521` | `d78d942` | audit | Inventory identical (6,361). **2 lost, 2 gained**, all new. Lost: `internal/scanner` `BypassHosts` sort swap (map-order coin flip) and `otlpRuleMetrics`' loop (needed an earlier test's registered rule). Pinned by `TestIsolation_BypassHostsSortsAnUnorderedMap` and `TestCovIsoPolicy_OTLPRuleMetricsReportsRegisteredRules`. Gained: two empty-state branches |
 | 4 | `35844201068` | `76f8cb5` | audit | Inventory identical (6,362 / 3,847 / 112 / 50). Round 3's blocks are gone. **2 lost, 1 gained**, all new. Both lost blocks are in `internal/policylearn`, i.e. in the **lane, which runs the reference's exact command**: the captured-window admission path, reached only when one of 200 racing goroutines beats a `StopSession`. Pinned by `TestIsolation_CapturedCurrentWindowIsAdmitted`. Gained: `AdminSettingsOverriddenSurfaces`' non-nil branch |
 | 5 | `35846673968` | `b0078ec` | audit | Inventory identical (6,362 / 3,847 / 112 / 50); covered blocks equal (35,234 each). Round 4's blocks are gone. **1 lost, 1 gained**. Lost: `internal/mcp/catalog` `DisableServer`'s skip `continue`, again in the lane, reached only when `TestConcurrentIngestAndDisable`'s two goroutines line up two disables back to back. Pinned by `TestIsolation_DisableServerSkipsOtherAndAlreadyDisabled`. Gained: the same `AdminSettingsOverriddenSurfaces` branch as round 4 |
-| 6 | see the PR | current head | audit | Equivalence on the final code |
+| 6 | `35849484523` | `12e3b9c` | audit | **Comparison passed.** Inventory identical (6,362 / 3,847 / 112 / 50). **0 lost, 1 gained**: the shards cover 35,235 blocks, a superset of the reference's 35,234 (the gain is round 4-5's `AdminSettingsOverriddenSurfaces` branch). Floors exit 0 on both. The run's only red job was `QA · Determinism` on `TestShadowExitC7_LatencyBudget` (shadow/observe p99 7.20x vs a 5.0x ceiling), the timing test under separate investigation, which this change does not touch |
 
 **Inventory completeness.** Round 1 compares the sharded run with the reference. Round 2 is the verdict alone, with no reference.
 
@@ -1371,9 +1371,9 @@ figures are the two most recent main-push QA runs under the pre-5B layout.
 | 5B round 3 | 2 | 2 |
 | 5B round 4 | 2 | 1 |
 | 5B round 5 | 1 | 1 |
-| 5B round 6 | see the PR | see the PR |
+| 5B round 6 | **0** | 1 |
 
-Every block a round lost is pinned, and none recurs in a later round. No exception was needed, and the exceptions file stays empty.
+Every block a round lost is pinned, and none recurs in a later round. Round 6, on the final code (`12e3b9c`), is the first with no loss at all. No exception was needed, and the exceptions file stays empty.
 
 **What the rounds show about the residue.** Each audit round has found one or
 two NEW reference-only blocks, never a repeat. Round 4's two and round 5's one are in
