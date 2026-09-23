@@ -17,7 +17,7 @@ tense disagrees with this table, this table wins.
 | Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
 | Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | The non-root lane is now the Fast gate's critical path (§18.5); root-state/package isolation (`internal/mcp/execution` is 72 % of the lane) |
 | Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
-| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Per-run report on main, the manual reporting path and the trend verified live (§18.3) | The first scheduled audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired yet. Every reviewed baseline needs 10–20 comparable natural executions in a verified cohort: **0 so far** (§18.4) | Docs-only and pass-through runs have no observed runner image, so their cohorts stay unverified |
+| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Per-run report on main, the manual reporting path and the trend verified live (§18.3) | The first scheduled audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired yet. Every reviewed baseline needs 10–20 comparable natural executions in a verified cohort: **0 so far** (§18.4) | — |
 
 Remaining backlog, in the order the measurements support (§18.5):
 
@@ -2085,7 +2085,8 @@ The 90-day reports outlive the evidence they were built from. The retention
 periods are the ones observed on run 35874102885 (`expires_at`). A run can
 therefore be enriched on demand (dispatch with `run_id`) only within **7
 days**: after that its shard `meta.json` — the only source of the toolchain
-and runner image — is gone, and the report can no longer verify its cohort.
+— is gone, and the report can no longer verify its cohort. Job logs, the
+source of the runner image, are kept longer (90 days by default).
 
 - **Report on any run, including a PR run:** dispatch *CI Performance Report*
   with `run_id`. The trend already lists PR runs from metadata.
@@ -2252,8 +2253,8 @@ follow §16.6–16.7. Coverage exceptions are never generated.
 Stage 6B merged as PR #1477 (`3febe59`). This closeout corrects two
 measurement defects found in review of the merged code, verifies the
 reporting on GitHub, and starts the observation period. It changes reporting
-and one record-only field in the race engine's shard metadata. No required
-check, gate, release step or permission changes.
+only. No required check, gate, release step, permission or race-engine
+output changes.
 
 ### 18.1 Cohort identity
 
@@ -2267,23 +2268,32 @@ trend groups by `workflow|class|job set|cohort`:
 | Component | Source | Value when not observed |
 |---|---|---|
 | `platform` | the executed jobs' runner labels + runner group (job metadata) | `unknown` |
-| `image` | the runner image OS each shard reports (`ImageOS`, new in `meta.json`) | `unknown`; `mixed:…` when shards of one run landed on different images |
+| `image` | the runner image **every measured job** reported in its own log (the "Runner Image" group the runner writes first, e.g. `ubuntu-24.04`) | `unknown` when any measured job was not observed; `mixed:…` when jobs ran on different images |
 | `shards` | the root-shard jobs GitHub scheduled | `none` when no race engine ran |
 | `toolchain` | Go release line + GOOS/GOARCH from the shards' `meta.json` | `unknown`; `n/a` when no race engine ran |
 
 - **Why the image is keyed.** GitHub annotates every `ubuntu-latest` job on
   this repository: *"The ubuntu-latest label will migrate to Ubuntu 26
   beginning October 19, 2026."* A label is not a platform identity, and the
-  job metadata exposes no image. Each shard now records its runner's own
-  `ImageOS`/`ImageVersion` (`cmd/rootshard`, record-only, never a verdict
-  input, empty off a hosted runner).
+  job metadata exposes no image.
+- **Why every measured job, not just the shards.** A rollout can move one
+  job and not another. Elapsed time, runner-minutes and the lane's time come
+  from jobs outside the root shards, so an image read only from the shards
+  would pool a run whose lane ran on 26.04 under 24.04 (Codex review, PR
+  #1478; the first version of this closeout read the image from the shards'
+  `meta.json` and was reverted for exactly this). The collector reads the
+  first 16 KB of each measured job's log with a byte-range request and
+  parses only the `Image:` and `Version:` lines of the "Runner Image" group,
+  as data, in a safe character set. It reads nothing else and executes
+  nothing. Every hosted job prints the group, so runs without a race engine
+  (docs-only, pass-through) get an observed image too.
 - **What stays comparable.** Source commits, durations, Go patch releases
   and the weekly runner image build do not split a cohort. The exact Go and
   image versions stay in each report and trend sample row.
-- **Complete evidence only.** The image and toolchain count as observed only
-  when the `meta.json` of **every** scheduled shard was read and every shard
-  reported its image. A shard that was not read may have run elsewhere, and
-  the others do not speak for it. Shards that disagree on the Go release
+- **Complete evidence only.** The toolchain counts as observed only when the
+  `meta.json` of **every** scheduled shard was read; the image only when
+  **every** measured job's log was. An unread one may have run elsewhere,
+  and the others do not speak for it. Shards that disagree on the Go release
   line or GOOS/GOARCH make the toolchain `mixed:…`, like the image, and
   never verified (Codex review, PR #1478).
 - **Unknown stays separate.** A component that was not observed reads
@@ -2291,15 +2301,15 @@ trend groups by `workflow|class|job set|cohort`:
   baseline loader refuses a reviewed median unless the key parses as exactly
   `platform=…;image=…;shards=…;toolchain=…`, every field is non-empty and
   observed, and no field is `mixed:` (Codex review, PR #1478).
-- **The image build is stated only when all shards agree.** During a
-  rollout, shards can share an image OS but not a build; the report then
-  leaves the build unstated and says so, and the cohort (keyed on the OS) is
-  unaffected (Codex review, PR #1478). Runs without a race engine
-  (docs-only, QA pass-through) have no observed image and stay unverified.
+- **The image build is stated only when all jobs agree.** During a rollout
+  jobs can share an image but not a build; the report then leaves the build
+  unstated and says so, and the cohort (keyed on the image) is unaffected
+  (Codex review, PR #1478).
 - **Metadata-only PR reporting is unchanged.** PR runs are still measured
   from metadata in the trend. A selected natural run is enriched with the
   existing on-demand report (dispatch *CI Performance Report* with `run_id`),
-  within the 7-day shard-artifact retention (§17.5).
+  within the 7-day shard-artifact retention (§17.5). The workflow's
+  `actions: read` already covers job logs; no permission changes.
 
 ### 18.2 Attempt queue
 
@@ -2362,14 +2372,13 @@ The rest are pre-5C engine runs (`race-unsharded`), pre-5B QA runs
 (`qa-layers` only), fault injections and qualification dispatches, which are
 listed and never pooled with the current engine.
 
-**Verified cohorts: 0.** Every existing report predates the runner-image
-field, and `v1` reports are refused by the `v2` trend. The observation
+**Verified cohorts: 0.** Every existing report predates the cohort, and
+`v1` reports are refused by the `v2` trend. The observation
 period therefore starts at the first main QA run after this merges.
 
 **Missing evidence:**
 - per-run reports for PR runs (by design; enrich within 7 days if a PR
   cohort baseline is wanted);
-- runner image for any run without a race engine;
 - the first scheduled audit and backstop (due 2026-09-27);
 - the contents of the first automatic report (egress, above).
 
@@ -2413,9 +2422,17 @@ candidate after it.
   - **Separation:** another runner label, a self-hosted group, another shard
     count, another Go release line, another GOARCH, another runner image
     under the same label.
-  - **Unverified, never reviewed:** shards on mixed images, image not
-    recorded, one shard's metadata not read, one shard silent about its
-    image, toolchain not observed, platform not observed.
+  - **Unverified, never reviewed:** a non-shard job (the lane) on another
+    image, one measured job's log not read, one shard's metadata not read,
+    nothing read, platform not observed.
+  - **Verified without an engine:** a real docs-only run whose jobs were
+    all observed (toolchain `n/a`).
+  - **Log parsing:** the real log head of job 107340167293 parses to
+    `ubuntu-24.04` / `20260907.300.1`; the provisioner's `Version:` line
+    before the group is ignored; an unclosed group, a missing group and a
+    hostile value are refused. Through the fake API the collector follows
+    the storage redirect, cuts a 1 MB log that ignores the byte range, and
+    reads a missing log as unknown with a note.
   - **Still grouped:** another commit, slower jobs, a Go patch release and
     next week's image build.
   - **Trend and baseline:** the trend keeps verified and unknown cohorts
@@ -2428,9 +2445,7 @@ candidate after it.
   - **Evidence source:** the report says `artifacts` or `metadata-only` and
     names every document decoded. The log line cannot carry a workflow
     command (tested with an injection payload).
-- `cmd/rootshard`: the runner image comes from the runner's environment and
-  is empty, never guessed, off a hosted runner. The full suite passes,
-  end-to-end tests included.
+- `cmd/rootshard` is unchanged from main.
 - **Mutation proof.** Each of these was injected and failed a test:
   1. the cohort dropped from the group key;
   2. the full Go version keyed;
@@ -2440,22 +2455,25 @@ candidate after it.
   6. the attempt's `created_at` replacing identity;
   7. the runner group ignored;
   8. the image dropped from the key;
-  9. a mixed-image run verified;
+  9. jobs on different images not detected;
   10. a cohort verified from a subset of the shards' metadata;
-  11. a silent shard's image ignored;
+  11. an image accepted from a subset of the measured jobs;
   12. a reviewed `mixed:` cohort accepted;
   13. cohort field names and emptiness unchecked;
-  14. one shard's image build presented as the run's;
+  14. one job's image build presented as the run's;
   15. the attempt queue read only from completed jobs;
   16. a skipped job's stamp counted as a start;
   17. shards on different toolchain lines verified, or accepted by a
-      reviewed baseline.
+      reviewed baseline;
+  18. the image read from the root shards only;
+  19. the parser matching the provisioner group;
+  20. an unsafe image value accepted.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback
 
 Revert the closeout commits. The trend returns to `workflow|class|job set`
-groups and the old queue field, and shards stop recording the runner image.
+groups and the old queue field, and job logs are no longer read.
 No gate, check, release step or permission depends on any of it. A `v2`
 report left in retention is refused by a reverted `v1` trend, which then
 measures that run from metadata.

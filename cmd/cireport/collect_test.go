@@ -29,14 +29,17 @@ type fakeGitHub struct {
 	// attempts overrides the attempt endpoint ("id/n"); unset, it answers
 	// with the run itself, as GitHub does for attempt 1.
 	attempts map[string]apiRun
-	mu       sync.Mutex
-	fetched  []string
+	// jobLogs serves job logs by job id, behind a storage redirect that
+	// ignores the Range header (the client must cut the read itself).
+	jobLogs map[int64]string
+	mu      sync.Mutex
+	fetched []string
 }
 
 func newFake(t *testing.T) *fakeGitHub {
 	return &fakeGitHub{t: t, runs: map[int64]fixture{}, artifacts: map[int64][]apiArtifact{}, zips: map[int64][]byte{},
 		named: map[string][]apiArtifact{}, files: map[string][]byte{}, wfRuns: map[string][]apiRun{}, failJobs: map[int64]bool{},
-		attempts: map[string]apiRun{}}
+		attempts: map[string]apiRun{}, jobLogs: map[int64]string{}}
 }
 
 func (f *fakeGitHub) addArtifact(runID, id int64, name string, zipData []byte) {
@@ -55,6 +58,8 @@ var (
 	reWfRuns    = regexp.MustCompile(`^actions/workflows/([^/]+)/runs$`)
 	reRun       = regexp.MustCompile(`^actions/runs/(\d+)$`)
 	reRunAttmpt = regexp.MustCompile(`^actions/runs/(\d+)/attempts/(\d+)$`)
+	reJobLog    = regexp.MustCompile(`^actions/jobs/(\d+)/logs$`)
+	reLogBlob   = regexp.MustCompile(`^/log-blob/(\d+)$`)
 )
 
 func atoi(s string) int64 { n, _ := strconv.ParseInt(s, 10, 64); return n }
@@ -72,6 +77,19 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		jobs := f.runs[atoi(m[1])].Jobs
 		write(map[string]any{"total_count": len(jobs), "jobs": jobs})
+		return
+	}
+	if m := reJobLog.FindStringSubmatch(p); m != nil {
+		if _, ok := f.jobLogs[atoi(m[1])]; !ok {
+			http.NotFound(w, r)
+			return
+		}
+		// #nosec G710 -- test double: the target is this server's own /log-blob path and m[1] matched \d+
+		http.Redirect(w, r, "/log-blob/"+m[1], http.StatusFound)
+		return
+	}
+	if m := reLogBlob.FindStringSubmatch(r.URL.Path); m != nil {
+		_, _ = w.Write([]byte(f.jobLogs[atoi(m[1])]))
 		return
 	}
 	if m := reRunArts.FindStringSubmatch(p); m != nil {

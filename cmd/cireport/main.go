@@ -117,10 +117,10 @@ func cmdRun(ctx context.Context, args []string) error {
 // Every value is reduced to a safe character set and the line starts with a
 // fixed prefix, so no value from an artifact can form a workflow command.
 func reportLogLine(r RunReport) string {
-	return fmt.Sprintf("cireport run: run=%d attempt=%d event=%s head=%s tested=%s class=%s evidence=%s read=%s verdict=%s audit=%s cohort=%s verified=%v",
+	return fmt.Sprintf("cireport run: run=%d attempt=%d event=%s head=%s tested=%s class=%s evidence=%s read=%s image-logs=%d/%d verdict=%s audit=%s cohort=%s verified=%v",
 		r.Run.RunID, r.Run.Attempt, logSafe(r.Run.Event), logSafe(r.Run.HeadSHA), logSafe(r.Run.TestedSHA), logSafe(r.Class),
-		logSafe(r.Evidence.Source), logSafe(strings.Join(r.Evidence.Read, ",")), logSafe(r.Evidence.Verdict),
-		logSafe(r.Evidence.Audit.State), logSafe(r.Cohort.Key), r.Cohort.Verified)
+		logSafe(r.Evidence.Source), logSafe(strings.Join(r.Evidence.Read, ",")), r.RunnerImage.JobsObserved, r.RunnerImage.JobsMeasured,
+		logSafe(r.Evidence.Verdict), logSafe(r.Evidence.Audit.State), logSafe(r.Cohort.Key), r.Cohort.Verified)
 }
 
 func logSafe(s string) string {

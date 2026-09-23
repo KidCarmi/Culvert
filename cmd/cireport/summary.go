@@ -25,6 +25,12 @@ func renderRunSummary(r RunReport) string {
 		verified = "unverified — a component was not observed"
 	}
 	fmt.Fprintf(&b, "| cohort | `%s` (%s) |\n", r.Cohort.Key, verified)
+	ri := r.RunnerImage
+	img := ri.Image
+	if img == "" {
+		img = "not established"
+	}
+	fmt.Fprintf(&b, "| runner image | %s, build %s (%d of %d measured jobs observed) |\n", img, orDash(ri.Build), ri.JobsObserved, ri.JobsMeasured)
 	if r.Toolchain != nil {
 		fmt.Fprintf(&b, "| toolchain | %s %s/%s |\n", r.Toolchain.Go, r.Toolchain.GOOS, r.Toolchain.GOARCH)
 	}
@@ -62,6 +68,13 @@ func renderRunSummary(r RunReport) string {
 	writeList(&b, "Problems (contradictory evidence)", r.Problems)
 	writeList(&b, "Unknown (not observable — never read as healthy)", r.Unknowns)
 	return b.String()
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
 }
 
 func writeRanked(b *strings.Builder, title string, xs []NamedSeconds) {

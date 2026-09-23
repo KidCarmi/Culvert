@@ -17,27 +17,27 @@ const runnerMinutesNote = "sum of this attempt's job durations (parallel jobs co
 // RunReport is one execution of one workflow, measured from GitHub's own run
 // and job metadata plus the race engine's published evidence, read as data.
 type RunReport struct {
-	Schema    string        `json:"schema"`
-	Collector Collector     `json:"collector"`
-	Run       RunIdentity   `json:"run"`
-	Class     string        `json:"class"`
-	Reasons   []string      `json:"classReasons"`
-	JobSet    JobSet        `json:"jobSet"`
-	Toolchain *Toolchain    `json:"toolchain"` // nil: not observable for this run
-	Cohort    Cohort        `json:"cohort"`
-	Config    RunConfig     `json:"config"`
-	Timing    Timing        `json:"timing"`
-	Race      *RaceStats    `json:"race"` // nil: the race path did not run or left no evidence
-	Evidence  EvidenceState `json:"evidence"`
+	Schema    string      `json:"schema"`
+	Collector Collector   `json:"collector"`
+	Run       RunIdentity `json:"run"`
+	Class     string      `json:"class"`
+	Reasons   []string    `json:"classReasons"`
+	JobSet    JobSet      `json:"jobSet"`
+	Toolchain *Toolchain  `json:"toolchain"` // nil: not observable for this run
+	// RunnerImage is what the runner reported, in each job's log, about the
+	// image every measured job of this attempt ran on.
+	RunnerImage RunnerImageObs `json:"runnerImage"`
+	Cohort      Cohort         `json:"cohort"`
+	Config      RunConfig      `json:"config"`
+	Timing      Timing         `json:"timing"`
+	Race        *RaceStats     `json:"race"` // nil: the race path did not run or left no evidence
+	Evidence    EvidenceState  `json:"evidence"`
 	// Unknowns lists what could not be observed. A missing value is never
 	// reported as zero or as healthy.
 	Unknowns []string `json:"unknowns"`
 	// Problems are contradictions in the evidence (identities that disagree).
 	// They make the evidence untrusted, never the run green or red.
 	Problems []string `json:"problems"`
-	// cohortImage carries the shards' runner image from the evidence check
-	// to the cohort; not serialised (the cohort and toolchain carry it).
-	cohortImage string
 	// cohortMetas is how many shard meta.json documents were decoded; the
 	// cohort is verified only when every scheduled shard's was.
 	cohortMetas int
@@ -111,10 +111,18 @@ type Toolchain struct {
 	Go     string `json:"go"`
 	GOOS   string `json:"goos"`
 	GOARCH string `json:"goarch"`
-	// RunnerImage / RunnerImageVersion as the shards reported them, when
-	// they agree; the version changes weekly and is not a cohort component.
-	RunnerImage        string `json:"runnerImage,omitempty"`
-	RunnerImageVersion string `json:"runnerImageVersion,omitempty"`
+}
+
+// RunnerImageObs is the runner image of the attempt's measured jobs, read
+// from the "Runner Image" group each hosted job's log starts with. Image is
+// set only when every measured job was observed on the same image; Build
+// only when they also agree on the build. The counts say how complete the
+// observation was.
+type RunnerImageObs struct {
+	Image        string `json:"image,omitempty"`
+	Build        string `json:"build,omitempty"`
+	JobsMeasured int    `json:"jobsMeasured"`
+	JobsObserved int    `json:"jobsObserved"`
 }
 
 // Cohort is the observed configuration an execution ran under. Executions are
@@ -127,11 +135,12 @@ type Cohort struct {
 	// from GitHub's job metadata. The hosted image version behind a moving
 	// label (ubuntu-latest) is not exposed by the API and is not part of it.
 	Platform string `json:"platform"`
-	// Image is the hosted runner image OS the race shards reported
-	// (ImageOS, e.g. ubuntu24): the label ubuntu-latest moves between
-	// images under one name. "unknown" when no shard reported it; "mixed:…"
-	// when shards of one run landed on different images (never verified).
-	// The weekly image version is recorded per report, not keyed.
+	// Image is the hosted runner image (e.g. ubuntu-24.04) that EVERY job
+	// contributing to this attempt's timings reported in its log: the label
+	// ubuntu-latest moves between images under one name, and a rollout can
+	// move one job and not another. "unknown" when any measured job was not
+	// observed; "mixed:…" when they ran on different images (never
+	// verified). The image build changes weekly and is not keyed.
 	Image string `json:"image"`
 	// Shards is the sharded race engine's root shard count, from the shard
 	// jobs GitHub scheduled; "none" when the engine did not run.

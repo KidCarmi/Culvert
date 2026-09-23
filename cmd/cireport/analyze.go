@@ -492,7 +492,7 @@ func Analyze(run apiRun, jobs []apiJob, ev runEvidence) RunReport {
 	measureTiming(run, views, &rep)
 	raceEvidence(run, views, groups, ev, &rep)
 	auditEvidence(views, auditReq, ev, &rep)
-	rep.Cohort = cohortOf(views, &rep)
+	rep.Cohort = cohortOf(views, ev, &rep)
 	rep.Evidence.Read = append([]string{}, ev.Read...)
 	sort.Strings(rep.Evidence.Read)
 	rep.Evidence.Source = "metadata-only"
@@ -512,18 +512,14 @@ var goReleaseLineRE = regexp.MustCompile(`^(go\d+\.\d+)(?:\.\d+)?$`)
 // and shard count, the shards' own meta.json for the toolchain — and is
 // "unknown" when it was not. Nothing is filled in from what the workflow
 // files say should have happened.
-func cohortOf(views []jobView, rep *RunReport) Cohort {
-	c := Cohort{Platform: observedPlatform(views), Image: rep.cohortImage, Shards: scheduledShards(views, rep), Toolchain: cohortUnknown}
-	if c.Image == "" {
-		c.Image = cohortUnknown
-	}
+func cohortOf(views []jobView, ev runEvidence, rep *RunReport) Cohort {
+	c := Cohort{Platform: observedPlatform(views), Image: observedImage(views, ev, rep), Shards: scheduledShards(views, rep), Toolchain: cohortUnknown}
 	// Every scheduled shard's metadata must have been read: a shard that was
-	// not may have run on another image or toolchain.
+	// not may have run another toolchain.
 	complete := true
 	if n, err := strconv.Atoi(c.Shards); err == nil && rep.cohortMetas != n {
 		complete = false
-		c.Image = cohortUnknown
-		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read from %d of %d scheduled shards: an unread shard may have run another image or toolchain", rep.cohortMetas, n))
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read from %d of %d scheduled shards: an unread shard may have run another toolchain", rep.cohortMetas, n))
 	}
 	switch {
 	case !complete:
@@ -542,13 +538,48 @@ func cohortOf(views []jobView, rep *RunReport) Cohort {
 	case c.Toolchain == cohortUnknown:
 		rep.Unknowns = append(rep.Unknowns, "toolchain not observed (no shard meta.json read): this run's cohort is unverified")
 	}
-	if c.Image == cohortUnknown {
-		rep.Unknowns = append(rep.Unknowns, "runner image not observed (no shard reported ImageOS): this run's cohort is unverified")
-	}
 	c.Verified = c.Platform != cohortUnknown && c.Toolchain != cohortUnknown && c.Image != cohortUnknown &&
 		!strings.HasPrefix(c.Image, "mixed:") && !strings.HasPrefix(c.Toolchain, "mixed:")
 	c.Key = "platform=" + c.Platform + ";image=" + c.Image + ";shards=" + c.Shards + ";toolchain=" + c.Toolchain
 	return c
+}
+
+// observedImage is the runner image every job measured in this attempt ran
+// on, from the image group each job's log starts with. Any measured job that
+// was not observed leaves the image unknown: the others do not speak for it.
+// Jobs on different images make it mixed. The build is stated only when all
+// observed jobs agree on it.
+func observedImage(views []jobView, ev runEvidence, rep *RunReport) string {
+	images, builds := map[string]bool{}, map[string]bool{}
+	obs := &rep.RunnerImage
+	for vI := range views {
+		v := &views[vI]
+		if !v.inAttempt() {
+			continue
+		}
+		obs.JobsMeasured++
+		ri, ok := ev.JobImages[v.api.ID]
+		if !ok || v.api.ID == 0 {
+			continue
+		}
+		obs.JobsObserved++
+		images[ri.Image], builds[ri.Version] = true, true
+	}
+	names := sortedKeys(images)
+	switch {
+	case obs.JobsMeasured == 0 || obs.JobsObserved < obs.JobsMeasured:
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("runner image read from %d of %d measured jobs' logs: this run's cohort is unverified", obs.JobsObserved, obs.JobsMeasured))
+		return cohortUnknown
+	case len(names) > 1:
+		return "mixed:" + strings.Join(names, "+")
+	}
+	obs.Image = names[0]
+	if bs := sortedKeys(builds); len(bs) == 1 && bs[0] != "" {
+		obs.Build = bs[0]
+	} else {
+		rep.Unknowns = append(rep.Unknowns, "jobs reported different or missing runner image builds: the run's image build is unknown")
+	}
+	return names[0]
 }
 
 // toolchainLine is the Go release line and GOOS/GOARCH, or unknown.
@@ -753,36 +784,9 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 		lines[toolchainLine(&Toolchain{Go: m.GoVersion, GOOS: m.GOOS, GOARCH: m.GOARCH})] = true
 	}
 	rep.cohortToolchains = sortedKeys(lines)
-	shardImage(ev, idx, tc, rep)
 	rep.Toolchain = tc
 	if len(ev.ShardMetas) != len(v.Shards) {
 		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("toolchain read from %d of %d shards", len(ev.ShardMetas), len(v.Shards)))
-	}
-}
-
-// shardImage records the runner image the shards ran on. Any shard that did
-// not report its image leaves the run's image unobserved; shards on different
-// images are "mixed:"; the image build is stated only when all shards agree.
-func shardImage(ev runEvidence, idx []int, tc *Toolchain, rep *RunReport) {
-	images, versions := map[string]bool{}, map[string]bool{}
-	for _, i := range idx {
-		images[ev.ShardMetas[i].RunnerImage] = true
-		versions[ev.ShardMetas[i].RunnerImageVersion] = true
-	}
-	switch names := sortedKeys(images); {
-	case images[""]:
-	case len(names) == 1:
-		rep.cohortImage = names[0]
-		tc.RunnerImage = names[0]
-		// The image build is stated only when every shard reports the same
-		// one: during a rollout shards share an image OS but not a build.
-		if vs := sortedKeys(versions); len(vs) == 1 && vs[0] != "" {
-			tc.RunnerImageVersion = vs[0]
-		} else {
-			rep.Unknowns = append(rep.Unknowns, "shards reported different or missing runner image builds: the run's image build is unknown")
-		}
-	case len(names) > 1:
-		rep.cohortImage = "mixed:" + strings.Join(names, "+")
 	}
 }
 

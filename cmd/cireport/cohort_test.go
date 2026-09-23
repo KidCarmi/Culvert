@@ -8,16 +8,50 @@ import (
 	"time"
 )
 
+const (
+	img24   = "ubuntu-24.04"
+	build24 = "20260907.300.1"
+)
+
 // hosted puts every job of a real fixture on one runner platform, as GitHub
-// reports it (labels + runner group), which the trimmed fixtures omit.
+// reports it (labels + runner group + job id), which the trimmed fixtures omit.
 func hosted(jobs []apiJob, label, group string) []apiJob {
 	out := make([]apiJob, len(jobs))
 	for i := range jobs {
 		out[i] = jobs[i]
+		out[i].ID = int64(i + 1)
 		out[i].Labels = []string{label}
 		out[i].RunnerGroupName = group
 	}
 	return out
+}
+
+// imaged records that every job's log reported this runner image and build.
+func imaged(ev runEvidence, jobs []apiJob, image, build string) runEvidence {
+	ev.JobImages = map[int64]runnerImage{}
+	for jI := range jobs {
+		ev.JobImages[jobs[jI].ID] = runnerImage{Image: image, Version: build}
+	}
+	return ev
+}
+
+// setJobImage changes (or, with image "", removes) one job's observed image.
+func setJobImage(ev runEvidence, jobs []apiJob, suffix, image, build string) runEvidence {
+	m := map[int64]runnerImage{}
+	for k, v := range ev.JobImages {
+		m[k] = v
+	}
+	for jI := range jobs {
+		if strings.HasSuffix(jobs[jI].Name, suffix) {
+			if image == "" {
+				delete(m, jobs[jI].ID)
+			} else {
+				m[jobs[jI].ID] = runnerImage{Image: image, Version: build}
+			}
+		}
+	}
+	ev.JobImages = m
+	return ev
 }
 
 func withGo(ev runEvidence, version string) runEvidence {
@@ -25,19 +59,6 @@ func withGo(ev runEvidence, version string) runEvidence {
 	for i, m := range ev.ShardMetas {
 		c := *m
 		c.GoVersion = version
-		metas[i] = &c
-	}
-	ev.ShardMetas = metas
-	return ev
-}
-
-// withImage sets the runner image every shard reported; image "" leaves one
-// shard on a different image (mixed).
-func withImage(ev runEvidence, image, version string) runEvidence {
-	metas := map[int]*evShardMeta{}
-	for i, m := range ev.ShardMetas {
-		c := *m
-		c.RunnerImage, c.RunnerImageVersion = image, version
 		metas[i] = &c
 	}
 	ev.ShardMetas = metas
@@ -52,12 +73,6 @@ func dropMeta(ev runEvidence, idx int) runEvidence {
 		}
 	}
 	ev.ShardMetas = metas
-	return ev
-}
-
-func blankImage(ev runEvidence, idx int) runEvidence {
-	ev = withImage(ev, "ubuntu24", "20260915.1")
-	ev.ShardMetas[idx].RunnerImage = ""
 	return ev
 }
 
@@ -82,20 +97,24 @@ func dropShard(jobs []apiJob) []apiJob {
 	return out
 }
 
+// hostedAudit is the real audit run on one platform, every job observed on
+// one image.
+func hostedAudit(t *testing.T, label, group string) (fixture, []apiJob, runEvidence) {
+	fx, ev := qaAuditRun(t)
+	jobs := hosted(fx.Jobs, label, group)
+	return fx, jobs, imaged(ev, jobs, img24, build24)
+}
+
+const laneJob = "Race · non-root packages"
+
 // Materially different configurations never share a cohort, and a
 // configuration that was not observed is its own, unverified cohort.
 func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
-	fx, ev := qaAuditRun(t)
-	ev = withImage(ev, "ubuntu24", "20260915.1")
 	gh := "GitHub Actions"
-	base := Analyze(fx.Run, hosted(fx.Jobs, "ubuntu-latest", gh), ev)
-	if !base.Cohort.Verified || base.Cohort.Key != "platform=ubuntu-latest@GitHub Actions;image=ubuntu24;shards=4;toolchain=go1.26 linux/amd64" {
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", gh)
+	base := Analyze(fx.Run, jobs, ev)
+	if !base.Cohort.Verified || base.Cohort.Key != "platform=ubuntu-latest@GitHub Actions;image=ubuntu-24.04;shards=4;toolchain=go1.26 linux/amd64" {
 		t.Fatalf("base cohort %+v", base.Cohort)
-	}
-	mixedImages := func(e runEvidence) runEvidence {
-		e = withImage(e, "ubuntu24", "20260915.1")
-		e.ShardMetas[2].RunnerImage = "ubuntu26"
-		return e
 	}
 	arm := ev
 	arm.ShardMetas = map[int]*evShardMeta{}
@@ -104,26 +123,29 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 		c.GOARCH = "arm64"
 		arm.ShardMetas[i] = &c
 	}
+	armJobs := hosted(fx.Jobs, "ubuntu-24.04-arm", gh)
 	for _, tc := range []struct {
 		name  string
 		jobs  []apiJob
 		ev    runEvidence
 		wantV bool
 	}{
-		{"another runner label", hosted(fx.Jobs, "ubuntu-24.04-arm", gh), arm, true},
+		{"another runner label", armJobs, imaged(arm, armJobs, "ubuntu-24.04-arm", build24), true},
 		{"self-hosted runner group", hosted(fx.Jobs, "ubuntu-latest", "culvert-self-hosted"), ev, true},
-		{"another shard count", dropShard(hosted(fx.Jobs, "ubuntu-latest", gh)), threeShards(ev), true},
-		// Four shards scheduled, one shard's metadata never read: that shard
-		// may have run elsewhere, so the run is not a verified cohort.
-		{"one shard's metadata not read", hosted(fx.Jobs, "ubuntu-latest", gh), dropMeta(ev, 2), false},
-		{"one shard did not report its image", hosted(fx.Jobs, "ubuntu-latest", gh), blankImage(ev, 1), false},
-		{"another Go release line", hosted(fx.Jobs, "ubuntu-latest", gh), withGo(ev, "go1.27.0"), true},
-		{"another GOARCH", hosted(fx.Jobs, "ubuntu-latest", gh), arm, true},
+		{"another shard count", dropShard(jobs), threeShards(ev), true},
+		{"another Go release line", jobs, withGo(ev, "go1.27.0"), true},
+		{"another GOARCH", jobs, arm, true},
 		// The label ubuntu-latest moves to a new image under one name.
-		{"same label, another runner image", hosted(fx.Jobs, "ubuntu-latest", gh), withImage(ev, "ubuntu26", "20261020.1"), true},
-		{"shards on different images", hosted(fx.Jobs, "ubuntu-latest", gh), mixedImages(ev), false},
-		{"image not recorded (artifacts from before it was)", hosted(fx.Jobs, "ubuntu-latest", gh), withImage(ev, "", ""), false},
-		{"toolchain not observed (metadata only)", hosted(fx.Jobs, "ubuntu-latest", gh), runEvidence{}, false},
+		{"same label, another runner image", jobs, imaged(ev, jobs, "ubuntu-26.04", "20261020.1"), true},
+		// A rollout moves one job and not another: every root shard on
+		// 24.04 while the non-root lane — whose time is a trend metric —
+		// ran on 26.04. The run measured a mixed configuration.
+		{"a non-shard job on another image", jobs, setJobImage(ev, jobs, laneJob, "ubuntu-26.04", "20261020.1"), false},
+		{"one measured job's log not read", jobs, setJobImage(ev, jobs, laneJob, "", ""), false},
+		// Four shards scheduled, one shard's metadata never read: that shard
+		// may have run another toolchain.
+		{"one shard's metadata not read", jobs, dropMeta(ev, 2), false},
+		{"nothing read (metadata only)", jobs, runEvidence{}, false},
 		{"platform not observed", fx.Jobs, ev, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,38 +163,46 @@ func TestCohort_SeparatesMaterialConfigurations(t *testing.T) {
 	}
 }
 
-// A shard that did not report its image leaves the run's image unobserved:
-// the other shards do not speak for it, and it is not a second image either.
-func TestCohort_OneSilentShardMakesTheImageUnknown(t *testing.T) {
-	fx, ev := qaAuditRun(t)
-	r := Analyze(fx.Run, hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions"), blankImage(ev, 1))
-	if r.Cohort.Image != cohortUnknown || r.Cohort.Verified {
-		t.Errorf("image %q verified=%v, want unknown and unverified", r.Cohort.Image, r.Cohort.Verified)
+// One measured job whose log was not read leaves the run's image unobserved:
+// the other jobs do not speak for it, and it is not a second image either.
+func TestCohort_OneUnobservedJobMakesTheImageUnknown(t *testing.T) {
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
+	r := Analyze(fx.Run, jobs, setJobImage(ev, jobs, "✅ QA Gate — APPROVED", "", ""))
+	if r.Cohort.Image != cohortUnknown || r.Cohort.Verified || r.RunnerImage.JobsObserved != r.RunnerImage.JobsMeasured-1 {
+		t.Errorf("image %q verified=%v observed %d/%d, want unknown, unverified, one short",
+			r.Cohort.Image, r.Cohort.Verified, r.RunnerImage.JobsObserved, r.RunnerImage.JobsMeasured)
 	}
 }
 
-// During an image rollout shards can share an image OS but not a build. The
-// run-level build is stated only when every shard agrees; the cohort (keyed
-// on the OS) is unaffected.
-func TestCohort_ImageBuildStatedOnlyWhenShardsAgree(t *testing.T) {
-	fx, ev := qaAuditRun(t)
+// A run with no race engine has no toolchain, but every job's image is still
+// observed: its cohort is complete and can be verified.
+func TestCohort_RunWithoutEngineIsVerifiedFromJobImages(t *testing.T) {
+	fx := loadFixture(t, "fast-pr-docs")
 	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
-	ev = withImage(ev, "ubuntu24", "20260915.1")
-	if r := Analyze(fx.Run, jobs, ev); r.Toolchain.RunnerImageVersion != "20260915.1" {
-		t.Fatalf("agreeing shards: build %q", r.Toolchain.RunnerImageVersion)
+	r := Analyze(fx.Run, jobs, imaged(runEvidence{}, jobs, img24, build24))
+	if !r.Cohort.Verified || r.Cohort.Toolchain != "n/a" || r.Cohort.Image != img24 {
+		t.Errorf("docs-only cohort %+v, want verified with toolchain n/a", r.Cohort)
 	}
-	for name, mut := range map[string]func(e runEvidence){
-		"one shard on the next build": func(e runEvidence) { e.ShardMetas[3].RunnerImageVersion = "20260922.1" },
-		"one shard silent":            func(e runEvidence) { e.ShardMetas[3].RunnerImageVersion = "" },
+}
+
+// During an image rollout jobs can share an image but not a build. The build
+// is stated only when every job agrees; the cohort (keyed on the image) is
+// unaffected.
+func TestCohort_ImageBuildStatedOnlyWhenJobsAgree(t *testing.T) {
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
+	if r := Analyze(fx.Run, jobs, ev); r.RunnerImage.Build != build24 || r.RunnerImage.Image != img24 {
+		t.Fatalf("agreeing jobs: %+v", r.RunnerImage)
+	}
+	for name, e := range map[string]runEvidence{
+		"one job on the next build": setJobImage(ev, jobs, laneJob, img24, "20260914.1"),
+		"one job's build missing":   setJobImage(ev, jobs, laneJob, img24, ""),
 	} {
-		e := withImage(ev, "ubuntu24", "20260915.1")
-		mut(e)
 		r := Analyze(fx.Run, jobs, e)
-		if r.Toolchain.RunnerImageVersion != "" || !strings.Contains(strings.Join(r.Unknowns, "\n"), "image build is unknown") {
-			t.Errorf("%s: build %q unknowns %v, want unstated and noted", name, r.Toolchain.RunnerImageVersion, r.Unknowns)
+		if r.RunnerImage.Build != "" || !strings.Contains(strings.Join(r.Unknowns, "\n"), "image build is unknown") {
+			t.Errorf("%s: build %q unknowns %v, want unstated and noted", name, r.RunnerImage.Build, r.Unknowns)
 		}
-		if r.Cohort.Image != "ubuntu24" || !r.Cohort.Verified {
-			t.Errorf("%s: the cohort is keyed on the image OS and must stay %q verified, got %+v", name, "ubuntu24", r.Cohort)
+		if r.Cohort.Image != img24 || !r.Cohort.Verified {
+			t.Errorf("%s: the cohort is keyed on the image and must stay %q verified, got %+v", name, img24, r.Cohort)
 		}
 	}
 }
@@ -181,13 +211,12 @@ func TestCohort_ImageBuildStatedOnlyWhenShardsAgree(t *testing.T) {
 // architecture: the run is a mixed configuration and never verified, even
 // though the contradiction already keeps it out of the statistics.
 func TestCohort_ShardsDisagreeingOnToolchainAreMixed(t *testing.T) {
-	fx, ev := qaAuditRun(t)
-	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
 	for name, mut := range map[string]func(m *evShardMeta){
 		"another release line": func(m *evShardMeta) { m.GoVersion = "go1.27.0" },
 		"another GOARCH":       func(m *evShardMeta) { m.GOARCH = "arm64" },
 	} {
-		e := withImage(ev, "ubuntu24", "20260915.1")
+		e := withGo(ev, "go1.26.6") // a private copy of the metas
 		mut(e.ShardMetas[3])
 		r := Analyze(fx.Run, jobs, e)
 		if !strings.HasPrefix(r.Cohort.Toolchain, "mixed:") || r.Cohort.Verified {
@@ -207,24 +236,22 @@ func TestCohort_ShardsDisagreeingOnToolchainAreMixed(t *testing.T) {
 	}
 	// A patch-only difference is the same release line: comparable, though
 	// the exact-toolchain contradiction is still recorded as a problem.
-	e := withImage(ev, "ubuntu24", "20260915.1")
+	e := withGo(ev, "go1.26.6")
 	e.ShardMetas[3].GoVersion = "go1.26.7"
 	if r := Analyze(fx.Run, jobs, e); strings.HasPrefix(r.Cohort.Toolchain, "mixed:") || len(r.Problems) == 0 {
 		t.Errorf("patch-only difference: cohort %+v problems %v", r.Cohort, r.Problems)
 	}
 }
 
-// Ordinary change stays comparable: a different commit, different durations
-// and a Go patch release land in the same cohort as the base.
+// Ordinary change stays comparable: a different commit, different durations,
+// a Go patch release and next week's image build land in the same cohort.
 func TestCohort_ComparableRunsStayGrouped(t *testing.T) {
-	fx, ev := qaAuditRun(t)
-	ev = withImage(ev, "ubuntu24", "20260915.1")
-	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
 	base := Analyze(fx.Run, jobs, ev)
 
 	other := fx.Run
 	other.ID, other.HeadSHA = fx.Run.ID+1, strings.Repeat("a", 40)
-	oev := withImage(withGo(ev, "go1.26.7"), "ubuntu24", "20260922.1") // next week's image build
+	oev := imaged(withGo(ev, "go1.26.7"), jobs, img24, "20260914.1") // next week's image build
 	v := *ev.Verdict
 	v.Commit = other.HeadSHA
 	oev.Verdict = &v
@@ -246,8 +273,8 @@ func TestCohort_ComparableRunsStayGrouped(t *testing.T) {
 	if groupKeyOf(r) != groupKeyOf(base) {
 		t.Fatalf("comparable runs split:\n %s\n %s", groupKeyOf(base), groupKeyOf(r))
 	}
-	if r.Toolchain.Go != "go1.26.7" || base.Toolchain.Go != "go1.26.6" || r.Toolchain.RunnerImageVersion != "20260922.1" {
-		t.Error("the exact Go and image versions stay in the report even though the cohort keeps only the release line and image OS")
+	if r.Toolchain.Go != "go1.26.7" || base.Toolchain.Go != "go1.26.6" || r.RunnerImage.Build != "20260914.1" {
+		t.Error("the exact Go version and image build stay in the report even though the cohort keeps only the release line and image")
 	}
 
 	// And the trend pools them: one group, two counted samples, with the
@@ -265,9 +292,7 @@ func TestCohort_ComparableRunsStayGrouped(t *testing.T) {
 // Metadata-only samples of the same workflow/class/job set never enter a
 // verified cohort's statistics — they are pooled separately and labelled.
 func TestCohort_TrendKeepsUnknownApart(t *testing.T) {
-	fx, ev := qaAuditRun(t)
-	ev = withImage(ev, "ubuntu24", "20260915.1")
-	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
 	verified := Analyze(fx.Run, jobs, ev)
 	meta := Analyze(fx.Run, jobs, runEvidence{})
 	tr := buildTrend([]Sample{{Report: verified, Source: "per-run-report"}, {Report: meta, Source: "metadata-only"}},
@@ -289,25 +314,22 @@ func TestCohort_TrendKeepsUnknownApart(t *testing.T) {
 // A reviewed median may only describe one fully observed configuration in
 // the current key shape.
 func TestBaseline_ReviewedGroupsMustBeVerifiedCohorts(t *testing.T) {
-	fx, ev := qaAuditRun(t)
-	ev = withImage(ev, "ubuntu24", "20260915.1")
-	jobs := hosted(fx.Jobs, "ubuntu-latest", "GitHub Actions")
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
 	good := groupKeyOf(Analyze(fx.Run, jobs, ev))
-	mixed := withImage(ev, "ubuntu24", "20260915.1")
-	mixed.ShardMetas[2].RunnerImage = "ubuntu26"
+	mixed := setJobImage(ev, jobs, laneJob, "ubuntu-26.04", "20261020.1")
 	pre := qaWorkflowPath + "|" + classManualAudit + "|race+audit|"
 	for _, tc := range []struct {
 		key string
 		ok  bool
 	}{
 		{good, true},
-		{groupKeyOf(Analyze(fx.Run, jobs, runEvidence{})), false},                        // toolchain unknown
-		{groupKeyOf(Analyze(fx.Run, jobs, withImage(ev, "", ""))), false},                // image unknown
-		{qaWorkflowPath + "|" + classManualAudit + "|race+audit", false},                 // pre-cohort key shape
-		{groupKeyOf(Analyze(fx.Run, jobs, mixed)), false},                                // shards on different images
-		{pre + "platform=ubuntu-latest@GitHub Actions", false},                           // incomplete cohort
-		{pre + "platform=x;shards=4;image=ubuntu24;toolchain=go1.26 linux/amd64", false}, // fields out of order
-		{pre + "platform=x;image=;shards=4;toolchain=go1.26 linux/amd64", false},         // empty field
+		{groupKeyOf(Analyze(fx.Run, jobs, runEvidence{})), false},                            // nothing observed
+		{groupKeyOf(Analyze(fx.Run, jobs, setJobImage(ev, jobs, laneJob, "", ""))), false},   // image unknown
+		{qaWorkflowPath + "|" + classManualAudit + "|race+audit", false},                     // pre-cohort key shape
+		{groupKeyOf(Analyze(fx.Run, jobs, mixed)), false},                                    // jobs on different images
+		{pre + "platform=ubuntu-latest@GitHub Actions", false},                               // incomplete cohort
+		{pre + "platform=x;shards=4;image=ubuntu-24.04;toolchain=go1.26 linux/amd64", false}, // fields out of order
+		{pre + "platform=x;image=;shards=4;toolchain=go1.26 linux/amd64", false},             // empty field
 	} {
 		b := testBaseline("reviewed")
 		b.ReviewedBy, b.ReviewedAt = "someone", "2026-10-01"
@@ -316,6 +338,42 @@ func TestBaseline_ReviewedGroupsMustBeVerifiedCohorts(t *testing.T) {
 		}{tc.key: {"elapsedToAggregateSeconds": {Median: 700}}}
 		if err := validateBaseline(b); (err == nil) != tc.ok {
 			t.Errorf("key %q: err %v, want ok=%v", tc.key, err, tc.ok)
+		}
+	}
+}
+
+// realLogHead is the start of a real job log (job 107340167293), verbatim.
+const realLogHead = "\ufeff2026-09-23T19:14:04.3565260Z Current runner version: '2.337.0'\n" +
+	"2026-09-23T19:14:04.3589178Z ##[group]Runner Image Provisioner\n" +
+	"2026-09-23T19:14:04.3590176Z Hosted Compute Agent\n" +
+	"2026-09-23T19:14:04.3590798Z Version: 20260828.587\n" +
+	"2026-09-23T19:14:04.3594690Z ##[endgroup]\n" +
+	"2026-09-23T19:14:04.3596391Z ##[group]Operating System\n" +
+	"2026-09-23T19:14:04.3597056Z Ubuntu\n" +
+	"2026-09-23T19:14:04.3597575Z 24.04.5\n" +
+	"2026-09-23T19:14:04.3598702Z ##[endgroup]\n" +
+	"2026-09-23T19:14:04.3599233Z ##[group]Runner Image\n" +
+	"2026-09-23T19:14:04.3599878Z Image: ubuntu-24.04\n" +
+	"2026-09-23T19:14:04.3600441Z Version: 20260907.300.1\n" +
+	"2026-09-23T19:14:04.3601765Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md\n" +
+	"2026-09-23T19:14:04.3604785Z ##[endgroup]\n" +
+	"2026-09-23T19:14:04.3605954Z ##[group]GITHUB_TOKEN Permissions\n"
+
+// The parser reads only the "Runner Image" group — not the provisioner's
+// Version line before it — and refuses values outside a safe character set.
+func TestParseRunnerImage(t *testing.T) {
+	ri, ok := parseRunnerImage([]byte(realLogHead))
+	if !ok || ri.Image != img24 || ri.Version != build24 {
+		t.Fatalf("real log head: %+v ok=%v", ri, ok)
+	}
+	for name, head := range map[string]string{
+		"no image group":     "2026-09-23T19:14:04Z ##[group]Operating System\n2026-09-23T19:14:04Z Image: ubuntu-24.04\n2026-09-23T19:14:04Z ##[endgroup]\n",
+		"group never closed": "2026-09-23T19:14:04Z ##[group]Runner Image\n2026-09-23T19:14:04Z Image: ubuntu-24.04\n",
+		"hostile value":      "2026-09-23T19:14:04Z ##[group]Runner Image\n2026-09-23T19:14:04Z Image: ubuntu;$(id)\n2026-09-23T19:14:04Z ##[endgroup]\n",
+		"empty":              "",
+	} {
+		if ri, ok := parseRunnerImage([]byte(head)); ok {
+			t.Errorf("%s: parsed %+v, want unobserved", name, ri)
 		}
 	}
 }
@@ -437,5 +495,52 @@ func TestCollectRun_ReadsTheAttemptEnqueueTime(t *testing.T) {
 	}
 	if why := identityMismatch(rep.Run, run); why != "" {
 		t.Errorf("a retained re-run report must still match the runs list: %s", why)
+	}
+}
+
+// The collector reads the head of every measured job's log — through the
+// storage redirect, cutting a log that ignores the byte range — and derives
+// the image from all of them. A job whose log is missing leaves the image
+// unknown and is noted.
+func TestCollectRun_ReadsEveryMeasuredJobsImage(t *testing.T) {
+	fx, jobs, _ := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
+	fake := newFake(t)
+	fake.runs[fx.Run.ID] = fixture{Run: fx.Run, Jobs: jobs}
+	start, _ := parseTime(fx.Run.RunStartedAt)
+	measured := 0
+	var lane int64
+	for _, v := range viewJobs(jobs, start) {
+		if !v.inAttempt() {
+			continue
+		}
+		measured++
+		fake.jobLogs[v.api.ID] = realLogHead
+		if strings.HasSuffix(v.api.Name, laneJob) {
+			lane = v.api.ID
+			fake.jobLogs[v.api.ID] = realLogHead + strings.Repeat("2026-09-23T19:14:05Z test output line\n", 30000) // ~1 MB
+		}
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	c, err := newGHClient(srv.URL, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := collectRun(context.Background(), c, runOpts{repo: "o/r", runID: fx.Run.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.RunnerImage.JobsObserved != measured || rep.RunnerImage.JobsMeasured != measured || rep.Cohort.Image != img24 || rep.RunnerImage.Build != build24 {
+		t.Fatalf("runner image %+v cohort image %q, want all %d jobs on %s", rep.RunnerImage, rep.Cohort.Image, measured, img24)
+	}
+
+	delete(fake.jobLogs, lane)
+	rep, err = collectRun(context.Background(), c, runOpts{repo: "o/r", runID: fx.Run.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Cohort.Image != cohortUnknown || rep.RunnerImage.JobsObserved != measured-1 ||
+		!strings.Contains(strings.Join(rep.Unknowns, "\n"), "1 job logs unreadable") {
+		t.Errorf("one log missing: image %q observed %d/%d unknowns %v", rep.Cohort.Image, rep.RunnerImage.JobsObserved, measured, rep.Unknowns)
 	}
 }

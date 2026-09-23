@@ -22,9 +22,11 @@
 #     workflow (ci_perf_report_test.go pins both).
 #   · Trusted code only: workflow_run checks out the DEFAULT branch, never the
 #     PR head, so the collector is reviewed code. It downloads ZIPs into memory
-#     and decodes an allowlist of JSON members; the artifact carrying the
-#     prebuilt test binary is never downloaded, and nothing downloaded is
-#     executed, restored as a cache or written as anything but a report.
+#     and decodes an allowlist of JSON members, and reads the first 16 KB of
+#     each measured job's log for its "Runner Image" lines; the artifact
+#     carrying the prebuilt test binary is never downloaded, and nothing
+#     downloaded is executed, restored as a cache or written as anything but
+#     a report.
 #   · Least privilege: actions:read + contents:read, no cache (a cache restored
 #     here could be written by a PR run), and the collector builds with
 #     GOPROXY=off (it imports only the standard library, so no module is ever

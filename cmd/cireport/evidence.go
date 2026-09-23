@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // The subset of cmd/rootshard's published documents this reporter reads. They
@@ -57,10 +58,6 @@ type evShardMeta struct {
 	GoVersion string `json:"goVersion"`
 	GOOS      string `json:"goos"`
 	GOARCH    string `json:"goarch"`
-	// RunnerImage is the hosted image the shard ran on (ImageOS); empty in
-	// artifacts from before it was recorded.
-	RunnerImage        string `json:"runnerImage"`
-	RunnerImageVersion string `json:"runnerImageVersion"`
 }
 
 type evComparison struct {
@@ -94,8 +91,11 @@ type runEvidence struct {
 	Present []string
 	// Read are the "artifact/member" documents actually downloaded and
 	// decoded. Empty means the report rests on run metadata alone.
-	Read  []string
-	Notes []string
+	Read []string
+	// JobImages is the runner image each job's log reported, by job id;
+	// a job absent from the map was not observed.
+	JobImages map[int64]runnerImage
+	Notes     []string
 }
 
 func decodeStrict(name string, b []byte, v any) error {
@@ -183,4 +183,47 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 			}
 		}
 	}
+}
+
+// runnerImage is what the runner printed in a job log's "Runner Image" group.
+type runnerImage struct {
+	Image   string // e.g. ubuntu-24.04
+	Version string // the image build, e.g. 20260907.300.1
+}
+
+// jobLogHeadBytes bounds how much of each job log is read. The runner prints
+// the image group within the first few lines (about 2 KB observed).
+const jobLogHeadBytes = 16 << 10
+
+var imageValueRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// parseRunnerImage finds the "Runner Image" group the runner writes at the top
+// of every hosted job's log and reads its Image and Version lines. Each log
+// line starts with a timestamp, which is dropped. Only values in a safe
+// character set are accepted; anything else leaves the image unobserved.
+func parseRunnerImage(head []byte) (runnerImage, bool) {
+	var ri runnerImage
+	in := false
+	for _, raw := range strings.Split(string(head), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if i := strings.IndexByte(line, ' '); i > 0 && strings.HasSuffix(line[:i], "Z") {
+			line = line[i+1:]
+		}
+		switch {
+		case line == "##[group]Runner Image":
+			in = true
+		case !in:
+		case strings.HasPrefix(line, "##[endgroup]"):
+			return ri, ri.Image != ""
+		case strings.HasPrefix(line, "Image: "):
+			if v := strings.TrimSpace(strings.TrimPrefix(line, "Image: ")); imageValueRE.MatchString(v) {
+				ri.Image = v
+			}
+		case strings.HasPrefix(line, "Version: "):
+			if v := strings.TrimSpace(strings.TrimPrefix(line, "Version: ")); imageValueRE.MatchString(v) {
+				ri.Version = v
+			}
+		}
+	}
+	return runnerImage{}, false
 }

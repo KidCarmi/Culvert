@@ -52,6 +52,7 @@ func collectRun(ctx context.Context, c *ghClient, o runOpts) (RunReport, error) 
 		return RunReport{}, fmt.Errorf("jobs of run %d: %w", run.ID, err)
 	}
 	ev := gatherEvidence(ctx, c, o.repo, run)
+	ev.JobImages, ev.Notes = gatherJobImages(ctx, c, o.repo, run, jobs, ev.Notes)
 	rep := Analyze(run, jobs, ev)
 	rep.Collector = o.collector
 	if err := writeRunOutputs(rep, ev, o); err != nil {
@@ -96,6 +97,55 @@ func gatherEvidence(ctx context.Context, c *ghClient, repo string, run apiRun) r
 		}
 	}
 	return ev
+}
+
+// maxJobLogs bounds how many job logs one report reads.
+const maxJobLogs = 100
+
+// gatherJobImages reads the head of each job this attempt measured (executed,
+// not carried over) and takes the runner image from it. Each read is a small
+// byte range; a log that cannot be read or carries no image group leaves that
+// job unobserved, and the report then says the image is unknown.
+func gatherJobImages(ctx context.Context, c *ghClient, repo string, run apiRun, jobs []apiJob, notes []string) (images map[int64]runnerImage, outNotes []string) {
+	start, _ := parseTime(run.RunStartedAt)
+	views := viewJobs(jobs, start)
+	out := map[int64]runnerImage{}
+	var unreadable, noGroup, skipped int
+	var firstErr error
+	for vI := range views {
+		v := &views[vI]
+		if !v.inAttempt() || v.api.ID == 0 {
+			continue
+		}
+		if len(out)+unreadable+noGroup >= maxJobLogs {
+			skipped++
+			continue
+		}
+		head, err := c.jobLogHead(ctx, repo, v.api.ID, jobLogHeadBytes)
+		if err != nil {
+			unreadable++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ri, ok := parseRunnerImage(head)
+		if !ok {
+			noGroup++
+			continue
+		}
+		out[v.api.ID] = ri
+	}
+	if unreadable > 0 {
+		notes = append(notes, fmt.Sprintf("%d job logs unreadable (first: %v)", unreadable, firstErr))
+	}
+	if noGroup > 0 {
+		notes = append(notes, fmt.Sprintf("%d job logs carry no runner image group", noGroup))
+	}
+	if skipped > 0 {
+		notes = append(notes, fmt.Sprintf("%d job logs not read (over the %d-log bound)", skipped, maxJobLogs))
+	}
+	return out, notes
 }
 
 func writeJSON(path string, v any) error {

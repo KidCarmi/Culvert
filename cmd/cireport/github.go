@@ -62,6 +62,7 @@ type apiStep struct {
 }
 
 type apiJob struct {
+	ID          int64     `json:"id"`
 	Name        string    `json:"name"`
 	Status      string    `json:"status"`
 	Conclusion  string    `json:"conclusion"`
@@ -155,6 +156,44 @@ func (c *ghClient) get(ctx context.Context, rel string, limit int64) ([]byte, er
 }
 
 var errNotFound = errors.New("not found")
+
+// jobLogHead reads at most n bytes from the start of one job's log. The
+// runner writes its image identity in the first lines, so only a byte range
+// is requested; a server that ignores the range is simply cut off at n.
+// The log is data: it is scanned for two lines and never executed or stored.
+func (c *ghClient) jobLogHead(ctx context.Context, repo string, jobID, n int64) ([]byte, error) {
+	rel := fmt.Sprintf("repos/%s/actions/jobs/%d/logs", repo, jobID)
+	u := c.base.ResolveReference(&url.URL{Path: rel})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", rel, err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "culvert-cireport")
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", n-1))
+	if c.token != "" {
+		// Dropped by net/http when the storage redirect leaves this host.
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", rel, redactURLError(err))
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusPartialContent:
+	case http.StatusNotFound, http.StatusGone:
+		return nil, errNotFound
+	default:
+		return nil, fmt.Errorf("GET %s: HTTP %d", rel, resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, n))
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: read: %w", rel, err)
+	}
+	return b, nil
+}
 
 // redactURLError drops the query from the URL a transport error names. An
 // artifact download redirects to presigned storage whose query IS the
