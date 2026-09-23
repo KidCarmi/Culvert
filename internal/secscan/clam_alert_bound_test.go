@@ -26,7 +26,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
 )
@@ -102,29 +101,52 @@ func TestClamFailureClass_CoversEveryProducedShape(t *testing.T) {
 }
 
 // TestClamScanError_NoSubscriberNoDispatch pins the HasSubscriber gate.
+//
+// The gate is observed through the PROBE, not through a sink tally, and the
+// reason is the same one internal/yara records at degradedRecorder.probes:
+// clamScanError dispatches with `go alerts.Fire(...)`, alerts.Fire loads the
+// process-global sink INSIDE that goroutine, and this package's other tests
+// fire the same event — so under `-count=2 -shuffle=on` a straggler lands in a
+// later test's recorder and a zero-assertion on the sink is not this
+// invocation's to make. (clam_error_test.go's header records the same hazard;
+// it could still filter on a unique marker in the Detail, which stopped being
+// possible when the Detail became a bounded class.)
+//
+// A probe consultation is SYNCHRONOUS on the caller's goroutine, so it belongs
+// to whoever called clamScanError, and a straggler — already past the gate —
+// can never add one.
 func TestClamScanError_NoSubscriberNoDispatch(t *testing.T) {
 	rec := &alertRecorder{}
+	var probes atomic.Int64
 	alerts.SetSink(rec.sink)
-	alerts.SetSubscriberProbe(func(string) bool { return false })
+	alerts.SetSubscriberProbe(func(event string) bool {
+		if event == "scan_clam_error" {
+			probes.Add(1)
+		}
+		return false
+	})
 	t.Cleanup(func() {
 		alerts.SetSink(func(string, alerts.Payload) {})
 		alerts.SetSubscriberProbe(func(string) bool { return true })
 	})
 
 	before := atomic.LoadInt64(&statClamScanError)
-	for i := range 25 {
+	const rounds = 25
+	for i := range rounds {
 		clamScanError(clamNetErr("clamav: read response: ", 41000+i))
 	}
-	time.Sleep(50 * time.Millisecond)
 
-	if got := rec.matchingEvent("scan_clam_error"); len(got) != 0 {
-		t.Fatalf("dispatched %d scan_clam_error alerts with no subscriber", len(got))
+	// Every failure reached the subscriber gate, and the gate answered false —
+	// the branch that returns before `go alerts.Fire`.
+	if got := probes.Load(); got != rounds {
+		t.Fatalf("HasSubscriber consulted %d times, want %d: every failure must reach "+
+			"the subscriber gate", got, rounds)
 	}
 	// CONTROL: the gate must skip the DISPATCH, never the accounting — an
 	// operator scraping culvert_clamav_scan_errors_total must still see the
 	// fault on a node with no webhooks configured.
-	if got := atomic.LoadInt64(&statClamScanError) - before; got != 25 {
-		t.Fatalf("ClamScanError counter delta = %d, want 25: the gate must not cost the counter", got)
+	if got := atomic.LoadInt64(&statClamScanError) - before; got != rounds {
+		t.Fatalf("ClamScanError counter delta = %d, want %d: the gate must not cost the counter", got, rounds)
 	}
 }
 

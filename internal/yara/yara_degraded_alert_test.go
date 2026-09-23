@@ -42,6 +42,33 @@ import (
 type degradedRecorder struct {
 	mu     sync.Mutex
 	events []alerts.Payload
+	// probes counts SYNCHRONOUS HasSubscriber("yara_degraded") consultations.
+	//
+	// THIS COUNTER EXISTS BECAUSE THE SINK CANNOT CARRY A NEGATIVE, and the
+	// determinism gate proved it (shuffle seed 1790206228048001169 on 17b9edf):
+	// TestYARADegraded_AlertDegradedOffStaysSilent asserted the sink saw NOTHING
+	// and got [saturated saturated saturated] from OTHER tests in this binary —
+	// the regexrunner saturation tests fire the same event, `fireYARADegraded`
+	// dispatches with `go alerts.Fire(...)`, and alerts.Fire loads the
+	// process-global sink INSIDE that goroutine, so a straggler spawned by an
+	// earlier test lands in a later test's recorder. The payload cannot
+	// distinguish them: its Detail is a bounded class BY DESIGN, so there is no
+	// per-invocation marker to filter on the way internal/secscan's clam
+	// recorder used to.
+	//
+	// The probe is the attributable half. fireYARADegraded consults
+	// GetAlertDegraded() and alerts.HasSubscriber() SYNCHRONOUSLY on the
+	// caller's goroutine and defers only the Fire, so a consultation belongs to
+	// whoever called it and a straggler — already past the gate — can never add
+	// one. Negative assertions therefore read this; positive assertions can
+	// still read the sink, because a straggler can only ever ADD an event that
+	// satisfies the same bounded-class predicate.
+	//
+	// (package main's CDR recorder needs none of this: it swaps the fireAlert
+	// VAR, and `go fireAlert(...)` evaluates that var in the SPAWNING goroutine,
+	// so a straggler carries the old value and cannot reach a later test's
+	// recorder. The difference is where the indirection is resolved.)
+	probes atomic.Int64
 }
 
 func (r *degradedRecorder) sink(event string, p alerts.Payload) {
@@ -88,7 +115,12 @@ func withDegradedHarness(t *testing.T, subscribed bool) *degradedRecorder {
 	t.Helper()
 	rec := &degradedRecorder{}
 	alerts.SetSink(rec.sink)
-	alerts.SetSubscriberProbe(func(string) bool { return subscribed })
+	alerts.SetSubscriberProbe(func(event string) bool {
+		if event == "yara_degraded" {
+			rec.probes.Add(1)
+		}
+		return subscribed
+	})
 
 	oldMax, oldAlert, oldPosture := GetMaxInflight(), GetAlertDegraded(), GetOnSaturation()
 	oldSat, oldApp := lastYARASaturatedLog.Load(), lastYARAApproachingLog.Load()
@@ -171,15 +203,19 @@ func TestYARADegraded_DetailCarriesNoLiveCounter(t *testing.T) {
 	if len(details) < 2 {
 		t.Fatalf("want two saturation alerts, got %v", details)
 	}
+	// Stated over the WHOLE set rather than over two chosen indices: another
+	// test's in-flight dispatch can interleave here (see degradedRecorder.probes),
+	// and it carries a bounded class too — so "every detail is a bounded,
+	// digit-free class" is the claim that holds, while details[0] == details[1]
+	// was a claim about arrival order that nothing guarantees.
 	for _, d := range details {
 		if strings.ContainsAny(d, "0123456789") {
 			t.Errorf("yara_degraded Detail %q embeds a number: the magnitude belongs to the "+
 				"counter and the log line, never to the dedup key", d)
 		}
-	}
-	if details[0] != details[1] {
-		t.Errorf("two saturation alerts produced different details (%q, %q): dedup cannot collapse them",
-			details[0], details[1])
+		if !boundedDegradedReasons[d] {
+			t.Errorf("yara_degraded Detail %q is not a bounded reason class", d)
+		}
 	}
 }
 
@@ -190,14 +226,20 @@ func TestYARADegraded_NoSubscriberNoDispatch(t *testing.T) {
 	rec := withDegradedHarness(t, false)
 	SetMaxInflight(10)
 
-	for range 20 {
+	const rounds = 20
+	for range rounds {
 		yaraSaturationCheck(10)
 		yaraDegradedCheck(9)
 	}
-	// Give any (incorrectly spawned) goroutine time to land.
-	time.Sleep(50 * time.Millisecond)
-	if got := rec.details(); len(got) != 0 {
-		t.Fatalf("dispatched %d yara_degraded alerts with no subscriber: %v", len(got), got)
+
+	// Both arms must REACH the probe (so the gate is the subscriber check, not
+	// an accident earlier in the function) and the probe answered false, which
+	// is the branch that returns before `go alerts.Fire`. Counting probe
+	// consultations is exact and attributable; counting sink deliveries is not
+	// — see degradedRecorder.probes.
+	if got := rec.probes.Load(); got != 2*rounds {
+		t.Fatalf("HasSubscriber consulted %d times, want %d: each saturated and "+
+			"approaching-saturation fire must reach the subscriber gate", got, 2*rounds)
 	}
 }
 
@@ -227,9 +269,15 @@ func TestYARADegraded_AlertDegradedOffStaysSilent(t *testing.T) {
 
 	yaraSaturationCheck(10)
 	yaraDegradedCheck(9)
-	time.Sleep(50 * time.Millisecond)
-	if got := rec.details(); len(got) != 0 {
-		t.Fatalf("alert_degraded=false must suppress the alert, got %v", got)
+
+	// alert_degraded=false must short-circuit BEFORE the subscriber probe —
+	// which is a strictly stronger claim than "nothing was delivered", and the
+	// only one this binary can make honestly (see degradedRecorder.probes: the
+	// process-global sink receives other tests' in-flight dispatches, which is
+	// exactly how the first version of this gate failed the determinism run).
+	if got := rec.probes.Load(); got != 0 {
+		t.Fatalf("HasSubscriber consulted %d times with alert_degraded=false: the "+
+			"toggle must suppress the fire at the first condition", got)
 	}
 }
 

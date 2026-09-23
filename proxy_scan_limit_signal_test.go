@@ -473,10 +473,21 @@ func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
 	globalAlertStore = &AlertStore{}
 	t.Cleanup(func() { globalAlertStore = oldStore })
 
+	// This invocation's events are told apart by HOST and ACTOR, not by a raw
+	// tally: logScanLimitExceeded dispatches with `go alerts.Fire(...)`, and
+	// alerts.Fire loads the process-global sink INSIDE that goroutine, so a
+	// straggler spawned by one of this file's sibling tests lands here under
+	// `-count=2 -shuffle=on`. That is the CLAUDE.md "assert on content, not on
+	// a count" rule, with a host of our own and a TEST-NET-2 actor as the
+	// discriminator. (internal/yara's degradedRecorder.probes has to reach for
+	// the subscriber probe instead, because its payload is a bounded class with
+	// no field left to mark.)
+	const gateHost = "scan-skipped-gate.example"
+	const gateActor = "198.51.100.7" // TEST-NET-2, per the audit-ring pattern
 	var mu sync.Mutex
 	var seen []string
 	alerts.SetSink(func(event string, p AlertPayload) {
-		if event != "scan_skipped" {
+		if event != "scan_skipped" || p.Host != gateHost || p.Actor != gateActor {
 			return
 		}
 		mu.Lock()
@@ -503,7 +514,7 @@ func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
 	fire := func() int64 {
 		return scanSkippedDelta(func() {
 			for range 20 {
-				logScanLimitExceeded("files.example.com", "203.0.113.9", 1024)
+				logScanLimitExceeded(gateHost, gateActor, 1024)
 			}
 		})
 	}
