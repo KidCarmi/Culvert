@@ -1816,7 +1816,54 @@ comparison job derived from its own unsharded reference (run 35866546559 at
 
 ### 16.7 Qualification of the refreshed partition
 
-PENDING
+Both same-SHA audits ran on the final code commit `fef1fd0`, the first commit
+carrying the refreshed timing file, the yara test and the feedsync fix.
+
+| Audit | Run | Inventory | Blocks | Floors |
+|---|---|---|---|---|
+| QA | [35874102885](https://github.com/KidCarmi/Culvert/actions/runs/35874102885) | root 6,381 / 6,381 / 6,381; skips 51 = 51; subtests 3,873 = 3,873; packages 112 = 112 | **0 lost**, 1 gained (35,243 vs 35,242 of 46,453) | exit 0 / 0 |
+| Fast | [35874107185](https://github.com/KidCarmi/Culvert/actions/runs/35874107185) | identical to QA | **0 lost**, 1 gained | exit 0 / 0 |
+
+The yara block that failed the `a606f82` Fast audit is covered by both runs.
+The gained block (`controlplane_delta.go:207`) is on the sharded side, so it
+cannot fail the audit.
+
+On the same commit, the Fast PR run
+([35874104460](https://github.com/KidCarmi/Culvert/actions/runs/35874104460)),
+Deep ([35874104508](https://github.com/KidCarmi/Culvert/actions/runs/35874104508),
+including `Deep · determinism`) and QA's `Determinism` job were all green.
+
+**What the refresh did and did not change.**
+
+| | Estimate per shard | Actual root shards (test s) |
+|---|---|---|
+| Before, QA `a606f82` | 428 s | 348–406 |
+| After, QA `fef1fd0` | 288 s | 323–414 |
+| After, Fast `fef1fd0` | 288 s | 267–423 |
+
+- The estimates now match the partition the new file produces.
+- The shard spread did not narrow: two runs of the same commit spread 91 s and
+  156 s. Runner variance dominates, and no timing file can balance it away.
+- The non-root lane (610 s in QA, 724 s in the Fast audit, 761 s in the Fast PR
+  run) is still the critical path.
+- No wall-clock gain is claimed for the refresh. It removes stale entries and
+  keeps the estimates honest.
+
+**Fast PR run on `fef1fd0`:**
+- 872 s from run start to aggregate;
+- ≈60.1 runner-minutes summed over job durations (no frontend or MCP jobs);
+- root shards 360–462 s job time; non-root lane 761 s.
+
+**Open item: one determinism failure on `7fbc5ae`.** `Deep · determinism`
+failed once (run 35870770250, root package, no `-race`).
+- Rerunning the same seed locally on `7fbc5ae` (`-test.shuffle 1790172022257462916`,
+  `-count=2`) passed in 718 s.
+- The failing test's name is only in the `deep-determinism-log` artifact, which
+  the session environment could not download.
+- Both determinism jobs on `fef1fd0` passed.
+
+It is recorded here unresolved, not dismissed as a flake. Anyone with that
+artifact can name the test.
 
 ### 16.8 Rollback
 
