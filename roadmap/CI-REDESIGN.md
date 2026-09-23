@@ -1225,7 +1225,7 @@ reproducer:
 |---|---|---|---|
 | `main.go`, `upstream_downgrade.go` | 14 | Re-exec'd child coverage dropped (no `GOCOVERDIR` in env) | Fixed in 5A. The fixture's re-exec test fails without it |
 | CA / security / TLS / frontend state (`ui_frontend_v2.go`, root and cluster CA, GeoIP load error, rate-limit restore, server TLS pool) | see `coverage_isolation_security_test.go` | Global state left behind by an earlier test in the same process | Isolated `TestCovIsoSec_*` fixtures that set up their own state |
-| Policy / config / store (stale-version and in-lock 409s, log ring, import arms, top-hosts raced insert, catalog comparator arg order, `WaitOp` cancel, crash collector) | 25 | Earlier test state, or a race / map-order interleaving | `TestCovIsoPolicy_*` (`coverage_isolation_policy_test.go`). Interleavings are forced deterministically, e.g. the existing `policyWriteStateDecisionHook` seam, a lock held while a named frame is parked, or a context cancelled inside the round trip, rather than hoped for |
+| Policy / config / store (stale-version and in-lock 409s, log ring, import arms, top-hosts raced insert, catalog comparator arg order, `WaitOp` cancel, crash collector) | 26 (25 + the `connLimiter.Enable` import arm found by qualification round 1, §14.7) | Earlier test state, or a race / map-order interleaving | `TestCovIsoPolicy_*` (`coverage_isolation_policy_test.go`). Interleavings are forced deterministically, e.g. the existing `policyWriteStateDecisionHook` seam, a lock held while a named frame is parked, or a context cancelled inside the round trip, rather than hoped for |
 | Non-root packages (`internal/authcost`, `mcp/upstreamclient`, `policylearn`, `saasfeed`, `urlcat`) | see files | Timing and ordering of the package's own tests | `TestIsolation_*` in each package's `coverage_isolation_test.go` |
 
 Every fixture was verified by running it **alone** (its own covered binary,
@@ -1277,8 +1277,8 @@ verdict to fail **with no reference run present**:
 
 ### 14.4 Determinism failure: `TestBenchGate_IPFilterBulkLoadIsLinear` (8.28× vs 8×)
 
-This was **measurement instability, not a regression**, and the fix is kept
-separately reviewable in PR #1472. It was diagnosed by measurement, not by
+This was **measurement instability, not a regression**, and the fix was kept
+separately reviewable as PR #1472 (merged; this branch carries it via main). It was diagnosed by measurement, not by
 replaying a seed, and the numbers are in that PR:
 - **Idle:** median 4.25×, 0/60 runs over 8×.
 - **Under CPU contention:** median 4.44×, 16/60 over 8×, worst 13.66×. A GC cycle triggered by the preceding allocation-heavy phase lands inside one of the two timed windows.
