@@ -925,6 +925,19 @@ func initCDR(s *startupState) {
 	if msg := validCDRServerFingerprint(*s.cdrFingerprintFlag); msg != "" {
 		log.Fatalf("Invalid -cdr-server-fingerprint %q: %s", *s.cdrFingerprintFlag, msg)
 	}
+	// Same mirroring for -cdr-timeout-sec: config.yaml's cdr.timeout_sec is
+	// range-validated at load time (validateCDR), but the CLI flag reaches
+	// the exact same CDRConfig.TimeoutSec field with no equivalent gate. An
+	// out-of-range value here isn't rejected at all — it becomes the per-file
+	// gRPC deadline (cdr_pool.go/cdr_proxy.go), which is shorter than
+	// Sluice's own 30s processing cap, so ordinary files reliably miss the
+	// deadline and every scan comes back as a client-side timeout. Under the
+	// default fail-open FailMode that silently skips CDR sanitization on
+	// every request that hits it, with nothing at startup naming the bad
+	// flag — the same config.yaml already refuses to start with.
+	if msg := validCDRTimeoutSec(*s.cdrTimeoutFlag); msg != "" {
+		log.Fatalf("Invalid -cdr-timeout-sec %d: %s", *s.cdrTimeoutFlag, msg)
+	}
 	loadCDR(
 		resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
 			Enabled:     *s.cdrEnabledFlag,

@@ -393,3 +393,120 @@ func TestValidCDRServerFingerprint(t *testing.T) {
 		})
 	}
 }
+
+// ── CDR timeout_sec CLI/YAML validation parity (validCDRTimeoutSec) ─────────
+//
+// config.yaml's cdr.timeout_sec is range-validated by FileConfig.validateCDR
+// at load time (0 is valid/unset; otherwise must be >= 30, Sluice's own
+// per-file processing cap) — but the CLI flag -cdr-timeout-sec reaches the
+// exact same CDRConfig.TimeoutSec field (merged in
+// cdr_startup_config.go's resolveCDRStartupConfig, CLI wins over config.yaml)
+// with no equivalent gate, the same CLI/YAML parity gap TestValidCDRFailMode
+// and TestValidCDRServerFingerprint close for -cdr-fail-mode /
+// -cdr-server-fingerprint.
+//
+// A too-low CLI value (e.g. "-cdr-timeout-sec 5") is not rejected at startup:
+// it becomes the per-file gRPC deadline in cdr_pool.go/cdr_proxy.go
+// (`context.WithTimeout(ctx, c.cfg.Timeout)`), which is shorter than Sluice's
+// own 30s cap, so ordinary (non-trivial) files reliably miss the deadline and
+// every scan returns a client-side timeout. Because cdr.fail_mode defaults to
+// fail-OPEN, that silently disables CDR content sanitization on every request
+// that hits it, with no startup error naming the bad flag — the same failure
+// mode validateCDR's own comment says the YAML-side check exists to prevent,
+// just reached via the other input path.
+//
+// validCDRTimeoutSec is the shared predicate (mirroring validCDRFailMode /
+// validCDRServerFingerprint): used by validateCDR (config.go) for the YAML
+// path and by initCDR (main.go) for the CLI path, so both channels reject the
+// same invalid values instead of only one of them.
+func TestValidCDRTimeoutSec(t *testing.T) {
+	tests := []struct {
+		name string
+		t    int
+		want bool // true = accepted (validCDRTimeoutSec returns "")
+	}{
+		{"unset (0)", 0, true},
+		{"minimum valid (30)", 30, true},
+		{"well above minimum (35, the engine default)", 35, true},
+		{"one below minimum (29)", 29, false},
+		{"far too low (5)", 5, false},
+		{"negative", -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validCDRTimeoutSec(tt.t) == ""
+			if got != tt.want {
+				t.Errorf("validCDRTimeoutSec(%d) accepted=%v (msg=%q), want accepted=%v",
+					tt.t, got, validCDRTimeoutSec(tt.t), tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateCDR_RejectsTimeoutSecBelowMinimum pins the YAML-side oracle
+// (FileConfig.validateCDR) that validCDRTimeoutSec now backs, and — combined
+// with resolveCDRStartupConfig — demonstrates the parity gap directly: a
+// timeout_sec value that config.yaml has always refused to boot with reaches
+// CDRConfig.TimeoutSec identically whether it was set in config.yaml or, before
+// this fix, on the CLI-only path (initCDR had no gate for -cdr-timeout-sec).
+func TestValidateCDR_RejectsTimeoutSecBelowMinimum(t *testing.T) {
+	tests := []struct {
+		name string
+		t    int
+		want bool // true = validate() should accept
+	}{
+		{"unset (0)", 0, true},
+		{"valid (30)", 30, true},
+		{"too low (5)", 5, false},
+		{"one below minimum (29)", 29, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := &FileConfig{}
+			fc.CDR.Enabled = true
+			fc.CDR.Endpoint = "sluice:8443"
+			fc.CDR.TimeoutSec = tt.t
+			err := fc.validate()
+			if tt.want && err != nil {
+				t.Errorf("validate() rejected a valid timeout_sec %d: %v", tt.t, err)
+			}
+			if !tt.want && err == nil {
+				t.Errorf("validate() accepted an invalid timeout_sec %d, want a rejection", tt.t)
+			}
+		})
+	}
+}
+
+// TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation documents
+// the exact shape of the bug this change closes: resolveCDRStartupConfig
+// (the CLI/YAML merge, cdr_startup_config.go) has no opinion on validity — it
+// just merges — so a CLI-only timeout that config.yaml would refuse to boot
+// with merges through untouched. Before this fix, nothing downstream of the
+// merge (initCDR, main.go) caught it either; the merged value reached the
+// live CDR client as its per-file gRPC deadline. This test pins the merge
+// half of that chain: it is the CLI-side validCDRTimeoutSec check in initCDR
+// (not the merge) that must catch the value on the real startup path.
+func TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation(t *testing.T) {
+	fc := &FileConfig{} // no config.yaml timeout_sec at all
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{
+		Enabled:    true,
+		Endpoint:   "sluice:8443",
+		TimeoutSec: 5, // below Sluice's own 30s cap
+	})
+	if got.CDR.TimeoutSec != 5 {
+		t.Fatalf("resolved TimeoutSec = %d, want 5 (the merge itself must not silently drop or clamp it)", got.CDR.TimeoutSec)
+	}
+	// The merged value alone is exactly the shape validateCDR already
+	// refuses when it arrives via config.yaml — proving the CLI path used to
+	// let through a value the equivalent YAML config could never boot with.
+	asIfFromYAML := &FileConfig{CDR: got.CDR}
+	if err := asIfFromYAML.validate(); err == nil {
+		t.Fatalf("a merged CDR config with timeout_sec=5 must fail validate() — validCDRTimeoutSec regressed")
+	}
+	// And the CLI-facing gate (what initCDR actually calls before ever
+	// reaching resolveCDRStartupConfig's caller) must independently reject
+	// the same raw flag value.
+	if msg := validCDRTimeoutSec(5); msg == "" {
+		t.Fatalf("validCDRTimeoutSec(5) accepted a value below Sluice's 30s cap")
+	}
+}
