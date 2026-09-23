@@ -1699,3 +1699,103 @@ The lane wall was mutated the same way, and each mutation failed
 - env var dropped;
 - PASS check dropped;
 - job no longer running on push.
+
+### 16.4 CI evidence
+
+All runs are GitHub-hosted `ubuntu-latest`.
+
+| What | Run | Commit | Observed |
+|---|---|---|---|
+| Production-size aggregate case in `QA · On-disk contract` (no `-race`) | [35866546559](https://github.com/KidCarmi/Culvert/actions/runs/35866546559), job 107199502354 | `a606f82` | `CULVERT_RESTORE_PRODUCTION_SIZE: 1`; `--- PASS: TestReadTarball_ProductionAggregateBound_Integration (0.79s)`; job green |
+| Same-SHA QA audit (sharded vs unsharded) | same run, `Audit · sharded vs unsharded` | `a606f82` | **Passed.** Root entries 6,381 discovered / 6,381 reference / 6,381 sharded; skips 51 = 51; subtests 3,873 = 3,873 (0 missing, 0 extra); packages 112 = 112. Blocks: **0 lost**, 4 gained (35,243 vs 35,239 of 46,451). `coverage-floor.sh` exit 0 on both |
+| Fast PR run, real `pull_request` event | [35867970387](https://github.com/KidCarmi/Culvert/actions/runs/35867970387) | `9fb5e7c` | All 18 jobs green, including the privileged mount-point test, the verdict, both coverage floors and the aggregate |
+| Same-SHA Fast audit (the item §15.6 left open) | [35866549240](https://github.com/KidCarmi/Culvert/actions/runs/35866549240) | `a606f82` | see §16.5 |
+
+`9fb5e7c` differs from `a606f82` only by naming `readTarballLimited`'s results,
+a gocritic finding from the Fast gate's diff-scoped lint, so the audits on
+`a606f82` qualify the parser change.
+
+The superseded PR run on `a606f82` (35866550469) failed root shard 2 with the
+§15.6 `feedsync` data race, this time surfacing in
+`TestReportCatFeedDBOpened_WordsTheOutcome`. This change does not touch that
+path, and the re-run on `9fb5e7c` passed. The failure was reported on PR #1476 and
+belongs to the flaky-test investigation.
+
+### 16.5 Measurements
+
+**Test cost.** "Before" is the same toolchain on the same machine, taken just
+before the change (§16.1). "After" is the new tests on the same machine.
+
+| | Before, `-race` | After, `-race` |
+|---|---|---|
+| The two expensive tests: fixture + parse | 26.83 s + 0.00 s, 71.34 s + 28.59 s = **126.8 s** | none remain |
+| Every `TestReadTarball*` test in the file, one run | 126.8 s + 0.14 s control | **≈0.2 s** (the largest is the 1 MiB control, 0.14 s) |
+| Production-size aggregate proof | inside the ordinary suite, under `-race` | QA On-disk contract, no race: 1.40 s locally, **0.79 s on CI** |
+
+Per-test CI timings come from the committed timing file and the unsharded
+reference in QA audit 35866546559. The two removed tests had 29.01 s and
+81.56 s. The new restore tests measure between 0 and 0.06 s each.
+
+**Why summed test time is not the CI saving.** The 110.57 s sat in whichever
+root shard the plan gave it, and a shard's time counts only while that shard
+is the slowest process. In the QA audit's sharded run, still on the
+pre-refresh timing file, the four root shards ran 348–406 s of tests against
+estimates of 428 s. The non-root lane ran 722 s. The lane, not a root shard,
+now bounds the verdict. It is dominated by `internal/mcp/execution` and is
+untouched by 6A.
+
+**Fast and QA, observed.**
+
+| | Post-5C Fast (2 runs) | 6A Fast PR run 35867970387 |
+|---|---|---|
+| Aggregate | 711 s, 732 s | 779 s |
+| Root shards | 439–486 s | 408–443 s |
+| Non-root lane | 588 s (35859739941) | **600 s: the critical path** |
+| Runner-minutes | 67.6, 67.0, including the frontend and MCP jobs; about 62 without | 60.9 (no frontend or MCP jobs this time) |
+| Queue per job | 2–7 s | 3–5 s |
+
+- The root shards got shorter by roughly 30–40 s at the slowest.
+- The Fast aggregate did **not** get shorter in this sample: the non-root lane
+  was the longest job at 600 s, and the verdict waits for it. The aggregate
+  moves with run-to-run variance in the lane (588–722 s across the runs above).
+- No wall-clock saving is claimed for 6A.
+- The runner-minute saving is the removed fixture work, about 1.8 min per
+  race-suite execution: 110 s of CI test time, **estimated** from the
+  committed timings. The shuffled determinism lane runs the suite twice
+  (`-count=2`), so it saves about twice that. That estimate has not been
+  measured separately.
+
+### 16.6 Shard timing refresh
+
+`.github/qa-root-shard-timings.json` is replaced with the file the QA audit's
+comparison job derived from its own unsharded reference (run 35866546559 at
+`a606f82`), committed as-is per §14.5.
+
+- The two deleted tests (81.56 s and 29.01 s) are gone.
+- 23 entries were added: the new restore tests and the stage-5C walls. The new
+  restore tests measure 0–0.06 s.
+- The rest of the file also moved: summed entries went from 1,794.5 s to
+  1,128.7 s. Several unrelated slow tests measured 30–60 % faster in this
+  reference, for example `TestConformance_Response_Slice3f` 28.52 → 9.16 s and
+  `TestCredWall_EveryClaimedSurfaceIsScanned` 35.69 → 20.85 s. That is
+  run-to-run drift since the previous file (commit `21bfd7d`), not a 6A effect.
+- The timing file only balances; it never decides what runs (§14.5).
+- Because the partition changes with it, the refreshed file was qualified by a
+  further same-SHA audit on the final commit (§16.7).
+
+### 16.7 Qualification of the refreshed partition
+
+PENDING
+
+### 16.8 Rollback
+
+Revert the 6A commits.
+
+- The tests go back to generating 300 MiB and 800 MiB under `-race`.
+- `readTarballLimited` and `tarballLimitError` disappear. `readTarball`'s
+  behaviour and text are identical either way.
+- The QA contract step and its wall go too.
+- The timing file reverts with them.
+
+Do **not** remove the QA contract step on its own. That would leave the
+production aggregate bound proved nowhere at production size.
