@@ -627,7 +627,8 @@ func observedPlatform(views []jobView) string {
 }
 
 // escapePlatform percent-encodes the characters the platform and cohort key
-// use as separators (and the escape character itself), so distinct label sets
+// use as separators — including the trend's top-level "|" — and the escape
+// character itself, so distinct label sets
 // and groups never serialise to the same string: labels "a+b","c" and
 // "a","b","c" would otherwise both read "a+b+c". Ordinary labels such as
 // ubuntu-latest and the group "GitHub Actions" are unchanged.
@@ -635,7 +636,7 @@ func escapePlatform(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c < 0x20 || c == 0x7f || strings.IndexByte("%+@,;=", c) >= 0 {
+		if c < 0x20 || c == 0x7f || strings.IndexByte("%+@,;=|", c) >= 0 {
 			fmt.Fprintf(&b, "%%%02X", c)
 			continue
 		}

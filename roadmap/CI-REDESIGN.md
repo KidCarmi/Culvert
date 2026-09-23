@@ -2289,8 +2289,9 @@ trend groups by `workflow|class|job set|cohort`:
   (docs-only, pass-through) get an observed image too.
 - **What stays comparable.** Source commits, durations, Go patch releases
   and the weekly runner image build do not split a cohort. The exact Go and
-  image versions stay in each report and trend sample row, stated only when
-  every shard (or job) reported the same one.
+  image versions (including the weekly image build, the value that tells two
+  samples of one cohort apart) stay in each report and trend sample row,
+  stated only when every shard (or job) reported the same one.
 - **Complete evidence only.** The toolchain counts as observed only when the
   `meta.json` of **every** scheduled shard was read — matched shard for
   shard, not by count (documents for shards `{0,1,2,4}` do not cover
@@ -2478,7 +2479,9 @@ candidate after it.
   22. a `meta.json` accepted for a shard it does not name;
   23. one shard's exact Go version presented as the run's when shards
       differ by patch release;
-  24. runner labels joined without escaping their separators.
+  24. runner labels joined without escaping their separators (including
+      the trend's `|`);
+  25. the observed image build dropped from the trend sample row.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback

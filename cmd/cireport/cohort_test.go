@@ -268,8 +268,13 @@ func TestCohort_ShardsDisagreeingOnToolchainAreMixed(t *testing.T) {
 	if r.Toolchain != nil {
 		t.Errorf("patch-only difference: run toolchain %+v, want unstated", *r.Toolchain)
 	}
-	if row := sampleRow("g", "success", &Sample{Report: r}); row.Toolchain != "" {
+	row := sampleRow("g", "success", &Sample{Report: r})
+	if row.Toolchain != "" {
 		t.Errorf("patch-only difference: trend row toolchain %q, want empty", row.Toolchain)
+	}
+	// The image build is what separates two samples of one cohort.
+	if row.Image != img24 || row.ImageBuild != build24 {
+		t.Errorf("trend row image %q build %q, want %q %q", row.Image, row.ImageBuild, img24, build24)
 	}
 }
 
@@ -301,8 +306,23 @@ func TestCohort_PlatformEncodingIsUnambiguous(t *testing.T) {
 		t.Errorf("an ordinary platform reads %q, want it unchanged", got)
 	}
 	// Separators never reach the cohort key raw, so its fields still parse.
-	if p := withLabels("g;x=y", "a;b"); strings.ContainsAny(p, ";=") {
+	if p := withLabels("g;x=y|z", "a;b|c"); strings.ContainsAny(p, ";=|") {
 		t.Errorf("platform %q carries a cohort key separator", p)
+	}
+	// A verified run on a label carrying "|" still forms a group key a
+	// reviewed baseline can hold: the separator does not split it.
+	_, jobs, ev := hostedAudit(t, "self|hosted", "g|1")
+	r := Analyze(fx.Run, jobs, ev)
+	if !r.Cohort.Verified {
+		t.Fatalf("cohort %+v, want verified", r.Cohort)
+	}
+	b := testBaseline("reviewed")
+	b.ReviewedBy, b.ReviewedAt = "someone", "2026-10-01"
+	b.Groups = map[string]map[string]struct {
+		Median float64 `json:"median"`
+	}{groupKeyOf(r): {"elapsedToAggregateSeconds": {Median: 700}}}
+	if err := validateBaseline(b); err != nil {
+		t.Errorf("a verified cohort on a label with \"|\" was refused: %v", err)
 	}
 }
 

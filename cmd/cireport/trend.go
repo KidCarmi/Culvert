@@ -278,6 +278,11 @@ type SampleRow struct {
 	// Toolchain is the exact Go version the shards reported, when read; the
 	// cohort keeps only the release line.
 	Toolchain string `json:"toolchain,omitempty"`
+	// Image and ImageBuild are the runner image and its weekly build, when
+	// every measured job reported the same one. The cohort keeps only the
+	// image, so the build is what tells two samples in one cohort apart.
+	Image      string `json:"image,omitempty"`
+	ImageBuild string `json:"imageBuild,omitempty"`
 }
 
 // metricValues extracts the compared metrics; absent values are simply absent.
@@ -361,6 +366,7 @@ func sampleRow(group, concl string, s *Sample) SampleRow {
 	if r.Toolchain != nil {
 		row.Toolchain = r.Toolchain.Go
 	}
+	row.Image, row.ImageBuild = r.RunnerImage.Image, r.RunnerImage.Build
 	return row
 }
 
