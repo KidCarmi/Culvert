@@ -11,18 +11,23 @@
 ##   1. Failures are isolated by LAYER so the root cause is obvious at a
 ##      glance in the PR checks list:
 ##
-##        · qa-logic        — application-logic regressions (Go unit + race
-##                            tests, compile+vet). A red X here means the code
-##                            is wrong, independent of infra/OS.
+##        · qa-logic        — whole-module compile + `go vet`. A red X here
+##                            means the code does not build or vet cleanly.
+##        · qa-race         — application-logic regressions: the full race +
+##                            coverage suite, run as 4 isolated root-package
+##                            shards plus every other package (CI-REDESIGN
+##                            stage 5B, qa-race-shards.yml). A red X here means
+##                            the code is wrong, independent of infra/OS.
 ##        · qa-determinism  — repeats the same tests under -shuffle and -count
 ##                            to surface order-dependent tests and flakes.
 ##                            A red X here means a test is non-deterministic.
 ##        · qa-coverage     — enforces a minimum gate-critical coverage floor
 ##                            on the security-sensitive packages (totp, auth,
 ##                            session, SSRF helpers). Red = gap in coverage.
-##                            It runs NO tests: since CI-REDESIGN stage 2A the
-##                            profile is produced by qa-logic's race run and
-##                            this job only enforces the floors on it.
+##                            It runs NO tests: the profile is produced by the
+##                            race run (qa-logic's since stage 2A, qa-race's
+##                            since stage 5B) and this job only enforces the
+##                            floors on it.
 ##        · qa-infra-compose — builds the Docker image in isolation and brings
 ##                            up docker-compose.yml WITHOUT the application
 ##                            depending on it. Red = container/orchestration
@@ -36,11 +41,12 @@
 ##
 ##      These layers are INDEPENDENT with exactly ONE exception, and the
 ##      exception is real rather than incidental: qa-coverage consumes the
-##      coverage profile qa-logic publishes (stage 2A), so it genuinely
-##      cannot start earlier. Every other job is scheduled in parallel
-##      (stage 1) and each carries its own PR-skip condition, so a qa-logic
-##      failure suppresses only qa-coverage — and still fails the aggregate
-##      below, which needs all eight.
+##      coverage profile qa-race publishes, so it genuinely cannot start
+##      earlier. Every other job is scheduled in parallel (stage 1) and each
+##      carries its own PR-skip condition, so a qa-race failure suppresses
+##      only qa-coverage — and still fails the aggregate below, which needs
+##      every job. (The dispatch-only unsharded audit is the other consumer of
+##      qa-race's evidence; it is outside the ordinary graph — see below.)
 ##
 ##      Do not add a `needs:` edge here for ordering alone. Stage 1 removed
 ##      six that bought nothing but serialised the longest job in front of
@@ -74,6 +80,19 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      unsharded_audit:
+        # CI-REDESIGN stage 5B. Default false: an ordinary dispatch runs exactly
+        # the graph a main push runs. true ADDS the unsharded race reference
+        # (the single-process `go test -race ./...` qa-logic used to run) and a
+        # comparison of the sharded evidence against it — inventory, results,
+        # and every covered block. It is the QUALIFICATION mode for the sharded
+        # execution: a lost test or a lost covered block fails it, and the
+        # aggregate below then refuses. It is not run on ordinary executions —
+        # that would put the original critical path back.
+        description: "Also run the unsharded race reference and compare the sharded evidence with it (qualification)"
+        type: boolean
+        default: false
 
 concurrency:
   group: qa-gate-${{ github.ref }}
@@ -84,18 +103,20 @@ jobs:
   # Isolates PURE Go correctness. No Docker. No network. A failure here means
   # the committed source code is wrong — not infra, not the runner.
   qa-logic:
-    name: "QA · Application logic (race + vet)"
+    name: "QA · Application logic (compile + vet)"
     # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the
     # Fast/Deep PR Gates; full behavior retained on main pushes and on
     # workflow_dispatch (this workflow has NO tag trigger — see the `on:` block).
-    # Exactly ONE job depends on this one — qa-coverage, for the coverage
-    # profile published below (CI-REDESIGN stage 2A). Every other sibling is
-    # independent and carries the same PR-skip condition explicitly rather
-    # than inheriting it by cascade (stage 1). The aggregate below treats
+    #
+    # Stage 5B moved the race + coverage suite out of this job into qa-race
+    # (below). What stays here is what compiling the root test binary alone
+    # does NOT replace: `go build ./...` builds every package's non-test code
+    # (including main packages the tests never link), and `go vet ./...`
+    # checks every package, test files included. The aggregate below treats
     # skipped as pass so the required-check name keeps reporting.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 50  # > the 40m per-binary test budget below (compile + tee + upload)
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -110,88 +131,24 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: Unit + integration tests (race detector, fixed seed, coverage)
-        # Single-seed, single-shuffle run with the race detector. Owners of a
-        # failure here MUST treat it as a logic regression, not a flake.
-        #
-        # CI-REDESIGN stage 2A: this run now ALSO produces the coverage profile
-        # the `qa-coverage` job enforces the floors on. Before, `qa-coverage`
-        # ran the whole suite a SECOND time (non-race, no -v, 15m budget) purely
-        # to instrument it — the same tests, the same seed, twice per main push.
-        # `-coverprofile` is additive here: it changes no package scope, no test
-        # selection and no flag this step already carried.
-        env:
-          # Deterministic RNG seed for tests that use math/rand so reruns are
-          # byte-for-byte reproducible. Any test reading TEST_SEED should feed
-          # it to rand.New(rand.NewSource(...)).
-          TEST_SEED: "20260421"
-        # pipefail is load-bearing: the default Actions shell does not set it,
-        # so without it this pipeline returns tee's always-zero status and the
-        # gate goes green on failing tests (P0, CI review). The former second
-        # -json run doubled the full -race suite inside the job budget (25m at
-        # the time, 35m after CI-01, 50m now) for a report nothing consumed — dropped;
-        # logic.log remains the artifact.
-        run: |
-          set -o pipefail
-          mkdir -p qa-reports
-          # -timeout is PER TEST BINARY and the root package alone measured
-          # 897.9s against a 900s limit on origin/main -- 0.23% of headroom, far
-          # below this suite's run-to-run variance. Raised to 25m for the same
-          # reason as pr-fast-gate.yml's test-race job; see CI-01 in
-          # docs/engineering/security-reviews/2026-08-25-mcp-overnight-hardening-run.md
-          # Raised again to 40m on 2026-09-08 with the measurements recorded
-          # beside the same step in pr-fast-gate.yml (1445s on origin/main
-          # against 1500s; this run of the suite already takes 24m35s end to
-          # end). The two budgets move together. A genuinely hung test still
-          # fails, later.
-          #
-          # -coverprofile is placed BEFORE the package list on purpose: `go test`
-          # treats arguments after the packages as arguments to the test BINARY,
-          # so a trailing -coverprofile would be silently handed to the tests
-          # instead of the tool. It also implies -cover, which instruments only
-          # the packages being tested — identical scope to the second run this
-          # replaces. `-race` forces -covermode=atomic (set mode is not
-          # race-safe), so the profile's counts are real counts rather than 0/1;
-          # `go tool cover` treats any count > 0 as covered, so the PERCENTAGES
-          # the floors are computed from are unaffected. Do not "fix" that by
-          # forcing -covermode=set: it would be ignored under -race anyway.
-          go test -race -count=1 -timeout=40m -coverprofile=coverage.out -v ./... \
-            2>&1 | tee qa-reports/logic.log
-
-      - name: Assert the coverage profile is usable
-        # Fail CLOSED at the PRODUCER. A green qa-logic that published no usable
-        # profile would let `qa-coverage` enforce floors on nothing, so the
-        # evidence is checked here, where the file is still local, rather than
-        # trusted downstream. `go test` can exit 0 having written a profile that
-        # carries only its `mode:` header if no package was instrumented.
-        run: |
-          set -euo pipefail
-          test -s coverage.out || { echo "::error::coverage.out missing or empty after the race run"; exit 1; }
-          head -n1 coverage.out | grep -q '^mode:' || { echo "::error::coverage.out has no mode line — not a coverage profile"; exit 1; }
-          lines=$(($(wc -l < coverage.out) - 1))
-          [ "$lines" -gt 0 ] || { echo "::error::coverage.out carries a mode line and no statements"; exit 1; }
-          echo "coverage profile: $lines statement blocks, $(head -n1 coverage.out)"
-
-      - name: Upload coverage
-        # The ONE producer of the `qa-coverage` artifact (stage 2A). Name, path
-        # and 30-day retention are carried over verbatim from the job that used
-        # to produce it, so anything consuming this artifact by name is
-        # unaffected. if-no-files-found:error keeps a vanished profile a FAILURE
-        # rather than a silently absent artifact and a green gate.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: qa-coverage
-          path: coverage.out
-          retention-days: 30
-          if-no-files-found: error
-
-      - name: Upload logic test reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: qa-logic-reports
-          path: qa-reports/
-          retention-days: 14
+  # ─── A2. Race + coverage (sharded) ─────────────────────────────────────────
+  # The full race + coverage suite that qa-logic ran as ONE ~25–30-minute
+  # process until stage 5B: the root package as 4 isolated shards of one
+  # prebuilt binary, every other package whole, and a verdict that proves the
+  # evidence complete on its own — exact root partitioning, every
+  # source-declared test, and both coverage-block universes exactly. It
+  # publishes the authoritative `qa-coverage` profile. See
+  # .github/workflows/qa-race-shards.yml and roadmap/CI-REDESIGN.md §14.
+  #
+  # Owner of the main-push race suite (stage 2B handed it to QA; stage 5B moved
+  # it from qa-logic to this job). security-release-gate.yml's `tests-race`
+  # still owns tags, the weekly schedule and manual dispatch there.
+  qa-race:
+    name: "QA · Race + coverage (sharded)"
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/qa-race-shards.yml
+    with:
+      shards: 4
 
   # ─── B. Determinism gate ───────────────────────────────────────────────────
   # Re-runs the test suite with -shuffle=on and -count=2 to flush out
@@ -224,7 +181,7 @@ jobs:
           # state between invocations or depends on ordering will fail.
           #
           # Note: we INTENTIONALLY do NOT add -race here. The race detector
-          # is covered by qa-logic. Combining -race with -shuffle=on on a
+          # is covered by qa-race. Combining -race with -shuffle=on on a
           # shared CI runner roughly doubles wall time and surfaces timing
           # sensitivity that is orthogonal to order-dependency — exactly
           # the failure-isolation principle this gate enforces (one job,
@@ -249,23 +206,25 @@ jobs:
   #
   # CI-REDESIGN stage 2A: this job no longer RUNS the suite. It used to execute
   # the whole `./...` suite a second time (non-race, 15m budget) with the same
-  # TEST_SEED, purely to instrument what qa-logic had already executed. The
-  # profile now comes from qa-logic's race run and this job only ENFORCES the
-  # floors on it, so the duplicate execution is gone while the floor table, its
-  # calculation and its blast-radius scope are byte-identical.
+  # TEST_SEED, purely to instrument what the race run had already executed. It
+  # only ENFORCES the floors on the race run's profile, so the duplicate
+  # execution is gone while the floor table, its calculation and its
+  # blast-radius scope are byte-identical. Stage 5B changed only the PRODUCER:
+  # the profile is now the sharded race verdict's merged profile (qa-race),
+  # judged complete against both block universes before it is published.
   #
   # This is the ONE dependency between substantive jobs (stage 1 removed six
   # that bought nothing). It is deliberate and narrow: this job consumes
-  # qa-logic's ARTIFACT, so it genuinely cannot start before it. Every other
+  # qa-race's ARTIFACT, so it genuinely cannot start before it. Every other
   # job stays independent.
   qa-coverage:
     name: "QA · Gate-critical coverage floor"
     # `needs:` is the artifact dependency, NOT a scheduling preference. It also
     # makes the gate fail closed in the direction that matters: a failed
-    # qa-logic publishes no profile, this job never runs, and the aggregate
-    # refuses on qa-logic's own result. The PR-skip stays stated explicitly so
+    # qa-race publishes no profile, this job never runs, and the aggregate
+    # refuses on qa-race's own result. The PR-skip stays stated explicitly so
     # the condition does not depend on the cascade (stage 1's rule).
-    needs: qa-logic
+    needs: qa-race
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -277,7 +236,7 @@ jobs:
       # required even though no test runs here.
       - uses: ./.github/actions/setup-go-cache
 
-      - name: Download coverage profile from qa-logic
+      - name: Download coverage profile from qa-race
         # No `run-id`/`github-token`: without them actions/download-artifact
         # reads ONLY the current workflow run, so a floor can never be enforced
         # against some other run's profile. Do not add them.
@@ -293,7 +252,7 @@ jobs:
         # of a stack trace. Fail closed, with the reason named.
         run: |
           set -euo pipefail
-          test -s coverage.out || { echo "::error::no coverage profile from qa-logic (missing or empty after download)"; exit 1; }
+          test -s coverage.out || { echo "::error::no coverage profile from qa-race (missing or empty after download)"; exit 1; }
           head -n1 coverage.out | grep -q '^mode:' || { echo "::error::downloaded coverage.out has no mode line — transfer corrupted or not a profile"; exit 1; }
           lines=$(($(wc -l < coverage.out) - 1))
           [ "$lines" -gt 0 ] || { echo "::error::downloaded coverage.out carries a mode line and no statements"; exit 1; }
@@ -308,9 +267,9 @@ jobs:
 
   # ─── D. Docker Compose infra gate ──────────────────────────────────────────
   # Runs the compose stack INDEPENDENTLY of the Go test run — in PARALLEL with
-  # qa-logic, not after it (CI-REDESIGN stage 1). If this job fails, the failure
+  # the Go tests, not after them (CI-REDESIGN stage 1). If this job fails, the failure
   # is an infra/orchestration issue — image build, healthcheck, compose graph —
-  # NOT application logic; read it against qa-logic's result in the same run.
+  # NOT application logic; read it against qa-race's result in the same run.
   # That isolation matters: it lets operators ship a hotfix without re-running
   # hours of Go tests.
   qa-infra-compose:
@@ -374,7 +333,7 @@ jobs:
           docker compose -f compose.qa.yml up -d
           # Wait for the healthcheck to flip to healthy. Fail fast if it does
           # not become healthy within the retry budget — this is the boundary
-          # between "app issue" (would have failed in qa-logic) and "infra
+          # between "app issue" (would have failed in qa-race) and "infra
           # issue".
           healthy=0
           for i in $(seq 1 45); do
@@ -416,7 +375,7 @@ jobs:
 
   # ─── E. OS / environment gate ──────────────────────────────────────────────
   # Runs a static CGO_ENABLED=0 binary on a clean Ubuntu runner (no Docker,
-  # no sidecar). Runs in PARALLEL with qa-logic. If qa-logic is green in the
+  # no sidecar). Runs in PARALLEL with qa-race. If qa-race is green in the
   # same run and this job is red, the problem is in the build or the runtime
   # environment, NOT the Go test logic.
   qa-os:
@@ -453,7 +412,7 @@ jobs:
         run: |
           # Runs in a clean shell on the runner itself. If /health responds
           # we know the OS environment + binary combination is good. A
-          # failure here with qa-logic green in the same run = runner/OS problem.
+          # failure here with qa-race green in the same run = runner/OS problem.
           export CULVERT_SESSION_SECRET=$(openssl rand -hex 32)
           ./culvert -port 18080 -ui-port 19090 &
           PID=$!
@@ -658,6 +617,155 @@ jobs:
       - name: Allocation-regression gate (policy + scrub hot paths)
         run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v .
 
+  # ─── Audit: the unsharded race reference (CI-REDESIGN stage 5B) ────────────
+  # QUALIFICATION mode, dispatch-only (`unsharded_audit: true`). On every push,
+  # pull request and default dispatch both jobs are skipped, so an ordinary run
+  # pays nothing for them. When requested they are part of the gate: the
+  # aggregate needs both, so a lost test or a lost covered block refuses the
+  # QA approval of that run. Their artifacts carry the `qa-audit-` prefix and
+  # are never release evidence (release evidence is a main-push run).
+  qa-unsharded-audit:
+    name: "Audit · unsharded race reference"
+    if: github.event_name == 'workflow_dispatch' && inputs.unsharded_audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 50  # > the 40m per-binary test budget below (compile + tee + upload)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Unsharded race + coverage run (the pre-5B qa-logic command)
+        # Verbatim the single-process command qa-logic ran until stage 5B —
+        # same TEST_SEED, -race, -count, per-binary -timeout and coverage scope
+        # — so the comparison measures sharding, nothing else.
+        # qa_race_shards_test.go pins the shards' seed and -timeout to it.
+        env:
+          TEST_SEED: "20260421"
+        run: |
+          set -o pipefail
+          mkdir -p qa-audit-reference
+          go test -race -count=1 -timeout=40m -coverprofile=qa-audit-reference/coverage.out -v ./... \
+            2>&1 | tee qa-audit-reference/logic.log
+
+      - name: Upload the unsharded reference
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-audit-reference
+          path: qa-audit-reference/
+          retention-days: 14
+          if-no-files-found: warn
+
+  qa-unsharded-audit-compare:
+    name: "Audit · sharded vs unsharded"
+    # The edge carries DATA: the reference's log and profile, and qa-race's
+    # inventory, results and merged profile.
+    needs: [qa-race, qa-unsharded-audit]
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.unsharded_audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Download the unsharded reference
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: qa-audit-reference
+          path: reference
+
+      - name: Download the sharded run's inventory
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: qa-race-build
+          path: race-build
+
+      - name: Download the sharded run's verdict
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: qa-race-verdict
+          path: race-verdict
+
+      # Each download is independent (continue-on-error): a failed reference
+      # still yields its log and timings below, and the compare step names
+      # exactly which input is missing.
+      - name: Compare inventory, results and EVERY covered block with the reference
+        # A block the reference covered and the sharded run did not fails here
+        # unless .github/qa-root-shard-coverage-exceptions.json justifies it —
+        # that file is expected to be empty.
+        run: |
+          set -o pipefail
+          mkdir -p audit-compare
+          missing=0
+          for f in reference/logic.log reference/coverage.out race-build/list.txt \
+                   race-verdict/results.json race-verdict/merged.cover.out; do
+            [ -s "$f" ] || { echo "::error::comparison input $f is missing (its producer failed or published nothing)"; missing=1; }
+          done
+          [ "$missing" = 0 ] || exit 1
+          go run ./cmd/rootshard compare \
+            -ref-log reference/logic.log -ref-profile reference/coverage.out \
+            -pilot-results race-verdict/results.json -pilot-profile race-verdict/merged.cover.out \
+            -list race-build/list.txt -pkg "$(go list .)" \
+            -coverage-exceptions .github/qa-root-shard-coverage-exceptions.json \
+            -out audit-compare/comparison.json -baseline-out audit-compare/reference-timings.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage floors, reference vs sharded (same unchanged script)
+        if: always()
+        run: |
+          # +e: both verdicts are recorded before either decides the step.
+          set +e -u
+          mkdir -p audit-compare
+          .github/scripts/coverage-floor.sh reference/coverage.out > audit-compare/floors-reference.txt; ref=$?
+          .github/scripts/coverage-floor.sh race-verdict/merged.cover.out > audit-compare/floors-sharded.txt; sharded=$?
+          echo "coverage-floor.sh exit: reference=$ref sharded=$sharded"
+          diff -u audit-compare/floors-reference.txt audit-compare/floors-sharded.txt | tee audit-compare/floors.diff || true
+          [ "$ref" = "$sharded" ] || { echo "::error::the floors verdict differs between the reference and the sharded run"; exit 1; }
+
+      - name: Refreshed timing file from this reference (candidate for .github/qa-root-shard-timings.json)
+        if: always()
+        run: |
+          mkdir -p audit-compare
+          go run ./cmd/rootshard timings -log reference/logic.log -pkg "$(go list .)" \
+            -source "qa-gate run ${{ github.run_id }} @ ${{ github.sha }}" -out audit-compare/qa-root-shard-timings.json
+
+      - name: Both sides must have succeeded
+        if: always()
+        run: |
+          set -eu
+          fail=0
+          for pair in "qa-unsharded-audit=${{ needs.qa-unsharded-audit.result }}" "qa-race=${{ needs.qa-race.result }}"; do
+            echo "$pair"
+            [ "${pair#*=}" = success ] || { echo "::error::${pair%%=*} did not succeed (${pair#*=})"; fail=1; }
+          done
+          exit $fail
+
+      - name: Evidence, compact (last in the log, readable without the artifact)
+        # One JSON document per line at the END of the job log, so the evidence
+        # survives log-tail retrieval where artifact downloads are unavailable.
+        if: always()
+        run: |
+          for f in race-verdict/verdict.json audit-compare/comparison.json \
+                   audit-compare/reference-timings.json audit-compare/qa-root-shard-timings.json; do
+            [ -s "$f" ] && echo "EVIDENCE $f $(jq -c . "$f")" || echo "EVIDENCE $f MISSING"
+          done
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-audit-compare
+          path: audit-compare/
+          retention-days: 14
+          if-no-files-found: warn
+
   # ─── Gate summary ───────────────────────────────────────────────────────────
   qa-gate-approved:
     name: "✅ QA Gate — APPROVED"
@@ -665,6 +773,7 @@ jobs:
     timeout-minutes: 5
     needs:
       - qa-logic
+      - qa-race
       - qa-determinism
       - qa-coverage
       - qa-infra-compose
@@ -672,17 +781,21 @@ jobs:
       - qa-contract
       - qa-agent
       - qa-bench
+      - qa-unsharded-audit
+      - qa-unsharded-audit-compare
     # always() + skipped-as-pass: on PRs every QA job skips on its OWN
     # `if: github.event_name != 'pull_request'` (superseded by the Fast/Deep PR
     # Gates — retirement step 5) but this check name must keep reporting success
     # so a branch-protection rule requiring it can never wedge a PR at
-    # "Expected". On main pushes and workflow_dispatch all eight substantive
+    # "Expected". On main pushes and workflow_dispatch all nine substantive
     # jobs run and failure/cancellation of ANY of them fails the gate as before —
-    # including a qa-logic failure, which still refuses this approval. A failed
-    # qa-logic now SKIPS qa-coverage (it publishes no profile to enforce against)
+    # including a qa-race failure, which still refuses this approval. A failed
+    # qa-race SKIPS qa-coverage (it publishes no profile to enforce against)
     # and this aggregate reads that skip as a pass — which is correct only
-    # because qa-logic's own `failure` is in the same `needs` set and refuses
-    # on its own. Never drop qa-logic from that set.
+    # because qa-race's own `failure` is in the same `needs` set and refuses
+    # on its own. Never drop qa-race from that set. The two audit jobs skip
+    # unless a dispatch requests `unsharded_audit`; when it does, they are
+    # judged like any other job.
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -700,9 +813,10 @@ jobs:
 
           | Layer | Job | Status |
           |-------|-----|--------|
-          | Application logic | qa-logic | ✅ |
+          | Compile + vet     | qa-logic | ✅ |
+          | Application logic (race + coverage, 4 root shards + lane) | qa-race | ✅ |
           | Determinism       | qa-determinism | ✅ |
-          | Coverage floor    | qa-coverage (floors on qa-logic's profile) | ✅ |
+          | Coverage floor    | qa-coverage (floors on qa-race's verdict-checked profile) | ✅ |
           | Infra (Docker Compose) | qa-infra-compose | ✅ |
           | OS / environment  | qa-os | ✅ |
           | On-disk contract  | qa-contract | ✅ |
@@ -710,14 +824,17 @@ jobs:
           | Perf-regression (allocs/op) | qa-bench | ✅ |
 
           **Interpretation**
-          - If `qa-logic` was the only red job, the code is wrong.
-          - If `qa-logic` was green but `qa-infra-compose` was red, the
+          - If `qa-race` (or `qa-logic`) was the only red job, the code is wrong.
+            A red `qa-race` verdict that names MISSING or INCOMPLETE evidence
+            (not a failed test) is a sharding/infrastructure fault to diagnose,
+            never to retry away — see roadmap/CI-REDESIGN.md §14.
+          - If `qa-race` was green but `qa-infra-compose` was red, the
             Docker/compose graph is the problem — not the application.
-          - If `qa-logic` was green but `qa-os` was red, the runner or
+          - If `qa-race` was green but `qa-os` was red, the runner or
             build-environment is the problem — not the application.
           - `qa-determinism` failures are flakes or order-dependent tests;
             they must be pinned, not retried away.
           - `qa-coverage` runs no tests. A red there is a real floor breach in
-            the profile `qa-logic` produced, not a second test run disagreeing
+            the profile `qa-race` produced, not a second test run disagreeing
             with the first.
           EOF

@@ -952,3 +952,489 @@ the six E2E jobs running the unchanged recipe on GitHub runners (see the PR).
 Revert the commit. The E2E image returns to the old base images, build-time
 `go mod tidy` and the previous flags; the four workflows are unchanged, so
 nothing else needs to move.
+
+## 13. Stage 5A — root-suite sharding pilot (evidence only)
+
+> Superseded in operation by §14 (stage 5B): the pilot workflow is now
+> `qa-race-shards.yml`, it runs on every QA execution, and the `verdict`/
+> `compare` commands take the additional flags shown in §14's "Reproduce".
+> This section is kept as the record of the 5A evidence.
+
+The root package's race+coverage suite is ONE process inside `qa-logic`: ~6,300
+top-level entries in ~25–33 minutes, the longest item on every main push. Stage
+5A asks one question — can it run as several isolated processes **without
+silently losing a test, a coverage block or a failure** — and answers it with a
+working, opt-in pilot and measured evidence. Adopting it in a required gate is
+stage 5B; nothing here changes what any gate requires.
+
+### Shape
+
+`cmd/rootshard` + `.github/workflows/qa-root-shard-pilot.yml` (reusable, no
+trigger of its own), called from `qa-gate.yml` only when a manual dispatch sets
+`root_shard_pilot: true` (default false):
+
+| Job | What it does |
+|---|---|
+| `pilot-build` | `go test -c -race -cover .` **once**; inventory from the binary's own `-test.list .*` (source-regex counts are not authoritative: the root has 6,421 `func Test…` in source, many behind build tags such as `benchgate`, against 6,325 runnable Test/Fuzz/Example entries + 136 benchmarks in the default-tag CI binary); times an empty run (process start + TestMain + coverage write); partitions by measured duration |
+| `pilot-shard` ×4 | runs its selections against THAT binary from the same checkout path; refuses another binary, commit, toolchain or working directory; first proves the binary's own `-test.list` selects exactly the planned entries; then runs with the reference's per-binary flags (`-test.paniconexit0 -test.gocoverdir -test.timeout=40m -test.count=1 -test.coverprofile`), test2json events streamed to evidence |
+| `pilot-lane` | every package `go list ./...` returns EXCEPT the exact root import path, as whole packages, `-race -count=1 -timeout=40m -coverprofile -json` |
+| `pilot-verdict` | `if: always()`; rejects failed/cancelled/missing shards, identity mismatches, inventory mismatches (every planned entry exactly one result; nothing unselected ran), unusable or incompatible profiles; merges all profiles by block; runs the UNCHANGED `coverage-floor.sh` |
+| `qa-root-shard-pilot-compare` (in `qa-gate.yml`) | compares with the SAME run's unsharded `qa-logic` (no extra full-suite run): discovered vs executed inventory, pass/skip per entry, subtest inventory, package set, block universe, covered-block union, per-file coverage, and the floors verdict of both profiles |
+
+### Why each choice
+
+* **Build once, run the binary.** Compiling per shard would give four binaries
+  whose equality is assumed, not checked; one binary with a sha256 in the
+  manifest makes "every shard ran the same code" a verified fact.
+* **Same checkout path, no `-trimpath`.** `pkgSourceDir()` uses
+  `runtime.Caller`; tests read source, docs, frontend assets and fixtures and
+  invoke Go. Each shard checks out the same commit at the path the binary was
+  compiled in and has the same toolchain; the tool refuses otherwise.
+* **Evidence outside the checkout.** Several tests walk the repository, so the
+  binary and evidence live in `RUNNER_TEMP` — the shards test exactly the tree
+  the reference tests.
+* **Partition = longest-processing-time-first over measured durations**, total
+  order (estimate desc, name asc; ties to the lowest shard), so the same inputs
+  give the same plan. Estimates are floored at the 10 ms resolution of `go test
+  -v` (most root tests print `0.00s`; zero weights piled 5,053 of 6,319 entries
+  onto one shard in the first seeded plan) and a new test takes the MEAN
+  measured cost (the median is 0). New tests therefore enter the partition
+  automatically.
+* **Selections are anchored, escaped and verified twice.**
+  `^(?:QuoteMeta(a)|QuoteMeta(b)…)$` — the group keeps testing's splitter from
+  seeing a top-level `|`/`/`; every chunk regex is evaluated against the whole
+  inventory with the same regexp engine `testing` uses (it must select exactly
+  its names, nothing else, no benchmark), an empty selection is refused
+  (`-test.run ''` runs everything), and on the runner the binary's own
+  `-test.list <regex>` must return exactly the planned names.
+* **Argument size.** Linux caps one argv string at 128 KiB; the inventory is
+  ~268 KB of names. Selections are chunked at 96 KiB (one process each); four
+  shards need one chunk each today, and the tool handles more.
+* **Merge by block.** Key = source path + block coordinates; statement counts
+  must agree (else: different builds, refused); counters sum (atomic), a
+  zero-covered block is counted once. Root profiles must share an identical
+  block universe (same binary); the lane profile must contain no root block.
+  Percentages are never averaged and duplicate root blocks never concatenated.
+* **Coverage differences are reported, not fatal.** The block universe must be
+  identical; covered-block differences are listed by location, and the floors
+  decide pass/fail exactly as today — race/timing-dependent branches differ
+  between any two runs.
+* **Failures are never retried.** `fail-fast: false`, every shard runs to
+  completion, evidence uploads `if: always()`.
+
+### Reproduce
+
+The pilot is opt-in and runs only on a manual dispatch of the QA gate from the
+branch under test (PR/main behaviour, required job names and the aggregate's
+`needs` are unchanged — pinned by `qa_root_shard_pilot_test.go`,
+`qa_gate_scheduling_test.go` and `security_race_ownership_test.go`):
+
+```bash
+gh workflow run qa-gate.yml --ref <branch> -f root_shard_pilot=true
+```
+
+Locally, the same steps the jobs run (any writable directory outside the
+checkout for `$OUT`):
+
+```bash
+C=$(git rev-parse HEAD); go build -o "$OUT/rootshard" ./cmd/rootshard
+"$OUT/rootshard" build -out-dir "$OUT/build" -commit "$C"     # compile once, list, time an empty run
+"$OUT/rootshard" plan -list "$OUT/build/list.txt" -timings .github/qa-root-shard-timings.json \
+  -pkg "$(go list .)" -shards 4 -out "$OUT/build/plan.json"
+for i in 0 1 2 3; do
+  "$OUT/rootshard" run-shard -plan "$OUT/build/plan.json" -manifest "$OUT/build/manifest.json" \
+    -binary "$OUT/build/root.test" -shard $i -out-dir "$OUT/shards/shard-$i" -commit "$C" -timeout 40m
+done
+"$OUT/rootshard" run-lane -out-dir "$OUT/lane" -commit "$C" -timeout 40m
+"$OUT/rootshard" verdict -build-dir "$OUT/build" -shards-dir "$OUT/shards" -lane-dir "$OUT/lane" -out-dir "$OUT/verdict"
+.github/scripts/coverage-floor.sh "$OUT/verdict/merged.cover.out"
+# against an unsharded `go test -race -coverprofile=coverage.out -v ./... > logic.log` of the same commit:
+"$OUT/rootshard" compare -ref-log logic.log -ref-profile coverage.out \
+  -pilot-results "$OUT/verdict/results.json" -pilot-profile "$OUT/verdict/merged.cover.out" \
+  -list "$OUT/build/list.txt" -pkg "$(go list .)" -out "$OUT/comparison.json"
+```
+
+`go test ./cmd/rootshard` runs the tool's own gates, including an end-to-end
+test that builds a fixture module (TestMain, subtests, a skip, a Fuzz seed, an
+Example, a benchmark, a helper that re-execs the test binary and `os.Exit`s,
+a second package) and requires ZERO lost coverage blocks against a real
+unsharded `go test -race -coverprofile -v ./...` of it, plus the failure paths:
+a failing test, a crashing test (panic mid-chunk), a missing shard, a shard
+from another binary, and an unusable profile — each must turn the verdict red
+and name the cause.
+
+### Measurements (GitHub-hosted `ubuntu-latest`, 4 vCPU, warm module cache)
+
+Three dispatches on the branch; each run's reference is the SAME run's
+unsharded `qa-logic`, so both sides share runner class, cache state and time
+of day.
+
+| | Run 1 `35786256715` | Run 2 `35789916458` | Run 3 `35793263705` |
+|---|---|---|---|
+| Plan | bootstrap (local timings, fallback-heavy) | local measured timings, 5 ms floor | **CI-measured timings** (run 2's reference) |
+| Build job (compile+list+empty run) | — | 108 s (81 s) | 95 s (72 s) |
+| Empty run = process start + TestMain + coverage write | — | 1.95 s | ≈2 s |
+| Binary / artifact | — | 112 MB / 55 MB, ~4 s up, 2–4 s down | same |
+| Shard test time (s) | 414 / 324 / 504 / 296 | 424 / 440 / 405 / 434 | **379 / 421 / 420 / 411** (plan 392 each) |
+| Shard job (s) | — | 452 / 466 / 435 / 468 | 415 / 456 / 453 / 436 |
+| Non-root lane job (s) | 719 | 468 | 668 |
+| … of which `internal/mcp/execution` | 521 s | 311 s | 465 s |
+| **Pilot critical path** (first queued → verdict) | 769 s | **614 s** | **723 s** |
+| build+shards done / lane done | — | +583 s / +471 s | +578 s / +691 s |
+| **Reference critical path** (`qa-logic` job) | 1987 s | 1710 s | 1929 s |
+| Speed-up | 2.6× | 2.8× | 2.7× |
+| Pilot runner time (build+4 shards+lane+verdict) | 42.2 min | 40.4 min | 42.5 min |
+| Reference runner time (`qa-logic` + `qa-coverage`) | 33.1 min | 28.8 min | 32.7 min |
+| Verdict | **red, correctly** (5 problems) | green | green |
+
+Costs the spec asked to separate: queue delay 2–23 s per job (the lane and
+build queue longest because they start with the rest of the gate); setup-go
+10–19 s per job; artifact transfer ≤ 5 s per job; repeated TestMain ≈ 2 s per
+shard (8 s total — negligible against ~410 s shards). Compilation is paid ONCE
+(72–81 s) instead of once per shard. The extra runner time (~+10 min, +30–40%)
+is five extra setups, one extra compile, and the lane re-running what
+`qa-logic` already runs in the reference; it buys a ~2.7× shorter critical
+path.
+
+**The critical path is now bounded by two things, not by the root suite.**
+Build + the slowest shard finish at ~+580 s in both measured runs; the lane
+finishes anywhere from +471 s to +691 s, driven almost entirely by
+`internal/mcp/execution` (311–521 s across three runs; 428–505 s in the
+reference). In run 3 the lane, not the shards, was the critical path.
+
+### Equivalence (run 3 — the fix-complete run)
+
+| Check | Reference | Pilot |
+|---|---|---|
+| Root entries discovered (binary `-test.list`) | 6,325 | 6,325 |
+| Root entries executed, each exactly once | 6,325 | 6,325 |
+| Skipped (all environmental: `/data` not writable, opt-in CI-only gates, no root for a bind mount, interop env unset) | 51 | the same 51, each with its skip reason |
+| Subtests | 3,819 | 3,819 (0 missing, 0 extra) |
+| Packages | 112 | 112 |
+| Block universe (root + all other packages) | 46,223 | 46,223 — identical |
+| Covered blocks | 35,043 | 35,038 |
+| Statement coverage | 78.8% (56,029/71,092) | 78.8% (56,021/71,092) |
+| `coverage-floor.sh` | exit 0 | exit 0, byte-identical per-file table |
+
+**Failure path, demonstrated for real (run 1).** Run 1 carried a deliberately
+unmeasured timing seed that one of the pilot's own wall tests rejects. The
+shard containing that test exited 1, its evidence still uploaded, the other
+shards ran to completion, and the verdict listed the failure by name alongside
+the other problems — nothing was retried or masked. The same run's lane
+`-race` found a real data race in the tool itself (two writers on one
+buffer), fixed in the next commit.
+
+**Lost coverage — found, fixed, and the remainder explained.**
+
+* *Found and fixed:* run 2 lost 14 blocks in `main.go`/`upstream_downgrade.go`.
+  Those are reached by helper tests that re-exec the test binary and leave via
+  `os.Exit`; the child's counters are written to `GOCOVERDIR` and merged by the
+  parent. `go test` sets `GOCOVERDIR` in the environment AND passes
+  `-test.gocoverdir`; the pilot passed only the flag, so every child's
+  coverage was silently dropped. Now reproduced by the fixture's re-exec test
+  (which fails without the fix) and gone in run 3.
+* *Remaining (run 3): 14 blocks covered only by the reference, 9 only by the
+  pilot*, all in the root package. 11 of the 14 recur in run 2 under a
+  different plan, so they are NOT noise. They are **test-order coupling**:
+  branches reached only when an EARLIER test in the same process left global
+  state behind (a loaded root/cluster CA, a recorded CA-load failure or GeoIP
+  load error, a populated request log, a once-resolved value). Proven for
+  `ui_frontend_v2.go:110` (`ensureFrontendV2`'s cached return, a
+  process-lifetime `atomic.Pointer` no test resets):
+  `TestNewAdminUIServer_ReturnsConfiguredServer` alone → 0,
+  `TestAdminUIServer_ShutdownReturnsBeforeDeadline` alone → 0, both in one
+  process → 1. The unsharded reference covers it only because file order puts
+  both in one process; the pilot's plan puts them on different shards. The 9
+  gained blocks are the same mechanism in the other direction. No TEST is
+  lost — each still runs once and passes — only an incidental path through
+  shared state. Net effect 8 statements (0.01 pp), inside every floor.
+
+### Recommendation for stage 5B
+
+1. **Adopt 4 shards; do not go to 6.** The shards land within −3%/+8% of
+   the plan (379–421 s against 392 s), and build + slowest shard already finish at ~580 s — below the
+   lane in run 3. Six shards would cut ~140 s of shard time only while the
+   lane is not the bound, at two more setups (~2 runner-minutes) per run.
+2. **Split the lane, and put `internal/mcp/execution` on its own job.** It is
+   the single biggest variance on the critical path (311–521 s); alone it
+   bounds the pilot at roughly build-time + 470 s either way. With it split
+   out, the expected critical path is max(build + shard, mcp/execution) ≈
+   580 s, i.e. ~3× today.
+3. **Refresh timings from CI, not by hand.** The compare job prints a fresh
+   `qa-root-shard-timings.json` derived from the same run's reference;
+   committing it periodically (or deriving it in the gate from the last main
+   run) keeps the balance. New tests already enter automatically at the mean.
+4. **Keep the equivalence check as the adoption gate**, not a one-off: the
+   compare job (inventory, per-entry results, block universe) should stay red
+   on any missing execution when 5B moves the race+coverage contract onto the
+   shards; coverage differences stay reported, floors stay the judge.
+5. **Cost.** Expect ~+30–40% runner-minutes for ~2.7× critical path. If that
+   is too much, run the shards only where the critical path matters (the PR
+   Fast Gate) and keep the single process on main.
+6. **Test-order coupling is now visible**, which it never was in one process.
+   The 11 recurring blocks are candidates for making those tests set up their
+   own state; that is test hygiene for a separate change, not a blocker.
+
+Rollback: delete the `root_shard_pilot` input and its two jobs from
+`qa-gate.yml`, `qa-root-shard-pilot.yml`, `cmd/rootshard` and the timing file.
+Nothing else depends on them.
+
+## 14. Stage 5B — sharded race + coverage adopted in QA
+
+Stage 5A showed the root suite can run as isolated processes without losing a
+test. It left three gaps. 5B closes them, then moves QA's race + coverage
+execution onto the shards. The Fast PR Gate is **not** migrated here; that is
+the next reviewed step (§14.7).
+
+### 14.1 What changed in QA
+
+| Before (5A) | After (5B) |
+|---|---|
+| `qa-logic` = build + vet + the whole unsharded `go test -race -coverprofile ./...` (~25–33 min) | `qa-logic` = whole-module build + `go vet` only |
+| `qa-coverage` needs `qa-logic`, reads its `qa-coverage` artifact | `qa-coverage` needs `qa-race`; `qa-race`'s verdict publishes the same `qa-coverage` artifact (same name, same `coverage.out`, same retention); the floors are unchanged |
+| the pilot ran only on `root_shard_pilot: true` and never counted | `qa-race` (`qa-race-shards.yml`, 4 shards) runs on **every** QA execution and is in the aggregate's `needs` |
+| — | `unsharded_audit: true` (manual dispatch, default false) also runs the pre-5B unsharded command and compares the two on the same SHA |
+
+These stay the same:
+- the aggregate check name (`✅ QA Gate — APPROVED`);
+- the determinism lane (whole suite, shuffled, `-count=2`);
+- bench, OS, compose, contracts and maintenance-agent;
+- PR pass-through behaviour;
+- the Security gate's use of QA's race run. `security_race_ownership_test.go` now pins `qa-race` as the only main-push race owner.
+
+### 14.2 Coverage equivalence: losses now fail
+
+In 5A, `compare` *reported* a block the reference covered and the shards did
+not, but did not fail on it. Unchanged rounded coverage and passing floors do
+not establish equivalence, so 5B makes such a loss **fail** the comparison.
+There is one way out: an exact entry in
+`.github/qa-root-shard-coverage-exceptions.json`. Each entry must have:
+- one block key;
+- a reason and evidence;
+- a block that is still in the universe (stale entries fail, and so do duplicates).
+
+The file is **pinned empty** by `qa_race_shards_test.go`. A future exception
+therefore needs a reviewed test change, not only a JSON edit. Blocks gained by
+the shards are still reported and never fail.
+
+Each block that runs 2–4 of 5A lost (40 blocks across the three runs) was
+investigated individually rather than blamed on the single `ui_frontend_v2`
+reproducer:
+
+| Group | Blocks | Cause | Resolution |
+|---|---|---|---|
+| `main.go`, `upstream_downgrade.go` | 14 | Re-exec'd child coverage dropped (no `GOCOVERDIR` in env) | Fixed in 5A. The fixture's re-exec test fails without it |
+| CA / security / TLS / frontend state (`ui_frontend_v2.go`, root and cluster CA, GeoIP load error, rate-limit restore, server TLS pool) | see `coverage_isolation_security_test.go` | Global state left behind by an earlier test in the same process | Isolated `TestCovIsoSec_*` fixtures that set up their own state |
+| Policy / config / store (stale-version and in-lock 409s, log ring, import arms, top-hosts raced insert, catalog comparator arg order, `WaitOp` cancel, crash collector) | 27 (25 + the `connLimiter.Enable` import arm found by qualification round 1 + the `otlpRuleMetrics` rule loop found by round 3, §14.7) | Earlier test state, or a race / map-order interleaving | `TestCovIsoPolicy_*` (`coverage_isolation_policy_test.go`). Interleavings are forced deterministically, e.g. the existing `policyWriteStateDecisionHook` seam, a lock held while a named frame is parked, or a context cancelled inside the round trip, rather than hoped for |
+| Non-root packages (`internal/authcost`, `mcp/catalog`, `mcp/upstreamclient`, `policylearn`, `saasfeed`, `scanner`, `urlcat`) | see files | Timing and ordering of the package's own tests, or Go's randomized map iteration (`scanner` `BypassHosts`) | `TestIsolation_*` in each package's `coverage_isolation_test.go` |
+
+Every fixture was verified by running it **alone** (its own covered binary,
+`-test.run '^Name$'`, its own profile) with a non-zero hit count on its
+block(s), and under `-race` and `-shuffle=on`. No production code changed.
+
+### 14.3 The verdict is complete on its own
+
+An ordinary QA run has no unsharded reference; not having one is the point of
+sharding. So every expectation the verdict judges against now comes from a
+source other than the evidence being judged:
+
+| Evidence | Expected from | Refused when |
+|---|---|---|
+| Root tests | The binary's own `-test.list` (5A) | An entry is missing, reported twice, or unplanned |
+| Root blocks | `build` keeps the binary's **empty-run profile** (`root-universe.cover.out`, sha256 in the manifest) | The merged root profile's block set or statement counts differ from it, e.g. every shard truncated identically |
+| Lane packages | `go list ./...` minus the root (5A) | The set differs, or the evidence comes from another commit, toolchain or OS/arch |
+| Lane tests | `inventory.go`: a source enumerator that mirrors cmd/go's rules (`isTest`/`isTestFunc`, TestMain excluded, examples only with an `Output:` comment, test and x_test files under the lane's `-race` build config). On every verdict it is **cross-checked against the root binary's `-test.list`**; if it cannot reproduce that list exactly, its lane expectations are rejected | A declared test has no result (never ran, or its events were lost); a result has no declaration (foreign); an entry reports twice; any failure |
+| Lane blocks | The `race-universe` job runs the lane's exact command with `-run=^$` (a different job from the lane) | The lane profile's block set differs, it is empty, or it is truncated |
+
+Legitimate edge packages are **listed** in the verdict rather than tolerated:
+- `packagesWithoutTests`;
+- `packagesWithoutStatements`;
+- `emptyPackages` (neither).
+
+`go test -cover` reports an empty package as *skipped*. That skip is accepted
+for exactly those packages and for no other.
+
+Retained from 5A:
+- exact root partitioning;
+- Test/Example/Fuzz coverage;
+- child-process coverage via `GOCOVERDIR`;
+- zero-covered blocks counted once;
+- identity checks;
+- a failing, cancelled or missing producer fails the verdict. The job also has an explicit "every producer succeeded" step.
+
+The negative tests in `cmd/rootshard/completeness_test.go` each cause a real
+verdict to fail **with no reference run present**:
+- a lane profile with no blocks, or truncated;
+- lost events for one test;
+- an event stream cut mid-line;
+- a ghost entry;
+- a missing universe;
+- lane evidence passed off as the universe;
+- a universe from another commit;
+- every root profile truncated identically;
+- a test added to the source after the build;
+- a replaced root universe.
+
+### 14.4 Determinism failure: `TestBenchGate_IPFilterBulkLoadIsLinear` (8.28× vs 8×)
+
+This was **measurement instability, not a regression**, and the fix was kept
+separately reviewable as PR #1472 (merged; this branch carries it via main). It was diagnosed by measurement, not by
+replaying a seed, and the numbers are in that PR:
+- **Idle:** median 4.25×, 0/60 runs over 8×.
+- **Under CPU contention:** median 4.44×, 16/60 over 8×, worst 13.66×. A GC cycle triggered by the preceding allocation-heavy phase lands inside one of the two timed windows.
+- **With a `runtime.GC()` settle before each timed window** (what `testing.B` does): worst 4.98× under the same load, 0/60. The sibling rate-limit-exempt gate goes from 7/30 failures (worst 11.84×) to 0/30.
+
+The negative control still catches the defect it was written for: reintroducing a per-entry publish in `AddAll` gives 18×. The threshold, inputs and retry policy are unchanged. Enlarging the inputs was measured and rejected, because it moved the idle median to 6.3×.
+
+### 14.5 Operating model
+
+- **New tests and packages enter automatically.**
+  - Root entries come from the compiled binary's `-test.list`.
+  - Lane packages come from `go list ./...`.
+  - Lane tests come from the source enumerator, which is itself verified against the binary.
+  - Block sets come from the build.
+  - No list is maintained by hand. A new root test with no timing is placed at the mean measured cost.
+- **Timing data only balances.** `.github/qa-root-shard-timings.json` decides which shard runs an entry, never whether it runs.
+  - Refresh it from an audit run: the audit-compare job prints a timings file derived from the same run's unsharded reference. Commit it as-is.
+  - A stale file costs balance (a longer slowest shard), never correctness.
+- **Ownership of comparison failures.**
+  - A red verdict on an ordinary run is owned by the author of the change that turned it red. It names the missing test, block or producer. Read the producer job first.
+  - A red audit comparison is owned by the author of the coupled test or code. Pin the block with an isolated test. An exception requires a reviewed change to the pinned-empty exceptions file and its wall test.
+  - "Flake" is not an accepted classification, per the repo's CI rules.
+- **Reverting without weakening checks.** Revert the 5B commit.
+  - `qa-logic` gets its whole-suite race + coverage run back.
+  - `qa-coverage` reads the same artifact name from it.
+  - The walls revert with it.
+  - Do **not** revert by dropping `qa-race` from the aggregate's `needs`, or by pointing `qa-coverage` at a partial profile. Either would leave QA with no race run or incomplete coverage evidence.
+
+### 14.6 Reproduce
+
+```bash
+C=$(git rev-parse HEAD); go build -o "$OUT/rootshard" ./cmd/rootshard
+"$OUT/rootshard" build -out-dir "$OUT/build" -commit "$C"
+"$OUT/rootshard" plan -list "$OUT/build/list.txt" -timings .github/qa-root-shard-timings.json \
+  -pkg "$(go list .)" -shards 4 -out "$OUT/build/plan.json"
+for i in 0 1 2 3; do
+  "$OUT/rootshard" run-shard -plan "$OUT/build/plan.json" -manifest "$OUT/build/manifest.json" \
+    -binary "$OUT/build/root.test" -shard $i -out-dir "$OUT/shards/shard-$i" -commit "$C" -timeout 40m
+done
+"$OUT/rootshard" run-lane -out-dir "$OUT/lane" -commit "$C" -timeout 40m
+"$OUT/rootshard" universe -out-dir "$OUT/universe" -commit "$C" -timeout 40m
+"$OUT/rootshard" verdict -build-dir "$OUT/build" -shards-dir "$OUT/shards" -lane-dir "$OUT/lane" \
+  -universe-dir "$OUT/universe" -commit "$C" -out-dir "$OUT/verdict"
+.github/scripts/coverage-floor.sh "$OUT/verdict/merged.cover.out"
+# audit mode, against `go test -race -count=1 -timeout=40m -coverprofile=coverage.out -v ./... > logic.log`:
+"$OUT/rootshard" compare -ref-log logic.log -ref-profile coverage.out \
+  -pilot-results "$OUT/verdict/results.json" -pilot-profile "$OUT/verdict/merged.cover.out" \
+  -list "$OUT/build/list.txt" -pkg "$(go list .)" \
+  -coverage-exceptions .github/qa-root-shard-coverage-exceptions.json -out "$OUT/comparison.json"
+```
+
+In CI: `gh workflow run qa-gate.yml --ref <branch> -f unsharded_audit=true`.
+
+### 14.7 Qualification (actual CI evidence)
+
+Every number below comes from a GitHub-hosted `ubuntu-latest` run. The before
+figures are the two most recent main-push QA runs under the pre-5B layout.
+
+**Rounds.**
+
+| Round | Run | Commit | Mode | Outcome |
+|---|---|---|---|---|
+| 1 | `35834009198` | `21bfd7d` | audit (sharded + unsharded, same commit) | Inventory identical; **1** reference-only covered block, so the comparison failed, as designed. Pinned by `TestCovIsoPolicy_ImportEnablesConnLimit` |
+| 2 | `35837869936` | `59a555e` | ordinary (no reference) | Race path fully green. The determinism lane failed on `internal/yara` `TestRegexRunner_ConcurrentScans` (see below) |
+| 3 | `35839915521` | `d78d942` | audit | Inventory identical (6,361). **2 lost, 2 gained**, all new. Lost: `internal/scanner` `BypassHosts` sort swap (map-order coin flip) and `otlpRuleMetrics`' loop (needed an earlier test's registered rule). Pinned by `TestIsolation_BypassHostsSortsAnUnorderedMap` and `TestCovIsoPolicy_OTLPRuleMetricsReportsRegisteredRules`. Gained: two empty-state branches |
+| 4 | `35844201068` | `76f8cb5` | audit | Inventory identical (6,362 / 3,847 / 112 / 50). Round 3's blocks are gone. **2 lost, 1 gained**, all new. Both lost blocks are in `internal/policylearn`, i.e. in the **lane, which runs the reference's exact command**: the captured-window admission path, reached only when one of 200 racing goroutines beats a `StopSession`. Pinned by `TestIsolation_CapturedCurrentWindowIsAdmitted`. Gained: `AdminSettingsOverriddenSurfaces`' non-nil branch |
+| 5 | `35846673968` | `b0078ec` | audit | Inventory identical (6,362 / 3,847 / 112 / 50); covered blocks equal (35,234 each). Round 4's blocks are gone. **1 lost, 1 gained**. Lost: `internal/mcp/catalog` `DisableServer`'s skip `continue`, again in the lane, reached only when `TestConcurrentIngestAndDisable`'s two goroutines line up two disables back to back. Pinned by `TestIsolation_DisableServerSkipsOtherAndAlreadyDisabled`. Gained: the same `AdminSettingsOverriddenSurfaces` branch as round 4 |
+| 6 | `35849484523` | `12e3b9c` | audit | **Comparison passed.** Inventory identical (6,362 / 3,847 / 112 / 50). **0 lost, 1 gained**: the shards cover 35,235 blocks, a superset of the reference's 35,234 (the gain is round 4-5's `AdminSettingsOverriddenSurfaces` branch). Floors exit 0 on both. The run's only red job was `QA · Determinism` on `TestShadowExitC7_LatencyBudget` (shadow/observe p99 7.20x vs a 5.0x ceiling), the timing test under separate investigation, which this change does not touch |
+
+**Inventory completeness.** Round 1 compares the sharded run with the reference. Round 2 is the verdict alone, with no reference.
+
+| | Unsharded reference (r1) | Sharded (r1) | Sharded verdict alone (r2) |
+|---|---|---|---|
+| Root entries discovered / executed, each exactly once | 6,360 / 6,360 | 6,360 / 6,360 | 6,361 (+1 fixture) |
+| Skips | 50 | the same 50 | — |
+| Subtests | 3,847 | 3,847 (0 missing, 0 extra) | — |
+| Packages | 112 | 112 | 111 lane + root |
+| Lane top-level entries | — | — | 3,045 reported / 3,045 source-declared |
+| Source enumerator vs binary `-test.list` | — | agrees | agrees |
+| Block universe (root / lane) | 46,447 | 46,447 | 25,137 / 21,310, each matched exactly |
+| Covered blocks | 35,233 | 35,232 (1 lost, 0 gained) | 35,233 |
+| Statement coverage / floors | 78.8%, exit 0 | 78.8%, exit 0 | 78.8%, exit 0 |
+
+**Coverage differences, stage by stage.**
+
+| Stage | Reference-only blocks | Sharded-only blocks |
+|---|---|---|
+| 5A run 3 | 14 | 9 |
+| 5B round 1 | 1 | 0 |
+| 5B round 3 | 2 | 2 |
+| 5B round 4 | 2 | 1 |
+| 5B round 5 | 1 | 1 |
+| 5B round 6 | **0** | 1 |
+
+Every block a round lost is pinned, and none recurs in a later round. Round 6, on the final code (`12e3b9c`), is the first with no loss at all. No exception was needed, and the exceptions file stays empty.
+
+**What the rounds show about the residue.** Each audit round has found one or
+two NEW reference-only blocks, never a repeat. Round 4's two and round 5's one are in
+non-root packages, which the lane runs with the reference's exact command, so sharding
+cannot have caused them. They are paths that the suite reaches only on some
+schedules or map orders, whether sharded or not; two unsharded runs of the
+same commit would differ the same way. That is why a loss fails the audit
+instead of being tolerated: each audit samples that tail, and each finding
+becomes a deterministic fixture, so the tail only shrinks. A run the reference
+happens to win does not mean the shards lost a test. The inventory is
+identical in every round, and the verdict's completeness checks do not depend
+on it.
+
+**Negative tests for incomplete evidence.** These are `cmd/rootshard`'s
+`completeness_test.go` cases. They ran in CI as part of the lane (the
+`cmd/rootshard` package passed in both rounds) and in the shuffled
+determinism lane. Each case produces a real verdict that fails with no
+reference run present:
+- a lane profile with no blocks, or truncated;
+- one test's events lost, or the event stream cut mid-line;
+- a ghost entry;
+- a missing universe, or lane evidence passed off as the universe;
+- a universe from another commit;
+- every root profile truncated identically;
+- a test added to the source after the build;
+- a replaced root universe.
+
+A failed or cancelled producer is refused twice: the verdict marks its
+evidence as missing, and the "every producer succeeded" step checks each
+`needs.*.result`. 5A run 1 exercised the red path on the real pipeline.
+
+**Wall-clock and runner time.**
+
+| | Before 5B: main push `35829097344` | Before 5B: main push `35782882080` | 5B ordinary, round 2 |
+|---|---|---|---|
+| QA wall-clock (first job queued to aggregate) | 33.8 min | 27.4 min | **14.8 min** |
+| Longest job | race job, 1,986 s | race job, 1,602 s | determinism, 877 s (unchanged job) |
+| Race + coverage evidence published (coverage floor done) | +2,016 s | +1,630 s | **+827 s** |
+| Runner-minutes (sum of job durations) | 54.7 | 50.3 | **73.0** |
+
+What the round-2 figures show:
+- **Measured:**
+  - The QA wall-clock fell by 12.6–19.0 min (2.3×) against the two baselines.
+  - Runner time rose by about 18–23 minutes (about 35%).
+  - The critical path is now the pre-existing shuffled determinism lane (877 s).
+  - Next on the critical path: the verdict path (827 s), bounded by the non-root lane (727.7 s of tests, of which `internal/mcp/execution` alone takes 523 s).
+  - The four root shards ran 363–477 s of tests against an estimate of 454.5 s each.
+- **Estimate, not measured:** splitting `internal/mcp/execution` out of the lane would take about 200 s off the verdict path. It would not shorten QA until determinism is also faster. It is deliberately not done here.
+- **Not claimed:** no full-CI speed-up. Only the QA gate changed, and the Fast PR Gate still runs its own unsharded race suite.
+
+**The one red job in round 2 is outside this change.**
+- `QA · Determinism` failed on `internal/yara` `TestRegexRunner_ConcurrentScans` (`inflight delta = -1 after all concurrent scans finished`, seed `1790152692675770089`).
+- That package is untouched by this branch, and its tests run in their own process.
+- The failure is the same timing/ordering class that is being investigated separately. It is recorded here, not fixed.
+
+### 14.8 Remaining work
+
+1. **Fast PR Gate migration (next stage).**
+   - Move the Fast PR Gate's single `-race` run onto the same shards.
+   - Keep its runner hardening and the privileged mount-point regression it carries.
+   - Keep its two coverage contracts, fed by the verdict's `merged.cover.out`.
+2. **`internal/mcp/execution` split.** Unmeasured, and optional. It becomes worthwhile only once the verdict path, not determinism, bounds QA.
+3. **Timing refresh cadence.** Replace `.github/qa-root-shard-timings.json` with the file an audit run prints (§14.5) whenever the slowest shard drifts well above the estimate. In round 2 the shards landed at 0.80–1.05× their estimates.
+4. **The determinism failures** listed above belong to the separate flaky-test investigation, not to this stage.
