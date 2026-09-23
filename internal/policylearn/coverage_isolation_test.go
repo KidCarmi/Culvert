@@ -9,6 +9,14 @@ package policylearn
 // that window but never issue a read inside it, so the guard was covered only
 // when some unrelated reader happened to interleave. The fixture below holds
 // the window open on purpose and reads inside it.
+//
+// Observe's captured-window ADMISSION path (a producer-stamped WindowGen that
+// is still the current window, observe.go admitObservation's `return true`
+// and Observe's `o.gen = o.WindowGen`) was reached only by
+// TestObserve_CapturedDecisionsNeverVanishAcrossStop, whose 200 goroutines race a
+// StopSession: whether any of them is admitted before the stop depends on the
+// scheduler, so the path was covered on some runs and not others (stage 5B
+// qualification round 4). The second fixture takes that path synchronously.
 
 import (
 	"path/filepath"
@@ -126,5 +134,48 @@ func TestIsolation_LazyExpiryDefersToInProgressFinish(t *testing.T) {
 	}
 	if _, ok := e.ActiveSession(); ok {
 		t.Fatal("a session is still active after the finish completed")
+	}
+}
+
+// Pins observe.go admitObservation's captured-window `return true` and
+// Observe's `o.gen = o.WindowGen`: a decision stamped with the window that is
+// STILL open is admitted and aggregated into that window's session.
+//
+// Determinism: one synchronous Observe with no concurrent lifecycle call, and
+// StopSession's drain barrier guarantees the event is consumed before the
+// session goes terminal, so the assertions read settled state.
+func TestIsolation_CapturedCurrentWindowIsAdmitted(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.Categories = func(string) (string, string) { return "Dev Tools", "admin" }
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	s, err := e.StartSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, ok := e.CaptureWindow()
+	if !ok || captured == 0 {
+		t.Fatalf("CaptureWindow = (%d, %v) with a session Learning", captured, ok)
+	}
+	before := e.ObservationStats()
+	e.Observe(Observation{Subject: "alice", AuthSource: "idp", Groups: []string{"eng"},
+		Host: "code.example", Method: "GET", Status: "OK", WindowGen: captured})
+	if _, err := e.StopSession("op"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := e.ObservationStats()
+	if st.Delivered != before.Delivered+1 || st.Dropped != before.Dropped {
+		t.Fatalf("captured current-window decision not delivered: %+v -> %+v", before, st)
+	}
+	for _, got := range e.Sessions() {
+		if got.ID == s.ID && got.Transport.Dropped != 0 {
+			t.Fatalf("admitted decision charged as session loss: dropped=%d", got.Transport.Dropped)
+		}
+	}
+	ov, ok := e.SessionOverview(s.ID)
+	if !ok || ov.Cells != 1 {
+		t.Fatalf("session overview = (%+v, %v), want the decision aggregated into 1 cell", ov, ok)
 	}
 }
