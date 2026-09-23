@@ -483,6 +483,12 @@ func Analyze(run apiRun, jobs []apiJob, ev runEvidence) RunReport {
 	raceEvidence(run, views, groups, ev, &rep)
 	auditEvidence(views, auditReq, ev, &rep)
 	rep.Cohort = cohortOf(views, &rep)
+	rep.Evidence.Read = append([]string{}, ev.Read...)
+	sort.Strings(rep.Evidence.Read)
+	rep.Evidence.Source = "metadata-only"
+	if len(rep.Evidence.Read) > 0 {
+		rep.Evidence.Source = "artifacts"
+	}
 	rep.Unknowns = append(rep.Unknowns, ev.Notes...)
 	return rep
 }

@@ -185,6 +185,18 @@ func TestCollectRun_EndToEnd(t *testing.T) {
 	if rep.Config.TimingFileSource != "qa-gate run 35866546559 @ a606f82" {
 		t.Errorf("timing file source %q", rep.Config.TimingFileSource)
 	}
+	wantRead := []string{"qa-audit-compare/comparison.json", "qa-audit-compare/qa-root-shard-timings.json",
+		"qa-race-shard-0/meta.json", "qa-race-shard-1/meta.json", "qa-race-shard-2/meta.json", "qa-race-shard-3/meta.json",
+		"qa-race-verdict/results.json", "qa-race-verdict/verdict.json"}
+	if rep.Evidence.Source != "artifacts" || strings.Join(rep.Evidence.Read, " ") != strings.Join(wantRead, " ") {
+		t.Errorf("evidence source %q read %v, want artifacts / %v", rep.Evidence.Source, rep.Evidence.Read, wantRead)
+	}
+	line := reportLogLine(rep)
+	for _, want := range []string{"cireport run: run=", "attempt=1", "evidence=artifacts", "qa-race-verdict/verdict.json", "verdict=ok", "audit=passed"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log line %q lacks %q", line, want)
+		}
+	}
 	for _, p := range fake.fetched {
 		if strings.HasSuffix(p, fmt.Sprintf("/artifacts/%d/zip", buildID)) {
 			t.Fatal("the reporter downloaded qa-race-build — the artifact that carries the test binary")
@@ -224,6 +236,9 @@ func TestCollectRun_NoArtifactsIsUnknownNotHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if rep.Evidence.Source != "metadata-only" || len(rep.Evidence.Read) != 0 {
+		t.Errorf("no artifacts decoded: source %q read %v, want metadata-only / none", rep.Evidence.Source, rep.Evidence.Read)
+	}
 	if rep.Evidence.Verdict != "missing" || rep.Race != nil {
 		t.Errorf("verdict %s race %v, want missing/nil", rep.Evidence.Verdict, rep.Race)
 	}
@@ -232,5 +247,23 @@ func TestCollectRun_NoArtifactsIsUnknownNotHealthy(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("unknowns lack %q: %v", want, rep.Unknowns)
 		}
+	}
+}
+
+// The log line is the report's externally checkable record, and some of its
+// values come from artifacts a run uploaded. None may start a workflow
+// command or break the line.
+func TestReportLogLine_CannotInjectWorkflowCommands(t *testing.T) {
+	var r RunReport
+	r.Run.RunID, r.Run.Attempt = 1, 1
+	r.Run.TestedSHA = "abc\n::add-mask::x\r\n::error::forged"
+	r.Class = "pr-code"
+	r.Evidence.Read = []string{"qa-race-verdict/verdict.json"}
+	line := reportLogLine(r)
+	if strings.ContainsAny(line, "\r\n") || strings.Contains(line, "::") || !strings.HasPrefix(line, "cireport run: ") {
+		t.Errorf("unsafe log line %q", line)
+	}
+	if !strings.Contains(line, "tested=abc_") {
+		t.Errorf("the value must survive in reduced form: %q", line)
 	}
 }

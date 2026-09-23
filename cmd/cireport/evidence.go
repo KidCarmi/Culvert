@@ -92,7 +92,10 @@ type runEvidence struct {
 	TimingFileSource string
 	// Present are the artifact names the run published (expired included).
 	Present []string
-	Notes   []string
+	// Read are the "artifact/member" documents actually downloaded and
+	// decoded. Empty means the report rests on run metadata alone.
+	Read  []string
+	Notes []string
 }
 
 func decodeStrict(name string, b []byte, v any) error {
@@ -141,6 +144,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 			ev.ShardMetas = map[int]*evShardMeta{}
 		}
 		ev.ShardMetas[idx] = &meta
+		ev.Read = append(ev.Read, name+"/meta.json")
 		return
 	}
 	switch name {
@@ -150,6 +154,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 			note(err)
 		} else {
 			ev.Verdict = &v
+			ev.Read = append(ev.Read, name+"/verdict.json")
 		}
 		if b, ok := members["results.json"]; ok {
 			var r map[string]*evPkgResult
@@ -157,6 +162,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 				note(err)
 			} else {
 				ev.Results = r
+				ev.Read = append(ev.Read, name+"/results.json")
 			}
 		}
 	case "qa-audit-compare", "fast-audit-compare":
@@ -165,6 +171,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 			note(err)
 		} else {
 			ev.Comparison = &c
+			ev.Read = append(ev.Read, name+"/comparison.json")
 		}
 		if b, ok := members["qa-root-shard-timings.json"]; ok {
 			var t evTimings
@@ -172,6 +179,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 				note(err)
 			} else {
 				ev.Candidate, ev.CandidateRaw = &t, b
+				ev.Read = append(ev.Read, name+"/qa-root-shard-timings.json")
 			}
 		}
 	}

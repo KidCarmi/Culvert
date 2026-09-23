@@ -242,6 +242,12 @@ type CoverageFraction struct {
 
 // EvidenceState is the completeness and audit outcome.
 type EvidenceState struct {
+	// Source is "artifacts" when at least one evidence document was
+	// downloaded and decoded, else "metadata-only": the report then rests
+	// on GitHub's run and job metadata alone.
+	Source string `json:"source"`
+	// Read lists the "artifact/member" documents decoded, sorted.
+	Read []string `json:"read"`
 	// Verdict: ok | failed | missing | not-run.
 	Verdict         string   `json:"verdict"`
 	VerdictProblems []string `json:"verdictProblems"`
