@@ -1226,7 +1226,7 @@ reproducer:
 | `main.go`, `upstream_downgrade.go` | 14 | Re-exec'd child coverage dropped (no `GOCOVERDIR` in env) | Fixed in 5A. The fixture's re-exec test fails without it |
 | CA / security / TLS / frontend state (`ui_frontend_v2.go`, root and cluster CA, GeoIP load error, rate-limit restore, server TLS pool) | see `coverage_isolation_security_test.go` | Global state left behind by an earlier test in the same process | Isolated `TestCovIsoSec_*` fixtures that set up their own state |
 | Policy / config / store (stale-version and in-lock 409s, log ring, import arms, top-hosts raced insert, catalog comparator arg order, `WaitOp` cancel, crash collector) | 27 (25 + the `connLimiter.Enable` import arm found by qualification round 1 + the `otlpRuleMetrics` rule loop found by round 3, §14.7) | Earlier test state, or a race / map-order interleaving | `TestCovIsoPolicy_*` (`coverage_isolation_policy_test.go`). Interleavings are forced deterministically, e.g. the existing `policyWriteStateDecisionHook` seam, a lock held while a named frame is parked, or a context cancelled inside the round trip, rather than hoped for |
-| Non-root packages (`internal/authcost`, `mcp/upstreamclient`, `policylearn`, `saasfeed`, `scanner`, `urlcat`) | see files | Timing and ordering of the package's own tests, or Go's randomized map iteration (`scanner` `BypassHosts`) | `TestIsolation_*` in each package's `coverage_isolation_test.go` |
+| Non-root packages (`internal/authcost`, `mcp/catalog`, `mcp/upstreamclient`, `policylearn`, `saasfeed`, `scanner`, `urlcat`) | see files | Timing and ordering of the package's own tests, or Go's randomized map iteration (`scanner` `BypassHosts`) | `TestIsolation_*` in each package's `coverage_isolation_test.go` |
 
 Every fixture was verified by running it **alone** (its own covered binary,
 `-test.run '^Name$'`, its own profile) with a non-zero hit count on its
@@ -1345,7 +1345,8 @@ figures are the two most recent main-push QA runs under the pre-5B layout.
 | 2 | `35837869936` | `59a555e` | ordinary (no reference) | Race path fully green. The determinism lane failed on `internal/yara` `TestRegexRunner_ConcurrentScans` (see below) |
 | 3 | `35839915521` | `d78d942` | audit | Inventory identical (6,361). **2 lost, 2 gained**, all new. Lost: `internal/scanner` `BypassHosts` sort swap (map-order coin flip) and `otlpRuleMetrics`' loop (needed an earlier test's registered rule). Pinned by `TestIsolation_BypassHostsSortsAnUnorderedMap` and `TestCovIsoPolicy_OTLPRuleMetricsReportsRegisteredRules`. Gained: two empty-state branches |
 | 4 | `35844201068` | `76f8cb5` | audit | Inventory identical (6,362 / 3,847 / 112 / 50). Round 3's blocks are gone. **2 lost, 1 gained**, all new. Both lost blocks are in `internal/policylearn`, i.e. in the **lane, which runs the reference's exact command**: the captured-window admission path, reached only when one of 200 racing goroutines beats a `StopSession`. Pinned by `TestIsolation_CapturedCurrentWindowIsAdmitted`. Gained: `AdminSettingsOverriddenSurfaces`' non-nil branch |
-| 5 | see the PR | current head | audit | Equivalence on the final code |
+| 5 | `35846673968` | `b0078ec` | audit | Inventory identical (6,362 / 3,847 / 112 / 50); covered blocks equal (35,234 each). Round 4's blocks are gone. **1 lost, 1 gained**. Lost: `internal/mcp/catalog` `DisableServer`'s skip `continue`, again in the lane, reached only when `TestConcurrentIngestAndDisable`'s two goroutines line up two disables back to back. Pinned by `TestIsolation_DisableServerSkipsOtherAndAlreadyDisabled`. Gained: the same `AdminSettingsOverriddenSurfaces` branch as round 4 |
+| 6 | see the PR | current head | audit | Equivalence on the final code |
 
 **Inventory completeness.** Round 1 compares the sharded run with the reference. Round 2 is the verdict alone, with no reference.
 
@@ -1369,13 +1370,14 @@ figures are the two most recent main-push QA runs under the pre-5B layout.
 | 5B round 1 | 1 | 0 |
 | 5B round 3 | 2 | 2 |
 | 5B round 4 | 2 | 1 |
-| 5B round 5 | see the PR | see the PR |
+| 5B round 5 | 1 | 1 |
+| 5B round 6 | see the PR | see the PR |
 
 Every block a round lost is pinned, and none recurs in a later round. No exception was needed, and the exceptions file stays empty.
 
 **What the rounds show about the residue.** Each audit round has found one or
-two NEW reference-only blocks, never a repeat. Round 4's two are in a non-root
-package, which the lane runs with the reference's exact command, so sharding
+two NEW reference-only blocks, never a repeat. Round 4's two and round 5's one are in
+non-root packages, which the lane runs with the reference's exact command, so sharding
 cannot have caused them. They are paths that the suite reaches only on some
 schedules or map orders, whether sharded or not; two unsharded runs of the
 same commit would differ the same way. That is why a loss fails the audit
