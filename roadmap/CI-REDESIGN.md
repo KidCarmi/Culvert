@@ -1734,8 +1734,23 @@ a gocritic finding from the Fast gate's diff-scoped lint, so the audits on
 The superseded PR run on `a606f82` (35866550469) failed root shard 2 with the
 §15.6 `feedsync` data race, this time surfacing in
 `TestReportCatFeedDBOpened_WordsTheOutcome`. This change does not touch that
-path, and the re-run on `9fb5e7c` passed. The failure was reported on PR #1476 and
-belongs to the flaky-test investigation.
+path, and the re-run on `9fb5e7c` passed.
+
+It fired again on `7fbc5ae` (run 35870770341, root shard 1, in
+`TestReportCatFeedDBUnavailable_DoesNotClaimRecovery`): the third root-shard
+failure on this PR. A re-run was only a gamble, so it is fixed here.
+- **Cause.** `feedsync.Syncer.Start` launched a goroutine nothing could join.
+  The trace reports the reading goroutine as *finished*: it is a missing
+  happens-before edge between a sync round's log call and the next test's
+  `captureLogger` write, not two goroutines overlapping in time.
+- **Fix.** `Syncer.Wait` joins the loop (a `WaitGroup` around the goroutine).
+  The three in-process `loadCommunityFeedDB` tests go through
+  `loadCommunityFeedDBForTest`, which registers `t.Cleanup(syncer.Wait)`.
+  `t.Context()` is cancelled before cleanups run, so the loop exits after its
+  round in flight. `TestSyncer_WaitJoinsTheLoop` pins the join.
+- **Evidence limit.** Local runs did not reproduce the race with or without the
+  join (40 runs, then 25 runs at `-cpu=1,2,4` under CPU load). The fix is
+  correct by construction, not shown by a local repro.
 
 ### 16.5 Measurements
 

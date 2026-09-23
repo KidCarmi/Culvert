@@ -45,6 +45,21 @@ func noNetworkFeedCfg(dir string) urlCategoriesStartupConfig {
 	return urlCategoriesStartupConfig{FeedDBPath: dir, FeedURL: "\x7f://invalid"}
 }
 
+// loadCommunityFeedDBForTest starts the store like boot does and joins the
+// feed syncer at cleanup. t.Context() is cancelled before cleanups run, so the
+// loop exits after its round in flight; without the join that round logs
+// through the package logger while the NEXT test's captureLogger swaps it — a
+// data race the detector reported on three root-shard runs. Registered after
+// swapCommunityDBGlobals, so it runs first and the store is still open.
+func loadCommunityFeedDBForTest(t *testing.T, cfg urlCategoriesStartupConfig) *FeedSyncer {
+	t.Helper()
+	syncer := loadCommunityFeedDB(cfg, t.Context())
+	if syncer != nil {
+		t.Cleanup(syncer.Wait)
+	}
+	return syncer
+}
+
 func seedCorruptStore(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
@@ -110,7 +125,7 @@ func TestLoadCommunityFeedDB_EnvironmentalFailureDegradesToLayer1(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	syncer := loadCommunityFeedDB(noNetworkFeedCfg(notADir), t.Context())
+	syncer := loadCommunityFeedDBForTest(t, noNetworkFeedCfg(notADir))
 	if syncer != nil {
 		t.Error("a feed syncer was started against a store that never opened")
 	}
@@ -135,7 +150,7 @@ func TestLoadCommunityFeedDB_CorruptStoreSelfHealsAndKeepsServing(t *testing.T) 
 	swapCommunityDBGlobals(t)
 	dir := seedCorruptStore(t)
 
-	syncer := loadCommunityFeedDB(noNetworkFeedCfg(dir), t.Context())
+	syncer := loadCommunityFeedDBForTest(t, noNetworkFeedCfg(dir))
 	if syncer == nil || communityDB == nil {
 		t.Fatal("a recoverable store did not come up")
 	}
@@ -159,7 +174,7 @@ func TestLoadCommunityFeedDB_HealthyStoreIsQuiet(t *testing.T) {
 	swapCommunityDBGlobals(t)
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 
-	if syncer := loadCommunityFeedDB(noNetworkFeedCfg(dir), t.Context()); syncer == nil {
+	if syncer := loadCommunityFeedDBForTest(t, noNetworkFeedCfg(dir)); syncer == nil {
 		t.Fatal("healthy store did not come up")
 	}
 	if got := checkCategoryFeedDB(); got.Status != diagOK {
