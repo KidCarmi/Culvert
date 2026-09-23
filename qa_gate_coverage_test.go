@@ -41,8 +41,13 @@ const (
 	qaCoverageArtifact = "qa-coverage"
 	qaCoverageFile     = "coverage.out"
 	coverageFloorSh    = ".github/scripts/coverage-floor.sh"
-	qaLogicJob         = "qa-logic"
 	qaCoverageJob      = "qa-coverage"
+	// qaCoverageProducer is the ONE job that publishes the profile: the
+	// sharded race verdict (stage 5B; qa-logic's race run in stage 2A).
+	qaCoverageProducer     = "race-verdict"
+	qaCoverageProducerPath = ".github/workflows/qa-race-shards.yml"
+	// qaReferenceJob runs the unsharded command qa-logic ran until stage 5B.
+	qaReferenceJob = "qa-unsharded-audit"
 )
 
 // toScalar renders any YAML scalar as text. The shared toStr helper returns ""
@@ -63,9 +68,14 @@ func toScalar(v interface{}) string {
 // release-workflow tests share.
 func qaJobSteps(t *testing.T, job string) []map[string]interface{} {
 	t.Helper()
-	raw, err := os.ReadFile(qaGateWorkflowPath)
+	return qaJobStepsIn(t, qaGateWorkflowPath, job)
+}
+
+func qaJobStepsIn(t *testing.T, path, job string) []map[string]interface{} {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", qaGateWorkflowPath, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	var generic struct {
 		Jobs map[string]struct {
@@ -73,7 +83,7 @@ func qaJobSteps(t *testing.T, job string) []map[string]interface{} {
 		} `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(raw, &generic); err != nil {
-		t.Fatalf("parse %s: %v", qaGateWorkflowPath, err)
+		t.Fatalf("parse %s: %v", path, err)
 	}
 	steps := generic.Jobs[job].Steps
 	if len(steps) == 0 {
@@ -97,10 +107,22 @@ func shellRunOnly(steps []map[string]interface{}) string {
 // ─── 1. One execution, and the profile comes out of it ───────────────────────
 
 // TestQAGateCoverage_ProfileIsProducedByTheRaceRun pins the whole point of
-// stage 2A: qa-logic's single race invocation also writes the profile, and it
-// keeps every flag it carried before.
+// stage 2A — the race run also produces the profile — across stage 5B's move:
+//
+//   - the published profile is the sharded race verdict's merged profile
+//     (qa-race-shards.yml race-verdict copies it to coverage.out), and
+//   - the unsharded command that DEFINES what the sharded run must match is
+//     still the exact pre-5B qa-logic command, now run by the audit job; its
+//     flags are pinned here so the reference cannot drift either. The
+//     sharded run's own flags are pinned against it by
+//     TestQARaceShards_MatchesTheUnshardedCommand and, for the compiled
+//     binary and the lane, by cmd/rootshard's TestRunConfig_* tests.
 func TestQAGateCoverage_ProfileIsProducedByTheRaceRun(t *testing.T) {
-	run := shellRunOnly(qaJobSteps(t, qaLogicJob))
+	producer := shellRunOnly(qaJobStepsIn(t, qaCoverageProducerPath, qaCoverageProducer))
+	if !strings.Contains(producer, "cp race-verdict/merged.cover.out "+qaCoverageFile) {
+		t.Errorf("%s no longer publishes the verdict's merged profile as %s", qaCoverageProducer, qaCoverageFile)
+	}
+	run := shellRunOnly(qaJobSteps(t, qaReferenceJob))
 
 	var cmd string
 	for _, line := range strings.Split(run, "\n") {
@@ -109,14 +131,14 @@ func TestQAGateCoverage_ProfileIsProducedByTheRaceRun(t *testing.T) {
 		}
 	}
 	if cmd == "" {
-		t.Fatal("qa-logic no longer runs a `go test -race` command — the selector is stale and this test proves nothing")
+		t.Fatal("the audit reference no longer runs a `go test -race` command — the selector is stale and this test proves nothing")
 	}
 
 	// Every flag the race run carried before stage 2A must survive: the seed is
 	// an env var (checked separately), the rest are on the command line.
-	for _, want := range []string{"-race", "-count=1", "-timeout=40m", "-v", "./...", "-coverprofile=" + qaCoverageFile} {
+	for _, want := range []string{"-race", "-count=1", "-timeout=40m", "-v", "./...", "-coverprofile=qa-audit-reference/" + qaCoverageFile} {
 		if !strings.Contains(cmd, want) {
-			t.Errorf("qa-logic's race command lost %q — stage 2A adds coverage to this run, it does not re-scope it.\ngot: %s", want, cmd)
+			t.Errorf("the unsharded reference command lost %q — it must stay the exact pre-5B race run.\ngot: %s", want, cmd)
 		}
 	}
 
@@ -128,10 +150,10 @@ func TestQAGateCoverage_ProfileIsProducedByTheRaceRun(t *testing.T) {
 	}
 
 	if !strings.Contains(run, "pipefail") {
-		t.Error("qa-logic lost `set -o pipefail` — the run is piped into tee, whose exit status is always 0, so failing tests would go green")
+		t.Error("the audit reference lost `set -o pipefail` — the run is piped into tee, whose exit status is always 0, so failing tests would go green")
 	}
 	if !strings.Contains(run, "tee ") {
-		t.Error("qa-logic no longer tees its output to a log — the logic.log artifact is part of this job's contract")
+		t.Error("the audit reference no longer tees its output to a log — the comparison parses that log")
 	}
 }
 
@@ -166,22 +188,43 @@ func TestQAGateCoverage_VerifierRunsNoTests(t *testing.T) {
 // uploaded from two jobs, and its name, path and retention must survive the
 // move from consumer to producer.
 func TestQAGateCoverage_ArtifactHasExactlyOneProducer(t *testing.T) {
-	raw, err := os.ReadFile(qaGateWorkflowPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", qaGateWorkflowPath, err)
-	}
-	var generic struct {
-		Jobs map[string]struct {
-			Steps []map[string]interface{} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(raw, &generic); err != nil {
-		t.Fatalf("parse %s: %v", qaGateWorkflowPath, err)
+	// Every workflow, not only the two QA files: an artifact name is scoped to
+	// the RUN, and a reusable workflow's uploads land in its caller's run.
+	producers := []string{}
+	for _, wf := range workflowFiles(t) {
+		raw, err := os.ReadFile(wf)
+		if err != nil {
+			t.Fatalf("read %s: %v", wf, err)
+		}
+		var generic struct {
+			Jobs map[string]struct {
+				Steps []map[string]interface{} `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal(raw, &generic); err != nil {
+			t.Fatalf("parse %s: %v", wf, err)
+		}
+		producers = append(producers, coverageUploaders(t, wf, generic.Jobs)...)
 	}
 
-	producers := []string{}
-	for job := range generic.Jobs {
-		for _, st := range generic.Jobs[job].Steps {
+	if len(producers) != 1 {
+		t.Fatalf("the %q artifact must have exactly ONE producer; got %v. Uploading an immutable artifact name from "+
+			"two jobs is a race whose winner decides what the floors are enforced against.", qaCoverageArtifact, producers)
+	}
+	if want := qaCoverageProducerPath + " / " + qaCoverageProducer; producers[0] != want {
+		t.Errorf("the %q artifact must be produced by %s (the sharded race verdict); got %q", qaCoverageArtifact, want, producers[0])
+	}
+}
+
+// coverageUploaders returns "<workflow> / <job>" for every step uploading the
+// coverage artifact, checking the upload contract on each.
+func coverageUploaders(t *testing.T, wf string, jobs map[string]struct {
+	Steps []map[string]interface{} `yaml:"steps"`
+}) []string {
+	t.Helper()
+	var producers []string
+	for job := range jobs {
+		for _, st := range jobs[job].Steps {
 			if !strings.Contains(toStr(st["uses"]), "actions/upload-artifact") {
 				continue
 			}
@@ -189,7 +232,7 @@ func TestQAGateCoverage_ArtifactHasExactlyOneProducer(t *testing.T) {
 			if toStr(with["name"]) != qaCoverageArtifact {
 				continue
 			}
-			producers = append(producers, job)
+			producers = append(producers, wf+" / "+job)
 
 			if got := toScalar(with["path"]); got != qaCoverageFile {
 				t.Errorf("the %q artifact must stay at path %q (got %q)", qaCoverageArtifact, qaCoverageFile, got)
@@ -207,13 +250,7 @@ func TestQAGateCoverage_ArtifactHasExactlyOneProducer(t *testing.T) {
 		}
 	}
 
-	if len(producers) != 1 {
-		t.Fatalf("the %q artifact must have exactly ONE producer; got %v. Uploading an immutable artifact name from "+
-			"two jobs is a race whose winner decides what the floors are enforced against.", qaCoverageArtifact, producers)
-	}
-	if producers[0] != qaLogicJob {
-		t.Errorf("the %q artifact must be produced by %q (the single race+coverage run); got %q", qaCoverageArtifact, qaLogicJob, producers[0])
-	}
+	return producers
 }
 
 // TestQAGateCoverage_VerifierConsumesOnlyThisRun pins that the floors are
@@ -293,9 +330,9 @@ func regexpFloorRow(body, file, floor string) bool {
 // qaGuardScript extracts the shipped body of a named guard step so the test
 // drives what CI runs rather than a copy that could agree with the test and
 // disagree with CI.
-func qaGuardScript(t *testing.T, job, stepNameSubstr string) string {
+func qaGuardScript(t *testing.T, path, job, stepNameSubstr string) string {
 	t.Helper()
-	for _, st := range qaJobSteps(t, job) {
+	for _, st := range qaJobStepsIn(t, path, job) {
 		if strings.Contains(toStr(st["name"]), stepNameSubstr) {
 			if body := toStr(st["run"]); strings.TrimSpace(body) != "" {
 				return body
@@ -328,9 +365,12 @@ func TestQAGateCoverage_GuardsRefuseUnusableEvidence(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash unavailable")
 	}
-	guards := map[string]string{
-		"producer": qaGuardScript(t, qaLogicJob, "coverage profile is usable"),
-		"verifier": qaGuardScript(t, qaCoverageJob, "downloaded profile is usable"),
+	// Each guard reads the profile from where ITS job finds it: the producer
+	// from the verdict's merged output, the verifier from the download.
+	type guard struct{ script, seed string }
+	guards := map[string]guard{
+		"producer": {qaGuardScript(t, qaCoverageProducerPath, qaCoverageProducer, "coverage profile is usable"), "race-verdict/merged.cover.out"},
+		"verifier": {qaGuardScript(t, qaGateWorkflowPath, qaCoverageJob, "downloaded profile is usable"), qaCoverageFile},
 	}
 
 	cases := []struct {
@@ -345,21 +385,25 @@ func TestQAGateCoverage_GuardsRefuseUnusableEvidence(t *testing.T) {
 		{"usable", strptr("mode: atomic\ngithub.com/KidCarmi/Culvert/totp.go:1.1,2.2 1 1\n"), true},
 	}
 
-	for guard, script := range guards {
+	for name, g := range guards {
 		for _, tc := range cases {
-			t.Run(guard+"/"+tc.name, func(t *testing.T) {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
 				dir := t.TempDir()
 				if tc.content != nil {
-					if err := os.WriteFile(filepath.Join(dir, qaCoverageFile), []byte(*tc.content), 0o600); err != nil {
+					seed := filepath.Join(dir, g.seed)
+					if err := os.MkdirAll(filepath.Dir(seed), 0o750); err != nil {
+						t.Fatalf("seed dir: %v", err)
+					}
+					if err := os.WriteFile(seed, []byte(*tc.content), 0o600); err != nil {
 						t.Fatalf("seed profile: %v", err)
 					}
 				}
-				out, ok := runShell(t, script, dir)
+				out, ok := runShell(t, g.script, dir)
 				if ok != tc.wantOK {
-					t.Fatalf("%s guard on a %s profile: ok=%v want %v\noutput:\n%s", guard, tc.name, ok, tc.wantOK, out)
+					t.Fatalf("%s guard on a %s profile: ok=%v want %v\noutput:\n%s", name, tc.name, ok, tc.wantOK, out)
 				}
 				if !tc.wantOK && !strings.Contains(out, "::error::") {
-					t.Errorf("%s guard refused a %s profile without an ::error:: annotation — the operator cannot see why\noutput:\n%s", guard, tc.name, out)
+					t.Errorf("%s guard refused a %s profile without an ::error:: annotation — the operator cannot see why\noutput:\n%s", name, tc.name, out)
 				}
 			})
 		}
@@ -534,18 +578,18 @@ func TestQAGateCoverage_VerdictRefusesMissingCoverageEvidence(t *testing.T) {
 		{
 			name: "producer failed, so coverage never ran",
 			mutate: func(r map[string]string) {
-				r[qaLogicJob] = "failure"
+				r[qaRaceJob] = "failure"
 				r[qaCoverageJob] = "skipped" // what GitHub does to a needs-blocked job
 			},
-			wantRef: qaLogicJob,
+			wantRef: qaRaceJob,
 		},
 		{
 			name: "producer cancelled, so coverage never ran",
 			mutate: func(r map[string]string) {
-				r[qaLogicJob] = "cancelled"
+				r[qaRaceJob] = "cancelled"
 				r[qaCoverageJob] = "skipped"
 			},
-			wantRef: qaLogicJob,
+			wantRef: qaRaceJob,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -232,8 +232,12 @@ func packageTerminal(line string) (pkg, status string, elapsed float64, ok bool)
 		e, _ := strconv.ParseFloat(m[2], 64)
 		return m[1], statusFail, e, true
 	}
+	// "[no test files]" is a package-level SKIP in test2json's vocabulary
+	// (`go test -json` reports it as Action "skip"). With -cover that line is
+	// printed only for a package with nothing to instrument either; one with
+	// statements prints a coverage-only line instead (vPkgCovOnly, a pass).
 	if m := vPkgNoTests.FindStringSubmatch(line); m != nil {
-		return m[1], statusPass, 0, true
+		return m[1], statusSkip, 0, true
 	}
 	if m := vPkgCovOnly.FindStringSubmatch(line); m != nil {
 		return m[1], statusPass, 0, true

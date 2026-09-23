@@ -1,27 +1,35 @@
-// Command rootshard is the CI-REDESIGN stage 5A root-suite sharding PILOT: it
-// splits the root package's race+coverage test suite across isolated processes
-// and proves, before anyone relies on it, that nothing was lost on the way —
-// no test, no coverage block and no failure.
+// Command rootshard runs the root package's race+coverage test suite across
+// isolated processes (CI-REDESIGN stages 5A/5B) and proves, on every run and
+// WITHOUT an unsharded reference, that nothing was lost on the way — no test,
+// no coverage block and no failure.
 //
 // Why a tool and not a shell pipeline: every step here is a place a sharded
 // suite can SILENTLY lose evidence (a test no regex selected, an escaping bug
 // that selects a neighbour, an empty selection that `-test.run` reads as "run
 // everything", a shard that crashed and wrote no profile, a profile from a
-// different binary). Each of those has to fail closed, and each failure path is
-// pinned by a test in this package, which the ordinary `go test ./...` runs.
+// different binary, a lane profile truncated to nothing). Each of those has to
+// fail closed, and each failure path is pinned by a test in this package,
+// which the ordinary `go test ./...` runs.
 //
 // Subcommands (all JSON artifacts are deterministic):
 //
 //	build     compile the root race+coverage test binary ONCE, list its entries
-//	          from the binary itself, time an empty run, write manifest.json
+//	          from the binary itself, record its empty-run block universe,
+//	          write manifest.json
 //	plan      partition the binary's inventory into N shards by measured duration
 //	run-shard run one shard's chunks against the prebuilt binary
 //	run-lane  run every OTHER package of the module as whole packages
-//	verdict   check every shard + the lane, merge all coverage profiles
-//	compare   compare the pilot against the unsharded reference run
+//	universe  the lane's exact command with no test selected: its block universe
+//	verdict   check every shard, the lane and both universes against the
+//	          source/build expectations; merge all coverage profiles
+//	compare   audit mode: compare against the unsharded reference run
 //	timings   derive a timing file from a reference `go test -v` log
+//	inventory list the source's runnable test entries per package
 //
-// See roadmap/CI-REDESIGN.md §13 and .github/workflows/qa-root-shard-pilot.yml.
+// Timing data only BALANCES shards; test inclusion comes from the binary's
+// own -test.list and the source, never from a timing file.
+//
+// See roadmap/CI-REDESIGN.md §13–§14 and .github/workflows/qa-race-shards.yml.
 package main
 
 import (
@@ -44,14 +52,16 @@ var commands = map[string]func(args []string, stdout io.Writer) error{
 	"plan":      cmdPlan,
 	"run-shard": cmdRunShard,
 	"run-lane":  cmdRunLane,
+	"universe":  cmdUniverse,
 	"verdict":   cmdVerdict,
 	"compare":   cmdCompare,
 	"timings":   cmdTimings,
+	"inventory": cmdInventory,
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		sayln(stderr, "usage: rootshard <build|plan|run-shard|run-lane|verdict|compare|timings> [flags]")
+		sayln(stderr, "usage: rootshard <build|plan|run-shard|run-lane|universe|verdict|compare|timings|inventory> [flags]")
 		return 2
 	}
 	cmd, ok := commands[args[0]]
