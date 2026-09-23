@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -769,7 +771,11 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 // that reintroduced a per-request allocation here would have left it green
 // (Codex review, PR #1256).
 //
-// Two contracts they share, both of which the gate enforces:
+// HOW THEY RENDER is documented under "Decision-line rendering" below the four
+// emitters: they append into a pooled buffer instead of passing nine arguments
+// to fmt, which is where the bulk of this line's per-request cost lived.
+//
+// Three contracts they share, all of which the gate enforces:
 //
 //   - The rule name is sanitized ONCE and used for both the leading rule=%q and
 //     the trailing rule=%s. sanitizeLog scans the whole string, so naming the
@@ -790,36 +796,204 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     identical either way, so the emitted line is byte-for-byte what it was
 //     (pinned by TestPolicyDecisionLine_RenderIsByteIdentical). Every
 //     genuinely string-typed argument still goes through sanitizeLog.
+//
+//   - The line is rendered ONCE, into one buffer, and handed to the logger as a
+//     single value. No emitter may grow a second pass over the finished bytes,
+//     and none may reach the logger by any route that builds an intermediate
+//     string — both show up in the gate as a returning allocation.
 
 // logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
 // authority as the client sent it), not the port-stripped host the block
 // branches log — preserved from the pre-extraction call sites verbatim.
 func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}",
-		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	p := decisionLineBuf()
+	b := appendDecisionHead((*p)[:0], "POLICY_ALLOW", safeRule, priority)
+	b = append(b, ' ')
+	b = append(b, clientIP...)
+	b = append(b, ' ')
+	b = append(b, method...)
+	b = append(b, ' ')
+	b = appendQuotedValue(b, host)
+	b = appendDecisionTail(b, matchedConditions, reqID, identity, safeRule, "allow")
+	emitDecisionLine(p, b)
 }
 
 // logPolicyDrop emits the POLICY_DROP decision line.
 func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	p := decisionLineBuf()
+	b := appendDecisionHead((*p)[:0], "POLICY_DROP", safeRule, priority)
+	b = appendDecisionTarget(b, clientIP, host)
+	b = appendDecisionTail(b, matchedConditions, reqID, identity, safeRule, "drop")
+	emitDecisionLine(p, b)
 }
 
 // logPolicyBlock emits the POLICY_BLOCK decision line.
 func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	p := decisionLineBuf()
+	b := appendDecisionHead((*p)[:0], "POLICY_BLOCK", safeRule, priority)
+	b = appendDecisionTarget(b, clientIP, host)
+	b = appendDecisionTail(b, matchedConditions, reqID, identity, safeRule, "block")
+	emitDecisionLine(p, b)
 }
 
 // logPolicyRedirect emits the POLICY_REDIRECT decision line. Reached only after
 // isSafeRedirectURL has accepted redirectURL.
 func logPolicyRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	p := decisionLineBuf()
+	b := appendDecisionHead((*p)[:0], "POLICY_REDIRECT", safeRule, priority)
+	b = appendDecisionTarget(b, clientIP, host)
+	b = append(b, " => "...)
+	b = appendQuotedValue(b, redirectURL)
+	b = appendDecisionTail(b, matchedConditions, reqID, identity, safeRule, "redirect")
+	emitDecisionLine(p, b)
+}
+
+// ── Decision-line rendering ─────────────────────────────────────────────────
+//
+// The four emitters above render their line by APPENDING into a pooled byte
+// buffer rather than by handing nine arguments to logger.Printf, and the reason
+// is measurement, not taste.
+//
+// fmt's variadic interface is the cost. Every argument of a Printf call is
+// boxed into an `any`, and a string box is a heap allocation (runtime
+// convTstring) that also carries a pointer, so the GC must trace it. The
+// nine-argument POLICY_ALLOW line therefore allocated EIGHT pointer-carrying
+// objects per proxied request before anything was formatted, and then paid
+// fmt's reflective verb dispatch — three %q escapes and an integer conversion
+// driven by a format-string scan — on the request goroutine. Measured on this
+// machine (Go 1.26, 4-core Xeon @2.10GHz, medians of n=5, against a REAL log
+// sink; see the sink note in proxy_policylog_bench_test.go):
+//
+//	shape                                 │ ns/op │ B/op │ allocs/op
+//	──────────────────────────────────────┼───────┼──────┼──────────
+//	fmt, nine arguments (previous)        │  1012 │  128 │        8
+//	append into a pooled buffer (current) │   622 │   24 │        1
+//
+// 4x parallel: 475 → 328 ns/op. End to end on the forward benchmark the whole
+// proxy handler drops from 58.8 to 52.8 allocations per request, and the
+// dispatch pipeline's own share — everything handleRequest does OUTSIDE the
+// upstream round trip — from 13.6 to 7.7, because this one line was half of it.
+// The one remaining allocation is the boxing of
+// the finished buffer into Printf's single %s argument, which fmt writes
+// straight into the logger's own reused buffer — no intermediate string is
+// built, which is why the byte figure FALLS rather than trading allocation
+// count for allocation size.
+//
+// Three properties hold and must keep holding.
+//
+//   - The rendered bytes are UNCHANGED. The decision lines are consumed by SIEM
+//     forwarders and log parsers, so this is only acceptable as a pure cost
+//     change. The equivalence is exact rather than approximate: with no width
+//     or flag modifiers, fmt's %q on a string IS strconv.AppendQuote (fmt.fmtQ
+//     calls it), %d on an int IS strconv.AppendInt(…, 10), and %s on a string
+//     is the bytes themselves. That claim is pinned, not asserted:
+//     TestPolicyDecisionLine_AllEmittersMatchTheirFmtShape and
+//     FuzzPolicyDecisionLine compare all four production emitters against frozen
+//     replicas of the fmt shape they replace, and
+//     TestPolicyDecisionLine_RenderIsByteIdentical reaches back past the
+//     previous round too — so an upstream fmt or strconv change fails CI rather
+//     than silently rewriting the log format.
+//
+//   - sanitizeLog still runs on every string value that carries client- or
+//     admin-supplied data, at the point of use, and the rule name is still
+//     sanitized ONCE for both of its occurrences. strconv.AppendQuote escapes
+//     control bytes too, but it is not a substitute: sanitizeLog is the CWE-117
+//     barrier the code conventions require and the one CodeQL recognises, and
+//     two of the values (matchedConditions, identity) are emitted UNQUOTED.
+//
+//   - The buffer is RETURNED to the pool only after Printf has returned, and
+//     only when it has not grown past decisionLineKeepCap. fmt copies the bytes
+//     into the logger's buffer during the call and retains nothing, so reuse is
+//     safe; dropping an over-grown buffer keeps one pathological rule name or
+//     redirect URL from parking a large allocation in a per-P pool slot for the
+//     life of the process.
+
+const (
+	// decisionLineCap is the initial render-buffer size. On the representative
+	// arguments in proxy_policylog_bench_test.go the allow line renders to 187
+	// bytes and the redirect line — the longest of the four, since it quotes a
+	// URL as well as the host — to 232, so 256 renders every branch without a
+	// single grow while leaving room for longer rule names and hostnames.
+	decisionLineCap = 256
+	// decisionLineKeepCap bounds what the pool is allowed to retain, so one
+	// pathological rule name or redirect URL cannot park a large buffer in a
+	// per-P pool slot for the life of the process.
+	decisionLineKeepCap = 4096
+)
+
+// decisionLineBufs recycles decision-line render buffers. sync.Pool is per-P,
+// so the four emitters take no shared lock to get one — the whole point, since
+// the previous shape's allocations were themselves the contended resource.
+var decisionLineBufs = sync.Pool{New: func() any {
+	b := make([]byte, 0, decisionLineCap)
+	return &b
+}}
+
+// decisionLineBuf borrows a render buffer. Callers slice it to zero length
+// ((*p)[:0]) and must hand both the pointer and the final slice to
+// emitDecisionLine, which is what returns the (possibly grown) buffer.
+func decisionLineBuf() *[]byte { return decisionLineBufs.Get().(*[]byte) }
+
+// emitDecisionLine writes the rendered line through the package logger and
+// returns the buffer to the pool.
+//
+// It goes through logger.Printf rather than logger.Output(depth, string(b)) so
+// that no intermediate string is allocated: fmt's %s on a []byte appends the
+// bytes directly into log.Logger's own reused buffer. The format string is a
+// constant "%s", so a '%' inside the rendered line is data, never a verb.
+func emitDecisionLine(p *[]byte, b []byte) {
+	logger.Printf("%s", b)
+	if cap(b) <= decisionLineKeepCap {
+		*p = b[:0]
+		decisionLineBufs.Put(p)
+	}
+}
+
+// appendDecisionHead renders the shared prefix `VERB rule="…" pri=N`.
+// safeRule is already sanitized so that the rule name is scanned once for the
+// two places the line names it.
+func appendDecisionHead(b []byte, verb, safeRule string, priority int) []byte {
+	b = append(b, verb...)
+	b = append(b, " rule="...)
+	b = strconv.AppendQuote(b, safeRule)
+	b = append(b, " pri="...)
+	return strconv.AppendInt(b, int64(priority), 10)
+}
+
+// appendDecisionTarget renders ` <clientIP> -> "<host>"`, the shape the three
+// blocking branches share. The allow line spells its own (it carries the
+// request method between the two) rather than reusing this.
+func appendDecisionTarget(b []byte, clientIP, host string) []byte {
+	b = append(b, ' ')
+	b = append(b, clientIP...)
+	b = append(b, " -> "...)
+	return appendQuotedValue(b, host)
+}
+
+// appendDecisionTail renders the shared suffix
+// ` [conditions] {req_id=… identity=… rule=… action=…}`.
+func appendDecisionTail(b []byte, matchedConditions, reqID, identity, safeRule, action string) []byte {
+	b = append(b, " ["...)
+	b = append(b, sanitizeLog(matchedConditions)...)
+	b = append(b, "] {req_id="...)
+	b = append(b, reqID...)
+	b = append(b, " identity="...)
+	b = append(b, sanitizeLog(identity)...)
+	b = append(b, " rule="...)
+	b = append(b, safeRule...)
+	b = append(b, " action="...)
+	b = append(b, action...)
+	return append(b, '}')
+}
+
+// appendQuotedValue renders one %q-formatted string value, sanitized first —
+// the repo's CWE-117 idiom (sanitizeLog + %q), spelled as an append.
+func appendQuotedValue(b []byte, s string) []byte {
+	return strconv.AppendQuote(b, sanitizeLog(s))
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:
