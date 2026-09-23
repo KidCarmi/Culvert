@@ -1497,6 +1497,17 @@ culvert_storage_write_last_failure_age_seconds %d
 	// _unavailable is 1 while a backend is in its cooldown, and
 	// _gated_denials_total is the blast radius — requests denied without
 	// contacting the backend while it was gated.
+	//
+	// Terminology note: this is the SAME condition the "identity_backend_unreachable"
+	// alert (internal/alerts/store.go) and the "identity_backend" operator-contract
+	// row (diagnostics.go checkIdentityBackend) name — the metric prefix stays
+	// "auth_backend" rather than being renamed to match. This is NOT drift: the
+	// prefix is a published Prometheus contract (dashboards/alert rules key off
+	// these exact names), and unlike an internal alert-event string this has no
+	// safe aliasing seam (Dispatch's alert-name rename precedent — see
+	// normalizeEventNames — does not apply to metric series names). Kept
+	// deliberately unrenamed; an operator correlating the alert or the contract
+	// row to a PromQL query should read this comment as the cross-reference.
 	abSnap := authBackendHealthStatus()
 	abDegraded := 0
 	if abSnap.Degraded {
