@@ -686,6 +686,14 @@ func candidateIdentity(ev runEvidence, rep *RunReport) {
 		rep.Problems = append(rep.Problems, fmt.Sprintf("timing candidate source %q does not name %q", ev.Candidate.Source, want))
 		return
 	}
+	// A re-run attempt never publishes a candidate: the audit artifacts are
+	// per RUN, not per attempt, so a re-run can pair a fresh comparison with
+	// evidence carried over from the attempt that failed — the same reason a
+	// re-run never establishes a passing audit (auditRunPassed).
+	if rep.Run.Rerun || rep.Run.Attempt > 1 {
+		rep.Unknowns = append(rep.Unknowns, "timing candidate withheld: a re-run attempt's audit artifacts may mix attempts")
+		return
+	}
 	rep.Evidence.Audit.TimingCandidate = rep.Evidence.Audit.State == "passed"
 }
 

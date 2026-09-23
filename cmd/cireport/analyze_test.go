@@ -207,6 +207,12 @@ func TestAnalyze_RealAuditEvidence(t *testing.T) {
 	if r.Evidence.Verdict != "ok" || r.Evidence.Audit.State != "passed" || !r.Evidence.Audit.TimingCandidate {
 		t.Fatalf("verdict=%s audit=%s candidate=%v, want ok/passed/true", r.Evidence.Verdict, r.Evidence.Audit.State, r.Evidence.Audit.TimingCandidate)
 	}
+	// The same passing evidence on a re-run attempt publishes no candidate.
+	rerun := fx.Run
+	rerun.RunAttempt = 2
+	if rr := Analyze(rerun, fx.Jobs, ev); rr.Evidence.Audit.TimingCandidate {
+		t.Error("a re-run attempt published a timing candidate built from per-run, possibly mixed-attempt artifacts")
+	}
 	if r.Run.TestedSHA != fx.Run.HeadSHA || r.Toolchain == nil || r.Toolchain.Go != "go1.26.6" || r.Config.Shards != 4 {
 		t.Errorf("tested=%s toolchain=%v shards=%d", r.Run.TestedSHA, r.Toolchain, r.Config.Shards)
 	}
