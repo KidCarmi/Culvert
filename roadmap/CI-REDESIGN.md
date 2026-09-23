@@ -2481,7 +2481,8 @@ candidate after it.
       differ by patch release;
   24. runner labels joined without escaping their separators (including
       the trend's `|`);
-  25. the observed image build dropped from the trend sample row.
+  25. the observed image build dropped from the trend sample row;
+  26. a toolchain value carrying a key separator accepted as observed.
 - `golangci-lint` reports 0 issues; the root CI walls pass.
 
 ### 18.7 Rollback

@@ -586,7 +586,9 @@ func observedImage(views []jobView, ev runEvidence, rep *RunReport) string {
 
 // toolchainLine is the Go release line and GOOS/GOARCH, or unknown.
 func toolchainLine(tc *Toolchain) string {
-	if tc == nil || tc.Go == "" || tc.GOOS == "" || tc.GOARCH == "" {
+	if tc == nil || !imageValueRE.MatchString(tc.Go) || !imageValueRE.MatchString(tc.GOOS) || !imageValueRE.MatchString(tc.GOARCH) {
+		// Empty, or outside the safe set: the values come from artifacts, and
+		// a separator in them would split the cohort or group key.
 		return cohortUnknown
 	}
 	line := tc.Go

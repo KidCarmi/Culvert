@@ -627,3 +627,18 @@ func TestCollectRun_ReadsEveryMeasuredJobsImage(t *testing.T) {
 		t.Errorf("one log missing: image %q observed %d/%d unknowns %v", rep.Cohort.Image, rep.RunnerImage.JobsObserved, measured, rep.Unknowns)
 	}
 }
+
+// Toolchain values come from artifacts. One carrying a key separator is not
+// an observed toolchain: it would split the cohort or group key.
+func TestCohort_UnsafeToolchainValueIsUnknown(t *testing.T) {
+	fx, jobs, ev := hostedAudit(t, "ubuntu-latest", "GitHub Actions")
+	for _, v := range []string{"go1.26.6|x", "go1.26.6;toolchain=go1.26", "go1.26 6"} {
+		r := Analyze(fx.Run, jobs, withGo(ev, v))
+		if r.Cohort.Toolchain != cohortUnknown || r.Cohort.Verified {
+			t.Errorf("Go version %q: cohort %+v, want an unknown, unverified toolchain", v, r.Cohort)
+		}
+		if strings.Count(groupKeyOf(r), "|") != 3 {
+			t.Errorf("Go version %q split the group key: %q", v, groupKeyOf(r))
+		}
+	}
+}
