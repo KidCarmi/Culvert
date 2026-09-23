@@ -2,6 +2,8 @@
 proxy
 culvert
 /Culvert
+# `go build` inside cmd/rootshard (the CI pilot builds it from source)
+/cmd/rootshard/rootshard
 
 # Go compiled test binaries (`go test -c` / stray `-o *.test` output).
 # A 59MB unstripped Culvert.test was accidentally committed once — never again.
