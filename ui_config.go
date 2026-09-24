@@ -1874,17 +1874,19 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		syslogConfigured = body.Addr
 		syslogConfiguredAddr = body.Addr
-		sw := activeSyslog()
-		if sw == nil {
-			// InitSyslog returned nil error, so a writer was published; a
-			// concurrent disable can still have cleared it before we read it
-			// back. Report the target rather than dereferencing.
-			http.Error(w, "syslog was reconfigured concurrently; retry", http.StatusConflict)
-			return
+		// The effective format is derived, not read back off the handle. It is
+		// the same normalisation NewWriter applies ("" => rfc3164) and the
+		// value was already validated above, so the two cannot disagree — and
+		// deriving it avoids dereferencing a handle a concurrent disable can
+		// clear between the publish and the read-back, which is exactly the
+		// nil-deref the pre-CHAOS-66 code carried here.
+		effectiveFormat := body.Format
+		if effectiveFormat == "" {
+			effectiveFormat = "rfc3164"
 		}
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+sw.Format()+")")
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+effectiveFormat+")")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": sw.Format()})
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": effectiveFormat})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
