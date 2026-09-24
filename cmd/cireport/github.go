@@ -42,7 +42,11 @@ type apiRun struct {
 	RunStartedAt string `json:"run_started_at"`
 	UpdatedAt    string `json:"updated_at"`
 	DisplayTitle string `json:"display_title"`
-	Repository   struct {
+	// attemptCreatedAt is set only when the run was read from the attempt
+	// endpoint, whose created_at is that attempt's enqueue time (the runs
+	// endpoint and the runs list report attempt 1's).
+	attemptCreatedAt string
+	Repository       struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 	HeadRepository struct {
@@ -58,6 +62,7 @@ type apiStep struct {
 }
 
 type apiJob struct {
+	ID          int64     `json:"id"`
 	Name        string    `json:"name"`
 	Status      string    `json:"status"`
 	Conclusion  string    `json:"conclusion"`
@@ -66,6 +71,10 @@ type apiJob struct {
 	CompletedAt string    `json:"completed_at"`
 	RunAttempt  int       `json:"run_attempt"`
 	Steps       []apiStep `json:"steps"`
+	// Labels and RunnerGroupName say where the job ran (the runs-on labels
+	// and the hosted or self-hosted runner group).
+	Labels          []string `json:"labels"`
+	RunnerGroupName string   `json:"runner_group_name"`
 }
 
 type apiArtifact struct {
@@ -148,6 +157,44 @@ func (c *ghClient) get(ctx context.Context, rel string, limit int64) ([]byte, er
 
 var errNotFound = errors.New("not found")
 
+// jobLogHead reads at most n bytes from the start of one job's log. The
+// runner writes its image identity in the first lines, so only a byte range
+// is requested; a server that ignores the range is simply cut off at n.
+// The log is data: it is scanned for two lines and never executed or stored.
+func (c *ghClient) jobLogHead(ctx context.Context, repo string, jobID, n int64) ([]byte, error) {
+	rel := fmt.Sprintf("repos/%s/actions/jobs/%d/logs", repo, jobID)
+	u := c.base.ResolveReference(&url.URL{Path: rel})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", rel, err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "culvert-cireport")
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", n-1))
+	if c.token != "" {
+		// Dropped by net/http when the storage redirect leaves this host.
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", rel, redactURLError(err))
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusPartialContent:
+	case http.StatusNotFound, http.StatusGone:
+		return nil, errNotFound
+	default:
+		return nil, fmt.Errorf("GET %s: HTTP %d", rel, resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, n))
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: read: %w", rel, err)
+	}
+	return b, nil
+}
+
 // redactURLError drops the query from the URL a transport error names. An
 // artifact download redirects to presigned storage whose query IS the
 // credential; the error text reaches reports and step summaries, which
@@ -180,6 +227,19 @@ func (c *ghClient) run(ctx context.Context, repo string, id int64) (apiRun, erro
 	var r apiRun
 	err := c.getJSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d", repo, id), &r)
 	return r, err
+}
+
+// runAttempt reads one attempt of a run. Its created_at is the ATTEMPT's
+// enqueue time, so it is kept separately; every other identity field keeps the
+// run's own values, which is what the trend compares retained reports with.
+func (c *ghClient) runAttempt(ctx context.Context, repo string, run apiRun, attempt int) (apiRun, error) {
+	var a apiRun
+	if err := c.getJSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d", repo, run.ID, attempt), &a); err != nil {
+		return apiRun{}, err
+	}
+	a.attemptCreatedAt = a.CreatedAt
+	a.CreatedAt = run.CreatedAt
+	return a, nil
 }
 
 // jobs lists one attempt's jobs, every page.
