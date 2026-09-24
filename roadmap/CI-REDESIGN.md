@@ -2,7 +2,8 @@
 
 ## 0. Current status (authoritative)
 
-As of 2026-09-23, main `3febe59` plus the Stage 6B closeout (§18). This table
+As of 2026-09-24, main `9450d33` (Stage 6B closeout, §18) plus the first
+natural-run measurements (§18.3–§18.5). This table
 is the one place that says where the plan stands. The sections below it are
 the record of how each stage was built and measured; where their present
 tense disagrees with this table, this table wins.
@@ -17,13 +18,18 @@ tense disagrees with this table, this table wins.
 | Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
 | Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | The non-root lane is now the Fast gate's critical path (§18.5); root-state/package isolation (`internal/mcp/execution` is 72 % of the lane) |
 | Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
-| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Per-run report on main, the manual reporting path and the trend verified live (§18.3) | The first scheduled audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired yet. Every reviewed baseline needs 10–20 comparable natural executions in a verified cohort: **0 so far** (§18.4) | — |
+| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Schema v2 verified live: 28 on-demand PR reports read their evidence from artifacts and named a verified cohort; a metadata-only report stays `unknown`/unverified. The first automatic v2 report on main failed closed (HTTP 403, rate limit suspected) and its re-run verified it (§18.3.1) | Scheduler: the first audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired — **pending**. Verified cohorts: **1**. Successful executions: Fast `race` 16, Fast `race+frontend+mcp` 8, main QA 1. The PR samples all come from one 12-hour window, so every baseline stays provisional (§18.4) | The trend now skips a targeted dispatch (§18.3.1); live confirmation waits for the first dispatch after merge |
 
 Remaining backlog, in the order the measurements support (§18.5):
 
-1. **The non-root lane** — `internal/mcp/execution` alone is 436 s of a
-   610 s lane, and the lane bounds 10 of 14 recent code-PR runs.
-2. **QA's determinism lane** — the longest main-QA job (≈860 s).
+1. **The non-root lane** — it bounds the Fast race path in 23 of 24
+   successful code-PR runs (median 752 s against 454 s for the slowest
+   shard); `internal/mcp/execution` is the last package to finish in every
+   inspected lane. A saving here is a hypothesis until a bounded comparison
+   measures it (§18.5): PR time-to-both-green is bounded by the Deep gate's
+   determinism job in 25 of 28 runs.
+2. **Determinism** — the longest job on both QA (≈860 s) and the Deep PR
+   gate (median 897 s).
 3. **Root-state/package isolation** — packages whose tests share process or
    on-disk state cannot be split or reordered safely; this bounds items 1–2.
 4. **Repeated static-contract work** — many walls re-read and re-parse the
@@ -2357,6 +2363,48 @@ refused` on the agent socket in the shuffled double run. The seven previous
 main QA runs were green. It is outside this plan, it was not re-run, and it
 is left to the separate flaky-test investigation.
 
+### 18.3.1 Schema v2 on natural runs (2026-09-24)
+
+Collector revision for every report below: `ci-perf-report.yml` checks out
+the default branch, main `9450d33` (#1478). Each report prints one
+`cireport run:` line to its job log, which is how its contents were read
+(artifact storage is still refused by the authoring session's egress).
+
+| Check | Evidence | Result |
+|---|---|---|
+| First automatic v2 report | *CI Performance Report* 35990426653, job 107602944435, for *QA Gate* push 35989051459 on `9450d33` (QA succeeded) | Attempt 1 **failed closed**: `GET …/actions/runs/35989051459: HTTP 403` at 11:00 UTC. No report was published and nothing claimed success. **Cause suspected, not established:** it came minutes after the enrichment burst below, but the collector logs only the status code. The response body and `x-ratelimit-*` headers were not recorded, so the log cannot prove a rate limit. Attempt 2 (re-run of the failed job, 12:06 UTC, job 107624053905) **succeeded**: `attempt=1 event=push tested=9450d33 class=main-qa evidence=artifacts` (same six documents), `image-logs=17/17 verdict=ok verified=true`, same cohort as the PR samples. It published `ci-run-report-35989051459-1` (4,021 bytes). Attempt 1 remains in the run's history. |
+| On-demand v2 reports, Fast PR runs | 28 dispatches with `run_id`, e.g. 35990137756 / job 107602002719 for Fast run 35937792762 | All 28 report jobs succeeded. Every line reads `attempt=1 evidence=artifacts image-logs=18/18 verified=true` and names six documents (`qa-race-shard-0…3/meta.json`, `qa-race-verdict/{results,verdict}.json`). Example: `head=c96f0b60 tested=3a99c2be` — the tested SHA is the merge commit, not the PR head, and the report keeps both. |
+| Missing evidence stays unknown | The same collector run locally against Fast run 35937792762 without artifact access | `evidence=metadata-only image-logs=0/18`, image and toolchain `unknown`, `verified=false`. It lands in its own cohort and is never pooled. |
+| Trend on those dispatches | The 28 trend jobs of the same dispatches | **All failed** on `HTTP 403` (`list pr-fast-gate.yml push runs`). A dispatch with `run_id` also runs the full trend (the trend job's `if:` accepts any `workflow_dispatch`), so 28 dispatches were 28 trends reading the same history. |
+
+**Finding — enrichment was not bounded.** Enriching N runs cost N full
+trends against the shared budget of about 1,000 API requests per hour, and
+the likely casualty was an unrelated automatic report. **Fixed:** a dispatch
+with a `run_id` now reports that run and skips the trend; an empty dispatch
+is the trend. The weekly schedule, the scheduled-audit trigger, `needs:
+run-report`, `always()`, the default-branch checkout and the read-only token
+are unchanged. `ci_perf_report_dispatch_test.go` evaluates both jobs' real
+`if:` conditions, including GitHub's rule that an `if:` without a status
+function skips when a `needs` job was skipped or failed. The matrix covers:
+
+- a targeted dispatch;
+- an empty dispatch with run-report skipped;
+- a scheduled-audit completion whose report failed;
+- a cancelled scheduled audit;
+- main push completions: success, failure and cancelled;
+- pull-request runs.
+
+It rejects the pre-fix condition and the fixed condition without `always()`.
+
+**Enrichment rule until the fix is live on main:** no bulk enrichment.
+After it, enrich in small sequential batches (at most five dispatches, each
+waiting for the previous one), then dispatch once with an empty `run_id` for
+the trend. The 28 reports above are reused and not re-collected.
+
+**Follow-up, not in this change:** have the collector log the status,
+`x-ratelimit-remaining`/`-reset` and a bounded API message on failure, so
+a 403 can be attributed from its own evidence.
+
 ### 18.4 Observation period
 
 Baselines stay `provisional` until a **verified** cohort has 10–20
@@ -2377,15 +2425,40 @@ The rest are pre-5C engine runs (`race-unsharded`), pre-5B QA runs
 (`qa-layers` only), fault injections and qualification dispatches, which are
 listed and never pooled with the current engine.
 
-**Verified cohorts: 0.** Every existing report predates the cohort, and
-`v1` reports are refused by the `v2` trend. The observation
-period therefore starts at the first main QA run after this merges.
+**Verified cohorts, 2026-09-24: 1.** Cohort
+`platform=ubuntu-latest@GitHub Actions; image=ubuntu-24.04; shards=4;
+toolchain=go1.26 linux/amd64`. It holds 28 enriched Fast PR runs
+(2026-09-23 12:19 to 2026-09-24 00:18 UTC, 10 branches, all first attempts)
+and the first main QA run after #1478 (§18.3.1). Durations are job
+metadata; runner-minutes sum every job in the run. Statistics cover
+successful executions only.
+
+| Workflow · class · job set | Successful | Failed | Cancelled | Elapsed median / p90 | Race path median / p90 | Runner-min median | Queue median / p90 |
+|---|---|---|---|---|---|---|---|
+| Fast · `pr-code` · `race` | 16 | 4 (3 with `verdict=failed`, 1 in another job) | 14 | 856 / 951 s | 815 / 908 s | 62.3 | 4 / 99 s |
+| Fast · `pr-code` · `race+frontend+mcp` | 8 | 0 | 0 | 754 / 856 s | 712 / 810 s | 67.3 | 4 / 77 s |
+| QA · `main-qa` | 1 | 0 | 0 | one sample, not a statistic | — | — | — |
+
+- `race` and `race+frontend+mcp` stay separate groups and are never pooled.
+- Cancelled executions are counted from run metadata only; the collector
+  does not report them, so they are not verified samples. Another 2
+  cancelled code-PR runs in the window stopped before their job set was
+  known and belong to neither group.
+- Every group stays **provisional**. `race` reaches 10 successes, but they
+  all come from one 12-hour window. "Counted" also requires no
+  contradictory evidence, which only the trend checks, and no trend has run
+  over these samples yet.
+- The 101 older-engine and docs-only runs in the same window are
+  metadata-only and stay out of every verified cohort.
+- PR artifacts expire after 7 days, the first on 2026-09-30. Main QA
+  reports are produced automatically.
 
 **Missing evidence:**
-- per-run reports for PR runs (by design; enrich within 7 days if a PR
-  cohort baseline is wanted);
-- the first scheduled audit and backstop (due 2026-09-27);
-- the contents of the first automatic report (egress, above).
+- main QA samples beyond the first; they accrue with each main push;
+- the first scheduled audit and backstop (due 2026-09-27, **pending** until
+  they actually execute);
+- one deliberate trend run over the verified samples, after the dispatch
+  fix is on main.
 
 ### 18.5 Observed bottlenecks and the next optimization
 
@@ -2411,15 +2484,67 @@ Critical path of the counted current-engine runs (job metadata, medians):
 - **On main QA the determinism job is last** (≈860 s), after the race
   verdict (≈800 s).
 
-**Selected next optimization:** take `internal/mcp/execution` off the
-non-root lane's critical path, by giving it its own lane job or by sharding
-its tests the way the root suite is sharded. This depends on backlog item 3
-(the package's tests must not share state across the split). From the
-measurements above, the expected effect is the lane-bound runs moving toward
-the shard-bound median: roughly 150 s off a typical code-PR gate, for about
-one extra job's setup in runner time. That is an estimate to be confirmed by
-the cohort statistics, not a promise. QA's determinism lane is the next
-candidate after it.
+**Next optimization — a hypothesis, re-assessed 2026-09-24.** The original
+proposal was to take `internal/mcp/execution` off the non-root lane's
+critical path by giving it its own lane job or sharding its tests. The 28
+verified runs (§18.4) confirm the lane is the Fast race path's bound, but
+not the size of the saving:
+
+- The lane bounds 23 of 24 successful runs: median 752 s against 454 s for
+  the slowest root shard in `race` runs.
+- In three inspected lane logs, `internal/mcp/execution` was the last
+  package to finish (312, 407 and 528 s). It started 160–235 s into the
+  lane and ran alone for the final 227–393 s. Its neighbours in
+  `internal/mcp` slowed in step, so part of the variance is runner speed or
+  contention, not the package alone.
+- `go test` already runs packages concurrently. Moving the same package to
+  another job removes its contention with the rest of the lane but not its
+  own run time; the ≈150 s estimate from §18.5 is unproven.
+- **A faster Fast gate does not by itself make PRs green sooner.** Deep
+  finished after Fast in 25 of 28 PR runs (median 928 s against 853 s), and
+  its determinism job is Deep's longest (median 897 s, p90 913 s, 27
+  runs). Main QA ends
+  on determinism too (≈860 s). Until determinism shrinks, a lane saving
+  moves runner-minutes and Fast's own check, not time to both-green.
+
+**The end-to-end critical path.** A code PR is mergeable when both
+required gates are green, so its completion time is the later of Fast and
+Deep:
+
+| Path | Median | Bound by |
+|---|---|---|
+| Fast · `race` race path | 815 s | the non-root lane (median 752 s) |
+| Deep | 928 s | determinism (median 897 s) |
+| Main QA | ≈870–920 s | determinism (≈860 s), then the lane (≈750 s) |
+
+Any experiment must therefore report three results separately and never
+substitute one for another:
+
+1. the **Fast-only** change (lane end and Fast elapsed);
+2. the change in **PR completion time**, the later of Fast and Deep;
+3. the **runner-minute** cost.
+
+A Fast-only gain with PR completion unchanged is a runner-time result, not
+a latency result.
+
+**A bounded comparison comes before any implementation, outside the change
+that records this evidence.** Pair same-SHA runs of the arms in one time
+window, without re-running failed work:
+
+| Arm | Change |
+|---|---|
+| A | Current lane (control) |
+| B | `internal/mcp/execution` in its own job |
+| C | Same lane, with `internal/mcp/execution` started first |
+
+Arm C needs proof from the lane log that the package actually started
+first. Package order and `-p` do not establish it, because `go test`
+decides when packages start.
+
+A handful of pairs can show whether the median moves. It cannot show that
+p90 does not regress; that claim waits for the provisional baselines to
+mature. A determinism comparison of the same shape is the candidate that
+can move PR completion time. Neither is implemented here.
 
 ### 18.6 Validation
 
