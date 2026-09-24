@@ -9,6 +9,7 @@ package main
 // response, is caught here rather than silently weakening the suite.
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -53,7 +54,7 @@ func TestConformance_SharedSpecFixture_ValidationDoesNotMutateSpec(t *testing.T)
 	if err != nil {
 		t.Fatalf("marshal spec after validation: %v", err)
 	}
-	if string(before) != string(after) || len(spec.Ops) != ops {
+	if !bytes.Equal(before, after) || len(spec.Ops) != ops {
 		t.Fatalf("validation mutated the loaded contract (%d validations); a spec shared across subtests would carry state between them", validated)
 	}
 }
