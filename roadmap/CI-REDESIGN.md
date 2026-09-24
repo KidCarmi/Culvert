@@ -2686,11 +2686,20 @@ interleaved base/candidate).
 | Fixture: `loadContract` calls per `-count=2` run of the contract tests | 258 | 92 | −166 (≈30 s of loading at 183 ms) |
 | Family: `TestConformance_`, `-count=2`, 5 recorded seeds (101…505), median wall | 41.75 s | 14.31 s | −27.4 s (−66 %) |
 | Suite: root package, `-count=2 -shuffle=20260421`, one run each (test-binary time) | 906.2 s (917.3 s in an earlier run) | 889.5 s | ≈−17 s; two baseline runs differ by 11 s, so this single sample does not separate the saving from noise |
-| Gate: Deep determinism job on CI | 14 min 51 s (35999698583) | pending (this PR's Deep run) | one sample each; not a trend |
+| Gate: Deep determinism job on CI (job / shuffled double-run step / root package inside it) | 891 s / 829 s / 750.2 s (35999698583) | 884 s / 820 s / 744.6 s (36035947389, #1487) | −7 s / −9 s / −5.6 s; one sample each, within runner variation |
 
-The suite and gate rows are single samples. They say the saving shows up
-where expected. They do not establish a stable p90 or an overall
-PR-completion speedup; Deep determinism stays the PR's longest job (§18.5).
+**Reading the result.** The saving is real and large where it lives: 166
+fewer contract loads and −66 % on the conformance family. It is small at
+the package and gate level. The root package's double run gained ≈17 s
+locally and 5.6 s on CI, one sample each, both within run-to-run variation
+(≈11 s between two local baseline runs). So this change removes a named,
+repeated cost, but it is **not** a measurable determinism-gate speedup. It
+does not move PR completion time or p90, and Deep determinism stays the
+PR's longest job (§18.5).
+
+The gap between the family (−27 s) and the package (−6 to −17 s) is
+unexplained. Profile the whole root package before the next determinism
+slice rather than assume the next family behaves like this one.
 
 **Validation.**
 
