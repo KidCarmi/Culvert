@@ -23,15 +23,15 @@ package main
 // argument construction and nothing else, and reported roughly a third of the
 // real cost:
 //
-//	POLICY_ALLOW, 4-core Xeon @2.10GHz, medians of n=5
+//	POLICY_ALLOW, 4-core Xeon @2.10GHz, medians of n=8
 //	  against io.Discard      283 ns/op   (formatting skipped entirely)
-//	  against a real sink    1014 ns/op   (what production pays)
+//	  against a real sink    1042 ns/op   (what production pays)
 //
 // The allocation figure survived the bug — the nine arguments are boxed at the
 // CALL SITE, before Printf can short-circuit — which is why the gate's 8
 // allocs/op bound was right while its timing was not. It also means the
 // previously recorded "419 -> 272 ns" improvement from PR #1256 was really
-// 1100 -> 1014 ns: a 7.5% gain reported as 35%.
+// 1143 -> 1042 ns: a 9% gain reported as 35%.
 //
 // plNullSink therefore replaces io.Discard everywhere below. It throws the
 // bytes away exactly as io.Discard does, but log.Logger cannot recognise it, so

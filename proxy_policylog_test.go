@@ -14,6 +14,7 @@ package main
 // trust.
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"strconv"
@@ -299,7 +300,7 @@ func TestAppendQuotedForLog_MatchesStrconvAppendQuote(t *testing.T) {
 	for _, s := range corpus {
 		want := strconv.AppendQuote(nil, s)
 		got := appendQuotedForLog(nil, s)
-		if string(got) != string(want) {
+		if !bytes.Equal(got, want) {
 			t.Fatalf("appendQuotedForLog(%q) = %s, strconv.AppendQuote = %s", s, got, want)
 		}
 	}
@@ -326,7 +327,7 @@ func FuzzAppendQuotedForLog(f *testing.F) {
 	f.Fuzz(func(t *testing.T, s string) {
 		want := strconv.AppendQuote(nil, s)
 		got := appendQuotedForLog(nil, s)
-		if string(got) != string(want) {
+		if !bytes.Equal(got, want) {
 			t.Fatalf("appendQuotedForLog(%q) = %s, strconv.AppendQuote = %s", s, got, want)
 		}
 	})
