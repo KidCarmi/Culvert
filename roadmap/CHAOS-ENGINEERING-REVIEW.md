@@ -95,6 +95,13 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-24 — CHAOS-66 sweep (the SIEM/syslog forwarding path under a
+collector outage). ID CLAIMED IN THIS PLACEHOLDER ROW AS COMMIT ONE, BEFORE ANY
+CODE WAS WRITTEN** — the second sweep to follow the remedy the header above
+reaches twice, and the id will not move. Scope: `internal/syslog` +
+`syslog.go` + `checkSyslogFeed` (diagnostics.go) + the `/api/syslog` admin
+surface. Findings and closures are written up in §36 when the sweep lands.
+
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
 file as commit one, which is the remedy the header above reaches twice
