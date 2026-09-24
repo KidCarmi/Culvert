@@ -10,6 +10,7 @@ package main
 // and a plane that never reports degraded passes "does not page an idle node".
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -574,7 +575,8 @@ func TestChaos66_IdleNodeIsNeverDegraded(t *testing.T) {
 // A UDP feed cannot prove delivery; every surface that reports one as healthy
 // must say so, or a green gauge is read as proof the SIEM has the events.
 func TestChaos66_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}

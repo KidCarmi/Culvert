@@ -1859,7 +1859,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			// Disable syslog.
 			if sw := activeSyslog(); sw != nil {
 				sw.SetDeliveryObserver(nil)
-				sw.Close()
+				_ = sw.Close() //nolint:errcheck // best-effort release; the handle is being cleared either way
 				setActiveSyslog(nil)
 			}
 			syslogConfigured = ""
