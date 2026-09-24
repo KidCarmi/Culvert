@@ -6650,7 +6650,7 @@ diagnostics row (viewer-visible, counts only) already carries the posture.
 ### Gates
 
 `internal/syslog/syslog_stats_test.go` (7) and `syslog_health_chaos_test.go`
-(12).
+(13).
 
 Every defect gate was **verified failing against its reintroduced pre-fix
 shape**: the contract row reported `ok`/"forwarding is active" with a dead
@@ -6676,7 +6676,19 @@ found the two clock-seam races above, which is the argument for writing it at
 all: a concurrency gate earns its keep by finding what its author did not know
 to look for.
 
-Four controls, because the cheapest ways to pass the defect gates are all worse
+One gate was demoted to a control after being written as a defect gate.
+`ReplacedWriterDoesNotCorruptTheSuccessorsState` was meant to prove that
+detaching the delivery observer before closing a displaced writer stops that
+writer charging its final-flush drops against its replacement. It passes
+against the tree WITHOUT the detach, because the isolation holds by
+construction: `syslogFeedState` reads its counters from whichever writer is
+live. The detach stays as hygiene and is documented as hygiene; the test stays
+as a control on the property an operator depends on. **A gate that cannot fail
+is worth less than no gate**, so labelling it is not a formality — an
+unlabelled vacuous gate is read by the next person as proof of something it
+never tested.
+
+Five controls, because the cheapest ways to pass the defect gates are all worse
 than the defect: a plane that reported every feed as degraded would satisfy
 "sees a runtime outage" (`HealthyFeedStillReportsActive`); one that never
 reported degraded would satisfy "does not page an idle node"

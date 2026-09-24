@@ -128,5 +128,14 @@ func releaseReplacedSyslogWriter(old *syslogWriter) {
 	if old == nil {
 		return
 	}
+	// Detach the delivery observer FIRST. This is HYGIENE, not a fix for an
+	// observed defect: the plane reads its counters from whichever writer is
+	// live, so a displaced writer's final-flush drops land on its own Stats and
+	// cannot move the successor's (pinned as a control, which passes with and
+	// without this line). What it stops is an abandoned writer doing pointless
+	// work through a stale callback while it drains — and it removes the one
+	// path by which a future change to syslogFeedState could start attributing
+	// a dead writer's outcomes to a live one.
+	old.SetDeliveryObserver(nil)
 	go func() { _ = old.Close() }()
 }

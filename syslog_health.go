@@ -512,14 +512,22 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 	if sw == nil {
 		return "unconfigured", "no collector is configured"
 	}
+	syslogHealth.mu.Lock()
+	target := syslogHealth.target
+	syslogHealth.mu.Unlock()
+
 	before := sw.Stats()
 	_, _ = sw.Write([]byte("Culvert syslog test message — connectivity probe"))
 
-	deadline := syslogHealthNow().Add(syslogProbeWait)
+	// time.Now, deliberately NOT the syslogHealthNow seam: this waits on real
+	// socket I/O, not on a freshness computation, so it must advance even when
+	// a test has frozen the clock to drive degradation — against a frozen seam
+	// the loop would never reach its deadline and the probe would hang.
+	deadline := time.Now().Add(syslogProbeWait)
 	for {
 		st := sw.Stats()
 		if st.Delivered > before.Delivered {
-			if !strings.HasPrefix(strings.ToLower(syslogConfiguredAddr), "tcp://") {
+			if !strings.HasPrefix(strings.ToLower(target), "tcp://") {
 				return "sent", "datagram sent; UDP cannot confirm the collector received it — use tcp:// for delivery evidence"
 			}
 			return "delivered", "the collector accepted the test event"
@@ -527,7 +535,7 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 		if st.Drops > before.Drops {
 			return "dropped", "the test event was lost before reaching the collector (" + reasonOrUnknown(st.LastFailureReason) + ")"
 		}
-		if !syslogHealthNow().Before(deadline) {
+		if !time.Now().Before(deadline) {
 			return "unknown", "no delivery outcome within the probe window; the event is still queued"
 		}
 		time.Sleep(10 * time.Millisecond)

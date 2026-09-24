@@ -580,3 +580,42 @@ func TestChaos66_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
 		t.Errorf("udp feed row does not state that delivery is unprovable: %q", row.Message)
 	}
 }
+
+// CONTROL, not a defect gate, and labelled as such because it was written as
+// one and does not earn the title: it passes against the tree WITHOUT the
+// observer detach in releaseReplacedSyslogWriter, verified. The isolation holds
+// by construction — syslogFeedState reads its counters from whichever writer is
+// live, so a displaced writer's final-flush drops land on its own Stats and can
+// never move the successor's. The detach is hygiene (it stops an abandoned
+// writer doing pointless work through a stale callback) and this test does not
+// prove it; what it does pin is the property an operator depends on, which is
+// that re-pointing a collector does not make the new target look broken.
+func TestChaos66_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
+	first := startSyslogCollector(t)
+	second := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+first.addr)
+
+	// Fill the displaced writer's queue against a dead collector, then replace
+	// it: its flush window expires and it charges drops on its own counters.
+	first.stop()
+	for i := 0; i < 50; i++ {
+		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
+	}
+	syslogConfiguredAddr = "tcp://" + second.addr
+	if err := InitSyslog("tcp://"+second.addr, "rfc3164"); err != nil {
+		t.Fatalf("re-point: %v", err)
+	}
+	syslogConfigured = "tcp://" + second.addr
+
+	// Give the displaced writer time to finish flushing and dropping.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if syslogFeedState().Drops > 0 {
+			t.Fatalf("the replacement inherited %d drops from the writer it displaced", syslogFeedState().Drops)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if row := checkSyslogFeed(); row.Status != diagOK {
+		t.Errorf("row on a healthy replacement = %v (%q); want ok", row.Status, row.Message)
+	}
+}
