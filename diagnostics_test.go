@@ -136,6 +136,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"policy_loaded":              false,
 		"root_ca":                    false,
 		"session_secret":             false,
+		"admin_username_length":      false,
 		"cdr":                        false,
 		"cluster_posture":            false,
 		"saml_state_posture":         false,
@@ -1539,5 +1540,62 @@ func TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach(t *testing.T) {
 	}
 	if found.OperatorAction == "" {
 		t.Error("oidc_jwks_trust fail row has no operator_action")
+	}
+}
+
+// TestApiDiagnostics_OversizeUsernameSurfacedOnContract is the fix under
+// test: before it, an admin account whose username exceeds the login
+// endpoint's 256-byte bound (CHAOS-63) was reported only by a one-time log
+// line at boot (warnOversizeConfiguredUsernames) — an operator who missed
+// that line, or whose container's boot log had already rolled off, had no
+// way to discover or confirm-fix the condition without reading the process
+// log. This check makes the same evidence a standing GET /api/diagnostics
+// row instead.
+func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	longName := strings.Repeat("a", maxUsernameLen+1)
+	if err := cfg.SetUIUser(longName, "Chaos63-oversize-1!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findDiagnosticCheck(c, "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("admin_username_length status = %q, want warn when a configured username exceeds the login bound", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("admin_username_length warn row has no operator_action")
+	}
+	if strings.Contains(found.Message, longName) {
+		t.Error("admin_username_length message should not echo the username itself")
+	}
+}
+
+// TestApiDiagnostics_UsernameLengthOKByDefault pins the quiet case: an
+// ordinary roster with no oversize usernames reports ok, not warn.
+func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	if err := cfg.SetUIUser("ordinary-admin", "Chaos63-ordinary-1!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findDiagnosticCheck(c, "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagOK {
+		t.Errorf("admin_username_length status = %q, want ok when no username exceeds the login bound", found.Status)
 	}
 }

@@ -145,6 +145,7 @@ func buildOperatorContract() OperatorContract {
 		checkPolicyLoaded(),
 		checkRootCA(),
 		checkSessionSecret(),
+		checkOversizeConfiguredUsernames(),
 		checkCDR(),
 		checkClusterPosture(),
 		checkDPLastGoodConfigSnapshot(),
@@ -507,6 +508,62 @@ func checkSessionSecret() OperatorContractCheck {
 		Code:    "session_secret",
 		Status:  diagOK,
 		Message: "admin session HMAC key initialised",
+	}
+}
+
+// checkOversizeConfiguredUsernames reports admin accounts whose username
+// exceeds the public login endpoint's maxUsernameLen bound (CHAOS-63,
+// login_input_bounds.go). Such an account still authenticates normally —
+// rejectOversizeLoginUser exempts any already-configured name — so this is a
+// warning, never a failure or a block on the config itself.
+//
+// Before this check existed, the ONLY signal was a one-time log line emitted
+// at boot (warnOversizeConfiguredUsernames, auth_startup.go): an operator
+// who did not happen to be watching the console at startup — or who is
+// running a container fleet where boot logs roll off quickly — had no way
+// to discover the condition short of reading the process log, and no way
+// to confirm afterward that a rename actually fixed it. This surfaces the
+// identical evidence as a standing operator-contract row, visible on every
+// GET /api/diagnose call and in the Diagnostics panel, for the life of the
+// process rather than scrolling out of a log file. Usernames themselves are
+// not included in the message (matching the boot-time warning's own
+// discipline of reporting only the length) — Admin Users already lists the
+// full roster for the operator to identify which account to rename.
+func checkOversizeConfiguredUsernames() OperatorContractCheck {
+	if cfg == nil {
+		return OperatorContractCheck{
+			Code:    "admin_username_length",
+			Status:  diagOK,
+			Message: "no admin accounts configured",
+		}
+	}
+	n, maxLen := 0, 0
+	for _, u := range cfg.ListUIUsers() {
+		if len(u.Username) > maxUsernameLen {
+			n++
+			if len(u.Username) > maxLen {
+				maxLen = len(u.Username)
+			}
+		}
+	}
+	if n == 0 {
+		return OperatorContractCheck{
+			Code:    "admin_username_length",
+			Status:  diagOK,
+			Message: "all configured admin usernames are within the login length limit",
+		}
+	}
+	plural := ""
+	if n != 1 {
+		plural = "s"
+	}
+	return OperatorContractCheck{
+		Code:   "admin_username_length",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte login limit (longest: %d bytes) — "+
+			"they still authenticate normally, but every other credential entry point caps names at 64 bytes",
+			n, plural, maxUsernameLen, maxLen),
+		OperatorAction: "Rename the affected account(s) from Admin Users so every credential entry point agrees on the name.",
 	}
 }
 
