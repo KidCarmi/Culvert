@@ -45,8 +45,9 @@
 ##      earlier. Every other job is scheduled in parallel (stage 1) and each
 ##      carries its own PR-skip condition, so a qa-race failure suppresses
 ##      only qa-coverage — and still fails the aggregate below, which needs
-##      every job. (The dispatch-only unsharded audit is the other consumer of
-##      qa-race's evidence; it is outside the ordinary graph — see below.)
+##      every job. (The unsharded audit — weekly schedule or an opt-in
+##      dispatch — is the other consumer of qa-race's evidence; it is outside
+##      the ordinary graph — see below.)
 ##
 ##      Do not add a `needs:` edge here for ordering alone. Stage 1 removed
 ##      six that bought nothing but serialised the longest job in front of
@@ -61,6 +62,11 @@
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: QA Gate
+# The title names the execution mode so a reporter reading run metadata can
+# tell an audit from an ordinary dispatch without the inputs, which the runs
+# API does not return (CI-REDESIGN §17). '' keeps GitHub's default title for
+# pushes and pull requests.
+run-name: ${{ github.event_name == 'schedule' && 'QA Gate · scheduled equivalence audit' || github.event_name == 'workflow_dispatch' && format('QA Gate · dispatch · audit={0}', inputs.unsharded_audit) || '' }}
 # Least-privilege default: jobs that need write scopes (packages, checks,
 # contents, security-events, pull-requests) declare them at job level.
 permissions:
@@ -79,6 +85,16 @@ on:
     # remains via security-release-gate (tags) + ci.yml catalog gate.
   pull_request:
     branches: [main]
+  # CI-REDESIGN stage 6B: ONE weekly same-SHA equivalence audit on the default
+  # branch — the full main graph PLUS the unsharded reference and the
+  # comparison, exactly what a `unsharded_audit: true` dispatch runs. It is
+  # never release evidence: release gating reads only event=push runs of main
+  # (.github/scripts/require-gate.sh), which a schedule never is.
+  # Sunday 06:23 UTC: off the Monday 02:00–06:00 cluster (14 scheduled runs
+  # start there), and after every daily cron, so the audit does not queue
+  # behind them for runners.
+  schedule:
+    - cron: "23 6 * * 0"
   workflow_dispatch:
     inputs:
       unsharded_audit:
@@ -94,9 +110,16 @@ on:
         type: boolean
         default: false
 
+# Audit executions (the weekly schedule and an `unsharded_audit` dispatch) get
+# their OWN group and are never cancelled: a main push must not cancel a
+# ~30-minute audit half way, and an audit must not cancel the main-push run
+# that is release evidence. Ordinary runs keep the cancel-superseded group.
+# The audit predicate appears verbatim everywhere it decides (this group and
+# its cancel flag, both audit jobs, the aggregate's require-success);
+# ci_perf_report_test.go pins every copy equal.
 concurrency:
-  group: qa-gate-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)) && 'qa-audit' || 'qa-gate' }}-${{ github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)) }}
 
 jobs:
   # ─── A. Application-logic gate ──────────────────────────────────────────────
@@ -638,15 +661,17 @@ jobs:
         run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v .
 
   # ─── Audit: the unsharded race reference (CI-REDESIGN stage 5B) ────────────
-  # QUALIFICATION mode, dispatch-only (`unsharded_audit: true`). On every push,
-  # pull request and default dispatch both jobs are skipped, so an ordinary run
-  # pays nothing for them. When requested they are part of the gate: the
-  # aggregate needs both, so a lost test or a lost covered block refuses the
-  # QA approval of that run. Their artifacts carry the `qa-audit-` prefix and
+  # QUALIFICATION mode: the weekly schedule, or a dispatch with
+  # `unsharded_audit: true`. On every push, pull request and default dispatch
+  # both jobs are skipped, so an ordinary run pays nothing for them. On an
+  # audit execution they are part of the gate AND must be exactly `success`
+  # (the aggregate's require-success): a lost test or a lost covered block
+  # refuses the QA approval, and so does an audit job that was unexpectedly
+  # skipped. Their artifacts carry the `qa-audit-` prefix and
   # are never release evidence (release evidence is a main-push run).
   qa-unsharded-audit:
     name: "Audit · unsharded race reference"
-    if: github.event_name == 'workflow_dispatch' && inputs.unsharded_audit
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)
     runs-on: ubuntu-latest
     timeout-minutes: 50  # > the 40m per-binary test budget below (compile + tee + upload)
     steps:
@@ -684,7 +709,7 @@ jobs:
     # The edge carries DATA: the reference's log and profile, and qa-race's
     # inventory, results and merged profile.
     needs: [qa-race, qa-unsharded-audit]
-    if: always() && github.event_name == 'workflow_dispatch' && inputs.unsharded_audit
+    if: always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -814,8 +839,10 @@ jobs:
     # and this aggregate reads that skip as a pass — which is correct only
     # because qa-race's own `failure` is in the same `needs` set and refuses
     # on its own. Never drop qa-race from that set. The two audit jobs skip
-    # unless a dispatch requests `unsharded_audit`; when it does, they are
-    # judged like any other job.
+    # unless the run is an audit (weekly schedule or `unsharded_audit`
+    # dispatch); on an audit, skipped-as-pass would let an audit that never
+    # ran approve, so require-success names them — and the jobs they consume
+    # — as exactly `success`.
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -823,6 +850,7 @@ jobs:
         with:
           needs-json: ${{ toJSON(needs) }}
           title: "✅ QA Gate — APPROVED"
+          require-success: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)) && 'qa-race,qa-coverage,qa-unsharded-audit,qa-unsharded-audit-compare' || '' }}
           extra-summary: ${{ github.event_name == 'pull_request' && 'PASS-THROUGH on PRs — QA is enforced by the Fast/Deep PR Gates (roadmap/CI-REDESIGN.md, step 5); this gate runs fully on main pushes.' || '' }}
 
       - name: Summarise

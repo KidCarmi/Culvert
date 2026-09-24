@@ -291,6 +291,14 @@ func TestQARaceShards_AuditIsOptInAndJudged(t *testing.T) {
 				t.Errorf("job %q would run on %s with the input at its default — the audit must be opt-in", name, ev)
 			}
 		}
+		// Stage 6B: the weekly schedule IS an audit, and a dispatch that asks
+		// for one gets one.
+		if !evalRaceOwnership(t, cond, "schedule", "refs/heads/main") {
+			t.Errorf("job %q must run on the weekly schedule (stage 6B); got if: %q", name, j.If)
+		}
+		if !evalRaceOwnership(t, strings.ReplaceAll(cond, "inputs."+qaAuditInput, "true"), "workflow_dispatch", "refs/heads/main") {
+			t.Errorf("job %q must run on a dispatch with %s=true; got if: %q", name, qaAuditInput, j.If)
+		}
 		if !agg[name] {
 			t.Errorf("the QA aggregate must need %q — a requested audit that fails must refuse the gate", name)
 		}
