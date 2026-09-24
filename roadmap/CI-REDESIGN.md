@@ -2,8 +2,9 @@
 
 ## 0. Current status (authoritative)
 
-As of 2026-09-24, main `9450d33` (Stage 6B closeout, §18) plus the first
-natural-run measurements (§18.3–§18.5). This table
+As of 2026-09-24, main `75dbb8b` (#1486: targeted report dispatches skip the
+trend) plus the first natural-run measurements (§18.3–§18.5) and the
+conformance-fixture change (§19). This table
 is the one place that says where the plan stands. The sections below it are
 the record of how each stage was built and measured; where their present
 tense disagrees with this table, this table wins.
@@ -18,7 +19,7 @@ tense disagrees with this table, this table wins.
 | Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
 | Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | The non-root lane is now the Fast gate's critical path (§18.5); root-state/package isolation (`internal/mcp/execution` is 72 % of the lane) |
 | Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
-| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Schema v2 verified live: 28 on-demand PR reports read their evidence from artifacts and named a verified cohort; a metadata-only report stays `unknown`/unverified. The first automatic v2 report on main failed closed (HTTP 403, rate limit suspected) and its re-run verified it (§18.3.1) | Scheduler: the first audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired — **pending**. Verified cohorts: **1**. Successful executions: Fast `race` 16, Fast `race+frontend+mcp` 8, main QA 1. The PR samples all come from one 12-hour window, so every baseline stays provisional (§18.4) | The trend now skips a targeted dispatch (§18.3.1); live confirmation waits for the first dispatch after merge |
+| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Schema v2 verified live: 28 on-demand PR reports read their evidence from artifacts and named a verified cohort; a metadata-only report stays `unknown`/unverified. The first automatic v2 report on main failed closed (HTTP 403, rate limit suspected) and its re-run verified it (§18.3.1) | Scheduler: the first audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired — **pending**. Verified cohorts: **1**. Successful executions: Fast `race` 16, Fast `race+frontend+mcp` 8, main QA 1. The PR samples all come from one 12-hour window, so every baseline stays provisional (§18.4) | — (the dispatch fix is confirmed live: a targeted dispatch skipped the trend, an empty one ran it; §18.3.1) |
 
 Remaining backlog, in the order the measurements support (§18.5):
 
@@ -29,7 +30,8 @@ Remaining backlog, in the order the measurements support (§18.5):
    measures it (§18.5): PR time-to-both-green is bounded by the Deep gate's
    determinism job in 25 of 28 runs.
 2. **Determinism** — the longest job on both QA (≈860 s) and the Deep PR
-   gate (median 897 s).
+   gate (median 897 s). First slice done: repeated OpenAPI fixture
+   preparation in the conformance tests (§19).
 3. **Root-state/package isolation** — packages whose tests share process or
    on-disk state cannot be split or reordered safely; this bounds items 1–2.
 4. **Repeated static-contract work** — many walls re-read and re-parse the
@@ -2375,6 +2377,8 @@ the default branch, main `9450d33` (#1478). Each report prints one
 | First automatic v2 report | *CI Performance Report* 35990426653, job 107602944435, for *QA Gate* push 35989051459 on `9450d33` (QA succeeded) | Attempt 1 **failed closed**: `GET …/actions/runs/35989051459: HTTP 403` at 11:00 UTC. No report was published and nothing claimed success. **Cause suspected, not established:** it came minutes after the enrichment burst below, but the collector logs only the status code. The response body and `x-ratelimit-*` headers were not recorded, so the log cannot prove a rate limit. Attempt 2 (re-run of the failed job, 12:06 UTC, job 107624053905) **succeeded**: `attempt=1 event=push tested=9450d33 class=main-qa evidence=artifacts` (same six documents), `image-logs=17/17 verdict=ok verified=true`, same cohort as the PR samples. It published `ci-run-report-35989051459-1` (4,021 bytes). Attempt 1 remains in the run's history. |
 | On-demand v2 reports, Fast PR runs | 28 dispatches with `run_id`, e.g. 35990137756 / job 107602002719 for Fast run 35937792762 | All 28 report jobs succeeded. Every line reads `attempt=1 evidence=artifacts image-logs=18/18 verified=true` and names six documents (`qa-race-shard-0…3/meta.json`, `qa-race-verdict/{results,verdict}.json`). Example: `head=c96f0b60 tested=3a99c2be` — the tested SHA is the merge commit, not the PR head, and the report keeps both. |
 | Missing evidence stays unknown | The same collector run locally against Fast run 35937792762 without artifact access | `evidence=metadata-only image-logs=0/18`, image and toolchain `unknown`, `verified=false`. It lands in its own cohort and is never pooled. |
+| Targeted dispatch after #1486 | *CI Performance Report* 36017569814 on main `75dbb8b`, `run_id` 35989051459 (a run already reported, so nothing new was enriched) | `Report · one run` succeeded and published `ci-run-report-35989051459-1` (4,053 bytes); `Report · trend + audit freshness` was **skipped**. |
+| Empty dispatch after #1486 | *CI Performance Report* 36018809544 on main `75dbb8b`, empty `run_id` | `Report · one run` was **skipped** and the trend **ran and succeeded** (2 min 50 s) despite it, publishing `ci-trend-report-36018809544` (6,653 bytes). This is the one deliberate trend over the verified samples. Its verdict is in the artifact and step summary, which the authoring session's egress cannot read; the trend prints no summary line to its log. |
 | Trend on those dispatches | The 28 trend jobs of the same dispatches | **All failed** on `HTTP 403` (`list pr-fast-gate.yml push runs`). A dispatch with `run_id` also runs the full trend (the trend job's `if:` accepts any `workflow_dispatch`), so 28 dispatches were 28 trends reading the same history. |
 
 **Finding — enrichment was not bounded.** Enriching N runs cost N full
@@ -2457,8 +2461,9 @@ successful executions only.
 - main QA samples beyond the first; they accrue with each main push;
 - the first scheduled audit and backstop (due 2026-09-27, **pending** until
   they actually execute);
-- one deliberate trend run over the verified samples, after the dispatch
-  fix is on main.
+- the verdict of the one deliberate trend over the verified samples
+  (36018809544, §18.3.1): it ran and succeeded, but its artifact has not
+  been read from the authoring session.
 
 ### 18.5 Observed bottlenecks and the next optimization
 
@@ -2618,3 +2623,84 @@ groups and the old queue field, and job logs are no longer read.
 No gate, check, release step or permission depends on any of it. A `v2`
 report left in retention is refused by a reverted `v1` trend, which then
 measures that run from metadata.
+
+## 19. Conformance fixture reuse (first determinism slice)
+
+The determinism job runs the whole module unsharded, shuffled, twice in one
+package process (`go test -count=2 -shuffle=on ./...`). It is the longest job
+of the Deep PR gate and of main QA (§18.5), and the root package dominates it.
+
+**Evidence (Deep run 35999698583).** The determinism job took 14 min 51 s, of
+which the shuffled double run took 13 min 49 s. The root package took
+750.2 s; `internal/mcp/execution` 98.7 s.
+
+**What cost the time.** `assertResponseConforms`,
+`assertResponseConformsAdmin` and `mutatingResponseCase` each called
+`loadContract` for every subtest. `loadContract` calls
+`apicontract.LoadSpec`, which loads, parses and validates the entire OpenAPI
+document every time. Measured before any edit (4-core box, Go 1.26.6, one
+prebuilt test binary per side, fixed shuffle seeds):
+
+| Measure | Value |
+|---|---|
+| One `LoadSpec` | ≈183 ms (5×20 iterations, 174–190 ms) |
+| `loadContract` calls, root package, one pass | 129, of which 99 from per-subtest helpers |
+| Share of the `TestConformance_` family's CPU in `LoadSpec` | 72 % (CPU profile). Handlers and response/request validation do not show up among the top entries. |
+
+**Change (test helpers only).**
+
+- Each top-level test loads the spec once and passes it explicitly to its
+  subtests. `-count=2` runs each top-level test twice, so every invocation
+  still gets a freshly loaded fixture.
+- There is no global cache, no `sync.Once` and no `t.Parallel`, and no
+  production code changes.
+- The response check moved into `checkResponseConforms`, which returns the
+  violation instead of failing the test. The helpers call it and fail as
+  before.
+- Tests that load or modify their own specification are untouched: the
+  request-conformance tests, the drift and live gates, and `internal/apicontract`.
+
+**Sharing is safe, and pinned.**
+
+- `kin-openapi`'s `VisitJSON` only fills a package-level regex cache (a
+  `sync.Map` keyed by pattern); the schema setters that assign fields are
+  builders, not on the validation path.
+- `apicontract_shared_spec_test.go` validates every documented JSON response
+  status and request body against seven good and bad bodies (8,813
+  validations). It then requires the loaded document to marshal
+  byte-identically.
+- The same file interleaves conforming and malformed responses on one shared
+  spec, for both roles. The malformed cases are a wrong status, a wrong
+  content type, a wrong field type, a missing required field, an
+  undocumented field and a non-JSON body.
+- Three injected defects each fail those tests: schema validation off,
+  content-type check off, and a spec mutated during validation.
+- Every test and subtest name of the root package is unchanged; the full
+  `-v` result lists differ only by the two new tests.
+
+**Measured result** (same machine, toolchain and binaries; runs
+interleaved base/candidate).
+
+| Level | Baseline | Candidate | Change |
+|---|---|---|---|
+| Fixture: `loadContract` calls per `-count=2` run of the contract tests | 258 | 92 | −166 (≈30 s of loading at 183 ms) |
+| Family: `TestConformance_`, `-count=2`, 5 recorded seeds (101…505), median wall | 41.75 s | 14.31 s | −27.4 s (−66 %) |
+| Suite: root package, `-count=2 -shuffle=20260421`, one run each | ROOT_BASE | ROOT_CAND | ROOT_DELTA |
+| Gate: Deep determinism job on CI | 14 min 51 s (35999698583) | GATE_CAND | one sample each; not a trend |
+
+The suite and gate rows are single samples. They say the saving shows up
+where expected. They do not establish a stable p90 or an overall
+PR-completion speedup; Deep determinism stays the PR's longest job (§18.5).
+
+**Validation.**
+
+- Targeted race run of the contract tests, `-count=2 -shuffle=303`: passed.
+- Complete unsharded shuffled double run, `go test -count=2
+  -shuffle=20260421 ./...` with `TEST_SEED=20260421` (the CI seed): FULL_RESULT.
+- `-count=2` stays in one package process; nothing is split or sharded, so
+  state-leak detection across repetitions is unchanged.
+
+**Side note.** `TestCredWall_LedgerStatesTheRealScanCount` counts source
+files on disk, so every new test file changes the MCP ledger's
+`SCANNED (N files)` claim. That is its design. This change moves it to
+2,605.
