@@ -902,9 +902,11 @@ type policyDecision struct {
 
 // emitPolicyDecision renders d and writes it as one log line.
 //
-// d is taken by POINTER only to keep the ~176-byte struct off the argument
-// copy (gocritic hugeParam); it is read-only here and never retained, so the
-// callers' composite literals stay on the stack.
+// d is taken by POINTER to keep a ~176-byte struct copy off a path that runs
+// once per proxied request — the same reason this repo ranges large structs by
+// index. It is read-only here and never retained, and escape analysis confirms
+// the callers' composite literals still stay on the stack, so the pointer buys
+// the saving without moving anything to the heap.
 func emitPolicyDecision(d *policyDecision) {
 	safeRule := sanitizeLog(d.rule)
 
