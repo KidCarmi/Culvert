@@ -79,38 +79,39 @@ func idpmetaStaleMaxAgeString() string {
 	return (idpmeta.StaleMaxAge).String()
 }
 
-// acquireIdPDocument is the ONE entry point the IdP compile path uses to get a
-// remote document.
+// resolveIdPDocument adjudicates ONE document acquisition: the caller has
+// already attempted the network fetch and hands over its result, and this
+// function decides what the compile proceeds with.
+//
+// It takes the fetch RESULT rather than a fetch CLOSURE on purpose. A closure
+// seam would put this file between the profile config and the outbound
+// request, which is how CHAOS-66's first two attempts moved the SAML metadata
+// URL through an extra parse -> String() -> parameter -> re-parse hop and
+// raised a critical go/request-forgery alert: the taint reached the request
+// through a function boundary instead of being parsed and guarded where it is
+// used. Adjudicating a result keeps every outbound request in the same
+// function as its own guard, exactly as it was before this sweep, and this
+// file never touches a URL that is about to be dialled.
 //
 // Order, and why it is this order:
 //
-//  1. Try the network. A healthy appliance is byte-identical to the pre-fix
-//     one — same client, same timeout, same SSRF guard, same limits — and
-//     always prefers what the IdP is publishing NOW. The cache is a fallback,
-//     never a first choice, so an IdP-side key rotation is picked up at the
-//     first compile after it happens exactly as before.
+//  1. A successful fetch WINS, always. The cache is a fallback, never a first
+//     choice, so an IdP-side key rotation is picked up at the first compile
+//     after it happens exactly as before.
 //
-//  2. On success, persist the raw bytes as last-known-good. A persist failure
-//     is logged and IGNORED: the fetch succeeded, so the only cost is that a
-//     future outage has no fallback, and failing a working compile because a
-//     cache write failed would be strictly worse than not having the cache.
+//  2. On success the raw bytes are persisted as last-known-good. A persist
+//     failure is logged and IGNORED: the fetch succeeded, so the only cost is
+//     that a FUTURE outage has no fallback, and failing a working compile
+//     because a cache write failed would be strictly worse than no cache.
 //
 //  3. On failure, fall back to the last-known-good document if one exists
 //     within idpmeta.StaleMaxAge. Past the ceiling — or with nothing cached —
 //     the original fetch error is returned unchanged and the caller fails
 //     exactly as it did before this package existed.
-//
-// The `fetch` seam takes no arguments and returns raw bytes so this function
-// stays protocol-agnostic and so tests can drive every branch without a
-// network. Where the bytes came from is reported through
-// noteIdPMetadataOutcome rather than returned: the caller's job is identical
-// either way (parse and validate them), and a returned origin nobody consults
-// is an invitation to start treating cached bytes differently.
-func acquireIdPDocument(profileID string, kind idpmeta.Kind, source string, fetch func() ([]byte, error)) ([]byte, error) {
+func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error) ([]byte, error) {
 	store := idpMetadataStore()
 
-	doc, err := fetch()
-	if err == nil && len(doc) > 0 {
+	if fetchErr == nil && len(doc) > 0 {
 		if putErr := store.Put(profileID, kind, source, doc); putErr != nil {
 			// Not fatal — see (2) above. Rate-limiting is unnecessary: this
 			// line is emitted only on a SUCCESSFUL fetch, which is bounded by
@@ -122,17 +123,17 @@ func acquireIdPDocument(profileID string, kind idpmeta.Kind, source string, fetc
 		noteIdPMetadataOutcome(profileID, idpMetaFresh, nil)
 		return doc, nil
 	}
-	if err == nil {
-		err = fmt.Errorf("IdP returned an empty document")
+	if fetchErr == nil {
+		fetchErr = fmt.Errorf("IdP returned an empty document")
 	}
 
 	cached, age, cacheErr := store.Get(profileID, kind, source)
 	if cacheErr != nil {
-		noteIdPMetadataOutcome(profileID, idpMetaUnavailable, err)
-		return nil, err
+		noteIdPMetadataOutcome(profileID, idpMetaUnavailable, fetchErr)
+		return nil, fetchErr
 	}
-	noteIdPMetadataOutcome(profileID, idpMetaStale, err)
+	noteIdPMetadataOutcome(profileID, idpMetaStale, fetchErr)
 	logger.Printf("IdP[%s]: metadata fetch failed (%v) — continuing from the cached document fetched %s ago (refused past %s)",
-		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(err)), age.Round(time.Second), idpmetaStaleMaxAgeString())
+		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), idpmetaStaleMaxAgeString())
 	return cached, nil
 }

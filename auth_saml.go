@@ -231,17 +231,18 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 	var xmlData []byte
 
 	if cfg.MetadataURL != "" {
-		// Validate scheme before making any request.
-		metaURL, err := url.Parse(cfg.MetadataURL)
-		if err != nil {
-			return nil, fmt.Errorf("metadata URL parse: %w", err)
+		// Reject a malformed or wrong-scheme URL HERE, before the fetch, so
+		// that a CONFIGURATION error can never be mistaken for an
+		// AVAILABILITY error and answered from the last-known-good cache.
+		// Only the parse verdict is used; the parsed value is deliberately
+		// discarded and the raw configured string is what reaches the
+		// fetcher, which parses and guards it once in the same function that
+		// issues the request.
+		if err := validateSAMLMetadataURL(cfg.MetadataURL); err != nil {
+			return nil, err
 		}
-		if metaURL.Scheme != "http" && metaURL.Scheme != "https" {
-			return nil, fmt.Errorf("metadata URL must use http or https scheme")
-		}
-
-		doc, err := acquireIdPDocument(profileID, idpmeta.KindSAMLMetadata, metaURL.String(),
-			func() ([]byte, error) { return fetchSAMLMetadataOverNetwork(metaURL.String()) })
+		fetched, fetchErr := fetchSAMLMetadataOverNetwork(cfg.MetadataURL)
+		doc, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr)
 		if err != nil {
 			return nil, err
 		}
@@ -252,6 +253,22 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 	}
 
 	return samlsp.ParseMetadata(xmlData)
+}
+
+// validateSAMLMetadataURL reports whether a configured metadata URL is
+// well-formed and carries a scheme this appliance will fetch. It returns no
+// parsed value on purpose: nothing derived from it may reach an outbound
+// request, so the raw configured string stays the single thing the fetcher
+// parses (see fetchSAMLMetadataOverNetwork).
+func validateSAMLMetadataURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("metadata URL parse: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("metadata URL must use http or https scheme")
+	}
+	return nil
 }
 
 // fetchSAMLMetadataOverNetwork performs exactly the request the pre-CHAOS-66
