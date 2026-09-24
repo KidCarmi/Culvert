@@ -1858,11 +1858,15 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if body.Addr == "" {
 			// Disable syslog.
 			if sw := activeSyslog(); sw != nil {
+				sw.SetDeliveryObserver(nil)
 				sw.Close()
 				setActiveSyslog(nil)
 			}
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
+			// CHAOS-66: the plane must stop claiming the feature exists, or a
+			// switched-off feed keeps exporting culvert_syslog_up 1.
+			noteSyslogForwardingDisabled()
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})

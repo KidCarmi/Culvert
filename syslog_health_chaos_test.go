@@ -86,17 +86,26 @@ func armSyslogFeed(t *testing.T, addr string) {
 }
 
 // waitForDrops blocks until the writer has recorded at least n drops.
+//
+// The budget is deliberately generous. Delivery is asynchronous, so this waits
+// on the drain goroutine being scheduled and on the engine's own 5 s reconnect
+// backoff — both wall-clock, both stretched by whatever else the machine is
+// doing. A 10 s budget flaked once on a loaded box; the assertion is about
+// WHETHER drops are recorded, never about how fast, so a tight budget buys
+// nothing and costs a false failure. On timeout the full snapshot is printed,
+// because "no drops" and "drops attributed to the wrong reason" need different
+// answers.
 func waitForDrops(t *testing.T, n uint64) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if activeSyslog().Stats().Drops >= n {
 			return
 		}
 		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("writer recorded %d drops; want >= %d", activeSyslog().Stats().Drops, n)
+	t.Fatalf("writer recorded %d drops; want >= %d (stats: %+v)", activeSyslog().Stats().Drops, n, activeSyslog().Stats())
 }
 
 // ---------------------------------------------------------------------------
@@ -617,5 +626,38 @@ func TestChaos66_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 	}
 	if row := checkSyslogFeed(); row.Status != diagOK {
 		t.Errorf("row on a healthy replacement = %v (%q); want ok", row.Status, row.Message)
+	}
+}
+
+// Disabling forwarding must make the feature ABSENT again on every surface. A
+// switched-off feed that keeps exporting culvert_syslog_up 1 and a clean row is
+// the same class of false statement this plane exists to remove, pointing the
+// other way.
+func TestChaos66_DisablingForwardingRemovesEverySurface(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+
+	var armed strings.Builder
+	syslogWritePrometheus(&armed)
+	if !strings.Contains(armed.String(), "culvert_syslog_up") {
+		t.Fatalf("precondition: armed feed emits no series:\n%s", armed.String())
+	}
+
+	w := httptest.NewRecorder()
+	apiSyslogConfig(w, jsonReq(http.MethodPost, "/api/syslog", map[string]string{"addr": ""}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("disable returned %d", w.Code)
+	}
+
+	var off strings.Builder
+	syslogWritePrometheus(&off)
+	if off.Len() != 0 {
+		t.Errorf("still emitting series after forwarding was disabled:\n%s", off.String())
+	}
+	if n := syslogDropCount(); n != 0 {
+		t.Errorf("syslogDropCount() = %d after disable; want 0 so /healthz drops the field", n)
+	}
+	if row := checkSyslogFeed(); row.Status != diagOK || !strings.Contains(row.Message, "not configured") {
+		t.Errorf("row after disable = %v (%q); want ok/not configured", row.Status, row.Message)
 	}
 }

@@ -237,6 +237,26 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	sw.SetDeliveryObserver(noteSyslogDelivery)
 }
 
+// noteSyslogForwardingDisabled records that the operator turned forwarding off,
+// so every surface reports the feature as ABSENT again rather than exporting
+// stale zeros.
+//
+// Without it, disabling syslog cleared the writer handle but left the plane
+// reporting `configured`, so a switched-off feed kept exporting
+// `culvert_syslog_up 1` and a clean `syslog_feed` row forever — a green signal
+// for a feature that is not running, which is the same class of false
+// statement this whole file exists to remove, just in the other direction.
+func noteSyslogForwardingDisabled() {
+	syslogHealth.mu.Lock()
+	syslogHealth.configured = false
+	syslogHealth.installedAt = time.Time{}
+	syslogHealth.target = ""
+	syslogHealth.alerted = false
+	syslogHealth.logAt = time.Time{}
+	syslogHealth.suppressed = 0
+	syslogHealth.mu.Unlock()
+}
+
 // noteSyslogDelivery is the delivery observer: called once per DROPPED line,
 // and once when a delivery ends a failure episode.
 //
