@@ -855,10 +855,23 @@ const policyLineBufSize = 448
 // under Lshortfile/Llongfile — but wrong-by-default is not worth saving.
 const policyLineCallDepth = 2
 
-// policyDecision carries one decision line's fields. Every string here is RAW:
-// sanitizeLog is applied by emitPolicyDecision at the single point each value
-// reaches the line, which keeps the CWE-117 barrier exactly where the Printf
-// form had it (at the emitter, on the value, before the sink).
+// policyDecision carries one decision line's fields.
+//
+// rule, host, target, cond and identity are RAW: sanitizeLog is applied by
+// emitPolicyDecision at the single point each reaches the line, which keeps the
+// CWE-117 barrier exactly where the Printf form had it — at the emitter, on the
+// value, before the sink.
+//
+// verb, action, clientIP, hostSep and reqID reach the buffer BARE, and this is
+// the same set the Printf form passed bare through %s. Each has a reason that
+// must still hold if it is ever re-sourced: verb and action are compile-time
+// constants of the four emitters; clientIP is a net.SplitHostPort product of
+// the kernel-supplied peer address; hostSep is either the literal "->" or
+// r.Method, which net/http's request parser has already rejected control
+// characters from; reqID is generated hex. Do not add a field to this bare set
+// without stating why its bytes cannot be client-chosen — the SOCKS5
+// destination is the standing example of a value that looked safe and was not
+// (see SEC-SOCKS5-LOG-1).
 type policyDecision struct {
 	verb     string // leading token, e.g. "POLICY_ALLOW"
 	action   string // trailing action= token, e.g. "allow"
