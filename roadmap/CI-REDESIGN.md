@@ -1,6 +1,48 @@
 # CI/CD Redesign — Lane Architecture & Retirement Checklist
 
-Status: **retirement steps 2–4, §3.9 docker-skip, AND steps 5–7 in
+## 0. Current status (authoritative)
+
+As of 2026-09-24, main `9450d33` (Stage 6B closeout, §18) plus the first
+natural-run measurements (§18.3–§18.5). This table
+is the one place that says where the plan stands. The sections below it are
+the record of how each stage was built and measured; where their present
+tense disagrees with this table, this table wins.
+
+| Stage | Implemented | Operationally verified | Awaiting natural samples | Remaining backlog |
+|---|---|---|---|---|
+| Lane architecture, retirement steps 2–7 (§1–§3) | Yes | Yes: Fast/Deep gates carry every PR; QA/Security are pass-through on PRs | — | Step 1 (branch protection names Fast/Deep only; admin) and step 8 (traffic-smoke promotion, then retire `proxy-pr-gate.yml`) |
+| Release publication gating (§5a) | Yes: one predicate over `.github/release-evidence.txt` via `require-release-evidence.sh`; `docker` pushes candidate tags only; `promote-image` moves `latest`/`main`/semver onto the tested digest; every asset is staged as a draft | Yes: on `3febe59` main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step and nothing was promoted (CI run 35905503220) | — | Main-to-tag build-once promotion: a tag still rebuilds the image the main push already built and tested |
+| Stage 1: QA scheduling (§8) | Yes | Yes | — | — |
+| Stages 2A/2B: coverage from the race run, race ownership by event (§9–§10) | Yes | Yes | — | — |
+| Stage 3: native cross-compilation in the production image (§11) | Yes: `FROM --platform=$BUILDPLATFORM`, `-trimpath -buildvcs=false` | Yes (byte-identical binaries, measured) | — | Toolchain consistency: CI and `go.mod` use Go 1.26.6; the production and E2E images build with `golang:1.27-alpine` |
+| Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
+| Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | The non-root lane is now the Fast gate's critical path (§18.5); root-state/package isolation (`internal/mcp/execution` is 72 % of the lane) |
+| Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
+| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Schema v2 verified live: 28 on-demand PR reports read their evidence from artifacts and named a verified cohort; a metadata-only report stays `unknown`/unverified. The first automatic v2 report on main failed closed (HTTP 403, rate limit suspected) and its re-run verified it (§18.3.1) | Scheduler: the first audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired — **pending**. Verified cohorts: **1**. Successful executions: Fast `race` 16, Fast `race+frontend+mcp` 8, main QA 1. The PR samples all come from one 12-hour window, so every baseline stays provisional (§18.4) | The trend now skips a targeted dispatch (§18.3.1); live confirmation waits for the first dispatch after merge |
+
+Remaining backlog, in the order the measurements support (§18.5):
+
+1. **The non-root lane** — it bounds the Fast race path in 23 of 24
+   successful code-PR runs (median 752 s against 454 s for the slowest
+   shard); `internal/mcp/execution` is the last package to finish in every
+   inspected lane. A saving here is a hypothesis until a bounded comparison
+   measures it (§18.5): PR time-to-both-green is bounded by the Deep gate's
+   determinism job in 25 of 28 runs.
+2. **Determinism** — the longest job on both QA (≈860 s) and the Deep PR
+   gate (median 897 s).
+3. **Root-state/package isolation** — packages whose tests share process or
+   on-disk state cannot be split or reordered safely; this bounds items 1–2.
+4. **Repeated static-contract work** — many walls re-read and re-parse the
+   same workflow and source files independently.
+5. **Main-to-tag build-once promotion** — a tag still rebuilds the image the
+   main push already built and tested.
+6. **Toolchain consistency** — CI and `go.mod` use Go 1.26.6; the production
+   and E2E images build with `golang:1.27-alpine`.
+
+None is implemented by the closeout. Unrelated test investigations stay
+outside this plan.
+
+Historical status (2026-07-03; superseded by the table above): **retirement steps 2–4, §3.9 docker-skip, AND steps 5–7 in
 PASS-THROUGH MODE applied** (2026-07-03). The heavy installer/maint e2e
 workflows are nightly + path-filtered on PRs; catalog-e2e and CodeQL are
 PR-path-scoped; the QEMU image build no longer runs on PRs. Steps 5–7 were
@@ -155,12 +197,14 @@ only via the tag-path gates.
 
 ### 5a. Release-gate integrity (PANW audit item 1 — REQUIRED admin step)
 
-The signing/publish jobs (`docker`, `catalog-pipeline`, `release`) and
-`auto-tag` gate on the gate **workflow files** concluding success for the
-commit on its main push, via `.github/scripts/require-gate.sh` (bound to the
-workflow path + main-push provenance — a spoofed check-run *name* or a
-tag-triggered re-run of the same SHA can no longer self-approve). This is the
-in-repo backstop.
+Every release-publishing job gates on ONE predicate over ONE manifest:
+`.github/scripts/require-release-evidence.sh` reads
+`.github/release-evidence.txt` and resolves each row through
+`.github/scripts/require-gate.sh`, which binds the verdict to the workflow
+**file** path and to a main-push run of the exact commit (a spoofed check-run
+*name* or a tag-triggered re-run of the same SHA cannot self-approve). A
+`mandatory` row refuses on failed, cancelled, pending, skipped, neutral or
+absent. This is the in-repo backstop.
 
 It is a BACKSTOP, not the primary control. On the tag path `require-gate.sh`
 is checked out from the **tagged tree**, so anyone able to push an arbitrary
@@ -175,10 +219,15 @@ Until that ruleset exists, a maintainer with push access can still hand-push a
 tag on a *reviewed, green* commit (the in-repo guard allows exactly that and
 refuses a non-green commit). Set the ruleset to close the arbitrary-tree class.
 
-**Deferred (same class, Phase 2):** on a *main* push the `docker` job publishes
-+ cosign-signs `ghcr:latest` in parallel with the gate, with no gate
-dependency — a commit that later fails the gate has already shipped a signed
-`latest`. Fix by gating the main-push publish/sign the same way (wait mode).
+**Closed (was deferred, Phase 2).** A *main* push used to publish and
+cosign-sign `ghcr:latest` in parallel with the gate, so a commit that later
+failed the gate had already shipped a signed `latest` (run 35507615339
+published 29 minutes before the QA/Security verdict existed). Now `docker`
+pushes only non-channel candidate tags (`candidate-<run_id>`, `sha-<short>`),
+and the evidence-gated `promote-image` job moves `latest`/`main`/semver onto
+that exact tested digest; every release asset is staged as a draft and only
+`publish-release` turns it public. Runbook:
+`docs/operator/release-publication-gating.md`.
 
 ### 5b. Egress control on the signing jobs (PANW audit item 2)
 
@@ -229,18 +278,18 @@ release. The build is a **shared composite** (`.github/actions/build-release-bin
 that BOTH the `release` job and `verify-reproducible` call, so the independent
 rebuild can never drift from the real build (a two-copy build command would make
 the check tautological or falsely-red). Honest scope: this is **same-image,
-same-pinned-toolchain** reproduction (`setup-go-cache` pins Go 1.25.11 for both),
+same-pinned-toolchain** reproduction (`setup-go-cache` reads `go-version-file:
+go.mod` for both; Go 1.26.6 today),
 not an independent-environment rebuild — SLSA's trusted builder covers build
 integrity; F1 verifies *determinism* (catches dep/toolchain-drift/tampering
 nondeterrminism between hashing and signing). The verify job is `contents: read`
 only (signs nothing — deliberately no `id-token`). **Guardrail:** never add
 `always()`/`success()`/a status function to `provenance`'s `if:`, or the gate
-silently opens. **Remaining follow-up** — the **Docker image binary**
-(`Dockerfile`) still builds with default `-buildvcs=auto`, and its `.dockerignore`
-strips tracked files (`*_test.go`, `*.md`, …) while keeping `.git`, so the
-in-container `git status` sees those as deleted and the image binary ships
-`vcs.modified=true` (not tree-state reproducible). Disjoint provenance surface
-(the image has its own cosign signature), tracked separately.
+silently opens. **Image binary (closed).** The production `Dockerfile` used to
+build with the default `-buildvcs=auto`; its `.dockerignore` strips tracked
+files while keeping `.git`, so the image binary shipped `vcs.modified=true`.
+Both Go stages now build with `-trimpath -buildvcs=false` (§11), so the image
+binary is tree-state reproducible too.
 
 **F2 — runtime version stamp (DONE).** Prompted by the first LIVE
 authoritative MCP Observe Acceptance (v1.0.202), which failed its required
@@ -831,15 +880,14 @@ now lists `golang@1.27-alpine?platform=linux/amd64` as a material (previously
 provenance materials; an external policy that pins the toolchain material to the
 image's platform would need updating.
 
-### Next original-plan follow-up (NOT in this stage)
+### Next original-plan follow-up (done in stage 4, §12)
 
-`test/e2e/maint-agent/Dockerfile.e2e` — used by the maint-agent update,
-backup-upgrade, install-lifecycle and appliance-catalog-update E2E workflows —
-has drifted from production: `golang:1.26-alpine` (production 1.27),
+At the time of this stage, `test/e2e/maint-agent/Dockerfile.e2e` — used by the
+maint-agent update, backup-upgrade, install-lifecycle and
+appliance-catalog-update E2E workflows — had drifted from production: `golang:1.26-alpine` (production 1.27),
 `alpine:3.22` (production 3.24), a build-time `go mod tidy` (the divergent-recipe
-step production removed), and no `-trimpath`/`-buildvcs=false`. Aligning it is
-the next step; it was left alone here to keep this change to the production
-image.
+step production removed), and no `-trimpath`/`-buildvcs=false`. Stage 4
+aligned it (§12).
 
 ### Rollback
 
@@ -1879,3 +1927,694 @@ Revert the 6A commits.
 
 Do **not** remove the QA contract step on its own. That would leave the
 production aggregate bound proved nowhere at production size.
+
+## 17. Stage 6B — performance reporting and the weekly equivalence audit
+
+Goal: see CI performance drift and evidence drift early, from evidence that
+already exists. No test is re-run to produce a number.
+
+### 17.1 What was added
+
+| Piece | Where | What it does |
+|---|---|---|
+| Collector | `cmd/cireport` (stdlib only) | `run` → one versioned report (`culvert.ci-run-report/v2` since §18) + step summary per run attempt. `trend` → equivalence groups, provisional statistics, advisory regressions, audit freshness (`culvert.ci-trend-report/v2`). |
+| Reporter workflow | `.github/workflows/ci-perf-report.yml` | Runs the collector after gate runs complete, weekly, or on dispatch. |
+| Weekly audit | `qa-gate.yml` `schedule: "23 6 * * 0"` | The existing unsharded reference and `rootshard compare`, on the default branch, every Sunday. |
+| Baseline | `.github/ci-perf-baseline.json` | Reviewed performance targets. Ships `provisional` and empty. |
+| Walls | `ci_perf_report_test.go`, `cmd/cireport/*_test.go` | See §17.9. |
+
+### 17.2 What a report measures, and how
+
+- **Elapsed** = the required aggregate's `completed_at` minus the attempt's
+  `run_started_at`, and the same for the race verdict job. It is wall clock.
+  Parallel jobs are never added together to produce it.
+- **Busy** = the union of job intervals. It is always ≤ the wall span.
+- **Runner-minutes** = the sum of executed job durations. Every report says
+  this is **not a bill**: GitHub rounds per job, and public-repo minutes are free.
+- **Attempt scoping.** A re-run attempt lists the earlier attempt's jobs.
+  A job that started before this attempt did is *carried over*: it is listed
+  but never timed. Skipped jobs never count.
+- **Attempt queue** (§18.2) = the attempt's enqueue time → the first start
+  among this attempt's own jobs. It is `null` (unknown), never zero, when the
+  attempt's enqueue time was not observed.
+- **Phases.** Queue is job `created_at` → `started_at`. Setup, work and
+  teardown come from step names. Anything else is recorded under `unknowns`.
+  Cache state is **not inferred**.
+- **Race evidence.** Read from `qa-race-verdict` (`verdict.json`,
+  `results.json`) and `qa-race-shard-N/meta.json`: shard imbalance, slowest
+  lane packages, slowest root tests, inventory size, coverage and verdict
+  problems. Pre-5C Fast runs used a single race job with no verdict. Their
+  job set is `race-unsharded`, so they never share a group with the
+  sharded engine.
+- **Audit evidence.** Read from `qa-audit-compare` / `fast-audit-compare`
+  (`comparison.json`). The audit state is one of:
+  - `not-requested`
+  - `passed`
+  - `failed`
+  - `missing` — requested, but the jobs did not execute
+  - `unknown` — executed, but the comparison could not be read
+
+  Only `passed` is healthy.
+- **Identity.** The verdict's commit must equal `head_sha` on every event
+  except `pull_request`, which tests the merge commit. Every shard meta must
+  agree on commit and toolchain. A timing candidate's `source` must name this
+  run and SHA. Any disagreement is recorded as a **problem**, and the run is
+  kept out of the statistics.
+- **Classes**, which are never mixed:
+  - `pr-code`
+  - `pr-docs-only` — the race engine was not *scheduled*
+  - `pr-pass-through`
+  - `main-qa`
+  - `scheduled-audit`
+  - `manual-audit`
+  - `manual-qualification`
+  - `fault-injection`
+  - `other`
+
+  Groups are keyed `workflow|class|job set|cohort` (the cohort was added in
+  §18.1). The job set comes from what actually executed: `race`,
+  `race-unsharded`, `audit`, `qa-layers`, `frontend`, `mcp`, `maint`. So a PR
+  that ran the frontend and MCP lanes is never compared with one that did
+  not, and a run on another runner image, shard count or Go release line is
+  never compared with this one.
+- **Run-names.** A dispatch publishes its inputs in its title, which the runs
+  API returns:
+  - Fast PR Gate: `… · dispatch · audit=<bool> · fault=<choice>`
+  - QA Gate: `… · dispatch · audit=<bool>`
+
+  The collector trusts these facts **only on `workflow_dispatch`**. On a pull
+  request `display_title` is the PR's own title, so a PR named "fault=x"
+  cannot reclassify its run (pinned by test).
+
+**Missing evidence is `unknown`, never healthy.** Expired artifacts, a
+refused download or an undecodable document are listed under `unknowns`. The
+report still completes.
+
+### 17.3 The weekly same-SHA equivalence audit
+
+A scheduled QA run executes the **full main graph plus** `qa-unsharded-audit`
+and `qa-unsharded-audit-compare`. That is the job set an `unsharded_audit: true`
+dispatch has run since 5B, with the same comparison engine, inventory checks,
+coverage floors, the empty exceptions file and the "both sides must have
+succeeded" step. Nothing in the comparison changed.
+
+- **One predicate:**
+  `github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)`.
+  It is written in five places, all pinned equal: the concurrency group, its
+  cancel flag, both audit jobs' `if:`, and the aggregate's `require-success`.
+- **An unexpectedly skipped audit cannot pass.** On an audit run the aggregate
+  requires `qa-race`, `qa-coverage`, `qa-unsharded-audit` and
+  `qa-unsharded-audit-compare` to be exactly `success`. The test drives the real
+  `needs-verdict` shell: `skipped`, `failure`, `cancelled` or an absent entry
+  for any of the four refuses. Ordinary runs pass `''` and are unchanged.
+- **Separate concurrency.** Audits use the `qa-audit-<ref>` group with
+  `cancel-in-progress: false`. Ordinary runs keep `qa-gate-<ref>`, which
+  cancels superseded runs. A main push cannot cancel a running audit, and an
+  audit cannot cancel the main-push run that is release evidence.
+- **Never release evidence.** `require-gate.sh` reads only `event=push` runs of
+  `main`. The release manifest does not name the reporter (pinned).
+- **Sunday 06:23 UTC.** Monday 02:00–06:00 already starts 14 scheduled runs. Sunday 06:23 is after every daily cron has started and shares a slot with no other schedule.
+- **Fast's manual audit is kept** (`pr-fast-gate.yml` `unsharded_audit`) for
+  changes to Fast's caller-specific inputs. Only its run-name changed.
+
+### 17.4 Isolation of the reporter
+
+- **Off the PR critical path.** It runs on `workflow_run`, after the gate has
+  finished, on the default branch, and posts no check to the PR. Nothing
+  requires it, and no workflow chains from it (pinned).
+- **Trusted code only.** `actions/checkout` pins `ref:` to the repository's
+  default branch, with `persist-credentials: false`, so a dispatch on another
+  branch still runs the reviewed collector.
+- **Least privilege.** The token has `actions: read` and `contents: read`, and
+  no secret is used. `setup-go` runs with `cache: false`, because a cache here
+  could have been written by a PR run.
+- **Nothing fetched or executed.** `go run` builds with `GOPROXY=off`; the
+  collector imports only the standard library (pinned).
+- **Artifacts are data.** ZIPs are read into memory, capped in size, and only
+  allowlisted JSON members are decoded. Duplicate member names are refused.
+  `qa-race-build`, which carries the prebuilt test binary, is **never
+  downloaded** (pinned by test). A presigned storage URL's query is stripped
+  from errors before anything is written.
+- **No shell injection.** Event data reaches shell through `env`, and every
+  run id is checked to be numeric. No `run:` body interpolates `${{ }}`
+  (pinned).
+- **A retained report is authenticated before the trend trusts it.**
+  Artifact names are not access-controlled: any run in the repository,
+  including a pull request that edits or adds a workflow, can upload an
+  artifact named `ci-run-report-<id>-<attempt>`. Without a check, such a
+  report could make a failed scheduled audit read as passed. The trend
+  therefore accepts a report only when both of these hold:
+  1. **Trusted producer.** It was made by a run of `ci-perf-report.yml` on
+     the default branch of this repository (not a fork), from an event that
+     runs default-branch code: `workflow_run`, `schedule`, or a
+     default-branch dispatch.
+  2. **Matching identity.** Its run identity matches the API field for
+     field: workflow, event, commit, branch, status, conclusion, creation
+     time, run id and attempt.
+
+  Anything else is rejected and noted, and the run is measured from
+  metadata alone (Codex review, PR #1477). Removing either check alone
+  fails a test.
+
+### 17.5 Operation and retention
+
+| Output | Produced | Kept |
+|---|---|---|
+| `ci-run-report-<run>-<attempt>` (`report.json`, `summary.md`) | After every **non-PR, non-cancelled** Fast/QA run: main pushes, dispatches, the schedule | 90 days |
+| `timing-refresh-candidate-<run>-<attempt>` | Only for a **passed** audit: the refreshed timing file + `diff.json` against the committed one | 90 days |
+| `ci-trend-report-<collector run>` (`trend.json`, `summary.md`) | Sundays 09:43 UTC, after a scheduled audit completes, or on dispatch | 90 days |
+| Raw evidence the reports are built from | Race shard/build/lane/universe artifacts | 7 days |
+| | `qa-race-verdict`, audit reference/compare artifacts | 14 days |
+| | `qa-coverage` | 30 days |
+
+The 90-day reports outlive the evidence they were built from. The retention
+periods are the ones observed on run 35874102885 (`expires_at`). A run can
+therefore be enriched on demand (dispatch with `run_id`) only within **7
+days**: after that its shard `meta.json` — the only source of the toolchain
+— is gone, and the report can no longer verify its cohort. Job logs, the
+source of the runner image, are kept longer (90 days by default).
+
+- **Report on any run, including a PR run:** dispatch *CI Performance Report*
+  with `run_id`. The trend already lists PR runs from metadata.
+- **The trend** reads the newest 25 runs **per workflow and event**. A
+  workflow-wide window would let ~240 PR runs a week push every main push
+  out. It uses the retained per-run report when one exists, else metadata
+  only, and says which.
+
+### 17.6 Expected additional runner usage
+
+These figures are from the last 7 days of gate runs and the measured audit
+runs.
+
+| Item | Estimate |
+|---|---|
+| Weekly audit: one QA run with the audit jobs | **~92–99 runner-min/week**, measured in runs 35866546559 (92.6) and 35874102885 (99.4). An ordinary main QA run is 72 runner-min; the audit jobs are ~24–27 of the total. |
+| Per-run reports | ~47 jobs/week (19 main pushes, 27 dispatches, 1 schedule) × ~1–2 min ≈ **50–95 runner-min/week**. This is an estimate: the workflow cannot run before it is on `main`. |
+| Trend | 1–2 runs/week × ~4 min, of which 2.5 min is collection measured locally over 102 executions |
+| **Total** | **≈ 150–200 runner-min/week** |
+
+None of it is on a required check's path.
+
+Reporting a job per PR run was rejected. About 240 PR runs a week, roughly
+half of them cancelled by a newer push, would cost more than the audit
+itself.
+
+### 17.7 Baseline policy, ownership, investigation
+
+- **Provisional until reviewed.** A group's statistics count only executions
+  that are completed, first attempt, `success` and free of identity problems.
+  The window is the newest 20, and the statistics stay *provisional* below 10
+  samples.
+- **Reviewing a group.** After a group has 10–20 samples, a maintainer copies
+  its reviewed medians into `groups` and sets `status: reviewed`,
+  `reviewedBy` and `reviewedAt` in a PR. The loader refuses a `reviewed`
+  file without a reviewer or date, and sample bounds outside 10..20.
+  Extra full-suite runs must **not** be generated to fill a sample.
+- **Sustained regression (advisory).** It triggers when the 3 newest counted
+  samples of a group all exceed the reviewed median × 1.25. It is emitted as a
+  `::warning::` and never fails anything. Performance signals stay advisory.
+- **Audit freshness (a correctness signal, not advice).** States:
+  `pending-first`, `passed`, `failed`, `stale` (> 8 days since the last pass)
+  and `missing`.
+  `failed`, `stale` and `missing` make the trend job exit 1 with an `::error::`.
+  **Set `audit.introduced` to the merge date when this lands.**
+  - **One audit per weekly slot.** The baseline carries the audit schedule
+    (`audit.cron`, pinned equal to `qa-gate.yml`'s cron) and `slotGraceHours`
+    (3). The latest slot whose grace has passed must have its own completed
+    scheduled audit, or the state is `missing`. An age limit alone cannot
+    say this: the Sunday backstop runs about three hours after the slot, so
+    last week's audit is only ~7.1 days old and would pass a week in which
+    no audit ran (Codex review, PR #1477). A wall pins the backstop to the
+    same day, at or after slot + grace.
+  - **Unknown evidence never passes.** A scheduled run whose jobs cannot be
+    read is kept in the report as `unreadable` and judged `failed`. It is
+    never dropped: dropping it would let an older passing audit stand in
+    for it (Codex review, PR #1477).
+- **Owner.** The CI-REDESIGN owner reviews baselines and investigates every
+  red trend.
+- **Investigating a red audit:**
+  1. Open the audit run's `Audit · sharded vs unsharded` summary and
+     `comparison.json`. Lost tests or blocks are named there.
+  2. Follow §14.2. Every lost block needs an isolated fixture or a reviewed
+     exception.
+  3. Never re-run a red audit to get a green one. The trend enforces this:
+     the runs API reports only a run's latest attempt, so a re-run attempt
+     (attempt > 1) never counts as a passing audit. The next scheduled audit
+     must pass on its first attempt (Codex review, PR #1477).
+- **Investigating a regression warning:**
+  1. Compare the group's recent `report.json`s. Look at the job queue, the
+     setup phase, shard imbalance and the slowest tests.
+  2. A timing-driven imbalance is fixed by reviewing a timing candidate
+     (§17.8), not by editing the partition by hand.
+
+### 17.8 Timing-refresh candidates
+
+A **passed** audit's `qa-root-shard-timings.json` is published as a candidate,
+with a diff against the committed file listing added, removed and changed
+entries. It is **never committed automatically**.
+
+To adopt one, open a PR that replaces `.github/qa-root-shard-timings.json` and
+follow §16.6–16.7. Coverage exceptions are never generated.
+
+### 17.9 Validation
+
+- **`cmd/cireport` tests** use 14 real run fixtures and real audit evidence
+  from run 35874102885. They cover:
+  - every class, including a genuine docs-only run, a cancelled run, a failed
+    run and two re-run attempts;
+  - that parallel jobs do not inflate elapsed time (4 × 400 s shards → 545 s
+    elapsed; runner-minutes = the sum);
+  - that carried-over jobs are excluded;
+  - mismatched verdict, shard and candidate identities;
+  - that an audit that is missing, unreadable or failed never reads as passed;
+  - that only allowlisted artifact members are read, and `qa-race-build`
+    never;
+  - end-to-end collection through a fake API, including a report with no
+    artifacts;
+  - grouping, windowing, advisory regressions and all audit-freshness states;
+  - per-event listing surviving a flood of 30 PR runs.
+- **`ci_perf_report_test.go`** covers:
+  - predicate single-sourcing and its event matrix;
+  - the real `needs-verdict` shell refusing a skipped, failed, cancelled or
+    absent audit job on an audit run;
+  - separate concurrency;
+  - reporter isolation and cost bounds;
+  - the collector's standard-library-only imports;
+  - release evidence staying `event=push` of `main`;
+  - run-name ↔ parser agreement.
+
+  The existing walls were updated rather than bypassed:
+  - the trigger matrix now pins exactly one **weekly** schedule;
+  - the audit opt-in wall now also proves the audit runs on the schedule and
+    on `unsharded_audit=true`;
+  - the race-ownership rationale is corrected.
+- **Mutation proof.** Each of these 13 defects was injected and failed a test:
+  1. an audit job dropped from `require-success`;
+  2. `require-success` removed;
+  3. the compare job not scheduled;
+  4. audits cancellable;
+  5. a shared concurrency group;
+  6. a daily audit;
+  7. a write-scoped reporter;
+  8. a reporter cache;
+  9. a network `GOPROXY`;
+  10. the reporter no longer following QA;
+  11. the reporter checking out the PR head;
+  12. shell interpolation in the reporter;
+  13. a PR title trusted as a run-name.
+- **Live API.** `cireport run` on QA audit run 35874102885 produced:
+  - class `manual-audit`, job set `race+audit+qa-layers`;
+  - elapsed 1939 s to the aggregate and 751 s to the race verdict;
+  - wall 1939 s, busy 1870 s;
+  - runner-minutes 99.4 over 19 jobs.
+
+  `cireport trend` read 102 executions into 13 groups, with every failed and
+  cancelled run listed. Artifact downloads from the authoring session were
+  refused by blob storage (403, session egress policy). They were correctly
+  reported as `unknown` with verdict `missing`, and no signature leaked into
+  the output. Artifact parsing is proven through the fake API. The
+  `workflow_run` path runs for the first time after merge.
+
+### 17.10 Rollback
+
+- **Reporting only.** Delete `.github/workflows/ci-perf-report.yml` (and
+  optionally `cmd/cireport`, `.github/ci-perf-baseline.json` and
+  `ci_perf_report_test.go`). No gate, check or release depends on them.
+- **The weekly audit.** In `qa-gate.yml`:
+  1. remove the `schedule:` block, the `run-name` and the audit concurrency
+     split;
+  2. restore the two audit `if:`s to
+     `github.event_name == 'workflow_dispatch' && inputs.unsharded_audit`;
+  3. drop `require-success`.
+
+  Then revert the matching wall changes in `qa_gate_scheduling_test.go`,
+  `qa_race_shards_test.go` and `ci_perf_report_test.go`.
+
+  Do **not** remove only `require-success`: a scheduled audit would then pass
+  with its audit jobs skipped.
+- Fast's `run-name` can stay or go independently.
+
+## 18. Stage 6B closeout — operational acceptance
+
+Stage 6B merged as PR #1477 (`3febe59`). This closeout corrects two
+measurement defects found in review of the merged code, verifies the
+reporting on GitHub, and starts the observation period. It changes reporting
+only. No required check, gate, release step, permission or race-engine
+output changes.
+
+### 18.1 Cohort identity
+
+**Finding.** The trend grouped executions by workflow, class and job set
+only. Runs on a different runner platform, shard count or Go toolchain could
+therefore enter the same reviewed baseline.
+
+**Change.** Each report derives a **cohort** from what was observed, and the
+trend groups by `workflow|class|job set|cohort`:
+
+| Component | Source | Value when not observed |
+|---|---|---|
+| `platform` | the executed jobs' runner labels + runner group (job metadata), separators percent-escaped so distinct label sets never share a string | `unknown` |
+| `image` | the runner image **every measured job** reported in its own log (the "Runner Image" group the runner writes first, e.g. `ubuntu-24.04`) | `unknown` when any measured job was not observed; `mixed:…` when jobs ran on different images |
+| `shards` | the root-shard jobs GitHub scheduled | `none` when no race engine ran |
+| `toolchain` | Go release line + GOOS/GOARCH from the shards' `meta.json` | `unknown`; `n/a` when no race engine ran |
+
+- **Why the image is keyed.** GitHub annotates every `ubuntu-latest` job on
+  this repository: *"The ubuntu-latest label will migrate to Ubuntu 26
+  beginning October 19, 2026."* A label is not a platform identity, and the
+  job metadata exposes no image.
+- **Why every measured job, not just the shards.** A rollout can move one
+  job and not another. Elapsed time, runner-minutes and the lane's time come
+  from jobs outside the root shards, so an image read only from the shards
+  would pool a run whose lane ran on 26.04 under 24.04 (Codex review, PR
+  #1478; the first version of this closeout read the image from the shards'
+  `meta.json` and was reverted for exactly this). The collector reads the
+  first 16 KB of each measured job's log with a byte-range request and
+  parses only the `Image:` and `Version:` lines of the "Runner Image" group,
+  as data, in a safe character set. It reads nothing else and executes
+  nothing. Every hosted job prints the group, so runs without a race engine
+  (docs-only, pass-through) get an observed image too.
+- **What stays comparable.** Source commits, durations, Go patch releases
+  and the weekly runner image build do not split a cohort. The exact Go and
+  image versions (including the weekly image build, the value that tells two
+  samples of one cohort apart) stay in each report and trend sample row,
+  stated only when every shard (or job) reported the same one.
+- **Complete evidence only.** The toolchain counts as observed only when the
+  `meta.json` of **every** scheduled shard was read — matched shard for
+  shard, not by count (documents for shards `{0,1,2,4}` do not cover
+  scheduled `{0,1,2,3}`), and each document must name the shard whose
+  artifact carried it; the image only when
+  **every** measured job's log was. An unread one may have run elsewhere,
+  and the others do not speak for it. Shards that disagree on the Go release
+  line or GOOS/GOARCH make the toolchain `mixed:…`, like the image, and
+  never verified (Codex review, PR #1478).
+- **Unknown stays separate.** A component that was not observed reads
+  `unknown` (never a guessed value), forms its own unverified cohort, and the
+  baseline loader refuses a reviewed median unless the key parses as exactly
+  `platform=…;image=…;shards=…;toolchain=…`, every field is non-empty and
+  observed, and no field is `mixed:` (Codex review, PR #1478).
+- **The image build is stated only when all jobs agree.** During a rollout
+  jobs can share an image but not a build; the report then leaves the build
+  unstated and says so, and the cohort (keyed on the image) is unaffected
+  (Codex review, PR #1478).
+- **Metadata-only PR reporting is unchanged.** PR runs are still measured
+  from metadata in the trend. A selected natural run is enriched with the
+  existing on-demand report (dispatch *CI Performance Report* with `run_id`),
+  within the 7-day shard-artifact retention (§17.5). The workflow's
+  `actions: read` already covers job logs; no permission changes.
+
+### 18.2 Attempt queue
+
+**Finding.** `runQueueSeconds` was `run_started_at − created_at`. On attempt
+1 GitHub stamps both at enqueue, so it was always 0. On a re-run,
+`created_at` is attempt 1's, so it measured the gap between attempts.
+Observed on run 35034671115: the runs endpoint reports `created_at`
+23:13:20, while `/attempts/2` reports 23:47:37 — 34 minutes that are not
+queueing.
+
+**Change.** The collector reads through the attempt endpoint, whose
+`created_at` is that attempt's enqueue time, keeps the run's own `created_at`
+as identity (what the trend compares), and reports
+`attemptQueueSeconds` = attempt enqueue → the first start among this
+attempt's own jobs — every job that has started, completed or still running
+(a run reported in progress), excluding skipped jobs and jobs carried over
+from an earlier attempt (Codex review, PR #1478). When the enqueue time was not observed (a re-run read
+through the runs list) it is `null` with an `unknowns` entry, never zero.
+Elapsed time and runner-minutes are unchanged. Report schemas move to `v2`;
+the trend refuses `v1` reports and measures those runs from metadata.
+
+### 18.3 Live verification on GitHub
+
+| Check | Evidence | Result |
+|---|---|---|
+| First automatic report on main | *CI Performance Report* 35907140269 (`workflow_run`), triggered by *QA Gate* push 35905503217 on `3febe59` | Checked out main `3febe59` (trusted code). Collected in 14 s and published `ci-run-report-35905503217-1` (3,607 bytes, `report.json` + `summary.md`). The `-1` suffix is read from the report's own `run.attempt`, so the report names attempt 1. The trend job was skipped, as designed for a push. |
+| It ran on a failed run | The QA run concluded `failure` | Reported, as designed: only cancelled runs are skipped. |
+| Evidence it could read | The QA run published `qa-race-verdict` and `qa-race-shard-0…3`, plus `qa-race-build` (56 MB), which the allowlist never reads | Present and unexpired. |
+| Report contents | — | **Not verified from the authoring session**: artifact storage (`*.blob.core.windows.net`) is refused by the session's egress policy, and GitHub exposes no API for step summaries. The collector now also prints one sanitized line to its job log (`cireport run: … evidence=… read=… tested=…`), so from the first run after this merges the report's evidence and tested SHA are checkable through the logs API. |
+| Pre-merge `workflow_run` triggers | 35905794603, 35906657765 | `skipped`: pull-request runs, as designed. |
+| Manual reporting path, known successful audit | Dispatch 35907858252 on main, `run_id` 35874102885 (same-SHA audit at `fef1fd0`) | Published `ci-run-report-35874102885-1` (3,959 bytes) **and `timing-refresh-candidate-35874102885-1` (81,945 bytes)**. The candidate is uploaded only when the collector downloaded and decoded the verdict (ok) and the comparison (passed) and the candidate's provenance names this run — so this is artifact verification, not the metadata fallback. The trend job on the same dispatch succeeded. |
+| Audit scheduling | `qa-gate.yml` and `ci-perf-report.yml` are `active`; each has **0** scheduled runs | The first audit is due Sunday 2026-09-27 06:23 UTC and the backstop trend 09:43. Neither has fired yet; nothing here claims it has. |
+| Separate concurrency | `qa-gate.yml` on main, lines 120–122 | Audit runs use `qa-audit-<ref>` with `cancel-in-progress: false`; ordinary runs keep `qa-gate-<ref>`. Failure semantics (a skipped, failed, cancelled or absent audit job refuses) are pinned by the walls that drive the real `needs-verdict` shell. |
+| `audit.introduced` | `2026-09-23`, the merge date | Left unchanged. The trend reads `pending-first`: the only past due slot, 2026-09-20, predates it. |
+| Release safeguards | CI 35905503220 on `3febe59` | Main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step. Nothing was tagged or promoted. |
+
+The main QA failure is `TestUpgradeApply_RejectsInvalidRef` in
+`cmd/culvert-maint` (a separate module untouched since #1300): `connection
+refused` on the agent socket in the shuffled double run. The seven previous
+main QA runs were green. It is outside this plan, it was not re-run, and it
+is left to the separate flaky-test investigation.
+
+### 18.3.1 Schema v2 on natural runs (2026-09-24)
+
+Collector revision for every report below: `ci-perf-report.yml` checks out
+the default branch, main `9450d33` (#1478). Each report prints one
+`cireport run:` line to its job log, which is how its contents were read
+(artifact storage is still refused by the authoring session's egress).
+
+| Check | Evidence | Result |
+|---|---|---|
+| First automatic v2 report | *CI Performance Report* 35990426653, job 107602944435, for *QA Gate* push 35989051459 on `9450d33` (QA succeeded) | Attempt 1 **failed closed**: `GET …/actions/runs/35989051459: HTTP 403` at 11:00 UTC. No report was published and nothing claimed success. **Cause suspected, not established:** it came minutes after the enrichment burst below, but the collector logs only the status code. The response body and `x-ratelimit-*` headers were not recorded, so the log cannot prove a rate limit. Attempt 2 (re-run of the failed job, 12:06 UTC, job 107624053905) **succeeded**: `attempt=1 event=push tested=9450d33 class=main-qa evidence=artifacts` (same six documents), `image-logs=17/17 verdict=ok verified=true`, same cohort as the PR samples. It published `ci-run-report-35989051459-1` (4,021 bytes). Attempt 1 remains in the run's history. |
+| On-demand v2 reports, Fast PR runs | 28 dispatches with `run_id`, e.g. 35990137756 / job 107602002719 for Fast run 35937792762 | All 28 report jobs succeeded. Every line reads `attempt=1 evidence=artifacts image-logs=18/18 verified=true` and names six documents (`qa-race-shard-0…3/meta.json`, `qa-race-verdict/{results,verdict}.json`). Example: `head=c96f0b60 tested=3a99c2be` — the tested SHA is the merge commit, not the PR head, and the report keeps both. |
+| Missing evidence stays unknown | The same collector run locally against Fast run 35937792762 without artifact access | `evidence=metadata-only image-logs=0/18`, image and toolchain `unknown`, `verified=false`. It lands in its own cohort and is never pooled. |
+| Trend on those dispatches | The 28 trend jobs of the same dispatches | **All failed** on `HTTP 403` (`list pr-fast-gate.yml push runs`). A dispatch with `run_id` also runs the full trend (the trend job's `if:` accepts any `workflow_dispatch`), so 28 dispatches were 28 trends reading the same history. |
+
+**Finding — enrichment was not bounded.** Enriching N runs cost N full
+trends against the shared budget of about 1,000 API requests per hour, and
+the likely casualty was an unrelated automatic report. **Fixed:** a dispatch
+with a `run_id` now reports that run and skips the trend; an empty dispatch
+is the trend. The weekly schedule, the scheduled-audit trigger, `needs:
+run-report`, `always()`, the default-branch checkout and the read-only token
+are unchanged. `ci_perf_report_dispatch_test.go` evaluates both jobs' real
+`if:` conditions, including GitHub's rule that an `if:` without a status
+function skips when a `needs` job was skipped or failed. The matrix covers:
+
+- a targeted dispatch;
+- an empty dispatch with run-report skipped;
+- a scheduled-audit completion whose report failed;
+- a cancelled scheduled audit;
+- main push completions: success, failure and cancelled;
+- pull-request runs.
+
+It rejects the pre-fix condition and the fixed condition without `always()`.
+
+**Enrichment rule until the fix is live on main:** no bulk enrichment.
+After it, enrich in small sequential batches (at most five dispatches, each
+waiting for the previous one), then dispatch once with an empty `run_id` for
+the trend. The 28 reports above are reused and not re-collected.
+
+**Follow-up, not in this change:** have the collector log the status,
+`x-ratelimit-remaining`/`-reset` and a bounded API message on failure, so
+a 403 can be attributed from its own evidence.
+
+### 18.4 Observation period
+
+Baselines stay `provisional` until a **verified** cohort has 10–20
+comparable natural executions. No suite is re-run to produce samples.
+
+Samples available now (trend over 102 executions, newest 25 per workflow and
+event; counted = completed, first attempt, success, consistent evidence):
+
+| Workflow | Class | Job set | Executions | Counted | Elapsed to aggregate, median / p90 |
+|---|---|---|---|---|---|
+| Fast | `pr-code` | `race+frontend+mcp` | 10 | 8 | 754 / 927 s |
+| Fast | `pr-code` | `race` | 9 | 6 | 856 / 869 s |
+| QA | `main-qa` | `race+qa-layers` | 4 | 3 | 877 / 922 s |
+| QA | `manual-audit` | `race+audit+qa-layers` | 9 | 2 | 1,614 / 1,939 s |
+| QA | `pr-pass-through` | `minimal` | 25 | 20 | 12 / 14 s |
+
+The rest are pre-5C engine runs (`race-unsharded`), pre-5B QA runs
+(`qa-layers` only), fault injections and qualification dispatches, which are
+listed and never pooled with the current engine.
+
+**Verified cohorts, 2026-09-24: 1.** Cohort
+`platform=ubuntu-latest@GitHub Actions; image=ubuntu-24.04; shards=4;
+toolchain=go1.26 linux/amd64`. It holds 28 enriched Fast PR runs
+(2026-09-23 12:19 to 2026-09-24 00:18 UTC, 10 branches, all first attempts)
+and the first main QA run after #1478 (§18.3.1). Durations are job
+metadata; runner-minutes sum every job in the run. Statistics cover
+successful executions only.
+
+| Workflow · class · job set | Successful | Failed | Cancelled | Elapsed median / p90 | Race path median / p90 | Runner-min median | Queue median / p90 |
+|---|---|---|---|---|---|---|---|
+| Fast · `pr-code` · `race` | 16 | 4 (3 with `verdict=failed`, 1 in another job) | 14 | 856 / 951 s | 815 / 908 s | 62.3 | 4 / 99 s |
+| Fast · `pr-code` · `race+frontend+mcp` | 8 | 0 | 0 | 754 / 856 s | 712 / 810 s | 67.3 | 4 / 77 s |
+| QA · `main-qa` | 1 | 0 | 0 | one sample, not a statistic | — | — | — |
+
+- `race` and `race+frontend+mcp` stay separate groups and are never pooled.
+- Cancelled executions are counted from run metadata only; the collector
+  does not report them, so they are not verified samples. Another 2
+  cancelled code-PR runs in the window stopped before their job set was
+  known and belong to neither group.
+- Every group stays **provisional**. `race` reaches 10 successes, but they
+  all come from one 12-hour window. "Counted" also requires no
+  contradictory evidence, which only the trend checks, and no trend has run
+  over these samples yet.
+- The 101 older-engine and docs-only runs in the same window are
+  metadata-only and stay out of every verified cohort.
+- PR artifacts expire after 7 days, the first on 2026-09-30. Main QA
+  reports are produced automatically.
+
+**Missing evidence:**
+- main QA samples beyond the first; they accrue with each main push;
+- the first scheduled audit and backstop (due 2026-09-27, **pending** until
+  they actually execute);
+- one deliberate trend run over the verified samples, after the dispatch
+  fix is on main.
+
+### 18.5 Observed bottlenecks and the next optimization
+
+Critical path of the counted current-engine runs (job metadata, medians):
+
+| Run kind | Build | Root shards (4) | Non-root lane | Verdict | Aggregate done |
+|---|---|---|---|---|---|
+| Fast `pr-code`, `race` (6) | 138 s, done at 150 s | 449 s, done at 605 s | **758 s, done at 770 s** | 42 s | 855 s |
+| Fast `pr-code`, `race+frontend+mcp` (8) | 141 s | 456 s, done at 611 s | 590 s, done at 605 s | 37 s | 720 s |
+| QA `main-qa` (3) | 122 s | 469 s, done at 590 s | 753 s, done at 756 s | 41 s, done at 800 s | 874 s; **Determinism 859 s** |
+
+- **The non-root lane is the Fast gate's critical path.** Across the 14
+  counted code-PR runs, the lane finished after the root shards in 10. Those
+  runs took a median **854 s** to the aggregate, against **702 s** when the
+  shards finished last. The lane added a median 154 s (max 191 s). Its
+  duration varies from 476 to 763 s between runs of similar code, while the
+  shards stay at 433–499 s.
+- **One package dominates the lane.** In audit run 35874102885,
+  `internal/mcp/execution` took **436 s of the lane's 610 s**; the other 110
+  packages run beside it. §14.8 recorded this split as unmeasured and
+  optional; it is now measured.
+- **Queueing is not a bottleneck.** The median job queue is 3 s.
+- **On main QA the determinism job is last** (≈860 s), after the race
+  verdict (≈800 s).
+
+**Next optimization — a hypothesis, re-assessed 2026-09-24.** The original
+proposal was to take `internal/mcp/execution` off the non-root lane's
+critical path by giving it its own lane job or sharding its tests. The 28
+verified runs (§18.4) confirm the lane is the Fast race path's bound, but
+not the size of the saving:
+
+- The lane bounds 23 of 24 successful runs: median 752 s against 454 s for
+  the slowest root shard in `race` runs.
+- In three inspected lane logs, `internal/mcp/execution` was the last
+  package to finish (312, 407 and 528 s). It started 160–235 s into the
+  lane and ran alone for the final 227–393 s. Its neighbours in
+  `internal/mcp` slowed in step, so part of the variance is runner speed or
+  contention, not the package alone.
+- `go test` already runs packages concurrently. Moving the same package to
+  another job removes its contention with the rest of the lane but not its
+  own run time; the ≈150 s estimate from §18.5 is unproven.
+- **A faster Fast gate does not by itself make PRs green sooner.** Deep
+  finished after Fast in 25 of 28 PR runs (median 928 s against 853 s), and
+  its determinism job is Deep's longest (median 897 s, p90 913 s, 27
+  runs). Main QA ends
+  on determinism too (≈860 s). Until determinism shrinks, a lane saving
+  moves runner-minutes and Fast's own check, not time to both-green.
+
+**The end-to-end critical path.** A code PR is mergeable when both
+required gates are green, so its completion time is the later of Fast and
+Deep:
+
+| Path | Median | Bound by |
+|---|---|---|
+| Fast · `race` race path | 815 s | the non-root lane (median 752 s) |
+| Deep | 928 s | determinism (median 897 s) |
+| Main QA | ≈870–920 s | determinism (≈860 s), then the lane (≈750 s) |
+
+Any experiment must therefore report three results separately and never
+substitute one for another:
+
+1. the **Fast-only** change (lane end and Fast elapsed);
+2. the change in **PR completion time**, the later of Fast and Deep;
+3. the **runner-minute** cost.
+
+A Fast-only gain with PR completion unchanged is a runner-time result, not
+a latency result.
+
+**A bounded comparison comes before any implementation, outside the change
+that records this evidence.** Pair same-SHA runs of the arms in one time
+window, without re-running failed work:
+
+| Arm | Change |
+|---|---|
+| A | Current lane (control) |
+| B | `internal/mcp/execution` in its own job |
+| C | Same lane, with `internal/mcp/execution` started first |
+
+Arm C needs proof from the lane log that the package actually started
+first. Package order and `-p` do not establish it, because `go test`
+decides when packages start.
+
+A handful of pairs can show whether the median moves. It cannot show that
+p90 does not regress; that claim waits for the provisional baselines to
+mature. A determinism comparison of the same shape is the candidate that
+can move PR completion time. Neither is implemented here.
+
+### 18.6 Validation
+
+- `cmd/cireport` tests:
+  - **Separation:** another runner label, a self-hosted group, another shard
+    count, another Go release line, another GOARCH, another runner image
+    under the same label.
+  - **Unverified, never reviewed:** a non-shard job (the lane) on another
+    image, one measured job's log not read, one shard's metadata not read,
+    four documents for four shards that are not the scheduled four, a
+    shard's `meta.json` naming another shard, nothing read, platform not
+    observed.
+  - **Verified without an engine:** a real docs-only run whose jobs were
+    all observed (toolchain `n/a`).
+  - **Log parsing:** the real log head of job 107340167293 parses to
+    `ubuntu-24.04` / `20260907.300.1`; the provisioner's `Version:` line
+    before the group is ignored; an unclosed group, a missing group and a
+    hostile value are refused. Through the fake API the collector follows
+    the storage redirect, cuts a 1 MB log that ignores the byte range, and
+    reads a missing log as unknown with a note.
+  - **Still grouped:** another commit, slower jobs, a Go patch release and
+    next week's image build.
+  - **Trend and baseline:** the trend keeps verified and unknown cohorts
+    apart; the baseline refuses an unverified, mixed, incomplete,
+    reordered or empty-field reviewed key, and the old key shape.
+  - **Re-run queue:** the real 34-minute re-run reads 33 s through the
+    attempt endpoint, unknown through the runs list, with elapsed (222 s)
+    and runner-minutes (3.1) unchanged. The collector reads the attempt
+    endpoint and still matches the runs list's identity.
+  - **Evidence source:** the report says `artifacts` or `metadata-only` and
+    names every document decoded. The log line cannot carry a workflow
+    command (tested with an injection payload).
+- `cmd/rootshard` is unchanged from main.
+- **Mutation proof.** Each of these was injected and failed a test:
+  1. the cohort dropped from the group key;
+  2. the full Go version keyed;
+  3. a re-run falling back to attempt 1's `created_at`;
+  4. a reviewed unknown cohort accepted;
+  5. the collector ignoring the attempt endpoint;
+  6. the attempt's `created_at` replacing identity;
+  7. the runner group ignored;
+  8. the image dropped from the key;
+  9. jobs on different images not detected;
+  10. a cohort verified from a subset of the shards' metadata;
+  11. an image accepted from a subset of the measured jobs;
+  12. a reviewed `mixed:` cohort accepted;
+  13. cohort field names and emptiness unchecked;
+  14. one job's image build presented as the run's;
+  15. the attempt queue read only from completed jobs;
+  16. a skipped job's stamp counted as a start;
+  17. shards on different toolchain lines verified, or accepted by a
+      reviewed baseline;
+  18. the image read from the root shards only;
+  19. the parser matching the provisioner group;
+  20. an unsafe image value accepted;
+  21. shard metadata matched to the scheduled shards by count, not index;
+  22. a `meta.json` accepted for a shard it does not name;
+  23. one shard's exact Go version presented as the run's when shards
+      differ by patch release;
+  24. runner labels joined without escaping their separators (including
+      the trend's `|`);
+  25. the observed image build dropped from the trend sample row;
+  26. a toolchain value carrying a key separator accepted as observed;
+  27. the run's exact toolchain stated from a partial shard-metadata read.
+- `golangci-lint` reports 0 issues; the root CI walls pass.
+
+### 18.7 Rollback
+
+Revert the closeout commits. The trend returns to `workflow|class|job set`
+groups and the old queue field, and job logs are no longer read.
+No gate, check, release step or permission depends on any of it. A `v2`
+report left in retention is refused by a reverted `v1` trend, which then
+measures that run from metadata.

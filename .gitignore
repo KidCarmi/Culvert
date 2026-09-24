@@ -4,6 +4,9 @@ culvert
 /Culvert
 # `go build` inside cmd/rootshard (the CI pilot builds it from source)
 /cmd/rootshard/rootshard
+# `go build ./cmd/cireport` from the root or inside the package (CI uses `go run`)
+/cireport
+/cmd/cireport/cireport
 
 # Go compiled test binaries (`go test -c` / stray `-o *.test` output).
 # A 59MB unstripped Culvert.test was accidentally committed once — never again.
