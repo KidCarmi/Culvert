@@ -2843,10 +2843,27 @@ instead of restating the tag.
 | Agent module tests (`cd cmd/culvert-maint && go test ./...`) | pass on go1.26.8 and on go1.27.1 |
 | Full suite, `go test -count=1 -shuffle=20260421 ./...`, `GOTOOLCHAIN=local` go1.26.8 | **passed**: all 110 packages, 517 s wall (root package 466 s), no failures |
 
-Docker image builds need BuildKit, which the authoring session cannot run.
-They are qualified by this change's PR: the Deep gate's image build, the
-Fast gate's arm64 compile, and the maintenance E2E image build, whose log
-shows the assertion's `compiler:` line.
+**Validation (CI, PR #1488, head `c3d07f2`).** Docker image builds need
+BuildKit, which the authoring session cannot run, so they were qualified on
+the PR. Every compiler line in every job reads go1.26.8. The only other
+version in the logs is go1.23.7, the runner's Docker Engine, not a Culvert
+build.
+
+| Job | Evidence from its log |
+|---|---|
+| Deep · build image (production `Dockerfile`, amd64) | `builder`: `compiler: go1.26.8 (go.mod toolchain: go1.26.8)`, then `culvert: go1.26.8`; `maintbuilder`: the same assertion, then `/culvert-maint: go1.26.8` |
+| Fast · fmt + vet + build | `Setup go version spec 1.26.8`; `Go compiler: go1.26.8 (go.mod toolchain: go1.26.8, GOTOOLCHAIN=local)`; the `GOARCH=arm64` compile passed |
+| Agent-driven container update (maintenance E2E, `Dockerfile.e2e`) | host: the same `Go compiler:` line; image: `compiler: go1.26.8 (go.mod toolchain: go1.26.8)`, `culvert: go1.26.8` in both the v1 and v2 builds |
+| Deep · determinism (shuffle, count=2) | the same `Go compiler:` line; `build determinism OK (proxy)` and `(maint)`; root package passed in 636 s on the re-run |
+| Fast · go test -race (sharded), coverage floors, lint, govulncheck + gosec; the other maintenance and catalog E2E jobs | passed |
+
+The first determinism attempt failed in the root package after 752 s; every
+other package passed. Which test failed is not known: its block lies outside
+the retrievable log tail, and the log artifact's storage host is not
+reachable from the authoring session. Replaying the same commit with the
+same shuffle seed (`-count=2 -shuffle=1790277421444712900`, go1.26.8) passed
+locally in 904 s. The one permitted re-run passed. The failure is recorded
+here as unattributed and load-dependent; it was not fixed or suppressed.
 
 **Performance comparisons.** Every sample in §18.4 and §19 ran Go 1.26.6.
 The report's cohort key records the release line (`go1.26`) by design (§18.1),
