@@ -854,6 +854,19 @@ func checkSyslogFeed() OperatorContractCheck {
 			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
 		}
 	}
+	// CHAOS-66: everything above decides on state fixed at INIT time, and was
+	// the whole row. It answers "did we connect once?" and then reports
+	// "forwarding is active" for the rest of the process lifetime — including
+	// for a collector that died an hour later and has been swallowing every
+	// audit event since. Measured against the pre-fix tree: 49 of 49 audit
+	// lines dropped, this row still ok, still "active".
+	//
+	// The init-time branches stay FIRST and are unchanged: they catch the case
+	// where no Writer exists at all, which the delivery view cannot see because
+	// there is nothing to read stats from.
+	if row, ok := checkSyslogFeedDelivery(); ok {
+		return row
+	}
 	return OperatorContractCheck{
 		Code:    "syslog_feed",
 		Status:  diagOK,

@@ -1819,7 +1819,22 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			panics = globalSyslog.Panics()
 			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
+		// CHAOS-66: drops alone is cumulative and unreadable — it cannot
+		// distinguish a feed that is dark now from one that healed last week.
+		// The delivery snapshot carries the time axis the counter lacks.
+		snap := syslogFeedState()
+		jsonOK(w, map[string]any{
+			"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics,
+			"delivered":         snap.Delivered,
+			"degraded":          snap.Degraded,
+			"neverDelivered":    snap.Configured && snap.NeverDelivered,
+			"lastSuccessUnix":   unixOrZero(snap.LastSuccess),
+			"secondsSinceEvent": int64(snap.Age.Seconds()),
+			"lastFailureReason": snap.Reason,
+			"queueDepth":        snap.QueueDepth,
+			"queueCap":          snap.QueueCap,
+			"deliveryProvable":  snap.Configured && !snap.UDP,
+		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1878,10 +1893,19 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
-	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
-	// now via the exported io.Writer surface (writeMsg is package-internal).
-	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
-	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
+	// CHAOS-66: this used to Write and answer {"ok": true} unconditionally.
+	// Once delivery became asynchronous that confirmed only that a channel
+	// send succeeded — it returned ok for a collector that had been dead for a
+	// week, while checkSyslogFeed's own OperatorAction pointed operators here
+	// to "confirm connectivity". A probe that cannot fail is worse than no
+	// probe. syslogDeliveryProbe waits, bounded, for the drain goroutine to
+	// report an actual outcome for this line.
+	outcome, detail := syslogDeliveryProbe(globalSyslog)
+	jsonOK(w, map[string]any{
+		"ok":      outcome == "delivered" || outcome == "sent",
+		"outcome": outcome,
+		"message": detail,
+	})
 }
 
 // GET/POST /api/security — IP filter + rate limiter config

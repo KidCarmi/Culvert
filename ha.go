@@ -1117,6 +1117,15 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
 	}
+	// CHAOS-66: the SIEM half of the same compliance record. A collector that
+	// is unreachable, not draining, or slower than this node's event rate
+	// loses audit and request events on the way OUT — they are in the local
+	// JSONL but never reach the customer's SIEM, and are never replayed.
+	// Reported separately because the remedy is the collector, not the disk
+	// and not the CP link.
+	if n := syslogDropCount(); n > 0 {
+		resp["syslogDrops"] = n
+	}
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.
 	if n := reqlog.Backpressure(); n > 0 {

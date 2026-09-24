@@ -55,6 +55,26 @@ type Writer struct {
 	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
 	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
 
+	// CHAOS-66 delivery evidence. Drops alone is a CUMULATIVE counter with no
+	// time axis: an operator reading "drops: 40213" cannot tell a collector
+	// that is dark right now from one that healed last Tuesday, and every
+	// health surface that wanted to answer "is the SIEM feed delivering?" had
+	// nothing to read. These are the freshness half.
+	//
+	// All atomics, written only by the drain goroutine (or, for the queue-full
+	// and post-Close cases, by the enqueuing caller), read by any surface.
+	// There is deliberately NO combined snapshot lock: Stats reads them in the
+	// order that can only ever UNDERSTATE health (failures before successes),
+	// so a torn read never reports a dark feed as delivering.
+	delivered       atomic.Uint64
+	consecutiveFail atomic.Uint64
+	lastSuccessNano atomic.Int64
+	lastFailureNano atomic.Int64
+	lastFailReason  atomic.Pointer[string]
+
+	// deliveryObserver is the freshness seam; see SetDeliveryObserver.
+	deliveryObserver atomic.Pointer[func(delivered bool)]
+
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
 	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
 	stop      chan struct{} // closed by Close; tells drainLoop to flush and exit
@@ -140,7 +160,7 @@ func (s *Writer) drainLoop() {
 					if time.Now().Before(deadline) {
 						s.deliverGuarded(line)
 					} else {
-						s.drops.Add(1)
+						s.noteDrop(&reasonFlushTimeout)
 					}
 				default:
 					return
@@ -162,13 +182,13 @@ func (s *Writer) send(pri int, msg string) {
 		return
 	}
 	if s.closed.Load() {
-		s.drops.Add(1)
+		s.noteDrop(&reasonClosed)
 		return
 	}
 	select {
 	case s.queue <- s.formatMsg(pri, msg):
 	default:
-		s.drops.Add(1)
+		s.noteDrop(&reasonQueueFull)
 	}
 }
 
@@ -279,7 +299,7 @@ func (s *Writer) deliverGuarded(line string) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.panics.Add(1)
-			s.drops.Add(1)
+			s.noteDrop(&reasonPanic)
 			if p := s.panicObserver.Load(); p != nil {
 				func() {
 					defer func() { _ = recover() }() // an observer must never crash the drain goroutine
@@ -315,26 +335,26 @@ func (s *Writer) deliverLine(line string) {
 	if s.conn == nil {
 		// Backoff: don't retry more often than every 5 seconds.
 		if time.Since(s.lastReconnErr) < 5*time.Second {
-			s.drops.Add(1)
+			s.noteDrop(&reasonBackoff)
 			return
 		}
 		if err := s.connect(); err != nil {
 			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.noteDrop(&reasonConnectFail)
 			return // syslog down — swallow, never block the proxy
 		}
 		s.lastReconnErr = time.Time{} // reset on success
 	}
 	if err := s.writeLine(line); err != nil {
-		s.conn.Close()
+		s.conn.Close() //nolint:errcheck // best-effort release of a conn we are discarding
 		s.conn = nil
 		if time.Since(s.lastReconnErr) < 5*time.Second {
-			s.drops.Add(1)
+			s.noteDrop(&reasonBackoff)
 			return
 		}
 		if err2 := s.connect(); err2 != nil {
 			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.noteDrop(&reasonConnectFail)
 			return
 		}
 		if err3 := s.writeLine(line); err3 != nil {
@@ -344,20 +364,184 @@ func (s *Writer) deliverLine(line string) {
 			// writeTimeout + dial (5s) + writeTimeout — three serialized
 			// network ops (~15s worst case) under s.mu. Arm the backoff so
 			// subsequent calls fast-drop for the window instead.
-			s.conn.Close()
+			s.conn.Close() //nolint:errcheck // best-effort release of a conn we are discarding
 			s.conn = nil
 			s.lastReconnErr = time.Now()
-			s.drops.Add(1)
+			s.noteDrop(&reasonWriteFail)
 			return
 		}
 		s.lastReconnErr = time.Time{}
 	}
+	// Reached only when a write returned without error: the first attempt, or
+	// the retry after a successful reconnect. Recorded LAST so no path can
+	// report a delivery it did not make.
+	s.noteDelivered()
+}
+
+// Bounded reason classes for a delivery failure.
+//
+// A reason reaches an alert Detail and an operator-contract row, so it must be
+// a CLOSED SET, never a raw error string: the transport error embeds the
+// collector address (and for a dial failure the ephemeral local port), and the
+// alert store dedups on event+Detail — a per-failure-unique reason defeats the
+// dedup window by construction and evicts real alerts from the bounded retry
+// queue. That is the WK-12/RS-5 defect, recorded twice already in this tree.
+// The verbose cause stays in the process log.
+const (
+	ReasonQueueFull    = "queue_full"     // the collector is slower than the entry rate
+	ReasonClosed       = "closed"         // send after Close
+	ReasonConnectFail  = "connect_failed" // dial to the collector failed
+	ReasonWriteFail    = "write_failed"   // the socket write failed or timed out
+	ReasonBackoff      = "backoff"        // fast-dropped inside the reconnect backoff window
+	ReasonPanic        = "panic"          // a recovered panic in the drain goroutine
+	ReasonFlushTimeout = "flush_timeout"  // still queued when Close's flush window expired
+)
+
+// Pre-allocated so noteDrop stores a pointer to an existing string rather than
+// boxing one per failure: this runs on the drain goroutine while the collector
+// is down, which is exactly when the line rate is highest.
+var (
+	reasonQueueFull    = ReasonQueueFull
+	reasonClosed       = ReasonClosed
+	reasonConnectFail  = ReasonConnectFail
+	reasonWriteFail    = ReasonWriteFail
+	reasonBackoff      = ReasonBackoff
+	reasonPanic        = ReasonPanic
+	reasonFlushTimeout = ReasonFlushTimeout
+)
+
+// now is the clock seam; tests drive freshness deterministically.
+var now = time.Now
+
+// noteDrop charges one lost line against the cumulative counter AND the
+// freshness axis. Every drop site goes through here so a future one cannot be
+// added that moves Drops() without moving the reason and the timestamp — the
+// split that made the cumulative counter unreadable in the first place.
+func (s *Writer) noteDrop(reason *string) {
+	s.drops.Add(1)
+	s.consecutiveFail.Add(1)
+	s.lastFailureNano.Store(now().UnixNano())
+	s.lastFailReason.Store(reason)
+	s.notifyDelivery(false)
+}
+
+// noteDelivered records one line that reached the socket.
+//
+// On TCP that means the collector's kernel accepted the bytes. On UDP it means
+// only that THIS kernel accepted them for transmission — a connected UDP socket
+// surfaces an ICMP port-unreachable on a LATER write, and a collector that is
+// silently discarding datagrams surfaces nothing at all. Every surface built on
+// this counter therefore makes a strictly weaker claim on UDP, and says so.
+func (s *Writer) noteDelivered() {
+	s.delivered.Add(1)
+	s.lastSuccessNano.Store(now().UnixNano())
+	// Swap, don't Store: the observer must be called exactly on the edge that
+	// ENDS a failure episode, and reading-then-storing would let two
+	// deliveries racing the same episode both see a non-zero count. There is
+	// only ever one drain goroutine today, so this is defence against a
+	// future second writer rather than a live race — but a recovery signal
+	// that can fire twice is a recovery signal an operator stops trusting.
+	if s.consecutiveFail.Swap(0) > 0 {
+		s.notifyDelivery(true)
+	}
+}
+
+// SetDeliveryObserver publishes an optional observer notified on the drain
+// goroutine whenever a line is DROPPED, and once more when a delivery ends a
+// failure episode. A nil fn clears it.
+//
+// This is the same seam, for the same reason, as SetPanicObserver above: this
+// package is a stdlib-only leaf per its header contract and cannot log, alert
+// or hold a timer, so the freshness plane lives in package main
+// (syslog_health.go) and is driven from here.
+//
+// The asymmetry is deliberate and is a cost decision. The observer is NOT
+// called on an ordinary successful delivery: that is the steady state of a
+// gateway forwarding one request-log line per proxied request, and a callback
+// there would tax the happy path to observe a fault that is not happening. On
+// the failure side the cost is irrelevant — the line is already lost — and
+// per-drop notification is what lets the plane decide degradation on a
+// DURATION without polling and without a goroutine of its own.
+//
+// An observer must be cheap, must not block, and must never call back into
+// this Writer (send, Close, Stats are all reachable from the drain goroutine's
+// own stack) — the rule audit.SetWriteFailureObserver carries for the same
+// reason. It is panic-contained so a bad observer can never take down
+// delivery.
+func (s *Writer) SetDeliveryObserver(fn func(delivered bool)) {
+	if fn == nil {
+		s.deliveryObserver.Store(nil)
+		return
+	}
+	s.deliveryObserver.Store(&fn)
+}
+
+func (s *Writer) notifyDelivery(ok bool) {
+	p := s.deliveryObserver.Load()
+	if p == nil {
+		return
+	}
+	defer func() { _ = recover() }() // an observer must never crash the drain goroutine
+	(*p)(ok)
+}
+
+// Stats is a point-in-time snapshot of delivery health.
+type Stats struct {
+	Delivered           uint64
+	Drops               uint64
+	Panics              uint64
+	ConsecutiveFailures uint64
+	QueueDepth          int
+	QueueCap            int
+	// LastSuccess is zero when no line has EVER been delivered by this Writer.
+	// That case is distinct from "delivered a while ago" and the surfaces
+	// treat it as such: a feed that has never delivered was misconfigured or
+	// pointed at a dead collector from the start.
+	LastSuccess time.Time
+	LastFailure time.Time
+	// LastFailureReason is one of the Reason* constants, or "" before the
+	// first failure. Never a raw error.
+	LastFailureReason string
+}
+
+// Stats snapshots the delivery counters.
+//
+// Read order is deliberate and is the only consistency guarantee offered: the
+// FAILURE side is read before the SUCCESS side, so a snapshot taken across a
+// concurrent delivery can report a stale failure next to a fresh success
+// (harmless — reports healthy slightly late) but can never report a fresh
+// success next to a stale failure (which would report a dark feed as
+// delivering). A lock is deliberately not taken: Stats is reached from
+// /metrics, /healthz and the diagnostics row, and none of them may contend
+// with the drain goroutine's socket writes.
+func (s *Writer) Stats() Stats {
+	st := Stats{
+		Drops:               s.drops.Load(),
+		Panics:              s.panics.Load(),
+		ConsecutiveFailures: s.consecutiveFail.Load(),
+		QueueCap:            cap(s.queue),
+		QueueDepth:          len(s.queue),
+	}
+	if p := s.lastFailReason.Load(); p != nil {
+		st.LastFailureReason = *p
+	}
+	if n := s.lastFailureNano.Load(); n > 0 {
+		st.LastFailure = time.Unix(0, n)
+	}
+	st.Delivered = s.delivered.Load()
+	if n := s.lastSuccessNano.Load(); n > 0 {
+		st.LastSuccess = time.Unix(0, n)
+	}
+	return st
 }
 
 // Drops reports the number of messages dropped because the collector was
 // unreachable or not draining, the delivery queue overflowed, or the Writer
-// was already closed. Monotonic per Writer; delivery is otherwise
-// silent-best-effort, so this is the only loss signal.
+// was already closed. Monotonic per Writer.
+//
+// This is a CUMULATIVE count with no time axis and is therefore not, on its
+// own, an answer to "is the feed delivering right now?" — use Stats, which
+// pairs it with the last-success timestamp and the bounded failure reason.
 func (s *Writer) Drops() uint64 { return s.drops.Load() }
 
 // Panics reports how many lines were lost to a recovered panic in the drain

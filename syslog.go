@@ -62,7 +62,41 @@ func InitSyslog(addr, syslogFmt string) error {
 	if err != nil {
 		return err
 	}
+	releaseReplacedSyslogWriter(globalSyslog)
 	globalSyslog = sw
+	noteSyslogWriterInstalled(sw, addr)
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
 	return nil
+}
+
+// releaseReplacedSyslogWriter closes the Writer that InitSyslog is about to
+// replace (CHAOS-66).
+//
+// Overwriting globalSyslog used to be the whole handover, which stranded the
+// old Writer's drain goroutine parked forever on a queue nobody can reach any
+// more, holding its collector socket OPEN. Measured against the pre-fix tree:
+// +1 goroutine and +1 file descriptor per re-init, with the connection to the
+// abandoned collector still ESTABLISHED (no EOF at the far end) — a phantom
+// session that many SIEMs count against a per-source connection licence.
+//
+// This is NOT only an admin-triggered path. main.go runs initObservability
+// (YAML/flags) at step 206 and initPersistentAdminState → LoadAdminSettings →
+// applyAdminServices at step 240, and snapshotAdminEndpoints persists
+// syslogConfigured into admin_settings.json — so once an operator saves any
+// admin setting, EVERY SUBSEQUENT BOOT calls InitSyslog twice and leaks the
+// first Writer. FD exhaustion is the recorded terminal state of WK-11/PX-6.
+//
+// The close is ASYNCHRONOUS on purpose. Writer.Close is self-bounded (it waits
+// at most closeWait for the drain to flush) but that bound is ~7s against a
+// wedged collector, and the collector being replaced is — by the nature of the
+// operation — the one the operator has decided is broken. Paying that
+// synchronously would let a dead SIEM stall the boot (before the proxy
+// listener is up) or the admin request that is fixing it. Close is idempotent
+// and releases the socket itself when its write deadline fires, so nothing
+// here needs to wait for it.
+func releaseReplacedSyslogWriter(old *syslogWriter) {
+	if old == nil {
+		return
+	}
+	go func() { _ = old.Close() }()
 }
