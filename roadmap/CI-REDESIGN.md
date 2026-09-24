@@ -2685,8 +2685,8 @@ interleaved base/candidate).
 |---|---|---|---|
 | Fixture: `loadContract` calls per `-count=2` run of the contract tests | 258 | 92 | −166 (≈30 s of loading at 183 ms) |
 | Family: `TestConformance_`, `-count=2`, 5 recorded seeds (101…505), median wall | 41.75 s | 14.31 s | −27.4 s (−66 %) |
-| Suite: root package, `-count=2 -shuffle=20260421`, one run each | ROOT_BASE | ROOT_CAND | ROOT_DELTA |
-| Gate: Deep determinism job on CI | 14 min 51 s (35999698583) | GATE_CAND | one sample each; not a trend |
+| Suite: root package, `-count=2 -shuffle=20260421`, one run each | pending | pending | local A/B running |
+| Gate: Deep determinism job on CI | 14 min 51 s (35999698583) | pending (this PR's Deep run) | one sample each; not a trend |
 
 The suite and gate rows are single samples. They say the saving shows up
 where expected. They do not establish a stable p90 or an overall
@@ -2696,7 +2696,7 @@ PR-completion speedup; Deep determinism stays the PR's longest job (§18.5).
 
 - Targeted race run of the contract tests, `-count=2 -shuffle=303`: passed.
 - Complete unsharded shuffled double run, `go test -count=2
-  -shuffle=20260421 ./...` with `TEST_SEED=20260421` (the CI seed): FULL_RESULT.
+  -shuffle=20260421 ./...` with `TEST_SEED=20260421` (the CI seed): pending.
 - `-count=2` stays in one package process; nothing is split or sharded, so
   state-leak detection across repetitions is unchanged.
 
