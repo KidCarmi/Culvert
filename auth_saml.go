@@ -274,6 +274,19 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 	if metaURL.Scheme != "http" && metaURL.Scheme != "https" {
 		return nil, fmt.Errorf("metadata URL must use http or https scheme")
 	}
+	// The PRE-FLIGHT half of the guard, inline per the repo's SSRF convention
+	// so CodeQL can see a barrier on the host and not just on the scheme.
+	//
+	// It is not new enforcement: ssrfSafeDialContext below already refuses a
+	// private destination at connect time, so the set of URLs this function
+	// will fetch is unchanged — a private metadata host failed before and
+	// fails now, just earlier and with an error that names the reason. The
+	// two layers are complementary rather than redundant: this one refuses a
+	// host that resolves private NOW, the dialer catches one that resolves
+	// public here and private at connect time (DNS rebinding).
+	if err := isPrivateHost(metaURL.Host); err != nil {
+		return nil, fmt.Errorf("metadata URL host refused: %w", err)
+	}
 
 	// Use an SSRF-safe transport that rejects private/internal IPs at
 	// the dial level — even if DNS changes between validation and
