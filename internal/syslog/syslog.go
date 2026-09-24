@@ -76,11 +76,26 @@ type Writer struct {
 	deliveryObserver atomic.Pointer[func(delivered bool)]
 
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
-	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
-	stop      chan struct{} // closed by Close; tells drainLoop to flush and exit
-	done      chan struct{} // closed by drainLoop on exit (conn released)
-	closed    atomic.Bool   // post-Close sends drop instead of enqueueing
+	queue     chan queuedLine // formatted lines awaiting delivery (bounded at queueCap)
+	stop      chan struct{}   // closed by Close; tells drainLoop to flush and exit
+	done      chan struct{}   // closed by drainLoop on exit (conn released)
+	closed    atomic.Bool     // post-Close sends drop instead of enqueueing
 	closeOnce sync.Once
+}
+
+// queuedLine is one formatted line awaiting delivery.
+//
+// ack is nil for ordinary traffic — the overwhelmingly common case, and the
+// reason this is a struct rather than a parallel channel. When non-nil (a
+// connectivity probe) the drain goroutine reports the outcome of THIS line on
+// it, exactly once. Inferring a probe's outcome from writer-wide counters is
+// not equivalent and was the pre-review shape: on a gateway with concurrent
+// traffic another line's delivery lands between the before-snapshot and the
+// read, so the probe reports success for someone else's line while its own is
+// still queued behind a collector that is about to drop it.
+type queuedLine struct {
+	line string
+	ack  chan bool // buffered(1) when set; receives true iff THIS line was delivered
 }
 
 // queueCap bounds the async delivery queue. At a formatted line of ~0.5 KB the
@@ -128,7 +143,7 @@ func NewWriter(network, addr, format string) (*Writer, error) {
 // NewWriter so tests can build a Writer with an injected conn/dialFunc and
 // still exercise the production async path.
 func (s *Writer) startAsync() {
-	s.queue = make(chan string, queueCap)
+	s.queue = make(chan queuedLine, queueCap)
 	s.stop = make(chan struct{})
 	s.done = make(chan struct{})
 	go s.drainLoop()
@@ -150,17 +165,18 @@ func (s *Writer) drainLoop() {
 	}()
 	for {
 		select {
-		case line := <-s.queue:
-			s.deliverGuarded(line)
+		case item := <-s.queue:
+			s.deliverTracked(item)
 		case <-s.stop:
 			deadline := time.Now().Add(flushTimeout)
 			for {
 				select {
-				case line := <-s.queue:
+				case item := <-s.queue:
 					if time.Now().Before(deadline) {
-						s.deliverGuarded(line)
+						s.deliverTracked(item)
 					} else {
 						s.noteDrop(&reasonFlushTimeout)
+						ackQueued(item, false)
 					}
 				default:
 					return
@@ -181,15 +197,77 @@ func (s *Writer) send(pri int, msg string) {
 		s.writeMsg(pri, msg)
 		return
 	}
+	s.enqueue(s.formatMsg(pri, msg), nil)
+}
+
+// enqueue hands one formatted line to the drain goroutine without blocking.
+// Reports whether it was accepted; a rejected line is already counted.
+func (s *Writer) enqueue(line string, ack chan bool) bool {
 	if s.closed.Load() {
 		s.noteDrop(&reasonClosed)
+		return false
+	}
+	select {
+	case s.queue <- queuedLine{line: line, ack: ack}:
+		return true
+	default:
+		s.noteDrop(&reasonQueueFull)
+		return false
+	}
+}
+
+// ackQueued reports one line's outcome to a waiting prober. The channel is
+// buffered(1) and written exactly once, so this never blocks the drain
+// goroutine even if the prober has already given up and stopped listening.
+func ackQueued(item queuedLine, delivered bool) {
+	if item.ack == nil {
 		return
 	}
 	select {
-	case s.queue <- s.formatMsg(pri, msg):
+	case item.ack <- delivered:
 	default:
-		s.noteDrop(&reasonQueueFull)
 	}
+}
+
+// deliverTracked delivers one queued line and, when the line carries an ack,
+// reports the outcome OF THAT LINE.
+//
+// The delivered-counter delta is exact here and only here: the drain goroutine
+// is the sole writer of that counter, and it is inside this call that the one
+// line is attempted. The same comparison made by a caller OUTSIDE this
+// goroutine is not exact, which is precisely the defect this replaces.
+func (s *Writer) deliverTracked(item queuedLine) {
+	if item.ack == nil {
+		s.deliverGuarded(item.line)
+		return
+	}
+	before := s.delivered.Load()
+	s.deliverGuarded(item.line)
+	ackQueued(item, s.delivered.Load() > before)
+}
+
+// WriteProbe enqueues one message and returns a channel that receives the
+// delivery outcome OF THAT MESSAGE, once, from the drain goroutine.
+//
+// Returns ok=false when the line could not even be queued (writer closed, or
+// the collector is so far behind that the queue is full) — already counted as
+// a drop, and an outcome in its own right. A zero-value Writer has no drain
+// goroutine, so it reports the synchronous result directly.
+//
+// The caller must bound its own wait: a wedged collector can hold the drain in
+// a write deadline, and nothing here promises when the answer arrives.
+func (s *Writer) WriteProbe(msg string) (<-chan bool, bool) {
+	ack := make(chan bool, 1)
+	if s.queue == nil { // zero-value Writer: synchronous path
+		before := s.delivered.Load()
+		s.writeMsg(14, msg)
+		ack <- s.delivered.Load() > before
+		return ack, true
+	}
+	if !s.enqueue(s.formatMsg(14, msg), ack) {
+		return nil, false
+	}
+	return ack, true
 }
 
 func (s *Writer) connect() error {

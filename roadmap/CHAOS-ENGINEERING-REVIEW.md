@@ -6650,7 +6650,7 @@ diagnostics row (viewer-visible, counts only) already carries the posture.
 ### Gates
 
 `internal/syslog/syslog_stats_test.go` (7) and `syslog_health_chaos_test.go`
-(13).
+(17).
 
 Every defect gate was **verified failing against its reintroduced pre-fix
 shape**: the contract row reported `ok`/"forwarding is active" with a dead
@@ -6697,6 +6697,65 @@ deliver exactly what it delivered before and pay no observer cost on the happy
 path (`HealthyFeedIsUnchangedAndSilent`); and a panicking observer must never
 take the drain goroutine down (`PanickingObserverCannotKillDelivery` — CHAOS-24's
 rule, already applied to `SetPanicObserver` in the same file).
+
+### The Codex P1 round, and what it says about the sweep's own blind spots
+
+Three P1 findings, all correct, all closed. Each is the same shape: a rule this
+sweep applied correctly in one place and failed to carry to the next — the
+pattern §35 named after finding it four times in one sweep, arriving here on a
+different subsystem.
+
+**P1-B is the one that would have cost a customer a false page, and it is
+the sharpest.** `snap.Drops > 0 && snap.Age >= syslogDegradedAfter` reads as
+"something is failing and nothing is getting through", and it is not what it
+says: `Drops` is CUMULATIVE and never resets, so one transient loss — a queue
+overflow during a collector GC pause, weeks ago — armed the first half
+PERMANENTLY. The node then only had to go quiet for five minutes for `Age` to
+cross the threshold, and every surface reported a **perfectly healthy feed as
+DOWN**: the `fail` row, the alert, `culvert_syslog_up 0`. Reproduced: 101
+historical drops, `ConsecutiveFailures == 0`, one idle month, row `fail`. The
+predicate now keys on `ConsecutiveFailures`, which the engine resets on every
+delivery and which therefore means what the predicate needs it to mean —
+something is failing NOW.
+
+The reason this survived self-review is worth more than the fix. This file's own
+header argues at length that the predicate "cannot fire on an idle node", and
+there is a control test named `IdleNodeIsNeverDegraded` asserting exactly that —
+**but it uses a feed with ZERO drops.** It tested the half of the claim that was
+already true. A control written from the same mental model as the code inherits
+the model's blind spot; this one needed a feed that had dropped AND recovered,
+which is the state the author was not thinking about because the author was
+thinking about outages, not about their aftermath. *When a control exists for a
+claim and the claim is still wrong, suspect the control's inputs before the
+control's logic.*
+
+**P1-A: the observer is driven by drops, and drops are driven by traffic, which
+stops.** A collector that dies, produces two minutes of losses and is then
+followed by a quiet period crosses the threshold with nothing left to call the
+evaluator. The metrics and the diagnostics row compute the truth on READ, so a
+Prometheus deployment still sees it — but the `syslog_feed_down` alert and the
+warning log, which this very document advertises as the paging surfaces, never
+fire. The sibling planes do not have this hole because their drivers cannot
+stop: `threatfeed_health.go` is evaluated from a periodic feed loop,
+`socks5_health.go` from an accept loop that retries at 1/s. This one borrowed
+their shape without noticing that its driver is customer traffic. Closed with
+`startSyslogHealthWatchdog` — the CHAOS-23 answer, a detection-only ticker at a
+tenth of the window — and the wiring is pinned structurally, because a watchdog
+nobody starts satisfies a test that calls its body directly.
+
+**P1-C: the probe inferred its verdict instead of observing it.** It compared
+writer-wide `Delivered`/`Drops` around its own write, so on a gateway with
+concurrent traffic another line's delivery landed between the snapshot and the
+read and the probe answered "the collector accepted the test event" while its
+own message was still queued behind a collector about to drop it. That is the
+defect this whole sweep is about — claiming more than the evidence supports —
+committed by the endpoint written to fix it. `Writer.WriteProbe` now returns a
+per-message acknowledgement signalled by the drain goroutine, where the
+delivered-counter delta around one `deliverGuarded` call IS exact because that
+goroutine is the counter's sole writer. **Honest limitation: the P1-C gate
+proves the new primitive answers correctly in both directions; it cannot be
+made to fail deterministically against the old shape, because that defect is a
+race.** Recorded rather than dressed up as a verified-failing gate.
 
 ### A note on how the recovery gate was nearly wrong
 

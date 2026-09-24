@@ -106,19 +106,31 @@ never the collector address or a transport error.
 
 ## How degradation is decided
 
-> **Events are being dropped** *and* **nothing has been delivered for 5
+> **A loss is currently unresolved** *and* **nothing has been delivered for 5
 > minutes.**
 
 Both halves are required, and each one matters:
 
+- **Unresolved, not historical.** The first half is "losses since the last
+  successful delivery", not the cumulative drop count. A feed that dropped
+  events last week and has been delivering since is healthy, and one transient
+  loss must not mark it forever. (This was wrong in the first cut of the
+  feature: keying on the cumulative counter meant a single old blip plus a
+  quiet night reported a working SIEM feed as DOWN.)
 - **A duration, not a count.** One dropped event is a transient the writer's
   reconnect state machine absorbs, and a busy gateway can overflow the
   2048-slot queue during a collector GC pause without anything being wrong.
   By the time 5 minutes have elapsed the writer has failed roughly sixty
   bounded reconnect attempts.
 - **It cannot fire on an idle node.** A gateway with no traffic forwards
-  nothing, so its last-success timestamp ages without limit. Requiring drops
-  means silence is never read as a fault.
+  nothing and therefore loses nothing, so the first half is false however old
+  the last delivery is. Inventing a fault from silence is how a health plane
+  loses its audience.
+
+The transition is evaluated both when an event is lost and on an independent
+30-second timer, so a collector that dies and is then followed by a quiet
+period still pages: the alert does not depend on there being more traffic to
+lose.
 
 **Recovery is declared on observed evidence only** — one event that actually
 reaches the collector. Elapsed time never clears it, because a feed that
@@ -145,7 +157,7 @@ POST /api/syslog/test        (admin)
 
 | Outcome | Meaning |
 | --- | --- |
-| `delivered` | the collector accepted the event (TCP only) |
+| `delivered` | the collector accepted **this** event (TCP only) |
 | `sent` | the datagram left this host; UDP cannot confirm receipt |
 | `dropped` | the event was lost before reaching the collector, with the reason |
 | `unknown` | still queued after the 3-second probe window — retry |
@@ -156,6 +168,11 @@ POST /api/syslog/test        (admin)
 > only that a channel send had succeeded: it returned `ok` for a collector that
 > had been dead for a week, while the diagnostics row pointed operators here to
 > "confirm connectivity". A probe that cannot fail is worse than no probe.
+>
+> The outcome reported is that of **the probe's own message**, acknowledged by
+> the delivery goroutine — not an inference from the node's overall delivery
+> counters, which on a busy gateway would let another request's success be
+> reported as the probe's.
 
 ---
 

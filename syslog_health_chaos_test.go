@@ -661,3 +661,205 @@ func TestChaos66_DisablingForwardingRemovesEverySurface(t *testing.T) {
 		t.Errorf("row after disable = %v (%q); want ok/not configured", row.Status, row.Message)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Codex P1 round (PR #1494)
+// ---------------------------------------------------------------------------
+
+// P1-B. `Drops` is CUMULATIVE and never resets, so keying degradation on it
+// meant one transient loss armed half the predicate permanently: the node then
+// only had to go quiet for the window for Age to cross the threshold and every
+// surface to report a perfectly healthy feed as DOWN. A false page on a working
+// SIEM, from a blip that already healed.
+//
+// The original IdleNodeIsNeverDegraded control did not catch this because it
+// used a feed with ZERO drops — the control was too weak, which is exactly what
+// the reviewer pointed out.
+func TestChaos66_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+
+	// Produce a real, historical loss, then let the feed recover.
+	sw := activeSyslog()
+	sw.SetDeliveryObserver(nil) // isolate: this test is about the predicate
+	restore := syslog.SetNowForTest(nil)
+	defer restore()
+
+	// Force one drop through the closed-writer path, which is a genuine loss
+	// the engine counts exactly as a collector-down loss would be.
+	probe := &syslogTestCollector{}
+	_ = probe
+	for i := 0; i < 3; i++ {
+		sw.WriteAudit(map[string]string{"evt": "policy.change"})
+	}
+	// Drive a loss by pointing the writer at a collector that is gone, then
+	// bringing it back so a delivery resolves it.
+	col.stop()
+	waitForDrops(t, 1)
+	revived := startSyslogCollectorOn(t, col.addr)
+	defer revived.stop()
+
+	deadline := time.Now().Add(20 * time.Second)
+	base := activeSyslog().Stats().Delivered
+	for time.Now().Before(deadline) {
+		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
+		if activeSyslog().Stats().Delivered > base {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	st := activeSyslog().Stats()
+	if st.Delivered <= base {
+		t.Skip("collector could not be revived on the same port in this environment")
+	}
+	if st.Drops == 0 {
+		t.Fatal("precondition: no historical drop was recorded")
+	}
+	if st.ConsecutiveFailures != 0 {
+		t.Fatalf("precondition: ConsecutiveFailures = %d after a delivery; want 0", st.ConsecutiveFailures)
+	}
+
+	// Now the node goes quiet for a month. The feed is HEALTHY — the last thing
+	// it did was deliver — and must not be reported down.
+	now := time.Now()
+	setSyslogHealthNowForTest(func() time.Time { return now.Add(30 * 24 * time.Hour) })
+
+	snap := syslogFeedState()
+	if snap.Degraded {
+		t.Errorf("a healed feed with %d historical drops was reported DOWN after going idle (ConsecutiveFailures=%d, Age=%s) — degradation must key on UNRESOLVED failure, not cumulative history",
+			snap.Drops, snap.ConsecutiveFailures, snap.Age)
+	}
+	if row := checkSyslogFeed(); row.Status == diagFail {
+		t.Errorf("row = fail on a healed, idle feed: %q", row.Message)
+	}
+}
+
+// P1-A. The drop observer is driven by traffic, and traffic stops. A collector
+// that dies, produces a couple of minutes of losses and is then followed by a
+// quiet period crosses the threshold with nothing left to fire the alert: the
+// metrics and the row compute the truth on READ, but the paging surfaces never
+// fired. The watchdog is the independent driver.
+func TestChaos66_WatchdogFiresTheAlertWhenTrafficHasStopped(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	col.stop()
+	waitForDrops(t, 2)
+
+	var fired []string
+	old := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = old })
+
+	// Traffic stops here: no further drops, so the observer will never run
+	// again. Only elapsed time moves the feed across the threshold.
+	now := time.Now()
+	setSyslogHealthNowForTest(func() time.Time { return now.Add(syslogDegradedAfter + time.Minute) })
+
+	if !syslogFeedState().Degraded {
+		t.Fatal("precondition: the feed should be degraded once the window has passed")
+	}
+	if len(fired) != 0 {
+		t.Fatalf("precondition: alert fired %d times before any evaluator ran", len(fired))
+	}
+
+	// One watchdog tick's worth of work, called directly so the gate does not
+	// wait out a 30s ticker.
+	evaluateSyslogDegradation()
+
+	if len(fired) != 1 {
+		t.Fatalf("alert fired %d times after the evaluator ran; want exactly 1 — without an independent driver the page never lands on a node that went quiet mid-outage", len(fired))
+	}
+	// And still exactly once: the episode latch must hold across ticks.
+	evaluateSyslogDegradation()
+	evaluateSyslogDegradation()
+	if len(fired) != 1 {
+		t.Errorf("alert fired %d times across three ticks; want 1 (fire-once per episode)", len(fired))
+	}
+}
+
+// The P1-A gate above proves the evaluator does the right thing WHEN CALLED.
+// The actual fix is that something calls it on a timer, and no behavioural test
+// can observe that without waiting out a real ticker. Pinned structurally
+// instead (source scan, the convention the C1 route-parity tests use), with its
+// own not-vacuous control — the same treatment the metrics-exposition wiring
+// gets, and for the same reason: a watchdog nobody starts satisfies a test that
+// calls its body directly.
+func TestChaos66_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "background_services_startup.go"))
+	if err != nil {
+		t.Fatalf("read background_services_startup.go: %v", err)
+	}
+	if !strings.Contains(string(src), "go startSyslogHealthWatchdog(ctx)") {
+		t.Error("the SIEM health watchdog is never started — the degradation transition would then depend entirely on traffic, and a node that goes quiet mid-outage never pages")
+	}
+	// Not vacuous: the same scan must find a goroutine known to be started here.
+	if !strings.Contains(string(src), "go startDecCoverageSampler(ctx)") {
+		t.Error("control: the scan no longer matches a known-started worker, so it proves nothing")
+	}
+}
+
+// P1-C. The probe used to infer its answer from writer-wide counters, so a
+// concurrent line's delivery could be reported as the probe's own success while
+// the probe's message was still queued behind a collector about to drop it.
+// WriteProbe reports the outcome of THAT message, from the drain goroutine.
+func TestChaos66_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	sw := activeSyslog()
+
+	// Healthy: the probe's own line is delivered.
+	ack, queued := sw.WriteProbe("probe-1")
+	if !queued {
+		t.Fatal("probe could not be queued against a healthy collector")
+	}
+	select {
+	case ok := <-ack:
+		if !ok {
+			t.Error("probe reported its own line as lost against a healthy collector")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no per-message outcome within 5s")
+	}
+
+	// Dead collector: the probe's own line is lost, and says so — even while
+	// other traffic is moving the writer's aggregate counters underneath it.
+	col.stop()
+	waitForDrops(t, 1)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			sw.WriteAudit(map[string]string{"evt": "policy.change"})
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	ack2, queued2 := sw.WriteProbe("probe-2")
+	outcome := "not-queued"
+	if queued2 {
+		select {
+		case ok := <-ack2:
+			if ok {
+				outcome = "delivered"
+			} else {
+				outcome = "dropped"
+			}
+		case <-time.After(10 * time.Second):
+			outcome = "timeout"
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	if outcome == "delivered" {
+		t.Error("probe reported its own line as DELIVERED against a dead collector — the outcome was inferred from another line's success")
+	}
+}

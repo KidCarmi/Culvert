@@ -101,6 +101,7 @@ package main
 // who need delivery evidence must use `tcp://`.
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -268,6 +269,13 @@ func noteSyslogDelivery(delivered bool) {
 		noteSyslogDeliveryRecovered()
 		return
 	}
+	evaluateSyslogDegradation()
+}
+
+// evaluateSyslogDegradation fires the alert and the rate-limited log at most
+// once per episode. Called from the drop observer (immediate on a busy node)
+// and from the watchdog (so a node that went quiet mid-outage still pages).
+func evaluateSyslogDegradation() {
 	snap := syslogFeedState()
 	if !snap.Degraded {
 		return
@@ -316,6 +324,44 @@ func noteSyslogDeliveryRecovered() {
 	}
 }
 
+// syslogWatchdogInterval is how often the degradation transition is
+// re-evaluated independently of traffic.
+//
+// It exists because THE OBSERVER IS DRIVEN BY DROPS, and drops are driven by
+// traffic, which stops. A collector that dies, takes a couple of minutes of
+// losses and then goes quiet (overnight, or a drained node) crosses the
+// five-minute threshold with nothing left to call the evaluator: the metrics
+// and the diagnostics row compute the truth on READ, but the `syslog_feed_down`
+// alert and the warning log — the surfaces an operator is actually paged by —
+// would never fire (Codex P1, PR #1494).
+//
+// This is the same answer CHAOS-23 reached for the release catalog: when the
+// normal driver is not running, a standalone detection-only watchdog ticks at
+// the same cadence so the state stays live. Thirty seconds is a tenth of the
+// degradation window, so the alert lands within 10% of the threshold; the tick
+// itself is one snapshot of atomics and a comparison.
+const syslogWatchdogInterval = 30 * time.Second
+
+// startSyslogHealthWatchdog re-evaluates the degradation transition on a timer.
+// Started from the background-services slice, parented to the lifecycle ctx.
+//
+// Detection only: it fires the alert and the rate-limited log the drop observer
+// would have fired, and touches nothing else. It no-ops entirely when no
+// collector is configured, so a node that forwards nowhere pays one comparison
+// per tick.
+func startSyslogHealthWatchdog(ctx context.Context) {
+	t := time.NewTicker(syslogWatchdogInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			evaluateSyslogDegradation()
+		}
+	}
+}
+
 // syslogFeedSnapshot is the derived view every surface reads.
 type syslogFeedSnapshot struct {
 	// Configured is true once a Writer has been installed. Distinct from the
@@ -334,9 +380,12 @@ type syslogFeedSnapshot struct {
 	Delivered   uint64
 	Drops       uint64
 	Panics      uint64
-	Reason      string
-	QueueDepth  int
-	QueueCap    int
+	// ConsecutiveFailures is the count of losses since the last delivered
+	// event — zero means the last thing this writer did was succeed.
+	ConsecutiveFailures uint64
+	Reason              string
+	QueueDepth          int
+	QueueCap            int
 	// UDP records that this feed cannot prove delivery; see the header.
 	UDP bool
 }
@@ -366,6 +415,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	snap.Delivered = st.Delivered
 	snap.Drops = st.Drops
 	snap.Panics = st.Panics
+	snap.ConsecutiveFailures = st.ConsecutiveFailures
 	snap.Reason = st.LastFailureReason
 	snap.QueueDepth = st.QueueDepth
 	snap.QueueCap = st.QueueCap
@@ -387,9 +437,23 @@ func syslogFeedState() syslogFeedSnapshot {
 	if snap.Age < 0 {
 		snap.Age = 0
 	}
-	// Degradation requires BOTH halves. Drops alone is a blip the reconnect
-	// machine absorbs; age alone is an idle node with nothing to forward.
-	snap.Degraded = snap.Drops > 0 && snap.Age >= syslogDegradedAfter
+	// Degradation requires BOTH halves: an UNRESOLVED failure, and no delivery
+	// for the window.
+	//
+	// The failure half is ConsecutiveFailures, NOT the cumulative Drops
+	// counter. Drops never resets, so keying on it meant that one transient
+	// loss — a queue overflow during a collector GC pause, weeks ago — armed
+	// the first half permanently; the node then only had to go quiet for five
+	// minutes for Age to cross the threshold and every surface to report a
+	// perfectly healthy feed as DOWN. A false page on a working SIEM, from a
+	// blip that already healed (Codex P1, PR #1494). ConsecutiveFailures is
+	// reset by the engine on every delivery, so it means what this predicate
+	// needs it to mean: something is failing NOW.
+	//
+	// The age half still measures from the last DELIVERY, which is what makes
+	// the pair unable to fire on an idle node: no traffic means no failures,
+	// so the first half is false however old the last delivery is.
+	snap.Degraded = snap.ConsecutiveFailures > 0 && snap.Age >= syslogDegradedAfter
 	return snap
 }
 
@@ -536,29 +600,35 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 	target := syslogHealth.target
 	syslogHealth.mu.Unlock()
 
-	before := sw.Stats()
-	_, _ = sw.Write([]byte("Culvert syslog test message — connectivity probe"))
+	// WriteProbe reports the outcome of THIS message, from the drain
+	// goroutine. The first shape of this function compared writer-wide
+	// Delivered/Drops counters around the write, which is not the same
+	// question: on a gateway with concurrent audit and request traffic another
+	// line's delivery lands between the snapshot and the read, so the probe
+	// answered "delivered" while its own message was still queued behind a
+	// collector about to drop it — and a drop could likewise be blamed on the
+	// probe (Codex P1, PR #1494). An endpoint whose whole job is to be
+	// believed may not infer its answer.
+	ack, queued := sw.WriteProbe("Culvert syslog test message — connectivity probe")
+	if !queued {
+		return "dropped", "the test event could not be queued for delivery (" + reasonOrUnknown(sw.Stats().LastFailureReason) + ")"
+	}
 
-	// time.Now, deliberately NOT the syslogHealthNow seam: this waits on real
+	// time.After, deliberately NOT the syslogHealthNow seam: this waits on real
 	// socket I/O, not on a freshness computation, so it must advance even when
 	// a test has frozen the clock to drive degradation — against a frozen seam
-	// the loop would never reach its deadline and the probe would hang.
-	deadline := time.Now().Add(syslogProbeWait)
-	for {
-		st := sw.Stats()
-		if st.Delivered > before.Delivered {
-			if !strings.HasPrefix(strings.ToLower(target), "tcp://") {
-				return "sent", "datagram sent; UDP cannot confirm the collector received it — use tcp:// for delivery evidence"
-			}
-			return "delivered", "the collector accepted the test event"
+	// the wait would never expire and the probe would hang.
+	select {
+	case delivered := <-ack:
+		if !delivered {
+			return "dropped", "the test event was lost before reaching the collector (" + reasonOrUnknown(sw.Stats().LastFailureReason) + ")"
 		}
-		if st.Drops > before.Drops {
-			return "dropped", "the test event was lost before reaching the collector (" + reasonOrUnknown(st.LastFailureReason) + ")"
+		if !strings.HasPrefix(strings.ToLower(target), "tcp://") {
+			return "sent", "datagram sent; UDP cannot confirm the collector received it — use tcp:// for delivery evidence"
 		}
-		if !time.Now().Before(deadline) {
-			return "unknown", "no delivery outcome within the probe window; the event is still queued"
-		}
-		time.Sleep(10 * time.Millisecond)
+		return "delivered", "the collector accepted the test event"
+	case <-time.After(syslogProbeWait):
+		return "unknown", "no delivery outcome within the probe window; the event is still queued"
 	}
 }
 

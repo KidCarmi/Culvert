@@ -103,7 +103,7 @@ func TestChaos66_EveryDropCarriesABoundedReason(t *testing.T) {
 		{"queue_full", ReasonQueueFull, func(t *testing.T) *Writer {
 			c := &stubConn{}
 			w := newStubWriter(t, c, nil)
-			w.queue = make(chan string, 1) // no drain goroutine: fills immediately
+			w.queue = make(chan queuedLine, 1) // no drain goroutine: fills immediately
 			w.send(14, "a")
 			w.send(14, "b")
 			return w
@@ -111,7 +111,7 @@ func TestChaos66_EveryDropCarriesABoundedReason(t *testing.T) {
 		{"closed", ReasonClosed, func(t *testing.T) *Writer {
 			c := &stubConn{}
 			w := newStubWriter(t, c, nil)
-			w.queue = make(chan string, 1)
+			w.queue = make(chan queuedLine, 1)
 			w.closed.Store(true)
 			w.send(14, "a")
 			return w

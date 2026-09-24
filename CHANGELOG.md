@@ -430,9 +430,12 @@ endpoints for credentialed parents.
   `culvert_syslog_*` (emitted only when a collector is configured),
   `syslogDrops` on `/healthz` when non-zero, a delivery verdict on the
   diagnostics row and a fire-once `syslog_feed_down` alert. Degradation
-  requires both drops and five minutes without a delivery, so it cannot fire on
-  an idle node; recovery is declared only on an event that actually reaches the
-  collector. `GET /api/syslog` gains `delivered`, `degraded`,
+  requires an UNRESOLVED loss (losses since the last delivery, not the
+  cumulative count) plus five minutes without a delivery, so it cannot fire on
+  an idle node and a healed blip cannot mark a working feed as down; the
+  transition is evaluated both on loss and on an independent 30-second timer, so
+  a collector that dies and is then followed by a quiet period still pages.
+  Recovery is declared only on an event that actually reaches the collector. `GET /api/syslog` gains `delivered`, `degraded`,
   `neverDelivered`, `lastSuccessUnix`, `secondsSinceEvent`,
   `lastFailureReason`, `queueDepth`, `queueCap` and `deliveryProvable`
   (contract `SyslogConfig`). Note that `udp://` — the default when the address
@@ -444,7 +447,10 @@ endpoints for credentialed parents.
   returned `ok` for a collector that had been dead for a week, while the
   diagnostics row pointed operators at it to "confirm connectivity". It now
   waits, bounded, for a real outcome and reports `delivered`, `sent`
-  (UDP — unprovable), `dropped` with the reason, or `unknown`.
+  (UDP — unprovable), `dropped` with the reason, or `unknown`. The outcome is
+  that of the probe's own message, acknowledged by the delivery goroutine,
+  rather than an inference from node-wide counters that another request's
+  success could satisfy.
 
 - **Re-pointing the syslog collector leaked a goroutine and a descriptor
   (CHAOS-66).** `InitSyslog` overwrote the active writer without closing it,
