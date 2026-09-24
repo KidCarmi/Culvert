@@ -24,11 +24,16 @@
 #     exactly what the installer-lifecycle job exercises. Adding the bundle to
 #     make this image "look like production" would silently stop testing it.
 #   - wget is installed explicitly for the compose healthcheck.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS builder
+# Same pinned compiler and assertion as production (CI-REDESIGN §20).
+ENV GOTOOLCHAIN=local
 WORKDIR /app
 RUN apk add --no-cache git
 COPY test/e2e/maint-agent/depfiles-guard.sh /usr/local/bin/depfiles-guard
 COPY go.mod go.sum ./
+RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
+    echo "compiler: ${have} (go.mod toolchain: ${want})" && \
+    [ -n "${want}" ] && [ "${have}" = "${want}" ]
 # The guard runs in the SAME RUN as the download: the `COPY . .` below
 # overwrites go.mod/go.sum with the committed copies, so a download-induced
 # change checked any later would already be concealed.
@@ -48,6 +53,7 @@ RUN : "${BUILD_VARIANT}" \
     && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -buildvcs=false \
        -ldflags="-s -w -X main.version=e2e-${BUILD_VARIANT}" -o culvert . \
     && depfiles-guard verify "go build"
+RUN go version culvert && [ "$(go version culvert | cut -d' ' -f2)" = "$(go env GOVERSION)" ]
 
 FROM alpine:3.24
 ARG BUILD_VARIANT=v1
