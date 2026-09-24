@@ -1536,7 +1536,7 @@ gen_passphrase() {
   # (FIPS-mode engine warning, a stubbed binary in a hardened image) can print
   # a short deterministic diagnostic to stdout ahead of — or instead of — the
   # base64 data; filtered to alnum that can easily still be >=12 characters
-  # (e.g. "FIPSmodeselftestfailed", 23 chars), which would sail past
+  # (e.g. "FIPSmodeselftestfailed", 22 chars), which would sail past
   # validate_passphrase_for_env_file's length floor as if it were a proper
   # high-entropy random passphrase. Falling back to /dev/urandom whenever the
   # first generator falls short of its own target length catches that case
