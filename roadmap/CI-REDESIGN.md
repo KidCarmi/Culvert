@@ -2841,7 +2841,7 @@ instead of restating the tag.
 | `go mod tidy -diff`, root and agent | clean |
 | `golangci-lint` v2.5.0 `--new-from-rev origin/main` | 0 issues on go1.26.8; typecheck failure on go1.27.1 (above) |
 | Agent module tests (`cd cmd/culvert-maint && go test ./...`) | pass on go1.26.8 and on go1.27.1 |
-| Full suite, `go test -count=1 -shuffle=20260421 ./...`, `GOTOOLCHAIN=local` go1.26.8 | pending (running) |
+| Full suite, `go test -count=1 -shuffle=20260421 ./...`, `GOTOOLCHAIN=local` go1.26.8 | **passed**: all 110 packages, 517 s wall (root package 466 s), no failures |
 
 Docker image builds need BuildKit, which the authoring session cannot run.
 They are qualified by this change's PR: the Deep gate's image build, the
