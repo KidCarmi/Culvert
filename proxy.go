@@ -864,14 +864,26 @@ const policyLineCallDepth = 2
 //
 // verb, action, clientIP, hostSep and reqID reach the buffer BARE, and this is
 // the same set the Printf form passed bare through %s. Each has a reason that
-// must still hold if it is ever re-sourced: verb and action are compile-time
-// constants of the four emitters; clientIP is a net.SplitHostPort product of
-// the kernel-supplied peer address; hostSep is either the literal "->" or
-// r.Method, which net/http's request parser has already rejected control
-// characters from; reqID is generated hex. Do not add a field to this bare set
-// without stating why its bytes cannot be client-chosen — the SOCKS5
-// destination is the standing example of a value that looked safe and was not
-// (see SEC-SOCKS5-LOG-1).
+// must still hold if it is ever re-sourced:
+//
+//   - verb and action are compile-time constants of the four emitters.
+//   - clientIP is a net.SplitHostPort product of the kernel-supplied peer
+//     address.
+//   - hostSep is either the literal "->" or r.Method, and net/http's request
+//     parser admits only RFC 9110 token bytes as a method, so no control
+//     character can reach it.
+//   - reqID is the ONE of the five that can be client-chosen: setupRequestTracing
+//     passes an inbound X-Request-Id through, scrubbed INLINE of CR and LF (the
+//     repo's CodeQL-visible convention) rather than through sanitizeLog. That
+//     strips exactly what could forge a second record, which is why it is safe
+//     here — but it is narrower than sanitizeLog, so a TAB or an ANSI escape
+//     still survives into the line. That is pre-existing and unchanged by this
+//     shape; widening it would alter the emitted bytes and so belongs in its own
+//     change, not one whose acceptance condition is byte-identity.
+//
+// Do not add a field to this bare set without stating why its bytes cannot
+// forge a record — the SOCKS5 destination is the standing example of a value
+// that looked safe and was not (see SEC-SOCKS5-LOG-1).
 type policyDecision struct {
 	verb     string // leading token, e.g. "POLICY_ALLOW"
 	action   string // trailing action= token, e.g. "allow"
