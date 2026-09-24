@@ -1532,8 +1532,17 @@ env_put() {
 gen_passphrase() {
   local p
   p="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  [[ -n "$p" ]] || p="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  [[ -n "$p" ]] || error "Could not generate a passphrase (openssl and /dev/urandom both unavailable)."
+  # Require the FULL 40 characters, not merely "non-empty". A degraded openssl
+  # (FIPS-mode engine warning, a stubbed binary in a hardened image) can print
+  # a short deterministic diagnostic to stdout ahead of — or instead of — the
+  # base64 data; filtered to alnum that can easily still be >=12 characters
+  # (e.g. "FIPSmodeselftestfailed", 23 chars), which would sail past
+  # validate_passphrase_for_env_file's length floor as if it were a proper
+  # high-entropy random passphrase. Falling back to /dev/urandom whenever the
+  # first generator falls short of its own target length catches that case
+  # instead of accepting whatever it happened to produce (Codex review, PR #1491).
+  [[ "${#p}" -eq 40 ]] || p="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
+  [[ "${#p}" -eq 40 ]] || error "Could not generate a 40-character passphrase (openssl and /dev/urandom both unavailable or degraded)."
   printf '%s' "$p"
 }
 

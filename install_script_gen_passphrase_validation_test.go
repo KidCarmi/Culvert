@@ -43,6 +43,65 @@ import (
 	"testing"
 )
 
+// runGenPassphrase drives the REAL gen_passphrase() with `opensslStub` as the
+// body of a shell function shadowing `openssl` (empty string leaves the real
+// system openssl in place). Returns its stdout output (the generated
+// passphrase) and the combined stdout+stderr for diagnostics.
+func runGenPassphrase(t *testing.T, opensslStub string) (pass, output string) {
+	t.Helper()
+	fn := extractShellFunction(t, "scripts/install.sh", "gen_passphrase")
+
+	stubs := "error() { echo \"ERROR: $*\" >&2; exit 7; }\n"
+	if opensslStub != "" {
+		stubs += "openssl() { " + opensslStub + "; }\n"
+	}
+
+	script := stubs + fn + "\n" + "gen_passphrase\n"
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gen_passphrase failed: %v\n%s", err, out)
+	}
+	return string(out), string(out)
+}
+
+// TestInstallScript_GenPassphrase_FallsBackWhenOpensslOutputIsShort proves
+// gen_passphrase() itself falls back to /dev/urandom — rather than accepting
+// whatever `openssl` printed — when a degraded `openssl` (e.g. a FIPS-mode
+// build writing an engine warning ahead of, or instead of, the base64 data on
+// stdout) produces a short-but-non-empty alnum string. Flagged by Codex review
+// on PR #1491: the deterministic diagnostic text "FIPSmodeselftestfailed" (22
+// alnum characters) is well above validate_passphrase_for_env_file's
+// 12-character floor and contains no unsafe characters, so it would be
+// accepted and persisted as if it were a genuine random 40-character
+// passphrase — a predictable encryption key with no error and no warning.
+func TestInstallScript_GenPassphrase_FallsBackWhenOpensslOutputIsShort(t *testing.T) {
+	const diagnostic = "FIPSmodeselftestfailed" // 22 chars, all alnum, >= the 12-char floor
+	pass, output := runGenPassphrase(t, `printf '%s' '`+diagnostic+`'`)
+
+	if pass == diagnostic {
+		t.Fatalf("gen_passphrase returned the degraded openssl's %d-character diagnostic text %q "+
+			"verbatim instead of falling back to /dev/urandom for a full-length passphrase; output:\n%s",
+			len(diagnostic), diagnostic, output)
+	}
+	if len(pass) != 40 {
+		t.Fatalf("gen_passphrase returned a %d-character passphrase (%q) after a degraded openssl; "+
+			"want exactly 40 (the /dev/urandom fallback's target length); output:\n%s", len(pass), pass, output)
+	}
+}
+
+// TestInstallScript_GenPassphrase_NormalOpensslProduces40Chars is the
+// baseline sanity check against the REAL system openssl: the common case
+// still yields exactly 40 characters, so the added full-length requirement
+// does not regress normal operation.
+func TestInstallScript_GenPassphrase_NormalOpensslProduces40Chars(t *testing.T) {
+	pass, output := runGenPassphrase(t, "")
+	if len(pass) != 40 {
+		t.Fatalf("gen_passphrase returned a %d-character passphrase (%q) using the real system openssl; "+
+			"want exactly 40; output:\n%s", len(pass), pass, output)
+	}
+}
+
 // runSetupAtRestEncryptionAutoGenerate drives the REAL setup_at_rest_encryption()
 // on its default non-interactive path (stdin is not a TTY, so `choice` stays
 // "1" and the `*)` auto-generate branch runs), with gen_passphrase() stubbed
