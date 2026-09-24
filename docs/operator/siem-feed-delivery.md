@@ -230,6 +230,21 @@ request that is fixing it.
 
 ---
 
+## Related fix: the writer handle was not concurrency-safe
+
+`globalSyslog` was a bare package-level pointer. The admin plane mutates it at
+runtime (`POST /api/syslog` re-points or disables forwarding) while the request
+path reads it — once per proxied request for the request log and once per admin
+action for the audit feed — with no synchronisation. Confirmed under the race
+detector.
+
+It is now an atomic pointer, and the publication in `InitSyslog` is a single
+swap so two concurrent re-points cannot both displace the same writer. There is
+no operator-visible behaviour change; re-pointing the collector under load is
+simply safe now where before it was undefined.
+
+---
+
 ## Related
 
 - `docs/operator/threat-feed-freshness.md` — the same freshness plane for

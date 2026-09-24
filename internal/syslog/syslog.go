@@ -411,7 +411,20 @@ var (
 )
 
 // now is the clock seam; tests drive freshness deterministically.
-var now = time.Now
+//
+// Held atomically rather than as a plain var: it is read on the DRAIN
+// GOROUTINE (noteDelivered / noteDrop) while a test replaces it from the test
+// goroutine, which as a bare function value is a data race the delivery-plane
+// gate catches under -race. The nil case is the production path and costs one
+// atomic load.
+var nowFn atomic.Pointer[func() time.Time]
+
+func now() time.Time {
+	if p := nowFn.Load(); p != nil {
+		return (*p)()
+	}
+	return time.Now()
+}
 
 // noteDrop charges one lost line against the cumulative counter AND the
 // freshness axis. Every drop site goes through here so a future one cannot be

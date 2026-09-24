@@ -104,6 +104,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/syslog"
@@ -165,7 +166,30 @@ var syslogHealth syslogHealthRecord
 
 // syslogHealthNow is the clock seam. Tests drive degradation deterministically
 // instead of sleeping past a five-minute threshold.
-var syslogHealthNow = time.Now
+//
+// Held atomically rather than as a plain var for the same reason as the
+// engine's: syslogFeedState is reached from the DRAIN GOROUTINE (via
+// noteSyslogDelivery) as well as from HTTP handler goroutines, so a test
+// replacing a bare function value races the delivery path — which the
+// concurrent-repoint gate catches under -race. Production never writes it and
+// pays one atomic load.
+var syslogNowFn atomic.Pointer[func() time.Time]
+
+func syslogHealthNow() time.Time {
+	if p := syslogNowFn.Load(); p != nil {
+		return (*p)()
+	}
+	return time.Now()
+}
+
+// setSyslogHealthNowForTest replaces the clock seam. Test-only.
+func setSyslogHealthNowForTest(fn func() time.Time) {
+	if fn == nil {
+		syslogNowFn.Store(nil)
+		return
+	}
+	syslogNowFn.Store(&fn)
+}
 
 // fireSyslogFeedDownAlert delivers the `syslog_feed_down` alert.
 //
@@ -278,10 +302,6 @@ type syslogFeedSnapshot struct {
 	// operator INTENT recorded in syslogConfiguredAddr, which is set even when
 	// the initial dial failed.
 	Configured bool
-	// IntentMatch is false when the operator's current target is not the one
-	// this process actually connected to — the boot/re-init failure case the
-	// pre-CHAOS-66 row already covered.
-	IntentMatch bool
 	// NeverDelivered is true when this Writer has never got a line out.
 	NeverDelivered bool
 	// Degraded is the paging predicate: lines are being lost AND nothing has
@@ -318,12 +338,11 @@ func syslogFeedState() syslogFeedSnapshot {
 		Configured: configured,
 		UDP:        !strings.HasPrefix(strings.ToLower(target), "tcp://"),
 	}
-	if !configured || globalSyslog == nil {
+	sw := activeSyslog()
+	if !configured || sw == nil {
 		return snap
 	}
-	snap.IntentMatch = syslogConfigured == syslogConfiguredAddr
-
-	st := globalSyslog.Stats()
+	st := sw.Stats()
 	snap.Delivered = st.Delivered
 	snap.Drops = st.Drops
 	snap.Panics = st.Panics
@@ -529,7 +548,7 @@ func resetSyslogHealthForTest() {
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
 	syslogHealth.mu.Unlock()
-	syslogHealthNow = time.Now
+	setSyslogHealthNowForTest(nil)
 }
 
 // syslogReasonClasses is the closed set the engine can report, mirrored here so

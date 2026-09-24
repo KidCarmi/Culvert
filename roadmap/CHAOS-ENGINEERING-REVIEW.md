@@ -98,7 +98,7 @@ everything else is triaged below with a suggested PR and required tests for foll
 **2026-09-24 — CHAOS-66 sweep (the SIEM/syslog forwarding path under a
 collector outage). ID CLAIMED IN THIS PLACEHOLDER ROW AS COMMIT ONE, BEFORE ANY
 CODE WAS WRITTEN** — the second sweep to follow the remedy the header above
-reaches twice, and the id never moved. Five defects, all closed; three residual
+reaches twice, and the id never moved. Six defects, all closed; three residual
 rows recorded (SL-1 UDP cannot prove delivery and is the default, SL-2 the flat
 reconnect backoff, SL-3 no durable spool). The finding: the only health surface
 covering the SIEM feed decides on state fixed at INIT time, so a collector that
@@ -112,7 +112,12 @@ goroutine and one ESTABLISHED collector socket per re-init, on EVERY boot of an
 appliance carrying both a YAML and a persisted target); and `POST
 /api/syslog/test` — the probe the diagnostics row itself tells operators to use
 to "confirm connectivity" — answered `ok: true` unconditionally, a
-second-order casualty of WK-9's otherwise-correct async fix. Written up in §36.
+second-order casualty of WK-9's otherwise-correct async fix. The sixth was found
+while wiring the plane and is a plain concurrency defect: `globalSyslog` was a
+bare package-level pointer mutated by the admin plane and read on the REQUEST
+PATH (`recordRequest`'s `WriteRequest`, the audit fan-out's `WriteAudit`),
+confirmed under `-race` — nothing in the suite exercised both at once, and this
+sweep would have added two more readers to it. Written up in §36.
 
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
@@ -6133,6 +6138,20 @@ revocation is not checked — while the log says "enabled", the panel says
 JSON blob nothing scrapes. That is the exact sentence §27 had to write about
 the threat feed.
 
+**D6 — the writer handle is mutated at runtime and read on the request path,
+with no synchronisation.** `globalSyslog` was a bare package-level
+`*syslogWriter`. It is written by the admin plane (`apiSyslogConfig` re-points
+or disables forwarding) and read on the REQUEST PATH — `store.go:1873`
+(`WriteRequest`, once per proxied request) and `store.go:416` (`WriteAudit`,
+once per admin action) — plus the diagnostics row, the `/metrics` scrape and
+the `/healthz` probe, each from its own handler goroutine. Confirmed under
+`-race` against the real `apiSyslogConfig` and `recordRequest` shapes. Nothing
+in the suite happened to exercise both at once, which is the only reason it had
+never been reported — and this sweep would have made it worse by adding two
+more readers. Found while wiring the plane, fixed rather than recorded, because
+a sweep may not leave a known data race on the request path in the subsystem it
+just rewrote.
+
 ### What shipped
 
 The engine, in `internal/ocsp`:
@@ -6561,6 +6580,29 @@ plane, converting a compliance gap into a traffic outage. That is the trade §19
 refused for the category store, §25 for the admin UI listener and §27 for the
 threat feed, and the answer is the same here.
 
+`globalSyslog` is now an `atomic.Pointer[syslogWriter]` behind
+`activeSyslog()` / `setActiveSyslog()`, and every call site loads ONCE into a
+local. The mechanical conversion produced `if activeSyslog() != nil {
+activeSyslog().X() }` at seven sites — a check-then-act against a handle the
+admin plane can clear in between, i.e. the same defect in a new costume — so
+each one was rewritten as `if sw := activeSyslog(); sw != nil`. The publication
+in `InitSyslog` is a `Swap`, not a load-then-store: two concurrent re-points
+would otherwise both read the same predecessor, one closing a writer the other
+was about to leak.
+
+Two further races surfaced only once the gate existed, both created by this
+sweep's own observer running `syslogFeedState` on the DRAIN goroutine: the
+clock seams (`syslogHealthNow` and the engine's `now`) were bare function
+values a test replaces, and the snapshot read the `syslogConfigured` /
+`syslogConfiguredAddr` intent strings the admin handler mutates. The clock
+seams are now atomic; the intent comparison was simply removed from the
+snapshot, since nothing consumed it — `checkSyslogFeed`'s own init branch
+already answers that question on the handler goroutine. **A new observer is a
+new concurrency context**: every global the observed function touches has to be
+re-examined against the goroutine it is now reached from, and a plain package
+var that was safe under "written at startup, read by handlers" stops being safe
+the moment a worker goroutine joins the readers.
+
 The replaced-Writer close is **asynchronous**, which is a decision and not an
 oversight: `Writer.Close` is self-bounded but that bound is ~7 s against a
 wedged collector, and the collector being replaced is — by the nature of the
@@ -6608,7 +6650,7 @@ diagnostics row (viewer-visible, counts only) already carries the posture.
 ### Gates
 
 `internal/syslog/syslog_stats_test.go` (7) and `syslog_health_chaos_test.go`
-(11).
+(12).
 
 Every defect gate was **verified failing against its reintroduced pre-fix
 shape**: the contract row reported `ok`/"forwarding is active" with a dead
@@ -6625,6 +6667,14 @@ drives the real handler, and
 `TestChaos66_MetricsExpositionCallsTheSyslogWriter` pins the exposition wiring
 structurally (a source scan, with its own not-vacuous control) because a metrics
 writer nobody calls satisfies a test that calls it directly.
+
+`TestChaos66_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` is the D6 gate
+and carries no assertion beyond "the race detector saw nothing" — a torn handle
+is the defect, and `-race` is the only instrument that observes it. Verified
+failing against the reintroduced bare-pointer shape. It is also the gate that
+found the two clock-seam races above, which is the argument for writing it at
+all: a concurrency gate earns its keep by finding what its author did not know
+to look for.
 
 Four controls, because the cheapest ways to pass the defect gates are all worse
 than the defect: a plane that reported every feed as degraded would satisfy

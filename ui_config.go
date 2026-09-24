@@ -1808,16 +1808,18 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		format := "rfc3164"
 		var drops, panics uint64
-		if globalSyslog != nil {
-			format = globalSyslog.Format()
+		// Loaded ONCE: the admin plane can clear this handle between two
+		// reads, so a check-then-act here would nil-deref the second call.
+		if sw := activeSyslog(); sw != nil {
+			format = sw.Format()
 			// Read panics before drops: deliverGuarded's recover branch always
 			// increments panics first, then drops (independent atomics, no
 			// combined snapshot). Reading in the same order means a report can
 			// only ever lag panics behind drops, never the reverse — so the
 			// UI's `drops > 0` gate can never hide a real panic behind a
 			// stale-looking drops==0.
-			panics = globalSyslog.Panics()
-			drops = globalSyslog.Drops()
+			panics = sw.Panics()
+			drops = sw.Drops()
 		}
 		// CHAOS-66: drops alone is cumulative and unreadable — it cannot
 		// distinguish a feed that is dark now from one that healed last week.
@@ -1855,9 +1857,9 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Addr == "" {
 			// Disable syslog.
-			if globalSyslog != nil {
-				globalSyslog.Close()
-				globalSyslog = nil
+			if sw := activeSyslog(); sw != nil {
+				sw.Close()
+				setActiveSyslog(nil)
 			}
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
@@ -1872,9 +1874,17 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		syslogConfigured = body.Addr
 		syslogConfiguredAddr = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
+		sw := activeSyslog()
+		if sw == nil {
+			// InitSyslog returned nil error, so a writer was published; a
+			// concurrent disable can still have cleared it before we read it
+			// back. Report the target rather than dereferencing.
+			http.Error(w, "syslog was reconfigured concurrently; retry", http.StatusConflict)
+			return
+		}
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+sw.Format()+")")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": sw.Format()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1889,7 +1899,8 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if globalSyslog == nil {
+	sw := activeSyslog()
+	if sw == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -1900,7 +1911,7 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	// to "confirm connectivity". A probe that cannot fail is worse than no
 	// probe. syslogDeliveryProbe waits, bounded, for the drain goroutine to
 	// report an actual outcome for this line.
-	outcome, detail := syslogDeliveryProbe(globalSyslog)
+	outcome, detail := syslogDeliveryProbe(sw)
 	jsonOK(w, map[string]any{
 		"ok":      outcome == "delivered" || outcome == "sent",
 		"outcome": outcome,

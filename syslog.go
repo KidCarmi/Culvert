@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/syslog"
 )
@@ -35,8 +36,33 @@ func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
 	return sw, nil
 }
 
-// globalSyslog is the active syslog writer; nil when syslog is not configured.
-var globalSyslog *syslogWriter
+// globalSyslog holds the active syslog writer; nil when syslog is not
+// configured. Read through activeSyslog, written through setActiveSyslog —
+// never touched directly.
+//
+// It is an atomic.Pointer because this handle is MUTATED AT RUNTIME by the
+// admin plane (POST /api/syslog re-points or disables forwarding) while it is
+// READ ON THE REQUEST PATH: store.go's recordRequest fan-out reaches
+// `WriteRequest` for every proxied request and the audit fan-out reaches
+// `WriteAudit` for every admin action, and the diagnostics row, the /metrics
+// scrape and the /healthz probe read it from their own handler goroutines.
+// As a bare `*syslogWriter` that was an unsynchronised concurrent
+// read/write of a pointer, confirmed under `-race` against the real
+// `apiSyslogConfig` and `recordRequest` shapes. Nothing in the suite happened
+// to exercise both at once, which is the only reason it had not been reported.
+//
+// A pointer swap is all that is required: the Writer it points at is already
+// internally synchronised, and every reader wants the generation that was live
+// when it looked. Callers therefore load ONCE into a local and use that —
+// `activeSyslog() != nil` followed by a second `activeSyslog()` call is a
+// check-then-act against a handle the admin plane can clear in between.
+var globalSyslog atomic.Pointer[syslogWriter]
+
+// activeSyslog returns the live writer, or nil when forwarding is off.
+func activeSyslog() *syslogWriter { return globalSyslog.Load() }
+
+// setActiveSyslog publishes a writer (or nil to disable forwarding).
+func setActiveSyslog(sw *syslogWriter) { globalSyslog.Store(sw) }
 
 // InitSyslog parses addr and initialises the global syslog writer.
 // Supported addr formats:
@@ -62,8 +88,12 @@ func InitSyslog(addr, syslogFmt string) error {
 	if err != nil {
 		return err
 	}
-	releaseReplacedSyslogWriter(globalSyslog)
-	globalSyslog = sw
+	// Swap, not load-then-store: two concurrent admin re-points would
+	// otherwise both read the same predecessor (one of them closing a writer
+	// the other is about to leak) or clobber each other's publication. The
+	// swap makes "publish the new one and hand me exactly the one I displaced"
+	// a single step, so every displaced writer is released exactly once.
+	releaseReplacedSyslogWriter(globalSyslog.Swap(sw))
 	noteSyslogWriterInstalled(sw, addr)
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
 	return nil

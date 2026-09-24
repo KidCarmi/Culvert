@@ -846,7 +846,7 @@ func checkSyslogFeed() OperatorContractCheck {
 	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
 	// has moved on — the persisted SIEM target is silently down but a nil-check
 	// would still report OK.
-	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+	if activeSyslog() == nil || syslogConfigured != syslogConfiguredAddr {
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,

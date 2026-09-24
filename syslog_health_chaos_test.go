@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,13 +90,13 @@ func waitForDrops(t *testing.T, n uint64) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if globalSyslog.Stats().Drops >= n {
+		if activeSyslog().Stats().Drops >= n {
 			return
 		}
-		globalSyslog.WriteAudit(map[string]string{"evt": "policy.change"})
+		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("writer recorded %d drops; want >= %d", globalSyslog.Stats().Drops, n)
+	t.Fatalf("writer recorded %d drops; want >= %d", activeSyslog().Stats().Drops, n)
 }
 
 // ---------------------------------------------------------------------------
@@ -125,12 +127,12 @@ func TestChaos66_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 
 	// Push past the degradation window on the clock seam.
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) }
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) })
 
 	row := checkSyslogFeed()
 	if row.Status != diagFail {
 		t.Fatalf("syslog_feed = %v (%q) with a dead collector and %d drops; want fail — the pre-CHAOS-66 row reported \"forwarding is active\" here",
-			row.Status, row.Message, globalSyslog.Stats().Drops)
+			row.Status, row.Message, activeSyslog().Stats().Drops)
 	}
 	if strings.Contains(row.Message, "is active") {
 		t.Errorf("row still claims the feed is active: %q", row.Message)
@@ -252,13 +254,13 @@ func TestChaos66_RecoveryRequiresADeliveredEvent(t *testing.T) {
 	waitForDrops(t, 3)
 
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) }
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) })
 	if !syslogFeedState().Degraded {
 		t.Fatal("precondition: feed should be degraded")
 	}
 
 	// Elapsed time alone must NOT clear it.
-	syslogHealthNow = func() time.Time { return base.Add(24 * time.Hour) }
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(24 * time.Hour) })
 	if !syslogFeedState().Degraded {
 		t.Error("degradation cleared on elapsed time alone — a quiet dead feed would report healthy")
 	}
@@ -275,22 +277,22 @@ func TestChaos66_RecoveryRequiresADeliveredEvent(t *testing.T) {
 	// that has already gone away can leave Delivered at 1. Waiting for
 	// "Delivered > 0" would then observe that stale success and conclude the
 	// feed recovered without a single byte having reached anything.
-	beforeDelivered := globalSyslog.Stats().Delivered
+	beforeDelivered := activeSyslog().Stats().Delivered
 
 	revived := startSyslogCollectorOn(t, col.addr)
 	defer revived.stop()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		globalSyslog.WriteAudit(map[string]string{"evt": "policy.change"})
-		if globalSyslog.Stats().Delivered > beforeDelivered {
+		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
+		if activeSyslog().Stats().Delivered > beforeDelivered {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if globalSyslog.Stats().Delivered <= beforeDelivered {
+	if activeSyslog().Stats().Delivered <= beforeDelivered {
 		t.Skip("collector could not be revived on the same port in this environment")
 	}
-	syslogHealthNow = func() time.Time { return base.Add(24*time.Hour + time.Second) }
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(24*time.Hour + time.Second) })
 	if syslogFeedState().Degraded {
 		t.Error("still degraded after an event was delivered — recovery on observed evidence did not fire")
 	}
@@ -340,7 +342,7 @@ func TestChaos66_AlertDetailCarriesOnlyABoundedReason(t *testing.T) {
 	t.Cleanup(func() { fireSyslogFeedDownAlert = old })
 
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) }
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) })
 	noteSyslogDelivery(false)
 	noteSyslogDelivery(false)
 	noteSyslogDelivery(false)
@@ -371,13 +373,13 @@ func TestChaos66_ProbeReportsTheRealOutcome(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
-	if outcome, detail := syslogDeliveryProbe(globalSyslog); outcome != "delivered" {
+	if outcome, detail := syslogDeliveryProbe(activeSyslog()); outcome != "delivered" {
 		t.Errorf("healthy probe outcome = %q (%s); want \"delivered\"", outcome, detail)
 	}
 
 	col.stop()
 	waitForDrops(t, 1)
-	outcome, detail := syslogDeliveryProbe(globalSyslog)
+	outcome, detail := syslogDeliveryProbe(activeSyslog())
 	if outcome == "delivered" || outcome == "sent" {
 		t.Errorf("probe reported %q against a dead collector (%s) — the pre-CHAOS-66 endpoint answered ok:true here", outcome, detail)
 	}
@@ -390,7 +392,7 @@ func TestChaos66_ProbeReportsTheRealOutcome(t *testing.T) {
 // convention the C1 route-parity tests use) rather than by standing up a
 // scrape. Deterministic on any hardware, under -race, at any load.
 func TestChaos66_MetricsExpositionCallsTheSyslogWriter(t *testing.T) {
-	src, err := os.ReadFile("metrics.go")
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "metrics.go"))
 	if err != nil {
 		t.Fatalf("read metrics.go: %v", err)
 	}
@@ -434,6 +436,73 @@ func TestChaos66_TestEndpointReportsFailureAgainstADeadCollector(t *testing.T) {
 	}
 }
 
+// The writer handle is MUTATED AT RUNTIME by the admin plane while the request
+// path reads it, and before CHAOS-66 it was a bare package-level pointer with
+// no synchronisation at all. Confirmed under -race against the real
+// apiSyslogConfig and recordRequest shapes: nothing in the suite happened to
+// exercise both at once, which is the only reason it had never been reported.
+// This gate is that exercise, and it is the reason the handle is now an
+// atomic.Pointer.
+func TestChaos66_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Request path: store.go's recordRequest and audit fan-out shapes.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if sw := activeSyslog(); sw != nil {
+					sw.WriteRequest(map[string]string{"host": "example.com"})
+					sw.WriteAudit(map[string]string{"evt": "policy.change"})
+				}
+			}
+		}()
+	}
+	// Admin path: repeated re-points, as POST /api/syslog performs them.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 25; i++ {
+			if err := InitSyslog("tcp://"+col.addr, "rfc3164"); err != nil {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	// And the surfaces that read it from their own handler goroutines.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = checkSyslogFeed()
+			var b strings.Builder
+			syslogWritePrometheus(&b)
+			_ = syslogDropCount()
+		}
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	// No assertion beyond "the race detector saw nothing": a torn handle is
+	// the defect, and -race is the only instrument that observes it.
+}
+
 // ---------------------------------------------------------------------------
 // CONTROLS — each of these passes trivially against a plane that is broken in
 // the opposite direction, which is why the defect gates alone are not enough.
@@ -446,10 +515,10 @@ func TestChaos66_HealthyFeedStillReportsActive(t *testing.T) {
 	armSyslogFeed(t, "tcp://"+col.addr)
 
 	for i := 0; i < 20; i++ {
-		globalSyslog.WriteAudit(map[string]string{"evt": "policy.change"})
+		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && globalSyslog.Stats().Delivered == 0 {
+	for time.Now().Before(deadline) && activeSyslog().Stats().Delivered == 0 {
 		time.Sleep(20 * time.Millisecond)
 	}
 
@@ -479,7 +548,7 @@ func TestChaos66_IdleNodeIsNeverDegraded(t *testing.T) {
 	armSyslogFeed(t, "tcp://"+col.addr)
 
 	base := time.Now()
-	syslogHealthNow = func() time.Time { return base.Add(30 * 24 * time.Hour) }
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(30 * 24 * time.Hour) })
 
 	snap := syslogFeedState()
 	if snap.Drops != 0 {

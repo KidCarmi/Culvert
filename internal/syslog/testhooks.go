@@ -18,10 +18,11 @@ import "time"
 // SetNowForTest replaces the package clock and returns a restore function.
 // Test-only; production never calls it.
 func SetNowForTest(fn func() time.Time) (restore func()) {
-	prev := now
+	prev := nowFn.Load()
 	if fn == nil {
-		fn = time.Now
+		nowFn.Store(nil)
+	} else {
+		nowFn.Store(&fn)
 	}
-	now = fn
-	return func() { now = prev }
+	return func() { nowFn.Store(prev) }
 }
