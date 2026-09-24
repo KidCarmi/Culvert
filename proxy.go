@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -778,7 +779,8 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     sanitize-once decision inside the measured function, where reintroducing
 //     a second call fails the gate.
 //
-//   - The priority is rendered with %d. It was previously spelled
+//   - The priority is rendered as plain digits (strconv.AppendInt today, the
+//     %d verb before that). It was originally spelled
 //     strings.ReplaceAll(fmt.Sprintf("%d", …), "\n", ""), which formatted an int
 //     to a string and then scanned that string for newlines a decimal integer
 //     cannot contain — two heap allocations per proxied request (the Sprintf
@@ -791,35 +793,213 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 //     (pinned by TestPolicyDecisionLine_RenderIsByteIdentical). Every
 //     genuinely string-typed argument still goes through sanitizeLog.
 
+// ── Building the line ───────────────────────────────────────────────────────
+//
+// The four emitters below build their line by APPENDING into a stack buffer
+// rather than by handing nine arguments to logger.Printf. That is a cost
+// decision with a measurement behind it, and the measurement only became
+// visible once the benchmark harness was fixed — see the note on plNullSink in
+// proxy_policylog_bench_test.go. In short: log.Logger short-circuits entirely
+// when its writer IS io.Discard, so every benchmark that silenced the logger
+// that way was timing a no-op and reporting barely a quarter of the real cost.
+//
+// Measured against a real (non-io.Discard) sink, 4-core Xeon @2.10GHz,
+// Go 1.26.6, the POLICY_ALLOW line, medians of n=8:
+//
+//	                               │ serial     │ 4x parallel │ allocs │ bytes
+//	───────────────────────────────┼────────────┼─────────────┼────────┼───────
+//	logger.Printf (previous shape) │ 1042 ns/op │   462 ns/op │      8 │ 128 B
+//	append + logger.Output         │  428 ns/op │   374 ns/op │      1 │ 192 B
+//
+// The parallel gain is much smaller, and that is expected rather than
+// disappointing: once four cores queue on log.Logger's own mutex, the mutex is
+// a larger share of the cost than the formatting this removes.
+//
+// Two separate costs go away. The nine format arguments were boxed into an
+// []any, which is seven runtime.convTstring calls plus the slice — 2/3 of the
+// line's CPU profile before fmt had parsed a single verb. And fmt's own
+// formatting of that argument list costs roughly 520 ns, of which ~200 ns is
+// the two %q verbs alone (strconv.AppendQuote runs rune-at-a-time through
+// strconv.IsPrint and costs 99 ns for a 17-byte ASCII host — 40x a plain
+// append; see BenchmarkPolicyQuote_*).
+//
+// BYTES PER OP GO UP, OBJECTS GO DOWN, and that trade is deliberate: one
+// right-sized string replaces eight small objects. GC mark cost is per OBJECT,
+// so 8 -> 1 is the term that matters; 64 extra bytes on a sweep is not.
+//
+// The end-to-end proxy benchmark cannot resolve the time saving — ~614 ns
+// against a 148 us op whose run-to-run spread is +/-10 us, because that harness
+// runs the client, the proxy and the backend in one process. What it does show
+// exactly is the allocation drop: this site went from 7.0 objects per request,
+// the largest Culvert-owned allocation site in the run, to 1.0.
+//
+// WHAT MAKES THE APPENDS SAFE TO READ is that they are not trusted. The format
+// strings survive as an executable specification in
+// TestPolicyDecisionLine_RenderIsByteIdentical, which renders every branch both
+// ways and requires the bytes to match. These lines are consumed by SIEM
+// forwarders and log parsers, so byte-identity is the acceptance condition for
+// the whole change, not a nicety.
+
+// policyLineBufSize is the stack scratch a decision line is built in. An
+// ordinary allow, block or drop line is ~190 bytes and a redirect line ~240,
+// so this leaves room for a long LDAP-DN identity or redirect URL. Exceeding
+// it is not a correctness problem — append spills to the heap and that one
+// line costs an extra allocation — and the size itself is free: 192, 320, 448
+// and 1024 all measured within noise of each other (395–424 ns/op), so it is
+// chosen for headroom rather than tuned.
+const policyLineBufSize = 448
+
+// policyLineCallDepth makes logger.Output attribute the line to the emitter's
+// CALLER (applyPolicyDecision), which is where logger.Printf attributed it
+// from. Inert under the process logger's LstdFlags — file/line is computed only
+// under Lshortfile/Llongfile — but wrong-by-default is not worth saving.
+const policyLineCallDepth = 2
+
+// policyDecision carries one decision line's fields. Every string here is RAW:
+// sanitizeLog is applied by emitPolicyDecision at the single point each value
+// reaches the line, which keeps the CWE-117 barrier exactly where the Printf
+// form had it (at the emitter, on the value, before the sink).
+type policyDecision struct {
+	verb     string // leading token, e.g. "POLICY_ALLOW"
+	action   string // trailing action= token, e.g. "allow"
+	rule     string // raw rule name; sanitized once, emitted twice
+	priority int
+	clientIP string
+
+	// hostSep is the token between the client IP and the quoted host: the
+	// request METHOD on the allow line, the literal "->" on the other three.
+	// That asymmetry is inherited from the pre-extraction call sites and is
+	// preserved verbatim rather than normalised — these lines are parsed
+	// downstream.
+	hostSep string
+
+	host string // raw
+
+	// target is the redirect destination, emitted as ` => %q` after the host.
+	// hasTarget, not target != "", is the signal: only the redirect branch
+	// carries the clause, and whether it is present must not depend on the
+	// VALUE of an admin-configured URL.
+	target    string // raw
+	hasTarget bool
+
+	cond     string // raw matched conditions
+	reqID    string
+	identity string // raw
+}
+
+// emitPolicyDecision renders d and writes it as one log line.
+//
+// d is taken by POINTER only to keep the ~176-byte struct off the argument
+// copy (gocritic hugeParam); it is read-only here and never retained, so the
+// callers' composite literals stay on the stack.
+func emitPolicyDecision(d *policyDecision) {
+	safeRule := sanitizeLog(d.rule)
+
+	var scratch [policyLineBufSize]byte
+	b := scratch[:0]
+	b = append(b, d.verb...)
+	b = append(b, " rule="...)
+	b = appendQuotedForLog(b, safeRule)
+	b = append(b, " pri="...)
+	b = strconv.AppendInt(b, int64(d.priority), 10)
+	b = append(b, ' ')
+	b = append(b, d.clientIP...)
+	b = append(b, ' ')
+	b = append(b, d.hostSep...)
+	b = append(b, ' ')
+	b = appendQuotedForLog(b, sanitizeLog(d.host))
+	if d.hasTarget {
+		b = append(b, " => "...)
+		b = appendQuotedForLog(b, sanitizeLog(d.target))
+	}
+	b = append(b, " ["...)
+	b = append(b, sanitizeLog(d.cond)...)
+	b = append(b, "] {req_id="...)
+	b = append(b, d.reqID...)
+	b = append(b, " identity="...)
+	b = append(b, sanitizeLog(d.identity)...)
+	b = append(b, " rule="...)
+	b = append(b, safeRule...)
+	b = append(b, " action="...)
+	b = append(b, d.action...)
+	b = append(b, '}')
+
+	// The error is discarded because logger.Printf discarded it too: a failing
+	// log sink is surfaced by its own counters, not per call site.
+	_ = logger.Output(policyLineCallDepth, string(b))
+}
+
+// appendQuotedForLog appends s to b exactly as fmt's %q verb would — it is
+// strconv.AppendQuote with a fast path, never a different quoting.
+//
+// strconv.AppendQuote decodes s rune by rune and asks strconv.IsPrint (a binary
+// search over the Unicode printable ranges) about each one, which costs ~100 ns
+// for a 17-byte ASCII hostname. A string made only of printable ASCII other
+// than '"' and '\' is quoted by wrapping it in quotes and nothing else, so
+// that case is settled with one byte scan instead.
+//
+// The fast path is entered only for bytes in [0x20,0x7e] excluding '"' and
+// '\'. Everything else — control bytes, DEL, and every byte >= 0x80, so all
+// multi-byte UTF-8 and all invalid UTF-8 — falls through to AppendQuote, which
+// keeps its exact escaping. Equivalence is pinned exhaustively over every byte
+// value, over the emitters' corpus, and by FuzzAppendQuotedForLog.
+//
+// Callers pass values that have already been through sanitizeLog, so in
+// practice the fallback is reached only for non-ASCII; the fast path does not
+// rely on that and stays correct for any input.
+func appendQuotedForLog(b []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			return strconv.AppendQuote(b, s)
+		}
+	}
+	b = append(b, '"')
+	b = append(b, s...)
+	return append(b, '"')
+}
+
 // logPolicyAllow emits the POLICY_ALLOW decision line. host is r.Host (the
 // authority as the client sent it), not the port-stripped host the block
 // branches log — preserved from the pre-extraction call sites verbatim.
 func logPolicyAllow(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
-	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}",
-		safeRule, priority, clientIP, method, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	emitPolicyDecision(&policyDecision{
+		verb: "POLICY_ALLOW", action: "allow",
+		rule: rule, priority: priority, clientIP: clientIP,
+		hostSep: method, host: host,
+		cond: matchedConditions, reqID: reqID, identity: identity,
+	})
 }
 
 // logPolicyDrop emits the POLICY_DROP decision line.
 func logPolicyDrop(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
-	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	emitPolicyDecision(&policyDecision{
+		verb: "POLICY_DROP", action: "drop",
+		rule: rule, priority: priority, clientIP: clientIP,
+		hostSep: "->", host: host,
+		cond: matchedConditions, reqID: reqID, identity: identity,
+	})
 }
 
 // logPolicyBlock emits the POLICY_BLOCK decision line.
 func logPolicyBlock(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
-	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	emitPolicyDecision(&policyDecision{
+		verb: "POLICY_BLOCK", action: "block",
+		rule: rule, priority: priority, clientIP: clientIP,
+		hostSep: "->", host: host,
+		cond: matchedConditions, reqID: reqID, identity: identity,
+	})
 }
 
 // logPolicyRedirect emits the POLICY_REDIRECT decision line. Reached only after
 // isSafeRedirectURL has accepted redirectURL.
 func logPolicyRedirect(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
-	safeRule := sanitizeLog(rule)
-	logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}",
-		safeRule, priority, clientIP, sanitizeLog(host), sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+	emitPolicyDecision(&policyDecision{
+		verb: "POLICY_REDIRECT", action: "redirect",
+		rule: rule, priority: priority, clientIP: clientIP,
+		hostSep: "->", host: host,
+		target: redirectURL, hasTarget: true,
+		cond: matchedConditions, reqID: reqID, identity: identity,
+	})
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:

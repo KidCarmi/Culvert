@@ -7,14 +7,13 @@ package main
 //	go test -tags benchgate -run 'TestBenchGate_PolicyDecisionLine' -v .
 
 import (
-	"io"
 	"testing"
 )
 
 // TestBenchGate_PolicyDecisionLineAllocs locks in the allocation contract for
 // the one log line applyPolicyDecision writes per proxied request.
 //
-// GATE DESIGN. Two properties make this gate mean something.
+// GATE DESIGN. Three properties make this gate mean something.
 //
 // (1) It measures the PRODUCTION emitters — logPolicyAllow and its siblings,
 // the exact functions applyPolicyDecision calls — not a copy of them. An
@@ -25,52 +24,74 @@ import (
 // (Codex review, PR #1256). Taking the RAW rule name as a parameter is part of
 // this — it puts the sanitize-once decision inside the measured function.
 //
-// (2) It is keyed on ALLOCATIONS PER OP, not ns/op, for the reason
+// (2) It runs against plSwapBenchLogger, NOT io.Discard. log.Logger skips
+// formatting entirely when its writer IS io.Discard, so the previous harness
+// timed argument construction and nothing else and under-reported this line by
+// 3.6x. The allocation figure happened to survive that bug — the arguments were
+// boxed at the call site, before Printf could short-circuit — but a gate must
+// not be right by accident. See the harness note in proxy_policylog_bench_test.go
+// and TestLogBenchHarness_DiscardShortCircuitsTheLogger.
+//
+// (3) It is keyed on ALLOCATIONS PER OP, not ns/op, for the reason
 // bench_regression_test.go states: alloc counts are deterministic and
 // hardware-independent, so the gate means the same thing on any runner, under
 // -race, at any load. ns/op on a shared CI box does not.
 //
-// The bounds are CONSTANTS and tight rather than padded, and they are stated
-// PER BRANCH because the branches genuinely differ: allow and redirect pass
-// nine format arguments, block and drop pass eight, and one fewer argument is
-// one fewer interface box. Measured on the production emitters: 8/8/7/7
-// allocs/op (from 10/10/9/9 before). Every remaining allocation is accounted
-// for — the []any argument slice plus the boxing of each distinct string
-// argument that escapes into it — so there is no legitimate reason for these
-// lines to grow another one. A change that needs one more should say so here
-// with its justification, not slip past a generous bound.
+// THE BOUND IS ONE, FOR EVERY BRANCH, and it is tight rather than padded. The
+// emitters build their line by appending into a stack buffer, so the single
+// remaining allocation is the []byte -> string conversion that hands the
+// finished line to logger.Output. There is no legitimate reason for these lines
+// to grow a second one: another allocation here means either a format argument
+// has come back (boxing an []any), or the line has outgrown
+// policyLineBufSize and the stack buffer is spilling — the latter is a sizing
+// question, not a licence to raise the bound. A change that genuinely needs one
+// more should say so here with its justification.
+//
+// The previous shape allocated 8/8/7/7 (allow/redirect/block/drop): the []any
+// argument slice plus one runtime.convTstring per distinct string argument.
 //
 // The arguments come from plArgs (variables), never the pl* constants. Go boxes
 // a constant into an interface at compile time into read-only data, so passing
 // constants would make the gate measure a cost production never has — an
 // earlier draft did exactly that and reported 5 allocs/op for a line that
-// really does 8.
+// really did 8.
 //
 // All four branches are gated, not just the hot allow path: block and drop run
 // hardest under a scanning or beaconing flood, which is exactly when the
 // gateway can least afford the waste.
 func TestBenchGate_PolicyDecisionLineAllocs(t *testing.T) {
+	// maxBytes is a CEILING, not a saving, and it is the SECONDARY signal here.
+	// Bytes per op went UP with this shape (128 -> 192 for allow, 240 for
+	// redirect): one right-sized string replaces eight small boxes. That trade
+	// is deliberate — GC mark cost is per OBJECT, so 8 -> 1 is the term that
+	// matters. A stack-buffer spill shows up as a SECOND allocation and is
+	// caught by the alloc bound above; this ceiling only stops the line from
+	// quietly growing into a kilobyte. It is set well clear of the redirect
+	// branch's 240 B so that an ordinary wording change cannot trip it — a gate
+	// that fires on benign edits is a gate that gets muted.
+	const maxBytes = 384
+
 	cases := []struct {
 		name      string
 		maxAllocs int64
 		emit      func()
 	}{
-		{"allow", 8, func() {
+		{"allow", 1, func() {
 			logPolicyAllow(plRule, plPriority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
 		}},
-		{"redirect", 8, func() {
+		{"redirect", 1, func() {
 			logPolicyRedirect(plRule, plPriority, plArgs.clientIP, plArgs.host, plArgs.redirectURL, plArgs.cond, plArgs.reqID, plArgs.identity)
 		}},
-		{"block", 7, func() {
+		{"block", 1, func() {
 			logPolicyBlock(plRule, plPriority, plArgs.clientIP, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
 		}},
-		{"drop", 7, func() {
+		{"drop", 1, func() {
 			logPolicyDrop(plRule, plPriority, plArgs.clientIP, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
 		}},
 	}
 
 	for _, tc := range cases {
-		restore := plSwapLogger(io.Discard)
+		restore := plSwapBenchLogger()
 		res := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -80,34 +101,49 @@ func TestBenchGate_PolicyDecisionLineAllocs(t *testing.T) {
 		restore()
 
 		allocs := res.AllocsPerOp()
-		t.Logf("%s decision line: %d allocs/op (bound %d), %d B/op, %d ns/op",
-			tc.name, allocs, tc.maxAllocs, res.AllocedBytesPerOp(), res.NsPerOp())
+		t.Logf("%s decision line: %d allocs/op (bound %d), %d B/op (ceiling %d), %d ns/op",
+			tc.name, allocs, tc.maxAllocs, res.AllocedBytesPerOp(), maxBytes, res.NsPerOp())
 		if allocs > tc.maxAllocs {
 			t.Errorf("REGRESSION: the per-request %s decision line allocates %d/op, exceeds bound %d — "+
 				"an allocation has returned to the log-argument construction on the request hot path "+
-				"(a re-introduced fmt.Sprintf over a non-string value, or a duplicated sanitizeLog call?). "+
-				"See the contract comment above logPolicyAllow in proxy.go.", tc.name, allocs, tc.maxAllocs)
+				"(a re-introduced logger.Printf argument list, or a duplicated sanitizeLog call?). "+
+				"See the contract comment above emitPolicyDecision in proxy.go.", tc.name, allocs, tc.maxAllocs)
+		}
+		if got := res.AllocedBytesPerOp(); got > maxBytes {
+			t.Errorf("REGRESSION: the per-request %s decision line allocates %d B/op, exceeds ceiling %d — "+
+				"the line has most likely outgrown policyLineBufSize and the stack buffer is spilling "+
+				"to the heap on every request.", tc.name, got, maxBytes)
 		}
 	}
 }
 
-// TestBenchGate_PolicyDecisionLineBeatsLegacy is the CONTROL for the gate above.
+// TestBenchGate_PolicyDecisionLineBeatsPrintf is the CONTROL for the gate above.
 //
 // A constant alloc bound proves the line is cheap; it does not prove the fix is
 // what made it cheap, and a bound alone would still pass if someone reverted the
 // change and simultaneously loosened the number. Measuring the production
 // emitter against the frozen pre-change shape in the SAME run, on the same
 // hardware, makes the comparison self-contained: the production line must
-// allocate strictly less. Strictly-less is a real assertion and not a tautology
-// — the two render byte-identical output
+// allocate strictly less AND run measurably faster. Strictly-less is a real
+// assertion and not a tautology — the two render byte-identical output
 // (TestPolicyDecisionLine_RenderIsByteIdentical), so nothing but the removed
 // waste separates them.
-func TestBenchGate_PolicyDecisionLineBeatsLegacy(t *testing.T) {
-	restore := plSwapLogger(io.Discard)
-	legacy := testing.Benchmark(func(b *testing.B) {
+//
+// The timing half is expressed as a RATIO measured in one run, never an
+// absolute ns bound, for the reason recorded throughout this repo: an absolute
+// bound is hardware-dependent and a gate that can flake gets muted. Both arms
+// run on the same box, under the same load, in the same process, so the ratio
+// cancels the clock. The measured ratio is ~0.43 (1014 -> 435 ns on a 4-core
+// Xeon @2.10GHz); the bound is 0.85, which a full revert (ratio 1.0) fails
+// while leaving ample headroom for a loaded runner or -race.
+func TestBenchGate_PolicyDecisionLineBeatsPrintf(t *testing.T) {
+	const maxRatio = 0.85
+
+	restore := plSwapBenchLogger()
+	printf := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			plLegacy(plRule, plPriority)
+			plPrintf(plRule, plPriority)
 		}
 	})
 	current := testing.Benchmark(func(b *testing.B) {
@@ -118,17 +154,21 @@ func TestBenchGate_PolicyDecisionLineBeatsLegacy(t *testing.T) {
 	})
 	restore()
 
-	t.Logf("legacy %d allocs/op %d B/op %d ns/op → production %d allocs/op %d B/op %d ns/op",
-		legacy.AllocsPerOp(), legacy.AllocedBytesPerOp(), legacy.NsPerOp(),
-		current.AllocsPerOp(), current.AllocedBytesPerOp(), current.NsPerOp())
+	ratio := float64(current.NsPerOp()) / float64(printf.NsPerOp())
+	t.Logf("printf shape %d allocs/op %d B/op %d ns/op → production %d allocs/op %d B/op %d ns/op (ratio %.2f, bound %.2f)",
+		printf.AllocsPerOp(), printf.AllocedBytesPerOp(), printf.NsPerOp(),
+		current.AllocsPerOp(), current.AllocedBytesPerOp(), current.NsPerOp(), ratio, maxRatio)
 
-	if current.AllocsPerOp() >= legacy.AllocsPerOp() {
+	if current.AllocsPerOp() >= printf.AllocsPerOp() {
 		t.Errorf("REGRESSION: the production decision line allocates %d/op, not fewer than the frozen "+
-			"pre-change shape's %d/op — the Sprintf-over-an-int and/or the duplicated sanitizeLog "+
-			"call has returned to the policy decision path.", current.AllocsPerOp(), legacy.AllocsPerOp())
+			"logger.Printf shape's %d/op — the nine-argument Printf call has returned to the policy "+
+			"decision path.", current.AllocsPerOp(), printf.AllocsPerOp())
 	}
-	if current.AllocedBytesPerOp() >= legacy.AllocedBytesPerOp() {
-		t.Errorf("REGRESSION: the production decision line allocates %d B/op, not fewer than the frozen "+
-			"pre-change shape's %d B/op.", current.AllocedBytesPerOp(), legacy.AllocedBytesPerOp())
+	if printf.NsPerOp() > 0 && ratio > maxRatio {
+		t.Errorf("REGRESSION: the production decision line costs %.2f of the frozen logger.Printf shape "+
+			"(%d ns/op vs %d ns/op), above the %.2f bound — the formatting saving this change exists for "+
+			"is gone. Check that the emitters still append into a stack buffer and that "+
+			"appendQuotedForLog still has its printable-ASCII fast path.",
+			ratio, current.NsPerOp(), printf.NsPerOp(), maxRatio)
 	}
 }
