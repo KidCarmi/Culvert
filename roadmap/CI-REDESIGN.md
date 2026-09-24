@@ -18,7 +18,7 @@ tense disagrees with this table, this table wins.
 | Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
 | Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | The non-root lane is now the Fast gate's critical path (§18.5); root-state/package isolation (`internal/mcp/execution` is 72 % of the lane) |
 | Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
-| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Schema v2 verified live: 28 on-demand PR reports read their evidence from artifacts and named a verified cohort; a metadata-only report stays `unknown`/unverified. The first automatic v2 report on main failed closed on an API rate limit (§18.3) | Scheduler: the first audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired — **pending**. Verified cohorts: **1**; Fast `race` has 16 successful executions, Fast `race+frontend+mcp` 8, main QA 0. All from a 12-hour window, so every baseline stays provisional (§18.4) | Dispatch-with-`run_id` also runs the full trend, so bulk enrichment exhausts the repository's `GITHUB_TOKEN` API budget (§18.3) |
+| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Schema v2 verified live: 28 on-demand PR reports read their evidence from artifacts and named a verified cohort; a metadata-only report stays `unknown`/unverified. The first automatic v2 report on main failed closed (HTTP 403, rate limit suspected) and its re-run verified it (§18.3.1) | Scheduler: the first audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired — **pending**. Verified cohorts: **1**. Successful executions: Fast `race` 16, Fast `race+frontend+mcp` 8, main QA 1. The PR samples all come from one 12-hour window, so every baseline stays provisional (§18.4) | The trend now skips a targeted dispatch (§18.3.1); live confirmation waits for the first dispatch after merge |
 
 Remaining backlog, in the order the measurements support (§18.5):
 
@@ -2372,16 +2372,38 @@ the default branch, main `9450d33` (#1478). Each report prints one
 
 | Check | Evidence | Result |
 |---|---|---|
-| First automatic v2 report | *CI Performance Report* 35990426653, job 107602944435, for *QA Gate* push 35989051459 on `9450d33` (QA succeeded) | **Failed closed**: `GET …/actions/runs/35989051459: HTTP 403` at 11:00 UTC. No report was published and nothing claimed success. Cause: the enrichment burst below exhausted the repository's `GITHUB_TOKEN` API budget. Re-run pending after the rate-limit window resets. |
+| First automatic v2 report | *CI Performance Report* 35990426653, job 107602944435, for *QA Gate* push 35989051459 on `9450d33` (QA succeeded) | Attempt 1 **failed closed**: `GET …/actions/runs/35989051459: HTTP 403` at 11:00 UTC. No report was published and nothing claimed success. **Cause suspected, not established:** it came minutes after the enrichment burst below, but the collector logs only the status code. The response body and `x-ratelimit-*` headers were not recorded, so the log cannot prove a rate limit. Attempt 2 (re-run of the failed job, 12:06 UTC, job 107624053905) **succeeded**: `attempt=1 event=push tested=9450d33 class=main-qa evidence=artifacts` (same six documents), `image-logs=17/17 verdict=ok verified=true`, same cohort as the PR samples. It published `ci-run-report-35989051459-1` (4,021 bytes). Attempt 1 remains in the run's history. |
 | On-demand v2 reports, Fast PR runs | 28 dispatches with `run_id`, e.g. 35990137756 / job 107602002719 for Fast run 35937792762 | All 28 report jobs succeeded. Every line reads `attempt=1 evidence=artifacts image-logs=18/18 verified=true` and names six documents (`qa-race-shard-0…3/meta.json`, `qa-race-verdict/{results,verdict}.json`). Example: `head=c96f0b60 tested=3a99c2be` — the tested SHA is the merge commit, not the PR head, and the report keeps both. |
 | Missing evidence stays unknown | The same collector run locally against Fast run 35937792762 without artifact access | `evidence=metadata-only image-logs=0/18`, image and toolchain `unknown`, `verified=false`. It lands in its own cohort and is never pooled. |
 | Trend on those dispatches | The 28 trend jobs of the same dispatches | **All failed** on `HTTP 403` (`list pr-fast-gate.yml push runs`). A dispatch with `run_id` also runs the full trend (the trend job's `if:` accepts any `workflow_dispatch`), so 28 dispatches were 28 trends reading the same history. |
 
-**Finding — enrichment is not bounded.** Enriching N runs costs N full
-trends against a shared budget of about 1,000 API requests per hour, and
-the first casualty was an unrelated automatic report. Proposed fix, not
-implemented here: run the trend on dispatch only when `run_id` is empty,
-and enrich in batches of at most five per hour. It changes reporting only.
+**Finding — enrichment was not bounded.** Enriching N runs cost N full
+trends against the shared budget of about 1,000 API requests per hour, and
+the likely casualty was an unrelated automatic report. **Fixed:** a dispatch
+with a `run_id` now reports that run and skips the trend; an empty dispatch
+is the trend. The weekly schedule, the scheduled-audit trigger, `needs:
+run-report`, `always()`, the default-branch checkout and the read-only token
+are unchanged. `ci_perf_report_dispatch_test.go` evaluates both jobs' real
+`if:` conditions, including GitHub's rule that an `if:` without a status
+function skips when a `needs` job was skipped or failed. The matrix covers:
+
+- a targeted dispatch;
+- an empty dispatch with run-report skipped;
+- a scheduled-audit completion whose report failed;
+- a cancelled scheduled audit;
+- main push completions: success, failure and cancelled;
+- pull-request runs.
+
+It rejects the pre-fix condition and the fixed condition without `always()`.
+
+**Enrichment rule until the fix is live on main:** no bulk enrichment.
+After it, enrich in small sequential batches (at most five dispatches, each
+waiting for the previous one), then dispatch once with an empty `run_id` for
+the trend. The 28 reports above are reused and not re-collected.
+
+**Follow-up, not in this change:** have the collector log the status,
+`x-ratelimit-remaining`/`-reset` and a bounded API message on failure, so
+a 403 can be attributed from its own evidence.
 
 ### 18.4 Observation period
 
@@ -2405,31 +2427,38 @@ listed and never pooled with the current engine.
 
 **Verified cohorts, 2026-09-24: 1.** Cohort
 `platform=ubuntu-latest@GitHub Actions; image=ubuntu-24.04; shards=4;
-toolchain=go1.26 linux/amd64`, from the 28 enriched Fast PR runs
-(2026-09-23 12:19 to 2026-09-24 00:18 UTC, 10 branches, all first
-attempts). Durations are job metadata; runner-minutes sum every job in the
-run.
+toolchain=go1.26 linux/amd64`. It holds 28 enriched Fast PR runs
+(2026-09-23 12:19 to 2026-09-24 00:18 UTC, 10 branches, all first attempts)
+and the first main QA run after #1478 (§18.3.1). Durations are job
+metadata; runner-minutes sum every job in the run. Statistics cover
+successful executions only.
 
-| Workflow · class · job set | Executions | Success | Failed | Elapsed median / p90 | Race path median / p90 | Runner-min median | Queue median / p90 |
+| Workflow · class · job set | Successful | Failed | Cancelled | Elapsed median / p90 | Race path median / p90 | Runner-min median | Queue median / p90 |
 |---|---|---|---|---|---|---|---|
-| Fast · `pr-code` · `race` | 20 | 16 | 4 (3 with `verdict=failed`, 1 in another job) | 856 / 951 s | 815 / 908 s | 62.3 | 4 / 99 s |
-| Fast · `pr-code` · `race+frontend+mcp` | 8 | 8 | 0 | 754 / 856 s | 712 / 810 s | 67.3 | 4 / 77 s |
-| QA · `main-qa` | 0 verified | — | — | — | — | — | — |
+| Fast · `pr-code` · `race` | 16 | 4 (3 with `verdict=failed`, 1 in another job) | 14 | 856 / 951 s | 815 / 908 s | 62.3 | 4 / 99 s |
+| Fast · `pr-code` · `race+frontend+mcp` | 8 | 0 | 0 | 754 / 856 s | 712 / 810 s | 67.3 | 4 / 77 s |
+| QA · `main-qa` | 1 | 0 | 0 | one sample, not a statistic | — | — | — |
 
-- `race` reaches 10 successes but stays **provisional**: every sample comes
-  from one 12-hour window, and "counted" also requires no contradictory
-  evidence, which only the trend checks and the trend has not yet run
-  over them.
-- Cancelled runs are excluded by the collector and are not counted here.
+- `race` and `race+frontend+mcp` stay separate groups and are never pooled.
+- Cancelled executions are counted from run metadata only; the collector
+  does not report them, so they are not verified samples. Another 2
+  cancelled code-PR runs in the window stopped before their job set was
+  known and belong to neither group.
+- Every group stays **provisional**. `race` reaches 10 successes, but they
+  all come from one 12-hour window. "Counted" also requires no
+  contradictory evidence, which only the trend checks, and no trend has run
+  over these samples yet.
 - The 101 older-engine and docs-only runs in the same window are
   metadata-only and stay out of every verified cohort.
-- These are PR samples, whose artifacts expire after 7 days (the first on
-  2026-09-30).
+- PR artifacts expire after 7 days, the first on 2026-09-30. Main QA
+  reports are produced automatically.
 
 **Missing evidence:**
-- verified main QA samples: the first automatic report failed (§18.3.1);
-- the first scheduled audit and backstop (due 2026-09-27);
-- the trend over the verified samples (blocked by the same rate limit).
+- main QA samples beyond the first; they accrue with each main push;
+- the first scheduled audit and backstop (due 2026-09-27, **pending** until
+  they actually execute);
+- one deliberate trend run over the verified samples, after the dispatch
+  fix is on main.
 
 ### 18.5 Observed bottlenecks and the next optimization
 
@@ -2471,27 +2500,51 @@ not the size of the saving:
 - `go test` already runs packages concurrently. Moving the same package to
   another job removes its contention with the rest of the lane but not its
   own run time; the ≈150 s estimate from §18.5 is unproven.
-- **A faster Fast gate does not by itself make PRs green sooner.** Deep's
-  determinism job (median 897 s, p90 913 s, 27 runs) finished after Fast
-  in 25 of 28 PR runs (Deep median 928 s against Fast 853 s). Main QA ends
+- **A faster Fast gate does not by itself make PRs green sooner.** Deep
+  finished after Fast in 25 of 28 PR runs (median 928 s against 853 s), and
+  its determinism job is Deep's longest (median 897 s, p90 913 s, 27
+  runs). Main QA ends
   on determinism too (≈860 s). Until determinism shrinks, a lane saving
   moves runner-minutes and Fast's own check, not time to both-green.
 
-**Before implementing anything, run a bounded comparison.** Use existing
-PR SHAs, five same-SHA pairs per arm in one time window, dispatched without
-reruns of failing work:
+**The end-to-end critical path.** A code PR is mergeable when both
+required gates are green, so its completion time is the later of Fast and
+Deep:
+
+| Path | Median | Bound by |
+|---|---|---|
+| Fast · `race` race path | 815 s | the non-root lane (median 752 s) |
+| Deep | 928 s | determinism (median 897 s) |
+| Main QA | ≈870–920 s | determinism (≈860 s), then the lane (≈750 s) |
+
+Any experiment must therefore report three results separately and never
+substitute one for another:
+
+1. the **Fast-only** change (lane end and Fast elapsed);
+2. the change in **PR completion time**, the later of Fast and Deep;
+3. the **runner-minute** cost.
+
+A Fast-only gain with PR completion unchanged is a runner-time result, not
+a latency result.
+
+**A bounded comparison comes before any implementation, outside the change
+that records this evidence.** Pair same-SHA runs of the arms in one time
+window, without re-running failed work:
 
 | Arm | Change |
 |---|---|
 | A | Current lane (control) |
 | B | `internal/mcp/execution` in its own job |
-| C | Same lane, with `internal/mcp/execution` started first (package order or `-p`) |
+| C | Same lane, with `internal/mcp/execution` started first |
 
-Measure the lane's end time, Fast elapsed, runner-minutes, and p90. Adopt
-B or C only if the median gain is at least ≈60 s, p90 is no worse, and the
-runner-minute cost is stated. Run the same kind of comparison for
-determinism in parallel; it is the bound on PR time-to-green. Neither is
-implemented here.
+Arm C needs proof from the lane log that the package actually started
+first. Package order and `-p` do not establish it, because `go test`
+decides when packages start.
+
+A handful of pairs can show whether the median moves. It cannot show that
+p90 does not regress; that claim waits for the provisional baselines to
+mature. A determinism comparison of the same shape is the candidate that
+can move PR completion time. Neither is implemented here.
 
 ### 18.6 Validation
 
