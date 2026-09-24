@@ -416,6 +416,51 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- **The SIEM/syslog feed reported that it was forwarding when it had stopped
+  (CHAOS-66).** The `syslog_feed` operator-contract row decided on two strings
+  fixed at startup, so a collector that went away during ordinary uptime left
+  the node reporting `ok` — *"remote syslog/SIEM forwarding is active"* — while
+  every audit and request event was discarded. Measured against the pre-fix
+  tree: 49 of 49 audit events dropped, row still `ok`. Delivery loss reached no
+  Prometheus series (so no alerting rule could be written), no `/healthz`
+  field, no alert and no log line; the one counter that existed was cumulative
+  with no time axis, so it could not distinguish a feed that is dark now from
+  one that healed last week. `internal/syslog` now records delivery with a
+  timestamp and a bounded failure reason, and `syslog_health.go` exposes
+  `culvert_syslog_*` (emitted only when a collector is configured),
+  `syslogDrops` on `/healthz` when non-zero, a delivery verdict on the
+  diagnostics row and a fire-once `syslog_feed_down` alert. Degradation
+  requires both drops and five minutes without a delivery, so it cannot fire on
+  an idle node; recovery is declared only on an event that actually reaches the
+  collector. `GET /api/syslog` gains `delivered`, `degraded`,
+  `neverDelivered`, `lastSuccessUnix`, `secondsSinceEvent`,
+  `lastFailureReason`, `queueDepth`, `queueCap` and `deliveryProvable`
+  (contract `SyslogConfig`). Note that `udp://` — the default when the address
+  omits a scheme — cannot prove delivery at all; every surface now says so.
+
+- **`POST /api/syslog/test` could not fail (CHAOS-66).** It answered
+  `{"ok": true}` unconditionally, which was correct while delivery was
+  synchronous and became a channel-send acknowledgement once it was not: it
+  returned `ok` for a collector that had been dead for a week, while the
+  diagnostics row pointed operators at it to "confirm connectivity". It now
+  waits, bounded, for a real outcome and reports `delivered`, `sent`
+  (UDP — unprovable), `dropped` with the reason, or `unknown`.
+
+- **Re-pointing the syslog collector leaked a goroutine and a descriptor
+  (CHAOS-66).** `InitSyslog` overwrote the active writer without closing it,
+  stranding the previous one's delivery goroutine on an unreachable queue while
+  holding its collector socket open — the abandoned collector saw an
+  `ESTABLISHED` connection that never closed. Reached on every boot of an
+  appliance configured from both YAML and persisted admin settings, not only on
+  an admin re-point.
+
+- **The syslog writer handle was read on the request path while the admin plane
+  mutated it (CHAOS-66).** `globalSyslog` was a bare package-level pointer
+  written by `POST /api/syslog` and read by `recordRequest`, the audit fan-out
+  and three health surfaces — a data race confirmed under `-race`. It is now an
+  atomic pointer published by a single swap, with every call site loading once
+  into a local.
+
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,
