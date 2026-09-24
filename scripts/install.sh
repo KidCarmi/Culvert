@@ -1782,6 +1782,15 @@ setup_at_rest_encryption() {
       ;;
     *)
       pass="$(gen_passphrase)"
+      # gen_passphrase()'s only guard is "non-empty" (it falls back to
+      # /dev/urandom, then error(), only on a fully empty result) — a
+      # degraded `openssl` (e.g. a FIPS-mode build that writes an engine
+      # warning ahead of the base64 data on stdout) can still yield a
+      # short-but-non-empty alnum string. Apply the same floor/charset
+      # contract enforced on the operator-typed and host-env-supplied
+      # passphrases so a degraded auto-generate can never silently persist
+      # a weak CA/log encryption key instead of failing loudly.
+      validate_passphrase_for_env_file "Auto-generated passphrase" "$pass"
       info "Generated a random 40-character passphrase."
       ;;
   esac
