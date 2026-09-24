@@ -2685,7 +2685,7 @@ interleaved base/candidate).
 |---|---|---|---|
 | Fixture: `loadContract` calls per `-count=2` run of the contract tests | 258 | 92 | −166 (≈30 s of loading at 183 ms) |
 | Family: `TestConformance_`, `-count=2`, 5 recorded seeds (101…505), median wall | 41.75 s | 14.31 s | −27.4 s (−66 %) |
-| Suite: root package, `-count=2 -shuffle=20260421`, one run each | pending | pending | local A/B running |
+| Suite: root package, `-count=2 -shuffle=20260421`, one run each (test-binary time) | 906.2 s (917.3 s in an earlier run) | 889.5 s | ≈−17 s; two baseline runs differ by 11 s, so this single sample does not separate the saving from noise |
 | Gate: Deep determinism job on CI | 14 min 51 s (35999698583) | pending (this PR's Deep run) | one sample each; not a trend |
 
 The suite and gate rows are single samples. They say the saving shows up
@@ -2696,9 +2696,30 @@ PR-completion speedup; Deep determinism stays the PR's longest job (§18.5).
 
 - Targeted race run of the contract tests, `-count=2 -shuffle=303`: passed.
 - Complete unsharded shuffled double run, `go test -count=2
-  -shuffle=20260421 ./...` with `TEST_SEED=20260421` (the CI seed): pending.
+  -shuffle=20260421 ./...` with `TEST_SEED=20260421` (the CI seed): **passed**, all
+  110 packages, 1,000 s wall, the root package 941.6 s.
 - `-count=2` stays in one package process; nothing is split or sharded, so
   state-leak detection across repetitions is unchanged.
+
+**Unrelated test race found, not fixed here.** The root-package-only
+candidate run failed once, in `TestChaos64_StaleServesDoNotStackRefreshes`:
+`used 1 resolver calls, want 2`. The failure is in the test, not in this
+change:
+
+- The test reads the resolver call counter right after its 100 stale serves
+  return. It never waits for the asynchronous refresh they started
+  (`refreshAsync`) to reach the resolver.
+- The log shows the refresh did call the resolver afterwards: its
+  `i/o timeout` line comes just before the failure.
+- Alone, the test passes 10/10 on both sides, and it passed in the full
+  run with the same seed and order.
+- The fix is to wait for the second call with the existing
+  `waitForResolverCalls` helper. It is recorded for the flaky-test
+  investigation and deliberately not bundled here.
+
+The first attempt at these runs also failed 16 support-bundle tests with
+`insufficient disk headroom`: the session's disk was full. Those runs were
+discarded and repeated after freeing space.
 
 **Side note.** `TestCredWall_LedgerStatesTheRealScanCount` counts source
 files on disk, so every new test file changes the MCP ledger's
