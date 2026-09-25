@@ -7328,18 +7328,27 @@ sweep that adds walls should be most suspicious of the walls it cannot test.
 **A sibling tooling finding, recorded because it cost this sweep five
 misreadings in a row: on this repository a red required gate is more often a
 CANCELLATION CASCADE than a verdict, and the two are indistinguishable at
-check-run level.** The race+coverage suite runs SHARDED
-(`.github/workflows/qa-race-shards.yml`), and its verdict job FAILS CLOSED when
-a shard input is missing — which is correct, and is the whole point of the
-completeness proof. But a push that supersedes a head cancels that run's
-shards, the verdict job then observes them missing and reports `failure`, and
-the Fast/Deep Gate aggregates inherit it. The resulting check run is
-`conclusion: failure` on a required gate with no failing test anywhere in it.
-Five runs on this PR were read that way before the rule was written down:
-36187288439 (12 cancelled), 36187288351 (5), 36196777545 (11 cancelled + the
-verdict failing closed), 36197161409 (13 cancelled / 1 failure / 1 success / 4
-skipped) and 36198050751 (9). In every case the single `failure` was the
-verdict job and every job under it was `cancelled`.
+check-run level.** The cause is GENERIC, not specific to any one job: a push
+that supersedes a head cancels that run's jobs, and every required aggregate
+verifies its dependencies — `cancelled` is not `success`, so the aggregate's
+own `needs-verdict` step refuses and the check run reports
+`conclusion: failure` with no failing test anywhere in it. The sharded
+race+coverage suite (`.github/workflows/qa-race-shards.yml`) adds a second
+instance of the same shape one level down, since its verdict job FAILS CLOSED
+on a missing shard input — correct, and the whole point of the completeness
+proof — so a Fast Gate cascade usually shows TWO failures (the shard verdict
+and the aggregate) while a Deep Gate cascade shows ONE (the aggregate alone,
+with no shard verdict anywhere in it). **Do not go looking for the shard
+verdict when diagnosing this** — that was this note's own first formulation,
+and the Deep Gate falsified it: run 36198970055 on a superseded head measured
+5 cancelled / 4 skipped / 1 success / 1 failure, the failure being
+`Run ./.github/actions/needs-verdict` on the aggregate itself.
+Seven runs on this PR carried this shape: 36187288439 (12 cancelled),
+36187288351 (5), 36196777545 (11 cancelled + the verdict failing closed),
+36197161409 (13 cancelled / 1 failure / 1 success / 4 skipped), 36198050751
+(9), 36198306761 (13 cancelled / 2 failures — verdict AND aggregate) and
+36198306759 / 36198970055 (the Deep Gate pair, aggregate only). The first five
+were each MISREAD as a verdict before the rule was written down.
 
 The operational rule, which applies to anyone driving a PR here to green:
 **read the JOBS of the run, not the aggregate's conclusion, and check the head
