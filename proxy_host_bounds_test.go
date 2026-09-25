@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -815,4 +818,88 @@ func TestChaos69_DefectAdminEntryPointsApplyTheCanonicalTier(t *testing.T) {
 			t.Errorf("proxyOversizeHostRejected = %d, want %d — the admin-plane canonical refusal is uncounted", got, before+1)
 		}
 	})
+}
+
+// TestChaos69_RunbookLogExampleMatchesTheEmitter pins the runbook's OVERSIZE_HOST
+// examples against what noteOversizeHostRejection really emits, per tier.
+//
+// It exists because the example DRIFTED: the two-tier rework changed the line's
+// shape (it gained tier=, and limit= became the bound actually applied) while the
+// runbook kept a single pre-rework line showing no tier and limit=261 — the
+// derivation-only maxDestAuthorityLen, which this emitter never prints. An
+// operator building log parsing or an incident-response step from that example
+// could not match real output and could not tell WHICH bound fired, which is the
+// one question the two tiers exist to answer (Codex review, PR #1446).
+//
+// Prose cannot be unit-tested, but an example CAN: the doc is compared against
+// the emitter's own output rather than against a regex rewritten here, so a
+// future change to the format string fails the build until the runbook is
+// updated in the same commit. total= is normalised because it carries the live
+// cumulative count, which no example can pin.
+//
+// It deliberately does NOT dictate HOW MANY examples the runbook shows or which
+// tiers it picks — that is the doc author's call, and a gate that imposed it
+// would fail the build over formatting rather than over a wrong line. What it
+// enforces is narrower and is the actual contract: every OVERSIZE_HOST line the
+// runbook prints must be one this emitter really produces, and must name the
+// tier that fired (the field whose absence was half the original defect).
+func TestChaos69_RunbookLogExampleMatchesTheEmitter(t *testing.T) {
+	const runbook = "docs/operator/destination-host-bounds.md"
+	doc, err := os.ReadFile(runbook)
+	if err != nil {
+		t.Fatalf("read %s: %v", runbook, err)
+	}
+
+	totals := regexp.MustCompile(`total=\d+`)
+	normalise := func(s string) string { return totals.ReplaceAllString(strings.TrimSpace(s), "total=N") }
+
+	var examples []string
+	for _, line := range strings.Split(string(doc), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "OVERSIZE_HOST ") {
+			examples = append(examples, strings.TrimSpace(line))
+		}
+	}
+
+	// Not-vacuous check: a runbook that stopped showing the line entirely must
+	// FAIL rather than pass by having nothing left to compare.
+	if len(examples) == 0 {
+		t.Fatal("runbook shows no OVERSIZE_HOST example — nothing to pin against the emitter")
+	}
+
+	for _, want := range examples {
+		fields := strings.Fields(want)
+		if len(fields) < 4 {
+			t.Fatalf("unparseable example %q", want)
+		}
+		proto, clientIP := fields[1], fields[2]
+
+		var tier string
+		var nbytes int
+		for _, f := range fields {
+			f = strings.Trim(f, "{}")
+			switch {
+			case strings.HasPrefix(f, "tier="):
+				tier = strings.TrimPrefix(f, "tier=")
+			case strings.HasPrefix(f, "bytes="):
+				if nbytes, err = strconv.Atoi(strings.TrimPrefix(f, "bytes=")); err != nil {
+					t.Fatalf("example %q: bytes= is not a number: %v", want, err)
+				}
+			}
+		}
+		if tier == "" {
+			t.Errorf("example %q names no tier — an operator cannot tell which bound fired", want)
+			continue
+		}
+		resetOversizeHostStateForTest()
+		buf := chaos66CaptureLog(t)
+		noteOversizeHostRejection(proto, clientIP, nbytes, tier)
+
+		got := normalise(buf.String())
+		if got == "" {
+			t.Fatalf("emitter produced no line for tier=%s", tier)
+		}
+		if got != normalise(want) {
+			t.Errorf("runbook example does not match the emitter\n doc: %s\nreal: %s", normalise(want), got)
+		}
+	}
 }

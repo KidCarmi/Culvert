@@ -7466,3 +7466,78 @@ And one about **where a cost lives**:
 > *read*, each of them a correct, well-reviewed, individually cheap matcher. A
 > value that fans out to many consumers has no single owner of its cost, so the
 > bound belongs at the one place it has a single owner: where it enters.
+
+### The third review round: sharing a predicate is not sharing an action
+
+Two findings on `51f8922`, and neither is about what the bound *is*. Both are
+about what happens *around* it.
+
+**Face 1 — the SOCKS5 refusal charged its counter AFTER the reply.** The gate
+wrote `socks5Reply(conn, 0x02)` and only then called
+`noteOversizeHostRejection`, so anything acting on the refusal — a reader, an
+operator watching `culvert_proxy_oversize_host_rejected_total`, or the gate's own
+test — could observe the refusal with the counter unmoved.
+`TestChaos69_DefectSOCKS5RefusesOversizeDestination` failed **1 run in 4**.
+
+What makes this worth recording is that **every other call site was already
+right**: `rejectOversizeDestHost` and `rejectOversizeCanonicalHost` both charge
+before `http.Error`, and the two admin handlers copy that order. SOCKS5 was the
+one place the accounting-and-reply **sequence** was hand-written inline rather
+than going through the shared helper — because SOCKS5 speaks a wire protocol, so
+there was no `http.ResponseWriter` to hand the shared helper.
+
+The section above makes the completeness of the entry-point inventory a security
+property and satisfies it by sharing the **predicates**
+(`rawAuthorityOversize`, `canonicalHostOversize`). That was necessary and it was
+not sufficient. The four entry points agreed perfectly about *what is too long*
+and diverged about *what to do about it*, and the divergence landed exactly where
+the action was not shared:
+
+> **Sharing a predicate is not sharing an action.** When one call site cannot use
+> the shared helper, it inherits none of the helper's ordering guarantees — only
+> its answer. Enumerate what the helper *does*, not just what it *decides*.
+
+The ordering rule itself is CHAOS-57's, one plane over: the accounting lands
+ahead of what the peer observes (there, each severed tunnel's `TUNNEL_CLOSED`
+ahead of the flush hooks).
+
+**Face 2 — the runbook's log example drifted through the two-tier rework.** It
+kept a single pre-rework line:
+
+    OVERSIZE_HOST HTTP 10.4.2.19 {bytes=1048310 limit=261 total=4127 action=block}
+
+which is wrong twice. It omits `tier=`, the field the two-tier design added and
+which the runbook's own field list documents two paragraphs below — so the
+document contradicted itself. And `limit=261` is `maxDestAuthorityLen`, the
+**derivation-only** constant the emitter never prints; the real line carries
+`1024` for `raw` or `253` for `canonical`. An operator building log parsing or an
+incident-response step from that example could not match real output and could
+not tell **which bound fired** — the one question the two tiers exist to answer.
+
+This is the same drift class that, earlier in the same PR, left four places
+naming predicates the rework had deleted. Prose cannot be unit-tested; an
+**example** can:
+
+> **A documented log line is a parsing contract.** Pin it against the emitter
+> rather than against a regex rewritten in the test — otherwise the test and the
+> doc drift together and agree with each other while both disagree with the code.
+
+`TestChaos69_RunbookLogExampleMatchesTheEmitter` extracts every `OVERSIZE_HOST`
+line from the runbook, replays each through the real
+`noteOversizeHostRejection`, and compares — normalising only the live `total=`,
+which no example can pin.
+
+**What it deliberately does NOT pin is how many examples the runbook shows or
+which tiers it picks.** An earlier draft required both tiers; that is a
+formatting preference, not the contract, and a gate that enforced it would fail
+the build over layout rather than over a wrong line. The contract is narrower:
+every line the runbook prints must be one the emitter really produces, and must
+name the `tier` that fired — the field whose absence was half the original
+defect. Verified failing against the original drifted line, against the
+reviewer's exact `limit=261`, and against a runbook with the example deleted
+(the not-vacuous case); verified PASSING when a second tier's example is added,
+because that is the author's call.
+
+> A wall should pin the property that was broken, not the shape the author
+> happened to write while fixing it. Ask what a future change could get *wrong*,
+> and stop there.
