@@ -9,5 +9,6 @@ import (
 )
 
 func TestConformance_Response_Slice3l(t *testing.T) {
-	assertResponseConforms(t, http.MethodGet, "/api/alerts/webhooks", apiAlertsWebhooks)
+	spec := loadContract(t)
+	assertResponseConforms(t, spec, http.MethodGet, "/api/alerts/webhooks", apiAlertsWebhooks)
 }
