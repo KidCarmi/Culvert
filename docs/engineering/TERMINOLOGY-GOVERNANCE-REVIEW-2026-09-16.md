@@ -1,8 +1,14 @@
 # Culvert Language & Terminology Governance Review — 2026-09-16
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
+> **Snapshot scope (read this first):** this is a HISTORICAL record of `origin/main` at `993b390` on
+> 2026-09-16. It was merged later, after `main` had moved on, so the tree it ships in contains commits it
+> never audited. Its findings, carried-over backlog, health score and PR-backlog recommendations describe
+> `993b390` only. They are not a statement about the tree this file is published in; the current governance
+> state is whatever the most recent review in this series says. Later windows are audited by later
+> reports, never retroactively by this one.
 > **Method:** Fetched `origin/main` immediately before writing this report and again immediately
-> before opening its PR (per the DEBT-014 process lesson). `main` is unchanged at `993b390` — the same
+> before opening its PR (per the DEBT-014 process lesson). `main` was then unchanged at `993b390` — the same
 > tip audited by `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-15.md` (PR #1402, still open) — so the content
 > audit below covers the same `574d265..993b390` window (104 files / 11 first-parent merges / ~12.5k
 > insertions: CHAOS-65 OCSP revocation checking, the MCP "read-first"/"First Canary exact scope"
