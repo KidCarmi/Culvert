@@ -117,8 +117,8 @@ func TestRollbackScope_OffRegistryEntriesAreReportedOnce(t *testing.T) {
 	seen := map[string]int{}
 	for _, e := range rollbackExcludedConfigSurfaces() {
 		seen[e.ID]++
-		if e.Note == "" {
-			t.Errorf("%q has no note", e.ID)
+		if e.Reason == "" {
+			t.Errorf("%q has no reason", e.ID)
 		}
 	}
 	for i := range offRegistryRollbackExclusions {
@@ -132,5 +132,57 @@ func TestRollbackScope_OffRegistryEntriesAreReportedOnce(t *testing.T) {
 				t.Errorf("off-registry ID %q collides with a registry row", configSurfaces[i].ID)
 			}
 		}
+	}
+}
+
+// TestRollbackScope_ReasonIsDedicatedNeverNote pins that the rollback-scope
+// reason comes ONLY from the dedicated RollbackExclusion field (or an
+// explicit generic explanation) and never from the general-purpose registry
+// Note — e.g. otlp_endpoint's Note describes DP apply semantics, not why
+// rollback preserves the setting. It also rejects a RollbackExclusion on a
+// row that IS on the rollback surface (a reason for an exclusion that does
+// not exist).
+func TestRollbackScope_ReasonIsDedicatedNeverNote(t *testing.T) {
+	reasons := map[string]string{}
+	for _, e := range rollbackExcludedConfigSurfaces() {
+		reasons[e.ID] = e.Reason
+	}
+	for i := range configSurfaces {
+		row := &configSurfaces[i]
+		if row.Rollback && row.RollbackExclusion != "" {
+			t.Errorf("%q is on the rollback surface but records a RollbackExclusion", row.ID)
+		}
+		if row.Kind != kindConfig || row.Rollback {
+			continue
+		}
+		got, ok := reasons[row.ID]
+		if !ok {
+			t.Errorf("%q is off the rollback surface but not reported", row.ID)
+			continue
+		}
+		want := row.RollbackExclusion
+		if want == "" {
+			want = rollbackExclusionGenericReason
+			if row.Sensitive {
+				want = rollbackExclusionSensitiveReason
+			}
+		}
+		if got != want {
+			t.Errorf("%q reason = %q, want %q", row.ID, got, want)
+		}
+		if row.Note != "" && row.RollbackExclusion != row.Note && got == row.Note {
+			t.Errorf("%q reports its registry Note as the rollback reason", row.ID)
+		}
+	}
+	// The two Codex-cited rows carry notes unrelated to rollback; they must
+	// get the generic explanation, not those notes.
+	for _, id := range []string{"otlp_endpoint", "threat_feed_urls"} {
+		if reasons[id] != rollbackExclusionGenericReason {
+			t.Errorf("%q reason = %q, want the generic explanation", id, reasons[id])
+		}
+	}
+	// Recorded reasons reach the API verbatim.
+	if !strings.Contains(reasons["alert_webhooks"], "HMAC") {
+		t.Errorf("alert_webhooks reason = %q, want its recorded rollback-exclusion reason", reasons["alert_webhooks"])
 	}
 }

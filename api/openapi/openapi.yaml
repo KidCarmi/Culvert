@@ -1790,11 +1790,17 @@ components:
             setting participates in rollback.
           items:
             type: object
-            required: [id, note]
+            required: [id, reason]
             additionalProperties: false
             properties:
               id: { type: string, description: "Stable snake_case setting identifier." }
-              note: { type: string, description: "Why this setting is excluded by design." }
+              reason:
+                type: string
+                description: >-
+                  Why rollback leaves this setting unchanged: the setting's
+                  recorded rollback-exclusion reason when one exists, otherwise
+                  an explicit generic explanation (not captured in snapshots;
+                  secret-bearing settings are never snapshotted).
 
     # ── Slice 3 tranche 8: write request schemas ──────────────────────────────────
     SetBlocklistMode:

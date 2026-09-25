@@ -8125,7 +8125,7 @@ function loadConfigRollbackScope() {
       configRollbackScopeError = false;
       if (configRollbackExcluded.length === 0) { el.style.display = 'none'; return; }
       const items = configRollbackExcluded.map(e =>
-        `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.note)}</li>`).join('');
+        `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.reason)}</li>`).join('');
       // "including": the list is the set this appliance KNOWS about, not a
       // proof that everything else rolls back.
       el.innerHTML = `<details><summary>Settings not restored by rollback (by design), including these ${configRollbackExcluded.length}</summary>` +

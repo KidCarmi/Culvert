@@ -1380,14 +1380,14 @@
                   "description": "Stable snake_case setting identifier.",
                   "type": "string"
                 },
-                "note": {
-                  "description": "Why this setting is excluded by design.",
+                "reason": {
+                  "description": "Why rollback leaves this setting unchanged: the setting's recorded rollback-exclusion reason when one exists, otherwise an explicit generic explanation (not captured in snapshots; secret-bearing settings are never snapshotted).",
                   "type": "string"
                 }
               },
               "required": [
                 "id",
-                "note"
+                "reason"
               ],
               "type": "object"
             },

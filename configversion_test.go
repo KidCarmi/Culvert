@@ -64,10 +64,6 @@ func TestApiConfigDiff_InvalidFrom(t *testing.T) {
 	}
 }
 
-// TestSaveConfigVersion_WritesValidJSON verifies that saveConfigVersion
-// produces a syntactically valid JSON envelope on disk after the writer
-// was converted to the hardened atomicWriteFile helper. Redirects
-// configVersionsDir to a temp dir to avoid touching /data.
 func TestApiConfigRollbackScope_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/config/rollback-scope", http.NoBody)
 	w := httptest.NewRecorder()
@@ -103,8 +99,8 @@ func TestApiConfigRollbackScope_ListsFindingTenThreeExclusions(t *testing.T) {
 	seen := make(map[string]bool, len(resp.Excluded))
 	for _, e := range resp.Excluded {
 		seen[e.ID] = true
-		if e.Note == "" {
-			t.Errorf("excluded setting %q has no explanatory note", e.ID)
+		if e.Reason == "" {
+			t.Errorf("excluded setting %q has no explanatory reason", e.ID)
 		}
 	}
 	for _, want := range []string{
@@ -133,6 +129,10 @@ func TestApiConfigRollbackScope_ListsFindingTenThreeExclusions(t *testing.T) {
 	}
 }
 
+// TestSaveConfigVersion_WritesValidJSON verifies that saveConfigVersion
+// produces a syntactically valid JSON envelope on disk after the writer
+// was converted to the hardened atomicWriteFile helper. Redirects
+// configVersionsDir to a temp dir to avoid touching /data.
 func TestSaveConfigVersion_WritesValidJSON(t *testing.T) {
 	tmp := t.TempDir()
 
