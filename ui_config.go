@@ -2027,7 +2027,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, map[string]any{
+		resp := map[string]any{
 			"base_url":                proxyExternalBaseURL,
 			"ui_sans":                 uiExtraSANs,
 			"trust_forwarded_headers": trustForwardedHeaders,
@@ -2037,7 +2037,18 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			"ui_custom_cert_uploaded": customUITLSFilesPresent(),
 			"ui_custom_cert_active":   uiCustomTLSActive,
 			"ui_custom_cert_corrupt":  uiCustomTLSCorrupt,
-		})
+		}
+		// The admin UI's OWN serving certificate expiry — distinct from the
+		// MITM inspection root CA and the outbound upstream mTLS client
+		// cert, which already surface theirs on other panels. Only known
+		// once a custom cert/key pair (uploaded here, or set via
+		// -tls-cert/-tls-key) has actually bound; omitted entirely for the
+		// auto self-signed fallback, which is not operator-configured.
+		if notAfter, known := adminUITLSCertExpiry(); known {
+			resp["ui_tls_cert_not_after"] = notAfter.UTC().Format(time.RFC3339)
+			resp["ui_tls_cert_days_remaining"] = daysRemainingFloor(notAfter)
+		}
+		jsonOK(w, resp)
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
