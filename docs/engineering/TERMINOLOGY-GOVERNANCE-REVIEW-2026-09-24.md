@@ -23,7 +23,9 @@
 > The window covers 34 first-parent merges / 256 files / ~55.7k insertions, dominated by two
 > unrelated backend tracks: (a) CI-REDESIGN pipeline work (`cmd/cireport`, `cmd/rootshard`,
 > `.github/workflows/*`, release-publication gating, the R2-only catalog-origin retirement of GitHub
-> Pages) — CI/release-engineering internals with no operator-facing surface — and (b) MCP "first
+> Pages; mostly CI internals, but it also adds operator-facing text: the
+> `docs/operator/release-publication-gating.md` runbook and the catalog workflows' `::error::` messages)
+> — and (b) MCP "first
 > controlled canary" rollout hardening (`internal/mcp/canary/*`, `mcp_canary_*.go`,
 > `docs/design/mcp/CANARY-READINESS-MATRIX.md`, `docs/operator/mcp-first-controlled-canary-review.md`)
 > alongside the CHAOS-65 (OCSP revocation checking), CHAOS-60 (GeoIP resolution health), and CHAOS-63
@@ -69,9 +71,11 @@ parts of the same window did find drift this pass missed; see "Overlap with para
      name to compare yet, and therefore nothing to flag. The readiness-matrix row renumbering and the
      canary-review design doc are internal row-ID/function-name jargon, not administrator-facing product
      vocabulary, and stay internally self-consistent.
-   - The release-publication-gating and R2-only-catalog work (`promote-image`, `candidate-<run_id>`,
-     `resolve-candidate`) is CI/release-engineering internals with no operator-GUI or config-surface
-     exposure, out of this glossary's scope.
+   - The release-publication-gating and R2-only-catalog work: its job and tag names (`promote-image`,
+     `candidate-<run_id>`, `resolve-candidate`) are CI internals. Its operator runbook
+     (`docs/operator/release-publication-gating.md`) and its workflow `::error::` messages are
+     operator-facing text, and the glossary applies to them. Their "appliance" wording is covered in
+     "Forbidden term: appliance" below.
 2. **Carry-over findings were spot-checked at their cited locations, not exhaustively re-verified.**
    This pass did not trace every changed file that a carry-over finding depends on. It checked the
    cited locations of T-11, T-12, T-29 and T-30 directly (item 3 below), and read the window's hunks in
@@ -121,6 +125,39 @@ deliberate, independently-documented naming decisions — legacy GUI per
 `docs/design/INFORMATION-ARCHITECTURE.md`, new frontend per `docs/design/FRONTEND-MIGRATION-PLAN.md` —
 not a mechanical rename) also remains unresolved and is not queued to the numbered backlog, per the
 2026-09-09 report's reasoning.
+
+---
+
+## Forbidden term: appliance
+
+`docs/design/PRODUCT-TERMINOLOGY.md` says "Appliance: *Not used*" for UI labels and docs.
+`git diff 574d265 6ec745d -U0 | grep -i appliance` finds 30 added lines in this window. Line numbers
+below are at `6c46ebd`/`6ec745d`.
+
+**User- or operator-visible text (9 lines).** All nine were added in the 2026-09-21 report's window,
+and that report's PR (#1456, its T-51 recurrence) changes them to "node" or "Culvert". This PR does not
+edit them, so the same line is never changed in two PRs:
+- `api/openapi/openapi.yaml:483`, `api/openapi/openapi.json:2735`, `frontend/src/api/types.gen.ts:6240`
+  (the `uncheckedEnforcingPaths` description)
+- `docs/operator/ocsp-revocation-checking.md:22`, `:122`
+- `docs/operator/geoip-resolution-health.md:36`
+- `docs/operator/release-publication-gating.md:547`
+- `CHANGELOG.md:285`
+- `.github/workflows/publish-catalog-r2.yml:104` (an `::error::` line in the Actions log)
+
+**Left as is (21 lines), with reasons:**
+- Code comments, none part of an emitted string: `geoip_resolve_health.go:292`, `ocsp_coverage.go:19`,
+  `:84`, `ocsp_metrics.go:16`.
+- Test comments: `internal/ocsp/ocsp_chaos_test.go:1051`, `mcp_live_execution_e2e_test.go:66`, `:82`,
+  `ocsp_coverage_test.go:87`, `e2e_image_recipe_test.go:8` (names the `appliance-catalog-update` workflow).
+- Workflow YAML comments, not printed: `.github/workflows/publish-catalog-r2.yml:75`,
+  `.github/workflows/resign-catalog.yml:124`.
+- Identifiers: the test name `TestSluiceIntegration_ApplianceHandlersEndToEnd` in
+  `.github/qa-root-shard-timings.json:5769` and in `cmd/cireport/testdata/evidence/comparison.json:74`
+  and `:135` (test-fixture data).
+- `CLAUDE.md:182`, `:228`: contributor and agent instructions, not product documentation.
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md:1002`, `:6107`, `:6163` and `roadmap/CI-REDESIGN.md:889`, `:907`:
+  engineering records. The `CI-REDESIGN.md` lines name the `appliance-catalog-update` workflow.
 
 ---
 
