@@ -33,12 +33,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   authenticator as well as the password depends on it — but now clears
   deliberately and prints that the account became single-factor. The replay
   counter is part of the enrolment, not a separate durable fact: `ClearTOTP`
-  now clears it too, and `SetTOTPSecret` resets it when the secret changes
-  (but not when backup codes are re-issued for the same secret, which would
+  now clears it too, and `SetTOTPSecret` resets it when the KEY changes
+  (but not when backup codes are re-issued for the same key, which would
   reopen the replay window for a live secret). Without that, the counter
   outlived de-enrolment and refused the re-enrolment the break-glass warning
   instructs the operator to perform — it had been zeroed only as a side effect
-  of the record replacement this change removes.
+  of the record replacement this change removes. That comparison asks whether
+  the KEY changed, not whether the stored string did: the verifier folds case
+  and trims whitespace before base32-decoding, and Go's decoder ignores a
+  secret's non-canonical trailing bits, so spellings that differ as strings can
+  name one authenticator (`MZXW6` and `MZXW7` decode to the same key). A
+  string comparison read a backup-code re-issue in a different spelling as a
+  key change and zeroed the counter for a live key. The canonicalisation is now
+  one function that the verifier itself uses and that backs the exported
+  `totp.SameKey`/`totp.Usable`, so the comparison and the code generator cannot
+  disagree, and an unusable incoming secret never counts as evidence that the
+  key changed.
 
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job

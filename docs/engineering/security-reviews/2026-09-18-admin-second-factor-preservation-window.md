@@ -126,11 +126,58 @@ Two changes close it, and the second is the security half:
 
 - `ClearTOTP` clears the counter too. With no secret installed the value protects nothing, so
   keeping it can only cost availability.
-- `SetTOTPSecret` resets the counter **only when the secret actually changes**. A caller re-issuing
+- `SetTOTPSecret` resets the counter **only when the KEY actually changes**. A caller re-issuing
   BACKUP CODES for the same secret must keep it: zeroing it there would reopen the replay window for
   a *live* secret. Resetting unconditionally is the cheapest way to pass the first gate and is
   strictly worse than the lockout it fixes, so it is pinned as a CONTROL
   (`TestSetTOTPSecret_SameSecretKeepsCounter`, verified failing against the unconditional shape).
+
+### Correction round 2 — key identity is not string identity (Codex review, PR #1429)
+
+The guard above shipped comparing the STORED STRINGS (`u.totpSecret != secret`). **That was wrong,
+and it was wrong in the direction the guard exists to prevent.**
+
+`verifyTOTPAt` canonicalises a secret — `strings.ToUpper(strings.TrimSpace(secret))` — and then
+base32-decodes it, so the authenticator's identity is the DECODED KEY, not the stored string.
+Several spellings therefore name one authenticator and generate identical codes. A backup-code
+re-issue that passed the same secret in lowercase, or with surrounding whitespace, read as a KEY
+CHANGE and zeroed `totpLastCounter` for a key that was still live — reopening exactly the replay
+window correction round 1 closed, reached through spelling instead of a different literal.
+
+The CONTROL could not see it, and the reason is worth recording: `TestSetTOTPSecret_SameSecretKeepsCounter`
+re-passes the *same literal*, so it exercised the one spelling for which a raw comparison is
+correct. A control that only replays the canonical input cannot detect a comparison that is wrong
+about equivalence.
+
+**Case folding alone is not sufficient either.** Go's base32 decoder ignores the non-canonical
+trailing bits of a secret whose length is not a multiple of 8 characters, so `MZXW6` and `MZXW7`
+differ under every case-folded, whitespace-trimmed spelling and decode to the SAME key (measured:
+both `666f6f`). A fix that upper-cased and trimmed would pass every respelling gate and still zero
+the counter for a live key.
+
+Two changes close it:
+
+- **One canonicalisation.** `internal/totp.decodeSecret` is now the single function that decides what
+  a stored secret MEANS; `verifyTOTPAt` uses it to generate codes and the exported `totp.SameKey` /
+  `totp.Usable` use it to answer key identity, so the two layers cannot drift. `SameKey` compares the
+  decoded keys with `hmac.Equal`.
+- **A three-way decision ordered by failure direction.** An UNUSABLE incoming secret keeps the counter
+  (it can validate nothing, so it is no evidence the key changed, and resetting would zero the guard
+  on a key a caller may restore next); the SAME key keeps it; only a positively different usable key —
+  or a first usable key installed over an unusable one — resets it. The asymmetry is the argument:
+  keeping a counter that should have been reset costs at most a step or two of delay on re-enrolment,
+  because counters are time-derived and a past enrolment's counter is already in the past, whereas
+  zeroing one that should have been kept reopens a replay window on a live key.
+
+**The lesson, which generalises beyond TOTP:** when one layer decides what a value MEANS, every other
+layer that compares that value must ask that layer rather than re-deriving the rule. A comparison
+that canonicalises differently from the consumer is a silent security failure — it is not visibly
+wrong at either site, only in the gap between them. So the wall
+(`TestTOTPSameKey_AgreesWithTheVerifier`) asserts the AGREEMENT — `SameKey` says two spellings are
+one key **iff** the production verifier accepts a code minted from one under the other — rather than
+asserting either spelling of the canonicalisation rule. It never mentions `ToUpper` or `TrimSpace`,
+so it keeps holding if the canonicalisation changes, and it was verified failing against drift
+introduced from the VERIFIER side as well as from the comparison side.
 
 **The lesson, recorded because it generalises:** a field that was only ever cleared as a *side
 effect* has no owner, and the change that removes the side effect inherits it. When a fix makes
@@ -144,7 +191,7 @@ authentication decision.**
 
 ### Required tests — all present
 
-`auth_totp_preservation_test.go` (17 gates). Every defect gate was verified **failing** against the
+`auth_totp_preservation_test.go` (21 gates). Every defect gate was verified **failing** against the
 unfixed tree before the fix, and the fix was then mutated twice to prove the gates are not
 decorative:
 
@@ -159,8 +206,11 @@ decorative:
 | Concurrency (`-race`) | `TestSetUIUser_ConcurrentWithTOTPMutators` (credential writer × counter advance × reader × `VerifyUIUser`) |
 | Break-glass | `TestRunResetPasswordCommand_ClearsTOTPExplicitlyAndSaysSo` + its silent-when-unenrolled control |
 | Structural wall | `TestWall_CredentialWritesGoThroughTOTPPreservingConstructor` |
-| Counter lifecycle (correction round) | `TestClearTOTP_ResetsReplayCounter`, `TestSetTOTPSecret_NewSecretResetsCounter`, `TestRunResetPasswordCommand_LeavesNoStaleReplayCounter` |
+| Counter lifecycle (correction round 1) | `TestClearTOTP_ResetsReplayCounter`, `TestSetTOTPSecret_NewSecretResetsCounter`, `TestRunResetPasswordCommand_LeavesNoStaleReplayCounter` |
 | Counter lifecycle — CONTROL | `TestSetTOTPSecret_SameSecretKeepsCounter` (an unconditional reset reopens the replay window for a live secret) |
+| Key identity (correction round 2) | `TestSetTOTPSecret_SameKeyDifferentSpellingKeepsCounter` (5 spellings), `TestSetTOTPSecret_TrailingBitSpellingKeepsCounter` (case folding alone is insufficient), `TestSetTOTPSecret_UnusableSecretKeepsCounter` (4 shapes) |
+| Key identity — availability half | `TestSetTOTPSecret_FreshEnrolmentOverUnusableSecretResets` |
+| Key identity — ANTI-DRIFT WALL | `TestTOTPSameKey_AgreesWithTheVerifier` (asserts the agreement, not the rule; fails against drift from either side) |
 
 **Mutation evidence.**
 Reintroducing the bare `&uiAdminUser{passHash, role}` literal in `SetUIUser` fails the wall **and**

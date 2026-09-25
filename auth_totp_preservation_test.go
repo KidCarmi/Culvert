@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha1" // #nosec G505 -- RFC 6238 TOTP mandates HMAC-SHA1
+	"encoding/base32"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/totp"
 )
 
 // auth_totp_preservation_test.go — SEC-TOTP-1.
@@ -720,4 +727,253 @@ func TestRunResetPasswordCommand_LeavesNoGlobalAuthPostureBehind(t *testing.T) {
 			"that rewrites the process-wide authentication posture breaks whichever test the shuffle "+
 			"runs next, and names the wrong one when it does", got, before)
 	}
+}
+
+// ─── Codex review round 2: key identity, not string identity ────────────────
+//
+// The conditional reset above compared the STORED STRINGS. The verifier
+// canonicalises case and surrounding whitespace before base32-decoding
+// (internal/totp decodeSecret), so several spellings name ONE authenticator and
+// generate identical codes. A raw string comparison therefore read a
+// backup-code re-issue that spelled the same secret differently as a KEY
+// CHANGE and zeroed the replay counter for a LIVE key — reopening the window
+// TestSetTOTPSecret_SameSecretKeepsCounter exists to defend, reached through
+// spelling rather than an identical literal, which is precisely why that
+// control could not see it: it re-passes the same literal.
+
+// TestSetTOTPSecret_SameKeyDifferentSpellingKeepsCounter is the defect gate.
+func TestSetTOTPSecret_SameKeyDifferentSpellingKeepsCounter(t *testing.T) {
+	// Every spelling of the secret enrolTOTPUser seeds. Each decodes to the
+	// same HMAC key, so each generates the same codes as the seeded one.
+	for _, tc := range []struct {
+		name    string
+		respelt string
+	}{
+		{"lowercase", "jbswy3dpehpk3pxp"},
+		{"mixed case", "JbSwY3dPeHpK3pXp"},
+		{"surrounding whitespace", "  JBSWY3DPEHPK3PXP  "},
+		{"leading newline", "\nJBSWY3DPEHPK3PXP"},
+		{"lowercase and whitespace", " jbswy3dpehpk3pxp\t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestConfig()
+			enrolTOTPUser(t, c, "peggy", "Passw0rd1", RoleAdmin)
+
+			// Prove the premise rather than assuming it: the respelt secret
+			// really is the same authenticator to the verifier.
+			if !totpSameKeyForTest(t, "JBSWY3DPEHPK3PXP", tc.respelt) {
+				t.Fatalf("fixture is wrong: %q is not the seeded key to the verifier", tc.respelt)
+			}
+
+			if !c.SetTOTPSecret("peggy", tc.respelt, []string{"regenerated-1"}) {
+				t.Fatal("SetTOTPSecret returned false")
+			}
+			if got := c.GetTOTPLastCounter("peggy"); got != 987654 {
+				t.Errorf("totpLastCounter = %d after re-issuing backup codes for the SAME key "+
+					"spelled %q, want 987654 — the key is unchanged and live, so zeroing the "+
+					"counter reopens the OTP replay window", got, tc.respelt)
+			}
+		})
+	}
+}
+
+// TestSetTOTPSecret_UnusableSecretKeepsCounter: a secret that cannot decode to
+// a key validates nothing, so it is no evidence that the key changed. Resetting
+// on it would zero the guard protecting the key a caller may restore next.
+func TestSetTOTPSecret_UnusableSecretKeepsCounter(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		unusable string
+	}{
+		{"empty", ""},
+		{"whitespace only", "   "},
+		{"not base32", "not-a-base32-secret!"},
+		{"base32 alphabet violation", "JBSWY3DPEHPK3PX1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestConfig()
+			enrolTOTPUser(t, c, "rupert", "Passw0rd1", RoleAdmin)
+
+			if !c.SetTOTPSecret("rupert", tc.unusable, nil) {
+				t.Fatal("SetTOTPSecret returned false")
+			}
+			if got := c.GetTOTPLastCounter("rupert"); got != 987654 {
+				t.Errorf("totpLastCounter = %d after installing the unusable secret %q, want "+
+					"987654 — an unusable secret authenticates nothing and so proves nothing "+
+					"about the key the counter guards", got, tc.unusable)
+			}
+		})
+	}
+}
+
+// TestSetTOTPSecret_FreshEnrolmentOverUnusableSecretResets is the other
+// direction, and it is the availability half: when the account held no usable
+// key, installing one is a genuinely new binding. A counter carried into it
+// refuses the new device until wall-clock time passes the stale value, and
+// indefinitely after a clock rollback — the lockout the previous correction
+// round closed on ClearTOTP.
+func TestSetTOTPSecret_FreshEnrolmentOverUnusableSecretResets(t *testing.T) {
+	c := newTestConfig()
+	enrolTOTPUser(t, c, "sybil", "Passw0rd1", RoleAdmin)
+
+	// Reach the "no usable key, stale counter" shape the way a provisioned or
+	// restored roster can: blank the secret without touching the counter.
+	c.mu.Lock()
+	c.uiUsers["sybil"].totpSecret = ""
+	c.mu.Unlock()
+	if got := c.GetTOTPLastCounter("sybil"); got != 987654 {
+		t.Fatalf("fixture: counter = %d, want the seeded 987654", got)
+	}
+
+	if !c.SetTOTPSecret("sybil", "KRSXG5CTMVRXEZLU", []string{"fresh-1"}) {
+		t.Fatal("SetTOTPSecret returned false")
+	}
+	if got := c.GetTOTPLastCounter("sybil"); got != 0 {
+		t.Errorf("totpLastCounter = %d after enrolling a key over an unusable secret, want 0 — "+
+			"the new authenticator would be refused until the clock passed the stale counter", got)
+	}
+}
+
+// TestTOTPSameKey_AgreesWithTheVerifier is the ANTI-DRIFT wall, and it is the
+// gate that actually matters: it never mentions ToUpper or TrimSpace, so it
+// keeps holding if the verifier's canonicalisation changes. It asserts the
+// agreement itself — SameKey says two spellings are one key IF AND ONLY IF the
+// verifier accepts the same code under both. A future change that canonicalises
+// in one layer and not the other fails here rather than silently reopening the
+// replay window.
+func TestTOTPSameKey_AgreesWithTheVerifier(t *testing.T) {
+	const canonical = "JBSWY3DPEHPK3PXP"
+	spellings := []string{
+		canonical,
+		"jbswy3dpehpk3pxp",
+		"JbSwY3dPeHpK3pXp",
+		"  JBSWY3DPEHPK3PXP  ",
+		"\tJBSWY3DPEHPK3PXP\n",
+		"KRSXG5CTMVRXEZLU", // a genuinely different key
+		"krsxg5ctmvrxezlu", // …and its lowercase spelling
+		"MZXW6",            // trailing-bit twins: canonically DIFFERENT strings
+		"MZXW7",            // …that base32-decode to the SAME key
+		"",
+		"   ",
+		"not-a-base32-secret!",
+	}
+	for _, a := range spellings {
+		for _, b := range spellings {
+			sameKey := totpSameKeyForTest(t, a, b)
+			sameToVerifier := totpVerifiersAgree(t, a, b)
+			if sameKey != sameToVerifier {
+				t.Errorf("SameKey(%q, %q) = %v but the verifier treats them as the same "+
+					"authenticator = %v — the key-identity comparison and the code generator "+
+					"disagree, so a live key can be read as changed (or a changed key as live)",
+					a, b, sameKey, sameToVerifier)
+			}
+		}
+	}
+}
+
+// TestSetTOTPSecret_TrailingBitSpellingKeepsCounter pins that comparing
+// CANONICALISED STRINGS is not sufficient — the comparison must compare the
+// decoded KEYS.
+//
+// Go's base32 decoder ignores the non-canonical trailing bits of a secret whose
+// length is not a multiple of 8 characters, so "MZXW6" and "MZXW7" differ in
+// every case-folded, whitespace-trimmed spelling and still decode to the SAME
+// HMAC key — one authenticator generating one stream of codes. A fix that only
+// upper-cased and trimmed would pass every other gate in this file and still
+// zero the replay counter for a live key, which is the whole defect.
+func TestSetTOTPSecret_TrailingBitSpellingKeepsCounter(t *testing.T) {
+	c := newTestConfig()
+	if err := c.SetUIUser("trent", "Passw0rd1", RoleAdmin); err != nil {
+		t.Fatalf("seed SetUIUser: %v", err)
+	}
+	if !c.SetTOTPSecret("trent", "MZXW6", []string{"code-1"}) {
+		t.Fatal("seed SetTOTPSecret returned false")
+	}
+	if !c.SetTOTPLastCounter("trent", 987654) {
+		t.Fatal("seed SetTOTPLastCounter returned false")
+	}
+
+	// Prove the premise: these really are one authenticator to the verifier.
+	if !totpVerifiersAgree(t, "MZXW6", "MZXW7") {
+		t.Fatal("fixture is wrong: MZXW6 and MZXW7 are not the same key to the verifier")
+	}
+	if strings.EqualFold(strings.TrimSpace("MZXW6"), strings.TrimSpace("MZXW7")) {
+		t.Fatal("fixture is wrong: the two spellings must differ after case folding and trimming")
+	}
+
+	if !c.SetTOTPSecret("trent", "MZXW7", []string{"regenerated-1"}) {
+		t.Fatal("SetTOTPSecret returned false")
+	}
+	if got := c.GetTOTPLastCounter("trent"); got != 987654 {
+		t.Errorf("totpLastCounter = %d after re-issuing backup codes for a secret that decodes "+
+			"to the SAME key, want 987654 — case folding alone does not establish key identity, "+
+			"so the replay window reopened for a live key", got)
+	}
+}
+
+// ─── Oracle for TestTOTPSameKey_AgreesWithTheVerifier ───────────────────────
+//
+// testTOTPCode is an INDEPENDENT RFC 6238 implementation written from the spec,
+// not a call into internal/totp — the repo's differential-oracle idiom
+// (legacySanitizeLog, legacySetupRequestTracing, oracleIsExempt). It mints a
+// code from a raw key so the oracle can ask the PRODUCTION verifier whether a
+// given spelling accepts it, which is what "the verifier treats these as one
+// authenticator" actually means.
+func testTOTPCode(key []byte, counter int64) string {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(counter))
+	mac := hmac.New(sha1.New, key) // #nosec G401 G505 -- RFC 6238 mandates HMAC-SHA1
+	mac.Write(buf[:])
+	sum := mac.Sum(nil)
+	off := sum[len(sum)-1] & 0x0f
+	bin := (int32(sum[off]&0x7f) << 24) | (int32(sum[off+1]) << 16) |
+		(int32(sum[off+2]) << 8) | int32(sum[off+3])
+	return fmt.Sprintf("%06d", bin%1000000)
+}
+
+// testDecodeTOTPSecret decodes a stored secret the way RFC 4648 base32 and the
+// documented storage format require. It exists only to obtain a key for the
+// oracle above; the agreement being tested is between totp.SameKey and the
+// production VERIFIER, never between production and this function.
+func testDecodeTOTPSecret(secret string) ([]byte, bool) {
+	s := strings.ToUpper(strings.TrimSpace(secret))
+	if s == "" {
+		return nil, false
+	}
+	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(s)
+	if err != nil || len(key) == 0 {
+		return nil, false
+	}
+	return key, true
+}
+
+func totpSameKeyForTest(t *testing.T, a, b string) bool {
+	t.Helper()
+	return totp.SameKey(a, b)
+}
+
+// totpVerifiersAgree reports whether the PRODUCTION verifier treats spellings a
+// and b as the same authenticator: it mints codes from a's key and asks the
+// verifier whether the b spelling accepts them.
+//
+// Several time steps are checked because two DIFFERENT keys can collide on one
+// 6-digit code (~1e-6); agreeing across three independent steps makes a false
+// "same" verdict ~1e-18 rather than relying on one sample.
+func totpVerifiersAgree(t *testing.T, a, b string) bool {
+	t.Helper()
+	ka, aok := testDecodeTOTPSecret(a)
+	_, bok := testDecodeTOTPSecret(b)
+	if !aok || !bok {
+		// A secret that decodes to no key authenticates nothing, so it is not
+		// "the same authenticator" as anything — including another such secret.
+		return false
+	}
+	for _, step := range []int64{56_666_666, 57_000_000, 57_123_456} {
+		nowUnix := step * 30
+		ok, _ := totp.VerifyTOTPReturnCounter(b, testTOTPCode(ka, step), nowUnix, 0)
+		if !ok {
+			return false
+		}
+	}
+	return true
 }

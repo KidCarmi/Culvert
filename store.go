@@ -24,6 +24,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"github.com/KidCarmi/Culvert/internal/totp"
 )
 
 // ─── Uptime ───────────────────────────────────────────────────────────────────
@@ -1575,10 +1576,28 @@ func (c *Config) GetTOTPSecret(username string) string {
 // until wall-clock time passed the stale value, and indefinitely after a clock
 // rollback.
 //
-// The reset is deliberately conditional on the secret actually changing. A
-// caller that re-issues BACKUP CODES for the same secret must keep the
-// counter: zeroing it there would reopen the replay window for the live
-// secret, which is the opposite of what this field is for.
+// The reset is deliberately conditional on the KEY actually changing. A caller
+// that re-issues BACKUP CODES for the same secret must keep the counter:
+// zeroing it there would reopen the replay window for the live secret, which is
+// the opposite of what this field is for.
+//
+// "The same key" is NOT "the same string" (Codex review round 2, PR #1429).
+// The verifier canonicalises case and surrounding whitespace before decoding,
+// so "jbswy3dpehpk3pxp" and "JBSWY3DPEHPK3PXP" are ONE authenticator producing
+// identical codes. The first version of this guard compared the stored strings
+// raw, so re-issuing backup codes with a differently-spelled identical secret
+// zeroed the counter for a LIVE key — the replay window reopened by the change
+// that closed it, reached through spelling instead of an identical string, and
+// invisible to the control test because that test re-passes the same literal.
+// totp.SameKey compares the DECODED keys through the verifier's own
+// canonicalisation, so the two cannot disagree.
+//
+// The three-way decision is ordered by which way each case must FAIL. Keeping a
+// counter that should have been reset costs at most a step or two of delay on a
+// genuine re-enrolment (counters are time-derived, so a counter from a past
+// enrolment is already in the past); zeroing one that should have been kept
+// reopens a replay window on a live key. So the counter is reset ONLY on
+// positive evidence that the key changed.
 func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1586,7 +1605,20 @@ func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bo
 	if !ok {
 		return false
 	}
-	if u.totpSecret != secret {
+	switch {
+	case !totp.Usable(secret):
+		// The incoming secret cannot validate any code, so there is no new key
+		// to protect and nothing the counter could wrongly refuse. Keep it:
+		// resetting here would zero the counter guarding the key a caller may
+		// restore next, on evidence that proves nothing.
+	case totp.SameKey(u.totpSecret, secret):
+		// Same authenticator, however it is spelled — a backup-code re-issue.
+		// Keeping the counter is the whole point of the guard.
+	default:
+		// Either a different usable key, or the account had no usable key at
+		// all. Both are a genuinely new binding, and a counter carried into one
+		// refuses the new device until wall-clock time passes it — indefinitely
+		// after a clock rollback.
 		u.totpLastCounter = 0
 	}
 	u.totpSecret = secret
