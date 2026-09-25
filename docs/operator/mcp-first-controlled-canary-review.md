@@ -3019,7 +3019,7 @@ The DIRECTORY axis was itself an unrecorded gap for one round. The first inverte
 `frontend`, `dist` and `testdata` and wrote none of them down, while this paragraph claimed every
 Go and Markdown file was covered — the same overclaim, on the axis introduced to close it, invisible
 to every staleness check because nothing represented it. Codex round 6 found it. Those three are now
-SCANNED (2,605 files), and the two that remain excluded are named with a reason each.
+SCANNED (2,608 files), and the two that remain excluded are named with a reason each.
 
 That number was wrong by one for a round, in two different ways at once, and both are worth
 keeping. It was TRANSCRIBED as 2,555 when the walk returns one fewer — it removes the wall's own
