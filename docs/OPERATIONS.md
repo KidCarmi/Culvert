@@ -286,9 +286,14 @@ linked above is the only supported reference.
 * `blocklist.txt`, `category_groups.json`, `cdr_policies.json` — content
   controls. `categories.json` (Layer-1 URL categories) defaults to a path
   relative to the working directory (`/app` in the shipped image), **not**
-  `/data` — set `url_categories_file` in `config.yaml` to an explicit
-  `/data/...` path if you need this store to survive a container
-  recreate or be captured by `--backup`.
+  `/data`. To make it survive a container recreate **and** be captured
+  by `--backup`, set `proxy.url_categories_file: /data/categories.json`
+  in `config.yaml` — that exact path, because `--backup` archives only
+  `<dataDir>/categories.json` and silently skips any other filename. The
+  shipped `docker-compose.yml` does not pass `-config`, so a mounted
+  `config.yaml` is ignored until you also uncomment its
+  `./config.yaml:/app/config.yaml:ro` volume and add
+  `"-config", "/app/config.yaml"` to the proxy `command`.
 * `cluster.json`, `cluster-ca.crt/key` — cluster identity
 * `config_versions/v{N}.json` — automatic config snapshots (50 kept)
 * `ui_users.json` — admin accounts (bcrypt hashes)
