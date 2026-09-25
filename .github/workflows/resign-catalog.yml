@@ -3,7 +3,7 @@ name: Re-sign Release Catalog (weekly freshness)
 # M1-4 (design §4 Slice D) — the weekly no-bump re-sign SCHEDULER. The served
 # catalog's expires_at must never lapse even with no releases (180d window,
 # re-signed weekly ⇒ ~25 retries of headroom; the SEC-F5 canary in
-# verify-dual-publish.yml goes RED after 2 missed weeks).
+# verify-catalog-publish.yml goes RED after 2 missed weeks).
 #
 # This workflow SIGNS NOTHING and holds no publish credentials (OPS-F4 +
 # SEC-F6c posture): it only sequences, because the publishers' workflow_run
@@ -16,9 +16,7 @@ name: Re-sign Release Catalog (weekly freshness)
 #   2. poll that run to SUCCESS (bounded, fail-closed).
 #   3. dispatch the R2 publisher with the EXACT resign asset name (OPS-F2) —
 #      its resign path adds the SEC-F2b monotonic live binding.
-#   4. dispatch the Pages publisher at the same tag (dual-publish parity for
-#      re-signs — design §4 recommended option).
-#   5. dispatch the dual-publish verify (Slice A) as the end-to-end proof.
+#   4. dispatch the catalog-publication verify as the end-to-end proof.
 #
 # Every poll is bounded and fail-closed: a timeout or a failed downstream run
 # turns THIS run red — that is the operator alert for a broken re-sign flow
@@ -30,7 +28,7 @@ name: Re-sign Release Catalog (weekly freshness)
 
 on:
   schedule:
-    - cron: "0 3 * * 1" # Mondays 03:00 UTC; verify-dual-publish's canary runs 09:00
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC; verify-catalog-publish's canary runs 09:00
   workflow_dispatch:
 
 permissions:
@@ -75,7 +73,7 @@ jobs:
       # poll it to completion. Bounded; any non-success conclusion fails.
       # One step end-to-end so the helper is defined exactly once (drift
       # hazard otherwise — impl review LOW).
-      - name: Re-sign at the tag, then publish R2 → Pages → verify (fail-closed)
+      - name: Re-sign at the tag, then publish R2 → verify (fail-closed)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
@@ -123,11 +121,11 @@ jobs:
           test -n "$ASSET" || { echo "FATAL: re-sign run succeeded but no resign asset found on $TAG"; exit 1; }
           echo "resign asset: $ASSET"
 
-          # 3) R2 first (the origin appliances read), with the SEC-F2b-guarded
-          # resign input; then Pages (dual-publish parity); then the Slice A
-          # verify proves both origins serve the re-signed bytes end-to-end.
+          # 3) R2 — the SOLE catalog origin, and the one appliances read — with
+          # the SEC-F2b-guarded resign input; then the verify workflow proves the
+          # origin serves the re-signed bytes end-to-end. (GitHub Pages was
+          # retired as an origin; there is no second publisher to keep in parity.)
           DEFAULT_BRANCH="${GITHUB_REF_NAME:-main}"
           dispatch_and_wait publish-catalog-r2.yml "$DEFAULT_BRANCH" 1200 -f "tag=$TAG" -f "resign_asset=$ASSET"
-          dispatch_and_wait publish-catalog-pages.yml "$DEFAULT_BRANCH" 1200 -f "tag=$TAG"
-          dispatch_and_wait verify-dual-publish.yml "$DEFAULT_BRANCH" 1800 -f "tag=$TAG"
-          echo "re-sign flow complete: $ASSET live on both origins and verified"
+          dispatch_and_wait verify-catalog-publish.yml "$DEFAULT_BRANCH" 1800 -f "tag=$TAG"
+          echo "re-sign flow complete: $ASSET live on the R2 origin and verified"
