@@ -1325,3 +1325,52 @@ func TestChaos66_HealthSnapshotDependsOnlyOnTheInjectedClock(t *testing.T) {
 		t.Errorf("advancing the injected clock did not age the episode: %s -> %s", first, third)
 	}
 }
+
+// TestChaos66_RecoverableDownEscalatingToTerminalPagesAgain pins that the
+// supervisor dying AFTER a recoverable accept-plane down still pages: the only
+// alert sent so far said "no restart required", which is now false.
+func TestChaos66_RecoverableDownEscalatingToTerminalPagesAgain(t *testing.T) {
+	fired := socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	noteSOCKS5ListenerDown("listener_socket_invalid")
+	if len(*fired) != 1 {
+		t.Fatalf("recoverable down fired %d alerts, want 1", len(*fired))
+	}
+	noteSOCKS5SupervisorDown("bind loop panicked")
+	if len(*fired) != 2 {
+		t.Fatalf("recoverable->terminal escalation fired %d alerts in total, want 2 — the operator is left with the no-restart instruction", len(*fired))
+	}
+	if !strings.Contains((*fired)[1], "until this node restarts") {
+		t.Errorf("escalation alert does not carry the restart instruction: %s", (*fired)[1])
+	}
+
+	// The latch still holds for a repeat of the same terminal state.
+	noteSOCKS5SupervisorDown("bind loop panicked")
+	if len(*fired) != 2 {
+		t.Errorf("a repeated terminal down re-paged (%d alerts)", len(*fired))
+	}
+}
+
+// TestChaos66_TerminalDownOutranksAnAgingBindEpisode pins that a supervisor
+// that died during a bind outage is reported as terminal, not as a listener
+// that is "still rebinding".
+func TestChaos66_TerminalDownOutranksAnAgingBindEpisode(t *testing.T) {
+	socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	start := time.Now()
+	clock := start
+	swapSOCKS5HealthClock(t, func() time.Time { return clock })
+	noteSOCKS5BindFailure("port_in_use", time.Second, start)
+	noteSOCKS5SupervisorDown("bind loop panicked")
+	clock = start.Add(socks5BindUnavailableAfter + time.Second)
+
+	row := checkSOCKS5Listener()
+	if row.Status != diagFail {
+		t.Fatalf("row status %q, want fail", row.Status)
+	}
+	if !strings.Contains(strings.ToLower(row.OperatorAction), "restart this node") {
+		t.Errorf("terminal supervisor stop reported with rebind guidance: %q", row.OperatorAction)
+	}
+}

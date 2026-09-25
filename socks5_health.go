@@ -401,10 +401,15 @@ func noteSOCKS5SupervisorDown(reason string) {
 // because it is the `event + ":" + Detail` dedup key.
 func noteSOCKS5DownWithRecovery(reason string, recoveryPending bool) {
 	socks5Listener.mu.Lock()
+	// A recoverable down that ESCALATES to terminal (the supervisor dies after
+	// the accept plane already paged "no restart required") must page again:
+	// the one alert already sent carries the opposite operator action. The
+	// shared fire-once latch alone would suppress the terminal page.
+	escalated := socks5Listener.down && socks5Listener.downRecoveryPending && !recoveryPending
 	socks5Listener.down = true
 	socks5Listener.downReason = reason
 	socks5Listener.downRecoveryPending = recoveryPending
-	alertNow := !socks5Listener.downAlerted
+	alertNow := !socks5Listener.downAlerted || escalated
 	socks5Listener.downAlerted = true
 	port := socks5Listener.port
 	socks5Listener.mu.Unlock()
@@ -816,7 +821,12 @@ func checkSOCKS5Listener() OperatorContractCheck {
 	// fundamental state than one whose accepts are failing, and while the
 	// supervisor is unbound the accept-plane fields describe the PREVIOUS
 	// socket. CHAOS-66.
-	if snap.BindUnavailable {
+	//
+	// The one exception is a TERMINAL supervisor stop: the bind episode may
+	// still be aging when the supervisor dies, and the bind branch's remedy
+	// promises an automatic rebind that nothing will now perform.
+	terminal := snap.Down && !snap.DownRecoveryPending
+	if snap.BindUnavailable && !terminal {
 		msg := fmt.Sprintf("SOCKS5 listener has never bound port %d (%s) after %s of retrying (%d attempts)",
 			snap.Port, snap.BindLastReason, snap.BindFailingFor.Round(time.Second), snap.BindConsecutive)
 		action := socks5BindRemedy(snap.BindLastReason, snap.Port)
