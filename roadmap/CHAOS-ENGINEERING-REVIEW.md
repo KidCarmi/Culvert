@@ -7392,6 +7392,46 @@ registered**, because a refused EDIT of a live profile leaves that profile
 authoritative and still down, and deleting its episode would hide a real
 outage.
 
+### Found while verifying this sweep's own claim — recorded, NOT fixed (IDP-8)
+
+Round 2's fix rests on the assertion that the token and JWKS endpoints need
+only a structural check because this appliance DIALS them through
+`ssrfSafeDialContext`. Having just been wrong twice about exactly this kind of
+claim, that one was read rather than inferred, and it holds:
+`NewOIDCFlowProvider` sets `transport.DialContext = ssrfSafeDialContext` and the
+`jwksCache` is handed that same client.
+
+Reading the loop closely surfaced something else. It validates
+`AuthorizationEndpoint`, `TokenEndpoint` and `JWKsURI` — **three of the five
+endpoints the discovery document names.** `IntrospectionEndpoint` and
+`UserinfoEndpoint` are persisted into the profile config
+(`NewOIDCFlowProvider`), used for outbound requests, and validated **nowhere**:
+not by this loop, not for scheme, not before or after this sweep (the
+pre-CHAOS-71 loop covered the same three).
+
+What they carry is the finding. `enrichFromUserinfo` sends
+`Authorization: Bearer <accessToken>` to `p.disc.UserinfoEndpoint`, and
+`introspect` sends `req.SetBasicAuth(p.cfg.ClientID, p.cfg.ClientSecret)` —
+**this appliance's own client secret** — to `p.disc.IntrospectionEndpoint`, on
+every cache-missing authentication. `ssrfSafeDialContext` refuses a PRIVATE
+resolved address, so the SSRF direction is covered; a **public cleartext**
+endpoint is not, because nothing checks the scheme. So an IdP's published
+document (or a cache file edited by anything with `dataDir` write access) can
+direct this appliance's client secret and its users' bearer tokens onto a
+plaintext channel, and the appliance will comply.
+
+**Recorded rather than fixed, deliberately.** Adding the two endpoints to the
+existing structural loop would be nearly free but buys almost nothing — the
+dialer already covers SSRF and `validateExternalURLStructure` permits `http`
+either way, so it is close to cosmetic. The change that would matter is
+REFUSING a non-`https` credential endpoint from discovery, and that is a
+POSTURE decision an owner should make: it would break self-signed/dev
+deployments that today rely on `TLSSkipVerify`, and it belongs in its own
+change with its own gates rather than folded into a third review round of a
+resilience sweep. The honest summary is that this sweep made the discovery
+document's endpoints no less safe than it found them, and found that three of
+five were the only ones anybody had ever checked.
+
 ### Register rows
 
 | Row | Finding | Status |
