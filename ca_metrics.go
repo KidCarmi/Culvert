@@ -37,9 +37,20 @@ func caWritePrometheus(w *strings.Builder) {
 	w.WriteString("# TYPE culvert_cert_cache_hits_total counter\n")
 	fmt.Fprintf(w, "culvert_cert_cache_hits_total %d\n", hits)
 
-	w.WriteString("\n# HELP culvert_cert_cache_misses_total Leaf-cert cache misses (request fell through to signing)\n")
+	// culvert_cert_cache_misses_total is the MISS count, and since the leaf-sign
+	// single flight (internal/ca/signflight.go) that is no longer the same thing
+	// as the SIGN count: a miss may be served by joining a sign already in
+	// flight. misses - singleflight_joined is the upper bound on signs, and
+	// culvert_cert_sign_duration_seconds_count is the exact figure. The hit
+	// ratio an operator alerts on is unchanged — hits + misses is still the
+	// number of GetCert calls.
+	w.WriteString("\n# HELP culvert_cert_cache_misses_total Leaf-cert cache misses (request fell through to the signing path; see culvert_cert_sign_singleflight_joined_total)\n")
 	w.WriteString("# TYPE culvert_cert_cache_misses_total counter\n")
 	fmt.Fprintf(w, "culvert_cert_cache_misses_total %d\n", misses)
+
+	w.WriteString("\n# HELP culvert_cert_sign_singleflight_joined_total Leaf-cert cache misses served by joining an in-progress sign (duplicate signs avoided)\n")
+	w.WriteString("# TYPE culvert_cert_sign_singleflight_joined_total counter\n")
+	fmt.Fprintf(w, "culvert_cert_sign_singleflight_joined_total %d\n", certMgr.SignFlightsJoined())
 
 	w.WriteString("\n# HELP culvert_cert_cache_size Current number of cached leaf certificates\n")
 	w.WriteString("# TYPE culvert_cert_cache_size gauge\n")
