@@ -8,9 +8,19 @@
 >   the T-51 recurrence) and every file:line citation describe this state. Here the panel still says
 >   "OCSP / CRL Revocation" and the "appliance" text is still present.
 > - **After this PR's corrections**: `6c46ebd` plus the copy fixes this PR makes (the T-59 panel title
->   and its doc/roadmap references, and the nine T-51-recurrence lines). The open backlog and the health
->   score describe this state, so T-59's title and the T-51 recurrence count as fixed and nothing else
->   does. To reproduce it, apply the fixes listed under T-59 and the T-51 recurrence to `6c46ebd`.
+>   and its doc/roadmap references, and the nine T-51-recurrence lines), nothing else. T-59's title and
+>   the T-51 recurrence lines count as fixed here and nothing else does. To reproduce it, apply the fixes
+>   listed under T-59 and the T-51 recurrence to `6c46ebd`.
+>
+> The **open backlog** and the **health score** are each stated for BOTH states (the convention of the
+> 2026-09-16 and 2026-09-19 reports). Fixes merged to `main` after `6c46ebd` — T-57 (#1407), T-58
+> (#1434) and T-17 (#1444) — are NOT applied to either state; they appear only in a clearly labelled
+> "for comparison" row.
+>
+> **Coverage limits:** the sweeps matched **literal patterns only** (the exact strings named in each
+> finding and in the glossary table below) — a synonym or paraphrase that no pattern named is not claimed
+> absent. CI workflow and script output was counted only where a `docs/operator/` runbook sends the
+> reader to it; other workflow/script output was not audited.
 >
 > Neither state is the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
@@ -106,10 +116,11 @@ Runbook") and the R2 terminology against CLAUDE.md's existing "R2 (`https://cata
 description — the names are consistent. The glossary sweep below records the release-gating runbook's
 "verdict" and "appliance" wording.
 
-**Spot-checked four carry-over items (five IDs: T-12, T-13, T-29, T-30, T-54) at their cited locations** in
-the then-current tree (`6c46ebd`), as prior reports have done. T-54's check, with the command that
-reproduces it, is under "Carried-Over Findings". The other carry-over findings were not re-verified; they
-are carried over with their original evidence.
+**Spot-checked carry-over items at their cited locations** in the audited tree (`6c46ebd`): T-12, T-13,
+T-29 and T-30 (below), plus T-54, T-55, T-56, T-57, T-58 and the T-51 residual, whose checks and
+reproduction commands are under "Carried-Over Findings". The other carry-over findings (T-9, T-11, T-17,
+T-18, T-21+T-32, T-25, T-33, T-34, T-39) were not re-verified; they are carried over with their original
+evidence.
 - **T-13**: `docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md:1` is still titled "TLS Inspection Deployment"
   (in-app/API/GUI still say "SSL Inspection", e.g. in `static/index.html`, `healthcheck.go`'s
   `ssl_inspection` field, `policy.go`'s `SSLAction`) — unchanged.
@@ -121,17 +132,42 @@ are carried over with their original evidence.
   `POST /v1/upgrades/check`/`apply` with no `/v1/updates/*` alias, while the GUI still says "Dispatch
   Release" — unchanged.
 
-**Terminology Health Score: 8.3 / 10** (down from 8.6; describes the state after this PR's corrections).
-The rule is the 2026-09-08 precedent: each item found moves the score −0.1, each item fixed in the same
-pass moves it +0.1, so an item found and fixed nets zero.
-- Start: 8.6, the 2026-09-12 report's score, which already charged T-54 (backlog 13 → 14). T-54 is not
-  charged again.
-- T-59 (panel title): found and fixed, net 0. T-51 recurrence: found and fixed, net 0.
-- T-60, T-59b, T-59c: found and left open, −0.1 each, −0.3 in total.
-- Result: 8.6 − 0.3 = **8.3**. The open backlog grows from fourteen to seventeen entries.
+**Terminology Health Score — audited snapshot `6c46ebd`: 7.8 / 10; after this PR's corrections:
+7.9 / 10.**
 
-The same-day T-59 fix does not raise the score, since a defect that reached production before this
-review is not evidence of improving health, only of this review doing its job.
+- **Rule** (unchanged from the 2026-09-08 precedent, as applied by the 2026-09-19 report): each open
+  backlog item a report newly records costs 0.1, and each item it fixes gives 0.1 back, so an item found
+  and fixed in the same pass nets zero. An item already charged by an earlier report is never charged a
+  second time.
+- **Baseline: 8.2**, the 2026-09-19 report's figure for its audited snapshot `36628eb` (T-57 and T-58
+  both open). That is the right baseline for `6c46ebd`: `36628eb` is an ancestor of `6c46ebd`, and every
+  fix merged since that report's snapshot — T-57 (#1407), T-58 (#1434), T-17 (#1444) — merged AFTER
+  `6c46ebd`, so all three are still open in the tree this report audited. The 8.2 already charges every
+  carried item: T-54 (2026-09-12), T-55, T-56 and the reopened T-51 residual (2026-09-13), T-57
+  (2026-09-16) and T-58 (2026-09-19). None of them is charged again here.
+- **Audited snapshot `6c46ebd`:** four new open IDs — T-59, T-59b, T-59c, T-60 → 8.2 − 0.4 = **7.8**.
+- **After this PR's corrections:** this PR fixes T-59 → 7.8 + 0.1 = **7.9**. T-59b, T-59c and T-60 stay
+  open.
+- **The T-51 recurrence moves neither figure.** It is new text under an ID the backlog already carries
+  as open (the T-51 residual, charged by the 2026-09-13 report), so charging it would double-charge
+  T-51. Fixing the recurrence lines does not close the residual either: the residual is the "appliance"
+  text in the new frontend's PAC and Policy Learning directories (12 files at `6c46ebd`), which this PR
+  does not touch.
+- **For comparison only (not a claim about any audited tree):** applying the same rule to "after this
+  PR's corrections" plus the three later fixes (T-57, T-58, T-17) gives 7.9 + 0.3 = 8.2.
+- **Disclosed, not amended (carried from the 2026-09-16 and 2026-09-19 reports):** the 2026-09-13 report
+  measured its drop from 8.7 rather than from the 2026-09-12 report's 8.6, so T-54's 0.1 charge was not
+  carried into its 8.4. Merged reports' scores are not amended retroactively; this report takes the
+  merged figures as recorded and does not charge T-54 a second time.
+- **Disclosed, not amended — a second, parallel lineage:** the 2026-09-20 report (#1444, the T-17 fix,
+  merged after `6c46ebd`) records **8.8 / 10, up from 8.7**, with twelve open backlog entries. It scores
+  from the 2026-09-11 report's lineage and does not count T-54..T-58 or the T-51 residual, so its 8.8
+  and this chain's figures are not comparable. This report does not amend it; reconciling the two
+  lineages is left to an owner (see the PR description).
+
+(Earlier revisions of this report said "8.3, down from 8.6" with a seventeen-entry backlog. That started
+from the 2026-09-12 report's 8.6 and omitted T-55, T-56, T-57, T-58 and the T-51 residual, all of which
+were open at `6c46ebd`. It is corrected here rather than silently replaced.)
 
 ---
 
@@ -217,8 +253,9 @@ Later review rounds found more errors, also fixed:
   "CRL" (per the same-subsystem grep above), so there was no wire-compatibility obligation and no
   migration plan was needed. "CRL" does appear elsewhere in the tree, but not for this checker: the
   cluster enrollment revocation list for node certificates (`enrollment.go`, `controlplane_server.go`) is
-  a separate mechanism, and code comments in `mtls_ocsp_startup.go`/`mtls_ocsp_startup_config.go` still
-  say "OCSP/CRL". Those comments are internal and were not changed.
+  a separate mechanism; `internal/ca/ca.go` uses the stdlib `x509.KeyUsageCRLSign` constant; and code
+  comments in `mtls_ocsp_startup.go`, `mtls_ocsp_startup_config.go` and `ui_security.go:1816` (the
+  `apiOCSPConfig` doc comment) still say "OCSP/CRL". Those comments are internal and were not changed.
   If CRL fallback is added in the future, "OCSP / CRL Revocation" becomes accurate again and can be
   restored at that time.
 - **Split out**: the OCSP copy's "verdict" wording, first recorded here as a sub-item, is now part of
@@ -284,8 +321,8 @@ Later review rounds found more errors, also fixed:
   (`internal/mcp/tooltrust/reviewed_operation.go`; the struct comment at `ui_mcp_tooltrust.go:91-94` says
   "read_only | mutating | unset"). The spec documents only the request enum `read_only | mutating`
   (`api/openapi/openapi.yaml:13078`) and types the response as an untyped `additionalProperties: true`
-  object, so an admin-visible `unset` is documented nowhere in the API. The 2026-09-24 report (#1492)
-  recorded this; it is folded into T-60 rather than given a new ID. Fix: document the response values.
+  object, so an admin-visible `unset` is documented nowhere in the API. The 2026-09-24 report (#1492,
+  not merged when this revision was written) recorded this; it is folded into T-60 rather than given a new ID. Fix: document the response values.
 - **Why it matters**: an operator or SIEM author who takes the spec at its word and searches or alerts on
   `mcp.tooltrust.decision` finds nothing, so approvals and revocations of MCP tools look unaudited.
 - **Recommended action**: make the spec name the events the handler actually writes, e.g. the family
@@ -417,22 +454,33 @@ therefore violations (all under T-59b: 13 OCSP and 40 recorded here) and 2 are e
 
 None of the 53, and none of the emitted lines in T-59b, is fixed in this report PR; see T-59b.
 
-## Carried-Over Findings (unchanged)
+## Carried-Over Findings
 
-All fifteen previously-open finding IDs (fourteen backlog entries, since T-21 and T-32 are tracked as one
-paired item) remain open with their original evidence. T-12, T-13, T-29 and T-30 were spot-checked at
-their cited locations in `6c46ebd` (see the Executive Summary), and so was T-54 (below); the rest were not
-re-verified:
-T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34,
-T-39, T-54. Full descriptions and the priority-ordered refactoring plan are unchanged from
-`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (T-9..T-39) and
-`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (T-54) and are not restated here to avoid drift between two
-descriptions of the same open items — see that report (or its predecessors, cited therein) for the
-canonical text of each. **T-59 (above) was found and fixed within this same pass and does not join the
-open backlog** — the fourteen-entry carry-over backlog is unchanged; T-59 is recorded here only as a closed finding
-ID, for the same reason closed items stay in the numbering series rather than being silently dropped.
-**T-60, T-59b and T-59c (above) are new and open**, so the open backlog after this PR's corrections is
-seventeen entries (eighteen IDs).
+Every ID below is carried as open at the audited snapshot `6c46ebd`; the ones re-checked there are
+named below, the rest were not re-verified. None is fixed by this PR, so each is also open after this
+PR's corrections. Full descriptions live in the report that owns each ID and are not
+restated here, to avoid two descriptions of one item drifting apart:
+
+- T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33,
+  T-34, T-39 — owned by `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (the last report in this chain to
+  restate them in full). T-12, T-13, T-29 and T-30 were spot-checked (Executive Summary); the rest were
+  not re-verified. T-17 is fixed on `main` by #1444, which merged after `6c46ebd`.
+- **T-54** — owned by `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (#1372). See "T-54 at `6c46ebd`"
+  below.
+- **T-55** — owned by `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-13.md` (#1380). Present at `6c46ebd`: the
+  legacy GUI says "Accept to Draft" (`static/index.html`, 3 lines) and the new frontend says "Accept to
+  Policy Draft" (`LearningRecommendations.tsx`, 4 lines).
+- **T-56** — owned by the 2026-09-13 report (doc half fixed there; code half open). Present at
+  `6c46ebd`: no file under `frontend/src/features/network/pac/` contains "steering profile".
+- **T-51 (residual)** — owned by the 2026-09-13 report. Present at `6c46ebd`: "appliance" still occurs
+  (comments included) in 12 non-test files under the new frontend's PAC and Policy Learning feature
+  directories. Distinct from this report's T-51 recurrence (above), which is in other files.
+- **T-57** — owned by `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-16.md` (#1407). Present at `6c46ebd`:
+  `static/index.html:5184,6119,16205` still say "diagnostic bundle". Fixed on `main` by #1407, which
+  merged after `6c46ebd`.
+- **T-58** — owned by `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-19.md` (#1434). Present at `6c46ebd`:
+  `frontend/src/features/policy/RuleEditor.tsx:437` ("SSL action") and `:508` ("SSL Inspect)"). Fixed on
+  `main` by #1434, which merged after `6c46ebd`.
 
 **T-54 at `6c46ebd`.** The 2026-09-12 report (audited `d378dff..2833db3`; `2833db3` is an ancestor of
 `6c46ebd`) opened T-54, and nothing in this window closed it. Checked at `6c46ebd`: the admin JSON in
@@ -440,10 +488,50 @@ seventeen entries (eighteen IDs).
 `unknownStatusTotal`, against the Go accessors `MalformedTotal()`/`StaleTotal()`/`UnknownTotal()`
 (`internal/ocsp/ocsp.go`) and the `/metrics` labels `malformed`/`stale`/`unknown_status`
 (`ocsp_metrics.go:59-61`); and `reason="responder_blocked"` (`ocsp_metrics.go:62`) is still reported in
-the same "responses discarded" series. Reproduce with `git grep -n
-'malformedResponseTotal\|staleResponseTotal\|UnknownTotal()' 6c46ebd -- ui_security.go
-internal/ocsp/ocsp.go` and `git show 6c46ebd:ocsp_metrics.go | sed -n 55,62p`. It stays open. The first
-revisions of this report left T-54 out of the backlog; that was an omission, now corrected.
+the same "responses discarded" series. It stays open. The first revisions of this report left T-54 out
+of the backlog; that was an omission, now corrected.
+
+**Backlog count:**
+
+| State | Open IDs | Backlog entries (T-21+T-32 counted once) |
+| --- | --- | --- |
+| 2026-09-19 report, its audited snapshot `36628eb` (T-57, T-58 open) | 20 | 19 |
+| Audited snapshot `6c46ebd` (adds T-59, T-59b, T-59c, T-60) | 24 | 23 |
+| After this PR's corrections (T-59 fixed) | 23 | 22 |
+| For comparison only: after this PR's corrections plus #1407 (T-57), #1434 (T-58) and #1444 (T-17) | 20 | 19 |
+
+The T-51 recurrence adds no row: it is new text under the already-open T-51 ID (see the score section).
+T-59 stays in the numbering series as a closed ID; IDs are never renumbered.
+
+### Reproduction commands
+
+Run from any clone that has fetched `6c46ebd` (`git grep -c` prints one `path:count` line per matching
+file):
+
+```sh
+R=6c46ebd
+# T-59 (audited snapshot): expect one hit, static/index.html:4477
+git grep -n 'OCSP / CRL Revocation' $R -- static/index.html
+# T-58: expect RuleEditor.tsx:437 and :508
+git grep -n -e 'SSL action' -e 'SSL Inspect)' $R -- frontend/src/features/policy/RuleEditor.tsx
+# T-57: expect three hits, at lines 5184, 6119 and 16205
+git grep -n -i 'diagnostic bundle' $R -- static/index.html
+# T-54: expect one hit each
+git grep -n 'func (oc \*Checker) UnknownTotal()' $R -- internal/ocsp/ocsp.go
+git grep -c '"malformedResponseTotal"' $R -- ui_security.go
+git grep -c '"staleResponseTotal"' $R -- ui_security.go
+git grep -n 'reason=\\"responder_blocked\\"' $R -- ocsp_metrics.go
+# T-55: expect static/index.html:3 and LearningRecommendations.tsx:4
+git grep -c 'Accept to Draft' $R -- static/index.html
+git grep -c 'Accept to Policy Draft' $R -- frontend/src/features/learning/LearningRecommendations.tsx
+# T-56: expect 0
+git grep -l -i 'steering profile' $R -- frontend/src/features/network/pac/ | wc -l
+# T-51 residual: expect 12
+git grep -l -i 'appliance' $R -- 'frontend/src/features/network/pac/*' \
+  'frontend/src/features/learning/*' ':!*.test.*' | wc -l
+# T-60: expect no output (no emitter of the documented event)
+git grep -n 'tooltrust.decision' $R -- '*.go'
+```
 
 The "Content & Scanning" (legacy GUI) vs. "Content Security" (new React frontend) soft finding — a
 non-mechanical naming-policy reconciliation between two deliberate design decisions, not a numbered backlog
@@ -461,9 +549,11 @@ are left open: T-60 (a documented audit event the tool-trust decision handler ne
 API-contract change; T-59b ("verdict" outside Diagnostics) and T-59c ("policy rules" in the GeoIP
 warning), for copy and string changes in their own PRs. Once re-audited, the MCP
 canary-execution stream produced T-60 (see "Corrections made in review") and 35 of T-59b's lines.
-The fifteen-ID (fourteen-entry) carry-over backlog, including T-54, remains open with its original
-evidence. T-12, T-13, T-29, T-30 and T-54 were spot-checked at their cited locations; the others were not
-re-verified. No
+The twenty-ID (nineteen-entry) carry-over backlog — the 2026-09-19 report's audited-snapshot backlog,
+including T-54, T-55, T-56, T-57, T-58 and the T-51 residual — was open at `6c46ebd`. T-12, T-13, T-29,
+T-30, T-54, T-55, T-56, T-57, T-58 and the T-51 residual were spot-checked at their cited locations; the
+others were not re-verified. Backlog: 24 IDs / 23 entries at the audited snapshot, 23 / 22 after this
+PR's corrections; score 7.8 and 7.9 respectively. No
 cosmetic or preference-driven renames are proposed. This report's first revision contained two factual
 errors, and later review rounds found more; all were caught by automated PR review before merge
 and corrected above rather than silently fixed —
