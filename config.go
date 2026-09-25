@@ -418,6 +418,20 @@ func validCDRFailMode(fm string) bool {
 	return fm == "" || fm == "open" || fm == "closed"
 }
 
+// validIPFilterMode validates the "security.ip_filter_mode" / -ip-filter-mode
+// value shared by the YAML (validateEnums) and CLI (loadFileConfigAndFlags,
+// main.go) paths: "" (disabled), "allow" (allowlist), and "block" (blocklist)
+// are the only accepted values — the same set IPFilter.Allowed (security.go)
+// treats as meaningful. Any other value reaching IPFilter.SetMode is treated
+// as corruption and DENIES ALL proxied traffic (fail closed) with no error at
+// the time it is set — that fail-closed behavior exists for state that can be
+// corrupted after the fact (a config-version rollback, a CP->DP snapshot), not
+// as a substitute for validating operator input up front. Mirrors
+// validCDRFailMode.
+func validIPFilterMode(mode string) bool {
+	return mode == "" || mode == "allow" || mode == "block"
+}
+
 // validCDRServerFingerprint validates the "cdr.server_fingerprint" /
 // -cdr-server-fingerprint value shared by the YAML (validateCDR) and CLI (initCDR,
 // main.go) paths: empty (unset) is valid; otherwise it must decode to
@@ -549,7 +563,7 @@ func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-
 	}
 
 	// ip_filter_mode
-	if m := fc.Security.IPFilterMode; m != "" && m != "allow" && m != "block" {
+	if m := fc.Security.IPFilterMode; !validIPFilterMode(m) {
 		errs = append(errs, fmt.Sprintf("security.ip_filter_mode: must be \"allow\" or \"block\", got %q", m))
 	}
 

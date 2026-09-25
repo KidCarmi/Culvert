@@ -1,10 +1,26 @@
 # Activating Cloudflare-R2 catalog hosting
 
+> **Correction (2026-09-21): GitHub Pages has been retired as a catalog origin.**
+> R2 is now the **sole** catalog host — see
+> [`release-publication-gating.md` §7b](release-publication-gating.md#7b-catalog-origin-r2-only).
+> The steps below still correctly describe how this appliance's R2 publisher was
+> brought live and are kept as a historical activation record, but two claims in
+> this file are now **false and must not be followed**: the framing that leaving
+> `R2_PUBLISH_ENABLED` unset is a harmless "dormant" no-op (Pages no longer exists
+> to fall back to — `publish-catalog-r2.yml`'s `assert-publication-target` job now
+> FAILS the run when the variable is not `true`, precisely so that state is loud
+> instead of silent), and the **Rollback** section's claim that unsetting it
+> restores Pages as authoritative. Once R2 is live, `R2_PUBLISH_ENABLED` must stay
+> `true`; there is no fallback host to roll back onto.
+
 This runbook turns the **dormant** R2 catalog publisher
 (`.github/workflows/publish-catalog-r2.yml`, shipped in M0-PR3) **live**. Until you
-complete it, that workflow skips cleanly (green, no writes) and GitHub Pages remains
-the authoritative catalog host. Every step here requires **owner** credentials — none
-of it is done by CI.
+complete it, the workflow does not publish. **At the time this runbook was written**
+it skipped cleanly (green, no writes) and GitHub Pages remained the authoritative
+catalog host; today it FAILS (red) via `assert-publication-target` while
+`R2_PUBLISH_ENABLED` is not `true`, and Pages has been retired (see the correction
+above). Every step here requires
+**owner** credentials — none of it is done by CI.
 
 > Trust model reminder: R2 (staging and live) is **untrusted transport**. Integrity
 > comes from the catalog's keyless Sigstore signature verified **in the binary**
@@ -129,5 +145,12 @@ auto-seeds and `/api/releases` reflects the served catalog.
 
 ## Rollback
 
-Set `R2_PUBLISH_ENABLED` back to unset/false — the publisher goes dormant again;
-Pages remains authoritative. No R2 object is deleted by disabling.
+**Historical — do not follow.** This section originally said setting
+`R2_PUBLISH_ENABLED` back to unset/false made the publisher dormant again with
+GitHub Pages remaining authoritative. That is no longer true: Pages has been
+retired as a catalog origin, so unsetting the variable stops the catalog from
+being published anywhere and turns `publish-catalog-r2.yml`'s
+`assert-publication-target` job red (by design — see the correction banner at the
+top of this file and
+[`release-publication-gating.md` §7b](release-publication-gating.md#7b-catalog-origin-r2-only)).
+No R2 object is deleted by disabling, but doing so is not a safe rollback.

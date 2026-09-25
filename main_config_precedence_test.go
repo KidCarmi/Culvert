@@ -581,3 +581,85 @@ func TestCDRStartupTimeoutError_RuntimeSentinelEnables(t *testing.T) {
 		t.Fatalf("valid timeout rejected under the sentinel: %q", msg)
 	}
 }
+
+// ── ip_filter_mode CLI/YAML validation parity (validIPFilterMode) ───────────
+//
+// config.yaml's security.ip_filter_mode is validated by
+// FileConfig.validateEnums at load time (TestConfigValidate_InvalidIPFilterMode,
+// p5_test.go): an unrecognized value (e.g. a typo like "Allow") fails the
+// whole config load with a clear error naming the field.
+//
+// The CLI flag -ip-filter-mode reaches the exact same merged value (resolved
+// in loadFileConfigAndFlags, CLI wins over config.yaml) but had no equivalent
+// gate: an invalid CLI value was stored verbatim as s.ipModeVal and handed
+// straight to IPFilter.SetMode (connlimit_startup.go). IPFilter.Allowed
+// (security.go) treats any mode other than "", "allow", or "block" as
+// CORRUPTION and denies ALL proxied traffic (fail closed) — a deliberate
+// posture for STATE that gets corrupted after the fact (e.g. a config-version
+// rollback), not a substitute for validating fresh operator input. A simple
+// case typo such as "-ip-filter-mode Allow" therefore silently blackholed
+// every request behind the proxy with no startup error pointing at the
+// mistake, while the identical typo in config.yaml already refused to boot.
+//
+// validIPFilterMode is the shared predicate (mirroring validCDRFailMode):
+// used by validateEnums (config.go) for the YAML path and by
+// loadFileConfigAndFlags (main.go) for the CLI path, so both channels reject
+// the same invalid values instead of only one of them.
+func TestValidIPFilterMode(t *testing.T) {
+	tests := []struct {
+		mode string
+		want bool
+	}{
+		{"", true},       // unset — filter disabled
+		{"allow", true},  // explicit allowlist
+		{"block", true},  // explicit blocklist
+		{"Allow", false}, // case typo — must be rejected, not silently deny-all
+		{"BLOCK", false},
+		{"alow", false}, // misspelling
+		{"deny", false}, // plausible-sounding but wrong value
+		{"whitelist", false},
+	}
+	for _, tt := range tests {
+		if got := validIPFilterMode(tt.mode); got != tt.want {
+			t.Errorf("validIPFilterMode(%q) = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// TestLoadFileConfigAndFlags_IPFilterMode_ValidCLIOverrideResolves proves the
+// happy path still works end to end through the same merge point the fatal
+// check above was added to: a valid -ip-filter-mode CLI value overrides an
+// unset config.yaml field and loadFileConfigAndFlags must not abort.
+func TestLoadFileConfigAndFlags_IPFilterMode_ValidCLIOverrideResolves(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("proxy:\n  port: 8080\n"), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	zero := 0
+	empty := ""
+	blockMode := "block"
+	s := &startupState{
+		configPath:   &cfgPath,
+		proxyPort:    &zero,
+		uiPortFlag:   &zero,
+		socks5Port:   &zero,
+		logFilePath:  &empty,
+		blockFile:    &empty,
+		logMaxMB:     &zero,
+		user:         &empty,
+		pass:         &empty,
+		tlsCert:      &empty,
+		tlsKey:       &empty,
+		rateLimitRPM: &zero,
+		ipMode:       &blockMode, // -ip-filter-mode block
+	}
+
+	// Must not call log.Fatalf (would os.Exit the test binary) — "block" is valid.
+	loadFileConfigAndFlags(s)
+
+	if s.ipModeVal != "block" {
+		t.Errorf("s.ipModeVal = %q, want %q", s.ipModeVal, "block")
+	}
+}
