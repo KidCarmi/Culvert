@@ -7228,10 +7228,15 @@ fault in their resolver. The fix splits the two questions that
 (absolute, http/https, host present, and — for an IP literal, where no
 resolution is needed — not private), and the DNS-backed check stays INLINE in
 `fetchOIDCDiscoveryOverNetwork`, where its failure is a failed FETCH and
-therefore routes to the cache. Nothing is lost on the trust side: the
-authorization endpoint is re-checked by `isSafeCaptiveRedirect` at the instant
-the redirect is issued, and everything dialled goes out through
-`ssrfSafeDialContext`. The lesson is the one this file keeps relearning in a new
+therefore routes to the cache. Round 1 argued that nothing was lost on the
+trust side because *"the authorization endpoint is re-checked by
+`isSafeCaptiveRedirect` at the instant the redirect is issued"*. **That claim
+is FALSE and was corrected in round 2 below** — `isSafeCaptiveRedirect` checks
+shape only, and the endpoint this appliance never dials is the one that needed
+the address check restoring (`refuseDefinitelyPrivateRedirect`). What round 1
+got right is the other half: everything this appliance DIALS from the document
+goes out through `ssrfSafeDialContext`, so a structural check is sufficient
+there. The lesson is the one this file keeps relearning in a new
 costume: **a guard that answers two different questions with one verdict will be
 placed correctly for one of them.** "Is this string a legal configuration?" and
 "does this name resolve to somewhere I may talk to?" have different answers,
@@ -7472,6 +7477,7 @@ five were the only ones anybody had ever checked.
 | **IDP-5** | `ReplaceAll` is all-or-nothing, so on a node with **no** cached document (first enrollment, newly added profile) an unreachable IdP still rejects the whole IdP set and aborts the snapshot | **OPEN** — steady-state nodes are covered by IDP-1; closing it properly means classifying reachability failures separately from validation failures inside the config-sync path, which deserves its own review |
 | **IDP-6** | The SAML SP key pair is EPHEMERAL (`ensureSPKeyPair`, regenerated per process) and therefore differs on every node and after every restart — SP metadata is node- and restart-dependent, and encrypted assertions cannot be decrypted by a node that did not issue the AuthnRequest | **OPEN, REPORTED NOT FIXED** — persisting it is a key-management decision with cluster-distribution consequences, not a resilience patch |
 | **IDP-7** | Neither fetch honours the metadata document's own `validUntil` / `cacheDuration` | **OPEN** — noted during this sweep; the 7-day ceiling bounds the exposure but does not implement the IdP's stated intent |
+| **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
 
 ### Governance note
 

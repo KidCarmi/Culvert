@@ -47,8 +47,22 @@ different metadata URL or issuer has no cache, so a migration can never be
 answered by the provider you are migrating away from.
 
 **Cached bytes are parsed and validated by exactly the same code as network
-bytes.** For OIDC in particular, every discovered endpoint is put back through
-the https/non-private check. A cache file edited on disk cannot widen anything.
+bytes.** For OIDC, all three endpoints the appliance uses from the document
+(authorization, token, JWKS) are re-checked STRUCTURALLY — absolute, `http` or
+`https`, host present, and not a private IP literal — so a cache file edited on
+disk cannot widen the shape of what is accepted.
+
+The address check is deliberately split, because the two kinds of endpoint have
+different protections. The token and JWKS endpoints are ones the appliance
+**dials**, and every such dial goes out through the SSRF-guarded dialer, which
+refuses a private *resolved* address at connect time and is immune to DNS
+rebinding — so a structural check is sufficient there, and a resolving check
+would make the cache unusable during exactly the outage it exists for. The
+authorization endpoint is **not dialled by the appliance at all** — it is handed
+to the user's browser — so no dialer is ever consulted, and it therefore keeps
+its own resolving check at compile time. That check refuses only a DEFINITE
+private verdict: a name that cannot be resolved is treated as *unknown*, not
+*private*, so a resolver outage can never reject a cached document.
 
 **A dark provider recovers on its own.** If a profile still cannot be compiled
 — unreachable at boot with nothing cached — the appliance retries at a bounded
@@ -166,6 +180,14 @@ safe at any time; it costs only the fallback.
 * **An IdP signing-key rotation during an outage is not picked up** until the
   IdP is reachable again. That is the intended trade: the alternative is to
   stop trusting a document the IdP has not actually retracted.
+* **Two discovery endpoints are not in the validation loop** (register row
+  IDP-8): `userinfo_endpoint` and `introspection_endpoint` are taken from the
+  document and dialled with a bearer token and the client secret respectively,
+  without being re-checked. The SSRF-guarded dialer still applies, so they
+  cannot reach a private address, but nothing refuses a plain-`http` endpoint
+  there — a discovery document that downgraded one would send credentials in
+  cleartext to a public host. Refusing non-`https` for those two is a posture
+  change with its own compatibility cost and is recorded as follow-up work.
 * **Metadata is only refreshed when a profile is compiled** (boot, admin save,
   config-version change). A long-lived process whose config never changes can
   hold a document for a long time and will not notice a rotation until
