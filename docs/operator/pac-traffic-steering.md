@@ -356,7 +356,7 @@ digest** (a local restore/verify anchor — see the pool-mutability caveat
 below; convergence itself is guaranteed by the deterministic compiler, not a
 cross-node digest check), author, reason, and timestamp. Revision numbers are
 **monotonic** and never reused; the history is bounded (oldest revisions are
-trimmed past the per-profile cap, mirroring the config-version store). A
+trimmed past the per-steering-profile cap, mirroring the config-version store). A
 rollback does not rewrite history — it re-activates a prior revision's spec as
 a NEW revision. The active steering profile's own `revision` field is the Part-2 PUT
 optimistic-concurrency token and advances independently of the lifecycle
