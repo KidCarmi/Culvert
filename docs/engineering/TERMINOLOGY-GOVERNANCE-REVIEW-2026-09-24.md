@@ -16,8 +16,8 @@
 > review-start, so a fix landed by a parallel branch is credited rather than re-claimed — no such
 > landing occurred this pass; the branch was created directly from a synced `origin/main`, so no merge
 > was needed). **Correction:** the first revision said no review dated later than 2026-09-11 existed on
-> any branch. That was wrong. Three were open as unmerged PRs at the time and audited overlapping
-> windows: 2026-09-19 (#1434), 2026-09-21 (#1456) and 2026-09-23 (#1482). This report is therefore a
+> any branch. That was wrong. Four were open as unmerged PRs at the time and audited overlapping
+> windows: 2026-09-12 (#1372, merged since), 2026-09-19 (#1434), 2026-09-21 (#1456) and 2026-09-23 (#1482). This report is therefore a
 > parallel run of the DEBT-014 kind; see "Overlap with parallel reports" below.
 >
 > The window covers 34 first-parent merges / 256 files / ~55.7k insertions, dominated by two
@@ -273,9 +273,16 @@ Neither merge touches a carry-over finding location.
 
 ## Overlap with parallel reports
 
-Three reports written before this one were still unmerged PRs when it was written, and each audited
+Four reports written before this one were still unmerged PRs when it was written, and each audited
 part of this window. They recorded findings this pass did not:
 
+- **2026-09-12 (#1372, since merged)**: audited `d378dff..2833db3`, a subset of this window, and opened
+  **T-54** — the OCSP discarded-response reason vocabulary does not match across the `/api/ocsp` JSON
+  fields, the Go accessors and the `/metrics` `reason` labels, and `responder_blocked` is counted in the
+  "responses discarded" series although no response exists. It moved the score from 8.7 to 8.6. This
+  report's OCSP check (Executive Summary item 1) first called those counters consistent; it now records
+  the mismatches as T-54, still open at `6ec745d`, carries T-54 in the backlog, and starts its score
+  from 8.6. T-54 is the 2026-09-12 report's finding, not a new one here.
 - **2026-09-21 (#1456)**: the OCSP admin panel was titled "OCSP / CRL Revocation" although only OCSP
   exists (its T-59), and the OCSP work added "appliance", which the glossary forbids, to an OpenAPI field
   description and operator docs (a T-51 recurrence). It also found that the MCP tool-trust decision
