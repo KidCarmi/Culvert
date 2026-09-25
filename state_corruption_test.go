@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -372,7 +373,9 @@ func TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics(t *testing.T
 	if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	qpath := quarantineCorruptStateFile("ui_users", path, errors.New("unexpected end of JSON input"))
+	var probe map[string]any
+	jsonErr := json.Unmarshal([]byte(`{`), &probe) // *json.SyntaxError "unexpected end of JSON input"
+	qpath := quarantineCorruptStateFile("ui_users", path, jsonErr)
 	if qpath == "" {
 		t.Fatal("setup: quarantine should have succeeded (path does not exist, rename target is free)")
 	}
@@ -534,5 +537,26 @@ func TestGlobEscapeLiteral_MatchesOnlyTheLiteral(t *testing.T) {
 	m, err := filepath.Glob(globEscapeLiteral(lit) + ".corrupt.*")
 	if err != nil || len(m) != 1 || m[0] != lit+".corrupt.1" {
 		t.Fatalf("got %v, %v; want only %q", m, err, lit+".corrupt.1")
+	}
+}
+
+// TestCheckStateFileIntegrity_DoesNotDiscloseValueBearingErrors pins the
+// Codex P2 on PR #1408: a validation error can embed stored data (the
+// policy_learning cell key carries an observed IdP group name), and the
+// viewer-role diagnostics row must carry only a bounded cause class.
+func TestCheckStateFileIntegrity_DoesNotDiscloseValueBearingErrors(t *testing.T) {
+	isolateStateCorruption(t)
+	path := filepath.Join(t.TempDir(), "policy_learning.json")
+	secret := "g:Finance-Payroll-Admins\x1fSocial Media"
+	quarantineCorruptStateFile("policy_learning", path, fmt.Errorf("session s1: cell %q is null", secret))
+	rows := checkStateFileIntegrity()
+	if len(rows) != 1 {
+		t.Fatalf("want one row, got %+v", rows)
+	}
+	if strings.Contains(rows[0].Message, "Finance-Payroll-Admins") {
+		t.Fatalf("diagnostics row disclosed a stored value: %q", rows[0].Message)
+	}
+	if !strings.Contains(rows[0].Message, "failed validation") {
+		t.Fatalf("row must still carry a bounded cause class, got %q", rows[0].Message)
 	}
 }

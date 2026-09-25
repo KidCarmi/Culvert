@@ -34,6 +34,8 @@ package main
 // problem. Only a file we READ and could not PARSE is treated as corrupt.
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,7 +60,7 @@ var (
 
 // stateCorruptionRecord is the path-free view of one recorded corruption.
 type stateCorruptionRecord struct {
-	ParseErr         string // parseErr.Error(); "" for a residual-only record
+	ParseErr         string // BOUNDED cause class (stateCorruptionCauseClass); "" for a residual-only record
 	QuarantineFailed bool   // true when this boot's rename-aside attempt itself failed
 	Residual         bool   // true when detected via a prior boot's leftover quarantine file(s)
 	ResidualCount    int    // number of unreconciled quarantine siblings, when Residual
@@ -119,7 +121,7 @@ func quarantineCorruptStateFile(kind, path string, parseErr error) string {
 	stateCorruptionMu.Lock()
 	stateCorruptionByKind[kind] = detail
 	stateCorruptionRecordByKind[kind] = stateCorruptionRecord{
-		ParseErr:         parseErr.Error(),
+		ParseErr:         stateCorruptionCauseClass(parseErr),
 		QuarantineFailed: qpath == "",
 	}
 	stateCorruptionMu.Unlock()
@@ -186,6 +188,27 @@ func noteResidualQuarantinePaths(kind string, paths ...string) {
 	stateCorruptionMu.Unlock()
 
 	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
+}
+
+// stateCorruptionCauseClass maps a load error to a BOUNDED, value-free cause
+// for the viewer-role diagnostics row. The raw error stays log/alert-only:
+// a validation error can embed stored data (e.g. policy_learning's cell key
+// carries an observed IdP group name), which /api/diagnostics must never
+// disclose. A json.SyntaxError's message is a fixed-grammar description of
+// the syntax fault (at most one offending byte), so it is kept verbatim.
+func stateCorruptionCauseClass(err error) string {
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		return "unknown error"
+	case errors.As(err, &syn):
+		return fmt.Sprintf("malformed JSON: %s", syn.Error())
+	case errors.As(err, &typ):
+		return "malformed JSON: a field has an unexpected type"
+	default:
+		return "content failed validation; see the server log for detail"
+	}
 }
 
 // globEscapeLiteral escapes the filepath.Match metacharacters in a LITERAL
