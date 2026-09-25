@@ -614,5 +614,17 @@ func rollbackExcludedConfigSurfaces() []rollbackExcludedSetting {
 		}
 		out = append(out, rollbackExcludedSetting{ID: row.ID, Note: note})
 	}
-	return out
+	return append(out, offRegistryRollbackExclusions...)
+}
+
+// offRegistryRollbackExclusions lists operator-facing configuration that lives
+// OUTSIDE the configSurfaces registry and is therefore invisible to the
+// derivation above, yet is equally untouched by a version rollback. Without it
+// the rollback-scope answer would understate what a rollback leaves in place.
+// CDR state is per-CP local and neither captured nor applied by
+// captureConfigBackup/applyConfigBackup (see the header of cdr_ui.go).
+var offRegistryRollbackExclusions = []rollbackExcludedSetting{
+	{ID: "cdr_enabled", Note: "CDR enablement is per-CP local state outside the config registry; rollback never captures or restores it"},
+	{ID: "cdr_instances", Note: "CDR instances (cdr_instances.json) are per-CP local state; rollback never captures or restores them, and must never silently un-revoke a credential"},
+	{ID: "cdr_policies", Note: "CDR policies (cdr_policies.json) are per-CP local state; rollback never captures or restores them"},
 }

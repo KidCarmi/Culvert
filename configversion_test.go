@@ -115,6 +115,17 @@ func TestApiConfigRollbackScope_ListsFindingTenThreeExclusions(t *testing.T) {
 			t.Errorf("expected %q in rollback-excluded settings, got %v", want, resp.Excluded)
 		}
 	}
+	// Off-registry CDR state is also untouched by rollback and must be
+	// reported, or the UI's "does not restore N settings" count understates
+	// the exclusions.
+	for _, want := range []string{"cdr_enabled", "cdr_instances", "cdr_policies"} {
+		if !seen[want] {
+			t.Errorf("expected off-registry %q in rollback-excluded settings, got %v", want, resp.Excluded)
+		}
+	}
+	if len(seen) != len(resp.Excluded) {
+		t.Errorf("rollback-excluded settings contain duplicate IDs: %v", resp.Excluded)
+	}
 	// category_groups IS on the rollback surface (Rollback: true) and must
 	// never be reported as excluded.
 	if seen["category_groups"] {
