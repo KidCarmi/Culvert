@@ -32,7 +32,8 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   TOTP** — a valid password alone reaches the full admin API — tracked as
   RISK-030; see `docs/operator/admin-api-credential-lockout.md`.
 - Two residuals on that path are recorded rather than closed, after a per-client
-  failure budget was tried in review and withdrawn (SEC-BASICAUTH-2/-3/-4).
+  failure budget was tried in review and withdrawn (SEC-BASICAUTH-2, -3, and
+  SEC-BASICAUTH-4).
   Recording a failure creates lockout state keyed by a caller-chosen username, on
   a public GET no rate limit covers (800 entries from 400 requests, measured), so
   a budget was added that refused a client which had exceeded it. Because the

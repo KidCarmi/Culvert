@@ -78,7 +78,7 @@ credential is accepted. The planned fix is fair-share eviction — evict the old
 entry belonging to whichever client is holding the most, so a flooding source
 evicts itself — which bounds the state without refusing any request.
 
-> **A per-client refusal was tried here and withdrawn.** An earlier release
+> **A per-client refusal was tried here and withdrawn (SEC-BASICAUTH-4).** An earlier release
 > refused a client that had exceeded a per-window failure budget. Because the
 > budget was keyed on the client, an unauthenticated flood from a shared egress —
 > a NAT, a CGNAT range, or an L7 reverse proxy with no `trusted_proxy_cidrs`
