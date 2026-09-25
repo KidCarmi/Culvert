@@ -458,7 +458,7 @@ func (b *Store) IsBlocked(host string) bool {
 	// The per-request hot path: one sharded read lock instead of the single
 	// process-wide one every proxied destination used to serialise on. The
 	// probe sequence below is unchanged, verdict for verdict. See hotread.go.
-	sh := b.mu.rlockHot()
+	sh := b.mu.RLockHot()
 	defer sh.RUnlock()
 	if b.isExcepted(host) {
 		return false
