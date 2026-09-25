@@ -310,7 +310,7 @@ func driveMiddleware(t *testing.T, sessionRole string) (int, UIRole, bool) {
 	h := uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached, seen = true, uiRole(r)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -395,7 +395,7 @@ func TestAuthStatus_UnenrolledSessionIsNotReportedAsAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value})
 	rec := httptest.NewRecorder()
 	apiAuthStatus(rec, req)
@@ -450,7 +450,7 @@ func TestRosterToSession_UnenrolledDiskRoleNeverReachesAdmin(t *testing.T) {
 		t.Fatalf("injected role = %q, want %q", injected, RoleViewer)
 	}
 	// Authorization: the elevated gate must actually refuse it.
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/users", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/users", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, injected))
 	rec := httptest.NewRecorder()
 	if requireRole(rec, req, RoleAdmin) {
