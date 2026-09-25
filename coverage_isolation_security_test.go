@@ -322,9 +322,18 @@ func TestCovIsoSec_WriteCACertPEMServesLoadedCA(t *testing.T) {
 	}
 }
 
-// TestCovIsoSec_WriteCACertPEMWithoutCAIs503 pins the `pem == nil` arm (503
-// "CA not initialised"), the complement of the test above: it was reached only
-// when no earlier test had left a CA installed.
+// TestCovIsoSec_WriteCACertPEMWithoutCAIs503 pins the `pem == nil` arm (503),
+// the complement of the test above: it was reached only when no earlier test
+// had left a CA installed.
+//
+// The arm answers the FE-6B.0 typed refusal — `application/json`,
+// `{"code":"ca_not_ready","error":…}` (refusalCANotReady, the bounded
+// CertRefusal contract every FE-6B route answers, mirrored by
+// frontend/src/api/types.gen.ts) — not the pre-FE-6B.0 plain-text
+// "CA not initialised" body this test pinned when it was written on main.
+// Adapted at the FE-6AR main-refresh merge (record 6ARR): the test's intent
+// (the empty-CA arm is a 503 that never advertises a PEM download) is kept in
+// full; only the body it expects follows the accepted contract.
 func TestCovIsoSec_WriteCACertPEMWithoutCAIs503(t *testing.T) {
 	covIsoSecInstallEmptyCA(t)
 	w := httptest.NewRecorder()
@@ -332,11 +341,21 @@ func TestCovIsoSec_WriteCACertPEMWithoutCAIs503(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "CA not initialised") {
-		t.Errorf("body = %q, want the CA-not-initialised message", w.Body.String())
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json (the typed refusal; never a PEM download)", ct)
 	}
-	if ct := w.Header().Get("Content-Type"); ct == "application/x-pem-file" {
-		t.Error("a 503 must not advertise a PEM download")
+	var body struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body %q is not the typed refusal: %v", w.Body.String(), err)
+	}
+	if body.Code != refusalCANotReady {
+		t.Errorf("code = %q, want %q", body.Code, refusalCANotReady)
+	}
+	if body.Error == "" {
+		t.Error("refusal carries no error message")
 	}
 }
 
