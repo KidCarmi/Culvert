@@ -1,5 +1,16 @@
 # Culvert Release/Update Hosting Migration — GitHub Pages → Cloudflare R2
 
+**Status update (Pages retirement executed):** the Pages origin has now been
+REMOVED. `publish-catalog-pages.yml` is deleted, `verify-dual-publish.yml` is
+replaced by the R2-only `verify-catalog-publish.yml`, and the re-sign scheduler
+no longer dispatches a Pages publisher. R2 (`https://catalog.culvertlabs.com`)
+is the sole publication target, which the baked default client URL already
+named. The trust contract is unchanged — integrity was never a property of the
+host. Remaining settings-level cleanup (disabling the Pages site itself in
+repository settings) is an owner action and is listed in
+`docs/operator/release-publication-gating.md`. Everything below is the ORIGINAL
+design record and is kept as written.
+
 **Status:** DESIGN ONLY. No code changes, no workflow changes, no client behavior
 change until this plan is reviewed and approved. Every recommendation below is
 tied to a concrete repository finding (file:line). Assumptions are marked

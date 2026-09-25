@@ -58,8 +58,8 @@ migrate on the first post-upgrade install).
 | 03:00 | `resign-catalog.yml` resolves the latest `v*` tag and dispatches `ci.yml` at that tag with `resign=true`; polls to success (fail-closed) | scheduler (signs nothing; `actions:write` only) |
 | — | `catalog-resign` job: latest-tag assert (SEC-F2a) → download the ORIGINAL bundle by exact name → **verify it through the baked root + pinned identity BEFORE reading anything** (SEC-F1, in the gate binary) → rebuild (same version/created_at, +180d window) → keyless sign → end-to-end verify → prune superseded `-r*` assets → attach `culvert-release-catalog-<tag>-rYYYYMMDD.tar.gz` | ci.yml at the tag ref |
 | — | R2 publish (resign input): stage to the NEW `history/stable/<tag>-rYYYYMMDD/` prefix → staged-bytes verify → **monotonic live binding** (SEC-F2b: staged `catalog_version` ≥ live; equality ⇒ identical entries + strictly newer `generated_at`) → promote → purge → confirm | publish-catalog-r2.yml |
-| — | Pages publish (same tag; picks the newest resign bundle) + dual-origin verify | publish-catalog-pages.yml, verify-dual-publish.yml |
-| 09:00 | **Freshness canary** (SEC-F5): live `generated_at` age must be ≤ 14d, else RED | verify-dual-publish.yml (cron) |
+| — | Catalog-publication verify (R2 origin serves the re-signed bytes) | verify-catalog-publish.yml |
+| 09:00 | **Freshness canary** (SEC-F5): live `generated_at` age must be ≤ 14d, else RED | verify-catalog-publish.yml (cron) |
 
 ## What failure looks like / what to do
 
@@ -84,4 +84,4 @@ migrate on the first post-upgrade install).
    latest-tag assert.)
 2. After it's green: `Actions → Publish Release Catalog (R2) → Run workflow`
    with `tag` and the exact `resign_asset` name from the release's assets.
-3. Same for Pages (`tag` only), then dispatch `Verify Dual Publish`.
+3. Then dispatch `Verify Release Catalog Publication (R2)` (`tag` only). GitHub Pages is retired as a catalog origin; R2 is the sole target.
