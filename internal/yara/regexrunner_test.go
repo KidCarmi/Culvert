@@ -471,3 +471,37 @@ func TestRegexRunner_ConcurrentScans(t *testing.T) {
 		t.Errorf("inflight delta = %d after all concurrent scans finished, want 0", got)
 	}
 }
+
+// TestRegexRunner_AbandonedWorkerSkipsAQueuedJob pins run's early return: a
+// job already queued when the parent abandons must not be matched, and the
+// worker still releases the charge it inherited.
+//
+// The live path only reaches this when the abandon lands between the parent's
+// hand-off and the worker's next receive, so whether an ordinary test run covers
+// it depends on scheduling (missed in 1 of 6 local runs of this package). This
+// drives run synchronously with the state already arranged, so the branch is
+// covered on every run — the coverage-equivalence audit compares two runs of
+// the suite and needs each block to be reached deterministically.
+func TestRegexRunner_AbandonedWorkerSkipsAQueuedJob(t *testing.T) {
+	r := &regexRunner{
+		jobs:    make(chan regexJob, 1),
+		results: make(chan bool, 1),
+		timer:   time.NewTimer(time.Hour),
+	}
+	t.Cleanup(func() { r.timer.Stop() })
+	r.charge()
+	r.jobs <- regexJob{re: regexp.MustCompile(`x`), data: []byte("x")}
+	r.abandoned.Store(true)
+	close(r.jobs)
+
+	r.run()
+
+	select {
+	case got := <-r.results:
+		t.Fatalf("an abandoned worker matched a queued job and published %v", got)
+	default:
+	}
+	if r.charged.Load() {
+		t.Fatal("the worker returned without releasing the charge it inherited")
+	}
+}

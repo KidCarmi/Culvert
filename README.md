@@ -239,7 +239,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 | **CSRF** | Origin-based same-origin enforcement on mutating requests + `X-Frame-Options: DENY` and CSP |
 | **Session security** | HMAC-SHA256 signed cookies, per-session 128-bit `jti`, dynamic `Secure` flag, fresh token per login, disk-persisted revocation list synced across the cluster via the control plane |
 | **CA key protection** | AES-256-GCM with PBKDF2-SHA256 (600,000 iterations, NIST SP 800-132) at rest; atomic bundle writes |
-| **Certificate revocation** | Upstream OCSP checking (fail-closed when a published responder is unreachable). CRL checking is **not yet implemented** - see [Limitations](#limitations--known-gaps) |
+| **Certificate revocation** | OCSP checking (fail-closed when a published responder is unreachable), currently scoped to the upstream parent-proxy TLS handshake only - **not yet wired to SSL-inspected origin certificates**. CRL checking is **not yet implemented** - see [Limitations](#limitations--known-gaps) |
 | **Hop-by-hop stripping** | RFC 7230-compliant - parses the `Connection` header for dynamically listed hop-by-hop names |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, drops private `X-Real-IP`, always removes `X-User-Identity` before forwarding |
 | **Password complexity** | 8+ chars, mixed case, and a digit required |
@@ -335,7 +335,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in 65 packages under `internal/`. A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live under 68 top-level directories in `internal/` (some, like the MCP gateway, further decomposed into dozens of subpackages — 107 directories tree-wide contain non-test Go source). A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
@@ -351,7 +351,7 @@ The main/tag security-release gate adds **9 blocking checks** - gosec, govulnche
 
 Stated plainly, because a security product should be honest about its edges:
 
-- **Revocation:** OCSP only - **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder.
+- **Revocation:** OCSP only - **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder. More significantly, the OCSP callbacks are wired to the upstream **parent-proxy** TLS handshake only (the `upstream.proxies` YAML block or the admin UI's Upstream panel) - the SSL-inspected **origin** certificate, the one your MITM policy is deciding to trust on the client's behalf, is **not currently OCSP-checked at all**. This is a deliberate, owner-tracked scope decision, not an oversight - attaching the same fail-closed check to every inspected handshake would make egress depend on reaching an external responder, which is unacceptable on networks where outbound port 80 is blocked by policy. See [`docs/operator/ocsp-revocation-checking.md`](docs/operator/ocsp-revocation-checking.md#6-why-inspected-https-is-not-covered-yet) for the coverage matrix and rationale.
 - **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
 - **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.26); certificate signing remains classical ECDSA P-256.
 - **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected.
