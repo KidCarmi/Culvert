@@ -122,6 +122,21 @@ two more rounds of review found real coverage gaps — see the corrections above
    image-baked seed source `seedYARARules` copies from once on first boot, distinct from the persistent,
    operator-mountable `/data/yara` runtime directory — confirmed by checking `docs/operator/` for any
    remaining `/app/yara` reference (none found). Both checked and clean.
+5. **`CHANGELOG.md`'s CHAOS-65 OCSP entries (`CHANGELOG.md:12-76` at `2833db3`)** — omitted from the
+   second draft's Part 2 even though they are the largest changelog addition in this window (found in
+   review). Audited against the API, metrics, GUI and operator doc at `2833db3`: `coverage` /
+   `uncheckedEnforcingPaths` match the `GET /api/ocsp` keys (`ui_security.go:1836-1837`,
+   `api/openapi/openapi.yaml:480`) and the GUI reader (`static/index.html:17519`);
+   `culvert_ocsp_path_checked{path}` matches the operator doc (`docs/operator/ocsp-revocation-checking.md:27,89`);
+   the `security.ocsp_check` key, `ParseResponseForCert`, `id-kp-OCSPSigning` and the `HTTP(S)_PROXY`
+   behaviour change are spelled identically in code (`config.go:47`, `internal/ocsp/ocsp.go:664,716,179`) and
+   the doc (`:3,124`). "Responder" is used consistently throughout. The entries name none of the
+   discarded-response reason labels, so they neither extend nor contradict T-54. One observation, recorded
+   here rather than filed as a new finding: the changelog says "a banner on the OCSP panel", and the panel
+   is actually titled **"OCSP / CRL Revocation"** (`static/index.html:4477`), a title that names a CRL
+   capability the product does not have (no CRL fallback exists — register row OCSP-10). That is a
+   pre-existing GUI label, not drift introduced this window; it belongs with T-54's GUI follow-up when that
+   is scheduled.
 
 **Carry-over backlog re-verified, one item's evidence base updated (no change to its finding or priority).**
 T-29 (`rate_limit`/`rate_limit_rpm`) was re-checked directly against the current tree and is unchanged
