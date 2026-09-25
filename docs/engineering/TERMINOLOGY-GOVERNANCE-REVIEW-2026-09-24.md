@@ -131,7 +131,8 @@ not a mechanical rename) also remains unresolved and is not queued to the number
 ## Forbidden term: appliance
 
 `docs/design/PRODUCT-TERMINOLOGY.md` says "Appliance: *Not used*" for UI labels and docs.
-`git diff 574d265 6ec745d -U0 | grep -i appliance` finds 30 added lines in this window. Line numbers
+`git diff 574d265 6ec745d -U0 | grep -i '^+.*appliance'` finds 30 added lines in this window (the
+unfiltered grep also matches one removed line). Line numbers
 below are at `6ec745d`, so a few differ from the 2026-09-21 report's list, which uses `6c46ebd`.
 
 **User- or operator-visible text (9 lines).** All nine were added in the 2026-09-21 report's window,
