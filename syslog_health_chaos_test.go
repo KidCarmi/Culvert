@@ -35,7 +35,8 @@ type syslogTestCollector struct {
 
 func startSyslogCollector(t *testing.T) *syslogTestCollector {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -312,7 +313,8 @@ func TestChaos66_RecoveryRequiresADeliveredEvent(t *testing.T) {
 // can revive the one it killed.
 func startSyslogCollectorOn(t *testing.T, addr string) *syslogTestCollector {
 	t.Helper()
-	ln, err := net.Listen("tcp", addr)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		t.Skipf("cannot rebind %s: %v", addr, err)
 	}
