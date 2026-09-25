@@ -365,7 +365,9 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 
 	// One upstream H2 client connection carries every stream of this tunnel;
 	// http2.ClientConn.RoundTrip is safe for concurrent use (h2 multiplexing).
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	tr := &http2.Transport{}
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	upstreamCC, err := tr.NewClientConn(upstreamTLS)
 	if err != nil {
 		logger.Printf("SSL_INSPECT(h2) upstream client-conn %q: %v", sanitizeLog(hostOnly), err)
@@ -403,6 +405,7 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	// ServeConn runs each stream's handler in its own goroutine and blocks until
 	// the client connection is no longer readable (or a shutdown GOAWAY + stream
 	// completion, or the backstop force-close).
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	sh.srv.ServeConn(clientTLS, &http2.ServeConnOpts{
 		Context:    outer.Context(),
 		Handler:    handler,
@@ -414,6 +417,8 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 // for an upstream round-trip and runs the shared inspection pipeline. The pipeline
 // is protocol-agnostic; only the roundTrip (upstream http2 RoundTrip) and deliver
 // (h2 ResponseWriter) hooks and the block responder are H2-specific.
+//
+//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Request, upstreamCC *http2.ClientConn, hostOnly, clientIP string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
 	// Per-request debug log, parity with the H1 loop's SSL_INNER line so admins can
 	// trace file-block/scan decisions on H2 tunnels too. Logged before the reshape
