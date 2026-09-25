@@ -184,7 +184,7 @@ Four reports in this series cover overlapping windows (every start commit below 
 | 2026-09-12 (#1372, merged) | `d378dff..2833db3` | T-54 (new) |
 | 2026-09-13 (#1380, merged) | `2833db3..993b390`, plus a scope extension to the new frontend's PAC and Policy Learning screens | T-55, T-56 (new); T-51 residual (reopened) |
 | 2026-09-16 (#1407, merged) | `574d265..993b390`, plus four domain sweeps | T-57 (new; fixed by #1407 after this snapshot) |
-| 2026-09-19 (this report) | `574d265..36628eb` (a superset of all three windows above; `993b390..36628eb` adds 4 first-parent merges, all MCP-first-canary work) | T-58 (new) |
+| 2026-09-19 (this report) | `574d265..36628eb` (a superset of all three windows above; `993b390..36628eb` adds 4 first-parent merges: three MCP First-Canary merges (#1378, #1422, #1423) and #1431, a policy benchmark-gate test change touching only `policy_srcprefix_benchgate_test.go`) | T-58 (new) |
 
 This report's sweeps were the targeted re-checks listed under Method; they did not re-derive T-54,
 T-55, T-56, T-57 or the T-51 residual, and did not re-audit the OCSP admin JSON, the new frontend's PAC
@@ -300,8 +300,13 @@ than left for a future review pass to catch.
 ## Stop-Condition Assessment
 
 Terminology is **not** fully consistent. The ~8-day audited window (2026-09-11 → 2026-09-19, 15
-first-parent merges) was dominated by the MCP-first-canary work plus a few CHAOS-series reliability fixes,
-per `CLAUDE.md` and the PR titles in the window. Within the targeted re-checks this pass ran, it found no
+first-parent merges; `git log --first-parent 574d265..36628eb`) was dominated by the MCP First-Canary
+work — five merges (#1362, #1370, #1378, #1422, #1423) carrying most of the window's insertions. The other
+ten are: #1363 (a correction to the 2026-09-11 governance report), #1364 (`trust_forwarded_headers`
+documentation), #1365 (oversize-username login rejections in the legacy GUI), #1366 (the
+`docker-compose.yml` YARA-directory doc fix), #1367 (SOCKS5/plugin log sanitisation), #1368 (rate-limit
+exempt-view sharding), #1369 (CHAOS-65 OCSP/SSRF), #1371 (a GeoIP diagnostics fix), #1374 (a CDR
+flag-merge fix) and #1431 (a policy benchmark-gate test). Within the targeted re-checks this pass ran, it found no
 new drift, and it changed no admin-facing rule-editing copy at all; the same window also contains the
 drift the 2026-09-12, 2026-09-13 and 2026-09-16 reports recorded (T-54, T-55, T-56, T-51 residual, T-57),
 which this pass did not re-derive and which is carried above. The one finding, small and zero-compatibility-risk, is PRE-EXISTING: the
