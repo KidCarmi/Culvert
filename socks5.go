@@ -461,7 +461,7 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
-	// ── Destination-host bound (CHAOS-67, fail-closed) ──────────────────────
+	// ── Destination-host bound (CHAOS-69, fail-closed) ──────────────────────
 	// This path needs NO raw pre-cap: RFC 1928 §4 length-prefixes DOMAINNAME with
 	// ONE byte, so the protocol structurally caps the destination at 255 — already
 	// inside maxRawDestAuthorityBytes (1024), which is why a raw gate here would be
@@ -481,7 +481,7 @@ func handleSOCKS5(conn net.Conn) {
 		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=idna}", clientIP, sanitizeLog(host))
 		return
 	}
-	// CHAOS-67 canonical tier: refuse a destination that cannot be a DNS name.
+	// CHAOS-69 canonical tier: refuse a destination that cannot be a DNS name.
 	// Nothing is recorded with the destination in it — the counter and the
 	// rate-limited line carry the LENGTH, never the value.
 	if canonicalHostOversize(normSOCKS5Host) {

@@ -10,7 +10,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Security
 
 - An unauthenticated client could park a gateway core for minutes with one
-  request by choosing a very long destination host (CHAOS-67, register rows
+  request by choosing a very long destination host (CHAOS-69, register rows
   PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
   `net/http` admits its 1 MiB default of request line plus headers, and nothing
   bounded it. It was copied verbatim into the process log and the durable

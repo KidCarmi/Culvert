@@ -1307,7 +1307,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// byte-identical). See crashguard.go.
 	defer proxyCrashGuard(reqID)
 
-	// ── Destination-authority RAW pre-cap (CHAOS-67, fail-closed) ───────────
+	// ── Destination-authority RAW pre-cap (CHAOS-69, fail-closed) ───────────
 	// FIRST consumer of r.Host, and deliberately ahead of the connection
 	// limiter, the IP filter, the rate limiter, authentication and policy. The
 	// client-supplied authority is copied into two rotating sinks and WALKED
@@ -1389,7 +1389,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// normalizes internally, and changing their input is out of scope here.
 	normHost, ok := normalizeHostStrict(host)
 	if ok && rejectOversizeCanonicalHost(w, clientIP, normHost) {
-		// CHAOS-67 canonical tier: the host normalized to more than DNS can
+		// CHAOS-69 canonical tier: the host normalized to more than DNS can
 		// carry. Reachable only for a value that does not shrink under IDNA —
 		// i.e. the dot-dense ASCII shape an attacker wants — because the raw
 		// pre-cap above already bounded everything to 1 KiB and a legitimate IDN

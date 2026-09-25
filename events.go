@@ -292,7 +292,7 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
 
-	// CHAOS-67: proxied requests refused for an over-long destination
+	// CHAOS-69: proxied requests refused for an over-long destination
 	// authority. Unlike the login counter above this one is ALWAYS emitted —
 	// there is no configuration to gate it on (every build bounds the
 	// authority), so a flat zero means "nothing has been probed", never "the

@@ -411,7 +411,7 @@ var destinationSinks = map[string]string{
 	"JoinHostPort":        "net; string construction only",
 	"DialContext":         "net.Dialer; the error it returns is sanitised at the log site",
 	"sanitizeLog":         "the sanitiser itself",
-	// CHAOS-67 destination-authority bound. All three receive the destination
+	// CHAOS-69 destination-authority bound. All three receive the destination
 	// only to MEASURE it, which is the whole design decision behind the bound's
 	// log line: the LENGTH is what an operator needs to tell a probe from a
 	// broken client, and a copy of the value — even a prefix — would reopen the
@@ -432,7 +432,7 @@ func TestSOCKS5_EveryDestinationSinkIsAudited(t *testing.T) {
 	// The normalized destination counts as raw. normalizeHostStrict is NOT a log
 	// sanitiser — TestNormalizeHostStrict_IsNotALogSanitiser pins that as a FACT —
 	// so normSOCKS5Host can still carry the control characters that forge a log
-	// record. CHAOS-67 introduced that variable and it escaped this wall until the
+	// record. CHAOS-69 introduced that variable and it escaped this wall until the
 	// stale registry entry for its deleted predecessor gave the omission away: the
 	// wall flags unregistered CALLEES, never an unwatched VALUE, so a new
 	// client-derived local is invisible to it by construction. Whoever adds the
@@ -467,7 +467,7 @@ func TestSOCKS5_EveryDestinationSinkIsAudited(t *testing.T) {
 // the other direction. The wall above flags an unregistered CALLEE; it says nothing
 // about an entry naming a function that no longer exists, so a rename or a deletion
 // leaves a reason recorded for code that is gone while the replacement goes
-// unaudited. CHAOS-67 did exactly that: it replaced destHostOversize with
+// unaudited. CHAOS-69 did exactly that: it replaced destHostOversize with
 // canonicalHostOversize, and the wall stayed green with the dead name registered and
 // the live one missing.
 //

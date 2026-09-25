@@ -9,7 +9,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// CHAOS-67 — the client-supplied destination authority on the proxy data path
+// CHAOS-69 — the client-supplied destination authority on the proxy data path
 //
 // Register row PX-21 opened this: `handleRequest` copies `r.Host` into the
 // process log and the request-log entry, `sanitizeLog` neutralises control
@@ -123,7 +123,7 @@ const maxDestAuthorityLen = 261
 // each at most 4 UTF-8 bytes — at most 236 raw bytes per label. Packing a
 // 253-byte A-label authority with maximal labels gives ~940 raw bytes, and the
 // empirical maximum found by driving the real `idna.ToASCII` is **899**
-// (pinned by TestChaos67_ControlRawCapExceedsMaximumIDNExpansion). 1024 clears
+// (pinned by TestChaos69_ControlRawCapExceedsMaximumIDNExpansion). 1024 clears
 // both with margin.
 //
 // **The cost it buys, stated honestly.** Measured through the real
