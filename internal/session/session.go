@@ -113,6 +113,19 @@ type RevocationList struct {
 	mu     sync.Mutex
 	tokens map[string]time.Time // b64 payload → session expiry
 	users  map[string]time.Time // username → revocation expiry (all sessions for this user)
+
+	// saveMu serializes SaveRevocations end to end: snapshot THROUGH rename.
+	//
+	// It is a SECOND mutex rather than a wider hold of mu, and that is
+	// deliberate. mu guards the maps every enforcement decision reads
+	// (IsRevoked runs on the admin path) and every revocation writes, so
+	// holding it across a marshal and an fsync would let a slow or full volume
+	// delay the act of revoking — making a durability mechanism cost
+	// availability of the security control it exists to protect. saveMu blocks
+	// only other SAVERS.
+	//
+	// Lock order is saveMu → mu, and mu is never held while taking saveMu.
+	saveMu sync.Mutex
 }
 
 // NewRevocationList returns an empty list (used by tests to swap the
@@ -452,6 +465,23 @@ func (r *RevocationList) SaveRevocations() error {
 		// configuration) is reported by the health plane, not here.
 		return nil
 	}
+	// Snapshot THROUGH rename under one lock. ExportRevocations takes and
+	// releases mu on its own, so without this the sequence
+	// export → marshal → AtomicWrite is three independently-atomic steps that
+	// are jointly not: two concurrent savers can interleave so the one holding
+	// the OLDER snapshot renames last, and the file loses a revocation both
+	// callers were told had been applied. Nothing detects it — both return nil,
+	// both count as a successful write, and the durability row stays green —
+	// until a restart resurrects the session. That is the defect class this
+	// whole sweep exists to close, and this function had it: before this change
+	// SaveRevocations had ONE caller, and it now has five, three of them in
+	// background loops (the CP SyncRevocations handler, the DP sync loop, the HA
+	// bundle apply) that run concurrently with an admin's delete.
+	//
+	// Reported by Codex on PR #1437 as a P1.
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+
 	entries := r.ExportRevocations()
 	data, err := json.Marshal(entries)
 	if err != nil {

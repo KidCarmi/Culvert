@@ -1170,6 +1170,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-23 | **A role or password change revokes nothing.** `POST /api/auth/users` re-writes the roster, but the role lives IN the cookie (`ui_middleware.go` reads `sess.Role`, it does not re-resolve), so a demoted admin keeps admin authority until the session expires, and the classic "my password was stolen, I changed it" action does not invalidate the stolen session. Only DELETE revokes. Closing it means revoking on a role/password edit, which changes an admin workflow and deserves its own review. | NEW, **REPORTED not changed** (CHAOS-68) | M | `ui_auth.go` POST branch; `ui_middleware.go:276`; see §38 |
 | AU-24 | **The HA standby CP was the one node with no route into the revocation plane at all.** The HA state bundle replicates `SessionHMAC` (inside `Config`), so a standby verifies exactly the cookies the leader does — while `SyncRevocations`, the only other carrier of revocations, is fenced on a standby by `haIssuanceAllowed`. So a session revoked on the leader authenticated against the standby, and kept full authority across a promotion until some Data Plane happened to push the entry back, or forever if none reconnected. Same defect as AU-20, one node over, and it survived AU-20's fix. | NEW → **CLOSED** (CHAOS-68 round 2, Codex P1: `HAStateBundle.Revocations`, `omitempty`, merged + persisted by `applyHABundle` inside the bundle's existing trust boundary) | **H** | was: `controlplane_server.go` `HAStateBundle`/`HASync`, `ha.go` `applyHABundle`; see §38 |
 | AU-25 | **A health row keyed on a CUMULATIVE failure counter can never recover.** `revocationsAreDurable` read `persistFailures == 0`, so one transient write failure pinned `culvert_session_revocation_durable` at 0 and the `session_revocation` row at `fail` for the life of the process — after the volume was repaired and a later save had written the complete live list. The row's own comment claimed the opposite ("evaluated, never latched"). `ca_health.go` records having fixed this exact bug once already, in the file CHAOS-68 cites as its model. | NEW (introduced by CHAOS-68) → **CLOSED in the same PR** (Codex P2: cumulative counter kept for magnitude, separate current-state flag cleared by a `SetPersistSuccessObserver` recovery seam) | M | was: `session_revocation_health.go`; precedent `ca_health.go` `caRotationPersistDegraded`; see §38 |
+| AU-26 | **An atomic write is not an atomic update: concurrent saves could silently drop a revocation.** `SaveRevocations` snapshotted the maps, released `mu`, then marshalled and renamed, so two savers could interleave with the OLDER snapshot renaming LAST — losing a revocation both callers were told had been applied, while both returned nil, both counted as a successful write and the durability row stayed green. Visible only at the next boot, when the dropped account's sessions authenticate again. Reachable BECAUSE of this sweep: `SaveRevocations` went from one caller to five, three of them background paths racing an admin's DELETE. | NEW (introduced by CHAOS-68) → **CLOSED in the same PR** (Codex P1: a dedicated `saveMu` across snapshot-through-rename; deliberately not a wider hold of `mu`, which would let a slow volume delay the act of revoking) | **H** | was: `internal/session/session.go` `SaveRevocations`; see §38 (36.6c) |
 
 ### 2.6 Background Workers / Feeds / Scanning / Alerting
 
@@ -7288,6 +7289,59 @@ are decided at the same moment.
 `TestChaos68_RevocationHealthIsIsolatedFromTheAggregateVerdict` pins it,
 verified failing against the unregistered shape with the production symptom
 (`aggregate verdict = "fail"`).
+
+### 36.6c Review round 3: the sweep's own defect, inside the function that fixes it
+
+`SaveRevocations` was **snapshot-then-write with the lock released in between**.
+`ExportRevocations` takes and releases `mu` on its own, so
+`export -> marshal -> AtomicWrite` were three individually-atomic steps that were
+**jointly not**. Two savers could interleave so the one holding the OLDER
+snapshot renamed LAST, and the file lost a revocation that both callers had been
+told was applied.
+
+Every surface stayed green while it happened: both calls return `nil`, both
+count as a successful write, `culvert_session_revocation_durable` reads 1 and
+the `session_revocation` row reads OK. The loss becomes visible only at the next
+boot, when the dropped account's sessions authenticate again — **which is the
+exact failure this entire sweep exists to close, occurring inside the function
+that closes it.**
+
+It is reachable **because of** this sweep rather than in spite of it.
+`SaveRevocations` had ONE caller before (the logout path) and now has FIVE, three
+of them in background paths — the CP `SyncRevocations` handler, the DP sync loop,
+the HA bundle apply — that run concurrently with an admin's `DELETE`. Widening
+who calls a persist routine is a concurrency change even when the routine is not
+touched.
+
+**The fix is a dedicated `saveMu` held across snapshot-THROUGH-rename, and it is
+deliberately a SECOND mutex rather than a wider hold of `mu`.** `mu` guards the
+maps every enforcement decision reads (`IsRevoked` is on the admin path) and
+every revocation writes, so holding it across a marshal and an fsync would let a
+slow or full volume delay *the act of revoking* — a durability mechanism costing
+availability of the security control it exists to protect. `saveMu` blocks only
+other SAVERS. Lock order is `saveMu -> mu`; `mu` is never held while taking
+`saveMu`.
+
+Serializing was taken over the generation-check alternative because once the
+snapshot and the rename are under one lock the persisted content is **monotonic
+by construction** (entries are only ever added, modulo expiry pruning), so a
+compare-and-retry would add a failure path with nothing left to detect.
+
+The gate is **many-trial**, not single-shot: whether the stale writer wins the
+rename is a scheduling race, and one trial passes a broken build most of the time
+(the `TestChaos54_StopIsPromptDuringAcceptBackoff` precedent). Verified failing
+against the reintroduced pre-fix shape with exactly the predicted symptom —
+*14 of 16 revocations surviving, two silently dropped.*
+`TestChaos68_SerializedSaveStillRoundTrips` is its control, because the cheapest
+way to pass the gate is to write less.
+
+**The standing rule this adds:** *an atomic write is not an atomic update.*
+`fileutil.AtomicWrite` makes the file never torn; it says nothing about which
+snapshot wins when two callers race, and a durability routine that reports
+success to both is indistinguishable from one that worked. Whenever a persist
+routine gains callers — especially background ones — the read-snapshot and the
+rename belong under one lock, and that lock must not be the one the hot path
+needs. Reported by Codex on PR #1437 as a P1.
 
 ### 36.7 Deliberately left (owner decisions)
 
