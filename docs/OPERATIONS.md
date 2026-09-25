@@ -293,7 +293,12 @@ linked above is the only supported reference.
   shipped `docker-compose.yml` does not pass `-config`, so a mounted
   `config.yaml` is ignored until you also uncomment its
   `./config.yaml:/app/config.yaml:ro` volume and add
-  `"-config", "/app/config.yaml"` to the proxy `command`.
+  `"-config", "/app/config.yaml"` to the proxy `command`. On an existing
+  deployment, copy the live store across **first**
+  (`docker compose exec proxy cp /app/categories.json /data/categories.json`):
+  once the path changes, a missing `/data/categories.json` is re-seeded
+  with the built-in defaults, and recreating the container discards the
+  old `/app` copy, so customised categories would otherwise be lost.
 * `cluster.json`, `cluster-ca.crt/key` — cluster identity
 * `config_versions/v{N}.json` — automatic config snapshots (50 kept)
 * `ui_users.json` — admin accounts (bcrypt hashes)
