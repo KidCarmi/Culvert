@@ -675,8 +675,8 @@ func TestPermitWall_FactIsNotPersistedIntoTheReviewedSnapshot(t *testing.T) {
 		if strings.Contains(strings.ToLower(n), "permit") || strings.Contains(strings.ToLower(n), "policyallow") {
 			t.Errorf("SECURITY: canary.ReviewedTarget.%s persists a policy permit into the "+
 				"activation's IMMUTABLE reviewed snapshot. The permit must be re-observed at every "+
-				"evaluation so a withdrawn authorization can make the node un-ready; a frozen copy "+
-				"cannot express that.", n)
+				"evaluation so a withdrawn authorization can make the next activation preflight "+
+				"refuse; a frozen copy cannot express that.", n)
 		}
 	}
 	st := reflect.TypeOf(canaryRuntimeState{})
