@@ -585,7 +585,8 @@ func TestChaos68_DurableZeroDoesNotImplyAWriteFailure(t *testing.T) {
 	// And it DOES fire once a write actually fails, so the conjunction has not
 	// been tightened into something that never pages.
 	noteRevocationPersistFailure(os.ErrPermission)
-	if !(!revocationsAreDurable() && sessionRevocationPersistFailures.Load() > 0) {
+	pageFiresOnRealFailure := !revocationsAreDurable() && sessionRevocationPersistFailures.Load() > 0
+	if !pageFiresOnRealFailure {
 		t.Error("the documented page does not fire when writes are actually failing")
 	}
 }
