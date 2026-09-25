@@ -4850,6 +4850,7 @@ Firefox (all platforms):
             <div class="stat-card"><div class="stat-val" id="crl-nodes">-</div><div class="stat-label">Syncing Nodes</div></div>
             <div class="stat-card"><div class="stat-val" id="crl-hot">-</div><div class="stat-label">Hot IPs</div></div>
             <div class="stat-card"><div class="stat-val" id="crl-rpm">-</div><div class="stat-label">Limit (RPM)</div></div>
+            <div class="stat-card" title="Fresh-to-stale transitions since this node started — how many separate times the Control Plane broadcast has gone stale, not just whether it is stale right now"><div class="stat-val" id="crl-episodes">-</div><div class="stat-label">Stale Episodes</div></div>
           </div>
           <div id="crl-stale-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:6px;background:rgba(255,176,32,.12);border:1px solid var(--yellow,#ffb020);color:var(--yellow,#ffb020)">
             <strong>Cluster counts not applied.</strong>
@@ -18470,6 +18471,12 @@ async function loadClusterRateLimits(show) {
     document.getElementById('crl-nodes').textContent = r.syncing_nodes || 0;
     document.getElementById('crl-hot').textContent = r.hot_ips || 0;
     document.getElementById('crl-rpm').textContent = r.rate_limit_rpm || 'Off';
+    // CHAOS-61: the gauge above (crl-stale-banner) only shows while the broadcast
+    // is CURRENTLY stale, so an operator reviewing after the fact sees a healthy
+    // panel even if the link flapped repeatedly overnight. This counter is the
+    // "has this happened before" signal the API already computes (Episodes) but
+    // the panel never rendered — a running total survives recovery.
+    document.getElementById('crl-episodes').textContent = r.remote_counts_stale_episodes || 0;
     // CHAOS-61: a stale broadcast is not an error — it is the gate that stops a
     // frozen Control Plane snapshot from denying a client forever — but it IS a
     // degradation of the distributed limit, and a 429 on this node no longer
