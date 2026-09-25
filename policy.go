@@ -269,6 +269,12 @@ type PolicyStore struct {
 	path      string
 	version   int64  // incremented on every mutation
 	updatedAt string // RFC3339 timestamp of last mutation
+	// adoptUnsaved is set when Load adopted a path whose file did not exist
+	// and the immediate write of the current in-memory rules FAILED: the path
+	// is configured but nothing is on disk, so Persisted() must keep reporting
+	// false (the GUI warning stays up) until a later write succeeds. Only a
+	// successful SaveErr, or a later Load, clears it.
+	adoptUnsaved atomic.Bool
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -284,7 +290,7 @@ func (ps *PolicyStore) policyVersion() (int64, string) {
 func (ps *PolicyStore) Persisted() bool {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	return ps.path != ""
+	return ps.path != "" && !ps.adoptUnsaved.Load()
 }
 
 // bumpVersion must be called under ps.mu.Lock().
@@ -328,6 +334,7 @@ var policyStore = &PolicyStore{}
 // Load reads rules from a JSON file. Missing file is treated as empty ruleset.
 func (ps *PolicyStore) Load(path string) error {
 	ps.path = path
+	ps.adoptUnsaved.Store(false)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -344,6 +351,7 @@ func (ps *PolicyStore) Load(path string) error {
 			// boot failure at initPolicy — that failure surfaces the normal
 			// way, on the next rule mutation's own persist attempt.
 			if saveErr := ps.SaveErr(); saveErr != nil {
+				ps.adoptUnsaved.Store(true)
 				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
 			}
 			return nil
@@ -525,6 +533,7 @@ func (ps *PolicyStore) SaveErr() error {
 	if err := atomicWriteFile(ps.path, data, 0o600); err != nil {
 		return fmt.Errorf("write policy rules: %w", err)
 	}
+	ps.adoptUnsaved.Store(false)
 	ps.saveMetaSnapshot(meta)
 	return nil
 }

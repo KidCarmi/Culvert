@@ -123,7 +123,9 @@ func TestPolicyStore_Load_AdoptingPathPersistsExistingRules(t *testing.T) {
 // not exist) must not turn Load into a fatal error — initPolicy calls
 // logFatalf on any Load error, so that would convert a graceful in-memory
 // boot into a crash loop, which is exactly the class of regression the
-// CHAOS-50 boot-path conventions in this codebase exist to prevent.
+// CHAOS-50 boot-path conventions in this codebase exist to prevent. It also
+// pins the visibility half: while no rules exist on disk, Persisted() is
+// false (the GUI warning stays up) until a later write succeeds.
 func TestPolicyStore_Load_AdoptFailureNeverFailsLoad(t *testing.T) {
 	// This test deliberately provokes a real AtomicWrite failure, which
 	// updates the process-global storage-health record (storage_health.go).
@@ -136,12 +138,29 @@ func TestPolicyStore_Load_AdoptFailureNeverFailsLoad(t *testing.T) {
 	ps := &PolicyStore{}
 	ps.ReplaceAll([]PolicyRule{{Priority: 1, Name: "unsaved", Action: ActionAllow}})
 
-	if err := ps.Load(filepath.Join(t.TempDir(), "no-such-dir", "policy.json")); err != nil {
+	dir := filepath.Join(t.TempDir(), "no-such-dir")
+	path := filepath.Join(dir, "policy.json")
+	if err := ps.Load(path); err != nil {
 		t.Fatalf("Load must not fail when the best-effort adopt-persist fails, got: %v", err)
 	}
-	// Persisted() still reports true (path is configured); the write failure
-	// itself surfaces the normal way, via the next mutation's own SaveErr.
+	// The path is configured but no rules exist on disk: Persisted() must
+	// keep reporting false so the GUI warning stays visible.
+	if ps.Persisted() {
+		t.Fatal("Persisted() = true after a failed adopt-write, but no rules are on disk")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected no policy file on disk after failed adopt-write, stat err = %v", err)
+	}
+
+	// Once the target becomes writable, the next successful save clears the
+	// flag and Persisted() reports true again.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.SaveErr(); err != nil {
+		t.Fatalf("SaveErr after making the directory: %v", err)
+	}
 	if !ps.Persisted() {
-		t.Error("Persisted() = false after Load set a path, even though the adopt-write failed")
+		t.Error("Persisted() = false after a later successful save")
 	}
 }
