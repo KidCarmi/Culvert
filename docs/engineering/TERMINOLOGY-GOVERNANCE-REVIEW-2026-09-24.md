@@ -146,18 +146,26 @@ not a mechanical rename) also remains unresolved and is not queued to the number
 
 ## Glossary term sweep
 
-Every term `docs/design/PRODUCT-TERMINOLOGY.md` forbids, reserves or replaces was checked against the
-lines this window ADDED. The counts come from the tool: for each term,
+The literal terms `docs/design/PRODUCT-TERMINOLOGY.md` forbids, reserves or replaces were checked against
+the lines this window ADDED. The counts come from the tool: for each term,
 `git diff 574d265 6ec745d -U0 | grep -v '^+++' | grep -ciE '^\+.*<pattern>'` gives "Added lines" (a case-insensitive
 substring match). The file:line lists come from the same diff, with line numbers at `6ec745d`. "Visible"
 means `static/index.html`, non-test `frontend/src`, `api/openapi/openapi.yaml`, `docs/` outside
 `docs/engineering`, `docs/design` and `docs/adr`, `CHANGELOG.md` and `README.md`; generated copies are
 not counted.
 
+The sweep covers only the literal patterns in the table below: the glossary's forbidden or replaced
+words, matched as substrings. It does **not** cover the glossary's context-sensitive rules, which a pattern
+count cannot decide and which this pass did not check: "policy" used loosely for a single rule, bare
+"profile" on the steering-profile screen, "status" used for a health roll-up, "user" where it could mean
+a console account, "kill switch" without its qualifier (the table counts the literal only),
+"exception"/"bypass"/"allowlist" used for the wrong kind of skip, and sentence case. A term missing from
+the table, or a zero count, is not evidence that those rules hold.
+
 | Term (pattern) | Added lines | Visible | Visible lines (file:line) | Outcome |
 |---|---|---|---|---|
 | appliance (`appliance`) | 30 | 6 | `CHANGELOG.md`: 285; `api/openapi/openapi.yaml`: 483; `docs/operator/geoip-resolution-health.md`: 36; `docs/operator/ocsp-revocation-checking.md`: 22,122; `docs/operator/release-publication-gating.md`: 547 | Same 6 lines as #1456's window; fixed there (T-51 recurrence). See "Forbidden term: appliance" below |
-| verdict (`verdict`) | 783 | 55 | `CHANGELOG.md`: 15,226,232,259,400; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Same 55 lines as #1456's window; recorded there (13 OCSP lines under its T-59, 42 others as not yet numbered) |
+| verdict (`verdict`) | 783 | 55 | `CHANGELOG.md`: 15,226,232,259,400; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Same 55 lines as #1456's window; recorded there (13 OCSP lines under its T-59, 40 others as not yet numbered, and 2 identifier-only lines, `mcp-first-controlled-canary-review.md:2558`/`:2592`, exempt as backend identifiers) |
 | result (`result`) | 286 | 7 | `CHANGELOG.md`: 426; `docs/operator/mcp-first-controlled-canary-review.md`: 2255,2402,2908,3116; `docs/operator/ocsp-revocation-checking.md`: 77; `docs/operator/release-publication-gating.md`: 362 | Same 7 lines as #1456's window; none means a request's decision — no violation |
 | incident (`incident`) | 6 | 1 | `docs/operator/mcp-first-controlled-canary-review.md`: 886 | Same line as #1456's window; plain English, no entity — no violation |
 | scanner (`scanner`) | 63 | 3 | `docs/operator/mcp-first-controlled-canary-review.md`: 2967,3212,3236 | Same 3 lines as #1456's window; a code scanner — no violation |
