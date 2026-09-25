@@ -269,4 +269,4 @@ simply safe now where before it was undefined.
 - `roadmap/CHAOS-ENGINEERING-REVIEW.md` §13 (ST-8, local audit write loss) and
   §30 (CHAOS-61, DP→CP audit push drops) — the other two members of this
   compliance-record family
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §36 — the CHAOS-72 write-up
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §42 — the CHAOS-72 write-up
