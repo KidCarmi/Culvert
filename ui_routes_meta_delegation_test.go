@@ -261,10 +261,34 @@ func c16Resolve(idx map[string]*c16Func, name, method string, depth int, seen ma
 		return c16Resolution{}
 	}
 
-	var (
-		direct    []UIRole
-		delegates []string
-	)
+	direct, delegates := c16BranchCalls(idx, fn, method)
+	if len(direct) > 0 {
+		return c16Resolution{role: c16Weakest(direct), resolved: true, viaDirect: true}
+	}
+
+	// No direct check in this branch — inherit from the delegates it calls.
+	// Once delegated, the delegate owns its own method dispatch, so it is
+	// resolved for the SAME method.
+	var out c16Resolution
+	for _, d := range delegates {
+		sub := c16Resolve(idx, d, method, depth+1, seen)
+		if !sub.resolved {
+			continue
+		}
+		if !out.resolved || rolePriorityOf(sub.role) < rolePriorityOf(out.role) {
+			out = c16Resolution{
+				role:     sub.role,
+				resolved: true,
+				chain:    append([]string{d}, sub.chain...),
+			}
+		}
+	}
+	return out
+}
+
+// c16BranchCalls collects the requireRole roles and the delegate handler
+// calls found in the statements governing one method of fn.
+func c16BranchCalls(idx map[string]*c16Func, fn *c16Func, method string) (direct []UIRole, delegates []string) {
 	for _, st := range c16MethodBranch(fn.decl, method) {
 		ast.Inspect(st, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
@@ -286,35 +310,18 @@ func c16Resolve(idx map[string]*c16Func, name, method string, depth int, seen ma
 			return true
 		})
 	}
+	return direct, delegates
+}
 
-	if len(direct) > 0 {
-		weakest := direct[0]
-		for _, r := range direct[1:] {
-			if rolePriorityOf(r) < rolePriorityOf(weakest) {
-				weakest = r
-			}
-		}
-		return c16Resolution{role: weakest, resolved: true, viaDirect: true}
-	}
-
-	// No direct check in this branch — inherit from the delegates it calls.
-	// Once delegated, the delegate owns its own method dispatch, so it is
-	// resolved for the SAME method.
-	var out c16Resolution
-	for _, d := range delegates {
-		sub := c16Resolve(idx, d, method, depth+1, seen)
-		if !sub.resolved {
-			continue
-		}
-		if !out.resolved || rolePriorityOf(sub.role) < rolePriorityOf(out.role) {
-			out = c16Resolution{
-				role:     sub.role,
-				resolved: true,
-				chain:    append([]string{d}, sub.chain...),
-			}
+// c16Weakest returns the least-privileged role in a non-empty list.
+func c16Weakest(roles []UIRole) UIRole {
+	weakest := roles[0]
+	for _, r := range roles[1:] {
+		if rolePriorityOf(r) < rolePriorityOf(weakest) {
+			weakest = r
 		}
 	}
-	return out
+	return weakest
 }
 
 // TestC16_DelegatedHandlersEnforceDeclaredRole is the enforcing half of the

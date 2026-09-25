@@ -88,6 +88,19 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 	// every admin.
 	clientIP := realClientIP(r)
 
+	// Per-IP FAILURE budget, checked before anything retains state or costs
+	// a bcrypt. The two-tier lockout below is keyed by (IP, username), so a
+	// caller rotating a fresh username per request never trips it, and
+	// apiLimiter gates only mutating methods — without this, GET
+	// /api/auth/status would let one unauthenticated client mint unbounded
+	// lockout-map entries and durable auth.basic.fail audit lines. Only
+	// failures are charged, so a correctly-configured script is never
+	// throttled; the refusal itself is silent (auditing it would rebuild the
+	// write amplifier this bounds).
+	if basicAuthFailLimiter.Exhausted(clientIP) {
+		return "", false
+	}
+
 	// Two-tier lockout BEFORE any credential verification — same order as
 	// apiAuthLogin, and the reason the ~80 ms bcrypt is no longer reachable at
 	// an unbounded rate.
@@ -97,6 +110,7 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 
 	role, ok := cfg.VerifyUIUser(user, pass)
 	if !ok {
+		basicAuthFailLimiter.Allow(clientIP) // charge the failure; result read via Exhausted
 		loginLimiter.RecordFailure(clientIP, user)
 		auditEvent(r, "auth.basic.fail", truncateForAudit(user),
 			fmt.Sprintf("invalid credentials over HTTP Basic, attempts_left=%d",

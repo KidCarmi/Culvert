@@ -333,14 +333,33 @@ func TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller(t *testing.T) {
 		"apiAuthChangePassword": "re-auth of an already-authenticated session for its OWN account; session-derived username, mutating-method rate limit",
 	}
 
+	checked, offenders := secBasicVerifyUIUserCallers(t, allowed)
+
+	// Not-vacuous guard: if the selector stops matching, every future caller
+	// would pass silently.
+	if checked < len(allowed) {
+		t.Fatalf("wall found only %d cfg.VerifyUIUser call sites, expected at least %d — the selector has drifted and the wall proves nothing",
+			checked, len(allowed))
+	}
+	if len(offenders) > 0 {
+		t.Errorf("cfg.VerifyUIUser is called from %d function(s) outside the permitted set:\n%s\n\n"+
+			"cfg.VerifyUIUser is a BARE bcrypt compare: it consults no lockout, no rate limit and no second factor, "+
+			"and records nothing. Route admin-plane credentials through verifyUIBasicAuth (ui_basic_auth.go) instead.",
+			len(offenders), strings.Join(offenders, "\n"))
+	}
+}
+
+// secBasicVerifyUIUserCallers walks every non-test source file in the package
+// and returns how many cfg.VerifyUIUser call sites it saw, plus the ones
+// outside the allowed functions.
+func secBasicVerifyUIUserCallers(t *testing.T, allowed map[string]string) (checked int, offenders []string) {
+	t.Helper()
 	fset := token.NewFileSet()
 	dir := pkgSourceDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
-	var offenders []string
-	checked := 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -356,38 +375,66 @@ func TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "VerifyUIUser" {
-					return true
-				}
-				recv, ok := sel.X.(*ast.Ident)
-				if !ok || recv.Name != "cfg" {
+				if !secBasicIsCfgVerifyUIUser(n) {
 					return true
 				}
 				checked++
 				if _, allow := allowed[fn.Name.Name]; !allow {
 					offenders = append(offenders, fmt.Sprintf("  %s:%d in %s",
-						name, fset.Position(call.Pos()).Line, fn.Name.Name))
+						name, fset.Position(n.Pos()).Line, fn.Name.Name))
 				}
 				return true
 			})
 		}
 	}
+	return checked, offenders
+}
 
-	// Not-vacuous guard: if the selector stops matching, every future caller
-	// would pass silently.
-	if checked < len(allowed) {
-		t.Fatalf("wall found only %d cfg.VerifyUIUser call sites, expected at least %d — the selector has drifted and the wall proves nothing",
-			checked, len(allowed))
+// secBasicIsCfgVerifyUIUser reports whether n is a cfg.VerifyUIUser(...) call.
+func secBasicIsCfgVerifyUIUser(n ast.Node) bool {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false
 	}
-	if len(offenders) > 0 {
-		t.Errorf("cfg.VerifyUIUser is called from %d function(s) outside the permitted set:\n%s\n\n"+
-			"cfg.VerifyUIUser is a BARE bcrypt compare: it consults no lockout, no rate limit and no second factor, "+
-			"and records nothing. Route admin-plane credentials through verifyUIBasicAuth (ui_basic_auth.go) instead.",
-			len(offenders), strings.Join(offenders, "\n"))
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "VerifyUIUser" {
+		return false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	return ok && recv.Name == "cfg"
+}
+
+// ── 8. Per-IP failure budget (Codex review) ───────────────────────────────
+
+// TestSECBASIC1_RotatingUsernamesHitAPerIPFailureBudget closes the gap the
+// two-tier lockout cannot see: it is keyed by (IP, username), so a caller
+// rotating a fresh username per GET never trips it, and apiLimiter gates only
+// mutating methods. Before the per-IP budget every such attempt reached bcrypt,
+// minted a lockout-map entry and wrote a durable audit line, without bound.
+func TestSECBASIC1_RotatingUsernamesHitAPerIPFailureBudget(t *testing.T) {
+	secBasicEnv(t)
+	for i := 0; i < lockout.Burst; i++ {
+		secBasicRequest(t, fmt.Sprintf("rotating-guess-%d", i), "wrong")
+	}
+	const fresh = "rotating-guess-after-budget"
+	secBasicRequest(t, fresh, "wrong")
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/policy", http.NoBody)
+	if left := loginLimiter.AttemptsLeft(realClientIP(req), fresh); left != lockout.MaxAttempts {
+		t.Fatalf("attempt past the per-IP failure budget still reached the lockout (attempts_left=%d, want %d untouched) — "+
+			"rotating usernames remain an unbounded bcrypt/state/audit amplifier", left, lockout.MaxAttempts)
+	}
+}
+
+// TestSECBASIC1_SuccessesDoNotConsumeTheFailureBudget is the CONTROL: only
+// failures are charged, so a correctly configured script making many
+// requests must never be throttled by the budget.
+func TestSECBASIC1_SuccessesDoNotConsumeTheFailureBudget(t *testing.T) {
+	secBasicEnv(t)
+	const user, pass = "busy-script", "Correct-Horse-Battery-20!"
+	secBasicUser(t, user, pass, RoleOperator, false)
+	for i := 0; i < lockout.Burst+5; i++ {
+		if code, role := secBasicRequest(t, user, pass); code != http.StatusOK || role != RoleOperator {
+			t.Fatalf("valid request %d throttled (status=%d role=%q); successes must not charge the failure budget", i+1, code, role)
+		}
 	}
 }

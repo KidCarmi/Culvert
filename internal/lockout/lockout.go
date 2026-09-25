@@ -564,6 +564,20 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	return e.count <= Burst
 }
 
+// Exhausted reports, WITHOUT recording anything, whether ip has already used
+// its Burst allowance in the current window. It lets a caller that charges
+// only some events (e.g. failures) refuse the next attempt before doing any
+// expensive or state-retaining work for it.
+func (a *APIRateLimiter) Exhausted(ip string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e := a.entries[ip]
+	if e == nil || time.Since(e.windowStart) > RateWindow {
+		return false
+	}
+	return e.count >= Burst
+}
+
 // Cleanup removes expired entries.
 func (a *APIRateLimiter) Cleanup() {
 	a.mu.Lock()
