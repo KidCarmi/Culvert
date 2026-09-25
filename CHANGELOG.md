@@ -50,6 +50,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   disagree, and an unusable incoming secret never counts as evidence that the
   key changed.
 
+- **A request header could name a root-executed artifact (SEC-BOOTSTRAP-HOST-1).**
+  The Control Plane's one-click DP bootstrap renders two artifacts a human is
+  told to run with root authority — the install script it documents as
+  `curl -fsSL … | sudo bash`, and the `docker-compose.yml` that script
+  downloads. Two of the values interpolated into them came straight off the
+  wire (`r.Host`, and `X-Forwarded-Host` when `proxy.trust_forwarded_headers`
+  is on), and the script carried them inside a **double-quoted** shell word:
+  `CP_BASE="{{.CPBase}}"`. A double-quoted shell word still performs command
+  substitution, so a request whose Host header was `cp.example.com$(…)`
+  produced a script that ran the attacker's command, as root, before it did
+  anything else. Go's header validation is not a mitigation — measured against
+  `net/http`, it rejects `"`, a backtick, `{` and space but accepts
+  `$ ( ) ' ;`, and `X-Forwarded-Host` is filtered not at all.
+
+  Both bootstrap endpoints and `POST /api/cluster/token` now **refuse** a
+  derived authority that is not a plain `host[:port]` (400, nothing rendered),
+  the renderers re-validate at the sink, and the templates single-quote what
+  they interpolate. A compose document is also refused (503) when the cluster
+  CA has no fingerprint to pin, rather than served with an unpinned enrollment
+  URL. Refusals are counted on `culvert_bootstrap_host_refused_total` and
+  logged once a minute; the caller is told only `invalid host`. Operators
+  behind a reverse proxy should confirm it sets `Host` / `X-Forwarded-Host`
+  explicitly rather than appending a client value — see
+  `docs/operator/dp-bootstrap-artifact-safety.md`.
+
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
   published and cosign-signed the `latest`, `v0.0.N` and `0.0.N` image tags at
@@ -301,7 +326,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   was cached for a fixed hour regardless of the response's own `NextUpdate`, so
   a response a minute from expiry kept admitting the certificate for another 59;
   cache lifetime is now capped at the responder's own deadline.
-- **Behaviour change for operators running `security.ocsp_check: true`:**
+- **Behaviour change for operators running `proxy.ocsp_check: true`:**
   responder queries are now made directly and no longer honour `HTTP(S)_PROXY`
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
@@ -352,6 +377,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - `google.golang.org/grpc` bumped `v1.83.1` → `v1.83.2` (CVE-2026-84445,
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
+- The Cluster panel's Distributed Rate Limiting card now shows **Stale
+  Episodes** — the number of times this node's cluster-wide rate-limit
+  broadcast has gone fresh→stale since startup (`GET /api/cluster/rate-limits`
+  already returned `remote_counts_stale_episodes`; the panel never rendered
+  it). The existing stale banner only appears while the broadcast is
+  *currently* stale, so an operator reviewing the panel after a Control Plane
+  blip had recovered saw a fully healthy panel with no way to tell "did this
+  happen once overnight, or six times" without SSHing in and grepping the
+  process log for the CHAOS-61 transition line. Read-only, no behavior change.
+
+### Performance
+
+- The threat feed's full-URL check no longer re-parses a URL it was handed
+  already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
+  request, on the request goroutine, before the policy engine — and called it
+  as `CheckURL(r.URL.String())`, so a `*url.URL` net/http had just parsed was
+  serialised and the feed immediately parsed it back, purely to read the three
+  fields (scheme, host, path) the caller already had. Measured against a
+  100k-entry feed for an ordinary destination that misses — what every
+  *allowed* request pays — the check cost **887 ns and 4 allocations**, against
+  **109 ns and 0 allocations** for the domain check beside it doing the same
+  amount of real work. The new `CheckRequestURL` takes the parsed URL:
+  **376 ns / 112 B / 2 allocations** (330 → 162 ns at 4× parallel). Verdicts
+  are unchanged and the equivalence is structural: the fast path is taken only
+  for the URL shape on which `String()` followed by `Parse()` is provably the
+  identity for those fields, and every other shape falls through to the
+  verbatim string derivation. Only deployments with threat intelligence
+  enabled are affected; with the feed off the check already returned early.
 
 ### Added
 
@@ -374,6 +427,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   including the config-version store, registry settings, the CDR
   enrollment certs root and runtime marker, and the alert retry queue —
   follows the override.
+- The admin UI's own serving certificate now reports its expiry
+  (`ui_tls_cert_not_after`/`ui_tls_cert_days_remaining` on
+  `GET /api/settings/network`, shown on the Certificates panel) whenever a
+  custom pair (`-tls-cert`/`-tls-key`, or one uploaded via the panel) has
+  bound — the one certificate in the product whose expiry was previously
+  untracked; the MITM inspection root CA and the outbound upstream mTLS
+  client cert already surfaced theirs.
 - Admin API operations (contract 2.0.0): `GET /api/rewrite/state`,
   `GET /api/fileblock/profiles/state`, `GET /api/urlcat/state`,
   `GET /api/pac/profiles/{name}/lifecycle`, the Upstream v2 entry endpoints
@@ -484,9 +544,83 @@ endpoints for credentialed parents.
   ns/op — 6.0x at four cores and a curve that improves with core count. The
   distinct-host cap, the decay pass and `Top` are unchanged and still
   serialised. No API, metric, or dashboard change.
+- Destination-category rules no longer allocate once per rule per request.
+  `urlcat.Store.MatchesHost` / `MatchesHostAdmin` answer "is this host in
+  category C?" and are called once per category-scoped access rule per proxied
+  request. Both derived their index key with
+  `strings.ToLower(string(cat))`, which allocates whenever the name carries an
+  uppercase letter — and all 21 shipped SaaS category names do — so a rulebase
+  with N `destCategory` rules charged N heap allocations to every proxied
+  request to re-derive a value that is pure configuration: the rule's category
+  name is fixed when the admin writes the rule. The key is now folded into a
+  caller-owned stack buffer and the map is probed against those bytes
+  directly. A category name too long for that buffer (the admin API accepts up
+  to 256 bytes) or carrying non-ASCII keeps the string `strings.ToLower`
+  already produced and is probed as a string, so no supported name became more
+  expensive than it was before the optimization. On a 4-core box, with both
+  arms benchmarked in one session (medians of n=5), the probe goes
+  204.4 → 137.4 ns on a miss and 170.1 → 105.7 ns on a hit, at 1 alloc → 0 in
+  every posture; through the real policy
+  scan against an uncategorized destination it goes 2420 → 1635 ns at 10
+  rules, 8572 → 5524 ns at 50, and 31670 → 19106 ns at 200, with 10 / 50 / 200
+  allocs → 0. Under 4-way concurrency the same probe moves only 94.3 → 88.2 ns,
+  because the per-call read lock — untouched here — dominates once several
+  cores contend. Matching semantics are unchanged exactly: a pure-ASCII name
+  folds byte-wise as `strings.ToLower` already did, and anything non-ASCII
+  falls back to `strings.ToLower` itself, so Unicode folding is never
+  reimplemented. Pinned by a differential against the verbatim pre-fix key
+  expression, a fuzz target, and a deterministic zero-allocation gate. No API,
+  metric, or dashboard change.
 
 ### Fixed
 
+- A SOCKS5 listener bind failure no longer terminates the whole appliance
+  (CHAOS-66). `startSOCKS5` bound with a single `logFatalf` branch, and
+  `initSOCKS5` runs *before* the admin UI and the proxy listener start — so an
+  occupied SOCKS5 port meant the HTTP/HTTPS proxy and the admin UI never came
+  up at all, and under `restart: unless-stopped` an unattended crash loop
+  recoverable only with shell access. This is the CHAOS-57 fault one plane
+  over and it lands harder: there the management plane killed the data plane,
+  here an *optional*, off-by-default listener killed the primary data plane,
+  the management plane and the health endpoints together. The triggers are
+  routine and invisible to `validatePortCollisions`, which only compares
+  Culvert's own three ports to each other: a predecessor container still
+  draining, a privileged port after `CAP_NET_BIND_SERVICE` was dropped, an
+  interface not yet up. The listener now rebinds with a jittered,
+  interruptible backoff for as long as the process lives, and an accept-loop
+  failure that invalidates the socket — previously terminal until a restart —
+  recovers the same way. **No SOCKS5 fault requires a node restart any more**,
+  and the `socks5_listener` diagnostics row no longer tells operators to
+  perform one. New read-only surfaces: `culvert_socks5_unavailable`,
+  `culvert_socks5_bind_failures_total`, `culvert_socks5_binds_total` and
+  `culvert_socks5_bind_backoff_seconds`, emitted only on a node with a
+  configured listener. `runProxyUntilShutdown`'s fatal proxy-listener branch
+  is deliberately unchanged. See `docs/operator/socks5-listener-health.md`.
+- A SOCKS5 listener outage is now reported the moment its threshold elapses,
+  not on the next retry. Both episode durations were measured between the first
+  and *last* recorded failure, so they stopped advancing between attempts: with
+  the rebind backoff at its 30 s ceiling (±20% jitter), a failure landing at
+  29 s left `/healthz` reporting *degraded*, `culvert_socks5_listener_up` at
+  `1`, the `socks5_listener` row saying *retrying* and the `socks5_listener_down`
+  alert unfired for up to 36 s after the documented 30 s outage threshold had
+  passed. Durations are now aged against the clock, and one sleep per outage is
+  shortened so it cannot carry the supervisor past the threshold without an
+  attempt to observe it (the alert is attempt-driven). A clock that jumps
+  backwards can no longer shrink an outage already observed. The accept plane
+  carried the same shape with a 1 s ceiling and is fixed identically.
+- The `socks5_listener` row's suggested action now matches the failure reason.
+  One action string — check the port owner and bind permission — was printed for
+  every class, so a node out of file descriptors, or one whose interface had not
+  come up, was directed to hunt the owner of a port nobody holds. Each bounded
+  reason class now carries its own remedy; `network_error` and `listen_failed`
+  remain the unrecognised classes and point at the log line.
+- Listener failures are no longer misreported as network faults. Every bind
+  error arrives wrapped in `*net.OpError`, which satisfies `net.Error`
+  unconditionally, so the admin UI listener's classifier labelled every
+  unrecognised errno `network_error` — pointing an operator at network
+  troubleshooting for a socket or permission fault — and could reach
+  `listen_failed` only for an error the `net` package had not produced. Both
+  listener classifiers now require an actual timeout for `network_error`.
 - A `config.yaml` `auth.user` (or CLI `-user`) value written with a YAML
   literal block scalar (`user: |` instead of `user: admin`) silently
   appended a trailing newline to the stored admin username. Every other
