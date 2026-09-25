@@ -103,7 +103,7 @@ session with an on-the-fly leaf certificate signed by its internal CA:
   (banking, health) without decryption. Per-host bypass patterns are managed in
   the UI.
 - **Post-quantum:** the TLS key exchange auto-negotiates hybrid
-  X25519 + ML-KEM-768 via the Go 1.25 standard library.
+  X25519 + ML-KEM-768 via the Go 1.26 standard library.
 
 ---
 
