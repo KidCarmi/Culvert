@@ -27,6 +27,9 @@ package main
 //	  against io.Discard      283 ns/op   (formatting skipped entirely)
 //	  against a real sink    1042 ns/op   (what production pays)
 //
+// Those were taken on Go 1.26.6; on the go1.26.8 toolchain pin they reproduce
+// within noise (1053 ns/op against a real sink).
+//
 // The allocation figure survived the bug — the nine arguments are boxed at the
 // CALL SITE, before Printf can short-circuit — which is why the gate's 8
 // allocs/op bound was right while its timing was not. It also means the

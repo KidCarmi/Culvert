@@ -125,6 +125,7 @@ The `docker` job pushes only non-channel tags:
 | --- | --- |
 | `candidate-<run_id>` | this run's own build. Run-scoped, because the main-push run and the tag run share a commit — `auto-tag` pushes the `v*` tag while the main run's `promote-image` is still resolving, so a per-commit tag could be overwritten by the other run's build. |
 | `sha-<short>` | the conventional per-commit tag (unchanged). |
+| `candidate-commit-<full sha>` | **main push only**: the discovery hint for this commit's build-once candidate (§4a). Written after the signed candidate record, never trusted on its own. |
 
 `candidate-v<version>`, written by `resolve-candidate`, is the **promotion
 authority** on the tag path (see *One version, one digest* below). The
@@ -306,7 +307,8 @@ the staging path. Two drafts, or none, refuse.
 
 | failure point | public GHCR state | GitHub Release | retry behaviour |
 | --- | --- | --- | --- |
-| `docker`, `resolve-candidate` | nothing written (binding may exist) | none/draft | rebuild; adopt the binding if present |
+| `docker`, `resolve-candidate` | nothing written (binding may exist) | none/draft | re-plan: the binding, else the main candidate; never a silent rebuild |
+| `qualify-candidate` (tag) | nothing written (binding may exist) | none/draft | the same digest is re-qualified; a real finding (e.g. a new CVE) needs a new version |
 | `catalog-pipeline` | no version channel | draft | regenerate against the **same** bound digest |
 | `release`, `aggregate-subjects` | no version channel | draft, partial assets | assets replaced in place |
 | `verify-reproducible`, `provenance` | **no version channel** — this is the ordering fix | draft | re-run; still no repoint, because promotion never ran |
@@ -363,6 +365,92 @@ rule and the tag path's fallback for telling superseded from divergent.
 > or pointed at the main run's digest rather than the one its own catalog pins
 > (Codex review, PR #1441).
 
+## 4a. Build-once promotion: the tag run reuses the main candidate
+
+The main push builds the multi-platform image **once**; the tag run that
+`auto-tag` triggers publishes **those exact bytes**. Before this, the tag run
+rebuilt the image — non-reproducibly (floating `alpine:3.24`, `apk upgrade`, a
+monthly GeoIP download) — so the digest a release published was never the digest
+that had been tested, and `latest` and `X.Y.Z` were two different images.
+
+**What the main push produces** (`docker` → `qualify-candidate`):
+
+| artefact | what it binds |
+| --- | --- |
+| candidate record — in-toto attestation, type `…/attestations/release-candidate/v1` | full commit SHA, repository, `ci.yml`, `refs/heads/main`, `push`, producer run id + attempt, the **version** (decided once, below), image-index digest, the digest of each required platform (`linux/amd64`, `linux/arm64`, read back from the registry), build inputs (go.mod toolchain, builder image digest, Dockerfile/go.mod/go.sum hashes) |
+| qualification record — type `…/release-candidate-qualification/v1` | the same commit/version/digest/platforms, `result: pass`, and the checks run: platforms, revision, compiler, version file, execution on both platforms, compose smoke, a trivy scan of both platforms |
+| `candidate-commit-<sha>` | pointer to the digest, written **after** the record is signed |
+
+Both records are signed keyless under the **candidate producer identity**
+`https://github.com/KidCarmi/Culvert/.github/workflows/ci.yml@refs/heads/main`
+(`.github/scripts/lib/candidate.sh`). That identity says "built and qualified on
+main" — it is **not** the release identity. `release_identity.env` still accepts
+only `ci.yml` on a `v*` tag, and `TestCandidateIdentity_IsNotTheReleaseIdentity`
+fails if it ever accepts the main identity.
+
+**The version is decided once.** `candidate-plan-main.sh` decides it when the
+candidate is built — the `v*` tag already naming the commit, else the highest
+`v*` + 1 patch — and bakes it into the image. A re-run of the main push **reuses**
+the commit's verified candidate and its version; it never rebuilds.
+`auto-tag` no longer computes a version: `decide-release-version.sh` tags the
+candidate's version, inside the cross-run `release-version-decision` lock, and
+refuses a conflict:
+
+| situation | auto-tag |
+| --- | --- |
+| the version already names this commit | nothing to do (a retry) |
+| the commit already carries another `v*` tag | **refuse** — one version per commit |
+| the version already names another commit | **refuse** — the next main push builds a fresh candidate with the next free version |
+| a higher version already exists | **refuse** — this candidate was overtaken |
+| push refused, but the remote now carries the same tag on this commit | success (a concurrent retry won) |
+
+**What the tag run does** (`candidate-plan-tag.sh`, in `docker`): it builds
+nothing, and takes the first of these that exists:
+
+1. **the version binding** `candidate-vX.Y.Z` — a previous attempt already bound
+   the version; a retry resumes on those bytes;
+2. **a published exact alias** `X.Y.Z` / `vX.Y.Z` — the version is already
+   public; the release adopts it (both aliases must agree);
+3. **the main candidate** for the tag's full SHA — accepted only if its
+   candidate record **and** qualification record verify against the producer
+   identity at that commit, name **this** version and the pinned compiler, and
+   describe exactly the platforms the live index carries;
+4. **an owner-authorized rebuild** — only when the repository variable
+   `RELEASE_REBUILD_AUTHORIZED_TAG` equals this exact tag, and 1–3 do not exist.
+
+Anything else **refuses**, naming the recovery. An ambiguous registry or
+Sigstore answer refuses at every step — "could not tell" is never read as
+"absent", because that is how new bytes would slip in beside bound ones.
+
+The tag run then **re-qualifies** the bound digest (`qualify-candidate`: a fresh
+trivy DB, execution on both platforms, embedded version == the tag, compiler ==
+the pin) and `catalog-pipeline` **signs the digest in the tag context** — under
+the release identity — before verifying that signature. Catalog, binaries,
+promotion and publication follow unchanged. Release **binaries** are still
+built standalone by `release` and independently reproduced by
+`verify-reproducible`; only the container image is built once.
+
+**Every public act needs qualification.** `auto-tag`, `promote-image`,
+`catalog-pipeline`, `release`, `promote-release-channels` and `publish-release`
+all depend on `qualify-candidate` with no status-function escape, so a failed
+qualification skips them: no tag, no `latest`, no signature, no release.
+
+### Manual tags and releases from before build-once
+
+| tag | what happens | recovery |
+| --- | --- | --- |
+| created by `auto-tag` from a qualified main push | reuses the main candidate | — |
+| re-run of any tag whose version was already bound | reuses the binding | — |
+| re-run of an already-published tag | adopts the published alias; publication itself is refused up front (§4) | — |
+| hand-pushed `v*` on a commit whose candidate carries another version | **refuses**: the image embeds the other version | set `RELEASE_REBUILD_AUTHORIZED_TAG=<tag>`, re-run, then clear it — or delete the tag |
+| tag created before build-once, never bound (old runs wrote no candidate record) | **refuses**: no candidate exists | same: authorize the rebuild for that exact tag |
+
+An authorized rebuild builds the tag from source exactly as the old pipeline did
+(`VERSION=<tag>`, signed under the release identity) and binds it, so later
+retries reuse it. It never applies once a binding or a published alias exists.
+The variable should name one tag and be cleared afterwards; a stale value
+authorizes nothing for any other tag.
+
 ---
 
 ## 5. Signing identity — the constraint, resolved
@@ -380,10 +468,13 @@ SAN regex changes.
 would change the SAN and break every one of those pins.
 
 Cosign signatures are also **digest-scoped**: `cosign sign <ref>@<digest>`
-stores the signature at `sha256-<hex>.sig`, so the `docker` job's signature of
-the candidate reference already verifies for every tag later pointed at the
-same digest, and `catalog-pipeline`'s digest-addressed
-`cosign verify ghcr.io/kidcarmi/culvert@<digest>` is unaffected.
+stores the signature at `sha256-<hex>.sig`, so a signature of the candidate
+reference verifies for every tag later pointed at the same digest. With
+build-once promotion the digest a release publishes was built — and signed — by
+the **main** push, under the main identity, which the release identity does not
+accept. So `catalog-pipeline` signs the bound digest **in the tag context**
+before its digest-addressed `cosign verify ghcr.io/kidcarmi/culvert@<digest>`
+against the release identity; nothing about the pinned identity changes.
 `promote-image` signs the promoted references *in addition*, so the signed
 `docker-reference` claim also names the public channel.
 
@@ -483,6 +574,30 @@ should be unreachable, because the candidate binding makes the retry promote the
 same digest. Reaching it means the exact tag and `<image>:candidate-vX.Y.Z`
 disagree — compare them and have an owner decide.
 
+**`docker` refused: "no reusable candidate for vX.Y.Z"** — the tag run found no
+binding, no published alias and no qualified main candidate for this tag's
+commit and version. The message names the reason. If it was transient
+(registry or Sigstore unreachable), re-run. If the tag was hand-pushed or
+predates build-once, see §4a *Manual tags*: authorize a rebuild for that exact
+tag, or delete the tag.
+
+**`docker` refused on main: "names …, but no attestation … verifies"** — the
+commit's candidate pointer exists but its signed record does not verify. A
+pointer is written only after the record, so this is not a half-finished run:
+re-run once Sigstore and the registry answer; if it persists, confirm no
+`candidate-v<version>` binding names that digest, delete
+`candidate-commit-<sha>`, and re-run to rebuild.
+
+**`auto-tag` refused: "… is taken" / "… was overtaken" / "One version per
+commit"** — the version the candidate was built with can no longer be this
+commit's release. Nothing was tagged. The next main push builds a new candidate
+with the next free version; no action is needed on the refused commit.
+
+**`qualify-candidate` failed** — the candidate itself did not run, report its
+version, carry the pinned compiler, or pass the scan. Nothing public moved. Fix
+the cause and push a new commit (a new candidate); on the tag run, a finding in
+a reused digest means the version cannot ship as-is.
+
 **`resolve-candidate` said "recovering that candidate"** — expected on any
 retry. The version was already bound to a digest, so this run's rebuild is
 discarded and everything downstream resumes on the bound bytes. This is what
@@ -574,15 +689,10 @@ assumption into a CI-visible failure.
 
 ## 8. Not covered by this slice
 
-- **The main-run digest and the tag-run digest differ.** The tag run rebuilds
-  the image (embedded provenance attestations carry the run ID), so the digest
-  the release catalog pins is not the digest the main run promoted as `latest`.
-  The exact version tags are no longer affected — both aliases now come from the
-  tag run — but `latest` still tracks the main build while `X.Y.Z` tracks the tag
-  build. Both digests are evidence-gated and both are signed, so nothing
-  unverified ships; the two channels are simply not byte-identical. Unifying them
-  (promote the main run's digest and have the tag run verify rather than rebuild)
-  is a separate slice.
+- ~~**The main-run digest and the tag-run digest differ.**~~ Closed by
+  build-once promotion (§4a): the tag run publishes the main candidate's digest,
+  so `latest`, `X.Y.Z` and `vX.Y.Z` name one image. An owner-authorized rebuild
+  (§4a) is the one remaining way a release digest differs from `latest`.
 - **Branch protection and repository rulesets were not inspected** — this
   session has no permission to read them. Every statement here is about
   in-repository workflow code. The `v*` tag ruleset (F3) and the
