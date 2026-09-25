@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
+	"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker"
 	"github.com/KidCarmi/Culvert/internal/mcp/execution"
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -69,6 +70,18 @@ func armCanaryLiveTier(t *testing.T, up *recordingUpstream, trustOK bool, budget
 // binds to the PREVIOUS live tier and refuses every admission with rollout_mode_invalid.
 func armCanaryLiveTierGate(t *testing.T, up execution.UpstreamCaller, newGate func() *mcpLiveSideEffectGate, budgetTotal int) *mcpruntime.Config {
 	t.Helper()
+	return armCanaryLiveTierBroker(t, up, newGate, budgetTotal, nil)
+}
+
+// armCanaryLiveTierBroker is armCanaryLiveTierGate with the credential broker supplied explicitly,
+// for the blocker-#9 gates that must prove the credential path is never touched. Production
+// composes a real broker (with zero providers), so a blocker-#9 proof against a nil-broker
+// composition would be proving something production does not do — the exact vacuity §6 forbids.
+//
+// The two public helpers delegate here so there is ONE composition path and they cannot drift
+// into testing two different appliances.
+func armCanaryLiveTierBroker(t *testing.T, up execution.UpstreamCaller, newGate func() *mcpLiveSideEffectGate, budgetTotal int, brk *broker.Broker) *mcpruntime.Config {
+	t.Helper()
 	resetLiveTierGlobals(t)
 	// This harness composes and activates at a FIXED fake instant (time.Unix(0,1)). Pin the
 	// Canary auto-stop clock to the same instant, or the absolute window deadline derived from a
@@ -88,7 +101,7 @@ func armCanaryLiveTierGate(t *testing.T, up execution.UpstreamCaller, newGate fu
 	// Compose the live executor with the controlled-trust gate + recording upstream.
 	cfg := &mcpruntime.Config{}
 	if err := composeGatewayLiveTierInto(cfg, liveTierComposition{
-		Upstream: up, Events: liveTestEvents(t),
+		Upstream: up, Events: liveTestEvents(t), Broker: brk,
 		ResponseProfile: inspection.DefaultGatewayProfile(1),
 		Clock:           func() time.Time { return time.Unix(0, 1) },
 		LiveGate:        newGate(),

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/hex"
+	"strings"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
+	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
+	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
 )
@@ -209,7 +213,21 @@ type CanaryActivationInput struct {
 	// pure w.r.t. inventory beyond the node scan).
 	ServerUsable       bool
 	FingerprintCurrent bool
-	Now                time.Time
+	// ToolCatalogUsable — every scoped tool is currently catalog.Usable at the exact
+	// fingerprint+format being bound (blocker #13). Resolved from authoritative inventory by
+	// canaryScopedToolsCatalogUsable, never supplied by a request.
+	ToolCatalogUsable bool
+	// ExactPolicyPermit — the exact First-Canary request resolves, through the REAL shared
+	// policy engine, to a plain executable ALLOW with satisfiable obligations and a verdict
+	// invariant over every unbound field (blocker #14). Resolved from authoritative state by
+	// canaryExactPolicyPermit, never supplied by a request.
+	ExactPolicyPermit bool
+	// FirstCanaryCredentialFree — every authoritative credential layer for the exact request is
+	// empty, so no credential planning, materialization, provider access or Authorization header
+	// can arise from it (blocker #9, first disjunct). Resolved from authoritative state by
+	// canaryExactRequestFacts alongside ExactPolicyPermit, never supplied by a request.
+	FirstCanaryCredentialFree bool
+	Now                       time.Time
 }
 
 // evaluateCanaryNodeReadiness returns the scope-independent Canary node readiness verdict.
@@ -232,6 +250,11 @@ type canaryActivationInputs struct {
 	Budget             canary.Budget
 	ServerUsable       bool
 	FingerprintCurrent bool
+	ToolCatalogUsable  bool
+	ExactPolicyPermit  bool
+	// FirstCanaryCredentialFree — blocker #9. Every authoritative credential layer for the exact
+	// request is empty. Resolved from the same capture as ExactPolicyPermit.
+	FirstCanaryCredentialFree bool
 }
 
 // canaryActivationInputsProbe derives the authoritative activation-level inputs for a Canary
@@ -253,8 +276,27 @@ var canaryActivationInputsProbe = productionCanaryActivationInputs
 // still never be satisfied and no Canary transition can occur (§0/§22). Wiring live approvals is a
 // pure READ (the tool-trust store + the catalog observation); it arms nothing.
 func productionCanaryActivationInputs(_ rollout.Capability, scope rollout.ScopeSpec, _ uint64) canaryActivationInputs {
+	bindings := buildLiveApprovalBindings(scope)
+	exact := canaryExactRequestFacts(scope, reviewedTargetsFromBindings(bindings), mcpToolTrust.now())
 	return canaryActivationInputs{
-		ToolApprovals: buildLiveApprovalBindings(scope),
+		ToolApprovals: bindings,
+		// Blocker #13: catalog usability is an ACTIVATION FACT, resolved here from the
+		// authoritative catalog rather than assumed by a runbook step. It is a pure read and
+		// promotes nothing — the governed shadow_evaluation lifecycle is the only writer.
+		ToolCatalogUsable: canaryScopedToolsCatalogUsable(scope),
+		// Blocker #14: the exact request must RESOLVE to a decision that can execute. It is
+		// resolved against the CANDIDATE reviewed targets these same bindings project — the set
+		// the activation would bind — because at preflight time no activation is armed, which is
+		// the question being decided. Also a pure read: it runs the engine, which is I/O-free and
+		// decides nothing outside its own return value.
+		ExactPolicyPermit: exact.Permit,
+		// Blocker #9 (first disjunct): the same exact request must be provably CREDENTIAL-FREE at
+		// every authoritative layer, not merely free of a policy CredentialProfile obligation.
+		// Resolved from the SAME capture as the permit above, so the two facts can never describe
+		// different inventories. A credential-required experiment is refused outright — no
+		// production credential Provider adapter exists, so "requires a credential" and "cannot
+		// execute safely" are the same statement for the First Canary.
+		FirstCanaryCredentialFree: exact.CredentialFree,
 	}
 }
 
@@ -362,6 +404,9 @@ func evaluateActivationOnFacts(f canary.Facts, in CanaryActivationInput) canary.
 	f.LiveApprovalValid = canary.ValidateScopeApprovals(in.Scope, in.ToolApprovals, in.Now) == canary.ScopeApprovalOK
 	f.ServerUsable = in.ServerUsable
 	f.ToolFingerprintCurrent = in.FingerprintCurrent
+	f.ToolCatalogUsable = in.ToolCatalogUsable
+	f.ExactPolicyPermit = in.ExactPolicyPermit
+	f.FirstCanaryCredentialFree = in.FirstCanaryCredentialFree
 	f.BudgetConfigured = canary.ValidateBudget(in.Budget) == canary.BudgetOK
 	return canary.Evaluate(f)
 }
@@ -584,4 +629,197 @@ func firstCanaryScopeReasonStrings() []string {
 		out = append(out, string(r))
 	}
 	return out
+}
+
+// canaryScopedToolsCatalogUsable resolves the blocker-#13 activation fact: is EVERY (tenant × tool)
+// the scope admits currently `catalog.Usable` at the EXACT fingerprint and fingerprint FORMAT the
+// activation is binding?
+//
+// WHY THIS IS AN ACTIVATION FACT AND NOT A RUNBOOK STEP. Catalog usability is enforced by the
+// POLICY ENGINE, not here: a Quarantined tool is hard-overridden to ActionQuarantine before any
+// operator ALLOW rule is consulted. Without this fact a node could hold a valid live approval, a
+// valid reviewed target, an exact scope and a read-first class, report Ready:true, and then have
+// every request die at that override — readiness reported for an experiment that cannot execute a
+// single call.
+//
+// IT IS NOT CATALOG HEALTH. ReasonCatalogUnhealthy already answers "is the catalog readable"; this
+// answers "did THIS ONE governed target pass the trust lifecycle". A perfectly healthy catalog whose
+// record for the scoped tool is Quarantined satisfies the first and fails this one.
+//
+// IT PROMOTES NOTHING. This is a pure read on the request-free activation path. The only writer of
+// catalog.Usable is the governed shadow_evaluation lifecycle (ApproveShadow → promoteFor →
+// catalog.Promote) and its reconcile; a live_execution approval never reaches it (§15).
+//
+// EXACT-CURRENT BINDING (§5) comes from reading the CURRENT record and comparing three things:
+//
+//   - eligibility is exactly catalog.Usable — the sticky Quarantined floor means a republish to a
+//     new fingerprint re-enters review, so F2 can never inherit F1's usability;
+//   - the record's digest equals the scope's PINNED fingerprint, so a usable record for some other
+//     revision of the tool cannot satisfy a scope pinned to this one. That comparison is FORMAT-BOUND
+//     BY CONSTRUCTION rather than by a second check: catalog.Fingerprint.Sum folds FormatVersion into
+//     the hash before any other segment, so the same capability under a different format scheme
+//     produces a different digest and cannot match a pin taken under the old one. A separate
+//     FormatVersion comparison against the same record would be a self-comparison — a check no test
+//     could ever distinguish, and therefore one that rots. The property the binding rests on is
+//     pinned directly instead, by TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest;
+//   - the tool is owned by the tenant the scope names, read DIRECTLY from the registry snapshot
+//     taken alongside the catalog snapshot — an independent source from the catalog record, so a
+//     scope naming a tenant that does not own the server can never satisfy the fact. It is
+//     deliberately NOT resolved through loadTarget: that helper re-reads BOTH current snapshots,
+//     which would put this decision back across two reads (see the one-snapshot note below).
+//
+// Fail-closed everywhere: an empty scope, absent inventory, a missing record, a tenant the scope
+// does not own, or any disagreement yields false, and the row stays unmet.
+func canaryScopedToolsCatalogUsable(scope rollout.ScopeSpec) bool {
+	if len(scope.Tools) == 0 || len(scope.Tenants) == 0 {
+		return false
+	}
+	// Materialize current trust into the catalog BEFORE reading it. Expiry is PASSIVE: a
+	// grant past its ExpiresAt leaves its tool catalog.Usable until reconcile() runs, and
+	// that is a 30-second tick (mcpToolTrustReconcileInterval), so reading the catalog
+	// directly answers "usable" for trust that has already lapsed — the fail-OPEN direction,
+	// and the one this whole row exists to prevent. Revocation demotes inline and needs no
+	// help; expiry does. shadowScopeHasUsableTool already reconciles for exactly this reason
+	// (ADR-0034 D7), and an activation gate must not be weaker than the Shadow gate it
+	// follows (Codex P2, PR #1378).
+	//
+	// It is safe on a READ path because it is ONE-DIRECTIONAL: reconcile withdraws lapsed
+	// trust and re-affirms exact-match active trust, and can never make a tool Usable that
+	// the governed lifecycle had not already promoted — so this is not a promotion path and
+	// the §8 wall still holds. Pinned by TestCatalogUsable_ReconcilingToReadNeverPromotes.
+	//
+	// LOCK ORDER: the transition-commit call site holds the rollout coordinator's durableMu,
+	// so this adds durableMu → deriveMu. There is no cycle: nothing reachable under deriveMu
+	// touches the rollout coordinator (reconcile reads the trust store and mutates the
+	// catalog, neither of which calls back), and deriveMu remains outside every store/catalog
+	// lock. A no-op when the coordinator is not composed.
+	//
+	// COHERENCE WITH THE TRUST STORE. Reconciling and THEN reading is not equivalent to doing
+	// both under one lock, and the difference is a fail-open (Codex P2 round 8, PR #1378).
+	// Revoke holds deriveMu across store.Revoke AND the catalog demotion precisely so the pair
+	// moves together; a reader that reconciles, RELEASES deriveMu, and only then reads
+	// cat.Current() can be scheduled into the middle of that section and observe the
+	// durably-revoked store with its tool still catalog.Usable. Every check below would then
+	// pass and this row would report met for an approval that no longer exists. So the
+	// reconcile and BOTH snapshot captures happen under ONE hold (reconcileAndSnapshot).
+	//
+	// This is the same class as the repin window below, in the other pair: two publications
+	// that a reader can land between. The registry/catalog pair cannot be closed by locking —
+	// the inconsistency is in the published state — so it is DETECTED; the trust-store/catalog
+	// pair CAN be, because one writer owns both halves under one lock, so it is PREVENTED.
+	// Which remedy applies depends on whether a single writer owns the pair.
+	snap, servers, ok := mcpToolTrustReconcileSnapshotFor()
+	if !ok {
+		return false
+	}
+	// EXACTLY ONE SNAPSHOT OF EACH SOURCE for the whole decision, both taken AFTER the
+	// reconcile. Every check below is derived from these two values and nothing re-reads
+	// cat.Current() or reg.Current(), so a re-ingest landing mid-scan cannot make the verdict
+	// internally inconsistent.
+	//
+	// That is a correctness requirement, not tidiness, and getting it wrong is how this
+	// function shipped a fail-open once already (Codex P2 round 2, PR #1378). The earlier
+	// shape resolved tenant ownership through mcpToolTrust.loadTarget, which re-reads BOTH
+	// current snapshots: a same-tenant republish between the two reads let an old Usable F1
+	// record satisfy eligibility and the F1-pinned digest while ownership came from the new
+	// snapshot, so the resolver answered "usable" for a target the current catalog had already
+	// re-quarantined at F2. The comment sitting here at the time asserted the single-snapshot
+	// invariant the code then broke — a reminder that "one snapshot" means one READ, not one
+	// source.
+	//
+	// The root cause is the second read, so the second read is gone rather than guarded: the
+	// registry snapshot answers ownership directly. A cross-check between two reads would only
+	// DETECT the inconsistency; taking one read cannot produce it.
+	for _, tenant := range scope.Tenants {
+		for i := range scope.Tools {
+			st := scope.Tools[i]
+			rec, ok := snap.Get(catalog.ToolKey{Server: registry.ServerID(st.Server), Name: st.Name})
+			if !ok {
+				return false
+			}
+			if rec.Eligibility != catalog.Usable {
+				return false
+			}
+			sum := rec.Fingerprint.Sum()
+			if !strings.EqualFold(hex.EncodeToString(sum[:]), st.Fingerprint) {
+				return false
+			}
+			// Tenant ownership from the REGISTRY snapshot taken above — an independent source
+			// from the catalog record, so a scope naming a tenant that does not own this server
+			// resolves to no usable target, and an unregistered server resolves to none at all.
+			srv, sok := servers.Get(registry.ServerID(st.Server))
+			if !sok || string(srv.OwnerScope) != tenant {
+				return false
+			}
+			// LOAD-BEARING, and the ONLY check that rejects one specific interleaving. An earlier
+			// revision of this comment called it unreachable; that was WRONG, and wrong in an
+			// instructive way (Codex P2 round 7, PR #1378).
+			//
+			// The sequential argument — reconcile withdraws trust for a disabled server, so
+			// rec.Eligibility has already left catalog.Usable before the check above reads it —
+			// holds only when the disable happens BEFORE the reconcile. The registry publishes
+			// independently of this function, so it can also happen AFTER `mcpToolTrustReconcile()`
+			// returns and BEFORE `reg.Current()` is read a few lines below.
+			//
+			// In that window a mismatching Registry.VerifyIdentity is the sharp case: its branch
+			// sets Enabled=false and Verification=VerifyIdentityMismatch but DOES NOT TOUCH
+			// PinnedIdentity. So the catalog record is still Usable, the tenant still owns the
+			// server, the digest still matches, and the identity comparison below still passes
+			// because the pin never moved. Every other check is satisfied and this one is the
+			// only thing standing between that state and a Ready verdict.
+			//
+			// TestCatalogUsable_DisabledServerIsNotUsable does NOT prove this — it is sequential,
+			// so its disable lands before the reconcile and it passes with or without this line.
+			// The interleaving needs a seam interposing between the reconcile and the registry
+			// read, and adding a production seam whose only purpose is to let a test drive a race
+			// is the worse trade (the same call made for the snapshot race in round 2), so the
+			// guard is pinned STRUCTURALLY by TestCatalogUsable_ServerUsabilityGuardIsPresent and
+			// by campaign mutation M18.
+			//
+			// The general lesson, which this function has now learned twice in opposite
+			// directions: reasoning sequentially about state that is PUBLISHED CONCURRENTLY is
+			// unsound in both directions — it deleted a guard as vacuous in round 2 that was not,
+			// and it labelled this one unreachable when it is the last line of defence.
+			if !srv.Usable() {
+				return false
+			}
+			// THE REPIN WINDOW. Registry.Repin and the catalog re-ingest that follows it are
+			// SEPARATE PUBLICATIONS, so between them the registry genuinely pins I2 while the
+			// catalog's record genuinely describes I1 — an inconsistency in the published state
+			// rather than in the reading of it. Taking one snapshot of each source (above) makes
+			// the decision internally consistent as a READ and cannot close this: no reader can
+			// read around a window that exists in the data. mcpToolTrust.loadTarget states that
+			// and answers it by DETECTING the pair; this row must do the same, with the same
+			// formula, or it reports met for a target whose requests the runtime then refuses as
+			// AnchorLost/RegistryPinDiverged (TestReviewedBinding_C18_RepinWindowIsDetectedAsDrift)
+			// — a Canary that activates and cannot execute (Codex P2 round 6, PR #1378).
+			//
+			// The reconcile above does not cover it: the active shadow grant still matches the
+			// OLD catalog record, so trust is re-affirmed and the record stays Usable.
+			//
+			// Identity is taken from the CATALOG RECORD, so it is atomic with the fingerprint
+			// checked above, and the registry's current pin is COMPARED against it rather than
+			// substituted for it. Both values come from the two snapshots already held, so this
+			// adds no read and the exactly-once invariant is unchanged.
+			if rec.Fingerprint.Identity != srv.PinnedIdentity {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// mcpToolTrustReconcileSnapshotFor adapts the coordinator seam to the resolver's argument order
+// (catalog first, registry second) and fails CLOSED when the coordinator is not composed.
+//
+// Not composed means no store, so nothing can ever have been promoted and every record is still at
+// its seeded Quarantined floor — the row could only be unmet anyway. Returning false rather than
+// falling back to an uncoordinated read keeps ONE path into this decision, so the coherence
+// argument above cannot be bypassed by a future caller taking the other branch.
+func mcpToolTrustReconcileSnapshotFor() (snap *catalog.Snapshot, servers *registry.Snapshot, ok bool) {
+	reg, cat, composed := mcpToolTrustReconcileSnapshot()
+	if !composed {
+		return nil, nil, false
+	}
+	return cat, reg, true
 }
