@@ -133,7 +133,7 @@ evidence.
   Release" — unchanged.
 
 **Terminology Health Score — audited snapshot `6c46ebd`: 7.8 / 10; after this PR's corrections:
-7.9 / 10.**
+7.9 / 10** (lineage figures; they inherit an unreconciled 0.1 under-charge for T-54 — see below).
 
 - **Rule** (unchanged from the 2026-09-08 precedent, as applied by the 2026-09-19 report): each open
   backlog item a report newly records costs 0.1, and each item it fixes gives 0.1 back, so an item found
@@ -142,9 +142,11 @@ evidence.
 - **Baseline: 8.2**, the 2026-09-19 report's figure for its audited snapshot `36628eb` (T-57 and T-58
   both open). That is the right baseline for `6c46ebd`: `36628eb` is an ancestor of `6c46ebd`, and every
   fix merged since that report's snapshot — T-57 (#1407), T-58 (#1434), T-17 (#1444) — merged AFTER
-  `6c46ebd`, so all three are still open in the tree this report audited. The 8.2 already charges every
-  carried item: T-54 (2026-09-12), T-55, T-56 and the reopened T-51 residual (2026-09-13), T-57
-  (2026-09-16) and T-58 (2026-09-19). None of them is charged again here.
+  `6c46ebd`, so all three are still open in the tree this report audited. The 8.2 is the
+  INHERITED, UNRECONCILED lineage figure: it charges T-55, T-56 and the reopened T-51 residual
+  (2026-09-13), T-57 (2026-09-16) and T-58 (2026-09-19), but it omits T-54's 0.1 charge (2026-09-12),
+  for the reason disclosed below. None of those items is charged again here, and T-54's missing 0.1 is
+  not restored either.
 - **Audited snapshot `6c46ebd`:** four new open IDs — T-59, T-59b, T-59c, T-60 → 8.2 − 0.4 = **7.8**.
 - **After this PR's corrections:** this PR fixes T-59 → 7.8 + 0.1 = **7.9**. T-59b, T-59c and T-60 stay
   open.
@@ -154,11 +156,15 @@ evidence.
   text in the new frontend's PAC and Policy Learning directories (12 files at `6c46ebd`), which this PR
   does not touch.
 - **For comparison only (not a claim about any audited tree):** applying the same rule to "after this
-  PR's corrections" plus the three later fixes (T-57, T-58, T-17) gives 7.9 + 0.3 = 8.2.
+  PR's corrections" plus the three later fixes (T-57, T-58, T-17) gives 7.9 + 0.3 = 8.2 (same lineage,
+  same 0.1 T-54 under-charge).
 - **Disclosed, not amended (carried from the 2026-09-16 and 2026-09-19 reports):** the 2026-09-13 report
   measured its drop from 8.7 rather than from the 2026-09-12 report's 8.6, so T-54's 0.1 charge was not
   carried into its 8.4. Merged reports' scores are not amended retroactively; this report takes the
-  merged figures as recorded and does not charge T-54 a second time.
+  merged figures as recorded. It therefore neither restores T-54's missing 0.1 nor charges T-54 again:
+  7.8 and 7.9 are lineage figures that UNDER-charge by 0.1. For transparency only, the fully charged
+  equivalents are **7.7** (audited snapshot) and **7.8** (after this PR's corrections); they are not
+  this report's score.
 - **Disclosed, not amended — a second, parallel lineage:** the 2026-09-20 report (#1444, the T-17 fix,
   merged after `6c46ebd`) records **8.8 / 10, up from 8.7**, with twelve open backlog entries. It scores
   from the 2026-09-11 report's lineage and does not count T-54..T-58 or the T-51 residual, so its 8.8
@@ -553,7 +559,8 @@ The twenty-ID (nineteen-entry) carry-over backlog — the 2026-09-19 report's au
 including T-54, T-55, T-56, T-57, T-58 and the T-51 residual — was open at `6c46ebd`. T-12, T-13, T-29,
 T-30, T-54, T-55, T-56, T-57, T-58 and the T-51 residual were spot-checked at their cited locations; the
 others were not re-verified. Backlog: 24 IDs / 23 entries at the audited snapshot, 23 / 22 after this
-PR's corrections; score 7.8 and 7.9 respectively. No
+PR's corrections; score 7.8 and 7.9 respectively (lineage figures that omit T-54's 0.1 charge;
+fully charged 7.7 and 7.8). No
 cosmetic or preference-driven renames are proposed. This report's first revision contained two factual
 errors, and later review rounds found more; all were caught by automated PR review before merge
 and corrected above rather than silently fixed —
