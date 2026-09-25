@@ -48,7 +48,14 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    `-cdr-server-fingerprint` — `loadCDR` skips client init entirely while
    `Enabled` is false, and `bootstrapPoolFromConfig` itself refuses to dial
    when either `Endpoint` or `ServerFingerprint` is empty. Configuring only
-   the endpoint silently leaves CDR with no client. This bootstrap path also
+   the endpoint silently leaves CDR with no client. Those three values are
+   still **bootstrap-only**: without `-cdr-certs-dir` pointing at a
+   provisioned client bundle (`ca.pem`, `client.pem`, `client.key`),
+   `buildCDRTLSConfig` presents no client certificate, so the pool holds an
+   apparently active client whose `Sanitize` calls fail Sluice's mTLS check —
+   and under the default `fail_mode: open` every eligible file is then
+   delivered unchanged. Operational sanitization on this path requires the
+   client bundle as well. This bootstrap path also
    has no certificate lifecycle automation — see **Certificate lifecycle**
    below before relying on it long-term.
 
@@ -62,6 +69,16 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    runtime toggle for an already-enrolled deployment; `true` writes the
    enable sentinel at `<dataDir>/cdr_enabled` and `false` removes it, and
    either way the connection pool starts/stops immediately.
+
+> **Scan-engine gate.** Enrollment turns CDR on, but CDR only runs on a
+> response body that the SSL-inspection path has decided to buffer.
+> `scanInspectBody` returns before `runCDRStage` whenever
+> `bodyNeedsBuffering` is false, and that predicate (`security_scan.go`)
+> considers only the remote scan service, text DPI, and ClamAV/YARA body
+> scanning — **not CDR**. On a node where none of those body scanners is
+> enabled, eligible SSL-inspected files are forwarded without ever calling
+> Sluice, with no counter or log line. Enable at least one body-scanning
+> engine (or the remote scan service) alongside CDR.
 
    **The sentinel can only force CDR *on*, never *off*, across a restart.**
    At boot, `loadCDR` starts from the static `cdr.enabled` value (config
@@ -98,7 +115,7 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    currently open — the request **passes through unsanitized
    unconditionally**, regardless of `fail_mode`. This path does not increment
    `culvert_cdr_fail_open_total`/`_fail_closed_total` and emits no per-request
-   log line or audit event — it is silent at the request level. The only way
+   log line or request-log event — it is silent at the request level. The only way
    to notice it is happening is the pool/health surfaces themselves:
    `GET /api/cdr/health`, `culvert_cdr_instance_healthy`, and the per-instance
    `culvert_cdr_pool_breaker_state` (see **Multi-instance pool** below). A
@@ -110,7 +127,7 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
 
    | Outcome | `open` (default) | `closed` |
    |---|---|---|
-   | Sluice unreachable mid-call / times out / returns `ERROR` | Original file passes through unchanged; `CDR_ERROR` audit event + log line; `culvert_cdr_fail_open_total` | Delivery refused (block page); `culvert_cdr_fail_closed_total` |
+   | Sluice unreachable mid-call / times out / returns `ERROR` | Original file passes through unchanged; `CDR_ERROR` request-log event + log line; `culvert_cdr_fail_open_total` | Delivery refused (block page); `culvert_cdr_fail_closed_total` |
    | Sluice returns `BLOCKED` (file is unsalvageable) | Delivery refused (block page) — **always**, regardless of `fail_mode` | same |
    | A panic anywhere in the CDR call path | Delivery refused (block page) — **always fail-closed**, regardless of `fail_mode` (`culvert_cdr_panics_total`) | same |
    | File exceeds `cdr.max_file_size_mb` | Skipped client-side before any bytes reach Sluice (`culvert_cdr_oversize_skipped_total`) — original file continues down the pipeline unsanitized | same |
@@ -138,9 +155,13 @@ inspected response in memory.
 Per-request outcomes are also gated by the CDR policy rule's own **Mode**
 (`ENFORCE` strips and delivers the sanitized file; `REPORT_ONLY` detects and
 logs but delivers the original bytes; `BYPASS_WITH_REPORT` is a VIP carve-out
-— report threats, still deliver the original). An unrecognized mode string
-defaults to `ENFORCE` (the safer choice over the alternative of silently
-falling back to `REPORT_ONLY`, which would let active content through).
+— report threats, still deliver the original). An invalid mode is normally
+**rejected, not defaulted**: with `cdr.enabled: true`, an invalid
+`cdr.default_mode` fails config validation and stops startup, and
+creating a CDR policy rule with an invalid mode is refused by the API. Only
+an unchecked value that nonetheless reaches the mode normalizer falls back to
+`ENFORCE` (the safer choice over `REPORT_ONLY`, which would let active
+content through).
 
 **Only non-sanitized verdicts are cached** — `CLEAN`, `UNSUPPORTED`, and
 `BLOCKED` results are cached by SHA-256 of the file body for up to one hour
@@ -261,7 +282,10 @@ trigger before writing a policy rule around it.
 
 ## Observability
 
-Audit/request-log events: `CDR_SANITIZED`, `CDR_BLOCKED`, `CDR_ERROR` — each
+Request-log events (traffic/request history, written via `recordRequest` —
+**not** the admin audit trail; no CDR runtime outcome calls `auditEvent`, so
+they carry request-log retention, not audit-trail semantics):
+`CDR_SANITIZED`, `CDR_BLOCKED`, `CDR_ERROR` — each
 carries the matched profile, but the second detail field differs by event:
 `CDR_SANITIZED` carries the threat summary, while `CDR_BLOCKED` and
 `CDR_ERROR` carry the block reason / transport error instead. None of the
