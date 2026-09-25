@@ -848,23 +848,32 @@ var nodeReadyScanExcludedDirs = []struct {
 // a temporary probe test to the tree — which the walk then counted. The observer was in the
 // sample. So the ledger no longer carries a number a human transcribes; this test reads it back
 // out of the document and compares it to what the walker actually returns.
+//
+// The stated number is a FLOOR ("SCANNED (at least N files)"). The defect is an OVERCLAIM, so the
+// gate fails only when the ledger states more than the walk returns. An exact pin also failed
+// whenever ANY Go or Markdown file was added anywhere in the tree, so every such PR had to edit this
+// document, and two of them could never merge in either order without one going red — churn that
+// protected nothing, since an undercount claims less coverage than exists.
 func TestCredWall_LedgerStatesTheRealScanCount(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "mcp-first-controlled-canary-review.md")) //nolint:gosec // fixed in-repo path
 	if err != nil {
 		t.Fatalf("read ledger: %v", err)
 	}
-	m := regexp.MustCompile(`SCANNED \(([0-9,]+) files\)`).FindStringSubmatch(string(data))
+	m := regexp.MustCompile(`SCANNED \(at least ([0-9,]+) files\)`).FindStringSubmatch(string(data))
 	if m == nil {
-		t.Fatal("§25d no longer states a scanned-file count in the form \"SCANNED (N files)\", so " +
+		t.Fatal("§25d no longer states a scanned-file floor in the form \"SCANNED (at least N files)\", so " +
 			"this gate cannot compare it to the walker. Restore the claim or delete this test.")
 	}
 	stated, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
 	if err != nil {
 		t.Fatalf("unparsable count %q: %v", m[1], err)
 	}
-	if got := len(nodeReadyScanFiles(t)); stated != got {
-		t.Errorf("§25d claims %d files are scanned; the walker returns %d. A coverage claim that "+
-			"overstates the walk by even one file is the defect this section records.", stated, got)
+	if stated <= 0 {
+		t.Fatalf("§25d states a floor of %d scanned files; a floor that is not positive claims nothing", stated)
+	}
+	if got := len(nodeReadyScanFiles(t)); stated > got {
+		t.Errorf("§25d claims at least %d files are scanned; the walker returns %d. A coverage claim "+
+			"that overstates the walk by even one file is the defect this section records.", stated, got)
 	}
 }
 

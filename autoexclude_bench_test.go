@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"testing"
 
@@ -148,11 +147,26 @@ func BenchmarkResolveSSLAction_MaxPending(b *testing.B) {
 	}
 }
 
-// benchSilenceLogger routes logger output to io.Discard for the benchmark so the
-// per-hit SSL_AUTOEXCLUDE_BYPASS line doesn't pollute -bench output or skew timing.
+// benchSilenceLogger keeps the benchmark's log lines off the terminal without
+// switching the logger off.
+//
+// It used to route the logger at io.Discard. That does not silence the logger,
+// it DISABLES it: log.Logger.output opens with `if l.isDiscard.Load() { return
+// nil }` and SetOutput sets that flag on `w == io.Discard` exactly, so no line
+// was formatted at all. Any benchmark whose measured path emits a log line was
+// therefore leaving that line's formatting out of its own result — for
+// BenchmarkPerfQual_ProxyHTTPForward, which emits one POLICY_ALLOW per request,
+// that is ~1 us of real per-request work the qualification figure did not
+// include. See the harness note in proxy_policylog_bench_test.go.
+//
+// plNullSink throws the bytes away just as io.Discard does but is a type
+// log.Logger cannot recognise, so the formatting runs and only the I/O is
+// dropped — which is what this helper was always meant to do, and is also what
+// production does, since internal/logsink takes the line on a channel rather
+// than a syscall.
 func benchSilenceLogger() func() {
 	prev := logger
-	logger = log.New(io.Discard, "", 0)
+	logger = log.New(&plNullSink{}, "[Culvert] ", log.LstdFlags)
 	return func() { logger = prev }
 }
 
