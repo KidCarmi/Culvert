@@ -392,6 +392,36 @@ endpoints for credentialed parents.
 
 ### Performance
 
+- The per-request policy decision line is built by appending rather than by
+  `logger.Printf`, and the benchmark that measured it was measuring a disabled
+  logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
+  request — HTTP, CONNECT, WebSocket and SOCKS5 all reach it — and the
+  end-to-end allocation profile ranked it the largest Culvert-owned allocation
+  site in the run, 7 objects per request. `log.Logger.output` returns
+  immediately when its writer *is* `io.Discard`, so every benchmark that
+  silenced the logger that way never formatted anything and under-reported the
+  line by 3.6x (283 ns/op against `io.Discard`, 1042 ns/op against a sink
+  `log.Logger` cannot recognise); the shared `benchSilenceLogger` behind the
+  end-to-end proxy qualification had the same defect, so that figure was
+  omitting ~1 µs of real per-request work. Measured correctly, the nine boxed
+  format arguments were two thirds of the line's CPU profile before `fmt`
+  parsed a verb, and the two `%q` verbs cost ~200 ns on their own
+  (`strconv.AppendQuote` decodes rune-by-rune through `strconv.IsPrint`: 99 ns
+  for a 17-byte ASCII host). The emitters now append into a stack buffer and
+  `appendQuotedForLog` settles printable ASCII with one byte scan, falling back
+  to `strconv.AppendQuote` for `"`, `\`, control bytes and everything at or
+  above 0x80. Serial cost goes 1042 → 428 ns/op (-59%) and allocations 8 → 1;
+  bytes per op rise 128 → 192 deliberately, one right-sized string in place of
+  eight small objects, because GC mark cost is per object. The parallel gain is
+  smaller (462 → 374 ns) because four cores queue on `log.Logger`'s own mutex,
+  which this does not touch, and the end-to-end benchmark cannot resolve ~614 ns
+  inside a 148 µs in-process operation — what it does show exactly is the
+  allocation drop, 185 → 179 per request overall and 7.0 → 1.0 at this site.
+  Emitted bytes are unchanged, which is the acceptance condition for lines that
+  SIEM forwarders and log parsers consume: the four format strings survive as an
+  executable specification and every branch is rendered both ways over a corpus
+  of control characters, quotes, backslashes, and multi-byte and invalid UTF-8.
+
 - The rate-limit exempt check is lock-free and flat in the exempt-CIDR count.
   `RateLimiter.IsExempt` is the first decision inside `Allow`, so once a rate
   limit is configured it runs on every proxied request; it took a
